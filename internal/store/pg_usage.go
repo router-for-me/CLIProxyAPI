@@ -133,6 +133,7 @@ type UsageWindow struct {
 type UsageStore struct {
 	db                 *sql.DB
 	apiKeysTable       string
+	litellmKeysTable   string
 	eventsTable        string
 	errorsTable        string
 	windowsTable       string
@@ -160,6 +161,7 @@ func NewUsageStore(parent *PostgresStore) *UsageStore {
 	return &UsageStore{
 		db:                 parent.DB(),
 		apiKeysTable:       parent.APIKeysTable(),
+		litellmKeysTable:   parent.LiteLLMKeysTable(),
 		eventsTable:        parent.UsageEventsTable(),
 		errorsTable:        parent.UsageErrorsTable(),
 		windowsTable:       parent.UsageWindowsTable(),
@@ -300,6 +302,82 @@ func (s *UsageStore) BatchInsertEvents(ctx context.Context, events []UsageEvent)
 		return fmt.Errorf("postgres store: batch insert usage events: %w", err)
 	}
 	return nil
+}
+
+// ImportLiteLLMSpendLogs inserts historical spend-log events from an external
+// LiteLLM into usage_events, deduplicating by request_id so re-running a
+// migration is idempotent. Events without a request_id are skipped (they have
+// no stable dedup key and would otherwise duplicate on every re-sync). Returns
+// the number of rows actually inserted; rows already present are counted as
+// zero. Batches are bounded to 100 rows to keep the multi-value INSERT small.
+func (s *UsageStore) ImportLiteLLMSpendLogs(ctx context.Context, events []UsageEvent) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	const batchSize = 100
+	imported := 0
+	remaining := make([]UsageEvent, 0, len(events))
+	for _, ev := range events {
+		if strings.TrimSpace(ev.RequestID) != "" {
+			remaining = append(remaining, ev)
+		}
+	}
+	for start := 0; start < len(remaining); start += batchSize {
+		end := start + batchSize
+		if end > len(remaining) {
+			end = len(remaining)
+		}
+		chunk := remaining[start:end]
+		var b strings.Builder
+		b.WriteString("INSERT INTO ")
+		b.WriteString(s.eventsTable)
+		b.WriteString(" (")
+		b.WriteString(usageEventColumnList)
+		b.WriteString(") VALUES ")
+		args := make([]any, 0, len(chunk)*31)
+		for i, ev := range chunk {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteByte('(')
+			for j := 1; j <= 31; j++ {
+				if j > 1 {
+					b.WriteByte(',')
+				}
+				b.WriteByte('$')
+				b.WriteString(itoa(i*31 + j))
+			}
+			b.WriteByte(')')
+			if ev.RequestedAt.IsZero() {
+				ev.RequestedAt = time.Now().UTC()
+			}
+			principal, err := s.sealer.Seal(ev.APIKeyPrincipal)
+			if err != nil {
+				log.WithError(err).Warn("postgres store: seal api_key_principal failed in spend-log import; persisting empty")
+				principal = ""
+			}
+			args = append(args, ev.RequestID, nullableString(ev.APIKeyID), nullableString(principal),
+				nullableString(ev.UserID),
+				ev.Provider, ev.ExecutorType, ev.Model, ev.Alias, ev.Endpoint,
+				nullableString(ev.ClientIP), nullableString(ev.ForwardedFor),
+				ev.AuthType,
+				ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
+				ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
+				ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
+				ev.Failed, ev.FailStatusCode, ev.Generate, ev.RequestedAt)
+		}
+		b.WriteString(" ON CONFLICT (request_id) WHERE request_id IS NOT NULL AND request_id <> '' DO NOTHING")
+		res, err := s.db.ExecContext(ctx, b.String(), args...)
+		if err != nil {
+			return imported, fmt.Errorf("postgres store: import litellm spend logs: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return imported, fmt.Errorf("postgres store: spend log import rows affected: %w", err)
+		}
+		imported += int(n)
+	}
+	return imported, nil
 }
 
 // itoa writes a small non-negative integer as a string without pulling in
@@ -1061,7 +1139,7 @@ type UsageEventRow struct {
 // NULL would fail the scan.
 const eventRowSelectColumns = `
 	e.id, e.request_id, COALESCE(e.api_key_id, ''),
-	COALESCE(NULLIF(k.key_alias, ''), k.name, '') AS key_alias,
+	COALESCE(NULLIF(k.key_alias, ''), NULLIF(lk.key_alias, ''), lk.name, k.name, '') AS key_alias,
 	e.provider, e.executor_type, e.model, e.alias, e.endpoint,
 	e.client_ip, e.forwarded_for,
 	e.auth_type,
@@ -1103,7 +1181,13 @@ const eventRowSelectColumns = `
 // index lookup with no row amplification.
 func (s *UsageStore) eventJoin() string {
 	catalog := s.modelsCatalogTable
+	// Join the Manage-LiteLLM keys table (litellm_api_keys) as a fallback alias
+	// source: spend-log events imported by the LiteLLM sync carry the remote
+	// key hash, which may only resolve in litellm_api_keys when the runtime
+	// api_keys table has not been migrated yet. The key_alias column COALESCEs
+	// runtime over litellm so the runtime label wins when both exist.
 	return s.eventsTable + " e LEFT JOIN " + s.apiKeysTable + " k ON k.id = e.api_key_id" +
+		" LEFT JOIN " + s.litellmKeysTable + " lk ON lk.id = e.api_key_id" +
 		" LEFT JOIN " + catalog + " mcAlias ON mcAlias.id = COALESCE(NULLIF(e.alias, ''), e.model) AND LOWER(mcAlias.provider) = LOWER(e.provider)" +
 		" LEFT JOIN " + catalog + " mcModel ON mcModel.id = e.model AND LOWER(mcModel.provider) = LOWER(e.provider)" +
 		" LEFT JOIN " + catalog + " mcCompat ON mcCompat.id = COALESCE(NULLIF(e.alias, ''), e.model) AND LOWER(mcCompat.provider) = LOWER(REPLACE(e.provider, 'openai-compatible-', ''))"

@@ -15,6 +15,8 @@ import {
   getLiteLLMSyncSettings,
   putLiteLLMSyncSettings,
   runLiteLLMSyncNow,
+  runLiteLLMSyncNixLLM,
+  getUsageEvents,
 } from '../../api/client.js';
 import { useAsync } from '../../hooks/useAsync.js';
 import {
@@ -28,6 +30,10 @@ import InternalUserPolicyForm, { formToPatch, userToForm } from '../../component
 import LiteLLMPolicyForm, { liteLLMFormToPolicy, liteLLMPolicyToForm } from './LiteLLMPolicyForm.jsx';
 import { PasswordInput, ToggleRow } from '../manage-cpa/FormPrimitives.jsx';
 import { formatRelativeTime } from '../../utils/formatRelativeTime.js';
+import {
+  PRESETS, presetToRange, EVENTS_PAGE_SIZE, loadTimezone,
+  EventsTableBody, EventDetailModal,
+} from '../usageShared.jsx';
 
 const DEFAULT_PAGE_SIZE = 25;
 const STATUS_OPTIONS = [
@@ -102,6 +108,13 @@ export default function LiteLLMPage() {
           </button>
           <button
             type="button"
+            className={`seg-btn ${tab === 'logs' ? 'seg-btn--active' : ''}`}
+            onClick={() => setTab('logs')}
+          >
+            Usage Logs
+          </button>
+          <button
+            type="button"
             className={`seg-btn ${tab === 'settings' ? 'seg-btn--active' : ''}`}
             onClick={() => setTab('settings')}
           >
@@ -112,6 +125,7 @@ export default function LiteLLMPage() {
 
       {tab === 'users' && <UsersTab />}
       {tab === 'keys' && <KeysTab />}
+      {tab === 'logs' && <UsageLogsTab />}
       {tab === 'settings' && <SyncSettingsTab />}
     </>
   );
@@ -756,7 +770,16 @@ function KeysTab() {
                   <td><StatusBadge status={k.status} /></td>
                   <td className="mono">{money(k.spend)}</td>
                   <td className="mono dim">
-                    {k.policy?.budget_usd ? money(k.policy.budget_usd) : 'unlimited'}
+                    {k.policy?.budget_usd ? (
+                      <>
+                        {money(k.policy.budget_usd)}
+                        {k.policy.budget_duration ? (
+                          <span className="dim" style={{ fontSize: 11 }}>
+                            {' '}· {k.policy.budget_duration}
+                          </span>
+                        ) : null}
+                      </>
+                    ) : 'unlimited'}
                   </td>
                   <td className="mono dim">
                     {k.policy?.rpm_limit ?? '∞'} / {k.policy?.tpm_limit ?? '∞'}
@@ -1378,6 +1401,10 @@ function SyncSettingsTab() {
   const [syncPending, setSyncPending] = useState(false);
   const [masterKeyDirty, setMasterKeyDirty] = useState(false);
   const [masterKey, setMasterKey] = useState('');
+  const [nixllmSyncing, setNixllmSyncing] = useState(false);
+  const [includeUsage, setIncludeUsage] = useState(false);
+  const [includeKeys, setIncludeKeys] = useState(false);
+  const [includeLogs, setIncludeLogs] = useState(false);
 
   useEffect(() => {
     if (settingsReq.data?.settings) {
@@ -1455,6 +1482,35 @@ function SyncSettingsTab() {
   const lastError = settings?.last_sync_error;
   const hasKey = !!settings?.master_key_set;
   const configured = hasKey && !!settings?.base_url;
+  const nixllmLastSyncAt = settings?.last_nixllm_sync_at;
+  const nixllmLastError = settings?.last_nixllm_sync_error;
+  const nixllmLastCount = settings?.last_nixllm_sync_users ?? 0;
+  const nixllmLastKeys = settings?.last_nixllm_sync_keys ?? 0;
+  const nixllmLastLogs = settings?.last_nixllm_sync_logs ?? 0;
+  const nixllmLastUsage = !!settings?.last_nixllm_sync_usage;
+  const liteLLMLastUpdate = settings?.last_litellm_users_updated_at;
+
+  // handleSyncToNixLLM runs the "sync to NixLLM" migration: Internal Users
+  // into the runtime internal_users table, plus (when checked) API Keys and
+  // usage logs from the external instance. The Manage-LiteLLM tables are
+  // unchanged by it.
+  async function handleSyncToNixLLM() {
+    setNixllmSyncing(true);
+    try {
+      const res = await runLiteLLMSyncNixLLM({ includeUsage, includeKeys, includeLogs });
+      const s = res?.settings;
+      if (s?.last_nixllm_sync_status === 'error') {
+        toast.error(`Sync to NixLLM failed: ${s.last_nixllm_sync_error || 'unknown error'}`);
+      } else {
+        toast.success(`Synced ${s?.last_nixllm_sync_users ?? 0} user${(s?.last_nixllm_sync_users ?? 0) === 1 ? '' : 's'} to NixLLM Internal Users`);
+      }
+    } catch (err) {
+      toast.error(err?.message || 'Failed to sync to NixLLM');
+    } finally {
+      setNixllmSyncing(false);
+      settingsReq.reload();
+    }
+  }
 
   return (
     <>
@@ -1500,7 +1556,7 @@ function SyncSettingsTab() {
               </span>
               {settings?.last_sync_at && !lastError && (
                 <span className="dim" style={{ fontSize: 12 }}>
-                  {settings.last_sync_users ?? 0} users · {settings.last_sync_keys ?? 0} keys pulled
+                  {settings.last_sync_users ?? 0} users · {settings.last_sync_keys ?? 0} keys · {settings.last_sync_logs ?? 0} logs pulled
                 </span>
               )}
               {hasKey && settings?.master_key_prefix && (
@@ -1517,6 +1573,99 @@ function SyncSettingsTab() {
                 Configure a base URL + master API key below to enable syncing from an external LiteLLM instance.
               </div>
             )}
+          </>
+        )}
+      </div>
+
+      {/* Sync to NixLLM card */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="row row--between" style={{ marginBottom: 12 }}>
+          <h3 className="card__title" style={{ margin: 0 }}>Sync to NixLLM</h3>
+          <button
+            type="button"
+            className="primary"
+            onClick={handleSyncToNixLLM}
+            disabled={nixllmSyncing || settingsReq.loading}
+            title="Refreshes from the external LiteLLM instance first, then copies the Manage-LiteLLM Internal Users into the NixLLM Internal Users the proxy enforces. Check the options to also migrate API Keys and usage logs."
+          >
+            {nixllmSyncing ? 'Syncing…' : 'Sync to NixLLM'}
+          </button>
+        </div>
+
+        {settingsReq.loading ? (
+          <CardSkeleton rows={2} />
+        ) : (
+          <>
+            <div className="row gap-sm" style={{ flexWrap: 'wrap', alignItems: 'center', marginBottom: 8 }}>
+              <span className={`sync-pill ${nixllmLastError ? 'sync-pill--error' : nixllmLastSyncAt ? '' : 'sync-pill--idle'}`} title={nixllmLastError || undefined}>
+                {nixllmLastError ? (
+                  <>
+                    <span className="sync-pill__dot sync-pill__dot--err" />
+                    <span>Last sync to NixLLM failed</span>
+                  </>
+                ) : nixllmLastSyncAt ? (
+                  <>
+                    <span className="sync-pill__dot" />
+                    <span>Last synced to NixLLM {formatRelativeTime(nixllmLastSyncAt)}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="sync-pill__dot sync-pill__dot--idle" />
+                    <span>Not synced to NixLLM yet</span>
+                  </>
+                )}
+              </span>
+              {nixllmLastSyncAt && (
+                <span className="dim" style={{ fontSize: 12 }}>
+                  {nixllmLastCount} user{nixllmLastCount === 1 ? '' : 's'}
+                  {nixllmLastKeys > 0 ? ` · ${nixllmLastKeys} key${nixllmLastKeys === 1 ? '' : 's'}` : ''}
+                  {nixllmLastLogs > 0 ? ` · ${nixllmLastLogs} log${nixllmLastLogs === 1 ? '' : 's'}` : ''}
+                  {nixllmLastUsage ? ' · usage included' : ''} · last update from LiteLLM{' '}
+                  {liteLLMLastUpdate ? formatRelativeTime(liteLLMLastUpdate) : 'unknown'}
+                </span>
+              )}
+            </div>
+            {nixllmLastError && (
+              <div className="error-banner" style={{ marginTop: 4 }}>
+                {nixllmLastError}
+              </div>
+            )}
+            <div className="row gap-lg" style={{ flexWrap: 'wrap', marginTop: 8 }}>
+              <label className="row gap-sm" style={{ cursor: 'pointer', alignItems: 'center' }} title="Also overwrite the NixLLM Internal User spend with the LiteLLM usage values.">
+                <input
+                  type="checkbox"
+                  checked={includeUsage}
+                  onChange={(e) => setIncludeUsage(e.target.checked)}
+                  style={{ width: 'auto' }}
+                />
+                <span style={{ fontSize: 12 }}>Include usage</span>
+              </label>
+              <label className="row gap-sm" style={{ cursor: 'pointer', alignItems: 'center' }} title="Migrate the Manage-LiteLLM API Keys into the runtime api_keys table (policies mapped lossily; existing secrets keep working).">
+                <input
+                  type="checkbox"
+                  checked={includeKeys}
+                  onChange={(e) => setIncludeKeys(e.target.checked)}
+                  style={{ width: 'auto' }}
+                />
+                <span style={{ fontSize: 12 }}>Include API Keys</span>
+              </label>
+              <label className="row gap-sm" style={{ cursor: 'pointer', alignItems: 'center' }} title="Pull /spend/logs from the external LiteLLM instance into usage_events and reconcile user spend. Requires base_url + master key below.">
+                <input
+                  type="checkbox"
+                  checked={includeLogs}
+                  onChange={(e) => setIncludeLogs(e.target.checked)}
+                  style={{ width: 'auto' }}
+                />
+                <span style={{ fontSize: 12 }}>Include usage logs</span>
+              </label>
+            </div>
+            <div className="dim" style={{ fontSize: 12, marginTop: 8 }}>
+              This first runs the external pull (users + keys + spend logs from the configured instance, like "Sync now"), then copies
+              Manage-LiteLLM Internal Users into the runtime internal_users table the proxy enforces (upsert-only, never deletes).
+              API Keys keep their hashes so existing client secrets keep working; budgets are enforced only where they map exactly
+              (7d → weekly, 30d → monthly) and other budget windows are preserved in the key metadata. Usage logs are pulled from
+              the external instance and require a base URL + master key; user spend is reconciled from the imported history.
+            </div>
           </>
         )}
       </div>
@@ -1607,6 +1756,95 @@ function SyncSettingsTab() {
           </div>
         )}
       </div>
+    </>
+  );
+}
+
+// --- Usage Logs tab ---------------------------------------------------------
+
+// UsageLogsTab shows the per-request spend logs that were pulled from the
+// external LiteLLM instance into the runtime usage_events table (provider
+// "litellm"), with an option to view all providers. Reuses the shared events
+// table + detail modal from usageShared so the columns and drill-down behave
+// exactly like the Recent Events page.
+function UsageLogsTab() {
+  const [presetIdx, setPresetIdx] = useState(3); // "Last 24h" default
+  const [provider, setProvider] = useState('litellm');
+  const [requestId, setRequestId] = useState('');
+  const [page, setPage] = useState(1);
+  const [selectedId, setSelectedId] = useState(null);
+  const [timezone, setTimezone] = useState(() => loadTimezone());
+
+  const range = useMemo(() => presetToRange(PRESETS[presetIdx]), [presetIdx]);
+
+  const events = useAsync(
+    () => getUsageEvents({
+      page,
+      page_size: EVENTS_PAGE_SIZE,
+      provider: provider || undefined,
+      request_id: requestId.trim() || undefined,
+      from: range.from,
+      to: range.to,
+    }),
+    [page, provider, requestId, range.from, range.to],
+  );
+
+  return (
+    <>
+      <ErrorBanner error={events.error} onRetry={events.reload} />
+
+      {/* Filter toolbar */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="catalog-toolbar" style={{ flexWrap: 'wrap', gap: 12 }}>
+          <div className="seg-group" role="tablist" aria-label="Time range">
+            {PRESETS.map((p, i) => (
+              <button
+                key={p.label}
+                type="button"
+                className={`seg-btn ${presetIdx === i ? 'seg-btn--active' : ''}`}
+                onClick={() => { setPresetIdx(i); setPage(1); }}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <select
+            className="sort-select"
+            value={provider}
+            onChange={(e) => { setProvider(e.target.value); setPage(1); }}
+            aria-label="Filter by provider"
+          >
+            <option value="">all providers</option>
+            <option value="litellm">litellm (synced)</option>
+          </select>
+          <input
+            className="search-input"
+            type="text"
+            value={requestId}
+            onChange={(e) => { setRequestId(e.target.value); setPage(1); }}
+            placeholder="Search request ID…"
+            aria-label="Search request ID"
+            style={{ flex: '1 1 240px' }}
+          />
+        </div>
+        <div className="dim" style={{ fontSize: 12, marginTop: 8 }}>
+          Per-request spend logs in the runtime usage_events table. Rows with provider "litellm" were pulled from the
+          external LiteLLM instance by "Sync now" / "Sync to NixLLM" (Include usage logs). Defaults to the last 24h and
+          the litellm provider; switch to "all providers" to include NixLLM's own traffic.
+        </div>
+      </div>
+
+      <EventsTableBody
+        events={events}
+        page={page}
+        pageSize={EVENTS_PAGE_SIZE}
+        onPage={setPage}
+        onRowClick={setSelectedId}
+        timezone={timezone}
+      />
+      {selectedId && (
+        <EventDetailModal id={selectedId} timezone={timezone} onClose={() => setSelectedId(null)} />
+      )}
     </>
   );
 }

@@ -394,9 +394,126 @@ func (s *UserStore) Update(ctx context.Context, id string, upd InternalUserUpdat
 	return nil
 }
 
-// Delete permanently removes an internal user. api_keys.user_id is left
-// dangling (the column has no FK); the dashboard surfaces "unassigned" for
-// such keys.
+// ImportLiteLLMUsers upserts Manage-LiteLLM internal users into the runtime
+// internal_users table — the "sync to NixLLM" push. Matching is by email first
+// (user_email is UNIQUE in both tables), then by id, so re-syncs update rows in
+// place and never create duplicates. By default runtime spend is preserved (it
+// stays authoritative from usage_events / ReconcileSpend); when overwriteSpend
+// is true the runtime spend is replaced with the LiteLLM usage value, so an
+// operator can carry a usage baseline over from an external LiteLLM. Rows that
+// cannot be imported (e.g. an email unique conflict against a different runtime
+// user) are skipped and counted; a single bad row never aborts the pass.
+func (s *UserStore) ImportLiteLLMUsers(ctx context.Context, src []LiteLLMUser, overwriteSpend bool) (imported, skipped int, err error) {
+	if s == nil || s.db == nil {
+		return 0, 0, fmt.Errorf("postgres store: user store not initialized")
+	}
+	for i := range src {
+		u := src[i]
+		destID := ""
+		if strings.TrimSpace(u.UserEmail) != "" {
+			if existing, errGet := s.GetByEmail(ctx, u.UserEmail); errGet == nil {
+				destID = existing.ID
+			} else if !errors.Is(errGet, ErrInternalUserNotFound) {
+				skipped++
+				log.WithError(errGet).WithField("user_email", u.UserEmail).
+					Warn("management: sync to nixllm: email lookup failed; skipping user")
+				continue
+			}
+		}
+		if destID == "" {
+			if existing, errGet := s.Get(ctx, u.ID); errGet == nil {
+				destID = existing.ID
+			} else if !errors.Is(errGet, ErrInternalUserNotFound) {
+				skipped++
+				log.WithError(errGet).WithField("user_id", u.ID).
+					Warn("management: sync to nixllm: id lookup failed; skipping user")
+				continue
+			}
+		}
+		if destID != "" {
+			if errUpd := s.Update(ctx, destID, liteLLMUserToUpdate(u)); errUpd != nil {
+				skipped++
+				log.WithError(errUpd).WithField("user_id", u.ID).
+					Warn("management: sync to nixllm: skipping un-importable user (update)")
+				continue
+			}
+			if overwriteSpend {
+				if errSet := s.SetSpend(ctx, destID, u.Spend); errSet != nil {
+					skipped++
+					log.WithError(errSet).WithField("user_id", u.ID).
+						Warn("management: sync to nixllm: skipping user (spend overwrite failed)")
+					continue
+				}
+			}
+			imported++
+			continue
+		}
+		created, errCreate := s.Create(ctx, liteLLMUserToInternal(u))
+		if errCreate != nil {
+			skipped++
+			log.WithError(errCreate).WithField("user_id", u.ID).
+				Warn("management: sync to nixllm: skipping un-importable user (create)")
+			continue
+		}
+		if overwriteSpend {
+			if errSet := s.SetSpend(ctx, created.ID, u.Spend); errSet != nil {
+				skipped++
+				log.WithError(errSet).WithField("user_id", u.ID).
+					Warn("management: sync to nixllm: skipping user (spend overwrite failed)")
+				continue
+			}
+		}
+		imported++
+	}
+	return imported, skipped, nil
+}
+
+// liteLLMUserToInternal converts a Manage-LiteLLM user into the runtime
+// InternalUser shape used when creating a brand-new runtime row. Spend is
+// intentionally dropped: Create forces spend = 0 for fresh NixLLM users.
+func liteLLMUserToInternal(u LiteLLMUser) InternalUser {
+	return InternalUser{
+		ID:                  u.ID,
+		UserAlias:           u.UserAlias,
+		UserEmail:           u.UserEmail,
+		UserRole:            u.UserRole,
+		Models:              normalizeStringSlice(u.Models),
+		Metadata:            metadataOrEmpty(u.Metadata),
+		MaxBudget:           u.MaxBudget,
+		BudgetDuration:      u.BudgetDuration,
+		BudgetResetAt:       u.BudgetResetAt,
+		RPMLimit:            u.RPMLimit,
+		TPMLimit:            u.TPMLimit,
+		MaxParallelRequests: u.MaxParallelRequests,
+	}
+}
+
+// liteLLMUserToUpdate builds a full-field partial update mirroring the source
+// user. BudgetResetAt is deliberately omitted: UserStore.Update recomputes it
+// from BudgetDuration, matching the normal edit path.
+func liteLLMUserToUpdate(u LiteLLMUser) InternalUserUpdate {
+	return InternalUserUpdate{
+		UserAlias:           &u.UserAlias,
+		UserEmail:           &u.UserEmail,
+		UserRole:            &u.UserRole,
+		Models:              &u.Models,
+		Metadata:            &u.Metadata,
+		MaxBudget:           u.MaxBudget,
+		BudgetDuration:      &u.BudgetDuration,
+		RPMLimit:            u.RPMLimit,
+		TPMLimit:            u.TPMLimit,
+		MaxParallelRequests: u.MaxParallelRequests,
+	}
+}
+
+// metadataOrEmpty returns the supplied metadata map, or an empty map when nil
+// so JSONB columns never receive a literal null.
+func metadataOrEmpty(m map[string]any) map[string]any {
+	if m == nil {
+		return map[string]any{}
+	}
+	return m
+}
 func (s *UserStore) Delete(ctx context.Context, id string) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("postgres store: user store not initialized")
@@ -429,6 +546,22 @@ func (s *UserStore) IncrementSpend(ctx context.Context, id string, cost float64)
 	), cost, id)
 	if err != nil {
 		return fmt.Errorf("postgres store: increment internal user spend: %w", err)
+	}
+	return nil
+}
+
+// SetSpend overwrites the running spend counter with the supplied absolute
+// value. Used by the "sync to NixLLM" push to carry a usage baseline over from
+// the external LiteLLM; unlike IncrementSpend it does not accumulate.
+func (s *UserStore) SetSpend(ctx context.Context, id string, spend float64) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: user store not initialized")
+	}
+	_, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE %s SET spend = $1, updated_at = NOW() WHERE id = $2`, s.usersTable,
+	), spend, id)
+	if err != nil {
+		return fmt.Errorf("postgres store: set internal user spend: %w", err)
 	}
 	return nil
 }

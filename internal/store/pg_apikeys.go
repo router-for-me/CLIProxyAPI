@@ -290,6 +290,172 @@ func (s *APIKeyStore) Create(ctx context.Context, name string, alias string, sec
 	return created, secret, nil
 }
 
+// Upsert inserts or updates an API key row by id, preserving the supplied
+// key_hash/key_prefix/status/user_id/expires_at so the "sync to NixLLM" key
+// migration is re-sync-stable and migrated secrets keep working (auth hashes
+// the presented secret and compares against key_hash). The policy, when
+// non-nil, is upserted alongside. Unlike Create it never generates a secret:
+// it carries an existing credential's identity over verbatim.
+func (s *APIKeyStore) Upsert(ctx context.Context, k APIKey, policy *Policy) (APIKey, error) {
+	if s == nil || s.db == nil {
+		return APIKey{}, fmt.Errorf("postgres store: api key store not initialized")
+	}
+	if k.ID == "" || k.KeyHash == "" {
+		return APIKey{}, fmt.Errorf("postgres store: upsert api key requires id and key_hash")
+	}
+	displayName := trimOr(k.Name, "unnamed")
+	meta := k.Metadata
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		return APIKey{}, fmt.Errorf("postgres store: marshal metadata: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return APIKey{}, fmt.Errorf("postgres store: begin api key upsert tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO %s (id, name, key_alias, key_hash, key_prefix, status, user_id, expires_at, last_used_at, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+		ON CONFLICT (id) DO UPDATE SET
+			name        = EXCLUDED.name,
+			key_alias   = EXCLUDED.key_alias,
+			key_hash    = EXCLUDED.key_hash,
+			key_prefix  = EXCLUDED.key_prefix,
+			status      = EXCLUDED.status,
+			user_id     = EXCLUDED.user_id,
+			expires_at  = EXCLUDED.expires_at,
+			last_used_at = EXCLUDED.last_used_at,
+			metadata    = EXCLUDED.metadata,
+			updated_at  = NOW()
+	`, s.apiKeysTable),
+		k.ID, displayName, nullableString(k.KeyAlias), k.KeyHash, k.KeyPrefix, k.Status,
+		nullableString(k.UserID), k.ExpiresAt, k.LastUsedAt, string(metaJSON)); err != nil {
+		return APIKey{}, fmt.Errorf("postgres store: upsert api key: %w", err)
+	}
+
+	if policy != nil {
+		policy.APIKeyID = k.ID
+		if err = upsertPolicyTx(ctx, tx, s.policiesTable, *policy); err != nil {
+			return APIKey{}, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return APIKey{}, fmt.Errorf("postgres store: commit api key upsert: %w", err)
+	}
+	created, _, err := s.LookupByID(ctx, k.ID)
+	if err != nil {
+		// Best-effort reconstruction when the row is not yet visible.
+		created = &APIKey{
+			ID: k.ID, Name: displayName, KeyAlias: k.KeyAlias, KeyHash: k.KeyHash, KeyPrefix: k.KeyPrefix,
+			Status: k.Status, UserID: k.UserID, ExpiresAt: k.ExpiresAt, LastUsedAt: k.LastUsedAt, Metadata: meta,
+			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		}
+	}
+	return *created, nil
+}
+
+// liteLLMPolicyToRuntimePolicy converts a Manage-LiteLLM key policy into the
+// runtime Policy shape. Most limits map 1:1; the runtime has no key-level
+// tpm_limit or alias map, and LiteLLM's single budget_usd + budget_duration is
+// enforced only when it maps exactly onto a runtime window (7d → weekly,
+// 30d → monthly). Budgets with a duration that has no precise runtime
+// counterpart (1d/24h/12h/8h, or no duration at all) are NOT enforced at
+// runtime — the raw values are preserved in api_keys.metadata by
+// ImportLiteLLMKeys so the operator keeps full visibility.
+func liteLLMPolicyToRuntimePolicy(src LiteLLMPolicy) Policy {
+	dst := Policy{
+		RPMLimit:            intToIntPtr(src.RPMLimit),
+		MaxParallelRequests: intToIntPtr(src.MaxParallelRequests),
+		AllowedModels:       normalizeStringSlice(src.AllowedModels),
+		BlockedModels:       normalizeStringSlice(src.BlockedModels),
+		AllowedIPs:          normalizeStringSlice(src.AllowedIPs),
+		BlockedIPs:          normalizeStringSlice(src.BlockedIPs),
+		ModelRoutes:         normalizeModelRoutes(src.ModelRoutes),
+	}
+	if src.BudgetUSD != nil && *src.BudgetUSD > 0 {
+		v := *src.BudgetUSD
+		switch src.BudgetDuration {
+		case BudgetDuration7d:
+			dst.BudgetWeeklyUSD = &v
+		case BudgetDuration30d:
+			dst.BudgetMonthlyUSD = &v
+		}
+	}
+	return dst
+}
+
+func intToIntPtr(v *int) *int {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
+}
+
+// ImportLiteLLMKeys upserts Manage-LiteLLM API keys into the runtime api_keys
+// table (with their policies) — the key phase of the "sync to NixLLM" full
+// migration. KeyHash is carried over so existing client secrets keep working
+// against the proxy's hash lookup. LiteLLM tags have no runtime column, so
+// they are folded into metadata["litellm_tags"]. Rows that cannot be imported
+// are skipped and counted; a single bad row never aborts the pass.
+func (s *APIKeyStore) ImportLiteLLMKeys(ctx context.Context, src []LiteLLMKey, policies map[string]*LiteLLMPolicy) (imported, skipped int, err error) {
+	if s == nil || s.db == nil {
+		return 0, 0, fmt.Errorf("postgres store: api key store not initialized")
+	}
+	for i := range src {
+		k := src[i]
+		meta := k.Metadata
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		if len(k.Tags) > 0 {
+			meta["litellm_tags"] = k.Tags
+		}
+		runtimeKey := APIKey{
+			ID:         k.ID,
+			Name:       k.Name,
+			KeyAlias:   k.KeyAlias,
+			KeyHash:    k.KeyHash,
+			KeyPrefix:  k.KeyPrefix,
+			Status:     k.Status,
+			UserID:     k.UserID,
+			ExpiresAt:  k.ExpiresAt,
+			LastUsedAt: k.LastUsedAt,
+			Metadata:   meta,
+		}
+		var pol *Policy
+		if policies != nil {
+			if srcPol, ok := policies[k.ID]; ok && srcPol != nil {
+				p := liteLLMPolicyToRuntimePolicy(*srcPol)
+				pol = &p
+				// Preserve the raw LiteLLM budget for budgets that are not
+				// enforced at runtime (no precisely-mappable window), so the
+				// operator can still see the original cap + duration.
+				if srcPol.BudgetUSD != nil {
+					meta["litellm_budget_usd"] = *srcPol.BudgetUSD
+				}
+				if srcPol.BudgetDuration != "" {
+					meta["litellm_budget_duration"] = srcPol.BudgetDuration
+				}
+			}
+		}
+		if _, errUps := s.Upsert(ctx, runtimeKey, pol); errUps != nil {
+			skipped++
+			log.WithError(errUps).WithField("key_id", k.ID).
+				Warn("management: sync to nixllm: skipping un-importable key")
+			continue
+		}
+		imported++
+	}
+	return imported, skipped, nil
+}
+
 func validateSecret(secret string) error {
 	if len(secret) < 16 {
 		return fmt.Errorf("%w: api key secret too short (min 16 chars)", ErrInvalidSecret)

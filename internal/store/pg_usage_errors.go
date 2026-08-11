@@ -139,7 +139,7 @@ const usageErrorColumnList = `
 // scanned into a plain string in scanErrorRow.
 const errorRowSelectColumns = `
 	e.id, e.request_id, COALESCE(e.api_key_id, ''),
-	COALESCE(NULLIF(k.key_alias, ''), k.name, '') AS key_alias,
+	COALESCE(NULLIF(k.key_alias, ''), NULLIF(lk.key_alias, ''), lk.name, k.name, '') AS key_alias,
 	e.provider, e.executor_type, e.model, e.alias, e.route_model, e.endpoint,
 	e.client_ip, e.forwarded_for,
 	e.auth_type,
@@ -159,6 +159,7 @@ const errorRowSelectColumns = `
 func (s *UsageStore) errorJoin() string {
 	catalog := s.modelsCatalogTable
 	return s.errorsTable + " e LEFT JOIN " + s.apiKeysTable + " k ON k.id = e.api_key_id" +
+		" LEFT JOIN " + s.litellmKeysTable + " lk ON lk.id = e.api_key_id" +
 		" LEFT JOIN " + catalog + " mcAlias ON mcAlias.id = COALESCE(NULLIF(e.alias, ''), e.model) AND LOWER(mcAlias.provider) = LOWER(e.provider)" +
 		" LEFT JOIN " + catalog + " mcModel ON mcModel.id = e.model AND LOWER(mcModel.provider) = LOWER(e.provider)" +
 		" LEFT JOIN " + catalog + " mcCompat ON mcCompat.id = COALESCE(NULLIF(e.alias, ''), e.model) AND LOWER(mcCompat.provider) = LOWER(REPLACE(e.provider, 'openai-compatible-', ''))"
@@ -288,6 +289,118 @@ func (s *UsageStore) BatchInsertErrors(ctx context.Context, errors []UsageError)
 		return fmt.Errorf("postgres store: batch insert usage errors: %w", err)
 	}
 	return nil
+}
+
+// ImportLiteLLMErrors inserts historical failed-attempt rows from an external
+// LiteLLM spend-log sync into usage_errors, deduplicating by request_id so
+// re-running a migration is idempotent. Unlike usage_events, usage_errors has
+// no unique index on request_id (the runtime flusher can legitimately record
+// the same request_id more than once), so dedup is done in the store: rows
+// whose request_id already exists are skipped. Rows without a request_id have
+// no stable dedup key and are skipped too. Returns the number of rows actually
+// inserted; batches are bounded to 100 rows to keep the multi-value INSERT small.
+func (s *UsageStore) ImportLiteLLMErrors(ctx context.Context, errs []UsageError) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	const batchSize = 100
+	imported := 0
+	remaining := make([]UsageError, 0, len(errs))
+	for _, e := range errs {
+		if strings.TrimSpace(e.RequestID) != "" {
+			remaining = append(remaining, e)
+		}
+	}
+	for start := 0; start < len(remaining); start += batchSize {
+		end := start + batchSize
+		if end > len(remaining) {
+			end = len(remaining)
+		}
+		chunk := remaining[start:end]
+		// Find which request_ids already exist so we skip them (idempotent).
+		existing := map[string]bool{}
+		{
+			ids := make([]string, 0, len(chunk))
+			for _, e := range chunk {
+				ids = append(ids, e.RequestID)
+			}
+			rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+				SELECT request_id FROM %s WHERE request_id = ANY($1::text[])
+			`, s.errorsTable), pqStringArray(ids))
+			if err != nil {
+				return imported, fmt.Errorf("postgres store: check existing usage error request_ids: %w", err)
+			}
+			for rows.Next() {
+				var rid string
+				if err := rows.Scan(&rid); err != nil {
+					rows.Close()
+					return imported, fmt.Errorf("postgres store: scan existing usage error request_id: %w", err)
+				}
+				existing[rid] = true
+			}
+			rows.Close()
+		}
+		fresh := make([]UsageError, 0, len(chunk))
+		seen := map[string]bool{}
+		for _, e := range chunk {
+			if existing[e.RequestID] || seen[e.RequestID] {
+				continue
+			}
+			seen[e.RequestID] = true
+			fresh = append(fresh, e)
+		}
+		if len(fresh) == 0 {
+			continue
+		}
+		var b strings.Builder
+		b.WriteString("INSERT INTO ")
+		b.WriteString(s.errorsTable)
+		b.WriteString(" (")
+		b.WriteString(usageErrorColumnList)
+		b.WriteString(") VALUES ")
+		args := make([]any, 0, len(fresh)*32)
+		for i, ev := range fresh {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteByte('(')
+			for j := 1; j <= 32; j++ {
+				if j > 1 {
+					b.WriteByte(',')
+				}
+				b.WriteByte('$')
+				b.WriteString(itoa(i*32 + j))
+			}
+			b.WriteByte(')')
+			if ev.RequestedAt.IsZero() {
+				ev.RequestedAt = time.Now().UTC()
+			}
+			principal, err := s.sealer.Seal(ev.APIKeyPrincipal)
+			if err != nil {
+				log.WithError(err).Warn("postgres store: seal api_key_principal failed in error import; persisting empty")
+				principal = ""
+			}
+			args = append(args, ev.RequestID, nullableString(ev.APIKeyID), nullableString(principal),
+				nullableString(ev.UserID),
+				ev.Provider, ev.ExecutorType, ev.Model, ev.Alias, nullableString(ev.RouteModel), ev.Endpoint,
+				nullableString(ev.ClientIP), nullableString(ev.ForwardedFor),
+				ev.AuthType,
+				ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
+				ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
+				ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
+				ev.FailStatusCode, ev.ErrorMessage, ev.Generate, ev.RequestedAt)
+		}
+		res, err := s.db.ExecContext(ctx, b.String(), args...)
+		if err != nil {
+			return imported, fmt.Errorf("postgres store: import litellm usage errors: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return imported, fmt.Errorf("postgres store: import litellm usage errors rows affected: %w", err)
+		}
+		imported += int(n)
+	}
+	return imported, nil
 }
 
 // SelectErrors returns a page of raw failed-attempt rows, newest first, with

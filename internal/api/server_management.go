@@ -242,6 +242,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/litellm/settings", s.mgmt.GetLiteLLMSyncSettings)
 		mgmt.PUT("/litellm/settings", s.mgmt.PutLiteLLMSyncSettings)
 		mgmt.POST("/litellm/sync/run", s.mgmt.RunLiteLLMSync)
+		// Manage LiteLLM — push Manage-LiteLLM Internal Users into the runtime
+		// internal_users table ("sync to NixLLM"). Needs no external connection.
+		mgmt.POST("/litellm/sync/nixllm", s.mgmt.RunLiteLLMSyncNixLLM)
 
 		// Aggregate usage stats powered by the PG usage_events table.
 		mgmt.GET("/usage-stats", s.mgmt.GetUsageStats)

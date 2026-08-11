@@ -93,6 +93,7 @@ function withGlobSuffix(entries) {
       entry('GET', '/litellm/settings'),
       entry('PUT', '/litellm/settings'),
       entry('POST', '/litellm/sync/run'),
+      entry('POST', '/litellm/sync/nixllm'),
     ],
   });
 

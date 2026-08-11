@@ -28,6 +28,9 @@ const LiteLLMSyncDefaultInterval = 300
 // Manage-LiteLLM external sync. The plaintext master API key is never
 // represented here — only MasterKeySet + a masked MasterKeyPrefix — so GET
 // responses can never leak it. MasterKey is sealed at rest via the Sealer.
+// The last_*_sync_* fields describe the external pull (remote → litellm_*
+// tables) while the last_nixllm_* fields describe the local "sync to NixLLM"
+// push (litellm_* → runtime internal_users).
 type LiteLLMSyncSettings struct {
 	Enabled         bool       `json:"enabled"`
 	IntervalSeconds int        `json:"interval_seconds"`
@@ -39,7 +42,26 @@ type LiteLLMSyncSettings struct {
 	LastSyncError   string     `json:"last_sync_error,omitempty"`
 	LastSyncUsers   int        `json:"last_sync_users"`
 	LastSyncKeys    int        `json:"last_sync_keys"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	LastSyncLogs    int        `json:"last_sync_logs"`
+	// LastNixLLMSyncAt is when Internal Users were last pushed from the
+	// litellm_internal_users table into the runtime internal_users table.
+	LastNixLLMSyncAt *time.Time `json:"last_nixllm_sync_at,omitempty"`
+	// LastNixLLMSyncStatus / LastNixLLMSyncError / LastNixLLMSyncUsers /
+	// LastNixLLMSyncKeys / LastNixLLMSyncLogs describe the outcome of the most
+	// recent "sync to NixLLM" push (users / API keys / spend-log rows imported).
+	LastNixLLMSyncStatus string `json:"last_nixllm_sync_status,omitempty"`
+	LastNixLLMSyncError  string `json:"last_nixllm_sync_error,omitempty"`
+	LastNixLLMSyncUsers  int    `json:"last_nixllm_sync_users"`
+	LastNixLLMSyncKeys   int    `json:"last_nixllm_sync_keys"`
+	LastNixLLMSyncLogs   int    `json:"last_nixllm_sync_logs"`
+	// LastNixLLMSyncUsage reports whether the most recent "sync to NixLLM" push
+	// also overwrote runtime spend with the LiteLLM usage values.
+	LastNixLLMSyncUsage bool `json:"last_nixllm_sync_usage"`
+	// LastLiteLLMUsersUpdatedAt is the max updated_at seen across the source
+	// litellm_internal_users rows at the last "sync to NixLLM" push, i.e. the
+	// newest change reflected from the external LiteLLM Internal Users.
+	LastLiteLLMUsersUpdatedAt *time.Time `json:"last_litellm_users_updated_at,omitempty"`
+	UpdatedAt                 time.Time  `json:"updated_at"`
 }
 
 // defaultLiteLLMSyncSettings returns the fallback settings used when the
@@ -110,13 +132,21 @@ func (s *LiteLLMSyncStore) Get(ctx context.Context) (LiteLLMSyncSettings, error)
 		       COALESCE(master_key_sealed, '') <> '' AS master_key_set,
 		       COALESCE(master_key_prefix, ''),
 		       last_sync_at, COALESCE(last_sync_status, ''), COALESCE(last_sync_error, ''),
-		       last_sync_users, last_sync_keys, updated_at
+		       last_sync_users, last_sync_keys, last_sync_logs,
+		       last_nixllm_sync_at, COALESCE(last_nixllm_sync_status, ''), COALESCE(last_nixllm_sync_error, ''),
+		       last_nixllm_sync_users, last_nixllm_sync_keys, last_nixllm_sync_logs,
+		       last_nixllm_sync_usage, last_litellm_users_updated_at,
+		       updated_at
 		FROM %s WHERE id = 1`, s.table))
 	err := row.Scan(
 		&set.Enabled, &set.IntervalSeconds, &set.BaseURL,
 		&set.MasterKeySet, &set.MasterKeyPrefix,
 		&set.LastSyncAt, &set.LastSyncStatus, &set.LastSyncError,
-		&set.LastSyncUsers, &set.LastSyncKeys, &set.UpdatedAt,
+		&set.LastSyncUsers, &set.LastSyncKeys, &set.LastSyncLogs,
+		&set.LastNixLLMSyncAt, &set.LastNixLLMSyncStatus, &set.LastNixLLMSyncError,
+		&set.LastNixLLMSyncUsers, &set.LastNixLLMSyncKeys, &set.LastNixLLMSyncLogs,
+		&set.LastNixLLMSyncUsage, &set.LastLiteLLMUsersUpdatedAt,
+		&set.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -232,9 +262,10 @@ func (s *LiteLLMSyncStore) MasterKey(ctx context.Context) (string, error) {
 	return plain, nil
 }
 
-// RecordSync persists the outcome of a sync pass (status + error + counts) on
-// the singleton row, stamping LastSyncAt = now.
-func (s *LiteLLMSyncStore) RecordSync(ctx context.Context, status, errMsg string, users, keys int) error {
+// RecordSync persists the outcome of an external sync pass (status + error +
+// counts of users/keys/logs pulled) on the singleton row, stamping
+// LastSyncAt = now.
+func (s *LiteLLMSyncStore) RecordSync(ctx context.Context, status, errMsg string, users, keys, logs int) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("postgres store: litellm sync store not initialized")
 	}
@@ -245,12 +276,53 @@ func (s *LiteLLMSyncStore) RecordSync(ctx context.Context, status, errMsg string
 			last_sync_error  = $2,
 			last_sync_users  = $3,
 			last_sync_keys   = $4,
+			last_sync_logs   = $5,
 			updated_at       = NOW()
 		WHERE id = 1`, s.table),
-		status, nullableString(errMsg), users, keys,
+		status, nullableString(errMsg), users, keys, logs,
 	)
 	if err != nil {
 		return fmt.Errorf("postgres store: record litellm sync outcome: %w", err)
+	}
+	return nil
+}
+
+// NixLLMSyncOutcome is the result of one "sync to NixLLM" push, persisted on
+// the singleton settings row so the dashboard can render the last outcome.
+type NixLLMSyncOutcome struct {
+	Status          string
+	Error           string
+	Users           int // imported internal users
+	Keys            int // imported API keys
+	Logs            int // imported spend-log rows
+	SourceUpdatedAt *time.Time
+	IncludedUsage   bool
+}
+
+// RecordNixLLMSync persists the outcome of a "sync to NixLLM" push (Manage
+// LiteLLM Internal Users / API Keys / spend logs → runtime tables) on the
+// singleton row, stamping LastNixLLMSyncAt = now.
+func (s *LiteLLMSyncStore) RecordNixLLMSync(ctx context.Context, out NixLLMSyncOutcome) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: litellm sync store not initialized")
+	}
+	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		UPDATE %s SET
+			last_nixllm_sync_at           = NOW(),
+			last_nixllm_sync_status       = $1,
+			last_nixllm_sync_error        = $2,
+			last_nixllm_sync_users        = $3,
+			last_nixllm_sync_keys         = $4,
+			last_nixllm_sync_logs         = $5,
+			last_nixllm_sync_usage        = $6,
+			last_litellm_users_updated_at = $7,
+			updated_at                    = NOW()
+		WHERE id = 1`, s.table),
+		out.Status, nullableString(out.Error), out.Users, out.Keys, out.Logs,
+		out.IncludedUsage, out.SourceUpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres store: record litellm nixllm sync outcome: %w", err)
 	}
 	return nil
 }

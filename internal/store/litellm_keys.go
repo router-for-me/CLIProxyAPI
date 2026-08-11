@@ -62,6 +62,10 @@ type LiteLLMKey struct {
 	UpdatedAt  time.Time      `json:"updated_at"`
 	ExpiresAt  *time.Time     `json:"expires_at,omitempty"`
 	LastUsedAt *time.Time     `json:"last_used_at,omitempty"`
+	// Policy is populated by the list paths (ListPaged) so the dashboard can
+	// render per-key limits (Budget, RPM/TPM, model access) without a second
+	// round-trip. It is nil when the key has no litellm_key_policies row.
+	Policy *LiteLLMPolicy `json:"policy,omitempty"`
 }
 
 // LiteLLMKeyStore provides CRUD operations for Manage-LiteLLM API keys and
@@ -475,7 +479,217 @@ func (s *LiteLLMKeyStore) ListPaged(ctx context.Context, page, pageSize int, f L
 	if err = rows.Err(); err != nil {
 		return nil, 0, fmt.Errorf("postgres store: iterate litellm keys: %w", err)
 	}
+	// Attach policies for the visible page so the dashboard renders Budget and
+	// RPM/TPM without a per-key round-trip. Keys without a policy row stay nil.
+	ids := make([]string, 0, len(keys))
+	for _, k := range keys {
+		ids = append(ids, k.ID)
+	}
+	pols, err := s.policiesForKeys(ctx, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, k := range keys {
+		k.Policy = pols[k.ID]
+	}
 	return keys, total, nil
+}
+
+// ListAll returns every Manage-LiteLLM API key (no pagination). It backs the
+// "sync to NixLLM" key migration, which needs the full source set so the
+// runtime api_keys table can mirror the external LiteLLM keys. KeyHash is
+// preserved so migrated keys keep working against the proxy's hash lookup.
+func (s *LiteLLMKeyStore) ListAll(ctx context.Context) ([]LiteLLMKey, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: litellm key store not initialized")
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT k.id, k.name, COALESCE(k.key_alias, ''), k.key_hash, k.key_prefix, k.status,
+		       COALESCE(k.user_id, ''),
+		       COALESCE(u.user_alias, ''), COALESCE(u.user_email, ''),
+		       k.key_spend, k.tags, k.metadata, k.created_at, k.updated_at, k.expires_at, k.last_used_at
+		FROM %s k
+		LEFT JOIN %s u ON u.id = k.user_id
+		ORDER BY k.created_at ASC
+	`, s.keysTable, s.internalUsersTable))
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: list all litellm keys: %w", err)
+	}
+	defer rows.Close()
+	keys := make([]LiteLLMKey, 0)
+	for rows.Next() {
+		var (
+			key      LiteLLMKey
+			tagsJSON []byte
+			metaJSON []byte
+		)
+		if err = rows.Scan(&key.ID, &key.Name, &key.KeyAlias, &key.KeyHash, &key.KeyPrefix, &key.Status,
+			&key.UserID, &key.UserAlias, &key.UserEmail,
+			&key.Spend, &tagsJSON, &metaJSON, &key.CreatedAt, &key.UpdatedAt, &key.ExpiresAt, &key.LastUsedAt); err != nil {
+			return nil, fmt.Errorf("postgres store: scan litellm key row: %w", err)
+		}
+		if len(tagsJSON) > 0 {
+			_ = json.Unmarshal(tagsJSON, &key.Tags)
+		}
+		if len(metaJSON) > 0 {
+			_ = json.Unmarshal(metaJSON, &key.Metadata)
+		}
+		if key.Metadata == nil {
+			key.Metadata = map[string]any{}
+		}
+		keys = append(keys, key)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres store: iterate litellm keys: %w", err)
+	}
+	return keys, nil
+}
+
+// LookupByHash returns the Manage-LiteLLM key matching the supplied SHA-256
+// secret hash. It is the litellm_api_keys analogue of APIKeyStore.LookupByHash
+// and is used to attribute external spend-log rows to a key (and its alias)
+// even when the runtime api_keys table has not been migrated yet. ErrLiteLLMKeyNotFound
+// is returned when no row matches.
+func (s *LiteLLMKeyStore) LookupByHash(ctx context.Context, hash string) (*LiteLLMKey, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: litellm key store not initialized")
+	}
+	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT k.id, k.name, COALESCE(k.key_alias, ''), k.key_hash, k.key_prefix, k.status,
+		       COALESCE(k.user_id, ''),
+		       COALESCE(u.user_alias, ''), COALESCE(u.user_email, ''),
+		       k.key_spend, k.tags, k.metadata, k.created_at, k.updated_at, k.expires_at, k.last_used_at
+		FROM %s k
+		LEFT JOIN %s u ON u.id = k.user_id
+		WHERE k.key_hash = $1
+	`, s.keysTable, s.internalUsersTable), hash)
+	var (
+		key      LiteLLMKey
+		tagsJSON []byte
+		metaJSON []byte
+	)
+	if err := row.Scan(&key.ID, &key.Name, &key.KeyAlias, &key.KeyHash, &key.KeyPrefix, &key.Status,
+		&key.UserID, &key.UserAlias, &key.UserEmail,
+		&key.Spend, &tagsJSON, &metaJSON, &key.CreatedAt, &key.UpdatedAt, &key.ExpiresAt, &key.LastUsedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrLiteLLMKeyNotFound
+		}
+		return nil, err
+	}
+	if len(tagsJSON) > 0 {
+		_ = json.Unmarshal(tagsJSON, &key.Tags)
+	}
+	if len(metaJSON) > 0 {
+		_ = json.Unmarshal(metaJSON, &key.Metadata)
+	}
+	if key.Metadata == nil {
+		key.Metadata = map[string]any{}
+	}
+	return &key, nil
+}
+
+// ListAllPolicies returns every Manage-LiteLLM key policy keyed by api_key_id.
+// Used by the "sync to NixLLM" key migration to avoid an N+1 policy lookup per
+// key. Keys without a policy row are simply absent from the map.
+func (s *LiteLLMKeyStore) ListAllPolicies(ctx context.Context) (map[string]*LiteLLMPolicy, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: litellm key store not initialized")
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT api_key_id, rpm_limit, tpm_limit, budget_usd, COALESCE(budget_duration, ''),
+		       max_parallel_requests, allowed_models, blocked_models, aliases,
+		       allowed_ips, blocked_ips, model_routes, updated_at
+		FROM %s
+	`, s.policiesTable))
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: list all litellm key policies: %w", err)
+	}
+	defer rows.Close()
+	return scanLiteLLMPolicyRows(rows)
+}
+
+// policiesForKeys loads the litellm_key_policies rows for the supplied key ids
+// (used by ListPaged so a page of keys carries its policies without an N+1
+// per-key lookup). Returns a map keyed by api_key_id.
+func (s *LiteLLMKeyStore) policiesForKeys(ctx context.Context, ids []string) (map[string]*LiteLLMPolicy, error) {
+	if len(ids) == 0 {
+		return map[string]*LiteLLMPolicy{}, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT api_key_id, rpm_limit, tpm_limit, budget_usd, COALESCE(budget_duration, ''),
+		       max_parallel_requests, allowed_models, blocked_models, aliases,
+		       allowed_ips, blocked_ips, model_routes, updated_at
+		FROM %s WHERE api_key_id IN (%s)
+	`, s.policiesTable, strings.Join(placeholders, ",")), args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: list litellm key policies for page: %w", err)
+	}
+	defer rows.Close()
+	return scanLiteLLMPolicyRows(rows)
+}
+
+// scanLiteLLMPolicyRows decodes litellm_key_policies rows into a map keyed by
+// api_key_id. Shared by ListAllPolicies and policiesForKeys.
+func scanLiteLLMPolicyRows(rows *sql.Rows) (map[string]*LiteLLMPolicy, error) {
+	out := make(map[string]*LiteLLMPolicy)
+	for rows.Next() {
+		var (
+			keyID           string
+			rpmLimit        sql.NullInt64
+			tpmLimit        sql.NullInt64
+			budgetUSD       sql.NullFloat64
+			budgetDuration  string
+			maxParallel     sql.NullInt64
+			allowedModels   []byte
+			blockedModels   []byte
+			aliasesJSON     []byte
+			allowedIPs      []byte
+			blockedIPs      []byte
+			modelRoutes     []byte
+			policyUpdatedAt time.Time
+		)
+		if err := rows.Scan(&keyID, &rpmLimit, &tpmLimit, &budgetUSD, &budgetDuration,
+			&maxParallel, &allowedModels, &blockedModels, &aliasesJSON,
+			&allowedIPs, &blockedIPs, &modelRoutes, &policyUpdatedAt); err != nil {
+			return nil, fmt.Errorf("postgres store: scan litellm key policy row: %w", err)
+		}
+		p := LiteLLMPolicy{APIKeyID: keyID, UpdatedAt: policyUpdatedAt, BudgetDuration: budgetDuration}
+		if rpmLimit.Valid {
+			v := int(rpmLimit.Int64)
+			p.RPMLimit = &v
+		}
+		if tpmLimit.Valid {
+			v := int(tpmLimit.Int64)
+			p.TPMLimit = &v
+		}
+		if budgetUSD.Valid {
+			v := budgetUSD.Float64
+			p.BudgetUSD = &v
+		}
+		if maxParallel.Valid {
+			v := int(maxParallel.Int64)
+			p.MaxParallelRequests = &v
+		}
+		p.AllowedModels = decodeStringArray(allowedModels)
+		p.BlockedModels = decodeStringArray(blockedModels)
+		if len(aliasesJSON) > 0 {
+			_ = json.Unmarshal(aliasesJSON, &p.Aliases)
+		}
+		p.AllowedIPs = decodeStringArray(allowedIPs)
+		p.BlockedIPs = decodeStringArray(blockedIPs)
+		p.ModelRoutes = decodeModelRoutes(modelRoutes)
+		out[keyID] = &p
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres store: iterate litellm key policies: %w", err)
+	}
+	return out, nil
 }
 
 // UpdatePolicy creates or replaces the policy attached to a Manage-LiteLLM key.

@@ -464,3 +464,134 @@ func TestUsageStoreSelectTopNullDimensionKey(t *testing.T) {
 		}
 	}
 }
+
+func TestUsageStoreImportLiteLLMSpendLogs(t *testing.T) {
+	store := newTestPostgresStore(t, "usage_spend_log_import")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	events := []UsageEvent{
+		{RequestID: "req-1", Provider: "litellm", Model: "gpt-4o", CostUSD: 0.25, TotalTokens: 100, RequestedAt: base},
+		{RequestID: "req-2", Provider: "litellm", Model: "gpt-4o", CostUSD: 0.5, TotalTokens: 200, RequestedAt: base.Add(time.Minute)},
+		{RequestID: "", Provider: "litellm", Model: "gpt-4o", CostUSD: 0.1}, // skipped: no request_id
+	}
+	imported, err := us.ImportLiteLLMSpendLogs(ctx, events)
+	if err != nil {
+		t.Fatalf("ImportLiteLLMSpendLogs: %v", err)
+	}
+	if imported != 2 {
+		t.Fatalf("imported = %d; want 2 (request_id-less row skipped)", imported)
+	}
+
+	// Re-import the same request_ids: idempotent, no new rows.
+	imported2, err := us.ImportLiteLLMSpendLogs(ctx, events)
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	if imported2 != 0 {
+		t.Fatalf("re-import imported = %d; want 0 (dedup by request_id)", imported2)
+	}
+
+	// Total cost across both events is 0.75.
+	aggs, err := us.SelectAggregate(ctx, UsageFilter{})
+	if err != nil {
+		t.Fatalf("SelectAggregate: %v", err)
+	}
+	if len(aggs) != 1 || aggs[0].CostUSD != 0.75 {
+		t.Fatalf("total cost = %+v; want one aggregate with 0.75", aggs)
+	}
+}
+
+func TestUsageStoreImportLiteLLMSpendLogsMixedDupes(t *testing.T) {
+	store := newTestPostgresStore(t, "usage_spend_log_mixed")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	events := []UsageEvent{
+		{RequestID: "req-a", Provider: "litellm", Model: "gpt-4o", CostUSD: 1.0, RequestedAt: base},
+		{RequestID: "req-a", Provider: "litellm", Model: "gpt-4o", CostUSD: 2.0, RequestedAt: base}, // duplicate in same batch
+		{RequestID: "req-b", Provider: "litellm", Model: "gpt-4o", CostUSD: 3.0, RequestedAt: base},
+	}
+	imported, err := us.ImportLiteLLMSpendLogs(ctx, events)
+	if err != nil {
+		t.Fatalf("ImportLiteLLMSpendLogs: %v", err)
+	}
+	// req-a inserted once (first wins via DO NOTHING), req-b inserted once.
+	if imported != 2 {
+		t.Fatalf("imported = %d; want 2 (in-batch dupes collapsed)", imported)
+	}
+	aggs, _ := us.SelectAggregate(ctx, UsageFilter{})
+	if len(aggs) != 1 || aggs[0].CostUSD != 4.0 {
+		t.Fatalf("total cost = %+v; want one aggregate with 4.0 (1.0 + 3.0)", aggs)
+	}
+}
+
+func TestUsageStoreImportLiteLLMErrors(t *testing.T) {
+	store := newTestPostgresStore(t, "usage_errors_import")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	errs := []UsageError{
+		{RequestID: "err-1", Provider: "litellm", Model: "gpt-4o", FailStatusCode: 500, ErrorMessage: "upstream timeout", LatencyMs: 999, RequestedAt: base},
+		{RequestID: "err-2", Provider: "litellm", Model: "gpt-4o", FailStatusCode: 429, ErrorMessage: "rate limited", RequestedAt: base.Add(time.Minute)},
+		{RequestID: "", Provider: "litellm", Model: "gpt-4o", FailStatusCode: 500, ErrorMessage: "no id"}, // skipped
+	}
+	imported, err := us.ImportLiteLLMErrors(ctx, errs)
+	if err != nil {
+		t.Fatalf("ImportLiteLLMErrors: %v", err)
+	}
+	if imported != 2 {
+		t.Fatalf("imported = %d; want 2 (request_id-less row skipped)", imported)
+	}
+
+	// Re-import the same request_ids: idempotent, no new rows.
+	imported2, err := us.ImportLiteLLMErrors(ctx, errs)
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	if imported2 != 0 {
+		t.Fatalf("re-import imported = %d; want 0 (dedup by request_id)", imported2)
+	}
+
+	// Verify persisted rows carry the error message + status + latency.
+	rows, total, err := us.SelectErrors(ctx, UsageFilter{}, 1, 200)
+	if err != nil {
+		t.Fatalf("SelectErrors: %v", err)
+	}
+	if total != 2 || len(rows) != 2 {
+		t.Fatalf("total = %d, len = %d; want 2/2", total, len(rows))
+	}
+	byReq := map[string]UsageErrorRow{}
+	for _, r := range rows {
+		byReq[r.RequestID] = r
+	}
+	if r := byReq["err-1"]; r.ErrorMessage != "upstream timeout" || r.FailStatusCode != 500 || r.LatencyMs != 999 {
+		t.Fatalf("err-1 persisted wrong: %+v", r)
+	}
+	if r := byReq["err-2"]; r.ErrorMessage != "rate limited" || r.FailStatusCode != 429 {
+		t.Fatalf("err-2 persisted wrong: %+v", r)
+	}
+}
+
+func TestUsageStoreImportLiteLLMErrorsInBatchDupes(t *testing.T) {
+	store := newTestPostgresStore(t, "usage_errors_import_dupes")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	errs := []UsageError{
+		{RequestID: "err-a", Provider: "litellm", Model: "gpt-4o", FailStatusCode: 500, ErrorMessage: "first", RequestedAt: base},
+		{RequestID: "err-a", Provider: "litellm", Model: "gpt-4o", FailStatusCode: 500, ErrorMessage: "second", RequestedAt: base}, // dup in batch
+		{RequestID: "err-b", Provider: "litellm", Model: "gpt-4o", FailStatusCode: 400, ErrorMessage: "bad", RequestedAt: base},
+	}
+	imported, err := us.ImportLiteLLMErrors(ctx, errs)
+	if err != nil {
+		t.Fatalf("ImportLiteLLMErrors: %v", err)
+	}
+	if imported != 2 {
+		t.Fatalf("imported = %d; want 2 (in-batch dupes collapsed)", imported)
+	}
+}

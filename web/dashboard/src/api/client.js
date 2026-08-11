@@ -799,6 +799,26 @@ export async function runLiteLLMSyncNow() {
   return fetchJSON('/litellm/sync/run', { method: 'POST' });
 }
 
+// runLiteLLMSyncNixLLM pushes Manage-LiteLLM Internal Users into the runtime
+// internal_users table ("sync to NixLLM"), and optionally migrates API Keys
+// into api_keys and spend logs (pulled from the external LiteLLM) into
+// usage_events. Options:
+//   - includeUsage: overwrite runtime user spend with LiteLLM values
+//   - includeKeys:  migrate API Keys (policies mapped lossily)
+//   - includeLogs:  pull /spend/logs from the external instance + reconcile
+//     user spend from the imported history (requires base_url + master key)
+// Returns the fresh settings (with last_nixllm_sync_* outcome).
+export async function runLiteLLMSyncNixLLM({
+  includeUsage = false,
+  includeKeys = false,
+  includeLogs = false,
+} = {}) {
+  return fetchJSON('/litellm/sync/nixllm', {
+    method: 'POST',
+    body: JSON.stringify({ include_usage: includeUsage, include_keys: includeKeys, include_logs: includeLogs }),
+  });
+}
+
 // --- Models Catalog + Pricing -----------------------------------------------
 
 export async function listModelsCatalog({

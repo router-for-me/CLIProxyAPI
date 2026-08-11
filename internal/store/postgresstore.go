@@ -577,6 +577,15 @@ func (s *PostgresStore) ensureLiteLLMSchema(ctx context.Context) error {
 			last_sync_error     TEXT,
 			last_sync_users     INTEGER NOT NULL DEFAULT 0,
 			last_sync_keys      INTEGER NOT NULL DEFAULT 0,
+			last_sync_logs      INTEGER NOT NULL DEFAULT 0,
+			last_nixllm_sync_at         TIMESTAMPTZ,
+			last_nixllm_sync_status     TEXT,
+			last_nixllm_sync_error      TEXT,
+			last_nixllm_sync_users      INTEGER NOT NULL DEFAULT 0,
+			last_nixllm_sync_keys       INTEGER NOT NULL DEFAULT 0,
+			last_nixllm_sync_logs       INTEGER NOT NULL DEFAULT 0,
+			last_nixllm_sync_usage      BOOLEAN NOT NULL DEFAULT FALSE,
+			last_litellm_users_updated_at TIMESTAMPTZ,
 			updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			CONSTRAINT litellm_sync_settings_singleton CHECK (id = 1)
 		)
@@ -588,6 +597,26 @@ func (s *PostgresStore) ensureLiteLLMSchema(ctx context.Context) error {
 		`INSERT INTO %s (id) VALUES (1) ON CONFLICT (id) DO NOTHING`, syncTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: seed litellm_sync_settings singleton: %w", err)
+	}
+	// Backfill the "sync to NixLLM" outcome columns (external LiteLLM users →
+	// runtime internal_users). Idempotent so existing deployments upgrade
+	// transparently without recreating the table.
+	for _, col := range []string{
+		`last_sync_logs INTEGER NOT NULL DEFAULT 0`,
+		`last_nixllm_sync_at TIMESTAMPTZ`,
+		`last_nixllm_sync_status TEXT`,
+		`last_nixllm_sync_error TEXT`,
+		`last_nixllm_sync_users INTEGER NOT NULL DEFAULT 0`,
+		`last_nixllm_sync_keys INTEGER NOT NULL DEFAULT 0`,
+		`last_nixllm_sync_logs INTEGER NOT NULL DEFAULT 0`,
+		`last_nixllm_sync_usage BOOLEAN NOT NULL DEFAULT FALSE`,
+		`last_litellm_users_updated_at TIMESTAMPTZ`,
+	} {
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+			`ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s`, syncTable, col,
+		)); err != nil {
+			return fmt.Errorf("postgres store: alter litellm_sync_settings add column %q: %w", col, err)
+		}
 	}
 	return nil
 }
@@ -742,6 +771,61 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_usage_events_requested_at ON %s(requested_at DESC)`, usageEventsTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: create usage_events requested_at index: %w", err)
+	}
+	// Partial unique index on request_id for idempotent historical log imports
+	// (the "sync to NixLLM" spend-log migration). Postgres treats NULLs as
+	// distinct, so only non-NULL/non-empty request_ids are deduplicated.
+	//
+	// Existing deployments may already hold duplicate request_ids (the usage
+	// flusher can re-record a request that had a request-id context set), which
+	// would make CREATE UNIQUE INDEX fail with a 23505 duplicate error. Dedupe
+	// first — keeping the earliest row per request_id, the same semantics as the
+	// ON CONFLICT (request_id) DO NOTHING used by the spend-log import — then
+	// create the index. Both steps run only when the index is missing so an
+	// already-migrated deployment is not re-scanned on every boot.
+	requestIDIdxName := "idx_usage_events_request_id"
+	schemaName := strings.TrimSpace(s.cfg.Schema)
+	if schemaName == "" {
+		// No explicit schema: resolve the connection's current schema so the
+		// existence check is scoped to the actual table (index names are only
+		// unique per schema, and tests create one schema per case). A driver
+		// that answers no rows (some unit tests mock every query) falls back to
+		// "public" — the schema name only feeds the EXISTS probe below.
+		var currentSchema string
+		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(current_schema(), 'public')`).Scan(&currentSchema); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				currentSchema = "public"
+			} else {
+				return fmt.Errorf("postgres store: resolve current_schema: %w", err)
+			}
+		}
+		schemaName = currentSchema
+	}
+	var requestIDIdxExists bool
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = $1 AND schemaname = $2 AND tablename = $3)`,
+		requestIDIdxName, schemaName, s.cfg.UsageEventsTable,
+	).Scan(&requestIDIdxExists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			requestIDIdxExists = false // driver cannot answer; treat as missing
+		} else {
+			return fmt.Errorf("postgres store: check usage_events request_id index: %w", err)
+		}
+	}
+	if !requestIDIdxExists {
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+			DELETE FROM %s a USING %s b
+			WHERE a.request_id = b.request_id
+			  AND a.request_id IS NOT NULL AND a.request_id <> ''
+			  AND a.id > b.id
+		`, usageEventsTable, usageEventsTable)); err != nil {
+			return fmt.Errorf("postgres store: dedupe usage_events request_id: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+			`CREATE UNIQUE INDEX %s ON %s(request_id) WHERE request_id IS NOT NULL AND request_id <> ''`, requestIDIdxName, usageEventsTable,
+		)); err != nil {
+			return fmt.Errorf("postgres store: create usage_events request_id unique index: %w", err)
+		}
 	}
 	// Backfill the user_id column on usage_events, stamped by the usage
 	// flusher when resolving the API key. Idempotent.

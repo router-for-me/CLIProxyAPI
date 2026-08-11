@@ -1,15 +1,20 @@
 // Package management: Manage LiteLLM external sync.
 //
 // This file implements the external LiteLLM sync under
-// /v0/management/litellm/settings and /v0/management/litellm/sync/run.
+// /v0/management/litellm/settings and /v0/management/litellm/sync/run, plus
+// the local "sync to NixLLM" push under /v0/management/litellm/sync/nixllm.
 // An operator configures a base URL + master API key for an EXTERNAL LiteLLM
 // instance, and the sync pulls (upserts) that instance's Internal Users and
-// API Keys into the local litellm_* tables. The sync is management-only: it
-// never touches the runtime tables and never deletes local rows (upsert-only).
+// API Keys into the local litellm_* tables. The external sync is
+// management-only: it never touches the runtime tables and never deletes local
+// rows (upsert-only). The "sync to NixLLM" push copies the Manage-LiteLLM
+// Internal Users (litellm_internal_users) into the runtime internal_users
+// table that the proxy enforces; it needs no external connection.
 //
-//	GET  /litellm/settings    — current settings (master key is masked)
-//	PUT  /litellm/settings    — partial-merge update (master_key optional)
-//	POST /litellm/sync/run    — run a sync immediately, return fresh settings
+//	GET  /litellm/settings        — current settings (master key is masked)
+//	PUT  /litellm/settings        — partial-merge update (master_key optional)
+//	POST /litellm/sync/run        — run a sync immediately, return fresh settings
+//	POST /litellm/sync/nixllm     — push Manage-LiteLLM users to runtime internal_users
 //
 // A background sweep (StartLiteLLMSyncSweep) runs the same sync on the
 // configured interval when enabled.
@@ -41,6 +46,10 @@ const liteLLMSyncMaxPages = 100
 // liteLLMSyncPageSize is the page size used when talking to the external
 // LiteLLM paginated list endpoints.
 const liteLLMSyncPageSize = 100
+
+// liteLLMSpendLogPageSize is kept smaller because spend-log rows can contain
+// large request/response payloads even when the row count is modest.
+const liteLLMSpendLogPageSize = 25
 
 // liteLLMSyncMaxBody is the limit on a single external response body read.
 const liteLLMSyncMaxBody = 8 << 20 // 8 MiB
@@ -143,16 +152,91 @@ func (h *Handler) PutLiteLLMSyncSettings(c *gin.Context) {
 // RunLiteLLMSync handles POST /v0/management/litellm/sync/run. It runs a sync
 // synchronously (with a bounded timeout) and returns the fresh settings row so
 // the dashboard can render the last-sync outcome without a second round-trip.
+// Besides users + keys it also pulls spend logs into the runtime usage_events
+// table, so a following "sync to NixLLM" migrates the freshest data.
 func (h *Handler) RunLiteLLMSync(c *gin.Context) {
 	syncStore, users, keys, ok := h.requireLiteLLMSync(c)
 	if !ok {
 		return
 	}
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	runtimeKeys, usage, _, _, ok := h.requirePG(c)
+	if !ok {
+		return
+	}
+	runtimeUsers, ok := h.requireUsers(c)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
 	defer cancel()
-	result := h.runLiteLLMSync(ctx, syncStore, users, keys)
+	result := h.runLiteLLMSync(ctx, syncStore, users, keys, runtimeKeys, usage, runtimeUsers)
 	if result.err != nil && result.status == store.LiteLLMSyncStatusFailed {
 		// Still surface settings (with last_sync_error) + a 502.
+		set, _ := syncStore.Get(ctx)
+		c.JSON(http.StatusBadGateway, gin.H{"settings": set, "error": gin.H{
+			"type": "sync_failed", "message": result.err.Error(),
+		}})
+		return
+	}
+	set, err := syncStore.Get(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"settings": set})
+}
+
+// RunLiteLLMSyncNixLLM handles POST /v0/management/litellm/sync/nixllm. It
+// pushes the Manage-LiteLLM Internal Users (litellm_internal_users) into the
+// runtime internal_users table synchronously (with a bounded timeout) and
+// returns the fresh settings row so the dashboard can render the last-sync
+// outcome without a second round-trip. No external connection is required for
+// users/keys (the source is the local litellm_* tables); the spend-log phase
+// pulls GET /spend/logs from the external instance and so requires base_url +
+// master key. An optional body selects the phases:
+//
+//	{"include_usage": true}  — overwrite runtime user spend with LiteLLM values
+//	{"include_keys":  true}  — migrate API Keys into the runtime api_keys table
+//	{"include_logs":  true}  — import spend logs (usage_events) + reconcile spend
+func (h *Handler) RunLiteLLMSyncNixLLM(c *gin.Context) {
+	syncStore, users, keys, ok := h.requireLiteLLMSync(c)
+	if !ok {
+		return
+	}
+	runtimeUsers, ok := h.requireUsers(c)
+	if !ok {
+		return
+	}
+	runtimeKeys, usage, _, _, ok := h.requirePG(c)
+	if !ok {
+		return
+	}
+	includeUsage, includeKeys, includeLogs := false, false, false
+	if c.Request.ContentLength != 0 {
+		var req struct {
+			IncludeUsage *bool `json:"include_usage"`
+			IncludeKeys  *bool `json:"include_keys"`
+			IncludeLogs  *bool `json:"include_logs"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": err.Error()}})
+			return
+		}
+		if req.IncludeUsage != nil {
+			includeUsage = *req.IncludeUsage
+		}
+		if req.IncludeKeys != nil {
+			includeKeys = *req.IncludeKeys
+		}
+		if req.IncludeLogs != nil {
+			includeLogs = *req.IncludeLogs
+		}
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
+	defer cancel()
+	result := h.runLiteLLMSyncNixLLM(ctx, syncStore, users, keys, runtimeUsers, runtimeKeys, usage, includeUsage, includeKeys, includeLogs)
+	if result.err != nil && result.status == store.LiteLLMSyncStatusFailed {
+		// Still surface settings (with last_nixllm_sync_error) + a 502.
 		set, _ := syncStore.Get(ctx)
 		c.JSON(http.StatusBadGateway, gin.H{"settings": set, "error": gin.H{
 			"type": "sync_failed", "message": result.err.Error(),
@@ -172,29 +256,33 @@ type liteLLMSyncResult struct {
 	status string
 	users  int
 	keys   int
+	logs   int
 	err    error
 }
 
-// runLiteLLMSync performs one synchronous sync pass: fetch users, upsert them;
-// fetch keys, upsert them; record the outcome on the settings row.
-func (h *Handler) runLiteLLMSync(ctx context.Context, syncStore *store.LiteLLMSyncStore, users *store.LiteLLMUserStore, keys *store.LiteLLMKeyStore) liteLLMSyncResult {
+// runLiteLLMSync performs one synchronous external sync pass: fetch users,
+// upsert them; fetch keys, upsert them; then pull spend logs into the runtime
+// usage_events table so a subsequent "sync to NixLLM" migrates the freshest
+// data possible. runtimeKeys/usage/runtimeUsers may be nil, in which case the
+// spend-log phase is skipped (the sweep passes whatever is wired).
+func (h *Handler) runLiteLLMSync(ctx context.Context, syncStore *store.LiteLLMSyncStore, users *store.LiteLLMUserStore, keys *store.LiteLLMKeyStore, runtimeKeys *store.APIKeyStore, usage *store.UsageStore, runtimeUsers *store.UserStore) liteLLMSyncResult {
 	set, err := syncStore.Get(ctx)
 	if err != nil {
 		return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: err}
 	}
 	if strings.TrimSpace(set.BaseURL) == "" {
 		err := errors.New("litellm sync: base_url is not configured")
-		_ = syncStore.RecordSync(ctx, store.LiteLLMSyncStatusFailed, err.Error(), 0, 0)
+		_ = syncStore.RecordSync(ctx, store.LiteLLMSyncStatusFailed, err.Error(), 0, 0, 0)
 		return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: err}
 	}
 	masterKey, err := syncStore.MasterKey(ctx)
 	if err != nil {
-		_ = syncStore.RecordSync(ctx, store.LiteLLMSyncStatusFailed, err.Error(), 0, 0)
+		_ = syncStore.RecordSync(ctx, store.LiteLLMSyncStatusFailed, err.Error(), 0, 0, 0)
 		return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: err}
 	}
 	if masterKey == "" {
 		err := errors.New("litellm sync: master API key is not configured")
-		_ = syncStore.RecordSync(ctx, store.LiteLLMSyncStatusFailed, err.Error(), 0, 0)
+		_ = syncStore.RecordSync(ctx, store.LiteLLMSyncStatusFailed, err.Error(), 0, 0, 0)
 		return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: err}
 	}
 	base := strings.TrimRight(set.BaseURL, "/")
@@ -202,7 +290,7 @@ func (h *Handler) runLiteLLMSync(ctx context.Context, syncStore *store.LiteLLMSy
 	// 1. Pull internal users.
 	remoteUsers, err := h.fetchLiteLLMUsers(ctx, base, masterKey)
 	if err != nil {
-		_ = syncStore.RecordSync(ctx, store.LiteLLMSyncStatusFailed, err.Error(), 0, 0)
+		_ = syncStore.RecordSync(ctx, store.LiteLLMSyncStatusFailed, err.Error(), 0, 0, 0)
 		return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: err}
 	}
 	for i := range remoteUsers {
@@ -213,12 +301,13 @@ func (h *Handler) runLiteLLMSync(ctx context.Context, syncStore *store.LiteLLMSy
 				Warn("management: litellm sync: skipping un-importable user")
 		}
 	}
+	userCount := len(remoteUsers)
 
 	// 2. Pull API keys (attached to users by user_id; budgets → key policy).
 	remoteKeys, err := h.fetchLiteLLMKeys(ctx, base, masterKey)
 	if err != nil {
-		_ = syncStore.RecordSync(ctx, store.LiteLLMSyncStatusFailed, err.Error(), len(remoteUsers), 0)
-		return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: err}
+		_ = syncStore.RecordSync(ctx, store.LiteLLMSyncStatusFailed, err.Error(), userCount, 0, 0)
+		return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, users: userCount, err: err}
 	}
 	if len(remoteKeys) == 0 {
 		// A misconfigured/foreign /key/list shape that returns 200 but no rows
@@ -234,13 +323,499 @@ func (h *Handler) runLiteLLMSync(ctx context.Context, syncStore *store.LiteLLMSy
 				Warn("management: litellm sync: skipping un-importable key")
 		}
 	}
-
-	userCount := len(remoteUsers)
 	keyCount := len(remoteKeys)
-	if err := syncStore.RecordSync(ctx, store.LiteLLMSyncStatusOK, "", userCount, keyCount); err != nil {
+
+	// 3. Pull spend logs from the external instance into the runtime
+	// usage_events table (idempotent per request_id) so "sync to NixLLM" with
+	// "Include usage logs" migrates the freshest data available. Skipped when
+	// the runtime stores are not wired.
+	//
+	// The reported "logs pulled" count is the number of rows fetched from the
+	// external instance (fetchedLogs), not the rows newly inserted this pass.
+	// The insert is idempotent (ON CONFLICT (request_id) DO NOTHING), so on a
+	// re-sync nearly all rows already exist and "imported" would collapse to 0
+	// — misleading the operator into thinking nothing synced. The fetched count
+	// is stable and reflects the true pull volume.
+	fetchedLogs := 0
+	if runtimeKeys != nil && usage != nil && runtimeUsers != nil {
+		remoteLogs, errLogs := h.fetchLiteLLMSpendLogs(ctx, base, masterKey)
+		fetchedLogs = len(remoteLogs)
+		if errLogs != nil {
+			_ = syncStore.RecordSync(ctx, store.LiteLLMSyncStatusFailed, errLogs.Error(), userCount, keyCount, 0)
+			return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, users: userCount, keys: keyCount, err: errLogs}
+		}
+		if len(remoteLogs) == 0 {
+			log.Warn("management: litellm sync: spend-log fetch returned 0 rows for the lookback window; " +
+				"verify the external /spend/logs/v2 response shape and that the window contains activity")
+		}
+		if len(remoteLogs) > 0 {
+			events := h.remoteSpendLogsToEvents(ctx, remoteLogs, runtimeKeys, keys)
+			importedLogs, errIns := usage.ImportLiteLLMSpendLogs(ctx, events)
+			log.Infof("management: litellm sync: spend logs imported: fetched=%d imported=%d", len(remoteLogs), importedLogs)
+			if errIns != nil {
+				_ = syncStore.RecordSync(ctx, store.LiteLLMSyncStatusFailed, errIns.Error(), userCount, keyCount, importedLogs)
+				return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, users: userCount, keys: keyCount, logs: importedLogs, err: errIns}
+			}
+			// Failed spend logs also carry the upstream error message, which
+			// usage_events intentionally drops. Import it into usage_errors
+			// (idempotent per request_id) so error drill-down preserves the
+			// message. A failure here is non-fatal to the sync: the events were
+			// already imported, so we log and keep going.
+			errorRows := h.remoteSpendLogsToErrors(ctx, remoteLogs, runtimeKeys, keys)
+			if len(errorRows) > 0 {
+				if _, errErr := usage.ImportLiteLLMErrors(ctx, errorRows); errErr != nil {
+					log.WithError(errErr).Warn("management: litellm sync: import usage errors from spend logs failed")
+				}
+			}
+			if importedLogs > 0 {
+				if _, errRec := runtimeUsers.ReconcileAll(ctx, time.Time{}); errRec != nil {
+					log.WithError(errRec).Warn("management: litellm sync: reconcile spend after log import failed")
+				}
+			}
+		}
+	}
+
+	if err := syncStore.RecordSync(ctx, store.LiteLLMSyncStatusOK, "", userCount, keyCount, fetchedLogs); err != nil {
 		return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: err}
 	}
-	return liteLLMSyncResult{status: store.LiteLLMSyncStatusOK, users: userCount, keys: keyCount}
+	return liteLLMSyncResult{status: store.LiteLLMSyncStatusOK, users: userCount, keys: keyCount, logs: fetchedLogs}
+}
+
+// runLiteLLMSyncNixLLM performs one "sync to NixLLM" pass across the requested
+// phases: it first refreshes from the external instance (users + keys pulled
+// into the litellm_* tables, spend logs into usage_events) so the migration
+// uses the freshest data, then imports Internal Users → runtime internal_users
+// and (optionally) API Keys → runtime api_keys. Users are always imported (the
+// base phase). A failure in any phase records a failed outcome but users/keys
+// already written are kept.
+func (h *Handler) runLiteLLMSyncNixLLM(ctx context.Context, syncStore *store.LiteLLMSyncStore, litellmUsers *store.LiteLLMUserStore, litellmKeys *store.LiteLLMKeyStore, runtimeUsers *store.UserStore, runtimeKeys *store.APIKeyStore, usage *store.UsageStore, includeUsage, includeKeys, includeLogs bool) liteLLMSyncResult {
+	outcome := store.NixLLMSyncOutcome{IncludedUsage: includeUsage || includeLogs}
+
+	// Phase 0: refresh from the external instance. "Sync now" pulls users +
+	// keys + spend logs (into usage_events) so the migration below always runs
+	// against just-synced data. Skipped when the external instance is not
+	// configured; spend logs can only come from the external instance, so
+	// include_logs without a configuration is an error.
+	set, errSet := syncStore.Get(ctx)
+	if errSet != nil {
+		outcome.Error = errSet.Error()
+		_ = syncStore.RecordNixLLMSync(ctx, outcome)
+		return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: errSet}
+	}
+	refreshConfigured := strings.TrimSpace(set.BaseURL) != ""
+	if refreshConfigured {
+		if mk, errKey := syncStore.MasterKey(ctx); errKey != nil || mk == "" {
+			refreshConfigured = false
+		}
+	}
+	if refreshConfigured {
+		pull := h.runLiteLLMSync(ctx, syncStore, litellmUsers, litellmKeys, runtimeKeys, usage, runtimeUsers)
+		if pull.err != nil && pull.status == store.LiteLLMSyncStatusFailed {
+			outcome.Error = pull.err.Error()
+			_ = syncStore.RecordNixLLMSync(ctx, outcome)
+			return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: pull.err}
+		}
+		if includeLogs {
+			// The pull already imported spend logs into usage_events (and
+			// reconciled user spend), so the migration reports that count.
+			outcome.Logs = pull.logs
+		}
+	} else if includeLogs {
+		err := errors.New("litellm sync: usage-log import requires base_url + master key (configure in Sync Settings)")
+		outcome.Error = err.Error()
+		_ = syncStore.RecordNixLLMSync(ctx, outcome)
+		return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: err}
+	}
+
+	// Phase 1: internal users (always) — from the (now fresh) litellm_* tables.
+	srcUsers, err := litellmUsers.ListAll(ctx)
+	if err != nil {
+		outcome.Error = err.Error()
+		_ = syncStore.RecordNixLLMSync(ctx, outcome)
+		return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: err}
+	}
+	outcome.SourceUpdatedAt = maxLiteLLMUsersUpdatedAt(srcUsers)
+	// When logs are imported, user spend is derived by the pull's ReconcileAll,
+	// so the coarse snapshot overwrite is skipped to avoid double-counting.
+	importedUsers, _, err := runtimeUsers.ImportLiteLLMUsers(ctx, srcUsers, includeUsage && !includeLogs)
+	if err != nil {
+		outcome.Error = err.Error()
+		_ = syncStore.RecordNixLLMSync(ctx, outcome)
+		return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: err}
+	}
+	outcome.Users = importedUsers
+
+	// Phase 2: API keys (optional) — from the (now fresh) litellm_* tables.
+	if includeKeys {
+		srcKeys, errKeys := litellmKeys.ListAll(ctx)
+		if errKeys != nil {
+			outcome.Error = errKeys.Error()
+			_ = syncStore.RecordNixLLMSync(ctx, outcome)
+			return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: errKeys}
+		}
+		policies, errPol := litellmKeys.ListAllPolicies(ctx)
+		if errPol != nil {
+			outcome.Error = errPol.Error()
+			_ = syncStore.RecordNixLLMSync(ctx, outcome)
+			return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: errPol}
+		}
+		importedKeys, _, errImp := runtimeKeys.ImportLiteLLMKeys(ctx, srcKeys, policies)
+		if errImp != nil {
+			outcome.Error = errImp.Error()
+			_ = syncStore.RecordNixLLMSync(ctx, outcome)
+			return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: errImp}
+		}
+		outcome.Keys = importedKeys
+	}
+
+	if err := syncStore.RecordNixLLMSync(ctx, outcome); err != nil {
+		return liteLLMSyncResult{status: store.LiteLLMSyncStatusFailed, err: err}
+	}
+	return liteLLMSyncResult{status: store.LiteLLMSyncStatusOK, users: outcome.Users, keys: outcome.Keys, logs: outcome.Logs}
+}
+
+// maxLiteLLMUsersUpdatedAt returns the newest updated_at across the supplied
+// Manage-LiteLLM users, or nil when the list is empty. It is the "last update
+// from LiteLLM Internal Users" the dashboard surfaces next to the NixLLM sync
+// timestamp so an operator can see whether the runtime users are behind the
+// Manage-LiteLLM data.
+func maxLiteLLMUsersUpdatedAt(users []store.LiteLLMUser) *time.Time {
+	var maxT *time.Time
+	for i := range users {
+		if users[i].UpdatedAt.IsZero() {
+			continue
+		}
+		if maxT == nil || users[i].UpdatedAt.After(*maxT) {
+			t := users[i].UpdatedAt
+			maxT = &t
+		}
+	}
+	return maxT
+}
+
+// remoteSpendLog carries a parsed LiteLLM spend-log row plus the hashed API
+// key (SHA-256) so the migration can resolve the runtime api_keys.id before
+// inserting the usage event. ErrorMsg is the upstream error message from the
+// row's metadata.error_information (only populated on failed requests); it is
+// not part of UsageEvent (which intentionally drops it) and is imported into
+// usage_errors instead.
+type remoteSpendLog struct {
+	Event    store.UsageEvent
+	KeyHash  string
+	ErrorMsg string
+}
+
+// liteLLMSpendLogLookback bounds the spend-log import to a rolling window. The
+// paginated LiteLLM endpoint requires a date range, and a bounded window keeps
+// the sync useful without trying to transfer an unbounded log history.
+const liteLLMSpendLogLookback = 30 * 24 * time.Hour
+
+// fetchLiteLLMSpendLogs pulls spend-log rows from the external instance with
+// pagination. LiteLLM's legacy /spend/logs endpoint is not paginated and can
+// return an arbitrarily large response; /spend/logs/v2 requires a date range
+// and returns the array under "data" with total_pages metadata.
+func (h *Handler) fetchLiteLLMSpendLogs(ctx context.Context, base, masterKey string) ([]remoteSpendLog, error) {
+	var all []remoteSpendLog
+	end := time.Now().UTC()
+	start := end.Add(-liteLLMSpendLogLookback)
+	for page := 1; page <= liteLLMSyncMaxPages; page++ {
+		params := url.Values{}
+		params.Set("start_date", start.Format("2006-01-02 15:04:05"))
+		params.Set("end_date", end.Format("2006-01-02 15:04:05"))
+		params.Set("page", strconv.Itoa(page))
+		params.Set("page_size", strconv.Itoa(liteLLMSpendLogPageSize))
+		endpoint := fmt.Sprintf("%s/spend/logs/v2?%s", base, params.Encode())
+		body, totalPages, err := h.liteLLMGet(ctx, endpoint, masterKey)
+		if err != nil {
+			return nil, err
+		}
+		parsed, parsedTotalPages, err := parseLiteLLMSpendLogs(body)
+		if err != nil {
+			return nil, err
+		}
+		if len(parsed) == 0 {
+			// A 200-but-unparseable /spend/logs response is suspicious; flag it
+			// so an empty log migration is not silently accepted.
+			log.Warn("management: litellm sync: /spend/logs returned 0 parseable rows; " +
+				"verify the external /spend/logs response shape.")
+			break
+		}
+		all = append(all, parsed...)
+		tp := totalPages
+		if tp <= 0 {
+			tp = parsedTotalPages
+		}
+		if tp > 0 && page >= tp {
+			break
+		}
+		if len(parsed) < liteLLMSpendLogPageSize {
+			break
+		}
+	}
+	return all, nil
+}
+
+// parseLiteLLMSpendLogs parses a /spend/logs response body into remoteSpendLog
+// values. LiteLLM has returned the array under different keys across versions
+// ("data", "logs", "spend_logs", or a bare array). Rows without a request_id
+// are skipped — they have no stable dedup key and would duplicate on re-sync.
+func parseLiteLLMSpendLogs(body []byte) ([]remoteSpendLog, int, error) {
+	items, err := extractLiteLLMArray(body, "data", "logs", "spend_logs")
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]remoteSpendLog, 0, len(items))
+	for _, item := range items {
+		var raw map[string]any
+		if err := json.Unmarshal(item, &raw); err != nil || raw == nil {
+			continue
+		}
+		requestID := strings.TrimSpace(strAny(raw["request_id"]))
+		if requestID == "" {
+			continue
+		}
+		ev := store.UsageEvent{
+			RequestID:           requestID,
+			Provider:            "litellm",
+			Model:               strAny(raw["model"]),
+			Alias:               strAny(raw["alias"]),
+			Endpoint:            strAny(raw["call_type"]),
+			InputTokens:         int64Any(raw["prompt_tokens"]),
+			OutputTokens:        int64Any(raw["completion_tokens"]),
+			CachedTokens:        cacheTokensOf(raw, "cache_read_input_tokens"),
+			CacheCreationTokens: cacheTokensOf(raw, "cache_creation_input_tokens"),
+			TotalTokens:         int64Any(raw["total_tokens"]),
+			CostUSD:             floatAny(raw["spend"]),
+			OriginalCostUSD:     floatAny(raw["spend"]),
+			Generate:            false,
+		}
+		if ev.TotalTokens == 0 {
+			ev.TotalTokens = ev.InputTokens + ev.OutputTokens
+		}
+		if t := timePtrAny(raw["startTime"]); t != nil {
+			ev.RequestedAt = *t
+		} else if t := timePtrAny(raw["start_time"]); t != nil {
+			ev.RequestedAt = *t
+		}
+		// Latency: request_duration_ms (float64 milliseconds → int64).
+		if d, ok := raw["request_duration_ms"].(float64); ok {
+			ev.LatencyMs = int64(d)
+		} else if d := int64Any(raw["request_duration_ms"]); d > 0 {
+			ev.LatencyMs = d
+		}
+		// TTFT: completionStartTime - startTime (only when both timestamps are
+		// RFC3339 strings, giving sub-ms precision).
+		compStart := timePtrAny(raw["completionStartTime"])
+		if compStart != nil && !ev.RequestedAt.IsZero() {
+			d := compStart.Sub(ev.RequestedAt)
+			if d > 0 {
+				ev.TTFTMs = d.Milliseconds()
+			}
+		}
+		// Status: a non-empty string like "200" or "500". Treat any non-2xx
+		// value as failed; absence of the field means success.
+		statusStr := strAny(raw["status"])
+		ev.Failed = false
+		ev.FailStatusCode = 0
+		if statusStr != "" {
+			if code, parseErr := strconv.Atoi(statusStr); parseErr == nil {
+				ev.FailStatusCode = code
+				if code < 200 || code >= 300 {
+					ev.Failed = true
+				}
+			}
+		}
+
+		// Error message from metadata.error_information.
+		errorMsg := extractErrorMsg(raw)
+
+		out = append(out, remoteSpendLog{
+			Event:    ev,
+			KeyHash:  strings.TrimSpace(strAny(raw["api_key"])),
+			ErrorMsg: errorMsg,
+		})
+	}
+	totalPages := 0
+	var env struct {
+		TotalPages int `json:"total_pages"`
+	}
+	if err := json.Unmarshal(body, &env); err == nil {
+		totalPages = env.TotalPages
+	}
+	return out, totalPages, nil
+}
+
+// extractErrorMsg pulls the upstream error message out of a spend-log row's
+// metadata.error_information (LiteLLM renders the error detail there as a
+// nested object with error_code/error_message). Returns "" when absent.
+func extractErrorMsg(raw map[string]any) string {
+	meta, ok := raw["metadata"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	info, ok := meta["error_information"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	msg := strings.TrimSpace(strAny(info["error_message"]))
+	if msg == "" {
+		msg = strings.TrimSpace(strAny(info["error_message_en"]))
+	}
+	return msg
+}
+
+// cacheTokensOf reads a cache-token counter off a spend-log row. LiteLLM
+// stores these under metadata.additional_usage_values (not as top-level
+// columns); some versions expose them flat on the row, so fall back to that.
+func cacheTokensOf(raw map[string]any, key string) int64 {
+	if meta, ok := raw["metadata"].(map[string]any); ok {
+		if av, ok := meta["additional_usage_values"].(map[string]any); ok {
+			if v := int64Any(av[key]); v > 0 {
+				return v
+			}
+		}
+	}
+	return int64Any(raw[key])
+}
+
+// int64Any coerces a JSON value to int64 (tokens count), tolerating float64,
+// json.Number, and numeric strings.
+func int64Any(v any) int64 {
+	switch t := v.(type) {
+	case float64:
+		return int64(t)
+	case json.Number:
+		n, _ := t.Int64()
+		return n
+	case string:
+		n, _ := strconv.ParseInt(t, 10, 64)
+		return n
+	default:
+		return 0
+	}
+}
+
+// remoteSpendLogsToEvents resolves each spend log's hashed api_key to the
+// runtime api_keys.id and stamps the owning user_id, then returns the
+// UsageEvents ready for the idempotent bulk insert. Logs whose key is not yet
+// migrated are still imported with an empty api_key_id so cost attribution is
+// not lost entirely. Resolution is two-tier: the runtime api_keys table is
+// tried first, and when it has no match the key is looked up in the
+// Manage-LiteLLM store (litellm_api_keys) and upserted into the runtime table
+// so the read-path key_alias JOIN resolves and later lookups hit the runtime
+// table directly.
+func (h *Handler) remoteSpendLogsToEvents(ctx context.Context, logs []remoteSpendLog, runtimeKeys *store.APIKeyStore, litellmKeys *store.LiteLLMKeyStore) []store.UsageEvent {
+	events := make([]store.UsageEvent, 0, len(logs))
+	hashToIDs := map[string]struct{ keyID, userID string }{}
+	for i := range logs {
+		lg := logs[i]
+		ev := lg.Event
+		hash := lg.KeyHash
+		if ids, ok := hashToIDs[hash]; ok {
+			ev.APIKeyID = ids.keyID
+			ev.UserID = ids.userID
+		} else if hash != "" {
+			if ids, ok := h.resolveSpendLogKey(ctx, hash, runtimeKeys, litellmKeys); ok {
+				ev.APIKeyID = ids.keyID
+				ev.UserID = ids.userID
+				hashToIDs[hash] = ids
+			}
+		}
+		events = append(events, ev)
+	}
+	return events
+}
+
+// resolveSpendLogKey resolves a hashed API key to its runtime id + owner,
+// migrating the key from the Manage-LiteLLM store into the runtime api_keys
+// table when it is not already present. Returns ok=false when the key cannot
+// be resolved (empty hash, or unknown to both stores).
+func (h *Handler) resolveSpendLogKey(ctx context.Context, hash string, runtimeKeys *store.APIKeyStore, litellmKeys *store.LiteLLMKeyStore) (struct{ keyID, userID string }, bool) {
+	if hash == "" {
+		return struct{ keyID, userID string }{}, false
+	}
+	if key, _, err := runtimeKeys.LookupByHash(ctx, hash); err == nil && key != nil {
+		return struct{ keyID, userID string }{key.ID, key.UserID}, true
+	}
+	// Not in the runtime table: try the Manage-LiteLLM store and migrate it.
+	if litellmKeys == nil {
+		return struct{ keyID, userID string }{}, false
+	}
+	lk, err := litellmKeys.LookupByHash(ctx, hash)
+	if err != nil || lk == nil {
+		return struct{ keyID, userID string }{}, false
+	}
+	runtimeKey := store.APIKey{
+		ID:         lk.ID,
+		Name:       lk.Name,
+		KeyAlias:   lk.KeyAlias,
+		KeyHash:    lk.KeyHash,
+		KeyPrefix:  lk.KeyPrefix,
+		Status:     lk.Status,
+		UserID:     lk.UserID,
+		ExpiresAt:  lk.ExpiresAt,
+		LastUsedAt: lk.LastUsedAt,
+		Metadata:   lk.Metadata,
+	}
+	if _, errUp := runtimeKeys.Upsert(ctx, runtimeKey, nil); errUp != nil {
+		// A failed migration must not abort the sync; the log row still imports
+		// with an empty api_key_id so spend attribution is not lost.
+		log.WithError(errUp).WithField("key_hash", hash).
+			Warn("management: litellm sync: migrating spend-log key to runtime api_keys failed")
+		return struct{ keyID, userID string }{}, false
+	}
+	return struct{ keyID, userID string }{lk.ID, lk.UserID}, true
+}
+
+// remoteSpendLogsToErrors builds the failed-attempt rows for the error-message
+// import. Only spend logs marked Failed are carried (success rows have no
+// error message and belong exclusively in usage_events). The hashed api_key is
+// resolved to the runtime api_keys.id + owner user_id exactly as in
+// remoteSpendLogsToEvents so usage_errors rows attribute to the same key.
+func (h *Handler) remoteSpendLogsToErrors(ctx context.Context, logs []remoteSpendLog, runtimeKeys *store.APIKeyStore, litellmKeys *store.LiteLLMKeyStore) []store.UsageError {
+	out := make([]store.UsageError, 0, len(logs))
+	hashToIDs := map[string]struct{ keyID, userID string }{}
+	for i := range logs {
+		lg := logs[i]
+		if !lg.Event.Failed {
+			continue
+		}
+		ev := lg.Event
+		ue := store.UsageError{
+			RequestID:           ev.RequestID,
+			APIKeyID:            ev.APIKeyID,
+			UserID:              ev.UserID,
+			Provider:            ev.Provider,
+			ExecutorType:        ev.ExecutorType,
+			Model:               ev.Model,
+			Alias:               ev.Alias,
+			Endpoint:            ev.Endpoint,
+			InputTokens:         ev.InputTokens,
+			OutputTokens:        ev.OutputTokens,
+			ReasoningTokens:     ev.ReasoningTokens,
+			CachedTokens:        ev.CachedTokens,
+			CacheCreationTokens: ev.CacheCreationTokens,
+			TotalTokens:         ev.TotalTokens,
+			CostUSD:             ev.CostUSD,
+			OriginalCostUSD:     ev.OriginalCostUSD,
+			LatencyMs:           ev.LatencyMs,
+			TTFTMs:              ev.TTFTMs,
+			FailStatusCode:      ev.FailStatusCode,
+			ErrorMessage:        lg.ErrorMsg,
+			RequestedAt:         ev.RequestedAt,
+		}
+		hash := lg.KeyHash
+		if ids, ok := hashToIDs[hash]; ok {
+			ue.APIKeyID = ids.keyID
+			ue.UserID = ids.userID
+		} else if ids, ok := h.resolveSpendLogKey(ctx, hash, runtimeKeys, litellmKeys); ok {
+			ue.APIKeyID = ids.keyID
+			ue.UserID = ids.userID
+			hashToIDs[hash] = ids
+		}
+		out = append(out, ue)
+	}
+	return out
 }
 
 // remoteKeyCarrier carries a parsed LiteLLM key plus the raw plaintext secret
@@ -501,6 +1076,12 @@ func parseLiteLLMUsers(body []byte) ([]store.LiteLLMUser, int, error) {
 		u.TPMLimit = int64PtrAny(raw["tpm_limit"])
 		u.MaxParallelRequests = intPtrAny(raw["max_parallel_requests"])
 		u.Spend = floatAny(raw["spend"])
+		if t := timePtrAny(raw["created_at"]); t != nil {
+			u.CreatedAt = *t
+		}
+		if t := timePtrAny(raw["updated_at"]); t != nil {
+			u.UpdatedAt = *t
+		}
 		out = append(out, u)
 	}
 	return out, envelope.TotalPages, nil
@@ -718,6 +1299,7 @@ func (h *Handler) StartLiteLLMSyncSweep() {
 					defer liteLLMSyncMutex.Unlock()
 					h.mu.Lock()
 					st, u, k := h.litellmSync, h.litellmUsers, h.litellmKeys
+					rk, us, ru := h.pgAPIKeys, h.pgUsage, h.pgUsers
 					h.mu.Unlock()
 					if st == nil || u == nil || k == nil {
 						return
@@ -733,9 +1315,9 @@ func (h *Handler) StartLiteLLMSyncSweep() {
 					if keyErr != nil || set == "" {
 						return
 					}
-					ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+					ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 					defer cancel()
-					h.runLiteLLMSync(ctx, st, u, k)
+					h.runLiteLLMSync(ctx, st, u, k, rk, us, ru)
 				}
 				run()
 			}

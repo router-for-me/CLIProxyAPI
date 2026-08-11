@@ -330,3 +330,168 @@ func namesOf(keys []*LiteLLMKey) []string {
 func float64Ptr(v float64) *float64 { return &v }
 func int64Ptr(v int64) *int64       { return &v }
 func intPtr(v int) *int             { return &v }
+
+func TestLiteLLMUserUpsertPreservesRemoteUpdatedAt(t *testing.T) {
+	users, _ := newTestLiteLLMStore(t, "litellm_users_upsert_ts")
+	ctx := context.Background()
+
+	remoteUpdate := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	u, err := users.Upsert(ctx, LiteLLMUser{
+		ID:        "u-remote-1",
+		UserAlias: "alice",
+		UserEmail: "alice@example.com",
+		UpdatedAt: remoteUpdate,
+	})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if !u.UpdatedAt.Equal(remoteUpdate) {
+		t.Fatalf("updated_at = %v; want remote %v", u.UpdatedAt, remoteUpdate)
+	}
+
+	// A newer remote update overwrites the stored timestamp on re-sync.
+	newer := remoteUpdate.Add(3 * time.Hour)
+	u2, err := users.Upsert(ctx, LiteLLMUser{
+		ID:        "u-remote-1",
+		UserAlias: "alice-2",
+		UserEmail: "alice@example.com",
+		UpdatedAt: newer,
+	})
+	if err != nil {
+		t.Fatalf("Upsert update: %v", err)
+	}
+	if !u2.UpdatedAt.Equal(newer) {
+		t.Fatalf("updated_at after re-sync = %v; want %v", u2.UpdatedAt, newer)
+	}
+	if u2.UserAlias != "alice-2" {
+		t.Fatalf("alias not updated: %+v", u2)
+	}
+
+	// Rows without a remote timestamp fall back to a fresh local stamp.
+	u3, err := users.Upsert(ctx, LiteLLMUser{ID: "u-local-1", UserAlias: "bob", UserEmail: "bob@example.com"})
+	if err != nil {
+		t.Fatalf("Upsert local: %v", err)
+	}
+	if u3.UpdatedAt.IsZero() {
+		t.Fatal("updated_at should be set for rows without a remote timestamp")
+	}
+}
+
+func TestLiteLLMUserListAll(t *testing.T) {
+	users, _ := newTestLiteLLMStore(t, "litellm_users_listall")
+	ctx := context.Background()
+
+	for i, email := range []string{"a@example.com", "b@example.com", "c@example.com"} {
+		if _, err := users.Create(ctx, LiteLLMUser{
+			UserAlias:      "user-" + email[:1],
+			UserEmail:      email,
+			MaxBudget:      float64Ptr(float64(i + 1)),
+			BudgetDuration: BudgetDuration7d,
+		}); err != nil {
+			t.Fatalf("Create %s: %v", email, err)
+		}
+	}
+
+	all, err := users.ListAll(ctx)
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("ListAll len = %d; want 3", len(all))
+	}
+	seen := map[string]bool{}
+	for _, u := range all {
+		if u.ID == "" || u.UserEmail == "" {
+			t.Fatalf("ListAll row incomplete: %+v", u)
+		}
+		seen[u.UserEmail] = true
+	}
+	for _, email := range []string{"a@example.com", "b@example.com", "c@example.com"} {
+		if !seen[email] {
+			t.Fatalf("ListAll missing %s", email)
+		}
+	}
+
+	// Empty table returns an empty, non-nil slice without error.
+	users2, _ := newTestLiteLLMStore(t, "litellm_users_listall_empty")
+	empty, err := users2.ListAll(ctx)
+	if err != nil {
+		t.Fatalf("ListAll empty: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("ListAll empty len = %d; want 0", len(empty))
+	}
+}
+
+func TestLiteLLMKeyListPagedIncludesPolicy(t *testing.T) {
+	users, keys := newTestLiteLLMStore(t, "litellm_keys_list_policy")
+	ctx := context.Background()
+
+	if _, err := users.Create(ctx, LiteLLMUser{ID: "u-1", UserAlias: "alice", UserEmail: "a@example.com"}); err != nil {
+		t.Fatalf("Create user: %v", err)
+	}
+	pol := LiteLLMPolicy{RPMLimit: intPtr(60), TPMLimit: intPtr(5000), BudgetUSD: float64Ptr(25.0), BudgetDuration: BudgetDuration7d}
+	if _, _, err := keys.Create(ctx, "k-1", "alias", "sk-secret-key-0123456789", nil, nil, nil, &pol); err != nil {
+		t.Fatalf("Create key: %v", err)
+	}
+	// A key without a policy row.
+	if _, _, err := keys.Create(ctx, "k-2", "", "sk-second-secret-0123456789", nil, nil, nil, nil); err != nil {
+		t.Fatalf("Create key 2: %v", err)
+	}
+
+	rows, total, err := keys.ListPaged(ctx, 1, 25, LiteLLMKeyListFilter{})
+	if err != nil {
+		t.Fatalf("ListPaged: %v", err)
+	}
+	if total != 2 || len(rows) != 2 {
+		t.Fatalf("total=%d len=%d; want 2/2", total, len(rows))
+	}
+	for _, k := range rows {
+		if k.ID == "k-1" {
+			if k.Policy == nil {
+				t.Fatal("k-1 policy should be loaded")
+			}
+			if k.Policy.RPMLimit == nil || *k.Policy.RPMLimit != 60 {
+				t.Fatalf("k-1 rpm wrong: %+v", k.Policy.RPMLimit)
+			}
+			if k.Policy.TPMLimit == nil || *k.Policy.TPMLimit != 5000 {
+				t.Fatalf("k-1 tpm wrong: %+v", k.Policy.TPMLimit)
+			}
+			if k.Policy.BudgetUSD == nil || *k.Policy.BudgetUSD != 25.0 {
+				t.Fatalf("k-1 budget wrong: %+v", k.Policy.BudgetUSD)
+			}
+		} else if k.ID == "k-2" && k.Policy != nil {
+			t.Fatalf("k-2 should have no policy: %+v", k.Policy)
+		}
+	}
+}
+
+func TestLiteLLMKeyStoreLookupByHash(t *testing.T) {
+	_, keys := newTestLiteLLMStore(t, "litellm_keys_lookup_hash")
+	ctx := context.Background()
+
+	created, secret, err := keys.Create(ctx, "prod", "prod-alias", "", nil, nil, []string{"prod"}, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	hash := HashSecret(secret)
+
+	got, err := keys.LookupByHash(ctx, hash)
+	if err != nil {
+		t.Fatalf("LookupByHash: %v", err)
+	}
+	if got.ID != created.ID {
+		t.Fatalf("LookupByHash id = %q; want %q", got.ID, created.ID)
+	}
+	if got.KeyAlias != "prod-alias" {
+		t.Fatalf("LookupByHash alias = %q; want prod-alias", got.KeyAlias)
+	}
+	if got.KeyHash != hash {
+		t.Fatalf("LookupByHash key_hash = %q; want %q", got.KeyHash, hash)
+	}
+
+	// Unknown hash must surface ErrLiteLLMKeyNotFound.
+	if _, err := keys.LookupByHash(ctx, "no-such-hash"); !errors.Is(err, ErrLiteLLMKeyNotFound) {
+		t.Fatalf("LookupByHash unknown = %v; want ErrLiteLLMKeyNotFound", err)
+	}
+}

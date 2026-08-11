@@ -119,7 +119,7 @@ func TestLiteLLMSyncRecordOutcome(t *testing.T) {
 	sync, _, _ := newTestLiteLLMSyncStore(t, "litellm_sync_outcome")
 	ctx := context.Background()
 
-	if err := sync.RecordSync(ctx, LiteLLMSyncStatusOK, "", 12, 7); err != nil {
+	if err := sync.RecordSync(ctx, LiteLLMSyncStatusOK, "", 12, 7, 3); err != nil {
 		t.Fatalf("RecordSync ok: %v", err)
 	}
 	set, err := sync.Get(ctx)
@@ -129,11 +129,14 @@ func TestLiteLLMSyncRecordOutcome(t *testing.T) {
 	if set.LastSyncStatus != LiteLLMSyncStatusOK || set.LastSyncUsers != 12 || set.LastSyncKeys != 7 {
 		t.Fatalf("outcome not recorded: %+v", set)
 	}
+	if set.LastSyncLogs != 3 {
+		t.Fatalf("last_sync_logs = %d; want 3", set.LastSyncLogs)
+	}
 	if set.LastSyncAt == nil {
 		t.Fatal("LastSyncAt should be set")
 	}
 
-	if err := sync.RecordSync(ctx, LiteLLMSyncStatusFailed, "boom", 0, 0); err != nil {
+	if err := sync.RecordSync(ctx, LiteLLMSyncStatusFailed, "boom", 0, 0, 0); err != nil {
 		t.Fatalf("RecordSync err: %v", err)
 	}
 	set, _ = sync.Get(ctx)
@@ -195,4 +198,81 @@ func TestLiteLLMSyncUpsertUserAndKey(t *testing.T) {
 	}
 	// syncStore is only used to hold the DB connection alive in this test.
 	_ = sync
+}
+
+func TestLiteLLMSyncRecordNixLLMOutcome(t *testing.T) {
+	sync, _, _ := newTestLiteLLMSyncStore(t, "litellm_sync_nixllm_outcome")
+	ctx := context.Background()
+
+	// Defaults: no NixLLM sync recorded yet.
+	def, err := sync.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get default: %v", err)
+	}
+	if def.LastNixLLMSyncAt != nil || def.LastNixLLMSyncStatus != "" || def.LastNixLLMSyncUsers != 0 {
+		t.Fatalf("unexpected default NixLLM sync fields: %+v", def)
+	}
+	if def.LastNixLLMSyncUsage {
+		t.Fatalf("unexpected default nixllm usage flag: %+v", def)
+	}
+	if def.LastLiteLLMUsersUpdatedAt != nil {
+		t.Fatalf("unexpected default source update: %+v", def.LastLiteLLMUsersUpdatedAt)
+	}
+
+	srcUpdate := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	if err := sync.RecordNixLLMSync(ctx, NixLLMSyncOutcome{
+		Status: LiteLLMSyncStatusOK, Users: 5, Keys: 3, Logs: 42,
+		SourceUpdatedAt: &srcUpdate, IncludedUsage: true,
+	}); err != nil {
+		t.Fatalf("RecordNixLLMSync ok: %v", err)
+	}
+	set, err := sync.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if set.LastNixLLMSyncStatus != LiteLLMSyncStatusOK || set.LastNixLLMSyncUsers != 5 {
+		t.Fatalf("nixllm outcome not recorded: %+v", set)
+	}
+	if set.LastNixLLMSyncKeys != 3 || set.LastNixLLMSyncLogs != 42 {
+		t.Fatalf("nixllm keys/logs outcome not recorded: %+v", set)
+	}
+	if !set.LastNixLLMSyncUsage {
+		t.Fatal("LastNixLLMSyncUsage should be true after an include-usage push")
+	}
+	if set.LastNixLLMSyncAt == nil {
+		t.Fatal("LastNixLLMSyncAt should be set")
+	}
+	if set.LastLiteLLMUsersUpdatedAt == nil || !set.LastLiteLLMUsersUpdatedAt.Equal(srcUpdate) {
+		t.Fatalf("source update not recorded: %+v", set.LastLiteLLMUsersUpdatedAt)
+	}
+
+	// A failed push overwrites status + error; source update may be nil.
+	if err := sync.RecordNixLLMSync(ctx, NixLLMSyncOutcome{Status: LiteLLMSyncStatusFailed, Error: "boom"}); err != nil {
+		t.Fatalf("RecordNixLLMSync err: %v", err)
+	}
+	set, _ = sync.Get(ctx)
+	if set.LastNixLLMSyncStatus != LiteLLMSyncStatusFailed || set.LastNixLLMSyncError != "boom" {
+		t.Fatalf("failed outcome not recorded: %+v", set)
+	}
+	if set.LastNixLLMSyncUsage {
+		t.Fatalf("nixllm usage flag should reflect the latest push (false): %+v", set)
+	}
+	if set.LastNixLLMSyncKeys != 0 || set.LastNixLLMSyncLogs != 0 {
+		t.Fatalf("nixllm keys/logs should reset on failed push: %+v", set)
+	}
+	if set.LastLiteLLMUsersUpdatedAt != nil {
+		t.Fatalf("source update should be nil after failed push: %+v", set.LastLiteLLMUsersUpdatedAt)
+	}
+
+	// The external-sync fields are independent of the NixLLM fields.
+	if err := sync.RecordSync(ctx, LiteLLMSyncStatusOK, "", 3, 2, 0); err != nil {
+		t.Fatalf("RecordSync: %v", err)
+	}
+	set, _ = sync.Get(ctx)
+	if set.LastSyncUsers != 3 || set.LastSyncKeys != 2 {
+		t.Fatalf("external outcome clobbered nixllm fields? %+v", set)
+	}
+	if set.LastNixLLMSyncStatus != LiteLLMSyncStatusFailed {
+		t.Fatalf("nixllm status was clobbered by RecordSync: %+v", set)
+	}
 }

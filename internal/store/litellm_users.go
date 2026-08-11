@@ -168,11 +168,19 @@ func (s *LiteLLMUserStore) Upsert(ctx context.Context, user LiteLLMUser) (LiteLL
 		return LiteLLMUser{}, fmt.Errorf("postgres store: marshal litellm user metadata: %w", err)
 	}
 
+	// Persist the remote row's updated_at when the sync parser carried one, so
+	// the "last update from LiteLLM" detection reflects the remote change time
+	// rather than the local write time. Fall back to now for rows without one.
+	updatedAt := user.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = time.Now()
+	}
+
 	if _, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (id, user_alias, user_email, user_role, models, metadata,
 			max_budget, budget_duration, budget_reset_at, rpm_limit, tpm_limit,
-			max_parallel_requests, spend)
-		VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11, $12, $13)
+			max_parallel_requests, spend, updated_at)
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14)
 		ON CONFLICT (id) DO UPDATE SET
 			user_alias           = EXCLUDED.user_alias,
 			user_email           = EXCLUDED.user_email,
@@ -186,12 +194,12 @@ func (s *LiteLLMUserStore) Upsert(ctx context.Context, user LiteLLMUser) (LiteLL
 			tpm_limit            = EXCLUDED.tpm_limit,
 			max_parallel_requests = EXCLUDED.max_parallel_requests,
 			spend                = EXCLUDED.spend,
-			updated_at           = NOW()
+			updated_at           = EXCLUDED.updated_at
 	`, s.usersTable),
 		user.ID, nullableString(user.UserAlias), nullableString(user.UserEmail),
 		user.UserRole, string(modelsJSON), string(metaJSON),
 		user.MaxBudget, nullableString(user.BudgetDuration), user.BudgetResetAt,
-		user.RPMLimit, user.TPMLimit, user.MaxParallelRequests, user.Spend,
+		user.RPMLimit, user.TPMLimit, user.MaxParallelRequests, user.Spend, updatedAt,
 	); err != nil {
 		if isUniqueViolation(err) {
 			return LiteLLMUser{}, ErrLiteLLMUserEmailExists
@@ -313,7 +321,34 @@ func (s *LiteLLMUserStore) List(ctx context.Context, f LiteLLMListFilter) ([]Lit
 	return out, total, rows.Err()
 }
 
-// LiteLLMUserUpdate mutates the mutable fields of a Manage-LiteLLM user.
+// ListAll returns every Manage-LiteLLM internal user (no pagination). It backs
+// the "sync to NixLLM" push, which needs the full source set so the runtime
+// internal_users table can mirror the external LiteLLM users. KeyCount is left
+// at zero; single-row reads (Get) leave it at zero too.
+func (s *LiteLLMUserStore) ListAll(ctx context.Context) ([]LiteLLMUser, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: litellm user store not initialized")
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT id, COALESCE(user_alias, ''), COALESCE(user_email, ''), user_role,
+		       models, metadata, max_budget, COALESCE(budget_duration, ''), budget_reset_at,
+		       rpm_limit, tpm_limit, max_parallel_requests, spend, created_at, updated_at, 0
+		FROM %s`, s.usersTable))
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: list all litellm users: %w", err)
+	}
+	defer rows.Close()
+	out := make([]LiteLLMUser, 0)
+	for rows.Next() {
+		u, errScan := scanLiteLLMUserFull(rows)
+		if errScan != nil {
+			return nil, fmt.Errorf("postgres store: scan litellm user row: %w", errScan)
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
 // Pointer-typed fields are only updated when non-nil; scalar strings are
 // cleared on empty.
 type LiteLLMUserUpdate struct {
