@@ -79,6 +79,46 @@ func (s *mutableCredentialSnapshotStorage) CredentialSnapshot() ([]byte, map[str
 	return []byte(token), metadata, baseauth.CredentialFingerprintMaterial{Opaque: token}
 }
 
+func (s *mutableCredentialSnapshotStorage) CredentialPersistenceSnapshot() baseauth.TokenStorage {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	metadata := cloneCredentialMetadataValue(s.metadata).(map[string]any)
+	s.mu.RUnlock()
+	return &mutableCredentialSnapshotStorage{metadata: metadata}
+}
+
+type conditionalStorageMutationStore struct {
+	blocked chan struct{}
+	release chan struct{}
+	mutated chan struct{}
+	finish  chan struct{}
+	once    sync.Once
+}
+
+func (*conditionalStorageMutationStore) List(context.Context) ([]*Auth, error) { return nil, nil }
+func (*conditionalStorageMutationStore) Delete(context.Context, string) error  { return nil }
+
+func (s *conditionalStorageMutationStore) Save(_ context.Context, auth *Auth) (string, error) {
+	blocked := false
+	s.once.Do(func() {
+		blocked = true
+		close(s.blocked)
+	})
+	if blocked {
+		<-s.release
+		if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+			setter.SetMetadata(auth.Metadata)
+		}
+		close(s.mutated)
+		<-s.finish
+	} else if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+		setter.SetMetadata(auth.Metadata)
+	}
+	return auth.ID, nil
+}
+
 type blockedMetadataPersistenceStore struct {
 	blockNext chan struct{}
 	blocked   chan struct{}
@@ -537,6 +577,87 @@ func TestExecuteCapturesOpaquePluginCredentialBeforeDispatch(t *testing.T) {
 	}
 	if len(current.ModelStates) != 0 {
 		t.Fatalf("in-flight old failure created model state: %#v", current.ModelStates)
+	}
+}
+
+func TestConditionalPersistenceDoesNotMutateReplacementStorage(t *testing.T) {
+	store := &conditionalStorageMutationStore{
+		blocked: make(chan struct{}),
+		release: make(chan struct{}),
+		mutated: make(chan struct{}),
+		finish:  make(chan struct{}),
+	}
+	storage := &mutableCredentialSnapshotStorage{metadata: map[string]any{"token": "old-token"}}
+	manager := NewManager(store, nil, nil)
+	auth := &Auth{
+		ID:       "conditional-storage-detach.json",
+		Provider: "opaque-plugin",
+		Status:   StatusActive,
+		Metadata: map[string]any{"token": "old-token"},
+		Storage:  storage,
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+
+	manager.mu.RLock()
+	expectedCurrent := manager.auths[auth.ID]
+	manager.mu.RUnlock()
+	if expectedCurrent == nil {
+		t.Fatal("registered auth missing")
+	}
+	refreshed := expectedCurrent.Clone()
+	refreshed.Metadata["token"] = "stale-refresh-token"
+
+	updateDone := make(chan error, 1)
+	go func() {
+		_, _, errUpdate := manager.updateAuth(context.Background(), refreshed, expectedCurrent)
+		updateDone <- errUpdate
+	}()
+	select {
+	case <-store.blocked:
+	case <-time.After(time.Second):
+		t.Fatal("conditional persistence did not block")
+	}
+
+	current, ok := manager.GetByID(auth.ID)
+	if !ok || current == nil {
+		t.Fatal("refreshed auth missing")
+	}
+	replacement := current.Clone()
+	replacement.Metadata["token"] = "replacement-token"
+	if _, errUpdate := manager.Update(WithSkipPersist(context.Background()), replacement); errUpdate != nil {
+		t.Fatalf("Update replacement: %v", errUpdate)
+	}
+
+	close(store.release)
+	select {
+	case <-store.mutated:
+	case <-time.After(time.Second):
+		t.Fatal("conditional persistence did not reach metadata mutation")
+	}
+
+	current, ok = manager.GetByID(auth.ID)
+	if !ok || current == nil {
+		t.Fatal("replacement auth missing")
+	}
+	source, okSnapshot := current.Storage.(baseauth.CredentialSnapshotSource)
+	if !okSnapshot || source == nil {
+		t.Fatalf("replacement storage = %T, want credential snapshot source", current.Storage)
+	}
+	_, metadata, _ := source.CredentialSnapshot()
+	observedToken, _ := metadata["token"].(string)
+	close(store.finish)
+	select {
+	case errUpdate := <-updateDone:
+		if errUpdate != nil {
+			t.Fatalf("conditional update: %v", errUpdate)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("conditional update did not finish")
+	}
+	if observedToken != "replacement-token" {
+		t.Fatalf("replacement storage token during stale save = %q, want replacement token", observedToken)
 	}
 }
 

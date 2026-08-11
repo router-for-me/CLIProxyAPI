@@ -905,7 +905,7 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 
 	updated, errPrepare := preparer.PrepareRequestAuth(ctx, target)
 	if errPrepare != nil {
-		return auth, errPrepare
+		return target, errPrepare
 	}
 	if updated == nil {
 		return target, nil

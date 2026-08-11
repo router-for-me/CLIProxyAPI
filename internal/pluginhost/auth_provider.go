@@ -434,6 +434,20 @@ func (s *pluginTokenStorage) CredentialSnapshot() ([]byte, map[string]any, basea
 	return payload, metadata, fingerprint
 }
 
+func (s *pluginTokenStorage) CredentialPersistenceSnapshot() baseauth.TokenStorage {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	snapshot := &pluginTokenStorage{
+		provider: s.provider,
+		rawJSON:  bytes.Clone(s.rawJSON),
+		meta:     cloneInterceptorMetadata(s.meta),
+	}
+	s.mu.RUnlock()
+	return snapshot
+}
+
 func (s *pluginTokenStorage) credentialSnapshot() ([]byte, map[string]any, baseauth.CredentialFingerprintMaterial, error) {
 	if s == nil {
 		return nil, nil, baseauth.CredentialFingerprintMaterial{}, fmt.Errorf("plugin token storage is nil")
@@ -599,7 +613,7 @@ func pluginCredentialHeaderName(key string) bool {
 
 func pluginCredentialMetadataKey(key string) bool {
 	switch normalizePluginMetadataKey(key) {
-	case "apikey", "accesstoken", "refreshtoken", "idtoken",
+	case "apikey", "apitoken", "accesstoken", "refreshtoken", "idtoken",
 		"token", "authtoken", "bearertoken", "sessiontoken",
 		"secret", "clientsecret", "password", "credential", "credentials",
 		"privatekey", "authorization", "cookie", "sessioncookie":

@@ -38,3 +38,9 @@ type CredentialFingerprintSource interface {
 type CredentialSnapshotSource interface {
 	CredentialSnapshot() ([]byte, map[string]any, CredentialFingerprintMaterial)
 }
+
+// CredentialPersistenceSnapshotSource lets mutable token storage detach an
+// independent copy before persistence runs outside the auth-manager lock.
+type CredentialPersistenceSnapshotSource interface {
+	CredentialPersistenceSnapshot() TokenStorage
+}

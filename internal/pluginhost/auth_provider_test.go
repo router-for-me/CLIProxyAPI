@@ -461,19 +461,46 @@ func TestPluginTokenStorageFingerprintIncludesMetadataCredentialHeaders(t *testi
 	}
 }
 
-func TestPluginTokenStorageFingerprintIncludesMetadataToken(t *testing.T) {
+func TestPluginTokenStoragePersistenceSnapshotIsDetached(t *testing.T) {
 	storage := &pluginTokenStorage{
 		provider: "plugin-provider",
 		rawJSON:  []byte(`{"provider_state":"stable"}`),
 	}
-	storage.SetMetadata(map[string]any{"token": "old-token", "note": "same"})
+	storage.SetMetadata(map[string]any{"token": "replacement-token"})
 
-	before := storage.CredentialFingerprintMaterial()
-	storage.SetMetadata(map[string]any{"token": "new-token", "note": "same"})
-	after := storage.CredentialFingerprintMaterial()
+	detached, ok := storage.CredentialPersistenceSnapshot().(*pluginTokenStorage)
+	if !ok || detached == nil {
+		t.Fatalf("persistence snapshot = %T, want detached plugin storage", detached)
+	}
+	detached.SetMetadata(map[string]any{"token": "stale-refresh-token"})
 
-	if before == after {
-		t.Fatal("metadata token replacement did not change credential fingerprint material")
+	_, originalMetadata, _ := storage.CredentialSnapshot()
+	if got, _ := originalMetadata["token"].(string); got != "replacement-token" {
+		t.Fatalf("original storage token = %q, want replacement token", got)
+	}
+	_, detachedMetadata, _ := detached.CredentialSnapshot()
+	if got, _ := detachedMetadata["token"].(string); got != "stale-refresh-token" {
+		t.Fatalf("detached storage token = %q, want stale refresh token", got)
+	}
+}
+
+func TestPluginTokenStorageFingerprintIncludesMetadataToken(t *testing.T) {
+	for _, key := range []string{"token", "api_token", "apiToken"} {
+		t.Run(key, func(t *testing.T) {
+			storage := &pluginTokenStorage{
+				provider: "plugin-provider",
+				rawJSON:  []byte(`{"provider_state":"stable"}`),
+			}
+			storage.SetMetadata(map[string]any{key: "old-token", "note": "same"})
+
+			before := storage.CredentialFingerprintMaterial()
+			storage.SetMetadata(map[string]any{key: "new-token", "note": "same"})
+			after := storage.CredentialFingerprintMaterial()
+
+			if before == after {
+				t.Fatalf("metadata %s replacement did not change credential fingerprint material", key)
+			}
+		})
 	}
 }
 

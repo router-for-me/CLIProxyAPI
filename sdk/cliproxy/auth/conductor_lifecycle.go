@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
@@ -71,6 +72,21 @@ func syncAuthStorageMetadata(auth *Auth) {
 	if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok && setter != nil {
 		setter.SetMetadata(auth.Metadata)
 	}
+}
+
+func cloneAuthForConditionalPersistence(auth *Auth) *Auth {
+	candidate := auth.Clone()
+	if candidate == nil || candidate.Storage == nil {
+		return candidate
+	}
+	source, ok := candidate.Storage.(baseauth.CredentialPersistenceSnapshotSource)
+	if !ok || source == nil {
+		return candidate
+	}
+	if storage := source.CredentialPersistenceSnapshot(); storage != nil {
+		candidate.Storage = storage
+	}
+	return candidate
 }
 
 // Register inserts a new auth entry into the manager.
@@ -158,11 +174,15 @@ func (m *Manager) updateAuth(ctx context.Context, auth, expectedCurrent *Auth) (
 	auth.EnsureIndex()
 	auth.credentialGeneration = m.authGeneration.Add(1)
 	authClone := auth.Clone()
-	m.auths[auth.ID] = authClone
 	persistedWithCAS := expectedCurrent != nil
+	var persistenceCandidate *Auth
+	if persistedWithCAS {
+		persistenceCandidate = cloneAuthForConditionalPersistence(auth)
+	}
+	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	if persistedWithCAS {
-		m.persistConditionalUpdate(ctx, auth, authClone)
+		m.persistConditionalUpdate(ctx, persistenceCandidate, authClone)
 	}
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
@@ -365,7 +385,7 @@ func (m *Manager) persistConditionalUpdate(ctx context.Context, auth, owner *Aut
 			return
 		}
 		if current != nil && m.shouldPersistAuth(ctx, current) {
-			candidate = current.Clone()
+			candidate = cloneAuthForConditionalPersistence(current)
 			candidateOwner = current
 			staleSavedID = savedID
 			m.mu.RUnlock()
@@ -387,7 +407,7 @@ func (m *Manager) persistConditionalUpdate(ctx context.Context, auth, owner *Aut
 			m.mu.RUnlock()
 			return
 		}
-		candidate = current.Clone()
+		candidate = cloneAuthForConditionalPersistence(current)
 		candidateOwner = current
 		m.mu.RUnlock()
 	}
