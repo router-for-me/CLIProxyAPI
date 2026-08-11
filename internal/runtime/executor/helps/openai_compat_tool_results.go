@@ -36,7 +36,7 @@ func ShouldEnsureOpenAICompatAssistantReasoningContent(compat *config.OpenAIComp
 		return true
 	}
 
-	rawUpstream := stripProviderPrefix(upstreamModel, compat.Prefix)
+	rawUpstream := upstreamModel
 	rawRequested := stripProviderPrefix(requestedModel, compat.Prefix)
 
 	normUpstream := normalizeOpenAICompatibilityModelName(rawUpstream)
