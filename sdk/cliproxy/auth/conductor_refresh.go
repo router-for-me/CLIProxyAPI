@@ -346,7 +346,12 @@ func authAccessToken(auth *Auth) string {
 	if token := authMetadataString(auth, "access_token"); token != "" {
 		return token
 	}
-	return authMetadataString(auth, "accessToken")
+	if token := authMetadataString(auth, "accessToken"); token != "" {
+		return token
+	}
+	// Kimi executes with Attributes["access_token"] when metadata does not
+	// carry an access token, so that fallback is credential-revision material.
+	return authAttribute(auth, "access_token")
 }
 
 func authHasRefreshCredential(auth *Auth) bool {

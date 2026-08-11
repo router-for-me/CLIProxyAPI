@@ -1410,38 +1410,54 @@ func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterCredentialReplacement
 	}
 }
 
-func TestRecordExecutionResultAppliesStaleQuotaFailureAfterTokenRotation(t *testing.T) {
-	m := NewManager(nil, nil, nil)
-	oldAuth := &Auth{
-		ID:       "codex-quota.json",
-		Provider: "codex",
-		Status:   StatusActive,
-		Metadata: map[string]any{"access_token": "old-access-token"},
-	}
-	if _, err := m.Register(context.Background(), oldAuth); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	selected, _ := m.GetByID(oldAuth.ID)
-	replacement := selected.Clone()
-	replacement.Metadata["access_token"] = "rotated-access-token"
-	if _, err := m.Update(context.Background(), replacement); err != nil {
-		t.Fatalf("Update replacement: %v", err)
-	}
+func TestRecordExecutionResultIgnoresStaleAvailabilityFailureAfterTokenRotation(t *testing.T) {
+	for _, statusCode := range []int{
+		http.StatusPaymentRequired,
+		http.StatusForbidden,
+		http.StatusTooManyRequests,
+	} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			oldAuth := &Auth{
+				ID:       "codex-stale-availability.json",
+				Provider: "codex",
+				Status:   StatusActive,
+				Metadata: map[string]any{"access_token": "old-access-token"},
+			}
+			if _, err := m.Register(context.Background(), oldAuth); err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+			selected, _ := m.GetByID(oldAuth.ID)
+			replacement := selected.Clone()
+			replacement.Metadata["access_token"] = "rotated-access-token"
+			if _, err := m.Update(context.Background(), replacement); err != nil {
+				t.Fatalf("Update replacement: %v", err)
+			}
 
-	m.recordExecutionResult(context.Background(), Result{
-		AuthID:   oldAuth.ID,
-		Provider: oldAuth.Provider,
-		Model:    "gpt-test",
-		Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota exhausted"},
-	}, selected, false)
+			m.recordExecutionResult(context.Background(), Result{
+				AuthID:   oldAuth.ID,
+				Provider: oldAuth.Provider,
+				Model:    "gpt-test",
+				Error:    &Error{HTTPStatus: statusCode, Message: http.StatusText(statusCode)},
+			}, selected, false)
 
-	current, _ := m.GetByID(oldAuth.ID)
-	if current == nil || current.Status != StatusError || current.LastError == nil {
-		t.Fatalf("quota result from pre-rotation request was not applied: %#v", current)
-	}
-	state := current.ModelStates["gpt-test"]
-	if state == nil || !state.Quota.Exceeded {
-		t.Fatalf("quota model state missing: %#v", state)
+			current, _ := m.GetByID(oldAuth.ID)
+			if current == nil {
+				t.Fatal("replacement auth missing")
+			}
+			if got := authAccessToken(current); got != "rotated-access-token" {
+				t.Fatalf("current access token = %q, want rotated token", got)
+			}
+			if current.Status != StatusActive || current.Unavailable || current.LastError != nil || current.StatusMessage != "" {
+				t.Fatalf("stale %d result changed replacement auth: %#v", statusCode, current)
+			}
+			if len(current.ModelStates) != 0 {
+				t.Fatalf("stale %d result created model states: %#v", statusCode, current.ModelStates)
+			}
+			if current.Failed != 1 {
+				t.Fatalf("failed count = %d, want request counted without changing availability", current.Failed)
+			}
+		})
 	}
 }
 
@@ -2287,6 +2303,55 @@ func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterAPIKeyReplacement(t *
 	}
 	if len(current.ModelStates) != 0 {
 		t.Fatalf("stale API-key result created model states: %#v", current.ModelStates)
+	}
+}
+
+func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterKimiAttributeTokenRotation(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	oldAuth := &Auth{
+		ID:       "kimi-attribute-token.json",
+		Provider: "kimi",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"access_token": "old-attribute-token",
+		},
+		Metadata: map[string]any{
+			"refresh_token": "stable-refresh-token",
+		},
+	}
+	if _, err := m.Register(context.Background(), oldAuth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	selected, okSelected := m.GetByID(oldAuth.ID)
+	if !okSelected || selected == nil {
+		t.Fatal("selected auth missing")
+	}
+
+	replacement := selected.Clone()
+	replacement.Attributes["access_token"] = "replacement-attribute-token"
+	if _, err := m.Update(context.Background(), replacement); err != nil {
+		t.Fatalf("Update replacement: %v", err)
+	}
+
+	m.recordExecutionResult(context.Background(), Result{
+		AuthID:   oldAuth.ID,
+		Provider: oldAuth.Provider,
+		Model:    "kimi-test",
+		Error:    &Error{HTTPStatus: http.StatusUnauthorized, Message: "old Kimi token unauthorized"},
+	}, selected, false)
+
+	current, okCurrent := m.GetByID(oldAuth.ID)
+	if !okCurrent || current == nil {
+		t.Fatal("current auth missing")
+	}
+	if got := authAttribute(current, "access_token"); got != "replacement-attribute-token" {
+		t.Fatalf("current attribute access token = %q, want replacement token", got)
+	}
+	if current.Status != StatusActive || current.Unavailable || current.LastError != nil || current.StatusMessage != "" {
+		t.Fatalf("stale Kimi result changed replacement auth: %#v", current)
+	}
+	if len(current.ModelStates) != 0 {
+		t.Fatalf("stale Kimi result created model states: %#v", current.ModelStates)
 	}
 }
 

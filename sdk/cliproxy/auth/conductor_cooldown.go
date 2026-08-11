@@ -1094,12 +1094,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			staleCredentialResult = auth.credentialGeneration == 0 || auth.credentialGeneration != result.credentialGeneration
 		}
 		staleSuccessfulResult := staleCredentialResult && result.Success
-		staleUnauthorizedResult := staleCredentialResult && !result.Success && isUnauthorizedError(result.Error)
-		if staleSuccessfulResult || staleUnauthorizedResult {
+		staleAvailabilityFailure := staleCredentialResult && !result.Success && isCredentialScopedAvailabilityError(result.Error)
+		if staleSuccessfulResult || staleAvailabilityFailure {
 			// Keep request metrics, but never let a superseded credential change
 			// availability owned by its replacement.
 			authSnapshot = auth.Clone()
-			suppressErrorEvent = staleUnauthorizedResult
+			suppressErrorEvent = staleAvailabilityFailure
 		} else if result.Success {
 			if modelKey != "" {
 				state := ensureModelState(auth, modelKey)
@@ -1857,6 +1857,18 @@ func retryAfterFromError(err error) *time.Duration {
 	}
 	value := *retryAfter
 	return &value
+}
+
+func isCredentialScopedAvailabilityError(err *Error) bool {
+	if isUnauthorizedError(err) {
+		return true
+	}
+	switch statusCodeFromResult(err) {
+	case http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
+		return true
+	default:
+		return false
+	}
 }
 
 func statusCodeFromResult(err *Error) int {
