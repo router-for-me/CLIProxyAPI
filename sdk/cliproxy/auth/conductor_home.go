@@ -1114,7 +1114,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
-			requestAuth, credentialRevision := snapshotAuthCredential(c.auth)
+			requestAuth, credentialRevision := snapshotAuthCredentialForExecution(creditsCtx, c.auth, execReq, creditsOpts)
 			resp, errExec := c.executor.Execute(creditsCtx, requestAuth, execReq, creditsOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {

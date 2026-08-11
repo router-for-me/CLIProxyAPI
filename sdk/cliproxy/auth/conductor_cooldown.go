@@ -755,7 +755,7 @@ func authCredentialHeaderMaterial(auth *Auth) []string {
 			continue
 		}
 		name := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(key, "header:")))
-		if !authHeaderCarriesCredential(name) {
+		if !authHeaderCarriesCredential(name) && !authHeaderCarriesAuthorizationScope(name) {
 			continue
 		}
 		value = strings.TrimSpace(value)
@@ -784,6 +784,24 @@ func authHeaderCarriesCredential(name string) bool {
 	}
 }
 
+func authHeaderCarriesAuthorizationScope(name string) bool {
+	normalized := normalizeAuthorizationScopeHeaderName(name)
+	switch normalized {
+	case "organization", "organisation", "project", "tenant", "workspace", "team", "subscription",
+		"openaiorganization", "openaiproject", "chatgptaccountid", "xgooguserproject":
+		return true
+	}
+	for _, suffix := range []string{
+		"organizationid", "organisationid", "projectid", "accountid",
+		"tenantid", "workspaceid", "teamid", "subscriptionid",
+	} {
+		if strings.HasSuffix(normalized, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func authCredentialEndpoint(auth *Auth) string {
 	if auth == nil {
 		return ""
@@ -796,9 +814,6 @@ func authCredentialEndpoint(auth *Auth) string {
 			// Both executors resolve metadata base_url only when the attribute is absent.
 			endpoint = strings.TrimSpace(authMetadataString(auth, "base_url"))
 		}
-	}
-	if provider == "xai" {
-		endpoint = authXAIEffectiveChatEndpoint(auth, endpoint)
 	}
 	return normalizeCredentialEndpoint(endpoint)
 }
@@ -1064,6 +1079,28 @@ func authCredentialFingerprint(auth *Auth) ([sha256.Size]byte, bool) {
 	return sha256.Sum256([]byte(strings.Join(parts, "\x00"))), true
 }
 
+type authCredentialRevisionScope uint8
+
+const (
+	authCredentialRevisionScopeDefault authCredentialRevisionScope = iota
+	authCredentialRevisionScopeXAIHTTPChat
+)
+
+func authCredentialFingerprintForScope(auth *Auth, scope authCredentialRevisionScope) ([sha256.Size]byte, bool) {
+	fingerprint, ok := authCredentialFingerprint(auth)
+	if !ok || scope != authCredentialRevisionScopeXAIHTTPChat || auth == nil ||
+		!strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") {
+		return fingerprint, ok
+	}
+	route := normalizeCredentialEndpoint(authXAIEffectiveChatEndpoint(auth, authCredentialEndpoint(auth)))
+	scoped := make([]byte, 0, sha256.Size+len(route)+24)
+	scoped = append(scoped, fingerprint[:]...)
+	scoped = append(scoped, 0)
+	scoped = append(scoped, "xai_http_chat_route="...)
+	scoped = append(scoped, route...)
+	return sha256.Sum256(scoped), true
+}
+
 func sameCredentialRevision(left, right *Auth, sameGeneration bool) bool {
 	leftFingerprint, leftOK := authCredentialFingerprint(left)
 	rightFingerprint, rightOK := authCredentialFingerprint(right)
@@ -1267,7 +1304,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 		staleCredentialResult := false
 		if result.hasCredentialFingerprint {
-			currentFingerprint, okFingerprint := authCredentialFingerprint(auth)
+			currentFingerprint, okFingerprint := authCredentialFingerprintForScope(auth, result.credentialRevisionScope)
 			staleCredentialResult = !okFingerprint || currentFingerprint != result.credentialFingerprint
 		} else if result.hasCredentialGeneration {
 			staleCredentialResult = auth.credentialGeneration == 0 || auth.credentialGeneration != result.credentialGeneration
@@ -1448,15 +1485,99 @@ type authCredentialRevision struct {
 	fingerprint    [sha256.Size]byte
 	hasFingerprint bool
 	generation     uint64
+	scope          authCredentialRevisionScope
 }
 
 func captureAuthCredentialRevision(auth *Auth) authCredentialRevision {
-	fingerprint, ok := authCredentialFingerprint(auth)
+	return captureAuthCredentialRevisionWithScope(auth, authCredentialRevisionScopeDefault)
+}
+
+func captureAuthCredentialRevisionWithScope(auth *Auth, scope authCredentialRevisionScope) authCredentialRevision {
+	fingerprint, ok := authCredentialFingerprintForScope(auth, scope)
 	var generation uint64
 	if auth != nil {
 		generation = auth.credentialGeneration
 	}
-	return authCredentialRevision{fingerprint: fingerprint, hasFingerprint: ok, generation: generation}
+	return authCredentialRevision{fingerprint: fingerprint, hasFingerprint: ok, generation: generation, scope: scope}
+}
+
+func captureAuthCredentialRevisionForExecution(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) authCredentialRevision {
+	scope := authCredentialRevisionScopeForExecution(ctx, auth, req, opts)
+	return captureAuthCredentialRevisionWithScope(auth, scope)
+}
+
+func authCredentialRevisionScopeForExecution(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) authCredentialRevisionScope {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") {
+		return authCredentialRevisionScopeDefault
+	}
+	if opts.Alt == "responses/compact" || authXAIExecutionIsMedia(req, opts) {
+		return authCredentialRevisionScopeDefault
+	}
+	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) ||
+		(cliproxyexecutor.DownstreamWebsocket(ctx) && authXAIWebsocketsEnabled(auth)) {
+		return authCredentialRevisionScopeDefault
+	}
+	return authCredentialRevisionScopeXAIHTTPChat
+}
+
+func authXAIExecutionIsMedia(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) bool {
+	for _, format := range []string{opts.SourceFormat.String(), req.Format.String()} {
+		switch strings.ToLower(strings.TrimSpace(format)) {
+		case "openai-image", "openai-video":
+			return true
+		}
+	}
+	for _, metadata := range []map[string]any{opts.Metadata, req.Metadata} {
+		path := strings.ToLower(strings.TrimSpace(authExecutionMetadataString(metadata, cliproxyexecutor.RequestPathMetadataKey)))
+		if path == "" {
+			continue
+		}
+		if parsed, errParse := url.Parse(path); errParse == nil && parsed.Path != "" {
+			path = strings.ToLower(strings.TrimSpace(parsed.Path))
+		}
+		if strings.Contains(path, "/images/") || strings.HasSuffix(path, "/images") ||
+			strings.Contains(path, "/videos/") || strings.HasSuffix(path, "/videos") {
+			return true
+		}
+	}
+	return false
+}
+
+func authExecutionMetadataString(metadata map[string]any, key string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	switch value := metadata[key].(type) {
+	case string:
+		return value
+	case []byte:
+		return string(value)
+	default:
+		return ""
+	}
+}
+
+func authXAIWebsocketsEnabled(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if raw := strings.TrimSpace(authAttribute(auth, "websockets")); raw != "" {
+		if parsed, errParse := strconv.ParseBool(raw); errParse == nil {
+			return parsed
+		}
+	}
+	if auth.Metadata == nil {
+		return false
+	}
+	switch value := auth.Metadata["websockets"].(type) {
+	case bool:
+		return value
+	case string:
+		parsed, errParse := strconv.ParseBool(strings.TrimSpace(value))
+		return errParse == nil && parsed
+	default:
+		return false
+	}
 }
 
 type executionCredentialStorage struct {
@@ -1546,6 +1667,14 @@ func snapshotAuthCredential(auth *Auth) (*Auth, authCredentialRevision) {
 	return snapshot, captureAuthCredentialRevision(snapshot)
 }
 
+func snapshotAuthCredentialForExecution(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*Auth, authCredentialRevision) {
+	snapshot, _ := snapshotAuthCredential(auth)
+	if snapshot == nil {
+		return nil, authCredentialRevision{}
+	}
+	return snapshot, captureAuthCredentialRevisionForExecution(ctx, snapshot, req, opts)
+}
+
 func (m *Manager) recordExecutionResult(ctx context.Context, result Result, auth *Auth, ephemeral bool) {
 	m.recordExecutionResultWithRevision(ctx, result, auth, ephemeral, captureAuthCredentialRevision(auth))
 }
@@ -1556,6 +1685,7 @@ func (m *Manager) recordExecutionResultWithRevision(ctx context.Context, result 
 		result.hasCredentialFingerprint = revision.hasFingerprint
 		result.credentialGeneration = revision.generation
 		result.hasCredentialGeneration = revision.generation != 0
+		result.credentialRevisionScope = revision.scope
 		m.MarkResult(ctx, result)
 		return
 	}

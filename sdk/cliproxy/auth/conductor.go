@@ -62,6 +62,7 @@ type Result struct {
 	hasCredentialFingerprint bool
 	credentialGeneration     uint64
 	hasCredentialGeneration  bool
+	credentialRevisionScope  authCredentialRevisionScope
 }
 
 // Selector chooses an auth candidate for execution.

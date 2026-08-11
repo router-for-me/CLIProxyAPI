@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 type opaqueCredentialStorage struct{}
@@ -2386,15 +2388,14 @@ func TestRefreshAuthForRequestAppliesRefreshReturnedScalarFields(t *testing.T) {
 	}
 }
 
-func TestAuthCredentialFingerprintUsesXAIEffectiveChatRoute(t *testing.T) {
+func TestAuthCredentialFingerprintIgnoresXAIUsingAPIOutsideExecutionScope(t *testing.T) {
 	left := &Auth{
 		Provider: "xai",
 		Metadata: map[string]any{
-			"access_token":  "stable-token",
-			"refresh_token": "stable-refresh-token",
-			"base_url":      xaiauth.DefaultAPIBaseURL,
-			"using_api":     true,
-			"auth_kind":     "oauth",
+			"access_token": "stable-token",
+			"base_url":     xaiauth.DefaultAPIBaseURL,
+			"using_api":    true,
+			"auth_kind":    "oauth",
 		},
 	}
 	right := left.Clone()
@@ -2405,8 +2406,8 @@ func TestAuthCredentialFingerprintUsesXAIEffectiveChatRoute(t *testing.T) {
 	if !leftOK || !rightOK {
 		t.Fatalf("fingerprint availability = (%t, %t), want both true", leftOK, rightOK)
 	}
-	if leftFingerprint == rightFingerprint {
-		t.Fatal("changing xAI's effective chat route did not change credential revision")
+	if leftFingerprint != rightFingerprint {
+		t.Fatal("xAI using_api changed the auth-global fingerprint outside request transport scope")
 	}
 }
 
@@ -2414,11 +2415,10 @@ func TestAuthCredentialFingerprintIgnoresXAIUsingAPIForCustomEndpoint(t *testing
 	left := &Auth{
 		Provider: "xai",
 		Metadata: map[string]any{
-			"access_token":  "stable-token",
-			"refresh_token": "stable-refresh-token",
-			"base_url":      "https://custom-xai.example.com/v1",
-			"using_api":     true,
-			"auth_kind":     "oauth",
+			"access_token": "stable-token",
+			"base_url":     "https://custom-xai.example.com/v1",
+			"using_api":    true,
+			"auth_kind":    "oauth",
 		},
 	}
 	right := left.Clone()
@@ -2434,53 +2434,193 @@ func TestAuthCredentialFingerprintIgnoresXAIUsingAPIForCustomEndpoint(t *testing
 	}
 }
 
-func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterXAIRouteReplacement(t *testing.T) {
+func TestExecuteIgnoresStaleUnauthorizedAfterXAIHTTPChatRouteReplacement(t *testing.T) {
+	executor := &blockingUnauthorizedCredentialExecutor{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		provider: "xai",
+	}
 	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(executor)
+	m.SetRetryConfig(0, 0, 1)
 	oldAuth := &Auth{
 		ID:       "xai-chat-route.json",
 		Provider: "xai",
 		Status:   StatusActive,
 		Metadata: map[string]any{
-			"access_token":  "stable-token",
-			"refresh_token": "stable-refresh-token",
-			"base_url":      xaiauth.DefaultAPIBaseURL,
-			"using_api":     true,
-			"auth_kind":     "oauth",
+			"access_token": "stable-token",
+			"base_url":     xaiauth.DefaultAPIBaseURL,
+			"using_api":    true,
+			"auth_kind":    "oauth",
 		},
 	}
 	if _, errRegister := m.Register(context.Background(), oldAuth); errRegister != nil {
 		t.Fatalf("Register: %v", errRegister)
 	}
-	selected, okSelected := m.GetByID(oldAuth.ID)
-	if !okSelected || selected == nil {
-		t.Fatal("selected auth missing")
+	registry.GetGlobalRegistry().RegisterClient(oldAuth.ID, oldAuth.Provider, []*registry.ModelInfo{{ID: "grok-test"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(oldAuth.ID) })
+	m.RefreshSchedulerEntry(oldAuth.ID)
+
+	done := make(chan error, 1)
+	go func() {
+		_, errExecute := m.Execute(context.Background(), []string{"xai"}, cliproxyexecutor.Request{Model: "grok-test"}, cliproxyexecutor.Options{})
+		done <- errExecute
+	}()
+	select {
+	case <-executor.started:
+	case <-time.After(time.Second):
+		t.Fatal("xAI chat execution did not start")
 	}
 
+	selected, _ := m.GetByID(oldAuth.ID)
 	replacement := selected.Clone()
 	replacement.Metadata["using_api"] = false
 	if _, errUpdate := m.Update(context.Background(), replacement); errUpdate != nil {
 		t.Fatalf("Update replacement: %v", errUpdate)
 	}
-
-	m.recordExecutionResult(context.Background(), Result{
-		AuthID:   oldAuth.ID,
-		Provider: oldAuth.Provider,
-		Model:    "grok-test",
-		Error:    &Error{HTTPStatus: http.StatusUnauthorized, Message: "old xAI route unauthorized"},
-	}, selected, false)
-
-	current, okCurrent := m.GetByID(oldAuth.ID)
-	if !okCurrent || current == nil {
-		t.Fatal("replacement auth missing")
+	close(executor.release)
+	select {
+	case errExecute := <-done:
+		if errExecute == nil {
+			t.Fatal("Execute error = nil, want old route unauthorized")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("xAI chat execution did not finish")
 	}
-	if got, ok := current.Metadata["using_api"].(bool); !ok || got {
-		t.Fatalf("current xAI using_api = %#v, want false", current.Metadata["using_api"])
-	}
-	if current.Status != StatusActive || current.Unavailable || current.LastError != nil || current.StatusMessage != "" {
-		t.Fatalf("stale xAI route result changed replacement auth: %#v", current)
+
+	current, _ := m.GetByID(oldAuth.ID)
+	if current == nil || current.Status != StatusActive || current.Unavailable || current.LastError != nil {
+		t.Fatalf("stale xAI chat-route failure changed replacement auth: %#v", current)
 	}
 	if len(current.ModelStates) != 0 {
-		t.Fatalf("stale xAI route result created model states: %#v", current.ModelStates)
+		t.Fatalf("stale xAI chat-route failure created model state: %#v", current.ModelStates)
+	}
+}
+
+func TestExecuteAppliesUnauthorizedAcrossXAINonChatUsingAPIToggle(t *testing.T) {
+	cases := []struct {
+		name string
+		opts cliproxyexecutor.Options
+	}{
+		{
+			name: "image format",
+			opts: cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-image")},
+		},
+		{
+			name: "video request path",
+			opts: cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.RequestPathMetadataKey: "/v1/videos/generations"}},
+		},
+		{
+			name: "compact",
+			opts: cliproxyexecutor.Options{Alt: "responses/compact"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &blockingUnauthorizedCredentialExecutor{
+				started:  make(chan struct{}),
+				release:  make(chan struct{}),
+				provider: "xai",
+			}
+			m := NewManager(nil, nil, nil)
+			m.RegisterExecutor(executor)
+			m.SetRetryConfig(0, 0, 1)
+			auth := &Auth{
+				ID:       "xai-non-chat-" + strings.NewReplacer(" ", "-").Replace(tc.name) + ".json",
+				Provider: "xai",
+				Status:   StatusActive,
+				Metadata: map[string]any{
+					"access_token": "stable-token",
+					"base_url":     xaiauth.DefaultAPIBaseURL,
+					"using_api":    true,
+					"auth_kind":    "oauth",
+				},
+			}
+			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("Register: %v", errRegister)
+			}
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "grok-test"}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+			m.RefreshSchedulerEntry(auth.ID)
+
+			done := make(chan error, 1)
+			go func() {
+				_, errExecute := m.Execute(context.Background(), []string{"xai"}, cliproxyexecutor.Request{Model: "grok-test"}, tc.opts)
+				done <- errExecute
+			}()
+			select {
+			case <-executor.started:
+			case <-time.After(time.Second):
+				t.Fatal("xAI non-chat execution did not start")
+			}
+
+			selected, _ := m.GetByID(auth.ID)
+			replacement := selected.Clone()
+			replacement.Metadata["using_api"] = false
+			if _, errUpdate := m.Update(context.Background(), replacement); errUpdate != nil {
+				t.Fatalf("Update replacement: %v", errUpdate)
+			}
+			close(executor.release)
+			select {
+			case errExecute := <-done:
+				if errExecute == nil {
+					t.Fatal("Execute error = nil, want unauthorized")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("xAI non-chat execution did not finish")
+			}
+
+			current, _ := m.GetByID(auth.ID)
+			if current == nil || current.Status != StatusError || !current.Unavailable || current.LastError == nil || current.LastError.StatusCode() != http.StatusUnauthorized {
+				t.Fatalf("non-chat unauthorized result was incorrectly suppressed: %#v", current)
+			}
+		})
+	}
+}
+
+func TestExecuteStreamAppliesUnauthorizedAcrossXAIWebsocketUsingAPIToggle(t *testing.T) {
+	executor := &lateUnauthorizedStreamCredentialExecutor{provider: "xai", release: make(chan struct{})}
+	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(executor)
+	m.SetRetryConfig(0, 0, 1)
+	auth := &Auth{
+		ID:       "xai-websocket-route.json",
+		Provider: "xai",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token": "stable-token",
+			"base_url":     xaiauth.DefaultAPIBaseURL,
+			"using_api":    true,
+			"auth_kind":    "oauth",
+			"websockets":   true,
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "grok-test"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	m.RefreshSchedulerEntry(auth.ID)
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	streamResult, errStream := m.ExecuteStream(ctx, []string{"xai"}, cliproxyexecutor.Request{Model: "grok-test"}, cliproxyexecutor.Options{Stream: true})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream: %v", errStream)
+	}
+	current, _ := m.GetByID(auth.ID)
+	replacement := current.Clone()
+	replacement.Metadata["using_api"] = false
+	if _, errUpdate := m.Update(context.Background(), replacement); errUpdate != nil {
+		t.Fatalf("Update replacement: %v", errUpdate)
+	}
+	close(executor.release)
+	for range streamResult.Chunks {
+	}
+
+	current, _ = m.GetByID(auth.ID)
+	if current == nil || current.Status != StatusError || !current.Unavailable || current.LastError == nil || current.LastError.StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("websocket unauthorized result was incorrectly suppressed: %#v", current)
 	}
 }
 
@@ -2982,6 +3122,75 @@ func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterOAuthKindAPIKeyReplac
 	}
 	if len(current.ModelStates) != 0 {
 		t.Fatalf("stale OAuth-shaped API-key result created model states: %#v", current.ModelStates)
+	}
+}
+
+func TestRecordExecutionResultIgnoresStaleForbiddenAfterAuthorizationScopeHeaderReplacement(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const authID = "openai-organization-scope.json"
+	oldAuth := &Auth{
+		ID:       authID,
+		Provider: "openai-compatibility",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			AttributeAPIKey:              "stable-api-key",
+			"header:OpenAI-Organization": "org-old",
+			"header:X-Trace-ID":          "stable-trace",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), oldAuth); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	selected, _ := m.GetByID(authID)
+	replacement := selected.Clone()
+	replacement.Attributes["header:OpenAI-Organization"] = "org-replacement"
+	if _, errUpdate := m.Update(context.Background(), replacement); errUpdate != nil {
+		t.Fatalf("Update replacement: %v", errUpdate)
+	}
+
+	m.recordExecutionResult(context.Background(), Result{
+		AuthID:   authID,
+		Provider: oldAuth.Provider,
+		Model:    "gpt-test",
+		Error:    &Error{HTTPStatus: http.StatusForbidden, Message: "old organization forbidden"},
+	}, selected, false)
+
+	current, _ := m.GetByID(authID)
+	if current == nil || current.Status != StatusActive || current.Unavailable || current.LastError != nil {
+		t.Fatalf("stale organization-scope failure changed replacement auth: %#v", current)
+	}
+	if len(current.ModelStates) != 0 {
+		t.Fatalf("stale organization-scope failure created model state: %#v", current.ModelStates)
+	}
+}
+
+func TestCredentialFingerprintTracksAuthorizationScopeCustomHeaders(t *testing.T) {
+	for _, header := range []string{
+		"OpenAI-Organization",
+		"OpenAI-Project",
+		"X-Goog-User-Project",
+		"X-Tenant-ID",
+		"X-Workspace-ID",
+	} {
+		t.Run(header, func(t *testing.T) {
+			left := &Auth{
+				Provider: "openai-compatibility",
+				Attributes: map[string]string{
+					AttributeAPIKey:    "stable-api-key",
+					"header:" + header: "scope-a",
+				},
+			}
+			right := left.Clone()
+			right.Attributes["header:"+header] = "scope-b"
+			leftFingerprint, leftOK := authCredentialFingerprint(left)
+			rightFingerprint, rightOK := authCredentialFingerprint(right)
+			if !leftOK || !rightOK {
+				t.Fatalf("fingerprint availability = (%t, %t), want both true", leftOK, rightOK)
+			}
+			if leftFingerprint == rightFingerprint {
+				t.Fatalf("%s change did not change credential revision", header)
+			}
+		})
 	}
 }
 

@@ -349,7 +349,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if !restoreExecutionModel {
 				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel)
 			}
-			requestAuth, credentialRevision := snapshotAuthCredential(auth)
+			requestAuth, credentialRevision := snapshotAuthCredentialForExecution(execCtx, auth, execReq, execOpts)
 			resp, errExec := executor.Execute(execCtx, requestAuth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -358,7 +358,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(execCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
 					auth = refreshed
 					didRefreshOnUnauthorized = true
-					requestAuth, credentialRevision = snapshotAuthCredential(auth)
+					requestAuth, credentialRevision = snapshotAuthCredentialForExecution(execCtx, auth, execReq, execOpts)
 					resp, errExec = executor.Execute(execCtx, requestAuth, execReq, execOpts)
 					if errExec != nil {
 						if errCtx := execCtx.Err(); errCtx != nil {

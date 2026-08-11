@@ -227,7 +227,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		if errCtx := ctx.Err(); errCtx != nil {
 			return nil, errCtx
 		}
-		requestAuth, credentialRevision := snapshotAuthCredential(auth)
+		requestAuth, credentialRevision := snapshotAuthCredentialForExecution(ctx, auth, execReq, execOpts)
 		streamResult, errStream := executor.ExecuteStream(ctx, requestAuth, execReq, execOpts)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
@@ -250,7 +250,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					m.replaceHomeExecutionLifecycleAuth(execOpts.ExecutionLifecycle, auth)
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
-					requestAuth, credentialRevision = snapshotAuthCredential(auth)
+					requestAuth, credentialRevision = snapshotAuthCredentialForExecution(ctx, auth, execReq, execOpts)
 					streamResult, errStream = executor.ExecuteStream(ctx, requestAuth, execReq, execOpts)
 					if errStream != nil {
 						if errCtx := ctx.Err(); errCtx != nil {
@@ -304,7 +304,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					m.replaceHomeExecutionLifecycleAuth(execOpts.ExecutionLifecycle, auth)
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
-					requestAuth, credentialRevision = snapshotAuthCredential(auth)
+					requestAuth, credentialRevision = snapshotAuthCredentialForExecution(ctx, auth, execReq, execOpts)
 					retryStream, retryErr := executor.ExecuteStream(ctx, requestAuth, execReq, execOpts)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
 					if retryErr != nil {
