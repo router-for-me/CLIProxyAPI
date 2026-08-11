@@ -3,12 +3,102 @@ package management
 import (
 	"context"
 	"net/http"
+	"net/url"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
+
+func TestCodexResetCreditGateSerializesCalls(t *testing.T) {
+	handlers := []*Handler{
+		{codexResetCreditSpacing: time.Millisecond},
+		{codexResetCreditSpacing: time.Millisecond},
+	}
+	target, errParse := url.Parse("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")
+	if errParse != nil {
+		t.Fatal(errParse)
+	}
+	release, errAcquire := handlers[0].acquireCodexResetCreditGate(context.Background(), target)
+	if errAcquire != nil {
+		t.Fatal(errAcquire)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, errAcquire = handlers[1].acquireCodexResetCreditGate(canceled, target); errAcquire != context.Canceled {
+		t.Fatalf("canceled acquire error = %v, want context.Canceled", errAcquire)
+	}
+	release()
+
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	var wg sync.WaitGroup
+	for i := range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			release, errAcquire := handlers[i%len(handlers)].acquireCodexResetCreditGate(context.Background(), target)
+			if errAcquire != nil {
+				t.Errorf("acquire gate: %v", errAcquire)
+				return
+			}
+			current := active.Add(1)
+			if current > maxActive.Load() {
+				maxActive.Store(current)
+			}
+			time.Sleep(2 * time.Millisecond)
+			active.Add(-1)
+			release()
+		}()
+	}
+	wg.Wait()
+
+	if got := maxActive.Load(); got != 1 {
+		t.Fatalf("maximum concurrent calls = %d, want 1", got)
+	}
+}
+
+func TestCodexResetCreditRetryDelay(t *testing.T) {
+	want := []time.Duration{10 * time.Second, 20 * time.Second}
+	for attempt, wantDelay := range want {
+		if got := codexResetCreditRetryDelay(attempt); got != wantDelay {
+			t.Fatalf("attempt %d delay = %s, want %s", attempt, got, wantDelay)
+		}
+	}
+}
+
+func TestCodexResetCreditCacheExpiresAndDeletes(t *testing.T) {
+	const authIndex = "codex:test"
+	deleteCodexResetCreditCache(authIndex)
+	t.Cleanup(func() { deleteCodexResetCreditCache(authIndex) })
+
+	want := apiCallResponse{StatusCode: http.StatusOK, Body: `{"credits":[]}`}
+	storeCodexResetCreditCache(authIndex, want)
+	if got, ok := loadCodexResetCreditCache(authIndex, false); !ok || got.Body != want.Body {
+		t.Fatalf("fresh cache = (%+v, %v), want body %q", got, ok, want.Body)
+	}
+
+	codexResetCreditCache.Lock()
+	entry := codexResetCreditCache.entries[authIndex]
+	entry.storedAt = time.Now().Add(-codexResetCreditCacheTTL)
+	codexResetCreditCache.entries[authIndex] = entry
+	codexResetCreditCache.Unlock()
+	if _, ok := loadCodexResetCreditCache(authIndex, false); ok {
+		t.Fatal("expired cache unexpectedly returned as fresh")
+	}
+	if _, ok := loadCodexResetCreditCache(authIndex, true); !ok {
+		t.Fatal("expired cache unavailable for rate-limit fallback")
+	}
+
+	deleteCodexResetCreditCache(authIndex)
+	if _, ok := loadCodexResetCreditCache(authIndex, true); ok {
+		t.Fatal("deleted cache still available")
+	}
+}
 
 func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
