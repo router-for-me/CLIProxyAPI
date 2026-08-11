@@ -4,26 +4,21 @@ import (
 	"testing"
 )
 
-// TestExecutorFormatsRecognized enforces the ROOT guarantee: every registered
-// text executor's emitted stream format must be recognizable by the
-// empty-completion detection. The conductor judges the SSE/JSON payloads each
-// executor hands it at the boundary (bootstrap-close for streams, return for
-// non-streams), so an executor emitting a wire format the detection cannot
-// recognize would silently bypass empty-completion handling.
+// TestSupportedCompletionFormatsRecognized covers representative wire formats
+// handled by empty-completion detection. Executor names document current users
+// of each format; this manually maintained table is not an executor-registry
+// completeness check.
 //
-// Each case lists the registered executors that emit a given wire format plus a
+// Each case lists executors that emit a given wire format plus a
 // representative NON-empty chunk in that format (asserted recognized=true) and
-// the corresponding empty-terminal variant (asserted empty). If a future
-// executor emits a format not covered here, this table fails loudly and forces
-// the author to either map it onto an existing format or get empty-completion
-// detection extended for it.
+// the corresponding empty-terminal variant (asserted empty).
 //
 // Documented exclusions (NOT in this table, by design):
 //   - codex-live: realtime bidirectional voice/media relay, not a text
 //     completion stream — empty-completion handling does not apply.
 //   - gemini-interactions: Gemini Live realtime relay (parts/role frames, not
 //     candidates-shaped) — voice/media channel, not a text completion stream.
-func TestExecutorFormatsRecognized(t *testing.T) {
+func TestSupportedCompletionFormatsRecognized(t *testing.T) {
 	cases := []struct {
 		name      string
 		executors []string
@@ -51,8 +46,8 @@ func TestExecutorFormatsRecognized(t *testing.T) {
 			// (requestToFormat is FormatClaude).
 			name:      "claude",
 			executors: []string{"claude"},
-			nonEmpty:  []byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
-			empty:     []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+			nonEmpty:  []byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+			empty:     []byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
 		},
 		{
 			// Gemini wire (top-level candidates). Emitted by the Gemini-family

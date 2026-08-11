@@ -551,6 +551,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	unauthorizedRefreshTried := make(map[string]struct{})
+	emptyCompletionTried := make(map[string]struct{})
 	var lastErr error
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
@@ -592,6 +593,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
 		if selection != nil {
+			if _, emptyAlready := emptyCompletionTried[auth.ID]; emptyAlready {
+				selection.End("repeated_empty_completion_auth")
+				if lastErr != nil {
+					return nil, lastErr
+				}
+				return nil, errEmptyCompletion
+			}
 			if _, refreshedAlready := unauthorizedRefreshTried[auth.ID]; refreshedAlready {
 				selection.End("repeated_refresh_auth")
 				if lastErr != nil {
@@ -698,6 +706,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			lastErr = errStream
 			if homeMode {
+				if isEmptyCompletionError(errStream) {
+					emptyCompletionTried[auth.ID] = struct{}{}
+				}
 				homeAuthCount++
 			}
 			continue

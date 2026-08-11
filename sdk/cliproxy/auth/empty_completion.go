@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -21,6 +22,11 @@ var errEmptyCompletion = &Error{
 	HTTPStatus: http.StatusServiceUnavailable,
 }
 
+// maxStreamBootstrapBytes bounds how much metadata a stream can accumulate
+// before the conductor conservatively forwards it. Empty-completion detection
+// must never create an unbounded pre-output buffer.
+const maxStreamBootstrapBytes = 1 << 20
+
 // openAIChunk is the minimal OpenAI-style SSE/JSON shape used to detect empty
 // completions.
 type openAIChunk struct {
@@ -28,11 +34,13 @@ type openAIChunk struct {
 		Delta struct {
 			Content          string            `json:"content"`
 			ReasoningContent string            `json:"reasoning_content"`
+			Refusal          *string           `json:"refusal"`
 			ToolCalls        []json.RawMessage `json:"tool_calls"`
 		} `json:"delta"`
 		Message struct {
 			Content          string            `json:"content"`
 			ReasoningContent string            `json:"reasoning_content"`
+			Refusal          *string           `json:"refusal"`
 			ToolCalls        []json.RawMessage `json:"tool_calls"`
 		} `json:"message"`
 		FinishReason *string `json:"finish_reason"`
@@ -93,12 +101,18 @@ type geminiUsageMetadata struct {
 	CandidatesTokenCount *int `json:"candidatesTokenCount"`
 }
 
+type geminiPromptFeedback struct {
+	BlockReason string `json:"blockReason"`
+}
+
 type geminiChunk struct {
-	Candidates    []geminiCandidate    `json:"candidates"`
-	UsageMetadata *geminiUsageMetadata `json:"usageMetadata"`
-	Response      *struct {
-		Candidates    []geminiCandidate    `json:"candidates"`
-		UsageMetadata *geminiUsageMetadata `json:"usageMetadata"`
+	Candidates     []geminiCandidate     `json:"candidates"`
+	UsageMetadata  *geminiUsageMetadata  `json:"usageMetadata"`
+	PromptFeedback *geminiPromptFeedback `json:"promptFeedback"`
+	Response       *struct {
+		Candidates     []geminiCandidate     `json:"candidates"`
+		UsageMetadata  *geminiUsageMetadata  `json:"usageMetadata"`
+		PromptFeedback *geminiPromptFeedback `json:"promptFeedback"`
 	} `json:"response"`
 }
 
@@ -109,21 +123,22 @@ type openAIResponseUsage struct {
 }
 
 type openAIResponseContentPart struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type    string `json:"type"`
+	Text    string `json:"text"`
+	Refusal string `json:"refusal"`
 }
 
 type openAIResponseOutputItem struct {
-	Type      string                       `json:"type"`
-	Text      string                       `json:"text"`
-	Arguments string                       `json:"arguments"`
-	Content   []openAIResponseContentPart  `json:"content"`
+	Type      string                      `json:"type"`
+	Text      string                      `json:"text"`
+	Arguments string                      `json:"arguments"`
+	Content   []openAIResponseContentPart `json:"content"`
 }
 
 type openAIResponseObject struct {
-	Status string                     `json:"status"`
-	Output json.RawMessage            `json:"output"`
-	Usage  *openAIResponseUsage       `json:"usage"`
+	Status string               `json:"status"`
+	Output json.RawMessage      `json:"output"`
+	Usage  *openAIResponseUsage `json:"usage"`
 }
 
 type openAIResponseChunk struct {
@@ -131,6 +146,7 @@ type openAIResponseChunk struct {
 	Object    string                `json:"object"`
 	Status    string                `json:"status"`
 	Output    json.RawMessage       `json:"output"`
+	Item      json.RawMessage       `json:"item"`
 	Usage     *openAIResponseUsage  `json:"usage"`
 	Response  *openAIResponseObject `json:"response"`
 	Delta     string                `json:"delta"`
@@ -142,23 +158,24 @@ type openAIResponseChunk struct {
 // event types we recognize. Unknown/partial sub-shapes are left unrecognized so
 // the stream is forwarded rather than judged empty.
 var openAIResponseEventTypes = map[string]bool{
-	"response.created":                         true,
-	"response.in_progress":                     true,
-	"response.completed":                       true,
-	"response.incomplete":                      true,
-	"response.failed":                          true,
-	"response.output_item.added":               true,
-	"response.output_item.done":                true,
-	"response.output_text.delta":               true,
-	"response.output_text.done":                true,
-	"response.function_call_arguments.delta":   true,
-	"response.function_call_arguments.done":    true,
+	"response.created":                       true,
+	"response.in_progress":                   true,
+	"response.completed":                     true,
+	"response.incomplete":                    true,
+	"response.failed":                        true,
+	"response.output_item.added":             true,
+	"response.output_item.done":              true,
+	"response.output_text.delta":             true,
+	"response.output_text.done":              true,
+	"response.function_call_arguments.delta": true,
+	"response.function_call_arguments.done":  true,
 }
 
 // emptyCompletionAccum accumulates the properties relevant to deciding whether
 // an OpenAI-, Claude-, or Gemini-style completion is empty.
 type emptyCompletionAccum struct {
 	recognized       bool
+	sawUnknownData   bool
 	terminal         bool
 	hasContent       bool
 	hasToolCalls     bool
@@ -167,17 +184,17 @@ type emptyCompletionAccum struct {
 	blocked          bool
 }
 
-func (a *emptyCompletionAccum) evalJSON(data []byte) {
+func (a *emptyCompletionAccum) evalJSON(data []byte) bool {
 	if a.evalOpenAI(data) {
-		return
+		return true
 	}
 	if a.evalClaude(data) {
-		return
+		return true
 	}
 	if a.evalOpenAIResponse(data) {
-		return
+		return true
 	}
-	a.evalGemini(data)
+	return a.evalGemini(data)
 }
 
 func (a *emptyCompletionAccum) evalOpenAI(data []byte) bool {
@@ -216,6 +233,9 @@ func (a *emptyCompletionAccum) evalOpenAI(data []byte) bool {
 		if strings.TrimSpace(content) != "" {
 			a.hasContent = true
 		}
+		if ch.Delta.Refusal != nil || ch.Message.Refusal != nil {
+			a.hasContent = true
+		}
 		if len(ch.Delta.ToolCalls) > 0 || len(ch.Message.ToolCalls) > 0 {
 			a.hasToolCalls = true
 		}
@@ -245,17 +265,12 @@ func (a *emptyCompletionAccum) evalClaude(data []byte) bool {
 
 	a.recognized = true
 
-	if chunk.Type == "message_stop" {
-		a.terminal = true
+	a.evalClaudeStopReason(chunk.StopReason)
+	if chunk.Message != nil {
+		a.evalClaudeStopReason(chunk.Message.StopReason)
 	}
-	if chunk.StopReason != nil && strings.TrimSpace(*chunk.StopReason) != "" {
-		a.terminal = true
-	}
-	if chunk.Message != nil && chunk.Message.StopReason != nil && strings.TrimSpace(*chunk.Message.StopReason) != "" {
-		a.terminal = true
-	}
-	if chunk.Delta != nil && chunk.Delta.StopReason != nil && strings.TrimSpace(*chunk.Delta.StopReason) != "" {
-		a.terminal = true
+	if chunk.Delta != nil {
+		a.evalClaudeStopReason(chunk.Delta.StopReason)
 	}
 
 	if chunk.Usage != nil && chunk.Usage.OutputTokens != nil {
@@ -296,6 +311,20 @@ func (a *emptyCompletionAccum) evalClaude(data []byte) bool {
 	return true
 }
 
+func (a *emptyCompletionAccum) evalClaudeStopReason(stopReason *string) {
+	if stopReason == nil {
+		return
+	}
+	reason := strings.TrimSpace(*stopReason)
+	if strings.EqualFold(reason, "end_turn") {
+		a.terminal = true
+	} else if reason != "" {
+		// Request/output limits, refusals, and control stop reasons must reach the
+		// client instead of being converted into a credential failure.
+		a.blocked = true
+	}
+}
+
 func (a *emptyCompletionAccum) evalOpenAIResponse(data []byte) bool {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(data, &probe); err != nil {
@@ -322,12 +351,15 @@ func (a *emptyCompletionAccum) evalOpenAIResponse(data []byte) bool {
 	}
 
 	switch evType {
-	case "response.completed", "response.incomplete":
+	case "response.completed":
 		a.terminal = true
+	case "response.incomplete", "response.failed":
+		a.terminal = true
+		a.blocked = true
 	}
-	if (chunk.Object == "response" && (chunk.Status == "completed" || chunk.Status == "incomplete")) ||
-		(chunk.Response != nil && (chunk.Response.Status == "completed" || chunk.Response.Status == "incomplete")) {
-		a.terminal = true
+	a.evalOpenAIResponseStatus(chunk.Status)
+	if chunk.Response != nil {
+		a.evalOpenAIResponseStatus(chunk.Response.Status)
 	}
 
 	if chunk.Usage != nil && chunk.Usage.OutputTokens != nil {
@@ -353,11 +385,22 @@ func (a *emptyCompletionAccum) evalOpenAIResponse(data []byte) bool {
 	}
 
 	a.evalOpenAIResponseRawOutput(chunk.Output)
+	a.evalOpenAIResponseRawOutput(chunk.Item)
 	if chunk.Response != nil {
 		a.evalOpenAIResponseRawOutput(chunk.Response.Output)
 	}
 
 	return true
+}
+
+func (a *emptyCompletionAccum) evalOpenAIResponseStatus(status string) {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed":
+		a.terminal = true
+	case "incomplete", "failed":
+		a.terminal = true
+		a.blocked = true
+	}
 }
 
 func (a *emptyCompletionAccum) evalOpenAIResponseRawOutput(raw json.RawMessage) {
@@ -377,15 +420,24 @@ func (a *emptyCompletionAccum) evalOpenAIResponseRawOutput(raw json.RawMessage) 
 
 func (a *emptyCompletionAccum) evalOpenAIResponseOutput(items []openAIResponseOutputItem) {
 	for _, item := range items {
-		switch item.Type {
-		case "function_call", "web_search_call", "file_search_call", "computer_call":
+		itemType := strings.ToLower(strings.TrimSpace(item.Type))
+		switch {
+		case itemType == "image_generation_call":
+			a.hasContent = true
+		case strings.HasSuffix(itemType, "_call"):
 			a.hasToolCalls = true
+		case itemType != "" && itemType != "message":
+			// Responses may add output item types over time. A complete, typed
+			// non-message item is output unless the protocol proves otherwise.
+			a.hasContent = true
 		}
 		if strings.TrimSpace(item.Text) != "" {
 			a.hasContent = true
 		}
 		for _, part := range item.Content {
-			if strings.TrimSpace(part.Text) != "" {
+			partType := strings.ToLower(strings.TrimSpace(part.Type))
+			if strings.TrimSpace(part.Text) != "" || strings.TrimSpace(part.Refusal) != "" ||
+				partType == "refusal" || (partType != "" && partType != "output_text" && partType != "text") {
 				a.hasContent = true
 			}
 		}
@@ -444,6 +496,7 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 
 	candidates := chunk.Candidates
 	usage := chunk.UsageMetadata
+	promptFeedback := chunk.PromptFeedback
 
 	if chunk.Response != nil {
 		if len(candidates) == 0 {
@@ -452,7 +505,11 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 		if usage == nil {
 			usage = chunk.Response.UsageMetadata
 		}
+		if promptFeedback == nil {
+			promptFeedback = chunk.Response.PromptFeedback
+		}
 	}
+	promptBlocked := promptFeedback != nil && strings.TrimSpace(promptFeedback.BlockReason) != ""
 
 	if len(candidates) == 0 {
 		// Only treat an empty candidates array as a recognized empty completion
@@ -463,6 +520,7 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 		if hasJSONKey(data, "candidates") || hasNestedResponseCandidates(data) {
 			a.recognized = true
 			a.terminal = true
+			a.blocked = promptBlocked
 			if usage != nil && usage.CandidatesTokenCount != nil {
 				a.sawUsage = true
 				a.completionTokens += *usage.CandidatesTokenCount
@@ -473,6 +531,9 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 	}
 
 	a.recognized = true
+	if promptBlocked {
+		a.blocked = true
+	}
 
 	if usage != nil {
 		if usage.CandidatesTokenCount != nil {
@@ -534,7 +595,7 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 
 // empty reports whether the accumulated stream is an empty completion.
 func (a *emptyCompletionAccum) empty() bool {
-	if !a.recognized || !a.terminal {
+	if !a.recognized || a.sawUnknownData || !a.terminal {
 		return false
 	}
 	if a.blocked {
@@ -559,21 +620,82 @@ func isEmptyCompletion(chunks []cliproxyexecutor.StreamChunk) bool {
 	return isEmptyCompletionPayload(buf.Bytes())
 }
 
-// streamBootstrapShouldForward reports whether the stream bootstrap should stop
-// buffering and forward the buffered chunks to the client. It returns true when
-// the aggregate already contains real output (content or tool calls), or when
-// the payload format is not recognized (conservative: no empty completion
-// detection for unrecognized streams). It returns false only while the
-// aggregate is a recognized completion with no real output yet, so
-// the bootstrap keeps reading to detect a complete empty completion.
-func streamBootstrapShouldForward(chunks []cliproxyexecutor.StreamChunk) bool {
-	var acc emptyCompletionAccum
-	var buf bytes.Buffer
-	for _, c := range chunks {
-		buf.Write(c.Payload)
+func isEmptyCompletionError(err error) bool {
+	var authErr *Error
+	return errors.As(err, &authErr) && authErr != nil && authErr.Code == errEmptyCompletion.Code
+}
+
+// streamBootstrapState incrementally evaluates chunks so a metadata-heavy
+// prefix is processed once instead of reparsing the entire prefix per chunk.
+type streamBootstrapState struct {
+	acc     emptyCompletionAccum
+	bytes   int
+	pending []byte
+	forward bool
+	sawSSE  bool
+}
+
+func (s *streamBootstrapState) observe(fragment []byte) bool {
+	if s.forward {
+		return true
 	}
-	acc.evalSSE(buf.Bytes())
-	return acc.hasContent || acc.hasToolCalls || !acc.recognized
+	s.bytes += len(fragment)
+	if s.bytes > maxStreamBootstrapBytes {
+		s.forward = true
+		return true
+	}
+	s.pending = append(s.pending, fragment...)
+	for {
+		if newline := bytes.IndexByte(s.pending, '\n'); newline >= 0 {
+			line := bytes.TrimSpace(s.pending[:newline])
+			s.pending = s.pending[newline+1:]
+			if len(line) > 0 {
+				switch {
+				case bytes.HasPrefix(line, []byte("event:")), bytes.HasPrefix(line, []byte("data:")), bytes.HasPrefix(line, []byte(":")):
+					s.sawSSE = true
+					s.acc.evalSSE(line)
+				default:
+					s.acc.sawUnknownData = true
+				}
+			}
+			if s.shouldForward() {
+				s.forward = true
+				return true
+			}
+			continue
+		}
+		break
+	}
+
+	trimmed := bytes.TrimSpace(s.pending)
+	if len(trimmed) == 0 || couldBeSSEPrefix(trimmed) {
+		return false
+	}
+	if json.Valid(trimmed) {
+		if !s.acc.evalJSON(trimmed) {
+			s.acc.sawUnknownData = true
+		}
+		s.pending = s.pending[:0]
+	} else if (trimmed[0] == '{' && trimmed[len(trimmed)-1] != '}') ||
+		(trimmed[0] == '[' && trimmed[len(trimmed)-1] != ']') {
+		return false
+	} else {
+		s.acc.sawUnknownData = true
+	}
+	s.forward = s.shouldForward()
+	return s.forward
+}
+
+func (s *streamBootstrapState) shouldForward() bool {
+	return s.acc.hasContent || s.acc.hasToolCalls || s.acc.sawUnknownData || (!s.acc.recognized && !s.sawSSE)
+}
+
+func couldBeSSEPrefix(payload []byte) bool {
+	const dataPrefix = "data:"
+	const eventPrefix = "event:"
+	value := string(payload)
+	return strings.HasPrefix(value, ":") || strings.HasPrefix(dataPrefix, value) || strings.HasPrefix(eventPrefix, value) ||
+		strings.HasPrefix(value, dataPrefix) || strings.HasPrefix(value, eventPrefix)
 }
 
 // isEmptyCompletionPayload reports whether a payload (aggregated SSE chunks or
@@ -602,7 +724,6 @@ func (a *emptyCompletionAccum) evalSSE(payload []byte) {
 			event := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:")))
 			if bytes.Equal(event, []byte("message_stop")) {
 				a.recognized = true
-				a.terminal = true
 			}
 		}
 		if !bytes.HasPrefix(line, []byte("data:")) {
@@ -617,7 +738,9 @@ func (a *emptyCompletionAccum) evalSSE(payload []byte) {
 		if len(data) == 0 {
 			continue
 		}
-		a.evalJSON(data)
+		if !a.evalJSON(data) {
+			a.sawUnknownData = true
+		}
 	}
 }
 

@@ -197,19 +197,34 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: false,
 		},
 		{
+			name:     "openai sse refusal is not credential empty",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{\"refusal\":\"I cannot help with that\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
 			name:     "unterminated is not empty",
 			payload:  []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":null}]}\n\n"),
 			expected: false,
 		},
 		{
-			name:     "claude sse message_stop only is empty",
+			name:     "claude sse message_stop without end_turn is not empty",
 			payload:  []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
-			expected: true,
+			expected: false,
 		},
 		{
 			name:     "unrecognized format is not empty",
 			payload:  []byte("data: {\"unknown_payload\":true}\n\n"),
 			expected: false,
+		},
+		{
+			name:     "unknown sse data followed by done is not empty",
+			payload:  []byte("data: {\"vendor_event\":\"usable-or-unknown\"}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "done-only stream remains intentionally empty",
+			payload:  []byte("data: [DONE]\n\n"),
+			expected: true,
 		},
 		{
 			name:     "non stream empty json",
@@ -224,6 +239,11 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 		{
 			name:     "non stream reasoning only is not empty",
 			payload:  []byte(`{"choices":[{"message":{"reasoning_content":"thinking"},"finish_reason":"stop"}]}`),
+			expected: false,
+		},
+		{
+			name:     "openai non-stream refusal is not credential empty",
+			payload:  []byte(`{"choices":[{"message":{"content":"","refusal":"I cannot help with that"},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`),
 			expected: false,
 		},
 		{
@@ -249,6 +269,16 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 		{
 			name:     "claude non-stream with text content is not empty",
 			payload:  []byte(`{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":1}}`),
+			expected: false,
+		},
+		{
+			name:     "claude non-stream max_tokens is not credential empty",
+			payload:  []byte(`{"type":"message","content":[],"stop_reason":"max_tokens","usage":{"output_tokens":0}}`),
+			expected: false,
+		},
+		{
+			name:     "claude sse refusal is not credential empty",
+			payload:  []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
 			expected: false,
 		},
 		{
@@ -312,6 +342,16 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: false,
 		},
 		{
+			name:     "gemini prompt feedback safety is not credential empty",
+			payload:  []byte(`{"promptFeedback":{"blockReason":"SAFETY"},"candidates":[]}`),
+			expected: false,
+		},
+		{
+			name:     "gemini sse prompt feedback safety is not credential empty",
+			payload:  []byte("data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[]}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
 			name:     "openai sse empty choices array then done is empty",
 			payload:  []byte("data: {\"choices\":[]}\n\ndata: [DONE]\n\n"),
 			expected: true,
@@ -367,6 +407,56 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: false,
 		},
 		{
+			name:     "codex responses-api non-stream with custom_tool_call is not empty",
+			payload:  []byte(`{"object":"response","status":"completed","output":[{"type":"custom_tool_call","name":"shell","input":"pwd"}],"usage":{"output_tokens":0}}`),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api sse with custom_tool_call is not empty",
+			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"custom_tool_call\",\"name\":\"shell\",\"input\":\"pwd\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api non-stream with image_generation_call is not empty",
+			payload:  []byte(`{"object":"response","status":"completed","output":[{"type":"image_generation_call","status":"completed","result":"image-data"}],"usage":{"output_tokens":0}}`),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api sse with image_generation_call is not empty",
+			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"status\":\"completed\",\"result\":\"image-data\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api sse with reasoning item is not empty",
+			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"status\":\"completed\",\"summary\":[]}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api non-stream refusal is not credential empty",
+			payload:  []byte(`{"object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I cannot help with that"}]}],"usage":{"output_tokens":0}}`),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api sse refusal item is not credential empty",
+			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"I cannot help with that\"}]}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api non-stream incomplete is not credential empty",
+			payload:  []byte(`{"object":"response","status":"incomplete","output":[],"usage":{"output_tokens":0}}`),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api sse incomplete is not credential empty",
+			payload:  []byte("data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "codex responses-api sse failed is not credential empty",
+			payload:  []byte("data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
 			name:     "gemini non-stream empty candidates array is empty",
 			payload:  []byte(`{"candidates":[],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`),
 			expected: true,
@@ -383,6 +473,136 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 				t.Fatalf("isEmptyCompletionPayload() = %v, want %v", got, tc.expected)
 			}
 		})
+	}
+}
+
+func TestStreamBootstrapStateForwardsAtMetadataLimit(t *testing.T) {
+	var state streamBootstrapState
+	metadata := []byte("data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n")
+	for state.bytes+len(metadata) <= maxStreamBootstrapBytes {
+		if state.observe(metadata) {
+			t.Fatal("bootstrap forwarded recognized metadata before reaching its byte limit")
+		}
+	}
+	if !state.observe(metadata) {
+		t.Fatal("bootstrap did not conservatively forward after reaching its byte limit")
+	}
+}
+
+func TestStreamBootstrapDetector(t *testing.T) {
+	var detector StreamBootstrapDetector
+	if detector.Observe([]byte("data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n")) {
+		t.Fatal("StreamBootstrapDetector.Observe() = true for metadata-only prefix")
+	}
+	if !detector.Observe([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"custom_tool_call\"}}\n\n")) {
+		t.Fatal("StreamBootstrapDetector.Observe() = false after complete custom tool output")
+	}
+}
+
+func TestStreamBootstrapDetectorHandlesSplitSSEFrames(t *testing.T) {
+	t.Run("terminal empty remains buffered", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		fragments := [][]byte{
+			[]byte("da"),
+			[]byte("ta: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n"),
+			[]byte("\nda"),
+			[]byte("ta: [DO"),
+			[]byte("NE]\n\n"),
+		}
+		for i, fragment := range fragments {
+			if detector.Observe(fragment) {
+				t.Fatalf("Observe(fragment %d) forwarded terminal empty stream", i)
+			}
+		}
+	})
+
+	t.Run("meaningful output forwards after complete line", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe([]byte("da")) {
+			t.Fatal("Observe() forwarded incomplete SSE prefix")
+		}
+		if detector.Observe([]byte("ta: {\"type\":\"response.output_text.delta\",\"delta\":\"hel")) {
+			t.Fatal("Observe() forwarded incomplete meaningful SSE line")
+		}
+		if !detector.Observe([]byte("lo\"}\n\n")) {
+			t.Fatal("Observe() did not forward completed meaningful SSE line")
+		}
+	})
+
+	t.Run("opaque payload forwards promptly", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe([]byte("opaque-provider-payload")) {
+			t.Fatal("Observe() buffered definitely unrecognized payload")
+		}
+	})
+
+	t.Run("event line waits for empty claude data", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		fragments := [][]byte{
+			[]byte("event: message_start\n"),
+			[]byte("data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\"content\":[],\"stop_reason\":null,\"usage\":{\"output_tokens\":0}}}\n\n"),
+			[]byte("event: message_delta\n"),
+			[]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":0}}\n\n"),
+			[]byte("event: message_stop\n"),
+			[]byte("data: {\"type\":\"message_stop\"}\n\n"),
+		}
+		for i, fragment := range fragments {
+			if detector.Observe(fragment) {
+				t.Fatalf("Observe(fragment %d) forwarded empty Claude stream", i)
+			}
+		}
+	})
+
+	t.Run("split comment waits for terminal empty data", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		fragments := [][]byte{
+			[]byte(":"),
+			[]byte(" ping\n"),
+			[]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"),
+			[]byte("data: [DONE]\n\n"),
+		}
+		for i, fragment := range fragments {
+			if detector.Observe(fragment) {
+				t.Fatalf("Observe(fragment %d) forwarded comment-prefixed empty stream", i)
+			}
+		}
+	})
+
+	t.Run("comment then opaque line forwards", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe([]byte(":")) || detector.Observe([]byte(" heartbeat\n")) {
+			t.Fatal("Observe() forwarded a valid split SSE comment")
+		}
+		if !detector.Observe([]byte("opaque-provider-payload\n")) {
+			t.Fatal("Observe() buffered a definitely non-SSE line after a comment")
+		}
+	})
+}
+
+func TestReadStreamBootstrapWithholdsSplitClaudeEmptyCompletion(t *testing.T) {
+	fragments := [][]byte{
+		[]byte("event: message_start\n"),
+		[]byte("data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\"content\":[],\"stop_reason\":null,\"usage\":{\"output_tokens\":0}}}\n\n"),
+		[]byte("event: message_delta\n"),
+		[]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":0}}\n\n"),
+		[]byte("event: message_stop\n"),
+		[]byte("data: {\"type\":\"message_stop\"}\n\n"),
+	}
+	chunks := make(chan cliproxyexecutor.StreamChunk, len(fragments))
+	for _, fragment := range fragments {
+		chunks <- cliproxyexecutor.StreamChunk{Payload: fragment}
+	}
+	close(chunks)
+
+	buffered, closed, err := readStreamBootstrap(context.Background(), chunks)
+	if err != nil {
+		t.Fatalf("readStreamBootstrap() error = %v", err)
+	}
+	if !closed {
+		t.Fatal("readStreamBootstrap() forwarded empty Claude stream")
+	}
+	if !isEmptyCompletion(buffered) {
+		t.Fatal("split Claude stream was not classified as empty at close")
 	}
 }
 

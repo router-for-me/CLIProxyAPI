@@ -108,35 +108,111 @@ func (h *Host) ExecutePluginExecutorStream(ctx context.Context, pluginID string,
 	if err != nil {
 		return nil, err
 	}
-	return wrapStreamEmptyCompletion(streamResult), nil
+	return wrapStreamEmptyCompletion(ctx, streamResult), nil
 }
 
 // wrapStreamEmptyCompletion wraps a plugin stream so that a terminal but empty
 // completion (no content, no tool calls) surfaces as an empty-completion error
 // instead of a clean stream end, mirroring the conductor's aggregate-at-close
-// judgment. Chunks are forwarded immediately; the aggregate is only judged once
-// the upstream stream closes.
-func wrapStreamEmptyCompletion(streamResult *coreexecutor.StreamResult) *coreexecutor.StreamResult {
+// judgment. Recognized protocol framing is buffered only until meaningful output
+// appears or the stream closes; unrecognized streams remain pass-through.
+func wrapStreamEmptyCompletion(ctx context.Context, streamResult *coreexecutor.StreamResult) *coreexecutor.StreamResult {
+	if streamResult == nil || streamResult.Chunks == nil {
+		return streamResult
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	src := streamResult.Chunks
 	wrapped := make(chan coreexecutor.StreamChunk)
 	go func() {
 		defer close(wrapped)
-		var aggregate []byte
-		for chunk := range src {
-			if chunk.Err != nil {
-				wrapped <- chunk
+		buffered := make([]coreexecutor.StreamChunk, 0, 1)
+		var detector coreauth.StreamBootstrapDetector
+		forwarding := false
+		forward := func(chunk coreexecutor.StreamChunk) bool {
+			select {
+			case <-ctx.Done():
+				return false
+			case wrapped <- chunk:
+				return true
+			}
+		}
+		flush := func() bool {
+			for _, chunk := range buffered {
+				if !forward(chunk) {
+					return false
+				}
+			}
+			buffered = nil
+			return true
+		}
+
+		for {
+			var (
+				chunk coreexecutor.StreamChunk
+				ok    bool
+			)
+			select {
+			case <-ctx.Done():
+				return
+			case chunk, ok = <-src:
+			}
+			if !ok {
+				if !forwarding && len(buffered) == 0 {
+					_ = forward(coreexecutor.StreamChunk{Err: &coreauth.Error{
+						Code:      "empty_stream",
+						Message:   "upstream stream closed before first payload",
+						Retryable: true,
+					}})
+					return
+				}
+				if !forwarding && coreauth.IsEmptyCompletionPayload(streamChunkPayload(buffered)) {
+					_ = forward(coreexecutor.StreamChunk{Err: coreauth.EmptyCompletionError()})
+					return
+				}
+				_ = flush()
+				return
+			}
+			if forwarding {
+				if !forward(chunk) {
+					return
+				}
+				if chunk.Err != nil {
+					return
+				}
 				continue
 			}
-			if len(chunk.Payload) > 0 {
-				aggregate = append(aggregate, chunk.Payload...)
+
+			buffered = append(buffered, chunk)
+			if chunk.Err != nil {
+				// Before any semantic output, protocol framing is not client-visible.
+				// Surface the upstream failure first so the HTTP layer can still
+				// choose an error response instead of committing a successful stream.
+				buffered = buffered[:0]
+				forwarding = true
+				if !forward(chunk) {
+					return
+				}
+				return
 			}
-			wrapped <- chunk
-		}
-		if coreauth.IsEmptyCompletionPayload(aggregate) {
-			wrapped <- coreexecutor.StreamChunk{Err: coreauth.EmptyCompletionError()}
+			if detector.Observe(chunk.Payload) {
+				forwarding = true
+				if !flush() {
+					return
+				}
+			}
 		}
 	}()
 	return &coreexecutor.StreamResult{Chunks: wrapped, Headers: streamResult.Headers}
+}
+
+func streamChunkPayload(chunks []coreexecutor.StreamChunk) []byte {
+	var payload []byte
+	for _, chunk := range chunks {
+		payload = append(payload, chunk.Payload...)
+	}
+	return payload
 }
 
 // CountPluginExecutor executes a count-tokens request with the named plugin executor without changing the requested model.

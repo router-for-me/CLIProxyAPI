@@ -86,6 +86,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 		return nil, true, nil
 	}
 	buffered := make([]cliproxyexecutor.StreamChunk, 0, 1)
+	var bootstrap streamBootstrapState
 	for {
 		var (
 			chunk cliproxyexecutor.StreamChunk
@@ -107,7 +108,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			return nil, false, chunk.Err
 		}
 		buffered = append(buffered, chunk)
-		if streamBootstrapShouldForward(buffered) {
+		if bootstrap.observe(chunk.Payload) {
 			return buffered, false, nil
 		}
 	}

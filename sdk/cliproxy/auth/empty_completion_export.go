@@ -1,6 +1,8 @@
 package auth
 
-import "bytes"
+import (
+	"bytes"
+)
 
 // IsEmptyCompletionPayload reports whether a payload (aggregated SSE chunks or
 // a single non-stream JSON response) represents a terminal but empty
@@ -21,11 +23,8 @@ func EmptyCompletionError() error {
 
 // IsCompletionFormatRecognized reports whether payload uses a wire format the
 // empty-completion detection understands (OpenAI chat, OpenAI Responses,
-// Anthropic Claude, or Gemini). It is the exported form of the conductor's
-// recognition predicate, exposed so the executor-format contract test can assert
-// that every executor's emitted stream format is recognized — a new executor
-// emitting an unrecognized format fails that test loudly instead of silently
-// bypassing empty-completion detection.
+// Anthropic Claude, or Gemini). It supports representative format-contract
+// tests without claiming registry-wide executor coverage.
 func IsCompletionFormatRecognized(payload []byte) bool {
 	trimmed := bytes.TrimSpace(payload)
 	if len(trimmed) == 0 {
@@ -38,4 +37,20 @@ func IsCompletionFormatRecognized(payload []byte) bool {
 		acc.evalJSON(trimmed)
 	}
 	return acc.recognized
+}
+
+// StreamBootstrapDetector incrementally classifies a stream prefix without
+// reparsing previously observed chunks. Its zero value is ready for use.
+type StreamBootstrapDetector struct {
+	state streamBootstrapState
+}
+
+// Observe records an arbitrary stream byte fragment and reports whether
+// buffered data should now be forwarded. It retains incomplete SSE lines across
+// calls and forwards conservatively at the bootstrap byte limit.
+func (d *StreamBootstrapDetector) Observe(payload []byte) bool {
+	if d == nil {
+		return true
+	}
+	return d.state.observe(payload)
 }
