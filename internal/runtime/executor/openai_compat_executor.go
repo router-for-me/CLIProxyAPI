@@ -127,10 +127,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	requestPath := helps.PayloadRequestPath(opts)
 	compatConfig := e.resolveCompatConfig(auth)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
-	if helps.ShouldNormalizeOpenAIToolResultsForModel(compatConfig, baseModel, requestedModel) {
+	if helps.ShouldNormalizeOpenAIToolResultsForModel(compatConfig, req.Model, requestedModel) {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
-	if helps.ShouldEnsureOpenAICompatAssistantReasoningContent(compatConfig, baseModel, requestedModel) {
+	if helps.ShouldEnsureOpenAICompatAssistantReasoningContent(compatConfig, req.Model, requestedModel) {
 		translated = helps.EnsureOpenAICompatAssistantReasoningContent(translated)
 	}
 	if opts.Alt != "responses/compact" {
@@ -342,10 +342,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	requestPath := helps.PayloadRequestPath(opts)
 	compatConfig := e.resolveCompatConfig(auth)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
-	if helps.ShouldNormalizeOpenAIToolResultsForModel(compatConfig, baseModel, requestedModel) {
+	if helps.ShouldNormalizeOpenAIToolResultsForModel(compatConfig, req.Model, requestedModel) {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
-	if helps.ShouldEnsureOpenAICompatAssistantReasoningContent(compatConfig, baseModel, requestedModel) {
+	if helps.ShouldEnsureOpenAICompatAssistantReasoningContent(compatConfig, req.Model, requestedModel) {
 		translated = helps.EnsureOpenAICompatAssistantReasoningContent(translated)
 	}
 	if opts.Alt != "responses/compact" {
