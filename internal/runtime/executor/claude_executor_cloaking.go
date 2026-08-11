@@ -332,6 +332,79 @@ func newClaudeCallerSystemBlockError(index int, blockType string) error {
 	}}
 }
 
+// claudeMidSystemMessageModelError reports a mid-conversation
+// {"role":"system"} turn addressed to a first-party model that cannot carry
+// it. It is request-scoped for the same reason as claudeCallerSystemBlockError:
+// the body is incompatible with the model rather than evidence of unhealthy
+// credentials, so no credential should be cooled or retried.
+type claudeMidSystemMessageModelError struct {
+	statusErr
+}
+
+func (claudeMidSystemMessageModelError) IsRequestScoped() bool {
+	return true
+}
+
+// The turn is not always the caller's. CPA normally reconciles a cloaked turn
+// when a payload rule changes the model to legacy, but it deliberately gives up
+// if the rule also rewrites the tracked messages and their provenance is no
+// longer exact. The wording therefore states the model's requirement instead of
+// assuming the caller created the turn.
+func newClaudeMidSystemMessageModelError(model string) error {
+	if model == "" {
+		model = "unknown"
+	}
+	return claudeMidSystemMessageModelError{statusErr{
+		code: http.StatusBadRequest,
+		msg: fmt.Sprintf("invalid_request_error: role 'system' is not supported on this model. "+
+			"Model %q predates mid-conversation system turns, so system instructions must "+
+			"stay in the top-level system field for it.", model),
+	}}
+}
+
+// validateClaudeMidSystemMessageModel rejects a request that pairs a legacy
+// model with a caller's mid-conversation {"role":"system"} turn.
+//
+// Anthropic answers that pairing with a guaranteed rejection, verified on both
+// /v1/messages and /v1/messages/count_tokens:
+//
+//	400 role 'system' is not supported on this model
+//
+// The native client never produces it either: it gates the turn on the model,
+// which is also why claudeCodeCLIBetas withholds
+// mid-conversation-system-2026-04-07 for these IDs. In 314 captured native
+// requests the turn appears only on claude-opus-5 and claude-sonnet-5, and on
+// none of the 43 requests addressed to a model in
+// claudeLegacySystemReminderModels.
+//
+// Three conditions keep the check inside the evidence that produced it:
+//
+//   - firstPartyAnthropic, because the rejection was measured against
+//     api.anthropic.com. A third-party gateway may map these model IDs onto
+//     something that accepts the turn, and answering locally would also stop
+//     failover to another credential or base URL.
+//   - confirmedClaudeCode, because a client that still matches the native
+//     fingerprint owns its wire. It gates the turn itself, so its body is
+//     forwarded untouched and any upstream error reaches it unchanged.
+//   - the pairing itself, so unknown and future model IDs stay optimistic in
+//     the same way checkSystemInstructions treats them.
+//
+// Operators who prefer the turn folded into the system slot can still set
+// rebuild_mid_system_message, which runs before this check.
+//
+// The error is request-scoped: the body/model pairing is invalid independently
+// of first-party credential health, so no credential should be cooled or
+// retried.
+func validateClaudeMidSystemMessageModel(payload []byte, confirmedClaudeCode, firstPartyAnthropic bool) error {
+	if confirmedClaudeCode || !firstPartyAnthropic {
+		return nil
+	}
+	if !claudeUsesLegacySystemReminder(payload) || !claudePayloadHasMidSystemMessage(payload) {
+		return nil
+	}
+	return newClaudeMidSystemMessageModelError(gjson.GetBytes(payload, "model").String())
+}
+
 // validateClaudeCallerSystemBlocks rejects caller system content that cannot keep
 // its operator authority. Verified against api.anthropic.com on 2026-08-03: the
 // top-level system field answers "system.<i>.type: Input should be 'text'" for
@@ -537,6 +610,95 @@ func claudeMessageContentText(content gjson.Result) string {
 		return true
 	})
 	return strings.Join(parts, "\n\n")
+}
+
+// claudeCodeSystemPlacementState identifies only the role=system turns that CPA
+// itself inserted while cloaking. Caller-owned turns are deliberately excluded:
+// if one is paired with a legacy model, validateClaudeMidSystemMessageModel must
+// still return 400 instead of silently rewriting the caller's wire.
+type claudeCodeSystemPlacementState struct {
+	insertAt    int
+	insertedRaw []string
+	texts       []string
+}
+
+// captureClaudeCodeSystemPlacement records CPA's modern-model system placement
+// immediately after cloaking. The message-count increase is part of the proof:
+// insertClaudeMidConversationSystemMessages returns without inserting when the
+// same turns already exist, and those pre-existing turns belong to the caller.
+func captureClaudeCodeSystemPlacement(before, after []byte, cloaked bool) claudeCodeSystemPlacementState {
+	if !cloaked || claudeUsesLegacySystemReminder(before) {
+		return claudeCodeSystemPlacementState{}
+	}
+	texts := collectForwardedClaudeSystemPromptBlocks(gjson.GetBytes(before, "system"))
+	if len(texts) == 0 {
+		return claudeCodeSystemPlacementState{}
+	}
+
+	beforeMessages := gjson.GetBytes(before, "messages").Array()
+	afterMessages := gjson.GetBytes(after, "messages").Array()
+	if len(afterMessages) != len(beforeMessages)+len(texts) {
+		return claudeCodeSystemPlacementState{}
+	}
+	firstUserIdx := firstClaudeUserMessageIndex(before)
+	if firstUserIdx < 0 {
+		return claudeCodeSystemPlacementState{}
+	}
+	insertAt := firstUserIdx + 1
+	for insertAt < len(beforeMessages) && beforeMessages[insertAt].Get("role").String() == "user" {
+		insertAt++
+	}
+	if insertAt+len(texts) > len(afterMessages) {
+		return claudeCodeSystemPlacementState{}
+	}
+
+	insertedRaw := make([]string, len(texts))
+	for idx, text := range texts {
+		message := afterMessages[insertAt+idx]
+		if message.Get("role").String() != "system" || claudeMessageContentText(message.Get("content")) != text {
+			return claudeCodeSystemPlacementState{}
+		}
+		insertedRaw[idx] = message.Raw
+	}
+	return claudeCodeSystemPlacementState{
+		insertAt:    insertAt,
+		insertedRaw: insertedRaw,
+		texts:       append([]string(nil), texts...),
+	}
+}
+
+// reconcileClaudeCodeSystemPlacementAfterPayload repairs an otherwise stale
+// placement decision when payload rules change the final model from modern to
+// legacy. It removes only the exact contiguous turns captured above and replays
+// their text through the existing legacy <system-reminder> path. If any payload
+// rule also changed those messages, reconciliation fails closed and leaves the
+// final validation guard to return 400.
+func reconcileClaudeCodeSystemPlacementAfterPayload(payload []byte, state claudeCodeSystemPlacementState) []byte {
+	if len(state.insertedRaw) == 0 || !claudeUsesLegacySystemReminder(payload) {
+		return payload
+	}
+	messages := gjson.GetBytes(payload, "messages").Array()
+	if state.insertAt < 0 || state.insertAt+len(state.insertedRaw) > len(messages) {
+		return payload
+	}
+	for idx, raw := range state.insertedRaw {
+		if messages[state.insertAt+idx].Raw != raw {
+			return payload
+		}
+	}
+
+	rawMessages := make([]string, 0, len(messages)-len(state.insertedRaw))
+	for idx, message := range messages {
+		if idx >= state.insertAt && idx < state.insertAt+len(state.insertedRaw) {
+			continue
+		}
+		rawMessages = append(rawMessages, message.Raw)
+	}
+	updated, errSet := sjson.SetRawBytes(payload, "messages", []byte("["+strings.Join(rawMessages, ",")+"]"))
+	if errSet != nil {
+		return payload
+	}
+	return prependClaudeSystemRemindersToFirstUserMessage(updated, state.texts)
 }
 
 // claudeCodeLocalDate reproduces Claude Code 2.1.220's wcs() helper:

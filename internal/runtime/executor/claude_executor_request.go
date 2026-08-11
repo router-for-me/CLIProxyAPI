@@ -888,6 +888,24 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	return
 }
 
+// claudePayloadHasMidSystemMessage reports whether the caller placed a
+// {"role":"system"} turn inside messages.
+func claudePayloadHasMidSystemMessage(payload []byte) bool {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return false
+	}
+	found := false
+	messages.ForEach(func(_, message gjson.Result) bool {
+		if strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "system") {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 func rebuildMidSystemMessagesToTopLevel(payload []byte) []byte {
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.IsArray() {
