@@ -6,12 +6,13 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
@@ -21,6 +22,7 @@ import (
 	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -72,13 +74,58 @@ func (e *AntigravityExecutor) obfuscateSensitiveWords(payload []byte) []byte {
 // Each Antigravity credential gets its own HTTP/1.1 connection pool. Sessions routed
 // to the same auth reuse that pool, while different OAuth identities never share a
 // TCP/TLS connection, matching the native client's one-credential process model.
+// The cache is bounded so pools cannot accumulate when keys churn.
 var (
 	antigravityBaseTransport = defaultAntigravityBaseTransport()
-	antigravityTransports    sync.Map // antigravityTransportKey -> *http.Transport
+	antigravityTransports    = helps.NewTransportCache[antigravityTransportKey](antigravityTransportCacheCapacity)
 )
 
+const (
+	// antigravityTransportCacheCapacity caps how many Antigravity connection pools stay
+	// alive. The bound exists only to stop entries from accumulating when keys churn, for
+	// example when a credential's proxy is rotated through the management API or when an
+	// SDK embedder supplies a freshly built base transport per request.
+	//
+	// It is sized for large deployments on purpose. An unused cache entry costs under 1 KB
+	// and no goroutines, so capacity is close to free, whereas evicting a pool that is
+	// still in active use forces the next request on that credential to redo the TCP + TLS
+	// handshake and defeats the point of caching. Credential counts in the low thousands
+	// are expected once Home-managed pools are included.
+	//
+	// Capacity is therefore NOT the lever for bounding memory: an idle pooled connection
+	// costs roughly 38 KB plus three goroutines, and that total is driven by live traffic
+	// and reclaimed by IdleConnTimeout. Shrinking this number does not save that memory,
+	// it only causes pool thrashing.
+	antigravityTransportCacheCapacity = 8192
+
+	// antigravityMaxIdleConnsPerHost mirrors the value that
+	// cloud.google.com/go/auth/httptransport and google.golang.org/api/transport/http
+	// set on their base transport, which is the stack the native Antigravity client
+	// uses. Both raise Go's DefaultMaxIdleConnsPerHost of 2 to 100 because the low
+	// default forces concurrent requests to re-handshake instead of reusing pooled
+	// connections.
+	antigravityMaxIdleConnsPerHost = 100
+
+	// antigravityIdleConnTimeout keeps pooled connections usable far longer than Go's
+	// 90s default. Captured native traffic reuses a connection after idle gaps with a
+	// p90 of roughly six minutes, and a 90s timeout would discard about an eighth of
+	// the reuses the native client actually performs.
+	antigravityIdleConnTimeout = 10 * time.Minute
+
+	// antigravityAnonymousTransportScope is the pool scope for auth objects that carry
+	// no identity at all. Reaching it means the auth has no ID, no source path and no
+	// token of any kind, so there is no credential to keep isolated and a single shared
+	// pool is safe. Allocating a private pool per request instead would leak a
+	// connection pool, and the goroutines managing it, on every call.
+	antigravityAnonymousTransportScope = "anonymous"
+)
+
+// antigravityTransportKey identifies one connection pool. At most one of proxy and
+// base is set: proxy for a credential-scoped proxy pool, base for a transport handed
+// in through the request context, and neither for a direct pool.
 type antigravityTransportKey struct {
 	credential string
+	proxy      string
 	base       *http.Transport
 }
 
@@ -106,54 +153,134 @@ func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
 	// Native Antigravity sends no ALPN extension. With HTTP/2 disabled above,
 	// an empty NextProtos keeps the wire shape aligned while using HTTP/1.1.
 	clone.TLSClientConfig.NextProtos = nil
+	applyAntigravityPoolLimits(clone)
 	return clone
 }
 
-// antigravityHTTP11Transport returns the HTTP/1.1 pool for one credential and
-// base transport. The base is either the process default, a credential-scoped
-// proxy transport, or a context-provided transport.
+// applyAntigravityPoolLimits widens the connection pool so keep-alive actually
+// survives concurrency and idle periods. Limits are only ever raised, so an
+// operator-supplied base transport with a larger pool keeps its own settings.
+func applyAntigravityPoolLimits(transport *http.Transport) {
+	if transport == nil {
+		return
+	}
+	// Go treats 0 as DefaultMaxIdleConnsPerHost (2) and a negative value as "never pool
+	// an idle connection". Raise the default and smaller positive values, but leave a
+	// negative value alone so an operator can still disable pooling outright.
+	if transport.MaxIdleConnsPerHost >= 0 && transport.MaxIdleConnsPerHost < antigravityMaxIdleConnsPerHost {
+		transport.MaxIdleConnsPerHost = antigravityMaxIdleConnsPerHost
+	}
+	// MaxIdleConns caps the pool across all hosts. Leaving it below the per-host limit
+	// would silently throttle Antigravity, which talks to a single host at a time.
+	// Zero means unlimited, so it must not be lowered.
+	if transport.MaxIdleConns > 0 && transport.MaxIdleConns < transport.MaxIdleConnsPerHost {
+		transport.MaxIdleConns = transport.MaxIdleConnsPerHost
+	}
+	// Zero already means "never expire idle connections", which is strictly longer.
+	if transport.IdleConnTimeout > 0 && transport.IdleConnTimeout < antigravityIdleConnTimeout {
+		transport.IdleConnTimeout = antigravityIdleConnTimeout
+	}
+}
+
+// antigravityHTTP11Transport returns the HTTP/1.1 pool shared by every request that
+// uses the same credential and the same base transport. The base is either the
+// process default or a transport provided through the request context.
 func antigravityHTTP11Transport(auth *cliproxyauth.Auth, base *http.Transport) *http.Transport {
 	if base == nil {
 		return nil
 	}
-	credential, shareable := antigravityTransportScope(auth)
-	if !shareable {
-		// Without a stable credential identity there is no safe cache key: pointer
-		// identity is reused once the old auth is collected, which would silently
-		// merge two unrelated OAuth identities onto the same TCP/TLS connections.
-		// Fall back to a private pool instead of risking cross-credential sharing.
-		return cloneTransportWithHTTP11(base)
-	}
 	key := antigravityTransportKey{
-		credential: credential,
+		credential: antigravityTransportScope(auth),
 		base:       base,
 	}
-	if cached, ok := antigravityTransports.Load(key); ok {
-		return cached.(*http.Transport)
+	transport, errGet := antigravityTransports.Get(key, func() (*http.Transport, error) {
+		return cloneTransportWithHTTP11(base), nil
+	})
+	if errGet != nil {
+		// Defensive only: the builder above cannot fail. Never return nil here, because a
+		// nil Transport makes http.Client fall back to http.DefaultTransport, which
+		// advertises h2 over ALPN and would break the Antigravity wire fingerprint.
+		log.Debugf("antigravity executor: cache HTTP/1.1 transport failed: %v", errGet)
+		return cloneTransportWithHTTP11(base)
 	}
-	clone := cloneTransportWithHTTP11(base)
-	actual, _ := antigravityTransports.LoadOrStore(key, clone)
-	stored := actual.(*http.Transport)
-	if stored != clone {
-		// Another goroutine won the race; drop the redundant pool.
-		clone.CloseIdleConnections()
-	}
-	return stored
+	return transport
 }
 
-// antigravityTransportScope returns the connection-pool scope for one credential
-// and reports whether that scope is stable enough to share a pool across requests.
-// Runtime auths always carry an ID; incomplete test or plugin auth objects do not
-// and must never be grouped together.
-func antigravityTransportScope(auth *cliproxyauth.Auth) (string, bool) {
+// antigravityProxiedHTTP11Transport returns the credential-scoped HTTP/1.1 pool for
+// one proxy setting, or nil when the proxy setting cannot be turned into a
+// transport. Keying on the normalized proxy string rather than on a prebuilt
+// transport keeps one pool per credential and proxy instead of one per request.
+func antigravityProxiedHTTP11Transport(auth *cliproxyauth.Auth, proxyURL string) *http.Transport {
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return nil
+	}
+	key := antigravityTransportKey{
+		credential: antigravityTransportScope(auth),
+		proxy:      proxyURL,
+	}
+	transport, errGet := antigravityTransports.Get(key, func() (*http.Transport, error) {
+		base, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
+		if errBuild != nil {
+			return nil, errBuild
+		}
+		if base == nil {
+			return nil, fmt.Errorf("antigravity executor: proxy setting produced no transport")
+		}
+		return cloneTransportWithHTTP11(base), nil
+	})
+	if errGet != nil {
+		// The caller falls back to NewProxyAwareHTTPClient, which reports the failure
+		// and applies the context transport fallback.
+		return nil
+	}
+	return transport
+}
+
+// antigravityTransportScope returns the connection-pool scope for one credential.
+// Runtime auths always carry an ID. Incomplete auth objects, such as those built by
+// tests, plugins or SDK embedders, fall back to another stable credential marker so
+// they neither share a pool with an unrelated OAuth identity nor allocate a fresh
+// pool, and with it a fresh set of pool goroutines, on every single request.
+func antigravityTransportScope(auth *cliproxyauth.Auth) string {
 	if auth == nil {
-		return "", false
+		return antigravityAnonymousTransportScope
 	}
-	id := strings.TrimSpace(auth.ID)
-	if id == "" {
-		return "", false
+	if id := strings.TrimSpace(auth.ID); id != "" {
+		return "id:" + id
 	}
-	return "id:" + id, true
+	if auth.Attributes != nil {
+		if path := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributePath]); path != "" {
+			return "path:" + path
+		}
+		if source := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeSource]); source != "" {
+			return "source:" + source
+		}
+	}
+	// Fall back to the credential material itself. Auth.Label is deliberately not used:
+	// it is documented as an optional human readable label for logging and carries no
+	// uniqueness guarantee, so two different OAuth identities sharing one label would
+	// wrongly share a TCP/TLS pool.
+	//
+	// The refresh token is preferred over the access token because it stays stable
+	// across token rotation. Keying on the access token would move a credential to a new
+	// pool on every refresh, and would also strand refresh requests themselves, which
+	// run before any access token exists.
+	if refresh := strings.TrimSpace(metaStringValue(auth.Metadata, "refresh_token")); refresh != "" {
+		return antigravityCredentialScope("refresh:", refresh)
+	}
+	if access := strings.TrimSpace(metaStringValue(auth.Metadata, "access_token")); access != "" {
+		return antigravityCredentialScope("token:", access)
+	}
+	return antigravityAnonymousTransportScope
+}
+
+// antigravityCredentialScope derives a pool scope from secret credential material.
+// Only a short digest is retained, and it is never logged, so a pool key cannot be
+// used to recover the credential it came from.
+func antigravityCredentialScope(prefix, secret string) string {
+	digest := sha256.Sum256([]byte(secret))
+	return prefix + hex.EncodeToString(digest[:8])
 }
 
 // newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
@@ -162,15 +289,15 @@ func antigravityTransportScope(auth *cliproxyauth.Auth) (string, bool) {
 // The underlying Transport is always shared so keep-alive connections survive across
 // requests instead of forcing a fresh TCP + TLS handshake every time.
 func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	credential, _ := antigravityTransportScope(auth)
-
 	// Native Antigravity reuses one transport across requests. Opt into a
 	// credential-scoped proxy transport only here so other providers keep their
 	// existing lifecycle and different OAuth identities remain isolated.
 	if proxyURL := antigravityProxyURL(cfg, auth); proxyURL != "" {
-		if transport, _, errProxy := helps.SharedProxyTransport(credential, proxyURL); errProxy == nil && transport != nil {
-			return &http.Client{Transport: antigravityHTTP11Transport(auth, transport), Timeout: timeout}
+		if transport := antigravityProxiedHTTP11Transport(auth, proxyURL); transport != nil {
+			return &http.Client{Transport: transport, Timeout: timeout}
 		}
+		// Fall through so NewProxyAwareHTTPClient reports the failure and applies the
+		// context transport fallback, preserving the previous behavior.
 	}
 
 	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
@@ -182,9 +309,19 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 
 	// Preserve a context-provided transport while forcing HTTP/1.1. The cache key
 	// includes credential identity, so sharing the base does not share TLS pools.
-	if transport, ok := client.Transport.(*http.Transport); ok {
-		client.Transport = antigravityHTTP11Transport(auth, transport)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		// A RoundTripper that is not an *http.Transport owns its own protocol behavior.
+		return client
 	}
+	if transport == nil {
+		// A typed-nil *http.Transport still satisfies the interface nil check in
+		// NewProxyAwareHTTPClient. Leaving it in place would make http.Client fall back
+		// to http.DefaultTransport, which advertises h2 over ALPN and breaks the
+		// Antigravity fingerprint, so substitute the process base transport.
+		transport = antigravityBaseTransport
+	}
+	client.Transport = antigravityHTTP11Transport(auth, transport)
 	return client
 }
 

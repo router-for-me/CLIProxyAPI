@@ -35,10 +35,10 @@ func useAntigravityRefreshTestTransport(t *testing.T, targetHost string) {
 	}
 	originalBase := antigravityBaseTransport
 	antigravityBaseTransport = transport
-	antigravityTransports = sync.Map{}
+	antigravityTransports.Purge()
 	t.Cleanup(func() {
 		antigravityBaseTransport = originalBase
-		antigravityTransports = sync.Map{}
+		antigravityTransports.Purge()
 	})
 }
 
