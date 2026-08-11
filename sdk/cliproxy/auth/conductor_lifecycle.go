@@ -365,23 +365,46 @@ func persistenceTargetsMatch(left, right string) bool {
 	if leftClean == rightClean {
 		return true
 	}
-	if filepath.IsAbs(leftClean) != filepath.IsAbs(rightClean) {
-		return filepath.Base(leftClean) == filepath.Base(rightClean)
+	if filepath.IsAbs(leftClean) == filepath.IsAbs(rightClean) {
+		return false
 	}
-	return false
+
+	relativeTarget := leftClean
+	absoluteTarget := rightClean
+	if filepath.IsAbs(leftClean) {
+		relativeTarget, absoluteTarget = rightClean, leftClean
+	}
+	if relativeTarget == "." || relativeTarget == ".." ||
+		strings.HasPrefix(relativeTarget, ".."+string(filepath.Separator)) ||
+		filepath.VolumeName(relativeTarget) != "" {
+		return false
+	}
+	suffix := string(filepath.Separator) + relativeTarget
+	if filepath.Separator == '\\' {
+		absoluteTarget = strings.ToLower(absoluteTarget)
+		suffix = strings.ToLower(suffix)
+	}
+	return strings.HasSuffix(absoluteTarget, suffix)
 }
 
-func authOwnsPersistenceTarget(auth *Auth, target string) bool {
+func (m *Manager) authPersistenceTarget(auth *Auth) string {
+	if m != nil {
+		if resolver, ok := m.store.(PersistenceTargetResolver); ok && resolver != nil {
+			if target, errResolve := resolver.ResolveAuthPersistenceTarget(auth); errResolve == nil {
+				if target = strings.TrimSpace(target); target != "" {
+					return target
+				}
+			}
+		}
+	}
+	return authPersistenceDeleteID(auth, "")
+}
+
+func (m *Manager) authOwnsPersistenceTarget(auth *Auth, target string) bool {
 	if auth == nil {
 		return false
 	}
-	if path := authAttribute(auth, AttributePath); path != "" {
-		return persistenceTargetsMatch(path, target)
-	}
-	if fileName := strings.TrimSpace(auth.FileName); fileName != "" {
-		return persistenceTargetsMatch(fileName, target)
-	}
-	return persistenceTargetsMatch(auth.ID, target)
+	return persistenceTargetsMatch(m.authPersistenceTarget(auth), target)
 }
 
 func (m *Manager) persistenceTargetOwner(ctx context.Context, target string) (*Auth, *Auth) {
@@ -391,7 +414,7 @@ func (m *Manager) persistenceTargetOwner(ctx context.Context, target string) (*A
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, owner := range m.auths {
-		if authOwnsPersistenceTarget(owner, target) && m.shouldPersistAuth(ctx, owner) {
+		if m.authOwnsPersistenceTarget(owner, target) && m.shouldPersistAuth(ctx, owner) {
 			return owner, cloneAuthForConditionalPersistence(owner)
 		}
 	}

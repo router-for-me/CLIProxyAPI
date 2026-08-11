@@ -518,6 +518,11 @@ func (s *ObjectTokenStore) prefixedKey(key string) string {
 	return strings.TrimLeft(s.cfg.Prefix+"/"+key, "/")
 }
 
+// ResolveAuthPersistenceTarget returns the exact path Save would use.
+func (s *ObjectTokenStore) ResolveAuthPersistenceTarget(auth *cliproxyauth.Auth) (string, error) {
+	return s.resolveAuthPath(auth)
+}
+
 func (s *ObjectTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error) {
 	if auth == nil {
 		return "", fmt.Errorf("object store: auth is nil")

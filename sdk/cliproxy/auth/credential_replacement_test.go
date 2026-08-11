@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -244,6 +245,7 @@ func (s *orderedCredentialStore) lastDeleteID() string {
 
 type targetTrackingCredentialStore struct {
 	mu               sync.Mutex
+	root             string
 	blockNext        bool
 	blockedSave      chan struct{}
 	releaseSave      chan struct{}
@@ -255,8 +257,16 @@ type targetTrackingCredentialStore struct {
 
 func (*targetTrackingCredentialStore) List(context.Context) ([]*Auth, error) { return nil, nil }
 
-func (s *targetTrackingCredentialStore) Save(_ context.Context, auth *Auth) (string, error) {
+func (s *targetTrackingCredentialStore) ResolveAuthPersistenceTarget(auth *Auth) (string, error) {
 	target := orderedCredentialStoreSaveID(auth)
+	if s.root != "" && !filepath.IsAbs(target) {
+		target = filepath.Join(s.root, target)
+	}
+	return target, nil
+}
+
+func (s *targetTrackingCredentialStore) Save(_ context.Context, auth *Auth) (string, error) {
+	target, _ := s.ResolveAuthPersistenceTarget(auth)
 	s.mu.Lock()
 	if s.blockNext {
 		s.blockNext = false
@@ -870,6 +880,68 @@ func TestConditionalUpdateDoesNotPublishStaleOwnerAfterReplacement(t *testing.T)
 	}
 	if token := authMetadataString(picked, "access_token"); token != "replacement-token" {
 		t.Fatalf("scheduler published token %q, want replacement token", token)
+	}
+}
+
+func TestConditionalUpdateRemovesStaleTargetAcrossRelativeSubdirectoryRename(t *testing.T) {
+	store := &targetTrackingCredentialStore{root: t.TempDir()}
+	manager := NewManager(store, nil, nil)
+	original := &Auth{
+		ID:       "subdirectory-rename-runtime-id",
+		FileName: filepath.Join("old", "auth.json"),
+		Provider: "opaque-plugin",
+		Metadata: map[string]any{"access_token": "old-token"},
+	}
+	if _, errRegister := manager.Register(context.Background(), original); errRegister != nil {
+		t.Fatalf("Register original: %v", errRegister)
+	}
+
+	manager.mu.RLock()
+	expectedCurrent := manager.auths[original.ID]
+	manager.mu.RUnlock()
+	if expectedCurrent == nil {
+		t.Fatal("registered original auth missing")
+	}
+
+	refreshed := expectedCurrent.Clone()
+	refreshed.Metadata["access_token"] = "refreshed-old-token"
+	store.blockAfterNextSaveCall()
+	refreshDone := make(chan error, 1)
+	go func() {
+		_, _, errUpdate := manager.updateAuth(context.Background(), refreshed, expectedCurrent)
+		refreshDone <- errUpdate
+	}()
+	select {
+	case <-store.blockedAfterSave:
+	case <-time.After(time.Second):
+		t.Fatal("stale conditional save did not reach the persisted boundary")
+	}
+
+	replacement := expectedCurrent.Clone()
+	replacement.FileName = filepath.Join("new", "auth.json")
+	replacement.Metadata["access_token"] = "replacement-token"
+	if _, errUpdate := manager.Update(WithSkipPersist(context.Background()), replacement); errUpdate != nil {
+		t.Fatalf("Update replacement: %v", errUpdate)
+	}
+	close(store.releaseAfterSave)
+
+	select {
+	case errUpdate := <-refreshDone:
+		if errUpdate != nil {
+			t.Fatalf("conditional update: %v", errUpdate)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("conditional update did not finish")
+	}
+
+	oldTarget := filepath.Join(store.root, original.FileName)
+	if persisted := store.authAt(oldTarget); persisted != nil {
+		t.Fatalf("stale subdirectory target %q remains persisted: %#v", oldTarget, persisted)
+	}
+	newTarget := filepath.Join(store.root, replacement.FileName)
+	persistedReplacement := store.authAt(newTarget)
+	if token := authMetadataString(persistedReplacement, "access_token"); token != "replacement-token" {
+		t.Fatalf("replacement target token = %q, want replacement token", token)
 	}
 }
 
