@@ -1472,6 +1472,61 @@ func TestRecordExecutionResultIgnoresStaleAvailabilityFailureAfterTokenRotation(
 	}
 }
 
+func TestRecordExecutionResultIgnoresStaleInvalidGrantAfterTokenRotation(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	oldAuth := &Auth{
+		ID:       "codex-stale-invalid-grant.json",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token":  "old-access-token",
+			"refresh_token": "old-refresh-token",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), oldAuth); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	selected, okSelected := m.GetByID(oldAuth.ID)
+	if !okSelected || selected == nil {
+		t.Fatal("selected auth missing")
+	}
+
+	replacement := selected.Clone()
+	replacement.Metadata["access_token"] = "replacement-access-token"
+	replacement.Metadata["refresh_token"] = "replacement-refresh-token"
+	if _, errUpdate := m.Update(context.Background(), replacement); errUpdate != nil {
+		t.Fatalf("Update replacement: %v", errUpdate)
+	}
+
+	m.recordExecutionResult(context.Background(), Result{
+		AuthID:   oldAuth.ID,
+		Provider: oldAuth.Provider,
+		Model:    "gpt-test",
+		Error: &Error{
+			HTTPStatus: http.StatusBadRequest,
+			Code:       "invalid_grant",
+			Message:    "old refresh token invalid_grant",
+		},
+	}, selected, false)
+
+	current, okCurrent := m.GetByID(oldAuth.ID)
+	if !okCurrent || current == nil {
+		t.Fatal("replacement auth missing")
+	}
+	if got := authAccessToken(current); got != "replacement-access-token" {
+		t.Fatalf("current access token = %q, want replacement token", got)
+	}
+	if current.Status != StatusActive || current.Unavailable || current.LastError != nil || current.StatusMessage != "" {
+		t.Fatalf("stale invalid_grant changed replacement auth: %#v", current)
+	}
+	if len(current.ModelStates) != 0 {
+		t.Fatalf("stale invalid_grant created model states: %#v", current.ModelStates)
+	}
+	if current.Failed != 1 {
+		t.Fatalf("failed count = %d, want request counted without changing availability", current.Failed)
+	}
+}
+
 func TestExecuteStaleSuccessDoesNotClearReplacementCooldown(t *testing.T) {
 	previousDisableCooling := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
@@ -2892,6 +2947,153 @@ func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterOpaquePluginCredentia
 	}
 	if len(current.ModelStates) != 0 {
 		t.Fatalf("stale plugin unauthorized result created model states: %#v", current.ModelStates)
+	}
+}
+
+func TestRecordExecutionResultIgnoresStaleForbiddenAfterAuthorizationScopeReplacement(t *testing.T) {
+	cases := []struct {
+		name   string
+		auth   *Auth
+		mutate func(*Auth)
+		assert func(*testing.T, *Auth)
+	}{
+		{
+			name: "Antigravity project",
+			auth: &Auth{
+				ID:       "antigravity-project-scope.json",
+				Provider: "antigravity",
+				Status:   StatusActive,
+				Metadata: map[string]any{
+					"access_token": "stable-antigravity-token",
+					"project_id":   "old-project",
+				},
+			},
+			mutate: func(auth *Auth) {
+				auth.Metadata["project_id"] = "replacement-project"
+			},
+			assert: func(t *testing.T, auth *Auth) {
+				t.Helper()
+				if got := authMetadataString(auth, "project_id"); got != "replacement-project" {
+					t.Fatalf("current Antigravity project_id = %q, want replacement project", got)
+				}
+			},
+		},
+		{
+			name: "Vertex project",
+			auth: &Auth{
+				ID:       "vertex-project-scope.json",
+				Provider: "vertex",
+				Status:   StatusActive,
+				Metadata: map[string]any{
+					"project_id": "old-project",
+					"location":   "us-east1",
+					"service_account": map[string]any{
+						"type":           "service_account",
+						"client_email":   "vertex@example.com",
+						"private_key_id": "stable-key-id",
+						"private_key":    "stable-private-key",
+					},
+				},
+			},
+			mutate: func(auth *Auth) {
+				auth.Metadata["project_id"] = "replacement-project"
+			},
+			assert: func(t *testing.T, auth *Auth) {
+				t.Helper()
+				if got := authMetadataString(auth, "project_id"); got != "replacement-project" {
+					t.Fatalf("current Vertex project_id = %q, want replacement project", got)
+				}
+			},
+		},
+		{
+			name: "Vertex location",
+			auth: &Auth{
+				ID:       "vertex-location-scope.json",
+				Provider: "vertex",
+				Status:   StatusActive,
+				Metadata: map[string]any{
+					"project_id": "stable-project",
+					"location":   "us-east1",
+					"service_account": map[string]any{
+						"type":           "service_account",
+						"client_email":   "vertex@example.com",
+						"private_key_id": "stable-key-id",
+						"private_key":    "stable-private-key",
+					},
+				},
+			},
+			mutate: func(auth *Auth) {
+				auth.Metadata["location"] = "europe-west1"
+			},
+			assert: func(t *testing.T, auth *Auth) {
+				t.Helper()
+				if got := authMetadataString(auth, "location"); got != "europe-west1" {
+					t.Fatalf("current Vertex location = %q, want replacement location", got)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			if _, errRegister := m.Register(context.Background(), tc.auth); errRegister != nil {
+				t.Fatalf("Register: %v", errRegister)
+			}
+			selected, okSelected := m.GetByID(tc.auth.ID)
+			if !okSelected || selected == nil {
+				t.Fatal("selected auth missing")
+			}
+			replacement := selected.Clone()
+			tc.mutate(replacement)
+			if _, errUpdate := m.Update(context.Background(), replacement); errUpdate != nil {
+				t.Fatalf("Update replacement: %v", errUpdate)
+			}
+
+			m.recordExecutionResult(context.Background(), Result{
+				AuthID:   tc.auth.ID,
+				Provider: tc.auth.Provider,
+				Model:    "scope-test-model",
+				Error:    &Error{HTTPStatus: http.StatusForbidden, Message: "old authorization scope forbidden"},
+			}, selected, false)
+
+			current, okCurrent := m.GetByID(tc.auth.ID)
+			if !okCurrent || current == nil {
+				t.Fatal("replacement auth missing")
+			}
+			tc.assert(t, current)
+			if current.Status != StatusActive || current.Unavailable || current.LastError != nil || current.StatusMessage != "" {
+				t.Fatalf("stale scope failure changed replacement auth: %#v", current)
+			}
+			if len(current.ModelStates) != 0 {
+				t.Fatalf("stale scope failure created model states: %#v", current.ModelStates)
+			}
+		})
+	}
+}
+
+func TestAuthCredentialFingerprintIgnoresVertexScopeForAPIKeyAuth(t *testing.T) {
+	left := &Auth{
+		Provider: "vertex",
+		Attributes: map[string]string{
+			AttributeAPIKey: "stable-api-key",
+		},
+		Metadata: map[string]any{
+			"project_id": "old-project",
+			"location":   "us-east1",
+		},
+	}
+	right := left.Clone()
+	right.Metadata["project_id"] = "replacement-project"
+	right.Metadata["location"] = "europe-west1"
+
+	leftFingerprint, leftOK := authCredentialFingerprint(left)
+	rightFingerprint, rightOK := authCredentialFingerprint(right)
+	if !leftOK || !rightOK {
+		t.Fatalf("fingerprint availability = (%t, %t), want both true", leftOK, rightOK)
+	}
+	if leftFingerprint != rightFingerprint {
+		t.Fatal("Vertex API-key fingerprint included unused service-account project/location scope")
 	}
 }
 

@@ -837,22 +837,51 @@ func authCustomHeaderValues(auth *Auth, normalizedName string) []string {
 }
 
 func authAuthorizationScopeMaterial(auth *Auth) []string {
-	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+	if auth == nil {
 		return nil
 	}
-	if customAccounts := authCustomHeaderValues(auth, "chatgptaccountid"); len(customAccounts) > 0 {
-		material := make([]string, 0, len(customAccounts))
-		for _, accountID := range customAccounts {
-			material = append(material, "account_header="+accountID)
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	switch provider {
+	case "codex":
+		if customAccounts := authCustomHeaderValues(auth, "chatgptaccountid"); len(customAccounts) > 0 {
+			material := make([]string, 0, len(customAccounts))
+			for _, accountID := range customAccounts {
+				material = append(material, "account_header="+accountID)
+			}
+			return material
 		}
-		return material
-	}
-	// The Codex executor suppresses its metadata account header for API-key auth.
-	if strings.TrimSpace(authAttribute(auth, AttributeAPIKey)) != "" {
-		return nil
-	}
-	if accountID := strings.TrimSpace(authMetadataString(auth, "account_id")); accountID != "" {
-		return []string{"account_id=" + accountID}
+		// The Codex executor suppresses its metadata account header for API-key auth.
+		if strings.TrimSpace(authAttribute(auth, AttributeAPIKey)) != "" {
+			return nil
+		}
+		if accountID := strings.TrimSpace(authMetadataString(auth, "account_id")); accountID != "" {
+			return []string{"account_id=" + accountID}
+		}
+	case "antigravity":
+		if projectID := strings.TrimSpace(authMetadataString(auth, "project_id")); projectID != "" {
+			return []string{"project_id=" + projectID}
+		}
+	case "vertex":
+		// Vertex bypasses project/location when it can execute through its API-key path.
+		if strings.TrimSpace(authAttribute(auth, AttributeAPIKey)) != "" ||
+			strings.TrimSpace(authMetadataString(auth, "access_token")) != "" {
+			return nil
+		}
+		projectID := strings.TrimSpace(authMetadataString(auth, "project_id"))
+		if projectID == "" {
+			projectID = strings.TrimSpace(authMetadataString(auth, "project"))
+		}
+		if projectID == "" {
+			return nil
+		}
+		location := strings.TrimSpace(authMetadataString(auth, "location"))
+		if location == "" {
+			location = "us-central1"
+		}
+		return []string{
+			"project_id=" + projectID,
+			"location=" + location,
+		}
 	}
 	return nil
 }
@@ -1954,7 +1983,7 @@ func retryAfterFromError(err error) *time.Duration {
 }
 
 func isCredentialScopedAvailabilityError(err *Error) bool {
-	if isUnauthorizedError(err) {
+	if isUnauthorizedError(err) || isInvalidGrantResultError(err) {
 		return true
 	}
 	switch statusCodeFromResult(err) {
