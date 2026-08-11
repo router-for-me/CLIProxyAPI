@@ -4452,13 +4452,88 @@ func TestNormalizeClaudeSamplingForUpstream_NoThinkingRemovesTemperatureAndTopP(
 	}
 }
 
-func TestNormalizeClaudeSamplingForUpstream_AfterForcedToolChoiceRemovesTemperature(t *testing.T) {
+func TestNormalizeClaudeToolChoiceForThinking(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		payload   string
+		uncloaked bool
+		want      string
+	}{
+		{
+			name:    "adaptive thinking demotes named tool to auto",
+			payload: `{"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"tool_choice":{"type":"tool","name":"Read","disable_parallel_tool_use":true}}`,
+			want:    `{"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"tool_choice":{"type":"auto"}}`,
+		},
+		{
+			name:    "enabled thinking demotes named tool to auto",
+			payload: `{"thinking":{"type":"enabled","budget_tokens":2048},"tool_choice":{"type":"tool","name":"Read"}}`,
+			want:    `{"thinking":{"type":"enabled","budget_tokens":2048},"tool_choice":{"type":"auto"}}`,
+		},
+		{
+			name:    "omitted thinking uses Claude Code active default",
+			payload: `{"output_config":{"effort":"high"},"tool_choice":{"type":"tool","name":"Read"}}`,
+			want:    `{"output_config":{"effort":"high"},"tool_choice":{"type":"auto"}}`,
+		},
+		{
+			name:    "disabled thinking preserves named tool",
+			payload: `{"thinking":{"type":"disabled"},"output_config":{"effort":"high"},"tool_choice":{"type":"tool","name":"Read"}}`,
+			want:    `{"thinking":{"type":"disabled"},"output_config":{"effort":"high"},"tool_choice":{"type":"tool","name":"Read"}}`,
+		},
+		{
+			name:      "uncloaked adaptive thinking preserves named tool",
+			payload:   `{"thinking":{"type":"adaptive"},"tool_choice":{"type":"tool","name":"Read"}}`,
+			uncloaked: true,
+			want:      `{"thinking":{"type":"adaptive"},"tool_choice":{"type":"tool","name":"Read"}}`,
+		},
+		{
+			name:      "manual thinking demotes any to native valid auto without cloak",
+			payload:   `{"thinking":{"type":"enabled","budget_tokens":2048},"tool_choice":{"type":"any","disable_parallel_tool_use":true}}`,
+			uncloaked: true,
+			want:      `{"thinking":{"type":"enabled","budget_tokens":2048},"tool_choice":{"type":"auto"}}`,
+		},
+		{
+			name:    "disabled thinking preserves any",
+			payload: `{"thinking":{"type":"disabled"},"output_config":{"effort":"high"},"tool_choice":{"type":"any"}}`,
+			want:    `{"thinking":{"type":"disabled"},"output_config":{"effort":"high"},"tool_choice":{"type":"any"}}`,
+		},
+		{
+			name:    "adaptive thinking preserves supported any",
+			payload: `{"thinking":{"type":"adaptive"},"output_config":{"effort":"max","format":{"type":"json_schema"}},"tool_choice":{"type":"any"}}`,
+			want:    `{"thinking":{"type":"adaptive"},"output_config":{"effort":"max","format":{"type":"json_schema"}},"tool_choice":{"type":"any"}}`,
+		},
+		{
+			name:    "unknown non-disabled thinking mode is active",
+			payload: `{"thinking":{"type":"future"},"tool_choice":{"type":"tool","name":"Read"}}`,
+			want:    `{"thinking":{"type":"future"},"tool_choice":{"type":"auto"}}`,
+		},
+		{
+			name:    "auto tool choice is preserved",
+			payload: `{"thinking":{"type":"adaptive"},"tool_choice":{"type":"auto","disable_parallel_tool_use":true}}`,
+			want:    `{"thinking":{"type":"adaptive"},"tool_choice":{"type":"auto","disable_parallel_tool_use":true}}`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := normalizeClaudeToolChoiceForThinking([]byte(test.payload), !test.uncloaked)
+			if string(got) != test.want {
+				t.Fatalf("normalizeClaudeToolChoiceForThinking() = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeClaudeSamplingForUpstream_AfterToolChoiceNormalizationLeavesAnyUntouched(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"tool_choice":{"type":"any"}}`)
-	out := disableThinkingIfToolChoiceForced(payload)
+	out := normalizeClaudeToolChoiceForThinking(payload, true)
 	out = normalizeClaudeSamplingForUpstream(out)
 
-	if gjson.GetBytes(out, "thinking").Exists() {
-		t.Fatalf("thinking should be removed when tool_choice forces tool use")
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive", got)
+	}
+	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "max" {
+		t.Fatalf("output_config.effort = %q, want max", got)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "any" {
+		t.Fatalf("tool_choice.type = %q, want any", got)
 	}
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -5650,21 +5725,135 @@ func TestClaudeExecutorPayloadOverrideDisabledThinking(t *testing.T) {
 	})
 
 	for _, stream := range []bool{false, true} {
-		name := "forced tool choice retains automatic context management execute"
+		nameSuffix := "execute"
+		if stream {
+			nameSuffix = "execute stream"
+		}
+
+		t.Run("non-native any shape is not normalized "+nameSuffix, func(t *testing.T) {
+			payload := []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"tool_choice":{"type":"any"}}`)
+			upstreamBody := executeClaudeContextManagementRequest(t, &config.Config{}, payload, stream)
+			if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != "adaptive" {
+				t.Fatalf("thinking.type = %q, want adaptive; body=%s", got, upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, "context_management").Raw; got != claudeCodeContextManagement {
+				t.Fatalf("tool_choice any context_management = %s, want %s", got, claudeCodeContextManagement)
+			}
+			if got := gjson.GetBytes(upstreamBody, "tool_choice.type").String(); got != "any" {
+				t.Fatalf("tool_choice.type = %q, want any", got)
+			}
+		})
+
+		for _, toolChoice := range []struct {
+			name string
+			raw  string
+		}{
+			{name: "any", raw: `{"type":"any"}`},
+			{name: "named tool", raw: `{"type":"tool","name":"Read"}`},
+		} {
+			t.Run("disabled thinking preserves "+toolChoice.name+" "+nameSuffix, func(t *testing.T) {
+				payload := []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"},"tool_choice":` + toolChoice.raw + `}`)
+				upstreamBody := executeClaudeContextManagementRequest(t, &config.Config{}, payload, stream)
+				if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != "disabled" {
+					t.Fatalf("thinking.type = %q, want disabled; body=%s", got, upstreamBody)
+				}
+				if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
+					t.Fatalf("disabled thinking context_management = %s, want absent", got.Raw)
+				}
+				if got := gjson.GetBytes(upstreamBody, "tool_choice.type").String(); got != gjson.Get(toolChoice.raw, "type").String() {
+					t.Fatalf("tool_choice.type = %q; body=%s", got, upstreamBody)
+				}
+				if wantName := gjson.Get(toolChoice.raw, "name").String(); wantName != "" {
+					if got := gjson.GetBytes(upstreamBody, "tool_choice.name").String(); got != wantName {
+						t.Fatalf("tool_choice.name = %q, want %q; body=%s", got, wantName, upstreamBody)
+					}
+				}
+			})
+		}
+
+		t.Run("payload override disabled preserves any "+nameSuffix, func(t *testing.T) {
+			cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+				Models: modelRules,
+				Params: map[string]any{"thinking.type": "disabled"},
+			}}}}
+			payload := []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"tool_choice":{"type":"any"}}`)
+			upstreamBody := executeClaudeContextManagementRequest(t, cfg, payload, stream)
+			if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != "disabled" {
+				t.Fatalf("thinking.type = %q, want disabled; body=%s", got, upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
+				t.Fatalf("payload-disabled context_management = %s, want absent", got.Raw)
+			}
+			if got := gjson.GetBytes(upstreamBody, "tool_choice.type").String(); got != "any" {
+				t.Fatalf("tool_choice.type = %q, want any", got)
+			}
+		})
+	}
+}
+
+func TestClaudeExecutorNativeNamedToolChoiceFingerprint(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		thinkingJSON string
+		wantThinking string
+		wantEffort   string
+	}{
+		{name: "adaptive", thinkingJSON: `,"thinking":{"type":"adaptive"}`, wantThinking: "adaptive", wantEffort: "high"},
+		{name: "enabled normalized by Opus 5", thinkingJSON: `,"thinking":{"type":"enabled","budget_tokens":2048}`, wantThinking: "adaptive", wantEffort: "medium"},
+		{name: "omitted", wantEffort: "high"},
+	} {
+		for _, stream := range []bool{false, true} {
+			name := test.name + " execute"
+			if stream {
+				name += " stream"
+			}
+			t.Run(name, func(t *testing.T) {
+				payload := []byte(`{"model":"claude-opus-5","max_tokens":4096,"messages":[{"role":"user","content":"hi"}],"output_config":{"effort":"high"},"tool_choice":{"type":"tool","name":"Read","disable_parallel_tool_use":true}` + test.thinkingJSON + `}`)
+				upstreamBody := executeClaudeContextManagementRequest(t, &config.Config{}, payload, stream)
+				if got := gjson.GetBytes(upstreamBody, "tool_choice.type").String(); got != "auto" {
+					t.Fatalf("tool_choice.type = %q, want auto; body=%s", got, upstreamBody)
+				}
+				if got := gjson.GetBytes(upstreamBody, "tool_choice.name"); got.Exists() {
+					t.Fatalf("demoted tool_choice.name = %s, want absent", got.Raw)
+				}
+				if got := gjson.GetBytes(upstreamBody, "tool_choice.disable_parallel_tool_use"); got.Exists() {
+					t.Fatalf("demoted disable_parallel_tool_use = %s, want absent", got.Raw)
+				}
+				thinking := gjson.GetBytes(upstreamBody, "thinking")
+				if test.wantThinking == "" {
+					if thinking.Exists() {
+						t.Fatalf("thinking = %s, want absent", thinking.Raw)
+					}
+				} else if got := thinking.Get("type").String(); got != test.wantThinking {
+					t.Fatalf("thinking.type = %q, want %q", got, test.wantThinking)
+				}
+				if got := gjson.GetBytes(upstreamBody, "context_management").Raw; got != claudeCodeContextManagement {
+					t.Fatalf("context_management = %s, want %s", got, claudeCodeContextManagement)
+				}
+				if got := gjson.GetBytes(upstreamBody, "output_config.effort").String(); got != test.wantEffort {
+					t.Fatalf("output_config.effort = %q, want %q", got, test.wantEffort)
+				}
+			})
+		}
+	}
+
+	for _, stream := range []bool{false, true} {
+		name := "cloak disabled preserves adaptive named tool execute"
 		if stream {
 			name += " stream"
 		}
 		t.Run(name, func(t *testing.T) {
-			payload := []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"tool_choice":{"type":"any"}}`)
-			upstreamBody := executeClaudeContextManagementRequest(t, &config.Config{}, payload, stream)
-			if got := gjson.GetBytes(upstreamBody, "thinking"); got.Exists() {
-				t.Fatalf("forced tool choice thinking = %s, want absent", got.Raw)
+			payload := []byte(`{"model":"claude-opus-5","max_tokens":4096,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"tool_choice":{"type":"tool","name":"Read"}}`)
+			cfg := &config.Config{DisableClaudeCloakMode: true}
+			upstreamBody := executeClaudeContextManagementRequest(t, cfg, payload, stream)
+			if got := gjson.GetBytes(upstreamBody, "tool_choice.type").String(); got != "tool" {
+				t.Fatalf("tool_choice.type = %q, want tool; body=%s", got, upstreamBody)
 			}
-			if got := gjson.GetBytes(upstreamBody, "context_management").Raw; got != claudeCodeContextManagement {
-				t.Fatalf("forced tool choice context_management = %s, want %s", got, claudeCodeContextManagement)
+			if got := gjson.GetBytes(upstreamBody, "tool_choice.name").String(); got != "Read" {
+				t.Fatalf("tool_choice.name = %q, want Read; body=%s", got, upstreamBody)
 			}
-			if got := gjson.GetBytes(upstreamBody, "tool_choice.type").String(); got != "any" {
-				t.Fatalf("forced tool_choice.type = %q, want any", got)
+			if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
+				t.Fatalf("uncloaked context_management = %s, want absent", got.Raw)
 			}
 		})
 	}
@@ -5705,6 +5894,24 @@ func TestClaudeExecutorPayloadOverrideReenablesThinking(t *testing.T) {
 		if stream {
 			nameSuffix = "execute stream"
 		}
+
+		t.Run("manual thinking override demotes any to auto "+nameSuffix, func(t *testing.T) {
+			cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+				Models: modelRules,
+				Params: map[string]any{"thinking.type": "enabled"},
+			}}}}
+			payload := []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"},"tool_choice":{"type":"any","disable_parallel_tool_use":true}}`)
+			upstreamBody := executeClaudeContextManagementRequest(t, cfg, payload, stream)
+			if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != "enabled" {
+				t.Fatalf("thinking.type = %q, want enabled; body=%s", got, upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, "tool_choice").Raw; got != `{"type":"auto"}` {
+				t.Fatalf("tool_choice = %s, want native-valid auto; body=%s", got, upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, "context_management").Raw; got != claudeCodeContextManagement {
+				t.Fatalf("context_management = %s, want %s", got, claudeCodeContextManagement)
+			}
+		})
 
 		t.Run("caller context management is preserved after re-enabling "+nameSuffix, func(t *testing.T) {
 			cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
