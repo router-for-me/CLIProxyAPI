@@ -12,12 +12,14 @@ import (
 	"net/url"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -786,14 +788,23 @@ func authCredentialEndpoint(auth *Auth) string {
 	if auth == nil {
 		return ""
 	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	endpoint := strings.TrimSpace(authAttribute(auth, "base_url"))
 	if endpoint == "" {
-		switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+		switch provider {
 		case "antigravity", "xai":
 			// Both executors resolve metadata base_url only when the attribute is absent.
 			endpoint = strings.TrimSpace(authMetadataString(auth, "base_url"))
 		}
 	}
+	if provider == "xai" {
+		endpoint = authXAIEffectiveChatEndpoint(auth, endpoint)
+	}
+	return normalizeCredentialEndpoint(endpoint)
+}
+
+func normalizeCredentialEndpoint(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
 		return ""
 	}
@@ -806,6 +817,48 @@ func authCredentialEndpoint(auth *Auth) string {
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	parsed.RawPath = strings.TrimRight(parsed.RawPath, "/")
 	return parsed.String()
+}
+
+func authXAIEffectiveChatEndpoint(auth *Auth, baseURL string) string {
+	baseURL = strings.TrimSpace(baseURL)
+	if authXAIUsingAPI(auth) {
+		if baseURL == "" {
+			return xaiauth.DefaultAPIBaseURL
+		}
+		return baseURL
+	}
+	if baseURL != "" && normalizeCredentialEndpoint(baseURL) != normalizeCredentialEndpoint(xaiauth.DefaultAPIBaseURL) {
+		return baseURL
+	}
+	return xaiauth.CLIChatProxyBaseURL
+}
+
+func authXAIUsingAPI(auth *Auth) bool {
+	if auth == nil {
+		return true
+	}
+	if raw := strings.TrimSpace(authAttribute(auth, "using_api")); raw != "" {
+		if parsed, errParse := strconv.ParseBool(raw); errParse == nil {
+			return parsed
+		}
+	}
+	if auth.Metadata != nil {
+		raw, ok := auth.Metadata["using_api"]
+		if ok && raw != nil {
+			switch value := raw.(type) {
+			case bool:
+				return value
+			case string:
+				if parsed, errParse := strconv.ParseBool(strings.TrimSpace(value)); errParse == nil {
+					return parsed
+				}
+			}
+		}
+	}
+	if kind := strings.TrimSpace(authAttribute(auth, "auth_kind")); kind != "" {
+		return !strings.EqualFold(kind, AuthKindOAuth)
+	}
+	return !strings.EqualFold(strings.TrimSpace(authMetadataString(auth, "auth_kind")), AuthKindOAuth)
 }
 
 func normalizeAuthorizationScopeHeaderName(name string) string {

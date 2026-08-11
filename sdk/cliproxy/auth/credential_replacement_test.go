@@ -11,6 +11,7 @@ import (
 	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -2382,6 +2383,104 @@ func TestRefreshAuthForRequestAppliesRefreshReturnedScalarFields(t *testing.T) {
 	}
 	if !current.Disabled || current.Status != StatusDisabled || current.StatusMessage != "disabled by provider refresh" {
 		t.Fatalf("refresh lifecycle fields were dropped: %#v", current)
+	}
+}
+
+func TestAuthCredentialFingerprintUsesXAIEffectiveChatRoute(t *testing.T) {
+	left := &Auth{
+		Provider: "xai",
+		Metadata: map[string]any{
+			"access_token":  "stable-token",
+			"refresh_token": "stable-refresh-token",
+			"base_url":      xaiauth.DefaultAPIBaseURL,
+			"using_api":     true,
+			"auth_kind":     "oauth",
+		},
+	}
+	right := left.Clone()
+	right.Metadata["using_api"] = false
+
+	leftFingerprint, leftOK := authCredentialFingerprint(left)
+	rightFingerprint, rightOK := authCredentialFingerprint(right)
+	if !leftOK || !rightOK {
+		t.Fatalf("fingerprint availability = (%t, %t), want both true", leftOK, rightOK)
+	}
+	if leftFingerprint == rightFingerprint {
+		t.Fatal("changing xAI's effective chat route did not change credential revision")
+	}
+}
+
+func TestAuthCredentialFingerprintIgnoresXAIUsingAPIForCustomEndpoint(t *testing.T) {
+	left := &Auth{
+		Provider: "xai",
+		Metadata: map[string]any{
+			"access_token":  "stable-token",
+			"refresh_token": "stable-refresh-token",
+			"base_url":      "https://custom-xai.example.com/v1",
+			"using_api":     true,
+			"auth_kind":     "oauth",
+		},
+	}
+	right := left.Clone()
+	right.Metadata["using_api"] = false
+
+	leftFingerprint, leftOK := authCredentialFingerprint(left)
+	rightFingerprint, rightOK := authCredentialFingerprint(right)
+	if !leftOK || !rightOK {
+		t.Fatalf("fingerprint availability = (%t, %t), want both true", leftOK, rightOK)
+	}
+	if leftFingerprint != rightFingerprint {
+		t.Fatal("xAI using_api changed revision despite an explicit custom endpoint selecting the same route")
+	}
+}
+
+func TestRecordExecutionResultIgnoresStaleUnauthorizedAfterXAIRouteReplacement(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	oldAuth := &Auth{
+		ID:       "xai-chat-route.json",
+		Provider: "xai",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token":  "stable-token",
+			"refresh_token": "stable-refresh-token",
+			"base_url":      xaiauth.DefaultAPIBaseURL,
+			"using_api":     true,
+			"auth_kind":     "oauth",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), oldAuth); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	selected, okSelected := m.GetByID(oldAuth.ID)
+	if !okSelected || selected == nil {
+		t.Fatal("selected auth missing")
+	}
+
+	replacement := selected.Clone()
+	replacement.Metadata["using_api"] = false
+	if _, errUpdate := m.Update(context.Background(), replacement); errUpdate != nil {
+		t.Fatalf("Update replacement: %v", errUpdate)
+	}
+
+	m.recordExecutionResult(context.Background(), Result{
+		AuthID:   oldAuth.ID,
+		Provider: oldAuth.Provider,
+		Model:    "grok-test",
+		Error:    &Error{HTTPStatus: http.StatusUnauthorized, Message: "old xAI route unauthorized"},
+	}, selected, false)
+
+	current, okCurrent := m.GetByID(oldAuth.ID)
+	if !okCurrent || current == nil {
+		t.Fatal("replacement auth missing")
+	}
+	if got, ok := current.Metadata["using_api"].(bool); !ok || got {
+		t.Fatalf("current xAI using_api = %#v, want false", current.Metadata["using_api"])
+	}
+	if current.Status != StatusActive || current.Unavailable || current.LastError != nil || current.StatusMessage != "" {
+		t.Fatalf("stale xAI route result changed replacement auth: %#v", current)
+	}
+	if len(current.ModelStates) != 0 {
+		t.Fatalf("stale xAI route result created model states: %#v", current.ModelStates)
 	}
 }
 
