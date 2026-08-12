@@ -569,6 +569,29 @@ func TestStreamBootstrapDetector(t *testing.T) {
 	}
 }
 
+func TestStreamBootstrapDetectorRequiresResponsesDiscriminator(t *testing.T) {
+	t.Run("status-only custom JSON forwards", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe([]byte(`{"status":"running"}`)) {
+			t.Fatal("StreamBootstrapDetector.Observe() buffered status-only custom JSON")
+		}
+	})
+
+	t.Run("responses object remains buffered", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe([]byte(`{"object":"response","status":"in_progress"}`)) {
+			t.Fatal("StreamBootstrapDetector.Observe() forwarded Responses metadata")
+		}
+	})
+
+	t.Run("known responses event remains buffered", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe([]byte(`{"type":"response.in_progress","status":"in_progress"}`)) {
+			t.Fatal("StreamBootstrapDetector.Observe() forwarded known Responses event")
+		}
+	})
+}
+
 func TestStreamBootstrapDetectorHandlesSplitSSEFrames(t *testing.T) {
 	t.Run("terminal empty remains buffered", func(t *testing.T) {
 		var detector StreamBootstrapDetector
