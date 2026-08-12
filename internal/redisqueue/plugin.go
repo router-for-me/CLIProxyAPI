@@ -51,6 +51,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		authType = "unknown"
 	}
 	apiKey := strings.TrimSpace(record.APIKey)
+	clientKeyID := strings.TrimSpace(record.ClientKeyID)
+	clientKeyAlias := strings.TrimSpace(record.ClientKeyAlias)
 	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
 	reasoningEffort := strings.TrimSpace(record.ReasoningEffort)
 	if reasoningEffort == "" {
@@ -79,9 +81,10 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 
 	failed := record.Failed
-	if !failed {
+	if !record.OutcomeKnown && !failed {
 		failed = !resolveSuccess(ctx)
 	}
+	upstreamAttempt := record.UpstreamAttempt || (record.OutcomeKnown && !record.ExternalRequest && !record.Supplemental)
 	fail := resolveFail(ctx, record, failed)
 
 	detail := requestDetail{
@@ -95,6 +98,10 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		XForwardedFor:   clientRequestMetadata.XForwardedFor,
 		UserAgent:       clientRequestMetadata.UserAgent,
 		Tokens:          tokens,
+		ExternalRequest: record.ExternalRequest,
+		OutcomeKnown:    record.OutcomeKnown,
+		UpstreamAttempt: upstreamAttempt,
+		UpstreamFailed:  upstreamAttempt && failed,
 		Failed:          failed,
 		Generate:        coreusage.GenerateEnabled(record.Generate),
 		Fail:            fail,
@@ -112,6 +119,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		Endpoint:            resolveEndpoint(ctx),
 		AuthType:            authType,
 		APIKey:              apiKey,
+		ClientKeyID:         clientKeyID,
+		ClientKeyAlias:      clientKeyAlias,
 		RequestID:           requestID,
 		ReasoningEffort:     reasoningEffort,
 		ServiceTier:         serviceTier,
@@ -134,6 +143,8 @@ type queuedUsageDetail struct {
 	Endpoint            string                   `json:"endpoint"`
 	AuthType            string                   `json:"auth_type"`
 	APIKey              string                   `json:"api_key"`
+	ClientKeyID         string                   `json:"client_key_id"`
+	ClientKeyAlias      string                   `json:"client_key_alias"`
 	RequestID           string                   `json:"request_id"`
 	ReasoningEffort     string                   `json:"reasoning_effort"`
 	ServiceTier         string                   `json:"service_tier"`
@@ -151,6 +162,10 @@ type requestDetail struct {
 	XForwardedFor   string      `json:"x_forwarded_for"`
 	UserAgent       string      `json:"user_agent"`
 	Tokens          tokenStats  `json:"tokens"`
+	ExternalRequest bool        `json:"external_request"`
+	OutcomeKnown    bool        `json:"outcome_known"`
+	UpstreamAttempt bool        `json:"upstream_attempt"`
+	UpstreamFailed  bool        `json:"upstream_failed"`
 	Failed          bool        `json:"failed"`
 	Generate        bool        `json:"generate"`
 	Fail            failDetail  `json:"fail"`

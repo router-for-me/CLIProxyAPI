@@ -229,6 +229,88 @@ func TestReloadConfigIfChanged_TriggersOnChangeAndSkipsUnchanged(t *testing.T) {
 	}
 }
 
+func TestReloadConfigIfChangedAppliesNewestContentBeforeReturning(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if errMkdir := os.MkdirAll(authDir, 0o755); errMkdir != nil {
+		t.Fatalf("create auth dir: %v", errMkdir)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	writeConfig := func(port int) {
+		t.Helper()
+		data, errMarshal := yaml.Marshal(&config.Config{
+			Port:               port,
+			AuthDir:            authDir,
+			CredentialInFlight: config.DefaultCredentialInFlightConfig(),
+		})
+		if errMarshal != nil {
+			t.Fatalf("marshal config: %v", errMarshal)
+		}
+		if errWrite := os.WriteFile(configPath, data, 0o644); errWrite != nil {
+			t.Fatalf("write config: %v", errWrite)
+		}
+	}
+
+	writeConfig(8080)
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var firstOnce sync.Once
+	var callbacksMu sync.Mutex
+	callbacks := make([]int, 0, 2)
+	w := &Watcher{
+		configPath: configPath,
+		authDir:    authDir,
+		reloadCallback: func(cfg *config.Config) {
+			callbacksMu.Lock()
+			callbacks = append(callbacks, cfg.Port)
+			callbacksMu.Unlock()
+			if cfg.Port == 8080 {
+				firstOnce.Do(func() { close(firstEntered) })
+				<-releaseFirst
+			}
+		},
+	}
+
+	firstDone := make(chan struct{})
+	go func() {
+		w.reloadConfigIfChanged()
+		close(firstDone)
+	}()
+	select {
+	case <-firstEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first reload callback did not start")
+	}
+
+	writeConfig(9090)
+	secondDone := make(chan struct{})
+	go func() {
+		w.reloadConfigIfChanged()
+		close(secondDone)
+	}()
+	close(releaseFirst)
+
+	for name, done := range map[string]<-chan struct{}{"first": firstDone, "second": secondDone} {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s reload did not finish", name)
+		}
+	}
+
+	callbacksMu.Lock()
+	gotCallbacks := append([]int(nil), callbacks...)
+	callbacksMu.Unlock()
+	if len(gotCallbacks) != 2 || gotCallbacks[0] != 8080 || gotCallbacks[1] != 9090 {
+		t.Fatalf("reload callbacks = %v, want [8080 9090]", gotCallbacks)
+	}
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if w.config == nil || w.config.Port != 9090 {
+		t.Fatalf("final watcher config = %#v, want port 9090", w.config)
+	}
+}
+
 func TestStartAndStopSuccess(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
@@ -1518,8 +1600,11 @@ type stubStore struct {
 	authDir         string
 	cfgPersisted    int32
 	authPersisted   int32
+	mu              sync.Mutex
 	lastAuthMessage string
 	lastAuthPaths   []string
+	configDone      chan struct{}
+	authDone        chan struct{}
 }
 
 func (s *stubStore) List(context.Context) ([]*coreauth.Auth, error) { return nil, nil }
@@ -1529,12 +1614,20 @@ func (s *stubStore) Save(context.Context, *coreauth.Auth) (string, error) {
 func (s *stubStore) Delete(context.Context, string) error { return nil }
 func (s *stubStore) PersistConfig(context.Context) error {
 	atomic.AddInt32(&s.cfgPersisted, 1)
+	if s.configDone != nil {
+		s.configDone <- struct{}{}
+	}
 	return nil
 }
 func (s *stubStore) PersistAuthFiles(_ context.Context, message string, paths ...string) error {
 	atomic.AddInt32(&s.authPersisted, 1)
+	s.mu.Lock()
 	s.lastAuthMessage = message
-	s.lastAuthPaths = paths
+	s.lastAuthPaths = append([]string(nil), paths...)
+	s.mu.Unlock()
+	if s.authDone != nil {
+		s.authDone <- struct{}{}
+	}
 	return nil
 }
 func (s *stubStore) AuthDir() string { return s.authDir }
@@ -1559,26 +1652,41 @@ func TestNewWatcherDetectsPersisterAndAuthDir(t *testing.T) {
 }
 
 func TestPersistConfigAndAuthAsyncInvokePersister(t *testing.T) {
+	store := &stubStore{
+		configDone: make(chan struct{}, 1),
+		authDone:   make(chan struct{}, 1),
+	}
 	w := &Watcher{
-		storePersister: &stubStore{},
+		storePersister: store,
 	}
 
 	w.persistConfigAsync()
 	w.persistAuthAsync("msg", " a ", "", "b ")
 
-	time.Sleep(30 * time.Millisecond)
-	store := w.storePersister.(*stubStore)
-	if atomic.LoadInt32(&store.cfgPersisted) != 1 {
-		t.Fatalf("expected PersistConfig to be called once, got %d", store.cfgPersisted)
+	for name, done := range map[string]<-chan struct{}{"config": store.configDone, "auth": store.authDone} {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s persistence", name)
+		}
 	}
-	if atomic.LoadInt32(&store.authPersisted) != 1 {
-		t.Fatalf("expected PersistAuthFiles to be called once, got %d", store.authPersisted)
+	configCalls := atomic.LoadInt32(&store.cfgPersisted)
+	if configCalls != 1 {
+		t.Fatalf("expected PersistConfig to be called once, got %d", configCalls)
 	}
-	if store.lastAuthMessage != "msg" {
-		t.Fatalf("unexpected auth message: %s", store.lastAuthMessage)
+	authCalls := atomic.LoadInt32(&store.authPersisted)
+	if authCalls != 1 {
+		t.Fatalf("expected PersistAuthFiles to be called once, got %d", authCalls)
 	}
-	if len(store.lastAuthPaths) != 2 || store.lastAuthPaths[0] != "a" || store.lastAuthPaths[1] != "b" {
-		t.Fatalf("unexpected filtered paths: %#v", store.lastAuthPaths)
+	store.mu.Lock()
+	lastAuthMessage := store.lastAuthMessage
+	lastAuthPaths := append([]string(nil), store.lastAuthPaths...)
+	store.mu.Unlock()
+	if lastAuthMessage != "msg" {
+		t.Fatalf("unexpected auth message: %s", lastAuthMessage)
+	}
+	if len(lastAuthPaths) != 2 || lastAuthPaths[0] != "a" || lastAuthPaths[1] != "b" {
+		t.Fatalf("unexpected filtered paths: %#v", lastAuthPaths)
 	}
 }
 
@@ -1591,22 +1699,37 @@ func TestScheduleConfigReloadDebounces(t *testing.T) {
 	}
 
 	var reloads int32
+	reloadDone := make(chan struct{}, 1)
 	w := &Watcher{
-		configPath:     cfgPath,
-		authDir:        authDir,
-		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+		configPath: cfgPath,
+		authDir:    authDir,
+		reloadCallback: func(*config.Config) {
+			atomic.AddInt32(&reloads, 1)
+			reloadDone <- struct{}{}
+		},
 	}
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
 	w.scheduleConfigReload()
 	w.scheduleConfigReload()
 
-	time.Sleep(400 * time.Millisecond)
+	select {
+	case <-reloadDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for debounced config reload")
+	}
+	// The callback runs before lastConfigHash is committed. Waiting on the
+	// execution mutex ensures the complete reload pass has returned.
+	w.configApplyMu.Lock()
+	w.configApplyMu.Unlock()
 
 	if atomic.LoadInt32(&reloads) != 1 {
 		t.Fatalf("expected single debounced reload, got %d", reloads)
 	}
-	if w.lastConfigHash == "" {
+	w.clientsMutex.RLock()
+	lastConfigHash := w.lastConfigHash
+	w.clientsMutex.RUnlock()
+	if lastConfigHash == "" {
 		t.Fatal("expected lastConfigHash to be set after reload")
 	}
 }

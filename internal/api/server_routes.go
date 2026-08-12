@@ -51,7 +51,12 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/healthz", healthzHandler)
 	s.engine.HEAD("/healthz", healthzHandler)
 
-	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	s.engine.GET("/management.html", s.serveManagementDashboard)
+	s.engine.HEAD("/management.html", s.serveManagementDashboard)
+	s.engine.GET("/management", s.redirectManagementWeb)
+	s.engine.HEAD("/management", s.redirectManagementWeb)
+	s.engine.GET("/management/*assetPath", s.serveManagementWeb)
+	s.engine.HEAD("/management/*assetPath", s.serveManagementWeb)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)

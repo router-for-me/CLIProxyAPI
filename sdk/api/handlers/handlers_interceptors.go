@@ -196,10 +196,20 @@ func nextStreamChunk(ctx context.Context, pending *[]coreexecutor.StreamChunk, c
 	var chunk coreexecutor.StreamChunk
 	var ok bool
 	if ctx != nil {
+		// Prefer cancellation over a concurrently closed stream. Usage accounting
+		// wraps streams and closes the forwarding channel when the request context
+		// is canceled, so both cases can become ready at the same time. Treating the
+		// closed channel as a successful end would make lifecycle completion flaky.
+		if ctx.Err() != nil {
+			return coreexecutor.StreamChunk{}, false, true
+		}
 		select {
 		case <-ctx.Done():
 			return coreexecutor.StreamChunk{}, false, true
 		case chunk, ok = <-chunks:
+		}
+		if !ok && ctx.Err() != nil {
+			return coreexecutor.StreamChunk{}, false, true
 		}
 	} else {
 		chunk, ok = <-chunks

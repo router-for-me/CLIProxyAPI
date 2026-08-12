@@ -54,8 +54,14 @@ type Config struct {
 	// When exceeded, the oldest error log files are deleted. Default is 10. Set to 0 to disable cleanup.
 	ErrorLogsMaxFiles int `yaml:"error-logs-max-files" json:"error-logs-max-files"`
 
-	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
+	// UsageStatisticsEnabled toggles bounded persistent usage aggregation; when false, new usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
+
+	// UsageStatisticsRetentionDays controls how many local calendar-day usage buckets are retained.
+	UsageStatisticsRetentionDays int `yaml:"usage-statistics-retention-days" json:"usage-statistics-retention-days"`
+
+	// UsagePricing configures optional estimated-cost calculation for usage records.
+	UsagePricing UsagePricingConfig `yaml:"usage-pricing,omitempty" json:"usage-pricing,omitempty"`
 
 	// RedisUsageQueueRetentionSeconds controls how long usage queue items are retained
 	// in memory for Management API consumers.

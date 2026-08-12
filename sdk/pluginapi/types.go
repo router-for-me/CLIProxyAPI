@@ -1324,8 +1324,13 @@ type UsageRecord struct {
 	Model string
 	// Alias is the user-facing model alias when one was used.
 	Alias string
-	// APIKey is the client API key identifier when available.
+	// APIKey is the raw authenticated client key retained for compatibility.
+	// It is sensitive and should not be logged or persisted; prefer ClientKeyID.
 	APIKey string
+	// ClientKeyID is the stable identifier for the authenticated client key.
+	ClientKeyID string
+	// ClientKeyAlias is the user-facing name for the authenticated client key.
+	ClientKeyAlias string
 	// AuthID identifies the selected credential.
 	AuthID string
 	// AuthIndex identifies the credential index when applicable.
@@ -1347,7 +1352,20 @@ type UsageRecord struct {
 	Latency time.Duration
 	// TTFT is the time to first token for streaming requests.
 	TTFT time.Duration
-	// Failed reports whether the request failed.
+	// ExternalRequest marks the final outcome of one client request. When false,
+	// the record describes one upstream credential/model/provider attempt.
+	ExternalRequest bool
+	// UpstreamAttempt marks a real upstream attempt; supplemental token usage
+	// records leave it false.
+	UpstreamAttempt bool
+	// Supplemental marks token-only usage attached to an upstream attempt.
+	Supplemental bool
+	// OutcomeKnown reports that Failed is an explicit outcome, not inferred from
+	// a legacy request context response status.
+	OutcomeKnown bool
+	// Failed reports the outcome of this event. For ExternalRequest events it
+	// is the final client-request outcome; otherwise it describes the upstream
+	// attempt.
 	Failed bool
 	// Failure contains failure details when Failed is true.
 	Failure UsageFailure

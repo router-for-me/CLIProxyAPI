@@ -14,6 +14,16 @@ temp/*
 refs/*
 plugins/*
 examples/plugin/bin/*
+.build-cache/
+mihomo/
+
+# Local runtime state and deployment secrets
+config-usage.yaml
+frpc.toml
+start-all*.ps1
+start-all-hidden.vbs
+install-ssh-tunnel-task.ps1
+ssh-tunnel-watchdog.ps1
 
 # Storage backends
 pgstore/*

@@ -17,6 +17,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const maxConfigReloadPasses = 8
+
 func (w *Watcher) stopConfigReloadTimer() {
 	w.configReloadMu.Lock()
 	if w.configReloadTimer != nil {
@@ -49,50 +51,74 @@ func (w *Watcher) ReloadConfigIfChanged() {
 }
 
 func (w *Watcher) reloadConfigIfChanged() {
-	data, err := os.ReadFile(w.configPath)
-	if err != nil {
-		log.Errorf("failed to read config file for hash check: %v", err)
-		return
-	}
-	if len(data) == 0 {
-		log.Debugf("ignoring empty config file write event")
-		return
-	}
-	sum := sha256.Sum256(data)
-	newHash := hex.EncodeToString(sum[:])
+	w.configApplyMu.Lock()
+	defer w.configApplyMu.Unlock()
 
-	w.clientsMutex.RLock()
-	currentHash := w.lastConfigHash
-	w.clientsMutex.RUnlock()
+	for pass := 0; pass < maxConfigReloadPasses; pass++ {
+		data, errRead := os.ReadFile(w.configPath)
+		if errRead != nil {
+			log.Errorf("failed to read config file for hash check: %v", errRead)
+			return
+		}
+		if len(data) == 0 {
+			log.Debug("ignoring empty config file write event")
+			return
+		}
+		newHash := configContentHash(data)
 
-	if currentHash != "" && currentHash == newHash {
-		log.Debugf("config file content unchanged (hash match), skipping reload")
-		return
-	}
-	log.Infof("config file changed, reloading: %s", w.configPath)
-	if w.reloadConfig() {
-		finalHash := newHash
-		if updatedData, errRead := os.ReadFile(w.configPath); errRead == nil && len(updatedData) > 0 {
-			sumUpdated := sha256.Sum256(updatedData)
-			finalHash = hex.EncodeToString(sumUpdated[:])
-		} else if errRead != nil {
-			log.WithError(errRead).Debug("failed to compute updated config hash after reload")
+		w.clientsMutex.RLock()
+		currentHash := w.lastConfigHash
+		w.clientsMutex.RUnlock()
+
+		if currentHash != "" && currentHash == newHash {
+			log.Debug("config file content unchanged (hash match), skipping reload")
+			return
+		}
+		log.Infof("config file changed, reloading: %s", w.configPath)
+		applied, changedDuringLoad := w.reloadConfigAtHash(newHash)
+		if changedDuringLoad {
+			continue
+		}
+		if !applied {
+			return
 		}
 		w.clientsMutex.Lock()
-		w.lastConfigHash = finalHash
+		w.lastConfigHash = newHash
 		w.clientsMutex.Unlock()
 		w.persistConfigAsync()
+		// Loop once more while holding configApplyMu. If the file changed while
+		// the callback was running, the newer content is applied before any
+		// waiter can observe this reload as complete.
 	}
+
+	log.Warn("config file kept changing during reload; scheduling another pass")
+	w.scheduleConfigReload()
 }
 
 func (w *Watcher) reloadConfig() bool {
+	applied, _ := w.reloadConfigAtHash("")
+	return applied
+}
+
+func (w *Watcher) reloadConfigAtHash(expectedHash string) (applied bool, changedDuringLoad bool) {
 	log.Debug("=========================== CONFIG RELOAD ============================")
 	log.Debugf("starting config reload from: %s", w.configPath)
 
 	newConfig, errLoadConfig := config.LoadConfig(w.configPath)
 	if errLoadConfig != nil {
 		log.Errorf("failed to reload config: %v", errLoadConfig)
-		return false
+		return false, false
+	}
+	if expectedHash != "" {
+		loadedData, errRead := os.ReadFile(w.configPath)
+		if errRead != nil {
+			log.Errorf("failed to verify config file after load: %v", errRead)
+			return false, false
+		}
+		if len(loadedData) == 0 || configContentHash(loadedData) != expectedHash {
+			log.Debug("config file changed while it was being loaded; retrying newest content")
+			return false, true
+		}
 	}
 
 	if w.mirroredAuthDir != "" {
@@ -140,5 +166,10 @@ func (w *Watcher) reloadConfig() bool {
 
 	log.Infof("config successfully reloaded, triggering client reload")
 	w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh)
-	return true
+	return true, false
+}
+
+func configContentHash(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }

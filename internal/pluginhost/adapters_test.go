@@ -2283,6 +2283,65 @@ func TestUsageAdapterPreservesExplicitGenerateFalse(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterForwardsClientKeyMetadata(t *testing.T) {
+	var got pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(_ context.Context, record pluginapi.UsageRecord) {
+		got = record
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-client-key",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-client-key",
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		APIKey:         "raw-client-key",
+		ClientKeyID:    "tenant-a",
+		ClientKeyAlias: "Team A",
+	})
+
+	if got.APIKey != "raw-client-key" {
+		t.Fatalf("APIKey = %q, want raw-client-key", got.APIKey)
+	}
+	if got.ClientKeyID != "tenant-a" {
+		t.Fatalf("ClientKeyID = %q, want tenant-a", got.ClientKeyID)
+	}
+	if got.ClientKeyAlias != "Team A" {
+		t.Fatalf("ClientKeyAlias = %q, want Team A", got.ClientKeyAlias)
+	}
+}
+
+func TestUsageAdapterForwardsRequestOutcomeMetadata(t *testing.T) {
+	var got pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(_ context.Context, record pluginapi.UsageRecord) {
+		got = record
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-outcome",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{host: host, pluginID: "usage-outcome"}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		ExternalRequest: true,
+		UpstreamAttempt: true,
+		Supplemental:    true,
+		OutcomeKnown:    true,
+		Failed:          true,
+	})
+
+	if !got.ExternalRequest || !got.UpstreamAttempt || !got.Supplemental || !got.OutcomeKnown || !got.Failed {
+		t.Fatalf("outcome metadata was not forwarded: %+v", got)
+	}
+}
+
 func TestUsageManagerRegisterNamedReplacesWithoutDuplicateDispatch(t *testing.T) {
 	manager := coreusage.NewManager(0)
 	defer manager.Stop()

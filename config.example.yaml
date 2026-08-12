@@ -22,7 +22,7 @@ remote-management:
   # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
   secret-key: ""
 
-  # Disable the bundled management control panel asset download and HTTP route when true.
+  # Disable the disk-served management web app and the legacy panel download/routes when true.
   disable-control-panel: false
 
   # Disable automatic periodic background updates of the management panel from GitHub (default: false).
@@ -32,6 +32,11 @@ remote-management:
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
   panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 
+  # Directory containing the primary management web app. Relative paths are
+  # resolved from the directory containing this config file. Files are read on
+  # every request, so HTML/CSS/JS changes only require a browser refresh.
+  web-directory: "web/management"
+
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
@@ -40,6 +45,14 @@ api-keys:
   - "your-api-key-1"
   - "your-api-key-2"
   - "your-api-key-3"
+
+# Optional metadata keyed by the matching value in api-keys.
+# id is the stable usage/billing identity; alias is display-only.
+api-key-metadata:
+  "your-api-key-1":
+    id: "team-a"
+    alias: "Team A"
+    disabled: false
 
 # Enable debug logging
 debug: false
@@ -122,8 +135,28 @@ logs-max-total-size-mb: 0
 # When exceeded, the oldest error log files are deleted. Default is 10. Set to 0 to disable cleanup.
 error-logs-max-files: 10
 
-# When false, disable in-memory usage statistics aggregation
+# When false, disable collection of bounded persistent usage aggregates.
 usage-statistics-enabled: false
+
+# Number of UTC days retained by the bounded built-in usage aggregator.
+# Default: 90. Min: 1. Max: 3650.
+usage-statistics-retention-days: 90
+
+# Optional ordered rules for estimated usage cost. Rules use first-match semantics;
+# provider, model, and service-tier accept "*" wildcards. Prices are decimal strings
+# per one million tokens. Add rates that match your own provider contracts.
+usage-pricing:
+  currency: "USD"
+  version: "default"
+  rules: []
+#  rules:
+#    - provider: "example-provider"
+#      model: "example-model-*"
+#      service-tier: "*"
+#      input-per-million: "0.00"
+#      output-per-million: "0.00"
+#      cache-read-per-million: "0.00"
+#      cache-write-per-million: "0.00"
 
 # How long (in seconds) usage queue items are retained in memory for the Management API.
 # The local Redis RESP usage output is disabled.

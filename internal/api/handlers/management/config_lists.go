@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 )
 
 func parseCredentialWeightPatch(raw json.RawMessage) (*int, error) {
@@ -132,17 +134,160 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 }
 
 // api-keys
-func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
+func (h *Handler) GetAPIKeys(c *gin.Context) {
+	h.mu.Lock()
+	keys := append([]string(nil), h.cfg.APIKeys...)
+	profiles := apiKeyProfilesLocked(h.cfg)
+	h.mu.Unlock()
+	c.JSON(200, gin.H{"api-keys": keys, "api-key-profiles": profiles})
+}
 func (h *Handler) PutAPIKeys(c *gin.Context) {
-	h.putStringList(c, func(v []string) {
-		h.cfg.APIKeys = append([]string(nil), v...)
-	}, nil)
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var keys []string
+	if err = json.Unmarshal(data, &keys); err != nil {
+		var obj struct {
+			Items []string `json:"items"`
+		}
+		if errObject := json.Unmarshal(data, &obj); errObject != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		keys = obj.Items
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	metadata := cloneClientAPIKeyMetadata(h.cfg.APIKeyMetadata)
+	if len(keys) == len(h.cfg.APIKeys) {
+		migrateReplacedClientAPIKeyMetadata(metadata, h.cfg.APIKeys, keys)
+	}
+	pruneClientAPIKeyMetadata(keys, metadata)
+	if err = validateClientAPIKeyMetadata(keys, metadata); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	h.cfg.APIKeys = append([]string(nil), keys...)
+	h.cfg.APIKeyMetadata = metadata
+	h.persistLocked(c)
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	var body struct {
+		Old              *string `json:"old"`
+		New              *string `json:"new"`
+		Index            *int    `json:"index"`
+		ExpectedID       *string `json:"expected_id"`
+		ExpectedRevision *string `json:"expected_key_revision"`
+		Value            *string `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	keys := append([]string(nil), h.cfg.APIKeys...)
+	metadata := cloneClientAPIKeyMetadata(h.cfg.APIKeyMetadata)
+	changed := false
+	if body.Index != nil && body.Value != nil && *body.Index >= 0 && *body.Index < len(keys) {
+		oldKey := keys[*body.Index]
+		metadataKey := clientAPIKeyMetadataKey(oldKey)
+		if body.ExpectedID != nil && strings.TrimSpace(*body.ExpectedID) != resolvedClientAPIKeyID(metadataKey, metadata[metadataKey]) {
+			c.JSON(http.StatusConflict, gin.H{"error": "API key changed; refresh and retry"})
+			return
+		}
+		if body.ExpectedRevision != nil && strings.TrimSpace(*body.ExpectedRevision) != sdkaccess.FallbackClientKeyID(metadataKey) {
+			c.JSON(http.StatusConflict, gin.H{"error": "API key changed; refresh and retry"})
+			return
+		}
+		keys[*body.Index] = *body.Value
+		migrateClientAPIKeyMetadata(metadata, oldKey, *body.Value, keys)
+		changed = true
+	} else if body.New != nil {
+		if body.Old != nil {
+			for i := range keys {
+				if keys[i] == *body.Old {
+					oldKey := keys[i]
+					keys[i] = *body.New
+					migrateClientAPIKeyMetadata(metadata, oldKey, *body.New, keys)
+					changed = true
+					break
+				}
+			}
+			if !changed {
+				c.JSON(http.StatusConflict, gin.H{"error": "API key changed; refresh and retry"})
+				return
+			}
+		}
+		if !changed && body.Old == nil {
+			keys = append(keys, *body.New)
+			changed = true
+		}
+	}
+	if !changed {
+		c.JSON(400, gin.H{"error": "missing fields"})
+		return
+	}
+	pruneClientAPIKeyMetadata(keys, metadata)
+	if err := validateClientAPIKeyMetadata(keys, metadata); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	h.cfg.APIKeys = keys
+	h.cfg.APIKeyMetadata = metadata
+	h.persistLocked(c)
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	keys := append([]string(nil), h.cfg.APIKeys...)
+
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(keys) {
+			if expectedID := strings.TrimSpace(c.Query("expected_id")); expectedID != "" {
+				metadataKey := clientAPIKeyMetadataKey(keys[idx])
+				if expectedID != resolvedClientAPIKeyID(metadataKey, h.cfg.APIKeyMetadata[metadataKey]) {
+					c.JSON(http.StatusConflict, gin.H{"error": "API key changed; refresh and retry"})
+					return
+				}
+			}
+			if expectedRevision := strings.TrimSpace(c.Query("expected_key_revision")); expectedRevision != "" {
+				metadataKey := clientAPIKeyMetadataKey(keys[idx])
+				if expectedRevision != sdkaccess.FallbackClientKeyID(metadataKey) {
+					c.JSON(http.StatusConflict, gin.H{"error": "API key changed; refresh and retry"})
+					return
+				}
+			}
+			keys = append(keys[:idx], keys[idx+1:]...)
+			metadata := cloneClientAPIKeyMetadata(h.cfg.APIKeyMetadata)
+			pruneClientAPIKeyMetadata(keys, metadata)
+			h.cfg.APIKeys = keys
+			h.cfg.APIKeyMetadata = metadata
+			h.persistLocked(c)
+			return
+		}
+	}
+	if val := strings.TrimSpace(c.Query("value")); val != "" {
+		out := make([]string, 0, len(keys))
+		for _, key := range keys {
+			if strings.TrimSpace(key) != val {
+				out = append(out, key)
+			}
+		}
+		metadata := cloneClientAPIKeyMetadata(h.cfg.APIKeyMetadata)
+		pruneClientAPIKeyMetadata(out, metadata)
+		h.cfg.APIKeys = out
+		h.cfg.APIKeyMetadata = metadata
+		h.persistLocked(c)
+		return
+	}
+	c.JSON(400, gin.H{"error": "missing index or value"})
 }
 
 // gemini-api-key: []GeminiKey

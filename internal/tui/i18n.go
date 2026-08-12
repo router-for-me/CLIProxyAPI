@@ -62,6 +62,24 @@ func TabNames() []string {
 }
 
 var zhStrings = map[string]string{
+	"keys_profile_help":         " · [n] 编辑别名 · [t] 启用/停用",
+	"alias_label":               "别名",
+	"id_label":                  "ID",
+	"key_active":                "已启用",
+	"key_disabled_state":        "已停用",
+	"edit_alias_prompt":         "  编辑别名: ",
+	"alias_updated":             "别名已更新",
+	"key_enabled":               "API Key 已启用",
+	"key_disabled":              "API Key 已停用",
+	"usage_attempts":            "上游尝试",
+	"usage_estimated_cost":      "预估费用",
+	"usage_unpriced":            "未定价尝试/Token",
+	"usage_collection_disabled": "使用量统计未开启",
+	"usage_persistence_warning": "使用量快照持久化异常；当前数据可能仅在内存中",
+	"key_ignored":               "已忽略",
+	"key_ignored_empty":         "已忽略：空 Key",
+	"key_ignored_duplicate":     "已忽略：重复 Key",
+
 	// ── Common ──
 	"loading":      "加载中...",
 	"refresh":      "刷新",
@@ -217,6 +235,24 @@ var zhStrings = map[string]string{
 }
 
 var enStrings = map[string]string{
+	"keys_profile_help":         " · [n] Edit alias · [t] Enable/Disable",
+	"alias_label":               "Alias",
+	"id_label":                  "ID",
+	"key_active":                "enabled",
+	"key_disabled_state":        "disabled",
+	"edit_alias_prompt":         "  Edit Alias: ",
+	"alias_updated":             "Alias updated",
+	"key_enabled":               "API Key enabled",
+	"key_disabled":              "API Key disabled",
+	"usage_attempts":            "Upstream attempts",
+	"usage_estimated_cost":      "Estimated cost",
+	"usage_unpriced":            "Unpriced attempts/tokens",
+	"usage_collection_disabled": "Usage collection is disabled",
+	"usage_persistence_warning": "Usage snapshot persistence failed; current data may be memory-only",
+	"key_ignored":               "ignored",
+	"key_ignored_empty":         "ignored: empty key",
+	"key_ignored_duplicate":     "ignored: duplicate key",
+
 	// ── Common ──
 	"loading":      "Loading...",
 	"refresh":      "Refresh",

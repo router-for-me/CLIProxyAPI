@@ -23,10 +23,12 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdkusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -1374,12 +1376,21 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 		t.Fatalf("missing key status = %d, want %d body=%s", missingKeyRR.Code, http.StatusUnauthorized, missingKeyRR.Body.String())
 	}
 
-	legacyReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage?count=2", nil)
-	legacyReq.Header.Set("Authorization", "Bearer test-management-key")
-	legacyRR := httptest.NewRecorder()
-	server.engine.ServeHTTP(legacyRR, legacyReq)
-	if legacyRR.Code != http.StatusNotFound {
-		t.Fatalf("legacy usage status = %d, want %d body=%s", legacyRR.Code, http.StatusNotFound, legacyRR.Body.String())
+	statsReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage", nil)
+	statsReq.Header.Set("Authorization", "Bearer test-management-key")
+	statsRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(statsRR, statsReq)
+	if statsRR.Code != http.StatusOK {
+		t.Fatalf("usage statistics status = %d, want %d body=%s", statsRR.Code, http.StatusOK, statsRR.Body.String())
+	}
+	var statsPayload struct {
+		Estimated bool `json:"estimated"`
+	}
+	if errUnmarshal := json.Unmarshal(statsRR.Body.Bytes(), &statsPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal usage statistics: %v body=%s", errUnmarshal, statsRR.Body.String())
+	}
+	if !statsPayload.Estimated {
+		t.Fatal("usage statistics estimated = false, want true")
 	}
 
 	authReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)
@@ -1411,6 +1422,168 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 
 	if remaining := redisqueue.PopOldest(1); len(remaining) != 0 {
 		t.Fatalf("remaining queue = %q, want empty", remaining)
+	}
+}
+
+func TestUsageManagerMiddlewareScopesRequestContext(t *testing.T) {
+	usageManager := sdkusage.NewManager(1)
+	observed := make(chan *sdkusage.Manager, 1)
+	server := newTestServerWithOptions(t,
+		WithUsageManager(usageManager),
+		WithMiddleware(func(c *gin.Context) {
+			observed <- sdkusage.ManagerFromContext(c.Request.Context())
+			c.Next()
+		}),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	select {
+	case got := <-observed:
+		if got != usageManager {
+			t.Fatalf("scoped usage manager = %p, want %p", got, usageManager)
+		}
+	default:
+		t.Fatal("usage manager middleware did not run")
+	}
+}
+
+func TestStaleRuntimeReloadCannotReenableImmediatelyDisabledKey(t *testing.T) {
+	server := newTestServer(t)
+	oldConfig := server.cfg.CloneForRuntime()
+	newConfig := server.cfg.CloneForRuntime()
+	newConfig.APIKeyMetadata = map[string]proxyconfig.ClientAPIKeyMetadata{
+		"test-key": {ID: "team-a", Disabled: true},
+	}
+
+	server.applyImmediateManagementConfig(newConfig, 1)
+	assertServerKeyRejected(t, server, "test-key")
+	server.UpdateClients(oldConfig)
+	assertServerKeyRejected(t, server, "test-key")
+	if metadata := server.cfg.APIKeyMetadata["test-key"]; !metadata.Disabled {
+		t.Fatal("stale reload replaced the server config snapshot")
+	}
+	if metadata := server.handlers.Cfg.APIKeyMetadata["test-key"]; !metadata.Disabled {
+		t.Fatal("stale reload replaced the API handler config snapshot")
+	}
+	// The watcher serially applies the just-saved version after any older
+	// callback. Accepting it must discard the deferred stale snapshot.
+	server.UpdateClients(newConfig)
+	server.completeManagementConfigReload(newConfig, 1)
+	assertServerKeyRejected(t, server, "test-key")
+}
+
+func TestPendingManagementReloadAppliesResolvedAuthDirectoryOnCompletion(t *testing.T) {
+	server := newTestServer(t)
+	newConfig := server.cfg.CloneForRuntime()
+	newConfig.AuthDir = ".relative-auth"
+	newConfig.APIKeyMetadata = map[string]proxyconfig.ClientAPIKeyMetadata{
+		"test-key": {ID: "team-a", Disabled: true},
+	}
+	server.applyImmediateManagementConfig(newConfig, 1)
+
+	watcherConfig := newConfig.CloneForRuntime()
+	watcherConfig.AuthDir = t.TempDir()
+	server.UpdateClients(watcherConfig)
+
+	if server.cfg.AuthDir != newConfig.AuthDir {
+		t.Fatalf("runtime auth dir changed before reload completion: %q", server.cfg.AuthDir)
+	}
+	assertServerKeyRejected(t, server, "test-key")
+	server.completeManagementConfigReload(newConfig, 1)
+	if server.cfg.AuthDir != watcherConfig.AuthDir {
+		t.Fatalf("runtime auth dir = %q, want %q", server.cfg.AuthDir, watcherConfig.AuthDir)
+	}
+}
+
+func TestNewerConfigDeferredDuringManagementReloadAppliesOnCompletion(t *testing.T) {
+	server := newTestServer(t)
+	managementConfig := server.cfg.CloneForRuntime()
+	managementConfig.APIKeyMetadata = map[string]proxyconfig.ClientAPIKeyMetadata{
+		"test-key": {ID: "team-a", Alias: "Management save"},
+	}
+	externalConfig := managementConfig.CloneForRuntime()
+	externalConfig.APIKeyMetadata["test-key"] = proxyconfig.ClientAPIKeyMetadata{
+		ID:       "team-a",
+		Alias:    "Newer file update",
+		Disabled: true,
+	}
+
+	server.applyImmediateManagementConfig(managementConfig, 1)
+	server.UpdateClients(externalConfig)
+	if server.cfg.APIKeyMetadata["test-key"].Disabled {
+		t.Fatal("mismatched config applied before management reload completed")
+	}
+
+	server.completeManagementConfigReload(managementConfig, 1)
+	assertServerKeyRejected(t, server, "test-key")
+	metadata := server.cfg.APIKeyMetadata["test-key"]
+	if !metadata.Disabled || metadata.Alias != "Newer file update" {
+		t.Fatalf("deferred config metadata = %#v, want newer disabled profile", metadata)
+	}
+}
+
+func assertServerKeyRejected(t *testing.T, server *Server, key string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	result, authErr := server.accessManager.Authenticate(context.Background(), req)
+	if authErr == nil || result != nil {
+		t.Fatalf("key %q authenticated after being disabled: result=%#v error=%v", key, result, authErr)
+	}
+}
+
+func TestManagementUsageExposesConfiguredCollector(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+	collector := internalusage.NewCollector(&proxyconfig.Config{
+		UsageStatisticsEnabled:       true,
+		UsageStatisticsRetentionDays: 90,
+	}, "")
+	collector.HandleUsage(t.Context(), sdkusage.Record{
+		Provider:       "openai",
+		Model:          "test-model",
+		ClientKeyID:    "team-a",
+		ClientKeyAlias: "Team A",
+		RequestedAt:    time.Now(),
+		Detail: sdkusage.Detail{
+			InputTokens:  10,
+			OutputTokens: 5,
+			TotalTokens:  15,
+		},
+	})
+
+	server := newTestServerWithOptions(t, WithUsageStatistics(collector))
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/usage?key_id=team-a", nil)
+	req.Header.Set("Authorization", "Bearer test-management-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	var payload struct {
+		Summary struct {
+			Attempts int64 `json:"attempts"`
+			Tokens   struct {
+				Total int64 `json:"total_tokens"`
+			} `json:"tokens"`
+		} `json:"summary"`
+		Keys []struct {
+			KeyID string `json:"key_id"`
+			Alias string `json:"alias"`
+		} `json:"keys"`
+	}
+	if errUnmarshal := json.Unmarshal(rr.Body.Bytes(), &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal usage response: %v body=%s", errUnmarshal, rr.Body.String())
+	}
+	if payload.Summary.Attempts != 1 || payload.Summary.Tokens.Total != 15 {
+		t.Fatalf("summary = %#v, want one attempt and 15 tokens", payload.Summary)
+	}
+	if len(payload.Keys) != 1 || payload.Keys[0].KeyID != "team-a" || payload.Keys[0].Alias != "Team A" {
+		t.Fatalf("keys = %#v, want Team A profile", payload.Keys)
 	}
 }
 
@@ -1536,6 +1709,62 @@ func TestHomeEnabledHidesManagementEndpointsAndControlPanel(t *testing.T) {
 			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusNotFound, rr.Body.String())
 		}
 	})
+
+	t.Run("usage dashboard and assets return 404", func(t *testing.T) {
+		for _, path := range []string{"/management/usage", "/management/usage/dashboard.js"} {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+			if rr.Code != http.StatusNotFound {
+				t.Fatalf("%s status = %d, want %d body=%s", path, rr.Code, http.StatusNotFound, rr.Body.String())
+			}
+		}
+	})
+
+}
+
+func TestManagementControlPanelRemainsAvailableAsLegacyPage(t *testing.T) {
+	tmpDir := t.TempDir()
+	panelPath := filepath.Join(tmpDir, "management.html")
+	original := []byte("<!doctype html><html><head><title>Panel</title></head><body><main>official panel</main></body></html>")
+	if errWrite := os.WriteFile(panelPath, original, 0o600); errWrite != nil {
+		t.Fatalf("write management panel: %v", errWrite)
+	}
+	t.Setenv("MANAGEMENT_STATIC_PATH", panelPath)
+
+	server := newTestServer(t)
+	for _, requestPath := range []string{"/management/", "/management/legacy"} {
+		req := httptest.NewRequest(http.MethodGet, requestPath, nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want %d body=%s", requestPath, rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if rr.Body.String() != string(original) {
+			t.Fatalf("%s body changed: %s", requestPath, rr.Body.String())
+		}
+		if link := rr.Header().Get("Link"); !strings.Contains(link, "/management.html") {
+			t.Fatalf("%s Link header = %q, want dashboard alternate", requestPath, link)
+		}
+	}
+	after, errRead := os.ReadFile(panelPath)
+	if errRead != nil {
+		t.Fatalf("read management panel after request: %v", errRead)
+	}
+	if string(after) != string(original) {
+		t.Fatal("management panel asset was modified on disk")
+	}
+}
+
+func TestUsageBillingSettingsAPIStillRequiresManagementAuthentication(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/usage-billing-settings", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	}
 }
 
 func TestExampleAPIKeySafeModeShowsWarningAndKeepsManagement(t *testing.T) {

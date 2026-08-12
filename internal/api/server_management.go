@@ -80,7 +80,19 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
+		mgmt.GET("/api-key-profiles", s.mgmt.GetAPIKeyProfiles)
+		mgmt.PUT("/api-key-profiles", s.mgmt.PutAPIKeyProfiles)
+		mgmt.PATCH("/api-key-profiles", s.mgmt.PatchAPIKeyProfile)
+		mgmt.DELETE("/api-key-profiles", s.mgmt.DeleteAPIKeyProfile)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
+		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.GET("/client-key-usage", s.mgmt.GetClientKeyUsage)
+		mgmt.POST("/client-key-usage/reset", s.mgmt.ResetClientKeyUsage)
+		mgmt.GET("/usage-billing-settings", s.mgmt.GetUsageBillingSettings)
+		mgmt.PUT("/usage-billing-settings", s.mgmt.PutUsageBillingSettings)
+		mgmt.PATCH("/usage-billing-settings", s.mgmt.PatchUsageBillingSettings)
+		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
+		mgmt.GET("/usage/export.csv", s.mgmt.ExportUsageCSV)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
@@ -308,5 +320,7 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
+	c.Header("Link", `</management.html>; rel="alternate"; title="Management dashboard"`)
+	c.Header("Cache-Control", "no-cache")
 	c.File(filePath)
 }

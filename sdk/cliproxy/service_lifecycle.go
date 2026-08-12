@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -68,6 +71,9 @@ func (s *Service) Run(ctx context.Context) error {
 		if errEnsureAuthDir := s.ensureAuthDir(); errEnsureAuthDir != nil {
 			return errEnsureAuthDir
 		}
+		if errUsage := s.startUsageStatistics(ctx); errUsage != nil {
+			log.WithError(errUsage).Warn("usage: aggregate persistence unavailable; continuing with in-memory collection")
+		}
 	}
 
 	s.applyRetryConfig(s.cfg)
@@ -115,8 +121,15 @@ func (s *Service) Run(ctx context.Context) error {
 		redisqueue.SetEnabled(true)
 	}
 
-	// handlers no longer depend on legacy clients; pass nil slice initially
-	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	// Handlers no longer depend on legacy clients; pass nil slice initially.
+	serverOptions := append([]api.ServerOption(nil), s.serverOptions...)
+	if s.usageStatistics != nil {
+		serverOptions = append(serverOptions, api.WithUsageStatistics(s.usageStatistics))
+	}
+	if s.usageManager != nil {
+		serverOptions = append(serverOptions, api.WithUsageManager(s.usageManager))
+	}
+	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, serverOptions...)
 	s.syncPluginRuntimeConfig(ctx)
 	if homeEnabled {
 		s.syncPluginModelRuntime(ctx)
@@ -327,6 +340,15 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 
+		if s.usageManager != nil {
+			if errStopUsage := s.usageManager.StopAndWait(ctx); errStopUsage != nil {
+				log.WithError(errStopUsage).Warn("usage: timed out while draining usage events")
+				if shutdownErr == nil {
+					shutdownErr = errStopUsage
+				}
+			}
+		}
+
 		if s.pluginHost != nil {
 			sdktranslator.SetPluginHooks(nil)
 			sdkAuth.RegisterPluginAuthParser(nil)
@@ -345,9 +367,44 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 
+		if s.usageStatistics != nil {
+			if errCloseUsage := s.usageStatistics.Close(ctx); errCloseUsage != nil {
+				log.WithError(errCloseUsage).Warn("usage: failed to persist final aggregate snapshot")
+				if shutdownErr == nil {
+					shutdownErr = errCloseUsage
+				}
+			}
+		}
+
 		usage.StopDefault()
 	})
 	return shutdownErr
+}
+
+func (s *Service) startUsageStatistics(ctx context.Context) error {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	if s.usageStatistics == nil {
+		authDir, errAuthDir := util.ResolveAuthDir(s.cfg.AuthDir)
+		if errAuthDir != nil {
+			return fmt.Errorf("cliproxy: resolve usage storage directory: %w", errAuthDir)
+		}
+		storagePath := filepath.Join(authDir, ".usage", "usage-statistics.snapshot")
+		s.usageStatistics = internalusage.NewCollector(s.cfg, storagePath)
+	}
+	if s.usageManager == nil {
+		s.usageManager = usage.NewManager(1)
+	}
+	s.usageManager.RegisterCriticalNamed("builtin-client-key-usage", s.usageStatistics)
+	s.usageManager.Start(ctx)
+	if errStart := s.usageStatistics.Start(ctx); errStart != nil {
+		return errStart
+	}
+	if errFlush := s.usageStatistics.Flush(ctx); errFlush != nil {
+		log.WithError(errFlush).Warn("usage: failed to persist startup aggregate snapshot")
+	}
+	return nil
 }
 
 func (s *Service) ensureAuthDir() error {

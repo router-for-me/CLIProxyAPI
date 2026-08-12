@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -35,8 +36,10 @@ func claudeOAuthRequestCancellation(ctx context.Context, auth *Auth, err error) 
 
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
-func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	req, opts = cliproxysession.Enrich(req, opts)
+	ctx = beginUsageRequest(ctx, req, opts)
+	defer func() { coreusage.FinalizeRequest(ctx, err != nil, usageFailureFromError(err)) }()
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -80,8 +83,10 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 }
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
-func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	req, opts = cliproxysession.Enrich(req, opts)
+	ctx = beginUsageRequest(ctx, req, opts)
+	defer func() { coreusage.FinalizeRequest(ctx, err != nil, usageFailureFromError(err)) }()
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -121,6 +126,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	req, opts = cliproxysession.Enrich(req, opts)
+	ctx = beginUsageRequest(ctx, req, opts)
 	if m.HomeEnabled() {
 		if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
 			defer unlockSession()
@@ -128,7 +134,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	}
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
-		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+		errNoProvider := &Error{Code: "provider_not_found", Message: "no provider supplied"}
+		coreusage.FinalizeRequest(ctx, true, usageFailureFromError(errNoProvider))
+		return nil, errNoProvider
 	}
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
@@ -138,9 +146,10 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errStream == nil {
-			return result, nil
+			return wrapUsageFinalizedStream(ctx, result), nil
 		}
 		if isRequestTerminatedError(errStream) {
+			coreusage.FinalizeRequest(ctx, true, usageFailureFromError(errStream))
 			return nil, errStream
 		}
 		lastErr = errStream
@@ -149,24 +158,148 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			break
 		}
 		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
+			coreusage.FinalizeRequest(ctx, true, usageFailureFromError(errWait))
 			return nil, errWait
 		}
 	}
 	if lastErr != nil {
 		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if result, ok, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); errCredits != nil {
+				coreusage.FinalizeRequest(ctx, true, usageFailureFromError(errCredits))
 				return nil, errCredits
 			} else if ok {
-				return result, nil
+				return wrapUsageFinalizedStream(ctx, result), nil
 			}
 		}
 		var bootstrapErr *streamBootstrapError
 		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
-			return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
+			return wrapUsageFinalizedStream(ctx, streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause)), nil
 		}
+		coreusage.FinalizeRequest(ctx, true, usageFailureFromError(lastErr))
 		return nil, lastErr
 	}
-	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	errNoAuth := &Error{Code: "auth_not_found", Message: "no auth available"}
+	coreusage.FinalizeRequest(ctx, true, usageFailureFromError(errNoAuth))
+	return nil, errNoAuth
+}
+
+func beginUsageRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) context.Context {
+	ctx = contextWithRequestedModelAlias(ctx, opts, req.Model)
+	clientKeyID, clientKeyAlias := coreusage.ClientKeyMetadataFromContext(ctx)
+	return coreusage.BeginRequest(ctx, coreusage.Record{
+		Model:           req.Model,
+		Alias:           coreusage.RequestedModelAliasFromContext(ctx),
+		ClientKeyID:     clientKeyID,
+		ClientKeyAlias:  clientKeyAlias,
+		ReasoningEffort: coreusage.ReasoningEffortFromContext(ctx),
+		RequestedAt:     time.Now(),
+		ServiceTier:     coreusage.ServiceTierFromContext(ctx),
+	})
+}
+
+func usageFailureFromError(err error) coreusage.Failure {
+	if err == nil {
+		return coreusage.Failure{}
+	}
+	failure := coreusage.Failure{Body: strings.TrimSpace(err.Error())}
+	var statusErr interface{ StatusCode() int }
+	if errors.As(err, &statusErr) && statusErr != nil {
+		failure.StatusCode = statusErr.StatusCode()
+	}
+	return failure
+}
+
+func wrapUsageFinalizedStream(ctx context.Context, result *cliproxyexecutor.StreamResult) *cliproxyexecutor.StreamResult {
+	if result == nil {
+		coreusage.FinalizeRequest(ctx, true, coreusage.Failure{Body: "nil stream result"})
+		return nil
+	}
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		chunks := result.Chunks
+		if chunks == nil {
+			coreusage.FinalizeRequest(ctx, true, coreusage.Failure{Body: "upstream stream has no chunks"})
+			return
+		}
+		for {
+			var (
+				chunk cliproxyexecutor.StreamChunk
+				ok    bool
+			)
+			if ctx == nil {
+				chunk, ok = <-chunks
+			} else {
+				if ctx.Err() != nil {
+					coreusage.FinalizeRequest(ctx, true, usageFailureFromError(ctx.Err()))
+					for range chunks {
+					}
+					return
+				}
+				select {
+				case <-ctx.Done():
+					coreusage.FinalizeRequest(ctx, true, usageFailureFromError(ctx.Err()))
+					for range chunks {
+					}
+					return
+				case chunk, ok = <-chunks:
+				}
+			}
+			if !ok {
+				canceled := ctx != nil && ctx.Err() != nil
+				if canceled {
+					coreusage.FinalizeRequest(ctx, true, usageFailureFromError(ctx.Err()))
+				} else {
+					coreusage.FinalizeRequest(ctx, false, coreusage.Failure{})
+				}
+				return
+			}
+			if chunk.Err != nil {
+				coreusage.FinalizeRequest(ctx, true, usageFailureFromError(chunk.Err))
+				if ctx == nil {
+					out <- chunk
+					for range chunks {
+					}
+					return
+				}
+				select {
+				case <-ctx.Done():
+					for range chunks {
+					}
+					return
+				case out <- chunk:
+				}
+				// Preserve upstream stream lifecycle semantics: after forwarding the
+				// first error, consume but do not expose trailing chunks until the
+				// source closes. This lets credential/session release hooks finish.
+				for {
+					select {
+					case <-ctx.Done():
+						for range chunks {
+						}
+						return
+					case _, open := <-chunks:
+						if !open {
+							return
+						}
+					}
+				}
+			}
+			if ctx == nil {
+				out <- chunk
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				coreusage.FinalizeRequest(ctx, true, usageFailureFromError(ctx.Err()))
+				for range chunks {
+				}
+				return
+			case out <- chunk:
+			}
+		}
+	}()
+	return &cliproxyexecutor.StreamResult{Headers: result.Headers, Chunks: out}
 }
 
 type requestToFormatResolver interface {
