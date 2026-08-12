@@ -143,6 +143,9 @@ type UsageStore struct {
 	// sealer encrypts api_key_principal at rest. nil when no passphrase was
 	// configured (writes stay plaintext; reads tolerate plaintext rows).
 	sealer *Sealer
+	// cache short-TTL read-through store for aggregate usage reads. nil disables
+	// caching. Never nil for stores built via NewUsageStore.
+	cache *usageCache
 }
 
 // NewUsageStore builds a UsageStore from a PostgresStore connection. Returns
@@ -169,6 +172,7 @@ func NewUsageStore(parent *PostgresStore) *UsageStore {
 		internalUsersTable: parent.InternalUsersTable(),
 		modelsCatalogTable: parent.ModelsTable(),
 		sealer:             sealer,
+		cache:              newUsageCache(),
 	}
 }
 
@@ -518,6 +522,22 @@ func (s *UsageStore) ListWindows(ctx context.Context, apiKeyID string, limit int
 // contain many keys). The raw api_key_principal is sealed at rest and never
 // projected; operators should resolve the human label via api_keys.key_alias.
 func (s *UsageStore) SelectAggregate(ctx context.Context, filter UsageFilter) ([]UsageAggregate, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	// Request-scoped reads are unique one-row lookups: bypass the cache.
+	// RequestID is how the LiteLLM compat handlers drill into a single event.
+	if s.cache == nil || UsageFilterIncludeRequestID(filter) {
+		return s.selectAggregateMiss(ctx, filter)
+	}
+	return s.cache.getAggregate(ctx, filter, func() ([]UsageAggregate, error) {
+		return s.selectAggregateMiss(ctx, filter)
+	})
+}
+
+// selectAggregateMiss is the uncached SQL+scan path shared by SelectAggregate.
+// It is the loader for the aggregate cache.
+func (s *UsageStore) selectAggregateMiss(ctx context.Context, filter UsageFilter) ([]UsageAggregate, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store: usage store not initialized")
 	}
@@ -1036,6 +1056,18 @@ func (s *UsageStore) SelectTotals(ctx context.Context, filter UsageFilter) (Usag
 	if s == nil || s.db == nil {
 		return UsageAggregate{}, fmt.Errorf("postgres store: usage store not initialized")
 	}
+	// Request-scoped reads are unique one-row lookups: bypass the cache.
+	if s.cache == nil || UsageFilterIncludeRequestID(filter) {
+		return s.selectTotalsMiss(ctx, filter)
+	}
+	return s.cache.getTotals(ctx, filter, func() (UsageAggregate, error) {
+		return s.selectTotalsMiss(ctx, filter)
+	})
+}
+
+// selectTotalsMiss is the uncached SQL+scan path shared by SelectTotals. It is
+// the loader for the totals cache.
+func (s *UsageStore) selectTotalsMiss(ctx context.Context, filter UsageFilter) (UsageAggregate, error) {
 	var b strings.Builder
 	b.WriteString(`SELECT 'total', NULL::text,
 		COUNT(*),
