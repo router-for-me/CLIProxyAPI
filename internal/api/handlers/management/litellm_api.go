@@ -655,7 +655,6 @@ func (h *Handler) DeleteLiteLLMKeyCompat(c *gin.Context) {
 type liteLLMCompatSpendLogResponse struct {
 	RequestID        string  `json:"request_id,omitempty"`
 	APIKey           string  `json:"api_key,omitempty"`
-	User             string  `json:"user,omitempty"`
 	Model            string  `json:"model,omitempty"`
 	Spend            float64 `json:"spend"`
 	TotalTokens      int64   `json:"total_tokens"`

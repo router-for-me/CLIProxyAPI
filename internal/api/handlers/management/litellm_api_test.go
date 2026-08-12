@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -697,6 +698,24 @@ func TestListLiteLLMSpendLogsCompat(t *testing.T) {
 	}
 	if len(resp2.Data) != 0 || resp2.Total != 0 {
 		t.Fatalf("other-user rows = %d (total %d); want 0", len(resp2.Data), resp2.Total)
+	}
+
+	// An end_date before the seeded event's requested_at narrows results to 0,
+	// proving the start_date/end_date parsing actually filters.
+	earlier := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339)
+	rec3 := httptest.NewRecorder()
+	c3, _ := gin.CreateTestContext(rec3)
+	c3.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/spend/logs?user_id=team-a&end_date="+url.QueryEscape(earlier), nil)
+	h.ListLiteLLMSpendLogsCompat(c3)
+	var resp3 struct {
+		Data  []map[string]any `json:"data"`
+		Total int64            `json:"total"`
+	}
+	if err := json.Unmarshal(rec3.Body.Bytes(), &resp3); err != nil {
+		t.Fatalf("unmarshal resp3: %v", err)
+	}
+	if len(resp3.Data) != 0 || resp3.Total != 0 {
+		t.Fatalf("end_date-narrowed rows = %d (total %d); want 0", len(resp3.Data), resp3.Total)
 	}
 }
 
