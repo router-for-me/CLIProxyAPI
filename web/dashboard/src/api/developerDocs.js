@@ -166,6 +166,235 @@ export const sections = [
   },
 
   // =========================================================================
+  // 1.5 LiteLLM Compat API
+  // =========================================================================
+  {
+    id: 'litellm-compat',
+    title: 'LiteLLM Compat API',
+    description:
+      'A wire-compatible LiteLLM admin surface mounted at /litellm under the management base. ' +
+      'These routes are RUNTIME-BACKED: users and keys created here land in the same ' +
+      'internal_users / api_keys tables that serve real inference traffic, so a key minted via ' +
+      'POST /litellm/key/generate works immediately against /v1/chat/completions with full ' +
+      'budget/RPM/model enforcement. Payloads mirror LiteLLM\'s OpenAPI field names (snake_case, ' +
+      'omitempty on optionals, secret returned once on generate/regenerate, never on read). ' +
+      'A LiteLLM client can integrate by pointing its base URL at {NIXLLM}/v0/management. ' +
+      'All routes return 503 when the PG store is not configured.',
+    endpoints: [
+      {
+        method: 'POST', path: '/litellm/user/new', summary: 'Create an internal user (runtime-backed). Returns the user with LiteLLM field names.',
+        params: [
+          { name: 'user_id', in: 'body', type: 'string', required: false, default: '', description: 'Optional explicit id; server generates a UUID when omitted.' },
+          { name: 'user_alias', in: 'body', type: 'string', required: false, default: '', description: 'Human label.' },
+          { name: 'user_email', in: 'body', type: 'string', required: false, default: '', description: 'Unique email.' },
+          { name: 'user_role', in: 'body', type: 'string', required: false, default: 'internal_user', description: 'internal_user | proxy_admin | proxy_admin_viewer.' },
+          { name: 'models', in: 'body', type: 'string[]', required: false, default: '[]', description: 'Allowed model ids.' },
+          { name: 'metadata', in: 'body', type: 'object', required: false, default: '{}', description: 'Arbitrary JSON metadata.' },
+          { name: 'max_budget', in: 'body', type: 'number', required: false, default: 'null', description: 'Spend cap in USD.' },
+          { name: 'budget_duration', in: 'body', type: 'string', required: false, default: '', description: 'monthly | weekly | daily reset window.' },
+          { name: 'rpm_limit', in: 'body', type: 'integer', required: false, default: 'null', description: 'Requests per minute.' },
+          { name: 'tpm_limit', in: 'body', type: 'integer', required: false, default: 'null', description: 'Tokens per minute.' },
+          { name: 'max_parallel_requests', in: 'body', type: 'integer', required: false, default: 'null', description: 'In-flight cap.' },
+        ],
+        examplePayload: `{\n  "user_alias": "alice",\n  "user_email": "alice@example.com",\n  "user_role": "internal_user",\n  "max_budget": 50.0,\n  "budget_duration": "monthly",\n  "rpm_limit": 60,\n  "tpm_limit": 100000\n}`,
+        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/litellm/user/new" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"user_alias":"alice","user_email":"alice@example.com","max_budget":50.0,"rpm_limit":60}'`,
+        responses: [
+          { status: 201, label: 'Created', body: `{"user_id":"u-abc123","user_alias":"alice","user_email":"alice@example.com","user_role":"internal_user","models":["gpt-4o"],"max_budget":50.0,"spend":0,"created_at":"2026-07-01T10:00:00Z","updated_at":"2026-07-01T10:00:00Z"}` },
+          { status: 400, label: 'Invalid request', body: `{"error":{"type":"invalid_request","message":"invalid character 'x' looking for beginning of object key string"}}` },
+          { status: 503, label: 'PG store not configured', body: `{"error":{"type":"pg_store_not_configured","message":"PostgreSQL store is not configured. Set PGSTORE_DSN to enable this route."}}` },
+        ],
+      },
+      {
+        method: 'GET', path: '/litellm/user/list', summary: 'List internal users (paginated, filterable, sortable).',
+        params: [
+          { name: 'page', in: 'query', type: 'integer', required: false, default: '1', description: 'Page.' },
+          { name: 'page_size', in: 'query', type: 'integer', required: false, default: '25', description: 'Rows per page (max 200).' },
+          { name: 'role', in: 'query', type: 'string', required: false, default: '', description: 'Filter by role.' },
+          { name: 'search', in: 'query', type: 'string', required: false, default: '', description: 'Case-insensitive substring on alias OR email.' },
+          { name: 'sort_by', in: 'query', type: 'string', required: false, default: 'spend', description: 'spend | created_at | user_alias.' },
+          { name: 'sort_order', in: 'query', type: 'string', required: false, default: 'desc', description: 'asc | desc.' },
+        ],
+        examplePayload: null,
+        exampleCurl: `curl -s "${'{API_BASE}'}/litellm/user/list?page=1&sort_by=spend" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"users":[{"user_id":"u-abc123","user_alias":"alice","user_role":"internal_user","spend":3.42,"created_at":"2026-07-01T10:00:00Z","updated_at":"2026-07-22T08:30:00Z"}],"page":1,"page_size":25,"total":1}` },
+        ],
+      },
+      {
+        method: 'GET', path: '/litellm/user/info', summary: 'Get a single internal user by user_id (query param).',
+        params: [{ name: 'user_id', in: 'query', type: 'string', required: true, default: '', description: 'User id.' }],
+        examplePayload: null,
+        exampleCurl: `curl -s "${'{API_BASE}'}/litellm/user/info?user_id=u-abc123" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"user_id":"u-abc123","user_alias":"alice","user_email":"alice@example.com","user_role":"internal_user","spend":3.42,"created_at":"2026-07-01T10:00:00Z","updated_at":"2026-07-22T08:30:00Z"}` },
+          { status: 404, label: 'Not found', body: `{"error":{"type":"not_found","message":"user not found"}}` },
+          { status: 400, label: 'Missing user_id', body: `{"error":{"type":"invalid_request","message":"user_id is required"}}` },
+        ],
+      },
+      {
+        method: 'POST', path: '/litellm/user/update', summary: 'Partial update of an internal user. user_id may come from the JSON body or the query param.',
+        params: [
+          { name: 'user_id', in: 'body', type: 'string', required: true, default: '', description: 'User id (required; body preferred, query fallback).' },
+          { name: 'user_alias', in: 'body', type: 'string', required: false, default: '', description: '' },
+          { name: 'user_email', in: 'body', type: 'string', required: false, default: '', description: '' },
+          { name: 'user_role', in: 'body', type: 'string', required: false, default: '', description: '' },
+          { name: 'models', in: 'body', type: 'string[]', required: false, default: '', description: '' },
+          { name: 'max_budget', in: 'body', type: 'number', required: false, default: 'null', description: '' },
+          { name: 'budget_duration', in: 'body', type: 'string', required: false, default: '', description: '' },
+          { name: 'rpm_limit', in: 'body', type: 'integer', required: false, default: 'null', description: '' },
+          { name: 'tpm_limit', in: 'body', type: 'integer', required: false, default: 'null', description: '' },
+          { name: 'max_parallel_requests', in: 'body', type: 'integer', required: false, default: 'null', description: '' },
+        ],
+        examplePayload: `{"user_id":"u-abc123","max_budget":75.0,"rpm_limit":120}`,
+        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/litellm/user/update" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"user_id":"u-abc123","max_budget":75.0,"rpm_limit":120}'`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"user_id":"u-abc123","max_budget":75.0,"rpm_limit":120,"spend":3.42,"created_at":"2026-07-01T10:00:00Z","updated_at":"2026-07-22T08:31:00Z"}` },
+          { status: 404, label: 'Not found', body: `{"error":{"type":"not_found","message":"user not found"}}` },
+          { status: 400, label: 'Missing user_id', body: `{"error":{"type":"invalid_request","message":"user_id is required"}}` },
+        ],
+      },
+      {
+        method: 'POST', path: '/litellm/user/delete', summary: 'Delete an internal user. user_id may come from the JSON body or the query param.',
+        params: [{ name: 'user_id', in: 'body', type: 'string', required: true, default: '', description: 'User id (body preferred, query fallback).' }],
+        examplePayload: `{"user_id":"u-abc123"}`,
+        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/litellm/user/delete" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"user_id":"u-abc123"}'`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"id":"u-abc123","deleted":true}` },
+          { status: 404, label: 'Not found', body: `{"error":{"type":"not_found","message":"user not found"}}` },
+        ],
+      },
+      {
+        method: 'POST', path: '/litellm/key/generate', summary: 'Create a runtime API key owned by an internal user. The plaintext secret is returned ONCE. The key works immediately for real inference traffic.',
+        params: [
+          { name: 'user_id', in: 'body', type: 'string', required: true, default: '', description: 'Owning internal user id (must exist).' },
+          { name: 'models', in: 'body', type: 'string[]', required: false, default: '[]', description: 'Allowed model ids.' },
+          { name: 'metadata', in: 'body', type: 'object', required: false, default: '{}', description: 'Arbitrary JSON metadata.' },
+          { name: 'max_budget', in: 'body', type: 'number', required: false, default: 'null', description: 'Monthly USD cap.' },
+          { name: 'budget_duration', in: 'body', type: 'string', required: false, default: '', description: 'NOT SUPPORTED — sending it returns 400.' },
+          { name: 'alias', in: 'body', type: 'string', required: false, default: '', description: 'Non-secret alias.' },
+          { name: 'name', in: 'body', type: 'string', required: false, default: 'unnamed', description: 'Human label.' },
+        ],
+        examplePayload: `{\n  "user_id": "u-abc123",\n  "models": ["gpt-4o"],\n  "max_budget": 5.0,\n  "alias": "prod-app"\n}`,
+        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/litellm/key/generate" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"user_id":"u-abc123","models":["gpt-4o"],"alias":"prod-app"}'`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"key":"k-def1","user_id":"u-abc123","secret":"sk-xxxxxxxxxxxxxxxx","key_alias":"prod-app","models":["gpt-4o"],"max_budget":5.0,"spend":0,"created_at":"2026-07-01T10:00:00Z","updated_at":"2026-07-01T10:00:00Z"}` },
+          { status: 400, label: 'Missing user_id', body: `{"error":{"type":"invalid_request","message":"user_id is required"}}` },
+          { status: 400, label: 'Unsupported field', body: `{"error":{"type":"invalid_request","message":"tpm_limit / budget_duration are not supported on key generate"}}` },
+          { status: 404, label: 'Owner not found', body: `{"error":{"type":"not_found","message":"user not found"}}` },
+        ],
+      },
+      {
+        method: 'GET', path: '/litellm/key/list', summary: 'List runtime API keys (paginated, filterable). The secret is never included.',
+        params: [
+          { name: 'user_id', in: 'query', type: 'string', required: false, default: '', description: 'Filter to keys owned by this internal user.' },
+          { name: 'status', in: 'query', type: 'string', required: false, default: '', description: 'active | disabled | revoked | expired.' },
+          { name: 'search', in: 'query', type: 'string', required: false, default: '', description: 'Substring on name / alias / prefix.' },
+          { name: 'sort_by', in: 'query', type: 'string', required: false, default: 'created_at', description: 'created_at | name | last_used_at.' },
+          { name: 'sort_order', in: 'query', type: 'string', required: false, default: 'desc', description: 'asc | desc.' },
+          { name: 'page', in: 'query', type: 'integer', required: false, default: '1', description: 'Page.' },
+          { name: 'page_size', in: 'query', type: 'integer', required: false, default: '25', description: 'Rows per page (max 200).' },
+        ],
+        examplePayload: null,
+        exampleCurl: `curl -s "${'{API_BASE}'}/litellm/key/list?user_id=u-abc123&status=active" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"api_keys":[{"key":"k-def1","user_id":"u-abc123","key_alias":"prod-app","spend":0,"created_at":"2026-07-01T10:00:00Z","updated_at":"2026-07-01T10:00:00Z"}],"page":1,"page_size":25,"total":1}` },
+        ],
+      },
+      {
+        method: 'GET', path: '/litellm/key/info', summary: 'Get a single runtime API key by key id (query param). The secret is never included.',
+        params: [{ name: 'key', in: 'query', type: 'string', required: true, default: '', description: 'Key id.' }],
+        examplePayload: null,
+        exampleCurl: `curl -s "${'{API_BASE}'}/litellm/key/info?key=k-def1" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"key":"k-def1","user_id":"u-abc123","key_alias":"prod-app","models":["gpt-4o"],"spend":0,"created_at":"2026-07-01T10:00:00Z","updated_at":"2026-07-01T10:00:00Z"}` },
+          { status: 404, label: 'Not found', body: `{"error":{"type":"not_found","message":"key not found"}}` },
+          { status: 400, label: 'Missing key', body: `{"error":{"type":"invalid_request","message":"key is required"}}` },
+        ],
+      },
+      {
+        method: 'POST', path: '/litellm/key/update', summary: 'Partial update of a runtime API key (name, alias, status, metadata).',
+        params: [
+          { name: 'key', in: 'body', type: 'string', required: true, default: '', description: 'Key id.' },
+          { name: 'name', in: 'body', type: 'string', required: false, default: '', description: '' },
+          { name: 'alias', in: 'body', type: 'string', required: false, default: '', description: '' },
+          { name: 'status', in: 'body', type: 'string', required: false, default: '', description: 'active | disabled | revoked.' },
+          { name: 'metadata', in: 'body', type: 'object', required: false, default: '', description: '' },
+        ],
+        examplePayload: `{"key":"k-def1","status":"disabled"}`,
+        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/litellm/key/update" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"key":"k-def1","status":"disabled"}'`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"key":"k-def1","user_id":"u-abc123","key_alias":"prod-app","status":"disabled","spend":0,"created_at":"2026-07-01T10:00:00Z","updated_at":"2026-07-01T11:00:00Z"}` },
+          { status: 404, label: 'Not found', body: `{"error":{"type":"not_found","message":"key not found"}}` },
+          { status: 400, label: 'Missing key', body: `{"error":{"type":"invalid_request","message":"key is required"}}` },
+        ],
+      },
+      {
+        method: 'POST', path: '/litellm/key/regenerate', summary: 'Rotate a key\'s secret. Returns the new secret ONCE; the old secret stops working immediately.',
+        params: [{ name: 'key', in: 'body', type: 'string', required: true, default: '', description: 'Key id.' }],
+        examplePayload: `{"key":"k-def1"}`,
+        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/litellm/key/regenerate" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"key":"k-def1"}'`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"key":"k-def1","secret":"sk-xxxxxxxxxxxxxxxx"}` },
+          { status: 404, label: 'Not found', body: `{"error":{"type":"not_found","message":"key not found"}}` },
+          { status: 400, label: 'Missing key', body: `{"error":{"type":"invalid_request","message":"key is required"}}` },
+        ],
+      },
+      {
+        method: 'POST', path: '/litellm/key/delete', summary: 'Permanently delete a runtime API key.',
+        params: [{ name: 'key', in: 'body', type: 'string', required: true, default: '', description: 'Key id.' }],
+        examplePayload: `{"key":"k-def1"}`,
+        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/litellm/key/delete" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"key":"k-def1"}'`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"key":"k-def1","deleted":true}` },
+          { status: 404, label: 'Not found', body: `{"error":{"type":"not_found","message":"key not found"}}` },
+          { status: 400, label: 'Missing key', body: `{"error":{"type":"invalid_request","message":"key is required"}}` },
+        ],
+      },
+      {
+        method: 'GET', path: '/litellm/spend/logs', summary: 'Paginated spend-log events (filter by user, key, model, date range).',
+        params: [
+          { name: 'user_id', in: 'query', type: 'string', required: false, default: '', description: 'Filter to this internal user id.' },
+          { name: 'api_key', in: 'query', type: 'string', required: false, default: '', description: 'Filter to this API key id.' },
+          { name: 'model', in: 'query', type: 'string', required: false, default: '', description: 'Filter by model id.' },
+          { name: 'start_date', in: 'query', type: 'string', required: false, default: '', description: 'RFC3339 lower bound.' },
+          { name: 'end_date', in: 'query', type: 'string', required: false, default: '', description: 'RFC3339 upper bound.' },
+          { name: 'page', in: 'query', type: 'integer', required: false, default: '1', description: 'Page.' },
+          { name: 'page_size', in: 'query', type: 'integer', required: false, default: '25', description: 'Rows per page (max 200).' },
+        ],
+        examplePayload: null,
+        exampleCurl: `curl -s "${'{API_BASE}'}/litellm/spend/logs?user_id=u-abc123&start_date=2026-07-01T00:00:00Z" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"data":[{"request_id":"req-1","api_key":"prod-app","model":"gpt-4o","spend":1.25,"total_tokens":150,"prompt_tokens":100,"completion_tokens":50,"startTime":"2026-07-01T10:00:00Z","endTime":"2026-07-01T10:00:00Z","status":200}],"page":1,"page_size":25,"total":1}` },
+        ],
+      },
+      {
+        method: 'GET', path: '/litellm/spend/users', summary: 'Per-user spend aggregation.',
+        params: [
+          { name: 'start_date', in: 'query', type: 'string', required: false, default: '', description: 'RFC3339 lower bound.' },
+          { name: 'end_date', in: 'query', type: 'string', required: false, default: '', description: 'RFC3339 upper bound.' },
+        ],
+        examplePayload: null,
+        exampleCurl: `curl -s "${'{API_BASE}'}/litellm/spend/users" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"data":[{"user_id":"u-abc123","total_spend":3.42,"total_requests":120,"total_tokens":45000,"input_tokens":30000,"output_tokens":15000}]}` },
+        ],
+      },
+      {
+        method: 'GET', path: '/litellm/global/spend', summary: 'Global spend KPI (total spend + request count for the optional date range).',
+        params: [
+          { name: 'start_date', in: 'query', type: 'string', required: false, default: '', description: 'RFC3339 lower bound.' },
+          { name: 'end_date', in: 'query', type: 'string', required: false, default: '', description: 'RFC3339 upper bound.' },
+        ],
+        examplePayload: null,
+        exampleCurl: `curl -s "${'{API_BASE}'}/litellm/global/spend" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"total_spend":12.34,"total_requests":1024}` },
+        ],
+      },
+    ],
+  },
+
+  // =========================================================================
   // 2. API Keys
   // =========================================================================
   {
