@@ -273,6 +273,8 @@ func (h *Handler) UpdateLiteLLMUserCompat(c *gin.Context) {
 		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
+	// Policy cache must be invalidated so the next request re-reads the user.
+	h.invalidatePolicyCache()
 	u, err := users.Get(c.Request.Context(), userID)
 	if err != nil {
 		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
@@ -289,14 +291,17 @@ func (h *Handler) DeleteLiteLLMUserCompat(c *gin.Context) {
 	if !ok {
 		return
 	}
-	userID := c.Query("user_id")
-	if userID == "" {
+	userID := ""
+	if c.Request.Body != nil {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
 		if err := c.ShouldBindJSON(&req); err == nil && req.UserID != "" {
 			userID = req.UserID
 		}
+	}
+	if userID == "" {
+		userID = c.Query("user_id")
 	}
 	if userID == "" {
 		litellmCompatError(c, http.StatusBadRequest, "invalid_request", "user_id is required")
@@ -310,5 +315,7 @@ func (h *Handler) DeleteLiteLLMUserCompat(c *gin.Context) {
 		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
+	// Policy cache must be invalidated so the next request re-reads the snapshot.
+	h.invalidatePolicyCache()
 	c.JSON(http.StatusOK, gin.H{"id": userID, "deleted": true})
 }
