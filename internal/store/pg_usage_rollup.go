@@ -27,10 +27,18 @@ const maxRollupBackfillDays = 366
 // The fold's WHERE window uses $1 and $1 + '1 day' as half-open [day, day+1)
 // bounds on the requested_at index. Bucket columns are COALESCE'd to ” so empty
 // values collide with the PK rather than creating NULL-vs-” duplicates.
+//
+// The stat_day bucket is pinned to UTC: DATE_TRUNC over a $1::timestamptz
+// argument truncates in the session timezone (this store never sets TIMEZONE),
+// so without an explicit AT TIME ZONE a non-UTC session would bucket rows under
+// the wrong calendar day. Pin the truncation to UTC so every session writes the
+// same stat_day — the day-aligned GROUP BY semantics Task 6 reads from this
+// table then becomes deterministic. RunRollup already normalizes $1 to UTC
+// midnight, and the WHERE [day, day+1) window is TZ-independent.
 const rollupFoldSQL = `
 INSERT INTO %s (stat_day, user_id, api_key_id, model, provider, source,
                 request_count, fail_count, input_tokens, output_tokens, tot_tokens, cost_usd)
-SELECT DATE_TRUNC('day', $1::timestamptz)::date,
+SELECT DATE_TRUNC('day', $1::timestamptz AT TIME ZONE 'UTC')::date,
        COALESCE(e.user_id, ''), COALESCE(e.api_key_id, ''), COALESCE(e.model, ''),
        COALESCE(e.provider, ''), COALESCE(e.source, ''),
        COUNT(*),

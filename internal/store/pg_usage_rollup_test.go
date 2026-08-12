@@ -174,6 +174,53 @@ func TestRunRollupIdempotent(t *testing.T) {
 	}
 }
 
+// TestRunRollupPinsStatDayToUTC proves the bucket date is pinned to UTC: with
+// the session timezone set to a non-UTC zone, an event near UTC midnight must
+// still land on the event's UTC calendar day (not the session's). Without the
+// AT TIME ZONE 'UTC' pin, date_trunc over a timestamptz truncates in the session
+// timezone and this test fails.
+func TestRunRollupPinsStatDayToUTC(t *testing.T) {
+	pg := newTestPostgresStore(t, "test_rollup_utc_pin")
+	defer pg.Close()
+	ensureMigrated(t, pg)
+	us := NewUsageStore(pg)
+	ctx := context.Background()
+
+	// Put the session in a zone far from UTC so any session-zone truncation
+	// would visibly shift the bucket. Pacific is UTC-8: 01:30 UTC on day X is
+	// still 17:30 the PREVIOUS day in the session zone.
+	if _, err := us.db.ExecContext(ctx, `SET TIMEZONE = 'America/Los_Angeles'`); err != nil {
+		t.Fatalf("set session timezone: %v", err)
+	}
+	// Cleanup: restore the session TZ so the pooled connection is left in a
+	// sane state for any later reuse.
+	defer func() {
+		_, _ = us.db.ExecContext(context.Background(), `SET TIMEZONE = 'UTC'`)
+	}()
+
+	// 01:30 UTC on 2026-08-12 — in America/Los_Angeles this is 18:30 on
+	// 2026-08-11, so an un-pinned truncation would produce a stat_day of
+	// 2026-08-11 instead of 2026-08-12.
+	event := UsageEvent{UserID: "u1", Model: "m1", Provider: "p1", Source: "svc",
+		InputTokens: 10, OutputTokens: 10, TotalTokens: 20, CostUSD: 0.01,
+		RequestedAt: time.Date(2026, 8, 12, 1, 30, 0, 0, time.UTC)}
+	if err := us.InsertEvent(ctx, event); err != nil {
+		t.Fatalf("insert usage event: %v", err)
+	}
+	day := time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC)
+	if err := us.RunRollup(ctx, day); err != nil {
+		t.Fatalf("RunRollup: %v", err)
+	}
+	got := queryRollupRows(t, us)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 rollup bucket, got %d: %+v", len(got), got)
+	}
+	wantDay := time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC)
+	if !got[0].StatDay.Equal(wantDay) {
+		t.Fatalf("stat_day bucketed to %v in a non-UTC session; want UTC day %v", got[0].StatDay, wantDay)
+	}
+}
+
 // TestBackfillRollupMultiDay folds several prior days and asserts each day's
 // totals land in its own bucket, and that the fold stays idempotent across the
 // range when re-run.

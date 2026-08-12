@@ -167,29 +167,30 @@ func main() {
 	var homePluginSyncReport homeplugins.SyncReport
 	var homePluginStatusReady bool
 	var (
-		usePostgresStore     bool
-		pgStoreDSN           string
-		pgStoreSchema        string
-		pgStoreLocalPath     string
-		pgStoreEncryptionKey []byte
-		pgStoreMaxOpenConns  int
-		pgStoreMaxIdleConns  int
-		pgStoreInst          *store.PostgresStore
-		useGitStore          bool
-		gitStoreRemoteURL    string
-		gitStoreUser         string
-		gitStorePassword     string
-		gitStoreBranch       string
-		gitStoreLocalPath    string
-		gitStoreInst         *store.GitTokenStore
-		gitStoreRoot         string
-		useObjectStore       bool
-		objectStoreEndpoint  string
-		objectStoreAccess    string
-		objectStoreSecret    string
-		objectStoreBucket    string
-		objectStoreLocalPath string
-		objectStoreInst      *store.ObjectTokenStore
+		usePostgresStore          bool
+		pgStoreDSN                string
+		pgStoreSchema             string
+		pgStoreLocalPath          string
+		pgStoreEncryptionKey      []byte
+		pgStoreMaxOpenConns       int
+		pgStoreMaxIdleConns       int
+		pgStoreRollupBackfillDays = 7
+		pgStoreInst               *store.PostgresStore
+		useGitStore               bool
+		gitStoreRemoteURL         string
+		gitStoreUser              string
+		gitStorePassword          string
+		gitStoreBranch            string
+		gitStoreLocalPath         string
+		gitStoreInst              *store.GitTokenStore
+		gitStoreRoot              string
+		useObjectStore            bool
+		objectStoreEndpoint       string
+		objectStoreAccess         string
+		objectStoreSecret         string
+		objectStoreBucket         string
+		objectStoreLocalPath      string
+		objectStoreInst           *store.ObjectTokenStore
 	)
 
 	wd, err := os.Getwd()
@@ -256,6 +257,15 @@ func main() {
 		if value, ok := lookupEnv("PGSTORE_MAX_IDLE_CONNS", "pgstore_max_idle_conns"); ok {
 			if n, err := strconv.Atoi(value); err == nil && n > 0 {
 				pgStoreMaxIdleConns = n
+			}
+		}
+		// PGSTORE_ROLLUP_BACKFILL_DAYS controls how many prior days the daily
+		// usage_stat_day rollup backfills at startup. Defaults to 7 when unset to
+		// give the dashboard a week of pre-aggregated history on first boot.
+		if value, ok := lookupEnv("PGSTORE_ROLLUP_BACKFILL_DAYS", "pgstore_rollup_backfill_days"); ok {
+			// Accept 0 explicitly to disable the startup backfill.
+			if n, err := strconv.Atoi(value); err == nil && n >= 0 {
+				pgStoreRollupBackfillDays = n
 			}
 		}
 		useGitStore = false
@@ -710,13 +720,14 @@ func main() {
 		if errFlusherStart := usageFlusher.Start(context.Background()); errFlusherStart != nil {
 			log.Errorf("failed to start PG usage flusher: %v", errFlusherStart)
 		}
-		// Start the daily usage_stat_day rollup driver: backfill the previous 7
-		// days once at startup, then re-fold "today" every 24 hours as new
-		// events flush. The fold is idempotent (overwrite), so re-running is
-		// safe. Runs for the lifetime of the process; its context is derived
-		// from context.Background and the loop exits on return of this func only
-		// at shutdown, mirroring the other background sweeps.
-		go pgUsageStore.RunRollupLoop(context.Background(), 7)
+		// Start the daily usage_stat_day rollup driver: backfill pgStoreRollupBackfillDays
+		// prior days once at startup (configurable via PGSTORE_ROLLUP_BACKFILL_DAYS,
+		// default 7), then re-fold "today" every 24 hours as new events flush. The
+		// fold is idempotent (overwrite), so re-running is safe. Runs for the lifetime
+		// of the process; its context is derived from context.Background and the loop
+		// exits on return of this func only at shutdown, mirroring the other
+		// background sweeps.
+		go pgUsageStore.RunRollupLoop(context.Background(), pgStoreRollupBackfillDays)
 		coreusage.RegisterPlugin(usageFlusher)
 		// Register the policy usage plugin so budget windows are
 		// incremented as requests complete.
