@@ -621,6 +621,9 @@ func (h *Handler) RegenerateLiteLLMKeyCompat(c *gin.Context) {
 		translateLiteLLMKeyCompatError(c, err)
 		return
 	}
+	// Policy cache must be invalidated so the rotated key's old (keyid, hash)
+	// snapshot does not keep the stale secret resolving until the cache TTL.
+	h.invalidatePolicyCache()
 	c.JSON(http.StatusOK, gin.H{"key": req.Key, "secret": newSecret})
 }
 

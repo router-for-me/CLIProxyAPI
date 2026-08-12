@@ -435,10 +435,18 @@ func TestGetLiteLLMKeyCompat(t *testing.T) {
 func seedCompatKey(t *testing.T, h *Handler, name, alias string) *store.APIKey {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := h.pgUsers.Create(ctx, store.InternalUser{
-		ID: "team-a", UserAlias: "Team A", UserRole: "org",
-	}); err != nil {
-		t.Fatalf("seed user Create: %v", err)
+	// Idempotent on the owner user: seedCompatKey may be called multiple times
+	// within one test (e.g. TestListLiteLLMKeysCompat), so only Create the user
+	// when it does not already exist to avoid a duplicate-PK error on real PG.
+	if _, err := h.pgUsers.Get(ctx, "team-a"); err != nil {
+		if !errors.Is(err, store.ErrInternalUserNotFound) {
+			t.Fatalf("seed user Get: %v", err)
+		}
+		if _, cerr := h.pgUsers.Create(ctx, store.InternalUser{
+			ID: "team-a", UserAlias: "Team A", UserRole: "org",
+		}); cerr != nil {
+			t.Fatalf("seed user Create: %v", cerr)
+		}
 	}
 	pol := store.Policy{AllowedModels: []string{"gpt-4o"}}
 	key, _, err := h.pgAPIKeys.Create(ctx, name, alias, "", nil, nil, &pol)
