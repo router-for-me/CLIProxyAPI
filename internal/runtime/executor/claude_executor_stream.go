@@ -26,6 +26,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	upstreamModel := e.upstreamModel(baseModel)
 
 	apiKey, baseURL := claudeCreds(auth)
+	if isPlaceholderAPIKey(apiKey) {
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "placeholder API key detected; configure a real Claude OAuth token or API key"}
+	}
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}

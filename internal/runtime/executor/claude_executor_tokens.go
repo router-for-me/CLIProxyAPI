@@ -21,6 +21,9 @@ import (
 
 func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	apiKey, baseURL := claudeCreds(auth)
+	if isPlaceholderAPIKey(apiKey) {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusUnauthorized, msg: "placeholder API key detected; configure a real Claude OAuth token or API key"}
+	}
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
