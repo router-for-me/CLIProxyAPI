@@ -27,7 +27,7 @@ func TestCodexWebsocketsExecutorRestoresMultiAgentV2NamespaceAcrossIncrementalTu
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-			capturedPayload := make(chan []byte, 6)
+			capturedPayload := make(chan []byte, 8)
 			var connectionCount atomic.Int32
 			var requestCount atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -51,7 +51,7 @@ func TestCodexWebsocketsExecutorRestoresMultiAgentV2NamespaceAcrossIncrementalTu
 						t.Errorf("write websocket response: %v", errWrite)
 						return
 					}
-					if turn == 6 {
+					if turn == 8 {
 						return
 					}
 				}
@@ -136,25 +136,78 @@ func TestCodexWebsocketsExecutorRestoresMultiAgentV2NamespaceAcrossIncrementalTu
 				t.Fatalf("user-defined namespace was rewritten on the post-conflict incremental turn: %s", fourthClientPayload)
 			}
 
-			fifthClientPayload := execute(codexSpawnAgentTestPayload())
-			fifthUpstreamPayload := <-capturedPayload
-			if namespace := gjson.GetBytes(fifthUpstreamPayload, "input.0.tools.0.name").String(); namespace != "collaboration-optimize" {
+			optimizedBranchRequest := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_2","input":[{"type":"function_call_output","call_id":"call_2","output":"branch-a"}]}`)
+			optimizedBranchClientPayload := execute(optimizedBranchRequest)
+			optimizedBranchUpstreamPayload := <-capturedPayload
+			if strings.Contains(string(optimizedBranchUpstreamPayload), "collaboration") || strings.Contains(string(optimizedBranchUpstreamPayload), "spawn_agent") {
+				t.Fatalf("optimized branch request unexpectedly contains collaboration tools: %s", optimizedBranchUpstreamPayload)
+			}
+			assertCodexSpawnAgentClientNamespace(t, optimizedBranchClientPayload)
+
+			conflictBranchRequest := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_4","input":[{"type":"function_call_output","call_id":"call_4","output":"branch-b"}]}`)
+			conflictBranchClientPayload := execute(conflictBranchRequest)
+			conflictBranchUpstreamPayload := <-capturedPayload
+			if strings.Contains(string(conflictBranchUpstreamPayload), "collaboration") || strings.Contains(string(conflictBranchUpstreamPayload), "spawn_agent") {
+				t.Fatalf("conflict branch request unexpectedly contains collaboration tools: %s", conflictBranchUpstreamPayload)
+			}
+			if !strings.Contains(string(conflictBranchClientPayload), `"namespace":"collaboration-optimize"`) {
+				t.Fatalf("conflict branch user-defined namespace was rewritten: %s", conflictBranchClientPayload)
+			}
+
+			reenabledClientPayload := execute(codexSpawnAgentTestPayload())
+			reenabledUpstreamPayload := <-capturedPayload
+			if namespace := gjson.GetBytes(reenabledUpstreamPayload, "input.0.tools.0.name").String(); namespace != "collaboration-optimize" {
 				t.Fatalf("re-enabled upstream namespace = %q, want collaboration-optimize", namespace)
 			}
-			assertCodexSpawnAgentClientNamespace(t, fifthClientPayload)
+			assertCodexSpawnAgentClientNamespace(t, reenabledClientPayload)
 
-			sixthRequest := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_5","input":[{"type":"function_call_output","call_id":"call_5","output":"done"}]}`)
-			sixthClientPayload := execute(sixthRequest)
-			sixthUpstreamPayload := <-capturedPayload
-			if strings.Contains(string(sixthUpstreamPayload), "collaboration") || strings.Contains(string(sixthUpstreamPayload), "spawn_agent") {
-				t.Fatalf("re-enabled incremental upstream request unexpectedly contains collaboration tools: %s", sixthUpstreamPayload)
+			finalRequest := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_7","input":[{"type":"function_call_output","call_id":"call_7","output":"done"}]}`)
+			finalClientPayload := execute(finalRequest)
+			finalUpstreamPayload := <-capturedPayload
+			if strings.Contains(string(finalUpstreamPayload), "collaboration") || strings.Contains(string(finalUpstreamPayload), "spawn_agent") {
+				t.Fatalf("final incremental upstream request unexpectedly contains collaboration tools: %s", finalUpstreamPayload)
 			}
-			assertCodexSpawnAgentClientNamespace(t, sixthClientPayload)
+			assertCodexSpawnAgentClientNamespace(t, finalClientPayload)
 
 			if got := connectionCount.Load(); got != 1 {
 				t.Fatalf("upstream websocket connections = %d, want 1", got)
 			}
 		})
+	}
+}
+
+func TestCodexWebsocketSessionBoundsMultiAgentV2LineageState(t *testing.T) {
+	conn := &websocket.Conn{}
+	sess := &codexWebsocketSession{conn: conn}
+
+	for index := 0; index < codexMultiAgentV2LineageMaxEntries+2; index++ {
+		sess.recordMultiAgentV2Lineage(conn, fmt.Sprintf("resp_%d", index), index%2 == 0)
+	}
+
+	sess.connMu.Lock()
+	lineageCount := len(sess.multiAgentV2Lineages)
+	orderCount := len(sess.multiAgentV2LineageOrder)
+	_, retainedOldest := sess.multiAgentV2Lineages["resp_0"]
+	_, retainedNewest := sess.multiAgentV2Lineages[fmt.Sprintf("resp_%d", codexMultiAgentV2LineageMaxEntries+1)]
+	sess.connMu.Unlock()
+	if lineageCount != codexMultiAgentV2LineageMaxEntries || orderCount != codexMultiAgentV2LineageMaxEntries {
+		t.Fatalf("lineage state sizes = map:%d order:%d, want %d", lineageCount, orderCount, codexMultiAgentV2LineageMaxEntries)
+	}
+	if retainedOldest {
+		t.Fatal("oldest lineage was not evicted")
+	}
+	if !retainedNewest {
+		t.Fatal("newest lineage was evicted")
+	}
+	if sess.multiAgentV2OptimizedForRequest(&websocket.Conn{}, fmt.Sprintf("resp_%d", codexMultiAgentV2LineageMaxEntries), false, false) {
+		t.Fatal("lineage state leaked to a different connection")
+	}
+
+	sess.detachConnection(conn, nil)
+	sess.connMu.Lock()
+	defer sess.connMu.Unlock()
+	if len(sess.multiAgentV2Lineages) != 0 || len(sess.multiAgentV2LineageOrder) != 0 {
+		t.Fatalf("lineage state survived connection detach: map=%d order=%d", len(sess.multiAgentV2Lineages), len(sess.multiAgentV2LineageOrder))
 	}
 }
 
