@@ -828,11 +828,14 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		return
 	}
 
-	s.cache.CompareAndDelete(cacheKey, res.AuthID)
-	if fallbackKey != "" {
-		s.cache.CompareAndDelete(fallbackKey, res.AuthID)
+	aliases := s.cache.CompareAndDeleteAliases(cacheKey, res.AuthID)
+	if len(aliases) == 0 && fallbackKey != "" {
+		aliases = s.cache.CompareAndDeleteAliases(fallbackKey, res.AuthID)
 	}
-	s.quarantineSessionAuth(cacheKey, fallbackKey, res.AuthID, res.RetryAfter)
+	if len(aliases) == 0 {
+		aliases = []string{cacheKey, fallbackKey}
+	}
+	s.quarantineSessionAuth(aliases, res.AuthID, res.RetryAfter)
 }
 
 func (s *SessionAffinitySelector) excludeSessionQuarantine(cacheKey, fallbackKey string, auths []*Auth) []*Auth {
@@ -861,7 +864,7 @@ func (s *SessionAffinitySelector) excludeSessionQuarantine(cacheKey, fallbackKey
 	return filtered
 }
 
-func (s *SessionAffinitySelector) quarantineSessionAuth(cacheKey, fallbackKey, authID string, retryAfter *time.Duration) {
+func (s *SessionAffinitySelector) quarantineSessionAuth(cacheKeys []string, authID string, retryAfter *time.Duration) {
 	if s == nil || s.quarantine == nil || authID == "" {
 		return
 	}
@@ -870,7 +873,7 @@ func (s *SessionAffinitySelector) quarantineSessionAuth(cacheKey, fallbackKey, a
 		delay = *retryAfter
 	}
 	expiresAt := time.Now().Add(delay)
-	for _, key := range []string{cacheKey, fallbackKey} {
+	for _, key := range cacheKeys {
 		if key == "" {
 			continue
 		}

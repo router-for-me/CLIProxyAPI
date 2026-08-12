@@ -1457,6 +1457,59 @@ func TestSessionAffinitySelectorCombinedIdentifiersBindConversationFallback(t *t
 	}
 }
 
+func TestSessionAffinitySelectorFailureQuarantinesAllAliases(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	provider := "responses-alias-group-failure"
+	model := "gpt-test"
+
+	combined := cliproxyexecutor.Options{OriginalRequest: []byte(`{"conversation":{"id":"conversation-session"},"prompt_cache_key":"shared-cache-bucket"}`), Metadata: map[string]any{}}
+	first, err := selector.Pick(context.Background(), provider, model, combined, auths)
+	if err != nil {
+		t.Fatalf("combined-identifier Pick() error = %v", err)
+	}
+	selector.OnResult(Result{AuthID: first.ID, Provider: provider, Model: model, Options: combined, Success: true})
+
+	promptOnly := cliproxyexecutor.Options{OriginalRequest: []byte(`{"prompt_cache_key":"shared-cache-bucket"}`), Metadata: map[string]any{}}
+	failed, err := selector.Pick(context.Background(), provider, model, promptOnly, auths)
+	if err != nil {
+		t.Fatalf("prompt-only Pick() error = %v", err)
+	}
+	if failed.ID != first.ID {
+		t.Fatalf("prompt-only alias selected %q, want %q", failed.ID, first.ID)
+	}
+	selector.OnResult(Result{AuthID: failed.ID, Provider: provider, Model: model, Options: promptOnly, Error: &Error{Code: "upstream_failed", Message: "upstream failed", Retryable: true}})
+
+	conversationOnly := cliproxyexecutor.Options{OriginalRequest: []byte(`{"conversation":{"id":"conversation-session"}}`), Metadata: map[string]any{}}
+	next, err := selector.Pick(context.Background(), provider, model, conversationOnly, auths)
+	if err != nil {
+		t.Fatalf("conversation-only Pick() error = %v", err)
+	}
+	if next.ID == failed.ID {
+		t.Fatalf("conversation alias reused failed auth %q", failed.ID)
+	}
+}
+
+func TestSessionCacheCompareAndDeleteAliasesPreservesNewerBinding(t *testing.T) {
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+	cache.SetAliases("auth-a", "prompt", "conversation")
+	cache.SetAliases("auth-b", "prompt", "conversation")
+
+	if aliases := cache.CompareAndDeleteAliases("prompt", "auth-a"); len(aliases) != 0 {
+		t.Fatalf("CompareAndDeleteAliases() = %v for stale auth, want none", aliases)
+	}
+	for _, key := range []string{"prompt", "conversation"} {
+		if got, ok := cache.Get(key); !ok || got != "auth-b" {
+			t.Fatalf("cache.Get(%q) = %q, %v; want auth-b, true", key, got, ok)
+		}
+	}
+}
+
 func TestSessionAffinitySelectorPrimaryTrafficKeepsConversationAliasAlive(t *testing.T) {
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
 		Fallback: &RoundRobinSelector{},
