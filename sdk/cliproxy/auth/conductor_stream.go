@@ -43,20 +43,13 @@ func (m *Manager) streamFirstChunkTimeout(opts cliproxyexecutor.Options) time.Du
 		}
 	}
 	if m == nil {
-		return 20 * time.Second
-	}
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	if cfg == nil {
-		return 20 * time.Second
-	}
-	sec := cfg.Streaming.StreamFirstChunkTimeoutSeconds
-	if sec == 0 {
-		return 20 * time.Second
-	}
-	if sec < 0 {
 		return 0
 	}
-	return time.Duration(sec) * time.Second
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil || cfg.Streaming.StreamFirstChunkTimeoutSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(cfg.Streaming.StreamFirstChunkTimeoutSeconds) * time.Second
 }
 
 func discardStreamChunks(ch <-chan cliproxyexecutor.StreamChunk) {

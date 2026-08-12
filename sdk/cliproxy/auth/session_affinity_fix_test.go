@@ -15,7 +15,7 @@ func newTestRoundRobinSelector() *RoundRobinSelector {
 	}
 }
 
-func TestSessionAffinity_NoBindOnInitialPickBeforeSuccess(t *testing.T) {
+func TestSessionAffinity_InitialPickBindsBeforeSuccess(t *testing.T) {
 	authA := &Auth{ID: "auth-a"}
 	authB := &Auth{ID: "auth-b"}
 	auths := []*Auth{authA, authB}
@@ -32,10 +32,10 @@ func TestSessionAffinity_NoBindOnInitialPickBeforeSuccess(t *testing.T) {
 		t.Fatalf("Pick failed: err=%v, picked=%v", err, picked)
 	}
 
-	// Verify that cache is NOT bound prior to execution success
 	cacheKey := "provider::header:sess-12345678::model"
-	if _, ok := selector.cache.Get(cacheKey); ok {
-		t.Fatalf("expected cacheKey %q to be unbound before success, but found binding", cacheKey)
+	bound, ok := selector.cache.Get(cacheKey)
+	if !ok || bound != picked.ID {
+		t.Fatalf("expected cacheKey %q to be pre-bound to %q, got bound=%q ok=%v", cacheKey, picked.ID, bound, ok)
 	}
 }
 
@@ -273,7 +273,7 @@ func closedStreamChunks() <-chan cliproxyexecutor.StreamChunk {
 	return ch
 }
 
-func TestSessionAffinity_CachedAuthUnavailableRemovesStaleAndDoesNotBindFallback(t *testing.T) {
+func TestSessionAffinity_CachedAuthUnavailableRebindsFallback(t *testing.T) {
 	authA := &Auth{ID: "auth-a"}
 	authB := &Auth{ID: "auth-b"}
 
@@ -285,21 +285,15 @@ func TestSessionAffinity_CachedAuthUnavailableRemovesStaleAndDoesNotBindFallback
 	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"sess-unavail-1234"}}}
 	cacheKey := "provider::header:sess-unavail-1234::model"
 
-	// Bind A.
 	selector.OnResult(Result{AuthID: authA.ID, Provider: "provider", Model: "model", Success: true, Options: opts})
-	if _, ok := selector.cache.Get(cacheKey); !ok {
-		t.Fatalf("precondition: cache should be bound")
-	}
-
-	// A is unavailable for this pick (only B available) -> fallback returns B.
 	picked, err := selector.Pick(context.Background(), "provider", "model", opts, []*Auth{authB})
 	if err != nil || picked == nil || picked.ID != authB.ID {
 		t.Fatalf("Pick = %v/%v, want B", picked, err)
 	}
 
-	// Stale A entry must be removed and B must NOT be bound before success.
-	if bound, ok := selector.cache.Get(cacheKey); ok {
-		t.Fatalf("stale A binding not removed / B prematurely bound; cache=%q ok=%v", bound, ok)
+	bound, ok := selector.cache.Get(cacheKey)
+	if !ok || bound != authB.ID {
+		t.Fatalf("expected stale A to be replaced by pre-bound B; cache=%q ok=%v", bound, ok)
 	}
 }
 
@@ -484,7 +478,7 @@ func TestSessionAffinity_MixedNamespace_FailureLeavesCacheEmpty(t *testing.T) {
 	}
 }
 
-func TestSessionAffinity_MixedNamespace_StaleAuthDeletedAndFallbackUnbound(t *testing.T) {
+func TestSessionAffinity_MixedNamespace_StaleAuthRebindsFallback(t *testing.T) {
 	authA := &Auth{ID: "auth-a", Provider: "gemini"}
 	authB := &Auth{ID: "auth-b", Provider: "antigravity"}
 	fallback := pickFuncSelector(func(_ context.Context, _, _ string, _ cliproxyexecutor.Options, available []*Auth) (*Auth, error) {
@@ -495,19 +489,14 @@ func TestSessionAffinity_MixedNamespace_StaleAuthDeletedAndFallbackUnbound(t *te
 	opts := optsWithMixedNamespace(cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"mixed-stale-12345"}}})
 	cacheKey := "mixed::header:mixed-stale-12345::model"
 
-	// Bind A under the canonical mixed key.
 	selector.OnResult(Result{AuthID: authA.ID, Provider: "gemini", Model: "model", Success: true, Options: opts})
-	if _, ok := selector.cache.Get(cacheKey); !ok {
-		t.Fatalf("precondition: bound")
-	}
-
-	// A unavailable (only B available) -> fallback B; stale A deleted, B unbound until success.
 	picked, _ := selector.Pick(context.Background(), "mixed", "model", opts, []*Auth{authB})
 	if picked.ID != authB.ID {
 		t.Fatalf("Pick = %q, want B", picked.ID)
 	}
-	if bound, ok := selector.cache.Get(cacheKey); ok {
-		t.Fatalf("stale A not deleted / B prematurely bound; cache=%q ok=%v", bound, ok)
+	bound, ok := selector.cache.Get(cacheKey)
+	if !ok || bound != authB.ID {
+		t.Fatalf("expected stale A to be replaced by pre-bound B; cache=%q ok=%v", bound, ok)
 	}
 }
 
@@ -881,6 +870,7 @@ func TestSessionAffinity_QuarantineExpires(t *testing.T) {
 	if err != nil || before.ID != authB.ID {
 		t.Fatalf("Pick before expiry = %v/%v, want auth-b", before, err)
 	}
+	selector.OnResult(Result{AuthID: authB.ID, Provider: "gemini", Model: "gemini-3.6-flash", Success: false, Error: &Error{HTTPStatus: http.StatusBadGateway}, Options: opts})
 	time.Sleep(30 * time.Millisecond)
 	after, err := selector.Pick(context.Background(), "mixed", ".gemini-flash", opts, []*Auth{authA, authB})
 	if err != nil || after.ID != authA.ID {

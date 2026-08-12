@@ -229,8 +229,8 @@ func (e *postFirstChunkExecutor) ExecuteStream(ctx context.Context, auth *Auth, 
 func TestStreamFirstChunkTimeout_ConfigAndMetadata(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 
-	if got := m.streamFirstChunkTimeout(cliproxyexecutor.Options{}); got != 20*time.Second {
-		t.Fatalf("default streamFirstChunkTimeout = %v, want 20s", got)
+	if got := m.streamFirstChunkTimeout(cliproxyexecutor.Options{}); got != 0 {
+		t.Fatalf("default streamFirstChunkTimeout = %v, want disabled", got)
 	}
 
 	cfg := &internalconfig.Config{

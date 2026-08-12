@@ -650,6 +650,7 @@ type SessionAffinitySelector struct {
 	fallback   Selector
 	cache      *SessionCache
 	quarantine *SessionCache
+	bindMu     sync.Mutex
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -740,44 +741,47 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 		s.cache.Set(cacheKey, authID)
 	}
-
-	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
-		for _, auth := range available {
-			if auth.ID == cachedAuthID {
-				bind(auth.ID)
-				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-				return auth, nil
-			}
-		}
-		// Cached auth unavailable, remove stale binding before reselecting.
-		s.cache.CompareAndDelete(cacheKey, cachedAuthID)
-		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
-		if err != nil {
-			return nil, err
-		}
-		entry.Infof("session-affinity: cache hit but auth unavailable, selected candidate | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-		return auth, nil
-	}
-
-	if fallbackKey != "" {
-		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
+	pickCached := func() *Auth {
+		if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
 					bind(auth.ID)
-					entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
-					return auth, nil
+					return auth
 				}
 			}
-			// Fallback cached auth unavailable, remove stale binding before reselecting.
-			s.cache.CompareAndDelete(fallbackKey, cachedAuthID)
+			s.cache.CompareAndDelete(cacheKey, cachedAuthID)
 		}
+		if fallbackKey != "" {
+			if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
+				for _, auth := range available {
+					if auth.ID == cachedAuthID {
+						bind(auth.ID)
+						return auth
+					}
+				}
+				s.cache.CompareAndDelete(fallbackKey, cachedAuthID)
+			}
+		}
+		return nil
 	}
 
+	if auth := pickCached(); auth != nil {
+		entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		return auth, nil
+	}
+
+	s.bindMu.Lock()
+	defer s.bindMu.Unlock()
+	if auth := pickCached(); auth != nil {
+		entry.Infof("session-affinity: concurrent cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		return auth, nil
+	}
 	auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if err != nil {
 		return nil, err
 	}
-	entry.Infof("session-affinity: cache miss, candidate selected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+	bind(auth.ID)
+	entry.Infof("session-affinity: cache miss, bound candidate | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	return auth, nil
 }
 
