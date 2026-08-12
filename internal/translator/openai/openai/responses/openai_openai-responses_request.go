@@ -85,6 +85,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		pendingReasoningContent := ""
 		awaitingToolOutputs := make(map[string]struct{})
 		deferredMessages := make([][]byte, 0)
+		mergeableAssistantIndex := -1
 
 		takePendingReasoningContent := func() string {
 			reasoningContent := pendingReasoningContent
@@ -95,12 +96,29 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			if len(pendingToolCalls) == 0 {
 				return
 			}
-			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
-			assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
-			if reasoningContent := takePendingReasoningContent(); reasoningContent != "" {
-				assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
+
+			reasoningContent := takePendingReasoningContent()
+			mergedIntoAssistant := false
+			if mergeableAssistantIndex >= 0 && mergeableAssistantIndex == len(messages)-1 {
+				assistantMessage := gjson.ParseBytes(messages[mergeableAssistantIndex])
+				if assistantMessage.Get("role").String() == "assistant" && !assistantMessage.Get("tool_calls").Exists() {
+					updatedMessage, _ := sjson.SetBytes(messages[mergeableAssistantIndex], "tool_calls", pendingToolCalls)
+					combinedReasoning := combineOpenAIResponsesReasoning(assistantMessage.Get("reasoning_content").String(), reasoningContent)
+					if combinedReasoning != "" {
+						updatedMessage, _ = sjson.SetBytes(updatedMessage, "reasoning_content", combinedReasoning)
+					}
+					messages[mergeableAssistantIndex] = updatedMessage
+					mergedIntoAssistant = true
+				}
 			}
-			appendMessage(assistantMessage)
+			if !mergedIntoAssistant {
+				assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
+				assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
+				if reasoningContent != "" {
+					assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
+				}
+				appendMessage(assistantMessage)
+			}
 			for _, id := range pendingToolCallIDs {
 				if strings.TrimSpace(id) == "" {
 					continue
@@ -109,6 +127,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 			pendingToolCalls = pendingToolCalls[:0]
 			pendingToolCallIDs = pendingToolCallIDs[:0]
+			mergeableAssistantIndex = -1
 		}
 		flushDeferredMessages := func() {
 			for _, message := range deferredMessages {
@@ -124,14 +143,15 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 			return false
 		}
-		appendRegularMessage := func(message []byte) {
+		appendRegularMessage := func(message []byte) int {
 			// Keep tool-call adjacency strict for providers that require
 			// assistant(tool_calls) -> tool(tool_call_id) with no message in between.
 			if hasAwaitingToolOutput() {
 				deferredMessages = append(deferredMessages, message)
-				return
+				return -1
 			}
 			appendMessage(message)
+			return len(messages) - 1
 		}
 		appendPendingReasoningMessage := func() {
 			reasoningContent := takePendingReasoningContent()
@@ -159,6 +179,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if role == "developer" {
 					role = "user"
 				}
+				mergeableAssistantIndex = -1
 				if role != "assistant" {
 					appendPendingReasoningMessage()
 				}
@@ -196,28 +217,23 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 				if role == "assistant" {
-					reasoningContent := item.Get("reasoning_content").String()
-					if reasoningContent == "" {
-						reasoningContent = takePendingReasoningContent()
-					} else {
-						pendingReasoningContent = ""
-					}
+					reasoningContent := combineOpenAIResponsesReasoning(takePendingReasoningContent(), item.Get("reasoning_content").String())
 					if reasoningContent != "" {
 						message, _ = sjson.SetBytes(message, "reasoning_content", reasoningContent)
 					}
 				}
 
-				appendRegularMessage(message)
+				messageIndex := appendRegularMessage(message)
+				if role == "assistant" {
+					mergeableAssistantIndex = messageIndex
+				}
 
 			case "reasoning":
 				reasoningContent := collectOpenAIResponsesReasoningContent(item)
-				if pendingReasoningContent == "" {
-					pendingReasoningContent = reasoningContent
-				} else {
-					pendingReasoningContent += reasoningContent
-				}
+				pendingReasoningContent = combineOpenAIResponsesReasoning(pendingReasoningContent, reasoningContent)
 
 			case "function_call":
+				pendingReasoningContent = combineOpenAIResponsesReasoning(pendingReasoningContent, item.Get("reasoning_content").String())
 				// Buffer consecutive function calls and emit them as one assistant message.
 				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 
@@ -242,6 +258,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 			case "function_call_output":
+				mergeableAssistantIndex = -1
 				// Handle function call output conversion to tool message
 				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
 				callID := ""
@@ -264,6 +281,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 			case "custom_tool_call":
+				pendingReasoningContent = combineOpenAIResponsesReasoning(pendingReasoningContent, item.Get("reasoning_content").String())
 				// Codex freeform tool call replay: wrap the raw input so it
 				// matches the {"input": string} function shape used when
 				// converting custom tool definitions.
@@ -278,6 +296,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 			case "custom_tool_call_output":
+				mergeableAssistantIndex = -1
 				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
 				callID := strings.TrimSpace(item.Get("call_id").String())
 				toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
@@ -289,6 +308,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if len(awaitingToolOutputs) == 0 && len(deferredMessages) > 0 {
 					flushDeferredMessages()
 				}
+
+			default:
+				mergeableAssistantIndex = -1
 			}
 
 		}
@@ -311,25 +333,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	// "additional_tools" input item instead of the top-level "tools" field,
 	// so merge both sources.
 	var chatCompletionsTools []interface{}
-	appendChatTools := func(tools gjson.Result) {
-		if !tools.Exists() || !tools.IsArray() {
-			return
-		}
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			for _, chatTool := range convertResponsesToolToOpenAIChatTools(tool) {
-				chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
-			}
-			return true
-		})
-	}
-	appendChatTools(root.Get("tools"))
-	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		input.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("type").String() == "additional_tools" {
-				appendChatTools(item.Get("tools"))
-			}
-			return true
-		})
+	for _, chatTool := range mergeResponsesRequestChatTools(root) {
+		chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
 	}
 	if len(chatCompletionsTools) > 0 {
 		out, _ = sjson.SetBytes(out, "tools", chatCompletionsTools)
@@ -519,4 +524,22 @@ func collectOpenAIResponsesReasoningContent(item gjson.Result) string {
 		return "[reasoning unavailable]"
 	}
 	return reasoningText.String()
+}
+
+func combineOpenAIResponsesReasoning(existing, incoming string) string {
+	existingTrimmed := strings.TrimSpace(existing)
+	incomingTrimmed := strings.TrimSpace(incoming)
+
+	switch {
+	case existingTrimmed == "":
+		return incoming
+	case incomingTrimmed == "":
+		return existing
+	case existingTrimmed == "[reasoning unavailable]":
+		return incoming
+	case incomingTrimmed == "[reasoning unavailable]", existingTrimmed == incomingTrimmed:
+		return existing
+	default:
+		return existing + "\n\n" + incoming
+	}
 }

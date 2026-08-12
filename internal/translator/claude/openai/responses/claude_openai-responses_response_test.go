@@ -877,14 +877,16 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_ReportsCacheTokens(t *t
 	}
 }
 
-func TestConvertClaudeResponseToOpenAIResponses_RestoresAdditionalCustomToolCall(t *testing.T) {
+func TestConvertClaudeResponseToOpenAIResponses_RestoresAdditionalNamespaceCustomToolCall(t *testing.T) {
 	originalRequest := []byte(`{
 		"model":"gpt-test",
-		"input":[{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"exec"}]}]
+		"input":[{"type":"additional_tools","role":"developer","tools":[
+			{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec"}]}
+		]}]
 	}`)
 	chunks := [][]byte{
 		[]byte(`data: {"type":"message_start","message":{"id":"msg_custom","usage":{"input_tokens":1,"output_tokens":0}}}`),
-		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_custom","name":"exec","input":{}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_custom","name":"functions__exec","input":{}}}`),
 		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"input\":\"pwd\"}"}}`),
 		[]byte(`data: {"type":"content_block_stop","index":0}`),
 		[]byte(`data: {"type":"message_stop"}`),
@@ -921,8 +923,20 @@ func TestConvertClaudeResponseToOpenAIResponses_RestoresAdditionalCustomToolCall
 	if functionEvents != 0 {
 		t.Fatalf("function call events = %d, want 0", functionEvents)
 	}
-	if got := added.Get("item.name").String(); got != "exec" {
-		t.Fatalf("added name = %q, want exec", got)
+	for _, test := range []struct {
+		label string
+		item  gjson.Result
+	}{
+		{label: "added", item: added.Get("item")},
+		{label: "done", item: done.Get("item")},
+		{label: "completed", item: completed.Get("response.output.0")},
+	} {
+		if got := test.item.Get("name").String(); got != "exec" {
+			t.Fatalf("%s name = %q, want exec", test.label, got)
+		}
+		if got := test.item.Get("namespace").String(); got != "functions" {
+			t.Fatalf("%s namespace = %q, want functions", test.label, got)
+		}
 	}
 	if got := inputDone.Get("input").String(); got != "pwd" {
 		t.Fatalf("custom input.done input = %q, want pwd", got)
@@ -970,6 +984,13 @@ func TestConvertClaudeResponseToOpenAIResponses_DirectCustomWinsNamespaceCollisi
 	if got := streamCompleted.Get("response.output.0.input").String(); got != "pwd" {
 		t.Fatalf("stream output input = %q, want pwd", got)
 	}
+	item := streamCompleted.Get("response.output.0")
+	if got := item.Get("name").String(); got != "n__x" {
+		t.Fatalf("name = %q, want n__x", got)
+	}
+	if item.Get("namespace").Exists() {
+		t.Fatalf("unexpected namespace: %s", item.Get("namespace").Raw)
+	}
 
 	nonStreamRaw := []byte(strings.Join([]string{
 		`data: {"type":"message_start","message":{"id":"msg_collision_nonstream","usage":{"input_tokens":1,"output_tokens":0}}}`,
@@ -985,16 +1006,25 @@ func TestConvertClaudeResponseToOpenAIResponses_DirectCustomWinsNamespaceCollisi
 	if got := nonStream.Get("output.0.input").String(); got != "pwd" {
 		t.Fatalf("non-stream output input = %q, want pwd", got)
 	}
+	item = nonStream.Get("output.0")
+	if got := item.Get("name").String(); got != "n__x" {
+		t.Fatalf("name = %q, want n__x", got)
+	}
+	if item.Get("namespace").Exists() {
+		t.Fatalf("unexpected namespace: %s", item.Get("namespace").Raw)
+	}
 }
 
-func TestConvertClaudeResponseToOpenAIResponsesNonStream_RestoresAdditionalCustomToolCall(t *testing.T) {
+func TestConvertClaudeResponseToOpenAIResponsesNonStream_RestoresAdditionalNamespaceCustomToolCall(t *testing.T) {
 	originalRequest := []byte(`{
 		"model":"gpt-test",
-		"input":[{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"exec"}]}]
+		"input":[{"type":"additional_tools","role":"developer","tools":[
+			{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec"}]}
+		]}]
 	}`)
 	raw := []byte(strings.Join([]string{
 		`data: {"type":"message_start","message":{"id":"msg_custom_nonstream","usage":{"input_tokens":1,"output_tokens":0}}}`,
-		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_custom_nonstream","name":"exec","input":{}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_custom_nonstream","name":"functions__exec","input":{}}}`,
 		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"input\":\"pwd\"}"}}`,
 		`data: {"type":"content_block_stop","index":0}`,
 		`data: {"type":"message_stop"}`,
@@ -1009,6 +1039,12 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_RestoresAdditionalCusto
 	}
 	if got := root.Get("output.0.call_id").String(); got != "call_custom_nonstream" {
 		t.Fatalf("non-stream call_id = %q, want call_custom_nonstream", got)
+	}
+	if got := root.Get("output.0.name").String(); got != "exec" {
+		t.Fatalf("non-stream name = %q, want exec; output=%s", got, root.Raw)
+	}
+	if got := root.Get("output.0.namespace").String(); got != "functions" {
+		t.Fatalf("non-stream namespace = %q, want functions; output=%s", got, root.Raw)
 	}
 }
 

@@ -30,8 +30,10 @@ func TestKimiThinkingReplayModelFamily(t *testing.T) {
 		{model: "kimi-k3", want: "k3"},
 		{model: "k3-256k", want: "k3"},
 		{model: "kimi-k3-256k(high)", want: "k3"},
-		{model: "kimi-k2.7-code", want: "k2.7-code"},
-		{model: "kimi-k2.7-code-highspeed", want: "k2.7-code-highspeed"},
+		{model: "kimi-k2.7-code", want: "kimi-for-coding"},
+		{model: "kimi-k2.7-code-highspeed", want: "kimi-for-coding-highspeed"},
+		{model: "kimi-for-coding", want: "kimi-for-coding"},
+		{model: "kimi-for-coding-highspeed(high)", want: "kimi-for-coding-highspeed"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.model, func(t *testing.T) {
@@ -89,7 +91,7 @@ func TestPrepareKimiThinkingReplayRequestSharesOnlyK3Variants(t *testing.T) {
 	if !internalcache.CacheKimiThinkingReplayBestEffort(context.Background(), "k3", "execution:"+sessionID, []byte(cached)) {
 		t.Fatal("failed to seed K3 thinking replay cache")
 	}
-	if !internalcache.CacheKimiThinkingReplayBestEffort(context.Background(), "k2.7-code", "execution:"+sessionID, []byte(cached)) {
+	if !internalcache.CacheKimiThinkingReplayBestEffort(context.Background(), "kimi-for-coding", "execution:"+sessionID, []byte(cached)) {
 		t.Fatal("failed to seed K2.7 Code thinking replay cache")
 	}
 
@@ -110,8 +112,8 @@ func TestPrepareKimiThinkingReplayRequestSharesOnlyK3Variants(t *testing.T) {
 
 	k27Payload := []byte(`{"model":"kimi-k2.7-code-highspeed","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"README.md"}}]}]}`)
 	preparedK27, scopeK27 := prepareKimiThinkingReplayRequest(context.Background(), cliproxyexecutor.Request{Model: "kimi-k2.7-code-highspeed", Payload: k27Payload}, opts)
-	if scopeK27.modelFamily != "k2.7-code-highspeed" {
-		t.Fatalf("K2.7 replay family = %q, want k2.7-code-highspeed", scopeK27.modelFamily)
+	if scopeK27.modelFamily != "kimi-for-coding-highspeed" {
+		t.Fatalf("K2.7 replay family = %q, want kimi-for-coding-highspeed", scopeK27.modelFamily)
 	}
 	if gjson.GetBytes(preparedK27.Payload, "messages.0.content.0.signature").Exists() {
 		t.Fatalf("K2.7 variants must remain isolated: %s", preparedK27.Payload)

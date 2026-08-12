@@ -299,6 +299,119 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_AttachesReasoningT
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesAssistantContentWithToolCalls(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{
+				"type": "reasoning",
+				"id": "rs_1",
+				"summary": [{"type": "summary_text", "text": "inspect the next step"}]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [{"type": "output_text", "text": "Step 3 completed; continue to step 4."}]
+			},
+			{"type":"function_call","call_id":"call_4","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
+			{"type":"function_call_output","call_id":"call_4","output":"ok"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, false)
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if got := len(messages); got != 2 {
+		t.Fatalf("messages count = %d, want 2; output=%s", got, out)
+	}
+	assistant := messages[0]
+	if got := assistant.Get("role").String(); got != "assistant" {
+		t.Fatalf("assistant role = %q, want assistant; output=%s", got, out)
+	}
+	if got := assistant.Get("reasoning_content").String(); got != "inspect the next step" {
+		t.Fatalf("assistant reasoning_content = %q, want inspect the next step; output=%s", got, out)
+	}
+	if got := assistant.Get("content.0.text").String(); got != "Step 3 completed; continue to step 4." {
+		t.Fatalf("assistant content = %q, want preserved text; output=%s", got, out)
+	}
+	if got := assistant.Get("tool_calls.0.id").String(); got != "call_4" {
+		t.Fatalf("assistant tool call ID = %q, want call_4; output=%s", got, out)
+	}
+	if got := messages[1].Get("tool_call_id").String(); got != "call_4" {
+		t.Fatalf("tool output call ID = %q, want call_4; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DoesNotMergeToolCallsAcrossUserMessage(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]},
+			{"type":"function_call","call_id":"call_next","name":"exec_command","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_next","output":"ok"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, false)
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if got := len(messages); got != 4 {
+		t.Fatalf("messages count = %d, want 4; output=%s", got, out)
+	}
+	if messages[0].Get("tool_calls").Exists() {
+		t.Fatalf("messages.0 unexpectedly contains tool calls; output=%s", out)
+	}
+	if got := messages[1].Get("role").String(); got != "user" {
+		t.Fatalf("messages.1 role = %q, want user; output=%s", got, out)
+	}
+	if got := messages[2].Get("tool_calls.0.id").String(); got != "call_next" {
+		t.Fatalf("messages.2 tool call ID = %q, want call_next; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MergesDistinctReasoningWithinAssistantTurn(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"first"}]},
+			{"type":"message","role":"assistant","reasoning_content":"first","content":[{"type":"output_text","text":"working"}]},
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"second"}]},
+			{"type":"function_call","call_id":"call_reasoning","name":"exec_command","arguments":"{}"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, false)
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if got := len(messages); got != 1 {
+		t.Fatalf("messages count = %d, want 1; output=%s", got, out)
+	}
+	if got := messages[0].Get("reasoning_content").String(); got != "first\n\nsecond" {
+		t.Fatalf("reasoning_content = %q, want %q; output=%s", got, "first\n\nsecond", out)
+	}
+	if got := messages[0].Get("tool_calls.0.id").String(); got != "call_reasoning" {
+		t.Fatalf("tool call ID = %q, want call_reasoning; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReplacesUnavailableReasoningWithinAssistantTurn(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"reasoning","summary":[]},
+			{"type":"message","role":"assistant","reasoning_content":"real reasoning","content":[{"type":"output_text","text":"working"}]},
+			{"type":"function_call","call_id":"call_real_reasoning","name":"exec_command","arguments":"{}"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, false)
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if got := len(messages); got != 1 {
+		t.Fatalf("messages count = %d, want 1; output=%s", got, out)
+	}
+	if got := messages[0].Get("reasoning_content").String(); got != "real reasoning" {
+		t.Fatalf("reasoning_content = %q, want real reasoning; output=%s", got, out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_AttachesReasoningToToolCallMessage(t *testing.T) {
 	raw := []byte(`{
 		"input": [
@@ -693,5 +806,280 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_NormalizesInputIma
 				t.Fatalf("image detail = %q, want %q; output=%s", got, tt.expectedDetail, out)
 			}
 		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DeduplicatesToolsAcrossAdditionalTools(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"role":"user","content":"What time is it?"},
+			{
+				"type":"additional_tools",
+				"tools":[
+					{"type":"function","name":"get_time","description":"copy from additional_tools","parameters":{"type":"object","properties":{"tz":{"type":"string"}}}}
+				]
+			}
+		],
+		"tools": [
+			{"type":"function","name":"get_time","description":"authoritative top-level definition","parameters":{"type":"object","properties":{"timezone":{"type":"string"}}}}
+		]
+	}`)
+	t.Logf("input json:\n%s", prettyJSONForTest(raw))
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", raw, false)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != 1 {
+		t.Fatalf("tools count = %d, want 1; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.name").String(); got != "get_time" {
+		t.Fatalf("tools.0.function.name = %q, want get_time; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.description").String(); got != "authoritative top-level definition" {
+		t.Fatalf("tools.0.function.description = %q, want the top-level definition to win; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.properties.timezone.type").String(); got != "string" {
+		t.Fatalf("tools.0.function.parameters should come from the top-level definition; output=%s", out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DeduplicatesNamespaceQualifiedCollision(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"role":"user","content":"Patch the file."}
+		],
+		"tools": [
+			{"type":"function","name":"editor__apply_patch","parameters":{"type":"object"}},
+			{
+				"type":"namespace",
+				"name":"editor",
+				"tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object"}}]
+			}
+		]
+	}`)
+	t.Logf("input json:\n%s", prettyJSONForTest(raw))
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", raw, false)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != 1 {
+		t.Fatalf("tools count = %d, want 1; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.name").String(); got != "editor__apply_patch" {
+		t.Fatalf("tools.0.function.name = %q, want editor__apply_patch; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_KeepsDistinctToolsFromBothSources(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"role":"user","content":"Do the thing."},
+			{
+				"type":"additional_tools",
+				"tools":[
+					{"type":"function","name":"get_date","parameters":{"type":"object"}},
+					{"type":"function","name":"get_time","parameters":{"type":"object"}}
+				]
+			}
+		],
+		"tools": [
+			{"type":"function","name":"get_time","parameters":{"type":"object"}},
+			{"type":"function","name":"get_weather","parameters":{"type":"object"}}
+		]
+	}`)
+	t.Logf("input json:\n%s", prettyJSONForTest(raw))
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", raw, false)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	want := []string{"get_time", "get_weather", "get_date"}
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != int64(len(want)) {
+		t.Fatalf("tools count = %d, want %d; output=%s", got, len(want), out)
+	}
+	for i, wantName := range want {
+		got := gjson.GetBytes(out, fmt.Sprintf("tools.%d.function.name", i)).String()
+		if got != wantName {
+			t.Fatalf("tools.%d.function.name = %q, want %q; output=%s", i, got, wantName, out)
+		}
+	}
+}
+
+func TestResponsesSingleCustomToolName_CountsDeduplicatedTools(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"role":"user","content":"Patch the file."},
+			{
+				"type":"additional_tools",
+				"tools":[{"type":"custom","name":"apply_patch","description":"copy"}]
+			}
+		],
+		"tools": [
+			{"type":"custom","name":"apply_patch","description":"authoritative"}
+		]
+	}`)
+
+	name, ok := responsesSingleCustomToolName(raw)
+	if !ok {
+		t.Fatalf("responsesSingleCustomToolName ok = false, want true when the only tool is duplicated across both sources")
+	}
+	if name != "apply_patch" {
+		t.Fatalf("responsesSingleCustomToolName name = %q, want apply_patch", name)
+	}
+}
+
+func TestSplitResponsesQualifiedFunctionCallFromRequest_FirstDeclarationWins(t *testing.T) {
+	flatFirst := []byte(`{
+		"tools": [
+			{"type":"function","name":"editor__apply_patch","parameters":{"type":"object"}},
+			{"type":"namespace","name":"editor","tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object"}}]}
+		]
+	}`)
+	namespaceFirst := []byte(`{
+		"tools": [
+			{"type":"namespace","name":"editor","tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object"}}]},
+			{"type":"function","name":"editor__apply_patch","parameters":{"type":"object"}}
+		]
+	}`)
+	namespaceOnly := []byte(`{
+		"tools": [
+			{"type":"namespace","name":"mcp__github","tools":[{"type":"function","name":"get_me","parameters":{"type":"object"}}]}
+		]
+	}`)
+
+	tests := []struct {
+		name          string
+		raw           []byte
+		qualified     string
+		wantName      string
+		wantNamespace string
+	}{
+		// The flat tool is the one that survives merging, so it must stay flat.
+		{"flat declared first", flatFirst, "editor__apply_patch", "editor__apply_patch", ""},
+		// The namespace child survives here, so the call splits back into it.
+		{"namespace declared first", namespaceFirst, "editor__apply_patch", "apply_patch", "editor"},
+		// No collision: unchanged behaviour.
+		{"namespace only", namespaceOnly, "mcp__github__get_me", "get_me", "mcp__github"},
+		// Unknown name falls through untouched.
+		{"unknown name", flatFirst, "something_else", "something_else", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotName, gotNamespace := splitResponsesQualifiedFunctionCallFromRequest(tt.raw, tt.qualified)
+			if gotName != tt.wantName || gotNamespace != tt.wantNamespace {
+				t.Fatalf("split(%q) = (%q, %q), want (%q, %q)",
+					tt.qualified, gotName, gotNamespace, tt.wantName, tt.wantNamespace)
+			}
+		})
+	}
+}
+
+func TestSplitResponsesQualifiedFunctionCallFromRequest_MatchesMergedToolIdentity(t *testing.T) {
+	// Whatever survives the merge must be what reverse translation reports.
+	raw := []byte(`{
+		"tools": [
+			{"type":"function","name":"editor__apply_patch","parameters":{"type":"object"}},
+			{"type":"namespace","name":"editor","tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object"}}]}
+		]
+	}`)
+
+	merged := mergeResponsesRequestChatTools(gjson.ParseBytes(raw))
+	if len(merged) != 1 {
+		t.Fatalf("merged tool count = %d, want 1", len(merged))
+	}
+	emitted := gjson.GetBytes(merged[0], "function.name").String()
+
+	name, namespace := splitResponsesQualifiedFunctionCallFromRequest(raw, emitted)
+	if namespace != "" {
+		t.Fatalf("emitted tool %q came from a flat declaration, but split reported namespace %q", emitted, namespace)
+	}
+	if name != emitted {
+		t.Fatalf("split(%q) name = %q, want %q", emitted, name, emitted)
+	}
+}
+
+func TestResponsesCustomToolNames_FollowsMergedDeclaration(t *testing.T) {
+	// Declarations delivered through the two channels may differ in type: a
+	// top-level function and an "additional_tools" custom tool can flatten to
+	// the same Chat Completions name. Only the winner may decide whether the
+	// tool is freeform, otherwise a plain function call comes back as a
+	// custom_tool_call with unwrapped arguments.
+	functionFirst := []byte(`{
+		"input": [
+			{"type":"additional_tools","tools":[{"type":"custom","name":"exec","description":"copy"}]}
+		],
+		"tools": [
+			{"type":"function","name":"exec","parameters":{"type":"object"}}
+		]
+	}`)
+	customFirst := []byte(`{
+		"input": [
+			{"type":"additional_tools","tools":[{"type":"function","name":"exec","parameters":{"type":"object"}}]}
+		],
+		"tools": [
+			{"type":"custom","name":"exec","description":"authoritative"}
+		]
+	}`)
+
+	tests := []struct {
+		name       string
+		raw        []byte
+		wantCustom bool
+	}{
+		{name: "function declaration wins", raw: functionFirst, wantCustom: false},
+		{name: "custom declaration wins", raw: customFirst, wantCustom: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			merged := mergeResponsesRequestChatTools(gjson.ParseBytes(tt.raw))
+			if len(merged) != 1 {
+				t.Fatalf("merged tool count = %d, want 1", len(merged))
+			}
+			// Freeform tools are the ones converted to the single-string shape.
+			mergedIsCustom := gjson.GetBytes(merged[0], "function.parameters.properties.input").Exists()
+			if mergedIsCustom != tt.wantCustom {
+				t.Fatalf("merged tool custom = %v, want %v", mergedIsCustom, tt.wantCustom)
+			}
+
+			if _, isCustom := responsesCustomToolNames(tt.raw)["exec"]; isCustom != tt.wantCustom {
+				t.Fatalf("responsesCustomToolNames classified exec as custom = %v, want %v", isCustom, tt.wantCustom)
+			}
+
+			name, ok := responsesSingleCustomToolName(tt.raw)
+			if ok != tt.wantCustom {
+				t.Fatalf("responsesSingleCustomToolName ok = %v, want %v", ok, tt.wantCustom)
+			}
+			if ok && name != "exec" {
+				t.Fatalf("responsesSingleCustomToolName name = %q, want exec", name)
+			}
+		})
+	}
+}
+
+func TestResponsesCustomToolNames_OnlyReportsMergedTools(t *testing.T) {
+	// Nested namespaces are not converted, so their children never reach the
+	// upstream request and must not be classified as freeform tools either.
+	raw := []byte(`{
+		"tools": [
+			{"type":"namespace","name":"outer","tools":[
+				{"type":"namespace","name":"inner","tools":[{"type":"custom","name":"buried"}]},
+				{"type":"custom","name":"reachable"}
+			]}
+		]
+	}`)
+
+	mergedNames := make(map[string]struct{})
+	for _, chatTool := range mergeResponsesRequestChatTools(gjson.ParseBytes(raw)) {
+		mergedNames[gjson.GetBytes(chatTool, "function.name").String()] = struct{}{}
+	}
+	if _, ok := mergedNames["outer__reachable"]; !ok {
+		t.Fatalf("merged tool names = %v, want outer__reachable", mergedNames)
+	}
+
+	for name := range responsesCustomToolNames(raw) {
+		if _, ok := mergedNames[name]; !ok {
+			t.Fatalf("responsesCustomToolNames reported %q, which the merge never emits", name)
+		}
 	}
 }

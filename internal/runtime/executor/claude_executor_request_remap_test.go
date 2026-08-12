@@ -94,6 +94,141 @@ func TestRemapOAuthToolNamesWithOptionsFallsBackForMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestReverseRemapOAuthToolNamesRecoversMangledAliases(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"glob","input_schema":{"type":"object"}},{"name":"read","input_schema":{"type":"object"}}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "mangled-alias-caller"})
+	globAlias := gjson.GetBytes(remapped, "tools.0.name").String()
+	readAlias := gjson.GetBytes(remapped, "tools.1.name").String()
+	globParts, ok := parseClaudeMCPAlias(globAlias)
+	if !ok {
+		t.Fatalf("glob alias is invalid: %q", globAlias)
+	}
+	readParts, ok := parseClaudeMCPAlias(readAlias)
+	if !ok {
+		t.Fatalf("read alias is invalid: %q", readAlias)
+	}
+
+	repeatedAlias := "mcp__" + globParts.server + "__" + globAlias
+	mixedAlias := "mcp__" + globParts.server + "__" + globParts.toolID + "_" + readParts.semantic
+	response := []byte(fmt.Sprintf(`{"content":[
+		{"type":"tool_use","id":"toolu_glob","name":%q,"input":{}},
+		{"type":"tool_reference","tool_name":%q},
+		{"type":"tool_result","tool_use_id":"toolu_read","content":[{"type":"tool_reference","tool_name":%q}]}
+	]}`, repeatedAlias, mixedAlias, mixedAlias))
+
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
+	}
+	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "glob" {
+		t.Fatalf("repeated alias restored to %q, want glob", got)
+	}
+	if got := gjson.GetBytes(restored, "content.1.tool_name").String(); got != "read" {
+		t.Fatalf("mixed alias restored to %q, want read", got)
+	}
+	if got := gjson.GetBytes(restored, "content.2.content.0.tool_name").String(); got != "read" {
+		t.Fatalf("nested mixed alias restored to %q, want read", got)
+	}
+
+	streamTests := []struct {
+		name      string
+		block     string
+		fieldPath string
+		want      string
+	}{
+		{
+			name:      "repeated tool use alias",
+			block:     fmt.Sprintf(`{"type":"tool_use","id":"toolu_glob","name":%q,"input":{}}`, repeatedAlias),
+			fieldPath: "content_block.name",
+			want:      "glob",
+		},
+		{
+			name:      "mixed tool reference alias",
+			block:     fmt.Sprintf(`{"type":"tool_reference","tool_name":%q}`, mixedAlias),
+			fieldPath: "content_block.tool_name",
+			want:      "read",
+		},
+	}
+	for _, test := range streamTests {
+		t.Run(test.name, func(t *testing.T) {
+			line := []byte(`data: {"type":"content_block_start","index":0,"content_block":` + test.block + `}`)
+			restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+			if errStream != nil {
+				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
+			}
+			if got := gjson.GetBytes(helps.JSONPayload(restoredLine), test.fieldPath).String(); got != test.want {
+				t.Fatalf("restored stream name = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"tool.name"},{"name":"tool/name"}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "ambiguous-alias-caller"})
+	firstAlias := gjson.GetBytes(remapped, "tools.0.name").String()
+	secondAlias := gjson.GetBytes(remapped, "tools.1.name").String()
+	firstParts, ok := parseClaudeMCPAlias(firstAlias)
+	if !ok {
+		t.Fatalf("first alias is invalid: %q", firstAlias)
+	}
+	secondParts, ok := parseClaudeMCPAlias(secondAlias)
+	if !ok {
+		t.Fatalf("second alias is invalid: %q", secondAlias)
+	}
+	if firstParts.semantic != secondParts.semantic {
+		t.Fatalf("semantic suffixes differ: %q != %q", firstParts.semantic, secondParts.semantic)
+	}
+
+	unknownToolID := "aaaaaaaaaaaa"
+	if unknownToolID == firstParts.toolID || unknownToolID == secondParts.toolID {
+		unknownToolID = "bbbbbbbbbbbb"
+	}
+	tests := []struct {
+		name      string
+		alias     string
+		wantError string
+	}{
+		{
+			name:      "ambiguous semantic suffix",
+			alias:     "mcp__" + firstParts.server + "__" + unknownToolID + "_" + firstParts.semantic,
+			wantError: "semantic suffix matches multiple declared tools",
+		},
+		{
+			name:      "unrecoverable semantic suffix",
+			alias:     "mcp__" + firstParts.server + "__" + unknownToolID + "_missing_tool",
+			wantError: "no unique request-local match",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, test.alias))
+			if _, errReverse := reverseRemapOAuthToolNames(response, reverseMap); errReverse == nil || !strings.Contains(errReverse.Error(), test.wantError) {
+				t.Fatalf("reverseRemapOAuthToolNames() error = %v, want %q", errReverse, test.wantError)
+			}
+
+			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, test.alias))
+			if _, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap); errStream == nil || !strings.Contains(errStream.Error(), test.wantError) {
+				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v, want %q", errStream, test.wantError)
+			}
+		})
+	}
+}
+
+func TestReverseRemapOAuthToolNamesPreservesUnrelatedMCPName(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"glob"}]}`)
+	_, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "unrelated-mcp-caller"})
+	response := []byte(`{"content":[{"type":"tool_use","id":"toolu_1","name":"mcp__external__query","input":{}}]}`)
+
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
+	}
+	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "mcp__external__query" {
+		t.Fatalf("unrelated MCP name = %q, want unchanged", got)
+	}
+}
+
 func TestApplyClaudeRawJSONEditsRejectsInvalidRanges(t *testing.T) {
 	body := []byte(`{"a":"one","b":"two"}`)
 	tests := []struct {

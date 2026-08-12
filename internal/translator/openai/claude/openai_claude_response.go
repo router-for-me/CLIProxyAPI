@@ -8,6 +8,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -304,14 +305,8 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		if !param.ContentBlocksStopped {
 			for _, index := range toolCallAccumulatorIndexes(param.ToolCallsAccumulator) {
 				accumulator := param.ToolCallsAccumulator[index]
-				if !accumulator.StartEmitted {
-					// Belated emit for streams that supplied a valid name but
-					// never sent an id. SanitizeClaudeToolID("") produces the
-					// expected stable synthetic toolu_<nanos>_<n> ID shape.
-					if accumulator.Name == "" {
-						continue
-					}
-					emitToolUseStart(param, index, accumulator, &results)
+				if !emitBelatedToolUseStart(param, index, accumulator, &results) {
+					continue
 				}
 				blockIndex := param.toolContentBlockIndex(index)
 
@@ -377,13 +372,8 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 	if !param.ContentBlocksStopped {
 		for _, index := range toolCallAccumulatorIndexes(param.ToolCallsAccumulator) {
 			accumulator := param.ToolCallsAccumulator[index]
-			if !accumulator.StartEmitted {
-				// Belated emit at [DONE]; same behavior as the finish_reason
-				// path for name-but-no-id streams.
-				if accumulator.Name == "" {
-					continue
-				}
-				emitToolUseStart(param, index, accumulator, &results)
+			if !emitBelatedToolUseStart(param, index, accumulator, &results) {
+				continue
 			}
 			blockIndex := param.toolContentBlockIndex(index)
 
@@ -589,6 +579,29 @@ func emitToolUseStart(param *ConvertOpenAIResponseToAnthropicParams, openAIToolI
 	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSON, 2))
 	accumulator.StartEmitted = true
 	param.SawToolCall = true
+}
+
+// emitBelatedToolUseStart finalizes a tool_use block that never received a
+// mid-stream start. Some OpenAI-compatible providers leave function.name empty
+// for the whole stream; dropping those calls loses tool_use for Claude Code and
+// can trigger retry loops. When name is still empty but the call has an id
+// and/or arguments, synthesize tool_<index> instead of silently discarding it.
+// Returns false when the accumulator has no usable tool-call signal.
+func emitBelatedToolUseStart(param *ConvertOpenAIResponseToAnthropicParams, openAIToolIndex int, accumulator *ToolCallAccumulator, results *[][]byte) bool {
+	if accumulator == nil {
+		return false
+	}
+	if accumulator.StartEmitted {
+		return true
+	}
+	if accumulator.Name == "" && accumulator.ID == "" && accumulator.Arguments.Len() == 0 {
+		return false
+	}
+	if accumulator.Name == "" {
+		accumulator.Name = fmt.Sprintf("tool_%d", openAIToolIndex)
+	}
+	emitToolUseStart(param, openAIToolIndex, accumulator, results)
+	return true
 }
 
 func toolCallAccumulatorIndexes(accumulators map[int]*ToolCallAccumulator) []int {

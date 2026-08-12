@@ -36,6 +36,15 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("claude")
+	var replayScope claudeThinkingReplayScope
+	if claudeThinkingReplayEnabled(auth, req, opts) {
+		req, replayScope = prepareClaudeThinkingReplayRequest(ctx, auth, req, opts)
+	}
+	defer func() {
+		if err != nil && replayScope.replayApplied && shouldClearKimiThinkingReplayAfterError(err) {
+			clearClaudeThinkingReplayContent(ctx, replayScope)
+		}
+	}()
 	// Use an upstream stream whenever the downstream response needs translation
 	// from Claude events. Native Claude responses use the JSON response path.
 	upstreamStream := responseFormat != to
@@ -231,15 +240,28 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
-			lines[i] = restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
+			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
+			if errRestore != nil {
+				errRestore = fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore)
+				helps.RecordAPIResponseError(ctx, e.cfg, errRestore)
+				return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errRestore)
+			}
+			lines[i] = restoredLine
 		}
 		data = bytes.Join(lines, []byte("\n"))
 	} else {
 		commitClaudeDiagnostics(diagnosticsState, claudeMessageIDFromResponse(data))
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
-		data = restoreClaudeOAuthToolNamesFromResponse(data, oauthToolNamesReverseMap)
+		var errRestore error
+		data, errRestore = restoreClaudeOAuthToolNamesFromResponse(data, oauthToolNamesReverseMap)
+		if errRestore != nil {
+			errRestore = fmt.Errorf("restore Claude OAuth tool name from response: %w", errRestore)
+			helps.RecordAPIResponseError(ctx, e.cfg, errRestore)
+			return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errRestore)
+		}
 	}
 	data = e.restoreResponseModel(data, req.Model)
+	cacheClaudeThinkingReplayResponse(ctx, replayScope, data)
 	var param any
 	out := sdktranslator.TranslateNonStream(
 		ctx,

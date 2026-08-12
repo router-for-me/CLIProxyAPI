@@ -807,14 +807,24 @@ func stripKimiPrefix(model string) string {
 // It strips the CLIProxyAPI "kimi-" prefix and any Claude Code "[1m]" context
 // suffix while preserving a trailing thinking suffix (e.g. "(1024)"), so that
 // the upstream API receives IDs such as "k3(1024)" instead of "kimi-k3[1m](1024)".
+// K2.7 Code aliases are remapped to the official Kimi Code model IDs before
+// generic prefix stripping, so already-canonical IDs stay idempotent.
 func normalizeKimiUpstreamModel(model string) string {
 	model = strings.TrimSpace(model)
 	parsed := thinking.ParseSuffix(model)
-	base := parsed.ModelName
-	if strings.HasSuffix(strings.ToLower(base), "[1m]") {
+	base := strings.ToLower(strings.TrimSpace(parsed.ModelName))
+	if strings.HasSuffix(base, "[1m]") {
 		base = base[:len(base)-len("[1m]")]
 	}
-	normalized := strings.ToLower(stripKimiPrefix(strings.TrimSpace(base)))
+	var normalized string
+	switch base {
+	case "kimi-k2.7-code", "k2.7-code", "kimi-for-coding", "for-coding":
+		normalized = "kimi-for-coding"
+	case "kimi-k2.7-code-highspeed", "k2.7-code-highspeed", "kimi-for-coding-highspeed", "for-coding-highspeed":
+		normalized = "kimi-for-coding-highspeed"
+	default:
+		normalized = stripKimiPrefix(base)
+	}
 	if parsed.HasSuffix {
 		return normalized + "(" + parsed.RawSuffix + ")"
 	}

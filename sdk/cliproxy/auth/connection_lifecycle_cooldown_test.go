@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"testing"
 	"time"
 
@@ -29,9 +30,14 @@ func TestManager_MarkResult_ConnectionLifecycleDoesNotCooldown(t *testing.T) {
 		{name: "websocket 1001", err: &Error{Message: "websocket: close 1001 (going away)"}},
 		{name: "websocket 1006", err: &Error{Message: "websocket: close 1006 (abnormal closure): unexpected EOF"}},
 		{name: "context canceled", err: &Error{Message: "context canceled"}},
+		{name: "context deadline exceeded", err: &Error{Message: "context deadline exceeded"}},
 		{name: "unexpected EOF", err: &Error{Message: "unexpected EOF"}},
 		{name: "plain EOF", err: &Error{Message: "EOF"}},
 		{name: "wrapped unexpected EOF", err: &Error{Message: "read tcp 127.0.0.1:1->127.0.0.1:2: unexpected EOF"}},
+		{name: "typed canceled", err: resultErrorFromError(context.Canceled)},
+		{name: "typed deadline", err: resultErrorFromError(context.DeadlineExceeded)},
+		{name: "url canceled", err: resultErrorFromError(&url.Error{Op: "Post", URL: "https://example.com", Err: context.Canceled})},
+		{name: "url deadline", err: resultErrorFromError(&url.Error{Op: "Post", URL: "https://example.com", Err: context.DeadlineExceeded})},
 	}
 
 	for _, tc := range cases {
@@ -202,8 +208,11 @@ func TestManager_MarkResult_NonLifecycleStillCooldowns(t *testing.T) {
 func TestResultErrorFromError_ConnectionLifecycleDoesNotBecomeRequestScoped(t *testing.T) {
 	cases := []error{
 		context.Canceled,
+		context.DeadlineExceeded,
 		io.EOF,
 		io.ErrUnexpectedEOF,
+		&url.Error{Op: "Post", URL: "https://example.com", Err: context.Canceled},
+		&url.Error{Op: "Post", URL: "https://example.com", Err: context.DeadlineExceeded},
 		&websocket.CloseError{Code: websocket.CloseNormalClosure, Text: "normal"},
 		&websocket.CloseError{Code: websocket.CloseGoingAway, Text: "bye"},
 		&websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "unexpected EOF"},
@@ -211,6 +220,7 @@ func TestResultErrorFromError_ConnectionLifecycleDoesNotBecomeRequestScoped(t *t
 		fmt.Errorf("wrap: %w", io.ErrUnexpectedEOF),
 		errors.New("websocket: close 1000 (normal)"),
 		errors.New("websocket: close 1006 (abnormal closure): unexpected EOF"),
+		errors.New("context deadline exceeded"),
 		errors.New("unexpected EOF"),
 	}
 	for _, err := range cases {

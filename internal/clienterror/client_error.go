@@ -2,6 +2,7 @@
 package clienterror
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -9,6 +10,10 @@ import (
 
 	"github.com/tidwall/gjson"
 )
+
+// StatusClientClosedRequest is the nginx-style status used when the client
+// aborts the request before the proxy finishes (context.Canceled).
+const StatusClientClosedRequest = 499
 
 var requestFaultCodes = map[string]struct{}{
 	"cyber_policy":                {},
@@ -29,6 +34,40 @@ var requestFaultTypes = map[string]struct{}{
 	"invalid_prompt":        {},
 }
 
+// HTTPStatusFromError extracts an HTTP status from err.
+// Explicit StatusCode() values win. Otherwise context.Canceled maps to 499
+// and context.DeadlineExceeded maps to 504. Returns 0 when unknown.
+func HTTPStatusFromError(err error) int {
+	if err == nil {
+		return 0
+	}
+	type statusCoder interface {
+		StatusCode() int
+	}
+	var sc statusCoder
+	if errors.As(err, &sc) && sc != nil {
+		if code := sc.StatusCode(); code > 0 {
+			return code
+		}
+	}
+	if errors.Is(err, context.Canceled) {
+		return StatusClientClosedRequest
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout
+	}
+	return 0
+}
+
+// HTTPStatusFromErrorOr is like HTTPStatusFromError but returns fallback when
+// the error does not carry a known status.
+func HTTPStatusFromErrorOr(err error, fallback int) int {
+	if code := HTTPStatusFromError(err); code > 0 {
+		return code
+	}
+	return fallback
+}
+
 // IsRequestFault reports whether an upstream failure is caused by the request
 // and therefore must not rotate or penalize credentials.
 func IsRequestFault(status int, err error) bool {
@@ -40,6 +79,18 @@ func IsRequestFault(status int, err error) bool {
 		if errors.As(err, &statusErr) && statusErr != nil {
 			status = statusErr.StatusCode()
 		}
+	}
+	// Payment and rate-limit statuses are authoritative even when an upstream
+	// pairs them with a generic invalid_request_error body. The credential must
+	// remain eligible for cooldown and rotation.
+	if status == http.StatusPaymentRequired || status == http.StatusTooManyRequests {
+		return false
+	}
+	// DeepSeek reports an invalid API key as 401 with the authentication_error
+	// type alongside the same generic code. Preserve that credential failure
+	// classification without weakening generic request-fault handling.
+	if status == http.StatusUnauthorized && hasAuthenticationErrorBody(err) {
+		return false
 	}
 	if hasRequestFaultBody(err) {
 		return true
@@ -71,6 +122,22 @@ func IsItemNotPersisted(message string) bool {
 	return strings.Contains(lower, "item with id") &&
 		strings.Contains(lower, "not found") &&
 		strings.Contains(lower, "items are not persisted when `store` is set to false")
+}
+
+func hasAuthenticationErrorBody(err error) bool {
+	if err == nil {
+		return false
+	}
+	body := strings.TrimSpace(err.Error())
+	if body == "" || !json.Valid([]byte(body)) {
+		return false
+	}
+	for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
+		if errType := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String())); errType == "authentication_error" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasRequestFaultBody(err error) bool {

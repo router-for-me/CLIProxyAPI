@@ -14,17 +14,26 @@ var largeInlineDataBenchmarkOutput []byte
 func TestConvertGeminiRequestToGeminiReusesLargeNormalizedPayload(t *testing.T) {
 	input := largeInlineDataGeminiRequest(true)
 
+	// Assert the reuse invariant with t.Fatal rather than inside testing.Benchmark:
+	// a failing benchmark aborts before any iteration completes and yields a zero
+	// BenchmarkResult, so AllocedBytesPerOp would report 0 and silently satisfy the
+	// allocation check below exactly when the payload is being copied.
+	output := ConvertGeminiRequestToGemini("gemini-test", input, false)
+	if &output[0] != &input[0] {
+		t.Fatal("normalized request should reuse the input payload")
+	}
+	largeInlineDataBenchmarkOutput = output
+
 	result := testing.Benchmark(func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
-			output := ConvertGeminiRequestToGemini("gemini-test", input, false)
-			if &output[0] != &input[0] {
-				b.Fatal("normalized request should reuse the input payload")
-			}
-			largeInlineDataBenchmarkOutput = output
+			largeInlineDataBenchmarkOutput = ConvertGeminiRequestToGemini("gemini-test", input, false)
 		}
 	})
 
+	if result.N == 0 {
+		t.Fatal("allocation benchmark did not complete an iteration")
+	}
 	if allocated := result.AllocedBytesPerOp(); allocated >= 1<<20 {
 		t.Fatalf("normalized 20 MiB inlineData request allocated %d bytes/op, want less than 1 MiB", allocated)
 	}

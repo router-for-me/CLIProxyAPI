@@ -1,8 +1,11 @@
 package clienterror
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"testing"
 )
 
@@ -13,6 +16,94 @@ type statusError struct {
 
 func (e statusError) Error() string   { return e.body }
 func (e statusError) StatusCode() int { return e.status }
+
+func TestHTTPStatusFromError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "nil", err: nil, want: 0},
+		{name: "plain error", err: errors.New("boom"), want: 0},
+		{name: "context canceled", err: context.Canceled, want: StatusClientClosedRequest},
+		{name: "context deadline exceeded", err: context.DeadlineExceeded, want: http.StatusGatewayTimeout},
+		{
+			name: "url error wraps canceled",
+			err:  &url.Error{Op: "Post", URL: "https://example.com", Err: context.Canceled},
+			want: StatusClientClosedRequest,
+		},
+		{
+			name: "url error wraps deadline",
+			err:  &url.Error{Op: "Post", URL: "https://example.com", Err: context.DeadlineExceeded},
+			want: http.StatusGatewayTimeout,
+		},
+		{
+			name: "fmt wrap canceled",
+			err:  fmt.Errorf("upstream: %w", context.Canceled),
+			want: StatusClientClosedRequest,
+		},
+		{
+			name: "explicit status code wins",
+			err:  statusError{status: http.StatusTooManyRequests, body: "rate limited"},
+			want: http.StatusTooManyRequests,
+		},
+		{
+			name: "explicit status wins over canceled unwrap",
+			err: statusAndUnwrapError{
+				status: http.StatusTooManyRequests,
+				body:   "rate limited",
+				cause:  context.Canceled,
+			},
+			want: http.StatusTooManyRequests,
+		},
+		{
+			name: "zero status code falls through to canceled unwrap",
+			err: statusAndUnwrapError{
+				status: 0,
+				body:   "canceled",
+				cause:  context.Canceled,
+			},
+			want: StatusClientClosedRequest,
+		},
+		{
+			name: "zero status code without unwrap stays unknown",
+			err:  statusError{status: 0, body: context.Canceled.Error()},
+			want: 0,
+		},
+		{
+			name: "wrapped status code via errors.As",
+			err:  fmt.Errorf("execute failed: %w", statusError{status: http.StatusUnauthorized, body: "unauthorized"}),
+			want: http.StatusUnauthorized,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HTTPStatusFromError(tc.err); got != tc.want {
+				t.Fatalf("HTTPStatusFromError() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+
+	if got := HTTPStatusFromErrorOr(errors.New("boom"), http.StatusBadGateway); got != http.StatusBadGateway {
+		t.Fatalf("HTTPStatusFromErrorOr(plain) = %d, want %d", got, http.StatusBadGateway)
+	}
+	if got := HTTPStatusFromErrorOr(context.Canceled, http.StatusBadGateway); got != StatusClientClosedRequest {
+		t.Fatalf("HTTPStatusFromErrorOr(canceled) = %d, want %d", got, StatusClientClosedRequest)
+	}
+}
+
+type statusAndUnwrapError struct {
+	status int
+	body   string
+	cause  error
+}
+
+func (e statusAndUnwrapError) Error() string { return e.body }
+func (e statusAndUnwrapError) StatusCode() int {
+	return e.status
+}
+func (e statusAndUnwrapError) Unwrap() error { return e.cause }
 
 func TestIsRequestFaultStructuredIdentifiers(t *testing.T) {
 	for _, code := range []string{
@@ -100,6 +191,24 @@ func TestIsRequestFault(t *testing.T) {
 		},
 		{name: "plain not found", status: http.StatusNotFound, err: errors.New("model not found")},
 		{name: "unauthorized", status: http.StatusUnauthorized, err: errors.New("invalid token")},
+		{
+			name:   "deepseek authentication failure is credential failure",
+			status: http.StatusUnauthorized,
+			err:    errors.New(`{"error":{"code":"invalid_request_error","message":"Authentication Fails, Your api key: ****heck is invalid","param":null,"type":"authentication_error"}}`),
+			want:   false,
+		},
+		{
+			name:   "deepseek insufficient balance is payment failure",
+			status: http.StatusPaymentRequired,
+			err:    errors.New(`{"error":{"message":"Insufficient Balance","type":"unknown_error","param":null,"code":"invalid_request_error"}}`),
+			want:   false,
+		},
+		{
+			name:   "rate limit status overrides generic request error code",
+			status: http.StatusTooManyRequests,
+			err:    errors.New(`{"error":{"message":"Rate Limit Reached","type":"unknown_error","param":null,"code":"invalid_request_error"}}`),
+			want:   false,
+		},
 		{name: "quota", status: http.StatusTooManyRequests, err: errors.New("quota")},
 		{name: "transport", status: http.StatusBadGateway, err: errors.New("unexpected EOF")},
 		{name: "invalid JSON body", status: http.StatusBadGateway, err: errors.New(`{"error":`)},
