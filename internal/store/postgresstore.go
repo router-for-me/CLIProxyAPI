@@ -640,6 +640,24 @@ func (s *PostgresStore) ensureLiteLLMSchema(ctx context.Context) error {
 	return nil
 }
 
+// Migrate runs idempotent schema migrations for tables/indexes that were added
+// after initial schema creation. It must be safe to run on every startup.
+// Applied migrations are appended here by later tasks (new usage_events indexes,
+// the usage_stat_day rollup table); it is a no-op as of this task.
+//
+// Migrate is intentionally a distinct step from EnsureSchema: EnsureSchema
+// creates the base tables at first construction, while Migrate evolves the
+// schema for already-running deployments. Tests exercise it explicitly via
+// ensureMigrated rather than folding it into EnsureSchema so the two phases
+// stay independently testable.
+func (s *PostgresStore) Migrate(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: not initialized")
+	}
+	// Future migrations append their idempotent DDL here.
+	return nil
+}
+
 // ensurePolicySchema creates the tables backing client-facing API keys, per-key policies,
 // usage events, usage windows, the model catalog, and per-model pricing. All statements are
 // idempotent (CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS).
@@ -1825,6 +1843,9 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 // Bootstrap synchronizes configuration and auth records between PostgreSQL and the local workspace.
 func (s *PostgresStore) Bootstrap(ctx context.Context, exampleConfigPath string) error {
 	if err := s.EnsureSchema(ctx); err != nil {
+		return err
+	}
+	if err := s.Migrate(ctx); err != nil {
 		return err
 	}
 	if err := s.syncConfigFromDatabase(ctx, exampleConfigPath); err != nil {
