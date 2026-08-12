@@ -3,6 +3,7 @@ package management
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -262,5 +263,152 @@ func TestDeleteLiteLLMUserCompat(t *testing.T) {
 	h.GetLiteLLMUserCompat(c2)
 	if rec2.Code != http.StatusNotFound {
 		t.Fatalf("post-delete get status = %d; want 404; body=%s", rec2.Code, rec2.Body.String())
+	}
+}
+
+// TestGenerateLiteLLMKeyCompat seeds a user, POSTs /litellm/key/generate, and
+// verifies the plaintext secret is returned once and is actually usable at
+// runtime (LookupByHash resolves to the created key). It also covers the 400
+// empty-user_id and 404 unknown-owner cases.
+func TestGenerateLiteLLMKeyCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_generate")
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	if _, err := h.pgUsers.Create(ctx, store.InternalUser{
+		ID: "team-a", UserAlias: "Team A", UserRole: "org",
+	}); err != nil {
+		t.Fatalf("seed Create: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := `{"user_id":"team-a","models":["gpt-4o"],"alias":"prod-key","max_budget":10}`
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/generate", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.GenerateLiteLLMKeyCompat(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := rec.Body.Bytes()
+	for _, want := range []string{
+		`"key"`,
+		`"user_id":"team-a"`,
+		`"secret"`,
+		`"key_alias":"prod-key"`,
+		`"models"`,
+		`"max_budget"`,
+		`"spend"`,
+		`"created_at"`,
+		`"updated_at"`,
+	} {
+		if !bytes.Contains(resp, []byte(want)) {
+			t.Errorf("generate response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+	// Extract the plaintext secret and prove it resolves via hash lookup.
+	var gen struct {
+		Key    string `json:"key"`
+		Secret string `json:"secret"`
+	}
+	if err := json.Unmarshal(resp, &gen); err != nil {
+		t.Fatalf("unmarshal generate response: %v", err)
+	}
+	if gen.Secret == "" {
+		t.Fatalf("generate returned empty secret; body=%s", rec.Body.String())
+	}
+	key, _, err := h.pgAPIKeys.LookupByHash(ctx, store.HashSecret(gen.Secret))
+	if err != nil {
+		t.Fatalf("LookupByHash(secret) failed: %v", err)
+	}
+	if key.ID != gen.Key {
+		t.Errorf("LookupByHash resolved key %s; want generated key %s", key.ID, gen.Key)
+	}
+
+	// 400: empty user_id.
+	rec400 := httptest.NewRecorder()
+	c400, _ := gin.CreateTestContext(rec400)
+	c400.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/generate", bytes.NewBufferString(`{"user_id":""}`))
+	c400.Request.Header.Set("Content-Type", "application/json")
+	h.GenerateLiteLLMKeyCompat(c400)
+	if rec400.Code != http.StatusBadRequest {
+		t.Fatalf("empty user_id status = %d; want 400; body=%s", rec400.Code, rec400.Body.String())
+	}
+	if !bytes.Contains(rec400.Body.Bytes(), []byte(`"invalid_request"`)) {
+		t.Errorf("empty user_id response missing invalid_request type; body=%s", rec400.Body.String())
+	}
+
+	// 404: unknown owner.
+	rec404 := httptest.NewRecorder()
+	c404, _ := gin.CreateTestContext(rec404)
+	c404.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/generate", bytes.NewBufferString(`{"user_id":"nope"}`))
+	c404.Request.Header.Set("Content-Type", "application/json")
+	h.GenerateLiteLLMKeyCompat(c404)
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("unknown owner status = %d; want 404; body=%s", rec404.Code, rec404.Body.String())
+	}
+	if !bytes.Contains(rec404.Body.Bytes(), []byte(`"not_found"`)) {
+		t.Errorf("unknown owner response missing not_found type; body=%s", rec404.Body.String())
+	}
+}
+
+// TestGetLiteLLMKeyCompat seeds a user + key, GETs /litellm/key/info, and
+// verifies the fields are present while the secret is omitted (LiteLLM omits it
+// on read). Also covers the 404 case.
+func TestGetLiteLLMKeyCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_info")
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	if _, err := h.pgUsers.Create(ctx, store.InternalUser{
+		ID: "team-a", UserAlias: "Team A", UserRole: "org",
+	}); err != nil {
+		t.Fatalf("seed user Create: %v", err)
+	}
+	pol := store.Policy{AllowedModels: []string{"gpt-4o"}}
+	key, _, err := h.pgAPIKeys.Create(ctx, "prod", "prod-key", "", nil, nil, &pol)
+	if err != nil {
+		t.Fatalf("seed key Create: %v", err)
+	}
+	if err := h.pgAPIKeys.UpdateUserID(ctx, key.ID, "team-a"); err != nil {
+		t.Fatalf("seed UpdateUserID: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/key/info?key="+key.ID, nil)
+	h.GetLiteLLMKeyCompat(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := rec.Body.Bytes()
+	for _, want := range []string{
+		`"key":"` + key.ID + `"`,
+		`"user_id":"team-a"`,
+		`"key_alias":"prod-key"`,
+		`"models"`,
+		`"spend"`,
+		`"created_at"`,
+		`"updated_at"`,
+	} {
+		if !bytes.Contains(resp, []byte(want)) {
+			t.Errorf("info response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+	// The secret must NOT be leaked on read.
+	if bytes.Contains(resp, []byte(`"secret"`)) {
+		t.Errorf("info response leaked secret; body=%s", rec.Body.String())
+	}
+
+	// 404 case.
+	rec404 := httptest.NewRecorder()
+	c404, _ := gin.CreateTestContext(rec404)
+	c404.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/key/info?key=nope", nil)
+	h.GetLiteLLMKeyCompat(c404)
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("missing key status = %d; want 404; body=%s", rec404.Code, rec404.Body.String())
+	}
+	if !bytes.Contains(rec404.Body.Bytes(), []byte(`"not_found"`)) {
+		t.Errorf("missing key response missing not_found type; body=%s", rec404.Body.String())
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 )
@@ -318,4 +319,150 @@ func (h *Handler) DeleteLiteLLMUserCompat(c *gin.Context) {
 	// Policy cache must be invalidated so the next request re-reads the snapshot.
 	h.invalidatePolicyCache()
 	c.JSON(http.StatusOK, gin.H{"id": userID, "deleted": true})
+}
+
+// liteLLMCompatKeyGenerateRequest is the JSON payload for POST /litellm/key/generate.
+// The LiteLLM key owner is user_id (REQUIRED); the remaining fields map onto a
+// runtime store.Policy / APIKey.
+type liteLLMCompatKeyGenerateRequest struct {
+	UserID         string         `json:"user_id"`
+	Models         []string       `json:"models"`
+	Metadata       map[string]any `json:"metadata"`
+	MaxBudget      *float64       `json:"max_budget"`
+	BudgetDuration string         `json:"budget_duration"`
+	RPMLimit       *int           `json:"rpm_limit"`
+	TPMLimit       *int           `json:"tpm_limit"`
+	Alias          string         `json:"alias"`
+	Name           string         `json:"name"`
+}
+
+// liteLLMCompatKeyResponse is the typed /litellm/key/generate + /litellm/key/info
+// response. Typed struct + omitempty so unset optional fields are omitted from
+// the JSON, matching LiteLLM's Optional-model / wire parity (mirrors
+// liteLLMCompatUserResponse). Secret is only populated on generate — LiteLLM
+// returns the plaintext key once at creation and omits it on read.
+type liteLLMCompatKeyResponse struct {
+	Key        string         `json:"key"`
+	UserID     string         `json:"user_id"`
+	Secret     string         `json:"secret,omitempty"`
+	KeyAlias   string         `json:"key_alias,omitempty"`
+	Models     []string       `json:"models,omitempty"`
+	MaxBudget  *float64       `json:"max_budget,omitempty"`
+	Spend      float64        `json:"spend"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+	ExpiresAt  *time.Time     `json:"expires_at,omitempty"`
+	LastUsedAt *time.Time     `json:"last_used_at,omitempty"`
+}
+
+// keyToCompat maps a runtime APIKey + Policy to LiteLLM's /key response field
+// names (snake_case). spend is not tracked on the runtime key row, so it is
+// surfaced as 0. models / max_budget come from the policy.
+func keyToCompat(k *store.APIKey, pol *store.Policy) liteLLMCompatKeyResponse {
+	var models []string
+	var maxBudget *float64
+	if pol != nil {
+		models = pol.AllowedModels
+		maxBudget = pol.BudgetMonthlyUSD
+	}
+	return liteLLMCompatKeyResponse{
+		Key:        k.ID,
+		UserID:     k.UserID,
+		KeyAlias:   k.KeyAlias,
+		Models:     models,
+		MaxBudget:  maxBudget,
+		CreatedAt:  k.CreatedAt,
+		UpdatedAt:  k.UpdatedAt,
+		Metadata:   k.Metadata,
+		ExpiresAt:  k.ExpiresAt,
+		LastUsedAt: k.LastUsedAt,
+	}
+}
+
+// GenerateLiteLLMKeyCompat is the runtime-backed POST /litellm/key/generate
+// handler. It creates a runtime API key owned by an internal user and returns
+// the plaintext secret exactly once (LiteLLM's generate contract).
+func (h *Handler) GenerateLiteLLMKeyCompat(c *gin.Context) {
+	users, keys, _, ok := h.requireLiteLLMRuntime(c)
+	if !ok {
+		return
+	}
+	var req liteLLMCompatKeyGenerateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		litellmCompatError(c, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if req.UserID == "" {
+		litellmCompatError(c, http.StatusBadRequest, "invalid_request", "user_id is required")
+		return
+	}
+	// Validate the owner exists; surface a 404 when the caller picked a stale id.
+	if _, err := users.Get(c.Request.Context(), req.UserID); err != nil {
+		if errors.Is(err, store.ErrInternalUserNotFound) {
+			litellmCompatError(c, http.StatusNotFound, "not_found", "user not found")
+			return
+		}
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	pol := store.Policy{
+		AllowedModels:    req.Models,
+		RPMLimit:         req.RPMLimit,
+		BudgetMonthlyUSD: req.MaxBudget,
+	}
+	key, secret, err := keys.Create(c.Request.Context(), req.Name, req.Alias, "", nil, req.Metadata, &pol)
+	if err != nil {
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	// Stamp the owner assignment.
+	keyID := key.ID
+	if err := keys.UpdateUserID(c.Request.Context(), keyID, req.UserID); err != nil {
+		// Roll back: drop the orphaned key rather than presenting a half-assigned row.
+		if delErr := keys.Delete(c.Request.Context(), keyID); delErr != nil {
+			log.WithError(delErr).WithField("api_key_id", keyID).
+				Warn("management: failed to roll back orphaned litellm compat key after user_id attach failure")
+		}
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	// Re-read so the response carries the freshly-stamped user_id and policy.
+	reloaded, reloadedPolicy, err := keys.LookupByID(c.Request.Context(), keyID)
+	if err != nil {
+		if delErr := keys.Delete(c.Request.Context(), keyID); delErr != nil {
+			log.WithError(delErr).WithField("api_key_id", keyID).
+				Warn("management: failed to roll back orphaned litellm compat key after re-read failure")
+		}
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	resp := keyToCompat(reloaded, reloadedPolicy)
+	resp.Secret = secret
+	c.JSON(http.StatusOK, resp)
+}
+
+// GetLiteLLMKeyCompat is the runtime-backed GET /litellm/key/info handler. The
+// key id is read from the key query param (LiteLLM's convention). The secret is
+// NOT returned on read — LiteLLM omits it.
+func (h *Handler) GetLiteLLMKeyCompat(c *gin.Context) {
+	_, keys, _, ok := h.requireLiteLLMRuntime(c)
+	if !ok {
+		return
+	}
+	keyID := c.Query("key")
+	if keyID == "" {
+		litellmCompatError(c, http.StatusBadRequest, "invalid_request", "key is required")
+		return
+	}
+	key, pol, err := keys.LookupByID(c.Request.Context(), keyID)
+	if err != nil {
+		if errors.Is(err, store.ErrAPIKeyNotFound) {
+			litellmCompatError(c, http.StatusNotFound, "not_found", "key not found")
+			return
+		}
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, keyToCompat(key, pol))
 }
