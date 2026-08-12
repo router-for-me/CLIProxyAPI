@@ -24,10 +24,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	upstreamModel := e.upstreamModel(baseModel)
 
-	apiKey, baseURL := claudeCreds(auth)
-	if isPlaceholderAPIKey(apiKey) {
-		return resp, statusErr{code: http.StatusUnauthorized, msg: "placeholder API key detected; configure a real Claude OAuth token or API key"}
+	if err := rejectPlaceholderClaudeAPIKey(auth); err != nil {
+		return resp, err
 	}
+	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}

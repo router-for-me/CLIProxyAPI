@@ -152,6 +152,18 @@ func isPlaceholderAPIKey(key string) bool {
 	return false
 }
 
+// rejectPlaceholderClaudeAPIKey returns a 401 when the selected Claude credential
+// is a known config placeholder. Shared by Execute, ExecuteStream, CountTokens,
+// and PrepareRequest (HttpRequest) so every entrypoint fails closed before any
+// upstream call.
+func rejectPlaceholderClaudeAPIKey(auth *cliproxyauth.Auth) error {
+	apiKey, _ := claudeCreds(auth)
+	if !isPlaceholderAPIKey(apiKey) {
+		return nil
+	}
+	return statusErr{code: http.StatusUnauthorized, msg: "placeholder API key detected; configure a real Claude OAuth token or API key"}
+}
+
 // Anthropic-compatible upstreams may reject or even crash when Claude models
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const defaultModelMaxTokens = 1024
@@ -230,6 +242,9 @@ func setClaudeResponseModel(payload []byte, model string) ([]byte, bool) {
 func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if req == nil {
 		return nil
+	}
+	if err := rejectPlaceholderClaudeAPIKey(auth); err != nil {
+		return err
 	}
 	apiKey, _ := claudeCreds(auth)
 	useAPIKey := auth != nil && (auth.AuthKind() == cliproxyauth.AuthKindAPIKey || (auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""))
