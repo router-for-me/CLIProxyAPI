@@ -148,7 +148,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if sess != nil {
 				sess.reqMu.Unlock()
 			}
-			if opts.ExecutionLifecycle != nil || cliproxyexecutor.DownstreamWebsocket(ctx) {
+			if cliproxyexecutor.DownstreamWebsocket(ctx) {
 				return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
 			}
 			return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)

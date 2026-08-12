@@ -143,7 +143,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header.Clone(), bodyErr)
 		}
 		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
-			if opts.ExecutionLifecycle != nil || cliproxyexecutor.DownstreamWebsocket(ctx) {
+			if cliproxyexecutor.DownstreamWebsocket(ctx) {
 				return resp, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
 			}
 			return e.CodexExecutor.Execute(ctx, auth, req, opts)
