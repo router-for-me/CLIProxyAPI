@@ -246,6 +246,27 @@ func (s *Server) registerManagementRoutes() {
 		// internal_users table ("sync to NixLLM"). Needs no external connection.
 		mgmt.POST("/litellm/sync/nixllm", s.mgmt.RunLiteLLMSyncNixLLM)
 
+		// Runtime-backed LiteLLM compat routes (wire-parity with LiteLLM's
+		// OpenAPI). These are additive siblings of the Manage-LiteLLM routes
+		// above: each is served by a *Compat handler that reads/writes the
+		// runtime tables through requireLiteLLMRuntime, returning 503
+		// pg_store_not_configured when the PG store is unwired. Existing routes
+		// are left untouched.
+		mgmt.POST("/litellm/user/new", s.mgmt.CreateLiteLLMUserCompat)
+		mgmt.GET("/litellm/user/list", s.mgmt.ListLiteLLMUsersCompat)
+		mgmt.GET("/litellm/user/info", s.mgmt.GetLiteLLMUserCompat)
+		mgmt.POST("/litellm/user/update", s.mgmt.UpdateLiteLLMUserCompat)
+		mgmt.POST("/litellm/user/delete", s.mgmt.DeleteLiteLLMUserCompat)
+		mgmt.POST("/litellm/key/generate", s.mgmt.GenerateLiteLLMKeyCompat)
+		mgmt.GET("/litellm/key/info", s.mgmt.GetLiteLLMKeyCompat)
+		mgmt.GET("/litellm/key/list", s.mgmt.ListLiteLLMKeysCompat)
+		mgmt.POST("/litellm/key/update", s.mgmt.UpdateLiteLLMKeyCompat)
+		mgmt.POST("/litellm/key/regenerate", s.mgmt.RegenerateLiteLLMKeyCompat)
+		mgmt.POST("/litellm/key/delete", s.mgmt.DeleteLiteLLMKeyCompat)
+		mgmt.GET("/litellm/spend/logs", s.mgmt.ListLiteLLMSpendLogsCompat)
+		mgmt.GET("/litellm/spend/users", s.mgmt.ListLiteLLMSpendUsersCompat)
+		mgmt.GET("/litellm/global/spend", s.mgmt.GetLiteLLMGlobalSpendCompat)
+
 		// Aggregate usage stats powered by the PG usage_events table.
 		mgmt.GET("/usage-stats", s.mgmt.GetUsageStats)
 		mgmt.GET("/usage-stats/summary", s.mgmt.GetUsageSummary)

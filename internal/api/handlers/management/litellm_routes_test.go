@@ -32,6 +32,22 @@ func newLiteLLMRouter(h *Handler) *gin.Engine {
 	g.GET("/litellm/settings", h.GetLiteLLMSyncSettings)
 	g.PUT("/litellm/settings", h.PutLiteLLMSyncSettings)
 	g.POST("/litellm/sync/run", h.RunLiteLLMSync)
+	// Runtime-backed LiteLLM compat routes. Additive siblings; each returns 503
+	// pg_store_not_configured when the runtime stores are absent.
+	g.POST("/litellm/user/new", h.CreateLiteLLMUserCompat)
+	g.GET("/litellm/user/list", h.ListLiteLLMUsersCompat)
+	g.GET("/litellm/user/info", h.GetLiteLLMUserCompat)
+	g.POST("/litellm/user/update", h.UpdateLiteLLMUserCompat)
+	g.POST("/litellm/user/delete", h.DeleteLiteLLMUserCompat)
+	g.POST("/litellm/key/generate", h.GenerateLiteLLMKeyCompat)
+	g.GET("/litellm/key/info", h.GetLiteLLMKeyCompat)
+	g.GET("/litellm/key/list", h.ListLiteLLMKeysCompat)
+	g.POST("/litellm/key/update", h.UpdateLiteLLMKeyCompat)
+	g.POST("/litellm/key/regenerate", h.RegenerateLiteLLMKeyCompat)
+	g.POST("/litellm/key/delete", h.DeleteLiteLLMKeyCompat)
+	g.GET("/litellm/spend/logs", h.ListLiteLLMSpendLogsCompat)
+	g.GET("/litellm/spend/users", h.ListLiteLLMSpendUsersCompat)
+	g.GET("/litellm/global/spend", h.GetLiteLLMGlobalSpendCompat)
 	return r
 }
 
@@ -63,6 +79,21 @@ func TestLiteLLMRoutesReturn503WhenNotConfigured(t *testing.T) {
 		{http.MethodGet, "/v0/management/litellm/settings", ""},
 		{http.MethodPut, "/v0/management/litellm/settings", `{"enabled":true}`},
 		{http.MethodPost, "/v0/management/litellm/sync/run", ""},
+		// Runtime-backed LiteLLM compat routes.
+		{http.MethodPost, "/v0/management/litellm/user/new", `{"user_email":"a@b.c"}`},
+		{http.MethodGet, "/v0/management/litellm/user/list", ""},
+		{http.MethodGet, "/v0/management/litellm/user/info?user_id=u1", ""},
+		{http.MethodPost, "/v0/management/litellm/user/update", `{"user_id":"u1","user_alias":"x"}`},
+		{http.MethodPost, "/v0/management/litellm/user/delete", `{"user_ids":["u1"]}`},
+		{http.MethodPost, "/v0/management/litellm/key/generate", `{"user_id":"u1"}`},
+		{http.MethodGet, "/v0/management/litellm/key/info?key=sk-123", ""},
+		{http.MethodGet, "/v0/management/litellm/key/list", ""},
+		{http.MethodPost, "/v0/management/litellm/key/update", `{"key":"sk-123"}`},
+		{http.MethodPost, "/v0/management/litellm/key/regenerate", `{"key":"sk-123"}`},
+		{http.MethodPost, "/v0/management/litellm/key/delete", `{"keys":["sk-123"]}`},
+		{http.MethodGet, "/v0/management/litellm/spend/logs", ""},
+		{http.MethodGet, "/v0/management/litellm/spend/users", ""},
+		{http.MethodGet, "/v0/management/litellm/global/spend", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
