@@ -12,7 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
-func TestOpenAIModelsFullMetadataIsOptIn(t *testing.T) {
+func TestOpenAIModelsIncludesRegistryMetadata(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	suffix := time.Now().UnixNano()
@@ -30,14 +30,9 @@ func TestOpenAIModelsFullMetadataIsOptIn(t *testing.T) {
 	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
 
 	handler := &OpenAIAPIHandler{}
-	defaultModel := requestListedModel(t, handler, "/v1/models", modelID)
-	if _, ok := defaultModel["context_length"]; ok {
-		t.Fatalf("default response unexpectedly included context_length: %#v", defaultModel)
-	}
-
-	fullModel := requestListedModel(t, handler, "/v1/models?full=1", modelID)
-	assertJSONNumber(t, fullModel, "context_length", 372000)
-	assertJSONNumber(t, fullModel, "max_completion_tokens", 128000)
+	model := requestListedModel(t, handler, "/v1/models", modelID)
+	assertJSONNumber(t, model, "context_length", 372000)
+	assertJSONNumber(t, model, "max_completion_tokens", 128000)
 }
 
 func requestListedModel(t *testing.T, handler *OpenAIAPIHandler, target, modelID string) map[string]any {
