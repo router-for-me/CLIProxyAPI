@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
@@ -61,6 +62,66 @@ func TestResponsesWebsocketToolCacheTurnOwnsRecordedResponseData(t *testing.T) {
 			}
 			if output := gjson.GetBytes(stored, "output"); output.Exists() && output.String() != "done" {
 				t.Fatalf("stored output = %q, want done; item=%s", output.String(), stored)
+			}
+		})
+	}
+}
+
+func TestResponsesWebsocketToolCacheTurnDoesNotRetainResponseBackingStorage(t *testing.T) {
+	const (
+		paddingSize     = 32 << 20
+		maxRetainedHeap = 8 << 20
+	)
+
+	for _, testCase := range []struct {
+		name   string
+		prefix string
+		suffix string
+	}{
+		{
+			name:   "response completed",
+			prefix: `{"type":"response.completed","response":{"output":[{"type":"message","role":"assistant","content":"`,
+			suffix: `"},{"type":"function_call","call_id":"call-retained","name":"lookup","arguments":"{}"}]}}`,
+		},
+		{
+			name:   "output item added",
+			prefix: `{"type":"response.output_item.added","padding":"`,
+			suffix: `","item":{"type":"function_call","call_id":"call-retained","name":"lookup","arguments":"{}"}}`,
+		},
+		{
+			name:   "output item done",
+			prefix: `{"type":"response.output_item.done","padding":"`,
+			suffix: `","item":{"type":"function_call","call_id":"call-retained","name":"lookup","arguments":"{}"}}`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runtime.GC()
+			var before runtime.MemStats
+			runtime.ReadMemStats(&before)
+
+			payload := make([]byte, len(testCase.prefix)+paddingSize+len(testCase.suffix))
+			copy(payload, testCase.prefix)
+			for index := len(testCase.prefix); index < len(testCase.prefix)+paddingSize; index++ {
+				payload[index] = 'x'
+			}
+			copy(payload[len(testCase.prefix)+paddingSize:], testCase.suffix)
+
+			turn := newResponsesWebsocketToolCacheTurn("response-backing-storage-session")
+			turn.recordResponse(payload)
+			payload = nil
+			runtime.GC()
+
+			var after runtime.MemStats
+			runtime.ReadMemStats(&after)
+			stored := turn.calls["call-retained"]
+			if got := gjson.GetBytes(stored, "call_id").String(); got != "call-retained" {
+				t.Fatalf("stored call_id = %q, want call-retained; item=%s", got, stored)
+			}
+			runtime.KeepAlive(turn)
+
+			retainedHeap := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+			if retainedHeap > maxRetainedHeap {
+				t.Fatalf("tool cache turn retained %d bytes after response release, want at most %d", retainedHeap, maxRetainedHeap)
 			}
 		})
 	}
