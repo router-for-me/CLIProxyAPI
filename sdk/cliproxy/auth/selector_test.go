@@ -766,6 +766,7 @@ func TestSessionAffinitySelector_SameSessionSameAuth(t *testing.T) {
 	if first == nil {
 		t.Fatalf("Pick() returned nil")
 	}
+	selector.OnResult(Result{AuthID: first.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
 
 	// Verify consistency: same session, same auths -> same result
 	for i := 0; i < 10; i++ {
@@ -794,6 +795,7 @@ func TestSessionAffinitySelector_WeightedBindingRebindsAfterWeightBecomesZero(t 
 	if errFirst != nil {
 		t.Fatalf("first Pick() error = %v", errFirst)
 	}
+	selector.OnResult(Result{AuthID: first.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
 	if first.ID != authA.ID {
 		t.Fatalf("first Pick() auth.ID = %q, want %q", first.ID, authA.ID)
 	}
@@ -803,6 +805,7 @@ func TestSessionAffinitySelector_WeightedBindingRebindsAfterWeightBecomesZero(t 
 	if errSecond != nil {
 		t.Fatalf("Pick() after weight update error = %v", errSecond)
 	}
+	selector.OnResult(Result{AuthID: second.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
 	if second.ID != authB.ID {
 		t.Fatalf("Pick() after weight update auth.ID = %q, want %q", second.ID, authB.ID)
 	}
@@ -832,6 +835,7 @@ func TestSessionAffinitySelector_WeightedNewSessionsResetAfterWeightChange(t *te
 		if errPick != nil {
 			t.Fatalf("Pick(session-%d) error = %v", index, errPick)
 		}
+		selector.OnResult(Result{AuthID: picked.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
 		return picked
 	}
 	for index := 0; index < 1000; index++ {
@@ -893,7 +897,9 @@ func TestSessionAffinitySelector_DifferentSessionsDifferentAuths(t *testing.T) {
 	opts2 := cliproxyexecutor.Options{OriginalRequest: session2}
 
 	auth1, _ := selector.Pick(context.Background(), "claude", "claude-3", opts1, auths)
+	selector.OnResult(Result{AuthID: auth1.ID, Provider: "claude", Model: "claude-3", Options: opts1, Success: true})
 	auth2, _ := selector.Pick(context.Background(), "claude", "claude-3", opts2, auths)
+	selector.OnResult(Result{AuthID: auth2.ID, Provider: "claude", Model: "claude-3", Options: opts2, Success: true})
 
 	// Different sessions may or may not pick different auths (depends on hash collision)
 	// But each session should be consistent
@@ -933,6 +939,7 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Pick() error = %v", err)
 	}
+	selector.OnResult(Result{AuthID: first.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
 
 	// Remove the bound auth from available list (simulating rate limit)
 	availableWithoutFirst := make([]*Auth, 0, len(auths)-1)
@@ -950,6 +957,7 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 	if second.ID == first.ID {
 		t.Fatalf("Pick() after failover returned same auth %q, expected different", first.ID)
 	}
+	selector.OnResult(Result{AuthID: second.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
 
 	// Subsequent picks should consistently return the new binding
 	for i := 0; i < 5; i++ {
@@ -1356,6 +1364,7 @@ func TestSessionAffinitySelector_ThreeScenarios(t *testing.T) {
 		opts3 := cliproxyexecutor.Options{OriginalRequest: openaiS3}
 
 		picked2, _ := selector.Pick(context.Background(), "test", "model", opts2, auths)
+		selector.OnResult(Result{AuthID: picked2.ID, Provider: "test", Model: "model", Options: opts2, Success: true})
 		picked3, _ := selector.Pick(context.Background(), "test", "model", opts3, auths)
 
 		if picked2.ID != picked3.ID {
@@ -1371,6 +1380,7 @@ func TestSessionAffinitySelector_ThreeScenarios(t *testing.T) {
 		opts2 := cliproxyexecutor.Options{OriginalRequest: s2}
 
 		picked1, _ := selector.Pick(context.Background(), "inherit", "model", opts1, auths)
+		selector.OnResult(Result{AuthID: picked1.ID, Provider: "inherit", Model: "model", Options: opts1, Success: true})
 		picked2, _ := selector.Pick(context.Background(), "inherit", "model", opts2, auths)
 
 		if picked1.ID != picked2.ID {
@@ -1408,6 +1418,7 @@ func TestSessionAffinitySelectorBodyIdentifierTransitionsPreserveBinding(t *test
 			if err != nil {
 				t.Fatalf("first Pick() error = %v", err)
 			}
+			selector.OnResult(Result{AuthID: first.ID, Provider: provider, Model: "gpt-test", Options: cliproxyexecutor.Options{OriginalRequest: tt.firstPayload}, Success: true})
 			second, err := selector.Pick(context.Background(), provider, "gpt-test", cliproxyexecutor.Options{OriginalRequest: bothPayload}, auths)
 			if err != nil {
 				t.Fatalf("combined-identifier Pick() error = %v", err)
@@ -1436,6 +1447,7 @@ func TestSessionAffinitySelectorCombinedIdentifiersBindConversationFallback(t *t
 	if err != nil {
 		t.Fatalf("combined-identifier Pick() error = %v", err)
 	}
+	selector.OnResult(Result{AuthID: first.ID, Provider: provider, Model: "gpt-test", Options: cliproxyexecutor.Options{OriginalRequest: combined}, Success: true})
 	second, err := selector.Pick(context.Background(), provider, "gpt-test", cliproxyexecutor.Options{OriginalRequest: conversationOnly}, auths)
 	if err != nil {
 		t.Fatalf("conversation-only Pick() error = %v", err)
@@ -1462,6 +1474,7 @@ func TestSessionAffinitySelectorPrimaryTrafficKeepsConversationAliasAlive(t *tes
 	if err != nil {
 		t.Fatalf("combined Pick() error = %v", err)
 	}
+	selector.OnResult(Result{AuthID: first.ID, Provider: provider, Model: model, Options: cliproxyexecutor.Options{OriginalRequest: combined}, Success: true})
 	conversationKey := provider + "::conv:conversation-session::" + model
 	selector.cache.mu.Lock()
 	conversationEntry := selector.cache.entries[conversationKey]
@@ -1473,6 +1486,7 @@ func TestSessionAffinitySelectorPrimaryTrafficKeepsConversationAliasAlive(t *tes
 	if err != nil {
 		t.Fatalf("prompt-only Pick() error = %v", err)
 	}
+	selector.OnResult(Result{AuthID: primary.ID, Provider: provider, Model: model, Options: cliproxyexecutor.Options{OriginalRequest: promptOnly}, Success: true})
 	if primary.ID != first.ID {
 		t.Fatalf("prompt-only auth = %q, want %q", primary.ID, first.ID)
 	}
@@ -1504,10 +1518,12 @@ func TestSessionAffinitySelectorSharedPromptKeyPreservesConversationAliases(t *t
 	if err != nil {
 		t.Fatalf("conversation A combined Pick() error = %v", err)
 	}
+	selector.OnResult(Result{AuthID: first.ID, Provider: provider, Model: model, Options: cliproxyexecutor.Options{OriginalRequest: combinedA}, Success: true})
 	second, err := selector.Pick(context.Background(), provider, model, cliproxyexecutor.Options{OriginalRequest: combinedB}, auths)
 	if err != nil {
 		t.Fatalf("conversation B combined Pick() error = %v", err)
 	}
+	selector.OnResult(Result{AuthID: second.ID, Provider: provider, Model: model, Options: cliproxyexecutor.Options{OriginalRequest: combinedB}, Success: true})
 	if second.ID != first.ID {
 		t.Fatalf("shared prompt key changed auth from %q to %q", first.ID, second.ID)
 	}
@@ -1538,6 +1554,7 @@ func TestSessionAffinitySelectorConversationIDContainingPromptMarkerRemainsStabl
 	if err != nil {
 		t.Fatalf("combined Pick() error = %v", err)
 	}
+	selector.OnResult(Result{AuthID: first.ID, Provider: provider, Model: model, Options: cliproxyexecutor.Options{OriginalRequest: combined}, Success: true})
 	second, err := selector.Pick(context.Background(), provider, model, cliproxyexecutor.Options{OriginalRequest: conversationOnly}, auths)
 	if err != nil {
 		t.Fatalf("conversation-only Pick() error = %v", err)
@@ -1627,6 +1644,7 @@ func TestSessionAffinitySelector_MultiModelSession(t *testing.T) {
 	if pickedA.ID != "auth-a" {
 		t.Fatalf("Pick() for model-a = %q, want auth-a", pickedA.ID)
 	}
+	selector.OnResult(Result{AuthID: pickedA.ID, Provider: "provider", Model: "model-a", Options: opts, Success: true})
 
 	// Request model-b with only auth-b available for that model
 	authsForModelB := []*Auth{authB}
@@ -1637,6 +1655,7 @@ func TestSessionAffinitySelector_MultiModelSession(t *testing.T) {
 	if pickedB.ID != "auth-b" {
 		t.Fatalf("Pick() for model-b = %q, want auth-b", pickedB.ID)
 	}
+	selector.OnResult(Result{AuthID: pickedB.ID, Provider: "provider", Model: "model-b", Options: opts, Success: true})
 
 	// Switch back to model-a - should still get auth-a (separate binding per model)
 	pickedA2, err := selector.Pick(context.Background(), "provider", "model-a", opts, authsForModelA)
@@ -1723,6 +1742,7 @@ func TestSessionAffinitySelector_CrossProviderIsolation(t *testing.T) {
 	if pickedClaude.ID != "auth-claude" {
 		t.Fatalf("Pick() for claude = %q, want auth-claude", pickedClaude.ID)
 	}
+	selector.OnResult(Result{AuthID: pickedClaude.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
 
 	// Same session but via gemini provider should get different auth
 	pickedGemini, err := selector.Pick(context.Background(), "gemini", "gemini-2.5-pro", opts, []*Auth{authGemini})
@@ -1732,6 +1752,7 @@ func TestSessionAffinitySelector_CrossProviderIsolation(t *testing.T) {
 	if pickedGemini.ID != "auth-gemini" {
 		t.Fatalf("Pick() for gemini = %q, want auth-gemini", pickedGemini.ID)
 	}
+	selector.OnResult(Result{AuthID: pickedGemini.ID, Provider: "gemini", Model: "gemini-2.5-pro", Options: opts, Success: true})
 
 	// Verify both bindings remain stable
 	for i := 0; i < 5; i++ {
@@ -1845,6 +1866,7 @@ func TestSessionAffinitySelector_Concurrent(t *testing.T) {
 		t.Fatalf("Initial Pick() error = %v", err)
 	}
 	expectedID := first.ID
+	selector.OnResult(Result{AuthID: first.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
 
 	start := make(chan struct{})
 	var wg sync.WaitGroup
@@ -2123,6 +2145,7 @@ func TestSessionAffinitySelectorUsesRequestPayloadWhenOriginalRequestMissing(t *
 	if errFirst != nil {
 		t.Fatalf("first Pick() error = %v", errFirst)
 	}
+	selector.OnResult(Result{AuthID: first.ID, Provider: "openai", Model: request.Model, Options: opts, Success: true})
 	second, errSecond := selector.Pick(context.Background(), "openai", request.Model, opts, auths)
 	if errSecond != nil {
 		t.Fatalf("second Pick() error = %v", errSecond)
@@ -2186,6 +2209,7 @@ func TestSessionAffinitySelector_FallbackReselectReceivesOnlyAvailable(t *testin
 	if err != nil {
 		t.Fatalf("Pick() error = %v", err)
 	}
+	selector.OnResult(Result{AuthID: first.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
 
 	// Make the bound auth unavailable so it is filtered out of `available`.
 	bound := first.ID
@@ -2210,6 +2234,56 @@ func TestSessionAffinitySelector_FallbackReselectReceivesOnlyAvailable(t *testin
 	for _, id := range got {
 		if id == bound {
 			t.Fatalf("fallback reselect received unavailable cached auth %q; received %v", bound, got)
+		}
+	}
+}
+
+// TestSessionAffinitySelector_RequestScopedExclusionBreaksCarousel is a
+// regression test for the live bug where an auth that just failed (429/5xx/empty)
+// was re-picked for the SAME request repeatedly. In home/mixed mode per-attempt
+// failures never update local availability (reportHomeResult does not set a local
+// cooldown), so `getAvailableAuths` kept reporting the freshly-failed auth as
+// available and the session-affinity cache returned it on every retry. The fix
+// threads the request-scoped set of failed auth IDs through to the selector so a
+// failed auth is never re-picked for the remainder of that request, even though
+// it is still locally "available".
+func TestSessionAffinitySelector_RequestScopedExclusionBreaksCarousel(t *testing.T) {
+	t.Parallel()
+
+	rec := &recordingFallbackSelector{inner: &RoundRobinSelector{}}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: rec,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+		{ID: "auth-c"},
+	}
+
+	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_carousel-test"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+
+	first, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	selector.OnResult(Result{AuthID: first.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
+
+	failed := first.ID
+	opts.Metadata = map[string]any{
+		cliproxyexecutor.ExcludedAuthIDsMetadataKey: map[string]struct{}{failed: {}},
+	}
+
+	for attempt := 0; attempt < 20; attempt++ {
+		got, errPick := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+		if errPick != nil {
+			t.Fatalf("Pick() attempt %d error = %v", attempt, errPick)
+		}
+		if got.ID == failed {
+			t.Fatalf("attempt %d re-picked auth %q that already failed in this request; want a different auth", attempt, failed)
 		}
 	}
 }

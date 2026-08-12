@@ -475,6 +475,76 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 		})
 	}
 }
+func TestEmptyCompletionTolerantUsage(t *testing.T) {
+	cases := []struct {
+		name     string
+		payload  []byte
+		expected bool
+	}{
+		{
+			name:     "openai completion_tokens 1e2 positive is not empty",
+			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":1e2}}`),
+			expected: false,
+		},
+		{
+			name:     "openai completion_tokens 1.5 positive is not empty",
+			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":1.5}}`),
+			expected: false,
+		},
+		{
+			name:     "openai completion_tokens 100.0 positive is not empty",
+			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":100.0}}`),
+			expected: false,
+		},
+		{
+			name:     "openai completion_tokens zero stays empty",
+			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`),
+			expected: true,
+		},
+		{
+			name:     "openai completion_tokens negative stays empty",
+			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":-5}}`),
+			expected: true,
+		},
+		{
+			name:     "openai completion_tokens overflow stays empty",
+			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":1e999}}`),
+			expected: true,
+		},
+		{
+			name:     "openai malformed completion_tokens with content is not empty",
+			payload:  []byte(`{"choices":[{"message":{"content":"hello"},"finish_reason":"stop"}],"usage":{"completion_tokens":"abc"}}`),
+			expected: false,
+		},
+		{
+			name:     "openai malformed completion_tokens alone stays empty",
+			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":"abc"}}`),
+			expected: true,
+		},
+		{
+			name:     "claude message usage exponent positive is not empty",
+			payload:  []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null,\"usage\":{\"output_tokens\":1e2}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+			expected: false,
+		},
+		{
+			name:     "openai responses output_tokens decimal positive keeps terminal blocking",
+			payload:  []byte(`{"object":"response","id":"r","status":"completed","output":[],"usage":{"output_tokens":1.5}}`),
+			expected: false,
+		},
+		{
+			name:     "gemini candidatesTokenCount exponent positive is not empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1e2}}`),
+			expected: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isEmptyCompletionPayload(tc.payload); got != tc.expected {
+				t.Fatalf("isEmptyCompletionPayload() = %v, want %v", got, tc.expected)
+			}
+		})
+	}
+}
 
 func TestStreamBootstrapStateForwardsAtMetadataLimit(t *testing.T) {
 	var state streamBootstrapState
@@ -735,5 +805,283 @@ func assertRotatesToContent(t *testing.T, ids []string, emptyFirst, gotPayload, 
 	}
 	if !otherSucceeded {
 		t.Fatalf("content auth %q was not recorded as a success result; results=%v", other, capture.Results())
+	}
+}
+func TestEmptyCompletionAudio(t *testing.T) {
+	cases := []struct {
+		name     string
+		payload  []byte
+		expected bool
+	}{
+		{
+			name:     "delta audio transcript plus data is not empty",
+			payload:  []byte(`data: {"id":"1","choices":[{"index":0,"delta":{"audio":{"transcript":"hi","data":"AQID"}},"finish_reason":"stop"}]}` + "\n\n" + `data: [DONE]` + "\n\n"),
+			expected: false,
+		},
+		{
+			name:     "delta audio transcript only is not empty",
+			payload:  []byte(`data: {"id":"1","choices":[{"index":0,"delta":{"audio":{"transcript":"hi"}},"finish_reason":"stop"}]}` + "\n\n" + `data: [DONE]` + "\n\n"),
+			expected: false,
+		},
+		{
+			name:     "delta audio data only is not empty",
+			payload:  []byte(`data: {"id":"1","choices":[{"index":0,"delta":{"audio":{"data":"AQID"}},"finish_reason":"stop"}]}` + "\n\n" + `data: [DONE]` + "\n\n"),
+			expected: false,
+		},
+		{
+			name:     "message audio non-stream is not empty",
+			payload:  []byte(`{"id":"1","choices":[{"index":0,"message":{"role":"assistant","content":"","audio":{"transcript":"hi","data":"AQID"}},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`),
+			expected: false,
+		},
+		{
+			name:     "delta audio null stays empty",
+			payload:  []byte(`data: {"id":"1","choices":[{"index":0,"delta":{"audio":null},"finish_reason":"stop"}]}` + "\n\n" + `data: [DONE]` + "\n\n"),
+			expected: true,
+		},
+		{
+			name:     "delta audio empty object stays empty",
+			payload:  []byte(`data: {"id":"1","choices":[{"index":0,"delta":{"audio":{}},"finish_reason":"stop"}]}` + "\n\n" + `data: [DONE]` + "\n\n"),
+			expected: true,
+		},
+		{
+			name:     "delta audio empty fields stay empty",
+			payload:  []byte(`data: {"id":"1","choices":[{"index":0,"delta":{"audio":{"transcript":"","data":""}},"finish_reason":"stop"}]}` + "\n\n" + `data: [DONE]` + "\n\n"),
+			expected: true,
+		},
+		{
+			name:     "message audio recursively empty stays empty",
+			payload:  []byte(`{"id":"1","choices":[{"index":0,"message":{"audio":{"transcript":"   ","nested":{"items":[null,false,0,"",{},[]]}}},"finish_reason":"stop"}]}`),
+			expected: true,
+		},
+		{
+			name:     "delta audio id only is not empty",
+			payload:  []byte(`data: {"id":"1","choices":[{"index":0,"delta":{"audio":{"id":"audio-1"}},"finish_reason":"stop"}]}` + "\n\n" + `data: [DONE]` + "\n\n"),
+			expected: false,
+		},
+		{
+			name:     "delta audio positive expires at is not empty",
+			payload:  []byte(`data: {"id":"1","choices":[{"index":0,"delta":{"audio":{"expires_at":1}},"finish_reason":"stop"}]}` + "\n\n" + `data: [DONE]` + "\n\n"),
+			expected: false,
+		},
+		{
+			name:     "delta audio malformed frame fails safe as non-empty",
+			payload:  []byte(`data: {"id":"1","choices":[{"index":0,"delta":{"audio":"unterminated},"finish_reason":"stop"}]}` + "\n\n" + `data: [DONE]` + "\n\n"),
+			expected: false,
+		},
+		{
+			name:     "delta audio malformed with text stays not empty",
+			payload:  []byte(`data: {"id":"1","choices":[{"index":0,"delta":{"content":"text","audio":"unterminated},"finish_reason":"stop"}]}` + "\n\n" + `data: [DONE]` + "\n\n"),
+			expected: false,
+		},
+		{
+			name:     "audio with malformed usage stays not empty",
+			payload:  []byte(`data: {"id":"1","choices":[{"index":0,"delta":{"audio":{"transcript":"hi"}},"finish_reason":"stop"}],"usage":{"completion_tokens":"abc"}}` + "\n\n" + `data: [DONE]` + "\n\n"),
+			expected: false,
+		},
+		{
+			name:     "raw json audio frame is not empty",
+			payload:  []byte(`{"id":"1","choices":[{"index":0,"delta":{"audio":{"transcript":"hi","data":"AQID"}},"finish_reason":"stop"}]}`),
+			expected: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isEmptyCompletionPayload(tc.payload); got != tc.expected {
+				t.Fatalf("isEmptyCompletionPayload() = %v, want %v", got, tc.expected)
+			}
+		})
+	}
+}
+
+// TestEmptyCompletionMeaningfulFields covers the targeted meaningful-content
+// fields: Gemini executableCode/codeExecutionResult parts and OpenAI legacy
+// message.function_call (and its streaming delta.function_call form). A value
+// is meaningful only when it carries actual payload; null, empty string, empty
+// object, and empty array stay empty.
+func TestEmptyCompletionMeaningfulFields(t *testing.T) {
+	cases := []struct {
+		name     string
+		payload  []byte
+		expected bool // true = empty completion
+	}{
+		{
+			name:     "gemini executableCode with payload is not empty",
+			payload:  []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"executableCode":{"language":"python","code":"print(1)"}}]},"finishReason":"STOP"}]}`),
+			expected: false,
+		},
+		{
+			name:     "gemini executableCode null stays empty",
+			payload:  []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"executableCode":null}]},"finishReason":"STOP"}]}`),
+			expected: true,
+		},
+		{
+			name:     "gemini executableCode empty object stays empty",
+			payload:  []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"executableCode":{}}]},"finishReason":"STOP"}]}`),
+			expected: true,
+		},
+		{
+			name:     "gemini codeExecutionResult with payload is not empty",
+			payload:  []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"codeExecutionResult":{"outcome":"OK","output":"1"}}]},"finishReason":"STOP"}]}`),
+			expected: false,
+		},
+		{
+			name:     "gemini codeExecutionResult null stays empty",
+			payload:  []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"codeExecutionResult":null}]},"finishReason":"STOP"}]}`),
+			expected: true,
+		},
+		{
+			name:     "gemini codeExecutionResult empty object stays empty",
+			payload:  []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"codeExecutionResult":{}}]},"finishReason":"STOP"}]}`),
+			expected: true,
+		},
+		{
+			name:     "openai non-stream message function_call name only is not empty",
+			payload:  []byte(`{"choices":[{"message":{"function_call":{"name":"get_weather","arguments":""}},"finish_reason":"stop"}]}`),
+			expected: false,
+		},
+		{
+			name:     "openai non-stream message function_call arguments only is not empty",
+			payload:  []byte(`{"choices":[{"message":{"function_call":{"name":"","arguments":"{\"city\":\"x\"}"}},"finish_reason":"stop"}]}`),
+			expected: false,
+		},
+		{
+			name:     "openai non-stream message function_call empty object stays empty",
+			payload:  []byte(`{"choices":[{"message":{"function_call":{}},"finish_reason":"stop"}]}`),
+			expected: true,
+		},
+		{
+			name:     "openai non-stream message function_call null stays empty",
+			payload:  []byte(`{"choices":[{"message":{"function_call":null},"finish_reason":"stop"}]}`),
+			expected: true,
+		},
+		{
+			name:     "openai non-stream message function_call whitespace fields stay empty",
+			payload:  []byte(`{"choices":[{"message":{"function_call":{"name":"  ","arguments":"  "}},"finish_reason":"stop"}]}`),
+			expected: true,
+		},
+		{
+			name:     "openai sse delta function_call is not empty",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"get_weather\",\"arguments\":\"{}\"}},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsEmptyCompletionPayload(tc.payload)
+			if got != tc.expected {
+				t.Fatalf("IsEmptyCompletionPayload = %v, want %v\npayload: %s", got, tc.expected, tc.payload)
+			}
+		})
+	}
+}
+
+// TestEmptyCompletionFraming covers aggregated raw JSON payloads that carry one
+// or more top-level values (NDJSON, whitespace/concat, pretty) evaluated through
+// the protocol evaluators. Malformed or trailing garbage must stay non-empty
+// (safe to forward).
+func TestEmptyCompletionFraming(t *testing.T) {
+	cases := []struct {
+		name     string
+		payload  []byte
+		expected bool // true = empty completion
+	}{
+		{
+			name:     "ndjson second frame meaningful",
+			payload:  []byte("{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}\n{\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":5}}"),
+			expected: false,
+		},
+		{
+			name:     "concatenated second frame meaningful",
+			payload:  []byte("{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}{\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":5}}"),
+			expected: false,
+		},
+		{
+			name:     "ndjson all empty terminal",
+			payload:  []byte("{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}\n{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}"),
+			expected: true,
+		},
+		{
+			name:     "pretty multiline meaningful",
+			payload:  []byte("{\n  \"choices\": [\n    {\"delta\": {\"content\": \"hi\"}, \"finish_reason\": \"stop\"}\n  ],\n  \"usage\": {\"completion_tokens\": 5}\n}"),
+			expected: false,
+		},
+		{
+			name:     "ndjson trailing garbage not empty",
+			payload:  []byte("{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}\nnot-json"),
+			expected: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsEmptyCompletionPayload(tc.payload)
+			if got != tc.expected {
+				t.Fatalf("IsEmptyCompletionPayload = %v, want %v\npayload: %s", got, tc.expected, tc.payload)
+			}
+		})
+	}
+}
+
+// TestStreamBootstrapDetectorRawJSON verifies a single raw JSON value split at
+// every byte boundary (including inside string escapes and multi-byte UTF-8)
+// never forwards prematurely and forwards promptly once complete.
+func TestStreamBootstrapDetectorRawJSON(t *testing.T) {
+	raws := []struct {
+		name string
+		raw  []byte
+	}{
+		{"ascii", []byte(`{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}`)},
+		{"string-escape", []byte(`{"choices":[{"delta":{"content":"a\nb"},"finish_reason":"stop"}]}`)},
+		{"utf8", []byte(`{"choices":[{"delta":{"content":"😀"},"finish_reason":"stop"}]}`)},
+	}
+	for _, r := range raws {
+		for i := 0; i <= len(r.raw); i++ {
+			d := &StreamBootstrapDetector{}
+			first := d.Observe(r.raw[:i])
+			second := d.Observe(r.raw[i:])
+			if i == len(r.raw) {
+				if !first {
+					t.Fatalf("%s split at %d: expected forward after full value, got %v", r.name, i, first)
+				}
+				continue
+			}
+			if first {
+				t.Fatalf("%s split at %d: premature forward on prefix %q", r.name, i, r.raw[:i])
+			}
+			if !second {
+				t.Fatalf("%s split at %d: expected forward after completion, got %v", r.name, i, second)
+			}
+		}
+	}
+}
+
+// TestStreamBootstrapDetectorRawConcatenated verifies two raw JSON frames
+// delivered as concatenated values (no newline); the detector must not forward
+// on the empty first frame and must forward once the meaningful second lands.
+func TestStreamBootstrapDetectorRawConcatenated(t *testing.T) {
+	d := &StreamBootstrapDetector{}
+	if got := d.Observe([]byte(`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`)); got != false {
+		t.Fatalf("Observe(first empty frame) = %v, want false", got)
+	}
+	if got := d.Observe([]byte(`{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}],"usage":{"completion_tokens":5}}`)); got != true {
+		t.Fatalf("Observe(second meaningful frame) = %v, want true", got)
+	}
+}
+
+// TestStreamBootstrapDetectorRawSSEPrefixes verifies incomplete SSE command
+// prefixes (d/da/data/data:/: and a split [DONE]) keep buffering, preserving
+// the current SSE bootstrap contract.
+func TestStreamBootstrapDetectorRawSSEPrefixes(t *testing.T) {
+	for _, p := range [][]byte{[]byte("d"), []byte("da"), []byte("data"), []byte("data:"), []byte(":")} {
+		d := &StreamBootstrapDetector{}
+		if got := d.Observe(p); got != false {
+			t.Fatalf("Observe(%q) = %v, want false (incomplete SSE prefix)", p, got)
+		}
+	}
+	d := &StreamBootstrapDetector{}
+	if got := d.Observe([]byte("data: [DO")); got != false {
+		t.Fatalf("Observe(split [DONE]) = %v, want false", got)
+	}
+	if got := d.Observe([]byte("NE]\n\n")); got != false {
+		t.Fatalf("Observe(completed [DONE]) = %v, want false (empty terminal stays buffered)", got)
 	}
 }

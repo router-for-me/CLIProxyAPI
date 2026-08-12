@@ -884,6 +884,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, authSnapshot)
+	m.updateSessionAffinity(result)
+}
+
+func (m *Manager) updateSessionAffinity(result Result) {
+	if m == nil || m.selector == nil {
+		return
+	}
+	if affinity, ok := m.selector.(interface {
+		OnResult(Result)
+	}); ok && affinity != nil {
+		affinity.OnResult(result)
+	}
 }
 
 func (m *Manager) recordExecutionResult(ctx context.Context, result Result, auth *Auth, ephemeral bool) {

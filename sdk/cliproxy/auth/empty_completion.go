@@ -5,11 +5,57 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"math"
 	"net/http"
 	"strings"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
+
+// tokenCount is a tolerant usage count that accepts any valid JSON number
+// (integer, decimal, or exponent) and treats every other JSON value (null,
+// string, object, array, or malformed) as unset, absorbing it without failing
+// the enclosing frame. positive reports whether the count is a finite number
+// greater than zero, the only property the empty-completion logic needs.
+type tokenCount json.Number
+
+func (t *tokenCount) UnmarshalJSON(b []byte) error {
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		*t = ""
+		return nil
+	}
+	*t = tokenCount(n)
+	return nil
+}
+
+// positive reports whether c is a finite JSON number greater than zero.
+func (c tokenCount) positive() bool {
+	n := json.Number(c)
+	if n == "" {
+		return false
+	}
+	f, err := n.Float64()
+	if err != nil {
+		return false
+	}
+	return !math.IsNaN(f) && !math.IsInf(f, 0) && f > 0
+}
+
+// addUsage folds a positive usage count into the accumulator's token total.
+// Exact integer counts are summed; fractional, huge, or otherwise non-integer
+// positive values still count as output evidence so the >0 check holds.
+func (a *emptyCompletionAccum) addUsage(c tokenCount) {
+	if !c.positive() {
+		return
+	}
+	if n, err := json.Number(c).Int64(); err == nil && n > 0 {
+		a.completionTokens += int(n)
+	} else {
+		a.completionTokens = max(a.completionTokens, 1)
+	}
+}
 
 // errEmptyCompletion indicates the upstream returned a terminal but empty
 // completion (no content, no tool calls, zero completion tokens). It is
@@ -36,18 +82,85 @@ type openAIChunk struct {
 			ReasoningContent string            `json:"reasoning_content"`
 			Refusal          *string           `json:"refusal"`
 			ToolCalls        []json.RawMessage `json:"tool_calls"`
+			FunctionCall     json.RawMessage   `json:"function_call"`
+			Audio            json.RawMessage   `json:"audio"`
 		} `json:"delta"`
 		Message struct {
 			Content          string            `json:"content"`
 			ReasoningContent string            `json:"reasoning_content"`
 			Refusal          *string           `json:"refusal"`
 			ToolCalls        []json.RawMessage `json:"tool_calls"`
+			FunctionCall     json.RawMessage   `json:"function_call"`
+			Audio            json.RawMessage   `json:"audio"`
 		} `json:"message"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
-		CompletionTokens *int `json:"completion_tokens"`
+		CompletionTokens *tokenCount `json:"completion_tokens"`
 	} `json:"usage"`
+}
+
+// nonEmptyJSONPayload reports whether raw holds a payload beyond an empty
+// null, empty string, empty object, or empty array.
+func nonEmptyJSONPayload(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" || s == `""` || s == "{}" || s == "[]" {
+		return false
+	}
+	return true
+}
+
+func nonEmptyAudioPayload(raw json.RawMessage) bool {
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return false
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return false
+	}
+	return nonEmptyAudioValue(value)
+}
+
+func nonEmptyAudioValue(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(typed) != ""
+	case bool:
+		return typed
+	case json.Number:
+		number, err := typed.Float64()
+		return err == nil && !math.IsNaN(number) && !math.IsInf(number, 0) && number != 0
+	case []any:
+		for _, item := range typed {
+			if nonEmptyAudioValue(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, item := range typed {
+			if nonEmptyAudioValue(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// nonEmptyFunctionCall reports whether a legacy OpenAI function_call object
+// carries a non-empty name and/or non-empty arguments.
+func nonEmptyFunctionCall(raw json.RawMessage) bool {
+	var fc struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+	if err := json.Unmarshal(raw, &fc); err != nil {
+		return false
+	}
+	return strings.TrimSpace(fc.Name) != "" || strings.TrimSpace(fc.Arguments) != ""
 }
 
 type claudeContentBlock struct {
@@ -62,14 +175,14 @@ type claudeChunk struct {
 	StopReason *string              `json:"stop_reason"`
 	Content    []claudeContentBlock `json:"content"`
 	Usage      *struct {
-		OutputTokens *int `json:"output_tokens"`
+		OutputTokens *tokenCount `json:"output_tokens"`
 	} `json:"usage"`
 	Message *struct {
 		Type       string               `json:"type"`
 		StopReason *string              `json:"stop_reason"`
 		Content    []claudeContentBlock `json:"content"`
 		Usage      *struct {
-			OutputTokens *int `json:"output_tokens"`
+			OutputTokens *tokenCount `json:"output_tokens"`
 		} `json:"usage"`
 	} `json:"message"`
 	ContentBlock *claudeContentBlock `json:"content_block"`
@@ -82,12 +195,14 @@ type claudeChunk struct {
 }
 
 type geminiPart struct {
-	Text             string          `json:"text"`
-	FunctionCall     json.RawMessage `json:"functionCall"`
-	InlineData       json.RawMessage `json:"inlineData"`
-	FileData         json.RawMessage `json:"fileData"`
-	FunctionResponse json.RawMessage `json:"functionResponse"`
-	Thought          json.RawMessage `json:"thought"`
+	Text                string          `json:"text"`
+	FunctionCall        json.RawMessage `json:"functionCall"`
+	InlineData          json.RawMessage `json:"inlineData"`
+	FileData            json.RawMessage `json:"fileData"`
+	FunctionResponse    json.RawMessage `json:"functionResponse"`
+	ExecutableCode      json.RawMessage `json:"executableCode"`
+	CodeExecutionResult json.RawMessage `json:"codeExecutionResult"`
+	Thought             json.RawMessage `json:"thought"`
 }
 
 type geminiCandidate struct {
@@ -98,7 +213,7 @@ type geminiCandidate struct {
 }
 
 type geminiUsageMetadata struct {
-	CandidatesTokenCount *int `json:"candidatesTokenCount"`
+	CandidatesTokenCount *tokenCount `json:"candidatesTokenCount"`
 }
 
 type geminiPromptFeedback struct {
@@ -119,7 +234,7 @@ type geminiChunk struct {
 // openAIResponseUsage is the usage block of the OpenAI Responses-API shape
 // (used by codex/xai executors).
 type openAIResponseUsage struct {
-	OutputTokens *int `json:"output_tokens"`
+	OutputTokens *tokenCount `json:"output_tokens"`
 }
 
 type openAIResponseContentPart struct {
@@ -185,16 +300,40 @@ type emptyCompletionAccum struct {
 }
 
 func (a *emptyCompletionAccum) evalJSON(data []byte) bool {
-	if a.evalOpenAI(data) {
-		return true
+	values, err := decodeJSONValues(data)
+	if err != nil {
+		return false
 	}
-	if a.evalClaude(data) {
-		return true
+	recognized := false
+	for _, v := range values {
+		if a.evalOpenAI(v) || a.evalClaude(v) || a.evalOpenAIResponse(v) || a.evalGemini(v) {
+			recognized = true
+		}
 	}
-	if a.evalOpenAIResponse(data) {
-		return true
+	return recognized
+}
+
+// decodeJSONValues decodes every top-level JSON value in payload with the
+// stdlib decoder until io.EOF, supporting pretty JSON, NDJSON, whitespace
+// separated, and directly concatenated values. It requires at least one value
+// and a clean EOF; malformed or trailing garbage returns an error.
+func decodeJSONValues(payload []byte) ([]json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	var values []json.RawMessage
+	for {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+		values = append(values, raw)
 	}
-	return a.evalGemini(data)
+	if len(values) == 0 {
+		return nil, io.EOF
+	}
+	return values, nil
 }
 
 func (a *emptyCompletionAccum) evalOpenAI(data []byte) bool {
@@ -215,7 +354,7 @@ func (a *emptyCompletionAccum) evalOpenAI(data []byte) bool {
 	}
 	if chunk.Usage != nil && chunk.Usage.CompletionTokens != nil {
 		a.sawUsage = true
-		a.completionTokens += *chunk.Usage.CompletionTokens
+		a.addUsage(*chunk.Usage.CompletionTokens)
 	}
 	for _, ch := range chunk.Choices {
 		if ch.FinishReason != nil {
@@ -238,6 +377,12 @@ func (a *emptyCompletionAccum) evalOpenAI(data []byte) bool {
 		}
 		if len(ch.Delta.ToolCalls) > 0 || len(ch.Message.ToolCalls) > 0 {
 			a.hasToolCalls = true
+		}
+		if nonEmptyFunctionCall(ch.Delta.FunctionCall) || nonEmptyFunctionCall(ch.Message.FunctionCall) {
+			a.hasToolCalls = true
+		}
+		if nonEmptyAudioPayload(ch.Delta.Audio) || nonEmptyAudioPayload(ch.Message.Audio) {
+			a.hasContent = true
 		}
 	}
 	return true
@@ -275,11 +420,11 @@ func (a *emptyCompletionAccum) evalClaude(data []byte) bool {
 
 	if chunk.Usage != nil && chunk.Usage.OutputTokens != nil {
 		a.sawUsage = true
-		a.completionTokens += *chunk.Usage.OutputTokens
+		a.addUsage(*chunk.Usage.OutputTokens)
 	}
 	if chunk.Message != nil && chunk.Message.Usage != nil && chunk.Message.Usage.OutputTokens != nil {
 		a.sawUsage = true
-		a.completionTokens += *chunk.Message.Usage.OutputTokens
+		a.addUsage(*chunk.Message.Usage.OutputTokens)
 	}
 
 	a.evalClaudeBlocks(chunk.Content)
@@ -364,11 +509,11 @@ func (a *emptyCompletionAccum) evalOpenAIResponse(data []byte) bool {
 
 	if chunk.Usage != nil && chunk.Usage.OutputTokens != nil {
 		a.sawUsage = true
-		a.completionTokens += *chunk.Usage.OutputTokens
+		a.addUsage(*chunk.Usage.OutputTokens)
 	}
 	if chunk.Response != nil && chunk.Response.Usage != nil && chunk.Response.Usage.OutputTokens != nil {
 		a.sawUsage = true
-		a.completionTokens += *chunk.Response.Usage.OutputTokens
+		a.addUsage(*chunk.Response.Usage.OutputTokens)
 	}
 
 	switch evType {
@@ -523,7 +668,7 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 			a.blocked = promptBlocked
 			if usage != nil && usage.CandidatesTokenCount != nil {
 				a.sawUsage = true
-				a.completionTokens += *usage.CandidatesTokenCount
+				a.addUsage(*usage.CandidatesTokenCount)
 			}
 			return true
 		}
@@ -538,7 +683,7 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 	if usage != nil {
 		if usage.CandidatesTokenCount != nil {
 			a.sawUsage = true
-			a.completionTokens += *usage.CandidatesTokenCount
+			a.addUsage(*usage.CandidatesTokenCount)
 		}
 	}
 
@@ -575,6 +720,9 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 					if thoughtStr != "" && thoughtStr != "false" && thoughtStr != "null" {
 						a.hasContent = true
 					}
+				}
+				if nonEmptyJSONPayload(part.ExecutableCode) || nonEmptyJSONPayload(part.CodeExecutionResult) {
+					a.hasContent = true
 				}
 				if strings.TrimSpace(part.Text) != "" {
 					a.hasContent = true
@@ -671,15 +819,15 @@ func (s *streamBootstrapState) observe(fragment []byte) bool {
 	if len(trimmed) == 0 || couldBeSSEPrefix(trimmed) {
 		return false
 	}
-	if json.Valid(trimmed) {
+	switch classifyJSONBuffer(trimmed) {
+	case jsonBufComplete:
 		if !s.acc.evalJSON(trimmed) {
 			s.acc.sawUnknownData = true
 		}
 		s.pending = s.pending[:0]
-	} else if (trimmed[0] == '{' && trimmed[len(trimmed)-1] != '}') ||
-		(trimmed[0] == '[' && trimmed[len(trimmed)-1] != ']') {
+	case jsonBufEmpty, jsonBufIncomplete:
 		return false
-	} else {
+	case jsonBufInvalid:
 		s.acc.sawUnknownData = true
 	}
 	s.forward = s.shouldForward()
@@ -688,6 +836,87 @@ func (s *streamBootstrapState) observe(fragment []byte) bool {
 
 func (s *streamBootstrapState) shouldForward() bool {
 	return s.acc.hasContent || s.acc.hasToolCalls || s.acc.sawUnknownData || (!s.acc.recognized && !s.sawSSE)
+}
+
+type jsonBufferStatus int
+
+const (
+	jsonBufEmpty jsonBufferStatus = iota
+	jsonBufComplete
+	jsonBufIncomplete
+	jsonBufInvalid
+)
+
+// classifyJSONBuffer classifies an accumulated raw-JSON stream tail as holding
+// one or more complete values (jsonBufComplete), a truncated prefix of a value
+// (jsonBufIncomplete), malformed or trailing garbage (jsonBufInvalid), or no
+// value (jsonBufEmpty). It inspects only the given buffer, so it can be called
+// again on each growing chunk without keeping a persistent decoder.
+func classifyJSONBuffer(buf []byte) jsonBufferStatus {
+	if hasTruncatedUTF8Suffix(buf) {
+		return jsonBufIncomplete
+	}
+	dec := json.NewDecoder(bytes.NewReader(buf))
+	count := 0
+	for {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			if err == io.EOF {
+				if count == 0 {
+					return jsonBufEmpty
+				}
+				return jsonBufComplete
+			}
+			if isTruncatedJSON(err) {
+				return jsonBufIncomplete
+			}
+			return jsonBufInvalid
+		}
+		count++
+	}
+}
+
+// isTruncatedJSON reports whether a json decoding error is caused by the input
+// ending mid-value (a truncated prefix) rather than by malformed contents.
+func isTruncatedJSON(err error) bool {
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var syn *json.SyntaxError
+	if errors.As(err, &syn) {
+		return strings.Contains(syn.Error(), "unexpected end of JSON input")
+	}
+	return false
+}
+
+// hasTruncatedUTF8Suffix reports whether buf ends in the middle of a multi-byte
+// UTF-8 sequence, which happens when a raw JSON value is split at a chunk
+// boundary inside a string literal.
+func hasTruncatedUTF8Suffix(buf []byte) bool {
+	n := len(buf)
+	if n == 0 {
+		return false
+	}
+	i := n - 1
+	for i >= 0 && buf[i]&0xC0 == 0x80 {
+		i--
+	}
+	if i < 0 {
+		return false
+	}
+	lead := buf[i]
+	var need int
+	switch {
+	case lead&0xE0 == 0xC0:
+		need = 1
+	case lead&0xF0 == 0xE0:
+		need = 2
+	case lead&0xF8 == 0xF0:
+		need = 3
+	default:
+		return false
+	}
+	return n-i-1 < need
 }
 
 func couldBeSSEPrefix(payload []byte) bool {

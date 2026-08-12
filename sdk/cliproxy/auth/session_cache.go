@@ -100,10 +100,17 @@ func (c *SessionCache) Set(sessionID, authID string) {
 
 // SetAliases binds multiple identifiers for one logical session to an auth ID.
 func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
-	if authID == "" {
+	c.setAliasesUntil(authID, time.Now().Add(c.ttl), sessionIDs...)
+}
+
+func (c *SessionCache) setAliasesUntil(authID string, expiresAt time.Time, sessionIDs ...string) {
+	if authID == "" || expiresAt.IsZero() {
 		return
 	}
 	now := time.Now()
+	if !now.Before(expiresAt) {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -125,7 +132,7 @@ func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 	if len(aliases) == 0 {
 		return
 	}
-	c.replaceAliasGroupsLocked(authID, now.Add(c.ttl), aliases, previousGroups...)
+	c.replaceAliasGroupsLocked(authID, expiresAt, aliases, previousGroups...)
 }
 
 func (c *SessionCache) replaceAliasGroupsLocked(authID string, expiresAt time.Time, aliases []string, previousGroups ...sessionEntry) {
@@ -251,6 +258,41 @@ func (c *SessionCache) Invalidate(sessionID string) {
 		}
 	}
 	c.mu.Unlock()
+}
+
+// CompareAndDelete removes the session binding only if it currently maps to expectedAuthID.
+// It returns true if the entry was removed, false otherwise.
+func (c *SessionCache) CompareAndDelete(sessionID, expectedAuthID string) bool {
+	if c == nil || sessionID == "" || expectedAuthID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, ok := c.entries[sessionID]
+	if !ok || entry.authID != expectedAuthID {
+		return false
+	}
+
+	delete(c.entries, sessionID)
+	for _, alias := range entry.aliases {
+		if alias == sessionID {
+			continue
+		}
+		current, exists := c.entries[alias]
+		if !exists || current.authID != entry.authID {
+			continue
+		}
+		filtered := make([]string, 0, len(current.aliases))
+		for _, candidate := range current.aliases {
+			if candidate != sessionID {
+				filtered = append(filtered, candidate)
+			}
+		}
+		current.aliases = filtered
+		c.entries[alias] = current
+	}
+	return true
 }
 
 // InvalidateAuth removes all sessions bound to a specific auth ID.
