@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -171,6 +172,8 @@ func main() {
 		pgStoreSchema        string
 		pgStoreLocalPath     string
 		pgStoreEncryptionKey []byte
+		pgStoreMaxOpenConns  int
+		pgStoreMaxIdleConns  int
 		pgStoreInst          *store.PostgresStore
 		useGitStore          bool
 		gitStoreRemoteURL    string
@@ -244,6 +247,16 @@ func main() {
 		// compatibility. Held in memory only.
 		if value, ok := lookupEnv("PGSTORE_ENCRYPTION_KEY", "pgstore_encryption_key"); ok {
 			pgStoreEncryptionKey = []byte(value)
+		}
+		if value, ok := lookupEnv("PGSTORE_MAX_OPEN_CONNS", "pgstore_max_open_conns"); ok {
+			if n, err := strconv.Atoi(value); err == nil && n > 0 {
+				pgStoreMaxOpenConns = n
+			}
+		}
+		if value, ok := lookupEnv("PGSTORE_MAX_IDLE_CONNS", "pgstore_max_idle_conns"); ok {
+			if n, err := strconv.Atoi(value); err == nil && n > 0 {
+				pgStoreMaxIdleConns = n
+			}
 		}
 		useGitStore = false
 	}
@@ -404,6 +417,8 @@ func main() {
 			Schema:             pgStoreSchema,
 			SpoolDir:           pgStoreLocalPath,
 			UsageEncryptionKey: pgStoreEncryptionKey,
+			MaxOpenConns:       pgStoreMaxOpenConns,
+			MaxIdleConns:       pgStoreMaxIdleConns,
 		})
 		cancel()
 		if err != nil {

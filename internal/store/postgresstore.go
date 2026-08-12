@@ -72,8 +72,18 @@ type PostgresStoreConfig struct {
 	DSN         string
 	Schema      string
 	ConfigTable string
-	AuthTable   string
-	SpoolDir    string
+	// MaxOpenConns caps the number of concurrent database connections. 0 keeps
+	// the database/sql default (unlimited). Bounded here so bursty stat polling
+	// can't exhaust Postgres max_connections.
+	MaxOpenConns int
+	// MaxIdleConns caps idle connections kept in the pool. Default (0) keeps
+	// the database/sql default of 2.
+	MaxIdleConns int
+	// ConnMaxLifetime bounds the reuse duration of a single pooled connection.
+	// 0 means "no limit".
+	ConnMaxLifetime time.Duration
+	AuthTable       string
+	SpoolDir        string
 	// CooldownTable persists runtime cooldown state (auth_id,model pairs)
 	// independently from auth tokens, so cooldowns survive process restarts.
 	CooldownTable string
@@ -385,6 +395,15 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	if err = db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("postgres store: ping database: %w", err)
+	}
+	if cfg.MaxOpenConns > 0 {
+		db.SetMaxOpenConns(cfg.MaxOpenConns)
+	}
+	if cfg.MaxIdleConns > 0 {
+		db.SetMaxIdleConns(cfg.MaxIdleConns)
+	}
+	if cfg.ConnMaxLifetime > 0 {
+		db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
 	}
 
 	store := &PostgresStore{
