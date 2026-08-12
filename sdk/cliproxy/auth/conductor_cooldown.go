@@ -894,6 +894,20 @@ func (m *Manager) recordExecutionResult(ctx context.Context, result Result, auth
 	m.reportHomeResult(ctx, result, auth)
 }
 
+// recordExecResultAware records an execution result with awareness of availability-neutral errors.
+// When the original error is availability-neutral, it records without changing credential availability.
+func (m *Manager) recordExecResultAware(ctx context.Context, result Result, auth *Auth, ephemeral bool, execErr error) {
+	if ephemeral {
+		m.reportHomeResult(ctx, result, auth)
+		return
+	}
+	if isAvailabilityNeutralError(execErr) {
+		m.recordAvailabilityNeutralResult(ctx, result)
+		return
+	}
+	m.MarkResult(ctx, result)
+}
+
 // reportHomeResult only observes a Home dispatch result and never updates local auth state.
 func (m *Manager) reportHomeResult(ctx context.Context, result Result, auth *Auth) {
 	if m == nil || result.AuthID == "" {
@@ -1217,6 +1231,28 @@ func isRequestScopedError(err error) bool {
 	}
 	requestErr, ok := errors.AsType[cliproxyexecutor.RequestScopedError](err)
 	return ok && requestErr != nil && requestErr.IsRequestScoped()
+}
+
+// isAvailabilityNeutralError reports whether err implements AvailabilityNeutral.
+// Availability-neutral errors should not change credential availability (no cooldown)
+// while still allowing failover to the next credential.
+func isAvailabilityNeutralError(err error) bool {
+	if err == nil {
+		return false
+	}
+	an, ok := errors.AsType[cliproxyexecutor.AvailabilityNeutral](err)
+	return ok && an != nil && an.AvailabilityNeutral()
+}
+
+// markResultForExecError records an execution result. If the original executor error
+// is availability-neutral, the result is recorded without changing credential availability
+// (no cooldown, no suspension). Otherwise, the standard MarkResult path applies.
+func (m *Manager) markResultForExecError(ctx context.Context, result Result, execErr error) {
+	if isAvailabilityNeutralError(execErr) {
+		m.recordAvailabilityNeutralResult(ctx, result)
+		return
+	}
+	m.MarkResult(ctx, result)
 }
 
 func resultErrorFromError(err error) *Error {

@@ -78,3 +78,45 @@ func TestCodexExecutorCompactAddsDefaultInstructionsWithoutInjectingImageTool(t 
 		})
 	}
 }
+
+func TestCodexExecutorCompact_PerAuthDisableStripsImageToolWithoutInjecting(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "test",
+		},
+		Metadata: map[string]any{"disable_image_generation": true},
+	}
+
+	payload := []byte(`{"model":"gpt-5.4","tools":[{"type":"image_generation"},{"type":"web_search"}],"tool_choice":{"type":"allowed_tools","tools":[{"type":"image_generation"},{"type":"web_search"}]},"input":[{"type":"message","role":"user","content":"history"},{"type":"compaction_trigger"}]}`)
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Alt:          "responses/compact",
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	tools := gjson.GetBytes(gotBody, "tools")
+	if !tools.IsArray() || len(tools.Array()) != 1 || tools.Array()[0].Get("type").String() != "web_search" {
+		t.Fatalf("expected only web_search after per-auth strip, got %s", tools.Raw)
+	}
+	choiceTools := gjson.GetBytes(gotBody, "tool_choice.tools")
+	if !choiceTools.IsArray() || len(choiceTools.Array()) != 1 || choiceTools.Array()[0].Get("type").String() != "web_search" {
+		t.Fatalf("expected allowed_tools pruned, got %s", gjson.GetBytes(gotBody, "tool_choice").Raw)
+	}
+}

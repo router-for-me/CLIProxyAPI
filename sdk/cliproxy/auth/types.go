@@ -459,6 +459,25 @@ func (a *Auth) DisableCoolingOverride() (bool, bool) {
 	return false, false
 }
 
+// DisableImageGenerationOverride returns whether this auth forces image_generation off.
+// The value is read from metadata key "disable_image_generation" (or "disable-image-generation").
+//
+// Like DisableCoolingOverride, this is intentionally "true-only": a false metadata value is
+// treated as unset so the global disable-image-generation mode remains authoritative.
+func (a *Auth) DisableImageGenerationOverride() bool {
+	if a == nil || a.Metadata == nil {
+		return false
+	}
+	for _, key := range []string{"disable_image_generation", "disable-image-generation"} {
+		if val, ok := a.Metadata[key]; ok {
+			if parsed, okParse := parseBoolAny(val); okParse {
+				return parsed
+			}
+		}
+	}
+	return false
+}
+
 // ToolPrefixDisabled returns whether the proxy_ tool name prefix should be
 // skipped for this auth. When true, tool names are sent to Anthropic unchanged.
 // The value is read from metadata key "tool_prefix_disabled" (or "tool-prefix-disabled").

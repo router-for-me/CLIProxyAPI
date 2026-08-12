@@ -338,3 +338,37 @@ func TestApplyPayloadConfigWithRequest_PayloadConditionsSkipRule(t *testing.T) {
 		})
 	}
 }
+
+func TestStripImageGenerationTools_PrunesAllowedToolsChoice(t *testing.T) {
+	payload := []byte(`{"tools":[{"type":"image_generation"},{"type":"web_search"}],"tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"image_generation"},{"type":"web_search"}]}}`)
+	out := StripImageGenerationTools(payload)
+
+	tools := gjson.GetBytes(out, "tools")
+	if !tools.IsArray() || len(tools.Array()) != 1 || tools.Array()[0].Get("type").String() != "web_search" {
+		t.Fatalf("expected only web_search tool remaining, got %s", tools.Raw)
+	}
+
+	choiceTools := gjson.GetBytes(out, "tool_choice.tools")
+	if !choiceTools.IsArray() || len(choiceTools.Array()) != 1 {
+		t.Fatalf("expected tool_choice.tools pruned to 1 entry, got %s", choiceTools.Raw)
+	}
+	if got := choiceTools.Array()[0].Get("type").String(); got != "web_search" {
+		t.Fatalf("expected remaining allowed tool type=web_search, got %q", got)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "allowed_tools" {
+		t.Fatalf("expected tool_choice.type=allowed_tools, got %q", got)
+	}
+}
+
+func TestStripImageGenerationTools_RemovesAllowedToolsChoiceWhenEmpty(t *testing.T) {
+	payload := []byte(`{"tools":[{"type":"image_generation"}],"tool_choice":{"type":"allowed_tools","tools":[{"type":"image_generation"}]}}`)
+	out := StripImageGenerationTools(payload)
+
+	tools := gjson.GetBytes(out, "tools")
+	if tools.Exists() && tools.IsArray() && len(tools.Array()) != 0 {
+		t.Fatalf("expected tools empty or absent after strip, got %s", tools.Raw)
+	}
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("expected tool_choice removed when allowed_tools becomes empty, got %s", gjson.GetBytes(out, "tool_choice").Raw)
+	}
+}
