@@ -176,38 +176,40 @@ func TestCodexWebsocketsExecutorRestoresMultiAgentV2NamespaceAcrossIncrementalTu
 	}
 }
 
-func TestCodexWebsocketSessionBoundsMultiAgentV2LineageState(t *testing.T) {
+func TestCodexWebsocketSessionPreservesOptimizedMultiAgentV2Lineages(t *testing.T) {
 	conn := &websocket.Conn{}
 	sess := &codexWebsocketSession{conn: conn}
 
-	for index := 0; index < codexMultiAgentV2LineageMaxEntries+2; index++ {
-		sess.recordMultiAgentV2Lineage(conn, fmt.Sprintf("resp_%d", index), index%2 == 0)
+	sess.recordMultiAgentV2Lineage(conn, "resp_optimized_old", true)
+	for index := 0; index < 512; index++ {
+		sess.recordMultiAgentV2Lineage(conn, fmt.Sprintf("resp_unoptimized_%d", index), false)
 	}
+	sess.recordMultiAgentV2Lineage(conn, "resp_optimized_new", true)
 
 	sess.connMu.Lock()
 	lineageCount := len(sess.multiAgentV2Lineages)
-	orderCount := len(sess.multiAgentV2LineageOrder)
-	_, retainedOldest := sess.multiAgentV2Lineages["resp_0"]
-	_, retainedNewest := sess.multiAgentV2Lineages[fmt.Sprintf("resp_%d", codexMultiAgentV2LineageMaxEntries+1)]
 	sess.connMu.Unlock()
-	if lineageCount != codexMultiAgentV2LineageMaxEntries || orderCount != codexMultiAgentV2LineageMaxEntries {
-		t.Fatalf("lineage state sizes = map:%d order:%d, want %d", lineageCount, orderCount, codexMultiAgentV2LineageMaxEntries)
+	if lineageCount != 2 {
+		t.Fatalf("stored optimized lineage count = %d, want 2", lineageCount)
 	}
-	if retainedOldest {
-		t.Fatal("oldest lineage was not evicted")
+	if !sess.multiAgentV2OptimizedForRequest(conn, "resp_optimized_old", false, false) {
+		t.Fatal("old optimized lineage was not retained")
 	}
-	if !retainedNewest {
-		t.Fatal("newest lineage was evicted")
+	if !sess.multiAgentV2OptimizedForRequest(conn, "resp_optimized_new", false, false) {
+		t.Fatal("new optimized lineage was not retained")
 	}
-	if sess.multiAgentV2OptimizedForRequest(&websocket.Conn{}, fmt.Sprintf("resp_%d", codexMultiAgentV2LineageMaxEntries), false, false) {
+	if sess.multiAgentV2OptimizedForRequest(conn, "resp_unoptimized_511", false, false) {
+		t.Fatal("unoptimized lineage was recorded as optimized")
+	}
+	if sess.multiAgentV2OptimizedForRequest(&websocket.Conn{}, "resp_optimized_old", false, false) {
 		t.Fatal("lineage state leaked to a different connection")
 	}
 
 	sess.detachConnection(conn, nil)
 	sess.connMu.Lock()
 	defer sess.connMu.Unlock()
-	if len(sess.multiAgentV2Lineages) != 0 || len(sess.multiAgentV2LineageOrder) != 0 {
-		t.Fatalf("lineage state survived connection detach: map=%d order=%d", len(sess.multiAgentV2Lineages), len(sess.multiAgentV2LineageOrder))
+	if len(sess.multiAgentV2Lineages) != 0 {
+		t.Fatalf("lineage state survived connection detach: map=%d", len(sess.multiAgentV2Lineages))
 	}
 }
 

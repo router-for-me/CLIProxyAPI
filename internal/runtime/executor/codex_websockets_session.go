@@ -19,8 +19,6 @@ type codexWebsocketSessionStore struct {
 	sessions map[string]*codexWebsocketSession
 }
 
-const codexMultiAgentV2LineageMaxEntries = 256
-
 var globalCodexWebsocketSessionStore = &codexWebsocketSessionStore{
 	sessions: make(map[string]*codexWebsocketSession),
 }
@@ -53,16 +51,15 @@ type codexWebsocketSession struct {
 
 	reqMu sync.Mutex
 
-	connMu                   sync.Mutex
-	conn                     *websocket.Conn
-	connCloser               *websocketConnectionCloser
-	wsURL                    string
-	authID                   string
-	multiAgentV2Lineages     map[string]bool
-	multiAgentV2LineageOrder []string
-	lifecycleBindMu          sync.Mutex
-	lifecycle                cliproxyexecutor.ExecutionLifecycle
-	lifecycleModel           string
+	connMu               sync.Mutex
+	conn                 *websocket.Conn
+	connCloser           *websocketConnectionCloser
+	wsURL                string
+	authID               string
+	multiAgentV2Lineages map[string]struct{}
+	lifecycleBindMu      sync.Mutex
+	lifecycle            cliproxyexecutor.ExecutionLifecycle
+	lifecycleModel       string
 
 	writeMu sync.Mutex
 
@@ -183,12 +180,13 @@ func (s *codexWebsocketSession) multiAgentV2OptimizedForRequest(conn *websocket.
 	if s.conn != conn {
 		return false
 	}
-	return s.multiAgentV2Lineages[previousResponseID]
+	_, optimized = s.multiAgentV2Lineages[previousResponseID]
+	return optimized
 }
 
 func (s *codexWebsocketSession) recordMultiAgentV2Lineage(conn *websocket.Conn, responseID string, optimized bool) {
 	responseID = strings.Clone(strings.TrimSpace(responseID))
-	if s == nil || conn == nil || responseID == "" {
+	if s == nil || conn == nil || responseID == "" || !optimized {
 		return
 	}
 	s.connMu.Lock()
@@ -197,23 +195,13 @@ func (s *codexWebsocketSession) recordMultiAgentV2Lineage(conn *websocket.Conn, 
 		return
 	}
 	if s.multiAgentV2Lineages == nil {
-		s.multiAgentV2Lineages = make(map[string]bool)
+		s.multiAgentV2Lineages = make(map[string]struct{})
 	}
-	if _, exists := s.multiAgentV2Lineages[responseID]; !exists {
-		s.multiAgentV2LineageOrder = append(s.multiAgentV2LineageOrder, responseID)
-	}
-	s.multiAgentV2Lineages[responseID] = optimized
-	for len(s.multiAgentV2LineageOrder) > codexMultiAgentV2LineageMaxEntries {
-		evict := s.multiAgentV2LineageOrder[0]
-		s.multiAgentV2LineageOrder[0] = ""
-		s.multiAgentV2LineageOrder = s.multiAgentV2LineageOrder[1:]
-		delete(s.multiAgentV2Lineages, evict)
-	}
+	s.multiAgentV2Lineages[responseID] = struct{}{}
 }
 
 func (s *codexWebsocketSession) resetMultiAgentV2LineagesLocked() {
 	s.multiAgentV2Lineages = nil
-	s.multiAgentV2LineageOrder = nil
 }
 
 // sendTerminalWebsocketRead reports whether it invalidated a full channel's connection before waiting.
