@@ -473,3 +473,180 @@ func (h *Handler) GetLiteLLMKeyCompat(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, keyToCompat(key, pol))
 }
+
+// ListLiteLLMKeysCompat is the runtime-backed GET /litellm/key/list handler. It
+// returns a paginated page of runtime API keys with LiteLLM field names. Query
+// params: user_id, status, search, page, page_size, sort_by (default
+// created_at), sort_order (default desc). The array key is api_keys, matching
+// LiteLLM's key/list contract.
+func (h *Handler) ListLiteLLMKeysCompat(c *gin.Context) {
+	_, keys, _, ok := h.requireLiteLLMRuntime(c)
+	if !ok {
+		return
+	}
+	page := atoiDefault(c.Query("page"), 1)
+	pageSize := atoiDefault(c.Query("page_size"), 25)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 25
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+	sortBy := c.DefaultQuery("sort_by", "created_at")
+	sortOrder := c.DefaultQuery("sort_order", "desc")
+	filter := store.APIKeyListFilter{
+		Status:    c.Query("status"),
+		UserID:    c.Query("user_id"),
+		Search:    c.Query("search"),
+		SortBy:    sortBy,
+		SortOrder: sortOrder,
+	}
+	list, total, err := keys.ListPagedFiltered(c.Request.Context(), page, pageSize, filter)
+	if err != nil {
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	compat := make([]liteLLMCompatKeyResponse, 0, len(list))
+	for _, k := range list {
+		compat = append(compat, keyToCompat(k, nil))
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"api_keys":  compat,
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
+	})
+}
+
+// liteLLMCompatKeyUpdateRequest is the JSON payload for POST /litellm/key/update.
+// key (the key id) is required; all optional fields are pointers so an unset
+// field is left untouched by the store update.
+type liteLLMCompatKeyUpdateRequest struct {
+	Key      string          `json:"key"`
+	Name     *string         `json:"name"`
+	Alias    *string         `json:"alias"`
+	Status   *string         `json:"status"`
+	Metadata *map[string]any `json:"metadata"`
+}
+
+// UpdateLiteLLMKeyCompat is the runtime-backed POST /litellm/key/update handler.
+// It applies the non-nil optional fields and returns the updated key with
+// LiteLLM field names.
+func (h *Handler) UpdateLiteLLMKeyCompat(c *gin.Context) {
+	_, keys, _, ok := h.requireLiteLLMRuntime(c)
+	if !ok {
+		return
+	}
+	var req liteLLMCompatKeyUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		litellmCompatError(c, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if req.Key == "" {
+		litellmCompatError(c, http.StatusBadRequest, "invalid_request", "key is required")
+		return
+	}
+	if req.Name != nil {
+		if err := keys.Rename(c.Request.Context(), req.Key, *req.Name); err != nil {
+			litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+			return
+		}
+	}
+	if req.Alias != nil {
+		if err := keys.UpdateAlias(c.Request.Context(), req.Key, *req.Alias); err != nil {
+			litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+			return
+		}
+	}
+	if req.Status != nil {
+		if err := keys.UpdateStatus(c.Request.Context(), req.Key, *req.Status); err != nil {
+			litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+			return
+		}
+	}
+	if req.Metadata != nil {
+		if err := keys.UpdateMetadata(c.Request.Context(), req.Key, *req.Metadata); err != nil {
+			litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+			return
+		}
+	}
+	key, pol, err := keys.LookupByID(c.Request.Context(), req.Key)
+	if err != nil {
+		if errors.Is(err, store.ErrAPIKeyNotFound) {
+			litellmCompatError(c, http.StatusNotFound, "not_found", "key not found")
+			return
+		}
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	// Policy cache must be invalidated so the next request re-reads the key.
+	h.invalidatePolicyCache()
+	c.JSON(http.StatusOK, keyToCompat(key, pol))
+}
+
+// liteLLMCompatKeyIDRequest is the JSON payload for the key id-only mutations
+// POST /litellm/key/regenerate and POST /litellm/key/delete.
+type liteLLMCompatKeyIDRequest struct {
+	Key string `json:"key"`
+}
+
+// RegenerateLiteLLMKeyCompat is the runtime-backed POST /litellm/key/regenerate
+// handler. It rotates the key's secret and returns the new plaintext secret
+// exactly once (LiteLLM's regenerate contract).
+func (h *Handler) RegenerateLiteLLMKeyCompat(c *gin.Context) {
+	_, keys, _, ok := h.requireLiteLLMRuntime(c)
+	if !ok {
+		return
+	}
+	var req liteLLMCompatKeyIDRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		litellmCompatError(c, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if req.Key == "" {
+		litellmCompatError(c, http.StatusBadRequest, "invalid_request", "key is required")
+		return
+	}
+	newSecret, err := keys.Regenerate(c.Request.Context(), req.Key, "")
+	if err != nil {
+		if errors.Is(err, store.ErrAPIKeyNotFound) {
+			litellmCompatError(c, http.StatusNotFound, "not_found", "key not found")
+			return
+		}
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"key": req.Key, "secret": newSecret})
+}
+
+// DeleteLiteLLMKeyCompat is the runtime-backed POST /litellm/key/delete handler.
+// It deletes the key and returns {"deleted": true} on success.
+func (h *Handler) DeleteLiteLLMKeyCompat(c *gin.Context) {
+	_, keys, _, ok := h.requireLiteLLMRuntime(c)
+	if !ok {
+		return
+	}
+	var req liteLLMCompatKeyIDRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		litellmCompatError(c, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if req.Key == "" {
+		litellmCompatError(c, http.StatusBadRequest, "invalid_request", "key is required")
+		return
+	}
+	if err := keys.Delete(c.Request.Context(), req.Key); err != nil {
+		if errors.Is(err, store.ErrAPIKeyNotFound) {
+			litellmCompatError(c, http.StatusNotFound, "not_found", "key not found")
+			return
+		}
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	// Policy cache must be invalidated so the next request re-reads the snapshot.
+	h.invalidatePolicyCache()
+	c.JSON(http.StatusOK, gin.H{"key": req.Key, "deleted": true})
+}

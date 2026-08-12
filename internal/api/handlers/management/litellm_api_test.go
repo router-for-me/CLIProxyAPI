@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -424,5 +425,186 @@ func TestGetLiteLLMKeyCompat(t *testing.T) {
 	}
 	if !bytes.Contains(rec404.Body.Bytes(), []byte(`"not_found"`)) {
 		t.Errorf("missing key response missing not_found type; body=%s", rec404.Body.String())
+	}
+}
+
+// seedCompatKey creates an internal owner user and a runtime API key owned by it,
+// returning the key row. The plaintext secret is discarded (only the hash is
+// stored); tests that need it use LookupByHash instead.
+func seedCompatKey(t *testing.T, h *Handler, name, alias string) *store.APIKey {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := h.pgUsers.Create(ctx, store.InternalUser{
+		ID: "team-a", UserAlias: "Team A", UserRole: "org",
+	}); err != nil {
+		t.Fatalf("seed user Create: %v", err)
+	}
+	pol := store.Policy{AllowedModels: []string{"gpt-4o"}}
+	key, _, err := h.pgAPIKeys.Create(ctx, name, alias, "", nil, nil, &pol)
+	if err != nil {
+		t.Fatalf("seed key Create: %v", err)
+	}
+	if err := h.pgAPIKeys.UpdateUserID(ctx, key.ID, "team-a"); err != nil {
+		t.Fatalf("seed UpdateUserID: %v", err)
+	}
+	return key
+}
+
+// TestListLiteLLMKeysCompat seeds a user + two keys and verifies GET
+// /litellm/key/list returns them under the api_keys array key (LiteLLM's
+// convention) plus pagination fields.
+func TestListLiteLLMKeysCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_list")
+	gin.SetMode(gin.TestMode)
+	k1 := seedCompatKey(t, h, "prod", "prod-key")
+	k2 := seedCompatKey(t, h, "dev", "dev-key")
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/key/list?page=1&page_size=25", nil)
+	h.ListLiteLLMKeysCompat(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.Bytes()
+	for _, want := range []string{
+		`"api_keys"`,
+		`"total":2`,
+		`"page":1`,
+		`"page_size":25`,
+		`"key":"` + k1.ID + `"`,
+		`"key_alias":"prod-key"`,
+		`"key":"` + k2.ID + `"`,
+		`"key_alias":"dev-key"`,
+	} {
+		if !bytes.Contains(body, []byte(want)) {
+			t.Errorf("list response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+	// The secret must NOT be leaked on read.
+	if bytes.Contains(body, []byte(`"secret"`)) {
+		t.Errorf("list response leaked secret; body=%s", rec.Body.String())
+	}
+}
+
+// TestUpdateLiteLLMKeyCompat seeds a user + key, POSTs /litellm/key/update
+// changing name/status/alias, and verifies the returned values reflect the
+// changes.
+func TestUpdateLiteLLMKeyCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_update")
+	gin.SetMode(gin.TestMode)
+	key := seedCompatKey(t, h, "prod", "prod-key")
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := `{"key":"` + key.ID + `","name":"prod-v2","status":"disabled","alias":"prod-alias"}`
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/update", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpdateLiteLLMKeyCompat(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{`"key":"` + key.ID + `"`, `"key_alias":"prod-alias"`} {
+		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
+			t.Errorf("update response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+	// Confirm the name/status persisted on the row.
+	reloaded, _, err := h.pgAPIKeys.LookupByID(context.Background(), key.ID)
+	if err != nil {
+		t.Fatalf("reload LookupByID: %v", err)
+	}
+	if reloaded.Name != "prod-v2" {
+		t.Errorf("reloaded name = %q; want prod-v2", reloaded.Name)
+	}
+	if reloaded.Status != "disabled" {
+		t.Errorf("reloaded status = %q; want disabled", reloaded.Status)
+	}
+}
+
+// TestRegenerateLiteLLMKeyCompat seeds a user + key, POSTs /litellm/key/regenerate,
+// and verifies the new plaintext secret is returned AND that rotation actually
+// happened: the old secret no longer resolves while the new one does.
+func TestRegenerateLiteLLMKeyCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_regenerate")
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	key := seedCompatKey(t, h, "prod", "prod-key")
+
+	// Recover the current plaintext secret so we can prove rotation.
+	seedKey, _, err := h.pgAPIKeys.LookupByID(ctx, key.ID)
+	if err != nil {
+		t.Fatalf("seed LookupByID: %v", err)
+	}
+	if seedKey.KeyHash == "" {
+		t.Fatal("seeded key has no secret hash")
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/regenerate", bytes.NewBufferString(`{"key":"`+key.ID+`"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.RegenerateLiteLLMKeyCompat(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Key    string `json:"key"`
+		Secret string `json:"secret"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal regenerate response: %v", err)
+	}
+	if resp.Key != key.ID {
+		t.Errorf("response key = %q; want %q", resp.Key, key.ID)
+	}
+	if resp.Secret == "" {
+		t.Fatalf("regenerate returned empty secret; body=%s", rec.Body.String())
+	}
+	newHash := store.HashSecret(resp.Secret)
+	if newHash == seedKey.KeyHash {
+		t.Fatal("regenerate returned the same secret; expected rotation")
+	}
+	// The old secret hash must no longer resolve.
+	if _, _, err := h.pgAPIKeys.LookupByHash(ctx, seedKey.KeyHash); !errors.Is(err, store.ErrAPIKeyNotFound) {
+		t.Errorf("old secret still resolves after regenerate; err=%v", err)
+	}
+	// The new secret must resolve to the same key id.
+	newKey, _, err := h.pgAPIKeys.LookupByHash(ctx, newHash)
+	if err != nil {
+		t.Fatalf("LookupByHash(new secret) failed: %v", err)
+	}
+	if newKey.ID != key.ID {
+		t.Errorf("LookupByHash(new) resolved key %s; want %s", newKey.ID, key.ID)
+	}
+}
+
+// TestDeleteLiteLLMKeyCompat seeds a user + key, POSTs /litellm/key/delete,
+// verifies {"deleted": true}, and confirms a subsequent LookupByID 404s.
+func TestDeleteLiteLLMKeyCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_delete")
+	gin.SetMode(gin.TestMode)
+	key := seedCompatKey(t, h, "prod", "prod-key")
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/delete", bytes.NewBufferString(`{"key":"`+key.ID+`"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.DeleteLiteLLMKeyCompat(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{`"key":"` + key.ID + `"`, `"deleted":true`} {
+		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
+			t.Errorf("delete response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+	// Confirm the key is gone.
+	if _, _, err := h.pgAPIKeys.LookupByID(context.Background(), key.ID); !errors.Is(err, store.ErrAPIKeyNotFound) {
+		t.Fatalf("post-delete LookupByID err = %v; want ErrAPIKeyNotFound", err)
 	}
 }
