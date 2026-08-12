@@ -230,6 +230,21 @@ codex:
   # normalizes encrypted agent_message content for Codex, and converts agent_message input
   # into standard user messages for non-Codex upstream protocols.
   optimize-multi-agent-v2: false
+  # — WebSocket upstream transport (reduces mid-stream disconnection errors) —
+  #
+  # enable-websocket-upstream: When true, Codex OAuth credentials (prolite, etc.)
+  #   connect to the upstream via wss:// instead of https://. WebSocket provides
+  #   ping/pong keepalives, explicit disconnect detection, and automatic reconnect
+  #   on send failure — all of which HTTP/2 lacks. This significantly reduces
+  #   "stream closed before response.completed" (408) errors caused by silent
+  #   mid-stream disconnections from intermediate proxies or server-side timeouts.
+  #
+  #   Per-credential override: set "websockets": false in the auth JSON file or
+  #   toggle the credential's WebSockets switch off in the management UI. Both
+  #   overrides take precedence over this global default.
+  #
+  #   Default: false (opt-in, safe default — no behavioral change without explicit enable).
+  enable-websocket-upstream: false
   # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
   # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
   live-media-relay:
