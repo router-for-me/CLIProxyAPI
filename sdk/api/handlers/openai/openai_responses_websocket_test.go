@@ -658,11 +658,12 @@ type websocketAuthCaptureExecutor struct {
 }
 
 type websocketPinnedFailoverExecutor struct {
-	mu         sync.Mutex
-	failStatus int
-	authIDs    []string
-	calls      map[string]int
-	payloads   map[string][][]byte
+	mu                    sync.Mutex
+	failStatus            int
+	authIDs               []string
+	calls                 map[string]int
+	payloads              map[string][][]byte
+	initialResponseChunks [][]byte
 }
 
 type websocketBootstrapFallbackExecutor struct {
@@ -1049,6 +1050,15 @@ func (e *websocketPinnedFailoverExecutor) ExecuteStream(_ context.Context, auth 
 			status: e.failStatus,
 			msg:    fmt.Sprintf(`{"error":{"message":"credential failed","status":%d}}`, e.failStatus),
 		}}
+		close(chunks)
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}
+
+	if authID == "auth-a" && call == 1 && len(e.initialResponseChunks) > 0 {
+		chunks := make(chan coreexecutor.StreamChunk, len(e.initialResponseChunks))
+		for _, payload := range e.initialResponseChunks {
+			chunks <- coreexecutor.StreamChunk{Payload: bytes.Clone(payload)}
+		}
 		close(chunks)
 		return &coreexecutor.StreamResult{Chunks: chunks}, nil
 	}
