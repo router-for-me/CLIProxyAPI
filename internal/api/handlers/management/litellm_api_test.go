@@ -119,3 +119,148 @@ func TestCreateLiteLLMUserCompatRoundTrip(t *testing.T) {
 		t.Errorf("response leaked internal casing; body=%s", resp)
 	}
 }
+
+// TestListLiteLLMUsersCompat seeds two users and verifies GET /litellm/user/list
+// returns them with LiteLLM field names plus pagination fields.
+func TestListLiteLLMUsersCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_list")
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	for _, u := range []store.InternalUser{
+		{ID: "team-a", UserAlias: "Team A", UserEmail: "a@example.com", UserRole: "org"},
+		{ID: "team-b", UserAlias: "Team B", UserEmail: "b@example.com", UserRole: "admin"},
+	} {
+		if _, err := h.pgUsers.Create(ctx, u); err != nil {
+			t.Fatalf("seed Create(%s): %v", u.ID, err)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/user/list?page=1&page_size=25", nil)
+	h.ListLiteLLMUsersCompat(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.Bytes()
+	for _, want := range []string{
+		`"users"`,
+		`"total":2`,
+		`"page":1`,
+		`"page_size":25`,
+		`"user_id":"team-a"`,
+		`"user_alias":"Team A"`,
+		`"user_id":"team-b"`,
+	} {
+		if !bytes.Contains(body, []byte(want)) {
+			t.Errorf("list response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+	if bytes.Contains(body, []byte(`"UserAlias"`)) {
+		t.Errorf("list response leaked internal casing; body=%s", rec.Body.String())
+	}
+}
+
+// TestGetLiteLLMUserCompat seeds a user and verifies GET /litellm/user/info
+// returns it by user_id, plus a 404 when the user does not exist.
+func TestGetLiteLLMUserCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_info")
+	gin.SetMode(gin.TestMode)
+	if _, err := h.pgUsers.Create(context.Background(), store.InternalUser{
+		ID: "team-a", UserAlias: "Team A", UserEmail: "a@example.com", UserRole: "org",
+	}); err != nil {
+		t.Fatalf("seed Create: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/user/info?user_id=team-a", nil)
+	h.GetLiteLLMUserCompat(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{`"user_id":"team-a"`, `"user_alias":"Team A"`, `"user_role":"org"`} {
+		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
+			t.Errorf("info response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+
+	// 404 case.
+	rec2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(rec2)
+	c2.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/user/info?user_id=nope", nil)
+	h.GetLiteLLMUserCompat(c2)
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("missing user status = %d; want 404; body=%s", rec2.Code, rec2.Body.String())
+	}
+	if !bytes.Contains(rec2.Body.Bytes(), []byte(`"not_found"`)) {
+		t.Errorf("missing user response missing not_found type; body=%s", rec2.Body.String())
+	}
+}
+
+// TestUpdateLiteLLMUserCompat seeds a user, updates user_alias via
+// POST /litellm/user/update, and verifies the returned value reflects the change.
+func TestUpdateLiteLLMUserCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_update")
+	gin.SetMode(gin.TestMode)
+	if _, err := h.pgUsers.Create(context.Background(), store.InternalUser{
+		ID: "team-a", UserAlias: "Team A", UserEmail: "a@example.com", UserRole: "org",
+	}); err != nil {
+		t.Fatalf("seed Create: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := `{"user_id":"team-a","user_alias":"Team Alpha","user_role":"admin"}`
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/user/update", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpdateLiteLLMUserCompat(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{`"user_alias":"Team Alpha"`, `"user_role":"admin"`, `"user_id":"team-a"`} {
+		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
+			t.Errorf("update response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+}
+
+// TestDeleteLiteLLMUserCompat seeds a user, deletes it via POST /litellm/user/delete,
+// verifies {"deleted": true}, and confirms a subsequent Get 404s.
+func TestDeleteLiteLLMUserCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_delete")
+	gin.SetMode(gin.TestMode)
+	if _, err := h.pgUsers.Create(context.Background(), store.InternalUser{
+		ID: "team-a", UserAlias: "Team A", UserRole: "org",
+	}); err != nil {
+		t.Fatalf("seed Create: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := `{"user_id":"team-a"}`
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/user/delete", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.DeleteLiteLLMUserCompat(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{`"id":"team-a"`, `"deleted":true`} {
+		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
+			t.Errorf("delete response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+
+	// Confirm the user is gone.
+	rec2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(rec2)
+	c2.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/user/info?user_id=team-a", nil)
+	h.GetLiteLLMUserCompat(c2)
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("post-delete get status = %d; want 404; body=%s", rec2.Code, rec2.Body.String())
+	}
+}

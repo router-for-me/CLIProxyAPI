@@ -1,13 +1,27 @@
 package management
 
 import (
+	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 )
+
+// atoiDefault parses s as an int, returning def when s is empty or unparsable.
+func atoiDefault(s string, def int) int {
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return def
+	}
+	return n
+}
 
 // requireLiteLLMRuntime returns the runtime PG stores backing the compat
 // /litellm routes, plus false (after writing a 503 response) when they are not
@@ -123,4 +137,178 @@ func internalUserToCompat(u store.InternalUser) liteLLMCompatUserResponse {
 		CreatedAt:           u.CreatedAt,
 		UpdatedAt:           u.UpdatedAt,
 	}
+}
+
+// ListLiteLLMUsersCompat is the runtime-backed GET /litellm/user/list handler.
+// It returns a paginated page of internal users with LiteLLM field names. Query
+// params: role, search, page, page_size, sort_by (default spend), sort_order
+// (default desc).
+func (h *Handler) ListLiteLLMUsersCompat(c *gin.Context) {
+	users, _, _, ok := h.requireLiteLLMRuntime(c)
+	if !ok {
+		return
+	}
+	page := atoiDefault(c.Query("page"), 1)
+	pageSize := atoiDefault(c.Query("page_size"), 25)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 25
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+	sortBy := c.Query("sort_by")
+	if sortBy == "" {
+		sortBy = "spend"
+	}
+	sortOrder := c.Query("sort_order")
+	if sortOrder == "" {
+		sortOrder = "desc"
+	}
+	list, total, err := users.ListWithSpend(c.Request.Context(), store.ListFilter{
+		Role:      c.Query("role"),
+		Search:    c.Query("search"),
+		Page:      page,
+		PageSize:  pageSize,
+		SortBy:    sortBy,
+		SortOrder: sortOrder,
+	})
+	if err != nil {
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	compatUsers := make([]liteLLMCompatUserResponse, 0, len(list))
+	for _, u := range list {
+		compatUsers = append(compatUsers, internalUserToCompat(u))
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"users":     compatUsers,
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
+	})
+}
+
+// GetLiteLLMUserCompat is the runtime-backed GET /litellm/user/info handler. The
+// user id is read from the user_id query param (LiteLLM's convention).
+func (h *Handler) GetLiteLLMUserCompat(c *gin.Context) {
+	users, _, _, ok := h.requireLiteLLMRuntime(c)
+	if !ok {
+		return
+	}
+	userID := c.Query("user_id")
+	if userID == "" {
+		litellmCompatError(c, http.StatusBadRequest, "invalid_request", "user_id is required")
+		return
+	}
+	u, err := users.Get(c.Request.Context(), userID)
+	if err != nil {
+		if errors.Is(err, store.ErrInternalUserNotFound) {
+			litellmCompatError(c, http.StatusNotFound, "not_found", "user not found")
+			return
+		}
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, internalUserToCompat(u))
+}
+
+// liteLLMCompatUserUpdateRequest is the JSON payload for POST /litellm/user/update.
+// All optional fields are pointers so an unset field is left untouched by the
+// store update.
+type liteLLMCompatUserUpdateRequest struct {
+	UserID              string          `json:"user_id"`
+	UserAlias           *string         `json:"user_alias"`
+	UserEmail           *string         `json:"user_email"`
+	UserRole            *string         `json:"user_role"`
+	Models              *[]string       `json:"models"`
+	Metadata            *map[string]any `json:"metadata"`
+	MaxBudget           *float64        `json:"max_budget"`
+	BudgetDuration      *string         `json:"budget_duration"`
+	RPMLimit            *int64          `json:"rpm_limit"`
+	TPMLimit            *int64          `json:"tpm_limit"`
+	MaxParallelRequests *int            `json:"max_parallel_requests"`
+}
+
+// UpdateLiteLLMUserCompat is the runtime-backed POST /litellm/user/update handler.
+// user_id may be delivered in the JSON body (preferred) or the user_id query
+// param. Returns the updated user with LiteLLM field names.
+func (h *Handler) UpdateLiteLLMUserCompat(c *gin.Context) {
+	users, _, _, ok := h.requireLiteLLMRuntime(c)
+	if !ok {
+		return
+	}
+	var req liteLLMCompatUserUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		litellmCompatError(c, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	userID := req.UserID
+	if userID == "" {
+		userID = c.Query("user_id")
+	}
+	if userID == "" {
+		litellmCompatError(c, http.StatusBadRequest, "invalid_request", "user_id is required")
+		return
+	}
+	upd := store.InternalUserUpdate{
+		UserAlias:           req.UserAlias,
+		UserEmail:           req.UserEmail,
+		UserRole:            req.UserRole,
+		Models:              req.Models,
+		Metadata:            req.Metadata,
+		MaxBudget:           req.MaxBudget,
+		BudgetDuration:      req.BudgetDuration,
+		RPMLimit:            req.RPMLimit,
+		TPMLimit:            req.TPMLimit,
+		MaxParallelRequests: req.MaxParallelRequests,
+	}
+	if err := users.Update(c.Request.Context(), userID, upd); err != nil {
+		if errors.Is(err, store.ErrInternalUserNotFound) {
+			litellmCompatError(c, http.StatusNotFound, "not_found", "user not found")
+			return
+		}
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	u, err := users.Get(c.Request.Context(), userID)
+	if err != nil {
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, internalUserToCompat(u))
+}
+
+// DeleteLiteLLMUserCompat is the runtime-backed POST /litellm/user/delete handler.
+// user_id may be delivered in the JSON body (preferred) or the user_id query
+// param. Returns {"deleted": true} on success.
+func (h *Handler) DeleteLiteLLMUserCompat(c *gin.Context) {
+	users, _, _, ok := h.requireLiteLLMRuntime(c)
+	if !ok {
+		return
+	}
+	userID := c.Query("user_id")
+	if userID == "" {
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+		if err := c.ShouldBindJSON(&req); err == nil && req.UserID != "" {
+			userID = req.UserID
+		}
+	}
+	if userID == "" {
+		litellmCompatError(c, http.StatusBadRequest, "invalid_request", "user_id is required")
+		return
+	}
+	if err := users.Delete(c.Request.Context(), userID); err != nil {
+		if errors.Is(err, store.ErrInternalUserNotFound) {
+			litellmCompatError(c, http.StatusNotFound, "not_found", "user not found")
+			return
+		}
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"id": userID, "deleted": true})
 }
