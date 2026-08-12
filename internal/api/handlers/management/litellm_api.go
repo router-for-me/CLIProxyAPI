@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -477,11 +478,7 @@ func (h *Handler) GetLiteLLMKeyCompat(c *gin.Context) {
 	}
 	key, pol, err := keys.LookupByID(c.Request.Context(), keyID)
 	if err != nil {
-		if errors.Is(err, store.ErrAPIKeyNotFound) {
-			litellmCompatError(c, http.StatusNotFound, "not_found", "key not found")
-			return
-		}
-		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		translateLiteLLMKeyCompatError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, keyToCompat(key, pol))
@@ -511,9 +508,9 @@ func (h *Handler) ListLiteLLMKeysCompat(c *gin.Context) {
 	sortBy := c.DefaultQuery("sort_by", "created_at")
 	sortOrder := c.DefaultQuery("sort_order", "desc")
 	filter := store.APIKeyListFilter{
-		Status:    c.Query("status"),
-		UserID:    c.Query("user_id"),
-		Search:    c.Query("search"),
+		Status:    strings.TrimSpace(c.Query("status")),
+		UserID:    strings.TrimSpace(c.Query("user_id")),
+		Search:    strings.TrimSpace(c.Query("search")),
 		SortBy:    sortBy,
 		SortOrder: sortOrder,
 	}
