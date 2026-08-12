@@ -17,6 +17,23 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func codexWebsocketContractResponseID(payloads [][]byte) string {
+	for _, payload := range payloads {
+		payload = bytes.TrimSpace(payload)
+		payload = bytes.TrimSpace(bytes.TrimPrefix(payload, []byte("data:")))
+		if responseID := gjson.GetBytes(payload, "id").String(); responseID != "" {
+			return responseID
+		}
+		if eventType := gjson.GetBytes(payload, "type").String(); eventType != "response.completed" && eventType != "response.done" {
+			continue
+		}
+		if responseID := gjson.GetBytes(payload, "response.id").String(); responseID != "" {
+			return responseID
+		}
+	}
+	return ""
+}
+
 func TestCodexWebsocketsExecutorPrewarmChainsOnSameConnection(t *testing.T) {
 	for _, testCase := range []struct {
 		name   string
@@ -83,30 +100,45 @@ func TestCodexWebsocketsExecutorPrewarmChainsOnSameConnection(t *testing.T) {
 					cliproxyexecutor.ExecutionSessionMetadataKey: sessionID,
 				},
 			}
-			execute := func(payload string) error {
+			execute := func(payload string) ([][]byte, error) {
 				t.Helper()
 				req := cliproxyexecutor.Request{Model: "gpt-5.6-luna", Payload: []byte(payload)}
 				if !testCase.stream {
-					_, errExecute := exec.Execute(context.Background(), auth, req, opts)
-					return errExecute
+					response, errExecute := exec.Execute(context.Background(), auth, req, opts)
+					if errExecute != nil {
+						return nil, errExecute
+					}
+					return [][]byte{bytes.Clone(response.Payload)}, nil
 				}
 				result, errExecute := exec.ExecuteStream(context.Background(), auth, req, opts)
 				if errExecute != nil {
-					return errExecute
+					return nil, errExecute
 				}
+				var payloads [][]byte
 				for chunk := range result.Chunks {
 					if chunk.Err != nil {
-						return chunk.Err
+						return nil, chunk.Err
 					}
+					payloads = append(payloads, bytes.Clone(chunk.Payload))
 				}
-				return nil
+				return payloads, nil
 			}
 
-			if errExecute := execute(`{"model":"gpt-5.6-luna","store":false,"generate":false,"input":[]}`); errExecute != nil {
+			prewarmPayloads, errExecute := execute(`{"model":"gpt-5.6-luna","store":false,"generate":false,"input":[]}`)
+			if errExecute != nil {
 				t.Fatalf("prewarm request failed: %v", errExecute)
 			}
-			if errExecute := execute(`{"model":"gpt-5.6-luna","store":false,"previous_response_id":"resp-warm","input":[]}`); errExecute != nil {
+			prewarmResponseID := codexWebsocketContractResponseID(prewarmPayloads)
+			if prewarmResponseID != "resp-warm" {
+				t.Fatalf("caller-visible prewarm response ID = %q, want resp-warm; payloads=%q", prewarmResponseID, prewarmPayloads)
+			}
+
+			generatedPayloads, errExecute := execute(fmt.Sprintf(`{"model":"gpt-5.6-luna","store":false,"previous_response_id":%q,"input":[]}`, prewarmResponseID))
+			if errExecute != nil {
 				t.Fatalf("generated request failed: %v", errExecute)
+			}
+			if generatedResponseID := codexWebsocketContractResponseID(generatedPayloads); generatedResponseID != "resp-generated" {
+				t.Fatalf("caller-visible generated response ID = %q, want resp-generated; payloads=%q", generatedResponseID, generatedPayloads)
 			}
 
 			first := <-captured
