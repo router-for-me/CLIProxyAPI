@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -246,7 +247,7 @@ func (t *responsesWebsocketToolCacheTurn) recordRequest(payload []byte) {
 	if t == nil || len(payload) == 0 {
 		return
 	}
-	input := gjson.GetBytes(payload, "input")
+	input := util.GetGJSONBytesNoCopy(payload, "input")
 	if !input.Exists() || !input.IsArray() {
 		return
 	}
@@ -259,9 +260,9 @@ func (t *responsesWebsocketToolCacheTurn) recordResponse(payload []byte) {
 	if t == nil || len(payload) == 0 {
 		return
 	}
-	switch strings.TrimSpace(gjson.GetBytes(payload, "type").String()) {
+	switch strings.TrimSpace(util.GetGJSONBytesNoCopy(payload, "type").String()) {
 	case "response.completed":
-		output := gjson.GetBytes(payload, "response.output")
+		output := util.GetGJSONBytesNoCopy(payload, "response.output")
 		if !output.Exists() || !output.IsArray() {
 			return
 		}
@@ -271,7 +272,7 @@ func (t *responsesWebsocketToolCacheTurn) recordResponse(payload []byte) {
 			}
 		}
 	case "response.output_item.added", "response.output_item.done":
-		item := gjson.GetBytes(payload, "item")
+		item := util.GetGJSONBytesNoCopy(payload, "item")
 		if isCompleteResponsesWebsocketToolCall(item) {
 			t.recordItem(item)
 		}
@@ -286,6 +287,7 @@ func (t *responsesWebsocketToolCacheTurn) recordItem(item gjson.Result) {
 	if callID == "" || strings.TrimSpace(item.Raw) == "" {
 		return
 	}
+	callID = strings.Clone(callID)
 	raw := append(json.RawMessage(nil), item.Raw...)
 	switch {
 	case isResponsesToolCallOutputType(item.Get("type").String()):
