@@ -350,6 +350,20 @@ func TestGenerateLiteLLMKeyCompat(t *testing.T) {
 	if !bytes.Contains(rec404.Body.Bytes(), []byte(`"not_found"`)) {
 		t.Errorf("unknown owner response missing not_found type; body=%s", rec404.Body.String())
 	}
+
+	// 400: tpm_limit is not supported on the runtime policy, so it must be
+	// rejected explicitly rather than silently dropped.
+	recTpm := httptest.NewRecorder()
+	cTpm, _ := gin.CreateTestContext(recTpm)
+	cTpm.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/generate", bytes.NewBufferString(`{"user_id":"team-a","tpm_limit":100}`))
+	cTpm.Request.Header.Set("Content-Type", "application/json")
+	h.GenerateLiteLLMKeyCompat(cTpm)
+	if recTpm.Code != http.StatusBadRequest {
+		t.Fatalf("tpm_limit status = %d; want 400; body=%s", recTpm.Code, recTpm.Body.String())
+	}
+	if !bytes.Contains(recTpm.Body.Bytes(), []byte(`"invalid_request"`)) {
+		t.Errorf("tpm_limit response missing invalid_request type; body=%s", recTpm.Body.String())
+	}
 }
 
 // TestGetLiteLLMKeyCompat seeds a user + key, GETs /litellm/key/info, and

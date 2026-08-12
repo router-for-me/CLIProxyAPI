@@ -393,6 +393,13 @@ func (h *Handler) GenerateLiteLLMKeyCompat(c *gin.Context) {
 		litellmCompatError(c, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	// The runtime Policy has no tpm_limit or budget_duration columns, so these
+	// fields cannot be honored. Reject them explicitly rather than silently
+	// dropping the client's intent behind a misleading 200.
+	if req.TPMLimit != nil || req.BudgetDuration != "" {
+		litellmCompatError(c, http.StatusBadRequest, "invalid_request", "tpm_limit / budget_duration are not supported on key generate")
+		return
+	}
 	if req.UserID == "" {
 		litellmCompatError(c, http.StatusBadRequest, "invalid_request", "user_id is required")
 		return
