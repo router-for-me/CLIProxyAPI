@@ -543,6 +543,16 @@ func (s *UsageStore) selectAggregateMiss(ctx context.Context, filter UsageFilter
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store: usage store not initialized")
 	}
+	// Fast path: when the aggregate can be answered exactly from the daily
+	// rollup table (a day-aligned group-by-user query with no non-rollup
+	// dimension filters), read it from usage_stat_day instead of scanning
+	// every usage_events row in the window. This is the query behind LiteLLM's
+	// /litellm/spend/users, which many users poll.
+	if rows, used, err := s.tryRollupAggregateUser(ctx, filter); err != nil {
+		return nil, err
+	} else if used {
+		return rows, nil
+	}
 	groupExpr, groupCol, err := aggregateGroupClause(filter.GroupBy)
 	if err != nil {
 		return nil, err
@@ -645,7 +655,119 @@ func (s *UsageStore) selectAggregateMiss(ctx context.Context, filter UsageFilter
 	return out, rows.Err()
 }
 
-// aggregateGroupClause resolves the GROUP BY settings for an aggregate query.
+// rollupDayExpr reports whether t lands exactly on a UTC calendar-day boundary
+// (00:00:00 UTC). Midnights truncate to themselves; any other instant does not.
+func rollupDayExpr(t time.Time) bool {
+	return t.UTC().Truncate(24*time.Hour) == t.UTC()
+}
+
+// rollupGroupByUserSQL is the rollup-backed GROUP BY user_id aggregate over a
+// day-aligned window. It reads usage_stat_day (one row per (day,user,key,model,
+// provider,source) bucket) and rolls each per-user row up into a UsageAggregate.
+//
+// Locator columns match the on-the-fly path so callers see identical shapes:
+// bucket carries the user id, principal is NULL (a user spans many api_keys, so
+// the api_keys LEFT JOIN is not applicable here), and the numeric projections
+// map 1:1 onto the usage_events sums — except reasoning_tokens and cached_tokens,
+// which the rollup does not track and project as 0. Callers relying on those two
+// fields on the group-by-user path will see 0; the current /litellm/spend/users
+// shape does not surface them, so this is acceptable.
+//
+// stat_day is a DATE pinned to UTC, so the window is inclusive on both ends
+// (>= From_date AND <= To_date). Parameters are bound as explicit YYYY-MM-DD
+// date strings cast to ::date — never as time.Time — so the comparison is
+// timezone-independent and matches the UTC-pinned stat_day regardless of the
+// session TIMEZONE.
+const rollupGroupByUserSQL = `
+SELECT r.user_id AS bucket,
+       NULL::text AS principal,
+       SUM(r.request_count) AS request_count,
+       SUM(r.fail_count)     AS failed_count,
+       SUM(r.input_tokens)   AS input_tokens,
+       SUM(r.output_tokens)  AS output_tokens,
+       0                     AS reasoning_tokens,
+       0                     AS cached_tokens,
+       SUM(r.tot_tokens)     AS total_tokens,
+       SUM(r.cost_usd)       AS cost_usd
+FROM %s r
+WHERE 1=1%s%s
+  AND r.user_id <> ''
+GROUP BY r.user_id
+ORDER BY bucket%s`
+
+// tryRollupAggregateUser answers a group-by-user aggregate from the daily rollup
+// when the filter's window is day-aligned and carries no non-rollup dimension
+// filters. It returns usedRollup=false (falling back to the usage_events scan)
+// whenever the fast path cannot faithfully reproduce the query's result.
+func (s *UsageStore) tryRollupAggregateUser(ctx context.Context, filter UsageFilter) ([]UsageAggregate, bool, error) {
+	if s.rollupTable == "" {
+		return nil, false, nil
+	}
+	// Only the group-by-user aggregation is fast-pathed; all other GroupBy
+	// dimensions (api_key_id, model, provider, day, hour, "") keep the
+	// on-the-fly usage_events path unchanged.
+	if strings.TrimSpace(strings.ToLower(filter.GroupBy)) != "user_id" {
+		return nil, false, nil
+	}
+	// The rollup buckets by all six dimensions, so any non-rollup dimension
+	// filter needs a filtered scan — fall back.
+	if filter.UserID != "" || filter.APIKeyID != "" || filter.Model != "" ||
+		filter.Provider != "" || filter.RequestID != "" {
+		return nil, false, nil
+	}
+	// Day alignment: both bounds, when set, must be UTC calendar-day midnights.
+	// A partial day (non-midnight From or exclusive To) cannot be answered from
+	// whole-day rollup buckets, so it falls back for partial-day accuracy.
+	if !filter.From.IsZero() && !rollupDayExpr(filter.From) {
+		return nil, false, nil
+	}
+	if !filter.To.IsZero() && !rollupDayExpr(filter.To) {
+		return nil, false, nil
+	}
+
+	from := ""
+	if !filter.From.IsZero() {
+		from = "\n  AND r.stat_day >= '" + filter.From.UTC().Format("2006-01-02") + "'"
+	}
+	to := ""
+	if !filter.To.IsZero() {
+		to = "\n  AND r.stat_day <= '" + filter.To.UTC().Format("2006-01-02") + "'"
+	}
+	limit := ""
+	args := []any{}
+	if filter.Limit > 0 {
+		limit = " LIMIT $1"
+		args = append(args, filter.Limit)
+	}
+	query := fmt.Sprintf(rollupGroupByUserSQL, s.rollupTable, from, to, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("postgres store: select rollup aggregate by user: %w", err)
+	}
+	defer rows.Close()
+	out := make([]UsageAggregate, 0, 16)
+	for rows.Next() {
+		var (
+			a         UsageAggregate
+			principal sql.NullString
+		)
+		if err = rows.Scan(&a.Bucket, &principal, &a.RequestCount, &a.FailedCount,
+			&a.InputTokens, &a.OutputTokens, &a.ReasoningTokens, &a.CachedTokens,
+			&a.TotalTokens, &a.CostUSD); err != nil {
+			return nil, false, fmt.Errorf("postgres store: scan rollup aggregate by user: %w", err)
+		}
+		if principal.Valid {
+			a.APIKeyPrincipal = principal.String
+		}
+		out = append(out, a)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("postgres store: iterate rollup aggregate by user: %w", err)
+	}
+	return out, true, nil
+}
+
 // Returns:
 //   - groupExpr: the SELECT projection that becomes the bucket (already
 //     contains any function call like date_trunc).
