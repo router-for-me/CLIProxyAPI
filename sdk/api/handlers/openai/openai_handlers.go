@@ -66,6 +66,13 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 
 	// Get all available models
 	allModels := h.Models()
+	if c.Query("full") == "1" {
+		c.JSON(http.StatusOK, gin.H{
+			"object": "list",
+			"data":   allModels,
+		})
+		return
+	}
 
 	// Filter to only include the 4 required fields: id, object, created, owned_by
 	filteredModels := make([]map[string]any, len(allModels))
