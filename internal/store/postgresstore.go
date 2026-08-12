@@ -643,7 +643,7 @@ func (s *PostgresStore) ensureLiteLLMSchema(ctx context.Context) error {
 // Migrate runs idempotent schema migrations for tables/indexes that were added
 // after initial schema creation. It must be safe to run on every startup.
 // Applied migrations are appended here by later tasks (new usage_events indexes,
-// the usage_stat_day rollup table); it is a no-op as of this task.
+// the usage_stat_day rollup table).
 //
 // Migrate is intentionally a distinct step from EnsureSchema: EnsureSchema
 // creates the base tables at first construction, while Migrate evolves the
@@ -654,7 +654,24 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("postgres store: not initialized")
 	}
-	// Future migrations append their idempotent DDL here.
+	// usage_events aggregate indexes. These target queries that otherwise full-scan
+	// the table: LiteLLM /spend/users (group-by-user over a time window),
+	// per-model spend leaderboards, and provider-filtered aggregates. The table
+	// name is dynamic (schema-qualified), so each statement is built with
+	// fmt.Sprintf. All are idempotent and safe to run on every startup. The
+	// partial WHERE user_id IS NOT NULL style matches the existing
+	// idx_usage_events_user_id index created in EnsureSchema.
+	usageEventsTable := s.fullTableName(s.cfg.UsageEventsTable)
+	migrations := []string{
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_usage_events_requested_at_user ON %s(requested_at DESC, user_id) WHERE user_id IS NOT NULL`, usageEventsTable),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_usage_events_user_model_at ON %s(user_id, model, requested_at) WHERE user_id IS NOT NULL`, usageEventsTable),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_usage_events_provider ON %s(provider, requested_at)`, usageEventsTable),
+	}
+	for _, q := range migrations {
+		if _, err := s.db.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("postgres store: migrate usage indexes: %w", err)
+		}
+	}
 	return nil
 }
 
