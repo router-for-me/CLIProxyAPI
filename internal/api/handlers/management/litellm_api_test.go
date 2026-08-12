@@ -522,6 +522,20 @@ func TestUpdateLiteLLMKeyCompat(t *testing.T) {
 	if reloaded.Status != "disabled" {
 		t.Errorf("reloaded status = %q; want disabled", reloaded.Status)
 	}
+
+	// Updating a nonexistent key must return 404 (not 500), even though the
+	// mutation itself (Rename) surfaces ErrAPIKeyNotFound.
+	rec404 := httptest.NewRecorder()
+	c404, _ := gin.CreateTestContext(rec404)
+	c404.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/update", bytes.NewBufferString(`{"key":"nope","name":"x"}`))
+	c404.Request.Header.Set("Content-Type", "application/json")
+	h.UpdateLiteLLMKeyCompat(c404)
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("missing key update status = %d; want 404; body=%s", rec404.Code, rec404.Body.String())
+	}
+	if !bytes.Contains(rec404.Body.Bytes(), []byte(`"not_found"`)) {
+		t.Errorf("missing key update response missing not_found type; body=%s", rec404.Body.String())
+	}
 }
 
 // TestRegenerateLiteLLMKeyCompat seeds a user + key, POSTs /litellm/key/regenerate,

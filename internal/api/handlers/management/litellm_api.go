@@ -48,6 +48,19 @@ func litellmCompatError(c *gin.Context, status int, typ, msg string) {
 	c.JSON(status, gin.H{"error": gin.H{"type": typ, "message": msg}})
 }
 
+// translateLiteLLMKeyCompatError maps a runtime APIKeyStore error onto the
+// LiteLLM compat envelope: a missing key becomes a 404 not_found, any other
+// error becomes a 500 internal_error. Each store mutation returns
+// store.ErrAPIKeyNotFound (via assertRowsAffected) when the key does not exist,
+// so routing that through here keeps the not-found case a 404 instead of a 500.
+func translateLiteLLMKeyCompatError(c *gin.Context, err error) {
+	if errors.Is(err, store.ErrAPIKeyNotFound) {
+		litellmCompatError(c, http.StatusNotFound, "not_found", "key not found")
+		return
+	}
+	litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+}
+
 // liteLLMCompatUserNewRequest is the JSON payload for POST /litellm/user/new.
 type liteLLMCompatUserNewRequest struct {
 	UserID              string         `json:"user_id"`
@@ -551,35 +564,31 @@ func (h *Handler) UpdateLiteLLMKeyCompat(c *gin.Context) {
 	}
 	if req.Name != nil {
 		if err := keys.Rename(c.Request.Context(), req.Key, *req.Name); err != nil {
-			litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+			translateLiteLLMKeyCompatError(c, err)
 			return
 		}
 	}
 	if req.Alias != nil {
 		if err := keys.UpdateAlias(c.Request.Context(), req.Key, *req.Alias); err != nil {
-			litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+			translateLiteLLMKeyCompatError(c, err)
 			return
 		}
 	}
 	if req.Status != nil {
 		if err := keys.UpdateStatus(c.Request.Context(), req.Key, *req.Status); err != nil {
-			litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+			translateLiteLLMKeyCompatError(c, err)
 			return
 		}
 	}
 	if req.Metadata != nil {
 		if err := keys.UpdateMetadata(c.Request.Context(), req.Key, *req.Metadata); err != nil {
-			litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+			translateLiteLLMKeyCompatError(c, err)
 			return
 		}
 	}
 	key, pol, err := keys.LookupByID(c.Request.Context(), req.Key)
 	if err != nil {
-		if errors.Is(err, store.ErrAPIKeyNotFound) {
-			litellmCompatError(c, http.StatusNotFound, "not_found", "key not found")
-			return
-		}
-		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		translateLiteLLMKeyCompatError(c, err)
 		return
 	}
 	// Policy cache must be invalidated so the next request re-reads the key.
@@ -612,11 +621,7 @@ func (h *Handler) RegenerateLiteLLMKeyCompat(c *gin.Context) {
 	}
 	newSecret, err := keys.Regenerate(c.Request.Context(), req.Key, "")
 	if err != nil {
-		if errors.Is(err, store.ErrAPIKeyNotFound) {
-			litellmCompatError(c, http.StatusNotFound, "not_found", "key not found")
-			return
-		}
-		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		translateLiteLLMKeyCompatError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"key": req.Key, "secret": newSecret})
@@ -639,11 +644,7 @@ func (h *Handler) DeleteLiteLLMKeyCompat(c *gin.Context) {
 		return
 	}
 	if err := keys.Delete(c.Request.Context(), req.Key); err != nil {
-		if errors.Is(err, store.ErrAPIKeyNotFound) {
-			litellmCompatError(c, http.StatusNotFound, "not_found", "key not found")
-			return
-		}
-		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		translateLiteLLMKeyCompatError(c, err)
 		return
 	}
 	// Policy cache must be invalidated so the next request re-reads the snapshot.
