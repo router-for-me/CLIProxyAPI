@@ -26,6 +26,8 @@ type handlerInterceptorTestHost struct {
 	interceptResponse          func(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
 	interceptStreamChunk       func(context.Context, pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse
 	completeRequest            func(context.Context, pluginapi.RequestCompletion)
+	// includeStreamChunkRequestBodies simulates legacy schema_version < 3 plugins.
+	includeStreamChunkRequestBodies bool
 }
 
 type handlerInterceptorNoStreamTestHost struct {
@@ -80,6 +82,15 @@ func (h *handlerInterceptorTestHost) CompleteRequest(ctx context.Context, comple
 	if h != nil && h.completeRequest != nil {
 		h.completeRequest(ctx, completion)
 	}
+}
+
+// StreamChunkPayloadIncludesRequestBody implements streamChunkRequestBodyPolicy.
+// Default false simulates schema_version >= 3 (omit request bodies on payload chunks).
+func (h *handlerInterceptorTestHost) StreamChunkPayloadIncludesRequestBody() bool {
+	if h == nil {
+		return false
+	}
+	return h.includeStreamChunkRequestBodies
 }
 
 type interceptorCaptureExecutor struct {
@@ -905,16 +916,22 @@ func TestHandlerStreamInterceptorRewritesAndDropsChunks(t *testing.T) {
 			if req.RequestHeaders.Get("X-Stage") != "after" {
 				t.Fatalf("stream request headers = %#v, want after-auth header", req.RequestHeaders)
 			}
-			if string(req.OriginalRequest) != `{"stage":"after-stream"}` {
-				t.Fatalf("stream original request = %q, want after-auth body", req.OriginalRequest)
-			}
-			if string(req.RequestBody) != `{"stage":"after-stream"}` {
-				t.Fatalf("stream request body = %q, want after-auth body", req.RequestBody)
-			}
 			if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex {
+				if string(req.OriginalRequest) != `{"stage":"after-stream"}` {
+					t.Fatalf("stream original request = %q, want after-auth body", req.OriginalRequest)
+				}
+				if string(req.RequestBody) != `{"stage":"after-stream"}` {
+					t.Fatalf("stream request body = %q, want after-auth body", req.RequestBody)
+				}
 				headers := cloneHeader(req.ResponseHeaders)
 				headers.Set("X-Stream", "plugin")
 				return pluginapi.StreamChunkInterceptResponse{Headers: headers}
+			}
+			if len(req.OriginalRequest) != 0 {
+				t.Fatalf("payload chunk OriginalRequest = %q, want omitted for schema v3+", req.OriginalRequest)
+			}
+			if len(req.RequestBody) != 0 {
+				t.Fatalf("payload chunk RequestBody = %q, want omitted for schema v3+", req.RequestBody)
 			}
 			if req.ResponseHeaders.Get("X-Upstream") != "stream" {
 				t.Fatalf("stream response headers = %#v, want upstream header", req.ResponseHeaders)
@@ -954,6 +971,65 @@ func TestHandlerStreamInterceptorRewritesAndDropsChunks(t *testing.T) {
 	}
 	if streamCalls != 4 {
 		t.Fatalf("stream interceptor calls = %d, want 4", streamCalls)
+	}
+}
+
+func TestHandlerStreamInterceptorLegacySchemaClonesRequestBodiesOnPayloadChunks(t *testing.T) {
+	model := "handler-interceptor-stream-legacy-clone-model"
+	executor := &interceptorCaptureExecutor{
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 2)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("first")}
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("second")}
+			close(chunks)
+			return &coreexecutor.StreamResult{
+				Headers: http.Header{"X-Upstream": []string{"stream"}},
+				Chunks:  chunks,
+			}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{PassthroughHeaders: true})
+	var payloadBodies [][]byte
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		includeStreamChunkRequestBodies: true,
+		interceptRequestAfterAuth: func(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			return pluginapi.RequestInterceptResponse{Body: []byte(`{"stage":"legacy-stream"}`)}
+		},
+		interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex {
+				if string(req.OriginalRequest) != `{"stage":"legacy-stream"}` || string(req.RequestBody) != `{"stage":"legacy-stream"}` {
+					t.Fatalf("header-init bodies = original:%q body:%q", req.OriginalRequest, req.RequestBody)
+				}
+				// Mutate delivered slices; later chunks must not observe this mutation.
+				req.OriginalRequest[0] = 'X'
+				req.RequestBody[0] = 'Y'
+				return pluginapi.StreamChunkInterceptResponse{}
+			}
+			if string(req.OriginalRequest) != `{"stage":"legacy-stream"}` {
+				t.Fatalf("payload OriginalRequest = %q, want isolated clone of after-auth body", req.OriginalRequest)
+			}
+			if string(req.RequestBody) != `{"stage":"legacy-stream"}` {
+				t.Fatalf("payload RequestBody = %q, want isolated clone of after-auth body", req.RequestBody)
+			}
+			payloadBodies = append(payloadBodies, req.OriginalRequest)
+			req.OriginalRequest[0] = 'Z'
+			return pluginapi.StreamChunkInterceptResponse{Body: req.Body}
+		},
+	})
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	for range dataChan {
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	if len(payloadBodies) != 2 {
+		t.Fatalf("payload body deliveries = %d, want 2", len(payloadBodies))
+	}
+	if &payloadBodies[0][0] == &payloadBodies[1][0] {
+		t.Fatal("payload OriginalRequest slices alias across chunks; want fresh clones")
 	}
 }
 

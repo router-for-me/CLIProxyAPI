@@ -427,6 +427,63 @@ func TestNormalizeKimiToolMessageLinks_InsertsFallbackReasoningWhenMissing(t *te
 	}
 }
 
+func TestNormalizeKimiToolMessageLinks_DoesNotReuseUnavailableReasoning(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","reasoning_content":"[reasoning unavailable]"},
+			{"role":"assistant","content":"current summary","tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_directory","arguments":"{}"}}]}
+		]
+	}`)
+
+	out, err := normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
+	}
+
+	got := gjson.GetBytes(out, "messages.1.reasoning_content").String()
+	if got != "current summary" {
+		t.Fatalf("messages.1.reasoning_content = %q, want %q", got, "current summary")
+	}
+}
+
+func TestNormalizeKimiToolMessageLinks_UnavailableReasoningDoesNotOverridePreviousReasoning(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","reasoning_content":"real reasoning"},
+			{"role":"assistant","reasoning_content":"[reasoning unavailable]"},
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_directory","arguments":"{}"}}]}
+		]
+	}`)
+
+	out, err := normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
+	}
+
+	got := gjson.GetBytes(out, "messages.2.reasoning_content").String()
+	if got != "real reasoning" {
+		t.Fatalf("messages.2.reasoning_content = %q, want %q", got, "real reasoning")
+	}
+}
+
+func TestNormalizeKimiToolMessageLinks_ReplacesUnavailableReasoningContent(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":"assistant summary","tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_directory","arguments":"{}"}}],"reasoning_content":"[reasoning unavailable]"}
+		]
+	}`)
+
+	out, err := normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
+	}
+
+	got := gjson.GetBytes(out, "messages.0.reasoning_content").String()
+	if got != "assistant summary" {
+		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "assistant summary")
+	}
+}
+
 func TestNormalizeKimiToolMessageLinks_UsesContentAsReasoningFallback(t *testing.T) {
 	body := []byte(`{
 		"messages":[

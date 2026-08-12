@@ -81,19 +81,28 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
 	rawStreamHeaders := cloneHeader(streamResult.Headers)
 	baseStreamHeaders := cloneHeader(streamResult.Headers)
+	// Request headers and request bodies are stream-invariant. Keep a private snapshot
+	// and clone into each interceptor call so plugins cannot mutate shared storage.
+	// Schema v3+ payload chunks omit these bodies (host also strips per plugin).
+	var streamRequestHeaders http.Header
+	var streamOriginalRequest []byte
+	var streamRequestBody []byte
 	applyStreamHeaders := func(headers http.Header) {
 		rawStreamHeaders = finalInterceptorHeaders(rawStreamHeaders, headers)
 	}
 	if streamInterceptorsActive {
+		streamRequestHeaders = cloneHeader(opts.Headers)
+		streamOriginalRequest = cloneBytes(opts.OriginalRequest)
+		streamRequestBody = cloneBytes(req.Payload)
 		intercepted := interceptStreamChunk(ctx, interceptorHost, pluginapi.StreamChunkInterceptRequest{
 			RequestID:       lifecycle.requestID(),
 			SourceFormat:    responseProtocol,
 			Model:           modelName,
 			RequestedModel:  originalRequestedModel,
-			RequestHeaders:  cloneHeader(opts.Headers),
+			RequestHeaders:  cloneHeader(streamRequestHeaders),
 			ResponseHeaders: cloneHeader(rawStreamHeaders),
-			OriginalRequest: cloneBytes(opts.OriginalRequest),
-			RequestBody:     cloneBytes(req.Payload),
+			OriginalRequest: cloneBytes(streamOriginalRequest),
+			RequestBody:     cloneBytes(streamRequestBody),
 			ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
 			Metadata:        opts.Metadata,
 		}, execOptions.SkipInterceptorPluginID)
@@ -161,20 +170,25 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 			}
 			payload := cloneBytes(chunk.Payload)
 			if streamInterceptorsActive {
-				intercepted := interceptStreamChunk(ctx, interceptorHost, pluginapi.StreamChunkInterceptRequest{
+				chunkReq := pluginapi.StreamChunkInterceptRequest{
 					RequestID:       lifecycle.requestID(),
 					SourceFormat:    responseProtocol,
 					Model:           modelName,
 					RequestedModel:  originalRequestedModel,
-					RequestHeaders:  cloneHeader(opts.Headers),
+					RequestHeaders:  cloneHeader(streamRequestHeaders),
 					ResponseHeaders: cloneHeader(rawStreamHeaders),
-					OriginalRequest: cloneBytes(opts.OriginalRequest),
-					RequestBody:     cloneBytes(req.Payload),
 					Body:            payload,
 					HistoryChunks:   cloneByteSlices(historyChunks),
 					ChunkIndex:      chunkIndex,
 					Metadata:        opts.Metadata,
-				}, execOptions.SkipInterceptorPluginID)
+				}
+				// Re-evaluate each chunk so mid-stream plugin reloads stay correct.
+				// Schema v3+ omits bodies here (one header-init clone only).
+				if streamChunkPayloadIncludesRequestBody(interceptorHost) {
+					chunkReq.OriginalRequest = cloneBytes(streamOriginalRequest)
+					chunkReq.RequestBody = cloneBytes(streamRequestBody)
+				}
+				intercepted := interceptStreamChunk(ctx, interceptorHost, chunkReq, execOptions.SkipInterceptorPluginID)
 				applyStreamHeaders(intercepted.Headers)
 				if len(intercepted.Body) > 0 {
 					payload = cloneBytes(intercepted.Body)
@@ -323,6 +337,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	streamClosedBeforeRead := false
 	streamCanceledBeforeRead := false
 	streamHeaderInitialized := false
+	// Request headers/bodies are stream-invariant after after-auth capture. Keep a private
+	// snapshot and clone into each interceptor call so plugins cannot mutate shared storage.
+	// Schema v3+ payload chunks omit these bodies (host also strips per plugin).
+	var streamRequestHeaders http.Header
+	var streamOriginalRequest []byte
+	var streamRequestBody []byte
 
 	applyStreamHeaders := func(headers http.Header) {
 		rawStreamHeaders = finalInterceptorHeaders(rawStreamHeaders, headers)
@@ -333,15 +353,18 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			return
 		}
 		executedReq, executedOpts := executedRequest()
+		streamRequestHeaders = cloneHeader(executedOpts.Headers)
+		streamOriginalRequest = cloneBytes(executedOpts.OriginalRequest)
+		streamRequestBody = cloneBytes(executedReq.Payload)
 		intercepted := interceptStreamChunk(ctx, interceptorHost, pluginapi.StreamChunkInterceptRequest{
 			RequestID:       lifecycle.requestID(),
 			SourceFormat:    responseProtocol,
 			Model:           normalizedModel,
 			RequestedModel:  originalRequestedModel,
-			RequestHeaders:  cloneHeader(executedOpts.Headers),
+			RequestHeaders:  cloneHeader(streamRequestHeaders),
 			ResponseHeaders: cloneHeader(rawStreamHeaders),
-			OriginalRequest: cloneBytes(executedOpts.OriginalRequest),
-			RequestBody:     cloneBytes(executedReq.Payload),
+			OriginalRequest: cloneBytes(streamOriginalRequest),
+			RequestBody:     cloneBytes(streamRequestBody),
 			ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
 			Metadata:        executedOpts.Metadata,
 		}, execOptions.SkipInterceptorPluginID)
@@ -353,21 +376,25 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		applyStreamHeaderInit()
 		payload = cloneBytes(payload)
 		if streamInterceptorsActive {
-			executedReq, executedOpts := executedRequest()
-			intercepted := interceptStreamChunk(ctx, interceptorHost, pluginapi.StreamChunkInterceptRequest{
+			chunkReq := pluginapi.StreamChunkInterceptRequest{
 				RequestID:       lifecycle.requestID(),
 				SourceFormat:    responseProtocol,
 				Model:           normalizedModel,
 				RequestedModel:  originalRequestedModel,
-				RequestHeaders:  cloneHeader(executedOpts.Headers),
+				RequestHeaders:  cloneHeader(streamRequestHeaders),
 				ResponseHeaders: cloneHeader(rawStreamHeaders),
-				OriginalRequest: cloneBytes(executedOpts.OriginalRequest),
-				RequestBody:     cloneBytes(executedReq.Payload),
 				Body:            payload,
 				HistoryChunks:   cloneByteSlices(historyChunks),
 				ChunkIndex:      *chunkIndex,
-				Metadata:        executedOpts.Metadata,
-			}, execOptions.SkipInterceptorPluginID)
+				Metadata:        opts.Metadata,
+			}
+			// Re-evaluate each chunk so mid-stream plugin reloads stay correct.
+			// Schema v3+ omits bodies here (one header-init clone only).
+			if streamChunkPayloadIncludesRequestBody(interceptorHost) {
+				chunkReq.OriginalRequest = cloneBytes(streamOriginalRequest)
+				chunkReq.RequestBody = cloneBytes(streamRequestBody)
+			}
+			intercepted := interceptStreamChunk(ctx, interceptorHost, chunkReq, execOptions.SkipInterceptorPluginID)
 			applyStreamHeaders(intercepted.Headers)
 			if len(intercepted.Body) > 0 {
 				payload = cloneBytes(intercepted.Body)

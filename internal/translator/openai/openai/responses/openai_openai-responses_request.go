@@ -300,7 +300,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
 				callID := strings.TrimSpace(item.Get("call_id").String())
 				toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
-				toolMessage, _ = sjson.SetBytes(toolMessage, "content", responsesToolOutputText(item.Get("output")))
+				if output := item.Get("output"); output.Exists() {
+					toolMessage = setCustomToolCallOutputContent(toolMessage, output)
+				}
 				appendMessage(toolMessage)
 				if callID != "" {
 					delete(awaitingToolOutputs, callID)
@@ -398,6 +400,19 @@ func setFunctionCallOutputContent(toolMessage []byte, output gjson.Result) []byt
 	}
 
 	toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
+	return toolMessage
+}
+
+func setCustomToolCallOutputContent(toolMessage []byte, output gjson.Result) []byte {
+	structuredContent := output
+	if output.Type == gjson.String && gjson.Valid(output.String()) {
+		structuredContent = gjson.Parse(output.String())
+	}
+	if hasChatToolOutputImagePart(structuredContent) {
+		return setFunctionCallOutputContent(toolMessage, output)
+	}
+
+	toolMessage, _ = sjson.SetBytes(toolMessage, "content", responsesToolOutputText(output))
 	return toolMessage
 }
 

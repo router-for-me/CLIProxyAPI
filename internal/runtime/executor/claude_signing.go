@@ -56,6 +56,19 @@ func finalizeAnthropicMessagesBodyCCH(body []byte, fallbackBilling string) ([]by
 	return signAnthropicMessagesBody(bodyWithPlaceholder)
 }
 
+// claudeBodyNeedsBillingFallback reports whether a confirmed native helper request
+// still needs CPA's billing-header fallback.
+//
+// The measured minimal helper carries no system field at all, which is exactly the
+// native wire shape, so injecting a billing header there would be the deviation.
+// Keying on "system is absent" rather than "no billing header present" means that
+// if anything later in the pipeline (a payload rule, for instance) does attach a
+// system prompt, the fallback comes back and the request cannot go upstream with a
+// system block that native would never send unsigned.
+func claudeBodyNeedsBillingFallback(body []byte) bool {
+	return gjson.GetBytes(body, "system").Exists()
+}
+
 func ensureClaudeBillingHeaderCCHPlaceholder(body []byte, fallbackBilling string) ([]byte, error) {
 	billing := gjson.GetBytes(body, "system.0.text")
 	if billing.Type != gjson.String || !strings.HasPrefix(billing.String(), "x-anthropic-billing-header:") {

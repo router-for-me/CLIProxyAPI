@@ -574,13 +574,19 @@ func registerToolCallState(p *ConvertCliToOpenAIParams, eventResult, itemResult 
 
 func findToolCallState(p *ConvertCliToOpenAIParams, eventResult, itemResult gjson.Result) *toolCallStreamState {
 	if itemID := eventResult.Get("item_id").String(); itemID != "" {
-		return p.toolCallStates["item:"+itemID]
+		if state := p.toolCallStates["item:"+itemID]; state != nil {
+			return state
+		}
 	}
 	if itemID := itemResult.Get("id").String(); itemID != "" {
-		return p.toolCallStates["item:"+itemID]
+		if state := p.toolCallStates["item:"+itemID]; state != nil {
+			return state
+		}
 	}
 	if outputIndex := eventResult.Get("output_index"); outputIndex.Exists() {
-		return p.toolCallStates["output:"+outputIndex.Raw]
+		if state := p.toolCallStates["output:"+outputIndex.Raw]; state != nil {
+			return state
+		}
 	}
 	return p.currentToolCall
 }

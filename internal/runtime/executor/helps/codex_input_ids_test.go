@@ -94,6 +94,71 @@ func TestSanitizeCodexInputItemIDsNormalizesResponseItemIDs(t *testing.T) {
 	}
 }
 
+func TestSanitizeCodexInputItemIDsAvoidsNormalizationCollisions(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		itemType string
+		prefix   string
+	}{
+		{name: "message", itemType: "message", prefix: "msg_"},
+		{name: "reasoning", itemType: "reasoning", prefix: "rs_"},
+		{name: "function call", itemType: "function_call", prefix: "fc_"},
+		{name: "custom tool call", itemType: "custom_tool_call", prefix: "ctc_"},
+		{name: "custom tool call output", itemType: "custom_tool_call_output", prefix: "ctco_"},
+	} {
+		for _, idCase := range []struct {
+			name      string
+			invalidID string
+		}{
+			{name: "short", invalidID: "item_collision"},
+			{name: "overlong", invalidID: strings.Repeat("x", codexInputItemIDLimit-len([]rune(testCase.prefix))+1)},
+		} {
+			prefixedID := testCase.prefix + idCase.invalidID
+			for _, order := range []struct {
+				name          string
+				ids           [2]string
+				prefixedIndex int
+			}{
+				{name: "local first", ids: [2]string{idCase.invalidID, prefixedID}, prefixedIndex: 1},
+				{name: "prefixed first", ids: [2]string{prefixedID, idCase.invalidID}, prefixedIndex: 0},
+			} {
+				t.Run(testCase.name+"/"+idCase.name+"/"+order.name, func(t *testing.T) {
+					body := []byte(fmt.Sprintf(`{"input":[{"type":%q,"id":%q},{"type":%q,"id":%q}]}`, testCase.itemType, order.ids[0], testCase.itemType, order.ids[1]))
+
+					first := SanitizeCodexInputItemIDs(body)
+					second := SanitizeCodexInputItemIDs(body)
+					normalizedAgain := SanitizeCodexInputItemIDs(first)
+					ids := [2]string{
+						gjson.GetBytes(first, "input.0.id").String(),
+						gjson.GetBytes(first, "input.1.id").String(),
+					}
+
+					if ids[0] == ids[1] {
+						t.Fatalf("distinct IDs collided after normalization: %q; payload=%s", ids[0], first)
+					}
+					for index, id := range ids {
+						if !strings.HasPrefix(id, testCase.prefix) {
+							t.Fatalf("input.%d.id = %q, want prefix %q", index, id, testCase.prefix)
+						}
+						if len([]rune(id)) > codexInputItemIDLimit {
+							t.Fatalf("input.%d.id length = %d, want at most %d: %q", index, len([]rune(id)), codexInputItemIDLimit, id)
+						}
+					}
+					if len([]rune(prefixedID)) <= codexInputItemIDLimit && ids[order.prefixedIndex] != prefixedID {
+						t.Fatalf("existing valid ID changed: got %q want %q", ids[order.prefixedIndex], prefixedID)
+					}
+					if string(first) != string(second) {
+						t.Fatalf("collision resolution is not deterministic: first=%s second=%s", first, second)
+					}
+					if string(first) != string(normalizedAgain) {
+						t.Fatalf("collision resolution is not idempotent: first=%s normalized_again=%s", first, normalizedAgain)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestSanitizeCodexInputItemIDsNormalizesCustomToolCallIDs(t *testing.T) {
 	const invalidID = "item_44e13caebc1ddf25f1337cbe"
 	body := []byte(`{"input":[{"type":"custom_tool_call","id":"` + invalidID + `","call_id":"call-1","name":"lookup","input":"{}"}]}`)
@@ -223,6 +288,27 @@ func TestSanitizeCodexInputItemIDsLeavesUnsupportedPayloadsUnchanged(t *testing.
 
 func BenchmarkSanitizeCodexInputItemIDsLargeNoopPayload(b *testing.B) {
 	body := []byte(`{"input":[{"type":"message","id":"msg_1","role":"user","content":"` + strings.Repeat("x", 8<<20) + `"}]}`)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	b.ResetTimer()
+	for b.Loop() {
+		benchmarkSanitizeCodexInputItemIDsOutput = SanitizeCodexInputItemIDs(body)
+	}
+}
+
+func BenchmarkSanitizeCodexInputItemIDsLargeHistory(b *testing.B) {
+	var payload strings.Builder
+	payload.Grow(64 << 10)
+	payload.WriteString(`{"input":[`)
+	for index := range 1000 {
+		if index > 0 {
+			payload.WriteByte(',')
+		}
+		fmt.Fprintf(&payload, `{"type":"message","id":"msg_%d","role":"user","content":"x"}`, index)
+	}
+	payload.WriteString(`]}`)
+	body := []byte(payload.String())
+
 	b.ReportAllocs()
 	b.SetBytes(int64(len(body)))
 	b.ResetTimer()

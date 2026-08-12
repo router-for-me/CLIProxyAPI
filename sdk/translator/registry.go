@@ -52,6 +52,13 @@ func (r *Registry) SetPluginHooks(hooks PluginHooks) {
 	r.hooks = hooks
 }
 
+// HasPluginHooks reports whether request or response translation hooks are installed.
+func (r *Registry) HasPluginHooks() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.hooks != nil
+}
+
 // TranslateRequest converts a payload between schemas, returning the original payload
 // if no translator is registered. When falling back to the original payload, the
 // "model" field is still updated to match the resolved model name so that
@@ -245,6 +252,11 @@ func Register(from, to Format, request RequestTransform, response ResponseTransf
 // SetPluginHooks stores plugin hooks on the default registry.
 func SetPluginHooks(hooks PluginHooks) {
 	defaultRegistry.SetPluginHooks(hooks)
+}
+
+// HasPluginHooks reports whether hooks are installed on the default registry.
+func HasPluginHooks() bool {
+	return defaultRegistry.HasPluginHooks()
 }
 
 // TranslateRequest is a helper on the default registry.

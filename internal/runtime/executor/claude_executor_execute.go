@@ -73,6 +73,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
+	bodyBeforeCloaking := body
 	var cloaked bool
 	body, cloaked, err = applyCloaking(
 		ctx,
@@ -86,6 +87,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
+	systemPlacementState := captureClaudeCodeSystemPlacement(bodyBeforeCloaking, body, cloaked)
 	// Only the Messages endpoint on Anthropic itself was captured; count_tokens
 	// keeps its own shape and other gateways never see this field.
 	diagnosticsState := claudeDiagnosticsRequestState{}
@@ -103,15 +105,22 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body, contextManagementState.payloadRuleTouched = helps.ApplyPayloadConfigWithRequestTracked(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers, "context_management")
+	body = reconcileClaudeCodeSystemPlacementAfterPayload(body, systemPlacementState)
 	body = ensureModelMaxTokens(body, baseModel)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 	body = reconcileClaudeCodeContextManagement(body, contextManagementState)
-	body = normalizeClaudeSamplingForUpstream(body)
+	body = normalizeClaudeSamplingForUpstream(body, confirmedClaudeCode)
 
-	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	if countCacheControls(body) == 0 {
+	// Default cache_control for translated entrypoints (Responses/Chat/Gemini) and other
+	// non-native callers. Confirmed native Claude Code owns its marker placement and must
+	// not be rewritten. Cloaked requests always run section-independent ensure so cloaking's
+	// first-user marker cannot suppress system/latest-user breakpoints.
+	// cloaked and confirmedClaudeCode are mutually exclusive: resolveClaudeWirePolicy
+	// forces Cloak off for a confirmed native client.
+	cpaOwnsCacheControl := shouldEnsureCacheControl(body, cloaked, confirmedClaudeCode)
+	if cpaOwnsCacheControl {
 		body = ensureCacheControl(body)
 	}
 
@@ -120,12 +129,31 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// already sends multiple cache_control blocks.
 	body = enforceCacheControlLimit(body, 4)
 
+	// Native selects the 1h cache pool only for OAuth credentials and pairs it with
+	// extended-cache-ttl-2025-04-11, which claudeCodeCLIBetas emits on exactly the
+	// same credential condition. Upgrading after placement is settled mirrors the
+	// native ttl helper.
+	//
+	// This runs only while CPA owns placement, and it then owns the ttl of every
+	// breakpoint it can reach: a marker carrying no ttl is the wire default, not an
+	// opt-in to 5m, so a cloaked caller's bare {"type":"ephemeral"} is upgraded too.
+	// Only a ttl the caller wrote out explicitly survives, because
+	// upgradeClaudeCacheControlTTL skips any block that already has one.
+	if cpaOwnsCacheControl && claudeCredentialUsesOAuth(auth, apiKey) {
+		body = upgradeClaudeCacheControlTTL(body, claudeCacheControlTTL1h)
+	}
+
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
 	body = normalizeCacheControlTTL(body)
 	// Payload rules and other request processing may rewrite stream. Keep the
 	// upstream body, transport headers, and response parser on one authority.
-	body = helps.SetBoolIfDifferent(body, "stream", upstreamStream)
+	// Native non-stream Haiku helper requests omit stream rather than sending
+	// false, so preserve that measured wire shape when the transport agrees.
+	streamField := gjson.GetBytes(body, "stream")
+	if !claudeCodeDetection.HelperProfile || streamField.Exists() || upstreamStream {
+		body = helps.SetBoolIfDifferent(body, "stream", upstreamStream)
+	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -146,18 +174,38 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	cchBilling := ""
 	if cchSigning {
-		cchBilling = claudeCCHFallbackBillingHeader(ctx, e.cfg, bodyForUpstream, claudeCodeDetection.Entrypoint)
+		if !claudeCodeDetection.HelperProfile || claudeBodyNeedsBillingFallback(bodyForUpstream) {
+			cchBilling = claudeCCHFallbackBillingHeader(ctx, e.cfg, bodyForUpstream, claudeCodeDetection.Entrypoint)
+		}
 		bodyForUpstream, err = finalizeAnthropicMessagesBodyCCH(bodyForUpstream, cchBilling)
 		if err != nil {
 			return resp, fmt.Errorf("finalize Claude CCH: %w", err)
 		}
+	}
+	// Runs on the finished body: payload rules can rewrite model and messages
+	// long after translation, so an earlier check would not describe the request
+	// that is about to be sent.
+	if errMidSystem := validateClaudeMidSystemMessageModel(bodyForUpstream, confirmedClaudeCode, isAnthropicUpstreamBase(baseURL)); errMidSystem != nil {
+		return resp, errMidSystem
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return resp, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, upstreamStream, extraBetas, bodyForUpstream, e.cfg, incomingHeaders, confirmedClaudeCode && !cloaked, claudeSessionID); errHeaders != nil {
+	if errHeaders := applyClaudeHeadersWithNativeProfile(
+		httpReq,
+		auth,
+		apiKey,
+		upstreamStream,
+		extraBetas,
+		bodyForUpstream,
+		e.cfg,
+		incomingHeaders,
+		confirmedClaudeCode && !cloaked,
+		claudeCodeDetection.HelperProfile,
+		claudeSessionID,
+	); errHeaders != nil {
 		return resp, errHeaders
 	}
 	fastRequest := isAnthropicUpstreamBase(baseURL) && claudeRequestIsFast(httpReq, bodyForUpstream)
