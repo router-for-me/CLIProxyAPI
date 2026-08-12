@@ -6562,3 +6562,88 @@ func TestClaudeExecutor_CountTokens_RejectsPlaceholderKey(t *testing.T) {
 		t.Fatalf("expected 401, got %d", se.code)
 	}
 }
+
+func TestClaudeExecutor_HttpRequest_RejectsPlaceholderKey(t *testing.T) {
+	upstreamCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "your_api_key_here"},
+	}
+	e := NewClaudeExecutor(&config.Config{})
+	req, errNew := http.NewRequest(http.MethodPost, server.URL+"/v1/messages", strings.NewReader(`{}`))
+	if errNew != nil {
+		t.Fatalf("NewRequest() error = %v", errNew)
+	}
+
+	resp, err := e.HttpRequest(context.Background(), auth, req)
+	if err == nil {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		t.Fatal("expected error for placeholder key, got nil")
+	}
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+	if se.code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", se.code)
+	}
+	if upstreamCalled {
+		t.Fatal("placeholder HttpRequest must fail before any upstream call")
+	}
+}
+
+func TestClaudeExecutor_PrepareRequest_RejectsPlaceholderKey(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "changeme"},
+	}
+	e := NewClaudeExecutor(&config.Config{})
+	req, errNew := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader(`{}`))
+	if errNew != nil {
+		t.Fatalf("NewRequest() error = %v", errNew)
+	}
+
+	err := e.PrepareRequest(req, auth)
+	if err == nil {
+		t.Fatal("expected error for placeholder key, got nil")
+	}
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+	if se.code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", se.code)
+	}
+	if got := req.Header.Get("x-api-key"); got != "" {
+		t.Fatalf("x-api-key = %q, want empty after placeholder rejection", got)
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty after placeholder rejection", got)
+	}
+}
+
+// TestApplyClaudeHeaders_DoesNotHardcodeStainlessHelperMethod guards the review
+// requirement that X-Stainless-Helper-Method must not be stamped onto every
+// Claude request. Real Claude Code uses messages.create({stream:true}), not
+// messages.stream(), so the Stainless SDK never injects this header; keeping it
+// off both stream and non-stream paths avoids a fingerprint mismatch.
+func TestApplyClaudeHeaders_DoesNotHardcodeStainlessHelperMethod(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-helper-method"}}
+	body := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"hi"}]}`)
+
+	for _, stream := range []bool{false, true} {
+		req := newClaudeHeaderTestRequest(t, nil)
+		if err := applyClaudeHeaders(req, auth, "key-helper-method", stream, nil, body, nil, nil, false); err != nil {
+			t.Fatalf("applyClaudeHeaders(stream=%v) error = %v", stream, err)
+		}
+		if got := req.Header.Get("X-Stainless-Helper-Method"); got != "" {
+			t.Fatalf("stream=%v: X-Stainless-Helper-Method = %q, want unset", stream, got)
+		}
+	}
+}
