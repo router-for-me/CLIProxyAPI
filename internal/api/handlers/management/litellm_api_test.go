@@ -622,3 +622,146 @@ func TestDeleteLiteLLMKeyCompat(t *testing.T) {
 		t.Fatalf("post-delete LookupByID err = %v; want ErrAPIKeyNotFound", err)
 	}
 }
+
+// seedCompatSpendEvent inserts a usage event carrying token/cost data so the
+// spend compat endpoints have something to aggregate. Returns the event.
+func seedCompatSpendEvent(t *testing.T, h *Handler, userID string) store.UsageEvent {
+	t.Helper()
+	ev := store.UsageEvent{
+		RequestID:    "req-usage-compat",
+		APIKeyID:     "key-usage-compat",
+		UserID:       userID,
+		Provider:     "openai",
+		Model:        "gpt-4o",
+		InputTokens:  100,
+		OutputTokens: 50,
+		TotalTokens:  150,
+		CostUSD:      1.25,
+		RequestedAt:  time.Now().Add(-time.Hour).UTC(),
+	}
+	if err := h.pgUsage.InsertEvent(context.Background(), ev); err != nil {
+		t.Fatalf("InsertEvent: %v", err)
+	}
+	return ev
+}
+
+// TestListLiteLLMSpendLogsCompat verifies GET /litellm/spend/logs returns the
+// paginated spend rows using LiteLLM's field names (request_id, model, spend,
+// total_tokens, prompt_tokens, completion_tokens) and honors the user_id filter.
+func TestListLiteLLMSpendLogsCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_spend_logs")
+	gin.SetMode(gin.TestMode)
+	seedCompatSpendEvent(t, h, "team-a")
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/spend/logs?user_id=team-a", nil)
+	h.ListLiteLLMSpendLogsCompat(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, rec.Body.String())
+	}
+	if len(resp.Data) != 1 {
+		t.Fatalf("data len = %d; want 1; body=%s", len(resp.Data), rec.Body.String())
+	}
+	row := resp.Data[0]
+	if got := row["model"]; got != "gpt-4o" {
+		t.Errorf("model = %v; want gpt-4o", got)
+	}
+	if got := row["spend"]; got != float64(1.25) {
+		t.Errorf("spend = %v; want 1.25", got)
+	}
+	for _, field := range []string{"request_id", "total_tokens", "prompt_tokens", "completion_tokens"} {
+		if _, ok := row[field]; !ok {
+			t.Errorf("spend/logs row missing %q; row=%v", field, row)
+		}
+	}
+
+	// A different user yields no rows.
+	rec2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(rec2)
+	c2.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/spend/logs?user_id=other", nil)
+	h.ListLiteLLMSpendLogsCompat(c2)
+	var resp2 struct {
+		Data  []map[string]any `json:"data"`
+		Total int64            `json:"total"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &resp2); err != nil {
+		t.Fatalf("unmarshal resp2: %v", err)
+	}
+	if len(resp2.Data) != 0 || resp2.Total != 0 {
+		t.Fatalf("other-user rows = %d (total %d); want 0", len(resp2.Data), resp2.Total)
+	}
+}
+
+// TestListLiteLLMSpendUsersCompat verifies GET /litellm/spend/users groups
+// spend by user and returns total_spend/total_requests per user.
+func TestListLiteLLMSpendUsersCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_spend_users")
+	gin.SetMode(gin.TestMode)
+	seedCompatSpendEvent(t, h, "team-a")
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/spend/users", nil)
+	h.ListLiteLLMSpendUsersCompat(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, rec.Body.String())
+	}
+	if len(resp.Data) != 1 {
+		t.Fatalf("data len = %d; want 1; body=%s", len(resp.Data), rec.Body.String())
+	}
+	row := resp.Data[0]
+	if got := row["user_id"]; got != "team-a" {
+		t.Errorf("user_id = %v; want team-a", got)
+	}
+	if got := row["total_spend"]; got != float64(1.25) {
+		t.Errorf("total_spend = %v; want 1.25", got)
+	}
+	if got := row["total_requests"]; got != float64(1) {
+		t.Errorf("total_requests = %v; want 1", got)
+	}
+}
+
+// TestGetLiteLLMGlobalSpendCompat verifies GET /litellm/global/spend returns the
+// total spend and request count across all usage.
+func TestGetLiteLLMGlobalSpendCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_global_spend")
+	gin.SetMode(gin.TestMode)
+	seedCompatSpendEvent(t, h, "team-a")
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/global/spend", nil)
+	h.GetLiteLLMGlobalSpendCompat(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		TotalSpend    float64 `json:"total_spend"`
+		TotalRequests int64   `json:"total_requests"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, rec.Body.String())
+	}
+	if resp.TotalSpend != 1.25 {
+		t.Errorf("total_spend = %v; want 1.25", resp.TotalSpend)
+	}
+	if resp.TotalRequests != 1 {
+		t.Errorf("total_requests = %d; want 1", resp.TotalRequests)
+	}
+}

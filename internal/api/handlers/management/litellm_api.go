@@ -648,3 +648,168 @@ func (h *Handler) DeleteLiteLLMKeyCompat(c *gin.Context) {
 	h.invalidatePolicyCache()
 	c.JSON(http.StatusOK, gin.H{"key": req.Key, "deleted": true})
 }
+
+// liteLLMCompatSpendLogResponse is the LiteLLM spend-log shape returned by
+// GET /litellm/spend/logs. Optional fields are omitempty to keep the payload
+// tight, mirroring the user/key compat responses.
+type liteLLMCompatSpendLogResponse struct {
+	RequestID        string  `json:"request_id,omitempty"`
+	APIKey           string  `json:"api_key,omitempty"`
+	User             string  `json:"user,omitempty"`
+	Model            string  `json:"model,omitempty"`
+	Spend            float64 `json:"spend"`
+	TotalTokens      int64   `json:"total_tokens"`
+	PromptTokens     int64   `json:"prompt_tokens"`
+	CompletionTokens int64   `json:"completion_tokens"`
+	CacheTokens      int64   `json:"cache_tokens,omitempty"`
+	StartTime        string  `json:"startTime,omitempty"`
+	EndTime          string  `json:"endTime,omitempty"`
+	Status           int     `json:"status"`
+}
+
+// spendLogToCompat maps a UsageEventRow onto the LiteLLM spend-log shape.
+// The row carries KeyAlias rather than the raw API key, and the user/principal
+// is never returned to API callers, so the user field is left empty for now.
+func spendLogToCompat(r store.UsageEventRow) liteLLMCompatSpendLogResponse {
+	status := http.StatusOK
+	if r.Failed {
+		status = r.FailStatusCode
+		if status == 0 {
+			status = http.StatusInternalServerError
+		}
+	}
+	end := r.RequestedAt
+	return liteLLMCompatSpendLogResponse{
+		RequestID:        r.RequestID,
+		APIKey:           r.KeyAlias,
+		Model:            r.Model,
+		Spend:            r.CostUSD,
+		TotalTokens:      r.TotalTokens,
+		PromptTokens:     r.InputTokens,
+		CompletionTokens: r.OutputTokens,
+		CacheTokens:      r.CachedTokens,
+		StartTime:        r.RequestedAt.Format(time.RFC3339),
+		EndTime:          end.Format(time.RFC3339),
+		Status:           status,
+	}
+}
+
+// ListLiteLLMSpendLogsCompat handles GET /litellm/spend/logs, returning the
+// paginated spend-log rows in LiteLLM's spend-log shape.
+func (h *Handler) ListLiteLLMSpendLogsCompat(c *gin.Context) {
+	_, _, usage, ok := h.requireLiteLLMRuntime(c)
+	if !ok {
+		return
+	}
+	filter := store.UsageFilter{
+		UserID: c.Query("user_id"),
+		Model:  c.Query("model"),
+	}
+	if ks := c.Query("api_key"); ks != "" {
+		filter.APIKeyID = ks
+	}
+	if from, err := time.Parse(time.RFC3339, c.Query("start_date")); err == nil {
+		filter.From = from
+	}
+	if to, err := time.Parse(time.RFC3339, c.Query("end_date")); err == nil {
+		filter.To = to
+	}
+	page := atoiDefault(c.Query("page"), 1)
+	if page < 1 {
+		page = 1
+	}
+	pageSize := atoiDefault(c.Query("page_size"), 25)
+	if pageSize < 1 {
+		pageSize = 25
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+	rows, total, err := usage.SelectEvents(c.Request.Context(), filter, page, pageSize)
+	if err != nil {
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	data := make([]liteLLMCompatSpendLogResponse, 0, len(rows))
+	for _, r := range rows {
+		data = append(data, spendLogToCompat(r))
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"data":      data,
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
+	})
+}
+
+// liteLLMCompatSpendUserResponse is the LiteLLM spend-user shape returned by
+// GET /litellm/spend/users.
+type liteLLMCompatSpendUserResponse struct {
+	UserID        string  `json:"user_id,omitempty"`
+	TotalSpend    float64 `json:"total_spend"`
+	TotalRequests int64   `json:"total_requests"`
+	TotalTokens   int64   `json:"total_tokens,omitempty"`
+	InputTokens   int64   `json:"input_tokens,omitempty"`
+	OutputTokens  int64   `json:"output_tokens,omitempty"`
+	CacheTokens   int64   `json:"cache_tokens,omitempty"`
+}
+
+// ListLiteLLMSpendUsersCompat handles GET /litellm/spend/users, returning the
+// per-user spend aggregation in LiteLLM's spend-user shape. Each aggregate row
+// is grouped by user_id, so the bucket carries the user identifier.
+func (h *Handler) ListLiteLLMSpendUsersCompat(c *gin.Context) {
+	_, _, usage, ok := h.requireLiteLLMRuntime(c)
+	if !ok {
+		return
+	}
+	filter := store.UsageFilter{GroupBy: "user_id"}
+	if from, err := time.Parse(time.RFC3339, c.Query("start_date")); err == nil {
+		filter.From = from
+	}
+	if to, err := time.Parse(time.RFC3339, c.Query("end_date")); err == nil {
+		filter.To = to
+	}
+	rows, err := usage.SelectAggregate(c.Request.Context(), filter)
+	if err != nil {
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	data := make([]liteLLMCompatSpendUserResponse, 0, len(rows))
+	for _, a := range rows {
+		data = append(data, liteLLMCompatSpendUserResponse{
+			UserID:        a.Bucket,
+			TotalSpend:    a.CostUSD,
+			TotalRequests: a.RequestCount,
+			TotalTokens:   a.TotalTokens,
+			InputTokens:   a.InputTokens,
+			OutputTokens:  a.OutputTokens,
+			CacheTokens:   a.CachedTokens,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"data": data})
+}
+
+// GetLiteLLMGlobalSpendCompat handles GET /litellm/global/spend, returning the
+// total spend across all usage in LiteLLM's global-spend shape.
+func (h *Handler) GetLiteLLMGlobalSpendCompat(c *gin.Context) {
+	_, _, usage, ok := h.requireLiteLLMRuntime(c)
+	if !ok {
+		return
+	}
+	filter := store.UsageFilter{}
+	if from, err := time.Parse(time.RFC3339, c.Query("start_date")); err == nil {
+		filter.From = from
+	}
+	if to, err := time.Parse(time.RFC3339, c.Query("end_date")); err == nil {
+		filter.To = to
+	}
+	totals, err := usage.SelectTotals(c.Request.Context(), filter)
+	if err != nil {
+		litellmCompatError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"total_spend":    totals.CostUSD,
+		"total_requests": totals.RequestCount,
+	})
+}
