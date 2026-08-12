@@ -19,6 +19,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
@@ -1688,6 +1689,84 @@ func TestHasStreamInterceptorsReflectsActiveStreamInterceptors(t *testing.T) {
 	streamHost.mu.Unlock()
 	if streamHost.HasStreamInterceptors() {
 		t.Fatal("HasStreamInterceptors() = true, want false after interceptor plugin is fused")
+	}
+}
+
+func TestStreamChunkRequestBodyPolicyBySchemaVersion(t *testing.T) {
+	var legacyGot, modernGot pluginapi.StreamChunkInterceptRequest
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "legacy",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: 2,
+				Capabilities: pluginapi.Capabilities{
+					StreamChunkInterceptor: responseInterceptorFunc{
+						interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+							legacyGot = req
+							return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+						},
+					},
+				},
+			},
+		},
+		capabilityRecord{
+			id: "modern",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionStreamChunkOmitRequestBody,
+				Capabilities: pluginapi.Capabilities{
+					StreamChunkInterceptor: responseInterceptorFunc{
+						interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+							modernGot = req
+							return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+						},
+					},
+				},
+			},
+		},
+	)
+	if !host.StreamChunkPayloadIncludesRequestBody() {
+		t.Fatal("StreamChunkPayloadIncludesRequestBody() = false, want true when legacy stream interceptor is active")
+	}
+
+	_ = host.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		OriginalRequest: []byte("original"),
+		RequestBody:     []byte("request"),
+		Body:            []byte("chunk"),
+		ChunkIndex:      0,
+	})
+	if string(legacyGot.OriginalRequest) != "original" || string(legacyGot.RequestBody) != "request" {
+		t.Fatalf("legacy payload bodies = original:%q body:%q, want preserved", legacyGot.OriginalRequest, legacyGot.RequestBody)
+	}
+	if len(modernGot.OriginalRequest) != 0 || len(modernGot.RequestBody) != 0 {
+		t.Fatalf("modern payload bodies = original:%q body:%q, want omitted", modernGot.OriginalRequest, modernGot.RequestBody)
+	}
+
+	legacyGot = pluginapi.StreamChunkInterceptRequest{}
+	modernGot = pluginapi.StreamChunkInterceptRequest{}
+	_ = host.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		OriginalRequest: []byte("original"),
+		RequestBody:     []byte("request"),
+		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+	})
+	if string(legacyGot.OriginalRequest) != "original" || string(modernGot.OriginalRequest) != "original" {
+		t.Fatalf("header-init bodies not preserved: legacy=%q modern=%q", legacyGot.OriginalRequest, modernGot.OriginalRequest)
+	}
+
+	modernOnly := newHostWithRecords(capabilityRecord{
+		id: "modern-only",
+		plugin: pluginapi.Plugin{
+			SchemaVersion: pluginabi.SchemaVersionStreamChunkOmitRequestBody,
+			Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						return pluginapi.StreamChunkInterceptResponse{}, nil
+					},
+				},
+			},
+		},
+	})
+	if modernOnly.StreamChunkPayloadIncludesRequestBody() {
+		t.Fatal("StreamChunkPayloadIncludesRequestBody() = true, want false for schema v3+ only")
 	}
 }
 

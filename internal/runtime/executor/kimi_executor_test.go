@@ -28,6 +28,41 @@ func TestNewKimiExecutorInitializesDelegatedClaudeConfig(t *testing.T) {
 	}
 }
 
+func TestKimiExecutorRequestToFormatMatchesWireProtocol(t *testing.T) {
+	type requestToFormatReporter interface {
+		RequestToFormat(cliproxyexecutor.Request, cliproxyexecutor.Options) sdktranslator.Format
+	}
+
+	executor := NewKimiExecutor(&config.Config{})
+	reporter, ok := any(executor).(requestToFormatReporter)
+	if !ok {
+		t.Fatal("Kimi executor does not report its upstream request format")
+	}
+
+	tests := []struct {
+		name   string
+		stream bool
+		source sdktranslator.Format
+		want   sdktranslator.Format
+	}{
+		{name: "Claude non-streaming", source: sdktranslator.FormatClaude, want: sdktranslator.FormatClaude},
+		{name: "Claude streaming", stream: true, source: sdktranslator.FormatClaude, want: sdktranslator.FormatClaude},
+		{name: "OpenAI non-streaming", source: sdktranslator.FormatOpenAI, want: sdktranslator.FormatOpenAI},
+		{name: "OpenAI streaming", stream: true, source: sdktranslator.FormatOpenAI, want: sdktranslator.FormatOpenAI},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := reporter.RequestToFormat(cliproxyexecutor.Request{}, cliproxyexecutor.Options{
+				SourceFormat: tt.source,
+				Stream:       tt.stream,
+			})
+			if got != tt.want {
+				t.Fatalf("RequestToFormat() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestKimiExecutorClaudeRequestPreservesInternalModelSemantics(t *testing.T) {
 	var upstreamBody []byte
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -424,6 +459,63 @@ func TestNormalizeKimiToolMessageLinks_InsertsFallbackReasoningWhenMissing(t *te
 	}
 	if reasoning.String() != "[reasoning unavailable]" {
 		t.Fatalf("messages.0.reasoning_content = %q, want %q", reasoning.String(), "[reasoning unavailable]")
+	}
+}
+
+func TestNormalizeKimiToolMessageLinks_DoesNotReuseUnavailableReasoning(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","reasoning_content":"[reasoning unavailable]"},
+			{"role":"assistant","content":"current summary","tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_directory","arguments":"{}"}}]}
+		]
+	}`)
+
+	out, err := normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
+	}
+
+	got := gjson.GetBytes(out, "messages.1.reasoning_content").String()
+	if got != "current summary" {
+		t.Fatalf("messages.1.reasoning_content = %q, want %q", got, "current summary")
+	}
+}
+
+func TestNormalizeKimiToolMessageLinks_UnavailableReasoningDoesNotOverridePreviousReasoning(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","reasoning_content":"real reasoning"},
+			{"role":"assistant","reasoning_content":"[reasoning unavailable]"},
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_directory","arguments":"{}"}}]}
+		]
+	}`)
+
+	out, err := normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
+	}
+
+	got := gjson.GetBytes(out, "messages.2.reasoning_content").String()
+	if got != "real reasoning" {
+		t.Fatalf("messages.2.reasoning_content = %q, want %q", got, "real reasoning")
+	}
+}
+
+func TestNormalizeKimiToolMessageLinks_ReplacesUnavailableReasoningContent(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":"assistant summary","tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_directory","arguments":"{}"}}],"reasoning_content":"[reasoning unavailable]"}
+		]
+	}`)
+
+	out, err := normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
+	}
+
+	got := gjson.GetBytes(out, "messages.0.reasoning_content").String()
+	if got != "assistant summary" {
+		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "assistant summary")
 	}
 }
 

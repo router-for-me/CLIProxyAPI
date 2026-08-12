@@ -1069,3 +1069,28 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Restores
 		t.Fatalf("output input = %q, want pwd; response=%s", got, resp)
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoesNotCompleteReasoningOnlyStream(t *testing.T) {
+	request := []byte(`{"model":"deepseek-v4-flash"}`)
+	chunks := []string{
+		`data: {"id":"resp_reasoning_only","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"still thinking"},"finish_reason":null}]}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	reasoningSeen := false
+	for _, line := range chunks {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "deepseek-v4-flash", request, request, []byte(line), &param) {
+			event, _ := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event == "response.reasoning_summary_text.delta" {
+				reasoningSeen = true
+			}
+			if event == "response.completed" {
+				t.Fatalf("reasoning-only stream was finalized as response.completed: %s", chunk)
+			}
+		}
+	}
+	if !reasoningSeen {
+		t.Fatal("test stream did not exercise reasoning output")
+	}
+}

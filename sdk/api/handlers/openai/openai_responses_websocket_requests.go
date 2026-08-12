@@ -139,31 +139,14 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 			appendInputRaw = inputWithoutCompactionItems(nextInput)
 		}
 
-		existingInput := gjson.GetBytes(lastRequest, "input")
 		var errMerge error
-		mergedInput, errMerge = mergeJSONArrayRaw(existingInput.Raw, normalizeJSONArrayRaw(lastResponseOutput))
+		mergedInput, errMerge = mergeResponsesWebsocketInput(lastRequest, lastResponseOutput, appendInputRaw)
 		if errMerge != nil {
 			return nil, lastRequest, &interfaces.ErrorMessage{
 				StatusCode: http.StatusBadRequest,
-				Error:      fmt.Errorf("invalid previous response output: %w", errMerge),
+				Error:      errMerge,
 			}
 		}
-
-		mergedInput, errMerge = mergeJSONArrayRaw(mergedInput, appendInputRaw)
-		if errMerge != nil {
-			return nil, lastRequest, &interfaces.ErrorMessage{
-				StatusCode: http.StatusBadRequest,
-				Error:      fmt.Errorf("invalid request input: %w", errMerge),
-			}
-		}
-	}
-	dedupedInput, errDedupeFunctionCalls := dedupeFunctionCallsByCallID(mergedInput)
-	if errDedupeFunctionCalls == nil {
-		mergedInput = dedupedInput
-	}
-	dedupedInput, errDedupeItemIDs := dedupeInputItemsByID(mergedInput)
-	if errDedupeItemIDs == nil {
-		mergedInput = dedupedInput
 	}
 
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
@@ -171,14 +154,6 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		normalized = bytes.Clone(rawJSON)
 	}
 	normalized, _ = sjson.DeleteBytes(normalized, "previous_response_id")
-	var errSet error
-	normalized, errSet = sjson.SetRawBytes(normalized, "input", []byte(mergedInput))
-	if errSet != nil {
-		return nil, lastRequest, &interfaces.ErrorMessage{
-			StatusCode: http.StatusBadRequest,
-			Error:      fmt.Errorf("failed to merge websocket input: %w", errSet),
-		}
-	}
 	if !gjson.GetBytes(normalized, "model").Exists() {
 		modelName := strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
 		if modelName != "" {
@@ -192,7 +167,15 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		}
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
-	return normalized, bytes.Clone(normalized), nil
+	var errSet error
+	normalized, errSet = sjson.SetRawBytes(normalized, "input", []byte(mergedInput))
+	if errSet != nil {
+		return nil, lastRequest, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("failed to merge websocket input: %w", errSet),
+		}
+	}
+	return normalized, normalized, nil
 }
 
 func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bool {
@@ -329,40 +312,182 @@ func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) 
 	return bytes.Clone(normalized)
 }
 
-func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
+type responsesWebsocketInputItem struct {
+	raw      json.RawMessage
+	itemType string
+	id       string
+	callID   string
+}
+
+func mergeResponsesWebsocketInput(lastRequest []byte, lastResponseOutput []byte, appendRaw string) (string, error) {
+	var previousRequest struct {
+		Input []json.RawMessage `json:"input"`
+	}
+	if errUnmarshal := json.Unmarshal(lastRequest, &previousRequest); errUnmarshal != nil {
+		return "", fmt.Errorf("invalid previous request input: %w", errUnmarshal)
+	}
+	items, errExisting := appendResponsesWebsocketRawInputItems(nil, previousRequest.Input)
+	if errExisting != nil {
+		return "", fmt.Errorf("invalid previous request input: %w", errExisting)
+	}
+
+	var responseItems []json.RawMessage
+	trimmedResponse := bytes.TrimSpace(lastResponseOutput)
+	if len(trimmedResponse) > 0 && trimmedResponse[0] == '[' && json.Valid(trimmedResponse) {
+		if errUnmarshal := json.Unmarshal(trimmedResponse, &responseItems); errUnmarshal != nil {
+			return "", fmt.Errorf("invalid previous response output: %w", errUnmarshal)
+		}
+	}
+	items, errResponse := appendResponsesWebsocketRawInputItems(items, responseItems)
+	if errResponse != nil {
+		return "", fmt.Errorf("invalid previous response output: %w", errResponse)
+	}
+
+	items, errAppend := appendResponsesWebsocketInputItems(items, appendRaw)
+	if errAppend != nil {
+		return "", fmt.Errorf("invalid request input: %w", errAppend)
+	}
+
+	items = dedupeResponsesWebsocketFunctionCalls(items)
+	items = dedupeResponsesWebsocketInputItems(items)
+	return marshalResponsesWebsocketInputItems(items)
+}
+
+func parseResponsesWebsocketInputItems(rawArray string) ([]responsesWebsocketInputItem, error) {
+	return appendResponsesWebsocketInputItems(nil, rawArray)
+}
+
+func appendResponsesWebsocketInputItems(items []responsesWebsocketInputItem, rawArray string) ([]responsesWebsocketInputItem, error) {
 	rawArray = strings.TrimSpace(rawArray)
 	if rawArray == "" {
-		return "[]", nil
+		rawArray = "[]"
 	}
-	var items []json.RawMessage
-	if errUnmarshal := json.Unmarshal([]byte(rawArray), &items); errUnmarshal != nil {
-		return "", errUnmarshal
+	var rawItems []json.RawMessage
+	if errUnmarshal := json.Unmarshal([]byte(rawArray), &rawItems); errUnmarshal != nil {
+		return nil, errUnmarshal
 	}
+	return appendResponsesWebsocketRawInputItems(items, rawItems)
+}
 
-	seenCallIDs := make(map[string]struct{}, len(items))
-	filtered := make([]json.RawMessage, 0, len(items))
-	for _, item := range items {
-		if len(item) == 0 {
-			continue
+func appendResponsesWebsocketRawInputItems(items []responsesWebsocketInputItem, rawItems []json.RawMessage) ([]responsesWebsocketInputItem, error) {
+	for _, rawItem := range rawItems {
+		item, errItem := parseResponsesWebsocketInputItem(rawItem)
+		if errItem != nil {
+			return nil, errItem
 		}
-		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
-		if isResponsesToolCallType(itemType) {
-			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
-			if callID != "" {
-				if _, ok := seenCallIDs[callID]; ok {
-					continue
-				}
-				seenCallIDs[callID] = struct{}{}
-			}
-		}
-		filtered = append(filtered, item)
+		items = append(items, item)
 	}
+	return items, nil
+}
 
-	out, errMarshal := json.Marshal(filtered)
+func parseResponsesWebsocketInputItem(rawItem json.RawMessage) (responsesWebsocketInputItem, error) {
+	item := responsesWebsocketInputItem{raw: rawItem}
+	trimmed := bytes.TrimSpace(rawItem)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return item, nil
+	}
+	var metadata struct {
+		Type   json.RawMessage `json:"type"`
+		ID     json.RawMessage `json:"id"`
+		CallID json.RawMessage `json:"call_id"`
+	}
+	if errUnmarshal := json.Unmarshal(trimmed, &metadata); errUnmarshal != nil {
+		return responsesWebsocketInputItem{}, errUnmarshal
+	}
+	item.itemType = responsesWebsocketMetadataString(metadata.Type)
+	item.id = responsesWebsocketMetadataString(metadata.ID)
+	item.callID = responsesWebsocketMetadataString(metadata.CallID)
+	return item, nil
+}
+
+func responsesWebsocketMetadataString(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	if raw[0] == '"' {
+		var value string
+		if errUnmarshal := json.Unmarshal(raw, &value); errUnmarshal == nil {
+			return strings.TrimSpace(value)
+		}
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+func marshalResponsesWebsocketInputItems(items []responsesWebsocketInputItem) (string, error) {
+	rawItems := make([]json.RawMessage, len(items))
+	for index := range items {
+		rawItems[index] = items[index].raw
+	}
+	out, errMarshal := json.Marshal(rawItems)
 	if errMarshal != nil {
 		return "", errMarshal
 	}
 	return string(out), nil
+}
+
+func dedupeResponsesWebsocketFunctionCalls(items []responsesWebsocketInputItem) []responsesWebsocketInputItem {
+	seenCallIDs := make(map[string]struct{}, len(items))
+	filtered := items[:0]
+	for _, item := range items {
+		if isResponsesToolCallType(item.itemType) && item.callID != "" {
+			if _, ok := seenCallIDs[item.callID]; ok {
+				continue
+			}
+			seenCallIDs[item.callID] = struct{}{}
+		}
+		filtered = append(filtered, item)
+	}
+	clear(items[len(filtered):])
+	return filtered
+}
+
+func dedupeResponsesWebsocketInputItems(items []responsesWebsocketInputItem) []responsesWebsocketInputItem {
+	// Collect the call_ids that are still referenced by tool-call output
+	// items. When several input items share the same id, the one we keep must
+	// preserve any call_id that has a matching output; otherwise the upstream
+	// rejects the request with "No tool call found for function call output".
+	referencedCallIDs := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		switch item.itemType {
+		case "function_call_output", "custom_tool_call_output":
+			if item.callID != "" {
+				referencedCallIDs[item.callID] = struct{}{}
+			}
+		}
+	}
+
+	// For each id, choose the index to keep. The default is the last
+	// occurrence (matching the original dedupe behavior), but we never replace
+	// an item whose call_id still has a matching output with one that does not.
+	keepIndexByID := make(map[string]int, len(items))
+	keepReferencedByID := make(map[string]bool, len(items))
+	for index, item := range items {
+		if item.id == "" {
+			continue
+		}
+		_, referenced := referencedCallIDs[item.callID]
+		referenced = referenced && item.callID != ""
+		if _, seen := keepIndexByID[item.id]; !seen {
+			keepIndexByID[item.id] = index
+			keepReferencedByID[item.id] = referenced
+			continue
+		}
+		if referenced || !keepReferencedByID[item.id] {
+			keepIndexByID[item.id] = index
+			keepReferencedByID[item.id] = referenced
+		}
+	}
+
+	filtered := items[:0]
+	for index, item := range items {
+		if item.id != "" && keepIndexByID[item.id] != index {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	clear(items[len(filtered):])
+	return filtered
 }
 
 func dedupeResponsesWebsocketInputItemsByID(payload []byte) []byte {
@@ -382,94 +507,11 @@ func dedupeResponsesWebsocketInputItemsByID(payload []byte) []byte {
 }
 
 func dedupeInputItemsByID(rawArray string) (string, error) {
-	rawArray = strings.TrimSpace(rawArray)
-	if rawArray == "" {
-		return "[]", nil
+	items, errParse := parseResponsesWebsocketInputItems(rawArray)
+	if errParse != nil {
+		return "", errParse
 	}
-	var items []json.RawMessage
-	if errUnmarshal := json.Unmarshal([]byte(rawArray), &items); errUnmarshal != nil {
-		return "", errUnmarshal
-	}
-
-	// Parse each item's type, id and call_id once; gjson is a scan-based
-	// parser, so reusing this metadata avoids rescanning every item in each of
-	// the loops below as the conversation history grows.
-	type itemMetadata struct {
-		itemType string
-		id       string
-		callID   string
-	}
-	meta := make([]itemMetadata, len(items))
-	for i, item := range items {
-		if len(item) == 0 {
-			continue
-		}
-		res := gjson.GetManyBytes(item, "type", "id", "call_id")
-		meta[i] = itemMetadata{
-			itemType: strings.TrimSpace(res[0].String()),
-			id:       strings.TrimSpace(res[1].String()),
-			callID:   strings.TrimSpace(res[2].String()),
-		}
-	}
-
-	// Collect the call_ids that are still referenced by tool-call output
-	// items. When several input items share the same id, the one we keep must
-	// preserve any call_id that has a matching output; otherwise the upstream
-	// rejects the request with "No tool call found for function call output".
-	referencedCallIDs := make(map[string]struct{}, len(items))
-	for i := range items {
-		switch meta[i].itemType {
-		case "function_call_output", "custom_tool_call_output":
-			if meta[i].callID != "" {
-				referencedCallIDs[meta[i].callID] = struct{}{}
-			}
-		}
-	}
-
-	// For each id, choose the index to keep. The default is the last
-	// occurrence (matching the original dedupe behavior), but we never replace
-	// an item whose call_id still has a matching output with one that does not.
-	// This keeps a single item per id while ensuring retained tool calls stay
-	// paired with their outputs.
-	keepIndexByID := make(map[string]int, len(items))
-	keepReferencedByID := make(map[string]bool, len(items))
-	for i := range items {
-		itemID := meta[i].id
-		if itemID == "" {
-			continue
-		}
-		_, referenced := referencedCallIDs[meta[i].callID]
-		referenced = referenced && meta[i].callID != ""
-		if _, seen := keepIndexByID[itemID]; !seen {
-			keepIndexByID[itemID] = i
-			keepReferencedByID[itemID] = referenced
-			continue
-		}
-		if referenced || !keepReferencedByID[itemID] {
-			keepIndexByID[itemID] = i
-			keepReferencedByID[itemID] = referenced
-		}
-	}
-
-	filtered := make([]json.RawMessage, 0, len(items))
-	for i, item := range items {
-		if len(item) == 0 {
-			continue
-		}
-		itemID := meta[i].id
-		if itemID != "" {
-			if keepIndexByID[itemID] != i {
-				continue
-			}
-		}
-		filtered = append(filtered, item)
-	}
-
-	out, errMarshal := json.Marshal(filtered)
-	if errMarshal != nil {
-		return "", errMarshal
-	}
-	return string(out), nil
+	return marshalResponsesWebsocketInputItems(dedupeResponsesWebsocketInputItems(items))
 }
 
 func normalizeResponsesWebsocketPassthroughRequest(rawJSON []byte, modelName string) ([]byte, *interfaces.ErrorMessage) {

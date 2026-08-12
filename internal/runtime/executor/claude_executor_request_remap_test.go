@@ -163,6 +163,21 @@ func TestReverseRemapOAuthToolNamesRecoversMangledAliases(t *testing.T) {
 	}
 }
 
+func TestReverseRemapOAuthToolNamesRecoversRepeatedServerAlias(t *testing.T) {
+	const alias = "mcp__hmzqrngkulqv__xuo7jlxlpzee_Bash"
+	reverseMap := map[string]string{alias: "Bash"}
+	responseAlias := "mcp__hmzqrngkulqv__hmzqrngkulqv__xuo7jlxlpzee_Bash"
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, responseAlias))
+
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
+	}
+	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "Bash" {
+		t.Fatalf("repeated server alias restored to %q, want Bash", got)
+	}
+}
+
 func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"tool.name"},{"name":"tool/name"}]}`)
 	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "ambiguous-alias-caller"})

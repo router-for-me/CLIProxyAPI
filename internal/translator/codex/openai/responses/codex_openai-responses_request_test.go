@@ -252,6 +252,7 @@ func TestConvertOpenAIResponsesRequestToCodexNormalizesRequiredFields(t *testing
 		"top_p":0.9,
 		"service_tier":"standard",
 		"truncation":"auto",
+		"prompt_cache_options":{"mode":"implicit"},
 		"user":"request-owner",
 		"input":[{"type":"message","role":"system","content":"hello"}]
 	}`)
@@ -281,6 +282,7 @@ func TestConvertOpenAIResponsesRequestToCodexNormalizesRequiredFields(t *testing
 		"top_p",
 		"service_tier",
 		"truncation",
+		"prompt_cache_options",
 		"user",
 	} {
 		if gjson.GetBytes(output, path).Exists() {
