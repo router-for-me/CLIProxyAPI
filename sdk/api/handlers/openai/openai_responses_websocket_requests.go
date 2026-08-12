@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -139,21 +140,18 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 			appendInputRaw = inputWithoutCompactionItems(nextInput)
 		}
 
-		existingInput := gjson.GetBytes(lastRequest, "input")
+		existingInput := util.GetGJSONBytesNoCopy(lastRequest, "input")
 		var errMerge error
-		mergedInput, errMerge = mergeJSONArrayRaw(existingInput.Raw, normalizeJSONArrayRaw(lastResponseOutput))
+		var invalidPart int
+		mergedInput, invalidPart, errMerge = mergeJSONArraysRaw(existingInput.Raw, normalizeJSONArrayRaw(lastResponseOutput), appendInputRaw)
 		if errMerge != nil {
-			return nil, lastRequest, &interfaces.ErrorMessage{
-				StatusCode: http.StatusBadRequest,
-				Error:      fmt.Errorf("invalid previous response output: %w", errMerge),
+			message := "invalid previous response output"
+			if invalidPart == 2 {
+				message = "invalid request input"
 			}
-		}
-
-		mergedInput, errMerge = mergeJSONArrayRaw(mergedInput, appendInputRaw)
-		if errMerge != nil {
 			return nil, lastRequest, &interfaces.ErrorMessage{
 				StatusCode: http.StatusBadRequest,
-				Error:      fmt.Errorf("invalid request input: %w", errMerge),
+				Error:      fmt.Errorf("%s: %w", message, errMerge),
 			}
 		}
 	}
@@ -171,14 +169,6 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		normalized = bytes.Clone(rawJSON)
 	}
 	normalized, _ = sjson.DeleteBytes(normalized, "previous_response_id")
-	var errSet error
-	normalized, errSet = sjson.SetRawBytes(normalized, "input", []byte(mergedInput))
-	if errSet != nil {
-		return nil, lastRequest, &interfaces.ErrorMessage{
-			StatusCode: http.StatusBadRequest,
-			Error:      fmt.Errorf("failed to merge websocket input: %w", errSet),
-		}
-	}
 	if !gjson.GetBytes(normalized, "model").Exists() {
 		modelName := strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
 		if modelName != "" {
@@ -192,6 +182,16 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		}
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	// Install the merged transcript last. Every later sjson mutation would copy
+	// the complete conversation again as it grows across websocket turns.
+	var errSet error
+	normalized, errSet = sjson.SetRawBytes(normalized, "input", []byte(mergedInput))
+	if errSet != nil {
+		return nil, lastRequest, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("failed to merge websocket input: %w", errSet),
+		}
+	}
 	return normalized, bytes.Clone(normalized), nil
 }
 
@@ -334,6 +334,31 @@ func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
 	if rawArray == "" {
 		return "[]", nil
 	}
+	itemsNoCopy, errItems := parseJSONArrayResultsNoCopy(rawArray)
+	if errItems != nil {
+		return "", errItems
+	}
+	seenCallIDsNoCopy := make(map[string]struct{}, len(itemsNoCopy))
+	for _, item := range itemsNoCopy {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if !isResponsesToolCallType(itemType) {
+			continue
+		}
+		callID := strings.TrimSpace(item.Get("call_id").String())
+		if callID == "" {
+			continue
+		}
+		if _, ok := seenCallIDsNoCopy[callID]; ok {
+			// Preserve the established encoding/json output for the uncommon
+			// duplicate path. The normal no-duplicate path returns without a copy.
+			return dedupeFunctionCallsByCallIDCopying(rawArray)
+		}
+		seenCallIDsNoCopy[callID] = struct{}{}
+	}
+	return rawArray, nil
+}
+
+func dedupeFunctionCallsByCallIDCopying(rawArray string) (string, error) {
 	var items []json.RawMessage
 	if errUnmarshal := json.Unmarshal([]byte(rawArray), &items); errUnmarshal != nil {
 		return "", errUnmarshal
@@ -365,6 +390,26 @@ func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
 	return string(out), nil
 }
 
+func parseJSONArrayResultsNoCopy(rawArray string) ([]gjson.Result, error) {
+	parsed := gjson.Parse(rawArray)
+	if gjson.Valid(rawArray) {
+		if parsed.IsArray() {
+			return parsed.Array(), nil
+		}
+		if parsed.Type == gjson.Null {
+			return nil, nil
+		}
+	}
+
+	// Preserve encoding/json's validation and type errors for malformed or
+	// non-array payloads. Valid arrays take the allocation-free path above.
+	var items []json.RawMessage
+	if errUnmarshal := json.Unmarshal([]byte(rawArray), &items); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+	return nil, nil
+}
+
 func dedupeResponsesWebsocketInputItemsByID(payload []byte) []byte {
 	input := gjson.GetBytes(payload, "input")
 	if !input.Exists() || !input.IsArray() {
@@ -386,6 +431,27 @@ func dedupeInputItemsByID(rawArray string) (string, error) {
 	if rawArray == "" {
 		return "[]", nil
 	}
+	itemsNoCopy, errItems := parseJSONArrayResultsNoCopy(rawArray)
+	if errItems != nil {
+		return "", errItems
+	}
+	seenItemIDs := make(map[string]struct{}, len(itemsNoCopy))
+	hasDuplicateItemID := false
+	for _, item := range itemsNoCopy {
+		itemID := strings.TrimSpace(item.Get("id").String())
+		if itemID == "" {
+			continue
+		}
+		if _, ok := seenItemIDs[itemID]; ok {
+			hasDuplicateItemID = true
+			break
+		}
+		seenItemIDs[itemID] = struct{}{}
+	}
+	if !hasDuplicateItemID {
+		return rawArray, nil
+	}
+
 	var items []json.RawMessage
 	if errUnmarshal := json.Unmarshal([]byte(rawArray), &items); errUnmarshal != nil {
 		return "", errUnmarshal

@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"encoding/json"
 	"strings"
 	"time"
 
@@ -98,31 +97,46 @@ func syntheticResponsesWebsocketPrewarmPayloads(requestJSON []byte) ([][]byte, e
 	return [][]byte{createdPayload, completedPayload}, nil
 }
 
-func mergeJSONArrayRaw(existingRaw, appendRaw string) (string, error) {
-	existingRaw = strings.TrimSpace(existingRaw)
-	appendRaw = strings.TrimSpace(appendRaw)
-	if existingRaw == "" {
-		existingRaw = "[]"
+// mergeJSONArraysRaw validates all inputs and writes their items into one
+// result allocation. The returned index identifies the invalid input, if any.
+func mergeJSONArraysRaw(rawArrays ...string) (string, int, error) {
+	arrays := make([][]gjson.Result, 0, len(rawArrays))
+	mergedLen := 2
+	itemCount := 0
+	for _, rawArray := range rawArrays {
+		rawArray = strings.TrimSpace(rawArray)
+		if rawArray == "" {
+			rawArray = "[]"
+		}
+		items, errItems := parseJSONArrayResultsNoCopy(rawArray)
+		if errItems != nil {
+			return "", len(arrays), errItems
+		}
+		arrays = append(arrays, items)
+		for _, item := range items {
+			mergedLen += len(item.Raw)
+			itemCount++
+		}
 	}
-	if appendRaw == "" {
-		appendRaw = "[]"
+	if itemCount > 1 {
+		mergedLen += itemCount - 1
 	}
 
-	var existing []json.RawMessage
-	if err := json.Unmarshal([]byte(existingRaw), &existing); err != nil {
-		return "", err
+	var merged strings.Builder
+	merged.Grow(mergedLen)
+	merged.WriteByte('[')
+	wroteItem := false
+	for _, items := range arrays {
+		for _, item := range items {
+			if wroteItem {
+				merged.WriteByte(',')
+			}
+			merged.WriteString(item.Raw)
+			wroteItem = true
+		}
 	}
-	var appendItems []json.RawMessage
-	if err := json.Unmarshal([]byte(appendRaw), &appendItems); err != nil {
-		return "", err
-	}
-
-	merged := append(existing, appendItems...)
-	out, err := json.Marshal(merged)
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
+	merged.WriteByte(']')
+	return merged.String(), -1, nil
 }
 
 // inputContainsFullTranscript returns true when the input array carries compact
