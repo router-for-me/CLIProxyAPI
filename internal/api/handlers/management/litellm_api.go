@@ -2,6 +2,7 @@ package management
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -80,24 +81,46 @@ func (h *Handler) CreateLiteLLMUserCompat(c *gin.Context) {
 	c.JSON(http.StatusCreated, internalUserToCompat(u))
 }
 
+// liteLLMCompatUserResponse is the typed /litellm/user/new response. Typed
+// struct + omitempty so unset optional fields are omitted from the JSON,
+// matching LiteLLM's Optional-model / OpenAPI parity. Pointer fields (and
+// omitempty on strings) mean user_alias="" or max_budget=nil are omitted.
+type liteLLMCompatUserResponse struct {
+	UserID              string         `json:"user_id"`
+	UserAlias           string         `json:"user_alias,omitempty"`
+	UserEmail           string         `json:"user_email,omitempty"`
+	UserRole            string         `json:"user_role"`
+	Models              []string       `json:"models,omitempty"`
+	Metadata            map[string]any `json:"metadata,omitempty"`
+	MaxBudget           *float64       `json:"max_budget,omitempty"`
+	BudgetDuration      string         `json:"budget_duration,omitempty"`
+	BudgetResetAt       *time.Time     `json:"budget_reset_at,omitempty"`
+	RPMLimit            *int64         `json:"rpm_limit,omitempty"`
+	TPMLimit            *int64         `json:"tpm_limit,omitempty"`
+	MaxParallelRequests *int           `json:"max_parallel_requests,omitempty"`
+	Spend               float64        `json:"spend"`
+	CreatedAt           time.Time      `json:"created_at"`
+	UpdatedAt           time.Time      `json:"updated_at"`
+}
+
 // internalUserToCompat maps an internal user to LiteLLM's /user/new response
 // field names (snake_case) rather than NixLLM's internal casing.
-func internalUserToCompat(u store.InternalUser) map[string]any {
-	return map[string]any{
-		"user_id":               u.ID,
-		"user_alias":            u.UserAlias,
-		"user_email":            u.UserEmail,
-		"user_role":             u.UserRole,
-		"models":                u.Models,
-		"metadata":              u.Metadata,
-		"max_budget":            u.MaxBudget,
-		"budget_duration":       u.BudgetDuration,
-		"budget_reset_at":       u.BudgetResetAt,
-		"rpm_limit":             u.RPMLimit,
-		"tpm_limit":             u.TPMLimit,
-		"max_parallel_requests": u.MaxParallelRequests,
-		"spend":                 u.Spend,
-		"created_at":            u.CreatedAt,
-		"updated_at":            u.UpdatedAt,
+func internalUserToCompat(u store.InternalUser) liteLLMCompatUserResponse {
+	return liteLLMCompatUserResponse{
+		UserID:              u.ID,
+		UserAlias:           u.UserAlias,
+		UserEmail:           u.UserEmail,
+		UserRole:            u.UserRole,
+		Models:              u.Models,
+		Metadata:            u.Metadata,
+		MaxBudget:           u.MaxBudget,
+		BudgetDuration:      u.BudgetDuration,
+		BudgetResetAt:       u.BudgetResetAt,
+		RPMLimit:            u.RPMLimit,
+		TPMLimit:            u.TPMLimit,
+		MaxParallelRequests: u.MaxParallelRequests,
+		Spend:               u.Spend,
+		CreatedAt:           u.CreatedAt,
+		UpdatedAt:           u.UpdatedAt,
 	}
 }

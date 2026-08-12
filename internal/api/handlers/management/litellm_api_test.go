@@ -96,6 +96,24 @@ func TestCreateLiteLLMUserCompatRoundTrip(t *testing.T) {
 			t.Errorf("response missing %s; body=%s", want, resp)
 		}
 	}
+	// user_email was set in the request, so it must be present as a value (not
+	// omitted): confirm it carries the value.
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"user_email":"a@example.com"`)) {
+		t.Errorf("response missing user_email value; body=%s", resp)
+	}
+	// Fields NOT set in the request must be ABSENT (omitempty parity), not
+	// present-as-empty. budget_duration / tpm_limit / rpm_limit / metadata were
+	// not sent, so they must not appear at all.
+	for _, absent := range []string{
+		`"budget_duration"`,
+		`"tpm_limit"`,
+		`"rpm_limit"`,
+		`"metadata"`,
+	} {
+		if bytes.Contains(rec.Body.Bytes(), []byte(absent)) {
+			t.Errorf("response contains unset field %s; want omitted; body=%s", absent, resp)
+		}
+	}
 	// The internal NixLLM casing must NOT leak into the compat response.
 	if bytes.Contains(rec.Body.Bytes(), []byte(`"UserAlias"`)) {
 		t.Errorf("response leaked internal casing; body=%s", resp)
