@@ -137,6 +137,7 @@ type UsageStore struct {
 	eventsTable        string
 	errorsTable        string
 	windowsTable       string
+	rollupTable        string
 	pricingTable       string
 	internalUsersTable string
 	modelsCatalogTable string
@@ -168,6 +169,7 @@ func NewUsageStore(parent *PostgresStore) *UsageStore {
 		eventsTable:        parent.UsageEventsTable(),
 		errorsTable:        parent.UsageErrorsTable(),
 		windowsTable:       parent.UsageWindowsTable(),
+		rollupTable:        parent.RollupTable(),
 		pricingTable:       parent.ModelPricingTable(),
 		internalUsersTable: parent.InternalUsersTable(),
 		modelsCatalogTable: parent.ModelsTable(),

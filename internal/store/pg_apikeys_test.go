@@ -45,6 +45,7 @@ func newTestPostgresStore(t *testing.T, schema string) *PostgresStore {
 		store.cfg.UsageWindowsTable,
 		store.cfg.UsageEventsTable,
 		store.cfg.UsageErrorsTable,
+		store.cfg.UsageStatDayTable,
 		store.cfg.PoliciesTable,
 		store.cfg.ModelsTable,
 		store.cfg.ModelPricingTable,

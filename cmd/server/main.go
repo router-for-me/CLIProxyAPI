@@ -710,6 +710,13 @@ func main() {
 		if errFlusherStart := usageFlusher.Start(context.Background()); errFlusherStart != nil {
 			log.Errorf("failed to start PG usage flusher: %v", errFlusherStart)
 		}
+		// Start the daily usage_stat_day rollup driver: backfill the previous 7
+		// days once at startup, then re-fold "today" every 24 hours as new
+		// events flush. The fold is idempotent (overwrite), so re-running is
+		// safe. Runs for the lifetime of the process; its context is derived
+		// from context.Background and the loop exits on return of this func only
+		// at shutdown, mirroring the other background sweeps.
+		go pgUsageStore.RunRollupLoop(context.Background(), 7)
 		coreusage.RegisterPlugin(usageFlusher)
 		// Register the policy usage plugin so budget windows are
 		// incremented as requests complete.

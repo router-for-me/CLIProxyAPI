@@ -29,6 +29,7 @@ const (
 	defaultUsageEventsTable              = "usage_events"
 	defaultUsageErrorsTable              = "usage_errors"
 	defaultUsageWindowsTable             = "usage_windows"
+	defaultUsageStatDayTable             = "usage_stat_day"
 	defaultModelsTable                   = "models_catalog"
 	defaultModelPricingTable             = "model_pricing"
 	defaultModelRoutingTable             = "model_routing"
@@ -103,6 +104,11 @@ type PostgresStoreConfig struct {
 	UsageErrorsTable string
 	// UsageWindowsTable stores time-windowed aggregate counters for budget enforcement.
 	UsageWindowsTable string
+	// UsageStatDayTable stores the pre-aggregated daily rollup of usage_events
+	// (one row per day × user × api_key × model × provider × source). Refreshed
+	// incrementally by RunRollup/BackfillRollup so aggregate queries can read
+	// O(buckets) instead of O(events). Defaults to "usage_stat_day".
+	UsageStatDayTable string
 	// ModelsTable stores the model catalog mirrored from the registry updater.
 	ModelsTable string
 	// ModelPricingTable stores per-model unit pricing used to compute usage cost.
@@ -273,6 +279,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.UsageWindowsTable == "" {
 		cfg.UsageWindowsTable = defaultUsageWindowsTable
+	}
+	if cfg.UsageStatDayTable == "" {
+		cfg.UsageStatDayTable = defaultUsageStatDayTable
 	}
 	if cfg.ModelsTable == "" {
 		cfg.ModelsTable = defaultModelsTable
@@ -671,6 +680,37 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 		if _, err := s.db.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("postgres store: migrate usage indexes: %w", err)
 		}
+	}
+
+	// usage_stat_day is the pre-aggregated daily rollup of usage_events. It folds
+	// per-request rows into per-(day, user, api_key, model, provider, source)
+	// counters so daily aggregate queries (LiteLLM /spend/users, per-model/API-key
+	// spend over a range) read O(buckets) instead of O(events). The bucket columns
+	// user_id/api_key_id/model/provider/source may legitimately be empty or NULL
+	// for some events, and are COALESCE'd to '' by the fold so the PK stays free
+	// of NULLs (Postgres treats '' as distinct from NULL). Counters are overwritten
+	// (SET, not +=) by RunRollup/BackfillRollup so re-running the fold over the
+	// append-only source recomputes the same totals — the idempotency contract the
+	// daily driver relies on. Idempotent CREATE TABLE IF NOT EXISTS.
+	rollupTable := s.fullTableName(s.cfg.UsageStatDayTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			stat_day      DATE NOT NULL,
+			user_id       TEXT,
+			api_key_id    TEXT,
+			model         TEXT,
+			provider      TEXT,
+			source        TEXT,
+			request_count BIGINT NOT NULL DEFAULT 0,
+			fail_count    BIGINT NOT NULL DEFAULT 0,
+			input_tokens  BIGINT NOT NULL DEFAULT 0,
+			output_tokens BIGINT NOT NULL DEFAULT 0,
+			tot_tokens    BIGINT NOT NULL DEFAULT 0,
+			cost_usd      NUMERIC(12,6) NOT NULL DEFAULT 0,
+			PRIMARY KEY (stat_day, user_id, api_key_id, model, provider, source)
+		)
+	`, rollupTable)); err != nil {
+		return fmt.Errorf("postgres store: create usage_stat_day rollup table: %w", err)
 	}
 	return nil
 }
@@ -1959,6 +1999,15 @@ func (s *PostgresStore) UsageWindowsTable() string {
 		return quoteIdentifier(defaultUsageWindowsTable)
 	}
 	return s.fullTableName(s.cfg.UsageWindowsTable)
+}
+
+// RollupTable returns the fully-qualified name of the pre-aggregated daily
+// usage rollup table (usage_stat_day).
+func (s *PostgresStore) RollupTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultUsageStatDayTable)
+	}
+	return s.fullTableName(s.cfg.UsageStatDayTable)
 }
 
 // ModelsTable returns the fully-qualified name of the model catalog table.
