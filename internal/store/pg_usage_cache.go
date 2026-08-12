@@ -13,135 +13,154 @@ import (
 const usageCacheTTL = 15 * time.Second
 
 // usageCacheMaxEntries bounds the number of distinct cached filters to prevent
-// unbounded growth. When exceeded a single (non-current) entry is evicted.
+// unbounded growth. When exceeded a single (non-current) entry is evicted per
+// map (rows and totals are bounded independently).
 const usageCacheMaxEntries = 512
 
-// aggKind distinguishes the two value shapes the cache stores under a filter:
-// a grouped row set (SelectAggregate) vs a single roll-up (SelectTotals). The
-// two kinds share the same logical filter key, so the kind is folded into the
-// physical map key to keep them independent.
-type aggKind int
-
-const (
-	aggRows aggKind = iota
-	aggTotals
-)
-
-// aggCacheEntry is one cached value. Both rows and tot are stored so the entry
-// is self-describing; only the field matching kind is meaningful.
-type aggCacheEntry struct {
-	rows     []UsageAggregate
-	tot      UsageAggregate
-	kind     aggKind
+// cacheValue is the single cached shape for both aggregate reads: a grouped
+// row set (values) or a scalar roll-up (total). isTotal disambiguates which
+// field is meaningful.
+type cacheValue struct {
+	values   []UsageAggregate // row set when !isTotal
+	total    UsageAggregate   // scalar when isTotal
+	isTotal  bool
 	storedAt time.Time
 }
 
-// aggResult is the loader's output plus the kind it produced.
-type aggResult struct {
-	rows []UsageAggregate
-	tot  UsageAggregate
-	kind aggKind
-}
-
 // call tracks a single in-flight loader invocation for a key. Waiters block on
-// done; the sole goroutine that created the call fills res/err and closes it
+// done; the sole goroutine that created the call fills val/err and closes it
 // exactly once (under the cache mutex), so the close is never double-fired.
 type call struct {
 	done chan struct{}
-	res  aggResult
+	val  cacheValue
 	err  error
 }
 
 // usageCache is a small, TTL-aware, read-through cache for aggregate usage
 // reads. It is safe for concurrent use. Single-flight: concurrent callers for
 // the same key share one loader invocation; the loader always runs WITHOUT the
-// cache mutex held. Fail-open: loader errors are never cached.
+// cache mutex held. Fail-open: loader errors are never cached. Rows and totals
+// live in separate maps, so the two shapes for the same logical filter are
+// cached independently.
 type usageCache struct {
+	now      func() time.Time // clock source; overridable in tests.
 	mu       sync.Mutex
-	entries  map[string]aggCacheEntry
+	rows     map[string]cacheValue
+	totals   map[string]cacheValue
 	inflight map[string]*call
 }
 
 func newUsageCache() *usageCache {
 	return &usageCache{
-		entries:  make(map[string]aggCacheEntry),
+		now:      time.Now,
+		rows:     make(map[string]cacheValue),
+		totals:   make(map[string]cacheValue),
 		inflight: make(map[string]*call),
 	}
 }
 
-// mapKey folds the value kind into the physical map key so aggregate-rows and
-// totals for the same filter never collide.
-func (c *usageCache) mapKey(kind aggKind, filterKey string) string {
-	return string(rune('a'+int(kind))) + "\x1f" + filterKey
+// newUsageCacheWithClock builds a cache with an injected clock, used by tests
+// to advance time past the TTL without real sleeps.
+func newUsageCacheWithClock(now func() time.Time) *usageCache {
+	c := newUsageCache()
+	c.now = now
+	return c
+}
+
+// inflightKey routes rows vs totals loads into distinct single-flight slots so
+// the two shapes for a filter never share a loader.
+func (c *usageCache) inflightKey(isTotal bool, filterKey string) string {
+	if isTotal {
+		return "t\x1f" + filterKey
+	}
+	return "r\x1f" + filterKey
 }
 
 // get is the shared read-through + single-flight core. It returns a cached
 // value when fresh, otherwise exactly one caller runs load and the rest wait on
 // its result. Errors are returned to callers but never cached.
-func (c *usageCache) get(filterKey string, kind aggKind, load func() (aggResult, error)) (aggResult, error) {
-	key := c.mapKey(kind, filterKey)
-	now := time.Now()
+func (c *usageCache) get(isTotal bool, filterKey string, load func() (cacheValue, error)) (cacheValue, error) {
+	ik := c.inflightKey(isTotal, filterKey)
+	now := c.now()
 
 	c.mu.Lock()
+	// Look up the value in the appropriate map.
+	var cached cacheValue
+	ok := false
+	if isTotal {
+		cached, ok = c.totals[filterKey]
+	} else {
+		cached, ok = c.rows[filterKey]
+	}
 	// Fresh cache hit: serve from memory.
-	if e, ok := c.entries[key]; ok && now.Sub(e.storedAt) < usageCacheTTL {
+	if ok && now.Sub(cached.storedAt) < usageCacheTTL {
 		c.mu.Unlock()
-		return aggResult{rows: e.rows, tot: e.tot, kind: e.kind}, nil
+		return cached, nil
 	}
 	// Another caller is already loading this key: wait for its result.
-	if cl, ok := c.inflight[key]; ok {
+	if cl, ok := c.inflight[ik]; ok {
 		c.mu.Unlock()
 		<-cl.done
-		return cl.res, cl.err
+		return cl.val, cl.err
 	}
 	// Miss: become the leader for this key.
 	cl := &call{done: make(chan struct{})}
-	c.inflight[key] = cl
+	c.inflight[ik] = cl
 	c.mu.Unlock()
 
 	// Run the loader outside the cache mutex so concurrent DB I/O is not
 	// serialized behind the lock.
-	res, err := load()
+	val, err := load()
 
 	c.mu.Lock()
-	delete(c.inflight, key)
+	delete(c.inflight, ik)
 	if err == nil {
-		c.entries[key] = aggCacheEntry{rows: res.rows, tot: res.tot, kind: res.kind, storedAt: time.Now()}
-		if len(c.entries) > usageCacheMaxEntries {
-			// Simple capacity eviction: drop one entry that is not the one we
-			// just stored. Map iteration order is random, so this is a cheap
-			// approximate-LRU stand-in.
-			for k := range c.entries {
-				if k != key {
-					delete(c.entries, k)
-					break
+		val.storedAt = c.now()
+		if isTotal {
+			c.totals[filterKey] = val
+			if len(c.totals) > usageCacheMaxEntries {
+				for k := range c.totals {
+					if k != filterKey {
+						delete(c.totals, k)
+						break
+					}
+				}
+			}
+		} else {
+			c.rows[filterKey] = val
+			if len(c.rows) > usageCacheMaxEntries {
+				for k := range c.rows {
+					if k != filterKey {
+						delete(c.rows, k)
+						break
+					}
 				}
 			}
 		}
 	}
-	cl.res = res
+	cl.val = val
 	cl.err = err
 	close(cl.done)
 	c.mu.Unlock()
-	return res, err
+	return val, err
 }
 
 // getAggregate serves a grouped aggregate row set through the cache.
 func (c *usageCache) getAggregate(ctx context.Context, filter UsageFilter, load func() ([]UsageAggregate, error)) ([]UsageAggregate, error) {
-	res, err := c.get(usageFilterKey(filter), aggRows, func() (aggResult, error) {
+	v, err := c.get(false, usageFilterKey(filter), func() (cacheValue, error) {
 		rows, lerr := load()
-		return aggResult{rows: rows, kind: aggRows}, lerr
+		return cacheValue{values: rows}, lerr
 	})
-	return res.rows, err
+	return v.values, err
 }
 
 // getTotals serves a single roll-up aggregate through the cache.
 func (c *usageCache) getTotals(ctx context.Context, filter UsageFilter, load func() (UsageAggregate, error)) (UsageAggregate, error) {
-	res, err := c.get(usageFilterKey(filter), aggTotals, func() (aggResult, error) {
+	v, err := c.get(true, usageFilterKey(filter), func() (cacheValue, error) {
 		tot, lerr := load()
-		return aggResult{tot: tot, kind: aggTotals}, lerr
+		return cacheValue{total: tot, isTotal: true}, lerr
 	})
-	return res.tot, err
+	return v.total, err
 }
 
 // UsageFilterIncludeRequestID reports whether the filter targets a single

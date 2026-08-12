@@ -73,10 +73,18 @@ func TestUsageFilterKeyDistinct(t *testing.T) {
 	}
 }
 
+// advanceableClock returns a controllable time source for cache tests. Advance
+// the returned pointer's time to move the cache clock forward.
+func advanceableClock() (*time.Time, func() time.Time) {
+	t := time.Now()
+	return &t, func() time.Time { return t }
+}
+
 // TestUsageCacheHitAndMiss verifies read-through: the loader runs on the first
 // call, is skipped on a second call within TTL, and re-runs after TTL expiry.
 func TestUsageCacheHitAndMiss(t *testing.T) {
-	c := newUsageCache()
+	now, clock := advanceableClock()
+	c := newUsageCacheWithClock(clock)
 	var calls atomic.Int64
 	load := func() ([]UsageAggregate, error) {
 		calls.Add(1)
@@ -100,8 +108,8 @@ func TestUsageCacheHitAndMiss(t *testing.T) {
 		t.Fatalf("expected cache hit (still 1 loader call), got %d", calls.Load())
 	}
 
-	// After TTL, the loader must re-run.
-	time.Sleep(usageCacheTTL + 10*time.Millisecond)
+	// After TTL, the loader must re-run (advance the fake clock past the TTL).
+	*now = now.Add(usageCacheTTL + time.Millisecond)
 	if _, err := c.getAggregate(nil, f, load); err != nil {
 		t.Fatalf("post-TTL call: %v", err)
 	}
@@ -190,7 +198,8 @@ func TestUsageCacheFailOpen(t *testing.T) {
 
 // TestUsageCacheTTLExpiry verifies the loader re-runs once the TTL has elapsed.
 func TestUsageCacheTTLExpiry(t *testing.T) {
-	c := newUsageCache()
+	now, clock := advanceableClock()
+	c := newUsageCacheWithClock(clock)
 	var calls atomic.Int64
 	load := func() ([]UsageAggregate, error) {
 		calls.Add(1)
@@ -204,7 +213,8 @@ func TestUsageCacheTTLExpiry(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("expected 1 call, got %d", calls.Load())
 	}
-	time.Sleep(usageCacheTTL + 10*time.Millisecond)
+	// Advance the clock past the TTL: the loader must re-run.
+	*now = now.Add(usageCacheTTL + time.Millisecond)
 	if _, err := c.getAggregate(nil, f, load); err != nil {
 		t.Fatalf("post-TTL call: %v", err)
 	}
