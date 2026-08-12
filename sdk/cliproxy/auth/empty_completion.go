@@ -816,7 +816,23 @@ func (s *streamBootstrapState) observe(fragment []byte) bool {
 	}
 
 	trimmed := bytes.TrimSpace(s.pending)
-	if len(trimmed) == 0 || couldBeSSEPrefix(trimmed) {
+	if len(trimmed) == 0 {
+		return false
+	}
+
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		payload := bytes.TrimSpace(trimmed[len("data:"):])
+		if bytes.Equal(payload, []byte("[DONE]")) || classifyJSONBuffer(payload) == jsonBufComplete {
+			s.sawSSE = true
+			s.acc.evalSSE(trimmed)
+			s.pending = s.pending[:0]
+			s.forward = s.shouldForward()
+			return s.forward
+		}
+		return false
+	}
+
+	if couldBeSSEPrefix(trimmed) {
 		return false
 	}
 	switch classifyJSONBuffer(trimmed) {

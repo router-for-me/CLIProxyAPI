@@ -1108,3 +1108,72 @@ func TestStreamBootstrapDetectorRawSSEPrefixes(t *testing.T) {
 		t.Fatalf("Observe(completed [DONE]) = %v, want false (empty terminal stays buffered)", got)
 	}
 }
+
+func TestStreamBootstrapDetectorNewlineLessSSE(t *testing.T) {
+	t.Run("complete newline-less content frame forwards immediately", func(t *testing.T) {
+		d := &StreamBootstrapDetector{}
+		payload := []byte(`data: {"choices":[{"delta":{"content":"hello"}}],"finish_reason":null}`)
+		if got := d.Observe(payload); got != true {
+			t.Fatalf("Observe(newline-less content) = %v, want true", got)
+		}
+		if !d.state.forward {
+			t.Fatal("state.forward = false, want true")
+		}
+	})
+
+	t.Run("complete newline-less empty terminal frame stays buffered", func(t *testing.T) {
+		d := &StreamBootstrapDetector{}
+		payload := []byte(`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`)
+		if got := d.Observe(payload); got != false {
+			t.Fatalf("Observe(newline-less empty terminal) = %v, want false", got)
+		}
+		if d.state.forward {
+			t.Fatal("state.forward = true, want false")
+		}
+		if !d.state.acc.empty() {
+			t.Fatal("acc.empty() = false, want true for empty terminal frame")
+		}
+	})
+
+	t.Run("following newline-less [DONE] remains terminal-empty", func(t *testing.T) {
+		d := &StreamBootstrapDetector{}
+		emptyFrame := []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		if got := d.Observe(emptyFrame); got != false {
+			t.Fatalf("Observe(empty frame) = %v, want false", got)
+		}
+		doneFrame := []byte("data: [DONE]")
+		if got := d.Observe(doneFrame); got != false {
+			t.Fatalf("Observe(newline-less [DONE]) = %v, want false", got)
+		}
+		if d.state.forward {
+			t.Fatal("state.forward = true, want false")
+		}
+		if !d.state.acc.empty() {
+			t.Fatal("acc.empty() = false, want true after [DONE]")
+		}
+	})
+
+	t.Run("split truncated JSON and split [DONE] do not forward prematurely", func(t *testing.T) {
+		d := &StreamBootstrapDetector{}
+		if got := d.Observe([]byte(`data: {"choices":[{"delta":{"content":"hel`)); got != false {
+			t.Fatalf("Observe(truncated JSON) = %v, want false", got)
+		}
+		if got := d.Observe([]byte(`lo"}}],"finish_reason":null}`)); got != true {
+			t.Fatalf("Observe(completed JSON remainder) = %v, want true", got)
+		}
+
+		d2 := &StreamBootstrapDetector{}
+		if got := d2.Observe([]byte("data: [DO")); got != false {
+			t.Fatalf("Observe(split [DONE] part 1) = %v, want false", got)
+		}
+		if got := d2.Observe([]byte("NE]")); got != false {
+			t.Fatalf("Observe(split [DONE] part 2) = %v, want false", got)
+		}
+		if d2.state.forward {
+			t.Fatal("state.forward after split [DONE] = true, want false")
+		}
+		if !d2.state.acc.empty() {
+			t.Fatal("acc.empty() = false, want true after complete [DONE]")
+		}
+	})
+}
