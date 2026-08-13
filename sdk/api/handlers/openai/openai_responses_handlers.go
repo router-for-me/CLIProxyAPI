@@ -534,7 +534,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "responses/compact")
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -560,7 +560,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -576,7 +576,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponseViaChat(c *gin.Con
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, OpenAI, modelName, chatJSON, "")
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -641,7 +641,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				continue
 			}
 			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
+			h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
@@ -650,7 +650,15 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				// Stream closed without data? Send headers and done.
+				// Stream closed without data. Surface a buffered pending error
+				// before committing SSE headers, so a failed upstream never
+				// looks like a successful empty stream.
+				if pErr, pending := pendingOpenAIStreamError(errChan); pending {
+					h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(pErr))
+					cliCancel(pErr.Error)
+					return
+				}
+				// Clean close. Send headers and done.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 				_, _ = c.Writer.Write([]byte("\n"))
@@ -708,7 +716,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Contex
 				errChan = nil
 				continue
 			}
-			h.WriteErrorResponse(c, errMsg)
+			h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
@@ -717,6 +725,15 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Contex
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				// Stream closed without data. Surface a buffered pending error
+				// before committing SSE headers, so a failed upstream never
+				// looks like a successful empty stream.
+				if pErr, pending := pendingOpenAIStreamError(errChan); pending {
+					h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(pErr))
+					cliCancel(pErr.Error)
+					return
+				}
+				// Clean close. Send headers and done.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 				_, _ = c.Writer.Write([]byte("\n"))
@@ -797,6 +814,7 @@ func writeResponsesTerminalError(c *gin.Context, errMsg *interfaces.ErrorMessage
 	if !shouldExposeResponsesUpstreamError(errMsg) {
 		return
 	}
+	errMsg = sanitizeOpenAIErrorMessage(errMsg)
 	status := http.StatusInternalServerError
 	if errMsg.StatusCode > 0 {
 		status = errMsg.StatusCode

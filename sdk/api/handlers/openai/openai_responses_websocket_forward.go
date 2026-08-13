@@ -529,6 +529,7 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 	status := http.StatusInternalServerError
 	errText := http.StatusText(status)
 	if errMsg != nil {
+		errMsg = sanitizeOpenAIErrorMessage(errMsg)
 		if errMsg.StatusCode > 0 {
 			status = errMsg.StatusCode
 			errText = http.StatusText(status)

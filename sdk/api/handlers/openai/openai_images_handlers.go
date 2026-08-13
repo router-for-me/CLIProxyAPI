@@ -92,6 +92,7 @@ func writeImagesStreamErrorEvent(c *gin.Context, errMsg *interfaces.ErrorMessage
 	if errMsg == nil {
 		return
 	}
+	errMsg = sanitizeOpenAIErrorMessage(errMsg)
 	status := http.StatusInternalServerError
 	if errMsg.StatusCode > 0 {
 		status = errMsg.StatusCode
@@ -1156,7 +1157,7 @@ func (h *OpenAIAPIHandler) collectRoutedImages(c *gin.Context, imageReq []byte, 
 	resp, upstreamHeaders, errMsg := h.ExecuteImageWithAuthManager(cliCtx, xaiImagesHandlerType, model, imageReq, "")
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 		if errMsg.Error != nil {
 			cliCancel(errMsg.Error)
 		} else {
@@ -1220,7 +1221,7 @@ func (h *OpenAIAPIHandler) streamRoutedImages(c *gin.Context, imageReq []byte, i
 				writeImagesStreamErrorEvent(c, errMsg)
 				flusher.Flush()
 			} else {
-				h.WriteErrorResponse(c, errMsg)
+				h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 			}
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
@@ -1230,6 +1231,15 @@ func (h *OpenAIAPIHandler) streamRoutedImages(c *gin.Context, imageReq []byte, i
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				// Stream closed without data. Surface a buffered pending error
+				// before committing SSE headers, so a failed upstream never
+				// looks like a successful empty stream.
+				if pErr, pending := pendingOpenAIStreamError(errChan); pending {
+					h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(pErr))
+					cliCancel(pErr.Error)
+					return
+				}
+				// Clean close. Send headers and done.
 				stopKeepAlive()
 				setImagesSSEHeaders(c)
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
@@ -1348,7 +1358,7 @@ func (h *OpenAIAPIHandler) streamOpenAICompatImages(c *gin.Context, compatReq []
 				writeImagesStreamErrorEvent(c, errMsg)
 				flusher.Flush()
 			} else {
-				h.WriteErrorResponse(c, errMsg)
+				h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 			}
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
@@ -1358,6 +1368,15 @@ func (h *OpenAIAPIHandler) streamOpenAICompatImages(c *gin.Context, compatReq []
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				// Stream closed without data. Surface a buffered pending error
+				// before committing SSE headers, so a failed upstream never
+				// looks like a successful empty stream.
+				if pErr, pending := pendingOpenAIStreamError(errChan); pending {
+					h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(pErr))
+					cliCancel(pErr.Error)
+					return
+				}
+				// Clean close. Send headers and done.
 				stopKeepAlive()
 				setImagesSSEHeaders(c)
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
@@ -1377,7 +1396,7 @@ func (h *OpenAIAPIHandler) streamOpenAICompatImages(c *gin.Context, compatReq []
 					_, _ = c.Writer.Write(next)
 				},
 				WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
-					writeImagesStreamErrorEvent(c, errMsg)
+					writeImagesStreamErrorEvent(c, sanitizeOpenAIErrorMessage(errMsg))
 				},
 			})
 			return
@@ -1405,7 +1424,7 @@ func (h *OpenAIAPIHandler) collectImagesWithModel(c *gin.Context, imageReq []byt
 	resp, upstreamHeaders, errMsg := h.ExecuteImageWithAuthManager(cliCtx, xaiImagesHandlerType, model, imageReq, "")
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 		if errMsg.Error != nil {
 			cliCancel(errMsg.Error)
 		} else {
@@ -1417,7 +1436,7 @@ func (h *OpenAIAPIHandler) collectImagesWithModel(c *gin.Context, imageReq []byt
 	out, err := buildImagesAPIResponseFromXAI(resp, responseFormat)
 	if err != nil {
 		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 		cliCancel(err)
 		return
 	}
@@ -1472,7 +1491,7 @@ func (h *OpenAIAPIHandler) streamImagesWithModel(c *gin.Context, imageReq []byte
 			writeImagesStreamErrorEvent(c, errMsg)
 			flusher.Flush()
 		} else {
-			h.WriteErrorResponse(c, errMsg)
+			h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 		}
 		if errMsg != nil && errMsg.Error != nil {
 			cliCancel(errMsg.Error)
@@ -1554,7 +1573,7 @@ func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesR
 	out, errMsg := collectImagesFromResponsesStream(cliCtx, dataChan, errChan, responseFormat)
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 		if errMsg.Error != nil {
 			cliCancel(errMsg.Error)
 		} else {
@@ -1789,7 +1808,7 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 				writeImagesStreamErrorEvent(c, errMsg)
 				flusher.Flush()
 			} else {
-				h.WriteErrorResponse(c, errMsg)
+				h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 			}
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
@@ -1799,6 +1818,15 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				// Stream closed without data. Surface a buffered pending error
+				// before committing SSE headers, so a failed upstream never
+				// looks like a successful empty stream.
+				if pErr, pending := pendingOpenAIStreamError(errChan); pending {
+					h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(pErr))
+					cliCancel(pErr.Error)
+					return
+				}
+				// Clean close. Send headers and done.
 				stopKeepAlive()
 				setImagesSSEHeaders(c)
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
