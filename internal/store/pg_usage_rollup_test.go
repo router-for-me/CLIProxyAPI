@@ -414,8 +414,8 @@ func TestSelectAggregateDayAlignedRollupByUser(t *testing.T) {
 		}
 	}
 	u1 := got["u1"]
-	if u1.RequestCount != 2 || u1.FailedCount != 1 {
-		t.Fatalf("u1 request/fail counts wrong: %+v", u1)
+	if u1.RequestCount != 2 {
+		t.Fatalf("u1 request count wrong: %+v", u1)
 	}
 	if u1.InputTokens != 150 || u1.OutputTokens != 50 || u1.TotalTokens != 200 {
 		t.Fatalf("u1 token sums wrong: %+v", u1)
@@ -423,9 +423,11 @@ func TestSelectAggregateDayAlignedRollupByUser(t *testing.T) {
 	if u1.CostUSD != 0.015 {
 		t.Fatalf("u1 cost wrong: got %v want 0.015", u1.CostUSD)
 	}
-	// The rollup tracks neither reasoning nor cached tokens; both project as 0.
-	if u1.ReasoningTokens != 0 || u1.CachedTokens != 0 {
-		t.Fatalf("u1 reasoning/cached must be 0 from the rollup: %+v", u1)
+	// The rollup does not track reasoning/cached tokens and deliberately
+	// projects failed_count as 0 (matching the on-the-fly scan); all three are
+	// 0 on the fast path.
+	if u1.FailedCount != 0 || u1.ReasoningTokens != 0 || u1.CachedTokens != 0 {
+		t.Fatalf("u1 failed/reasoning/cached must be 0 from the rollup: %+v", u1)
 	}
 	u2 := got["u2"]
 	if u2.RequestCount != 1 || u2.InputTokens != 10 || u2.OutputTokens != 5 || u2.TotalTokens != 15 {
@@ -440,41 +442,99 @@ func TestSelectAggregateDayAlignedRollupByUser(t *testing.T) {
 	}
 }
 
+// seedRollupConsistencyData seeds a single fully-rolled-up day using ONLY rows
+// with a real, non-empty user_id. Every row carries a non-empty api_key_id and
+// source so the on-the-fly usage_events scan — which reads the user bucket
+// directly — never trips over a NULL/empty user bucket. u1's rows span two
+// (user,key) buckets so the rollup's per-user SUM is exercised.
+func seedRollupConsistencyData(t *testing.T, us *UsageStore) time.Time {
+	t.Helper()
+	ctx := context.Background()
+	day := time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC)
+	events := []UsageEvent{
+		// u1 across two model/provider buckets.
+		{UserID: "u1", Model: "m1", Provider: "p1", Source: "svc",
+			InputTokens: 100, OutputTokens: 50, TotalTokens: 150, CostUSD: 0.01, RequestedAt: day.Add(time.Hour)},
+		{UserID: "u1", Model: "m2", Provider: "p1", Source: "svc",
+			InputTokens: 50, OutputTokens: 0, TotalTokens: 50, CostUSD: 0.005, RequestedAt: day.Add(2 * time.Hour)},
+		// u2 one request.
+		{UserID: "u2", Model: "m1", Provider: "p1", Source: "svc",
+			InputTokens: 10, OutputTokens: 5, TotalTokens: 15, CostUSD: 0.001, RequestedAt: day.Add(3 * time.Hour)},
+	}
+	for _, e := range events {
+		if err := us.InsertEvent(ctx, e); err != nil {
+			t.Fatalf("insert usage event: %v", err)
+		}
+	}
+	if err := us.RunRollup(ctx, day); err != nil {
+		t.Fatalf("RunRollup: %v", err)
+	}
+	return day
+}
+
 // TestSelectAggregateDayAlignedRollupConsistency is the key correctness
-// invariant: over a complete day, the rollup fast path and the on-the-fly
-// usage_events scan MUST produce identical per-user sums. It proves the fast
-// path is a faithful substitute for the query it replaces.
+// invariant: over a complete day, the rollup fast path and a GENUINE cache-less
+// usage_events scan MUST produce identical per-user sums on every field. This
+// proves the fast path is a faithful substitute for the query it replaces — if
+// the fast path diverged (wrong sums, failed_count, or NULL-bucket handling),
+// this equality would fail.
 func TestSelectAggregateDayAlignedRollupConsistency(t *testing.T) {
 	pg := newTestPostgresStore(t, "test_user_rollup_consistent")
 	defer pg.Close()
 	ensureMigrated(t, pg)
 	us := NewUsageStore(pg)
 
-	day, _ := seedRollupGroupByUserData(t, us)
+	day := seedRollupConsistencyData(t, us)
 	ctx := context.Background()
 	filter := UsageFilter{GroupBy: "user_id", From: day, To: day.Add(24 * time.Hour)}
 
+	// Rollup fast path: this store has the rollup table wired.
 	rollup, err := us.SelectAggregate(ctx, filter)
 	if err != nil {
 		t.Fatalf("rollup SelectAggregate: %v", err)
 	}
-	// Force the on-the-fly path by disabling the rollup table — the fallback
-	// guard is rollupTable == "", so an un-named table routes to usage_events.
-	noRollup := *us
-	noRollup.rollupTable = ""
+
+	// Genuine scan: a SEPARATE store with rollupTable == "" AND no cache, so it
+	// cannot route to the rollup and cannot reuse the rollup call's cache entry
+	// (cache:nil forces the direct DB scan). The scan is a real usage_events
+	// GROUP BY user_id over the same day.
+	noRollup := &UsageStore{
+		db:           us.db,
+		eventsTable:  us.eventsTable,
+		apiKeysTable: us.apiKeysTable,
+	}
 	onFly, err := noRollup.SelectAggregate(ctx, filter)
 	if err != nil {
 		t.Fatalf("on-the-fly SelectAggregate: %v", err)
 	}
+
 	if len(rollup) != len(onFly) {
 		t.Fatalf("row count mismatch: rollup %d vs on-the-fly %d\nrollup %+v\nonfly %+v",
 			len(rollup), len(onFly), rollup, onFly)
 	}
 	for i := range rollup {
-		if rollup[i] != onFly[i] {
-			t.Fatalf("row %d mismatch (rollup vs on-the-fly):\n  rollup %+v\n  onfly  %+v", i, rollup[i], onFly[i])
+		if !aggEqual(rollup[i], onFly[i]) {
+			t.Fatalf("row %d mismatch (rollup vs genuine scan):\n  rollup %+v\n  onfly  %+v", i, rollup[i], onFly[i])
 		}
 	}
+}
+
+// aggEqual compares every field of two UsageAggregate rows, including
+// failed_count and the 0-projected reasoning/cached tokens.
+func aggEqual(a, b UsageAggregate) bool {
+	return a.Bucket == b.Bucket &&
+		a.APIKeyID == b.APIKeyID &&
+		a.APIKeyPrincipal == b.APIKeyPrincipal &&
+		a.Model == b.Model &&
+		a.Provider == b.Provider &&
+		a.RequestCount == b.RequestCount &&
+		a.FailedCount == b.FailedCount &&
+		a.InputTokens == b.InputTokens &&
+		a.OutputTokens == b.OutputTokens &&
+		a.ReasoningTokens == b.ReasoningTokens &&
+		a.CachedTokens == b.CachedTokens &&
+		a.TotalTokens == b.TotalTokens &&
+		a.CostUSD == b.CostUSD
 }
 
 // TestSelectAggregateDayAlignedRollupUserFilterFallback proves that a non-empty

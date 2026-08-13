@@ -667,11 +667,12 @@ func rollupDayExpr(t time.Time) bool {
 //
 // Locator columns match the on-the-fly path so callers see identical shapes:
 // bucket carries the user id, principal is NULL (a user spans many api_keys, so
-// the api_keys LEFT JOIN is not applicable here), and the numeric projections
-// map 1:1 onto the usage_events sums — except reasoning_tokens and cached_tokens,
-// which the rollup does not track and project as 0. Callers relying on those two
-// fields on the group-by-user path will see 0; the current /litellm/spend/users
-// shape does not surface them, so this is acceptable.
+// the api_keys LEFT JOIN is not applicable here). The rollup does not track
+// reasoning_tokens or cached_tokens, so those project as 0; and failed_count,
+// like the on-the-fly scan, deliberately projects 0 (the rollup's fail_count
+// column holds real counts, but matching the existing on-the-fly behavior keeps
+// the two paths consistent). So on the group-by-user fast path
+// reasoning_tokens, cached_tokens, and failed_count are all 0.
 //
 // stat_day is a DATE pinned to UTC, so the window is inclusive on both ends
 // (>= From_date AND <= To_date). Parameters are bound as explicit YYYY-MM-DD
@@ -682,7 +683,7 @@ const rollupGroupByUserSQL = `
 SELECT r.user_id AS bucket,
        NULL::text AS principal,
        SUM(r.request_count) AS request_count,
-       SUM(r.fail_count)     AS failed_count,
+       0                    AS failed_count,
        SUM(r.input_tokens)   AS input_tokens,
        SUM(r.output_tokens)  AS output_tokens,
        0                     AS reasoning_tokens,
