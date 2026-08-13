@@ -16,6 +16,15 @@ import (
 // sweep (many keys/users) plus a re-tick does not double up.
 var alertSweepRunning sync.Mutex
 
+// shouldWarnDrops reports whether the cumulative usage-flusher drop counter
+// increased between two alert sweeps. Equal/steady counts must NOT warn
+// (anti-spam: a quiescent drain stays silent), and a decrease (counter reset or
+// overflow) must not warn either. Only a strictly-positive delta is worth
+// surfacing.
+func shouldWarnDrops(prev, cur int64) bool {
+	return cur > prev
+}
+
 // alertFingerprintKey joins components into a stable dedup key. Component
 // order matters — changing it would re-key existing alerts (harmless, but
 // avoid unless needed).
@@ -58,11 +67,13 @@ func (h *Handler) runAlertChecks(ctx context.Context) {
 	if flusher != nil {
 		drops := flusher.Drops()
 		h.mu.Lock()
-		increased := drops > h.pgFlusherLastDrops
+		prev := h.pgFlusherLastDrops
 		h.pgFlusherLastDrops = drops
 		h.mu.Unlock()
-		if increased {
-			log.WithField("drops", drops).Warn("postgres usage flusher: usage records dropped since last sweep (queue backpressure)")
+		if shouldWarnDrops(prev, drops) {
+			log.WithField("drops_cumulative", drops).
+				WithField("drops_delta", drops-prev).
+				Warn("postgres usage flusher: usage records dropped since last sweep (queue backpressure)")
 		}
 	}
 
