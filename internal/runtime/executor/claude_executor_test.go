@@ -123,6 +123,66 @@ func TestApplyClaudeHeaders_FastModeBetaIsConditional(t *testing.T) {
 	}
 }
 
+func TestClaudeExecutor_DisabledCloakingDoesNotGenerateIdentity(t *testing.T) {
+	var seenBody []byte
+	var seenHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenBody, _ = io.ReadAll(r.Body)
+		seenHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{DisableClaudeCloakMode: true})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "generic-api-key",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"model":"claude-sonnet-5","input":"hello","max_output_tokens":16}`)
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatClaude,
+		Headers: http.Header{
+			"User-Agent":        {"caller-sdk/1.0"},
+			"Anthropic-Version": {"2023-06-01"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if metadata := gjson.GetBytes(seenBody, "metadata"); metadata.Exists() {
+		t.Fatalf("uncloaked upstream body contains generated metadata: %s", metadata.Raw)
+	}
+	if got := seenHeaders.Get("User-Agent"); got != "caller-sdk/1.0" {
+		t.Fatalf("User-Agent = %q, want caller value", got)
+	}
+	for _, name := range []string{
+		"X-App",
+		"X-Claude-Code-Session-Id",
+		"X-Client-Request-Id",
+		"X-Stainless-Retry-Count",
+		"X-Stainless-Runtime",
+		"X-Stainless-Lang",
+		"X-Stainless-Timeout",
+		"X-Stainless-Package-Version",
+		"X-Stainless-Runtime-Version",
+		"X-Stainless-OS",
+		"X-Stainless-Arch",
+	} {
+		if got := seenHeaders.Get(name); got != "" {
+			t.Errorf("generated identity header %s = %q, want absent", name, got)
+		}
+	}
+	if strings.Contains(string(seenBody), claudeCodeCLIIdentity) {
+		t.Fatalf("uncloaked upstream body contains Claude Code identity: %s", seenBody)
+	}
+}
+
 func assertClaudeCredentialIdentity(t *testing.T, body []byte, headers http.Header, deviceIDs []string, accountUUID string) {
 	t.Helper()
 	userID := gjson.GetBytes(body, "metadata.user_id").String()
