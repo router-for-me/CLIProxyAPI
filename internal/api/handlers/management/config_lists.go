@@ -723,6 +723,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Headers               *map[string]string                  `json:"headers"`
 		SupportPromptCacheKey *bool                               `json:"support-prompt-cache-key"`
 		RequestRetry          *int                                `json:"request-retry"`
+		PassthroughHeaders    *bool                               `json:"passthrough-headers"`
 	}
 	var body struct {
 		Name  *string            `json:"name"`
@@ -769,6 +770,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.RequestRetry != nil {
 		entry.RequestRetry = body.Value.RequestRetry
+	}
+	if body.Value.PassthroughHeaders != nil {
+		entry.PassthroughHeaders = *body.Value.PassthroughHeaders
 	}
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)

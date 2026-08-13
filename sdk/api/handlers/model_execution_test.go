@@ -253,6 +253,33 @@ func TestExecuteModelCarriesEntryAndExitProtocols(t *testing.T) {
 	}
 }
 
+func TestExecuteModelHonorsProviderScopedHeaderPassthrough(t *testing.T) {
+	model := "model-execution-provider-headers"
+	executor := &modelExecutionCaptureExecutor{
+		execute: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+			return coreexecutor.Response{
+				Payload:            []byte(`{"ok":true}`),
+				Headers:            http.Header{"X-Upstream-Request-Id": {"request-1"}},
+				PassthroughHeaders: true,
+			}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, nil)
+
+	resp, errMsg := handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol: "openai",
+		ExitProtocol:  "openai",
+		Model:         model,
+		Body:          []byte(fmt.Sprintf(`{"model":%q}`, model)),
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() error = %+v", errMsg)
+	}
+	if got := resp.Headers.Get("X-Upstream-Request-Id"); got != "request-1" {
+		t.Fatalf("X-Upstream-Request-Id = %q, want request-1", got)
+	}
+}
+
 func TestExecuteModelSkipsOriginatingPluginInterceptors(t *testing.T) {
 	model := "model-execution-skip-origin-model"
 	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))

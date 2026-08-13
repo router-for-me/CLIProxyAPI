@@ -397,9 +397,9 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		_, _ = c.Writer.Write(body)
 		return
 	}
-	if msg != nil && msg.Addon != nil && handlers.PassthroughHeadersEnabled(h.Cfg) {
-		for key, values := range msg.Addon {
-			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) {
+	if msg != nil && msg.Addon != nil && (handlers.PassthroughHeadersEnabled(h.Cfg) || msg.PassthroughHeaders) {
+		for key, values := range handlers.FilterUpstreamHeaders(msg.Addon) {
+			if len(values) == 0 {
 				continue
 			}
 			c.Writer.Header().Del(key)

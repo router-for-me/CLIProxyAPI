@@ -633,6 +633,9 @@ type OpenAICompatibility struct {
 	// RequestRetry optionally overrides the global request-retry for this provider.
 	// Nil or a negative value means "use the global request-retry". 0 disables retries.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
+
+	// PassthroughHeaders forwards this provider's upstream response headers to clients.
+	PassthroughHeaders bool `yaml:"passthrough-headers,omitempty" json:"passthrough-headers,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

@@ -163,7 +163,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 		var bootstrapErr *streamBootstrapError
 		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
-			return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
+			return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause, bootstrapErr.PassthroughHeaders()), nil
 		}
 		return nil, lastErr
 	}

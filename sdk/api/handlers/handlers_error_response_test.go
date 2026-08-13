@@ -171,6 +171,25 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 	}
 }
 
+func TestWriteErrorResponse_ProviderScopedAddonHeadersEnabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+
+	handler := NewBaseAPIHandlers(nil, nil)
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode:         http.StatusTooManyRequests,
+		Error:              errors.New("rate limit"),
+		Addon:              http.Header{"Retry-After": {"2"}},
+		PassthroughHeaders: true,
+	})
+
+	if got := recorder.Header().Get("Retry-After"); got != "2" {
+		t.Fatalf("Retry-After = %q, want provider-scoped passthrough", got)
+	}
+}
+
 func TestWriteErrorResponse_AppliesResponseInterceptor(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

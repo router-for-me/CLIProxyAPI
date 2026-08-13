@@ -86,6 +86,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if !optionalIntEqual(oldEntry.RequestRetry, newEntry.RequestRetry) {
 		details = append(details, fmt.Sprintf("request-retry %s -> %s", formatOptionalInt(oldEntry.RequestRetry), formatOptionalInt(newEntry.RequestRetry)))
 	}
+	if oldEntry.PassthroughHeaders != newEntry.PassthroughHeaders {
+		details = append(details, fmt.Sprintf("passthrough-headers %t -> %t", oldEntry.PassthroughHeaders, newEntry.PassthroughHeaders))
+	}
 	if oldKeyCount != newKeyCount {
 		details = append(details, fmt.Sprintf("api-keys %d -> %d", oldKeyCount, newKeyCount))
 	}

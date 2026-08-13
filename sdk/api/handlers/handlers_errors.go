@@ -90,9 +90,9 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 			c.Writer.Header().Add("Retry-After", value)
 		}
 	}
-	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.Cfg) {
-		for key, values := range msg.Addon {
-			if len(values) == 0 || IsCPAReservedResponseHeader(key) {
+	if msg != nil && msg.Addon != nil && (PassthroughHeadersEnabled(h.Cfg) || msg.PassthroughHeaders) {
+		for key, values := range FilterUpstreamHeaders(msg.Addon) {
+			if len(values) == 0 {
 				continue
 			}
 			c.Writer.Header().Del(key)

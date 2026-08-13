@@ -51,6 +51,16 @@ func TestDiffOpenAICompatibilityPromptCacheKey(t *testing.T) {
 	expectContains(t, changes, "provider updated: provider-a (support-prompt-cache-key false -> true)")
 }
 
+func TestDiffOpenAICompatibilityPassthroughHeaders(t *testing.T) {
+	oldList := []config.OpenAICompatibility{{Name: "provider-a", PassthroughHeaders: false}}
+	newList := []config.OpenAICompatibility{{Name: "provider-a", PassthroughHeaders: true}}
+
+	changes := DiffOpenAICompatibility(oldList, newList)
+	if len(changes) != 1 || !strings.Contains(changes[0], "passthrough-headers false -> true") {
+		t.Fatalf("changes = %v", changes)
+	}
+}
+
 func TestDiffOpenAICompatibilityDuplicateNames(t *testing.T) {
 	oldList := []config.OpenAICompatibility{
 		{Name: "duplicate", SupportPromptCacheKey: false},

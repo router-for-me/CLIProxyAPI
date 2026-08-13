@@ -493,6 +493,7 @@ nonstream-keepalive-interval: 0
 #     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     request-retry: 3 # optional: per-provider override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
+#     passthrough-headers: false # optional: forward this provider's safe upstream response headers
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:

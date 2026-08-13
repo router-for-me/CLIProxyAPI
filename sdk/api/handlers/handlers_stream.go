@@ -76,7 +76,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		return nil, nil, errChan
 	}
 
-	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
+	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg) || streamResult.PassthroughHeaders
 	interceptorHost := h.interceptorHost()
 	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
 	rawStreamHeaders := cloneHeader(streamResult.Headers)
@@ -346,7 +346,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	executedRequest := func() (coreexecutor.Request, coreexecutor.Options) {
 		return afterAuthCapture.apply(req, opts)
 	}
-	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
+	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg) || streamResult.PassthroughHeaders
 	interceptorHost := h.interceptorHost()
 	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
 	// Resolve bootstrap retries and header initialization before returning so the

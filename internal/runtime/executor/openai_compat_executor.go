@@ -97,7 +97,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
-		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
+		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL", passthroughHeaders: e.passthroughHeaders(auth)}
 		return
 	}
 
@@ -193,7 +193,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = e.responseStatusError(auth, httpResp, b)
 		return resp, err
 	}
 	body, err := io.ReadAll(httpResp.Body)
@@ -208,7 +208,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// Translate response back to source format when needed
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, body, &param)
-	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone(), PassthroughHeaders: e.passthroughHeaders(auth)}
 	return resp, nil
 }
 
@@ -220,7 +220,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
-		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
+		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL", passthroughHeaders: e.passthroughHeaders(auth)}
 		return resp, err
 	}
 
@@ -291,13 +291,13 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
-		err = statusErr{code: httpResp.StatusCode, msg: string(body)}
+		err = e.responseStatusError(auth, httpResp, body)
 		return resp, err
 	}
 
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	reporter.EnsurePublished(ctx)
-	resp = cliproxyexecutor.Response{Payload: body, Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: body, Headers: httpResp.Header.Clone(), PassthroughHeaders: e.passthroughHeaders(auth)}
 	return resp, nil
 }
 
@@ -313,7 +313,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
-		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
+		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL", passthroughHeaders: e.passthroughHeaders(auth)}
 		return nil, err
 	}
 
@@ -402,7 +402,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = e.responseStatusError(auth, httpResp, b)
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -426,6 +426,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		defer streamUsage.Publish(ctx, reporter)
 
 		publishStreamError := func(streamErr statusErr, containsPayload bool) {
+			streamErr.headers = httpResp.Header.Clone()
+			streamErr.passthroughHeaders = e.passthroughHeaders(auth)
 			loggedErr := streamErr
 			if containsPayload {
 				loggedErr = statusErr{code: streamErr.code, msg: "upstream stream returned an error payload"}
@@ -564,7 +566,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		streamUsage.Publish(ctx, reporter)
 		reporter.EnsurePublished(ctx)
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), PassthroughHeaders: e.passthroughHeaders(auth), Chunks: out}, nil
 }
 
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -575,7 +577,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
-		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
+		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL", passthroughHeaders: e.passthroughHeaders(auth)}
 		return nil, err
 	}
 
@@ -644,7 +646,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(body)}
+		return nil, e.responseStatusError(auth, httpResp, body)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -681,7 +683,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 			}
 		}
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), PassthroughHeaders: e.passthroughHeaders(auth), Chunks: out}, nil
 }
 
 func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -964,6 +966,24 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 	return nil
 }
 
+func (e *OpenAICompatExecutor) passthroughHeaders(auth *cliproxyauth.Auth) bool {
+	compat := e.resolveCompatConfig(auth)
+	return compat != nil && compat.PassthroughHeaders
+}
+
+func (e *OpenAICompatExecutor) responseStatusError(auth *cliproxyauth.Auth, response *http.Response, body []byte) statusErr {
+	if response == nil {
+		return statusErr{code: http.StatusBadGateway, msg: string(body), passthroughHeaders: e.passthroughHeaders(auth)}
+	}
+	return statusErr{
+		code:               response.StatusCode,
+		msg:                string(body),
+		retryAfter:         helps.RetryAfter(response.Header, time.Now()),
+		headers:            response.Header.Clone(),
+		passthroughHeaders: e.passthroughHeaders(auth),
+	}
+}
+
 func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {
 	if len(payload) == 0 || model == "" {
 		return payload
@@ -1008,9 +1028,11 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 }
 
 type statusErr struct {
-	code       int
-	msg        string
-	retryAfter *time.Duration
+	code               int
+	msg                string
+	retryAfter         *time.Duration
+	headers            http.Header
+	passthroughHeaders bool
 }
 
 func (e statusErr) Error() string {
@@ -1021,3 +1043,5 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+func (e statusErr) Headers() http.Header       { return e.headers.Clone() }
+func (e statusErr) PassthroughHeaders() bool   { return e.passthroughHeaders }

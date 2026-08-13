@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -19,8 +20,9 @@ func discardStreamChunks(ch <-chan cliproxyexecutor.StreamChunk) {
 }
 
 type streamBootstrapError struct {
-	cause   error
-	headers http.Header
+	cause              error
+	headers            http.Header
+	passthroughHeaders bool
 }
 
 func cloneHTTPHeader(headers http.Header) http.Header {
@@ -30,13 +32,18 @@ func cloneHTTPHeader(headers http.Header) http.Header {
 	return headers.Clone()
 }
 
-func newStreamBootstrapError(err error, headers http.Header) error {
+func newStreamBootstrapError(err error, headers http.Header, passthrough ...bool) error {
 	if err == nil {
 		return nil
 	}
+	passthroughHeaders := errorPassthroughHeaders(err)
+	if len(passthrough) > 0 {
+		passthroughHeaders = passthrough[0]
+	}
 	return &streamBootstrapError{
-		cause:   err,
-		headers: cloneHTTPHeader(headers),
+		cause:              err,
+		headers:            cloneHTTPHeader(headers),
+		passthroughHeaders: passthroughHeaders,
 	}
 }
 
@@ -61,14 +68,28 @@ func (e *streamBootstrapError) Headers() http.Header {
 	return cloneHTTPHeader(e.headers)
 }
 
-func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamResult {
+func (e *streamBootstrapError) PassthroughHeaders() bool {
+	return e != nil && e.passthroughHeaders
+}
+
+func streamErrorResult(headers http.Header, err error, passthrough ...bool) *cliproxyexecutor.StreamResult {
 	ch := make(chan cliproxyexecutor.StreamChunk, 1)
 	ch <- cliproxyexecutor.StreamChunk{Err: err}
 	close(ch)
-	return &cliproxyexecutor.StreamResult{
-		Headers: cloneHTTPHeader(headers),
-		Chunks:  ch,
+	passthroughHeaders := errorPassthroughHeaders(err)
+	if len(passthrough) > 0 {
+		passthroughHeaders = passthrough[0]
 	}
+	return &cliproxyexecutor.StreamResult{
+		Headers:            cloneHTTPHeader(headers),
+		PassthroughHeaders: passthroughHeaders,
+		Chunks:             ch,
+	}
+}
+
+func errorPassthroughHeaders(err error) bool {
+	var providerError interface{ PassthroughHeaders() bool }
+	return errors.As(err, &providerError) && providerError != nil && providerError.PassthroughHeaders()
 }
 
 func validateStreamResult(result *cliproxyexecutor.StreamResult, err error) (*cliproxyexecutor.StreamResult, error) {
@@ -113,7 +134,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, ephemeralResult bool) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, passthroughHeaders bool, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, ephemeralResult bool) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -187,7 +208,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			m.recordExecutionResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: true}, auth, ephemeralResult)
 		}
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
+	return &cliproxyexecutor.StreamResult{Headers: headers, PassthroughHeaders: passthroughHeaders, Chunks: out}
 }
 
 func (m *Manager) replaceHomeExecutionLifecycleAuth(lifecycle cliproxyexecutor.ExecutionLifecycle, auth *Auth) {
@@ -346,7 +367,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			result.RetryAfter = retryAfterFromError(bootstrapErr)
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 			discardStreamChunks(streamResult.Chunks)
-			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers, streamResult.PassthroughHeaders)
 		}
 
 		if closed && len(buffered) == 0 {
@@ -357,7 +378,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				lastErr = emptyErr
 				continue
 			}
-			return nil, newStreamBootstrapError(emptyErr, streamResult.Headers)
+			return nil, newStreamBootstrapError(emptyErr, streamResult.Headers, streamResult.PassthroughHeaders)
 		}
 
 		remaining := streamResult.Chunks
@@ -367,7 +388,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			remaining = closedCh
 		}
 		attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, execModel, aliasResult)
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, attemptAliasResult, ephemeralResult), nil
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, streamResult.PassthroughHeaders, buffered, remaining, attemptAliasResult, ephemeralResult), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}

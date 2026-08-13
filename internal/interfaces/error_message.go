@@ -18,6 +18,9 @@ type ErrorMessage struct {
 	// Addon contains upstream headers that may be passed through when enabled.
 	Addon http.Header
 
+	// PassthroughHeaders allows the selected provider to opt into header passthrough.
+	PassthroughHeaders bool
+
 	// DirectResponse reports that Body and Headers were explicitly supplied by a trusted in-process component.
 	DirectResponse bool
 
