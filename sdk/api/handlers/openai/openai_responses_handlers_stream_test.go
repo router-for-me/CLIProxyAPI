@@ -17,7 +17,6 @@ import (
 func TestOpenAIChatStreamOwnsExactlyOneDoneMarker(t *testing.T) {
 	newHandler := func(t *testing.T) (*OpenAIAPIHandler, *httptest.ResponseRecorder, *gin.Context, http.Flusher) {
 		t.Helper()
-		gin.SetMode(gin.TestMode)
 		h := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
 		recorder := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(recorder)
@@ -63,7 +62,6 @@ func TestOpenAIChatStreamOwnsExactlyOneDoneMarker(t *testing.T) {
 func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *httptest.ResponseRecorder, *gin.Context, http.Flusher) {
 	t.Helper()
 
-	gin.SetMode(gin.TestMode)
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
 	h := NewOpenAIResponsesAPIHandler(base)
 

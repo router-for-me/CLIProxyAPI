@@ -23,7 +23,6 @@ import (
 func TestPrepareCodexMultiAgentV2ToolsAtResponsesBoundary(t *testing.T) {
 	t.Parallel()
 
-	gin.SetMode(gin.TestMode)
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOptimizeMultiAgentV2: true}, nil)
 	handler := NewOpenAIResponsesAPIHandler(base)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
@@ -131,7 +130,6 @@ func newResponsesMultiAgentTestHandler(t *testing.T, executor *responsesMultiAge
 }
 
 func TestResponsesWebsocketPreparesCodexMultiAgentV2Tools(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	executor := &websocketDirectCaptureExecutor{provider: "codex"}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
@@ -183,7 +181,6 @@ func TestResponsesWebsocketPreparesCodexMultiAgentV2Tools(t *testing.T) {
 func TestPrepareCodexMultiAgentV2ToolsAtResponsesBoundarySkipsOtherClients(t *testing.T) {
 	t.Parallel()
 
-	gin.SetMode(gin.TestMode)
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOptimizeMultiAgentV2: true}, nil)
 	handler := NewOpenAIResponsesAPIHandler(base)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
