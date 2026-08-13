@@ -726,6 +726,39 @@ func TestXAIExecutorPrepareHonorsInjectXSearchConfig(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorPrepareGrokBuildRequestDoesNotInjectXSearch(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"input":"review the repository",
+			"tools":[
+				{"type":"function","name":"read_file","parameters":{"type":"object"}},
+				{"type":"function","name":"run_terminal_cmd","parameters":{"type":"object"}}
+			]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	}, true)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+
+	if gjson.GetBytes(prepared.body, `tools.#(type=="x_search")`).Exists() {
+		t.Fatalf("Grok Build request gained x_search during normalization: %s", prepared.body)
+	}
+	if gjson.GetBytes(prepared.body, `tool_choice.tools.#(type=="x_search")`).Exists() {
+		t.Fatalf("Grok Build tool choice gained x_search during normalization: %s", prepared.body)
+	}
+	if prepared.filterInternalXSearch {
+		t.Fatal("filterInternalXSearch = true for a request without x_search")
+	}
+}
+
 func TestEnsureXAINativeXSearchTool(t *testing.T) {
 	t.Parallel()
 
@@ -2579,6 +2612,112 @@ func TestXAIExecutorExecuteStreamNormalizesReasoningTextEvents(t *testing.T) {
 	partDoneIndex := strings.Index(output, `"type":"response.reasoning_summary_part.done"`)
 	if textDoneIndex < 0 || partDoneIndex < 0 || textDoneIndex > partDoneIndex {
 		t.Fatalf("reasoning done events are out of order: %s", output)
+	}
+}
+
+func TestXAIExecutorExecuteStreamNormalizesResponseEnvelopes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"resp_1\",\"created_at\":1}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.in_progress\",\"sequence_number\":2,\"response\":{\"id\":\"resp_1\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"id\":\"resp_1\",\"model\":\"upstream-model\",\"object\":\"custom-response\",\"status\":\"completed\",\"background\":true,\"error\":{\"code\":\"kept\"},\"output\":[{\"id\":\"msg_1\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.6",
+		Payload: []byte(`{"model":"grok-4.6","input":"hello"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatCodex,
+		Stream:         true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	events := make(map[string]gjson.Result)
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		payload := bytes.TrimSpace(chunk.Payload)
+		if !bytes.HasPrefix(payload, []byte("data:")) {
+			continue
+		}
+		event := gjson.ParseBytes(bytes.TrimSpace(payload[len("data:"):]))
+		events[event.Get("type").String()] = event
+	}
+
+	for _, eventType := range []string{"response.created", "response.in_progress"} {
+		response := events[eventType].Get("response")
+		if got := response.Get("model").String(); got != "grok-4.6" {
+			t.Errorf("%s model = %q, want grok-4.6", eventType, got)
+		}
+		if got := response.Get("object").String(); got != "response" {
+			t.Errorf("%s object = %q, want response", eventType, got)
+		}
+		if got := response.Get("status").String(); got != "in_progress" {
+			t.Errorf("%s status = %q, want in_progress", eventType, got)
+		}
+		if response.Get("background").Bool() {
+			t.Errorf("%s background = true, want false", eventType)
+		}
+		if errorValue := response.Get("error"); !errorValue.Exists() || errorValue.Type != gjson.Null {
+			t.Errorf("%s error = %s, want null", eventType, errorValue.Raw)
+		}
+		if output := response.Get("output"); !output.IsArray() || len(output.Array()) != 0 {
+			t.Errorf("%s output = %s, want []", eventType, output.Raw)
+		}
+	}
+
+	completed := events["response.completed"].Get("response")
+	if completed.Get("model").String() != "upstream-model" ||
+		completed.Get("object").String() != "custom-response" ||
+		!completed.Get("background").Bool() ||
+		completed.Get("error.code").String() != "kept" ||
+		completed.Get("output.0.id").String() != "msg_1" {
+		t.Fatalf("completed response fields were overwritten: %s", completed.Raw)
+	}
+}
+
+func TestXAINormalizeResponseEnvelopeStatusDefaults(t *testing.T) {
+	tests := []struct {
+		eventType string
+		want      string
+	}{
+		{eventType: "response.created", want: "in_progress"},
+		{eventType: "response.completed", want: "completed"},
+		{eventType: "response.failed", want: "failed"},
+		{eventType: "response.cancelled", want: "cancelled"},
+		{eventType: "response.incomplete", want: "incomplete"},
+		{eventType: "response.queued", want: "queued"},
+	}
+	for _, test := range tests {
+		t.Run(test.eventType, func(t *testing.T) {
+			raw := []byte(`{"type":"` + test.eventType + `","response":{}}`)
+			normalized := normalizeResponsesStreamEnvelope(raw, "grok-4.6")
+			if got := gjson.GetBytes(normalized, "response.status").String(); got != test.want {
+				t.Fatalf("status = %q, want %q; payload=%s", got, test.want, normalized)
+			}
+		})
+	}
+
+	for _, raw := range [][]byte{
+		[]byte(`{"type":"keepalive"}`),
+		[]byte(`{"type":`),
+		[]byte(`{"type":"response.created","response":null}`),
+		[]byte(`{"type":"response.created","response":[]}`),
+	} {
+		if got := normalizeResponsesStreamEnvelope(raw, "grok-4.6"); !bytes.Equal(got, raw) {
+			t.Errorf("non-object response changed: input=%s output=%s", raw, got)
+		}
 	}
 }
 

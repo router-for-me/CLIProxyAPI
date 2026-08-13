@@ -853,6 +853,57 @@ func xaiPatchCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]by
 	return patched
 }
 
+// normalizeResponsesStreamEnvelope fills stable Responses fields that some
+// xAI streams omit. Grok Build deserializes every response envelope, including
+// intermediate events, so a missing required field can terminate the agent
+// before it receives the completed response.
+func normalizeResponsesStreamEnvelope(eventData []byte, model string) []byte {
+	if !gjson.ValidBytes(eventData) || !gjson.GetBytes(eventData, "response").IsObject() {
+		return eventData
+	}
+
+	normalized := eventData
+	setStringIfMissing := func(field, value string) {
+		path := "response." + field
+		if gjson.GetBytes(normalized, path).Exists() {
+			return
+		}
+		normalized, _ = sjson.SetBytes(normalized, path, value)
+	}
+	setRawIfMissing := func(field string, value []byte) {
+		path := "response." + field
+		if gjson.GetBytes(normalized, path).Exists() {
+			return
+		}
+		normalized, _ = sjson.SetRawBytes(normalized, path, value)
+	}
+
+	setStringIfMissing("model", model)
+	setStringIfMissing("object", "response")
+	setStringIfMissing("status", xaiResponseStatusForEvent(gjson.GetBytes(eventData, "type").String()))
+	setRawIfMissing("background", []byte("false"))
+	setRawIfMissing("error", []byte("null"))
+	setRawIfMissing("output", []byte("[]"))
+	return normalized
+}
+
+func xaiResponseStatusForEvent(eventType string) string {
+	switch eventType {
+	case "response.completed":
+		return "completed"
+	case "response.failed":
+		return "failed"
+	case "response.cancelled":
+		return "cancelled"
+	case "response.incomplete":
+		return "incomplete"
+	case "response.queued":
+		return "queued"
+	default:
+		return "in_progress"
+	}
+}
+
 // xaiFreeUsageExhaustedCooldown is the free-tier rolling window advertised by
 // cli-chat-proxy ("Usage resets over a rolling 24-hour window").
 const xaiFreeUsageExhaustedCooldown = 24 * time.Hour

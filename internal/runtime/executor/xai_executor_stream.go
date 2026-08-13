@@ -109,6 +109,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				eventDataList := xaiNormalizeReasoningSummaryDataEvents(bytes.TrimSpace(line[len(xaiDataTag):]))
 				hasPendingEventLine := pendingEventLine != nil
 				for i, eventData := range eventDataList {
+					eventData = normalizeResponsesStreamEnvelope(eventData, prepared.baseModel)
 					eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
 					eventData = responseFilter.apply(eventData)
 					if len(eventData) == 0 {

@@ -22,6 +22,7 @@ type oaiToResponsesStateReasoning struct {
 type oaiToResponsesState struct {
 	Seq              int
 	ResponseID       string
+	Model            string
 	Created          int64
 	Started          bool
 	CompletedEmitted bool
@@ -68,10 +69,11 @@ func emitRespEvent(event string, payload []byte) []byte {
 }
 
 func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte, nextSeq func() int) []byte {
-	completed := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`)
+	completed := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"model":"","output":[]}}`)
 	completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
 	completed, _ = sjson.SetBytes(completed, "response.id", st.ResponseID)
 	completed, _ = sjson.SetBytes(completed, "response.created_at", st.Created)
+	completed, _ = sjson.SetBytes(completed, "response.model", st.Model)
 	// Inject original request fields into response as per docs/response.completed.json
 	if requestRawJSON != nil {
 		req := gjson.ParseBytes(requestRawJSON)
@@ -216,6 +218,7 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &oaiToResponsesState{
+			Model:           modelName,
 			FuncArgsBuf:     make(map[string]*strings.Builder),
 			FuncNames:       make(map[string]string),
 			FuncCallIDs:     make(map[string]string),
@@ -234,6 +237,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		}
 	}
 	st := (*param).(*oaiToResponsesState)
+	if st.Model == "" {
+		st.Model = modelName
+	}
 
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
@@ -403,7 +409,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		}
 		out = append(out, emitRespEvent("response.created", created))
 
-		inprog := []byte(`{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","output":[]}}`)
+		inprog := []byte(`{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
 		inprog, _ = sjson.SetBytes(inprog, "sequence_number", nextSeq())
 		inprog, _ = sjson.SetBytes(inprog, "response.id", st.ResponseID)
 		inprog, _ = sjson.SetBytes(inprog, "response.created_at", st.Created)

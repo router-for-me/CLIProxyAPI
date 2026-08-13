@@ -140,6 +140,18 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompleted
 			if got := inProgressData.Get("response.model").String(); got != "gpt-5.4" {
 				t.Fatalf("response.in_progress models = %q, want gpt-5.4", got)
 			}
+			for eventName, eventData := range map[string]gjson.Result{
+				"response.created":     createdData,
+				"response.in_progress": inProgressData,
+				"response.completed":   completedData,
+			} {
+				response := eventData.Get("response")
+				for _, field := range []string{"model", "object", "status", "background", "error", "output"} {
+					if !response.Get(field).Exists() {
+						t.Errorf("%s response missing %s: %s", eventName, field, response.Raw)
+					}
+				}
+			}
 
 			// Missing upstream usage should stay omitted in the final completed event.
 			if !tt.hasUsage {
