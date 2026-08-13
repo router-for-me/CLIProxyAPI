@@ -425,8 +425,15 @@ func TestExecuteModelStreamStartupError(t *testing.T) {
 	if errMsg.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusInternalServerError)
 	}
-	if errMsg.Error == nil || errMsg.Error.Error() != "startup failed" {
-		t.Fatalf("error = %v, want startup failed", errMsg.Error)
+	if errMsg.Error == nil {
+		t.Fatal("ExecuteModelStream() error = nil, want startup error")
+	}
+	got := errMsg.Error.Error()
+	if !strings.HasPrefix(got, "startup failed") {
+		t.Fatalf("error = %q, want prefix %q", got, "startup failed")
+	}
+	if !strings.Contains(got, "attempted routes: [codex:error]") {
+		t.Fatalf("error = %q, want sanitized route summary %q", got, "attempted routes: [codex:error]")
 	}
 	if stream.Chunks != nil {
 		t.Fatal("stream chunks created for startup error")

@@ -696,6 +696,12 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	entry := selectorLogEntry(ctx)
+	if opts.Metadata == nil {
+		opts.Metadata = make(map[string]any)
+	}
+	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
+	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
+
 	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
 	now := time.Now()
 	excluded := excludedAuthIDsFromOptions(opts)
@@ -711,14 +717,6 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
 		return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	}
-	// Record the affinity selection namespace so OnResult keys the session cache
-	// identically to how selection read it (mixed pools select under the literal
-	// pool key, not the auth's actual provider). The metadata map is request-local.
-	if opts.Metadata == nil {
-		opts.Metadata = make(map[string]any)
-	}
-	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
-	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
 
 	// A single availability pass serves both lookups: the bound credential is validated against
 	// every priority tier, while the fallback selector keeps seeing only the highest tier.

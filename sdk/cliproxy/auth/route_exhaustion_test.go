@@ -1,0 +1,474 @@
+package auth
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	executionregistry "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+)
+
+type routeExhaustionTestExecutor struct {
+	provider   string
+	failErrors map[string]error
+}
+
+func newRouteExhaustionTestExecutor(provider string) *routeExhaustionTestExecutor {
+	return &routeExhaustionTestExecutor{
+		provider:   provider,
+		failErrors: make(map[string]error),
+	}
+}
+
+func (e *routeExhaustionTestExecutor) Identifier() string                { return e.provider }
+func (*routeExhaustionTestExecutor) ShouldPrepareRequestAuth(*Auth) bool { return false }
+func (e *routeExhaustionTestExecutor) PrepareRequestAuth(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+func (e *routeExhaustionTestExecutor) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if err, ok := e.failErrors[auth.ID]; ok && err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	return cliproxyexecutor.Response{Payload: []byte(`{"choices":[{"message":{"content":"ok"}}]}`)}, nil
+}
+func (e *routeExhaustionTestExecutor) ExecuteStream(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if err, ok := e.failErrors[auth.ID]; ok && err != nil {
+		return nil, err
+	}
+	ch := make(chan cliproxyexecutor.StreamChunk, 1)
+	ch <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"choices":[{"delta":{"content":"ok"}}]}\n\n`)}
+	close(ch)
+	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+}
+func (e *routeExhaustionTestExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+func (*routeExhaustionTestExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+func (e *routeExhaustionTestExecutor) CountTokens(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if err, ok := e.failErrors[auth.ID]; ok && err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	return cliproxyexecutor.Response{}, nil
+}
+
+func registerRouteTestAuth(t *testing.T, mgr *Manager, provider string, model string, errToReturn error) string {
+	t.Helper()
+	authID := fmt.Sprintf("%s-auth-%s", provider, uuid.NewString())
+	auth := &Auth{
+		ID:         authID,
+		Provider:   provider,
+		Attributes: map[string]string{"disable_cooling": "true"},
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	if _, err := mgr.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	return authID
+}
+
+// A. Non-stream public exhaustion with three routes/classes/statuses
+func TestRouteExhaustion_ThreeRoutes(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetRetryConfig(3, 5*time.Second, 3)
+
+	execClaude := newRouteExhaustionTestExecutor("claude")
+	execGemini := newRouteExhaustionTestExecutor("gemini")
+	execCodex := newRouteExhaustionTestExecutor("codex")
+
+	mgr.RegisterExecutor(execClaude)
+	mgr.RegisterExecutor(execGemini)
+	mgr.RegisterExecutor(execCodex)
+
+	model := "test-model-" + uuid.NewString()
+
+	id1 := registerRouteTestAuth(t, mgr, "claude", model, nil)
+	id2 := registerRouteTestAuth(t, mgr, "gemini", model, nil)
+	id3 := registerRouteTestAuth(t, mgr, "codex", model, nil)
+
+	execClaude.failErrors[id1] = &Error{Code: "rate_limit", Message: "429 Rate Limit", HTTPStatus: 429}
+	execGemini.failErrors[id2] = &Error{Code: "rate_limit", Message: "429 Rate Limit", HTTPStatus: 429}
+	execCodex.failErrors[id3] = &Error{Code: "rate_limit", Message: "429 Rate Limit", HTTPStatus: 429}
+
+	_, err := mgr.Execute(context.Background(), []string{"claude", "gemini", "codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatalf("Execute() expected error, got nil")
+	}
+
+	errStr := err.Error()
+	if !strings.Contains(errStr, "attempted routes:") || !strings.Contains(errStr, "claude:429") || !strings.Contains(errStr, "gemini:429") || !strings.Contains(errStr, "codex:429") {
+		t.Errorf("unexpected error string: %s", errStr)
+	}
+
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		t.Fatalf("errors.As(*Error) failed")
+	}
+	if authErr.HTTPStatus != 429 {
+		t.Errorf("expected status 429, got %d", authErr.HTTPStatus)
+	}
+}
+
+// B. Security redaction
+func TestRouteExhaustion_SecurityRedaction(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetRetryConfig(3, 5*time.Second, 3)
+
+	exec := newRouteExhaustionTestExecutor("gemini")
+	mgr.RegisterExecutor(exec)
+
+	model := "redaction-model-" + uuid.NewString()
+
+	secretAuthID := "secret-auth-id-999"
+	fakeKey := "sk-secret-api-key-12345"
+	emailFilename := "user@secret.com.json"
+	baseURL := "https://internal.secret.net/v1"
+	privateModel := "private-alias-99"
+
+	auth := &Auth{
+		ID:         secretAuthID,
+		Provider:   "gemini",
+		Attributes: map[string]string{"api_key": fakeKey, "credential_file": emailFilename, "base_url": baseURL, "disable_cooling": "true"},
+		Metadata:   map[string]any{"private_model": privateModel},
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	if _, err := mgr.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	exec.failErrors[secretAuthID] = &Error{Code: "upstream_error", Message: "502 Bad Gateway to " + baseURL, HTTPStatus: 502}
+
+	_, err := mgr.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatalf("Execute() expected error")
+	}
+
+	summaryIdx := strings.Index(err.Error(), "attempted routes:")
+	if summaryIdx == -1 {
+		t.Fatalf("summary missing in error: %s", err.Error())
+	}
+	summaryPart := err.Error()[summaryIdx:]
+
+	sensitiveTokens := []string{secretAuthID, fakeKey, emailFilename, baseURL, privateModel}
+	for _, tok := range sensitiveTokens {
+		if strings.Contains(summaryPart, tok) {
+			t.Errorf("sensitive token %q leaked in summary part: %s", tok, summaryPart)
+		}
+	}
+}
+
+// C. Duplicate and Cap behavior
+func TestRouteExhaustion_DedupAndCap(t *testing.T) {
+	tracker := newRouteAttemptTracker()
+
+	// Dedup test
+	authGemini := &Auth{Provider: "gemini"}
+	authCodex := &Auth{Provider: "codex"}
+	err502 := &Error{HTTPStatus: 502}
+	err429 := &Error{HTTPStatus: 429}
+
+	tracker.Record(authGemini, err502)
+	tracker.Record(authGemini, err502) // dup
+	tracker.Record(authCodex, err429)
+	tracker.Record(authCodex, err429) // dup
+
+	if summary := tracker.Summary(); summary != "attempted routes: [gemini:502, codex:429]" {
+		t.Errorf("dedup failed: %s", summary)
+	}
+
+	// Cap test (> 16 unique attempts)
+	bigTracker := newRouteAttemptTracker()
+	for i := 0; i < 20; i++ {
+		provider := fmt.Sprintf("provider-%d", i)
+		bigTracker.Record(&Auth{Provider: provider}, &Error{HTTPStatus: 400 + i})
+	}
+	bigSummary := bigTracker.Summary()
+	if !strings.Contains(bigSummary, "... (+4 omitted)") {
+		t.Errorf("expected omitted count in summary, got: %s", bigSummary)
+	}
+}
+
+// D. No-candidate path: exact existing auth_not_found behavior unchanged
+func TestRouteExhaustion_NoCandidatePath(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+	_, err := mgr.Execute(context.Background(), []string{"unknown-provider"}, cliproxyexecutor.Request{Model: "nonexistent"}, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if strings.Contains(err.Error(), "attempted routes:") {
+		t.Errorf("no candidate path should not contain attempted routes summary, got: %s", err.Error())
+	}
+}
+
+// E. ExecuteCount full exhaustion summary
+func TestRouteExhaustion_ExecuteCount(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+	exec := newRouteExhaustionTestExecutor("openai")
+	mgr.RegisterExecutor(exec)
+
+	model := "count-model-" + uuid.NewString()
+	authID := registerRouteTestAuth(t, mgr, "openai", model, nil)
+	exec.failErrors[authID] = &Error{Code: "bad_gateway", Message: "502 Bad Gateway", HTTPStatus: 502}
+
+	_, err := mgr.ExecuteCount(context.Background(), []string{"openai"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "attempted routes: [openai:502]") {
+		t.Errorf("ExecuteCount error missing summary: %s", err.Error())
+	}
+}
+
+// F. Pre-commit ExecuteStream exhaustion summary
+func TestRouteExhaustion_ExecuteStream(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+	exec := newRouteExhaustionTestExecutor("claude")
+	mgr.RegisterExecutor(exec)
+
+	model := "stream-model-" + uuid.NewString()
+	authID := registerRouteTestAuth(t, mgr, "claude", model, nil)
+	exec.failErrors[authID] = &Error{Code: "rate_limit", Message: "429 Too Many Requests", HTTPStatus: 429}
+
+	_, err := mgr.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatalf("ExecuteStream() expected error")
+	}
+	if !strings.Contains(err.Error(), "attempted routes: [claude:429]") {
+		t.Errorf("ExecuteStream error missing summary, got err=%v", err)
+	}
+}
+
+// G. Healthy fallback success: no summary leaks into successful response
+func TestRouteExhaustion_HealthyFallbackSuccess(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+	execClaude := newRouteExhaustionTestExecutor("claude")
+	execGemini := newRouteExhaustionTestExecutor("gemini")
+
+	mgr.RegisterExecutor(execClaude)
+	mgr.RegisterExecutor(execGemini)
+
+	model := "fallback-model-" + uuid.NewString()
+	id1 := registerRouteTestAuth(t, mgr, "claude", model, nil)
+	_ = registerRouteTestAuth(t, mgr, "gemini", model, nil)
+
+	execClaude.failErrors[id1] = &Error{Code: "bad_gateway", Message: "502 Bad Gateway", HTTPStatus: 502}
+
+	resp, err := mgr.Execute(context.Background(), []string{"claude", "gemini"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("Execute() unexpected error = %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatalf("empty response payload")
+	}
+}
+
+// H. Request-invalid / cancellation early abort remains unchanged
+func TestRouteExhaustion_RequestInvalidEarlyAbort(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+	exec := newRouteExhaustionTestExecutor("claude")
+	mgr.RegisterExecutor(exec)
+
+	model := "invalid-model-" + uuid.NewString()
+	id1 := registerRouteTestAuth(t, mgr, "claude", model, nil)
+	id2 := registerRouteTestAuth(t, mgr, "claude", model, nil)
+
+	exec.failErrors[id1] = &Error{Code: "invalid_request", Message: "400 Bad Request", HTTPStatus: 400}
+	exec.failErrors[id2] = &Error{Code: "invalid_request", Message: "400 Bad Request", HTTPStatus: 400}
+
+	_, err := mgr.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr.HTTPStatus != 400 {
+		t.Errorf("expected status 400, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "attempted routes:") {
+		t.Errorf("request invalid early abort should not contain attempted routes summary, got: %s", err.Error())
+	}
+}
+
+type routeExhaustionHomeDispatcher struct {
+	responses map[int]string
+	callCount int
+}
+
+func (d *routeExhaustionHomeDispatcher) HeartbeatOK() bool       { return true }
+func (d *routeExhaustionHomeDispatcher) AbortAmbiguousDispatch() {}
+
+func (d *routeExhaustionHomeDispatcher) RPopAuth(_ context.Context, _ string, _ string, _ http.Header, _ int) ([]byte, error) {
+	resp, ok := d.responses[d.callCount]
+	d.callCount++
+	if !ok || resp == "" {
+		if d.callCount > 1 && d.responses[d.callCount-2] != "" {
+			return []byte(d.responses[d.callCount-2]), nil
+		}
+		return nil, errors.New("no home auth available")
+	}
+	return []byte(resp), nil
+}
+
+func TestRouteExhaustion_HomeMode(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	mgr.SetRetryConfig(3, 5*time.Second, 3)
+
+	execClaude := newRouteExhaustionTestExecutor("claude")
+	execGemini := newRouteExhaustionTestExecutor("gemini")
+	mgr.RegisterExecutor(execClaude)
+	mgr.RegisterExecutor(execGemini)
+
+	model := "home-model-" + uuid.NewString()
+
+	authID1 := "home-secret-auth-1"
+	key1 := "sk-home-secret-key-111"
+	file1 := "user1@home-secret.com.json"
+	url1 := "https://home1.secret.net/v1"
+	alias1 := "secret-home-alias-1"
+
+	authID2 := "home-secret-auth-2"
+	key2 := "sk-home-secret-key-222"
+	file2 := "user2@home-secret.com.json"
+	url2 := "https://home2.secret.net/v1"
+	alias2 := "secret-home-alias-2"
+
+	payload1 := fmt.Sprintf(`{"provider":"claude","auth":{"id":%q,"provider":"claude","status":"active","attributes":{"api_key":%q,"credential_file":%q,"base_url":%q,"disable_cooling":"true"},"metadata":{"private_model":%q}}}`, authID1, key1, file1, url1, alias1)
+	payload2 := fmt.Sprintf(`{"provider":"gemini","auth":{"id":%q,"provider":"gemini","status":"active","attributes":{"api_key":%q,"credential_file":%q,"base_url":%q,"disable_cooling":"true"},"metadata":{"private_model":%q}}}`, authID2, key2, file2, url2, alias2)
+
+	execClaude.failErrors[authID1] = &Error{Code: "rate_limit", Message: "429 Rate Limit", HTTPStatus: 429}
+	execGemini.failErrors[authID2] = &Error{Code: "bad_gateway", Message: "502 Bad Gateway", HTTPStatus: 502}
+
+	t.Run("Exhaustion", func(t *testing.T) {
+		dispatcher := &routeExhaustionHomeDispatcher{
+			responses: map[int]string{
+				0: payload1,
+				1: payload2,
+			},
+		}
+		mgr.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+
+		_, err := mgr.Execute(context.Background(), []string{"claude", "gemini"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		if err == nil {
+			t.Fatalf("Execute() expected error on home route exhaustion")
+		}
+
+		errStr := err.Error()
+		summaryIdx := strings.Index(errStr, "attempted routes:")
+		if summaryIdx == -1 {
+			t.Fatalf("summary missing in home route exhaustion error: %s", errStr)
+		}
+		summaryPart := errStr[summaryIdx:]
+
+		if !strings.Contains(summaryPart, "claude:429") || !strings.Contains(summaryPart, "gemini:502") {
+			t.Errorf("expected attempted routes [claude:429, gemini:502] in summary, got: %s", summaryPart)
+		}
+
+		var authErr *Error
+		if !errors.As(err, &authErr) || authErr == nil {
+			t.Fatalf("errors.As(*Error) failed on home route exhaustion error")
+		}
+		if authErr.HTTPStatus != 502 {
+			t.Errorf("expected preserved cause status 502, got %d", authErr.HTTPStatus)
+		}
+		if authErr.Code != "bad_gateway" {
+			t.Errorf("expected preserved cause code bad_gateway, got %s", authErr.Code)
+		}
+
+		secrets := []string{authID1, authID2, key1, key2, file1, file2, url1, url2, alias1, alias2}
+		for _, sec := range secrets {
+			if strings.Contains(summaryPart, sec) {
+				t.Errorf("sensitive secret %q leaked in home route summary: %s", sec, summaryPart)
+			}
+		}
+	})
+
+	t.Run("HealthyFallbackSuccess", func(t *testing.T) {
+		execGemini.failErrors[authID2] = nil
+		dispatcher := &routeExhaustionHomeDispatcher{
+			responses: map[int]string{
+				0: payload1,
+				1: payload2,
+			},
+		}
+		mgr.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+
+		resp, err := mgr.Execute(context.Background(), []string{"claude", "gemini"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		if err != nil {
+			t.Fatalf("Execute() unexpected error on healthy home fallback: %v", err)
+		}
+		if len(resp.Payload) == 0 {
+			t.Errorf("expected non-empty payload on home fallback success")
+		}
+	})
+}
+
+type routeExhaustionHomeNoModelDispatcher struct {
+	payloads []string
+	count    int
+}
+
+func (d *routeExhaustionHomeNoModelDispatcher) HeartbeatOK() bool       { return true }
+func (d *routeExhaustionHomeNoModelDispatcher) AbortAmbiguousDispatch() {}
+func (d *routeExhaustionHomeNoModelDispatcher) RPopAuth(_ context.Context, _ string, _ string, _ http.Header, _ int) ([]byte, error) {
+	if d.count >= len(d.payloads) {
+		return nil, errors.New("no home auth available")
+	}
+	next := d.payloads[d.count]
+	d.count++
+	if next == "" {
+		return nil, errors.New("no home auth available")
+	}
+	return []byte(next), nil
+}
+
+// I. Home no-execution-models path: a dispatched auth blocked for its upstream model yields a
+// sanitized attempted-routes diagnostic (records the no_model outcome) instead of an empty error.
+func TestRouteExhaustion_HomeNoExecutionModelsDiagnostic(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	mgr.SetRetryConfig(3, 5*time.Second, 3)
+
+	exec := newRouteExhaustionTestExecutor("claude")
+	mgr.RegisterExecutor(exec)
+
+	authID := "home-no-model-auth"
+	fakeKey := "sk-home-no-model-secret-123"
+	credFile := "user-no-model@home-secret.com.json"
+
+	payload := fmt.Sprintf(
+		`{"model":"upstream-blocked-1","provider":"claude","auth":{"id":%q,"provider":"claude","status":"active","attributes":{"api_key":%q,"credential_file":%q,"disable_cooling":"true"},"unavailable":true,"next_retry_after":"2030-01-02T03:04:05Z"}}`,
+		authID, fakeKey, credFile,
+	)
+
+	dispatcher := &routeExhaustionHomeNoModelDispatcher{payloads: []string{payload}}
+	mgr.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+
+	_, err := mgr.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-3-5-sonnet"}, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatalf("Execute() expected error on home no-execution-models route")
+	}
+
+	summaryIdx := strings.Index(err.Error(), "attempted routes:")
+	if summaryIdx == -1 {
+		t.Fatalf("no-model home path missing attempted-routes diagnostic: %s", err.Error())
+	}
+	summaryPart := err.Error()[summaryIdx:]
+
+	if !strings.Contains(summaryPart, "claude:") {
+		t.Errorf("expected claude provider recorded in summary, got: %s", summaryPart)
+	}
+	for _, secret := range []string{authID, fakeKey, credFile} {
+		if strings.Contains(summaryPart, secret) {
+			t.Errorf("sensitive token %q leaked in home no-model summary: %s", secret, summaryPart)
+		}
+	}
+}

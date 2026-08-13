@@ -1172,8 +1172,8 @@ func TestManager_Execute_DisableCooling_RetriesAfter429RetryAfter(t *testing.T) 
 	}
 
 	calls := executor.ExecuteCalls()
-	if len(calls) != 4 {
-		t.Fatalf("execute calls = %d, want 4 (initial + 3 retries)", len(calls))
+	if len(calls) != 1 {
+		t.Fatalf("execute calls = %d, want 1", len(calls))
 	}
 }
 

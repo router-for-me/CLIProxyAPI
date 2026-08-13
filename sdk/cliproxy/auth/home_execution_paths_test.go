@@ -734,7 +734,7 @@ func TestHomeStreamDoesNotRevisitEmptyAuthAfterAnotherFailure(t *testing.T) {
 	executor := &alternatingEmptyHomeExecutor{}
 	manager.RegisterExecutor(executor)
 
-	_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-execution"}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{Stream: true}, 0)
+	_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-execution"}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{Stream: true}, 0, nil)
 	if errExecute == nil || !strings.Contains(errExecute.Error(), "transient stream failure") {
 		t.Fatalf("executeStreamMixedOnce() error = %v, want last transient failure", errExecute)
 	}

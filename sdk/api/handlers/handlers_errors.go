@@ -51,7 +51,7 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 		modelText = "unknown"
 	}
 
-	baseMessage := strings.TrimSpace(authErr.Message)
+	baseMessage := strings.TrimSpace(err.Error())
 	if baseMessage == "" {
 		baseMessage = "no auth available"
 	}
