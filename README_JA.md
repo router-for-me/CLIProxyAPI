@@ -126,7 +126,7 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 - Claude Codeのマルチアカウント負荷分散
 - OpenAI Codexのマルチアカウント負荷分散
 - Grok Buildのマルチアカウント負荷分散
-- 設定によるOpenAI互換アップストリームプロバイダー（例：OpenRouter）
+- 設定によるOpenAI互換アップストリームプロバイダー（例：OpenRouter、OrcaRouter）
 - プロキシ埋め込み用の再利用可能なGo SDK（`docs/sdk-usage.md`を参照）
 
 ## はじめに

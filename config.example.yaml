@@ -523,6 +523,16 @@ nonstream-keepalive-interval: 0
 #         alias: "claude-opus-4.66"
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
+#   - name: "orcarouter" # OpenAI-compatible gateway; see https://www.orcarouter.ai
+#     disabled: false # optional: set to true to disable this provider without removing it
+#     prefix: "orca" # optional: require calls like "orca/orcarouter-auto" to target this provider's credentials
+#     base-url: "https://api.orcarouter.ai/v1" # The base URL of the provider.
+#     api-key-entries:
+#       - api-key: "sk-orca-..." # get a key at https://api.orcarouter.ai
+#     models: # The models supported by the provider.
+#       - name: "orcarouter/auto" # per-request virtual router: routes each call to the best model for the task
+#         alias: "orcarouter-auto"
+#         display-name: "OrcaRouter Auto"
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
