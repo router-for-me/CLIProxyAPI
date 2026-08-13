@@ -493,6 +493,187 @@ func TestStreamFirstChunkTimeout_ConfigAndMetadata(t *testing.T) {
 	}
 }
 
+type ttftRefreshExecutor struct {
+	id string
+
+	mu             sync.Mutex
+	streamCalls    int
+	refreshCalls   int
+	tokenInvalid   map[string]struct{}
+	refreshTokens  map[string]string
+	delayedStreams []string // auth IDs whose retry stream must delay its first chunk
+	staleDelay     time.Duration
+	retryDelay     time.Duration
+}
+
+func (e *ttftRefreshExecutor) Identifier() string { return e.id }
+
+func (e *ttftRefreshExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not implemented"}
+}
+
+func (e *ttftRefreshExecutor) ExecuteStream(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.streamCalls++
+	call := e.streamCalls
+	token := authAccessToken(auth)
+	_, invalid := e.tokenInvalid[token]
+	delayed := false
+	for _, id := range e.delayedStreams {
+		if id == auth.ID {
+			delayed = true
+			break
+		}
+	}
+	staleDelay := e.staleDelay
+	retryDelay := e.retryDelay
+	e.mu.Unlock()
+
+	if invalid {
+		// The stale-token attempt consumes TTFT budget before failing, so a
+		// shared (non-fresh) timer would be near-firing by the time the retry
+		// starts its own (possibly long) first-chunk wait.
+		if call == 1 && staleDelay > 0 {
+			select {
+			case <-time.After(staleDelay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return nil, &Error{
+			HTTPStatus: http.StatusUnauthorized,
+			Message:    "Your authentication token has been invalidated. Please try signing in again.",
+		}
+	}
+
+	if delayed && call > 1 && retryDelay > 0 {
+		select {
+		case <-time.After(retryDelay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	ch := make(chan cliproxyexecutor.StreamChunk, 1)
+	ch <- cliproxyexecutor.StreamChunk{Payload: []byte(auth.ID + ":" + token)}
+	close(ch)
+	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *ttftRefreshExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.refreshCalls++
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	next := e.refreshTokens[auth.ID]
+	if next == "" {
+		next = "refreshed-access-token"
+	}
+	auth.Metadata["access_token"] = next
+	return auth, nil
+}
+
+func (e *ttftRefreshExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *ttftRefreshExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *ttftRefreshExecutor) StreamCalls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.streamCalls
+}
+
+func (e *ttftRefreshExecutor) RefreshCalls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.refreshCalls
+}
+
+func newTTFTRefreshFixture(t *testing.T, staleDelay, retryDelay time.Duration) (*Manager, *ttftRefreshExecutor, *Auth, string) {
+	t.Helper()
+
+	model := "gpt-5.5"
+	primary := &Auth{
+		ID:       "ttft-primary",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"access_token":  "ttft-stale-token",
+			"refresh_token": "ttft-refresh-token",
+		},
+	}
+
+	executor := &ttftRefreshExecutor{
+		id: "codex",
+		tokenInvalid: map[string]struct{}{
+			"ttft-stale-token": {},
+		},
+		staleDelay:     staleDelay,
+		retryDelay:     retryDelay,
+		delayedStreams: []string{primary.ID},
+		refreshTokens: map[string]string{
+			primary.ID: "ttft-fresh-token",
+		},
+	}
+
+	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(executor)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(primary.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(primary.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), primary); errRegister != nil {
+		t.Fatalf("register primary: %v", errRegister)
+	}
+
+	return m, executor, primary, model
+}
+
+func TestManagerExecuteStream_RefreshRetryGetsFreshTTFTTimer(t *testing.T) {
+	// First attempt consumes 90ms of a 120ms budget before failing with the
+	// stale-token 401, then triggers a refresh. The retry must receive a fresh
+	// TTFT budget: its first chunk arrives 70ms into the retry, well inside a
+	// fresh 120ms window. A shared (non-fresh) timer would have already elapsed
+	// 90ms and fired at ~50ms into the retry, cutting the 70ms chunk off.
+	m, executor, primary, model := newTTFTRefreshFixture(t, 90*time.Millisecond, 70*time.Millisecond)
+
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			"stream_first_chunk_timeout_ms": 120,
+		},
+	}
+
+	stream, errStream := m.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, opts)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream error = %v, want success on refreshed retry", errStream)
+	}
+	if stream == nil || stream.Chunks == nil {
+		t.Fatal("expected stream result")
+	}
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		if got := string(chunk.Payload); got != primary.ID+":ttft-fresh-token" {
+			t.Fatalf("payload = %q, want refreshed primary response (refreshCalls=%d streamCalls=%d)", got, executor.RefreshCalls(), executor.StreamCalls())
+		}
+	}
+
+	if got := executor.RefreshCalls(); got != 1 {
+		t.Fatalf("Refresh calls = %d, want 1", got)
+	}
+	if got := executor.StreamCalls(); got != 2 {
+		t.Fatalf("Stream calls = %d, want 2 (initial + refreshed retry)", got)
+	}
+}
+
 func containsString(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstr(s, substr))
 }
