@@ -48,11 +48,20 @@ func newTestLiteLLMCompatHandler(t *testing.T, schema string) *Handler {
 	if err := pg.EnsureSchema(ctx); err != nil {
 		t.Fatalf("EnsureSchema: %v", err)
 	}
+	// Mirror production Bootstrap: EnsureSchema creates the base tables, but the
+	// usage_stat_day rollup table (and the Task-3 aggregate indexes) are created
+	// by Migrate. Run it so a day-aligned /litellm/spend/users request — which
+	// routes through the rollup fast path — resolves its table instead of 500ing
+	// with "relation usage_stat_day does not exist".
+	if err := pg.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
 	for _, table := range []string{
 		pg.InternalUsersTable(),
 		pg.APIKeysTable(),
 		pg.PoliciesTable(),
 		pg.UsageEventsTable(),
+		pg.RollupTable(),
 	} {
 		if _, err := pg.DB().ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			_ = err
@@ -728,11 +737,21 @@ func TestListLiteLLMSpendLogsCompat(t *testing.T) {
 }
 
 // TestListLiteLLMSpendUsersCompat verifies GET /litellm/spend/users groups
-// spend by user and returns total_spend/total_requests per user.
+// spend by user and returns total_spend/total_requests per user. A day-aligned
+// (no date filter) request routes through the usage_stat_day rollup fast path,
+// so the seeded event must first be folded into the rollup — mirroring
+// production, where RunRollupLoop folds each day before daily aggregates are
+// served.
 func TestListLiteLLMSpendUsersCompat(t *testing.T) {
 	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_spend_users")
 	gin.SetMode(gin.TestMode)
-	seedCompatSpendEvent(t, h, "team-a")
+	ev := seedCompatSpendEvent(t, h, "team-a")
+	// Fold the fixture's calendar day into usage_stat_day so the day-aligned
+	// fast path can answer it (otherwise the rollup is empty and the aggregate
+	// returns no rows).
+	if err := h.pgUsage.RunRollup(context.Background(), ev.RequestedAt); err != nil {
+		t.Fatalf("RunRollup: %v", err)
+	}
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
