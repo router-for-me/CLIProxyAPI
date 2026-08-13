@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1188,6 +1189,87 @@ func TestNormalizeResponsesWebsocketRequestCreate(t *testing.T) {
 	}
 }
 
+func TestNormalizeResponseSubsequentRequestBoundsTranscriptAllocations(t *testing.T) {
+	makeInput := func(count int, role string) string {
+		var input strings.Builder
+		input.WriteByte('[')
+		content := strings.Repeat("x", 1024)
+		for index := 0; index < count; index++ {
+			if index > 0 {
+				input.WriteByte(',')
+			}
+			fmt.Fprintf(&input, `{"type":"message","role":%q,"id":"%s-%d","content":%q}`, role, role, index, content)
+		}
+		input.WriteByte(']')
+		return input.String()
+	}
+
+	lastRequest := []byte(`{"model":"test-model","stream":true,"input":` + makeInput(128, "user") + `}`)
+	lastResponseOutput := []byte(makeInput(64, "assistant"))
+	raw := []byte(`{"type":"response.create","input":[{"type":"message","role":"user","id":"user-next","content":"continue"}]}`)
+	inputBytes := len(lastRequest) + len(lastResponseOutput) + len(raw)
+
+	result := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for index := 0; index < b.N; index++ {
+			normalized, next, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, lastResponseOutput, false, false)
+			if errMsg != nil {
+				b.Fatalf("unexpected error: %v", errMsg.Error)
+			}
+			runtime.KeepAlive(normalized)
+			runtime.KeepAlive(next)
+		}
+	})
+
+	const maxAllocationMultiple = 14
+	maxAllocatedBytes := int64(inputBytes * maxAllocationMultiple)
+	t.Logf("normalization allocated %d bytes per operation for %d input bytes", result.AllocedBytesPerOp(), inputBytes)
+	if allocatedBytes := result.AllocedBytesPerOp(); allocatedBytes > maxAllocatedBytes {
+		t.Fatalf("normalizing %d input bytes allocated %d bytes per operation, want at most %d", inputBytes, allocatedBytes, maxAllocatedBytes)
+	}
+}
+
+func TestResponsesWebsocketFallbackTurnBoundsTranscriptAllocations(t *testing.T) {
+	makeInput := func(count int, role string) string {
+		var input strings.Builder
+		input.WriteByte('[')
+		content := strings.Repeat("x", 1024)
+		for index := 0; index < count; index++ {
+			if index > 0 {
+				input.WriteByte(',')
+			}
+			fmt.Fprintf(&input, `{"type":"message","role":%q,"id":"%s-%d","content":%q}`, role, role, index, content)
+		}
+		input.WriteByte(']')
+		return input.String()
+	}
+
+	lastRequest := []byte(`{"model":"test-model","stream":true,"input":` + makeInput(128, "user") + `}`)
+	lastResponseOutput := []byte(makeInput(64, "assistant"))
+	raw := []byte(`{"type":"response.create","input":[{"type":"message","role":"user","id":"user-next","content":"continue"}]}`)
+	inputBytes := len(lastRequest) + len(lastResponseOutput) + len(raw)
+
+	result := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for index := 0; index < b.N; index++ {
+			requestJSON, _, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, lastResponseOutput, false, false)
+			if errMsg != nil {
+				b.Fatalf("unexpected error: %v", errMsg.Error)
+			}
+			requestJSON, turn := prepareResponsesWebsocketFallbackTurn("allocation-session", requestJSON)
+			runtime.KeepAlive(requestJSON)
+			runtime.KeepAlive(turn)
+		}
+	})
+
+	const maxAllocationMultiple = 14
+	maxAllocatedBytes := int64(inputBytes * maxAllocationMultiple)
+	t.Logf("fallback turn allocated %d bytes per operation for %d input bytes", result.AllocedBytesPerOp(), inputBytes)
+	if allocatedBytes := result.AllocedBytesPerOp(); allocatedBytes > maxAllocatedBytes {
+		t.Fatalf("processing a fallback turn with %d input bytes allocated %d bytes per operation, want at most %d", inputBytes, allocatedBytes, maxAllocatedBytes)
+	}
+}
+
 func TestNormalizeResponsesWebsocketRequestCreateWithHistory(t *testing.T) {
 	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"}]}`)
 	lastResponseOutput := []byte(`[
@@ -1862,13 +1944,62 @@ func TestRepairResponsesWebsocketToolCallsInsertsCachedOutput(t *testing.T) {
 	}
 }
 
+func TestRepairResponsesWebsocketToolCallsDeduplicatesInputItemsByID(t *testing.T) {
+	cache := newWebsocketToolOutputCache(time.Minute, 10)
+	raw := []byte(`{"input":[{"type":"message","id":"msg-1","content":"old"},{"type":"message","id":"msg-1","content":"new"}]}`)
+
+	for _, sessionKey := range []string{"dedupe-session", ""} {
+		t.Run(fmt.Sprintf("session_key_%q", sessionKey), func(t *testing.T) {
+			repaired := repairResponsesWebsocketToolCallsWithCache(cache, sessionKey, raw)
+
+			items := gjson.GetBytes(repaired, "input").Array()
+			if len(items) != 1 {
+				t.Fatalf("repaired input len = %d, want 1: %s", len(items), repaired)
+			}
+			if got := items[0].Get("content").String(); got != "new" {
+				t.Fatalf("repaired input content = %q, want new: %s", got, repaired)
+			}
+		})
+	}
+}
+
+func TestResponsesWebsocketToolCacheTurnDoesNotRetainRequestBackingStorage(t *testing.T) {
+	const (
+		paddingSize     = 32 << 20
+		maxRetainedHeap = 8 << 20
+	)
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	prefix := []byte(`{"input":[{"type":"message","id":"padding","content":"`)
+	suffix := []byte(`"},{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"ok"}]}`)
+	payload := make([]byte, len(prefix)+paddingSize+len(suffix))
+	copy(payload, prefix)
+	for index := len(prefix); index < len(prefix)+paddingSize; index++ {
+		payload[index] = 'x'
+	}
+	copy(payload[len(prefix)+paddingSize:], suffix)
+
+	_, turn := prepareResponsesWebsocketFallbackTurn("backing-storage-session", payload)
+	payload = nil
+	runtime.GC()
+
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(turn)
+	retainedHeap := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	if retainedHeap > maxRetainedHeap {
+		t.Fatalf("tool cache turn retained %d bytes after request release, want at most %d", retainedHeap, maxRetainedHeap)
+	}
+}
+
 func TestResponsesWebsocketToolCacheTurnCommitsOnlyOnSuccess(t *testing.T) {
 	const sessionKey = "tool-cache-turn-commit-session"
 	defer defaultWebsocketToolOutputCache.deleteSession(sessionKey)
 	defer defaultWebsocketToolCallCache.deleteSession(sessionKey)
 
-	turn := newResponsesWebsocketToolCacheTurn(sessionKey)
-	turn.recordRequest([]byte(`{"input":[{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"cached result"}]}`))
+	_, turn := prepareResponsesWebsocketFallbackTurn(sessionKey, []byte(`{"input":[{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"cached result"}]}`))
 	beforeCommit := repairResponsesWebsocketToolCallsWithoutRecording(sessionKey, []byte(`{"input":[{"type":"function_call","id":"fc-next","call_id":"call-1","name":"lookup","arguments":"{}"}]}`))
 	if gjson.GetBytes(beforeCommit, "input.#").Int() != 0 {
 		t.Fatalf("uncommitted turn populated global cache: %s", beforeCommit)
@@ -1886,8 +2017,7 @@ func TestResponsesWebsocketToolCacheRetainPreventsOverlappingReleaseDeletion(t *
 	const sessionKey = "tool-cache-overlapping-retain-session"
 	retainResponsesWebsocketToolCaches(sessionKey)
 	retainResponsesWebsocketToolCaches(sessionKey)
-	turn := newResponsesWebsocketToolCacheTurn(sessionKey)
-	turn.recordRequest([]byte(`{"input":[{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"kept"}]}`))
+	_, turn := prepareResponsesWebsocketFallbackTurn(sessionKey, []byte(`{"input":[{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"kept"}]}`))
 	turn.commit()
 
 	releaseResponsesWebsocketToolCaches(sessionKey)

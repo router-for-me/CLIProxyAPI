@@ -28,6 +28,41 @@ func TestNewKimiExecutorInitializesDelegatedClaudeConfig(t *testing.T) {
 	}
 }
 
+func TestKimiExecutorRequestToFormatMatchesWireProtocol(t *testing.T) {
+	type requestToFormatReporter interface {
+		RequestToFormat(cliproxyexecutor.Request, cliproxyexecutor.Options) sdktranslator.Format
+	}
+
+	executor := NewKimiExecutor(&config.Config{})
+	reporter, ok := any(executor).(requestToFormatReporter)
+	if !ok {
+		t.Fatal("Kimi executor does not report its upstream request format")
+	}
+
+	tests := []struct {
+		name   string
+		stream bool
+		source sdktranslator.Format
+		want   sdktranslator.Format
+	}{
+		{name: "Claude non-streaming", source: sdktranslator.FormatClaude, want: sdktranslator.FormatClaude},
+		{name: "Claude streaming", stream: true, source: sdktranslator.FormatClaude, want: sdktranslator.FormatClaude},
+		{name: "OpenAI non-streaming", source: sdktranslator.FormatOpenAI, want: sdktranslator.FormatOpenAI},
+		{name: "OpenAI streaming", stream: true, source: sdktranslator.FormatOpenAI, want: sdktranslator.FormatOpenAI},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := reporter.RequestToFormat(cliproxyexecutor.Request{}, cliproxyexecutor.Options{
+				SourceFormat: tt.source,
+				Stream:       tt.stream,
+			})
+			if got != tt.want {
+				t.Fatalf("RequestToFormat() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestKimiExecutorClaudeRequestPreservesInternalModelSemantics(t *testing.T) {
 	var upstreamBody []byte
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {

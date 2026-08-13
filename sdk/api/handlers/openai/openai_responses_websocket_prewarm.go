@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"encoding/json"
 	"strings"
 	"time"
 
@@ -96,33 +95,6 @@ func syntheticResponsesWebsocketPrewarmPayloads(requestJSON []byte) ([][]byte, e
 	}
 
 	return [][]byte{createdPayload, completedPayload}, nil
-}
-
-func mergeJSONArrayRaw(existingRaw, appendRaw string) (string, error) {
-	existingRaw = strings.TrimSpace(existingRaw)
-	appendRaw = strings.TrimSpace(appendRaw)
-	if existingRaw == "" {
-		existingRaw = "[]"
-	}
-	if appendRaw == "" {
-		appendRaw = "[]"
-	}
-
-	var existing []json.RawMessage
-	if err := json.Unmarshal([]byte(existingRaw), &existing); err != nil {
-		return "", err
-	}
-	var appendItems []json.RawMessage
-	if err := json.Unmarshal([]byte(appendRaw), &appendItems); err != nil {
-		return "", err
-	}
-
-	merged := append(existing, appendItems...)
-	out, err := json.Marshal(merged)
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
 }
 
 // inputContainsFullTranscript returns true when the input array carries compact

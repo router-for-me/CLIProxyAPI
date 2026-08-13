@@ -482,6 +482,12 @@ func rewriteCodexSpawnAgentTools(payload []byte, toolPaths []string, models []co
 	return updated
 }
 
+// HasCodexMultiAgentV2NamespaceConflict reports whether the request defines
+// the reserved optimized namespace, which must remain untouched.
+func HasCodexMultiAgentV2NamespaceConflict(payload []byte) bool {
+	return hasCodexOptimizedCollaborationConflict(payload)
+}
+
 func hasCodexOptimizedCollaborationConflict(payload []byte) bool {
 	if codexToolsHaveOptimizedCollaborationConflict(gjson.GetBytes(payload, "tools")) {
 		return true

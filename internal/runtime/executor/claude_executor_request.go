@@ -1586,6 +1586,13 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return "", false, nil
 	}
 
+	repeatedServerPrefix := "mcp__" + server + "__" + server + "__"
+	if suffix, repeatedServer := strings.CutPrefix(name, repeatedServerPrefix); repeatedServer {
+		if original, exact := resolver.exact["mcp__"+server+"__"+suffix]; exact {
+			return original, true, nil
+		}
+	}
+
 	matchedOriginal := ""
 	matchCount := 0
 	for _, entry := range resolver.aliases {

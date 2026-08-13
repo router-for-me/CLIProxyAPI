@@ -97,6 +97,12 @@ func TranslateRequestWithAPIKeyModelCompatibility(ctx context.Context, headers h
 	return thinking.ApplySummaryConfigForModel(translated, to.String(), model, summaryConfig)
 }
 
+// HasCodexMultiAgentV2NamespaceConflict reports whether the request defines
+// the reserved optimized namespace, which must remain untouched.
+func HasCodexMultiAgentV2NamespaceConflict(payload []byte) bool {
+	return multiagentv2.HasCodexMultiAgentV2NamespaceConflict(payload)
+}
+
 // OptimizeCodexMultiAgentV2Request rewrites an eligible spawn_agent request and
 // reports whether the collaboration namespace was renamed for upstream use.
 func OptimizeCodexMultiAgentV2Request(ctx context.Context, headers http.Header, payload []byte, cfg *config.Config) ([]byte, bool) {
