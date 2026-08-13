@@ -80,6 +80,20 @@ func IsRequestFault(status int, err error) bool {
 			status = statusErr.StatusCode()
 		}
 	}
+	// Payment and rate-limit statuses are authoritative even when an upstream
+	// pairs them with a generic invalid_request_error body. The credential must
+	// remain eligible for cooldown and rotation.
+	if status == http.StatusPaymentRequired || status == http.StatusTooManyRequests {
+		return false
+	}
+	// Authentication and invalid-or-expired-credential failures are caused by
+	// the credential, not the request: they must remain eligible for rotation
+	// by the shared mixed-auth loop even when the provider pairs them with a
+	// generic invalid-request identifier in the body. This must be checked
+	// before hasRequestFaultBody so the generic classifier cannot misfile them.
+	if (status == http.StatusUnauthorized || status == http.StatusForbidden) && hasAuthenticationErrorBody(err) {
+		return false
+	}
 	if hasRequestFaultBody(err) {
 		return true
 	}
@@ -110,6 +124,37 @@ func IsItemNotPersisted(message string) bool {
 	return strings.Contains(lower, "item with id") &&
 		strings.Contains(lower, "not found") &&
 		strings.Contains(lower, "items are not persisted when `store` is set to false")
+}
+
+// hasAuthenticationErrorBody reports whether err is a structured credential
+// failure: an authentication_error type, an invalid or expired API-key code,
+// or a Gemini UNAUTHENTICATED status. These are credential faults, not request
+// faults, so they must never be classified as request faults on 401/403.
+func hasAuthenticationErrorBody(err error) bool {
+	if err == nil {
+		return false
+	}
+	body := strings.TrimSpace(err.Error())
+	if body == "" || !json.Valid([]byte(body)) {
+		return false
+	}
+	for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
+		switch strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String())) {
+		case "invalid_api_key", "incorrect_api_key", "expired_api_key":
+			return true
+		}
+	}
+	for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
+		if errType := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String())); errType == "authentication_error" {
+			return true
+		}
+	}
+	for _, path := range []string{"error.status", "status", "response.error.status", "body.error.status"} {
+		if status := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String())); status == "unauthenticated" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasRequestFaultBody(err error) bool {
