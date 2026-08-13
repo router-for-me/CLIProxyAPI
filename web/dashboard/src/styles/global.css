@@ -3011,6 +3011,8 @@ tr:focus-within .row-actions {
 
 .devdocs__summary { margin: 0 0 12px; font-size: 13px; color: var(--text); line-height: 1.5; }
 
+.devdocs__notes { margin: 0 0 12px; font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+
 .devdocs__params { margin-bottom: 12px; }
 .devdocs__params .table { width: 100%; }
 
