@@ -230,7 +230,13 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		pendingToolUseParts = append(pendingToolUseParts, toolUse)
 	}
 
-	if input := root.Get("input"); input.Exists() && input.IsArray() {
+	if input := root.Get("input"); input.Type == gjson.String {
+		if text := input.String(); text != "" {
+			contentPart := []byte(`{"type":"text","text":""}`)
+			contentPart, _ = sjson.SetBytes(contentPart, "text", text)
+			appendParts("user", contentPart)
+		}
+	} else if input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
 			// System-level items already became top-level system blocks.
 			if isResponsesSystemLevelRole(item.Get("role").String()) {

@@ -21,6 +21,12 @@ func TestConvertOpenAIResponsesRequestToClaude_DoesNotInjectSyntheticMetadata(t 
 	if metadata := gjson.GetBytes(result, "metadata"); metadata.Exists() {
 		t.Fatalf("translated request unexpectedly contains metadata: %s", metadata.Raw)
 	}
+	if got := gjson.GetBytes(result, "messages.0.role").String(); got != "user" {
+		t.Fatalf("translated string input role = %q, want user; output: %s", got, result)
+	}
+	if got := gjson.GetBytes(result, "messages.0.content").String(); got != "hello" {
+		t.Fatalf("translated string input content = %q, want hello; output: %s", got, result)
+	}
 }
 
 func TestConvertOpenAIResponsesRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T) {

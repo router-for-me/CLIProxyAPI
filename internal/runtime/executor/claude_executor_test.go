@@ -158,6 +158,12 @@ func TestClaudeExecutor_DisabledCloakingDoesNotGenerateIdentity(t *testing.T) {
 	if metadata := gjson.GetBytes(seenBody, "metadata"); metadata.Exists() {
 		t.Fatalf("uncloaked upstream body contains generated metadata: %s", metadata.Raw)
 	}
+	if got := gjson.GetBytes(seenBody, "messages.0.role").String(); got != "user" {
+		t.Fatalf("upstream message role = %q, want user; body: %s", got, seenBody)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.0.content.0.text").String(); got != "hello" {
+		t.Fatalf("upstream message content = %q, want hello; body: %s", got, seenBody)
+	}
 	if got := seenHeaders.Get("User-Agent"); got != "caller-sdk/1.0" {
 		t.Fatalf("User-Agent = %q, want caller value", got)
 	}
