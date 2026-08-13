@@ -369,6 +369,7 @@ export const sections = [
       },
       {
         method: 'GET', path: '/litellm/spend/users', summary: 'Per-user spend aggregation.',
+        notes: 'Aggregates are served from a short-TTL cache; whole-day (00:00 UTC–now) queries read the pre-aggregated daily rollup, so polling this endpoint frequently is cheap. Partial-day windows read usage_events (also cached).',
         params: [
           { name: 'start_date', in: 'query', type: 'string', required: false, default: '', description: 'RFC3339 lower bound.' },
           { name: 'end_date', in: 'query', type: 'string', required: false, default: '', description: 'RFC3339 upper bound.' },
@@ -381,6 +382,7 @@ export const sections = [
       },
       {
         method: 'GET', path: '/litellm/global/spend', summary: 'Global spend KPI (total spend + request count for the optional date range).',
+        notes: 'Served from a short-TTL cache; whole-day queries read the pre-aggregated daily rollup, so polling this endpoint frequently is cheap.',
         params: [
           { name: 'start_date', in: 'query', type: 'string', required: false, default: '', description: 'RFC3339 lower bound.' },
           { name: 'end_date', in: 'query', type: 'string', required: false, default: '', description: 'RFC3339 upper bound.' },

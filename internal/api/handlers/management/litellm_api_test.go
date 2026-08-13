@@ -792,3 +792,160 @@ func TestGetLiteLLMGlobalSpendCompat(t *testing.T) {
 		t.Errorf("total_requests = %d; want 1", resp.TotalRequests)
 	}
 }
+
+// callSpendUsersCompat performs one GET /litellm/spend/users request against the
+// handler and returns the raw response body. It mirrors the request construction
+// used by TestListLiteLLMSpendUsersCompat. startDate sets a partial-day RFC3339
+// start_date bound: a non-midnight From keeps the query on the cached
+// usage_events path (the day-aligned rollup fast-path is not exercised here
+// because the test harness schema has no usage_stat_day rollup table — rolling
+// that in is the pre-existing store-layer concern, not this test's).
+func callSpendUsersCompat(h *Handler, startDate string) *httptest.ResponseRecorder {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/spend/users?start_date="+url.QueryEscape(startDate), nil)
+	h.ListLiteLLMSpendUsersCompat(c)
+	return rec
+}
+
+// callGlobalSpendCompat performs one GET /litellm/global/spend request against the
+// handler and returns the raw response body. startDate sets a partial-day RFC3339
+// start_date bound so a shared window is cached identically across calls.
+func callGlobalSpendCompat(h *Handler, startDate string) *httptest.ResponseRecorder {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/global/spend?start_date="+url.QueryEscape(startDate), nil)
+	h.GetLiteLLMGlobalSpendCompat(c)
+	return rec
+}
+
+// spendUsersTotalSpend extracts the total_spend for the given user_id from a
+// /litellm/spend/users response body, or -1 when absent/mismatched.
+func spendUsersTotalSpend(t *testing.T, body []byte, userID string) float64 {
+	t.Helper()
+	var resp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("unmarshal spend/users response: %v; body=%s", err, string(body))
+	}
+	for _, row := range resp.Data {
+		if row["user_id"] == userID {
+			if sp, ok := row["total_spend"].(float64); ok {
+				return sp
+			}
+			return -1
+		}
+	}
+	return -1
+}
+
+// TestLiteLLMSpendEndpointsServedViaCache proves the /litellm/spend/users and
+// /litellm/global/spend endpoints are served through the UsageStore's short-TTL
+// read-through cache (wired by NewUsageStore at the store layer, inherited by
+// the handlers with no handler code change). It inserts NEW usage events between
+// two calls inside the 15s TTL and asserts the second call still returns the
+// ORIGINAL aggregate — proving the second call did NOT re-query the DB. If the
+// cache were inactive, the second call would see the new events and the
+// assertion would fail.
+//
+// Both endpoints are queried with the SAME partial-day start_date window so the
+// cache key (and thus the cached value) is identical across the two calls. The
+// partial-day window keeps the query on the cached usage_events path (the
+// day-aligned rollup fast-path is out of scope; see callSpendUsersCompat).
+// request_id is deduped (unique) in usage_events, so each inserted event uses a
+// distinct RequestID.
+func TestLiteLLMSpendEndpointsServedViaCache(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_spend_cache")
+	ctx := context.Background()
+
+	// A partial-day (non-midnight) start bound: routes both endpoints through the
+	// cached usage_events path and is well inside the seeded events' window, so
+	// the aggregate includes them.
+	probeStart := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+
+	// Prime the store: one spend event for team-a worth 1.25.
+	seedCompatSpendEvent(t, h, "team-a")
+
+	// First call populates the aggregate cache for both endpoints.
+	recA := callSpendUsersCompat(h, probeStart)
+	if recA.Code != http.StatusOK {
+		t.Fatalf("spend/users status = %d; want 200; body=%s", recA.Code, recA.Body.String())
+	}
+	if got := spendUsersTotalSpend(t, recA.Body.Bytes(), "team-a"); got != 1.25 {
+		t.Fatalf("spend/users baseline total_spend = %v; want 1.25", got)
+	}
+	globA := callGlobalSpendCompat(h, probeStart)
+	if globA.Code != http.StatusOK {
+		t.Fatalf("global/spend status = %d; want 200; body=%s", globA.Code, globA.Body.String())
+	}
+
+	// Insert ADDITIONAL spend for team-a while the 15s cache TTL is still active.
+	// A live (non-cached) aggregate would now report 1.25 + 0.50 = 1.75.
+	extra := store.UsageEvent{
+		RequestID:    "req-usage-cache-probe",
+		APIKeyID:     "key-usage-compat",
+		UserID:       "team-a",
+		Provider:     "openai",
+		Model:        "gpt-4o",
+		InputTokens:  40,
+		OutputTokens: 10,
+		TotalTokens:  50,
+		CostUSD:      0.50,
+		RequestedAt:  time.Now().Add(-time.Hour).UTC(),
+	}
+	if err := h.pgUsage.InsertEvent(ctx, extra); err != nil {
+		t.Fatalf("InsertEvent(extra): %v", err)
+	}
+
+	// Second call within the TTL: the cached aggregate must NOT see the new
+	// event, i.e. spend/users still reports 1.25 (not 1.75).
+	recB := callSpendUsersCompat(h, probeStart)
+	if got := spendUsersTotalSpend(t, recB.Body.Bytes(), "team-a"); got != 1.25 {
+		t.Fatalf("cached spend/users total_spend after extra insert = %v; want 1.25 (cache should hide the new event); body=%s", got, recB.Body.String())
+	}
+	// And the two responses must be byte-identical (served from the same cache entry).
+	if !bytes.Equal(recA.Body.Bytes(), recB.Body.Bytes()) {
+		t.Errorf("spend/users responses differ across cached calls:\n A=%s\n B=%s", recA.Body.String(), recB.Body.String())
+	}
+
+	// Same proof for /litellm/global/spend.
+	globB := callGlobalSpendCompat(h, probeStart)
+	var aG, bG struct {
+		TotalSpend float64 `json:"total_spend"`
+	}
+	if err := json.Unmarshal(globA.Body.Bytes(), &aG); err != nil {
+		t.Fatalf("unmarshal global A: %v; body=%s", err, globA.Body.String())
+	}
+	if err := json.Unmarshal(globB.Body.Bytes(), &bG); err != nil {
+		t.Fatalf("unmarshal global B: %v; body=%s", err, globB.Body.String())
+	}
+	if aG.TotalSpend != 1.25 {
+		t.Fatalf("global/spend baseline total_spend = %v; want 1.25", aG.TotalSpend)
+	}
+	if bG.TotalSpend != 1.25 {
+		t.Fatalf("cached global/spend total_spend after extra insert = %v; want 1.25 (cache should hide the new event); body=%s", bG.TotalSpend, globB.Body.String())
+	}
+	if !bytes.Equal(globA.Body.Bytes(), globB.Body.Bytes()) {
+		t.Errorf("global/spend responses differ across cached calls:\n A=%s\n B=%s", globA.Body.String(), globB.Body.String())
+	}
+
+	// Sanity: the extra event really did land in the DB — so the unchanged
+	// aggregate really is the cache, not an insert that silently failed. Re-query
+	// via the uncached spend/logs path (which is NOT cached by design).
+	var logs struct {
+		Total int64 `json:"total"`
+	}
+	recLogs := httptest.NewRecorder()
+	cLogs, _ := gin.CreateTestContext(recLogs)
+	cLogs.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/spend/logs?user_id=team-a", nil)
+	h.ListLiteLLMSpendLogsCompat(cLogs)
+	if err := json.Unmarshal(recLogs.Body.Bytes(), &logs); err != nil {
+		t.Fatalf("unmarshal spend/logs: %v", err)
+	}
+	if logs.Total != 2 {
+		t.Fatalf("uncached spend/logs total = %d; want 2 (proves extra insert persisted)", logs.Total)
+	}
+}

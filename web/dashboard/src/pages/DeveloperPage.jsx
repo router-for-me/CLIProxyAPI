@@ -173,6 +173,10 @@ function EndpointCard({ endpoint }) {
       </div>
       <p className="devdocs__summary">{endpoint.summary}</p>
 
+      {endpoint.notes && (
+        <p className="devdocs__notes">{endpoint.notes}</p>
+      )}
+
       {endpoint.params && endpoint.params.length > 0 && (
         <div className="devdocs__params">
           <div className="form__label">Parameters</div>
