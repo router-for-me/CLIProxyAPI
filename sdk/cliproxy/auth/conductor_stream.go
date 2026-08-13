@@ -132,24 +132,6 @@ func (s *ttftScope) release() {
 	}
 }
 
-// stopTimerAndRelease fully stops this attempt's timer and releases it before
-// starting the next attempt with a fresh scope.
-func (s *ttftScope) stopTimerAndRelease() {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.committed = true
-	if s.timer != nil {
-		s.timer.Stop()
-	}
-	if s.cancel != nil {
-		s.cancel()
-		s.cancel = nil
-	}
-}
-
 func newTTFTTimeoutError(timeout time.Duration) error {
 	return &Error{
 		Code:       "stream_first_chunk_timeout",
@@ -422,20 +404,20 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		var errIntercept error
 		execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 		if errIntercept != nil {
-			scope.stopTimerAndRelease()
+			scope.release()
 			return nil, errIntercept
 		}
 		if executionModel == "" {
 			execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, execModel)
 		}
 		if errCtx := ctx.Err(); errCtx != nil {
-			scope.stopTimerAndRelease()
+			scope.release()
 			return nil, errCtx
 		}
 		streamResult, errStream := executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
-				scope.stopTimerAndRelease()
+				scope.release()
 				return nil, errCtx
 			}
 			errStream = checkTTFTErr(errStream)
@@ -457,14 +439,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
 					// Fresh TTFT budget and attempt context for the retry.
-					scope.stopTimerAndRelease()
+					scope.release()
 					scope = newTTFTScope(ctx, ttftTimeout)
 					attemptCtx = scope.ctx
 					streamResult, errStream = executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
 					errStream = checkTTFTErr(errStream)
 					if errStream != nil {
 						if errCtx := ctx.Err(); errCtx != nil {
-							scope.stopTimerAndRelease()
+							scope.release()
 							return nil, errCtx
 						}
 					}
@@ -473,13 +455,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		if !ephemeralResult {
 			if errCancel := claudeOAuthRequestCancellation(ctx, auth, errStream); errCancel != nil {
-				scope.stopTimerAndRelease()
+				scope.release()
 				return nil, errCancel
 			}
 		}
 		streamResult, errStream = validateStreamResult(streamResult, errStream)
 		if errStream != nil {
-			scope.stopTimerAndRelease()
+			scope.release()
 			errStream = checkTTFTErr(errStream)
 			rerr := resultErrorFromError(errStream)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: execOpts}
@@ -498,7 +480,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
-				scope.stopTimerAndRelease()
+				scope.release()
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
 			}
@@ -524,7 +506,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
 					// Fresh TTFT budget and attempt context for the retry.
-					scope.stopTimerAndRelease()
+					scope.release()
 					scope = newTTFTScope(ctx, ttftTimeout)
 					attemptCtx = scope.ctx
 					retryStream, retryErr := executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
@@ -532,7 +514,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					retryErr = checkTTFTErr(retryErr)
 					if retryErr != nil {
 						if errCtx := ctx.Err(); errCtx != nil {
-							scope.stopTimerAndRelease()
+							scope.release()
 							return nil, errCtx
 						}
 						bootstrapErr = retryErr
@@ -550,13 +532,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		if !ephemeralResult {
 			if errCancel := claudeOAuthRequestCancellation(ctx, auth, bootstrapErr); errCancel != nil {
-				scope.stopTimerAndRelease()
+				scope.release()
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCancel
 			}
 		}
 		if bootstrapErr != nil {
-			scope.stopTimerAndRelease()
+			scope.release()
 			bootstrapErr = checkTTFTErr(bootstrapErr)
 			if isRequestInvalidError(bootstrapErr) {
 				rerr := resultErrorFromError(bootstrapErr)
@@ -584,7 +566,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 
 		if closed && (len(buffered) == 0 || isEmptyCompletion(buffered)) {
-			scope.stopTimerAndRelease()
+			scope.release()
 			emptyErr := errEmptyCompletion
 			if len(buffered) == 0 {
 				emptyErr = &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
