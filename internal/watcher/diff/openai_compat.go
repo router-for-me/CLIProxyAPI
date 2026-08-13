@@ -173,7 +173,7 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 		if name == "" && alias == "" {
 			continue
 		}
-		models = append(models, strings.ToLower(name)+"|"+strings.ToLower(alias)+"|"+strings.TrimSpace(model.DisplayName)+"|"+fmt.Sprintf("image=%t", model.Image))
+		models = append(models, strings.ToLower(name)+"|"+strings.ToLower(alias)+"|"+strings.TrimSpace(model.DisplayName)+"|"+fmt.Sprintf("image=%t", model.Image)+"|"+fmt.Sprintf("speech=%t", model.Speech))
 	}
 	if len(models) > 0 {
 		sort.Strings(models)

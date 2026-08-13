@@ -722,13 +722,15 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		modelType := "openai-compatibility"
 		if model.Image {
 			modelType = registry.OpenAIImageModelType
+		} else if model.Speech {
+			modelType = registry.OpenAISpeechModelType
 		}
 		info := buildConfiguredModelInfo(model, compat.Name, modelType, now, strings.TrimSpace(model.Alias), false)
 		if info == nil {
 			continue
 		}
 		thinkingSupport := model.Thinking
-		if thinkingSupport == nil && !model.Image {
+		if thinkingSupport == nil && !model.Image && !model.Speech {
 			thinkingSupport = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 		}
 		info.Thinking = modelconfig.NormalizeThinkingSupport(thinkingSupport)
@@ -815,7 +817,10 @@ func buildXAIConfigModels(entry *config.XAIKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return buildConfigModels(entry.Models, "xai", "xai")
+	// Re-apply the built-ins so a configured models[] list does not shadow the
+	// hard-coded image/video/speech model ids, which are endpoint-only and never
+	// something an operator would enumerate alongside chat models.
+	return registry.WithXAIBuiltins(buildConfigModels(entry.Models, "xai", "xai"))
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {

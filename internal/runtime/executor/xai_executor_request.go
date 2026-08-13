@@ -470,6 +470,20 @@ func xaiIsVideoRequest(opts cliproxyexecutor.Options) bool {
 	return opts.SourceFormat.String() == xaiVideoHandlerType
 }
 
+// xaiSpeechEndpointPath resolves the upstream xAI speech path for a request.
+// Both /v1/audio/speech and /v1/tts map to the same upstream /tts endpoint; the
+// handler is responsible for translating the OpenAI body shape beforehand.
+func xaiSpeechEndpointPath(opts cliproxyexecutor.Options) string {
+	if opts.SourceFormat.String() != xaiSpeechHandlerType {
+		return ""
+	}
+	path := xaiMetadataString(opts.Metadata, cliproxyexecutor.RequestPathMetadataKey)
+	if strings.HasSuffix(path, "/tts/voices") {
+		return xaiTTSVoicesPath
+	}
+	return xaiTTSPath
+}
+
 func xaiVideoEndpointPath(opts cliproxyexecutor.Options) string {
 	if !xaiIsVideoRequest(opts) {
 		return ""

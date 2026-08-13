@@ -286,3 +286,48 @@ func TestExecuteImageWithAuthManager_AllowsImageOnlyModels(t *testing.T) {
 		})
 	}
 }
+
+func TestIsOpenAISpeechOnlyModel(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{model: "grok-tts", want: true},
+		{model: "xai/grok-tts", want: true},
+		{model: "XAI/Grok-TTS", want: true},
+		{model: "grok-4.6", want: false},
+		{model: "grok-imagine-image", want: false},
+		{model: "gpt-4o-mini-tts", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			if got := isOpenAISpeechOnlyModel(tt.model); got != tt.want {
+				t.Fatalf("isOpenAISpeechOnlyModel(%q) = %v, want %v", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateImageOnlyModel_GatesSpeechOnlyModels(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	for _, model := range []string{"grok-tts", "xai/grok-tts"} {
+		t.Run(model, func(t *testing.T) {
+			// Speech routes pass allowImageModel=true and must be permitted.
+			if errMsg := handler.validateImageOnlyModel(model, true); errMsg != nil {
+				t.Fatalf("validateImageOnlyModel(%q, true) = %+v, want nil", model, errMsg)
+			}
+			// Chat routes pass false and must get a clear rejection.
+			errMsg := handler.validateImageOnlyModel(model, false)
+			if errMsg == nil {
+				t.Fatalf("validateImageOnlyModel(%q, false) = nil, want speech-only error", model)
+			}
+			if errMsg.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
+			}
+			if !strings.Contains(errMsg.Error.Error(), "/v1/audio/speech") {
+				t.Fatalf("error %q should mention /v1/audio/speech", errMsg.Error.Error())
+			}
+		})
+	}
+}

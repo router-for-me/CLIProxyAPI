@@ -111,3 +111,20 @@ func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing
 		t.Fatalf("unknown model should not get Antigravity web search model, got %q", got)
 	}
 }
+
+func TestWithXAIBuiltinsIncludesTTS(t *testing.T) {
+	models := WithXAIBuiltins(nil)
+	for _, model := range models {
+		if model == nil || model.ID != xaiBuiltinTTSModelID {
+			continue
+		}
+		if model.Type != "xai" {
+			t.Fatalf("type = %q, want xai", model.Type)
+		}
+		if len(model.SupportedOutputModalities) != 1 || model.SupportedOutputModalities[0] != "audio" {
+			t.Fatalf("output modalities = %v, want [audio]", model.SupportedOutputModalities)
+		}
+		return
+	}
+	t.Fatalf("expected xAI builtin model %s", xaiBuiltinTTSModelID)
+}

@@ -213,7 +213,7 @@ func compileConfiguredModelCapabilities[T interface {
 func compileOpenAICompatibleModelCapabilities(out map[string][]apiKeyModelCapabilityRoute, models []internalconfig.OpenAICompatibilityModel) {
 	for i := range models {
 		support := models[i].Thinking
-		if support == nil && !models[i].Image {
+		if support == nil && !models[i].Image && !models[i].Speech {
 			support = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 		}
 		addConfiguredModelCapability(out, models[i].Name, models[i].Alias, "openai-compatibility", support, models[i].IsCompat)

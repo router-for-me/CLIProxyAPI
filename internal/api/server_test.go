@@ -2267,3 +2267,57 @@ func TestInteractionsRouteRegistered(t *testing.T) {
 		t.Fatalf("status = %d, want route registered; body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestSpeechRoutesAreRegistered(t *testing.T) {
+	server := newTestServer(t)
+
+	// Each route must reach its handler rather than 404 from the router.
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		expect string
+	}{
+		{
+			name:   "audio speech validates model",
+			method: http.MethodPost,
+			path:   "/v1/audio/speech",
+			body:   `{"input":"hi","voice":"eve"}`,
+			expect: "model is required",
+		},
+		{
+			name:   "native tts validates text",
+			method: http.MethodPost,
+			path:   "/v1/tts",
+			body:   `{"voice_id":"eve"}`,
+			expect: "text is required",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer test-key")
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+
+			if rr.Code == http.StatusNotFound {
+				t.Fatalf("%s %s returned 404; route is not registered", tc.method, tc.path)
+			}
+			if !strings.Contains(rr.Body.String(), tc.expect) {
+				t.Fatalf("body = %s, want it to contain %q", rr.Body.String(), tc.expect)
+			}
+		})
+	}
+
+	// The voices route is a GET and must also resolve.
+	voicesReq := httptest.NewRequest(http.MethodGet, "/v1/tts/voices", nil)
+	voicesReq.Header.Set("Authorization", "Bearer test-key")
+	voicesRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(voicesRR, voicesReq)
+	if voicesRR.Code == http.StatusNotFound {
+		t.Fatal("GET /v1/tts/voices returned 404; route is not registered")
+	}
+}

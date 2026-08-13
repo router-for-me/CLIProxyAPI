@@ -223,15 +223,28 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	return providers, resolvedModelName, nil
 }
 
+// validateImageOnlyModel rejects media-only models on chat-style routes.
+// allowImageModel is the generic "this is a non-chat media endpoint" flag: it is
+// set by the images and speech execution entrypoints alike, so this function
+// gates both image-only and speech-only models.
 func (h *BaseAPIHandler) validateImageOnlyModel(modelName string, allowImageModel bool) *interfaces.ErrorMessage {
 	baseModel := strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName)
 	if baseModel == "" {
 		baseModel = strings.TrimSpace(modelName)
 	}
-	if isOpenAIImageOnlyModel(baseModel) && !allowImageModel {
+	if allowImageModel {
+		return nil
+	}
+	if isOpenAIImageOnlyModel(baseModel) {
 		return &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
 			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", routeModelBaseName(baseModel)),
+		}
+	}
+	if isOpenAISpeechOnlyModel(baseModel) {
+		return &interfaces.ErrorMessage{
+			StatusCode: http.StatusServiceUnavailable,
+			Error:      fmt.Errorf("model %s is only supported on /v1/audio/speech and /v1/tts", routeModelBaseName(baseModel)),
 		}
 	}
 	return nil
@@ -244,6 +257,10 @@ func isOpenAIImageOnlyModel(model string) bool {
 	default:
 		return false
 	}
+}
+
+func isOpenAISpeechOnlyModel(model string) bool {
+	return strings.EqualFold(strings.TrimSpace(routeModelBaseName(model)), "grok-tts")
 }
 
 func routeModelBaseName(model string) string {

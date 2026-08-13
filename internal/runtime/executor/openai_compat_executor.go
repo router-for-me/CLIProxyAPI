@@ -30,6 +30,8 @@ import (
 
 const (
 	openAICompatImageHandlerType            = "openai-image"
+	openAICompatSpeechHandlerType           = "openai-audio"
+	openAICompatSpeechPath                  = "/audio/speech"
 	openAICompatImagesGenerationsPath       = "/images/generations"
 	openAICompatImagesEditsPath             = "/images/edits"
 	openAICompatDefaultImageEndpoint        = openAICompatImagesGenerationsPath
@@ -88,6 +90,9 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImages(ctx, auth, req, opts, endpointPath)
+	}
+	if endpointPath := openAICompatSpeechEndpointPath(opts); endpointPath != "" {
+		return e.executeSpeech(ctx, auth, req, opts, endpointPath)
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -290,7 +295,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 		err = errRead
 		return resp, err
 	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, helps.ResponseLogBody(httpResp.Header.Get("Content-Type"), body))
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
@@ -302,6 +307,14 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 	reporter.EnsurePublished(ctx)
 	resp = cliproxyexecutor.Response{Payload: body, Headers: httpResp.Header.Clone()}
 	return resp, nil
+}
+
+// executeSpeech forwards an OpenAI-compatible /v1/audio/speech request.
+// The wire contract is identical to the image endpoints — a JSON body carrying
+// the upstream model name, and an opaque response body returned untouched — so
+// the same execution path is reused rather than duplicated.
+func (e *OpenAICompatExecutor) executeSpeech(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (cliproxyexecutor.Response, error) {
+	return e.executeImages(ctx, auth, req, opts, endpointPath)
 }
 
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -764,6 +777,13 @@ func openAICompatImageEndpointPath(opts cliproxyexecutor.Options) string {
 		return openAICompatImagesGenerationsPath
 	}
 	return openAICompatDefaultImageEndpoint
+}
+
+func openAICompatSpeechEndpointPath(opts cliproxyexecutor.Options) string {
+	if opts.SourceFormat.String() != openAICompatSpeechHandlerType {
+		return ""
+	}
+	return openAICompatSpeechPath
 }
 
 func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType string, stream bool) ([]byte, string, error) {

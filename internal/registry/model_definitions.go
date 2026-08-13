@@ -15,6 +15,7 @@ const (
 	xaiBuiltinVideoModelID        = "grok-imagine-video"
 	xaiBuiltinVideo15ModelID      = "grok-imagine-video-1.5"
 	xaiBuiltinVideo15PreviewID    = "grok-imagine-video-1.5-preview"
+	xaiBuiltinTTSModelID          = "grok-tts"
 )
 
 // staticModelsJSON mirrors the top-level structure of models.json.
@@ -119,10 +120,10 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo())
 }
 
-// WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
-// not depend on remote models.json updates.
+// WithXAIBuiltins injects hard-coded xAI image/video/speech model definitions that
+// should not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
+	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo(), xaiBuiltinTTSModelInfo())
 }
 
 func normalizeAntigravityCapabilityModelID(modelID string) string {
@@ -232,6 +233,25 @@ func xaiBuiltinVideo15PreviewModelInfo() *ModelInfo {
 		DisplayName: "Grok Imagine Video 1.5 Preview",
 		Name:        xaiBuiltinVideo15PreviewID,
 		Description: "Compatibility alias for the xAI Grok video generation model.",
+	}
+}
+
+// xaiBuiltinTTSModelInfo describes the synthetic model id used to route speech
+// requests to the xAI provider. xAI's /v1/tts endpoint takes no model field, so
+// this id exists only for provider resolution and model catalog discovery; it is
+// never forwarded upstream.
+func xaiBuiltinTTSModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                        xaiBuiltinTTSModelID,
+		Object:                    "model",
+		Created:                   1735689600, // 2025-01-01
+		OwnedBy:                   "xai",
+		Type:                      "xai",
+		DisplayName:               "Grok TTS",
+		Name:                      xaiBuiltinTTSModelID,
+		Description:               "xAI Grok text-to-speech model.",
+		SupportedInputModalities:  []string{"text"},
+		SupportedOutputModalities: []string{"audio"},
 	}
 }
 

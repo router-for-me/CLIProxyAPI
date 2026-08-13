@@ -120,6 +120,7 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 - 支持流式、非流式响应，以及受支持场景下的 WebSocket 响应
 - 函数调用/工具支持
 - 多模态输入（文本、图片）
+- 基于 Grok TTS 的文本转语音（`POST /v1/audio/speech`、`POST /v1/tts`）
 - 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude、Grok）
 - 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude、Grok）
 - 支持 Gemini AIStudio API 密钥

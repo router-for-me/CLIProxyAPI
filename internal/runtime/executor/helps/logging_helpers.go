@@ -670,6 +670,17 @@ func formatAuthInfo(info UpstreamRequestLog) string {
 	return strings.Join(parts, ", ")
 }
 
+// ResponseLogBody returns the bytes to record in the request log for an upstream
+// response. Binary payloads such as synthesized audio are replaced with a short
+// marker so enabling request logging does not fill the log with raw media.
+func ResponseLogBody(contentType string, body []byte) []byte {
+	normalized := strings.ToLower(strings.TrimSpace(contentType))
+	if normalized == "" || strings.Contains(normalized, "json") || strings.HasPrefix(normalized, "text/") {
+		return body
+	}
+	return []byte(fmt.Sprintf("<%s, %d bytes>", normalized, len(body)))
+}
+
 func SummarizeErrorBody(contentType string, body []byte) string {
 	isHTML := strings.Contains(strings.ToLower(contentType), "text/html")
 	if !isHTML {
