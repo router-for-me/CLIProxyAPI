@@ -131,18 +131,77 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 	c.JSON(400, gin.H{"error": "missing index or value"})
 }
 
-// api-keys
-func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
+// api-keys (with optional display names in api-key-names)
+func (h *Handler) GetAPIKeys(c *gin.Context) {
+	keys := h.cfg.APIKeys
+	if keys == nil {
+		keys = []string{}
+	}
+	names := h.cfg.APIKeyNames
+	if names == nil {
+		names = map[string]string{}
+	}
+	c.JSON(200, gin.H{"api-keys": keys, "api-key-names": names})
+}
 func (h *Handler) PutAPIKeys(c *gin.Context) {
+	type payload struct {
+		Keys  []string          `json:"api-keys"`
+		Names map[string]string `json:"api-key-names,omitempty"`
+	}
+	var p payload
+	if err := c.ShouldBindJSON(&p); err == nil && p.Keys != nil {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.cfg.APIKeys = append([]string(nil), p.Keys...)
+		// rebuild names: keep only entries whose key still exists
+		kept := map[string]string{}
+		for _, k := range h.cfg.APIKeys {
+			if n, ok := p.Names[k]; ok && n != "" {
+				kept[k] = n
+			}
+		}
+		h.cfg.APIKeyNames = kept
+		h.persistLocked(c)
+		return
+	}
 	h.putStringList(c, func(v []string) {
 		h.cfg.APIKeys = append([]string(nil), v...)
+		if h.cfg.APIKeyNames != nil {
+			kept := map[string]string{}
+			for _, k := range h.cfg.APIKeys {
+				if n, ok := h.cfg.APIKeyNames[k]; ok {
+					kept[k] = n
+				}
+			}
+			h.cfg.APIKeyNames = kept
+		}
 	}, nil)
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	h.patchStringList(c, &h.cfg.APIKeys, func() {
+		if h.cfg.APIKeyNames != nil {
+			kept := map[string]string{}
+			for _, k := range h.cfg.APIKeys {
+				if n, ok := h.cfg.APIKeyNames[k]; ok {
+					kept[k] = n
+				}
+			}
+			h.cfg.APIKeyNames = kept
+		}
+	})
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {
+		if h.cfg.APIKeyNames != nil {
+			kept := map[string]string{}
+			for _, k := range h.cfg.APIKeys {
+				if n, ok := h.cfg.APIKeyNames[k]; ok {
+					kept[k] = n
+				}
+			}
+			h.cfg.APIKeyNames = kept
+		}
+	})
 }
 
 // gemini-api-key: []GeminiKey
