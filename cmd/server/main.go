@@ -797,6 +797,7 @@ func main() {
 			LiteLLMUsers:      pgLiteLLMUsers,
 			LiteLLMKeys:       pgLiteLLMKeys,
 			LiteLLMSync:       pgLiteLLMSync,
+			Flusher:           usageFlusher,
 		}))
 	}
 

@@ -47,7 +47,24 @@ func (h *Handler) runAlertChecks(ctx context.Context) {
 	apiKeys := h.pgAPIKeys
 	usage := h.pgUsage
 	authManager := h.authManager
+	flusher := h.pgFlusher
 	h.mu.Unlock()
+
+	// Backpressure signal: if the PG usage flusher's flush queue filled up and
+	// shed records since the last sweep, log a warning. The flush-side already
+	// logs each per-record drop; this sweep turns the cumulative Drops() counter
+	// into a periodic visibility/anomaly flag. Alarm on the *delta* (not the
+	// cumulative total) so a steady-state drain does not re-warn every sweep.
+	if flusher != nil {
+		drops := flusher.Drops()
+		h.mu.Lock()
+		increased := drops > h.pgFlusherLastDrops
+		h.pgFlusherLastDrops = drops
+		h.mu.Unlock()
+		if increased {
+			log.WithField("drops", drops).Warn("postgres usage flusher: usage records dropped since last sweep (queue backpressure)")
+		}
+	}
 
 	if alerts == nil {
 		return

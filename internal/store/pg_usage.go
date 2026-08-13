@@ -548,6 +548,11 @@ func (s *UsageStore) selectAggregateMiss(ctx context.Context, filter UsageFilter
 	// dimension filters), read it from usage_stat_day instead of scanning
 	// every usage_events row in the window. This is the query behind LiteLLM's
 	// /litellm/spend/users, which many users poll.
+	//
+	// NOTE on freshness: a day-aligned result reflects the last rollup fold, so
+	// "today" is at most ~24h stale (folded on the daily cadence + startup
+	// backfill). The 15s aggregate cache hides DB load but does not change this.
+	// This is an accepted tradeoff — see docs/operations/postgres-sizing.md.
 	if rows, used, err := s.tryRollupAggregateUser(ctx, filter); err != nil {
 		return nil, err
 	} else if used {
@@ -700,6 +705,10 @@ ORDER BY bucket%s`
 // when the filter's window is day-aligned and carries no non-rollup dimension
 // filters. It returns usedRollup=false (falling back to the usage_events scan)
 // whenever the fast path cannot faithfully reproduce the query's result.
+//
+// Results from this fast path reflect the last rollup fold (whole-day-aligned),
+// so "today" may be up to ~24h stale and is cached for the 15s aggregate-cache
+// TTL. Accepted tradeoff — see docs/operations/postgres-sizing.md.
 func (s *UsageStore) tryRollupAggregateUser(ctx context.Context, filter UsageFilter) ([]UsageAggregate, bool, error) {
 	if s.rollupTable == "" {
 		return nil, false, nil

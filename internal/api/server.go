@@ -267,6 +267,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		// detection sweep is started here so it only runs after the auth manager
 		// is attached (the provider-cooldown detector polls live cooldowns).
 		s.mgmt.SetAlertsStore(handles.Alerts)
+		s.mgmt.SetUsageFlusher(handles.Flusher)
 		s.mgmt.StartAlertSweep()
 		// Wire the backup store that powers the /export and /import routes
 		// (dump/restore of the PG tables). No-op when PG is not configured.

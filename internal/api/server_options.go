@@ -102,6 +102,10 @@ type PgStoreHandles struct {
 	// /v0/management/litellm/* routes return 503 in that case.
 	LiteLLMUsers *store.LiteLLMUserStore
 	LiteLLMKeys  *store.LiteLLMKeyStore
+	// Flusher is the asynchronous PG usage flusher. Its cumulative drop count
+	// (Drops()) is surfaced by the alerts sweep so backpressure from a full
+	// flush queue is observable. nil when PG is not configured.
+	Flusher *store.UsageFlusher
 	// LiteLLMSync is the PG-backed store for the Manage-LiteLLM external sync
 	// settings (base URL + sealed master API key + last-sync outcome). nil when
 	// PG is not configured — the /litellm/settings and /litellm/sync/run routes

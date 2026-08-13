@@ -72,6 +72,10 @@ type Handler struct {
 	// in that case so callers can detect the absence cleanly.
 	pgAPIKeys *store.APIKeyStore
 	pgUsage   *store.UsageStore
+	// pgFlusher is the asynchronous PG usage flusher. The alerts sweep reads its
+	// cumulative Drops() count to flag backpressure (full flush queue). nil when
+	// PG is not configured.
+	pgFlusher *store.UsageFlusher
 	pgModels  *store.ModelsStore
 	pgUsers   *store.UserStore
 	pgSync    *registry.PGSync
@@ -121,7 +125,8 @@ type Handler struct {
 	// pgAlerts stores the notification feed produced by the alert detectors
 	// (Analysis → Alerts). nil when PG is not configured — the /alerts routes
 	// return 503 in that case.
-	pgAlerts *store.AlertStore
+	pgAlerts           *store.AlertStore
+	pgFlusherLastDrops int64
 
 	// v1ModelsHandler is the http.Handler that serves GET /v1/models. It is
 	// wired by api.Server after route setup so the management handler can
@@ -450,6 +455,17 @@ func (h *Handler) SetAlertsStore(s *store.AlertStore) {
 	h.pgAlerts = s
 	h.mu.Unlock()
 	store.StartAlertRetentionSweep(s) // nil-safe
+}
+
+// SetUsageFlusher wires the PG usage flusher so the alerts sweep can flag drops
+// (full flush queue = backpressure). nil when PG is not configured.
+func (h *Handler) SetUsageFlusher(f *store.UsageFlusher) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.pgFlusher = f
+	h.mu.Unlock()
 }
 
 // SetModelsCatalogResolver wires the resolver that translates an internal
