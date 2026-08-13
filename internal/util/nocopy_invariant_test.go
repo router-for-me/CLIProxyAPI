@@ -18,6 +18,15 @@ var inPlaceSJSONTokens = []string{"ReplaceInPlace", "Optimistic"}
 // from the same buffer can still be alive at that point.
 var inPlaceSJSONAllowlist = map[string]struct{}{}
 
+// skippedWalkDirs are directories the source walker never descends into. The
+// build and tool dirs are excluded because they hold cloned third-party or
+// generated Go sources (build output, caches, temporary GOPATH/module trees)
+// that must not be treated as product code governed by these invariants.
+var skippedWalkDirs = map[string]struct{}{
+	".git": {}, "vendor": {}, "node_modules": {}, "testdata": {},
+	".tmp_build": {}, ".go-cache": {}, ".go-tmp": {}, ".gocache": {},
+}
+
 // forEachSourceFile visits every non-test Go file in the repository.
 func forEachSourceFile(t *testing.T, root string, visit func(rel string, data []byte)) {
 	t.Helper()
@@ -26,8 +35,7 @@ func forEachSourceFile(t *testing.T, root string, visit func(rel string, data []
 			return err
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "vendor", "node_modules", "testdata":
+			if _, skip := skippedWalkDirs[d.Name()]; skip {
 				return filepath.SkipDir
 			}
 			return nil
@@ -49,6 +57,63 @@ func forEachSourceFile(t *testing.T, root string, visit func(rel string, data []
 	if err != nil {
 		t.Fatalf("walk repository: %v", err)
 	}
+}
+
+// TestForEachSourceFileSkipsKnownDirs is the regression for the walker's skip
+// list: it must skip exactly the build/cache/dependency basenames and still
+// descend into an unrelated dot-directory such as .hidden-source.
+func TestForEachSourceFileSkipsKnownDirs(t *testing.T) {
+	root := t.TempDir()
+	kept := "prod.go"
+	skipped := []string{
+		".git", "vendor", "node_modules", "testdata",
+		".tmp_build", ".go-cache", ".go-tmp", ".gocache",
+	}
+	for _, name := range skipped {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package x\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	hiddenDir := filepath.Join(root, ".hidden-source")
+	if err := os.MkdirAll(hiddenDir, 0o755); err != nil {
+		t.Fatalf("mkdir .hidden-source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hiddenDir, kept), []byte("package x\n"), 0o644); err != nil {
+		t.Fatalf("write .hidden-source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "top.go"), []byte("package x\n"), 0o644); err != nil {
+		t.Fatalf("write top.go: %v", err)
+	}
+
+	var visited []string
+	forEachSourceFile(t, root, func(rel string, _ []byte) {
+		visited = append(visited, rel)
+	})
+
+	for _, name := range skipped {
+		if containsString(visited, name+"/a.go") {
+			t.Errorf("walker descended into skipped dir %q", name)
+		}
+	}
+	if !containsString(visited, ".hidden-source/"+kept) {
+		t.Errorf("walker did not scan dot-dir .hidden-source (visited %v)", visited)
+	}
+	if !containsString(visited, "top.go") {
+		t.Errorf("walker did not scan top-level file top.go (visited %v)", visited)
+	}
+}
+
+func containsString(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 // TestNoInPlaceSJSONWrites protects the invariant that request payload buffers
