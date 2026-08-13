@@ -382,7 +382,7 @@ export const sections = [
       },
       {
         method: 'GET', path: '/litellm/global/spend', summary: 'Global spend KPI (total spend + request count for the optional date range).',
-        notes: 'Served from a short-TTL cache; whole-day queries read the pre-aggregated daily rollup, so polling this endpoint frequently is cheap.',
+        notes: 'Served from a short-TTL cache, so polling this endpoint frequently is cheap. (Unlike spend/users, this endpoint scans usage_events directly and does not read the daily rollup.)',
         params: [
           { name: 'start_date', in: 'query', type: 'string', required: false, default: '', description: 'RFC3339 lower bound.' },
           { name: 'end_date', in: 'query', type: 'string', required: false, default: '', description: 'RFC3339 upper bound.' },
