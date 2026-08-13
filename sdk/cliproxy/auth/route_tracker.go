@@ -3,6 +3,7 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 )
@@ -165,4 +166,19 @@ func (e *routeExhaustionError) Unwrap() error {
 		return nil
 	}
 	return e.cause
+}
+
+// Headers forwards the wrapped cause's error headers if it exposes them, so
+// handlers that collect passthrough headers from the final routed error do not
+// lose them when the cause is wrapped by route exhaustion. It returns a fresh
+// copy of the cause's map and never mutates the caller's headers.
+func (e *routeExhaustionError) Headers() http.Header {
+	if e == nil {
+		return nil
+	}
+	var carrier interface{ Headers() http.Header }
+	if errors.As(e.cause, &carrier) && carrier != nil {
+		return cloneHTTPHeader(carrier.Headers())
+	}
+	return nil
 }
