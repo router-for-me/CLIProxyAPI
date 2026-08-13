@@ -146,15 +146,6 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 	return retries
 }
 
-// StreamFirstChunkTimeout returns the opt-in maximum wait duration for the first meaningful chunk in a stream response.
-// Default is disabled.
-func StreamFirstChunkTimeout(cfg *config.SDKConfig) time.Duration {
-	if cfg == nil || cfg.Streaming.StreamFirstChunkTimeoutSeconds <= 0 {
-		return 0
-	}
-	return time.Duration(cfg.Streaming.StreamFirstChunkTimeoutSeconds) * time.Second
-}
-
 // PassthroughHeadersEnabled returns whether upstream response headers should be forwarded to clients.
 // Default is false.
 func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {
