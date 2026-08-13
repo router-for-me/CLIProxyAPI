@@ -10,6 +10,19 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
+func TestConvertOpenAIResponsesRequestToClaude_DoesNotInjectSyntheticMetadata(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-sonnet-5",
+		"input": "hello",
+		"max_output_tokens": 16
+	}`
+
+	result := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5", []byte(inputJSON), false)
+	if metadata := gjson.GetBytes(result, "metadata"); metadata.Exists() {
+		t.Fatalf("translated request unexpectedly contains metadata: %s", metadata.Raw)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",
