@@ -44,6 +44,14 @@ const (
 	antigravityCreditsHintRefreshTimeout   = 5 * time.Second
 	antigravityShortQuotaCooldownThreshold = 5 * time.Minute
 	antigravityInstantRetryThreshold       = 3 * time.Second
+	// antigravitySoftRateLimitMaxAttempts caps how many attempts a bare/ambiguous
+	// 429 (RESOURCE_EXHAUSTED without RetryInfo) is retried against the SAME auth
+	// before switching. One quick retry still catches genuinely transient blips.
+	antigravitySoftRateLimitMaxAttempts = 2
+	// antigravitySoftRateLimitExhaustedCooldown is the local cooldown applied to an
+	// auth once soft-rate-limit retries are exhausted, so subsequent requests skip
+	// it (draining the pool toward fallback providers) instead of re-hitting it.
+	antigravitySoftRateLimitExhaustedCooldown = 120 * time.Second
 	// systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
 

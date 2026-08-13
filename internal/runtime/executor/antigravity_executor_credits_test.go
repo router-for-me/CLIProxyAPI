@@ -765,3 +765,58 @@ func TestParseMetaFloat(t *testing.T) {
 		})
 	}
 }
+
+func TestAntigravityExecute_SoftRateLimitExhaustedRecordsCooldown(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	// Google now returns a bare RESOURCE_EXHAUSTED 429 (no RetryInfo) for an
+	// exhausted credential, indistinguishable from a transient blip. The executor
+	// should retry the same auth at most antigravitySoftRateLimitMaxAttempts times,
+	// then record a short cooldown so subsequent requests skip this auth instead of
+	// re-hitting it (which starves lower-priority fallback providers).
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`))
+	}))
+	defer server.Close()
+
+	// RequestRetry 3 => 4 total attempts if uncapped; the soft cap must limit it.
+	exec := NewAntigravityExecutor(&config.Config{RequestRetry: 3})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-soft-exhausted-429",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "project-1",
+			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+		},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-6",
+		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatAntigravity,
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want 429 error after soft rate limit exhausted")
+	}
+	if requestCount != antigravitySoftRateLimitMaxAttempts {
+		t.Fatalf("request count = %d, want %d (soft retries must be capped)", requestCount, antigravitySoftRateLimitMaxAttempts)
+	}
+	inCooldown, remaining, cdErr := antigravityIsInShortCooldownRequired(context.Background(), auth, "claude-sonnet-4-6", time.Now())
+	if cdErr != nil {
+		t.Fatalf("antigravityIsInShortCooldownRequired() error = %v", cdErr)
+	}
+	if !inCooldown {
+		t.Fatal("expected auth to be in short cooldown after soft rate limit exhausted, got none")
+	}
+	if remaining <= 0 || remaining > antigravitySoftRateLimitExhaustedCooldown {
+		t.Fatalf("cooldown remaining = %v, want in (0, %v]", remaining, antigravitySoftRateLimitExhaustedCooldown)
+	}
+}
