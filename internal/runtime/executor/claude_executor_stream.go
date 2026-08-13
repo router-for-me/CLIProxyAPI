@@ -39,6 +39,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	cchSigning := claudeCCHSigningEnabled(apiKey, claudeCCHUpstreamAnthropic, url)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	reporter.SetStream(true)
 	defer reporter.TrackFailure(ctx, &err)
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -294,6 +295,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if responseFormat == to {
 			scanner := bufio.NewScanner(decodedBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
+			var usageBuffer helps.ClaudeStreamUsageBuffer
 			var event bytes.Buffer
 			var upstreamMessageID string
 			upstreamCompleted := false
@@ -314,9 +316,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				line := scanner.Bytes()
 				observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-					reporter.Publish(ctx, detail)
-				}
+				usageBuffer.Observe(line)
 				restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
 				if errRestore != nil {
 					emitResponseError(fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore))
@@ -350,12 +350,14 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if upstreamCompleted {
 				commitClaudeDiagnostics(diagnosticsState, upstreamMessageID)
 			}
+			usageBuffer.Publish(ctx, reporter)
 			return
 		}
 
 		// For other formats, use translation
 		scanner := bufio.NewScanner(decodedBody)
 		scanner.Buffer(nil, 52_428_800) // 50MB
+		var usageBuffer helps.ClaudeStreamUsageBuffer
 		var param any
 		var upstreamMessageID string
 		upstreamCompleted := false
@@ -363,9 +365,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			line := scanner.Bytes()
 			observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
-			}
+			usageBuffer.Observe(line)
 			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
 			if errRestore != nil {
 				emitResponseError(fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore))
@@ -407,6 +407,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if upstreamCompleted {
 			commitClaudeDiagnostics(diagnosticsState, upstreamMessageID)
 		}
+		usageBuffer.Publish(ctx, reporter)
 	}()
 	result := &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}
 	if replayScope.valid() {

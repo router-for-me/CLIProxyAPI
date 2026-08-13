@@ -1341,6 +1341,8 @@ type UsageRecord struct {
 	// Generate reports whether the client requested actual generation.
 	// The host normalizes omitted usage.Record values to true before delivery.
 	Generate bool
+	// Stream reports whether usage was collected from a streaming upstream response.
+	Stream bool
 	// RequestedAt is the time the request was received.
 	RequestedAt time.Time
 	// Latency is the total request latency.
@@ -1379,6 +1381,10 @@ type UsageDetail struct {
 	CacheReadTokens int64
 	// CacheCreationTokens is the cache creation token count.
 	CacheCreationTokens int64
+	// CacheCreation5mTokens is the five-minute cache creation token count.
+	CacheCreation5mTokens int64
+	// CacheCreation1hTokens is the one-hour cache creation token count.
+	CacheCreation1hTokens int64
 	// TotalTokens is the total token count.
 	TotalTokens int64
 }

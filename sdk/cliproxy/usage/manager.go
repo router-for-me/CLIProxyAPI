@@ -44,7 +44,9 @@ type Record struct {
 	// Generate reports whether the client requested actual generation.
 	// nil or true means generation is enabled; only an explicit false disables generation.
 	// Use GenerateFlag to set the value and GenerateEnabled to read it with the default.
-	Generate    *bool
+	Generate *bool
+	// Stream reports whether usage was collected from a streaming upstream response.
+	Stream      bool
 	RequestedAt time.Time
 	Latency     time.Duration
 	TTFT        time.Duration
@@ -63,21 +65,24 @@ type Failure struct {
 
 // Detail holds the token usage breakdown.
 type Detail struct {
-	InputTokens         int64
-	OutputTokens        int64
-	ReasoningTokens     int64
-	CachedTokens        int64
-	CacheReadTokens     int64
-	CacheCreationTokens int64
-	TotalTokens         int64
-	TokenBreakdown      TokenBreakdown
-	ResponseServiceTier string
+	InputTokens           int64
+	OutputTokens          int64
+	ReasoningTokens       int64
+	CachedTokens          int64
+	CacheReadTokens       int64
+	CacheCreationTokens   int64
+	CacheCreation5mTokens int64
+	CacheCreation1hTokens int64
+	TotalTokens           int64
+	TokenBreakdown        TokenBreakdown
+	ResponseServiceTier   string
 }
 
 type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
 type generateContextKey struct{}
+type streamContextKey struct{}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -193,6 +198,23 @@ func GenerateFromContext(ctx context.Context) bool {
 	default:
 		return true
 	}
+}
+
+// WithStream stores whether usage is being collected from a streaming upstream response.
+func WithStream(ctx context.Context, stream bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, streamContextKey{}, stream)
+}
+
+// StreamFromContext returns whether usage is being collected from a streaming upstream response.
+func StreamFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	stream, _ := ctx.Value(streamContextKey{}).(bool)
+	return stream
 }
 
 // GenerateFlag returns a pointer suitable for Record.Generate.

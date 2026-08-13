@@ -48,6 +48,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Use an upstream stream whenever the downstream response needs translation
 	// from Claude events. Native Claude responses use the JSON response path.
 	upstreamStream := responseFormat != to
+	reporter.SetStream(upstreamStream)
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -283,11 +284,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errValidate)
 		}
 		commitClaudeDiagnostics(diagnosticsState, claudeMessageIDFromSSE(data))
+		var usageBuffer helps.ClaudeStreamUsageBuffer
 		lines := bytes.Split(data, []byte("\n"))
 		for i, line := range lines {
-			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
-			}
+			usageBuffer.Observe(line)
 			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
 			if errRestore != nil {
 				errRestore = fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore)
@@ -296,6 +296,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			}
 			lines[i] = restoredLine
 		}
+		usageBuffer.Publish(ctx, reporter)
 		data = bytes.Join(lines, []byte("\n"))
 	} else {
 		commitClaudeDiagnostics(diagnosticsState, claudeMessageIDFromResponse(data))

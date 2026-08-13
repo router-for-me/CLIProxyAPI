@@ -176,6 +176,33 @@ func TestUsageQueuePluginPreservesLegacyCachedOnlyUsage(t *testing.T) {
 	})
 }
 
+func TestUsageQueuePluginEmitsCanonicalCacheBreakdownAndStreamFlag(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider: "claude",
+			Model:    "claude-opus-4-6",
+			Stream:   true,
+			Detail: coreusage.Detail{
+				CacheReadTokens:       13,
+				CacheCreationTokens:   24,
+				CacheCreation5mTokens: 17,
+				CacheCreation1hTokens: 7,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireBoolField(t, payload, "stream", true)
+		tokens := requireTokensPayload(t, payload)
+		requireIntField(t, tokens, "cache_read_tokens", 13)
+		requireIntField(t, tokens, "cache_creation_tokens", 24)
+		requireIntField(t, tokens, "cache_creation_5m_tokens", 17)
+		requireIntField(t, tokens, "cache_creation_1h_tokens", 7)
+	})
+}
+
 func TestUsageQueuePluginEmitsSingleCanonicalAutoTier(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := coreusage.WithServiceTier(context.Background(), coreusage.AutoServiceTier)

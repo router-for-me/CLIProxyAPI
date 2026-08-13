@@ -315,6 +315,9 @@ func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
 	if detail.CacheCreationTokens != 19514 {
 		t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, 19514)
 	}
+	if detail.CacheCreation5mTokens != 19514 || detail.CacheCreation1hTokens != 0 {
+		t.Fatalf("cache creation TTL tokens = (%d, %d), want (%d, 0)", detail.CacheCreation5mTokens, detail.CacheCreation1hTokens, 19514)
+	}
 	if detail.CachedTokens != 7 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 7)
 	}
@@ -326,14 +329,58 @@ func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
 	}
 }
 
-func TestParseClaudeUsageFallsBackCachedTokensToCacheCreation(t *testing.T) {
+func TestParseClaudeUsageDoesNotAliasCacheCreationAsCachedTokens(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":3085,"output_tokens":253,"cache_creation_input_tokens":19514}}`)
 	detail := ParseClaudeUsage(data)
-	if detail.CachedTokens != 19514 {
-		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 19514)
+	if detail.CachedTokens != 0 {
+		t.Fatalf("cached tokens = %d, want 0", detail.CachedTokens)
 	}
 	if detail.TotalTokens != 22852 {
 		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22852)
+	}
+}
+
+func TestParseClaudeUsagePreservesCacheCreationTTLBreakdown(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":2,"output_tokens":3,"cache_read_input_tokens":5,"cache_creation_input_tokens":18,"cache_creation":{"ephemeral_5m_input_tokens":11,"ephemeral_1h_input_tokens":7}}}`)
+	detail := ParseClaudeUsage(data)
+	if detail.CacheCreationTokens != 18 || detail.CacheCreation5mTokens != 11 || detail.CacheCreation1hTokens != 7 {
+		t.Fatalf("cache creation tokens = (%d, %d, %d), want (18, 11, 7)", detail.CacheCreationTokens, detail.CacheCreation5mTokens, detail.CacheCreation1hTokens)
+	}
+	if detail.TotalTokens != 28 {
+		t.Fatalf("total tokens = %d, want 28", detail.TotalTokens)
+	}
+}
+
+func TestClaudeStreamUsageBufferMergesMessageStartAndMessageDelta(t *testing.T) {
+	var buffer ClaudeStreamUsageBuffer
+	if !buffer.Observe([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":13,"output_tokens":1,"cache_read_input_tokens":22000,"cache_creation_input_tokens":31,"cache_creation":{"ephemeral_5m_input_tokens":19,"ephemeral_1h_input_tokens":12}}}}`)) {
+		t.Fatal("message_start usage was not observed")
+	}
+	if !buffer.Observe([]byte(`data: {"type":"message_delta","usage":{"output_tokens":4}}`)) {
+		t.Fatal("message_delta usage was not observed")
+	}
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("buffer detail ok = false, want true")
+	}
+	if detail.InputTokens != 13 || detail.OutputTokens != 4 || detail.CacheReadTokens != 22000 ||
+		detail.CacheCreationTokens != 31 || detail.CacheCreation5mTokens != 19 || detail.CacheCreation1hTokens != 12 ||
+		detail.TotalTokens != 22048 {
+		t.Fatalf("unexpected merged Claude usage: %+v", detail)
+	}
+}
+
+func TestClaudeStreamUsageBufferUsesLatestCumulativeValues(t *testing.T) {
+	var buffer ClaudeStreamUsageBuffer
+	buffer.Observe([]byte(`data: {"type":"message_delta","usage":{"input_tokens":2,"output_tokens":3,"cache_read_input_tokens":5,"cache_creation_input_tokens":7}}`))
+	buffer.Observe([]byte(`data: {"type":"message_delta","usage":{"input_tokens":11,"output_tokens":13,"cache_read_input_tokens":17,"cache_creation_input_tokens":19}}`))
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("buffer detail ok = false, want true")
+	}
+	if detail.InputTokens != 11 || detail.OutputTokens != 13 || detail.CacheReadTokens != 17 ||
+		detail.CacheCreationTokens != 19 || detail.TotalTokens != 60 {
+		t.Fatalf("unexpected cumulative Claude usage: %+v", detail)
 	}
 }
 

@@ -36,6 +36,7 @@ type UsageReporter struct {
 	reasoning       string
 	serviceTier     string
 	generate        bool
+	stream          bool
 	requestedAt     time.Time
 	ttftMu          sync.RWMutex
 	ttft            time.Duration
@@ -75,6 +76,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reasoning:   usage.ReasoningEffortFromContext(ctx),
 		serviceTier: usage.ServiceTierFromContext(ctx),
 		generate:    usage.GenerateFromContext(ctx),
+		stream:      usage.StreamFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -82,6 +84,16 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reporter.accessTokenHash = authAccessTokenSHA256(auth)
 	}
 	return reporter
+}
+
+// SetStream records whether the upstream response uses a streaming transport.
+// Executors that stream upstream for a non-streaming downstream request use this
+// to override the request-level stream marker.
+func (r *UsageReporter) SetStream(stream bool) {
+	if r == nil {
+		return
+	}
+	r.stream = stream
 }
 
 // UpdateAccessTokenFingerprint records the token version actually used upstream.
@@ -240,6 +252,8 @@ func hasNonZeroTokenUsage(detail usage.Detail) bool {
 		detail.CachedTokens != 0 ||
 		detail.CacheReadTokens != 0 ||
 		detail.CacheCreationTokens != 0 ||
+		detail.CacheCreation5mTokens != 0 ||
+		detail.CacheCreation1hTokens != 0 ||
 		detail.TotalTokens != 0 ||
 		detail.TokenBreakdown.TotalTokens != 0
 }
@@ -292,6 +306,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		ServiceTier:         r.serviceTier,
 		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
 		Generate:            usage.GenerateFlag(r.generate),
+		Stream:              r.stream,
 		RequestedAt:         r.requestedAt,
 		Latency:             r.latency(),
 		TTFT:                r.ttftDuration(),
@@ -699,15 +714,97 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
 	if !usageNode.Exists() {
+		usageNode = gjson.GetBytes(payload, "message.usage")
+	}
+	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
 	return parseClaudeUsageNode(usageNode), true
 }
 
+// ClaudeStreamUsageBuffer merges Anthropic's split streaming usage contract.
+// message_start.message.usage carries input/cache quantities while one or more
+// message_delta.usage objects carry cumulative output and may repeat input fields.
+type ClaudeStreamUsageBuffer struct {
+	detail usage.Detail
+	ok     bool
+}
+
+// Observe merges usage from a single Anthropic SSE line.
+func (b *ClaudeStreamUsageBuffer) Observe(line []byte) bool {
+	if b == nil {
+		return false
+	}
+	payload := jsonPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return false
+	}
+	root := gjson.ParseBytes(payload)
+	usageNode := root.Get("usage")
+	if root.Get("type").String() == "message_start" {
+		usageNode = root.Get("message.usage")
+	}
+	if !usageNode.Exists() {
+		return false
+	}
+	mergeClaudeUsageNode(&b.detail, usageNode)
+	b.detail = finalizeClaudeUsageDetail(b.detail)
+	b.ok = true
+	return true
+}
+
+// Detail returns the merged canonical usage.
+func (b *ClaudeStreamUsageBuffer) Detail() (usage.Detail, bool) {
+	if b == nil || !b.ok {
+		return usage.Detail{}, false
+	}
+	return b.detail, true
+}
+
+// Publish emits the final merged streaming usage once.
+func (b *ClaudeStreamUsageBuffer) Publish(ctx context.Context, reporter *UsageReporter) bool {
+	detail, ok := b.Detail()
+	if !ok || reporter == nil {
+		return false
+	}
+	reporter.Publish(ctx, detail)
+	return true
+}
+
 func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
-	cacheReadTokens := usageNode.Get("cache_read_input_tokens").Int()
-	cacheCreationTokens := usageNode.Get("cache_creation_input_tokens").Int()
-	rawOutputTokens := usageNode.Get("output_tokens").Int()
+	detail := usage.Detail{}
+	mergeClaudeUsageNode(&detail, usageNode)
+	return finalizeClaudeUsageDetail(detail)
+}
+
+func mergeClaudeUsageNode(detail *usage.Detail, usageNode gjson.Result) {
+	if detail == nil || !usageNode.Exists() {
+		return
+	}
+	if input := usageNode.Get("input_tokens"); input.Exists() {
+		detail.InputTokens = input.Int()
+	}
+	if output := usageNode.Get("output_tokens"); output.Exists() {
+		detail.OutputTokens = output.Int()
+	}
+	if cacheRead := usageNode.Get("cache_read_input_tokens"); cacheRead.Exists() {
+		detail.CacheReadTokens = cacheRead.Int()
+		detail.CachedTokens = detail.CacheReadTokens
+	}
+	cacheCreation := usageNode.Get("cache_creation_input_tokens")
+	cacheCreation5m := usageNode.Get("cache_creation.ephemeral_5m_input_tokens")
+	cacheCreation1h := usageNode.Get("cache_creation.ephemeral_1h_input_tokens")
+	if cacheCreation5m.Exists() || cacheCreation1h.Exists() {
+		detail.CacheCreation5mTokens = cacheCreation5m.Int()
+		detail.CacheCreation1hTokens = cacheCreation1h.Int()
+		detail.CacheCreationTokens = detail.CacheCreation5mTokens + detail.CacheCreation1hTokens
+	} else if cacheCreation.Exists() {
+		detail.CacheCreationTokens = cacheCreation.Int()
+		// Older responses expose only the aggregate; cache controls without an
+		// explicit TTL are five-minute entries.
+		detail.CacheCreation5mTokens = detail.CacheCreationTokens
+		detail.CacheCreation1hTokens = 0
+	}
 	// Anthropic reports thinking as a subset of output_tokens. Prefer the official
 	// nested field, then fall back to legacy aliases used by some gateways.
 	reasoningNode := firstExistingUsageNode(
@@ -716,33 +813,27 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		"output_tokens_details.reasoning_tokens",
 		"thinking_tokens",
 	)
-	reasoningTokens := reasoningNode.Int()
-	if reasoningTokens < 0 {
-		reasoningTokens = 0
+	if reasoningNode.Exists() {
+		detail.ReasoningTokens = reasoningNode.Int()
+		if detail.ReasoningTokens < 0 {
+			detail.ReasoningTokens = 0
+		}
 	}
-	nonReasoningOutput := rawOutputTokens
-	if reasoningTokens > 0 && reasoningTokens <= rawOutputTokens {
-		nonReasoningOutput = rawOutputTokens - reasoningTokens
-	} else if reasoningTokens > rawOutputTokens {
+}
+
+func finalizeClaudeUsageDetail(detail usage.Detail) usage.Detail {
+	nonReasoningOutput := detail.OutputTokens
+	if detail.ReasoningTokens > 0 && detail.ReasoningTokens <= detail.OutputTokens {
+		nonReasoningOutput = detail.OutputTokens - detail.ReasoningTokens
+	} else if detail.ReasoningTokens > detail.OutputTokens {
 		// Keep Detail.OutputTokens authoritative for keeper subset checks and
 		// avoid inventing extra non-reasoning output when the upstream payload
 		// is inconsistent.
 		nonReasoningOutput = 0
 	}
-	detail := usage.Detail{
-		InputTokens:         usageNode.Get("input_tokens").Int(),
-		OutputTokens:        rawOutputTokens,
-		ReasoningTokens:     reasoningTokens,
-		CachedTokens:        cacheReadTokens,
-		CacheReadTokens:     cacheReadTokens,
-		CacheCreationTokens: cacheCreationTokens,
-	}
-	if detail.CachedTokens == 0 {
-		detail.CachedTokens = detail.CacheCreationTokens
-	}
 	// raw output_tokens already includes thinking; cache fields are independent
 	// from input_tokens in the Messages API.
-	detail.TotalTokens = detail.InputTokens + rawOutputTokens + detail.CacheReadTokens + detail.CacheCreationTokens
+	detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.CacheReadTokens + detail.CacheCreationTokens
 	detail.TokenBreakdown = usage.NewIndependentTokenBreakdown(
 		detail.InputTokens,
 		detail.CacheReadTokens,
