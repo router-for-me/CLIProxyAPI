@@ -114,7 +114,7 @@ func sanitizeStatus(err error) string {
 	return "error"
 }
 
-type routeExhaustionError struct {
+type routeExhaustionClonedError struct {
 	cause   error
 	summary string
 }
@@ -130,25 +130,13 @@ func wrapRouteExhaustion(cause error, tracker *routeAttemptTracker) error {
 	if summary == "" {
 		return cause
 	}
-	var authErr *Error
-	if errors.As(cause, &authErr) && authErr != nil {
-		cloned := *authErr
-		if cloned.Message != "" {
-			cloned.Message = cloned.Message + "; " + summary
-		} else if cloned.Code != "" {
-			cloned.Message = cloned.Code + "; " + summary
-		} else {
-			cloned.Message = summary
-		}
-		return &cloned
-	}
-	return &routeExhaustionError{
+	return &routeExhaustionClonedError{
 		cause:   cause,
 		summary: summary,
 	}
 }
 
-func (e *routeExhaustionError) Error() string {
+func (e *routeExhaustionClonedError) Error() string {
 	if e == nil {
 		return ""
 	}
@@ -161,7 +149,7 @@ func (e *routeExhaustionError) Error() string {
 	return e.cause.Error() + "; " + e.summary
 }
 
-func (e *routeExhaustionError) Unwrap() error {
+func (e *routeExhaustionClonedError) Unwrap() error {
 	if e == nil {
 		return nil
 	}
@@ -172,7 +160,7 @@ func (e *routeExhaustionError) Unwrap() error {
 // handlers that collect passthrough headers from the final routed error do not
 // lose them when the cause is wrapped by route exhaustion. It returns a fresh
 // copy of the cause's map and never mutates the caller's headers.
-func (e *routeExhaustionError) Headers() http.Header {
+func (e *routeExhaustionClonedError) Headers() http.Header {
 	if e == nil {
 		return nil
 	}
@@ -181,4 +169,15 @@ func (e *routeExhaustionError) Headers() http.Header {
 		return cloneHTTPHeader(carrier.Headers())
 	}
 	return nil
+}
+
+// SafeResponseHeaders forwards trusted response headers from the wrapped cause
+// if it exposes them, so handlers reading SafeResponseHeaders from the final
+// routed error keep e.g. the Home busy error's Retry-After through route
+// exhaustion. It returns a fresh copy and never mutates the caller's headers.
+func (e *routeExhaustionClonedError) SafeResponseHeaders() http.Header {
+	if e == nil {
+		return nil
+	}
+	return SafeResponseHeaders(e.cause)
 }
