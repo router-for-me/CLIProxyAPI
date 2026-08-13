@@ -949,3 +949,87 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigSynthesizer_RequestRetry(t *testing.T) {
+	zero := 0
+	positive := 2
+	negative := -1
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GeminiKey: []config.GeminiKey{
+				{APIKey: "gemini-zero", RequestRetry: &zero},
+				{APIKey: "gemini-positive", RequestRetry: &positive},
+				{APIKey: "gemini-negative", RequestRetry: &negative},
+				{APIKey: "gemini-unset"},
+			},
+			InteractionsKey: []config.GeminiKey{
+				{APIKey: "interactions-zero", RequestRetry: &zero},
+			},
+			ClaudeKey: []config.ClaudeKey{
+				{APIKey: "claude-positive", RequestRetry: &positive},
+			},
+			CodexKey: []config.CodexKey{
+				{APIKey: "codex-zero", RequestRetry: &zero},
+			},
+			XAIKey: []config.XAIKey{
+				{APIKey: "xai-positive", RequestRetry: &positive},
+			},
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:         "compat",
+					BaseURL:      "https://compat.api",
+					RequestRetry: &zero,
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "compat-key"},
+					},
+				},
+			},
+			VertexCompatAPIKey: []config.VertexCompatKey{
+				{APIKey: "vertex-positive", BaseURL: "https://vertex.api", RequestRetry: &positive},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+
+	want := map[string]any{
+		"gemini-zero":       0,
+		"gemini-positive":   2,
+		"gemini-negative":   nil,
+		"gemini-unset":      nil,
+		"interactions-zero": 0,
+		"claude-positive":   2,
+		"codex-zero":        0,
+		"xai-positive":      2,
+		"compat-key":        0,
+		"vertex-positive":   2,
+	}
+	got := make(map[string]any, len(auths))
+	for _, auth := range auths {
+		key := auth.Attributes["api_key"]
+		if auth.Metadata == nil {
+			got[key] = nil
+			continue
+		}
+		if value, exists := auth.Metadata["request_retry"]; exists {
+			got[key] = value
+			continue
+		}
+		got[key] = nil
+	}
+	for key, expected := range want {
+		actual, exists := got[key]
+		if !exists {
+			t.Fatalf("missing synthesized auth for %s", key)
+		}
+		if actual != expected {
+			t.Fatalf("%s request_retry = %v, want %v", key, actual, expected)
+		}
+	}
+}
