@@ -1,15 +1,28 @@
 package claude
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"github.com/tidwall/gjson"
 )
+
+type claudeErrorInterceptorHost struct {
+	handlers.PluginInterceptorHost
+	intercept func(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
+}
+
+func (h *claudeErrorInterceptorHost) InterceptResponse(ctx context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+	return h.intercept(ctx, req)
+}
 
 func TestClaudeErrorExtractsOpenAIStyleUpstreamJSON(t *testing.T) {
 	handler := &ClaudeCodeAPIHandler{}
@@ -72,6 +85,39 @@ func TestWriteClaudeErrorResponseUsesClaudeEnvelope(t *testing.T) {
 	}
 	if got := gjson.GetBytes(body, "error.message").String(); got != "Your input exceeds the context window of this model. Please adjust your input and try again." {
 		t.Fatalf("error.message = %q; body=%s", got, body)
+	}
+}
+
+func TestWriteClaudeErrorResponseAppliesResponseInterceptor(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+	base := handlers.NewBaseAPIHandlers(nil, nil)
+	var calls int
+	base.SetPluginHost(&claudeErrorInterceptorHost{
+		intercept: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			calls++
+			if req.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want %d", req.StatusCode, http.StatusTooManyRequests)
+			}
+			return pluginapi.ResponseInterceptResponse{
+				Body: []byte(strings.ReplaceAll(string(req.Body), "apikey.fun", "gateway.trylle.ai")),
+			}
+		},
+	})
+	handler := NewClaudeCodeAPIHandler(base)
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      errors.New("apikey.fun rate limit"),
+	})
+
+	if calls != 1 {
+		t.Fatalf("response interceptor calls = %d, want 1", calls)
+	}
+	if got := recorder.Body.String(); strings.Contains(got, "apikey.fun") || !strings.Contains(got, "gateway.trylle.ai") {
+		t.Fatalf("body = %q, want filtered gateway hostname", got)
 	}
 }
 

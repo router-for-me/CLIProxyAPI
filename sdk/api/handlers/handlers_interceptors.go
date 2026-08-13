@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -515,4 +516,45 @@ func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestI
 		body = cloneBytes(resp.Body)
 	}
 	return body, responseHeaders
+}
+
+// InterceptErrorResponse applies response plugins to a finalized non-streaming error response.
+func (h *BaseAPIHandler) InterceptErrorResponse(c *gin.Context, statusCode int, body []byte) []byte {
+	host := h.interceptorHost()
+	if host == nil || c == nil {
+		return body
+	}
+
+	ctx := context.Background()
+	var requestHeaders http.Header
+	if c.Request != nil {
+		ctx = c.Request.Context()
+		requestHeaders = cloneHeader(c.Request.Header)
+	}
+	ctx = context.WithValue(ctx, "gin", c)
+
+	currentHeaders := cloneHeader(c.Writer.Header())
+	resp := interceptResponse(ctx, host, pluginapi.ResponseInterceptRequest{
+		Stream:          false,
+		RequestHeaders:  requestHeaders,
+		ResponseHeaders: currentHeaders,
+		Body:            cloneBytes(body),
+		StatusCode:      statusCode,
+	}, "")
+	if resp.Headers != nil {
+		replaceHeaders(c.Writer.Header(), finalInterceptorHeaders(currentHeaders, resp.Headers))
+	}
+	if len(resp.Body) > 0 {
+		return cloneBytes(resp.Body)
+	}
+	return body
+}
+
+func replaceHeaders(dst, src http.Header) {
+	for key := range dst {
+		dst.Del(key)
+	}
+	for key, values := range src {
+		dst[key] = append([]string(nil), values...)
+	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {
@@ -167,6 +168,42 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 	}
 	if got := recorder.Header().Get("Access-Control-Expose-Headers"); got != "x-cpa-trace-id" {
 		t.Fatalf("Access-Control-Expose-Headers = %q, want CPA value", got)
+	}
+}
+
+func TestWriteErrorResponse_AppliesResponseInterceptor(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	handler := NewBaseAPIHandlers(nil, nil)
+	var calls int
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			calls++
+			if req.StatusCode != http.StatusBadGateway {
+				t.Fatalf("status = %d, want %d", req.StatusCode, http.StatusBadGateway)
+			}
+			if req.Stream {
+				t.Fatal("error response marked as streaming")
+			}
+			return pluginapi.ResponseInterceptResponse{
+				Body: []byte(strings.ReplaceAll(string(req.Body), "apikey.fun", "gateway.trylle.ai")),
+			}
+		},
+	})
+
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadGateway,
+		Error:      errors.New("upstream apikey.fun failed"),
+	})
+
+	if calls != 1 {
+		t.Fatalf("response interceptor calls = %d, want 1", calls)
+	}
+	if got := recorder.Body.String(); strings.Contains(got, "apikey.fun") || !strings.Contains(got, "gateway.trylle.ai") {
+		t.Fatalf("body = %q, want filtered gateway hostname", got)
 	}
 }
 

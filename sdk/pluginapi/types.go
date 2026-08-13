@@ -108,7 +108,7 @@ type Capabilities struct {
 	RequestInterceptor RequestInterceptor
 	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
 	RequestLifecyclePlugin RequestLifecyclePlugin
-	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
+	// ResponseInterceptor rewrites non-streaming HTTP execution responses before downstream delivery.
 	ResponseInterceptor ResponseInterceptor
 	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
 	StreamChunkInterceptor StreamChunkInterceptor
@@ -939,7 +939,7 @@ type RequestLifecyclePlugin interface {
 	HandleRequestComplete(context.Context, RequestCompletion) error
 }
 
-// ResponseInterceptor rewrites successful non-streaming execution responses before downstream delivery.
+// ResponseInterceptor rewrites non-streaming execution responses before downstream delivery.
 type ResponseInterceptor interface {
 	InterceptResponse(context.Context, ResponseInterceptRequest) (ResponseInterceptResponse, error)
 }
