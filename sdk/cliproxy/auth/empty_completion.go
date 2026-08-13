@@ -761,11 +761,16 @@ func (a *emptyCompletionAccum) empty() bool {
 // isEmptyCompletion reports whether the buffered SSE stream chunks aggregate to
 // an empty completion.
 func isEmptyCompletion(chunks []cliproxyexecutor.StreamChunk) bool {
-	var buf bytes.Buffer
-	for _, c := range chunks {
-		buf.Write(c.Payload)
+	if len(chunks) == 0 {
+		return false
 	}
-	return isEmptyCompletionPayload(buf.Bytes())
+	var detector StreamBootstrapDetector
+	for _, c := range chunks {
+		if detector.Observe(c.Payload) {
+			return false
+		}
+	}
+	return detector.Finish()
 }
 
 func isEmptyCompletionError(err error) bool {
@@ -848,6 +853,39 @@ func (s *streamBootstrapState) observe(fragment []byte) bool {
 	}
 	s.forward = s.shouldForward()
 	return s.forward
+}
+
+func (s *streamBootstrapState) finish() {
+	if len(s.pending) == 0 {
+		return
+	}
+	trimmed := bytes.TrimSpace(s.pending)
+	s.pending = s.pending[:0]
+	if len(trimmed) == 0 {
+		return
+	}
+
+	switch {
+	case bytes.HasPrefix(trimmed, []byte("event:")), bytes.HasPrefix(trimmed, []byte("data:")), bytes.HasPrefix(trimmed, []byte(":")):
+		s.sawSSE = true
+		s.acc.evalSSE(trimmed)
+	case bytes.HasPrefix(trimmed, []byte("{")), bytes.HasPrefix(trimmed, []byte("[")):
+		if !s.acc.evalJSON(trimmed) {
+			s.acc.sawUnknownData = true
+		}
+	default:
+		if classify := classifyJSONBuffer(trimmed); classify == jsonBufComplete || classify == jsonBufIncomplete {
+			if !s.acc.evalJSON(trimmed) {
+				s.acc.sawUnknownData = true
+			}
+		} else {
+			s.acc.sawUnknownData = true
+		}
+	}
+}
+
+func (s *streamBootstrapState) isEmptyCompletion() bool {
+	return s.acc.empty()
 }
 
 func (s *streamBootstrapState) shouldForward() bool {

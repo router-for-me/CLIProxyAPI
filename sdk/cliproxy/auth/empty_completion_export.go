@@ -54,3 +54,13 @@ func (d *StreamBootstrapDetector) Observe(payload []byte) bool {
 	}
 	return d.state.observe(payload)
 }
+
+// Finish flushes any trailing pending fragment at EOF and reports whether the
+// accumulated stream chunks represent a terminal empty completion.
+func (d *StreamBootstrapDetector) Finish() bool {
+	if d == nil {
+		return false
+	}
+	d.state.finish()
+	return d.state.isEmptyCompletion()
+}

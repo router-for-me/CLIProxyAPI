@@ -1177,3 +1177,58 @@ func TestStreamBootstrapDetectorNewlineLessSSE(t *testing.T) {
 		}
 	})
 }
+
+func TestEmptyCompletion_MultiChunkBoundarySafety(t *testing.T) {
+	t.Run("two complete newline-less data chunks plus terminal DONE classify empty", func(t *testing.T) {
+		chunks := []cliproxyexecutor.StreamChunk{
+			{Payload: []byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"\"}}]}")},
+			{Payload: []byte("data: [DONE]")},
+		}
+		if !isEmptyCompletion(chunks) {
+			t.Fatal("isEmptyCompletion = false, want true")
+		}
+	})
+
+	t.Run("split JSON string fragments concatenate and classify non-empty", func(t *testing.T) {
+		chunks := []cliproxyexecutor.StreamChunk{
+			{Payload: []byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"hello ")},
+			{Payload: []byte("world\"}}]}\n")},
+		}
+		if isEmptyCompletion(chunks) {
+			t.Fatal("isEmptyCompletion = true, want false")
+		}
+	})
+
+	t.Run("boundary before nested object remains valid", func(t *testing.T) {
+		chunks := []cliproxyexecutor.StreamChunk{
+			{Payload: []byte("data: ")},
+			{Payload: []byte("{\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"\"}}]}")},
+			{Payload: []byte("\ndata: [DONE]\n")},
+		}
+		if !isEmptyCompletion(chunks) {
+			t.Fatal("isEmptyCompletion = false, want true")
+		}
+	})
+
+	t.Run("unknown custom stream remains unrecognized and non-empty", func(t *testing.T) {
+		chunks := []cliproxyexecutor.StreamChunk{
+			{Payload: []byte("custom_binary_payload_format")},
+		}
+		if isEmptyCompletion(chunks) {
+			t.Fatal("isEmptyCompletion = true, want false for unrecognized stream")
+		}
+	})
+
+	t.Run("detector finish flushes pending at EOF", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe([]byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"\"}}]}")) {
+			t.Fatal("Observe() = true, want false")
+		}
+		if detector.Observe([]byte("data: [DONE]")) {
+			t.Fatal("Observe() = true, want false")
+		}
+		if !detector.Finish() {
+			t.Fatal("detector.Finish() = false, want true")
+		}
+	})
+}
