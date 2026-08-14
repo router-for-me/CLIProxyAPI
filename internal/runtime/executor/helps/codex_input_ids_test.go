@@ -92,6 +92,65 @@ func TestSanitizeCodexInputItemIDsAvoidsExistingCallIDCollision(t *testing.T) {
 	}
 }
 
+func TestSanitizeCodexInputItemIDsReusesMatchingPreShortenedCallID(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		callType   string
+		outputType string
+	}{
+		{name: "function tool", callType: "function_call", outputType: "function_call_output"},
+		{name: "custom tool", callType: "custom_tool_call", outputType: "custom_tool_call_output"},
+	} {
+		for _, order := range []struct {
+			name       string
+			firstType  string
+			secondType string
+			firstLong  bool
+		}{
+			{name: "long call first", firstType: testCase.callType, secondType: testCase.outputType, firstLong: true},
+			{name: "short output first", firstType: testCase.outputType, secondType: testCase.callType, firstLong: false},
+		} {
+			t.Run(testCase.name+"/"+order.name, func(t *testing.T) {
+				longCallID := strings.Repeat("cursor-call-", 8)
+				shortCallID := shortenCodexCallIDWithAttempt(longCallID, 0)
+				firstCallID, secondCallID := shortCallID, longCallID
+				if order.firstLong {
+					firstCallID, secondCallID = longCallID, shortCallID
+				}
+				body := []byte(fmt.Sprintf(`{"input":[{"type":%q,"call_id":%q},{"type":%q,"call_id":%q}]}`, order.firstType, firstCallID, order.secondType, secondCallID))
+
+				first := SanitizeCodexInputItemIDs(body)
+				normalizedAgain := SanitizeCodexInputItemIDs(first)
+				for index := range 2 {
+					if actual := gjson.GetBytes(first, fmt.Sprintf("input.%d.call_id", index)).String(); actual != shortCallID {
+						t.Fatalf("input.%d.call_id = %q, want matching pre-shortened ID %q; payload=%s", index, actual, shortCallID, first)
+					}
+				}
+				if string(first) != string(normalizedAgain) {
+					t.Fatalf("pre-shortened pair normalization is not idempotent: first=%s normalized_again=%s", first, normalizedAgain)
+				}
+			})
+		}
+	}
+}
+
+func TestSanitizeCodexInputItemIDsDoesNotReusePreShortenedIDAcrossToolKinds(t *testing.T) {
+	longCallID := strings.Repeat("cursor-call-", 8)
+	shortCallID := shortenCodexCallIDWithAttempt(longCallID, 0)
+	body := []byte(`{"input":[` +
+		`{"type":"function_call","call_id":"` + longCallID + `"},` +
+		`{"type":"custom_tool_call_output","call_id":"` + shortCallID + `"}` +
+		`]}`)
+
+	got := SanitizeCodexInputItemIDs(body)
+	if actual := gjson.GetBytes(got, "input.0.call_id").String(); actual == shortCallID {
+		t.Fatalf("function call reused unrelated custom-tool output ID: %q", actual)
+	}
+	if actual := gjson.GetBytes(got, "input.1.call_id").String(); actual != shortCallID {
+		t.Fatalf("existing custom-tool output ID changed: %q", actual)
+	}
+}
+
 func TestSanitizeCodexInputItemIDsShortensOnlyOverlongCallID(t *testing.T) {
 	longCallID := strings.Repeat("call-", 20)
 	body := []byte(`{"input":[{"type":"function_call","call_id":"` + longCallID + `","name":"read","arguments":"{}"}]}`)

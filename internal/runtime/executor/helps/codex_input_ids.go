@@ -23,6 +23,11 @@ const (
 
 	codexInputItemIDOccupied  uint8 = 1 << 0
 	codexInputItemIDPreserved uint8 = 1 << 1
+
+	codexCallIDFunctionCall     uint8 = 1 << 1
+	codexCallIDFunctionOutput   uint8 = 1 << 2
+	codexCallIDCustomToolCall   uint8 = 1 << 3
+	codexCallIDCustomToolOutput uint8 = 1 << 4
 )
 
 // SanitizeCodexInputItemIDs normalizes supported input item IDs for Codex, removes encrypted
@@ -37,6 +42,7 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 	items := input.Array()
 	idStates := make(map[string]uint8, len(items))
 	var callIDStates map[string]uint8
+	var overlongCallIDRoles map[string]uint8
 	for _, item := range items {
 		if shouldDropCodexEncryptedReasoningItem(item) {
 			continue
@@ -48,7 +54,12 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 				if callIDStates == nil {
 					callIDStates = make(map[string]uint8)
 				}
-				callIDStates[value] |= codexInputItemIDOccupied
+				callIDStates[value] |= codexInputItemIDOccupied | codexCallIDRole(item)
+			} else {
+				if overlongCallIDRoles == nil {
+					overlongCallIDRoles = make(map[string]uint8)
+				}
+				overlongCallIDRoles[value] |= codexCallIDRole(item)
 			}
 		}
 
@@ -139,7 +150,9 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 			if !ok {
 				for attempt := 0; ; attempt++ {
 					shortened = shortenCodexCallIDWithAttempt(originalCallID, attempt)
-					if callIDStates[shortened]&codexInputItemIDOccupied == 0 {
+					shortenedState := callIDStates[shortened]
+					if shortenedState&codexInputItemIDOccupied == 0 ||
+						(attempt == 0 && codexCallIDRolesArePair(overlongCallIDRoles[originalCallID], shortenedState)) {
 						break
 					}
 				}
@@ -170,6 +183,29 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 		return body
 	}
 	return updated
+}
+
+func codexCallIDRole(item gjson.Result) uint8 {
+	switch item.Get("type").String() {
+	case "function_call":
+		return codexCallIDFunctionCall
+	case "function_call_output":
+		return codexCallIDFunctionOutput
+	case "custom_tool_call":
+		return codexCallIDCustomToolCall
+	case "custom_tool_call_output":
+		return codexCallIDCustomToolOutput
+	default:
+		return 0
+	}
+}
+
+func codexCallIDRolesArePair(overlongRole, shortenedState uint8) bool {
+	shortenedRole := shortenedState &^ codexInputItemIDOccupied
+	return (overlongRole == codexCallIDFunctionCall && shortenedRole == codexCallIDFunctionOutput) ||
+		(overlongRole == codexCallIDFunctionOutput && shortenedRole == codexCallIDFunctionCall) ||
+		(overlongRole == codexCallIDCustomToolCall && shortenedRole == codexCallIDCustomToolOutput) ||
+		(overlongRole == codexCallIDCustomToolOutput && shortenedRole == codexCallIDCustomToolCall)
 }
 
 func normalizeCodexInputItemID(item gjson.Result, id string) string {
