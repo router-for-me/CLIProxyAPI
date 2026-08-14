@@ -34,6 +34,7 @@ const (
 	openAICompatImagesEditsPath             = "/images/edits"
 	openAICompatDefaultImageEndpoint        = openAICompatImagesGenerationsPath
 	openAICompatMultipartMemory       int64 = 32 << 20
+	openAICompatResponsesBackend            = "responses"
 )
 
 // OpenAICompatExecutor implements a stateless executor for OpenAI-compatible providers.
@@ -88,6 +89,9 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImages(ctx, auth, req, opts, endpointPath)
+	}
+	if e.usesResponsesBackend(auth, opts) {
+		return NewXAIExecutor(e.cfg).Execute(ctx, auth, req, opts)
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -304,6 +308,9 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImagesStream(ctx, auth, req, opts, endpointPath)
+	}
+	if e.usesResponsesBackend(auth, opts) {
+		return NewXAIExecutor(e.cfg).ExecuteStream(ctx, auth, req, opts)
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -687,6 +694,9 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 }
 
 func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if e.usesResponsesBackend(auth, opts) {
+		return NewXAIExecutor(e.cfg).CountTokens(ctx, auth, req, opts)
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	from := opts.SourceFormat
@@ -964,6 +974,17 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 		}
 	}
 	return nil
+}
+
+// usesResponsesBackend reports whether an OpenAI Responses request should be
+// sent to the provider's native /responses endpoint. Chat Completions requests
+// continue using the compatibility executor even when this option is enabled.
+func (e *OpenAICompatExecutor) usesResponsesBackend(auth *cliproxyauth.Auth, opts cliproxyexecutor.Options) bool {
+	if opts.SourceFormat != sdktranslator.FormatOpenAIResponse {
+		return false
+	}
+	compat := e.resolveCompatConfig(auth)
+	return compat != nil && strings.EqualFold(strings.TrimSpace(compat.APIBackend), openAICompatResponsesBackend)
 }
 
 func (e *OpenAICompatExecutor) passthroughHeaders(auth *cliproxyauth.Auth) bool {

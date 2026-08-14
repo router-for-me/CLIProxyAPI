@@ -627,6 +627,10 @@ type OpenAICompatibility struct {
 	// SupportPromptCacheKey enables derived prompt_cache_key injection for supported requests.
 	SupportPromptCacheKey bool `yaml:"support-prompt-cache-key,omitempty" json:"support-prompt-cache-key,omitempty"`
 
+	// APIBackend selects the upstream API used for OpenAI Responses requests.
+	// The default is chat_completions; responses preserves native Responses tools such as x_search.
+	APIBackend string `yaml:"api-backend,omitempty" json:"api-backend,omitempty"`
+
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 
