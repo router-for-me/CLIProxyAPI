@@ -15,6 +15,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -2924,6 +2925,215 @@ func TestExecutorAdapterUsesResponseFormatForOutputTranslation(t *testing.T) {
 	}
 	if !bytes.Equal(resp.Payload, claudeResponse) {
 		t.Fatalf("Execute() payload = %s, want Claude response payload %s", resp.Payload, claudeResponse)
+	}
+}
+
+func TestExecutorStreamTranslationPayloadsExtractsDataFromSSEFrame(t *testing.T) {
+	payload := []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n")
+	frames := executorStreamTranslationPayloads(payload)
+	if len(frames) != 1 {
+		t.Fatalf("translation payload count = %d, want 1", len(frames))
+	}
+	want := []byte(`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}`)
+	if !bytes.Equal(frames[0], want) {
+		t.Fatalf("translation payload = %q, want %q", frames[0], want)
+	}
+}
+
+func TestExecutorStreamTranslationPayloadsReassemblesMultilineData(t *testing.T) {
+	payload := []byte("event: content_block_delta\ndata: {\ndata:   \"type\": \"content_block_delta\",\ndata:   \"delta\": {\"type\": \"text_delta\", \"text\": \"hello\"}\ndata: }\n\n")
+	frames := executorStreamTranslationPayloads(payload)
+	if len(frames) != 1 {
+		t.Fatalf("translation payload count = %d, want 1", len(frames))
+	}
+	want := []byte("data: {\n  \"type\": \"content_block_delta\",\n  \"delta\": {\"type\": \"text_delta\", \"text\": \"hello\"}\n}")
+	if !bytes.Equal(frames[0], want) {
+		t.Fatalf("translation payload = %q, want %q", frames[0], want)
+	}
+}
+
+func TestExecutorSSERecordBufferRetainsSplitDataLine(t *testing.T) {
+	var buffer executorSSERecordBuffer
+	first := []byte("event: message_delta\ndata: {\"type\":")
+	if records := buffer.Push(first); len(records) != 0 {
+		t.Fatalf("first chunk produced %d records, want none", len(records))
+	}
+
+	second := []byte("\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\n")
+	records := buffer.Push(second)
+	if len(records) != 1 {
+		t.Fatalf("second chunk produced %d records, want one", len(records))
+	}
+	want := append(bytes.Clone(first), second...)
+	if !bytes.Equal(records[0], want) {
+		t.Fatalf("buffered record = %q, want %q", records[0], want)
+	}
+	if tail := buffer.Flush(); len(tail) != 0 {
+		t.Fatalf("buffer tail = %q, want empty", tail)
+	}
+}
+
+func TestExecutorSSERecordBufferFlushesFinalRecordWithoutDelimiter(t *testing.T) {
+	var buffer executorSSERecordBuffer
+	payload := []byte("data: [DONE]")
+	if records := buffer.Push(payload); len(records) != 0 {
+		t.Fatalf("unterminated chunk produced %d records, want none", len(records))
+	}
+	tail := buffer.Flush()
+	if len(tail) != 1 || !bytes.Equal(tail[0], payload) {
+		t.Fatalf("buffer tail = %q, want %q", tail, payload)
+	}
+}
+
+func TestExecutorSSERecordBufferRecognizesCROnlyDelimiter(t *testing.T) {
+	var buffer executorSSERecordBuffer
+	payload := []byte("event: message_delta\rdata: {\"type\":\"message_delta\"}\r\r")
+	records := buffer.Push(payload)
+	if len(records) != 1 || !bytes.Equal(records[0], payload) {
+		t.Fatalf("CR-only records = %q, want one complete record %q", records, payload)
+	}
+	if tail := buffer.Flush(); len(tail) != 0 {
+		t.Fatalf("buffer tail = %q, want empty", tail)
+	}
+}
+
+func TestExecutorStreamTranslationPayloadsExtractsDataFromCROnlySSEFrame(t *testing.T) {
+	payload := []byte("event: content_block_delta\rdata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\r\r")
+	frames := executorStreamTranslationPayloads(payload)
+	want := []byte(`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}`)
+	if len(frames) != 1 || !bytes.Equal(frames[0], want) {
+		t.Fatalf("CR-only translation payloads = %q, want %q", frames, want)
+	}
+}
+
+func TestPluginExecutorUsageParsesFinalClaudeStreamCounts(t *testing.T) {
+	var usageBuffer helps.StreamUsageBuffer
+	payload := []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":12,\"output_tokens\":4}}\n\n")
+	observePluginExecutorStreamUsage(&usageBuffer, sdktranslator.FormatClaude, payload)
+	detail, ok := usageBuffer.Detail()
+	if !ok {
+		t.Fatal("stream usage was not observed")
+	}
+	if detail.InputTokens != 12 || detail.OutputTokens != 4 || detail.TotalTokens != 16 {
+		t.Fatalf("stream usage = %#v, want input=12 output=4 total=16", detail)
+	}
+}
+
+func TestPluginExecutorUsageMergesClaudeStreamCounts(t *testing.T) {
+	var usageBuffer helps.StreamUsageBuffer
+	observePluginExecutorStreamUsage(&usageBuffer, sdktranslator.FormatClaude, []byte("event: message_start\ndata: {\"type\":\"message_start\",\"usage\":{\"input_tokens\":12,\"output_tokens\":10,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":2}}\n\n"))
+	observePluginExecutorStreamUsage(&usageBuffer, sdktranslator.FormatClaude, []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\n"))
+	detail, ok := usageBuffer.Detail()
+	if !ok {
+		t.Fatal("stream usage was not observed")
+	}
+	if detail.InputTokens != 12 || detail.OutputTokens != 4 || detail.CacheReadTokens != 3 || detail.CacheCreationTokens != 2 || detail.TotalTokens != 21 {
+		t.Fatalf("merged Claude stream usage = %#v, want input=12 output=4 cache-read=3 cache-create=2 total=21", detail)
+	}
+}
+
+func TestPluginExecutorUsageReassemblesMultilineSSEData(t *testing.T) {
+	var usageBuffer helps.StreamUsageBuffer
+	payload := []byte("event: message_delta\ndata: {\ndata:   \"type\": \"message_delta\",\ndata:   \"usage\": {\"output_tokens\": 4}\ndata: }\n\n")
+	observePluginExecutorStreamUsage(&usageBuffer, sdktranslator.FormatClaude, payload)
+	detail, ok := usageBuffer.Detail()
+	if !ok {
+		t.Fatal("multi-line SSE usage was not observed")
+	}
+	if detail.OutputTokens != 4 || detail.TotalTokens != 4 {
+		t.Fatalf("multi-line SSE usage = %#v, want output=4 total=4", detail)
+	}
+}
+
+func TestPluginExecutorUsageBuffersSplitClaudeStreamCounts(t *testing.T) {
+	var usageBuffer helps.StreamUsageBuffer
+	var pending []byte
+	pending = observePluginExecutorStreamChunk(&usageBuffer, sdktranslator.FormatClaude, pending, []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":12,"))
+	pending = observePluginExecutorStreamChunk(&usageBuffer, sdktranslator.FormatClaude, pending, []byte("\"output_tokens\":4}}\n\n"))
+	if len(pending) != 0 {
+		t.Fatalf("pending stream payload = %q, want empty", pending)
+	}
+	detail, ok := usageBuffer.Detail()
+	if !ok {
+		t.Fatal("stream usage was not observed")
+	}
+	if detail.InputTokens != 12 || detail.OutputTokens != 4 || detail.TotalTokens != 16 {
+		t.Fatalf("stream usage = %#v, want input=12 output=4 total=16", detail)
+	}
+}
+
+func TestPluginExecutorUsageParsesGeminiCounts(t *testing.T) {
+	payload := []byte(`{"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":4,"totalTokenCount":16}}`)
+	detail, ok := pluginExecutorNonStreamUsage(sdktranslator.FormatGemini, payload)
+	if !ok {
+		t.Fatal("non-stream Gemini usage was not observed")
+	}
+	if detail.InputTokens != 12 || detail.OutputTokens != 4 || detail.TotalTokens != 16 {
+		t.Fatalf("non-stream Gemini usage = %#v, want input=12 output=4 total=16", detail)
+	}
+
+	var usageBuffer helps.StreamUsageBuffer
+	observePluginExecutorStreamUsage(&usageBuffer, sdktranslator.FormatGemini, append([]byte("data: "), payload...))
+	detail, ok = usageBuffer.Detail()
+	if !ok {
+		t.Fatal("stream Gemini usage was not observed")
+	}
+	if detail.InputTokens != 12 || detail.OutputTokens != 4 || detail.TotalTokens != 16 {
+		t.Fatalf("stream Gemini usage = %#v, want input=12 output=4 total=16", detail)
+	}
+}
+
+func TestPluginExecutorUsageDoesNotBufferUnsupportedStreamFormat(t *testing.T) {
+	var usageBuffer helps.StreamUsageBuffer
+	pending := observePluginExecutorStreamChunk(
+		&usageBuffer,
+		sdktranslator.Format("plugin-custom-output"),
+		nil,
+		[]byte("custom stream payload without a newline"),
+	)
+	if len(pending) != 0 {
+		t.Fatalf("pending unsupported stream payload = %q, want empty", pending)
+	}
+}
+
+func TestExecutorAdapterPublishesNativeUsageForBilling(t *testing.T) {
+	const model = "plugin-usage-billing-model"
+	records := make(chan coreusage.Record, 1)
+	coreusage.RegisterNamedPlugin("test:plugin-executor-usage", coreUsagePluginFunc(func(ctx context.Context, record coreusage.Record) {
+		if record.Model == model {
+			select {
+			case records <- record:
+			default:
+			}
+		}
+	}))
+
+	host := New()
+	adapter := newCurrentExecutorAdapterForTest(host, "executor-usage", &fakeExecutor{
+		execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{Payload: []byte(`{"id":"msg_usage","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":12,"output_tokens":4}}`)}, nil
+		},
+	}, []sdktranslator.Format{sdktranslator.FormatClaude}, []sdktranslator.Format{sdktranslator.FormatClaude})
+
+	_, errExecute := adapter.Execute(context.Background(), &coreauth.Auth{ID: "auth-usage", Provider: "plugin-provider"}, coreexecutor.Request{
+		Model:   model,
+		Format:  sdktranslator.FormatClaude,
+		Payload: []byte(`{"model":"plugin-usage-billing-model","messages":[{"role":"user","content":"hi"}]}`),
+	}, coreexecutor.Options{SourceFormat: sdktranslator.FormatClaude, ResponseFormat: sdktranslator.FormatClaude})
+	if errExecute != nil {
+		t.Fatal(errExecute)
+	}
+
+	select {
+	case record := <-records:
+		if record.Provider != "plugin-provider" || record.AuthID != "auth-usage" {
+			t.Fatalf("billing identity = provider:%q auth:%q", record.Provider, record.AuthID)
+		}
+		if record.Detail.InputTokens != 12 || record.Detail.OutputTokens != 4 || record.Detail.TotalTokens != 16 {
+			t.Fatalf("billing usage = %#v, want input=12 output=4 total=16", record.Detail)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for plugin executor billing record")
 	}
 }
 

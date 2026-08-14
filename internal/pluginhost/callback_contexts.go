@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 type callbackContextRegistry struct {
@@ -15,16 +17,17 @@ type callbackContextRegistry struct {
 }
 
 type callbackContextEntry struct {
-	ctx      context.Context
-	pluginID string
-	cleanup  []func()
+	ctx        context.Context
+	pluginID   string
+	httpClient pluginapi.HostHTTPClient
+	cleanup    []func()
 }
 
 func newCallbackContextRegistry() *callbackContextRegistry {
 	return &callbackContextRegistry{contexts: make(map[string]callbackContextEntry)}
 }
 
-func (r *callbackContextRegistry) open(ctx context.Context, pluginID string) (string, func()) {
+func (r *callbackContextRegistry) open(ctx context.Context, pluginID string, httpClients ...pluginapi.HostHTTPClient) (string, func()) {
 	if r == nil {
 		return "", func() {}
 	}
@@ -33,9 +36,13 @@ func (r *callbackContextRegistry) open(ctx context.Context, pluginID string) (st
 	}
 	pluginID = strings.TrimSpace(pluginID)
 	ctx = withHostCallbackPluginID(ctx, pluginID)
+	var httpClient pluginapi.HostHTTPClient
+	if len(httpClients) > 0 {
+		httpClient = httpClients[0]
+	}
 	id := strconv.FormatUint(r.next.Add(1), 10)
 	r.mu.Lock()
-	r.contexts[id] = callbackContextEntry{ctx: ctx, pluginID: pluginID}
+	r.contexts[id] = callbackContextEntry{ctx: ctx, pluginID: pluginID, httpClient: httpClient}
 	r.mu.Unlock()
 
 	var once sync.Once
@@ -54,6 +61,16 @@ func (r *callbackContextRegistry) open(ctx context.Context, pluginID string) (st
 			}
 		})
 	}
+}
+
+func (r *callbackContextRegistry) httpClient(id string) pluginapi.HostHTTPClient {
+	if r == nil || id == "" {
+		return nil
+	}
+	r.mu.RLock()
+	httpClient := r.contexts[id].httpClient
+	r.mu.RUnlock()
+	return httpClient
 }
 
 func (r *callbackContextRegistry) pluginID(id string) string {
@@ -104,11 +121,11 @@ func (h *Host) openCallbackContext(ctx context.Context) (string, func()) {
 	return h.openCallbackContextForPlugin(ctx, "")
 }
 
-func (h *Host) openCallbackContextForPlugin(ctx context.Context, pluginID string) (string, func()) {
+func (h *Host) openCallbackContextForPlugin(ctx context.Context, pluginID string, httpClients ...pluginapi.HostHTTPClient) (string, func()) {
 	if h == nil || h.callbackContexts == nil {
 		return "", func() {}
 	}
-	return h.callbackContexts.open(ctx, pluginID)
+	return h.callbackContexts.open(ctx, pluginID, httpClients...)
 }
 
 func (h *Host) addCallbackCleanup(id string, cleanup func()) bool {
@@ -136,4 +153,11 @@ func (h *Host) callbackContextPluginID(id string) string {
 		return ""
 	}
 	return h.callbackContexts.pluginID(id)
+}
+
+func (h *Host) callbackHTTPClient(id string) pluginapi.HostHTTPClient {
+	if h == nil || h.callbackContexts == nil {
+		return nil
+	}
+	return h.callbackContexts.httpClient(id)
 }

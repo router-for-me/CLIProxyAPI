@@ -107,6 +107,11 @@ plugins:
       config2: "string"
       config3: 3
       mode: "safe" # enum example: safe, fast
+    # kiro-go:
+    #   enabled: true
+    #   priority: 1
+    #   models:
+    #     - "*" # expose every model discovered for each Kiro account
 
 # When true, disable high-overhead request logging and HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false

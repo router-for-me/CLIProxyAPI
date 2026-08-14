@@ -537,7 +537,7 @@ func (a *executorAdapter) translateExecutorResponse(ctx context.Context, prepare
 	return sdktranslator.TranslateNonStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
 }
 
-func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, prepared preparedExecutorCall, in <-chan pluginapi.ExecutorStreamChunk) <-chan pluginapi.ExecutorStreamChunk {
+func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, prepared preparedExecutorCall, headers http.Header, in <-chan pluginapi.ExecutorStreamChunk) <-chan pluginapi.ExecutorStreamChunk {
 	if prepared.requestedFormat == "" || prepared.outputFormat == prepared.requestedFormat {
 		return in
 	}
@@ -551,12 +551,30 @@ func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, pre
 	go func() {
 		defer close(out)
 		var param any
+		var sseBuffer executorSSERecordBuffer
+		isSSE := strings.Contains(strings.ToLower(headers.Get("Content-Type")), "text/event-stream")
+		sendTranslated := func(payload []byte) bool {
+			frames := a.translateExecutorStreamPayload(ctx, prepared, payload, &param)
+			for _, frame := range frames {
+				if !sendExecutorPluginStreamChunk(ctx, out, pluginapi.ExecutorStreamChunk{Payload: frame}) {
+					return false
+				}
+			}
+			return true
+		}
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case chunk, ok := <-in:
 				if !ok {
+					if isSSE {
+						for _, payload := range sseBuffer.Flush() {
+							if !sendTranslated(payload) {
+								return
+							}
+						}
+					}
 					a.emitTranslatedExecutorStreamTail(ctx, prepared, out, &param)
 					return
 				}
@@ -564,9 +582,12 @@ func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, pre
 					_ = sendExecutorPluginStreamChunk(ctx, out, chunk)
 					continue
 				}
-				frames := a.translateExecutorStreamPayload(ctx, prepared, chunk.Payload, &param)
-				for _, frame := range frames {
-					if !sendExecutorPluginStreamChunk(ctx, out, pluginapi.ExecutorStreamChunk{Payload: frame}) {
+				payloads := [][]byte{chunk.Payload}
+				if isSSE {
+					payloads = sseBuffer.Push(chunk.Payload)
+				}
+				for _, payload := range payloads {
+					if !sendTranslated(payload) {
 						return
 					}
 				}
@@ -576,16 +597,105 @@ func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, pre
 	return out
 }
 
+type executorSSERecordBuffer struct {
+	pending []byte
+}
+
+func (b *executorSSERecordBuffer) Push(payload []byte) [][]byte {
+	if b == nil || len(payload) == 0 {
+		return nil
+	}
+	b.pending = append(b.pending, payload...)
+	var records [][]byte
+	for {
+		end := executorSSERecordEnd(b.pending)
+		if end < 0 {
+			return records
+		}
+		records = append(records, bytes.Clone(b.pending[:end]))
+		b.pending = append(b.pending[:0], b.pending[end:]...)
+	}
+}
+
+func (b *executorSSERecordBuffer) Flush() [][]byte {
+	if b == nil || len(bytes.TrimSpace(b.pending)) == 0 {
+		return nil
+	}
+	payload := bytes.Clone(b.pending)
+	b.pending = b.pending[:0]
+	return [][]byte{payload}
+}
+
+func executorSSERecordEnd(payload []byte) int {
+	end := -1
+	if index := bytes.Index(payload, []byte("\n\n")); index >= 0 {
+		end = index + 2
+	}
+	if index := bytes.Index(payload, []byte("\r\n\r\n")); index >= 0 && (end < 0 || index+4 < end) {
+		end = index + 4
+	}
+	if index := bytes.Index(payload, []byte("\r\r")); index >= 0 && (end < 0 || index+2 < end) {
+		end = index + 2
+	}
+	return end
+}
+
 func (a *executorAdapter) translateExecutorStreamPayload(ctx context.Context, prepared preparedExecutorCall, payload []byte, param *any) [][]byte {
 	originalRequest := prepared.opts.OriginalRequest
 	if len(originalRequest) == 0 {
 		originalRequest = prepared.req.Payload
 	}
-	frames := sdktranslator.TranslateStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
-	if executorStreamTranslationFellBack(prepared, payload, frames) {
-		return nil
+	translationPayloads := executorStreamTranslationPayloads(payload)
+	frames := make([][]byte, 0, len(translationPayloads))
+	for _, translationPayload := range translationPayloads {
+		translated := sdktranslator.TranslateStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, translationPayload, param)
+		if executorStreamTranslationFellBack(prepared, translationPayload, translated) {
+			continue
+		}
+		frames = append(frames, translated...)
 	}
 	return frames
+}
+
+func executorStreamTranslationPayloads(payload []byte) [][]byte {
+	normalized := bytes.ReplaceAll(payload, []byte("\r\n"), []byte("\n"))
+	normalized = bytes.ReplaceAll(normalized, []byte("\r"), []byte("\n"))
+	if !bytes.Contains(normalized, []byte("\n")) {
+		return [][]byte{payload}
+	}
+	var translationPayloads [][]byte
+	var dataValues [][]byte
+	sawData := false
+	flushData := func() {
+		if len(dataValues) == 0 {
+			return
+		}
+		joined := bytes.Join(dataValues, []byte("\n"))
+		frame := []byte("data:")
+		if len(joined) > 0 {
+			frame = append(frame, ' ')
+			frame = append(frame, joined...)
+		}
+		translationPayloads = append(translationPayloads, frame)
+		dataValues = nil
+	}
+	for _, line := range bytes.Split(normalized, []byte("\n")) {
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			flushData()
+			continue
+		}
+		if bytes.HasPrefix(trimmed, []byte("data:")) {
+			sawData = true
+			value := bytes.TrimPrefix(trimmed[len("data:"):], []byte(" "))
+			dataValues = append(dataValues, bytes.Clone(value))
+		}
+	}
+	flushData()
+	if !sawData {
+		return [][]byte{payload}
+	}
+	return translationPayloads
 }
 
 func executorStreamTranslationFellBack(prepared preparedExecutorCall, payload []byte, frames [][]byte) bool {
@@ -636,6 +746,8 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return coreexecutor.Response{}, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
+	usageReporter := newPluginExecutorUsage(ctx, a, req.Model, auth)
+	defer usageReporter.trackFailure(ctx, &err)
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "Executor.Execute", recovered)
@@ -652,6 +764,7 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 	if errExecute != nil {
 		return coreexecutor.Response{}, errExecute
 	}
+	usageReporter.publishNonStream(ctx, prepared.outputFormat, pluginResp.Payload)
 	return coreexecutor.Response{
 		Payload:  a.translateExecutorResponse(ctx, prepared, pluginResp.Payload, false, nil),
 		Metadata: cloneAnyMap(pluginResp.Metadata),
@@ -663,6 +776,8 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
+	usageReporter := newPluginExecutorUsage(ctx, a, req.Model, auth)
+	defer usageReporter.trackFailure(ctx, &err)
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "Executor.ExecuteStream", recovered)
@@ -679,9 +794,10 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	if errExecuteStream != nil {
 		return nil, errExecuteStream
 	}
+	nativeChunks := usageReporter.observeStream(ctx, prepared.outputFormat, pluginResp.Headers, pluginResp.Chunks)
 	return &coreexecutor.StreamResult{
 		Headers: cloneHeader(pluginResp.Headers),
-		Chunks:  mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, pluginResp.Chunks)),
+		Chunks:  mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, pluginResp.Headers, nativeChunks)),
 	}, nil
 }
 
