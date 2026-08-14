@@ -472,7 +472,7 @@ func buildDevinRequest(parsed *devinParsedRequest, token, model string) devinReq
 		RequestType: devinRequestTypeCascade,
 		Configuration: devinCompletionConfig{
 			NumCompletions: 1,
-			MaxTokens:      64000,
+			MaxTokens:      128000,
 			MaxNewlines:    400,
 			Temperature:    1.0,
 			TopK:           40,
