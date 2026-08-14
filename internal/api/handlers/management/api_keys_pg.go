@@ -635,8 +635,11 @@ const maxImportRows = 1000
 // (case-insensitive), then apply the supplied custom secret via Regenerate
 // (preserving the key's ID, policy, metadata, and owner). Rows are independent:
 // one row's failure never aborts the others. The response reports imported vs
-// skipped rows so callers can reconcile. Malformed requests and DB-level
-// failures return 4xx/5xx without a partial report.
+// skipped rows so callers can reconcile. Malformed requests and whole-request
+// validation failures (too many rows, empty keys) return 4xx without a report;
+// per-row failures, including non-recoverable DB errors, are reported as
+// skipped rows so the batch always completes and the policy cache is
+// invalidated for any keys already regenerated.
 func (h *Handler) ImportPGAPIKeys(c *gin.Context) {
 	apiKeys, _, _, policySvc, ok := h.requirePG(c)
 	if !ok {
@@ -683,8 +686,11 @@ func (h *Handler) ImportPGAPIKeys(c *gin.Context) {
 				resp.Skipped = append(resp.Skipped, pgImportSkipped{Alias: alias, Reason: "ambiguous alias"})
 				continue
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
-			return
+			// A non-recoverable lookup failure is reported as a skipped row so the
+			// batch still completes and the policy cache is invalidated for any
+			// keys already regenerated earlier in this loop.
+			resp.Skipped = append(resp.Skipped, pgImportSkipped{Alias: alias, Reason: "internal error"})
+			continue
 		}
 		// Reject secrets already used by another key. key_hash carries a UNIQUE
 		// constraint in the schema, so the primary purpose of this pre-check is
@@ -696,8 +702,8 @@ func (h *Handler) ImportPGAPIKeys(c *gin.Context) {
 		hash := store.HashSecret(secret)
 		dup, _, dupErr := apiKeys.LookupByHash(ctx, hash)
 		if dupErr != nil && !errors.Is(dupErr, store.ErrAPIKeyNotFound) {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": dupErr.Error()}})
-			return
+			resp.Skipped = append(resp.Skipped, pgImportSkipped{Alias: alias, Reason: "internal error"})
+			continue
 		}
 		if dupErr == nil && dup.ID != key.ID {
 			resp.Skipped = append(resp.Skipped, pgImportSkipped{Alias: alias, Reason: "duplicate secret"})
@@ -721,8 +727,12 @@ func (h *Handler) ImportPGAPIKeys(c *gin.Context) {
 				resp.Skipped = append(resp.Skipped, pgImportSkipped{Alias: alias, Reason: "duplicate secret"})
 				continue
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
-			return
+			// Unknown Regenerate failure: report it as a skipped row so the rest
+			// of the batch proceeds and the policy cache is invalidated for any
+			// keys already regenerated (see policy/enforce.go, cache keyed by
+			// secret hash — leaving it stale would keep old-hash snapshots).
+			resp.Skipped = append(resp.Skipped, pgImportSkipped{Alias: alias, Reason: "internal error"})
+			continue
 		}
 		resp.Imported++
 		changed = true
