@@ -347,6 +347,22 @@ func TestXAINativeToolMarkupChatStreamBuffersUntilComplete(t *testing.T) {
 	}
 }
 
+func TestXAINativeToolMarkupChatStreamReleasesFalseMarkerPrefix(t *testing.T) {
+	stream := NewXAINativeToolMarkupChatStream(sdktranslator.FormatOpenAI)
+	prefix := []byte(`{"id":"chatcmpl_1","choices":[{"delta":{"content":"compare a <"}}]}`)
+	if got := stream.Ingest(prefix); len(got) != 0 {
+		t.Fatalf("trailing < should buffer pending a marker check, got %#v", got)
+	}
+	rest := []byte(`{"id":"chatcmpl_1","choices":[{"delta":{"content":" b"}}]}`)
+	got := stream.Ingest(rest)
+	if len(got) != 2 {
+		t.Fatalf("false marker prefix should release immediately, got %#v", got)
+	}
+	if flushed := stream.Flush(); len(flushed) != 0 {
+		t.Fatalf("Flush() = %#v, want empty after false-prefix release", flushed)
+	}
+}
+
 func TestApplyXAINativeToolMarkupChatJSONIgnoresResponsesFormat(t *testing.T) {
 	body := []byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"Working.<|tool_calls_begin|>"}]}]}`)
 	if got := ApplyXAINativeToolMarkupChatJSON(sdktranslator.FormatOpenAIResponse, body); !bytes.Equal(got, body) {

@@ -354,6 +354,7 @@ type XAINativeToolMarkupChatStream struct {
 	enabled   bool
 	passthru  bool
 	buffering bool
+	confirmed bool
 	held      [][]byte
 }
 
@@ -380,12 +381,27 @@ func (s *XAINativeToolMarkupChatStream) Ingest(chunk []byte) [][]byte {
 		out := append(append([][]byte{}, s.held...), chunk)
 		s.held = nil
 		s.buffering = false
+		s.confirmed = false
 		return out
 	}
 	if s.buffering || xaiNativeChunkMayContainMarkup(chunk) {
-		s.buffering = true
 		s.held = append(s.held, bytes.Clone(chunk))
-		return nil
+		s.buffering = true
+		if s.confirmed {
+			return nil
+		}
+		switch xaiNativeHeldMarkupState(s.held) {
+		case xaiNativeMarkupConfirmed:
+			s.confirmed = true
+			return nil
+		case xaiNativeMarkupPossible:
+			return nil
+		default:
+			out := s.held
+			s.held = nil
+			s.buffering = false
+			return out
+		}
 	}
 	return [][]byte{chunk}
 }
@@ -399,6 +415,7 @@ func (s *XAINativeToolMarkupChatStream) Flush() [][]byte {
 	held := s.held
 	s.held = nil
 	s.buffering = false
+	s.confirmed = false
 	if s.passthru {
 		return held
 	}
@@ -569,15 +586,37 @@ func xaiNativeChunkContent(chunk []byte) string {
 	return b.String()
 }
 
+type xaiNativeMarkupState int
+
+const (
+	xaiNativeMarkupNone xaiNativeMarkupState = iota
+	xaiNativeMarkupPossible
+	xaiNativeMarkupConfirmed
+)
+
 func xaiNativeChunkMayContainMarkup(chunk []byte) bool {
-	content := xaiNativeChunkContent(chunk)
+	return xaiNativeContentMarkupState(xaiNativeChunkContent(chunk)) != xaiNativeMarkupNone
+}
+
+func xaiNativeHeldMarkupState(chunks [][]byte) xaiNativeMarkupState {
+	var content strings.Builder
+	for _, chunk := range chunks {
+		content.WriteString(xaiNativeChunkContent(chunk))
+	}
+	return xaiNativeContentMarkupState(content.String())
+}
+
+func xaiNativeContentMarkupState(content string) xaiNativeMarkupState {
 	if content == "" {
-		return false
+		return xaiNativeMarkupNone
 	}
 	if strings.Contains(content, xaiNativeToolCallsBegin) || strings.Contains(content, xaiNativeToolCallBegin) {
-		return true
+		return xaiNativeMarkupConfirmed
 	}
-	return xaiHasMarkerPrefixSuffix(content, xaiNativeToolCallsBegin) || xaiHasMarkerPrefixSuffix(content, xaiNativeToolCallBegin)
+	if xaiHasMarkerPrefixSuffix(content, xaiNativeToolCallsBegin) || xaiHasMarkerPrefixSuffix(content, xaiNativeToolCallBegin) {
+		return xaiNativeMarkupPossible
+	}
+	return xaiNativeMarkupNone
 }
 
 func xaiHasMarkerPrefixSuffix(text, marker string) bool {
