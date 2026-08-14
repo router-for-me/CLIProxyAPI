@@ -2,12 +2,14 @@ package openai
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -287,4 +289,23 @@ func (*untrustedTerminationStreamExecutor) HttpRequest(context.Context, *coreaut
 
 func (e *untrustedTerminationStreamExecutor) body() []byte {
 	return []byte(`{"raw":"` + e.secret + `"}`)
+}
+
+func TestSanitizedStreamErrorUnwrapReturnsNil(t *testing.T) {
+	rawSecret := "raw-secret-key-12345"
+	rawErr := errors.New("internal upstream error with api_key=" + rawSecret)
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadGateway,
+		Error:      rawErr,
+	}
+	sanitized := sanitizeOpenAIErrorMessage(errMsg)
+	if sanitized == nil || sanitized.Error == nil {
+		t.Fatal("expected sanitized error, got nil")
+	}
+	if errors.Unwrap(sanitized.Error) != nil {
+		t.Fatalf("errors.Unwrap(sanitized.Error) = %v, want nil to prevent raw cause leakage", errors.Unwrap(sanitized.Error))
+	}
+	if strings.Contains(sanitized.Error.Error(), rawSecret) {
+		t.Fatalf("sanitized error leaked secret %q: %q", rawSecret, sanitized.Error.Error())
+	}
 }

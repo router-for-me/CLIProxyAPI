@@ -1494,14 +1494,15 @@ func TestSessionAffinitySelectorFailureQuarantinesAllAliases(t *testing.T) {
 	}
 }
 
-func TestSessionCacheCompareAndDeleteAliasesPreservesNewerBinding(t *testing.T) {
+func TestSessionCacheCompareAndReplaceAliasesPreservesNewerBinding(t *testing.T) {
 	cache := NewSessionCache(time.Minute)
 	defer cache.Stop()
 	cache.SetAliases("auth-a", "prompt", "conversation")
+	_, gen1, aliases1, _ := cache.GetWithGeneration("prompt")
 	cache.SetAliases("auth-b", "prompt", "conversation")
 
-	if aliases := cache.CompareAndDeleteAliases("prompt", "auth-a"); len(aliases) != 0 {
-		t.Fatalf("CompareAndDeleteAliases() = %v for stale auth, want none", aliases)
+	if replaced := cache.CompareAndReplaceAliases("auth-a", gen1, aliases1, "auth-c"); replaced {
+		t.Fatal("CompareAndReplaceAliases() succeeded for stale auth, want false")
 	}
 	for _, key := range []string{"prompt", "conversation"} {
 		if got, ok := cache.Get(key); !ok || got != "auth-b" {
@@ -1689,6 +1690,149 @@ func TestSessionAffinitySelectorCachedAuthUnavailableConcurrencyNewerBinding(t *
 		if got.ID != "auth-b" {
 			t.Fatalf("concurrent Pick() #%d = %q, want auth-b (newer binding preserved)", i, got.ID)
 		}
+	}
+}
+
+func TestSessionAffinitySelector_ABAMutationCycleRejected(t *testing.T) {
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	sessionA := "openai::conv:session-aba::gpt-test"
+	promptA := "openai::pck:prompt-aba::gpt-test"
+
+	// 1. Initial binding: auth-a (Generation 1)
+	cache.SetAliases("auth-a", sessionA, promptA)
+	authID, gen1, aliases1, ok := cache.GetWithGeneration(sessionA)
+	if !ok || authID != "auth-a" || gen1 == 0 {
+		t.Fatalf("initial binding failed: authID=%q, gen=%d, ok=%v", authID, gen1, ok)
+	}
+
+	// 2. Mutation to auth-b (Generation 2)
+	cache.SetAliases("auth-b", sessionA, promptA)
+	authID2, gen2, _, ok2 := cache.GetWithGeneration(sessionA)
+	if !ok2 || authID2 != "auth-b" || gen2 <= gen1 {
+		t.Fatalf("second binding failed: authID=%q, gen=%d", authID2, gen2)
+	}
+
+	// 3. Mutation back to auth-a (Generation 3 - ABA cycle)
+	cache.SetAliases("auth-a", sessionA, promptA)
+	authID3, gen3, _, ok3 := cache.GetWithGeneration(sessionA)
+	if !ok3 || authID3 != "auth-a" || gen3 <= gen2 {
+		t.Fatalf("third binding failed: authID=%q, gen=%d", authID3, gen3)
+	}
+
+	// 4. Stale CAS attempting to replace gen1 auth-a with auth-c MUST fail
+	casSuccess := cache.CompareAndReplaceAliases("auth-a", gen1, aliases1, "auth-c")
+	if casSuccess {
+		t.Fatal("ABA CAS replacement succeeded unexpectedly with stale generation token")
+	}
+
+	// Verify cache still retains gen3 auth-a intact
+	currentAuth, currentGen, _, okCurrent := cache.GetWithGeneration(sessionA)
+	if !okCurrent || currentAuth != "auth-a" || currentGen != gen3 {
+		t.Fatalf("cache was corrupted by failed ABA CAS: auth=%q gen=%d", currentAuth, currentGen)
+	}
+}
+
+func TestSessionAffinitySelector_PartialGroupSplitAbortsWithoutMutation(t *testing.T) {
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	k1 := "openai::conv:session-split-1::gpt-test"
+	k2 := "openai::conv:session-split-2::gpt-test"
+
+	// 1. Bind group {k1, k2} to auth-a
+	cache.SetAliases("auth-a", k1, k2)
+	_, gen1, aliases1, ok := cache.GetWithGeneration(k1)
+	if !ok {
+		t.Fatal("initial SetAliases failed")
+	}
+
+	// 2. Invalidate k1 (splits group, k2 gets updated aliases and gen2)
+	cache.Invalidate(k1)
+
+	// 3. Stale CAS expecting {k1, k2} at gen1 must fail because k1 is gone and k2 generation/aliases changed
+	casSuccess := cache.CompareAndReplaceAliases("auth-a", gen1, aliases1, "auth-b")
+	if casSuccess {
+		t.Fatal("partial group split CAS succeeded unexpectedly")
+	}
+
+	// k2 must remain bound to auth-a with its updated group
+	authK2, _, aliasesK2, okK2 := cache.GetWithGeneration(k2)
+	if !okK2 || authK2 != "auth-a" || len(aliasesK2) != 1 || aliasesK2[0] != k2 {
+		t.Fatalf("k2 corrupted after aborted CAS: ok=%v auth=%q aliases=%v", okK2, authK2, aliasesK2)
+	}
+}
+
+func TestSessionAffinitySelector_AdditionalAliasBelongsToOtherActiveGroupAbortsCAS(t *testing.T) {
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	g1Session := "openai::conv:group1::gpt-test"
+	g2Session := "openai::conv:group2::gpt-test"
+
+	// Group 1 -> auth-a
+	cache.SetAliases("auth-a", g1Session)
+	_, gen1, aliases1, _ := cache.GetWithGeneration(g1Session)
+
+	// Group 2 -> auth-b
+	cache.SetAliases("auth-b", g2Session)
+
+	// CAS attempting to rebind group 1 to auth-c while adding g2Session (which belongs to live group 2) must abort
+	casSuccess := cache.CompareAndReplaceAliases("auth-a", gen1, aliases1, "auth-c", g2Session)
+	if casSuccess {
+		t.Fatal("CAS with conflicting foreign active alias succeeded unexpectedly")
+	}
+
+	// Verify group 2 remains intact on auth-b
+	authG2, _ := cache.Get(g2Session)
+	if authG2 != "auth-b" {
+		t.Fatalf("group 2 was corrupted: auth=%q, want auth-b", authG2)
+	}
+}
+
+type failingTestSelector struct{}
+
+func (f *failingTestSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	return nil, fmt.Errorf("fallback selection failed")
+}
+
+func TestSessionAffinitySelector_FallbackFailureKeepsOriginalGroupIntact(t *testing.T) {
+	failingFallback := &failingTestSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: failingFallback,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	provider := "responses-fallback-failure"
+	model := "gpt-test"
+	sessionID := "conv:fallback-fail-test"
+	cacheKey := provider + "::" + sessionID + "::" + model
+
+	// Pre-seed cache with auth-a
+	selector.cache.Set(cacheKey, "auth-a")
+	authBefore, okBefore := selector.cache.Get(cacheKey)
+	if !okBefore || authBefore != "auth-a" {
+		t.Fatalf("failed to seed cache: got %q, %v", authBefore, okBefore)
+	}
+
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"conversation":{"id":"fallback-fail-test"}}`),
+	}
+
+	// Request with only auth-b available (auth-a unavailable).
+	// Fallback selector will fail with error.
+	availableAuths := []*Auth{{ID: "auth-b"}}
+	picked, err := selector.Pick(context.Background(), provider, model, opts, availableAuths)
+	if err == nil {
+		t.Fatalf("expected error from failing fallback selector, got auth=%v", picked)
+	}
+
+	// Cache MUST still contain auth-a (no eager delete).
+	authAfter, okAfter := selector.cache.Get(cacheKey)
+	if !okAfter || authAfter != "auth-a" {
+		t.Fatalf("cache was eagerly deleted or corrupted on fallback failure: got %q, %v", authAfter, okAfter)
 	}
 }
 

@@ -707,63 +707,76 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 		s.cache.Set(cacheKey, authID)
 	}
-	// rebindAliases re-points every identifier in a removed alias group at a
-	// replacement auth so sibling-aliased requests keep the recovered binding.
-	rebindAliases := func(authID string, aliases []string) {
-		s.cache.SetAliases(authID, aliases...)
-	}
-	pickCached := func() *Auth {
-		if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
+
+	// Fast path outside bindMu: reuse valid cached binding without holding bindMu.
+	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
+		for _, auth := range available {
+			if auth.ID == cachedAuthID {
+				bind(auth.ID)
+				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+				return auth, nil
+			}
+		}
+	} else if fallbackKey != "" {
+		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
 					bind(auth.ID)
-					return auth
-				}
-			}
-			if aliases := s.cache.CompareAndDeleteAliases(cacheKey, cachedAuthID); len(aliases) > 0 {
-				// True stale binding: re-point every alias at the replacement auth.
-				replacement, errReplacement := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
-				if errReplacement == nil {
-					rebindAliases(replacement.ID, aliases)
-					return replacement
+					entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+					return auth, nil
 				}
 			}
 		}
-		if fallbackKey != "" {
-			if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
-				for _, auth := range available {
-					if auth.ID == cachedAuthID {
-						bind(auth.ID)
-						return auth
-					}
-				}
-				if aliases := s.cache.CompareAndDeleteAliases(fallbackKey, cachedAuthID); len(aliases) > 0 {
-					replacement, errReplacement := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
-					if errReplacement == nil {
-						rebindAliases(replacement.ID, aliases)
-						return replacement
-					}
-				}
-			}
-		}
-		return nil
-	}
-
-	if auth := pickCached(); auth != nil {
-		entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-		return auth, nil
 	}
 
 	s.bindMu.Lock()
 	defer s.bindMu.Unlock()
-	if auth := pickCached(); auth != nil {
-		entry.Infof("session-affinity: concurrent cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-		return auth, nil
+
+	// Under bindMu, re-check if a concurrent request refreshed or rebound the session.
+	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
+		for _, auth := range available {
+			if auth.ID == cachedAuthID {
+				entry.Infof("session-affinity: concurrent cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+				bind(auth.ID)
+				return auth, nil
+			}
+		}
+	} else if fallbackKey != "" {
+		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
+			for _, auth := range available {
+				if auth.ID == cachedAuthID {
+					entry.Infof("session-affinity: concurrent cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+					bind(auth.ID)
+					return auth, nil
+				}
+			}
+		}
 	}
+
+	// Authoritative stale observation conducted under bindMu using non-refreshing token read.
+	staleAuthID, staleGen, staleAliases, hasStale := s.cache.GetWithGeneration(cacheKey)
+	if !hasStale && fallbackKey != "" {
+		staleAuthID, staleGen, staleAliases, hasStale = s.cache.GetWithGeneration(fallbackKey)
+	}
+
 	auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if err != nil {
 		return nil, err
 	}
+
+	if hasStale {
+		additional := []string{cacheKey}
+		if fallbackKey != "" {
+			additional = append(additional, fallbackKey)
+		}
+		if s.cache.CompareAndReplaceAliases(staleAuthID, staleGen, staleAliases, auth.ID, additional...) {
+			entry.Infof("session-affinity: rebound stale alias group | session=%s oldAuth=%s newAuth=%s gen=%d", truncateSessionID(primaryID), staleAuthID, auth.ID, staleGen)
+		} else {
+			entry.Infof("session-affinity: CAS rebind aborted due to concurrent mutation, serving selected auth statelessly | session=%s auth=%s", truncateSessionID(primaryID), auth.ID)
+		}
+		return auth, nil
+	}
+
 	bind(auth.ID)
 	entry.Infof("session-affinity: cache miss, bound candidate | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	return auth, nil
@@ -812,9 +825,15 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		return
 	}
 
-	aliases := s.cache.CompareAndDeleteAliases(cacheKey, res.AuthID)
-	if len(aliases) == 0 && fallbackKey != "" {
-		aliases = s.cache.CompareAndDeleteAliases(fallbackKey, res.AuthID)
+	var aliases []string
+	if authID, _, groupAliases, ok := s.cache.GetWithGeneration(cacheKey); ok && authID == res.AuthID {
+		aliases = groupAliases
+		s.cache.Invalidate(cacheKey)
+	} else if fallbackKey != "" {
+		if authID, _, groupAliases, ok := s.cache.GetWithGeneration(fallbackKey); ok && authID == res.AuthID {
+			aliases = groupAliases
+			s.cache.Invalidate(fallbackKey)
+		}
 	}
 	if len(aliases) == 0 {
 		aliases = []string{cacheKey, fallbackKey}

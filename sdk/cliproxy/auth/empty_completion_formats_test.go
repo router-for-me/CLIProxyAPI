@@ -1,7 +1,9 @@
-package auth
+package auth_test
 
 import (
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 // TestSupportedCompletionFormatsRecognized covers representative wire formats
@@ -71,13 +73,13 @@ func TestSupportedCompletionFormatsRecognized(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if !IsCompletionFormatRecognized(tc.nonEmpty) {
+			if !auth.IsCompletionFormatRecognized(tc.nonEmpty) {
 				t.Fatalf("non-empty chunk for executors %v was NOT recognized; a new executor emitting this format would silently bypass empty-completion detection", tc.executors)
 			}
-			if !IsEmptyCompletionPayload(tc.empty) {
+			if !auth.IsEmptyCompletionPayload(tc.empty) {
 				t.Fatalf("empty-terminal variant for executors %v was not judged empty", tc.executors)
 			}
-			if IsEmptyCompletionPayload(tc.nonEmpty) {
+			if auth.IsEmptyCompletionPayload(tc.nonEmpty) {
 				t.Fatalf("non-empty chunk for executors %v was wrongly judged empty", tc.executors)
 			}
 		})

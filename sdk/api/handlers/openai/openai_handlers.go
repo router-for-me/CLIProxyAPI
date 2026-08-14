@@ -942,18 +942,16 @@ func sanitizeOpenAIStrictErrorMessage(errMsg *interfaces.ErrorMessage) *interfac
 	safe.DirectResponse = false
 	safe.Body = nil
 	if errMsg.Error != nil {
-		safe.Error = &openAIStreamSanitizedError{message: openAIStreamErrorText(errMsg.Error.Error(), status), cause: errMsg.Error}
+		safe.Error = &openAIStreamSanitizedError{message: openAIStreamErrorText(errMsg.Error.Error(), status)}
 	}
 	return &safe
 }
 
 type openAIStreamSanitizedError struct {
 	message string
-	cause   error
 }
 
 func (e *openAIStreamSanitizedError) Error() string { return e.message }
-func (e *openAIStreamSanitizedError) Unwrap() error { return e.cause }
 
 // openAIStreamErrorText produces a client-safe error message. JSON error bodies
 // are preserved field-by-field with sanitization; free-form text is kept with

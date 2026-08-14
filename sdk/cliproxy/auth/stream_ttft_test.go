@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -129,7 +130,7 @@ func TestManagerExecuteStream_TTFTTimeoutFailsOverToNextAuth(t *testing.T) {
 	if len(chunks) == 0 {
 		t.Fatalf("expected chunks from authB")
 	}
-	if got := string(chunks[0].Payload); !containsString(got, "chunk-from-auth-b") {
+	if got := string(chunks[0].Payload); !strings.Contains(got, "chunk-from-auth-b") {
 		t.Fatalf("chunk payload = %q, expected bytes ONLY from authB", got)
 	}
 
@@ -357,7 +358,7 @@ func TestManagerExecuteStream_MetadataFirstPrefixStopsTTFTWithoutFailover(t *tes
 	if got := string(chunks[0].Payload); got != ": keepalive\n\n" {
 		t.Fatalf("first chunk payload = %q, want buffered metadata kept first", got)
 	}
-	if got := string(chunks[1].Payload); !containsString(got, "chunk-from-auth-a") {
+	if got := string(chunks[1].Payload); !strings.Contains(got, "chunk-from-auth-a") {
 		t.Fatalf("second chunk payload = %q, want content from auth-a", got)
 	}
 
@@ -429,7 +430,7 @@ func TestManagerExecuteStream_PostCommitErrorNotRetried(t *testing.T) {
 			terminalErr = chunk.Err
 			continue
 		}
-		if len(chunk.Payload) > 0 && containsString(string(chunk.Payload), "chunk-from-auth-a") {
+		if len(chunk.Payload) > 0 && strings.Contains(string(chunk.Payload), "chunk-from-auth-a") {
 			seenContent = true
 			chunks = append(chunks, chunk)
 		}
@@ -672,17 +673,4 @@ func TestManagerExecuteStream_RefreshRetryGetsFreshTTFTTimer(t *testing.T) {
 	if got := executor.StreamCalls(); got != 2 {
 		t.Fatalf("Stream calls = %d, want 2 (initial + refreshed retry)", got)
 	}
-}
-
-func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstr(s, substr))
-}
-
-func containsSubstr(s, substr string) bool {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
