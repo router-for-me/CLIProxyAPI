@@ -29,6 +29,88 @@ func TestSanitizeCodexInputItemIDsBoundaries(t *testing.T) {
 	}
 }
 
+func TestSanitizeCodexInputItemIDsShortensPairedCallIDs(t *testing.T) {
+	callID64 := strings.Repeat("a", 64)
+	callID65 := strings.Repeat("b", 65)
+	callID86 := strings.Repeat("c", 86)
+	callID87 := strings.Repeat("界", 87)
+	body := []byte(`{"input":[` +
+		`{"type":"function_call","call_id":"` + callID64 + `","name":"read","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"` + callID64 + `","output":"done"},` +
+		`{"type":"function_call","call_id":"` + callID65 + `","name":"read","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"` + callID65 + `","output":"done"},` +
+		`{"type":"custom_tool_call","call_id":"` + callID86 + `","name":"lookup","input":"{}"},` +
+		`{"type":"custom_tool_call_output","call_id":"` + callID86 + `","output":"done"},` +
+		`{"type":"function_call","call_id":"` + callID87 + `","name":"read","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"` + callID87 + `","output":"done"}` +
+		`]}`)
+
+	first := SanitizeCodexInputItemIDs(body)
+	second := SanitizeCodexInputItemIDs(body)
+	normalizedAgain := SanitizeCodexInputItemIDs(first)
+
+	if actual := gjson.GetBytes(first, "input.0.call_id").String(); actual != callID64 {
+		t.Fatalf("64-character call_id changed: %q", actual)
+	}
+	for _, pair := range [][2]int{{2, 3}, {4, 5}, {6, 7}} {
+		callID := gjson.GetBytes(first, fmt.Sprintf("input.%d.call_id", pair[0])).String()
+		outputCallID := gjson.GetBytes(first, fmt.Sprintf("input.%d.call_id", pair[1])).String()
+		if callID != outputCallID {
+			t.Fatalf("paired call IDs differ at input.%d and input.%d: %q != %q", pair[0], pair[1], callID, outputCallID)
+		}
+		if len([]rune(callID)) != codexCallIDLimit {
+			t.Fatalf("input.%d.call_id length = %d, want %d: %q", pair[0], len([]rune(callID)), codexCallIDLimit, callID)
+		}
+	}
+	if string(first) != string(second) {
+		t.Fatalf("call_id shortening is not deterministic: first=%s second=%s", first, second)
+	}
+	if string(first) != string(normalizedAgain) {
+		t.Fatalf("call_id shortening is not idempotent: first=%s normalized_again=%s", first, normalizedAgain)
+	}
+}
+
+func TestSanitizeCodexInputItemIDsAvoidsExistingCallIDCollision(t *testing.T) {
+	longCallID := strings.Repeat("cursor-call-", 8)
+	collidingValidCallID := shortenCodexCallIDWithAttempt(longCallID, 0)
+	body := []byte(`{"input":[` +
+		`{"type":"function_call","call_id":"` + longCallID + `","name":"read","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"` + longCallID + `","output":"done"},` +
+		`{"type":"function_call","call_id":"` + collidingValidCallID + `","name":"other","arguments":"{}"}` +
+		`]}`)
+
+	got := SanitizeCodexInputItemIDs(body)
+	shortened := gjson.GetBytes(got, "input.0.call_id").String()
+	if shortened == collidingValidCallID {
+		t.Fatalf("shortened call_id collided with existing valid call_id: %q", shortened)
+	}
+	if paired := gjson.GetBytes(got, "input.1.call_id").String(); paired != shortened {
+		t.Fatalf("paired call_id = %q, want %q", paired, shortened)
+	}
+	if actual := gjson.GetBytes(got, "input.2.call_id").String(); actual != collidingValidCallID {
+		t.Fatalf("existing valid call_id changed: %q", actual)
+	}
+}
+
+func TestSanitizeCodexInputItemIDsShortensOnlyOverlongCallID(t *testing.T) {
+	longCallID := strings.Repeat("call-", 20)
+	body := []byte(`{"input":[{"type":"function_call","call_id":"` + longCallID + `","name":"read","arguments":"{}"}]}`)
+
+	got := SanitizeCodexInputItemIDs(body)
+	if actual := gjson.GetBytes(got, "input.0.call_id").String(); actual == longCallID || len([]rune(actual)) != codexCallIDLimit {
+		t.Fatalf("overlong call_id was not shortened: %q", actual)
+	}
+}
+
+func TestSanitizeCodexInputItemIDsLeavesValidCallIDsByteForByteUnchanged(t *testing.T) {
+	body := []byte(`{ "model": "gpt-5", "input": [ { "type": "function_call", "call_id": "call_123", "name": "read", "arguments": "{}" } ] }`)
+
+	got := SanitizeCodexInputItemIDs(body)
+	if string(got) != string(body) {
+		t.Fatalf("valid payload changed byte-for-byte: got=%q want=%q", got, body)
+	}
+}
+
 func TestSanitizeCodexInputItemIDsNormalizesMessageIDs(t *testing.T) {
 	const invalidID = "item_74ec40c883248ebb4885ec84"
 	body := []byte(`{"input":[` +
@@ -305,6 +387,28 @@ func BenchmarkSanitizeCodexInputItemIDsLargeHistory(b *testing.B) {
 			payload.WriteByte(',')
 		}
 		fmt.Fprintf(&payload, `{"type":"message","id":"msg_%d","role":"user","content":"x"}`, index)
+	}
+	payload.WriteString(`]}`)
+	body := []byte(payload.String())
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	b.ResetTimer()
+	for b.Loop() {
+		benchmarkSanitizeCodexInputItemIDsOutput = SanitizeCodexInputItemIDs(body)
+	}
+}
+
+func BenchmarkSanitizeCodexInputItemIDsLargeToolHistory(b *testing.B) {
+	var payload strings.Builder
+	payload.Grow(128 << 10)
+	payload.WriteString(`{"input":[`)
+	for index := range 500 {
+		if index > 0 {
+			payload.WriteByte(',')
+		}
+		fmt.Fprintf(&payload, `{"type":"function_call","call_id":"call_%d","name":"read","arguments":"{}"},`, index)
+		fmt.Fprintf(&payload, `{"type":"function_call_output","call_id":"call_%d","output":"done"}`, index)
 	}
 	payload.WriteString(`]}`)
 	body := []byte(payload.String())

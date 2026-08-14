@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
@@ -13,6 +14,7 @@ import (
 
 const (
 	codexInputItemIDLimit                 = 64
+	codexCallIDLimit                      = 64
 	codexMessageItemIDPrefix              = "msg"
 	codexReasoningItemIDPrefix            = "rs"
 	codexFunctionCallItemIDPrefix         = "fc"
@@ -25,7 +27,7 @@ const (
 
 // SanitizeCodexInputItemIDs normalizes supported input item IDs for Codex, removes encrypted
 // reasoning items whose IDs exceed the Codex limit, and deterministically shortens
-// other overlong input item IDs.
+// other overlong input item IDs and call IDs.
 func SanitizeCodexInputItemIDs(body []byte) []byte {
 	input := util.GetGJSONBytesNoCopy(body, "input")
 	if !input.IsArray() {
@@ -34,10 +36,22 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 
 	items := input.Array()
 	idStates := make(map[string]uint8, len(items))
+	var callIDStates map[string]uint8
 	for _, item := range items {
 		if shouldDropCodexEncryptedReasoningItem(item) {
 			continue
 		}
+		callID := item.Get("call_id")
+		if callID.Type == gjson.String {
+			value := callID.String()
+			if utf8.RuneCountInString(value) <= codexCallIDLimit {
+				if callIDStates == nil {
+					callIDStates = make(map[string]uint8)
+				}
+				callIDStates[value] |= codexInputItemIDOccupied
+			}
+		}
+
 		itemID := item.Get("id")
 		if itemID.Type != gjson.String {
 			continue
@@ -58,6 +72,7 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 
 	var mapped map[string]string
 	var collisionMapped map[string]string
+	var callIDMapped map[string]string
 	rebuilt := make([]string, 0, len(items))
 	changed := false
 	for _, item := range items {
@@ -114,6 +129,34 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 					raw = string(next)
 					changed = true
 				}
+			}
+		}
+
+		callID := item.Get("call_id")
+		if callID.Type == gjson.String && utf8.RuneCountInString(callID.String()) > codexCallIDLimit {
+			originalCallID := callID.String()
+			shortened, ok := callIDMapped[originalCallID]
+			if !ok {
+				for attempt := 0; ; attempt++ {
+					shortened = shortenCodexCallIDWithAttempt(originalCallID, attempt)
+					if callIDStates[shortened]&codexInputItemIDOccupied == 0 {
+						break
+					}
+				}
+				if callIDMapped == nil {
+					callIDMapped = make(map[string]string)
+				}
+				if callIDStates == nil {
+					callIDStates = make(map[string]uint8)
+				}
+				callIDMapped[originalCallID] = shortened
+				callIDStates[shortened] |= codexInputItemIDOccupied
+			}
+
+			next, errSet := sjson.SetBytes([]byte(raw), "call_id", shortened)
+			if errSet == nil {
+				raw = string(next)
+				changed = true
 			}
 		}
 		rebuilt = append(rebuilt, raw)
@@ -173,6 +216,14 @@ func shortenCodexInputItemIDWithAttempt(id string, attempt int) string {
 		return id
 	}
 	return codexInputItemIDWithHashSuffixRunes(id, runes, attempt)
+}
+
+func shortenCodexCallIDWithAttempt(callID string, attempt int) string {
+	runes := []rune(callID)
+	if len(runes) <= codexCallIDLimit {
+		return callID
+	}
+	return codexInputItemIDWithHashSuffixRunes(callID, runes, attempt)
 }
 
 func codexInputItemIDWithHashSuffix(id string, attempt int) string {
