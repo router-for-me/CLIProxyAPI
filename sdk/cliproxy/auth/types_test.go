@@ -8,6 +8,48 @@ import (
 	"time"
 )
 
+func TestRequestRetryOverride(t *testing.T) {
+	var unset *Auth
+	if got, ok := unset.RequestRetryOverride(); ok || got != 0 {
+		t.Fatalf("nil auth override = (%d, %t), want (0, false)", got, ok)
+	}
+
+	auth := &Auth{}
+	if got, ok := auth.RequestRetryOverride(); ok || got != 0 {
+		t.Fatalf("empty auth override = (%d, %t), want (0, false)", got, ok)
+	}
+
+	auth = &Auth{Metadata: map[string]any{"request_retry": 0}}
+	if got, ok := auth.RequestRetryOverride(); !ok || got != 0 {
+		t.Fatalf("request_retry=0 override = (%d, %t), want (0, true)", got, ok)
+	}
+
+	auth = &Auth{Metadata: map[string]any{"request_retry": 3}}
+	if got, ok := auth.RequestRetryOverride(); !ok || got != 3 {
+		t.Fatalf("request_retry=3 override = (%d, %t), want (3, true)", got, ok)
+	}
+
+	auth = &Auth{Metadata: map[string]any{"request_retry": -1}}
+	if got, ok := auth.RequestRetryOverride(); ok || got != 0 {
+		t.Fatalf("request_retry=-1 override = (%d, %t), want (0, false)", got, ok)
+	}
+
+	auth = &Auth{Metadata: map[string]any{"request-retry": 2}}
+	if got, ok := auth.RequestRetryOverride(); !ok || got != 2 {
+		t.Fatalf("request-retry=2 override = (%d, %t), want (2, true)", got, ok)
+	}
+
+	auth = &Auth{Metadata: map[string]any{"request-retry": -2}}
+	if got, ok := auth.RequestRetryOverride(); ok || got != 0 {
+		t.Fatalf("request-retry=-2 override = (%d, %t), want (0, false)", got, ok)
+	}
+
+	auth = &Auth{Metadata: map[string]any{"request_retry": "0"}}
+	if got, ok := auth.RequestRetryOverride(); !ok || got != 0 {
+		t.Fatalf("request_retry string 0 override = (%d, %t), want (0, true)", got, ok)
+	}
+}
+
 func TestToolPrefixDisabled(t *testing.T) {
 	var a *Auth
 	if a.ToolPrefixDisabled() {

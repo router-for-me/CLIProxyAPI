@@ -14,6 +14,9 @@ type ClaudeMessagesSignatureSanitizeOptions struct {
 	DropEmptyMessages             bool
 	DropToolSignatures            bool
 	DropEmptyThinkingPlaceholders bool
+	// PreserveEmptyThinkingBlocks preserves compatibility-mode thinking blocks
+	// together with their original signatures, including opaque signatures.
+	PreserveEmptyThinkingBlocks bool
 }
 
 type SignatureSanitizeReport struct {
@@ -37,16 +40,19 @@ func SanitizeClaudeMessagesSignaturesForModel(payload []byte, targetModel string
 }
 
 // SanitizeClaudeMessagesForClaudeUpstream prepares a Claude /v1/messages body
-// for native Claude upstreams. Invalid thinking blocks are dropped, valid
-// thinking signatures are normalized to Claude provider-native E-form, and
-// tool_use blocks keep only their tool-call payload.
-func SanitizeClaudeMessagesForClaudeUpstream(payload []byte, targetModel string) ([]byte, SignatureSanitizeReport) {
+// for Claude-compatible upstreams. Valid Claude signatures are normalized to
+// provider-native E-form, valid Claude CAIS signatures are kept,
+// incompatible thinking blocks are dropped, and tool_use blocks keep only their
+// tool-call payload.
+func SanitizeClaudeMessagesForClaudeUpstream(payload []byte, targetModel string, preserveEmptyThinkingBlocks ...bool) ([]byte, SignatureSanitizeReport) {
+	preserveEmpty := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
 	return SanitizeClaudeMessagesSignaturesForTarget(payload, ClaudeMessagesSignatureSanitizeOptions{
 		TargetProvider:                SignatureProviderClaude,
 		TargetModel:                   targetModel,
 		DropEmptyMessages:             true,
 		DropToolSignatures:            true,
-		DropEmptyThinkingPlaceholders: true,
+		DropEmptyThinkingPlaceholders: !preserveEmpty,
+		PreserveEmptyThinkingBlocks:   preserveEmpty,
 	})
 }
 
@@ -94,7 +100,7 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 					keptParts = append(keptParts, updatedPart)
 					continue
 				}
-				updatedPart, changed, decisions := sanitizeClaudeToolUseSignature(part, targetProvider, i, j)
+				updatedPart, changed, decisions := sanitizeClaudeToolUseSignature(part, targetProvider, opts.TargetModel, i, j)
 				report.Decisions = append(report.Decisions, decisions...)
 				if changed {
 					messageModified = true
@@ -118,13 +124,18 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 				continue
 			}
 
+			rawSignature := part.Get("signature").String()
+			if opts.PreserveEmptyThinkingBlocks {
+				report.Preserved++
+				keptParts = append(keptParts, part.Raw)
+				continue
+			}
 			if targetProvider == SignatureProviderClaude && isEmptyClaudeThinkingPlaceholder(part) && !opts.DropEmptyThinkingPlaceholders {
 				keptParts = append(keptParts, part.Raw)
 				continue
 			}
 
-			rawSignature := part.Get("signature").String()
-			decision := DecideSignatureCompatibility(targetProvider, rawSignature, SignatureBlockKindClaudeThinking)
+			decision := DecideSignatureCompatibilityForModel(targetProvider, opts.TargetModel, rawSignature, SignatureBlockKindClaudeThinking)
 			decision.Reason = fmt.Sprintf("messages[%d].content[%d]: %s", i, j, decision.Reason)
 			report.Decisions = append(report.Decisions, decision)
 
@@ -195,7 +206,7 @@ func stripClaudeToolUseSignatureFields(part gjson.Result) (string, bool) {
 	return updated, changed
 }
 
-func sanitizeClaudeToolUseSignature(part gjson.Result, targetProvider SignatureProvider, messageIdx, partIdx int) (string, bool, []SignatureCompatibilityDecision) {
+func sanitizeClaudeToolUseSignature(part gjson.Result, targetProvider SignatureProvider, targetModel string, messageIdx, partIdx int) (string, bool, []SignatureCompatibilityDecision) {
 	updated := part.Raw
 	changed := false
 	var decisions []SignatureCompatibilityDecision
@@ -212,7 +223,7 @@ func sanitizeClaudeToolUseSignature(part gjson.Result, targetProvider SignatureP
 		} else if targetProvider == SignatureProviderGPT {
 			blockKind = SignatureBlockKindGPTReasoning
 		}
-		decision := DecideSignatureCompatibility(targetProvider, sigResult.String(), blockKind)
+		decision := DecideSignatureCompatibilityForModel(targetProvider, targetModel, sigResult.String(), blockKind)
 		decision.Reason = fmt.Sprintf("messages[%d].content[%d].%s: %s", messageIdx, partIdx, sigPath, decision.Reason)
 		decisions = append(decisions, decision)
 

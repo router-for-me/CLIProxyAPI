@@ -130,6 +130,40 @@ func TestAntigravityBuildRequest_UsesRouteModelWhenPayloadContainsDifferentModel
 	}
 }
 
+func TestAntigravityBuildRequestUsesDerivedSessionIDAndPreservesExplicit(t *testing.T) {
+	t.Parallel()
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+	payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
+	req, err := executor.buildRequest(context.Background(), auth, "token", "gemini-3.1-pro", payload, false, "", "https://example.com", "-123456789")
+	if err != nil {
+		t.Fatalf("buildRequest error: %v", err)
+	}
+	body := requestBody(t, req)
+	request, ok := body["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("request missing or invalid: %v", body["request"])
+	}
+	if got := request["sessionId"]; got != "-123456789" {
+		t.Fatalf("request.sessionId = %v, want -123456789", got)
+	}
+
+	explicitPayload := []byte(`{"request":{"sessionId":"-987654321","contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
+	explicitReq, errExplicit := executor.buildRequest(context.Background(), auth, "token", "gemini-3.1-pro", explicitPayload, false, "", "https://example.com", "-123456789")
+	if errExplicit != nil {
+		t.Fatalf("buildRequest explicit error: %v", errExplicit)
+	}
+	explicitBody := requestBody(t, explicitReq)
+	explicitRequest, ok := explicitBody["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("explicit request missing or invalid: %v", explicitBody["request"])
+	}
+	if got := explicitRequest["sessionId"]; got != "-987654321" {
+		t.Fatalf("explicit request.sessionId = %v, want -987654321", got)
+	}
+}
+
 func TestAntigravityBuildRequest_PreservesIndependentWebSearchRequestType(t *testing.T) {
 	body := buildRequestBodyFromRawPayload(t, "gemini-3.1-flash-lite", []byte(`{
 		"requestType": "web_search",

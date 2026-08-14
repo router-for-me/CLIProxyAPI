@@ -24,9 +24,10 @@ func GeminiReplaySignatureOrBypass(rawSignature string, blockKind SignatureBlock
 }
 
 // SanitizeGeminiRequestThoughtSignatures applies Gemini replay policy to a
-// Gemini-shaped request. Model-turn functionCall, thought, and signed parts keep
-// compatible Gemini signatures and use the bypass sentinel otherwise. User-turn
-// functionResponse parts must not carry thoughtSignature fields.
+// Gemini-shaped request. Existing provider signatures stay on their original
+// model parts. Only a missing or incompatible first functionCall gets the bypass
+// sentinel; unsigned sibling calls remain unsigned, matching native Gemini
+// parallel-call history. functionResponse parts never carry signatures.
 func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string) []byte {
 	contentsPath = strings.TrimSpace(contentsPath)
 	if contentsPath == "" {
@@ -48,21 +49,22 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 		}
 
 		isModelTurn := content.Get("role").String() == "model"
+		firstFunctionCallSeen := false
 		partsChanged := false
 		partItems := make([][]byte, 0, int(parts.Get("#").Int()))
 		parts.ForEach(func(partIdx, part gjson.Result) bool {
 			partJSON := []byte(part.Raw)
+			rawSignature, hasSignature := geminiPartThoughtSignature(part)
 			if part.Get("functionResponse").Exists() {
-				_, hadSignature := geminiPartThoughtSignature(part)
-				if hadSignature {
+				if hasSignature {
 					partJSON = deleteGeminiPartThoughtSignatureFields(partJSON)
 					partsChanged = true
 					logGeminiThoughtSignatureSanitize(contentsPath, int(contentIdx.Int()), int(partIdx.Int()), SignatureCompatibilityDecision{
 						TargetProvider: SignatureProviderGemini,
 						BlockKind:      SignatureBlockKindGeminiModelPart,
 						Action:         SignatureActionDropSignature,
-						Reason:         "user-turn functionResponse parts cannot replay thought signatures",
-					}, "", true)
+						Reason:         "functionResponse parts cannot replay thought signatures",
+					}, rawSignature, true)
 				}
 				partItems = append(partItems, partJSON)
 				return true
@@ -73,9 +75,11 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 			}
 
 			hasFunctionCall := part.Get("functionCall").Exists()
-			hasThought := part.Get("thought").Exists()
-			rawSignature, hasSignature := geminiPartThoughtSignature(part)
-			if !hasFunctionCall && !hasThought && !hasSignature {
+			isFirstFunctionCall := hasFunctionCall && !firstFunctionCallSeen
+			if hasFunctionCall {
+				firstFunctionCallSeen = true
+			}
+			if !hasFunctionCall && !hasSignature {
 				partItems = append(partItems, partJSON)
 				return true
 			}
@@ -85,14 +89,38 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 				blockKind = SignatureBlockKindGeminiFunctionCall
 			}
 			decision := DecideSignatureCompatibility(SignatureProviderGemini, rawSignature, blockKind)
-			replaySignature := GeminiReplaySignatureOrBypass(rawSignature, blockKind)
-			if !hasNormalizedGeminiPartThoughtSignature(part, replaySignature) {
-				partJSON = deleteGeminiPartThoughtSignatureFields(partJSON)
-				partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", replaySignature)
-				partsChanged = true
+			replaySignature := ""
+			switch {
+			case isFirstFunctionCall:
+				replaySignature = GeminiReplaySignatureOrBypass(rawSignature, blockKind)
+			case hasSignature && decision.Action == SignatureActionPreserve && !IsGeminiThoughtSignatureBypass(SignaturePayloadWithoutProviderPrefix(rawSignature)):
+				replaySignature = decision.NormalizedSignature
+			case hasSignature:
+				decision.Action = SignatureActionDropSignature
+				decision.ReplacementSignature = ""
+				if hasFunctionCall {
+					decision.Reason = "unsigned sibling functionCalls preserve native parallel-call shape"
+				} else {
+					decision.Reason = "non-function model parts do not synthesize Gemini bypass signatures"
+				}
 			}
-			if decision.Action != SignatureActionPreserve {
-				logGeminiThoughtSignatureSanitize(contentsPath, int(contentIdx.Int()), int(partIdx.Int()), decision, rawSignature, hasSignature)
+
+			partChanged := false
+			if replaySignature != "" {
+				if !hasNormalizedGeminiPartThoughtSignature(part, replaySignature) {
+					partJSON = deleteGeminiPartThoughtSignatureFields(partJSON)
+					partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", replaySignature)
+					partChanged = true
+				}
+			} else if hasSignature {
+				partJSON = deleteGeminiPartThoughtSignatureFields(partJSON)
+				partChanged = true
+			}
+			if partChanged {
+				partsChanged = true
+				if decision.Action != SignatureActionPreserve {
+					logGeminiThoughtSignatureSanitize(contentsPath, int(contentIdx.Int()), int(partIdx.Int()), decision, rawSignature, hasSignature)
+				}
 			}
 			partItems = append(partItems, partJSON)
 			return true
@@ -120,31 +148,44 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 func geminiContentsThoughtSignaturesNeedSanitize(contents gjson.Result) bool {
 	needsSanitize := false
 	contents.ForEach(func(_, content gjson.Result) bool {
-		isModelTurn := content.Get("role").String() == "model"
 		parts := content.Get("parts")
 		if !parts.IsArray() {
 			return true
 		}
+		isModelTurn := content.Get("role").String() == "model"
+		firstFunctionCallSeen := false
 		parts.ForEach(func(_, part gjson.Result) bool {
+			rawSignature, hasSignature := geminiPartThoughtSignature(part)
 			if part.Get("functionResponse").Exists() {
-				_, needsSanitize = geminiPartThoughtSignature(part)
+				needsSanitize = hasSignature
 				return !needsSanitize
 			}
 			if !isModelTurn {
 				return true
 			}
 			hasFunctionCall := part.Get("functionCall").Exists()
-			hasThought := part.Get("thought").Exists()
-			rawSignature, hasSignature := geminiPartThoughtSignature(part)
-			if !hasFunctionCall && !hasThought && !hasSignature {
+			isFirstFunctionCall := hasFunctionCall && !firstFunctionCallSeen
+			if hasFunctionCall {
+				firstFunctionCallSeen = true
+			}
+			if isFirstFunctionCall {
+				replaySignature := GeminiReplaySignatureOrBypass(rawSignature, SignatureBlockKindGeminiFunctionCall)
+				needsSanitize = !hasNormalizedGeminiPartThoughtSignature(part, replaySignature)
+				return !needsSanitize
+			}
+			if !hasSignature {
 				return true
 			}
 			blockKind := SignatureBlockKindGeminiModelPart
 			if hasFunctionCall {
 				blockKind = SignatureBlockKindGeminiFunctionCall
 			}
-			replaySignature := GeminiReplaySignatureOrBypass(rawSignature, blockKind)
-			needsSanitize = !hasNormalizedGeminiPartThoughtSignature(part, replaySignature)
+			decision := DecideSignatureCompatibility(SignatureProviderGemini, rawSignature, blockKind)
+			if decision.Action != SignatureActionPreserve || IsGeminiThoughtSignatureBypass(SignaturePayloadWithoutProviderPrefix(rawSignature)) {
+				needsSanitize = true
+				return false
+			}
+			needsSanitize = !hasNormalizedGeminiPartThoughtSignature(part, decision.NormalizedSignature)
 			return !needsSanitize
 		})
 		return !needsSanitize

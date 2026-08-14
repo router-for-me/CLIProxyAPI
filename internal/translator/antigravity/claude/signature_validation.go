@@ -17,6 +17,14 @@ func StripEmptySignatureThinkingBlocks(payload []byte) []byte {
 	return signature.StripInvalidClaudeThinkingBlocks(payload, signature.ClaudeSignatureValidationOptions{PrefixOnly: true})
 }
 
+// StripInvalidGeminiSignatureThinkingBlocks removes Claude thinking blocks whose
+// signatures are not valid Claude signatures. This is used on Gemini replay paths
+// where the request may still carry prior provider-generated Gemini signatures
+// that must be discarded before the request is forwarded to Antigravity.
+func StripInvalidGeminiSignatureThinkingBlocks(payload []byte) []byte {
+	return signature.StripInvalidClaudeThinkingBlocks(payload, signature.ClaudeSignatureValidationOptions{Strict: true})
+}
+
 func StripInvalidBypassSignatureThinkingBlocks(payload []byte) []byte {
 	return signature.StripInvalidClaudeThinkingBlocks(payload, claudeBypassSignatureValidationOptions())
 }

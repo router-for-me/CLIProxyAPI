@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,179 @@ func TestXAIWebsocketsEnabledForConfigAPIKey(t *testing.T) {
 	}
 	if !xaiWebsocketsEnabled(auth) {
 		t.Fatal("xaiWebsocketsEnabled() = false, want true")
+	}
+}
+
+func TestXAIAutoExecutorRequiredUpstreamWebsocketRejectsHTTPFallback(t *testing.T) {
+	exec := NewXAIAutoExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-http-only",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"api_key": "xai-key",
+		},
+	}
+	ctx := cliproxyexecutor.WithRequiredUpstreamWebsocket(
+		cliproxyexecutor.WithDownstreamWebsocket(context.Background()),
+	)
+	_, errExecute := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "grok-4",
+		Payload: []byte(`{"model":"grok-4","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
+	if errExecute == nil {
+		t.Fatal("ExecuteStream() error = nil, want replay-required error")
+	}
+	statusErr, ok := errExecute.(interface{ StatusCode() int })
+	if !ok || statusErr.StatusCode() != http.StatusUpgradeRequired {
+		t.Fatalf("ExecuteStream() error = %T %v, want status 426", errExecute, errExecute)
+	}
+	if got := gjson.Get(errExecute.Error(), "error.code").String(); got != "upstream_http_replay_required" {
+		t.Fatalf("ExecuteStream() error code = %q, want upstream_http_replay_required", got)
+	}
+	requestScoped, ok := errExecute.(cliproxyexecutor.RequestScopedError)
+	if !ok || !requestScoped.IsRequestScoped() {
+		t.Fatalf("ExecuteStream() error = %T, want request-scoped replay signal", errExecute)
+	}
+}
+
+func TestXAIWebsocketsRequiredUpstreamRejectsCompactionHTTPFallback(t *testing.T) {
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	ctx := cliproxyexecutor.WithRequiredUpstreamWebsocket(context.Background())
+	_, errExecute := exec.ExecuteStream(ctx, &cliproxyauth.Auth{}, cliproxyexecutor.Request{
+		Model:   "grok-4",
+		Payload: []byte(`{"model":"grok-4","input":[{"type":"compaction_trigger"}]}`),
+	}, cliproxyexecutor.Options{})
+	if !cliproxyexecutor.IsUpstreamWebsocketReplayRequired(errExecute) {
+		t.Fatalf("ExecuteStream() error = %T %v, want replay-required", errExecute, errExecute)
+	}
+}
+
+func TestMapXAIWebsocketWriteErrorStopsRetryForMessageTooBig(t *testing.T) {
+	networkWriteErr := errors.New("write: broken pipe")
+	tests := []struct {
+		name       string
+		closeCode  int
+		writeErr   error
+		wantStatus int
+		wantRetry  bool
+	}{
+		{
+			name:       "close sent after message too big is request scoped",
+			closeCode:  websocket.CloseMessageTooBig,
+			writeErr:   websocket.ErrCloseSent,
+			wantStatus: http.StatusRequestEntityTooLarge,
+			wantRetry:  false,
+		},
+		{
+			name:       "network write error after message too big is request scoped",
+			closeCode:  websocket.CloseMessageTooBig,
+			writeErr:   networkWriteErr,
+			wantStatus: http.StatusRequestEntityTooLarge,
+			wantRetry:  false,
+		},
+		{
+			name:      "other close keeps stale connection retry",
+			closeCode: websocket.CloseNormalClosure,
+			writeErr:  websocket.ErrCloseSent,
+			wantRetry: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sess := &codexWebsocketSession{}
+			conn := &websocket.Conn{}
+			sess.resetUpstreamDisconnectError(conn)
+			sess.setUpstreamDisconnectError(conn, &websocket.CloseError{Code: tt.closeCode})
+
+			mappedErr := mapXAIWebsocketWriteError(sess, conn, tt.writeErr)
+			if got := shouldRetryXAIWebsocketSend(mappedErr); got != tt.wantRetry {
+				t.Fatalf("shouldRetryXAIWebsocketSend() = %v, want %v; err=%v", got, tt.wantRetry, mappedErr)
+			}
+			if tt.wantStatus == 0 {
+				if !errors.Is(mappedErr, tt.writeErr) {
+					t.Fatalf("mapped error = %v, want %v", mappedErr, tt.writeErr)
+				}
+				return
+			}
+			statusErr, ok := mappedErr.(interface{ StatusCode() int })
+			if !ok || statusErr.StatusCode() != tt.wantStatus {
+				t.Fatalf("mapped status = %v, want %d; err=%v", statusErr, tt.wantStatus, mappedErr)
+			}
+			requestErr, ok := mappedErr.(interface{ IsRequestScoped() bool })
+			if !ok || !requestErr.IsRequestScoped() {
+				t.Fatalf("mapped error should be request scoped, got %T", mappedErr)
+			}
+		})
+	}
+}
+
+func TestXAIWebsocketsExecuteStreamMapsMessageTooBigClose(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		deadline := time.Now().Add(time.Second)
+		closeMessage := websocket.FormatCloseMessage(websocket.CloseMessageTooBig, "message too big")
+		if errWrite := conn.WriteControl(websocket.CloseMessage, closeMessage, deadline); errWrite != nil {
+			t.Errorf("write close websocket message: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":   server.URL,
+			"websockets": "true",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "grok-4.5",
+		Payload: []byte(`{"model":"grok-4.5","input":[{"type":"message","role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+	}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	select {
+	case chunk, ok := <-result.Chunks:
+		if !ok {
+			t.Fatal("stream closed before error chunk")
+		}
+		if chunk.Err == nil {
+			t.Fatal("error chunk Err = nil, want message-too-big error")
+		}
+		statusErr, ok := chunk.Err.(interface{ StatusCode() int })
+		if !ok || statusErr.StatusCode() != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status error = %v, want %d; err=%v", statusErr, http.StatusRequestEntityTooLarge, chunk.Err)
+		}
+		if got := gjson.Get(chunk.Err.Error(), "error.code").String(); got != "message_too_big" {
+			t.Fatalf("error code = %q, want message_too_big; err=%v", got, chunk.Err)
+		}
+		requestErr, ok := chunk.Err.(interface{ IsRequestScoped() bool })
+		if !ok || !requestErr.IsRequestScoped() {
+			t.Fatalf("message-too-big error should be request scoped, got %T", chunk.Err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for error stream chunk")
 	}
 }
 
@@ -1116,6 +1290,127 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 	}
 }
 
+func TestXAIWebsocketPostCompactionAppendWithoutPreviousReplaysCompactedTranscript(t *testing.T) {
+	store := &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+	state := getXAIWebsocketIDState(store, "post-compaction-append-session")
+	state.replaceTranscriptWithItems([]byte(`{"type":"compaction","encrypted_content":"compact-state"}`))
+	state.mapDownstreamToUpstream("resp-compact", "")
+
+	fullReset := []byte(`{"type":"response.create","model":"grok-4.3","input":[{"type":"message","id":"msg-full"}]}`)
+	fullMapper := newXAIWebsocketRequestIDMapper(store, "post-compaction-append-session", fullReset)
+	if full := fullMapper.upstreamRequestPayload(fullReset); len(gjson.GetBytes(full, "input").Array()) != 1 {
+		t.Fatalf("self-contained response.create unexpectedly replayed compacted transcript: %s", full)
+	}
+
+	payload := []byte(`{"type":"response.append","model":"grok-4.3","input":[{"type":"message","id":"msg-2","role":"user","content":"second"}]}`)
+	mapper := newXAIWebsocketRequestIDMapper(store, "post-compaction-append-session", payload)
+	got := mapper.upstreamRequestPayload(payload)
+	input := gjson.GetBytes(got, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("post-compaction append input len = %d, want 2: %s", len(input), got)
+	}
+	if gotType := input[0].Get("type").String(); gotType != "compaction" {
+		t.Fatalf("post-compaction append input[0].type = %q, want compaction: %s", gotType, got)
+	}
+	if gotID := input[1].Get("id").String(); gotID != "msg-2" {
+		t.Fatalf("post-compaction append input[1].id = %q, want msg-2: %s", gotID, got)
+	}
+
+	state.recordTranscriptTurn(got, []byte(`{"type":"response.completed","response":{"id":"resp-after-compact","output":[{"type":"message","id":"out-2"}]}}`), true)
+	nextPayload := []byte(`{"type":"response.create","model":"grok-4.3","input":[{"type":"message","id":"msg-3"}]}`)
+	nextMapper := newXAIWebsocketRequestIDMapper(store, "post-compaction-append-session", nextPayload)
+	next := nextMapper.upstreamRequestPayload(nextPayload)
+	if nextInput := gjson.GetBytes(next, "input").Array(); len(nextInput) != 1 || nextInput[0].Get("id").String() != "msg-3" {
+		t.Fatalf("compacted transcript replay was not cleared after success: %s", next)
+	}
+}
+
+func TestXAIWebsocketPostCompactionWarmupPreservesTranscriptForLaterCompaction(t *testing.T) {
+	store := &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+	state := getXAIWebsocketIDState(store, "warmup-reset-session")
+	state.replaceTranscriptWithItems([]byte(`{"type":"compaction","encrypted_content":"compact-state"}`))
+
+	warmupPayload := []byte(`{"type":"response.append","model":"grok-4.3","generate":false,"input":[{"type":"message","id":"warmup-context"}]}`)
+	warmupMapper := newXAIWebsocketRequestIDMapper(store, "warmup-reset-session", warmupPayload)
+	warmupUpstream := warmupMapper.upstreamRequestPayload(warmupPayload)
+	if !warmupMapper.replayedCompactedTranscript {
+		t.Fatal("post-compaction warmup did not mark full transcript replay")
+	}
+	state.recordTranscriptTurn(
+		warmupUpstream,
+		[]byte(`{"type":"response.completed","response":{"id":"resp-warmup","output":[]}}`),
+		true,
+	)
+
+	appendPayload := []byte(`{"type":"response.append","model":"grok-4.3","input":[{"type":"message","id":"msg-after-warmup"}]}`)
+	appendMapper := newXAIWebsocketRequestIDMapper(store, "warmup-reset-session", appendPayload)
+	appendUpstream := appendMapper.upstreamRequestPayload(appendPayload)
+	input := gjson.GetBytes(appendUpstream, "input").Array()
+	if len(input) != 1 || input[0].Get("id").String() != "msg-after-warmup" {
+		t.Fatalf("warmup retained pending replay instead of native append: %s", appendUpstream)
+	}
+	state.recordTranscriptTurn(
+		appendUpstream,
+		[]byte(`{"type":"response.completed","response":{"id":"resp-after-warmup","output":[{"type":"message","id":"out-after-warmup"}]}}`),
+		false,
+	)
+
+	transcript := gjson.ParseBytes(state.snapshotTranscriptInput()).Array()
+	wantTypes := []string{"compaction", "message", "message", "message"}
+	if len(transcript) != len(wantTypes) {
+		t.Fatalf("post-warmup transcript len = %d, want %d: %s", len(transcript), len(wantTypes), state.snapshotTranscriptInput())
+	}
+	for i, wantType := range wantTypes {
+		if gotType := transcript[i].Get("type").String(); gotType != wantType {
+			t.Fatalf("post-warmup transcript[%d].type = %q, want %q: %s", i, gotType, wantType, state.snapshotTranscriptInput())
+		}
+	}
+}
+
+func TestXAIWebsocketEmptyFullResetClearsPendingCompactionReplay(t *testing.T) {
+	store := &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+	state := getXAIWebsocketIDState(store, "empty-reset-session")
+	state.replaceTranscriptWithItems([]byte(`{"type":"compaction","encrypted_content":"stale-compact-state"}`))
+	state.recordTranscriptTurn(
+		[]byte(`{"type":"response.create","model":"grok-4.3","input":[]}`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp-empty","output":[]}}`),
+		true,
+	)
+
+	appendPayload := []byte(`{"type":"response.append","model":"grok-4.3","input":[{"type":"message","id":"msg-new"}]}`)
+	mapper := newXAIWebsocketRequestIDMapper(store, "empty-reset-session", appendPayload)
+	got := mapper.upstreamRequestPayload(appendPayload)
+	input := gjson.GetBytes(got, "input").Array()
+	if len(input) != 1 || input[0].Get("id").String() != "msg-new" {
+		t.Fatalf("empty full reset retained stale compaction replay: %s", got)
+	}
+}
+
+func TestValidateXAIWebsocketCompactionResponse(t *testing.T) {
+	valid := []byte(`{"id":"resp_compact","output":[{"type":"compaction","encrypted_content":"opaque-state"}]}`)
+	responseID, item, err := validateXAIWebsocketCompactionResponse(valid)
+	if err != nil {
+		t.Fatalf("valid compaction response error: %v", err)
+	}
+	if responseID != "resp_compact" || gjson.GetBytes(item, "encrypted_content").String() != "opaque-state" {
+		t.Fatalf("validated compaction response = id:%q item:%s", responseID, item)
+	}
+
+	for _, payload := range [][]byte{
+		nil,
+		[]byte(`{}`),
+		[]byte(`{"id":"resp_empty","output":[]}`),
+		[]byte(`{"id":123,"output":[{"type":"compaction","encrypted_content":"opaque"}]}`),
+		[]byte(`{"id":"resp_object","output":{"0":{"type":"compaction","encrypted_content":"opaque"}}}`),
+		[]byte(`{"id":"resp_numeric_state","output":[{"type":"compaction","encrypted_content":123}]}`),
+		[]byte(`{"id":"resp_missing_state","output":[{"type":"compaction"}]}`),
+	} {
+		if _, _, errInvalid := validateXAIWebsocketCompactionResponse(payload); errInvalid == nil {
+			t.Fatalf("invalid compaction response accepted: %s", payload)
+		}
+	}
+}
+
 func TestBuildXAIWebsocketRequestBodySetsStoreAndKeepsPromptCacheKey(t *testing.T) {
 	body := []byte(`{"model":"grok-4.3","stream":true,"stream_options":{"include_usage":true},"background":true,"prompt_cache_key":"cache-1","previous_response_id":"resp-prev","instructions":"system prompt","input":[{"type":"message","role":"user","content":"hello"}]}`)
 
@@ -1302,6 +1597,43 @@ func TestParseXAIWebsocketErrorFreeUsageExhaustedSetsRetryAfter(t *testing.T) {
 	}
 	if got := parsed.Get("error.code").String(); got != "subscription:free-usage-exhausted" {
 		t.Fatalf("error code = %q, want free-usage-exhausted; payload=%s", got, err)
+	}
+}
+
+func TestParseXAIWebsocketErrorBadCredentialsRemapsToUnauthorized(t *testing.T) {
+	payload := []byte(`{"type":"error","status":403,"headers":{"x-request-id":"req-bad-credentials"},"error":{"code":"unauthenticated:bad-credentials","message":"The OAuth2 access token could not be validated."}}`)
+	err, ok := parseXAIWebsocketError(payload)
+	if !ok {
+		t.Fatal("expected xAI websocket error")
+	}
+
+	status, okStatus := err.(interface{ StatusCode() int })
+	if !okStatus || status.StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("status = %#v, want 401", err)
+	}
+	headerSource, okHeaders := err.(interface{ Headers() http.Header })
+	if !okHeaders {
+		t.Fatalf("expected websocket error to preserve headers, got %#v", err)
+	}
+	if got := headerSource.Headers().Get("x-request-id"); got != "req-bad-credentials" {
+		t.Fatalf("x-request-id = %q, want req-bad-credentials", got)
+	}
+	parsed := gjson.Parse(err.Error())
+	if got := parsed.Get("error.code").String(); got != "unauthenticated:bad-credentials" {
+		t.Fatalf("error code = %q, want unauthenticated:bad-credentials; payload=%s", got, err)
+	}
+}
+
+func TestParseXAIWebsocketBareErrorBadCredentialsRemapsToUnauthorized(t *testing.T) {
+	payload := []byte(`{"status":403,"error":{"code":"unauthenticated:bad-credentials","message":"The OAuth2 access token could not be validated."}}`)
+	err, ok := parseXAIWebsocketError(payload)
+	if !ok {
+		t.Fatal("expected bare xAI websocket error")
+	}
+
+	status, okStatus := err.(interface{ StatusCode() int })
+	if !okStatus || status.StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("status = %#v, want 401", err)
 	}
 }
 

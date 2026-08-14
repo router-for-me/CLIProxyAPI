@@ -29,7 +29,8 @@ func TestPatchXAIKeyUpdatesExecutionFields(t *testing.T) {
 		"value": {
 			"priority": 7,
 			"websockets": false,
-			"disable-cooling": true
+			"disable-cooling": true,
+			"request-retry": 0
 		}
 	}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
@@ -48,5 +49,8 @@ func TestPatchXAIKeyUpdatesExecutionFields(t *testing.T) {
 	}
 	if !entry.DisableCooling {
 		t.Fatal("disable-cooling = false, want true")
+	}
+	if entry.RequestRetry == nil || *entry.RequestRetry != 0 {
+		t.Fatalf("request-retry = %v, want 0", entry.RequestRetry)
 	}
 }
