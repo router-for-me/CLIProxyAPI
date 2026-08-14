@@ -215,6 +215,7 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 			HTTPStatus: resp.StatusCode,
 			Header:     cloneRequestHeaders(resp.ResponseHeaders),
 			Body:       bytes.Clone(resp.ResponseBody),
+			Trusted:    true,
 		}
 	}
 	return req, opts, nil

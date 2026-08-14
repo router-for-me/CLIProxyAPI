@@ -916,12 +916,20 @@ func pendingOpenAIStreamError(errs <-chan *interfaces.ErrorMessage) (*interfaces
 	}
 }
 
-// sanitizeOpenAIErrorMessage is the strict trust-boundary sanitizer for the
-// OpenAI streaming peek paths. It always sanitizes: it forces a valid status,
-// clears Body, forces DirectResponse=false, and redacts credential material
-// from the error text before it reaches the client's error body. It returns nil
-// for a nil input.
+// sanitizeOpenAIErrorMessage is the trust-boundary sanitizer for the OpenAI
+// pre-output sinks. It preserves a DirectResponse only when it is explicitly
+// trusted (local plugin/interceptor); every other error path sanitizes
+// strictly: forces a valid status, clears Body, forces DirectResponse=false,
+// and redacts credential material from the error text. It returns nil for a
+// nil input.
 func sanitizeOpenAIErrorMessage(errMsg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
+	if errMsg != nil && errMsg.DirectResponse && errMsg.TrustedDirectResponse {
+		return errMsg
+	}
+	return sanitizeOpenAIStrictErrorMessage(errMsg)
+}
+
+func sanitizeOpenAIStrictErrorMessage(errMsg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
 	if errMsg == nil {
 		return nil
 	}

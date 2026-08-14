@@ -121,6 +121,9 @@ type RequestTerminatedError struct {
 	HTTPStatus int
 	Header     http.Header
 	Body       []byte
+	// Trusted reports that the termination originated locally (plugin/interceptor)
+	// rather than from an untrusted upstream. Zero value false is the safe default.
+	Trusted bool
 }
 
 func (e *RequestTerminatedError) Error() string {

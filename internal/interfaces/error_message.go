@@ -21,6 +21,11 @@ type ErrorMessage struct {
 	// DirectResponse reports that Body and Headers were explicitly supplied by a trusted in-process component.
 	DirectResponse bool
 
+	// TrustedDirectResponse reports that a DirectResponse originated locally
+	// (plugin/interceptor) and is safe to preserve through OpenAI sanitizers.
+	// Zero value false means the DirectResponse must be treated as untrusted.
+	TrustedDirectResponse bool
+
 	// Body contains a preformatted downstream response when DirectResponse is true.
 	Body []byte
 

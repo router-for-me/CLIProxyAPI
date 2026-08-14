@@ -609,3 +609,41 @@ func TestResponsesWebsocketTerminalErrorRedacts(t *testing.T) {
 		t.Fatalf("websocket terminal error not redacted: %q", raw)
 	}
 }
+
+// TestSanitizeOpenAIErrorMessageTrustedPreservation verifies the OpenAI shared
+// sanitizer preserves a DirectResponse only when it is explicitly trusted.
+func TestSanitizeOpenAIErrorMessageTrustedPreservation(t *testing.T) {
+	const secret = "trusted-openai-secret-311"
+	trusted := &interfaces.ErrorMessage{
+		StatusCode:            http.StatusTooManyRequests,
+		Error:                 errors.New("plugin"),
+		DirectResponse:        true,
+		TrustedDirectResponse: true,
+		Body:                  []byte(`{"status":429,"message":"plugin","secret":"` + secret + `"}`),
+		Headers:               http.Header{"X-Plugin": []string{"yes"}},
+	}
+	if got := sanitizeOpenAIErrorMessage(trusted); got != trusted {
+		t.Fatalf("trusted direct response must be preserved verbatim, got %#v", got)
+	}
+
+	untrusted := &interfaces.ErrorMessage{
+		StatusCode:     http.StatusBadGateway,
+		Error:          errors.New("provider failed: api_key=" + secret),
+		DirectResponse: true,
+		Body:           []byte(`{"raw":"` + secret + `"}`),
+		Headers:        http.Header{"X-Upstream": []string{"leak"}},
+	}
+	got := sanitizeOpenAIErrorMessage(untrusted)
+	if got == nil {
+		t.Fatal("untrusted direct response must be sanitized, not nil")
+	}
+	if got.DirectResponse {
+		t.Fatal("untrusted DirectResponse must be forced false")
+	}
+	if got.Body != nil {
+		t.Fatal("untrusted Body must be cleared")
+	}
+	if got.Error != nil && strings.Contains(got.Error.Error(), secret) {
+		t.Fatalf("untrusted sanitized error leaked %q: %q", secret, got.Error.Error())
+	}
+}
