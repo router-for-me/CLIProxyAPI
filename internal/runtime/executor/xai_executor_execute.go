@@ -105,6 +105,9 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			completedData = xaiNormalizeReasoningSummaryData(completedData)
 			completedData, _ = repeatGuard.PatchCompleted(completedData)
+			if xaiCompletedHasReasoningOnly(completedData) {
+				return resp, statusErr{code: http.StatusBadGateway, msg: "xai upstream completed with reasoning only and no final answer"}
+			}
 			cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)

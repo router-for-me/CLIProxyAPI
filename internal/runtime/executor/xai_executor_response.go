@@ -701,6 +701,25 @@ func xaiNormalizeReasoningSummaryData(eventData []byte) []byte {
 	return normalized
 }
 
+func xaiCompletedHasReasoningOnly(eventData []byte) bool {
+	if gjson.GetBytes(eventData, "type").String() != "response.completed" {
+		return false
+	}
+	output := gjson.GetBytes(eventData, "response.output")
+	if !output.IsArray() {
+		return false
+	}
+	hasReasoning := false
+	for _, item := range output.Array() {
+		if strings.TrimSpace(item.Get("type").String()) == "reasoning" {
+			hasReasoning = true
+			continue
+		}
+		return false
+	}
+	return hasReasoning
+}
+
 func xaiNormalizeReasoningSummaryDataEvents(eventData []byte) [][]byte {
 	if len(eventData) == 0 || !gjson.ValidBytes(eventData) {
 		return [][]byte{eventData}

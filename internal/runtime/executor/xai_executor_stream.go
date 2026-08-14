@@ -136,6 +136,15 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 						eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 						eventData = xaiNormalizeReasoningSummaryData(eventData)
 						eventData, blockedDuplicate = repeatGuard.PatchCompleted(eventData)
+						if xaiCompletedHasReasoningOnly(eventData) {
+							errReasoningOnly := statusErr{code: http.StatusBadGateway, msg: "xai upstream completed with reasoning only and no final answer"}
+							reporter.PublishFailure(ctx, errReasoningOnly)
+							select {
+							case out <- cliproxyexecutor.StreamChunk{Err: errReasoningOnly}:
+							case <-ctx.Done():
+							}
+							return
+						}
 						cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, eventData)
 						normalizedEventName = gjson.GetBytes(eventData, "type").String()
 					}
