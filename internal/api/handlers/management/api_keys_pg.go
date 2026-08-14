@@ -686,11 +686,20 @@ func (h *Handler) ImportPGAPIKeys(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 			return
 		}
-		// Reject secrets that would silently shadow an existing key. Regenerate
-		// does not pre-check collisions, so a duplicate secret would make
-		// LookupByHash resolve to the first row sharing the hash.
+		// Reject secrets already used by another key. key_hash carries a UNIQUE
+		// constraint in the schema, so the primary purpose of this pre-check is
+		// to convert a would-be duplicate-key unique-violation (which would
+		// otherwise abort the whole batch as a 500) into a clean per-row skip.
+		// Regenerate re-checks independently, so this also guards the
+		// non-transactional race where a duplicate lands between this check and
+		// the UPDATE.
 		hash := store.HashSecret(secret)
-		if dup, _, dupErr := apiKeys.LookupByHash(ctx, hash); dupErr == nil && dup.ID != key.ID {
+		dup, _, dupErr := apiKeys.LookupByHash(ctx, hash)
+		if dupErr != nil && !errors.Is(dupErr, store.ErrAPIKeyNotFound) {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": dupErr.Error()}})
+			return
+		}
+		if dupErr == nil && dup.ID != key.ID {
 			resp.Skipped = append(resp.Skipped, pgImportSkipped{Alias: alias, Reason: "duplicate secret"})
 			continue
 		}
@@ -698,6 +707,18 @@ func (h *Handler) ImportPGAPIKeys(c *gin.Context) {
 		if _, err := apiKeys.Regenerate(ctx, key.ID, secret); err != nil {
 			if errors.Is(err, store.ErrInvalidSecret) {
 				resp.Skipped = append(resp.Skipped, pgImportSkipped{Alias: alias, Reason: "invalid secret"})
+				continue
+			}
+			// A key deleted between the LookupByAlias above and this UPDATE
+			// surfaces as not-found; treat it as a per-row skip, not a batch 500.
+			if errors.Is(err, store.ErrAPIKeyNotFound) {
+				resp.Skipped = append(resp.Skipped, pgImportSkipped{Alias: alias, Reason: "alias not found"})
+				continue
+			}
+			// The duplicate landed in the non-transactional window after our
+			// pre-check; map the UNIQUE violation to the same per-row skip.
+			if isUniqueViolation(err) {
+				resp.Skipped = append(resp.Skipped, pgImportSkipped{Alias: alias, Reason: "duplicate secret"})
 				continue
 			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
@@ -761,4 +782,15 @@ func totalPages(total int64, pageSize int) int {
 		pages = 1
 	}
 	return pages
+}
+
+// isUniqueViolation reports whether err is a Postgres unique-constraint
+// violation (SQLSTATE 23505). It is surfaced by the pgx driver as a
+// *pgconn.PgError; the string-based check mirrors internal/store and avoids
+// pulling a pgconn import into this package.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "23505") || strings.Contains(strings.ToLower(err.Error()), "unique constraint")
 }
