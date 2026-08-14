@@ -406,6 +406,118 @@ func TestDevinBuildOpenAIChatCompletion(t *testing.T) {
 	}
 }
 
+func TestDevinBuildOpenAIChatCompletionWithToolCalls(t *testing.T) {
+	toolCalls := []devinToolCall{
+		{ID: "call-1", Name: "run_command", ArgumentsJSON: `{"command": "ls"}`},
+		{ID: "call-2", Name: "edit_file", ArgumentsJSON: `{"path": "hello.txt", "content": "Hello World"}`},
+	}
+	resp := buildOpenAIChatCompletion("bot-test", "glm-5-2", "", "", "stop", toolCalls, nil)
+
+	var result map[string]any
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	choices := result["choices"].([]any)
+	choice := choices[0].(map[string]any)
+	msg := choice["message"].(map[string]any)
+	tcs, ok := msg["tool_calls"].([]any)
+	if !ok {
+		t.Fatalf("missing tool_calls in response")
+	}
+	if len(tcs) != 2 {
+		t.Fatalf("tool_calls: got %d, want 2", len(tcs))
+	}
+	tc0 := tcs[0].(map[string]any)
+	if tc0["id"] != "call-1" {
+		t.Errorf("tool_call[0].id: got %v, want call-1", tc0["id"])
+	}
+	fn0 := tc0["function"].(map[string]any)
+	if fn0["name"] != "run_command" {
+		t.Errorf("tool_call[0].name: got %v, want run_command", fn0["name"])
+	}
+	if fn0["arguments"] != `{"command": "ls"}` {
+		t.Errorf("tool_call[0].arguments: got %v, want {\"command\": \"ls\"}", fn0["arguments"])
+	}
+}
+
+func TestDevinEncodeToolDefinition(t *testing.T) {
+	tool := devinToolDefinition{
+		Name:             "run_command",
+		Description:      "Run a terminal command",
+		JSONSchemaString: `{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`,
+	}
+	b := encodeToolDefinition(tool)
+	if len(b) == 0 {
+		t.Fatal("encodeToolDefinition returned empty bytes")
+	}
+
+	// Verify field 1 (name)
+	name := extractStringField(t, b, 1)
+	if name != "run_command" {
+		t.Errorf("field 1 (name): got %q, want %q", name, "run_command")
+	}
+	// Verify field 2 (description)
+	desc := extractStringField(t, b, 2)
+	if desc != "Run a terminal command" {
+		t.Errorf("field 2 (description): got %q, want %q", desc, "Run a terminal command")
+	}
+	// Verify field 3 (json_schema_string)
+	schema := extractStringField(t, b, 3)
+	if !contains(schema, "command") {
+		t.Errorf("field 3 (json_schema): missing 'command' in %q", schema)
+	}
+}
+
+func TestDevinEncodeToolCall(t *testing.T) {
+	tc := devinToolCall{
+		ID:            "call-1",
+		Name:          "run_command",
+		ArgumentsJSON: `{"command": "ls"}`,
+	}
+	b := encodeToolCall(tc)
+	if len(b) == 0 {
+		t.Fatal("encodeToolCall returned empty bytes")
+	}
+
+	// Verify field 1 (id)
+	id := extractStringField(t, b, 1)
+	if id != "call-1" {
+		t.Errorf("field 1 (id): got %q, want %q", id, "call-1")
+	}
+	// Verify field 2 (name)
+	name := extractStringField(t, b, 2)
+	if name != "run_command" {
+		t.Errorf("field 2 (name): got %q, want %q", name, "run_command")
+	}
+	// Verify field 3 (arguments_json)
+	args := extractStringField(t, b, 3)
+	if args != `{"command": "ls"}` {
+		t.Errorf("field 3 (arguments): got %q, want %q", args, `{"command": "ls"}`)
+	}
+}
+
+func TestDevinStreamChunkWithToolCalls(t *testing.T) {
+	chunk := &devinStreamChunk{
+		MessageID: "bot-test",
+		DeltaToolCalls: []devinToolCall{
+			{ID: "call-1", Name: "edit_file", ArgumentsJSON: `{"path":"hello.txt"}`},
+		},
+	}
+	sse := buildOpenAIStreamChunk(chunk, "glm-5-2")
+	if sse == "" {
+		t.Fatal("buildOpenAIStreamChunk returned empty for tool call chunk")
+	}
+	if !contains(sse, `"tool_calls"`) {
+		t.Errorf("SSE missing tool_calls: %s", sse)
+	}
+	if !contains(sse, `"edit_file"`) {
+		t.Errorf("SSE missing tool name: %s", sse)
+	}
+	if !contains(sse, `"call-1"`) {
+		t.Errorf("SSE missing tool id: %s", sse)
+	}
+}
+
 // extractStringField extracts a string field from a protobuf message for testing.
 func extractStringField(t *testing.T, data []byte, fieldNum protowire.Number) string {
 	t.Helper()
