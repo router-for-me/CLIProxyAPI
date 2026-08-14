@@ -3140,6 +3140,153 @@ func TestClaudeExecutor_ExecuteSanitizesSignaturesBeforeUpstream(t *testing.T) {
 	}
 }
 
+func TestClaudeExecutor_HTTPErrorRetryAfter(t *testing.T) {
+	const retryAfterSeconds = 124633
+	const errorBody = `{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."}}`
+
+	testCases := []struct {
+		name       string
+		compressed bool
+		invoke     func(context.Context, *ClaudeExecutor, *cliproxyauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) error
+	}{
+		{
+			name: "execute",
+			invoke: func(ctx context.Context, executor *ClaudeExecutor, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
+				_, err := executor.Execute(ctx, auth, req, opts)
+				return err
+			},
+		},
+		{
+			name:       "execute stream",
+			compressed: true,
+			invoke: func(ctx context.Context, executor *ClaudeExecutor, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
+				_, err := executor.ExecuteStream(ctx, auth, req, opts)
+				return err
+			},
+		},
+		{
+			name: "count tokens",
+			invoke: func(ctx context.Context, executor *ClaudeExecutor, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
+				_, err := executor.CountTokens(ctx, auth, req, opts)
+				return err
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				body := []byte(errorBody)
+				header := http.Header{
+					"Content-Type": {"application/json"},
+					"Retry-After":  {"124633"},
+				}
+				if testCase.compressed {
+					var compressed bytes.Buffer
+					writer := gzip.NewWriter(&compressed)
+					if _, errWrite := writer.Write(body); errWrite != nil {
+						t.Fatal(errWrite)
+					}
+					if errClose := writer.Close(); errClose != nil {
+						t.Fatal(errClose)
+					}
+					body = compressed.Bytes()
+					header.Set("Content-Encoding", "gzip")
+				}
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Header:     header,
+					Body:       io.NopCloser(bytes.NewReader(body)),
+					Request:    req,
+				}, nil
+			})
+			ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(transport))
+			auth := &cliproxyauth.Auth{
+				ID:         "claude-retry-after-" + strings.ReplaceAll(testCase.name, " ", "-"),
+				Attributes: map[string]string{"api_key": "sk-ant-oat-retry-after"},
+				Metadata:   claudeOAuthTestMetadata(),
+			}
+			request := cliproxyexecutor.Request{
+				Model:   "claude-opus-5",
+				Payload: []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"reply OK"}]}`),
+			}
+			options := cliproxyexecutor.Options{
+				Stream:         testCase.name == "execute stream",
+				SourceFormat:   sdktranslator.FormatClaude,
+				ResponseFormat: sdktranslator.FormatClaude,
+			}
+
+			err := testCase.invoke(ctx, NewClaudeExecutor(&config.Config{}), auth, request, options)
+			if err == nil {
+				t.Fatal("Claude executor error = nil, want 429")
+			}
+			var statusError interface{ StatusCode() int }
+			if !errors.As(err, &statusError) || statusError.StatusCode() != http.StatusTooManyRequests {
+				t.Fatalf("Claude executor error = %T %v, want status 429", err, err)
+			}
+			var retryError interface{ RetryAfter() *time.Duration }
+			if !errors.As(err, &retryError) || retryError.RetryAfter() == nil {
+				t.Fatalf("Claude executor error = %T %v, want RetryAfter", err, err)
+			}
+			if got, want := *retryError.RetryAfter(), retryAfterSeconds*time.Second; got != want {
+				t.Fatalf("RetryAfter() = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestClaudeExecutor_HTTPErrorRetryAfterIgnoresAbsentOrInvalidValues(t *testing.T) {
+	testCases := []struct {
+		name       string
+		status     int
+		retryAfter string
+	}{
+		{name: "absent", status: http.StatusTooManyRequests},
+		{name: "not an integer", status: http.StatusTooManyRequests, retryAfter: "later"},
+		{name: "negative", status: http.StatusTooManyRequests, retryAfter: "-1"},
+		{name: "overflow", status: http.StatusTooManyRequests, retryAfter: "9223372036854775807"},
+		{name: "non rate limit", status: http.StatusServiceUnavailable, retryAfter: "60"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				header := http.Header{"Content-Type": {"application/json"}}
+				if testCase.retryAfter != "" {
+					header.Set("Retry-After", testCase.retryAfter)
+				}
+				return &http.Response{
+					StatusCode: testCase.status,
+					Header:     header,
+					Body:       io.NopCloser(strings.NewReader(`{"type":"error","error":{"type":"rate_limit_error","message":"quota"}}`)),
+					Request:    req,
+				}, nil
+			})
+			ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(transport))
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-ant-oat-invalid-retry-after"}, Metadata: claudeOAuthTestMetadata()}
+			request := cliproxyexecutor.Request{
+				Model:   "claude-opus-5",
+				Payload: []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"reply OK"}]}`),
+			}
+
+			_, err := NewClaudeExecutor(&config.Config{}).Execute(ctx, auth, request, cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatClaude,
+				ResponseFormat: sdktranslator.FormatClaude,
+			})
+			if err == nil {
+				t.Fatal("Claude executor error = nil, want upstream error")
+			}
+			var retryError interface{ RetryAfter() *time.Duration }
+			if !errors.As(err, &retryError) {
+				t.Fatalf("Claude executor error = %T %v, want RetryAfter provider", err, err)
+			}
+			if got := retryError.RetryAfter(); got != nil {
+				t.Fatalf("RetryAfter() = %v, want nil", *got)
+			}
+		})
+	}
+}
+
 func TestClaudeExecutor_Execute_InvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
 	testClaudeExecutorInvalidCompressedErrorBody(t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
 		_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{

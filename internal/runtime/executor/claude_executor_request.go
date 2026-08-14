@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/andybalholm/brotli"
 	"github.com/google/uuid"
@@ -272,12 +274,30 @@ func (claudeEntitlementError) IsRequestScoped() bool {
 // next one, which returns the same 429. A single speed:"fast" request would walk
 // the whole Claude pool and cool down every credential, all of which remain
 // perfectly healthy for ordinary traffic. The refusal belongs to the request.
-func classifyClaudeUpstreamError(statusCode int, body []byte) error {
-	err := statusErr{code: statusCode, msg: string(body)}
+func classifyClaudeUpstreamError(statusCode int, headers http.Header, body []byte) error {
+	err := statusErr{
+		code:       statusCode,
+		msg:        string(body),
+		retryAfter: parseClaudeRetryAfterHeader(statusCode, headers),
+	}
 	if statusCode == http.StatusTooManyRequests && claudeBodyIndicatesFastModeCredits(body) {
 		return claudeEntitlementError{err}
 	}
 	return err
+}
+
+// parseClaudeRetryAfterHeader reads Anthropic's integer delta-seconds quota hint.
+func parseClaudeRetryAfterHeader(statusCode int, headers http.Header) *time.Duration {
+	if statusCode != http.StatusTooManyRequests || headers == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(headers.Get("Retry-After"))
+	seconds, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || seconds > uint64(time.Duration(1<<63-1)/time.Second) {
+		return nil
+	}
+	retryAfter := time.Duration(seconds) * time.Second
+	return &retryAfter
 }
 
 // claudeBodyIndicatesFastModeCredits matches Anthropic's fast-mode entitlement
