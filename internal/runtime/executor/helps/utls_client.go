@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -23,8 +24,8 @@ import (
 )
 
 // utlsRoundTripper implements http.RoundTripper using a Chrome fingerprint for
-// providers that require a browser-like TLS and HTTP/2 transport. Each request
-// gets a dedicated connection that is closed with the response body.
+// providers that require a browser-like TLS transport. Each request gets a
+// dedicated connection that is closed with the response body.
 type utlsRoundTripper struct {
 	dialer proxy.Dialer
 }
@@ -54,6 +55,26 @@ func (b *closeConnectionBody) Close() error {
 	return b.err
 }
 
+func closeConnectionOnContextCancel(ctx context.Context, conn net.Conn) func() error {
+	var (
+		once     sync.Once
+		errClose error
+	)
+	closeConnection := func() error {
+		once.Do(func() {
+			errClose = conn.Close()
+		})
+		return errClose
+	}
+	stop := context.AfterFunc(ctx, func() {
+		_ = closeConnection()
+	})
+	return func() error {
+		stop()
+		return closeConnection()
+	}
+}
+
 func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
@@ -67,7 +88,7 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	return &utlsRoundTripper{dialer: dialer}
 }
 
-func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
+func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*tls.UConn, error) {
 	contextDialer, ok := t.dialer.(proxy.ContextDialer)
 	if !ok {
 		return nil, fmt.Errorf("utls: dialer does not support context cancellation")
@@ -90,16 +111,7 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 		return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
 	}
 
-	tr := &http2.Transport{}
-	h2Conn, errClientConn := tr.NewClientConn(tlsConn)
-	if errClientConn != nil {
-		if errClose := tlsConn.Close(); errClose != nil {
-			return nil, fmt.Errorf("utls: initialize HTTP/2 connection: %w; close TLS connection: %v", errClientConn, errClose)
-		}
-		return nil, fmt.Errorf("utls: initialize HTTP/2 connection: %w", errClientConn)
-	}
-
-	return h2Conn, nil
+	return tlsConn, nil
 }
 
 func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -110,20 +122,52 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	addr := net.JoinHostPort(hostname, port)
 
-	h2Conn, err := t.createConnection(req.Context(), hostname, addr)
+	tlsConn, err := t.createConnection(req.Context(), hostname, addr)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := h2Conn.RoundTrip(req)
+	var (
+		resp            *http.Response
+		closeConnection func() error
+	)
+	negotiatedProtocol := tlsConn.ConnectionState().NegotiatedProtocol
+	switch negotiatedProtocol {
+	case "h2":
+		tr := &http2.Transport{}
+		h2Conn, errClientConn := tr.NewClientConn(tlsConn)
+		if errClientConn != nil {
+			if errClose := tlsConn.Close(); errClose != nil {
+				return nil, fmt.Errorf("utls: initialize HTTP/2 connection: %w; close TLS connection: %v", errClientConn, errClose)
+			}
+			return nil, fmt.Errorf("utls: initialize HTTP/2 connection: %w", errClientConn)
+		}
+		resp, err = h2Conn.RoundTrip(req)
+		closeConnection = h2Conn.Close
+	case "", "http/1.1":
+		closeConnection = closeConnectionOnContextCancel(req.Context(), tlsConn)
+		if errWrite := req.Write(tlsConn); errWrite != nil {
+			if errClose := closeConnection(); errClose != nil {
+				return nil, fmt.Errorf("utls: write HTTP/1.1 request: %w; close connection: %v", errWrite, errClose)
+			}
+			return nil, fmt.Errorf("utls: write HTTP/1.1 request: %w", errWrite)
+		}
+		resp, err = http.ReadResponse(bufio.NewReader(tlsConn), req)
+		closeConnection = tlsConn.Close
+	default:
+		if errClose := tlsConn.Close(); errClose != nil {
+			return nil, fmt.Errorf("utls: unsupported negotiated protocol %q; close connection: %v", negotiatedProtocol, errClose)
+		}
+		return nil, fmt.Errorf("utls: unsupported negotiated protocol %q", negotiatedProtocol)
+	}
 	if err != nil {
-		if errClose := h2Conn.Close(); errClose != nil {
+		if errClose := closeConnection(); errClose != nil {
 			log.Debugf("utls: close connection after round trip failure: %v", errClose)
 		}
 		return nil, err
 	}
 	if resp == nil {
-		if errClose := h2Conn.Close(); errClose != nil {
+		if errClose := closeConnection(); errClose != nil {
 			log.Debugf("utls: close connection after empty response: %v", errClose)
 		}
 		return nil, fmt.Errorf("utls: upstream returned an empty response")
@@ -133,7 +177,7 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	resp.Body = &closeConnectionBody{
 		ReadCloser:      resp.Body,
-		closeConnection: h2Conn.Close,
+		closeConnection: closeConnection,
 	}
 	return resp, nil
 }
