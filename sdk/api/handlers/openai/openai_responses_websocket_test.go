@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -3675,6 +3676,113 @@ func TestResponsesWebsocketRejectsUnknownPreviousResponseOnNewSocket(t *testing.
 	}
 	if got := len(gjson.GetBytes(payloads[0], "input").Array()); got != 3 {
 		t.Fatalf("full recovery input len = %d, want 3: %s", got, payloads[0])
+	}
+}
+
+// TestResponsesWebsocketAppendBeforeCreateEmitsNonTerminalError proves the
+// non-terminal error path: a response.append before any response.create emits a
+// single sanitized error frame, keeps the connection open, and lets a subsequent
+// valid response.create proceed normally.
+func TestResponsesWebsocketAppendBeforeCreateEmitsNonTerminalError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketDirectCaptureExecutor{provider: "codex"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:       "ws-append-auth",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "ws-append-model"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Step 1: send response.append before any response.create — non-terminal error.
+	appendRequest := `{"type":"response.append","input":[{"type":"message","id":"msg-1","role":"user","content":"hi"}]}`
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(appendRequest)); errWrite != nil {
+		t.Fatalf("write append request: %v", errWrite)
+	}
+
+	_, errorPayload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read error response: %v", errRead)
+	}
+
+	// Assert exactly one sanitized error frame.
+	if got := gjson.GetBytes(errorPayload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("error frame type = %q, want %q: %s", got, wsEventTypeError, errorPayload)
+	}
+	if got := int(gjson.GetBytes(errorPayload, "status").Int()); got != http.StatusBadRequest {
+		t.Fatalf("error frame status = %d, want %d: %s", got, http.StatusBadRequest, errorPayload)
+	}
+	if errType := gjson.GetBytes(errorPayload, "error.type").String(); errType != "invalid_request_error" {
+		t.Fatalf("error frame error.type = %q, want invalid_request_error: %s", errType, errorPayload)
+	}
+	if code := gjson.GetBytes(errorPayload, "error.code").String(); code != "" && code != "internal_server_error" {
+		t.Fatalf("error frame carries unexpected code %q: %s", code, errorPayload)
+	}
+	if msg := gjson.GetBytes(errorPayload, "error.message").String(); msg == "" {
+		t.Fatalf("error frame missing message: %s", errorPayload)
+	}
+	if unknown := gjson.GetBytes(errorPayload, "unknown"); unknown.Exists() {
+		t.Fatalf("error frame leaked unknown field: %s", errorPayload)
+	}
+	if gjson.GetBytes(errorPayload, "error.secret").Exists() {
+		t.Fatalf("error frame leaked raw secret field: %s", errorPayload)
+	}
+
+	// Step 2: send valid response.create — must succeed, proving socket still open.
+	createRequest := `{"type":"response.create","model":"ws-append-model","input":[{"type":"message","id":"msg-1","role":"user","content":"hi"}]}`
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(createRequest)); errWrite != nil {
+		t.Fatalf("write create request: %v", errWrite)
+	}
+
+	_, recoveryPayload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read recovery response: %v", errRead)
+	}
+	if got := gjson.GetBytes(recoveryPayload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("recovery response type = %q, want %q: %s", got, wsEventTypeCompleted, recoveryPayload)
+	}
+
+	// Step 3: read should block/close — prove exactly one error frame was sent.
+	// The gorilla/websocket ReadMessage for an unclosed healthy connection
+	// blocks until the next write. A non-blocking check proves no extra frame.
+	conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+	if _, gotExtra, errExtra := conn.ReadMessage(); errExtra == nil {
+		t.Fatalf("received unexpected frame after recovery: %s", gotExtra)
+	} else if !errors.Is(errExtra, os.ErrDeadlineExceeded) && !strings.Contains(errExtra.Error(), "i/o timeout") &&
+		!websocket.IsCloseError(errExtra, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+		t.Fatalf("unexpected read error after recovery: %v", errExtra)
+	}
+	// Restore blocking reads before deferred Close.
+	conn.SetReadDeadline(time.Time{})
+
+	// Verify executor received exactly one valid request (the recovery).
+	payloads := executor.Payloads()
+	if len(payloads) != 1 {
+		t.Fatalf("executor payload count = %d, want 1 (the recovery create)", len(payloads))
+	}
+	if got := gjson.GetBytes(payloads[0], "model").String(); got != "ws-append-model" {
+		t.Fatalf("executor model = %q, want ws-append-model: %s", got, payloads[0])
 	}
 }
 
