@@ -46,7 +46,7 @@ func TestDevinEncodeMetadata(t *testing.T) {
 func TestDevinEncodeCompletionConfig(t *testing.T) {
 	cfg := devinCompletionConfig{
 		NumCompletions: 1,
-		MaxTokens:      128000,
+		MaxTokens:      64000,
 		MaxNewlines:    400,
 		Temperature:    1.0,
 		TopK:           40,
@@ -63,10 +63,10 @@ func TestDevinEncodeCompletionConfig(t *testing.T) {
 		t.Errorf("field 1: got %d, want 1", val)
 	}
 
-	// Verify field 2 (max_tokens) = 128000.
+	// Verify field 2 (max_tokens) = 64000.
 	val = extractVarintField(t, b, 2)
-	if val != 128000 {
-		t.Errorf("field 2: got %d, want 128000", val)
+	if val != 64000 {
+		t.Errorf("field 2: got %d, want 64000", val)
 	}
 }
 

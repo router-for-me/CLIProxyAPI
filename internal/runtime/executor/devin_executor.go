@@ -89,27 +89,39 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		if chunk.Err != nil {
 			return resp, chunk.Err
 		}
-		parsed, errParse := parseGetChatMessageResponse(chunk.Payload)
-		if errParse != nil {
-			continue
+		// Chunks from ExecuteStream are OpenAI chat completion chunk JSON.
+		// Extract fields using gjson.
+		id := gjson.GetBytes(chunk.Payload, "id").String()
+		if id != "" {
+			messageID = strings.TrimPrefix(id, "chatcmpl-")
 		}
-		if parsed.MessageID != "" {
-			messageID = parsed.MessageID
+		if content := gjson.GetBytes(chunk.Payload, "choices.0.delta.content").String(); content != "" {
+			allText.WriteString(content)
 		}
-		if parsed.DeltaText != "" {
-			allText.WriteString(parsed.DeltaText)
+		if reasoning := gjson.GetBytes(chunk.Payload, "choices.0.delta.reasoning").String(); reasoning != "" {
+			thinkingText.WriteString(reasoning)
 		}
-		if parsed.DeltaThinking != "" {
-			thinkingText.WriteString(parsed.DeltaThinking)
+		if fr := gjson.GetBytes(chunk.Payload, "choices.0.finish_reason"); fr.Exists() && fr.Type == gjson.String {
+			stopReason = fr.String()
 		}
-		if parsed.StopReason != 0 {
-			stopReason = devinStopReasonToString(parsed.StopReason)
+		if pt := gjson.GetBytes(chunk.Payload, "usage.prompt_tokens"); pt.Exists() {
+			if usageDetail == nil {
+				usageDetail = &devinUsageStats{}
+			}
+			usageDetail.InputTokens = uint64(pt.Int())
+			usageDetail.OutputTokens = uint64(gjson.GetBytes(chunk.Payload, "usage.completion_tokens").Int())
 		}
-		if parsed.Usage != nil {
-			usageDetail = parsed.Usage
-		}
-		if len(parsed.DeltaToolCalls) > 0 {
-			toolCalls = append(toolCalls, parsed.DeltaToolCalls...)
+		// Extract tool calls from delta.
+		toolCallsResult := gjson.GetBytes(chunk.Payload, "choices.0.delta.tool_calls")
+		if toolCallsResult.IsArray() {
+			toolCallsResult.ForEach(func(_, tc gjson.Result) bool {
+				toolCalls = append(toolCalls, devinToolCall{
+					ID:            tc.Get("id").String(),
+					Name:          tc.Get("function.name").String(),
+					ArgumentsJSON: tc.Get("function.arguments").String(),
+				})
+				return true
+			})
 		}
 	}
 
@@ -260,7 +272,6 @@ func (e *DevinExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}
 
-		out <- cliproxyexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
 		if !usagePublished {
 			reporter.ensurePublished(ctx)
 		}
@@ -461,7 +472,7 @@ func buildDevinRequest(parsed *devinParsedRequest, token, model string) devinReq
 		RequestType: devinRequestTypeCascade,
 		Configuration: devinCompletionConfig{
 			NumCompletions: 1,
-			MaxTokens:      128000,
+			MaxTokens:      64000,
 			MaxNewlines:    400,
 			Temperature:    1.0,
 			TopK:           40,
@@ -609,15 +620,15 @@ func buildOpenAIChatCompletion(messageID, model, text, thinking, stopReason stri
 	return []byte(b.String())
 }
 
-// buildOpenAIStreamChunk converts a Devin response chunk to an OpenAI SSE data line.
+// buildOpenAIStreamChunk converts a Devin response chunk to an OpenAI chat completion
+// chunk JSON object. The proxy wraps each chunk with "data: %s\n\n" framing.
 func buildOpenAIStreamChunk(chunk *devinStreamChunk, model string) string {
 	if chunk.MessageID == "" && chunk.DeltaText == "" && chunk.DeltaThinking == "" && chunk.StopReason == 0 && len(chunk.DeltaToolCalls) == 0 {
 		return ""
 	}
 
 	var b strings.Builder
-	b.WriteString("data: {")
-	b.WriteString(`"id":"chatcmpl-`)
+	b.WriteString(`{"id":"chatcmpl-`)
 	if chunk.MessageID != "" {
 		b.WriteString(devinJSONEscape(chunk.MessageID))
 	} else {
@@ -684,9 +695,9 @@ func buildOpenAIStreamChunk(chunk *devinStreamChunk, model string) string {
 	} else {
 		b.WriteString("null")
 	}
-	b.WriteString(`}]}`)
+	b.WriteString(`}]`)
 
-	if chunk.Usage != nil {
+	if chunk.Usage != nil && (chunk.Usage.InputTokens > 0 || chunk.Usage.OutputTokens > 0) {
 		b.WriteString(`,"usage":{"prompt_tokens":`)
 		b.WriteString(fmt.Sprintf("%d", chunk.Usage.InputTokens))
 		b.WriteString(`,"completion_tokens":`)
@@ -696,7 +707,7 @@ func buildOpenAIStreamChunk(chunk *devinStreamChunk, model string) string {
 		b.WriteString(`}`)
 	}
 
-	b.WriteString("}\n\n")
+	b.WriteString("}")
 	return b.String()
 }
 
