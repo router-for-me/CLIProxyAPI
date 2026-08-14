@@ -1100,15 +1100,12 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 			if _, exists := forwardMap[name]; exists {
 				return true
 			}
-			for attempt := uint32(0); ; attempt++ {
-				alias := helps.ClaudeMCPToolAlias(mcpAliases.secret, name, attempt)
-				if reservedNames[alias] {
-					continue
-				}
-				forwardMap[name] = alias
-				reservedNames[alias] = true
-				break
+			alias, allocated := helps.AllocateClaudeMCPToolAlias(mcpAliases.secret, name, reservedNames)
+			if !allocated {
+				return true
 			}
+			forwardMap[name] = alias
+			reservedNames[alias] = true
 			return true
 		})
 	}
@@ -1354,15 +1351,12 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 			if _, exists := forwardMap[name]; exists {
 				return true
 			}
-			for attempt := uint32(0); ; attempt++ {
-				alias := helps.ClaudeMCPToolAlias(mcpAliases.secret, name, attempt)
-				if reservedNames[alias] {
-					continue
-				}
-				forwardMap[name] = alias
-				reservedNames[alias] = true
-				break
+			alias, allocated := helps.AllocateClaudeMCPToolAlias(mcpAliases.secret, name, reservedNames)
+			if !allocated {
+				return true
 			}
+			forwardMap[name] = alias
+			reservedNames[alias] = true
 			return true
 		})
 	}
@@ -1537,31 +1531,22 @@ func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResol
 }
 
 func parseClaudeMCPAlias(name string) (claudeMCPAliasParts, bool) {
+	if !helps.IsClaudeMCPToolName(name) {
+		return claudeMCPAliasParts{}, false
+	}
 	rest, ok := strings.CutPrefix(name, "mcp__")
 	if !ok {
 		return claudeMCPAliasParts{}, false
 	}
 	server, tool, ok := strings.Cut(rest, "__")
-	if !ok || !isClaudeMCPAliasDigest(server) {
+	if !ok || server == "" {
 		return claudeMCPAliasParts{}, false
 	}
 	toolID, semantic, ok := strings.Cut(tool, "_")
-	if !ok || !isClaudeMCPAliasDigest(toolID) || semantic == "" {
+	if !ok || toolID == "" || semantic == "" {
 		return claudeMCPAliasParts{}, false
 	}
 	return claudeMCPAliasParts{server: server, toolID: toolID, semantic: semantic}, true
-}
-
-func isClaudeMCPAliasDigest(value string) bool {
-	if len(value) != 12 {
-		return false
-	}
-	for _, char := range value {
-		if (char < 'a' || char > 'z') && (char < '2' || char > '7') {
-			return false
-		}
-	}
-	return true
 }
 
 func claudeMCPAliasServer(name string) string {
@@ -1624,13 +1609,38 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 				matchCount++
 			}
 		}
-	} else {
-		// Keep generated aliases strict while allowing a malformed response tool ID
-		// to recover only when its request-local semantic suffix is unambiguous.
+	}
+	// Extra words in the tool component still parse, but the semantic field
+	// is then wrong. Fall through to an unambiguous suffix match so word-level
+	// repeats do not become restore 500s.
+	if matchCount == 0 {
+		var suffixMatches []claudeMCPAliasEntry
 		for _, entry := range resolver.aliases {
 			if entry.parts.server == server && strings.HasSuffix(normalizedName, "_"+entry.parts.semantic) {
-				matchedOriginal = entry.original
-				matchCount++
+				suffixMatches = append(suffixMatches, entry)
+			}
+		}
+		if len(suffixMatches) == 1 {
+			matchedOriginal = suffixMatches[0].original
+			matchCount = 1
+		} else if len(suffixMatches) > 1 {
+			// If multiple candidates match (e.g. "_file" and "_read_file"),
+			// choose the strictly longest semantic match when unambiguous.
+			longest := suffixMatches[0]
+			tie := false
+			for _, candidate := range suffixMatches[1:] {
+				if len(candidate.parts.semantic) > len(longest.parts.semantic) {
+					longest = candidate
+					tie = false
+				} else if len(candidate.parts.semantic) == len(longest.parts.semantic) {
+					tie = true
+				}
+			}
+			if !tie {
+				matchedOriginal = longest.original
+				matchCount = 1
+			} else {
+				matchCount = len(suffixMatches)
 			}
 		}
 	}

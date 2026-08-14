@@ -243,6 +243,61 @@ func TestReverseRemapOAuthToolNamesRecoversMalformedToolIDBySemanticSuffix(t *te
 	}
 }
 
+func TestReverseRemapOAuthToolNamesWithBIP39Aliases(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"Bash","input_schema":{"type":"object"}},{"name":"fetch_url","input_schema":{"type":"object"}}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "bip39-caller"})
+	bashAlias := gjson.GetBytes(remapped, "tools.0.name").String()
+	fetchAlias := gjson.GetBytes(remapped, "tools.1.name").String()
+
+	if !helps.IsClaudeMCPToolName(bashAlias) {
+		t.Fatalf("generated bash alias is invalid: %q", bashAlias)
+	}
+	if !helps.IsClaudeMCPToolName(fetchAlias) {
+		t.Fatalf("generated fetch alias is invalid: %q", fetchAlias)
+	}
+
+	bashParts, ok := parseClaudeMCPAlias(bashAlias)
+	if !ok {
+		t.Fatalf("parseClaudeMCPAlias(%q) failed", bashAlias)
+	}
+	if bashParts.semantic != "Bash" {
+		t.Fatalf("bashParts.semantic = %q, want Bash", bashParts.semantic)
+	}
+
+	repeatedAlias := "mcp__" + bashParts.server + "__" + bashParts.server + "__" + bashParts.toolID + "_Bash"
+	mangledToolIDAlias := "mcp__" + bashParts.server + "__corruptedword_Bash"
+	repeatedToolIDAlias := "mcp__" + bashParts.server + "__" + bashParts.toolID + "_" + bashParts.toolID + "_Bash"
+	extraWordAlias := "mcp__" + bashParts.server + "__" + bashParts.toolID + "_cabin_Bash"
+
+	response := []byte(fmt.Sprintf(`{"content":[
+		{"type":"tool_use","id":"toolu_1","name":%q,"input":{}},
+		{"type":"tool_use","id":"toolu_2","name":%q,"input":{}},
+		{"type":"tool_reference","tool_name":%q},
+		{"type":"tool_use","id":"toolu_3","name":%q,"input":{}},
+		{"type":"tool_use","id":"toolu_4","name":%q,"input":{}}
+	]}`, bashAlias, repeatedAlias, mangledToolIDAlias, repeatedToolIDAlias, extraWordAlias))
+
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
+	}
+	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "Bash" {
+		t.Fatalf("exact alias restored to %q, want Bash", got)
+	}
+	if got := gjson.GetBytes(restored, "content.1.name").String(); got != "Bash" {
+		t.Fatalf("repeated alias restored to %q, want Bash", got)
+	}
+	if got := gjson.GetBytes(restored, "content.2.tool_name").String(); got != "Bash" {
+		t.Fatalf("mangled toolID alias restored to %q, want Bash", got)
+	}
+	if got := gjson.GetBytes(restored, "content.3.name").String(); got != "Bash" {
+		t.Fatalf("repeated toolID alias restored to %q, want Bash", got)
+	}
+	if got := gjson.GetBytes(restored, "content.4.name").String(); got != "Bash" {
+		t.Fatalf("extra-word alias restored to %q, want Bash", got)
+	}
+}
+
 func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"tool.name"},{"name":"tool/name"}]}`)
 	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "ambiguous-alias-caller"})
@@ -297,6 +352,44 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v, want %q", errStream, test.wantError)
 			}
 		})
+	}
+}
+
+func TestReverseRemapOAuthToolNames_OverlappingSemanticSuffix(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"file"},{"name":"read_file"}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "overlapping-caller"})
+	fileAlias := gjson.GetBytes(remapped, "tools.0.name").String()
+	readFileAlias := gjson.GetBytes(remapped, "tools.1.name").String()
+
+	if !helps.IsClaudeMCPToolName(fileAlias) {
+		t.Fatalf("fileAlias is invalid: %q", fileAlias)
+	}
+	readFileParts, ok := parseClaudeMCPAlias(readFileAlias)
+	if !ok {
+		t.Fatalf("parseClaudeMCPAlias(%q) failed", readFileAlias)
+	}
+
+	// Model generates repeated toolID for read_file: mcp__<server>__<toolID>_<toolID>_read_file
+	// Even though "_file" is a suffix of "_read_file", longest match should resolve to "read_file"
+	driftedReadFile := "mcp__" + readFileParts.server + "__" + readFileParts.toolID + "_" + readFileParts.toolID + "_read_file"
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, driftedReadFile))
+
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
+	}
+	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "read_file" {
+		t.Fatalf("restored tool name = %q, want read_file", got)
+	}
+
+	// Exact file alias still resolves to file
+	responseFile := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_2","name":%q,"input":{}}]}`, fileAlias))
+	restoredFile, errFile := reverseRemapOAuthToolNames(responseFile, reverseMap)
+	if errFile != nil {
+		t.Fatalf("reverseRemapOAuthToolNames(file) error = %v", errFile)
+	}
+	if got := gjson.GetBytes(restoredFile, "content.0.name").String(); got != "file" {
+		t.Fatalf("restored tool name = %q, want file", got)
 	}
 }
 
