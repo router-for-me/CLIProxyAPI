@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -78,7 +79,15 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 
 	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
 	interceptorHost := h.interceptorHost()
-	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
+	streamInterceptorSession, streamSessionsSupported := openStreamChunkInterceptorSession(interceptorHost, execOptions.SkipInterceptorPluginID)
+	streamInterceptorsActive := streamInterceptorSession != nil
+	if !streamSessionsSupported {
+		streamInterceptorsActive = streamInterceptorsEnabled(interceptorHost)
+	}
+	streamID := ""
+	if streamInterceptorSession != nil {
+		streamID = uuid.NewString()
+	}
 	rawStreamHeaders := cloneHeader(streamResult.Headers)
 	baseStreamHeaders := cloneHeader(streamResult.Headers)
 	// Request headers and request bodies are stream-invariant. Keep a private snapshot
@@ -94,8 +103,9 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		streamRequestHeaders = cloneHeader(opts.Headers)
 		streamOriginalRequest = cloneBytes(opts.OriginalRequest)
 		streamRequestBody = cloneBytes(req.Payload)
-		intercepted := interceptStreamChunk(ctx, interceptorHost, pluginapi.StreamChunkInterceptRequest{
+		intercepted := interceptStreamChunkWithSession(ctx, streamInterceptorSession, interceptorHost, pluginapi.StreamChunkInterceptRequest{
 			RequestID:       lifecycle.requestID(),
+			StreamID:        streamID,
 			SourceFormat:    responseProtocol,
 			Model:           modelName,
 			RequestedModel:  originalRequestedModel,
@@ -111,6 +121,23 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 	upstreamHeaders := downstreamHeadersAfterInterceptors(baseStreamHeaders, rawStreamHeaders, passthroughHeadersEnabled)
 	if upstreamHeaders == nil && (passthroughHeadersEnabled || streamInterceptorsActive) {
 		upstreamHeaders = make(http.Header)
+	}
+	endStreamInterceptors := func() {
+		if streamInterceptorSession == nil {
+			return
+		}
+		defer streamInterceptorSession.Close()
+		streamInterceptorSession.InterceptStreamChunk(streamFinalizerContext(ctx), pluginapi.StreamChunkInterceptRequest{
+			RequestID:       lifecycle.requestID(),
+			StreamID:        streamID,
+			SourceFormat:    responseProtocol,
+			Model:           modelName,
+			RequestedModel:  originalRequestedModel,
+			RequestHeaders:  cloneHeader(opts.Headers),
+			ResponseHeaders: cloneHeader(rawStreamHeaders),
+			ChunkIndex:      pluginapi.StreamChunkEndIndex,
+			Metadata:        opts.Metadata,
+		})
 	}
 
 	dataChan := make(chan []byte)
@@ -130,6 +157,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		responseSSEValidator = &sseJSONValidationState{}
 	}
 	go func() {
+		defer endStreamInterceptors()
 		completionOutcome := pluginapi.RequestCompletionSucceeded
 		completionStatus := http.StatusOK
 		var completionErr error
@@ -190,8 +218,9 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 			}
 			payload := cloneBytes(chunk.Payload)
 			if streamInterceptorsActive {
-				chunkReq := pluginapi.StreamChunkInterceptRequest{
+				interceptReq := pluginapi.StreamChunkInterceptRequest{
 					RequestID:       lifecycle.requestID(),
+					StreamID:        streamID,
 					SourceFormat:    responseProtocol,
 					Model:           modelName,
 					RequestedModel:  originalRequestedModel,
@@ -202,13 +231,18 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 					ChunkIndex:      chunkIndex,
 					Metadata:        opts.Metadata,
 				}
-				// Re-evaluate each chunk so mid-stream plugin reloads stay correct.
-				// Schema v3+ omits bodies here (one header-init clone only).
-				if streamChunkPayloadIncludesRequestBody(interceptorHost) {
-					chunkReq.OriginalRequest = cloneBytes(streamOriginalRequest)
-					chunkReq.RequestBody = cloneBytes(streamRequestBody)
+				if streamInterceptorSession != nil {
+					if streamInterceptorSession.CanOmitHeavyFields() {
+						interceptReq.HistoryChunks = nil
+					} else {
+						interceptReq.OriginalRequest = cloneBytes(streamOriginalRequest)
+						interceptReq.RequestBody = cloneBytes(streamRequestBody)
+					}
+				} else if streamChunkPayloadIncludesRequestBody(interceptorHost) {
+					interceptReq.OriginalRequest = cloneBytes(streamOriginalRequest)
+					interceptReq.RequestBody = cloneBytes(streamRequestBody)
 				}
-				intercepted := interceptStreamChunk(ctx, interceptorHost, chunkReq, execOptions.SkipInterceptorPluginID)
+				intercepted := interceptStreamChunkWithSession(ctx, streamInterceptorSession, interceptorHost, interceptReq, execOptions.SkipInterceptorPluginID)
 				applyStreamHeaders(intercepted.Headers)
 				if len(intercepted.Body) > 0 {
 					payload = cloneBytes(intercepted.Body)
@@ -348,7 +382,15 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
 	interceptorHost := h.interceptorHost()
-	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
+	streamInterceptorSession, streamSessionsSupported := openStreamChunkInterceptorSession(interceptorHost, execOptions.SkipInterceptorPluginID)
+	streamInterceptorsActive := streamInterceptorSession != nil
+	if !streamSessionsSupported {
+		streamInterceptorsActive = streamInterceptorsEnabled(interceptorHost)
+	}
+	streamID := ""
+	if streamInterceptorSession != nil {
+		streamID = uuid.NewString()
+	}
 	// Resolve bootstrap retries and header initialization before returning so the
 	// returned header snapshot is never modified by the stream goroutine.
 	rawStreamHeaders := cloneHeader(streamResult.Headers)
@@ -368,6 +410,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	var streamRequestHeaders http.Header
 	var streamOriginalRequest []byte
 	var streamRequestBody []byte
+	streamLifecycleStarted := false
 
 	applyStreamHeaders := func(headers http.Header) {
 		rawStreamHeaders = finalInterceptorHeaders(rawStreamHeaders, headers)
@@ -381,8 +424,10 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		streamRequestHeaders = cloneHeader(executedOpts.Headers)
 		streamOriginalRequest = cloneBytes(executedOpts.OriginalRequest)
 		streamRequestBody = cloneBytes(executedReq.Payload)
-		intercepted := interceptStreamChunk(ctx, interceptorHost, pluginapi.StreamChunkInterceptRequest{
+		streamLifecycleStarted = streamInterceptorSession != nil
+		intercepted := interceptStreamChunkWithSession(ctx, streamInterceptorSession, interceptorHost, pluginapi.StreamChunkInterceptRequest{
 			RequestID:       lifecycle.requestID(),
+			StreamID:        streamID,
 			SourceFormat:    responseProtocol,
 			Model:           normalizedModel,
 			RequestedModel:  originalRequestedModel,
@@ -396,6 +441,27 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		applyStreamHeaders(intercepted.Headers)
 		streamHeaderInitialized = true
 	}
+	endStreamInterceptors := func() {
+		if streamInterceptorSession == nil {
+			return
+		}
+		defer streamInterceptorSession.Close()
+		if !streamLifecycleStarted {
+			return
+		}
+		_, executedOpts := executedRequest()
+		streamInterceptorSession.InterceptStreamChunk(streamFinalizerContext(ctx), pluginapi.StreamChunkInterceptRequest{
+			RequestID:       lifecycle.requestID(),
+			StreamID:        streamID,
+			SourceFormat:    responseProtocol,
+			Model:           normalizedModel,
+			RequestedModel:  originalRequestedModel,
+			RequestHeaders:  cloneHeader(executedOpts.Headers),
+			ResponseHeaders: cloneHeader(rawStreamHeaders),
+			ChunkIndex:      pluginapi.StreamChunkEndIndex,
+			Metadata:        executedOpts.Metadata,
+		})
+	}
 
 	var responseSSEValidator *sseJSONValidationState
 	if responseProtocol == "openai-response" {
@@ -406,8 +472,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		applyStreamHeaderInit()
 		payload = cloneBytes(payload)
 		if streamInterceptorsActive {
-			chunkReq := pluginapi.StreamChunkInterceptRequest{
+			interceptReq := pluginapi.StreamChunkInterceptRequest{
 				RequestID:       lifecycle.requestID(),
+				StreamID:        streamID,
 				SourceFormat:    responseProtocol,
 				Model:           normalizedModel,
 				RequestedModel:  originalRequestedModel,
@@ -418,13 +485,18 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				ChunkIndex:      *chunkIndex,
 				Metadata:        opts.Metadata,
 			}
-			// Re-evaluate each chunk so mid-stream plugin reloads stay correct.
-			// Schema v3+ omits bodies here (one header-init clone only).
-			if streamChunkPayloadIncludesRequestBody(interceptorHost) {
-				chunkReq.OriginalRequest = cloneBytes(streamOriginalRequest)
-				chunkReq.RequestBody = cloneBytes(streamRequestBody)
+			if streamInterceptorSession != nil {
+				if streamInterceptorSession.CanOmitHeavyFields() {
+					interceptReq.HistoryChunks = nil
+				} else {
+					interceptReq.OriginalRequest = cloneBytes(streamOriginalRequest)
+					interceptReq.RequestBody = cloneBytes(streamRequestBody)
+				}
+			} else if streamChunkPayloadIncludesRequestBody(interceptorHost) {
+				interceptReq.OriginalRequest = cloneBytes(streamOriginalRequest)
+				interceptReq.RequestBody = cloneBytes(streamRequestBody)
 			}
-			intercepted := interceptStreamChunk(ctx, interceptorHost, chunkReq, execOptions.SkipInterceptorPluginID)
+			intercepted := interceptStreamChunkWithSession(ctx, streamInterceptorSession, interceptorHost, interceptReq, execOptions.SkipInterceptorPluginID)
 			applyStreamHeaders(intercepted.Headers)
 			if len(intercepted.Body) > 0 {
 				payload = cloneBytes(intercepted.Body)
@@ -562,6 +634,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	errChan := make(chan *interfaces.ErrorMessage, 1)
 
 	go func() {
+		defer endStreamInterceptors()
 		completionOutcome := pluginapi.RequestCompletionSucceeded
 		completionStatus := http.StatusOK
 		var completionErr error

@@ -130,6 +130,7 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	}
 	if resp.Capabilities.StreamChunkInterceptor {
 		plugin.Capabilities.StreamChunkInterceptor = adapter
+		plugin.Capabilities.StreamChunkInterceptorStateful = resp.SchemaVersion >= pluginabi.SchemaVersionStatefulStreamInterceptor && resp.Capabilities.StreamChunkInterceptorStateful
 	}
 	if resp.Capabilities.ThinkingApplier {
 		plugin.Capabilities.ThinkingApplier = rpcThinkingApplier{rpcPluginAdapter: adapter}

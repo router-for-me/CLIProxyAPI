@@ -15,6 +15,7 @@
 - `request-normalizer/`：只演示请求规整能力。
 - `codex-service-tier/`：仅 Go 实现的请求规整插件，启用后会将 Codex `gpt-5.5` 请求设置为 priority service tier。
 - `request-lifecycle/`：仅 Go 实现的请求生命周期插件，演示并发控制、主动终止 HTTP 请求和终态回调。
+- `stateful-stream-interceptor/`：仅 Go 实现的响应流拦截插件，演示稳定流 ID、逐流状态和确定性终态清理。
 - `scheduler/`：仅 Go 实现的调度插件，可选择指定 auth ID、委托内置调度器或拒绝调度。
 - `response-translator/`：只演示响应转换能力。
 - `response-normalizer/`：只演示响应规整能力。
@@ -56,6 +57,21 @@ plugins:
 ```
 
 构建方式和生命周期语义详见 `request-lifecycle/README.md`。
+
+## 有状态响应流拦截器
+
+`stateful-stream-interceptor` 声明 schema 3 有状态响应流能力。它按稳定 `StreamID` 隔离 payload 计数，在初始化时添加响应头，丢弃超过 `max_chunks` 的 payload，并在终态回调中释放状态。
+
+```yaml
+plugins:
+  configs:
+    stateful-stream-interceptor:
+      enabled: true
+      priority: 100
+      max_chunks: 3
+```
+
+构建方式以及 init、payload、end 生命周期契约详见 `stateful-stream-interceptor/README.md`。
 
 ## Host Auth Files 回调
 

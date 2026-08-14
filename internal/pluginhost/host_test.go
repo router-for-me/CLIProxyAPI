@@ -267,11 +267,11 @@ func TestHostUnloadPluginTargetsOnlyRequestedPlugin(t *testing.T) {
 	if !h.PluginLoaded("bravo") {
 		t.Fatal("PluginLoaded(bravo) = false, want true after alpha unload")
 	}
-	if alphaLookup.shutdownCalls != 1 {
-		t.Fatalf("alpha shutdown calls = %d, want 1", alphaLookup.shutdownCalls)
+	if shutdownCalls := alphaLookup.shutdownCalls.Load(); shutdownCalls != 1 {
+		t.Fatalf("alpha shutdown calls = %d, want 1", shutdownCalls)
 	}
-	if bravoLookup.shutdownCalls != 0 {
-		t.Fatalf("bravo shutdown calls = %d, want 0", bravoLookup.shutdownCalls)
+	if shutdownCalls := bravoLookup.shutdownCalls.Load(); shutdownCalls != 0 {
+		t.Fatalf("bravo shutdown calls = %d, want 0", shutdownCalls)
 	}
 	plugins := h.RegisteredPlugins()
 	if len(plugins) != 1 || plugins[0].ID != "bravo" {
@@ -291,6 +291,145 @@ func TestHostUnloadPluginTargetsOnlyRequestedPlugin(t *testing.T) {
 	}
 	if bravo.reconfigureCalls != 1 {
 		t.Fatalf("bravo reconfigure calls = %d, want 1", bravo.reconfigureCalls)
+	}
+}
+
+func TestHostUnloadPluginDefersPinnedStreamClientShutdown(t *testing.T) {
+	loader := newTestSymbolLoader()
+	var calls []int
+	plugin := &testPlugin{
+		registerResult: pluginapi.Plugin{
+			Metadata: validTestPlugin("alpha").Metadata,
+			Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						calls = append(calls, req.ChunkIndex)
+						return pluginapi.StreamChunkInterceptResponse{Body: append(req.Body, []byte("|alpha")...)}, nil
+					},
+				},
+				StreamChunkInterceptorStateful: true,
+			},
+		},
+	}
+	lookup := newTestSymbolLookup(plugin)
+	lookup.shutdownDone = make(chan struct{})
+	loader.lookups["alpha"] = lookup
+	h := NewForTest(loader)
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
+		},
+	})
+
+	session := h.OpenStreamChunkInterceptorSession("")
+	if session == nil {
+		t.Fatal("OpenStreamChunkInterceptorSession() = nil, want active session")
+	}
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:    "stream-1",
+		RequestBody: []byte("request"),
+		ChunkIndex:  pluginapi.StreamChunkHeaderInitIndex,
+	})
+
+	if !h.UnloadPlugin("alpha") {
+		t.Fatal("UnloadPlugin(alpha) = false, want true")
+	}
+	if shutdownCalls := lookup.shutdownCalls.Load(); shutdownCalls != 0 {
+		t.Fatalf("shutdown calls = %d while stream session is pinned, want 0", shutdownCalls)
+	}
+	resp := session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		Body:       []byte("chunk"),
+		ChunkIndex: 0,
+	})
+	if string(resp.Body) != "chunk|alpha" {
+		t.Fatalf("pinned stream payload = %q, want chunk|alpha after unload", resp.Body)
+	}
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkEndIndex,
+	})
+	session.Close()
+	waitForHostTestSignal(t, lookup.shutdownDone, "deferred pinned plugin shutdown")
+
+	if fmt.Sprint(calls) != "[-1 0 -2]" {
+		t.Fatalf("pinned plugin calls = %v, want [-1 0 -2]", calls)
+	}
+	if shutdownCalls := lookup.shutdownCalls.Load(); shutdownCalls != 1 {
+		t.Fatalf("shutdown calls = %d after session close, want 1", shutdownCalls)
+	}
+}
+
+func TestHostRetiredPinnedStreamClientShutsDownAfterSessionClose(t *testing.T) {
+	loader := newTestSymbolLoader()
+	oldPlugin := validTestPlugin("alpha")
+	oldPlugin.Capabilities = pluginapi.Capabilities{
+		StreamChunkInterceptor: responseInterceptorFunc{
+			interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+				return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+			},
+		},
+		StreamChunkInterceptorStateful: true,
+	}
+	oldLookup := newTestSymbolLookup(&testPlugin{registerResult: oldPlugin})
+	oldLookup.shutdownDone = make(chan struct{})
+	loader.lookups["alpha"] = oldLookup
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, _ := makeVersionedPluginDir(t, "alpha", "1.0.0")
+	h.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: map[string]config.PluginInstanceConfig{
+			"alpha": enabledPluginConfigWithStoreVersion(t, "1.0.0"),
+		},
+	}})
+	h.mu.Lock()
+	oldClient, okGuarded := h.loaded["alpha"].client.(*guardedPluginClient)
+	h.mu.Unlock()
+	if !okGuarded {
+		t.Fatal("loaded client is not guarded")
+	}
+
+	session := h.OpenStreamChunkInterceptorSession("")
+	if session == nil {
+		t.Fatal("OpenStreamChunkInterceptorSession() = nil, want active session")
+	}
+	session.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		StreamID:   "stream-1",
+		ChunkIndex: pluginapi.StreamChunkHeaderInitIndex,
+	})
+
+	loader.lookups["alpha"] = newTestSymbolLookup(&testPlugin{registerResult: validTestPlugin("alpha")})
+	writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	h.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: map[string]config.PluginInstanceConfig{
+			"alpha": enabledPluginConfigWithStoreVersion(t, "2.0.0"),
+		},
+	}})
+
+	session.Close()
+	waitForHostTestSignal(t, oldLookup.shutdownDone, "retired pinned plugin shutdown")
+	waitForHostTestSignal(t, oldClient.shutdownDone, "retired plugin cleanup")
+	if shutdownCalls := oldLookup.shutdownCalls.Load(); shutdownCalls != 1 {
+		t.Fatalf("retired plugin shutdown calls = %d, want 1", shutdownCalls)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		h.mu.Lock()
+		retiredCount := len(h.retired["alpha"])
+		h.mu.Unlock()
+		if retiredCount == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("retired plugin count after shutdown = %d, want 0", retiredCount)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

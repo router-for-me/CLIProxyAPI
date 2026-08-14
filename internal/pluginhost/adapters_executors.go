@@ -242,7 +242,7 @@ func (h *Host) executorProvider(record capabilityRecord, executor pluginapi.Prov
 	}
 	provider := h.modelProvider(record.id)
 	if provider == "" {
-		identifier, okIdentifier := h.callExecutorIdentifier(record.id, executor)
+		identifier, okIdentifier := h.callExecutorIdentifier(record, executor)
 		if !okIdentifier {
 			return "", false
 		}
@@ -252,13 +252,13 @@ func (h *Host) executorProvider(record capabilityRecord, executor pluginapi.Prov
 	return provider, provider != ""
 }
 
-func (h *Host) callExecutorIdentifier(pluginID string, executor pluginapi.ProviderExecutor) (provider string, ok bool) {
-	if h == nil || executor == nil || h.isPluginFused(pluginID) {
+func (h *Host) callExecutorIdentifier(record capabilityRecord, executor pluginapi.ProviderExecutor) (provider string, ok bool) {
+	if h == nil || executor == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return "", false
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			h.fusePlugin(pluginID, "Executor.Identifier", recovered)
+			h.fusePlugin(record, "Executor.Identifier", recovered)
 			provider = ""
 			ok = false
 		}
@@ -638,7 +638,7 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(a.pluginID, "Executor.Execute", recovered)
+			a.host.fusePluginIdentity(a.pluginID, a.path, a.version, "Executor.Execute", recovered)
 			resp = coreexecutor.Response{}
 			err = fmt.Errorf("plugin executor %s panic: %v", a.Identifier(), recovered)
 		}
@@ -665,7 +665,7 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(a.pluginID, "Executor.ExecuteStream", recovered)
+			a.host.fusePluginIdentity(a.pluginID, a.path, a.version, "Executor.ExecuteStream", recovered)
 			result = nil
 			err = fmt.Errorf("plugin executor %s stream panic: %v", a.Identifier(), recovered)
 		}
@@ -695,7 +695,7 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(record.id, "AuthProvider.RefreshAuth", recovered)
+			a.host.fusePlugin(*record, "AuthProvider.RefreshAuth", recovered)
 			refreshed = nil
 			err = fmt.Errorf("plugin executor %s refresh panic: %v", a.Identifier(), recovered)
 		}
@@ -764,7 +764,7 @@ func (a *executorAdapter) CountTokens(ctx context.Context, auth *coreauth.Auth, 
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(a.pluginID, "Executor.CountTokens", recovered)
+			a.host.fusePluginIdentity(a.pluginID, a.path, a.version, "Executor.CountTokens", recovered)
 			resp = coreexecutor.Response{}
 			err = fmt.Errorf("plugin executor %s count tokens panic: %v", a.Identifier(), recovered)
 		}
@@ -794,7 +794,7 @@ func (a *executorAdapter) HttpRequest(ctx context.Context, auth *coreauth.Auth, 
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(a.pluginID, "Executor.HttpRequest", recovered)
+			a.host.fusePluginIdentity(a.pluginID, a.path, a.version, "Executor.HttpRequest", recovered)
 			resp = nil
 			err = fmt.Errorf("plugin executor %s http request panic: %v", a.Identifier(), recovered)
 		}

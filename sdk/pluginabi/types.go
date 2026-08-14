@@ -8,12 +8,16 @@ const (
 	// SchemaVersion tracks the RPC JSON contract exchanged at plugin.register.
 	// Version 2 adds request lifecycle completion and active request termination.
 	// Version 3 omits OriginalRequest/RequestBody on payload stream chunks
-	// (ChunkIndex >= 0); those fields remain on StreamChunkHeaderInitIndex only.
-	// Plugins that still need per-chunk request bodies should keep schema_version < 3.
-	SchemaVersion uint32 = 3
+	// (ChunkIndex >= 0); request fields remain on StreamChunkHeaderInitIndex only.
+	// Plugins that need per-chunk request bodies should keep schema_version < 3.
+	// Version 4 adds stateful stream interceptor session negotiation and lifecycle.
+	SchemaVersion uint32 = 4
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
+	// SchemaVersionStatefulStreamInterceptor is the first schema version that supports
+	// stateful stream interceptor session negotiation and lifecycle.
+	SchemaVersionStatefulStreamInterceptor uint32 = 4
 )
 
 const (

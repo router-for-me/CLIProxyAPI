@@ -27,11 +27,14 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 }
 
 func TestMethodNamesAreStable(t *testing.T) {
-	if SchemaVersion != 3 {
-		t.Fatalf("SchemaVersion = %d, want 3", SchemaVersion)
+	if SchemaVersion != 4 {
+		t.Fatalf("SchemaVersion = %d, want 4", SchemaVersion)
 	}
 	if SchemaVersionStreamChunkOmitRequestBody != 3 {
 		t.Fatalf("SchemaVersionStreamChunkOmitRequestBody = %d, want 3", SchemaVersionStreamChunkOmitRequestBody)
+	}
+	if SchemaVersionStatefulStreamInterceptor != 4 {
+		t.Fatalf("SchemaVersionStatefulStreamInterceptor = %d, want 4", SchemaVersionStatefulStreamInterceptor)
 	}
 	if MethodPluginRegister != "plugin.register" {
 		t.Fatalf("MethodPluginRegister = %q", MethodPluginRegister)
