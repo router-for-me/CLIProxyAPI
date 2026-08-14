@@ -453,3 +453,92 @@ func FuzzRemapOAuthToolNamesWithBatchedEditsMatchesLegacy(f *testing.F) {
 		}
 	})
 }
+
+// TestReverseRemapPassesThroughCallerMCPToolsOnVirtualServerCollision pins the
+// behaviour when a caller's real MCP server is named exactly like the derived
+// two-word virtual server. Word-based server components are only ~2048^2 wide,
+// and plausible server names such as "file_system" or "web_search" are valid
+// BIP-39 word pairs, so this collision is reachable. The caller's own tools must
+// never be rewritten into a proxied tool, and must never fail the request.
+func TestReverseRemapPassesThroughCallerMCPToolsOnVirtualServerCollision(t *testing.T) {
+	const secret = "virtual-server-collision"
+	server := strings.Split(helps.ClaudeMCPToolAlias(secret, "probe", 0), "__")[1]
+
+	native := []string{
+		// Same semantic suffix as a proxied tool.
+		"mcp__" + server + "__read_file",
+		// Semantic suffix of a proxied tool preceded by an extra word, which is
+		// exactly the shape the drift fallback is designed to absorb.
+		"mcp__" + server + "__grep_read_file",
+		// No proxied counterpart at all.
+		"mcp__" + server + "__write_file",
+	}
+	body := []byte(fmt.Sprintf(
+		`{"tools":[{"name":"read_file","input_schema":{"type":"object"}},{"name":%q},{"name":%q},{"name":%q}]}`,
+		native[0], native[1], native[2]))
+
+	upstream, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: secret})
+
+	alias := ""
+	for renamed, original := range reverseMap {
+		if original == "read_file" && renamed != original {
+			alias = renamed
+		}
+	}
+	if alias == "" {
+		t.Fatal("read_file was not aliased, the collision scenario is not being exercised")
+	}
+	for index, name := range native {
+		if got := gjson.GetBytes(upstream, fmt.Sprintf("tools.%d.name", index+1)).String(); got != name {
+			t.Fatalf("caller MCP tool %d sent upstream as %q, want %q unchanged", index, got, name)
+		}
+	}
+
+	for _, name := range native {
+		response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, name))
+		restored, err := restoreClaudeOAuthToolNamesFromResponse(response, reverseMap)
+		if err != nil {
+			t.Fatalf("caller MCP tool %q failed to restore: %v", name, err)
+		}
+		if got := gjson.GetBytes(restored, "content.0.name").String(); got != name {
+			t.Fatalf("caller MCP tool %q restored as %q, want it passed through unchanged", name, got)
+		}
+
+		line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, name))
+		restoredLine, errLine := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap)
+		if errLine != nil {
+			t.Fatalf("caller MCP tool %q failed to restore from stream: %v", name, errLine)
+		}
+		if got := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != name {
+			t.Fatalf("caller MCP tool %q restored from stream as %q, want unchanged", name, got)
+		}
+	}
+
+	// The proxied tool must still round-trip, including the drifted shapes the
+	// BIP-39 change was introduced to recover.
+	toolPart := strings.SplitN(alias, "__", 3)[2]
+	for _, drifted := range []string{alias, "mcp__" + server + "__" + server + "__" + toolPart, "mcp__" + server + "__abandon_read_file"} {
+		response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, drifted))
+		restored, err := restoreClaudeOAuthToolNamesFromResponse(response, reverseMap)
+		if err != nil {
+			t.Fatalf("proxied alias %q failed to restore: %v", drifted, err)
+		}
+		if got := gjson.GetBytes(restored, "content.0.name").String(); got != "read_file" {
+			t.Fatalf("proxied alias %q restored as %q, want %q", drifted, got, "read_file")
+		}
+	}
+}
+
+// TestRemapKeepsReverseMapEmptyWhenOnlyCallerMCPToolsArePresent guards the
+// passthrough bookkeeping from turning an untouched request into one that runs
+// the restore path.
+func TestRemapKeepsReverseMapEmptyWhenOnlyCallerMCPToolsArePresent(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"mcp__context7__query-docs"},{"type":"web_search_20250305","name":"web_search"}]}`)
+	out, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "no-proxied-tools"})
+	if len(reverseMap) != 0 {
+		t.Fatalf("reverseMap = %v, want empty when nothing was aliased", reverseMap)
+	}
+	if !bytes.Equal(out, body) {
+		t.Fatalf("body = %s, want unchanged %s", out, body)
+	}
+}

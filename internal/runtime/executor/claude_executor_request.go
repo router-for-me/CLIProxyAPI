@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
@@ -1089,12 +1090,17 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 			}
 			return true
 		})
+		passthroughMCPTools := make([]string, 0, 4)
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			if helps.IsClaudeServerToolType(tool.Get("type").String()) {
 				return true
 			}
 			name := tool.Get("name").String()
-			if name == "" || helps.IsClaudeMCPToolName(name) {
+			if name == "" {
+				return true
+			}
+			if helps.IsClaudeMCPToolName(name) {
+				passthroughMCPTools = append(passthroughMCPTools, name)
 				return true
 			}
 			if _, exists := forwardMap[name]; exists {
@@ -1102,12 +1108,14 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 			}
 			alias, allocated := helps.AllocateClaudeMCPToolAlias(mcpAliases.secret, name, reservedNames)
 			if !allocated {
+				log.Warnf("claude oauth mcp alias: no free alias left for tool %q, forwarding the original name", name)
 				return true
 			}
 			forwardMap[name] = alias
 			reservedNames[alias] = true
 			return true
 		})
+		recordPassthroughMCPTools(recordRename, forwardMap, passthroughMCPTools)
 	}
 
 	rewriteName := func(name string) (string, bool) {
@@ -1131,7 +1139,7 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 		return true
 	}
 	appendStringEdit := func(result gjson.Result, replacement string) bool {
-		// ClaudeMCPToolAlias only emits [A-Za-z0-9_-], so adding quotes is
+		// Generated aliases only emit [A-Za-z0-9_-], so adding quotes is
 		// byte-identical to sjson's encoding without another allocation.
 		return appendRawEdit(result, `"`+replacement+`"`)
 	}
@@ -1340,12 +1348,17 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 			}
 			return true
 		})
+		passthroughMCPTools := make([]string, 0, 4)
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			if helps.IsClaudeServerToolType(tool.Get("type").String()) {
 				return true
 			}
 			name := tool.Get("name").String()
-			if name == "" || helps.IsClaudeMCPToolName(name) {
+			if name == "" {
+				return true
+			}
+			if helps.IsClaudeMCPToolName(name) {
+				passthroughMCPTools = append(passthroughMCPTools, name)
 				return true
 			}
 			if _, exists := forwardMap[name]; exists {
@@ -1353,12 +1366,14 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 			}
 			alias, allocated := helps.AllocateClaudeMCPToolAlias(mcpAliases.secret, name, reservedNames)
 			if !allocated {
+				log.Warnf("claude oauth mcp alias: no free alias left for tool %q, forwarding the original name", name)
 				return true
 			}
 			forwardMap[name] = alias
 			reservedNames[alias] = true
 			return true
 		})
+		recordPassthroughMCPTools(recordRename, forwardMap, passthroughMCPTools)
 	}
 
 	rewriteName := func(name string) (string, bool) {
@@ -1516,6 +1531,11 @@ func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResol
 		servers: make(map[string]struct{}),
 	}
 	for alias, original := range reverseMap {
+		if alias == original {
+			// Caller-owned MCP tool recorded for exact passthrough only. It must not
+			// register a virtual server or take part in fuzzy alias recovery.
+			continue
+		}
 		parts, ok := parseClaudeMCPAlias(alias)
 		if !ok {
 			continue
@@ -1561,8 +1581,27 @@ func claudeMCPAliasServer(name string) string {
 	return server
 }
 
+// recordPassthroughMCPTools remembers caller-owned MCP tool names that were left
+// untouched. Without this the response resolver would treat such a name as a
+// drifted alias whenever the derived two-word virtual server happens to equal a
+// real MCP server name, and would either restore the wrong tool or fail the
+// request. Recording is skipped when nothing was aliased so an untouched request
+// keeps an empty reverse map and the restore path stays a no-op.
+func recordPassthroughMCPTools(recordRename func(original, renamed string), forwardMap map[string]string, passthrough []string) {
+	if len(forwardMap) == 0 {
+		return
+	}
+	for _, name := range passthrough {
+		recordRename(name, name)
+	}
+}
+
 func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error) {
 	if original, ok := resolver.exact[name]; ok {
+		if original == name {
+			// Caller-owned MCP tool: forward it exactly as the client declared it.
+			return "", false, nil
+		}
 		return original, true, nil
 	}
 
@@ -1642,6 +1681,11 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 			} else {
 				matchCount = len(suffixMatches)
 			}
+		}
+		if matchCount == 1 {
+			// This path guesses instead of failing, so leave a trace: it is the only
+			// way to tell a silent wrong-tool restore from a healthy request.
+			log.Debugf("claude oauth mcp alias: recovered drifted tool name %q as %q via semantic suffix", name, matchedOriginal)
 		}
 	}
 	if matchCount == 1 {

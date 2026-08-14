@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"strings"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // IsClaudeMCPToolName reports whether name follows Claude Code's MCP tool
@@ -42,18 +44,12 @@ func ClaudeMCPAliasWordCount() int {
 // Server and tool IDs use BIP-39 English words so weak models are less likely
 // to drift high-entropy Base32 fragments.
 func ClaudeMCPToolAlias(secret, original string, attempt uint32) string {
-	serverDigest := claudeMCPAliasDigest(secret, "server", "")
 	toolDigest := claudeMCPAliasDigest(secret, "tool", original)
-	server := claudeMCPAliasWord(serverDigest[:], 0, 0) + "_" + claudeMCPAliasWord(serverDigest[:], 2, 0)
-	toolID := claudeMCPAliasWord(toolDigest[:], 0, attempt)
-
-	prefix := "mcp__" + server + "__" + toolID + "_"
-	maxSemanticLen := 64 - len(prefix)
-	if maxSemanticLen < 1 {
-		maxSemanticLen = 1
-	}
-	semantic := claudeMCPToolSemanticSuffix(original, maxSemanticLen)
-	return prefix + semantic
+	return claudeMCPAliasFor(
+		claudeMCPAliasServerComponent(secret),
+		claudeMCPAliasWord(toolDigest[:], 0, attempt),
+		original,
+	)
 }
 
 // AllocateClaudeMCPToolAlias picks an alias that is not already reserved.
@@ -64,28 +60,40 @@ func AllocateClaudeMCPToolAlias(secret, original string, reserved map[string]boo
 	words := claudeMCPAliasEnglishWords
 	totalWords := len(words)
 	if totalWords == 0 {
+		log.Error("claude oauth mcp alias: embedded BIP-39 wordlist is empty, tool aliasing is disabled")
 		return "", false
 	}
-	serverDigest := claudeMCPAliasDigest(secret, "server", "")
+	server := claudeMCPAliasServerComponent(secret)
 	toolDigest := claudeMCPAliasDigest(secret, "tool", original)
-	server := claudeMCPAliasWord(serverDigest[:], 0, 0) + "_" + claudeMCPAliasWord(serverDigest[:], 2, 0)
 	baseIndex := int(binary.BigEndian.Uint16(toolDigest[0:2])) % totalWords
 
 	for attempt := 0; attempt < totalWords; attempt++ {
-		toolID := words[(baseIndex+attempt)%totalWords]
-		prefix := "mcp__" + server + "__" + toolID + "_"
-		maxSemanticLen := 64 - len(prefix)
-		if maxSemanticLen < 1 {
-			maxSemanticLen = 1
-		}
-		semantic := claudeMCPToolSemanticSuffix(original, maxSemanticLen)
-		alias := prefix + semantic
+		alias := claudeMCPAliasFor(server, words[(baseIndex+attempt)%totalWords], original)
 		if reserved != nil && reserved[alias] {
 			continue
 		}
 		return alias, true
 	}
 	return "", false
+}
+
+// claudeMCPAliasFor assembles the final alias for one server/tool word pair.
+// Both the single-shot and the allocating entry point must build names here so
+// the two cannot drift apart.
+func claudeMCPAliasFor(server, toolID, original string) string {
+	prefix := "mcp__" + server + "__" + toolID + "_"
+	maxSemanticLen := 64 - len(prefix)
+	if maxSemanticLen < 1 {
+		maxSemanticLen = 1
+	}
+	return prefix + claudeMCPToolSemanticSuffix(original, maxSemanticLen)
+}
+
+// claudeMCPAliasServerComponent derives the caller-stable two-word virtual
+// server shared by every alias generated for one credential.
+func claudeMCPAliasServerComponent(secret string) string {
+	serverDigest := claudeMCPAliasDigest(secret, "server", "")
+	return claudeMCPAliasWord(serverDigest[:], 0, 0) + "_" + claudeMCPAliasWord(serverDigest[:], 2, 0)
 }
 
 func claudeMCPAliasWord(digest []byte, offset int, attempt uint32) string {

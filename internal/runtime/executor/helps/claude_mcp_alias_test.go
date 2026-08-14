@@ -220,3 +220,53 @@ func assertClaudeMCPAliasWords(t *testing.T, alias string) {
 		}
 	}
 }
+
+func TestClaudeMCPAliasWordlistIntegrity(t *testing.T) {
+	// The wordlist is embedded, so a truncated or reordered file would silently
+	// disable aliasing (AllocateClaudeMCPToolAlias returns false for every tool)
+	// instead of failing loudly. Pin the exact BIP-39 English dictionary.
+	if got := ClaudeMCPAliasWordCount(); got != 2048 {
+		t.Fatalf("wordlist size = %d, want the 2048-word BIP-39 English dictionary", got)
+	}
+	if got := claudeMCPAliasEnglishWords[0]; got != "abandon" {
+		t.Fatalf("first word = %q, want %q", got, "abandon")
+	}
+	if got := claudeMCPAliasEnglishWords[2047]; got != "zoo" {
+		t.Fatalf("last word = %q, want %q", got, "zoo")
+	}
+	seen := make(map[string]struct{}, len(claudeMCPAliasEnglishWords))
+	for _, word := range claudeMCPAliasEnglishWords {
+		if _, duplicate := seen[word]; duplicate {
+			t.Fatalf("duplicate word %q would shrink the usable alias space", word)
+		}
+		seen[word] = struct{}{}
+		if word == "" || len(word) > 8 {
+			t.Fatalf("word %q is outside the 1..8 character budget assumed by the 64-char alias limit", word)
+		}
+		for _, char := range word {
+			if char < 'a' || char > 'z' {
+				t.Fatalf("word %q contains a non-lowercase-ASCII rune %q", word, char)
+			}
+		}
+	}
+}
+
+func TestAllocateClaudeMCPToolAliasMatchesSingleShotConstruction(t *testing.T) {
+	// Both entry points must build identical names; the exhaustion tests above
+	// use ClaudeMCPToolAlias to seed the reserved set, so any drift between the
+	// two would make them silently stop testing the production path.
+	const secret = "shared-construction"
+	for _, original := range []string{"Bash", "read_file", strings.Repeat("long_tool_name_", 9)} {
+		reserved := make(map[string]bool, ClaudeMCPAliasWordCount())
+		for attempt := 0; attempt < ClaudeMCPAliasWordCount(); attempt++ {
+			allocated, ok := AllocateClaudeMCPToolAlias(secret, original, reserved)
+			if !ok {
+				t.Fatalf("original %q: allocation exhausted at attempt %d", original, attempt)
+			}
+			if want := ClaudeMCPToolAlias(secret, original, uint32(attempt)); allocated != want {
+				t.Fatalf("original %q attempt %d: allocated %q, single-shot %q", original, attempt, allocated, want)
+			}
+			reserved[allocated] = true
+		}
+	}
+}
