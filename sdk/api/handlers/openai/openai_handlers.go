@@ -23,6 +23,7 @@ import (
 	codexconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/openai/chat-completions"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -942,16 +943,27 @@ func sanitizeOpenAIStrictErrorMessage(errMsg *interfaces.ErrorMessage) *interfac
 	safe.DirectResponse = false
 	safe.Body = nil
 	if errMsg.Error != nil {
-		safe.Error = &openAIStreamSanitizedError{message: openAIStreamErrorText(errMsg.Error.Error(), status)}
+		safe.Error = &openAIStreamSanitizedError{
+			message:     openAIStreamErrorText(errMsg.Error.Error(), status),
+			safeHeaders: coreauth.SafeResponseHeaders(errMsg.Error),
+		}
 	}
 	return &safe
 }
 
 type openAIStreamSanitizedError struct {
-	message string
+	message     string
+	safeHeaders http.Header
 }
 
 func (e *openAIStreamSanitizedError) Error() string { return e.message }
+
+func (e *openAIStreamSanitizedError) SafeResponseHeaders() http.Header {
+	if e == nil || e.safeHeaders == nil {
+		return nil
+	}
+	return e.safeHeaders.Clone()
+}
 
 // openAIStreamErrorText produces a client-safe error message. JSON error bodies
 // are preserved field-by-field with sanitization; free-form text is kept with
