@@ -21,6 +21,7 @@ func newPGRouter(h *Handler) *gin.Engine {
 	g.PUT("/api-keys-pg/:id/policy", h.PutPGAPIKeyPolicy)
 	g.POST("/api-keys-pg/:id/regenerate", h.RegeneratePGAPIKey)
 	g.DELETE("/api-keys-pg/:id", h.DeletePGAPIKey)
+	g.POST("/api-keys-pg/import", h.ImportPGAPIKeys)
 	g.GET("/usage-stats", h.GetUsageStats)
 	g.GET("/usage-stats/summary", h.GetUsageSummary)
 	g.GET("/usage-windows/:api_key_id", h.GetUsageWindows)
@@ -50,6 +51,7 @@ func TestPGRoutesReturn503WhenNotConfigured(t *testing.T) {
 		{http.MethodPut, "/v0/management/api-keys-pg/k1/policy", `{"rpm_limit":60}`},
 		{http.MethodPost, "/v0/management/api-keys-pg/k1/regenerate", ""},
 		{http.MethodDelete, "/v0/management/api-keys-pg/k1", ""},
+		{http.MethodPost, "/v0/management/api-keys-pg/import", `{"keys":[{"alias":"a","key":"custom-secret-0123456789"}]}`},
 		{http.MethodGet, "/v0/management/usage-stats", ""},
 		{http.MethodGet, "/v0/management/usage-stats/summary?window=hourly&api_key_id=k1", ""},
 		{http.MethodGet, "/v0/management/usage-windows/k1", ""},

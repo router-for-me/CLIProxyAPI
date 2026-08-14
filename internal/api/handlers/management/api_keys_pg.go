@@ -599,6 +599,121 @@ func (h *Handler) RegeneratePGAPIKey(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"id": id, "secret": newSecret})
 }
 
+// pgImportKeyRequest is one row of a key import: the alias to resolve plus the
+// custom plaintext secret to apply. The secret is never stored or logged; only
+// its SHA-256 hash is persisted via Regenerate.
+type pgImportKeyRequest struct {
+	Alias string `json:"alias"`
+	Key   string `json:"key"`
+}
+
+// pgImportKeysRequest is the body of POST /v0/management/api-keys-pg/import.
+type pgImportKeysRequest struct {
+	Keys []pgImportKeyRequest `json:"keys"`
+}
+
+// pgImportSkipped is a per-row skip/failure entry in the import report.
+type pgImportSkipped struct {
+	Alias  string `json:"alias"`
+	Reason string `json:"reason"`
+}
+
+// pgImportKeysResponse is the import report. total is the number of rows in the
+// request; imported is the count that took effect; skipped lists rows that did
+// not, each with a human-readable reason.
+type pgImportKeysResponse struct {
+	Total    int               `json:"total"`
+	Imported int               `json:"imported"`
+	Skipped  []pgImportSkipped `json:"skipped"`
+}
+
+const maxImportRows = 1000
+
+// ImportPGAPIKeys handles POST /v0/management/api-keys-pg/import.
+//
+// For each {alias, key} row: resolve the target key by key_alias
+// (case-insensitive), then apply the supplied custom secret via Regenerate
+// (preserving the key's ID, policy, metadata, and owner). Rows are independent:
+// one row's failure never aborts the others. The response reports imported vs
+// skipped rows so callers can reconcile. Malformed requests and DB-level
+// failures return 4xx/5xx without a partial report.
+func (h *Handler) ImportPGAPIKeys(c *gin.Context) {
+	apiKeys, _, _, policySvc, ok := h.requirePG(c)
+	if !ok {
+		return
+	}
+	var req pgImportKeysRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": err.Error()}})
+		return
+	}
+	if len(req.Keys) > maxImportRows {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"type":    "invalid_request",
+			"message": fmt.Sprintf("too many keys: %d (max %d)", len(req.Keys), maxImportRows),
+		}})
+		return
+	}
+	if len(req.Keys) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"type":    "invalid_request",
+			"message": "keys: at least one entry is required",
+		}})
+		return
+	}
+
+	ctx := c.Request.Context()
+	resp := pgImportKeysResponse{Total: len(req.Keys), Skipped: []pgImportSkipped{}}
+	changed := false
+	for _, row := range req.Keys {
+		alias := strings.TrimSpace(row.Alias)
+		secret := strings.TrimSpace(row.Key)
+		if alias == "" || secret == "" {
+			resp.Skipped = append(resp.Skipped, pgImportSkipped{Alias: alias, Reason: "missing alias or key"})
+			continue
+		}
+		// Resolve by alias (case-insensitive; ambiguous aliases are skipped).
+		key, _, err := apiKeys.LookupByAlias(ctx, alias)
+		if err != nil {
+			if errors.Is(err, store.ErrAPIKeyNotFound) {
+				resp.Skipped = append(resp.Skipped, pgImportSkipped{Alias: alias, Reason: "alias not found"})
+				continue
+			}
+			if errors.Is(err, store.ErrAmbiguousAlias) {
+				resp.Skipped = append(resp.Skipped, pgImportSkipped{Alias: alias, Reason: "ambiguous alias"})
+				continue
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+			return
+		}
+		// Reject secrets that would silently shadow an existing key. Regenerate
+		// does not pre-check collisions, so a duplicate secret would make
+		// LookupByHash resolve to the first row sharing the hash.
+		hash := store.HashSecret(secret)
+		if dup, _, dupErr := apiKeys.LookupByHash(ctx, hash); dupErr == nil && dup.ID != key.ID {
+			resp.Skipped = append(resp.Skipped, pgImportSkipped{Alias: alias, Reason: "duplicate secret"})
+			continue
+		}
+		// Apply the custom secret, preserving ID/policy/metadata/owner.
+		if _, err := apiKeys.Regenerate(ctx, key.ID, secret); err != nil {
+			if errors.Is(err, store.ErrInvalidSecret) {
+				resp.Skipped = append(resp.Skipped, pgImportSkipped{Alias: alias, Reason: "invalid secret"})
+				continue
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+			return
+		}
+		resp.Imported++
+		changed = true
+	}
+	if changed {
+		if svc := *policySvc; svc != nil {
+			svc.InvalidateAll()
+		}
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
 // DeletePGAPIKey handles DELETE /v0/management/api-keys-pg/:id.
 func (h *Handler) DeletePGAPIKey(c *gin.Context) {
 	apiKeys, _, _, policySvc, ok := h.requirePG(c)
