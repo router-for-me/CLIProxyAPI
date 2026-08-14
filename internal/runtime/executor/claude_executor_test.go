@@ -3875,6 +3875,60 @@ func TestInjectClaudeCodeCurrentDatePrecedesExistingReminder(t *testing.T) {
 	assertEphemeralUserTextBlock(t, content[2], "continue", "")
 }
 
+func TestInjectClaudeCodeCurrentDateFollowsLeadingToolResults(t *testing.T) {
+	fixed := time.Date(2026, time.August, 1, 9, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))
+	payload := []byte(`{"messages":[` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]},` +
+		`{"role":"user","content":[` +
+		`{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"},` +
+		`{"type":"text","text":"continue"}]}]}`)
+
+	first := injectClaudeCodeCurrentDate(payload, fixed)
+	second := injectClaudeCodeCurrentDate(first, fixed)
+	if !bytes.Equal(first, second) {
+		t.Fatalf("currentDate injection is not idempotent:\nfirst:  %s\nsecond: %s", first, second)
+	}
+
+	content := gjson.GetBytes(first, "messages.1.content").Array()
+	if len(content) != 3 {
+		t.Fatalf("content has %d blocks, want tool_result, currentDate, and user text: %s", len(content), first)
+	}
+	if got := content[0].Get("type").String(); got != "tool_result" {
+		t.Fatalf("content[0].type = %q, want tool_result to stay first: %s", got, first)
+	}
+	if got := content[0].Get("tool_use_id").String(); got != "toolu_1" {
+		t.Fatalf("content[0].tool_use_id = %q, want toolu_1", got)
+	}
+	assertClaudeCodeCurrentDateBlockAt(t, content[1], fixed)
+	assertEphemeralUserTextBlock(t, content[2], "continue", "")
+}
+
+func TestInjectClaudeCodeCurrentDateFollowsAllLeadingToolResults(t *testing.T) {
+	fixed := time.Date(2026, time.August, 1, 9, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))
+	payload := []byte(`{"messages":[` +
+		`{"role":"assistant","content":[` +
+		`{"type":"tool_use","id":"toolu_1","name":"Read","input":{}},` +
+		`{"type":"tool_use","id":"toolu_2","name":"Read","input":{}}]},` +
+		`{"role":"user","content":[` +
+		`{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"},` +
+		`{"type":"tool_result","tool_use_id":"toolu_2","content":"ok"}]}]}`)
+
+	out := injectClaudeCodeCurrentDate(payload, fixed)
+	content := gjson.GetBytes(out, "messages.1.content").Array()
+	if len(content) != 3 {
+		t.Fatalf("content has %d blocks, want two tool_results and currentDate: %s", len(content), out)
+	}
+	for idx, wantID := range []string{"toolu_1", "toolu_2"} {
+		if got := content[idx].Get("type").String(); got != "tool_result" {
+			t.Fatalf("content[%d].type = %q, want tool_result: %s", idx, got, out)
+		}
+		if got := content[idx].Get("tool_use_id").String(); got != wantID {
+			t.Fatalf("content[%d].tool_use_id = %q, want %q", idx, got, wantID)
+		}
+	}
+	assertClaudeCodeCurrentDateBlockAt(t, content[2], fixed)
+}
+
 // Test case 1: String system prompt becomes an authoritative mid-conversation
 // system message after the first user turn.
 func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
