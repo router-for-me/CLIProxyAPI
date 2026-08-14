@@ -80,7 +80,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, websocket.ErrCloseSent
 			}
 
-			errorPayload, wrote, errTerminate := writeResponsesWebsocketTerminalError(writer, wsTimelineLog, errMsg, nil)
+			errorPayload, wrote, errTerminate := writeResponsesWebsocketTerminalError(writer, wsTimelineLog, errMsg)
 			if wrote {
 				log.Infof(
 					"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
@@ -149,7 +149,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						}
 						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, websocket.ErrCloseSent
 					}
-					errorPayload, wrote, errTerminate := writeResponsesWebsocketTerminalError(writer, wsTimelineLog, payloadErrMsg, payloads[i])
+					errorPayload, wrote, errTerminate := writeResponsesWebsocketTerminalError(writer, wsTimelineLog, payloadErrMsg)
 					if wrote {
 						log.Infof(
 							"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
@@ -213,7 +213,6 @@ func writeResponsesWebsocketTerminalError(
 	writer *responsesWebsocketWriter,
 	wsTimelineLog websocketTimelineAppender,
 	errMsg *interfaces.ErrorMessage,
-	payload []byte,
 ) ([]byte, bool, error) {
 	if !shouldExposeResponsesUpstreamError(errMsg) {
 		// Keep the upstream reason in the request-log timeline even though the client
@@ -229,13 +228,10 @@ func writeResponsesWebsocketTerminalError(
 		return nil, false, websocket.ErrCloseSent
 	}
 
-	if len(payload) == 0 {
-		var errBuild error
-		payload, errBuild = buildResponsesWebsocketErrorPayload(errMsg)
-		if errBuild != nil {
-			_, _ = writer.closeWithoutError()
-			return nil, false, errBuild
-		}
+	payload, errBuild := buildResponsesWebsocketErrorPayload(errMsg)
+	if errBuild != nil {
+		_, _ = writer.closeWithoutError()
+		return nil, false, errBuild
 	}
 
 	wrote, errClose := writer.closeWithPayload(payload)
@@ -551,21 +547,23 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		return nil, errSet
 	}
 
-	if errMsg != nil && errMsg.Addon != nil {
-		headers := []byte(`{}`)
-		hasHeaders := false
-		for key, values := range errMsg.Addon {
-			if len(values) == 0 {
-				continue
+	if errMsg != nil {
+		// Preserve only sanitized upstream headers as response headers and never
+		// echo them under a raw "headers" field. Filtering removes hop-by-hop,
+		// reserved, and gateway-identity headers.
+		filtered := handlers.FilterUpstreamHeaders(errMsg.Headers)
+		if len(errMsg.Headers) > 0 {
+			headers := []byte(`{}`)
+			for key, values := range filtered {
+				if len(values) == 0 {
+					continue
+				}
+				headerPath := strings.ReplaceAll(strings.ReplaceAll(key, `\\`, `\\\\`), ".", `\\.`)
+				headers, errSet = sjson.SetBytes(headers, headerPath, values[0])
+				if errSet != nil {
+					return nil, errSet
+				}
 			}
-			headerPath := strings.ReplaceAll(strings.ReplaceAll(key, `\\`, `\\\\`), ".", `\\.`)
-			headers, errSet = sjson.SetBytes(headers, headerPath, values[0])
-			if errSet != nil {
-				return nil, errSet
-			}
-			hasHeaders = true
-		}
-		if hasHeaders {
 			payload, errSet = sjson.SetRawBytes(payload, "headers", headers)
 			if errSet != nil {
 				return nil, errSet

@@ -2939,7 +2939,7 @@ func TestResponsesWebsocketTerminalErrorWrittenOnceAcrossForwardAndDisconnect(t 
 		go func() {
 			defer wg.Done()
 			<-start
-			payload, _, errWrite := writeResponsesWebsocketTerminalError(writer, nil, errMsg, nil)
+			payload, _, errWrite := writeResponsesWebsocketTerminalError(writer, nil, errMsg)
 			if !errors.Is(errWrite, websocket.ErrCloseSent) || gjson.GetBytes(payload, "error.code").String() != "cyber_policy" {
 				resultCh <- fmt.Errorf("err-channel terminal write failed: err=%v payload=%s", errWrite, payload)
 			}
@@ -2947,8 +2947,10 @@ func TestResponsesWebsocketTerminalErrorWrittenOnceAcrossForwardAndDisconnect(t 
 		go func() {
 			defer wg.Done()
 			<-start
-			payload := []byte(`{"type":"error","status":400,"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`)
-			writtenPayload, _, errWrite := writeResponsesWebsocketTerminalError(writer, nil, errMsg, payload)
+			// The payload parameter is intentionally removed: every terminal path
+			// rebuilds the payload from the parsed ErrorMessage so raw upstream
+			// error-frame bytes can never be echoed.
+			writtenPayload, _, errWrite := writeResponsesWebsocketTerminalError(writer, nil, errMsg)
 			if !errors.Is(errWrite, websocket.ErrCloseSent) || gjson.GetBytes(writtenPayload, "error.code").String() != "cyber_policy" {
 				resultCh <- fmt.Errorf("payload terminal write failed: err=%v payload=%s", errWrite, writtenPayload)
 			}
@@ -2992,6 +2994,107 @@ func TestResponsesWebsocketTerminalErrorWrittenOnceAcrossForwardAndDisconnect(t 
 	}
 	if errServer := <-serverErrCh; errServer != nil {
 		t.Fatalf("server error: %v", errServer)
+	}
+}
+
+// TestResponsesWebsocketTerminalErrorRebuildsSanitizedPayload proves the
+// terminal error path rebuilds a structured payload from the parsed
+// ErrorMessage instead of ever echoing raw upstream error-frame bytes: a
+// secret embedded only in the raw frame text must not survive, while safe
+// status/type/code fields do.
+func TestResponsesWebsocketTerminalErrorRebuildsSanitizedPayload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const secret = "ws-rebuild-secret-4217"
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(`{"error":{"type":"invalid_request","code":"offensive_policy","message":"blocked api_key=` + secret + `","param":null}}`),
+	}
+	payload, err := buildResponsesWebsocketErrorPayload(errMsg)
+	if err != nil {
+		t.Fatalf("buildResponsesWebsocketErrorPayload: %v", err)
+	}
+	raw := string(payload)
+	if strings.Contains(raw, secret) {
+		t.Fatalf("webSocket rebuilt error leaked raw upstream secret: [REDACTED:API key param] %s", raw)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("type = %q, want %q", got, wsEventTypeError)
+	}
+	if status := int(gjson.GetBytes(payload, "status").Int()); status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+	}
+	if code := gjson.GetBytes(payload, "error.code").String(); code != "offensive_policy" {
+		t.Fatalf("error.code = %q, want offensive_policy", code)
+	}
+	if !strings.Contains(raw, "[REDACTED]") {
+		t.Fatalf("rebuilt payload not redacted: %q", raw)
+	}
+}
+
+// TestResponsesWebsocketTerminalErrorUnknownFieldNotEchoed drives a valid
+// in-band error frame that carries an unknown secret field through
+// forwardResponsesWebsocket. The raw frame bytes/fields must never be echoed;
+// the terminal payload is rebuilt and preserves only safe protocol fields.
+func TestResponsesWebsocketTerminalErrorUnknownFieldNotEchoed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+
+		data := make(chan []byte, 1)
+		errCh := make(chan *interfaces.ErrorMessage)
+		data <- []byte(`{"type":"error","status":400,"error":{"secret":"ws-malformed-secret-8102","code":"x","message":"blocked"}}`)
+		close(data)
+		close(errCh)
+
+		_, _, _, _, errForward := h.forwardResponsesWebsocket(
+			ctx,
+			newResponsesWebsocketWriter(conn),
+			func(...interface{}) {},
+			data,
+			errCh,
+			newInMemoryWebsocketTimelineLog(),
+			"session-malformed",
+		)
+		if errForward != nil && !errors.Is(errForward, websocket.ErrCloseSent) {
+			serverErrCh <- errForward
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_, payload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read websocket message: %v", errRead)
+	}
+	raw := string(payload)
+	if strings.Contains(raw, "ws-malformed-secret-8102") {
+		t.Fatalf("error frame echoed raw unknown secret field: %q", raw)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("type = %q, want error; payload=%s", got, payload)
+	}
+	if code := gjson.GetBytes(payload, "error.code").String(); code != "x" {
+		t.Fatalf("error.code = %q, want x; payload=%s", code, payload)
 	}
 }
 
