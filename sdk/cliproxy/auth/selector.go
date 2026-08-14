@@ -707,6 +707,11 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 		s.cache.Set(cacheKey, authID)
 	}
+	// rebindAliases re-points every identifier in a removed alias group at a
+	// replacement auth so sibling-aliased requests keep the recovered binding.
+	rebindAliases := func(authID string, aliases []string) {
+		s.cache.SetAliases(authID, aliases...)
+	}
 	pickCached := func() *Auth {
 		if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 			for _, auth := range available {
@@ -715,7 +720,14 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 					return auth
 				}
 			}
-			s.cache.CompareAndDelete(cacheKey, cachedAuthID)
+			if aliases := s.cache.CompareAndDeleteAliases(cacheKey, cachedAuthID); len(aliases) > 0 {
+				// True stale binding: re-point every alias at the replacement auth.
+				replacement, errReplacement := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+				if errReplacement == nil {
+					rebindAliases(replacement.ID, aliases)
+					return replacement
+				}
+			}
 		}
 		if fallbackKey != "" {
 			if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
@@ -725,7 +737,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 						return auth
 					}
 				}
-				s.cache.CompareAndDelete(fallbackKey, cachedAuthID)
+				if aliases := s.cache.CompareAndDeleteAliases(fallbackKey, cachedAuthID); len(aliases) > 0 {
+					replacement, errReplacement := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+					if errReplacement == nil {
+						rebindAliases(replacement.ID, aliases)
+						return replacement
+					}
+				}
 			}
 		}
 		return nil

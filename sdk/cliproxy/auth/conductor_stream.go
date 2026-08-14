@@ -143,23 +143,11 @@ func newTTFTTimeoutError(timeout time.Duration) error {
 
 func (m *Manager) streamFirstChunkTimeout(opts cliproxyexecutor.Options) time.Duration {
 	if opts.Metadata != nil {
-		if d, ok := opts.Metadata["stream_first_chunk_timeout"].(time.Duration); ok {
-			if d <= 0 {
-				return 0
-			}
-			return d
-		}
 		if ms, ok := opts.Metadata["stream_first_chunk_timeout_ms"].(int); ok {
 			if ms <= 0 {
 				return 0
 			}
 			return time.Duration(ms) * time.Millisecond
-		}
-		if sec, ok := opts.Metadata["stream_first_chunk_timeout_seconds"].(int); ok {
-			if sec <= 0 {
-				return 0
-			}
-			return time.Duration(sec) * time.Second
 		}
 	}
 	if m == nil {
