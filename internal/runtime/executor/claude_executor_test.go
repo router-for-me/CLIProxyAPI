@@ -1968,6 +1968,132 @@ func TestClaudeExecutor_ExecuteStreamDirectPassthroughEmitsCompleteSSEEvents(t *
 	}
 }
 
+func TestClaudeExecutor_ExecuteStreamDirectPassthroughRejectsOverloadEvent(t *testing.T) {
+	upstreamStream := "event: error\n" +
+		`data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}` + "\n\n"
+
+	chunks := executeClaudeDirectStream(t, upstreamStream)
+	if len(chunks) != 1 {
+		t.Fatalf("chunk count = %d, want 1: %#v", len(chunks), chunks)
+	}
+	assertClaudeOverloadChunk(t, chunks[0])
+}
+
+func TestClaudeExecutor_ExecuteStreamDirectPassthroughRejectsMultilineOverloadEvent(t *testing.T) {
+	upstreamStream := "event: error\n" +
+		`data: {"type":"error",` + "\n" +
+		`data: "error":{"type":"overloaded_error","message":"Overloaded"}}` + "\n\n"
+
+	chunks := executeClaudeDirectStream(t, upstreamStream)
+	if len(chunks) != 1 {
+		t.Fatalf("chunk count = %d, want 1: %#v", len(chunks), chunks)
+	}
+	assertClaudeOverloadChunk(t, chunks[0])
+}
+
+func TestClaudeExecutor_ExecuteStreamDirectPassthroughPreservesNonOverloadError(t *testing.T) {
+	upstreamStream := "event: error\n" +
+		`data: {"type":"error","error":{"type":"invalid_request_error","message":"invalid input"}}` + "\n\n"
+
+	chunks := executeClaudeDirectStream(t, upstreamStream)
+	if len(chunks) != 1 {
+		t.Fatalf("chunk count = %d, want 1: %#v", len(chunks), chunks)
+	}
+	if chunks[0].Err != nil {
+		t.Fatalf("chunk error = %v, want nil", chunks[0].Err)
+	}
+	if got := string(chunks[0].Payload); got != upstreamStream {
+		t.Fatalf("payload = %q, want %q", got, upstreamStream)
+	}
+}
+
+func TestClaudeExecutor_ExecuteStreamDirectPassthroughPreservesFastOverloadStatus(t *testing.T) {
+	upstreamStream := "event: error\n" +
+		`data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}` + "\n\n"
+
+	chunks := executeClaudeDirectStreamWithPayload(t, upstreamStream, []byte(`{"model":"claude-opus-5","speed":"fast","messages":[{"role":"user","content":"hi"}]}`))
+	if len(chunks) != 1 {
+		t.Fatalf("chunk count = %d, want 1: %#v", len(chunks), chunks)
+	}
+	assertClaudeOverloadChunk(t, chunks[0])
+	var requestScoped cliproxyexecutor.RequestScopedError
+	if !errors.As(chunks[0].Err, &requestScoped) || !requestScoped.IsRequestScoped() {
+		t.Fatalf("chunk error = %T %v, want request-scoped", chunks[0].Err, chunks[0].Err)
+	}
+}
+
+func TestClaudeExecutor_ExecuteStreamDirectPassthroughSurfacesMidstreamOverload(t *testing.T) {
+	messageStart := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-3-5-sonnet-20241022"}}` + "\n\n"
+	upstreamStream := messageStart + "event: error\n" +
+		`data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}` + "\n\n"
+
+	chunks := executeClaudeDirectStream(t, upstreamStream)
+	if len(chunks) != 2 {
+		t.Fatalf("chunk count = %d, want 2: %#v", len(chunks), chunks)
+	}
+	if got := string(chunks[0].Payload); got != messageStart {
+		t.Fatalf("first payload = %q, want %q", got, messageStart)
+	}
+	if chunks[0].Err != nil {
+		t.Fatalf("first chunk error = %v, want nil", chunks[0].Err)
+	}
+	assertClaudeOverloadChunk(t, chunks[1])
+}
+
+func executeClaudeDirectStream(t *testing.T, upstreamStream string) []cliproxyexecutor.StreamChunk {
+	t.Helper()
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	return executeClaudeDirectStreamWithPayload(t, upstreamStream, payload)
+}
+
+func executeClaudeDirectStreamWithPayload(t *testing.T, upstreamStream string, payload []byte) []cliproxyexecutor.StreamChunk {
+	t.Helper()
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(upstreamStream)),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(transport))
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "sk-ant-oat-stream-test"},
+		Metadata:   claudeOAuthTestMetadata(),
+	}
+
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var chunks []cliproxyexecutor.StreamChunk
+	for chunk := range result.Chunks {
+		chunks = append(chunks, chunk)
+	}
+	return chunks
+}
+
+func assertClaudeOverloadChunk(t *testing.T, chunk cliproxyexecutor.StreamChunk) {
+	t.Helper()
+	if len(chunk.Payload) != 0 {
+		t.Fatalf("payload = %q, want none", chunk.Payload)
+	}
+	if chunk.Err == nil {
+		t.Fatal("chunk error = nil, want overload error")
+	}
+	assertStatusErr(t, chunk.Err, http.StatusServiceUnavailable)
+	if !strings.Contains(chunk.Err.Error(), "Overloaded") {
+		t.Fatalf("chunk error = %q, want Overloaded", chunk.Err)
+	}
+}
+
 // TestClaudeExecutor_ExecuteStreamDecodesCompressedSSE guards the dependency that
 // lets CPA advertise the real client's Accept-Encoding on streaming requests:
 // once compression is offered the upstream may compress the SSE body, so the

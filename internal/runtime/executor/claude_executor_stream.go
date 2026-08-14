@@ -281,7 +281,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return true
 		}
 		emitResponseError := func(errResponse error) {
-			errResponse = wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errResponse)
+			status := httpResp.StatusCode
+			if statusErr, ok := errResponse.(interface{ StatusCode() int }); ok && statusErr.StatusCode() > 0 {
+				status = statusErr.StatusCode()
+			}
+			errResponse = wrapClaudeFastRequestError(fastRequest, status, errResponse)
 			helps.RecordAPIResponseError(ctx, e.cfg, errResponse)
 			reporter.PublishFailure(ctx, errResponse)
 			select {
@@ -303,6 +307,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				}
 				cloned := bytes.Clone(event.Bytes())
 				event.Reset()
+				if eventErr := claudeDirectStreamOverloadError(cloned); eventErr != nil {
+					emitResponseError(eventErr)
+					return false
+				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
 					return true
@@ -413,6 +421,33 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		result = wrapClaudeThinkingReplayStream(ctx, result, replayScope)
 	}
 	return result, nil
+}
+
+func claudeDirectStreamOverloadError(event []byte) error {
+	var data bytes.Buffer
+	for _, line := range bytes.Split(event, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		if data.Len() > 0 {
+			data.WriteByte('\n')
+		}
+		data.Write(bytes.TrimSpace(line[len("data:"):]))
+	}
+	payload := data.Bytes()
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return nil
+	}
+	root := gjson.ParseBytes(payload)
+	if root.Get("type").String() != "error" || strings.TrimSpace(root.Get("error.type").String()) != "overloaded_error" {
+		return nil
+	}
+	message := strings.TrimSpace(root.Get("error.message").String())
+	if message == "" {
+		message = "overloaded_error"
+	}
+	return statusErr{code: http.StatusServiceUnavailable, msg: "claude executor: upstream returned error event: " + message}
 }
 
 func validateClaudeStreamingResponse(data []byte) error {
