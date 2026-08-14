@@ -111,15 +111,25 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			usageDetail.InputTokens = uint64(pt.Int())
 			usageDetail.OutputTokens = uint64(gjson.GetBytes(chunk.Payload, "usage.completion_tokens").Int())
 		}
-		// Extract tool calls from delta.
+		// Extract tool calls from delta. Tool call arguments arrive in
+		// fragments across multiple chunks: the first chunk carries the
+		// id and function name, subsequent chunks carry argument pieces
+		// with empty id/name. Merge fragments into the last tool call.
 		toolCallsResult := gjson.GetBytes(chunk.Payload, "choices.0.delta.tool_calls")
 		if toolCallsResult.IsArray() {
 			toolCallsResult.ForEach(func(_, tc gjson.Result) bool {
-				toolCalls = append(toolCalls, devinToolCall{
-					ID:            tc.Get("id").String(),
-					Name:          tc.Get("function.name").String(),
-					ArgumentsJSON: tc.Get("function.arguments").String(),
-				})
+				tcID := tc.Get("id").String()
+				tcName := tc.Get("function.name").String()
+				tcArgs := tc.Get("function.arguments").String()
+				if tcID != "" && tcName != "" {
+					toolCalls = append(toolCalls, devinToolCall{
+						ID:            tcID,
+						Name:          tcName,
+						ArgumentsJSON: tcArgs,
+					})
+				} else if len(toolCalls) > 0 {
+					toolCalls[len(toolCalls)-1].ArgumentsJSON += tcArgs
+				}
 				return true
 			})
 		}
