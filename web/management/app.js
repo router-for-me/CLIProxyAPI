@@ -23,6 +23,7 @@
   const THEME_KEY = "cliproxy:pulse:theme";
   const SVG_NS = "http" + "://www.w3.org/2000/svg";
   const PAGE_SIZE = 25;
+  const KEY_DETAIL_REFRESH_INTERVAL = 30000;
   const RATE_FIELDS = ["input-per-million", "output-per-million", "cache-read-per-million", "cache-write-per-million"];
   const BILLING_CUSTOM_VALUE = "__custom__";
   const QUOTA_PROVIDER_LABELS = Object.freeze({
@@ -123,6 +124,8 @@
   let oauthPollTimer = 0;
   let logsLiveTimer = 0;
   let viewEnterTimer = 0;
+  let keyDetailRefreshTimer = 0;
+  let keyDetailController = null;
   let motionFrame = 0;
   let motionPointerX = 0;
   let motionPointerY = 0;
@@ -351,7 +354,9 @@
       "live-throughput-chart", "live-throughput-success", "live-throughput-failed", "live-throughput-window",
       "key-ranking-body", "key-ranking-empty", "model-breakdown", "model-empty", "model-count", "key-total", "key-search",
       "key-status-filter", "key-sort", "keys-table-body", "keys-card-list", "keys-empty", "pagination-summary", "page-prev", "page-next",
-      "key-detail-panel", "key-detail-title", "key-detail-subtitle", "key-detail-status", "key-detail-close", "key-detail-stats", "key-detail-model-count", "key-detail-models", "key-detail-models-empty", "key-detail-daily", "key-detail-daily-empty",
+      "key-detail-panel", "key-detail-title", "key-detail-subtitle", "key-detail-status", "key-detail-close", "key-detail-stats",
+      "key-detail-throughput", "key-detail-throughput-chart", "key-detail-throughput-success", "key-detail-throughput-failed", "key-detail-throughput-window", "key-detail-throughput-updated", "key-detail-throughput-empty", "key-detail-throughput-empty-copy",
+      "key-detail-model-count", "key-detail-models", "key-detail-models-empty", "key-detail-daily", "key-detail-daily-empty",
       "billing-dirty", "billing-enabled", "retention-days", "pricing-currency", "pricing-version", "add-pricing-rule", "pricing-catalog-status", "pricing-rule-count", "pricing-rules-body",
       "pricing-empty", "billing-form-error", "settings-revision", "reset-billing", "save-billing", "profile-dialog", "profile-form",
       "profile-preview-alias", "profile-preview-key", "profile-preview-status", "profile-alias", "profile-id", "alias-count",
@@ -604,6 +609,13 @@
         setView(view, false);
       }
     });
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) {
+        cancelKeyDetailRefresh();
+      } else if (state.currentView === "keys" && state.keyDetail) {
+        refreshKeyDetailUsage({ showLoading: false, recentOnly: true });
+      }
+    });
 
     all("[data-close-dialog]").forEach(function (button) {
       button.addEventListener("click", function () {
@@ -775,6 +787,7 @@
     }
     window.clearTimeout(oauthPollTimer);
     window.clearTimeout(logsLiveTimer);
+    cancelKeyDetailRefresh();
     state.managementSecret = "";
     state.profiles = [];
     state.report = null;
@@ -796,6 +809,8 @@
     state.quotaWindowOffset = 0;
     state.quotaWindowMode = "week";
     state.keyUsageResettingAll = false;
+    state.keyDetail = null;
+    state.keyDetailLoading = false;
     state.quotaEpoch += 1;
     state.logCursor = "";
     state.logLiveError = false;
@@ -942,6 +957,9 @@
       state.lastUpdatedAt = new Date();
       populateDimensionFilters();
       renderAll();
+      if (state.currentView === "keys" && state.keyDetail) {
+        refreshKeyDetailUsage({ showLoading: false, recentOnly: false });
+      }
       if (!settings.initial) {
         toast("数据已刷新");
       }
@@ -1262,75 +1280,130 @@
     if (!dom.liveThroughputChart) {
       return;
     }
-    const report = state.report || normalizeReport({});
+    renderThroughput(state.report || normalizeReport({}), {
+      chart: dom.liveThroughputChart,
+      success: dom.liveThroughputSuccess,
+      failed: dom.liveThroughputFailed,
+      window: dom.liveThroughputWindow
+    });
+  }
+
+  function renderThroughput(report, nodes, options) {
+    if (!nodes || !nodes.chart) {
+      return;
+    }
+    const settings = Object.assign({ contextLabel: "实时窗口", maximumPlotHeight: 300 }, options || {});
     const bucketMinutes = 10;
+    const bucketMilliseconds = bucketMinutes * 60 * 1000;
     const requestedWindow = number(report.recent_window_minutes) || 200;
     const bucketCount = Math.max(1, Math.round(requestedWindow / bucketMinutes));
-    const now = new Date();
-    now.setSeconds(0, 0);
-    now.setMinutes(Math.floor(now.getMinutes() / bucketMinutes) * bucketMinutes);
+    const now = new Date(Math.floor(Date.now() / bucketMilliseconds) * bucketMilliseconds);
     const values = new Map();
     (report.recent || []).forEach(function (entry) {
       const start = new Date(entry.start_at);
       if (Number.isNaN(start.getTime())) {
         return;
       }
-      values.set(start.toISOString(), entry.summary || {});
+      values.set(start.getTime(), entry.summary || {});
     });
 
     const points = [];
     for (let index = bucketCount - 1; index >= 0; index -= 1) {
-      const start = new Date(now.getTime() - index * bucketMinutes * 60 * 1000);
-      const summary = values.get(start.toISOString()) || {};
+      const start = new Date(now.getTime() - index * bucketMilliseconds);
+      const summary = values.get(start.getTime()) || {};
       points.push({ start: start, summary: summary, success: number(summary.success), failed: number(summary.failed) });
     }
     const success = points.reduce(function (total, point) { return total + point.success; }, 0);
     const failed = points.reduce(function (total, point) { return total + point.failed; }, 0);
     const max = Math.max.apply(null, points.map(function (point) { return point.success + point.failed; }).concat([1]));
-    Array.from(dom.liveThroughputChart.classList).forEach(function (className) {
+    Array.from(nodes.chart.classList).forEach(function (className) {
       if (className.startsWith("live-plot-height-")) {
-        dom.liveThroughputChart.classList.remove(className);
+        nodes.chart.classList.remove(className);
       }
     });
-    dom.liveThroughputChart.classList.add("live-plot-height-" + liveThroughputPlotHeight(max));
+    nodes.chart.classList.add("live-plot-height-" + liveThroughputPlotHeight(max, settings.maximumPlotHeight));
+    const focusedBucket = nodes.chart.contains(document.activeElement) && document.activeElement.dataset
+      ? document.activeElement.dataset.bucketStart || ""
+      : "";
     const fragment = document.createDocumentFragment();
     points.forEach(function (point, index) {
       const total = point.success + point.failed;
       const startLabel = formatTenMinuteTime(point.start);
-      const end = new Date(point.start.getTime() + bucketMinutes * 60 * 1000);
+      const end = new Date(point.start.getTime() + bucketMilliseconds);
       const label = startLabel + "–" + formatTenMinuteTime(end);
       const bar = element("div", "live-throughput-bar");
       bar.tabIndex = 0;
-      bar.setAttribute("role", "img");
+      bar.dataset.bucketStart = String(point.start.getTime());
+      bar.setAttribute("role", "listitem");
       bar.setAttribute("aria-label", label + "：成功 " + formatInteger(point.success) + "，失败 " + formatInteger(point.failed));
       bar.title = label + "\n成功 " + formatInteger(point.success) + " · 失败 " + formatInteger(point.failed) + " · 共 " + formatInteger(total);
       const stack = element("span", "live-throughput-stack");
-      stack.appendChild(element("span", "live-throughput-success-bar " + liveThroughputFillClass(point.success, max) + (point.success > 0 ? " live-has-value" : "") + (point.failed > 0 ? "" : " live-top-segment")));
-      stack.appendChild(element("span", "live-throughput-failure-bar " + liveThroughputFillClass(point.failed, max) + (point.failed > 0 ? " live-has-value live-top-segment" : "")));
+      const fillClasses = liveThroughputFillClasses(point.success, point.failed, max);
+      stack.appendChild(element("span", "live-throughput-success-bar " + fillClasses.success + (point.success > 0 ? " live-has-value" : "") + (point.failed > 0 ? "" : " live-top-segment")));
+      stack.appendChild(element("span", "live-throughput-failure-bar " + fillClasses.failed + (point.failed > 0 ? " live-has-value live-top-segment" : "")));
       bar.appendChild(stack);
       if (index === 0 || index === Math.floor((points.length - 1) / 2) || index === points.length - 1) {
         bar.appendChild(element("span", "live-throughput-label", startLabel));
       }
       fragment.appendChild(bar);
     });
-    dom.liveThroughputChart.replaceChildren(fragment);
-    dom.liveThroughputSuccess.textContent = formatInteger(success);
-    dom.liveThroughputFailed.textContent = formatInteger(failed);
+    nodes.chart.replaceChildren(fragment);
+    if (focusedBucket) {
+      const replacement = Array.from(nodes.chart.children).find(function (bar) { return bar.dataset.bucketStart === focusedBucket; });
+      if (replacement) {
+        replacement.focus({ preventScroll: true });
+      }
+    }
+    nodes.chart.setAttribute("aria-label", settings.contextLabel + "：成功 " + formatInteger(success) + "，失败 " + formatInteger(failed));
+    if (nodes.success) {
+      nodes.success.textContent = formatInteger(success);
+    }
+    if (nodes.failed) {
+      nodes.failed.textContent = formatInteger(failed);
+    }
+    const summaryNode = nodes.success && nodes.success.closest(".live-throughput-summary");
+    if (summaryNode) {
+      summaryNode.setAttribute("aria-label", settings.contextLabel + "汇总：成功 " + formatInteger(success) + "，失败 " + formatInteger(failed));
+    }
     const hours = Math.floor(requestedWindow / 60);
     const minutes = requestedWindow % 60;
-    dom.liveThroughputWindow.textContent = "最近 " + hours + " 小时" + (minutes ? " " + minutes + " 分" : "");
+    const windowLabel = "最近 " + hours + " 小时" + (minutes ? " " + minutes + " 分" : "");
+    if (nodes.window) {
+      nodes.window.textContent = windowLabel;
+    }
+    const hasUsage = success + failed > 0;
+    if (nodes.empty) {
+      nodes.empty.hidden = hasUsage;
+      nodes.chart.hidden = !hasUsage;
+    } else {
+      nodes.chart.hidden = false;
+    }
+    return { success: success, failed: failed, windowLabel: windowLabel };
   }
 
-  function liveThroughputPlotHeight(maxValue) {
+  function liveThroughputPlotHeight(maxValue, maximumValue) {
     const minimum = 120;
-    const maximum = 300;
+    const maximum = Math.max(minimum, number(maximumValue) || 300);
     const scaled = 80 + Math.sqrt(Math.max(0, number(maxValue))) * 12;
     return Math.max(minimum, Math.min(maximum, Math.round(scaled / 20) * 20));
   }
 
-  function liveThroughputFillClass(value, maxValue) {
-    const percent = maxValue > 0 ? number(value) / maxValue * 100 : 0;
-    return quotaScaleClass("live-fill", percent);
+  function liveThroughputFillClasses(successValue, failedValue, maxValue) {
+    let successStep = successValue > 0 ? Math.max(5, quotaScaleStep(number(successValue) / maxValue * 100)) : 0;
+    let failedStep = failedValue > 0 ? Math.max(5, quotaScaleStep(number(failedValue) / maxValue * 100)) : 0;
+    while (successStep + failedStep > 100) {
+      if (successStep >= failedStep && successStep > 5) {
+        successStep -= 5;
+      } else if (failedStep > 5) {
+        failedStep -= 5;
+      } else {
+        break;
+      }
+    }
+    return {
+      success: "live-fill-" + successStep,
+      failed: "live-fill-" + failedStep
+    };
   }
 
   function formatTenMinuteTime(value) {
@@ -1618,6 +1691,7 @@
     const identity = element("td");
     identity.appendChild(element("span", "table-primary", item.alias || (item.historical ? "历史 Key" : "未命名 Key")));
     identity.appendChild(element("code", "table-subline", (item.maskedKey || "无脱敏信息") + " · " + item.id));
+    identity.appendChild(createKeyCreatedAt(item.profile, true));
     row.appendChild(identity);
     const statusCell = element("td");
     statusCell.appendChild(keyStatusChip(item));
@@ -1645,6 +1719,7 @@
     appendDefinition(list, "请求", formatInteger(item.summary.attempts));
     appendDefinition(list, "Token", formatCompact(number((item.summary.tokens || {}).total_tokens)));
     appendDefinition(list, "预估费用", formatSummaryCost(item.summary, state.baseReport && state.baseReport.currency));
+    appendDefinition(list, "创建时间", createKeyCreatedAt(item.profile, false));
     appendDefinition(list, "最近使用", item.summary.last_used_at ? formatDateTime(item.summary.last_used_at) : "从未");
     card.appendChild(list);
     const footer = element("footer");
@@ -1693,12 +1768,12 @@
     return actions;
   }
 
-  function buildKeyDetailQuery(keyID) {
+  function buildKeyDetailQuery(keyID, includeDates) {
     const params = new URLSearchParams();
-    if (state.filters.from) {
+    if (includeDates !== false && state.filters.from) {
       params.set("from", state.filters.from);
     }
-    if (state.filters.to) {
+    if (includeDates !== false && state.filters.to) {
       params.set("to", state.filters.to);
     }
     params.set("key_id", keyID);
@@ -1718,43 +1793,125 @@
     if (!item || !item.id) {
       return;
     }
-    const request = ++state.keyDetailRequest;
+    cancelKeyDetailRefresh();
     state.keyDetail = {
       item: {
         id: item.id,
         alias: item.alias || "",
         maskedKey: item.maskedKey || "",
         historical: Boolean(item.historical),
-        profile: item.profile ? { disabled: Boolean(item.profile.disabled), effective: Boolean(item.profile.effective), issue: item.profile.issue || "" } : null
+        profile: item.profile ? { disabled: Boolean(item.profile.disabled), effective: Boolean(item.profile.effective), issue: item.profile.issue || "", created_at: item.profile.created_at || "" } : null
       },
-      report: null
+      report: null,
+      recentReport: null
     };
     state.keyDetailLoading = true;
     renderKeyDetails();
     dom.keyDetailPanel.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "nearest" });
+    await refreshKeyDetailUsage({ showLoading: true });
+  }
+
+  function clearKeyDetailRefresh() {
+    window.clearTimeout(keyDetailRefreshTimer);
+    keyDetailRefreshTimer = 0;
+  }
+
+  function cancelKeyDetailRefresh() {
+    clearKeyDetailRefresh();
+    if (keyDetailController) {
+      keyDetailController.abort();
+      keyDetailController = null;
+    }
+    state.keyDetailRequest += 1;
+    state.keyDetailLoading = false;
+  }
+
+  function scheduleKeyDetailRefresh() {
+    clearKeyDetailRefresh();
+    if (!state.managementSecret || document.hidden || state.currentView !== "keys" || !state.keyDetail || state.keyDetail.item.historical) {
+      return;
+    }
+    keyDetailRefreshTimer = window.setTimeout(function () {
+      refreshKeyDetailUsage({ showLoading: false, recentOnly: true });
+    }, KEY_DETAIL_REFRESH_INTERVAL);
+  }
+
+  async function refreshKeyDetailUsage(options) {
+    const settings = Object.assign({ showLoading: false, recentOnly: false }, options || {});
+    const detail = state.keyDetail;
+    if (!detail || !detail.item || !detail.item.id) {
+      return;
+    }
+    clearKeyDetailRefresh();
+    if (keyDetailController) {
+      keyDetailController.abort();
+    }
+    const controller = new AbortController();
+    keyDetailController = controller;
+    const itemID = detail.item.id;
+    const request = ++state.keyDetailRequest;
+    if (settings.showLoading && !detail.report) {
+      state.keyDetailLoading = true;
+      delete detail.error;
+      renderKeyDetails();
+    }
     try {
-      const report = await apiRequest(API.usage + buildKeyDetailQuery(item.id), { method: "GET" });
-      if (request !== state.keyDetailRequest) {
+      const recentPath = API.usage + buildKeyDetailQuery(itemID, false);
+      let report = detail.report;
+      let recentReport = null;
+      if (settings.recentOnly && report) {
+        recentReport = await apiRequest(recentPath, { method: "GET", signal: controller.signal });
+      } else {
+        const reportPath = API.usage + buildKeyDetailQuery(itemID, true);
+        const reportPromise = apiRequest(reportPath, { method: "GET", signal: controller.signal });
+        const recentPromise = reportPath === recentPath
+          ? reportPromise
+          : apiRequest(recentPath, { method: "GET", signal: controller.signal });
+        const results = await Promise.all([reportPromise, recentPromise]);
+        report = results[0];
+        recentReport = results[1];
+      }
+      if (request !== state.keyDetailRequest || !state.keyDetail || state.keyDetail.item.id !== itemID) {
         return;
       }
-      state.keyDetail.report = normalizeReport(report);
+      if (!settings.recentOnly || !detail.report) {
+        detail.report = normalizeReport(report);
+      }
+      detail.recentReport = normalizeReport(recentReport);
+      detail.refreshedAt = new Date();
+      detail.refreshError = "";
+      delete detail.error;
     } catch (error) {
-      if (request !== state.keyDetailRequest) {
+      if (request !== state.keyDetailRequest || !state.keyDetail || state.keyDetail.item.id !== itemID) {
         return;
       }
-      state.keyDetail.error = apiErrorMessage(error);
+      if (error.name === "AbortError") {
+        return;
+      }
+      if (error.status === 401 || error.status === 403) {
+        signOut(apiErrorMessage(error));
+        return;
+      }
+      if (!detail.report) {
+        detail.error = apiErrorMessage(error);
+      } else {
+        detail.refreshError = apiErrorMessage(error);
+      }
     } finally {
-      if (request === state.keyDetailRequest) {
+      if (request === state.keyDetailRequest && state.keyDetail && state.keyDetail.item.id === itemID) {
+        if (keyDetailController === controller) {
+          keyDetailController = null;
+        }
         state.keyDetailLoading = false;
         renderKeyDetails();
+        scheduleKeyDetailRefresh();
       }
     }
   }
 
   function closeKeyDetails() {
-    state.keyDetailRequest += 1;
+    cancelKeyDetailRefresh();
     state.keyDetail = null;
-    state.keyDetailLoading = false;
     renderKeyDetails();
   }
 
@@ -1765,11 +1922,18 @@
     const detail = state.keyDetail;
     dom.keyDetailPanel.hidden = !detail;
     if (!detail) {
+      if (dom.keyDetailThroughput) {
+        dom.keyDetailThroughput.hidden = true;
+      }
       return;
     }
     const item = detail.item;
     dom.keyDetailTitle.textContent = (item.alias || (item.historical ? "历史 Key" : "未命名 Key")) + " · 使用详情";
-    dom.keyDetailSubtitle.textContent = (item.maskedKey || "脱敏信息不可用") + " · " + item.id;
+    dom.keyDetailSubtitle.replaceChildren();
+    dom.keyDetailSubtitle.append(
+      document.createTextNode((item.maskedKey || "脱敏信息不可用") + " · " + item.id + " · "),
+      createKeyCreatedAt(item.profile, true)
+    );
     dom.keyDetailStatus.replaceWith(keyStatusChip({ profile: item.profile, historical: item.historical }));
     dom.keyDetailStatus = dom.keyDetailPanel.querySelector(".status-chip");
     dom.keyDetailStats.replaceChildren();
@@ -1778,6 +1942,7 @@
     dom.keyDetailModelsEmpty.hidden = true;
     dom.keyDetailDailyEmpty.hidden = true;
     dom.keyDetailModelCount.textContent = "";
+    dom.keyDetailThroughput.hidden = true;
 
     if (state.keyDetailLoading) {
       dom.keyDetailStats.appendChild(createKeyDetailLoading("正在读取这个 Key 的历史用量…"));
@@ -1796,7 +1961,7 @@
       ["成功率", attempts ? formatPercent(number(summary.success) / attempts) : "—", attempts ? "按最终请求计算" : "等待调用"],
       ["总 Token", formatCompact(number((summary.tokens || {}).total_tokens)), "按计费口径拆分", detailTokens],
       ["预估费用", formatSummaryCost(summary, report.currency), summary.unpriced_attempts ? formatInteger(number(summary.unpriced_attempts)) + " 次未完整计价" : "按规则估算"],
-      ["平均延迟", number(summary.average_latency_ms) ? formatDuration(number(summary.average_latency_ms)) : "—", summary.last_used_at ? "最近 " + formatDateTime(summary.last_used_at) : "从未使用"]
+      ["平均延迟", attempts && number(summary.average_latency_ms) ? formatDuration(number(summary.average_latency_ms)) : "—", attempts && summary.last_used_at ? "最近 " + formatDateTime(summary.last_used_at) : "从未使用"]
     ];
     statValues.forEach(function (entry) {
       const card = element("article", "key-detail-stat" + (entry[3] ? " is-token-summary" : ""));
@@ -1819,6 +1984,8 @@
       }
       dom.keyDetailStats.appendChild(card);
     });
+
+    renderKeyDetailThroughput(detail.recentReport || report, detail);
 
     const models = (report.models || []).slice().sort(function (left, right) {
       return number((right.summary || {}).attempts) - number((left.summary || {}).attempts);
@@ -1859,6 +2026,39 @@
       row.appendChild(element("strong", "key-detail-day-value", formatInteger(attemptsForDay)));
       dom.keyDetailDaily.appendChild(row);
     });
+  }
+
+  function renderKeyDetailThroughput(report, detail) {
+    if (!dom.keyDetailThroughput || !dom.keyDetailThroughputChart) {
+      return;
+    }
+    dom.keyDetailThroughput.hidden = false;
+    dom.keyDetailThroughputEmptyCopy.textContent = detail.item.historical
+      ? "这个历史 Key 不会再产生新调用；这里只展示服务本次运行期间仍保留的实时窗口。"
+      : "新的成功或失败请求会按 10 分钟自动汇总到这里。";
+    renderThroughput(report, {
+      chart: dom.keyDetailThroughputChart,
+      success: dom.keyDetailThroughputSuccess,
+      failed: dom.keyDetailThroughputFailed,
+      window: dom.keyDetailThroughputWindow,
+      empty: dom.keyDetailThroughputEmpty
+    }, {
+      contextLabel: "当前 Key 实时窗口",
+      maximumPlotHeight: 220
+    });
+    const refreshError = detail.refreshError || "";
+    dom.keyDetailThroughputUpdated.classList.toggle("is-error", Boolean(refreshError));
+    if (refreshError) {
+      dom.keyDetailThroughputUpdated.textContent = "自动刷新失败，将在 30 秒后重试";
+      dom.keyDetailThroughputUpdated.title = refreshError;
+    } else if (detail.item.historical) {
+      dom.keyDetailThroughputUpdated.textContent = "历史 Key · 实时窗口不会继续产生新调用";
+      dom.keyDetailThroughputUpdated.removeAttribute("title");
+    } else {
+      const refreshedAt = detail.refreshedAt ? formatDateTime(detail.refreshedAt) : "刚刚";
+      dom.keyDetailThroughputUpdated.textContent = "更新于 " + refreshedAt + " · 每 30 秒刷新 · 重启后重新统计";
+      dom.keyDetailThroughputUpdated.removeAttribute("title");
+    }
   }
 
   function tokenBreakdown(tokens, provider) {
@@ -1907,9 +2107,32 @@
 
   function appendDefinition(list, term, description) {
     const wrapper = element("div");
+    const value = element("dd");
     wrapper.appendChild(element("dt", "", term));
-    wrapper.appendChild(element("dd", "", description));
+    if (description && description.nodeType) {
+      value.appendChild(description);
+    } else {
+      value.textContent = description;
+    }
+    wrapper.appendChild(value);
     list.appendChild(wrapper);
+  }
+
+  function createKeyCreatedAt(profile, includeLabel) {
+    const node = element("time", "key-created-at");
+    const value = profile && profile.created_at;
+    const createdAt = value ? new Date(value) : null;
+    if (createdAt && Number.isFinite(createdAt.getTime())) {
+      const formatted = formatFullDateTime(createdAt);
+      node.dateTime = createdAt.toISOString();
+      node.textContent = (includeLabel ? "创建于 " : "") + formatted;
+      node.title = "创建时间：" + formatted;
+      return node;
+    }
+    node.classList.add("is-unknown");
+    node.textContent = "创建时间未记录";
+    node.title = "此 Key 创建于升级前，旧版本未保存创建时间";
+    return node;
   }
 
   function keyStatusChip(item) {
@@ -5359,6 +5582,11 @@
     window.clearTimeout(logsLiveTimer);
     const applyView = function () {
       state.currentView = view;
+      if (view !== "keys") {
+        cancelKeyDetailRefresh();
+      } else if (state.keyDetail && !document.hidden) {
+        refreshKeyDetailUsage({ showLoading: false, recentOnly: true });
+      }
       all("[data-view-panel]").forEach(function (panel) { panel.hidden = panel.dataset.viewPanel !== view; });
       all("[data-view]").forEach(function (button) {
         const active = button.dataset.view === view;
@@ -5516,6 +5744,14 @@
       return "—";
     }
     return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+  }
+
+  function formatFullDateTime(value) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (!Number.isFinite(date.getTime())) {
+      return "—";
+    }
+    return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
   }
 
   function shortDay(day) {

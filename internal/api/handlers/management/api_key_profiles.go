@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -31,6 +32,7 @@ type apiKeyProfileResponse struct {
 	MaskedKey string `json:"masked_key"`
 	Effective bool   `json:"effective"`
 	Issue     string `json:"issue,omitempty"`
+	CreatedAt string `json:"created_at"`
 }
 
 type apiKeyProfileInput struct {
@@ -77,6 +79,7 @@ func apiKeyProfilesLocked(cfg *config.Config) []apiKeyProfileResponse {
 			MaskedKey: maskClientAPIKey(key),
 			Effective: effective,
 			Issue:     issue,
+			CreatedAt: metadata.CreatedAt,
 		})
 	}
 	return profiles
@@ -112,7 +115,7 @@ func (h *Handler) PutAPIKeyProfiles(c *gin.Context) {
 			return
 		}
 
-		metadata := config.ClientAPIKeyMetadata{}
+		metadata := config.ClientAPIKeyMetadata{CreatedAt: h.cfg.APIKeyMetadata[currentKey].CreatedAt}
 		if input.ID != nil {
 			metadata.ID = strings.TrimSpace(*input.ID)
 		}
@@ -129,6 +132,16 @@ func (h *Handler) PutAPIKeyProfiles(c *gin.Context) {
 		}
 		if !clientAPIKeyMetadataEmpty(metadata) {
 			next[key] = metadata
+		}
+	}
+	for _, rawKey := range h.cfg.APIKeys {
+		key := clientAPIKeyMetadataKey(rawKey)
+		if _, exists := next[key]; exists {
+			continue
+		}
+		createdAt := h.cfg.APIKeyMetadata[key].CreatedAt
+		if createdAt != "" {
+			next[key] = config.ClientAPIKeyMetadata{CreatedAt: createdAt}
 		}
 	}
 
@@ -203,7 +216,15 @@ func (h *Handler) DeleteAPIKeyProfile(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "API key profile changed; refresh and retry"})
 		return
 	}
-	delete(h.cfg.APIKeyMetadata, key)
+	metadata := h.cfg.APIKeyMetadata[key]
+	metadata.ID = ""
+	metadata.Alias = ""
+	metadata.Disabled = false
+	if clientAPIKeyMetadataEmpty(metadata) {
+		delete(h.cfg.APIKeyMetadata, key)
+	} else {
+		h.cfg.APIKeyMetadata[key] = metadata
+	}
 	h.persistLocked(c)
 }
 
@@ -267,6 +288,12 @@ func validateClientAPIKeyMetadata(keys []string, metadata map[string]config.Clie
 	for _, rawKey := range keys {
 		key := clientAPIKeyMetadataKey(rawKey)
 		entry := metadata[key]
+		if createdAt := strings.TrimSpace(entry.CreatedAt); createdAt != "" {
+			parsed, errParse := time.Parse(time.RFC3339, createdAt)
+			if errParse != nil || parsed.Location() != time.UTC {
+				return fmt.Errorf("invalid created_at for client API key metadata")
+			}
+		}
 		explicitID := strings.TrimSpace(entry.ID)
 		alias := strings.TrimSpace(entry.Alias)
 		if strings.IndexFunc(alias, unicode.IsControl) >= 0 {
@@ -314,7 +341,40 @@ func cloneClientAPIKeyMetadata(source map[string]config.ClientAPIKeyMetadata) ma
 }
 
 func clientAPIKeyMetadataEmpty(metadata config.ClientAPIKeyMetadata) bool {
-	return strings.TrimSpace(metadata.ID) == "" && strings.TrimSpace(metadata.Alias) == "" && !metadata.Disabled
+	return strings.TrimSpace(metadata.ID) == "" && strings.TrimSpace(metadata.Alias) == "" && !metadata.Disabled && metadata.CreatedAt == ""
+}
+
+func newClientAPIKeyCreatedAt() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}
+
+func stampNewClientAPIKeys(metadata map[string]config.ClientAPIKeyMetadata, oldKeys, newKeys []string) {
+	existing := make(map[string]struct{}, len(oldKeys))
+	for _, rawKey := range oldKeys {
+		key := clientAPIKeyMetadataKey(rawKey)
+		if key != "" {
+			existing[key] = struct{}{}
+		}
+	}
+	createdAt := ""
+	for _, rawKey := range newKeys {
+		key := clientAPIKeyMetadataKey(rawKey)
+		if key == "" {
+			continue
+		}
+		if _, exists := existing[key]; exists {
+			continue
+		}
+		entry := metadata[key]
+		if entry.CreatedAt != "" {
+			continue
+		}
+		if createdAt == "" {
+			createdAt = newClientAPIKeyCreatedAt()
+		}
+		entry.CreatedAt = createdAt
+		metadata[key] = entry
+	}
 }
 
 func pruneClientAPIKeyMetadata(keys []string, metadata map[string]config.ClientAPIKeyMetadata) {

@@ -107,6 +107,7 @@ api-key-metadata:
   " key-a ":
     id: " tenant "
     alias: " Team A "
+    created-at: "2026-08-12T03:04:05Z"
   key-b:
     id: "tenant"
     disabled: true
@@ -147,7 +148,7 @@ api-key-metadata:
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := test.parse(t)
-			if got := cfg.APIKeyMetadata["key-a"]; got.ID != "tenant" || got.Alias != "Team A" {
+			if got := cfg.APIKeyMetadata["key-a"]; got.ID != "tenant" || got.Alias != "Team A" || got.CreatedAt != "2026-08-12T03:04:05Z" {
 				t.Fatalf("key-a metadata = %+v, want normalized values", got)
 			}
 			if got := cfg.APIKeyMetadata["key-b"]; got.ID != sdkaccess.FallbackClientKeyID("key-b") || !got.Disabled {

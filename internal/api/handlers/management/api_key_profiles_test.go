@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
@@ -14,10 +15,11 @@ import (
 )
 
 func TestGetAPIKeyProfilesReturnsMaskedMergedProfiles(t *testing.T) {
+	const createdAt = "2026-08-12T03:04:05Z"
 	h := &Handler{cfg: testClientAPIKeyConfig(
 		[]string{"abcdefghijk", "short"},
 		map[string]config.ClientAPIKeyMetadata{
-			"abcdefghijk": {ID: "team-a", Alias: "Production", Disabled: true},
+			"abcdefghijk": {ID: "team-a", Alias: "Production", Disabled: true, CreatedAt: createdAt},
 		},
 	)}
 	rec := httptest.NewRecorder()
@@ -42,12 +44,69 @@ func TestGetAPIKeyProfilesReturnsMaskedMergedProfiles(t *testing.T) {
 		t.Fatalf("profiles len = %d, want 2", len(response.Profiles))
 	}
 	first := response.Profiles[0]
-	if first.Index != 0 || first.ID != "team-a" || first.Alias != "Production" || !first.Disabled || first.MaskedKey != "abcd***hijk" {
+	if first.Index != 0 || first.ID != "team-a" || first.Alias != "Production" || !first.Disabled || first.MaskedKey != "abcd***hijk" || first.CreatedAt != createdAt {
 		t.Fatalf("first profile = %#v", first)
 	}
 	second := response.Profiles[1]
 	if second.Index != 1 || second.ID != sdkaccess.FallbackClientKeyID("short") || second.Alias != "" || second.Disabled || second.MaskedKey != "*****" {
 		t.Fatalf("second profile = %#v", second)
+	}
+}
+
+func TestAPIKeyCreationTimeLifecycle(t *testing.T) {
+	h := &Handler{
+		cfg:            testClientAPIKeyConfig(nil, nil),
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	appendRec := httptest.NewRecorder()
+	appendContext, _ := gin.CreateTestContext(appendRec)
+	appendContext.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/api-keys", strings.NewReader(`{"old":null,"new":"created-key"}`))
+	appendContext.Request.Header.Set("Content-Type", "application/json")
+	h.PatchAPIKeys(appendContext)
+	if appendRec.Code != http.StatusOK {
+		t.Fatalf("append status = %d, want %d; body=%s", appendRec.Code, http.StatusOK, appendRec.Body.String())
+	}
+	createdAt := h.cfg.APIKeyMetadata["created-key"].CreatedAt
+	parsed, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil || parsed.Location() != time.UTC {
+		t.Fatalf("created_at = %q, want RFC3339 UTC; parse error=%v", createdAt, err)
+	}
+
+	rotateRec := httptest.NewRecorder()
+	rotateContext, _ := gin.CreateTestContext(rotateRec)
+	rotateContext.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/api-keys", strings.NewReader(`{"index":0,"value":"rotated-key"}`))
+	rotateContext.Request.Header.Set("Content-Type", "application/json")
+	h.PatchAPIKeys(rotateContext)
+	if rotateRec.Code != http.StatusOK {
+		t.Fatalf("rotate status = %d, want %d; body=%s", rotateRec.Code, http.StatusOK, rotateRec.Body.String())
+	}
+	if got := h.cfg.APIKeyMetadata["rotated-key"].CreatedAt; got != createdAt {
+		t.Fatalf("rotated created_at = %q, want preserved %q", got, createdAt)
+	}
+
+	profileRec := httptest.NewRecorder()
+	profileContext, _ := gin.CreateTestContext(profileRec)
+	profileContext.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/api-key-profiles", strings.NewReader(`{"index":0,"alias":"Rotated","created_at":"1999-01-01T00:00:00Z"}`))
+	profileContext.Request.Header.Set("Content-Type", "application/json")
+	h.PatchAPIKeyProfile(profileContext)
+	if profileRec.Code != http.StatusOK {
+		t.Fatalf("profile patch status = %d, want %d; body=%s", profileRec.Code, http.StatusOK, profileRec.Body.String())
+	}
+	if got := h.cfg.APIKeyMetadata["rotated-key"].CreatedAt; got != createdAt {
+		t.Fatalf("profile patch changed created_at to %q, want %q", got, createdAt)
+	}
+
+	deleteRec := httptest.NewRecorder()
+	deleteContext, _ := gin.CreateTestContext(deleteRec)
+	deleteContext.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/api-key-profiles?index=0", nil)
+	h.DeleteAPIKeyProfile(deleteContext)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("profile delete status = %d, want %d; body=%s", deleteRec.Code, http.StatusOK, deleteRec.Body.String())
+	}
+	metadata := h.cfg.APIKeyMetadata["rotated-key"]
+	if metadata.CreatedAt != createdAt || metadata.ID != "" || metadata.Alias != "" || metadata.Disabled {
+		t.Fatalf("profile delete metadata = %#v, want only preserved created_at", metadata)
 	}
 }
 
@@ -240,6 +299,37 @@ func TestPutAndDeleteAPIKeyProfilesDoNotChangeAPIKeys(t *testing.T) {
 	}
 }
 
+func TestPutAPIKeyProfilesPreservesCreationTimes(t *testing.T) {
+	const firstCreatedAt = "2026-08-01T02:03:04Z"
+	const secondCreatedAt = "2026-08-02T03:04:05Z"
+	h := &Handler{
+		cfg: testClientAPIKeyConfig(
+			[]string{"key-one", "key-two"},
+			map[string]config.ClientAPIKeyMetadata{
+				"key-one": {Alias: "Old", CreatedAt: firstCreatedAt},
+				"key-two": {CreatedAt: secondCreatedAt},
+			},
+		),
+		configFilePath: writeTestConfigFile(t),
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/api-key-profiles", strings.NewReader(`[{"index":0,"alias":"New","created_at":"1999-01-01T00:00:00Z"}]`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PutAPIKeyProfiles(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := h.cfg.APIKeyMetadata["key-one"]; got.Alias != "New" || got.CreatedAt != firstCreatedAt {
+		t.Fatalf("first metadata = %#v, want updated alias and preserved created_at", got)
+	}
+	if got := h.cfg.APIKeyMetadata["key-two"]; got.CreatedAt != secondCreatedAt || got.ID != "" || got.Alias != "" || got.Disabled {
+		t.Fatalf("second metadata = %#v, want only preserved created_at", got)
+	}
+}
+
 func TestAPIKeyCRUDMigratesAndPrunesMetadata(t *testing.T) {
 	h := &Handler{
 		cfg: testClientAPIKeyConfig(
@@ -320,8 +410,12 @@ func TestAPIKeyRotationPreservesLegacyFallbackIdentity(t *testing.T) {
 
 func TestPutAPIKeysPreservesIdentityForSameLengthRotation(t *testing.T) {
 	oldKey := "legacy-key"
+	const createdAt = "2026-08-01T02:03:04Z"
 	h := &Handler{
-		cfg:            testClientAPIKeyConfig([]string{oldKey}, nil),
+		cfg: testClientAPIKeyConfig(
+			[]string{oldKey},
+			map[string]config.ClientAPIKeyMetadata{oldKey: {CreatedAt: createdAt}},
+		),
 		configFilePath: writeTestConfigFile(t),
 	}
 	rec := httptest.NewRecorder()
@@ -336,6 +430,37 @@ func TestPutAPIKeysPreservesIdentityForSameLengthRotation(t *testing.T) {
 	}
 	if got := h.cfg.APIKeyMetadata["rotated-key"].ID; got != sdkaccess.FallbackClientKeyID(oldKey) {
 		t.Fatalf("rotated stable ID = %q, want %q", got, sdkaccess.FallbackClientKeyID(oldKey))
+	}
+	if got := h.cfg.APIKeyMetadata["rotated-key"].CreatedAt; got != createdAt {
+		t.Fatalf("rotated created_at = %q, want %q", got, createdAt)
+	}
+}
+
+func TestPutAPIKeysStampsOnlyTrulyNewKeys(t *testing.T) {
+	const createdAt = "2026-08-01T02:03:04Z"
+	h := &Handler{
+		cfg: testClientAPIKeyConfig(
+			[]string{"existing-key"},
+			map[string]config.ClientAPIKeyMetadata{"existing-key": {CreatedAt: createdAt}},
+		),
+		configFilePath: writeTestConfigFile(t),
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/api-keys", strings.NewReader(`["existing-key","new-key"]`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PutAPIKeys(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := h.cfg.APIKeyMetadata["existing-key"].CreatedAt; got != createdAt {
+		t.Fatalf("existing created_at = %q, want %q", got, createdAt)
+	}
+	newCreatedAt := h.cfg.APIKeyMetadata["new-key"].CreatedAt
+	if _, err := time.Parse(time.RFC3339, newCreatedAt); err != nil {
+		t.Fatalf("new created_at = %q, want RFC3339: %v", newCreatedAt, err)
 	}
 }
 

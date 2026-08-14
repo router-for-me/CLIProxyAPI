@@ -197,7 +197,7 @@
               <div><p class="eyebrow">即时流量 · 自动聚合</p><h2 id="live-throughput-title">以 10 分钟为粒度的吞吐</h2><p class="panel-subtitle">最近一段实时窗口的成功与失败调用，悬停柱状图可查看每个时间段。</p></div>
               <div class="live-throughput-summary" aria-label="实时窗口汇总"><span class="live-success-dot">成功 <strong id="live-throughput-success">0</strong></span><span class="live-failure-dot">失败 <strong id="live-throughput-failed">0</strong></span></div>
             </div>
-            <div id="live-throughput-chart" class="live-throughput-chart" role="img" aria-label="每十分钟调用吞吐图"></div>
+            <div id="live-throughput-chart" class="live-throughput-chart" role="list" aria-label="每十分钟调用吞吐图"></div>
             <div class="live-throughput-foot"><span id="live-throughput-window">最近 3 小时 20 分</span><span>按浏览器本地时间显示；实时窗口仅保留聚合数据，服务重启后从新的调用开始统计。</span></div>
           </section>
 
@@ -286,6 +286,15 @@
               <div class="key-detail-actions"><span id="key-detail-status" class="status-chip">历史数据</span><button id="key-detail-close" class="icon-button" type="button" aria-label="关闭 Key 详情">×</button></div>
             </div>
             <div id="key-detail-stats" class="key-detail-stats" aria-live="polite"></div>
+            <section id="key-detail-throughput" class="key-detail-throughput" aria-labelledby="key-detail-throughput-title" hidden>
+              <div class="key-detail-throughput-header">
+                <div><p class="eyebrow">即时流量 · 当前 Key</p><h4 id="key-detail-throughput-title">以 10 分钟为粒度的吞吐</h4><p class="panel-subtitle">独立统计这个 Key 最近实时窗口内的最终成功与失败请求，悬停柱状图可查看每个时间段。</p></div>
+                <div class="live-throughput-summary" aria-label="当前 Key 实时窗口汇总"><span class="live-success-dot">成功 <strong id="key-detail-throughput-success">0</strong></span><span class="live-failure-dot">失败 <strong id="key-detail-throughput-failed">0</strong></span></div>
+              </div>
+              <div id="key-detail-throughput-chart" class="live-throughput-chart key-detail-throughput-chart" role="list" aria-label="当前 Key 每十分钟调用吞吐图"></div>
+              <div id="key-detail-throughput-empty" class="key-detail-throughput-empty" role="status" hidden><strong>最近窗口暂无调用</strong><span id="key-detail-throughput-empty-copy">新的成功或失败请求会按 10 分钟自动汇总到这里。</span></div>
+              <div class="live-throughput-foot"><span id="key-detail-throughput-window">最近 3 小时 20 分</span><span id="key-detail-throughput-updated">每 30 秒自动刷新 · 服务重启后重新统计</span></div>
+            </section>
             <div class="key-detail-grid">
               <section class="key-detail-section" aria-labelledby="key-detail-models-title"><div class="key-detail-section-heading"><h4 id="key-detail-models-title">模型与服务层级</h4><span id="key-detail-model-count" class="muted"></span></div><div class="table-scroll"><table class="data-table compact-table key-detail-token-table"><thead><tr><th>模型</th><th>请求</th><th class="token-column token-input">输入</th><th class="token-column token-cache">缓存输入</th><th class="token-column token-output">输出</th><th>成功率</th><th>预估费用</th></tr></thead><tbody id="key-detail-models"></tbody></table></div><div id="key-detail-models-empty" class="empty-state compact-empty" hidden><strong>暂无模型明细</strong><span>在当前筛选时间内没有匹配的调用。</span></div></section>
               <section class="key-detail-section" aria-labelledby="key-detail-daily-title"><div class="key-detail-section-heading"><h4 id="key-detail-daily-title">每日调用</h4><span class="muted">按当前日期范围</span></div><div id="key-detail-daily" class="key-detail-daily"></div><div id="key-detail-daily-empty" class="empty-state compact-empty" hidden><strong>暂无每日记录</strong><span>新的调用会自动汇总到这里。</span></div></section>

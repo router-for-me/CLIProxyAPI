@@ -84,6 +84,9 @@ type ClientAPIKeyMetadata struct {
 
 	// Disabled prevents the associated client key from authenticating.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+
+	// CreatedAt is the server-maintained RFC3339 UTC creation time.
+	CreatedAt string `yaml:"created-at,omitempty" json:"created_at,omitempty"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.

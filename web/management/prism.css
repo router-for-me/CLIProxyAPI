@@ -848,6 +848,86 @@ html[data-theme="dark"] .button.secondary {
 .key-detail-message { display: grid; grid-column: 1 / -1; min-height: 76px; align-content: center; gap: 5px; }
 .key-detail-message.is-error { border-color: color-mix(in srgb, var(--danger) 50%, var(--prism-line)); }
 
+.key-detail-throughput {
+  position: relative;
+  margin: 0 0 14px;
+  padding: 18px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, #27d89b 30%, var(--prism-line));
+  border-radius: 18px;
+  background:
+    radial-gradient(420px 180px at 0% 100%, color-mix(in srgb, #20d79a 11%, transparent), transparent 72%),
+    color-mix(in srgb, var(--surface-solid) 42%, transparent);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+}
+
+.key-detail-throughput::before {
+  position: absolute;
+  top: 0;
+  left: 8%;
+  width: 150px;
+  height: 1px;
+  content: "";
+  background: linear-gradient(90deg, transparent, #29e5a6, transparent);
+  box-shadow: 0 0 20px rgba(41, 229, 166, .55);
+}
+
+.key-detail-throughput[hidden],
+.key-detail-throughput-empty[hidden] { display: none; }
+
+.key-detail-throughput-header {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.key-detail-throughput-header h4 {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 17px;
+  letter-spacing: -.025em;
+}
+
+.live-throughput-chart.key-detail-throughput-chart {
+  margin-top: 16px;
+  padding-top: 18px;
+  background:
+    linear-gradient(to top, color-mix(in srgb, var(--text) 8%, transparent) 1px, transparent 1px) 0 0 / 100% 25%,
+    color-mix(in srgb, var(--surface-solid) 38%, transparent);
+}
+
+.key-detail-throughput-empty {
+  display: grid;
+  min-height: 176px;
+  margin-top: 16px;
+  padding: 24px;
+  place-content: center;
+  justify-items: center;
+  gap: 7px;
+  border: 1px dashed color-mix(in srgb, #27d89b 24%, var(--prism-line));
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--surface-solid) 34%, transparent);
+  color: var(--text-3);
+  text-align: center;
+}
+
+.key-detail-throughput-empty::before {
+  width: 28px;
+  height: 28px;
+  margin-bottom: 3px;
+  border: 1px solid color-mix(in srgb, #29e5a6 52%, var(--prism-line));
+  border-radius: 50%;
+  content: "";
+  background: radial-gradient(circle, #29e5a6 0 3px, color-mix(in srgb, #29e5a6 18%, transparent) 4px 8px, transparent 9px);
+  box-shadow: 0 0 22px color-mix(in srgb, #29e5a6 18%, transparent);
+}
+
+.key-detail-throughput-empty strong { color: var(--text); font-size: 14px; }
+.key-detail-throughput-empty span { max-width: 360px; font-size: 11px; line-height: 1.55; }
+#key-detail-throughput-updated.is-error { color: var(--danger); }
+
 .key-detail-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(270px, .65fr);
@@ -855,11 +935,23 @@ html[data-theme="dark"] .button.secondary {
 }
 
 .key-detail-section {
+  position: relative;
   min-width: 0;
   padding: 16px;
   border: 1px solid var(--prism-line);
   border-radius: 16px;
   background: color-mix(in srgb, var(--surface-solid) 40%, transparent);
+}
+
+.key-detail-section .compact-empty {
+  position: static;
+  min-height: 116px;
+  padding: 16px 8px 4px;
+}
+
+.key-detail-section:has(.compact-empty:not([hidden])) .table-scroll,
+.key-detail-section:has(.compact-empty:not([hidden])) .key-detail-daily {
+  display: none;
 }
 
 .key-detail-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
@@ -895,6 +987,10 @@ html[data-theme="dark"] .button.secondary {
   .key-detail-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .key-detail-stat.is-token-summary { grid-column: span 2; }
   .key-detail-stat:last-child { grid-column: 1 / -1; }
+  .key-detail-throughput { padding: 14px; }
+  .key-detail-throughput-header { flex-direction: column; }
+  .live-throughput-chart.key-detail-throughput-chart { min-height: 218px; }
+  .key-detail-throughput-chart .live-throughput-bar { height: min(var(--live-plot-height), 160px); }
 }
 
 @media (prefers-reduced-motion: reduce) {

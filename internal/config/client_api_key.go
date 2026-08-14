@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
@@ -74,6 +75,16 @@ func (cfg *Config) SanitizeAPIKeyMetadata() {
 		metadata := cfg.APIKeyMetadata[rawKey]
 		metadata.ID = strings.TrimSpace(metadata.ID)
 		metadata.Alias = strings.TrimSpace(metadata.Alias)
+		metadata.CreatedAt = strings.TrimSpace(metadata.CreatedAt)
+		if metadata.CreatedAt != "" {
+			createdAt, errParse := time.Parse(time.RFC3339, metadata.CreatedAt)
+			if errParse != nil {
+				metadata.CreatedAt = ""
+				log.Warn("invalid client API key creation time detected; clearing creation time")
+			} else {
+				metadata.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+			}
+		}
 		metadata.Alias = strings.Map(func(r rune) rune {
 			if unicode.IsControl(r) {
 				return -1

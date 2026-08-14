@@ -284,6 +284,7 @@ type APIKeyProfile struct {
 	MaskedKey string `json:"masked_key"`
 	Effective bool   `json:"effective"`
 	Issue     string `json:"issue"`
+	CreatedAt string `json:"created_at"`
 }
 
 // ClientKeyUsageReport is the secret-safe aggregate returned by the management API.

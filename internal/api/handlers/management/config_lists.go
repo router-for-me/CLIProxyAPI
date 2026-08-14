@@ -161,9 +161,12 @@ func (h *Handler) PutAPIKeys(c *gin.Context) {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	oldKeys := append([]string(nil), h.cfg.APIKeys...)
 	metadata := cloneClientAPIKeyMetadata(h.cfg.APIKeyMetadata)
-	if len(keys) == len(h.cfg.APIKeys) {
-		migrateReplacedClientAPIKeyMetadata(metadata, h.cfg.APIKeys, keys)
+	if len(keys) == len(oldKeys) {
+		migrateReplacedClientAPIKeyMetadata(metadata, oldKeys, keys)
+	} else {
+		stampNewClientAPIKeys(metadata, oldKeys, keys)
 	}
 	pruneClientAPIKeyMetadata(keys, metadata)
 	if err = validateClientAPIKeyMetadata(keys, metadata); err != nil {
@@ -193,6 +196,7 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 	keys := append([]string(nil), h.cfg.APIKeys...)
 	metadata := cloneClientAPIKeyMetadata(h.cfg.APIKeyMetadata)
 	changed := false
+	newlyAdded := false
 	if body.Index != nil && body.Value != nil && *body.Index >= 0 && *body.Index < len(keys) {
 		oldKey := keys[*body.Index]
 		metadataKey := clientAPIKeyMetadataKey(oldKey)
@@ -226,11 +230,15 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 		if !changed && body.Old == nil {
 			keys = append(keys, *body.New)
 			changed = true
+			newlyAdded = true
 		}
 	}
 	if !changed {
 		c.JSON(400, gin.H{"error": "missing fields"})
 		return
+	}
+	if newlyAdded {
+		stampNewClientAPIKeys(metadata, h.cfg.APIKeys, keys)
 	}
 	pruneClientAPIKeyMetadata(keys, metadata)
 	if err := validateClientAPIKeyMetadata(keys, metadata); err != nil {

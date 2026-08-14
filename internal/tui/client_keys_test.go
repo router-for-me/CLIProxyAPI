@@ -115,7 +115,7 @@ func TestClientGetsKeysAndProfilesFromOneSnapshot(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"api-keys":["raw-key"],"api-key-profiles":[{"index":0,"id":"team-a","alias":"Production","masked_key":"****"}]}`))
+		_, _ = w.Write([]byte(`{"api-keys":["raw-key"],"api-key-profiles":[{"index":0,"id":"team-a","alias":"Production","masked_key":"****","created_at":"2026-08-12T03:04:05Z"}]}`))
 	}))
 	defer server.Close()
 
@@ -124,7 +124,7 @@ func TestClientGetsKeysAndProfilesFromOneSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAPIKeysAndProfiles: %v", err)
 	}
-	if len(keys) != 1 || keys[0] != "raw-key" || len(profiles) != 1 || profiles[0].ID != "team-a" {
+	if len(keys) != 1 || keys[0] != "raw-key" || len(profiles) != 1 || profiles[0].ID != "team-a" || profiles[0].CreatedAt != "2026-08-12T03:04:05Z" {
 		t.Fatalf("keys=%#v profiles=%#v", keys, profiles)
 	}
 }

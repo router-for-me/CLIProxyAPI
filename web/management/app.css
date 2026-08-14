@@ -1294,6 +1294,32 @@ main {
   text-overflow: ellipsis;
 }
 
+.key-created-at {
+  display: block;
+  max-width: 260px;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key-created-at.is-unknown {
+  color: color-mix(in srgb, var(--text-3) 82%, transparent);
+  cursor: help;
+}
+
+.key-mobile-card dd .key-created-at,
+.key-detail-header .key-created-at {
+  display: inline;
+  max-width: none;
+  margin-top: 0;
+  font-size: inherit;
+}
+
 .status-chip.success {
   border-color: color-mix(in srgb, var(--success) 40%, var(--border));
   background: var(--accent-soft);
