@@ -34,6 +34,7 @@ function withGlobSuffix(entries) {
       entry('PATCH', '/api-keys-pg/:id'),
       entry('PUT', '/api-keys-pg/:id/policy'),
       entry('POST', '/api-keys-pg/:id/regenerate'),
+      entry('POST', '/api-keys-pg/import'),
       entry('DELETE', '/api-keys-pg/:id'),
       entry('GET', '/api-keys'),
       entry('PUT', '/api-keys'),

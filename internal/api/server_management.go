@@ -191,6 +191,13 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-keys-pg/:id/policy", s.mgmt.PutPGAPIKeyPolicy)
 		mgmt.POST("/api-keys-pg/:id/regenerate", s.mgmt.RegeneratePGAPIKey)
 		mgmt.DELETE("/api-keys-pg/:id", s.mgmt.DeletePGAPIKey)
+		// Import custom API-key secrets by matching key_alias (case-
+		// insensitive; ambiguous aliases are skipped). Applies each secret
+		// via Regenerate, preserving key ID/policy/metadata/owner. Registered
+		// after the :id routes: Gin's httprouter gives static segments
+		// precedence over :param regardless of order, but keeping collection-
+		// level routes after the :id-suffixed ones matches convention here.
+		mgmt.POST("/api-keys-pg/import", s.mgmt.ImportPGAPIKeys)
 
 		// Internal Users (LiteLLM-style key owners with per-user
 		// budget/RPM/TPM enforcement, max-p concurrent-request caps, and

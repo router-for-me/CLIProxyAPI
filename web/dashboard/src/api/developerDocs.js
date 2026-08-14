@@ -517,6 +517,23 @@ export const sections = [
           { status: 404, label: 'Not found', body: `{"error":{"type":"not_found","message":"API key not found"}}` },
         ],
       },
+      {
+        method: 'POST', path: '/api-keys-pg/import', summary: 'Bulk-import custom API-key secrets by matching each row\'s key_alias (case-insensitive). Each matched secret is applied via Regenerate, preserving the key\'s ID/policy/metadata/owner. Rows are independent — one row\'s failure never aborts the others; the response reports imported vs skipped so callers can reconcile.',
+        params: [
+          { name: 'keys', in: 'body', type: 'object[]', required: true, default: '', description: 'Array of { alias, key } rows. alias is the target key_alias (matched case-insensitively, trimmed); key is the plaintext custom secret to apply (trimmed, min 16 chars). Only the SHA-256 hash of the secret is stored. Empty body or >1000 rows → 400.' },
+          { name: 'alias', in: 'body', type: 'string', required: true, default: '', description: 'Per-row key_alias to match against (case-insensitive).' },
+          { name: 'key', in: 'body', type: 'string', required: true, default: '', description: 'Per-row plaintext custom secret (min 16 chars). Only its SHA-256 hash is persisted.' },
+        ],
+        examplePayload: `{\n  "keys": [\n    { "alias": "prod-app", "key": "sk-my-team-rotate-key-0123456789" },\n    { "alias": "staging-app", "key": "sk-staging-rotate-key-0123456789" }\n  ]\n}`,
+        exampleCurl: `curl -s -X POST "${'{API_BASE}'}/api-keys-pg/import" \\\n  -H "Authorization: Bearer $MGMT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"keys":[{"alias":"prod-app","key":"sk-my-team-rotate-key-0123456789"}]}'`,
+        responses: [
+          { status: 200, label: 'OK', body: `{"total":2,"imported":1,"skipped":[{"alias":"staging-app","reason":"alias not found"}]}` },
+          { status: 400, label: 'Empty body', body: `{"error":{"type":"invalid_request","message":"keys: at least one entry is required"}}` },
+          { status: 400, label: 'Too many rows', body: `{"error":{"type":"invalid_request","message":"too many keys: 1001 (max 1000)"}}` },
+          { status: 503, label: 'PG store not configured', body: `{"error":{"type":"pg_store_not_configured","message":"..."}}` },
+        ],
+        notes: 'Each skipped row carries the failing alias and one of these reasons: "alias not found" (no key has that alias), "ambiguous alias" (multiple keys share the alias), "duplicate secret" (the secret is already in use by a different key), "invalid secret" (too short, <16 chars), or "missing alias or key" (either field empty). Matching is case-insensitive; rows are processed independently, so a partial import is not all-or-nothing.',
+      },
     ],
   },
 
