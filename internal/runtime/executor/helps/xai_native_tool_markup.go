@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"bytes"
@@ -185,7 +185,12 @@ func coerceXAINativeJSONValue(raw string) any {
 	if ((strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) ||
 		(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]"))) &&
 		gjson.Valid(trimmed) {
-		return gjson.Parse(trimmed).Value()
+		var decoded any
+		dec := json.NewDecoder(strings.NewReader(trimmed))
+		dec.UseNumber()
+		if err := dec.Decode(&decoded); err == nil {
+			return decoded
+		}
 	}
 	return raw
 }
@@ -326,7 +331,10 @@ func (r rawJSON) MarshalJSON() ([]byte, error) {
 	return r, nil
 }
 
-func applyXAINativeToolMarkupChatJSON(format sdktranslator.Format, body []byte) []byte {
+// ApplyXAINativeToolMarkupChatJSON rewrites an OpenAI chat-completion body when
+// the client format is OpenAI chat and assistant content contains native Grok
+// tool markup. Other formats are returned unchanged.
+func ApplyXAINativeToolMarkupChatJSON(format sdktranslator.Format, body []byte) []byte {
 	if format != sdktranslator.FormatOpenAI {
 		return body
 	}
@@ -338,22 +346,26 @@ func applyXAINativeToolMarkupChatJSON(format sdktranslator.Format, body []byte) 
 	return rewritten
 }
 
-// xaiNativeToolMarkupChatStream buffers OpenAI chat-completion chunks once
+// XAINativeToolMarkupChatStream buffers OpenAI chat-completion chunks once
 // native markup appears (or a chunk boundary might be splitting a marker) and
-// rewrites the assembled SSE at flush. Chunks before the marker are forwarded
+// rewrites the assembled SSE at Flush. Chunks before the marker are forwarded
 // immediately so ordinary text streams stay low-latency.
-type xaiNativeToolMarkupChatStream struct {
+type XAINativeToolMarkupChatStream struct {
 	enabled   bool
 	passthru  bool
 	buffering bool
 	held      [][]byte
 }
 
-func newXAINativeToolMarkupChatStream(format sdktranslator.Format) *xaiNativeToolMarkupChatStream {
-	return &xaiNativeToolMarkupChatStream{enabled: format == sdktranslator.FormatOpenAI}
+// NewXAINativeToolMarkupChatStream returns a rewriter that is active only for
+// OpenAI chat-completion client streams.
+func NewXAINativeToolMarkupChatStream(format sdktranslator.Format) *XAINativeToolMarkupChatStream {
+	return &XAINativeToolMarkupChatStream{enabled: format == sdktranslator.FormatOpenAI}
 }
 
-func (s *xaiNativeToolMarkupChatStream) ingest(chunk []byte) [][]byte {
+// Ingest forwards a translated chat chunk or holds it until Flush when markup
+// may be present. Callers must emit the returned payloads immediately.
+func (s *XAINativeToolMarkupChatStream) Ingest(chunk []byte) [][]byte {
 	if s == nil || !s.enabled || s.passthru {
 		if len(chunk) == 0 {
 			return nil
@@ -378,7 +390,9 @@ func (s *xaiNativeToolMarkupChatStream) ingest(chunk []byte) [][]byte {
 	return [][]byte{chunk}
 }
 
-func (s *xaiNativeToolMarkupChatStream) flush() [][]byte {
+// Flush emits any buffered chat chunks, rewriting assembled markup into
+// tool_calls when parsing succeeds.
+func (s *XAINativeToolMarkupChatStream) Flush() [][]byte {
 	if s == nil || !s.enabled || len(s.held) == 0 {
 		return nil
 	}

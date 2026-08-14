@@ -81,7 +81,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
-		markupStream := newXAINativeToolMarkupChatStream(prepared.responseFormat)
+		markupStream := helps.NewXAINativeToolMarkupChatStream(prepared.responseFormat)
 		var pendingEventLine []byte
 		emitPayloads := func(payloads [][]byte) bool {
 			for i := range payloads {
@@ -96,7 +96,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		emitTranslatedLine := func(translatedLine []byte) bool {
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, translatedLine, &param, claudeInputTokens)
 			for i := range chunks {
-				if !emitPayloads(markupStream.ingest(chunks[i])) {
+				if !emitPayloads(markupStream.Ingest(chunks[i])) {
 					return false
 				}
 			}
@@ -170,7 +170,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		if pendingEventLine != nil {
 			emitTranslatedLine(xaiNormalizeReasoningSummaryEventLine(pendingEventLine, ""))
 		}
-		if !emitPayloads(markupStream.flush()) {
+		if !emitPayloads(markupStream.Flush()) {
 			return
 		}
 		if errScan := scanner.Err(); errScan != nil {
