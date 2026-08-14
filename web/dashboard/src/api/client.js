@@ -203,6 +203,17 @@ export async function regenerateAPIKey(id, secret) {
   });
 }
 
+// importAPIKeys applies a list of { alias, key } custom secrets to existing
+// API keys matched by key_alias (case-insensitive). Rows that cannot be applied
+// (alias not found, ambiguous alias, duplicate secret, invalid secret) are
+// reported in the response, not rejected wholesale.
+export async function importAPIKeys(rows) {
+  return fetchJSON('/api-keys-pg/import', {
+    method: 'POST',
+    body: JSON.stringify({ keys: rows }),
+  });
+}
+
 export async function deleteAPIKey(id) {
   await fetchJSON(`/api-keys-pg/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }

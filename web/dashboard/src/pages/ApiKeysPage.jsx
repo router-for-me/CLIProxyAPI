@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { listAPIKeys, createAPIKey, patchAPIKey, listInternalUsers } from '../api/client.js';
+import { listAPIKeys, createAPIKey, patchAPIKey, listInternalUsers, importAPIKeys } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import { Spinner, ErrorBanner, EmptyState, StatusBadge, Modal } from '../components/Primitives.jsx';
 import Pager from '../components/Pager.jsx';
@@ -60,6 +60,7 @@ export default function ApiKeysPage() {
   const [sortOption, setSortOption] = useState('created_at:desc');
   const [selectedIds, setSelectedIds] = useState([]);
   const [showCreate, setShowCreate] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [actionLoading, setActionLoading] = useState({});
 
   const [sortBy, sortOrder] = useMemo(() => {
@@ -190,6 +191,7 @@ export default function ApiKeysPage() {
           <button type="button" className="primary" onClick={() => setShowCreate(true)}>
             + New Key
           </button>
+          <button type="button" onClick={() => setShowImport(true)}>⇪ Import Keys</button>
         </div>
       </div>
 
@@ -503,6 +505,18 @@ export default function ApiKeysPage() {
           onClose={() => setShowCreate(false)}
           onCreated={() => {
             setShowCreate(false);
+            setPage(1);
+            reload();
+          }}
+        />
+      )}
+
+      {/* Import Keys Modal */}
+      {showImport && (
+        <ImportKeysModal
+          onClose={() => setShowImport(false)}
+          onImported={() => {
+            setShowImport(false);
             setPage(1);
             reload();
           }}
@@ -823,6 +837,127 @@ function CreateKeyModal({ onClose, onCreated }) {
           </button>
         </div>
       </form>
+    </Modal>
+  );
+}
+
+const IMPORT_EXAMPLE = `[
+  { "alias": "key-alpha", "key": "sk-my-custom-alpha-0123456789" },
+  { "alias": "key-beta",  "key": "another-custom-key-0123456789" }
+]`;
+
+function ImportKeysModal({ onClose, onImported }) {
+  const toast = useToast();
+  const [raw, setRaw] = useState('');
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState(null);
+
+  async function handleImport() {
+    setError('');
+    let rows;
+    try {
+      rows = JSON.parse(raw);
+    } catch {
+      setError('Invalid JSON. Check the format and try again.');
+      return;
+    }
+    if (!Array.isArray(rows) || rows.length === 0) {
+      setError('Provide a JSON array with at least one { alias, key } entry.');
+      return;
+    }
+    const clean = rows.map((r) => ({
+      alias: String(r.alias ?? '').trim(),
+      key: String(r.key ?? '').trim(),
+    }));
+    if (clean.some((r) => !r.alias || !r.key)) {
+      setError('Every entry needs a non-empty "alias" and "key".');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const res = await importAPIKeys(clean);
+      setResult(res);
+      toast.success(`Imported ${res.imported} of ${res.total} keys`);
+    } catch (err) {
+      setError(err.message || 'Failed to import keys.');
+      toast.error(err.message || 'Failed to import keys');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Modal title="Import API Keys by Alias" onClose={onClose}>
+      {error && <div className="error-banner">{error}</div>}
+      {!result && (
+        <>
+          <div className="form__hint" style={{ marginBottom: 8 }}>
+            Paste a JSON array of <code>{"{ alias, key }"}</code> pairs. Each{' '}
+            <code>alias</code> must match an existing key&apos;s alias
+            (case-insensitive). The <code>key</code> is applied as that
+            key&apos;s new secret.
+          </div>
+          <textarea
+            value={raw}
+            onChange={(e) => setRaw(e.target.value)}
+            rows={10}
+            spellCheck={false}
+            placeholder={IMPORT_EXAMPLE}
+            style={{ width: '100%', fontFamily: 'var(--mono)', fontSize: 12 }}
+          />
+          <div className="row gap-sm" style={{ marginTop: 8 }}>
+            <button type="button" onClick={() => setRaw(IMPORT_EXAMPLE)}>
+              Load example
+            </button>
+          </div>
+          <div className="form__actions" style={{ marginTop: 12 }}>
+            <button type="button" onClick={onClose} disabled={submitting}>
+              Cancel
+            </button>
+            <button type="button" className="primary" onClick={handleImport} disabled={submitting}>
+              {submitting ? 'Importing…' : 'Import Keys'}
+            </button>
+          </div>
+        </>
+      )}
+      {result && (
+        <>
+          <div
+            style={{
+              padding: 16,
+              background: 'var(--accent-dim)',
+              border: '1px solid var(--accent)',
+              borderRadius: 'var(--radius)',
+              marginBottom: 12,
+            }}
+          >
+            <strong>{result.imported}</strong> of <strong>{result.total}</strong> keys imported.
+          </div>
+          {result.skipped?.length > 0 && (
+            <div className="card" style={{ padding: 0, marginBottom: 12 }}>
+              <table className="table" style={{ fontSize: 12 }}>
+                <thead>
+                  <tr><th>Alias</th><th>Reason</th></tr>
+                </thead>
+                <tbody>
+                  {result.skipped.map((s, i) => (
+                    <tr key={i}>
+                      <td><code>{s.alias}</code></td>
+                      <td>{s.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="form__actions">
+            <button type="button" className="primary" onClick={onImported}>
+              Done
+            </button>
+          </div>
+        </>
+      )}
     </Modal>
   );
 }
