@@ -34,6 +34,15 @@ const (
 // reasoning items whose IDs exceed the Codex limit, and deterministically shortens
 // other overlong input item IDs and call IDs.
 func SanitizeCodexInputItemIDs(body []byte) []byte {
+	return sanitizeResponsesInputIDs(body, true)
+}
+
+// SanitizeResponsesCallIDs deterministically shortens only overlong Responses call IDs.
+func SanitizeResponsesCallIDs(body []byte) []byte {
+	return sanitizeResponsesInputIDs(body, false)
+}
+
+func sanitizeResponsesInputIDs(body []byte, sanitizeItemIDs bool) []byte {
 	input := util.GetGJSONBytesNoCopy(body, "input")
 	if !input.IsArray() {
 		return body
@@ -44,7 +53,7 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 	var callIDStates map[string]uint8
 	var overlongCallIDRoles map[string]uint8
 	for _, item := range items {
-		if shouldDropCodexEncryptedReasoningItem(item) {
+		if sanitizeItemIDs && shouldDropCodexEncryptedReasoningItem(item) {
 			continue
 		}
 		callID := item.Get("call_id")
@@ -61,6 +70,9 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 				}
 				overlongCallIDRoles[value] |= codexCallIDRole(item)
 			}
+		}
+		if !sanitizeItemIDs {
+			continue
 		}
 
 		itemID := item.Get("id")
@@ -87,14 +99,14 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 	rebuilt := make([]string, 0, len(items))
 	changed := false
 	for _, item := range items {
-		if shouldDropCodexEncryptedReasoningItem(item) {
+		if sanitizeItemIDs && shouldDropCodexEncryptedReasoningItem(item) {
 			changed = true
 			continue
 		}
 
 		raw := item.Raw
 		itemID := item.Get("id")
-		if itemID.Type == gjson.String {
+		if sanitizeItemIDs && itemID.Type == gjson.String {
 			originalID := itemID.String()
 			id := normalizeCodexInputItemID(item, originalID)
 			if id != originalID && idStates[id]&codexInputItemIDPreserved != 0 {

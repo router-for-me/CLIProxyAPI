@@ -151,6 +151,38 @@ func TestSanitizeCodexInputItemIDsDoesNotReusePreShortenedIDAcrossToolKinds(t *t
 	}
 }
 
+func TestSanitizeResponsesCallIDsChangesOnlyCallIDs(t *testing.T) {
+	longCallID := strings.Repeat("cursor-call-", 8)
+	longReasoningID := "reasoning_" + strings.Repeat("a", 64)
+	body := []byte(`{"input":[` +
+		`{"type":"message","id":"item_message","role":"user","content":"before"},` +
+		`{"type":"reasoning","id":"` + longReasoningID + `","encrypted_content":"encrypted","summary":[]},` +
+		`{"type":"function_call","id":"item_call","call_id":"` + longCallID + `","name":"lookup","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"` + longCallID + `","output":"done"}` +
+		`]}`)
+
+	got := SanitizeResponsesCallIDs(body)
+	if actual := gjson.GetBytes(got, "input.0.id").String(); actual != "item_message" {
+		t.Fatalf("message ID changed: %q", actual)
+	}
+	if actual := gjson.GetBytes(got, "input.1.id").String(); actual != longReasoningID {
+		t.Fatalf("reasoning ID changed: %q", actual)
+	}
+	if actual := gjson.GetBytes(got, "input.1.encrypted_content").String(); actual != "encrypted" {
+		t.Fatalf("reasoning item changed or was dropped: %q; payload=%s", actual, got)
+	}
+	if actual := gjson.GetBytes(got, "input.2.id").String(); actual != "item_call" {
+		t.Fatalf("function-call item ID changed: %q", actual)
+	}
+	callID := gjson.GetBytes(got, "input.2.call_id").String()
+	if callID == longCallID || len([]rune(callID)) != codexCallIDLimit {
+		t.Fatalf("overlong call ID was not shortened: %q", callID)
+	}
+	if outputCallID := gjson.GetBytes(got, "input.3.call_id").String(); outputCallID != callID {
+		t.Fatalf("paired call IDs differ: %q != %q", callID, outputCallID)
+	}
+}
+
 func TestSanitizeCodexInputItemIDsShortensOnlyOverlongCallID(t *testing.T) {
 	longCallID := strings.Repeat("call-", 20)
 	body := []byte(`{"input":[{"type":"function_call","call_id":"` + longCallID + `","name":"read","arguments":"{}"}]}`)
