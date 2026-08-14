@@ -1486,9 +1486,17 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return "", false, nil
 	}
 
-	repeatedServerPrefix := "mcp__" + server + "__" + server + "__"
-	if suffix, repeatedServer := strings.CutPrefix(name, repeatedServerPrefix); repeatedServer {
-		if original, exact := resolver.exact["mcp__"+server+"__"+suffix]; exact {
+	canonicalServerPrefix := "mcp__" + server + "__"
+	normalizedName := name
+	suffix := strings.TrimPrefix(name, canonicalServerPrefix)
+	for {
+		strippedSuffix, repeatedServer := strings.CutPrefix(suffix, server+"__")
+		if !repeatedServer {
+			break
+		}
+		suffix = strippedSuffix
+		normalizedName = canonicalServerPrefix + suffix
+		if original, exact := resolver.exact[normalizedName]; exact {
 			return original, true, nil
 		}
 	}
@@ -1508,20 +1516,29 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: matched multiple declared aliases", name)
 	}
 
-	parts, ok := parseClaudeMCPAlias(name)
-	if ok {
+	parts, validAlias := parseClaudeMCPAlias(normalizedName)
+	if validAlias {
 		for _, entry := range resolver.aliases {
 			if entry.parts.server == parts.server && entry.parts.semantic == parts.semantic {
 				matchedOriginal = entry.original
 				matchCount++
 			}
 		}
-		if matchCount == 1 {
-			return matchedOriginal, true, nil
+	} else {
+		// Keep generated aliases strict while allowing a malformed response tool ID
+		// to recover only when its request-local semantic suffix is unambiguous.
+		for _, entry := range resolver.aliases {
+			if entry.parts.server == server && strings.HasSuffix(normalizedName, "_"+entry.parts.semantic) {
+				matchedOriginal = entry.original
+				matchCount++
+			}
 		}
-		if matchCount > 1 {
-			return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: semantic suffix matches multiple declared tools", name)
-		}
+	}
+	if matchCount == 1 {
+		return matchedOriginal, true, nil
+	}
+	if matchCount > 1 {
+		return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: semantic suffix matches multiple declared tools", name)
 	}
 
 	return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: no unique request-local match", name)

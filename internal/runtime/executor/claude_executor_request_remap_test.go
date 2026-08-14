@@ -163,18 +163,83 @@ func TestReverseRemapOAuthToolNamesRecoversMangledAliases(t *testing.T) {
 	}
 }
 
-func TestReverseRemapOAuthToolNamesRecoversRepeatedServerAlias(t *testing.T) {
+func TestReverseRemapOAuthToolNamesRecoversRepeatedServerAliases(t *testing.T) {
+	const alias = "mcp__hmzqrngkulqv__xuo7jlxlpzee_Bash"
+	reverseMap := map[string]string{
+		alias:                                  "Bash",
+		"mcp__hmzqrngkulqv__aaaaaaaaaaaa_Bash": "OtherBash",
+	}
+	tests := []struct {
+		name          string
+		responseAlias string
+	}{
+		{
+			name:          "single repetition",
+			responseAlias: "mcp__hmzqrngkulqv__hmzqrngkulqv__xuo7jlxlpzee_Bash",
+		},
+		{
+			name:          "multiple repetitions",
+			responseAlias: "mcp__hmzqrngkulqv__hmzqrngkulqv__hmzqrngkulqv__xuo7jlxlpzee_Bash",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, test.responseAlias))
+			restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+			if errReverse != nil {
+				t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
+			}
+			if got := gjson.GetBytes(restored, "content.0.name").String(); got != "Bash" {
+				t.Fatalf("repeated server alias restored to %q, want Bash", got)
+			}
+
+			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, test.responseAlias))
+			restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+			if errStream != nil {
+				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
+			}
+			if got := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != "Bash" {
+				t.Fatalf("stream repeated server alias restored to %q, want Bash", got)
+			}
+		})
+	}
+}
+
+func TestReverseRemapOAuthToolNamesRecoversMalformedToolIDBySemanticSuffix(t *testing.T) {
 	const alias = "mcp__hmzqrngkulqv__xuo7jlxlpzee_Bash"
 	reverseMap := map[string]string{alias: "Bash"}
-	responseAlias := "mcp__hmzqrngkulqv__hmzqrngkulqv__xuo7jlxlpzee_Bash"
-	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, responseAlias))
-
-	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
-	if errReverse != nil {
-		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
+	tests := []struct {
+		name          string
+		responseAlias string
+	}{
+		{name: "short tool ID", responseAlias: "mcp__hmzqrngkulqv__xuo7jlxlpze_Bash"},
+		{name: "long tool ID", responseAlias: "mcp__hmzqrngkulqv__xuo7jlxlpzeea_Bash"},
+		{name: "invalid base32 tool ID", responseAlias: "mcp__hmzqrngkulqv__xuo7jlxlpze0_Bash"},
+		{name: "substituted base32 tool ID", responseAlias: "mcp__hmzqrngkulqv__auo7jlxlpzee_Bash"},
+		{name: "repeated server and short tool ID", responseAlias: "mcp__hmzqrngkulqv__hmzqrngkulqv__xuo7jlxlpze_Bash"},
 	}
-	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "Bash" {
-		t.Fatalf("repeated server alias restored to %q, want Bash", got)
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, test.responseAlias))
+			restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+			if errReverse != nil {
+				t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
+			}
+			if got := gjson.GetBytes(restored, "content.0.name").String(); got != "Bash" {
+				t.Fatalf("malformed tool ID alias restored to %q, want Bash", got)
+			}
+
+			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, test.responseAlias))
+			restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+			if errStream != nil {
+				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
+			}
+			if got := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != "Bash" {
+				t.Fatalf("stream malformed tool ID alias restored to %q, want Bash", got)
+			}
+		})
 	}
 }
 
@@ -207,6 +272,11 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 		{
 			name:      "ambiguous semantic suffix",
 			alias:     "mcp__" + firstParts.server + "__" + unknownToolID + "_" + firstParts.semantic,
+			wantError: "semantic suffix matches multiple declared tools",
+		},
+		{
+			name:      "ambiguous semantic suffix with malformed tool ID",
+			alias:     "mcp__" + firstParts.server + "__" + unknownToolID[:len(unknownToolID)-1] + "_" + firstParts.semantic,
 			wantError: "semantic suffix matches multiple declared tools",
 		},
 		{
