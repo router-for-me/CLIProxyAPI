@@ -227,6 +227,9 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		if parts := sysInstr.Get("parts"); parts.Exists() && parts.IsArray() {
 			var systemText strings.Builder
 			parts.ForEach(func(_, part gjson.Result) bool {
+				if translatorcommon.IsGeminiThoughtPart(part) {
+					return true
+				}
 				if text := part.Get("text"); text.Exists() {
 					if systemText.Len() > 0 {
 						systemText.WriteString("\n")
@@ -265,6 +268,10 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			contentItems := make([][]byte, 0, 4)
 			if parts := content.Get("parts"); parts.Exists() && parts.IsArray() {
 				parts.ForEach(func(_, part gjson.Result) bool {
+					if translatorcommon.IsGeminiThoughtPart(part) {
+						return true
+					}
+
 					// Text content conversion
 					if text := part.Get("text"); text.Exists() {
 						textContent := []byte(`{"type":"text","text":""}`)

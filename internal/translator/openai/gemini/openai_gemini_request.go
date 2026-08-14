@@ -154,6 +154,10 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 		if parts.Exists() && parts.IsArray() {
 			parts.ForEach(func(_, part gjson.Result) bool {
+				if translatorcommon.IsGeminiThoughtPart(part) {
+					return true
+				}
+
 				// Handle text parts
 				if text := part.Get("text"); text.Exists() {
 					contentPart := []byte(`{"type":"text","text":""}`)
@@ -196,9 +200,15 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			contentItems := make([][]byte, 0, 4)
 			onlyTextContent := true
 			toolCallItems := make([][]byte, 0, 2)
+			droppedThought := false
 
 			if parts.Exists() && parts.IsArray() {
 				parts.ForEach(func(_, part gjson.Result) bool {
+					if translatorcommon.IsGeminiThoughtPart(part) {
+						droppedThought = true
+						return true
+					}
+
 					// Handle text parts
 					if text := part.Get("text"); text.Exists() {
 						formattedText := text.String()
@@ -286,6 +296,10 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			// Set tool calls if any.
 			if len(toolCallItems) > 0 {
 				msg, _ = sjson.SetRawBytes(msg, "tool_calls", translatorcommon.JoinRawArray(toolCallItems))
+			}
+
+			if droppedThought && len(contentItems) == 0 && len(toolCallItems) == 0 {
+				return true
 			}
 
 			messageItems = append(messageItems, msg)

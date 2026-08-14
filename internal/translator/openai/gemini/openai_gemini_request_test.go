@@ -169,3 +169,33 @@ func TestConvertGeminiRequestToOpenAI_SplitsNonImageInlineDataByMIME(t *testing.
 		t.Fatalf("non-image inlineData must not be converted to image_url. Output: %s", string(out))
 	}
 }
+
+func TestConvertGeminiRequestToOpenAI_DropsHiddenThoughtParts(t *testing.T) {
+	t.Run("thought-only turn", func(t *testing.T) {
+		out := ConvertGeminiRequestToOpenAI("openai-test", []byte(`{
+			"contents":[
+				{"role":"model","parts":[{"thought":true,"text":"internal reasoning","thoughtSignature":"opaque-provider-state"}]},
+				{"role":"user","parts":[{"text":"continue"}]}
+			]
+		}`), false)
+
+		messages := gjson.GetBytes(out, "messages").Array()
+		if len(messages) != 1 || messages[0].Get("role").String() != "user" || messages[0].Get("content").String() != "continue" {
+			t.Fatalf("hidden thought turn was not dropped. Output: %s", string(out))
+		}
+	})
+
+	t.Run("mixed turn", func(t *testing.T) {
+		out := ConvertGeminiRequestToOpenAI("openai-test", []byte(`{
+			"contents":[{"role":"model","parts":[
+				{"thought":true,"text":"internal reasoning","thoughtSignature":"opaque-provider-state"},
+				{"text":"visible answer"}
+			]}]
+		}`), false)
+
+		messages := gjson.GetBytes(out, "messages").Array()
+		if len(messages) != 1 || messages[0].Get("role").String() != "assistant" || messages[0].Get("content").String() != "visible answer" {
+			t.Fatalf("hidden thought was not dropped independently of visible text. Output: %s", string(out))
+		}
+	})
+}

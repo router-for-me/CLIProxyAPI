@@ -11,6 +11,7 @@ const (
 	codexBuiltinImageModelID      = "gpt-image-2"
 	xaiBuiltinImageModelID        = "grok-imagine-image"
 	xaiBuiltinImageQualityModelID = "grok-imagine-image-quality"
+	xaiBuiltinImage20ModelID      = "grok-imagine-image-2.0"
 	xaiBuiltinVideoModelID        = "grok-imagine-video"
 	xaiBuiltinVideo15ModelID      = "grok-imagine-video-1.5"
 	xaiBuiltinVideo15PreviewID    = "grok-imagine-video-1.5-preview"
@@ -121,7 +122,7 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 // WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
+	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
 }
 
 func normalizeAntigravityCapabilityModelID(modelID string) string {
@@ -179,6 +180,19 @@ func xaiBuiltinImageQualityModelInfo() *ModelInfo {
 		DisplayName: "Grok Imagine Image Quality",
 		Name:        xaiBuiltinImageQualityModelID,
 		Description: "xAI Grok higher-fidelity image generation model.",
+	}
+}
+
+func xaiBuiltinImage20ModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          xaiBuiltinImage20ModelID,
+		Object:      "model",
+		Created:     1786060800, // 2026-08-07
+		OwnedBy:     "xai",
+		Type:        "xai",
+		DisplayName: "Grok Imagine Image 2.0",
+		Name:        xaiBuiltinImage20ModelID,
+		Description: "xAI Grok image generation model.",
 	}
 }
 

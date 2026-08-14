@@ -13,6 +13,7 @@ import (
 func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 
+	requestRetry := 0
 	h := NewHandlerWithoutConfigFilePath(&config.Config{
 		OpenAICompatibility: []config.OpenAICompatibility{
 			{
@@ -26,6 +27,7 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 				},
 				SupportPromptCacheKey: true,
 				DisableCooling:        true,
+				RequestRetry:          &requestRetry,
 			},
 		},
 	}, nil)
@@ -43,6 +45,7 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 		OpenAICompatibility []struct {
 			SupportPromptCacheKey *bool `json:"support-prompt-cache-key"`
 			DisableCooling        *bool `json:"disable-cooling"`
+			RequestRetry          *int  `json:"request-retry"`
 		} `json:"openai-compatibility"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
@@ -56,5 +59,8 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 	}
 	if body.OpenAICompatibility[0].DisableCooling == nil || !*body.OpenAICompatibility[0].DisableCooling {
 		t.Fatalf("expected disable-cooling to be present and true, got %#v", body.OpenAICompatibility[0].DisableCooling)
+	}
+	if body.OpenAICompatibility[0].RequestRetry == nil || *body.OpenAICompatibility[0].RequestRetry != 0 {
+		t.Fatalf("expected request-retry to be present and 0, got %#v", body.OpenAICompatibility[0].RequestRetry)
 	}
 }

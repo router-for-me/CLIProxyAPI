@@ -35,6 +35,19 @@ func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
 	t.Fatalf("Vertex models do not contain %q", releaseID)
 }
 
+func TestWithXAIBuiltinsIncludesImage20(t *testing.T) {
+	models := WithXAIBuiltins(nil)
+	for _, model := range models {
+		if model != nil && model.ID == xaiBuiltinImage20ModelID {
+			if model.Created != 1786060800 {
+				t.Fatalf("created = %d, want 1786060800 (2026-08-07)", model.Created)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected xAI builtin model %s", xaiBuiltinImage20ModelID)
+}
+
 func TestWithXAIBuiltinsIncludesVideo15GAAndPreviewAlias(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 	foundGA := false
