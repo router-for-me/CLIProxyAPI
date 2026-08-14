@@ -866,12 +866,20 @@ function ImportKeysModal({ onClose, onImported }) {
       setError('Provide a JSON array with at least one { alias, key } entry.');
       return;
     }
+    if (!rows.every((r) => r && typeof r === 'object' && !Array.isArray(r))) {
+      setError('Every entry must be a { alias, key } object.');
+      return;
+    }
     const clean = rows.map((r) => ({
       alias: String(r.alias ?? '').trim(),
       key: String(r.key ?? '').trim(),
     }));
     if (clean.some((r) => !r.alias || !r.key)) {
       setError('Every entry needs a non-empty "alias" and "key".');
+      return;
+    }
+    if (clean.some((r) => r.key.length < 16)) {
+      setError('Each key must be at least 16 characters long.');
       return;
     }
     setSubmitting(true);
