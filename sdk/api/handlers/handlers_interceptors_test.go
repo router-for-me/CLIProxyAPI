@@ -34,6 +34,15 @@ type handlerInterceptorNoStreamTestHost struct {
 	*handlerInterceptorTestHost
 }
 
+type handlerInterceptorDetectorTestHost struct {
+	*handlerInterceptorTestHost
+	hasRequestInterceptors bool
+}
+
+func (h *handlerInterceptorDetectorTestHost) HasRequestInterceptors() bool {
+	return h != nil && h.hasRequestInterceptors
+}
+
 func (h *handlerInterceptorNoStreamTestHost) HasStreamInterceptors() bool {
 	return false
 }
@@ -229,6 +238,38 @@ func TestRequestLifecycleTrackerUsesUniqueExecutionIDs(t *testing.T) {
 	}
 	if first.completion.TraceID != "trace-1" || second.completion.TraceID != "trace-1" {
 		t.Fatalf("trace IDs = %q and %q", first.completion.TraceID, second.completion.TraceID)
+	}
+}
+
+func TestHandlerSkipsBeforeAuthWithoutRequestInterceptors(t *testing.T) {
+	handler := NewBaseAPIHandlers(nil, nil)
+	calls := 0
+	handler.SetPluginHost(&handlerInterceptorDetectorTestHost{
+		handlerInterceptorTestHost: &handlerInterceptorTestHost{
+			interceptRequestBeforeAuth: func(_ context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+				calls++
+				return pluginapi.RequestInterceptResponse{Headers: req.Headers, Body: req.Body}
+			},
+		},
+	})
+	payload := []byte(`{"model":"test"}`)
+	originalRequest := []byte(`{"model":"original"}`)
+	req := coreexecutor.Request{Model: "test", Payload: payload}
+	opts := coreexecutor.Options{OriginalRequest: originalRequest}
+
+	gotReq, gotOpts, errMsg := handler.applyRequestInterceptorsBeforeAuth(context.Background(), "openai", "test", "request-id", req, opts, "")
+
+	if errMsg != nil {
+		t.Fatalf("applyRequestInterceptorsBeforeAuth() error = %#v", errMsg)
+	}
+	if calls != 0 {
+		t.Fatalf("before-auth interceptor calls = %d, want 0", calls)
+	}
+	if &gotReq.Payload[0] != &payload[0] {
+		t.Fatal("request payload was copied without active request interceptors")
+	}
+	if &gotOpts.OriginalRequest[0] != &originalRequest[0] {
+		t.Fatal("original request was copied without active request interceptors")
 	}
 }
 
