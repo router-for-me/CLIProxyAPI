@@ -1226,9 +1226,11 @@ func (s *APIKeyStore) UpdateUserID(ctx context.Context, id, userID string) error
 // (the historical behavior). When secret is non-empty it is validated with
 // validateSecret and used verbatim — this lets callers rotate to a chosen
 // custom string. As with Create, uniqueness of the secret is the caller's
-// responsibility: no collision pre-check is performed, only the SHA-256 hash
-// is persisted, and a duplicate custom secret will silently shadow the row
-// that LookupByHash resolves first.
+// responsibility: no collision pre-check is performed, and only the SHA-256
+// hash is persisted. The key_hash column carries a UNIQUE constraint in the
+// schema, so a duplicate custom secret fails the UPDATE with a unique-violation
+// error (SQLSTATE 23505) rather than silently shadowing another key; callers
+// relying on the hash should tolerate that error.
 func (s *APIKeyStore) Regenerate(ctx context.Context, id, secret string) (string, error) {
 	if s == nil || s.db == nil {
 		return "", fmt.Errorf("postgres store: api key store not initialized")
