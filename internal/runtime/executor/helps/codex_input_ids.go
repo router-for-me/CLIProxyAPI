@@ -160,11 +160,21 @@ func sanitizeResponsesInputIDs(body []byte, sanitizeItemIDs bool) []byte {
 			originalCallID := callID.String()
 			shortened, ok := callIDMapped[originalCallID]
 			if !ok {
+				claudeCallID := util.SanitizeClaudeToolID(originalCallID)
 				for attempt := 0; ; attempt++ {
 					shortened = shortenCodexCallIDWithAttempt(originalCallID, attempt)
 					shortenedState := callIDStates[shortened]
-					if shortenedState&codexInputItemIDOccupied == 0 ||
-						(attempt == 0 && codexCallIDRolesArePair(overlongCallIDRoles[originalCallID], shortenedState)) {
+					if codexCallIDRolesArePair(overlongCallIDRoles[originalCallID], shortenedState) {
+						break
+					}
+					if claudeCallID != originalCallID {
+						claudeShortened := shortenCodexCallIDWithAttempt(claudeCallID, attempt)
+						if codexCallIDRolesArePair(overlongCallIDRoles[originalCallID], callIDStates[claudeShortened]) {
+							shortened = claudeShortened
+							break
+						}
+					}
+					if shortenedState&codexInputItemIDOccupied == 0 {
 						break
 					}
 				}

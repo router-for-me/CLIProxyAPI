@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 )
 
@@ -130,6 +131,47 @@ func TestSanitizeCodexInputItemIDsReusesMatchingPreShortenedCallID(t *testing.T)
 					t.Fatalf("pre-shortened pair normalization is not idempotent: first=%s normalized_again=%s", first, normalizedAgain)
 				}
 			})
+		}
+	}
+}
+
+func TestSanitizeCodexInputItemIDsReusesMatchingLaterAttemptCallID(t *testing.T) {
+	longCallID := strings.Repeat("cursor-call-", 8)
+	firstAttempt := shortenCodexCallIDWithAttempt(longCallID, 0)
+	matchingLaterAttempt := shortenCodexCallIDWithAttempt(longCallID, 1)
+	body := []byte(`{"input":[` +
+		`{"type":"function_call","call_id":"` + firstAttempt + `","name":"other","arguments":"{}"},` +
+		`{"type":"function_call","call_id":"` + longCallID + `","name":"lookup","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"` + matchingLaterAttempt + `","output":"done"}` +
+		`]}`)
+
+	got := SanitizeCodexInputItemIDs(body)
+	if actual := gjson.GetBytes(got, "input.0.call_id").String(); actual != firstAttempt {
+		t.Fatalf("existing colliding call ID changed: %q", actual)
+	}
+	for _, path := range []string{"input.1.call_id", "input.2.call_id"} {
+		if actual := gjson.GetBytes(got, path).String(); actual != matchingLaterAttempt {
+			t.Fatalf("%s = %q, want matching later-attempt ID %q; payload=%s", path, actual, matchingLaterAttempt, got)
+		}
+	}
+}
+
+func TestSanitizeCodexInputItemIDsReusesClaudeSanitizedPreShortenedCallID(t *testing.T) {
+	longCallID := "call.with/slashes/" + strings.Repeat("cursor-call-", 6)
+	claudeCallID := util.SanitizeClaudeToolID(longCallID)
+	claudeShortened := shortenCodexCallIDWithAttempt(claudeCallID, 0)
+	if claudeCallID == longCallID || claudeShortened == shortenCodexCallIDWithAttempt(longCallID, 0) {
+		t.Fatalf("invalid test setup: original=%q claude=%q shortened=%q", longCallID, claudeCallID, claudeShortened)
+	}
+	body := []byte(`{"input":[` +
+		`{"type":"function_call","call_id":"` + longCallID + `","name":"lookup","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"` + claudeShortened + `","output":"done"}` +
+		`]}`)
+
+	got := SanitizeCodexInputItemIDs(body)
+	for _, path := range []string{"input.0.call_id", "input.1.call_id"} {
+		if actual := gjson.GetBytes(got, path).String(); actual != claudeShortened {
+			t.Fatalf("%s = %q, want Claude-visible ID %q; payload=%s", path, actual, claudeShortened, got)
 		}
 	}
 }
