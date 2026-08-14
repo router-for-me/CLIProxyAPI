@@ -381,6 +381,57 @@ func TestAPIKeyUpdatePolicyReplaces(t *testing.T) {
 	}
 }
 
+func TestAPIKeyLookupByAlias(t *testing.T) {
+	store := newTestPostgresStore(t, "alias_test")
+	ctx := cancelableTestCtx(t)
+	apiKeys := NewAPIKeyStore(store)
+
+	// Give alpha a policy so we can verify the policy decodes through
+	// LookupByAlias too (matching LookupByHash semantics).
+	alphaRPM := 77
+	alphaPolicy := &Policy{RPMLimit: &alphaRPM, AllowedModels: []string{"gpt-4o"}}
+	alphaKey, _, err := apiKeys.Create(ctx, "a", "alpha", "", nil, nil, alphaPolicy)
+	if err != nil {
+		t.Fatalf("create alpha: %v", err)
+	}
+	if _, _, err := apiKeys.Create(ctx, "b", "Beta", "", nil, nil, nil); err != nil {
+		t.Fatalf("create beta: %v", err)
+	}
+	if _, _, err := apiKeys.Create(ctx, "c1", "shared", "", nil, nil, nil); err != nil {
+		t.Fatalf("create shared 1: %v", err)
+	}
+	if _, _, err := apiKeys.Create(ctx, "c2", "shared", "", nil, nil, nil); err != nil {
+		t.Fatalf("create shared 2: %v", err)
+	}
+
+	key, policy, err := apiKeys.LookupByAlias(ctx, "ALPHA")
+	if err != nil {
+		t.Fatalf("LookupByAlias(ALPHA): %v", err)
+	}
+	if key.KeyAlias != "alpha" {
+		t.Errorf("resolved key alias = %q; want %q", key.KeyAlias, "alpha")
+	}
+	if key.ID != alphaKey.ID {
+		t.Errorf("resolved key ID = %q; want %q", key.ID, alphaKey.ID)
+	}
+	if policy == nil || policy.RPMLimit == nil || *policy.RPMLimit != alphaRPM {
+		t.Errorf("resolved policy = %+v; want RPMLimit %d", policy, alphaRPM)
+	}
+	if policy == nil || len(policy.AllowedModels) != 1 || policy.AllowedModels[0] != "gpt-4o" {
+		t.Errorf("resolved AllowedModels = %v; want [gpt-4o]", policy.AllowedModels)
+	}
+
+	if _, _, err := apiKeys.LookupByAlias(ctx, "shared"); !errors.Is(err, ErrAmbiguousAlias) {
+		t.Fatalf("LookupByAlias(shared) = %v; want ErrAmbiguousAlias", err)
+	}
+	if _, _, err := apiKeys.LookupByAlias(ctx, "ghost"); !errors.Is(err, ErrAPIKeyNotFound) {
+		t.Fatalf("LookupByAlias(ghost) = %v; want ErrAPIKeyNotFound", err)
+	}
+	if _, _, err := apiKeys.LookupByAlias(ctx, ""); !errors.Is(err, ErrAPIKeyNotFound) {
+		t.Fatalf("LookupByAlias(\"\") = %v; want ErrAPIKeyNotFound", err)
+	}
+}
+
 func cancelableTestCtx(t *testing.T) context.Context {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)

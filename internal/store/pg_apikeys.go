@@ -41,6 +41,11 @@ var ErrAPIKeyNotFound = errors.New("postgres store: api key not found")
 // 400 responses rather than the default 500.
 var ErrInvalidSecret = errors.New("postgres store: invalid api key secret")
 
+// ErrAmbiguousAlias is returned by LookupByAlias when more than one API key
+// shares the same key_alias (case-insensitive). The caller must not guess which
+// row was meant; the import-by-alias flow reports the row as "ambiguous".
+var ErrAmbiguousAlias = errors.New("postgres store: api key alias is ambiguous")
+
 // APIKey mirrors a row in the api_keys table. The plaintext secret is never
 // persisted: only KeyHash (SHA-256) is stored. KeyPrefix exposes the first
 // characters of the secret for display in management UIs. KeyAlias is an
@@ -527,6 +532,144 @@ func (s *APIKeyStore) LookupByID(ctx context.Context, id string) (*APIKey, *Poli
 		return nil, nil, err
 	}
 	return key, policy, nil
+}
+
+// LookupByAlias returns the API key (and its policy, if any) whose key_alias
+// matches alias case-insensitively. The alias is not unique in the schema, so
+// when more than one row shares the alias ErrAmbiguousAlias is returned and the
+// caller must treat the match as unresolved. ErrAPIKeyNotFound is returned when
+// no row matches. A nil/empty alias never matches.
+func (s *APIKeyStore) LookupByAlias(ctx context.Context, alias string) (*APIKey, *Policy, error) {
+	if s == nil || s.db == nil {
+		return nil, nil, fmt.Errorf("postgres store: api key store not initialized")
+	}
+	if strings.TrimSpace(alias) == "" {
+		return nil, nil, ErrAPIKeyNotFound
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT k.id, k.name, COALESCE(k.key_alias, ''), k.key_hash, k.key_prefix, k.status,
+		       COALESCE(k.user_id, ''),
+		       COALESCE(u.user_alias, ''), COALESCE(u.user_email, ''),
+		       k.created_at, k.updated_at, k.expires_at, k.last_used_at, k.metadata,
+		       p.rpm_limit, p.hourly_rate_limit, p.budget_hourly_usd, p.budget_weekly_usd,
+		       p.budget_monthly_usd, p.max_parallel_requests,
+		       p.allowed_models, p.blocked_models, p.model_routes, p.model_group_id,
+		       p.allowed_ips, p.blocked_ips, p.updated_at
+		FROM %s k
+		LEFT JOIN %s u ON u.id = k.user_id
+		LEFT JOIN %s p ON p.api_key_id = k.id
+		WHERE LOWER(k.key_alias) = LOWER($1)
+		ORDER BY k.created_at ASC
+	`, s.apiKeysTable, s.internalUsersTable, s.policiesTable), alias)
+	if err != nil {
+		return nil, nil, fmt.Errorf("postgres store: lookup api key by alias: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	// Iterate rows; fully decode each (key, policy) exactly like scanAPIKeyRow
+	// does so the returned *Policy is populated correctly. Alias is not unique,
+	// so we must collect every match before deciding how to resolve it.
+	var keys []*APIKey
+	var policies []*Policy
+	for rows.Next() {
+		key, policy, err := scanAPIKeyRows(rows)
+		if err != nil {
+			return nil, nil, fmt.Errorf("postgres store: scan api key row by alias: %w", err)
+		}
+		keys = append(keys, key)
+		policies = append(policies, policy)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("postgres store: iterate api key rows by alias: %w", err)
+	}
+	switch len(keys) {
+	case 0:
+		return nil, nil, ErrAPIKeyNotFound
+	case 1:
+		return keys[0], policies[0], nil
+	default:
+		return nil, nil, ErrAmbiguousAlias
+	}
+}
+
+// scanAPIKeyRows decodes one row from a *sql.Rows into an APIKey and its
+// optional Policy, mirroring scanAPIKeyRow's column layout and policy decode.
+func scanAPIKeyRows(row *sql.Rows) (*APIKey, *Policy, error) {
+	var (
+		key             APIKey
+		metadata        []byte
+		rpmLimit        sql.NullInt64
+		hourlyRateLimit sql.NullInt64
+		budgetHourly    sql.NullFloat64
+		budgetWeekly    sql.NullFloat64
+		budgetMonthly   sql.NullFloat64
+		maxParallel     sql.NullInt64
+		allowedModels   []byte
+		blockedModels   []byte
+		modelRoutes     []byte
+		modelGroupID    sql.NullString
+		allowedIPs      []byte
+		blockedIPs      []byte
+		policyUpdatedAt sql.NullTime
+	)
+	if err := row.Scan(
+		&key.ID, &key.Name, &key.KeyAlias, &key.KeyHash, &key.KeyPrefix, &key.Status,
+		&key.UserID,
+		&key.UserAlias, &key.UserEmail,
+		&key.CreatedAt, &key.UpdatedAt, &key.ExpiresAt, &key.LastUsedAt, &metadata,
+		&rpmLimit, &hourlyRateLimit, &budgetHourly, &budgetWeekly, &budgetMonthly,
+		&maxParallel,
+		&allowedModels, &blockedModels, &modelRoutes, &modelGroupID,
+		&allowedIPs, &blockedIPs, &policyUpdatedAt,
+	); err != nil {
+		return nil, nil, err
+	}
+	if len(metadata) > 0 {
+		_ = json.Unmarshal(metadata, &key.Metadata)
+	}
+	if key.Metadata == nil {
+		key.Metadata = map[string]any{}
+	}
+
+	var policy *Policy
+	if policyUpdatedAt.Valid {
+		p := Policy{APIKeyID: key.ID, UpdatedAt: policyUpdatedAt.Time}
+		if rpmLimit.Valid {
+			v := int(rpmLimit.Int64)
+			p.RPMLimit = &v
+		}
+		if hourlyRateLimit.Valid {
+			v := int(hourlyRateLimit.Int64)
+			p.HourlyRateLimit = &v
+		}
+		if budgetHourly.Valid {
+			v := budgetHourly.Float64
+			p.BudgetHourlyUSD = &v
+		}
+		if budgetWeekly.Valid {
+			v := budgetWeekly.Float64
+			p.BudgetWeeklyUSD = &v
+		}
+		if budgetMonthly.Valid {
+			v := budgetMonthly.Float64
+			p.BudgetMonthlyUSD = &v
+		}
+		if maxParallel.Valid {
+			v := int(maxParallel.Int64)
+			p.MaxParallelRequests = &v
+		}
+		p.AllowedModels = decodeStringArray(allowedModels)
+		p.BlockedModels = decodeStringArray(blockedModels)
+		p.ModelRoutes = decodeModelRoutes(modelRoutes)
+		if modelGroupID.Valid && modelGroupID.String != "" {
+			id := modelGroupID.String
+			p.ModelGroupID = &id
+		}
+		p.AllowedIPs = decodeStringArray(allowedIPs)
+		p.BlockedIPs = decodeStringArray(blockedIPs)
+		policy = &p
+	}
+	return &key, policy, nil
 }
 
 func scanAPIKeyRow(row *sql.Row) (*APIKey, *Policy, error) {
