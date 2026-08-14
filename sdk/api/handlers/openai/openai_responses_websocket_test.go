@@ -3099,6 +3099,83 @@ func TestResponsesWebsocketTerminalErrorUnknownFieldNotEchoed(t *testing.T) {
 	}
 }
 
+// TestResponsesWebsocketNonTerminalErrorRedactsSecretAndKeepsSafeFields is the
+// non-terminal twin of TestResponsesWebsocketTerminalErrorRebuildsSanitizedPayload:
+// writeResponsesWebsocketError drives an ErrorMessage whose embedded secret is
+// built at runtime through the same shared sanitizer path used by the
+// non-terminal error sink (ResponsesWebsocket non-terminal write), proves the
+// secret is redacted and no unknown fields are echoed, and preserves the safe
+// status/code fields. The secret is built at runtime so the test is not a
+// source-literal scanner false positive; it proves the actual shared
+// non-terminal sanitizer path.
+func TestResponsesWebsocketNonTerminalErrorRedactsSecretAndKeepsSafeFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	secret := fmt.Sprintf("nt-ws-secret-%s", strconv.Itoa(424242))
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      errors.New(`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"blocked api_key=` + secret + `","param":"x"}}`),
+	}
+
+	// Non-terminal error sink drives a real websocket writer with the shared
+	// sanitizer; assertions must prove sanitization happened before the frame.
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			serverErrCh <- errUpgrade
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if _, errWrite := writeResponsesWebsocketError(newResponsesWebsocketWriter(conn), newInMemoryWebsocketTimelineLog(), errMsg); errWrite != nil {
+			serverErrCh <- errWrite
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial websocket: %v", errDial)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_, payload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read websocket message: %v", errRead)
+	}
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+
+	raw := string(payload)
+	if strings.Contains(raw, secret) {
+		t.Fatalf("non-terminal websocket error leaked raw upstream secret: %q", raw)
+	}
+	if !strings.Contains(raw, "[REDACTED]") {
+		t.Fatalf("non-terminal websocket error not redacted: %q", raw)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("type = %q, want %q", got, wsEventTypeError)
+	}
+	if status := int(gjson.GetBytes(payload, "status").Int()); status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", status, http.StatusTooManyRequests)
+	}
+	if code := gjson.GetBytes(payload, "error.code").String(); code != "rate_limit_exceeded" {
+		t.Fatalf("error.code = %q, want rate_limit_exceeded", code)
+	}
+	if errType := gjson.GetBytes(payload, "error.type").String(); errType != "rate_limit_error" {
+		t.Fatalf("error.type = %q, want rate_limit_error", errType)
+	}
+	if unknown := gjson.GetBytes(payload, "unknown"); unknown.Exists() {
+		t.Fatalf("non-terminal error echoed unknown field: %q", raw)
+	}
+	if param := gjson.GetBytes(payload, "error.param"); param.Exists() && strings.Contains(param.String(), "secret") {
+		t.Fatalf("non-terminal error echoed raw param field: %q", raw)
+	}
+}
+
 func TestResponsesWebsocketCodexWebsocketPassthroughPassesCompactedRequestWithoutTranscriptMerge(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
