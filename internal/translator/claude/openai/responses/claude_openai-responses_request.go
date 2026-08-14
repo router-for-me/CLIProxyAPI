@@ -13,6 +13,7 @@ import (
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	chatclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -23,6 +24,189 @@ var (
 	account = ""
 	session = ""
 )
+
+// ConvertClaudeRequestToOpenAIResponses converts an Anthropic Messages request
+// into the OpenAI Responses shape used by providers such as GitHub Copilot.
+// Claude Code remains the downstream protocol; this conversion only affects
+// the upstream request selected by the executor.
+func ConvertClaudeRequestToOpenAIResponses(modelName string, inputRawJSON []byte, stream bool) []byte {
+	chatPayload := chatclaude.ConvertClaudeRequestToOpenAI(modelName, inputRawJSON, stream)
+	root := gjson.ParseBytes(chatPayload)
+	out := []byte(`{"model":"","input":[],"stream":false}`)
+	out, _ = sjson.SetBytes(out, "model", modelName)
+	out, _ = sjson.SetBytes(out, "stream", stream)
+
+	for _, field := range []string{"max_tokens", "temperature", "top_p"} {
+		if value := root.Get(field); value.Exists() {
+			out, _ = sjson.SetRawBytes(out, responseFieldForChat(field), []byte(value.Raw))
+		}
+	}
+	if effort := root.Get("reasoning_effort"); effort.Exists() {
+		out, _ = sjson.SetBytes(out, "reasoning.effort", effort.String())
+	}
+
+	var instructions strings.Builder
+	var appendText func(gjson.Result)
+	appendText = func(content gjson.Result) {
+		if content.Type == gjson.String {
+			if text := strings.TrimSpace(content.String()); text != "" {
+				if instructions.Len() > 0 {
+					instructions.WriteByte('\n')
+				}
+				instructions.WriteString(text)
+			}
+			return
+		}
+		if content.IsArray() {
+			content.ForEach(func(_, part gjson.Result) bool {
+				appendText(part.Get("text"))
+				return true
+			})
+		}
+	}
+
+	messages := root.Get("messages")
+	if messages.IsArray() {
+		messages.ForEach(func(_, message gjson.Result) bool {
+			if message.Get("role").String() == "system" {
+				appendText(message.Get("content"))
+			}
+			return true
+		})
+	}
+	if instructions.Len() > 0 {
+		out, _ = sjson.SetBytes(out, "instructions", instructions.String())
+	}
+
+	if messages.IsArray() {
+		messages.ForEach(func(_, message gjson.Result) bool {
+			role := message.Get("role").String()
+			switch role {
+			case "system":
+				return true
+			case "tool":
+				item := []byte(`{"type":"function_call_output","call_id":"","output":""}`)
+				item, _ = sjson.SetBytes(item, "call_id", message.Get("tool_call_id").String())
+				item = setResponsesContent(item, "output", message.Get("content"))
+				out, _ = sjson.SetRawBytes(out, "input.-1", item)
+				return true
+			}
+
+			if role != "user" && role != "assistant" && role != "developer" {
+				return true
+			}
+			content := message.Get("content")
+			hasContent := content.Exists() && (content.Type == gjson.String || content.IsArray())
+			if content.Type == gjson.String && strings.TrimSpace(content.String()) == "" {
+				hasContent = false
+			}
+			if hasContent {
+				item := []byte(`{"type":"message","role":"","content":[]}`)
+				item, _ = sjson.SetBytes(item, "role", role)
+				item = appendResponsesMessageContent(item, content, role == "assistant")
+				if len(gjson.GetBytes(item, "content").Array()) > 0 {
+					out, _ = sjson.SetRawBytes(out, "input.-1", item)
+				}
+			}
+
+			if role == "assistant" {
+				calls := message.Get("tool_calls")
+				if calls.IsArray() {
+					calls.ForEach(func(_, call gjson.Result) bool {
+						item := []byte(`{"type":"function_call","call_id":"","name":"","arguments":""}`)
+						item, _ = sjson.SetBytes(item, "call_id", call.Get("id").String())
+						item, _ = sjson.SetBytes(item, "name", call.Get("function.name").String())
+						item, _ = sjson.SetBytes(item, "arguments", call.Get("function.arguments").String())
+						out, _ = sjson.SetRawBytes(out, "input.-1", item)
+						return true
+					})
+				}
+			}
+			return true
+		})
+	}
+
+	if tools := root.Get("tools"); tools.IsArray() {
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			if tool.Get("type").String() != "function" {
+				return true
+			}
+			function := tool.Get("function")
+			item := []byte(`{"type":"function","name":"","description":"","parameters":{}}`)
+			item, _ = sjson.SetBytes(item, "name", function.Get("name").String())
+			item, _ = sjson.SetBytes(item, "description", function.Get("description").String())
+			if parameters := function.Get("parameters"); parameters.Exists() {
+				item, _ = sjson.SetRawBytes(item, "parameters", []byte(parameters.Raw))
+			}
+			out, _ = sjson.SetRawBytes(out, "tools.-1", item)
+			return true
+		})
+	}
+
+	if choice := root.Get("tool_choice"); choice.Exists() {
+		switch choice.Type {
+		case gjson.String:
+			out, _ = sjson.SetBytes(out, "tool_choice", choice.String())
+		case gjson.JSON:
+			if choice.Get("type").String() == "function" {
+				out, _ = sjson.SetBytes(out, "tool_choice.type", "function")
+				out, _ = sjson.SetBytes(out, "tool_choice.name", choice.Get("function.name").String())
+			}
+		}
+	}
+
+	return out
+}
+
+func responseFieldForChat(field string) string {
+	if field == "max_tokens" {
+		return "max_output_tokens"
+	}
+	return field
+}
+
+func setResponsesContent(target []byte, path string, content gjson.Result) []byte {
+	if content.IsArray() || content.IsObject() {
+		updated, _ := sjson.SetRawBytes(target, path, []byte(content.Raw))
+		return updated
+	}
+	updated, _ := sjson.SetBytes(target, path, content.String())
+	return updated
+}
+
+func appendResponsesMessageContent(target []byte, content gjson.Result, assistant bool) []byte {
+	appendPart := func(part gjson.Result) {
+		partType := part.Get("type").String()
+		if partType == "text" {
+			partType = "output_text"
+			if !assistant {
+				partType = "input_text"
+			}
+			item := []byte(`{"type":"input_text","text":""}`)
+			item, _ = sjson.SetBytes(item, "type", partType)
+			item, _ = sjson.SetBytes(item, "text", part.Get("text").String())
+			target, _ = sjson.SetRawBytes(target, "content.-1", item)
+			return
+		}
+		if partType == "image_url" {
+			item := []byte(`{"type":"input_image","image_url":""}`)
+			item, _ = sjson.SetBytes(item, "image_url", part.Get("image_url.url").String())
+			target, _ = sjson.SetRawBytes(target, "content.-1", item)
+		}
+	}
+	if content.Type == gjson.String {
+		part := []byte(`{"type":"input_text","text":""}`)
+		part, _ = sjson.SetBytes(part, "type", map[bool]string{true: "output_text", false: "input_text"}[assistant])
+		part, _ = sjson.SetBytes(part, "text", content.String())
+		target, _ = sjson.SetRawBytes(target, "content.-1", part)
+		return target
+	}
+	content.ForEach(func(_, part gjson.Result) bool {
+		appendPart(part)
+		return true
+	})
+	return target
+}
 
 // ConvertOpenAIResponsesRequestToClaude transforms an OpenAI Responses API request
 // into a Claude Messages API request using only gjson/sjson for JSON handling.

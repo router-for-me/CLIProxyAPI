@@ -13,6 +13,87 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
+func copilotMetadataModelIDs(a *coreauth.Auth) []string {
+	if a == nil || a.Metadata == nil {
+		return nil
+	}
+	raw, ok := a.Metadata["available_models"]
+	if !ok {
+		return nil
+	}
+
+	switch ids := raw.(type) {
+	case nil:
+		return nil
+	case string:
+		return normalizeMetadataModelIDs(strings.Split(ids, ","))
+	case []string:
+		return normalizeMetadataModelIDs(ids)
+	case []any:
+		values := make([]string, 0, len(ids))
+		for _, item := range ids {
+			if value, ok := item.(string); ok {
+				values = append(values, value)
+			}
+		}
+		return normalizeMetadataModelIDs(values)
+	default:
+		return nil
+	}
+}
+
+func normalizeMetadataModelIDs(raw []string) []string {
+	if len(raw) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(raw))
+	ids := make([]string, 0, len(raw))
+	for _, entry := range raw {
+		id := strings.TrimSpace(entry)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func catalogModelInfosForIDs(catalog []*ModelInfo, ids []string) []*ModelInfo {
+	if len(ids) == 0 {
+		return nil
+	}
+	byID := make(map[string]*ModelInfo, len(catalog))
+	for _, model := range catalog {
+		if model == nil {
+			continue
+		}
+		byID[strings.TrimSpace(model.ID)] = model
+	}
+	models := make([]*ModelInfo, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		if model, ok := byID[trimmed]; ok {
+			clone := *model
+			models = append(models, &clone)
+			continue
+		}
+		models = append(models, &ModelInfo{ID: trimmed, Object: "model", OwnedBy: "copilot", Type: "copilot", DisplayName: trimmed})
+	}
+	return models
+}
+
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
 func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 	s.registerModelsForAuthWithCache(ctx, a, nil)
@@ -139,6 +220,13 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			models = registry.GetCodexFreeModels()
 		default:
 			models = registry.GetCodexProModels()
+		}
+		models = applyExcludedModels(models, excluded)
+	case "copilot":
+		if ids := copilotMetadataModelIDs(a); ids != nil {
+			models = catalogModelInfosForIDs(registry.GetCopilotModels(), ids)
+		} else {
+			models = registry.GetCopilotModels()
 		}
 		models = applyExcludedModels(models, excluded)
 	case "kimi":
