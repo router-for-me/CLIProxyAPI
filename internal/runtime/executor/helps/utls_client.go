@@ -37,6 +37,37 @@ type closeConnectionBody struct {
 	err             error
 }
 
+const (
+	maxHTTP1ResponseHeaderBytes = 10 << 20
+	maxInterimHTTP1Responses    = 10
+)
+
+var errHTTP1ResponseHeadersTooLarge = errors.New("utls: HTTP/1.1 response headers too large")
+
+type responseHeaderLimitReader struct {
+	reader    io.Reader
+	remaining int64
+}
+
+func (r *responseHeaderLimitReader) Read(p []byte) (int, error) {
+	if r.remaining < 0 {
+		return r.reader.Read(p)
+	}
+	if r.remaining == 0 {
+		return 0, errHTTP1ResponseHeadersTooLarge
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, errRead := r.reader.Read(p)
+	r.remaining -= int64(n)
+	return n, errRead
+}
+
+func (r *responseHeaderLimitReader) disableLimit() {
+	r.remaining = -1
+}
+
 func (b *closeConnectionBody) Close() error {
 	if b == nil {
 		return nil
@@ -72,6 +103,24 @@ func closeConnectionOnContextCancel(ctx context.Context, conn net.Conn) func() e
 	return func() error {
 		stop()
 		return closeConnection()
+	}
+}
+
+func readFinalHTTP1Response(reader io.Reader, req *http.Request) (*http.Response, error) {
+	limitedReader := &responseHeaderLimitReader{reader: reader, remaining: maxHTTP1ResponseHeaderBytes}
+	responseReader := bufio.NewReader(limitedReader)
+	for interimResponses := 0; ; interimResponses++ {
+		resp, errRead := http.ReadResponse(responseReader, req)
+		if errRead != nil {
+			return nil, errRead
+		}
+		if resp.StatusCode < http.StatusContinue || resp.StatusCode >= http.StatusOK || resp.StatusCode == http.StatusSwitchingProtocols {
+			limitedReader.disableLimit()
+			return resp, nil
+		}
+		if interimResponses == maxInterimHTTP1Responses {
+			return nil, fmt.Errorf("utls: too many interim HTTP/1.1 responses")
+		}
 	}
 }
 
@@ -150,10 +199,12 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 			if errClose := closeConnection(); errClose != nil {
 				return nil, fmt.Errorf("utls: write HTTP/1.1 request: %w; close connection: %v", errWrite, errClose)
 			}
+			if errContext := req.Context().Err(); errContext != nil {
+				return nil, errContext
+			}
 			return nil, fmt.Errorf("utls: write HTTP/1.1 request: %w", errWrite)
 		}
-		resp, err = http.ReadResponse(bufio.NewReader(tlsConn), req)
-		closeConnection = tlsConn.Close
+		resp, err = readFinalHTTP1Response(tlsConn, req)
 	default:
 		if errClose := tlsConn.Close(); errClose != nil {
 			return nil, fmt.Errorf("utls: unsupported negotiated protocol %q; close connection: %v", negotiatedProtocol, errClose)
@@ -163,6 +214,9 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	if err != nil {
 		if errClose := closeConnection(); errClose != nil {
 			log.Debugf("utls: close connection after round trip failure: %v", errClose)
+		}
+		if errContext := req.Context().Err(); errContext != nil {
+			return nil, errContext
 		}
 		return nil, err
 	}
