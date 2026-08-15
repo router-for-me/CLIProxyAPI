@@ -188,6 +188,24 @@ func hasMeaningfulToolCalls(rawCalls []json.RawMessage) bool {
 	return false
 }
 
+func isMeaningfulGeminiFunctionCall(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return false
+	}
+	var call struct {
+		Name string          `json:"name"`
+		Args json.RawMessage `json:"args"`
+	}
+	if err := json.Unmarshal(trimmed, &call); err != nil {
+		return false
+	}
+	if strings.TrimSpace(call.Name) != "" {
+		return true
+	}
+	return nonEmptyJSONPayload(call.Args)
+}
+
 func isMeaningfulToolCall(raw json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
@@ -820,7 +838,7 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 		}
 		if cand.Content != nil {
 			for _, part := range cand.Content.Parts {
-				if nonEmptyJSONPayload(part.FunctionCall) {
+				if isMeaningfulGeminiFunctionCall(part.FunctionCall) {
 					a.hasToolCalls = true
 				}
 				if nonEmptyJSONPayload(part.InlineData) ||

@@ -392,6 +392,21 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: false,
 		},
 		{
+			name:     "gemini non-stream with empty-name empty-args functionCall is empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"","args":{}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`),
+			expected: true,
+		},
+		{
+			name:     "gemini sse with empty-name empty-args functionCall is empty",
+			payload:  []byte("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"\",\"args\":{}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"candidatesTokenCount\":0}}\n\n"),
+			expected: true,
+		},
+		{
+			name:     "gemini non-stream with functionCall args and empty name is not empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"","args":{"query":"hello"}}}]},"finishReason":"STOP"}]}`),
+			expected: false,
+		},
+		{
 			name:     "gemini non-stream with text content is not empty",
 			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}]}`),
 			expected: false,
