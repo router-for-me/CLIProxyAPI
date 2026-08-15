@@ -502,6 +502,16 @@ func TestEmptyCompletionTolerantUsage(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "openai completed payload with empty choices array is empty",
+			payload:  []byte(`{"id":"chatcmpl-x","object":"chat.completion","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":0,"total_tokens":10}}`),
+			expected: true,
+		},
+		{
+			name:     "openai empty choices without usage is not judged terminal",
+			payload:  []byte(`{"choices":[]}`),
+			expected: false,
+		},
+		{
 			name:     "openai completion_tokens negative stays empty",
 			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":-5}}`),
 			expected: true,

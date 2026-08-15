@@ -159,7 +159,14 @@ func wrapStreamEmptyCompletion(ctx context.Context, streamResult *coreexecutor.S
 			case chunk, ok = <-src:
 			}
 			if !ok {
-				if !forwarding && len(buffered) == 0 {
+			if !forwarding {
+				payloadBytes := 0
+				for _, c := range buffered {
+					payloadBytes += len(c.Payload)
+				}
+				if payloadBytes == 0 {
+					// Zero-payload chunks are dropped downstream; a stream of only
+					// such chunks is an empty stream, not a successful completion.
 					_ = forward(coreexecutor.StreamChunk{Err: &coreauth.Error{
 						Code:      "empty_stream",
 						Message:   "upstream stream closed before first payload",
@@ -167,10 +174,14 @@ func wrapStreamEmptyCompletion(ctx context.Context, streamResult *coreexecutor.S
 					}})
 					return
 				}
-				if !forwarding && coreauth.IsEmptyCompletionPayload(streamChunkPayload(buffered)) {
+				// Judge with the incremental detector state instead of re-parsing
+				// the concatenated payload: separately chunked SSE frames do not
+				// reassemble into valid input for the payload-level check.
+				if detector.Finish() {
 					_ = forward(coreexecutor.StreamChunk{Err: coreauth.EmptyCompletionError()})
 					return
 				}
+			}
 				_ = flush()
 				return
 			}

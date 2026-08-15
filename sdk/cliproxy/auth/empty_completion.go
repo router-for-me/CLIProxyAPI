@@ -385,6 +385,14 @@ func (a *emptyCompletionAccum) evalOpenAI(data []byte) bool {
 			a.hasContent = true
 		}
 	}
+	if len(chunk.Choices) == 0 && chunk.Usage != nil {
+		// A completed non-streaming payload with zero choices
+		// ({"choices":[], "usage":...}) never enters the loop above, so
+		// terminal would never be set and the payload would be accepted as a
+		// successful response. With usage present the response is complete, so
+		// the empty judgment can run.
+		a.terminal = true
+	}
 	return true
 }
 
