@@ -272,6 +272,10 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			return buffered, true, nil
 		}
 		if chunk.Err != nil {
+			if len(buffered) > 0 {
+				buffered = append(buffered, chunk)
+				return buffered, false, nil
+			}
 			return nil, false, chunk.Err
 		}
 		for _, cb := range onFirstChunk {
@@ -490,16 +494,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		scope.stop()
 
-		var (
-			buffered     []cliproxyexecutor.StreamChunk
-			closed       bool
-			bootstrapErr error
-		)
-		if !cliproxyexecutor.DownstreamWebsocket(ctx) {
-			buffered, closed, bootstrapErr = readStreamBootstrap(attemptCtx, streamResult.Chunks)
-			if bootstrapErr == nil && scope.timedOut() {
-				bootstrapErr = scope.timeoutError()
-			}
+		buffered, closed, bootstrapErr := readStreamBootstrap(attemptCtx, streamResult.Chunks)
+		if bootstrapErr == nil && scope.timedOut() {
+			bootstrapErr = scope.timeoutError()
 		}
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
