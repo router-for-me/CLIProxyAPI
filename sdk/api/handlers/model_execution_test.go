@@ -618,7 +618,7 @@ func TestExecuteModelStreamKeepsInteractionsProviderForOpenAIEntry(t *testing.T)
 		provider: constant.GeminiInteractions,
 		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 			chunks := make(chan coreexecutor.StreamChunk, 1)
-			chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"id":"chunk_1","object":"chat.completion.chunk","choices":[]}`)}
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"id":"chunk_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"}}]}`)}
 			close(chunks)
 			return &coreexecutor.StreamResult{Chunks: chunks}, nil
 		},

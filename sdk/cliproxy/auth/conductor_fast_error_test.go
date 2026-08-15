@@ -50,7 +50,7 @@ func TestManagerFastLocalErrorDoesNotRefreshRetryOrCoolCredential(t *testing.T) 
 					if calls.Add(1) == 1 {
 						return cliproxyexecutor.Response{}, &requestScopedStatusError{message: "decode Fast response"}
 					}
-					return cliproxyexecutor.Response{Payload: []byte(`{"type":"message","content":[]}`)}, nil
+					return cliproxyexecutor.Response{Payload: []byte(`{"type":"message","content":[{"type":"text","text":"ok"}]}`)}, nil
 				}
 			},
 			run: func(manager *Manager, model string) error {
@@ -130,7 +130,7 @@ func TestManagerFastDirectErrorDoesNotRefreshRetryOrCoolCredential(t *testing.T)
 					if calls.Add(1) == 1 {
 						return cliproxyexecutor.Response{}, newFastDirectResponseTestError(http.StatusUnauthorized, `{"type":"error","error":{"message":"Fast denied"}}`)
 					}
-					return cliproxyexecutor.Response{Payload: []byte(`{"type":"message","content":[]}`)}, nil
+					return cliproxyexecutor.Response{Payload: []byte(`{"type":"message","content":[{"type":"text","text":"ok"}]}`)}, nil
 				}
 			},
 			run: func(manager *Manager, model string) error {
