@@ -284,6 +284,57 @@ func TestRewriteXAINativeToolMarkupChatJSONPreservesTextAfterBlock(t *testing.T)
 	}
 }
 
+func TestRewriteXAINativeToolMarkupChatJSONHonorsToolChoiceNone(t *testing.T) {
+	req, _ := sjson.SetBytes(xaiNativeOpenAIRequestWithTools("Execute"), "tool_choice", "none")
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"<|tool_calls_begin|><|tool_call_begin|>\nExecute\n<|tool_sep|>command\nls\n<|tool_call_end|><|tool_calls_end|>"}}]}`)
+	if _, ok := rewriteXAINativeToolMarkupChatJSON(body, parseXAINativeDeclaredTools(req)); ok {
+		t.Fatal("tool_choice none must leave matching markup as text")
+	}
+}
+
+func TestRewriteXAINativeToolMarkupChatJSONHonorsForcedFunction(t *testing.T) {
+	req := xaiNativeOpenAIRequestWithTools("Execute", "Read")
+	req, _ = sjson.SetRawBytes(req, "tool_choice", []byte(`{"type":"function","function":{"name":"Read"}}`))
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"<|tool_calls_begin|><|tool_call_begin|>\nExecute\n<|tool_sep|>command\nls\n<|tool_call_end|><|tool_calls_end|>"}}]}`)
+	if _, ok := rewriteXAINativeToolMarkupChatJSON(body, parseXAINativeDeclaredTools(req)); ok {
+		t.Fatal("forced Read must not lift an Execute markup block")
+	}
+
+	readBody := []byte(`{"choices":[{"message":{"role":"assistant","content":"<|tool_calls_begin|><|tool_call_begin|>\nRead\n<|tool_sep|>file_path\n/tmp/a\n<|tool_call_end|><|tool_calls_end|>"}}]}`)
+	rewritten, ok := rewriteXAINativeToolMarkupChatJSON(readBody, parseXAINativeDeclaredTools(req))
+	if !ok {
+		t.Fatal("forced Read should lift a Read markup block")
+	}
+	if gjson.GetBytes(rewritten, "choices.0.message.tool_calls.0.function.name").String() != "Read" {
+		t.Fatalf("rewritten = %s", rewritten)
+	}
+}
+
+func TestRewriteXAINativeToolMarkupChatJSONCapsCallIDLength(t *testing.T) {
+	name := strings.Repeat("a", 46)
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":""}}]}`)
+	body, _ = sjson.SetBytes(body, "choices.0.message.content", "<|tool_calls_begin|><|tool_call_begin|>\n"+name+"\n<|tool_sep|>path\n/tmp/a\n<|tool_call_end|><|tool_calls_end|>")
+	rewritten, ok := rewriteXAINativeToolMarkupChatJSON(body, xaiNativeDeclared(name))
+	if !ok {
+		t.Fatal("rewrite should succeed")
+	}
+	id := gjson.GetBytes(rewritten, "choices.0.message.tool_calls.0.id").String()
+	if id == "" {
+		t.Fatal("missing tool call id")
+	}
+	if len(id) > 64 {
+		t.Fatalf("call id length = %d, want <= 64: %q", len(id), id)
+	}
+}
+
+func TestXAINativeToolMarkupChatStreamPassThroughWhenToolChoiceNone(t *testing.T) {
+	req, _ := sjson.SetBytes(xaiNativeOpenAIRequestWithTools("Execute"), "tool_choice", "none")
+	stream := NewXAINativeToolMarkupChatStream(sdktranslator.FormatOpenAI, req)
+	if stream.enabled {
+		t.Fatal("stream rewriter must stay disabled when tool_choice is none")
+	}
+}
+
 func TestRewriteXAINativeToolMarkupChatJSONRejectsUndeclaredCallInBlock(t *testing.T) {
 	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"<|tool_calls_begin|><|tool_call_begin|>\nExecute\n<|tool_sep|>command\nls\n<|tool_call_end|><|tool_call_begin|>\nHallucinated\n<|tool_sep|>path\n/tmp/a\n<|tool_call_end|><|tool_calls_end|>"}}]}`)
 	if _, ok := rewriteXAINativeToolMarkupChatJSON(body, xaiNativeDeclared("Execute")); ok {

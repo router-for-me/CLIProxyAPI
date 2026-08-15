@@ -2,6 +2,8 @@ package helps
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -393,7 +395,7 @@ type XAINativeToolMarkupChatStream struct {
 func NewXAINativeToolMarkupChatStream(format sdktranslator.Format, originalRequest []byte) *XAINativeToolMarkupChatStream {
 	declared := parseXAINativeDeclaredTools(originalRequest)
 	return &XAINativeToolMarkupChatStream{
-		enabled:  format == sdktranslator.FormatOpenAI && len(declared.restore) > 0,
+		enabled:  format == sdktranslator.FormatOpenAI && len(declared.restore) > 0 && !declared.choiceNone,
 		declared: declared,
 	}
 }
@@ -517,6 +519,8 @@ func xaiNativeSSEToChatChunks(sse []byte) [][]byte {
 type xaiNativeDeclaredTools struct {
 	restore    map[string]string
 	properties map[string]map[string]string
+	choiceNone bool
+	allowed    map[string]struct{}
 }
 
 func parseXAINativeDeclaredTools(original []byte) xaiNativeDeclaredTools {
@@ -532,10 +536,63 @@ func parseXAINativeDeclaredTools(original []byte) xaiNativeDeclaredTools {
 	for originalName, shortName := range buildXAINativeShortNameMap(names) {
 		restore[shortName] = originalName
 	}
+	choiceNone, allowed := parseXAINativeToolChoice(original)
 	return xaiNativeDeclaredTools{
 		restore:    restore,
 		properties: collectXAINativeToolPropertyTypes(original),
+		choiceNone: choiceNone,
+		allowed:    allowed,
 	}
+}
+
+func parseXAINativeToolChoice(original []byte) (none bool, allowed map[string]struct{}) {
+	if len(original) == 0 || !gjson.ValidBytes(original) {
+		return false, nil
+	}
+	choice := gjson.GetBytes(original, "tool_choice")
+	if !choice.Exists() {
+		return false, nil
+	}
+	if choice.Type == gjson.String {
+		if choice.String() == "none" {
+			return true, nil
+		}
+		return false, nil
+	}
+	if !choice.IsObject() {
+		return false, nil
+	}
+	switch choice.Get("type").String() {
+	case "none":
+		return true, nil
+	case "function":
+		name := strings.TrimSpace(choice.Get("function.name").String())
+		if name == "" {
+			name = strings.TrimSpace(choice.Get("name").String())
+		}
+		if name != "" {
+			return false, map[string]struct{}{name: {}}
+		}
+	case "tool":
+		if name := strings.TrimSpace(choice.Get("name").String()); name != "" {
+			return false, map[string]struct{}{name: {}}
+		}
+	case "allowed_tools":
+		forced := make(map[string]struct{})
+		for _, tool := range choice.Get("tools").Array() {
+			name := strings.TrimSpace(tool.Get("function.name").String())
+			if name == "" {
+				name = strings.TrimSpace(tool.Get("name").String())
+			}
+			if name != "" {
+				forced[name] = struct{}{}
+			}
+		}
+		if len(forced) > 0 {
+			return false, forced
+		}
+	}
+	return false, nil
 }
 
 func (d xaiNativeDeclaredTools) resolve(name string) (string, bool) {
@@ -551,7 +608,7 @@ func (d xaiNativeDeclaredTools) resolve(name string) (string, bool) {
 }
 
 func (d xaiNativeDeclaredTools) filter(calls []xaiNativeToolCall) []xaiNativeToolCall {
-	if len(d.restore) == 0 || len(calls) == 0 {
+	if d.choiceNone || len(d.restore) == 0 || len(calls) == 0 {
 		return nil
 	}
 	out := make([]xaiNativeToolCall, 0, len(calls))
@@ -559,6 +616,11 @@ func (d xaiNativeDeclaredTools) filter(calls []xaiNativeToolCall) []xaiNativeToo
 		originalName, ok := d.resolve(call.Name)
 		if !ok {
 			return nil
+		}
+		if d.allowed != nil {
+			if _, ok := d.allowed[originalName]; !ok {
+				return nil
+			}
 		}
 		call.Name = originalName
 		call.Arguments = applyXAINativeDeclaredArgumentTypes(originalName, call.Arguments, d.properties)
@@ -821,7 +883,21 @@ func xaiNativeToolCallID(name string, index int) string {
 			b.WriteRune(r)
 		}
 	}
-	return "call_grok_native_" + strconv.Itoa(index) + "_" + b.String()
+	return shortenXAINativeToolCallID("call_grok_native_" + strconv.Itoa(index) + "_" + b.String())
+}
+
+func shortenXAINativeToolCallID(id string) string {
+	const limit = 64
+	if len(id) <= limit {
+		return id
+	}
+	sum := sha256.Sum256([]byte(id))
+	suffix := "_" + hex.EncodeToString(sum[:8])
+	prefixLen := limit - len(suffix)
+	if prefixLen <= 0 {
+		return suffix[len(suffix)-limit:]
+	}
+	return id[:prefixLen] + suffix
 }
 
 func xaiNativeArgumentsJSON(arguments map[string]any) string {
