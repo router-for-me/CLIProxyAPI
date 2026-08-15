@@ -1889,6 +1889,31 @@ func TestClaudeToolUseStopReasonEmptyCompletion(t *testing.T) {
 	})
 }
 
+func TestPrettyPrintedJSONWithDataSubstringEmptyCompletion(t *testing.T) {
+	t.Run("pretty-printed json with data substring is evaluated as empty completion", func(t *testing.T) {
+		payload := []byte("{\n  \"id\": \"msg-data:123\",\n  \"choices\": [\n    {\n      \"message\": {\n        \"role\": \"assistant\",\n        \"content\": \"\"\n      },\n      \"finish_reason\": \"stop\"\n    }\n  ]\n}")
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for pretty-printed JSON with data: substring, want true")
+		}
+	})
+}
+
+func TestClaudeInputJSONDeltaEmptyCompletion(t *testing.T) {
+	t.Run("empty input_json_delta with empty partial_json and no preceding tool id/name is empty completion", func(t *testing.T) {
+		payload := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3\",\"usage\":{\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"input\":null}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for stream with empty input_json_delta, want true")
+		}
+	})
+
+	t.Run("meaningful input_json_delta sets tool calls", func(t *testing.T) {
+		payload := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3\",\"usage\":{\"output_tokens\":0}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"location\\\":\\\"SF\\\"}\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		if IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = true for stream with meaningful input_json_delta, want false")
+		}
+	})
+}
+
 func TestRecognizedContentlessEOFEmptyStream(t *testing.T) {
 	t.Run("OpenAI role-only delta stream closed at EOF without [DONE] is empty completion", func(t *testing.T) {
 		var detector StreamBootstrapDetector

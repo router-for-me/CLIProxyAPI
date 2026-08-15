@@ -256,10 +256,11 @@ type claudeChunk struct {
 	} `json:"message"`
 	ContentBlock *claudeContentBlock `json:"content_block"`
 	Delta        *struct {
-		Type       string  `json:"type"`
-		Text       string  `json:"text"`
-		Thinking   string  `json:"thinking"`
-		StopReason *string `json:"stop_reason"`
+		Type        string  `json:"type"`
+		Text        string  `json:"text"`
+		Thinking    string  `json:"thinking"`
+		PartialJSON string  `json:"partial_json"`
+		StopReason  *string `json:"stop_reason"`
 	} `json:"delta"`
 }
 
@@ -352,6 +353,7 @@ var openAIResponseEventTypes = map[string]bool{
 	"response.output_text.done":              true,
 	"response.function_call_arguments.delta": true,
 	"response.function_call_arguments.done":  true,
+	"error":                                  true,
 }
 
 // emptyCompletionAccum accumulates the properties relevant to deciding whether
@@ -537,7 +539,10 @@ func (a *emptyCompletionAccum) evalClaude(data []byte) bool {
 				a.hasContent = true
 			}
 		case "input_json_delta":
-			a.hasToolCalls = true
+			partial := strings.TrimSpace(chunk.Delta.PartialJSON)
+			if partial != "" && partial != "null" && partial != "{}" {
+				a.hasToolCalls = true
+			}
 		default:
 			if strings.TrimSpace(chunk.Delta.Text) != "" || strings.TrimSpace(chunk.Delta.Thinking) != "" {
 				a.hasContent = true
@@ -594,7 +599,7 @@ func (a *emptyCompletionAccum) evalOpenAIResponse(data []byte) bool {
 		// output (see codex responses tests); never judge them empty.
 		a.terminal = true
 		a.blocked = true
-	case "response.incomplete", "response.failed":
+	case "response.incomplete", "response.failed", "error":
 		a.terminal = true
 		a.blocked = true
 	}
@@ -639,7 +644,7 @@ func (a *emptyCompletionAccum) evalOpenAIResponseStatus(status string) {
 	case "completed":
 		a.terminal = true
 		a.blocked = true
-	case "incomplete", "failed":
+	case "incomplete", "failed", "error":
 		a.terminal = true
 		a.blocked = true
 	}
@@ -1166,6 +1171,17 @@ func isEmptyCompletionPayload(payload []byte) bool {
 		return true
 	}
 
+	var jsonAcc emptyCompletionAccum
+	if jsonAcc.evalJSON(trimmed) {
+		var probe struct {
+			Choices json.RawMessage `json:"choices"`
+		}
+		if json.Unmarshal(trimmed, &probe) == nil && probe.Choices != nil {
+			jsonAcc.terminal = true
+		}
+		return jsonAcc.empty()
+	}
+
 	var acc emptyCompletionAccum
 
 	if isSSEPayload(trimmed) {
@@ -1174,14 +1190,6 @@ func isEmptyCompletionPayload(payload []byte) bool {
 	}
 
 	acc.evalJSON(trimmed)
-	// A complete non-SSE OpenAI chat completion body is terminal by
-	// construction: zero-choice payloads such as {"choices":[]} or
-	// {"choices":[],"usage":null} never enter the per-choice terminal paths,
-	// so without this they would be accepted as successful responses instead
-	// of being judged as empty completions. Other recognized shapes (for
-	// example Claude messages) keep their per-shape terminal rules.
-	//
-	// Mirror of CLIProxyAPI fb7c2675.
 	var probe struct {
 		Choices json.RawMessage `json:"choices"`
 	}
@@ -1192,12 +1200,12 @@ func isEmptyCompletionPayload(payload []byte) bool {
 }
 
 func isSSEPayload(trimmed []byte) bool {
-	if bytes.Contains(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("id:")) || bytes.HasPrefix(trimmed, []byte("retry:")) || bytes.HasPrefix(trimmed, []byte(":")) {
-		return true
-	}
 	for _, line := range bytes.Split(trimmed, []byte("\n")) {
 		line = bytes.TrimSpace(line)
-		if bytes.Equal(line, []byte("data")) || bytes.Equal(line, []byte("event")) || bytes.Equal(line, []byte("id")) || bytes.Equal(line, []byte("retry")) {
+		if len(line) == 0 {
+			continue
+		}
+		if isSSEPrefix(line) {
 			return true
 		}
 	}
