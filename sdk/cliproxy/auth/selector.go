@@ -248,13 +248,19 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	return available
 }
 
-func collectAvailableByPriority(auths []*Auth, model string, now time.Time, excluded map[string]struct{}) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
+func collectAvailableByPriority(auths []*Auth, model string, now time.Time, excluded map[string]struct{}) (available map[int][]*Auth, cooldownCount int, eligibleCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
 	for i := 0; i < len(auths); i++ {
 		candidate := auths[i]
+		// Skip nil candidates before consulting the exclusion map:
+		// candidate.ID on a nil entry would panic.
+		if candidate == nil {
+			continue
+		}
 		if _, skip := excluded[candidate.ID]; skip {
 			continue
 		}
+		eligibleCount++
 		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
 		if !blocked {
 			priority := authPriority(candidate)
@@ -268,7 +274,7 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time, excl
 			}
 		}
 	}
-	return available, cooldownCount, earliest
+	return available, cooldownCount, eligibleCount, earliest
 }
 
 func getAvailableAuths(auths []*Auth, provider, model string, now time.Time, excluded ...map[string]struct{}) ([]*Auth, error) {
@@ -288,9 +294,13 @@ func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, no
 		ex = excluded[0]
 	}
 
-	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now, ex)
+	availableByPriority, cooldownCount, eligibleCount, earliest := collectAvailableByPriority(auths, model, now, ex)
 	if len(availableByPriority) == 0 {
-		if cooldownCount == len(auths) && !earliest.IsZero() {
+		// Count only eligible (non-excluded) auths: excluded entries are not
+		// part of the cooldown decision, otherwise the caller would get a
+		// non-retryable auth_unavailable instead of the cooldown error with
+		// Retry-After when every pickable auth is in fact cooling.
+		if eligibleCount > 0 && cooldownCount == eligibleCount && !earliest.IsZero() {
 			providerForError := provider
 			if providerForError == "mixed" {
 				providerForError = ""
