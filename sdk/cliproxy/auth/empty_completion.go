@@ -828,7 +828,7 @@ func (s *streamBootstrapState) observe(fragment []byte) bool {
 			s.pending = s.pending[newline+1:]
 			if len(line) > 0 {
 				switch {
-				case bytes.HasPrefix(line, []byte("event:")), bytes.HasPrefix(line, []byte("data:")), bytes.HasPrefix(line, []byte(":")):
+				case bytes.HasPrefix(line, []byte("event:")), bytes.HasPrefix(line, []byte("data:")), bytes.HasPrefix(line, []byte("id:")), bytes.HasPrefix(line, []byte("retry:")), bytes.HasPrefix(line, []byte(":")), bytes.HasPrefix(line, []byte("{")):
 					s.sawSSE = true
 					s.acc.evalSSE(line)
 				default:
@@ -890,7 +890,7 @@ func (s *streamBootstrapState) finish() {
 	}
 
 	switch {
-	case bytes.HasPrefix(trimmed, []byte("event:")), bytes.HasPrefix(trimmed, []byte("data:")), bytes.HasPrefix(trimmed, []byte(":")):
+	case bytes.HasPrefix(trimmed, []byte("event:")), bytes.HasPrefix(trimmed, []byte("data:")), bytes.HasPrefix(trimmed, []byte("id:")), bytes.HasPrefix(trimmed, []byte("retry:")), bytes.HasPrefix(trimmed, []byte(":")):
 		s.sawSSE = true
 		s.acc.evalSSE(trimmed)
 	case bytes.HasPrefix(trimmed, []byte("{")), bytes.HasPrefix(trimmed, []byte("[")):
@@ -1000,9 +1000,14 @@ func hasTruncatedUTF8Suffix(buf []byte) bool {
 func couldBeSSEPrefix(payload []byte) bool {
 	const dataPrefix = "data:"
 	const eventPrefix = "event:"
+	const idPrefix = "id:"
+	const retryPrefix = "retry:"
 	value := string(payload)
-	return strings.HasPrefix(value, ":") || strings.HasPrefix(dataPrefix, value) || strings.HasPrefix(eventPrefix, value) ||
-		strings.HasPrefix(value, dataPrefix) || strings.HasPrefix(value, eventPrefix)
+	return strings.HasPrefix(value, ":") ||
+		strings.HasPrefix(dataPrefix, value) || strings.HasPrefix(eventPrefix, value) ||
+		strings.HasPrefix(idPrefix, value) || strings.HasPrefix(retryPrefix, value) ||
+		strings.HasPrefix(value, dataPrefix) || strings.HasPrefix(value, eventPrefix) ||
+		strings.HasPrefix(value, idPrefix) || strings.HasPrefix(value, retryPrefix)
 }
 
 // isEmptyCompletionPayload reports whether a payload (aggregated SSE chunks or
@@ -1019,7 +1024,7 @@ func isEmptyCompletionPayload(payload []byte) bool {
 
 	var acc emptyCompletionAccum
 
-	if bytes.Contains(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) {
+	if bytes.Contains(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("id:")) || bytes.HasPrefix(trimmed, []byte("retry:")) || bytes.HasPrefix(trimmed, []byte(":")) {
 		acc.evalSSE(trimmed)
 		return acc.empty()
 	}
@@ -1045,16 +1050,29 @@ func isEmptyCompletionPayload(payload []byte) bool {
 func (a *emptyCompletionAccum) evalSSE(payload []byte) {
 	for _, line := range bytes.Split(payload, []byte("\n")) {
 		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
 		if bytes.HasPrefix(line, []byte("event:")) {
 			event := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:")))
 			if bytes.Equal(event, []byte("message_stop")) {
 				a.recognized = true
 			}
-		}
-		if !bytes.HasPrefix(line, []byte("data:")) {
 			continue
 		}
-		data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if bytes.HasPrefix(line, []byte("id:")) || bytes.HasPrefix(line, []byte("retry:")) || bytes.HasPrefix(line, []byte(":")) {
+			continue
+		}
+		var data []byte
+		switch {
+		case bytes.HasPrefix(line, []byte("data:")):
+			data = bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		case bytes.HasPrefix(line, []byte("{")):
+			data = line
+		default:
+			a.sawUnknownData = true
+			continue
+		}
 		if bytes.Equal(data, []byte("[DONE]")) {
 			a.recognized = true
 			a.terminal = true

@@ -222,6 +222,16 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: false,
 		},
 		{
+			name:     "openai sse with id and retry metadata then empty is empty",
+			payload:  []byte("id: 12345\nretry: 3000\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}\n\ndata: [DONE]\n\n"),
+			expected: true,
+		},
+		{
+			name:     "openai sse with unknown field then empty is not empty",
+			payload:  []byte("x-unknown: 123\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
 			name:     "done-only stream remains intentionally empty",
 			payload:  []byte("data: [DONE]\n\n"),
 			expected: true,
@@ -688,6 +698,27 @@ func TestStreamBootstrapDetectorClaudePing(t *testing.T) {
 	}
 	if detector.Observe([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")) {
 		t.Fatal("Observe() forwarded terminal empty Claude stream preceded by ping")
+	}
+}
+
+func TestStreamBootstrapDetectorSSEMetadataFields(t *testing.T) {
+	var detector StreamBootstrapDetector
+	if detector.Observe([]byte("id: evt_12345\nretry: 5000\n")) {
+		t.Fatal("Observe() forwarded after standard SSE id/retry metadata")
+	}
+	if detector.Observe([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}\n\n")) {
+		t.Fatal("Observe() forwarded recognized empty terminal chunk")
+	}
+	if detector.Observe([]byte("data: [DONE]\n\n")) {
+		t.Fatal("Observe() forwarded [DONE]")
+	}
+	if !detector.Finish() {
+		t.Fatal("Finish() = false, want empty completion recognized despite id/retry metadata")
+	}
+
+	var detectorUnknown StreamBootstrapDetector
+	if !detectorUnknown.Observe([]byte("x-unknown-metadata: foo\n")) {
+		t.Fatal("Observe() = false, want unknown SSE metadata to force forwarding")
 	}
 }
 
