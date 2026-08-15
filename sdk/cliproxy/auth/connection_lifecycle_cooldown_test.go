@@ -337,3 +337,63 @@ func assertNoCooldown(t *testing.T, m *Manager, authID, model string) {
 		}
 	}
 }
+
+func TestManager_MarkResult_TransportFailureDoesNotCooldown(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{name: "tls handshake timeout", err: fmt.Errorf(`Post "https://example.com/v1/chat/completions": net/http: TLS handshake timeout`)},
+		{name: "connection refused", err: fmt.Errorf("dial tcp 1.2.3.4:443: connect: connection refused")},
+		{name: "connection reset", err: fmt.Errorf("read tcp 127.0.0.1:1->127.0.0.1:2: read: connection reset by peer")},
+		{name: "dns failure", err: fmt.Errorf(`dial tcp: lookup example.com: no such host`)},
+		{name: "io timeout", err: fmt.Errorf("dial tcp 1.2.3.4:443: i/o timeout")},
+		{name: "proxyconnect", err: fmt.Errorf("proxyconnect tcp: dial tcp 127.0.0.1:7890: connect: connection refused")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !isConnectionLifecycleError(tc.err) {
+				t.Fatalf("isConnectionLifecycleError(%v) = false, want true", tc.err)
+			}
+			got := resultErrorFromError(tc.err)
+			if !shouldSkipCredentialCooldown(got) {
+				t.Fatalf("shouldSkipCredentialCooldown(%#v) = false, want true", got)
+			}
+
+			m := NewManager(nil, nil, nil)
+			auth := &Auth{ID: "auth-transport-" + tc.name, Provider: "codex"}
+			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+			model := "gpt-5.6-sol"
+			m.MarkResult(context.Background(), Result{
+				AuthID:   auth.ID,
+				Provider: auth.Provider,
+				Model:    model,
+				Success:  false,
+				Error:    got,
+			})
+			assertNoCooldown(t, m, auth.ID, model)
+		})
+	}
+}
+
+func TestIsConnectionLifecycleError_TransportTextWithStatusStillCooldowns(t *testing.T) {
+	// An upstream HTTP error body mentioning transport text must stay coolable.
+	err := &statusBearingError{status: http.StatusBadGateway, msg: "upstream reported: connection refused"}
+	if isConnectionLifecycleError(err) {
+		t.Fatalf("status-bearing transport text must not be classified as lifecycle")
+	}
+	if shouldSkipCredentialCooldown(resultErrorFromError(err)) {
+		t.Fatalf("shouldSkipCredentialCooldown = true, want false")
+	}
+}

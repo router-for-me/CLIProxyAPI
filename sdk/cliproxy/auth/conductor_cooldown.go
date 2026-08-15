@@ -1310,7 +1310,8 @@ func shouldSkipCredentialCooldown(err *Error) bool {
 }
 
 // isConnectionLifecycleError reports transport/session lifecycle failures that must
-// not cool credentials: client cancellation and WebSocket close/EOF disconnects.
+// not cool credentials: client cancellation, WebSocket close/EOF disconnects, and
+// transport-level dial/TLS/write failures that carry no credential signal.
 func isConnectionLifecycleError(err error) bool {
 	if err == nil {
 		return false
@@ -1368,7 +1369,30 @@ func isConnectionLifecycleMessage(message string) bool {
 	if strings.Contains(lower, "unexpected eof") {
 		return true
 	}
+	// Transport-level failures (dial, DNS, TLS handshake, write) never indicate
+	// credential health, so they must not cool credentials either.
+	for _, pattern := range transportFailureMessagePatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
 	return false
+}
+
+// transportFailureMessagePatterns are lowercase substrings identifying
+// transport-level failures such as "net/http: TLS handshake timeout",
+// "dial tcp ...: connect: connection refused" or "read tcp ...: i/o timeout".
+// They only apply to errors without an HTTP status, so upstream response bodies
+// cannot suppress credential cooldown.
+var transportFailureMessagePatterns = []string{
+	"connection refused",
+	"connection reset",
+	"broken pipe",
+	"no such host",
+	"network is unreachable",
+	"proxyconnect tcp",
+	"i/o timeout",
+	"tls handshake timeout",
 }
 
 func isUnauthorizedError(err error) bool {
