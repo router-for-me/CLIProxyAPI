@@ -407,6 +407,29 @@ func TestParseGeminiUsageIncludesToolUsePromptTokens(t *testing.T) {
 	}
 }
 
+func TestParseGeminiStreamUsageSkipsZeroPlaceholder(t *testing.T) {
+	lines := [][]byte{
+		[]byte(`data: {"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"thoughtsTokenCount":0,"totalTokenCount":0}}`),
+		[]byte(`data: {"usageMetadata":{"promptTokenCount":17984,"candidatesTokenCount":2668,"thoughtsTokenCount":1028,"totalTokenCount":21680}}`),
+	}
+
+	accepted := make([]usage.Detail, 0, len(lines))
+	for _, line := range lines {
+		detail, ok := ParseGeminiStreamUsage(line)
+		if ok {
+			accepted = append(accepted, detail)
+		}
+	}
+
+	if len(accepted) != 1 {
+		t.Fatalf("accepted usage count = %d, want 1", len(accepted))
+	}
+	detail := accepted[0]
+	if detail.InputTokens != 17984 || detail.OutputTokens != 2668 || detail.ReasoningTokens != 1028 || detail.TotalTokens != 21680 {
+		t.Fatalf("accepted usage detail = %+v", detail)
+	}
+}
+
 func TestParseGeminiUsageRejectsInvalidToolUseSums(t *testing.T) {
 	tests := map[string]string{
 		"negative": `{"usageMetadata":{"promptTokenCount":10,"toolUsePromptTokenCount":-1,"totalTokenCount":10}}`,

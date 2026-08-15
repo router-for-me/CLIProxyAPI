@@ -290,6 +290,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func(first wsrelay.StreamEvent) {
 		defer close(out)
+		defer reporter.EnsurePublished(ctx)
 		responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 		originalRequest := opts.OriginalRequest
 		if len(originalRequest) == 0 {

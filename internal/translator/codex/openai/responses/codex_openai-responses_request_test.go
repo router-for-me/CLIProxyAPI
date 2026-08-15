@@ -437,6 +437,90 @@ func TestTruncationRemovedForCodexCompatibility(t *testing.T) {
 	}
 }
 
+func TestStripCodexResponsesCacheBreakpoints(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{
+						"type": "input_text",
+						"text": "Hello world",
+						"prompt_cache_breakpoint": {"mode": "explicit"}
+					},
+					{
+						"type": "input_text",
+						"text": "Second part"
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if strings.Contains(outputStr, "prompt_cache_breakpoint") {
+		t.Fatalf("prompt_cache_breakpoint should not exist in the output JSON")
+	}
+	if gjson.Get(outputStr, "input.0.content.0.text").String() != "Hello world" {
+		t.Fatalf("text content should be preserved")
+	}
+	if gjson.Get(outputStr, "input.0.content.1.text").String() != "Second part" {
+		t.Fatalf("second content part should be preserved")
+	}
+}
+
+func TestStripCodexResponsesCacheBreakpoints_WithSystemRole(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{
+				"type": "message",
+				"role": "system",
+				"content": [
+					{
+						"type": "input_text",
+						"text": "System prompt",
+						"prompt_cache_breakpoint": {"mode": "explicit"}
+					}
+				]
+			},
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{
+						"type": "input_text",
+						"text": "User query",
+						"prompt_cache_breakpoint": {"mode": "explicit"}
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	// Check system role is converted to developer
+	if gjson.Get(outputStr, "input.0.role").String() != "developer" {
+		t.Fatalf("expected role 'developer', got %q", gjson.Get(outputStr, "input.0.role").String())
+	}
+	// Check prompt_cache_breakpoint is completely removed from payload
+	if strings.Contains(outputStr, "prompt_cache_breakpoint") {
+		t.Fatalf("prompt_cache_breakpoint should not exist in the output JSON")
+	}
+	if gjson.Get(outputStr, "input.0.content.0.text").String() != "System prompt" {
+		t.Fatalf("expected system prompt text preserved, got %q", gjson.Get(outputStr, "input.0.content.0.text").String())
+	}
+	if gjson.Get(outputStr, "input.1.content.0.text").String() != "User query" {
+		t.Fatalf("expected user query text preserved, got %q", gjson.Get(outputStr, "input.1.content.0.text").String())
+	}
+}
+
 func BenchmarkConvertSystemRoleToDeveloperLargeInput(b *testing.B) {
 	cases := []struct {
 		name      string
