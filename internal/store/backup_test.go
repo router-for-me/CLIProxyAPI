@@ -1,9 +1,13 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -288,6 +292,140 @@ func TestBackupResourceRowCountsLegacyFallback(t *testing.T) {
 	}
 	if got := counts["internal_users"]; got != 1 {
 		t.Fatalf("legacy fallback internal_users = %d, want 1", got)
+	}
+}
+
+// TestBackupStreamExportKeysMatch verifies that the streaming export emits a
+// valid BackupBundle with the same resource/table keys as the in-memory export,
+// and that the header summary matches too. It does not assert full equality of
+// the (potentially large) row payloads.
+func TestBackupStreamExportKeysMatch(t *testing.T) {
+	st := roundTripTestStore(t, "backup_str_"+randSuffix())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	seedBackupTestData(t, st)
+
+	mem, err := st.ExportData(ctx, BackupExportOpts{})
+	if err != nil {
+		t.Fatalf("ExportData: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := st.StreamExport(ctx, BackupExportOpts{}, &buf); err != nil {
+		t.Fatalf("StreamExport: %v", err)
+	}
+	var streamed BackupBundle
+	if err := json.Unmarshal(buf.Bytes(), &streamed); err != nil {
+		t.Fatalf("unmarshal streamed: %v", err)
+	}
+	for res, data := range mem.Resources {
+		sd, ok := streamed.Resources[res]
+		if !ok {
+			t.Fatalf("streamed missing resource %q", res)
+		}
+		for tbl, rows := range data.Tables {
+			srows, ok := sd.Tables[tbl]
+			if !ok {
+				t.Fatalf("streamed missing table %q in %q", tbl, res)
+			}
+			// Row counts must match per table so a regression that silently drops
+			// rows in the streaming dump is caught (the header summary alone would
+			// still match, since it is computed by a separate COUNT pass).
+			if len(srows) != len(rows) {
+				t.Fatalf("streamed table %q in %q has %d rows, want %d", tbl, res, len(srows), len(rows))
+			}
+		}
+	}
+	// The header summary must match the in-memory export so the frontend preview
+	// reads identical counts from either path.
+	if len(streamed.Summary) != len(mem.Summary) {
+		t.Fatalf("streamed summary size = %d, want %d", len(streamed.Summary), len(mem.Summary))
+	}
+	for res, n := range mem.Summary {
+		if got := streamed.Summary[res]; got != n {
+			t.Fatalf("streamed summary[%q] = %d, want %d", res, got, n)
+		}
+	}
+}
+
+// TestBackupStreamExportPricingFiles verifies that the streaming export embeds
+// on-disk pricing-source catalog files exactly like the in-memory export: the
+// ,"files":{...} object must be comma-framed correctly relative to the tables
+// object, omitted when there are no file-backed sources, and base64-encode the
+// file content keyed by its absolute path.
+func TestBackupStreamExportPricingFiles(t *testing.T) {
+	st := roundTripTestStore(t, "backup_str_files_"+randSuffix())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	content := []byte(`{"models":[{"name":"m"}]}`)
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "catalog.json")
+	if err := os.WriteFile(filePath, content, 0o644); err != nil {
+		t.Fatalf("write catalog: %v", err)
+	}
+	ps := NewPricingSourceStore(st)
+	if _, err := ps.Create(ctx, PricingSource{Name: "file-src", SourceType: "file", FilePath: filePath, Format: "litellm", Enabled: true}); err != nil {
+		t.Fatalf("create file pricing source: %v", err)
+	}
+	// A url-backed source must not produce a files entry.
+	if _, err := ps.Create(ctx, PricingSource{Name: "url-src", SourceType: "url", URL: "https://example.com/c.json", Format: "litellm", Enabled: true}); err != nil {
+		t.Fatalf("create url pricing source: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := st.StreamExport(ctx, BackupExportOpts{Resources: []BackupResource{ResourcePricingSources}}, &buf); err != nil {
+		t.Fatalf("StreamExport: %v", err)
+	}
+	var streamed BackupBundle
+	if err := json.Unmarshal(buf.Bytes(), &streamed); err != nil {
+		t.Fatalf("unmarshal streamed: %v", err)
+	}
+	rd := streamed.Resources[string(ResourcePricingSources)]
+	got, ok := rd.Files[filePath]
+	if !ok {
+		t.Fatalf("streamed pricing source files missing %q (have %v)", filePath, rd.Files)
+	}
+	if got != base64.StdEncoding.EncodeToString(content) {
+		t.Fatalf("streamed file content = %q, want base64 of %q", got, content)
+	}
+	if len(rd.Files) != 1 {
+		t.Fatalf("streamed files = %v, want only the file-backed source", rd.Files)
+	}
+
+	// The in-memory export must embed the same file, proving parity between paths.
+	mem, err := st.ExportData(ctx, BackupExportOpts{Resources: []BackupResource{ResourcePricingSources}})
+	if err != nil {
+		t.Fatalf("ExportData: %v", err)
+	}
+	md := mem.Resources[string(ResourcePricingSources)]
+	if mgot := md.Files[filePath]; mgot != got {
+		t.Fatalf("in-memory file content = %q, streamed = %q", mgot, got)
+	}
+}
+
+// TestBackupStreamExportOmitsEmptyFiles verifies that the streamed document for
+// resources with no file-backed sources stays valid JSON and carries no "files"
+// object (matching ExportData's omitempty behavior), so the ","files": framing
+// never produces trailing-comma corruption when there is nothing to embed.
+func TestBackupStreamExportOmitsEmptyFiles(t *testing.T) {
+	st := roundTripTestStore(t, "backup_str_nofiles_"+randSuffix())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	seedBackupTestData(t, st)
+
+	var buf bytes.Buffer
+	if err := st.StreamExport(ctx, BackupExportOpts{Resources: []BackupResource{ResourceAPIKeys}}, &buf); err != nil {
+		t.Fatalf("StreamExport: %v", err)
+	}
+	if bytes.Contains(buf.Bytes(), []byte(`"files"`)) {
+		t.Fatalf("streamed api_keys export should not contain a files object:\n%s", buf.Bytes())
+	}
+	var streamed BackupBundle
+	if err := json.Unmarshal(buf.Bytes(), &streamed); err != nil {
+		t.Fatalf("unmarshal streamed: %v", err)
+	}
+	if len(streamed.Resources[string(ResourceAPIKeys)].Files) != 0 {
+		t.Fatalf("streamed api_keys files = %v, want none", streamed.Resources[string(ResourceAPIKeys)].Files)
 	}
 }
 

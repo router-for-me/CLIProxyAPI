@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -376,6 +377,31 @@ func transformSealedColumns(sealer *Sealer, raw json.RawMessage, cols []string, 
 	return json.RawMessage(enc), nil
 }
 
+// exportResource dumps every table of one resource into backupResourceData,
+// applying the unseal transform to sealed columns and embedding pricing-source
+// catalog files. It is the shared row fixture for both ExportData and
+// StreamExport.
+func (s *PostgresStore) exportResource(ctx context.Context, sealer *Sealer, res BackupResource) (backupResourceData, error) {
+	data := backupResourceData{Tables: make(map[string][]json.RawMessage), Files: make(map[string]string)}
+	for _, bt := range s.resourceTables(res) {
+		rows, err := s.exportTable(ctx, sealer, bt)
+		if err != nil {
+			return data, err
+		}
+		if len(rows) > 0 {
+			data.Tables[bt.name] = rows
+		}
+	}
+	// Pricing-source catalog files live on disk, not in the DB. Embed their
+	// content so a file-backed catalog survives the round-trip.
+	if res == ResourcePricingSources {
+		if err := s.embedPricingSourceFiles(ctx, &data); err != nil {
+			return data, err
+		}
+	}
+	return data, nil
+}
+
 // ExportData produces a portable BackupBundle for the requested resources
 // (default all). Within each resource, tables are ranked parents-first
 // (already reflected in resourceTables). Sealed columns are unsealed so the
@@ -396,27 +422,274 @@ func (s *PostgresStore) ExportData(ctx context.Context, opts BackupExportOpts) (
 		resources = AllBackupResources
 	}
 	for _, res := range resources {
-		data := backupResourceData{Tables: make(map[string][]json.RawMessage), Files: make(map[string]string)}
-		for _, bt := range s.resourceTables(res) {
-			rows, err := s.exportTable(ctx, sealer, bt)
-			if err != nil {
-				return bundle, err
-			}
-			if len(rows) > 0 {
-				data.Tables[bt.name] = rows
-			}
-		}
-		// Pricing-source catalog files live on disk, not in the DB. Embed their
-		// content so a file-backed catalog survives the round-trip.
-		if res == ResourcePricingSources {
-			if err := s.embedPricingSourceFiles(ctx, &data); err != nil {
-				return bundle, err
-			}
+		data, err := s.exportResource(ctx, sealer, res)
+		if err != nil {
+			return bundle, err
 		}
 		bundle.Resources[string(res)] = data
 		bundle.Summary[string(res)] = rowCount(data)
 	}
 	return bundle, nil
+}
+
+// StreamExport writes the same BackupBundle document as ExportData but streams
+// it to w progressively, table by table, instead of assembling the whole bundle
+// in memory. Row bodies are written one row at a time straight from the DB
+// cursor, so memory stays bounded regardless of table size. The per-resource
+// header summary is computed up front with cheap COUNT(*) queries (the body must
+// follow the header, so the counts have to be known before the rows are
+// streamed). The emitted JSON round-trips to a valid BackupBundle.
+func (s *PostgresStore) StreamExport(ctx context.Context, opts BackupExportOpts, w io.Writer) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store: backup not initialized")
+	}
+	sealer := s.sealer()
+	resources := opts.Resources
+	if len(resources) == 0 {
+		resources = AllBackupResources
+	}
+
+	// The header's per-resource summary precedes the row bodies, so count each
+	// resource's rows up front. COUNT(*) scans the table but materializes no
+	// rows, keeping the heavy to_jsonb dump single-pass below.
+	summary := make(map[string]int, len(resources))
+	for _, res := range resources {
+		n, err := s.countResourceRows(ctx, res)
+		if err != nil {
+			return err
+		}
+		summary[string(res)] = n
+	}
+
+	// {"version":1,"exported_at":"...","summary":{...},"resources":{
+	if err := writeStreamHeader(w, summary, time.Now().UTC()); err != nil {
+		return err
+	}
+
+	for i, res := range resources {
+		if i > 0 {
+			if _, err := io.WriteString(w, ","); err != nil {
+				return err
+			}
+		}
+		if err := writeJSONKey(w, string(res)); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, ":"); err != nil {
+			return err
+		}
+		if err := s.writeStreamResource(ctx, sealer, w, res); err != nil {
+			return err
+		}
+	}
+	_, err := io.WriteString(w, "}}")
+	return err
+}
+
+// writeStreamHeader writes the bundle's opening through the "resources" key,
+// i.e. {"version":1,"exported_at":"...","summary":{...},"resources":{
+func writeStreamHeader(w io.Writer, summary map[string]int, exportedAt time.Time) error {
+	header := struct {
+		Version    int            `json:"version"`
+		ExportedAt time.Time      `json:"exported_at"`
+		Summary    map[string]int `json:"summary"`
+	}{
+		Version:    1,
+		ExportedAt: exportedAt,
+		Summary:    summary,
+	}
+	b, err := json.Marshal(header)
+	if err != nil {
+		return fmt.Errorf("postgres store: stream export marshal header: %w", err)
+	}
+	// Strip the header object's closing brace and open the resources object so
+	// per-resource bodies can be appended incrementally.
+	if _, err := w.Write(b[:len(b)-1]); err != nil {
+		return err
+	}
+	_, err = io.WriteString(w, `,"resources":{`)
+	return err
+}
+
+// countResourceRows sums the row counts of every table in one resource via cheap
+// COUNT(*) queries, mirroring the per-resource total that ExportData derives
+// from the dumped rows. Note the COUNT pass and the later to_jsonb dump pass each
+// see their own READ COMMITTED snapshot, so a concurrent write between them can
+// make the header summary diverge slightly from the dumped rows; the impact is
+// cosmetic because the summary only drives the frontend preview, while import
+// consumes the row bodies.
+func (s *PostgresStore) countResourceRows(ctx context.Context, res BackupResource) (int, error) {
+	n := 0
+	for _, bt := range s.resourceTables(res) {
+		var c int
+		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+bt.name).Scan(&c); err != nil {
+			return 0, fmt.Errorf("postgres store: count %s: %w", bt.name, err)
+		}
+		n += c
+	}
+	return n, nil
+}
+
+// writeStreamResource streams one resource's body: {"tables":{...}} with an
+// optional ,"files":{...} for pricing-source catalog files. Only tables that
+// have at least one row are emitted, matching ExportData.
+func (s *PostgresStore) writeStreamResource(ctx context.Context, sealer *Sealer, w io.Writer, res BackupResource) error {
+	if _, err := io.WriteString(w, `{"tables":{`); err != nil {
+		return err
+	}
+	wroteAnyTable := false
+	for _, bt := range s.resourceTables(res) {
+		wrote, err := s.writeTableRows(ctx, sealer, w, bt, wroteAnyTable)
+		if err != nil {
+			return err
+		}
+		if wrote {
+			wroteAnyTable = true
+		}
+	}
+	if _, err := io.WriteString(w, `}`); err != nil {
+		return err
+	}
+	// Pricing-source catalog files live on disk, not in the DB. Embed their
+	// content so a file-backed catalog survives the round-trip.
+	if res == ResourcePricingSources {
+		if err := s.writeStreamPricingFiles(ctx, w); err != nil {
+			return err
+		}
+	}
+	_, err := io.WriteString(w, `}`)
+	return err
+}
+
+// writeTableRows streams one table's rows to w as its JSON key followed by a
+// JSON array, e.g. "usage_events":[{...},{...}]. Each row is written as it is
+// scanned and unsealed, so memory stays bounded to one row regardless of table
+// size. When leadingComma is true and the table has rows, a separating comma is
+// written first so consecutive tables form a valid JSON object. It returns
+// whether any rows were written (false for an empty table, which is skipped).
+func (s *PostgresStore) writeTableRows(ctx context.Context, sealer *Sealer, w io.Writer, bt backupTable, leadingComma bool) (bool, error) {
+	cols := sealedColumnsByTable[defaultTableHint(bt.name)]
+	query := fmt.Sprintf("SELECT to_jsonb(t)::text FROM %s t", bt.name)
+	if bt.orderColumn != "" {
+		query += " ORDER BY t." + quoteIdentifier(bt.orderColumn)
+	}
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return false, fmt.Errorf("postgres store: export %s: %w", bt.name, err)
+	}
+	defer rows.Close()
+
+	wrote := false
+	if rows.Next() {
+		wrote = true
+		if leadingComma {
+			if _, err := io.WriteString(w, ","); err != nil {
+				return false, err
+			}
+		}
+		if err := writeJSONKey(w, bt.name); err != nil {
+			return false, err
+		}
+		if _, err := io.WriteString(w, ":["); err != nil {
+			return false, err
+		}
+		if err := s.writeStreamRow(w, sealer, cols, rows, bt.name); err != nil {
+			return false, err
+		}
+	}
+	for rows.Next() {
+		if _, err := io.WriteString(w, ","); err != nil {
+			return false, err
+		}
+		if err := s.writeStreamRow(w, sealer, cols, rows, bt.name); err != nil {
+			return false, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("postgres store: export %s iterate: %w", bt.name, err)
+	}
+	if wrote {
+		if _, err := io.WriteString(w, "]"); err != nil {
+			return false, err
+		}
+	}
+	return wrote, nil
+}
+
+// writeStreamRow scans the current row of rows, applies the unseal transform to
+// sealed columns, and writes the resulting JSON verbatim to w.
+func (s *PostgresStore) writeStreamRow(w io.Writer, sealer *Sealer, cols []string, rows *sql.Rows, table string) error {
+	var text string
+	if err := rows.Scan(&text); err != nil {
+		return fmt.Errorf("postgres store: export %s scan: %w", table, err)
+	}
+	raw := json.RawMessage(text)
+	if len(cols) > 0 {
+		transformed, err := transformSealedColumns(sealer, raw, cols, true)
+		if err != nil {
+			return fmt.Errorf("postgres store: export %s unseal: %w", table, err)
+		}
+		raw = transformed
+	}
+	if _, err := w.Write(raw); err != nil {
+		return err
+	}
+	return nil
+}
+
+// writeStreamPricingFiles queries the pricing-sources table for file-backed
+// sources, reads each catalog file off disk, and writes the base64-encoded
+// contents as a ,"files":{...} object. No-op (no output) when there are no
+// file-backed sources, matching ExportData's omitempty files field.
+func (s *PostgresStore) writeStreamPricingFiles(ctx context.Context, w io.Writer) error {
+	table := s.PricingSourcesTable()
+	query := fmt.Sprintf(
+		"SELECT file_path FROM %s WHERE source_type = 'file' AND file_path IS NOT NULL AND file_path != ''",
+		table)
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("postgres store: export %s files: %w", table, err)
+	}
+	defer rows.Close()
+
+	files := make(map[string]string)
+	for rows.Next() {
+		var filePath string
+		if err := rows.Scan(&filePath); err != nil {
+			return fmt.Errorf("postgres store: export %s files scan: %w", table, err)
+		}
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			log.WithError(err).WithField("path", filePath).Warn("postgres store: export: pricing source file unreadable")
+			continue
+		}
+		files[filePath] = base64.StdEncoding.EncodeToString(content)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("postgres store: export %s files iterate: %w", table, err)
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	filesJSON, err := json.Marshal(files)
+	if err != nil {
+		return fmt.Errorf("postgres store: export %s files marshal: %w", table, err)
+	}
+	if _, err := io.WriteString(w, `,"files":`); err != nil {
+		return err
+	}
+	_, err = w.Write(filesJSON)
+	return err
+}
+
+// writeJSONKey writes s as a JSON object key, i.e. a quoted and escaped string.
+func writeJSONKey(w io.Writer, s string) error {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return fmt.Errorf("postgres store: stream export marshal key %q: %w", s, err)
+	}
+	_, err = w.Write(b)
+	return err
 }
 
 // embedPricingSourceFiles reads each source_type=file pricing source's on-disk
