@@ -69,6 +69,13 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
 		}
+		// Exclusions collected during this rotation pass refer to credentials
+		// that were cooling down when they failed; the wait just let them
+		// recover. Prune recovered exclusions so the retry can actually pick
+		// a recovered credential instead of failing auth_not_found instantly.
+		// Auths with disable_cooling stay excluded: they never enter cooldown,
+		// so the exclusion is the only anti-hammer guard within one request.
+		tried = m.resetRecoveredExclusions(tried)
 	}
 	if lastErr != nil {
 		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
@@ -118,6 +125,13 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
 		}
+		// Exclusions collected during this rotation pass refer to credentials
+		// that were cooling down when they failed; the wait just let them
+		// recover. Prune recovered exclusions so the retry can actually pick
+		// a recovered credential instead of failing auth_not_found instantly.
+		// Auths with disable_cooling stay excluded: they never enter cooldown,
+		// so the exclusion is the only anti-hammer guard within one request.
+		tried = m.resetRecoveredExclusions(tried)
 	}
 	if lastErr != nil {
 		return cliproxyexecutor.Response{}, wrapRouteExhaustion(lastErr, tracker)
@@ -163,6 +177,13 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
 			return nil, errWait
 		}
+		// Exclusions collected during this rotation pass refer to credentials
+		// that were cooling down when they failed; the wait just let them
+		// recover. Prune recovered exclusions so the retry can actually pick
+		// a recovered credential instead of failing auth_not_found instantly.
+		// Auths with disable_cooling stay excluded: they never enter cooldown,
+		// so the exclusion is the only anti-hammer guard within one request.
+		tried = m.resetRecoveredExclusions(tried)
 	}
 	if lastErr != nil {
 		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
@@ -1350,6 +1371,33 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
 	return exec.HttpRequest(ctx, auth, req)
+}
+
+// resetRecoveredExclusions prunes the per-request exclusion set after a
+// cooldown wait: credentials that entered a real cooldown have now waited it
+// out and must be pickable again, otherwise the configured request-retry dies
+// on stale exclusions (auth_not_found) without executing anything. Exclusions
+// are kept for auths with disable_cooling, and while the global disable-cooling
+// flag is on: those never enter cooldown, so the exclusion remains the only
+// guard against re-hammering them within one request.
+func (m *Manager) resetRecoveredExclusions(tried map[string]struct{}) map[string]struct{} {
+	if len(tried) == 0 {
+		return tried
+	}
+	if quotaCooldownDisabled.Load() {
+		return tried
+	}
+	kept := make(map[string]struct{}, len(tried))
+	m.mu.RLock()
+	for id := range tried {
+		if a, ok := m.auths[id]; ok && a != nil {
+			if _, disabled := a.DisableCoolingOverride(); disabled {
+				kept[id] = struct{}{}
+			}
+		}
+	}
+	m.mu.RUnlock()
+	return kept
 }
 
 func extractExcludedAuthIDs(meta map[string]any) map[string]struct{} {
