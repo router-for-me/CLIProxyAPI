@@ -201,101 +201,144 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 						}
 						return true
 					})
-					// Message-level cache_control applies to the last system block from this message.
-					if message.Get("cache_control").Exists() {
-						if len(systemBlocks) > systemStart {
-							lastIdx := len(systemBlocks) - 1
-							if !gjson.GetBytes(systemBlocks[lastIdx], "cache_control").Exists() {
-								systemBlocks[lastIdx] = common.AttachCacheControl(systemBlocks[lastIdx], message)
-							}
-						}
-					}
 				}
-			case "user", "assistant":
-				contentBlocks := make([][]byte, 0, 4)
-				if preserveEmptyThinkingBlocks && role == "assistant" {
-					if reasoningContent := message.Get("reasoning_content"); reasoningContent.Type == gjson.String && strings.TrimSpace(reasoningContent.String()) != "" {
-						part := []byte(`{"type":"thinking","thinking":"","signature":""}`)
-						part, _ = sjson.SetBytes(part, "thinking", reasoningContent.String())
-						contentBlocks = append(contentBlocks, part)
-					}
+				if len(systemBlocks) > systemStart && !gjson.GetBytes(systemBlocks[len(systemBlocks)-1], "cache_control").Exists() {
+					systemBlocks[len(systemBlocks)-1] = common.AttachCacheControl(systemBlocks[len(systemBlocks)-1], message)
 				}
 
-				// Handle content based on its type
+			case "user":
+				// Build user turn blocks and append as an atomic turn.
+				userBlocks := make([][]byte, 0)
+				userStart := len(userBlocks)
+
+				// Direct string content
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
-					part := []byte(`{"type":"text","text":""}`)
-					part, _ = sjson.SetBytes(part, "text", contentResult.String())
-					contentBlocks = append(contentBlocks, part)
+					textPart := []byte(`{"type":"text","text":""}`)
+					textPart, _ = sjson.SetBytes(textPart, "text", contentResult.String())
+					textPart = common.AttachCacheControl(textPart, message)
+					userBlocks = append(userBlocks, textPart)
+				}
+
+				// Array content with mixed types (text, images)
+				if contentResult.Exists() && contentResult.IsArray() {
+					contentResult.ForEach(func(_, part gjson.Result) bool {
+						partType := part.Get("type").String()
+						switch partType {
+						case "text":
+							textPart := []byte(`{"type":"text","text":""}`)
+							textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
+							textPart = common.AttachCacheControl(textPart, part)
+							userBlocks = append(userBlocks, textPart)
+
+						case "image_url":
+							url := part.Get("image_url.url").String()
+							if url != "" {
+								if mediaType, data, ok := common.ParseDataURL(url); ok {
+									imagePart := []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
+									imagePart, _ = sjson.SetBytes(imagePart, "source.media_type", mediaType)
+									imagePart, _ = sjson.SetBytes(imagePart, "source.data", data)
+									imagePart = common.AttachCacheControl(imagePart, part)
+									userBlocks = append(userBlocks, imagePart)
+								}
+							}
+						}
+						return true
+					})
+				}
+
+				if len(userBlocks) > userStart && !gjson.GetBytes(userBlocks[len(userBlocks)-1], "cache_control").Exists() {
+					userBlocks[len(userBlocks)-1] = common.AttachCacheControl(userBlocks[len(userBlocks)-1], message)
+				}
+
+				if len(userBlocks) > 0 {
+					messageAccumulator.AppendUserBlocks(userBlocks)
+				}
+
+			case "assistant":
+				// Build assistant turn blocks.
+				assistantBlocks := make([][]byte, 0)
+				assistantStart := len(assistantBlocks)
+
+				// Assistant thinking blocks
+				// ConvertOpenAIRequestToClaudeWithCompat preserves reasoning_content as an unsigned thinking block
+				// for third-party compatibility endpoints. Upstream Anthropic ignores/strips this block
+				// because it does not accept unsigned client thinking blocks on standard chat completions.
+				if preserveEmptyThinkingBlocks {
+					assistantBlocks = common.AppendOpenAIReasoningContentToClaude(assistantBlocks, message)
+				}
+
+				// Text content
+				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
+					textPart := []byte(`{"type":"text","text":""}`)
+					textPart, _ = sjson.SetBytes(textPart, "text", contentResult.String())
+					textPart = common.AttachCacheControl(textPart, message)
+					assistantBlocks = append(assistantBlocks, textPart)
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
-						claudePart := convertOpenAIContentPartToClaudePart(part)
-						if claudePart != "" {
-							contentBlocks = append(contentBlocks, []byte(claudePart))
+						if part.Get("type").String() == "text" {
+							textPart := []byte(`{"type":"text","text":""}`)
+							textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
+							textPart = common.AttachCacheControl(textPart, part)
+							assistantBlocks = append(assistantBlocks, textPart)
 						}
 						return true
 					})
 				}
 
-				// Handle tool calls (for assistant messages)
-				if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() && role == "assistant" {
+				// Tool calls handling
+				if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 					toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
 						if toolCall.Get("type").String() == "function" {
-							toolCallID := toolCall.Get("id").String()
-							if toolCallID == "" {
-								toolCallID = genToolCallID()
+							callID := toolCall.Get("id").String()
+							if callID == "" {
+								callID = genToolCallID()
 							}
-							toolCallID = util.SanitizeClaudeToolID(toolCallID)
+							callID = common.SanitizeToolCallIDForClaude(callID)
 
-							function := toolCall.Get("function")
-							toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-							toolUse, _ = sjson.SetBytes(toolUse, "id", toolCallID)
-							toolUse, _ = sjson.SetBytes(toolUse, "name", function.Get("name").String())
+							toolUsePart := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+							toolUsePart, _ = sjson.SetBytes(toolUsePart, "id", callID)
+							toolUsePart, _ = sjson.SetBytes(toolUsePart, "name", toolCall.Get("function.name").String())
 
-							// Parse arguments for the tool call
-							if args := function.Get("arguments"); args.Exists() {
+							// Parse function arguments JSON into input object
+							if args := toolCall.Get("function.arguments"); args.Exists() {
 								argsStr := args.String()
-								if argsStr != "" && gjson.Valid(argsStr) {
-									argsJSON := gjson.Parse(argsStr)
-									if argsJSON.IsObject() {
-										toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
-									} else {
-										toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte("{}"))
+								if argsStr != "" {
+									var inputObj map[string]any
+									if err := util.UnmarshalJSONCaseFold([]byte(argsStr), &inputObj); err == nil {
+										toolUsePart, _ = sjson.SetBytes(toolUsePart, "input", inputObj)
 									}
-								} else {
-									toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte("{}"))
 								}
-							} else {
-								toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte("{}"))
 							}
-
-							contentBlocks = append(contentBlocks, toolUse)
+							toolUsePart = common.AttachCacheControl(toolUsePart, toolCall)
+							assistantBlocks = append(assistantBlocks, toolUsePart)
 						}
 						return true
 					})
 				}
 
-				msg := []byte(`{"role":"","content":[]}`)
-				msg, _ = sjson.SetBytes(msg, "role", role)
-				msg, _ = sjson.SetRawBytes(msg, "content", common.JoinRawArray(contentBlocks))
-				msg = common.AttachMessageCacheControl(msg, message)
-				messageAccumulator.Append(msg)
+				if len(assistantBlocks) > assistantStart && !gjson.GetBytes(assistantBlocks[len(assistantBlocks)-1], "cache_control").Exists() {
+					assistantBlocks[len(assistantBlocks)-1] = common.AttachCacheControl(assistantBlocks[len(assistantBlocks)-1], message)
+				}
+
+				if len(assistantBlocks) > 0 {
+					messageAccumulator.AppendAssistantBlocks(assistantBlocks)
+				}
 
 			case "tool":
-				// Handle tool result messages conversion
-				toolCallID := message.Get("tool_call_id").String()
-				toolCallID = util.SanitizeClaudeToolID(toolCallID)
-				toolContentResult := message.Get("content")
+				// Convert tool result message to Claude Code format
+				callID := message.Get("tool_call_id").String()
+				if callID != "" {
+					callID = common.SanitizeToolCallIDForClaude(callID)
+					toolResultPart := []byte(`{"type":"tool_result","tool_use_id":""}`)
+					toolResultPart, _ = sjson.SetBytes(toolResultPart, "tool_use_id", callID)
 
-				msg := []byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`)
-				msg, _ = sjson.SetBytes(msg, "content.0.tool_use_id", toolCallID)
-				toolResultContent, toolResultContentRaw := convertOpenAIToolResultContent(toolContentResult)
-				if toolResultContentRaw {
-					msg, _ = sjson.SetRawBytes(msg, "content.0.content", []byte(toolResultContent))
-				} else {
-					msg, _ = sjson.SetBytes(msg, "content.0.content", toolResultContent)
+					// Tool execution content
+					if contentResult.Exists() {
+						toolResultPart = common.AppendClaudeToolResultContent(toolResultPart, contentResult)
+					}
+					toolResultPart = common.AttachCacheControl(toolResultPart, message)
+					messageAccumulator.AppendToolResult(toolResultPart)
 				}
-				msg = common.AttachMessageCacheControl(msg, message)
-				messageAccumulator.Append(msg)
 			}
 			return true
 		})
@@ -320,10 +363,22 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
 		var anthropicTools [][]byte
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			if tool.Get("type").String() == "function" {
+			if tool.Get("type").String() == "function" || tool.Get("type").String() == "custom" {
 				function := tool.Get("function")
-				anthropicTool := []byte(`{"name":"","description":""}`)
-				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", function.Get("name").String())
+				if !function.Exists() || !function.IsObject() {
+					if c := tool.Get("custom"); c.Exists() && c.IsObject() {
+						function = c
+					} else {
+						function = tool
+					}
+				}
+				toolName := function.Get("name").String()
+				if toolName == "" {
+					toolName = tool.Get("name").String()
+				}
+				sanitizedName := util.SanitizeClaudeFunctionName(toolName)
+				anthropicTool := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{}}}`)
+				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", sanitizedName)
 				anthropicTool, _ = sjson.SetBytes(anthropicTool, "description", function.Get("description").String())
 
 				// Convert parameters schema for the tool
@@ -365,119 +420,15 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 		case gjson.JSON:
 			// Specific tool choice mapping
 			if toolChoice.Get("type").String() == "function" {
-				functionName := toolChoice.Get("function.name").String()
-				toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
-				toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", functionName)
-				out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+				fnName := toolChoice.Get("function.name").String()
+				if fnName != "" {
+					tc := []byte(`{"type":"tool","name":""}`)
+					tc, _ = sjson.SetBytes(tc, "name", fnName)
+					out, _ = sjson.SetRawBytes(out, "tool_choice", tc)
+				}
 			}
-		default:
 		}
 	}
 
 	return out
-}
-
-func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
-	var claudePart []byte
-	switch part.Get("type").String() {
-	case "text":
-		textPart := []byte(`{"type":"text","text":""}`)
-		textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
-		claudePart = textPart
-
-	case "image_url":
-		claudePart = []byte(convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String()))
-
-	case "file":
-		fileData := part.Get("file.file_data").String()
-		if strings.HasPrefix(fileData, "data:") {
-			semicolonIdx := strings.Index(fileData, ";")
-			commaIdx := strings.Index(fileData, ",")
-			if semicolonIdx != -1 && commaIdx != -1 && commaIdx > semicolonIdx {
-				mediaType := strings.TrimPrefix(fileData[:semicolonIdx], "data:")
-				data := fileData[commaIdx+1:]
-				docPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
-				docPart, _ = sjson.SetBytes(docPart, "source.media_type", mediaType)
-				docPart, _ = sjson.SetBytes(docPart, "source.data", data)
-				claudePart = docPart
-			}
-		}
-	}
-
-	if len(claudePart) == 0 {
-		return ""
-	}
-	return string(common.AttachCacheControl(claudePart, part))
-}
-
-func convertOpenAIImageURLToClaudePart(imageURL string) string {
-	if imageURL == "" {
-		return ""
-	}
-
-	if strings.HasPrefix(imageURL, "data:") {
-		parts := strings.SplitN(imageURL, ",", 2)
-		if len(parts) != 2 {
-			return ""
-		}
-
-		mediaTypePart := strings.SplitN(parts[0], ";", 2)[0]
-		mediaType := strings.TrimPrefix(mediaTypePart, "data:")
-		if mediaType == "" {
-			mediaType = "application/octet-stream"
-		}
-
-		imagePart := []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
-		imagePart, _ = sjson.SetBytes(imagePart, "source.media_type", mediaType)
-		imagePart, _ = sjson.SetBytes(imagePart, "source.data", parts[1])
-		return string(imagePart)
-	}
-
-	imagePart := []byte(`{"type":"image","source":{"type":"url","url":""}}`)
-	imagePart, _ = sjson.SetBytes(imagePart, "source.url", imageURL)
-	return string(imagePart)
-}
-
-func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
-	if !content.Exists() {
-		return "", false
-	}
-
-	if content.Type == gjson.String {
-		return content.String(), false
-	}
-
-	if content.IsArray() {
-		claudeParts := make([][]byte, 0, 4)
-		content.ForEach(func(_, part gjson.Result) bool {
-			if part.Type == gjson.String {
-				textPart := []byte(`{"type":"text","text":""}`)
-				textPart, _ = sjson.SetBytes(textPart, "text", part.String())
-				claudeParts = append(claudeParts, textPart)
-				return true
-			}
-
-			claudePart := convertOpenAIContentPartToClaudePart(part)
-			if claudePart != "" {
-				claudeParts = append(claudeParts, []byte(claudePart))
-			}
-			return true
-		})
-
-		if len(claudeParts) > 0 || len(content.Array()) == 0 {
-			return string(common.JoinRawArray(claudeParts)), true
-		}
-
-		return content.Raw, false
-	}
-
-	if content.IsObject() {
-		claudePart := convertOpenAIContentPartToClaudePart(content)
-		if claudePart != "" {
-			return string(common.JoinRawArray([][]byte{[]byte(claudePart)})), true
-		}
-		return content.Raw, false
-	}
-
-	return content.Raw, false
 }

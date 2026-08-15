@@ -213,3 +213,24 @@ func TestRestoreSanitizedToolName(t *testing.T) {
 		t.Errorf("expected empty for empty name, got %q", got)
 	}
 }
+
+func TestSanitizeClaudeFunctionName(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"valid_name", "valid_name"},
+		{"valid-name-123", "valid-name-123"},
+		{"mcp.server.tool", "mcp_server_tool"},
+		{"mcp:server:tool", "mcp_server_tool"},
+		{"123start_digit", "_123start_digit"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		got := SanitizeClaudeFunctionName(tt.input)
+		if got != tt.expected {
+			t.Errorf("SanitizeClaudeFunctionName(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
