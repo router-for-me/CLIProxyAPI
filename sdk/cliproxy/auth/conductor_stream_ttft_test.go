@@ -116,10 +116,14 @@ func (e *ttftRefreshProbeExecutor) CountTokens(context.Context, *Auth, cliproxye
 	return cliproxyexecutor.Response{}, nil
 }
 
-func (e *ttftRefreshProbeExecutor) Refresh(_ context.Context, a *Auth) (*Auth, error) {
+func (e *ttftRefreshProbeExecutor) Refresh(ctx context.Context, a *Auth) (*Auth, error) {
 	e.refreshCalls.Add(1)
-	time.Sleep(200 * time.Millisecond)
-	return a, nil
+	select {
+	case <-time.After(200 * time.Millisecond):
+		return a, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (e *ttftRefreshProbeExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {

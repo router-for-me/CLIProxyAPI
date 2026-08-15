@@ -427,9 +427,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			errStream = checkTTFTErr(errStream)
 			if allowRetry {
+				scope.stop()
 				alreadyTried := didRefreshOnUnauthorized
 				willAttemptHomeRefresh := ephemeralResult && !alreadyTried && auth != nil && auth.AuthKind() == AuthKindOAuth && isUnauthorizedError(errStream)
-				refreshed, okRefresh, errRefresh := m.tryRefreshExecutionAuthAfterUnauthorized(attemptCtx, executor, auth, errStream, alreadyTried, ephemeralResult)
+				refreshed, okRefresh, errRefresh := m.tryRefreshExecutionAuthAfterUnauthorized(ctx, executor, auth, errStream, alreadyTried, ephemeralResult)
 				if willAttemptHomeRefresh {
 					didRefreshOnUnauthorized = true
 					if unauthorizedRefreshTried != nil {
@@ -437,7 +438,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					}
 				}
 				if errRefresh != nil {
-					errStream = checkTTFTErr(errRefresh)
+					errStream = errRefresh
 				} else if okRefresh {
 					auth = refreshed
 					m.replaceHomeExecutionLifecycleAuth(execOpts.ExecutionLifecycle, auth)
@@ -492,9 +493,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			bootstrapErr = checkTTFTErr(bootstrapErr)
 			if allowRetry {
+				scope.stop()
 				alreadyTried := didRefreshOnUnauthorized
 				willAttemptHomeRefresh := ephemeralResult && !alreadyTried && auth != nil && auth.AuthKind() == AuthKindOAuth && isUnauthorizedError(bootstrapErr)
-				refreshed, okRefresh, errRefresh := m.tryRefreshExecutionAuthAfterUnauthorized(attemptCtx, executor, auth, bootstrapErr, alreadyTried, ephemeralResult)
+				refreshed, okRefresh, errRefresh := m.tryRefreshExecutionAuthAfterUnauthorized(ctx, executor, auth, bootstrapErr, alreadyTried, ephemeralResult)
 				if willAttemptHomeRefresh {
 					didRefreshOnUnauthorized = true
 					if unauthorizedRefreshTried != nil {
@@ -503,7 +505,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 				if errRefresh != nil {
 					discardStreamChunks(streamResult.Chunks)
-					bootstrapErr = checkTTFTErr(errRefresh)
+					bootstrapErr = errRefresh
 					streamResult = &cliproxyexecutor.StreamResult{}
 				} else if okRefresh {
 					discardStreamChunks(streamResult.Chunks)
