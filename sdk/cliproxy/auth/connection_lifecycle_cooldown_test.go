@@ -397,3 +397,72 @@ func TestIsConnectionLifecycleError_TransportTextWithStatusStillCooldowns(t *tes
 		t.Fatalf("shouldSkipCredentialCooldown = true, want false")
 	}
 }
+
+func TestManager_MarkResult_TransportFailureWithAuthProxyStillCooldowns(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-transport-proxy", Provider: "codex", ProxyURL: "http://127.0.0.1:7890"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	transportErr := resultErrorFromError(fmt.Errorf("proxyconnect tcp: dial tcp 127.0.0.1:7890: connect: connection refused"))
+
+	model := "gpt-5.6-sol"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    transportErr,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil || state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected per-auth proxy transport failure to keep cooldown")
+	}
+
+	// Client cancellation must still skip cooldown even with a per-auth proxy.
+	authCancel := &Auth{ID: "auth-transport-proxy-cancel", Provider: "codex", ProxyURL: "http://127.0.0.1:7890"}
+	if _, errRegister := m.Register(context.Background(), authCancel); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authCancel.ID,
+		Provider: authCancel.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    resultErrorFromError(context.Canceled),
+	})
+	assertNoCooldown(t, m, authCancel.ID, model)
+
+	// Auth-level path (empty model) must also keep cooldown for transport
+	// failures through a per-auth proxy.
+	authLevel := &Auth{ID: "auth-transport-proxy-auth-level", Provider: "codex", ProxyURL: "http://127.0.0.1:7890"}
+	if _, errRegister := m.Register(context.Background(), authLevel); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authLevel.ID,
+		Provider: authLevel.Provider,
+		Success:  false,
+		Error:    transportErr,
+	})
+	updatedAuthLevel, okAuthLevel := m.GetByID(authLevel.ID)
+	if !okAuthLevel || updatedAuthLevel == nil {
+		t.Fatalf("expected auth-level auth to be present")
+	}
+	if updatedAuthLevel.NextRetryAfter.IsZero() {
+		t.Fatalf("expected auth-level transport failure via per-auth proxy to keep cooldown")
+	}
+}

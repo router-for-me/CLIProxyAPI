@@ -743,7 +743,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		} else {
 			if modelKey != "" {
-				if !shouldSkipCredentialCooldown(result.Error) {
+				if !shouldSkipCredentialCooldownForAuth(result.Error, auth) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, modelKey)
 					state.Unavailable = true
@@ -1309,6 +1309,38 @@ func shouldSkipCredentialCooldown(err *Error) bool {
 	return isRequestScopedResultError(err) || isConnectionLifecycleResultError(err)
 }
 
+// shouldSkipCredentialCooldownForAuth reports failures that must not mark auth/model cooling.
+// Transport-level failures still cool down credentials that carry their own proxy
+// override, because those failures indicate auth-specific routing problems.
+func shouldSkipCredentialCooldownForAuth(err *Error, auth *Auth) bool {
+	if !shouldSkipCredentialCooldown(err) {
+		return false
+	}
+	if isTransportFailureResultError(err) && authHasProxyOverride(auth) {
+		return false
+	}
+	return true
+}
+
+// authHasProxyOverride reports whether the auth carries its own proxy configuration.
+// Transport failures through a per-auth proxy are auth-specific routing faults,
+// not shared network outages, so they should keep credential cooldown.
+func authHasProxyOverride(auth *Auth) bool {
+	return auth != nil && strings.TrimSpace(auth.ProxyURL) != ""
+}
+
+// isTransportFailureResultError reports whether the result error is classified as a
+// transport-level failure (as opposed to client cancellation or stream EOF), so
+// callers can restore cooldown when the failure is auth-specific. Only errors that
+// were classified connection-lifecycle, carry no HTTP status, and whose message
+// matches a transport pattern qualify.
+func isTransportFailureResultError(err *Error) bool {
+	if err == nil || statusCodeFromResult(err) != 0 {
+		return false
+	}
+	return hasTransportFailureMessage(err.Message)
+}
+
 // isConnectionLifecycleError reports transport/session lifecycle failures that must
 // not cool credentials: client cancellation, WebSocket close/EOF disconnects, and
 // transport-level dial/TLS/write failures that carry no credential signal.
@@ -1371,6 +1403,16 @@ func isConnectionLifecycleMessage(message string) bool {
 	}
 	// Transport-level failures (dial, DNS, TLS handshake, write) never indicate
 	// credential health, so they must not cool credentials either.
+	return hasTransportFailureMessage(lower)
+}
+
+// hasTransportFailureMessage reports whether a message matches a known transport-level
+// failure pattern (dial, DNS, TLS handshake, proxy connect, read/write timeouts).
+func hasTransportFailureMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
 	for _, pattern := range transportFailureMessagePatterns {
 		if strings.Contains(lower, pattern) {
 			return true
@@ -1824,7 +1866,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if auth == nil {
 		return
 	}
-	if shouldSkipCredentialCooldown(resultErr) {
+	if shouldSkipCredentialCooldownForAuth(resultErr, auth) {
 		return
 	}
 	defer func() {
