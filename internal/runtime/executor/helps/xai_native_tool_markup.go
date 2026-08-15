@@ -475,9 +475,12 @@ func parseXAINativeDeclaredTools(original []byte) xaiNativeDeclaredTools {
 	if len(names) == 0 {
 		return xaiNativeDeclaredTools{}
 	}
-	restore := make(map[string]string, len(names)*2)
+	// restore is strictly upstream/short name → original owner. Identity
+	// entries for original names are not written here: a shortened name can
+	// collide with another tool's original name, and map iteration would
+	// overwrite the short→original mapping.
+	restore := make(map[string]string, len(names))
 	for originalName, shortName := range buildXAINativeShortNameMap(names) {
-		restore[originalName] = originalName
 		restore[shortName] = originalName
 	}
 	return xaiNativeDeclaredTools{
@@ -486,13 +489,25 @@ func parseXAINativeDeclaredTools(original []byte) xaiNativeDeclaredTools {
 	}
 }
 
+func (d xaiNativeDeclaredTools) resolve(name string) (string, bool) {
+	if originalName, ok := d.restore[name]; ok {
+		return originalName, true
+	}
+	for _, originalName := range d.restore {
+		if originalName == name {
+			return name, true
+		}
+	}
+	return "", false
+}
+
 func (d xaiNativeDeclaredTools) filter(calls []xaiNativeToolCall) []xaiNativeToolCall {
 	if len(d.restore) == 0 || len(calls) == 0 {
 		return nil
 	}
 	out := make([]xaiNativeToolCall, 0, len(calls))
 	for _, call := range calls {
-		originalName, ok := d.restore[call.Name]
+		originalName, ok := d.resolve(call.Name)
 		if !ok {
 			continue
 		}
@@ -630,27 +645,28 @@ func coerceXAINativeArgumentForType(value any, declaredType string) any {
 			}
 		}
 		return value
-	case "integer":
+	case "integer", "number":
 		if isString {
-			if intVal, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
-				return intVal
-			}
-		}
-		return value
-	case "number":
-		if isString {
-			trimmed := strings.TrimSpace(raw)
-			if intVal, err := strconv.ParseInt(trimmed, 10, 64); err == nil && strconv.FormatInt(intVal, 10) == trimmed {
-				return intVal
-			}
-			if floatVal, err := strconv.ParseFloat(trimmed, 64); err == nil {
-				return floatVal
+			if number, ok := xaiNativeJSONNumber(raw); ok {
+				return number
 			}
 		}
 		return value
 	default:
 		return value
 	}
+}
+
+func xaiNativeJSONNumber(raw string) (json.Number, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || !gjson.Valid(trimmed) {
+		return "", false
+	}
+	parsed := gjson.Parse(trimmed)
+	if parsed.Type != gjson.Number {
+		return "", false
+	}
+	return json.Number(parsed.Raw), true
 }
 
 func xaiNativeValueAsString(value any) string {

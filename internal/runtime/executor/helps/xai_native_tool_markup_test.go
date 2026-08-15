@@ -291,6 +291,53 @@ func TestRewriteXAINativeToolMarkupChatJSONPreservesSchemaStringScalars(t *testi
 	}
 }
 
+func TestRewriteXAINativeToolMarkupChatJSONResolvesShortNameCollisions(t *testing.T) {
+	longName := "mcp__factory__" + strings.Repeat("collect_workspace_diagnostics_detail", 2)
+	shortName := buildXAINativeShortNameMap([]string{longName})[longName]
+	if shortName == "" || shortName == longName {
+		t.Fatalf("short name = %q, want a distinct shortened form", shortName)
+	}
+
+	declared := parseXAINativeDeclaredTools(xaiNativeOpenAIRequestWithTools(longName, shortName))
+	shortMap := buildXAINativeShortNameMap([]string{longName, shortName})
+	if shortMap[longName] != shortName {
+		t.Fatalf("long tool upstream name = %q, want %q", shortMap[longName], shortName)
+	}
+	collidingUpstream := shortMap[shortName]
+	if collidingUpstream == "" || collidingUpstream == shortName {
+		t.Fatalf("colliding tool upstream name = %q, want a suffixed form", collidingUpstream)
+	}
+	if got, ok := declared.resolve(shortName); !ok || got != longName {
+		t.Fatalf("resolve(%q) = %q, %v; want the long tool that owns the short upstream name", shortName, got, ok)
+	}
+	if got, ok := declared.resolve(collidingUpstream); !ok || got != shortName {
+		t.Fatalf("resolve(%q) = %q, %v; want the colliding original tool", collidingUpstream, got, ok)
+	}
+
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":""}}]}`)
+	body, _ = sjson.SetBytes(body, "choices.0.message.content", "<|tool_calls_begin|><|tool_call_begin|>\n"+shortName+"\n<|tool_sep|>path\n/tmp/a\n<|tool_call_end|><|tool_calls_end|>")
+	rewritten, ok := rewriteXAINativeToolMarkupChatJSON(body, declared)
+	if !ok {
+		t.Fatal("colliding short markup name should rewrite")
+	}
+	if got := gjson.GetBytes(rewritten, "choices.0.message.tool_calls.0.function.name").String(); got != longName {
+		t.Fatalf("function name = %q, want the long tool that was sent as %q", got, shortName)
+	}
+}
+
+func TestRewriteXAINativeToolMarkupChatJSONPreservesSchemaNumberLexeme(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"<|tool_calls_begin|><|tool_call_begin|>\nRead\n<|tool_sep|>id\n9007199254740993.0\n<|tool_call_end|><|tool_calls_end|>"}}]}`)
+	declared := parseXAINativeDeclaredTools(xaiNativeOpenAIRequestWithToolSchema("Read", `{"id":{"type":"number"}}`))
+	rewritten, ok := rewriteXAINativeToolMarkupChatJSON(body, declared)
+	if !ok {
+		t.Fatal("number-schema markup should rewrite")
+	}
+	args := gjson.GetBytes(rewritten, "choices.0.message.tool_calls.0.function.arguments").String()
+	if gjson.Get(args, "id").Raw != "9007199254740993.0" {
+		t.Fatalf("number lexeme was rewritten: %s", args)
+	}
+}
+
 func TestRewriteXAINativeToolMarkupChatJSONRestoresShortenedToolName(t *testing.T) {
 	longName := "mcp__factory__" + strings.Repeat("collect_workspace_diagnostics_detail", 2)
 	if len(longName) <= 64 {
