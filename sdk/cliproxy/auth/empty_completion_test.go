@@ -192,6 +192,31 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: false,
 		},
 		{
+			name:     "openai sse semantically empty tool_calls null",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[null]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"),
+			expected: true,
+		},
+		{
+			name:     "openai sse semantically empty tool_calls empty object",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"),
+			expected: true,
+		},
+		{
+			name:     "openai sse semantically empty tool_calls empty fields",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"),
+			expected: true,
+		},
+		{
+			name:     "openai json meaningful tool_calls",
+			payload:  []byte(`{"choices":[{"message":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`),
+			expected: false,
+		},
+		{
+			name:     "openai sse meaningful tool_calls",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
 			name:     "openai sse reasoning only is not empty",
 			payload:  []byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking step by step\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
 			expected: false,
@@ -239,6 +264,21 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 		{
 			name:     "non stream empty json",
 			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`),
+			expected: true,
+		},
+		{
+			name:     "openai json semantically empty tool_calls null",
+			payload:  []byte(`{"choices":[{"message":{"tool_calls":[null]},"finish_reason":"tool_calls"}]}`),
+			expected: true,
+		},
+		{
+			name:     "openai json semantically empty tool_calls empty object",
+			payload:  []byte(`{"choices":[{"message":{"tool_calls":[{}]},"finish_reason":"tool_calls"}]}`),
+			expected: true,
+		},
+		{
+			name:     "openai json semantically empty tool_calls empty fields",
+			payload:  []byte(`{"choices":[{"message":{"tool_calls":[{"id":"","type":"function","function":{"name":"","arguments":""}}]},"finish_reason":"tool_calls"}]}`),
 			expected: true,
 		},
 		{
