@@ -302,6 +302,21 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "gemini non-stream null functionCall part is empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":null}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`),
+			expected: true,
+		},
+		{
+			name:     "gemini non-stream empty inlineData object part is empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"inlineData":{}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`),
+			expected: true,
+		},
+		{
+			name:     "gemini non-stream null functionResponse part is empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionResponse":null}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`),
+			expected: true,
+		},
+		{
 			name:     "gemini non-stream with functionCall part is not empty",
 			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"search","args":{}}}]},"finishReason":"STOP"}]}`),
 			expected: false,

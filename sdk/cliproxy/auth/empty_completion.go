@@ -715,12 +715,12 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 		}
 		if cand.Content != nil {
 			for _, part := range cand.Content.Parts {
-				if len(part.FunctionCall) > 0 {
+				if nonEmptyJSONPayload(part.FunctionCall) {
 					a.hasToolCalls = true
 				}
-				if len(part.InlineData) > 0 ||
-					len(part.FileData) > 0 ||
-					len(part.FunctionResponse) > 0 {
+				if nonEmptyJSONPayload(part.InlineData) ||
+					nonEmptyJSONPayload(part.FileData) ||
+					nonEmptyJSONPayload(part.FunctionResponse) {
 					a.hasContent = true
 				}
 				if len(part.Thought) > 0 {
