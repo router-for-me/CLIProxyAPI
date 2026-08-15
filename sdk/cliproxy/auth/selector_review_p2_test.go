@@ -280,3 +280,47 @@ func TestMergeSplitGroupsRetainsFallbackAliasesUnderCASContention(t *testing.T) 
 		}
 	}
 }
+
+func TestSessionAffinitySelector_SplitGroupMergeExhaustionRestoresFallbackAliases(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	provider := "responses-split-exhaustion"
+	model := "gpt-test"
+
+	cacheKey := provider + "::pck:shared-prompt::" + model
+	fallbackKey := provider + "::conv:conversation-session::" + model
+	extraFallbackAlias := provider + "::extra:alias::" + model
+	missingPrimaryAlias := provider + "::conv:missing::" + model
+
+	// 1. Group 1 on cacheKey + missingPrimaryAlias bound to auth-a
+	selector.cache.SetAliases("auth-a", cacheKey, missingPrimaryAlias)
+
+	// Invalidate missingPrimaryAlias from entries table while leaving cacheKey's entry
+	// expecting it, so CompareAndReplaceAliases on cacheKey fails on all CAS attempts.
+	selector.cache.mu.Lock()
+	delete(selector.cache.entries, missingPrimaryAlias)
+	selector.cache.mu.Unlock()
+
+	// 2. Group 2 on fallbackKey + extraFallbackAlias bound to auth-b
+	selector.cache.SetAliases("auth-b", fallbackKey, extraFallbackAlias)
+
+	// 3. mergeSplitAliasGroupsCAS attempts to merge cacheKey and fallbackKey into auth-c.
+	// Since cacheKey expects missingPrimaryAlias which is missing from entries,
+	// CompareAndReplaceAliases fails on all 3 attempts.
+	merged := selector.mergeSplitAliasGroupsCAS(cacheKey, fallbackKey, "auth-c")
+	if merged {
+		t.Fatalf("mergeSplitAliasGroupsCAS must fail due to CAS exhaustion")
+	}
+
+	// Since mergeSplitAliasGroupsCAS exhausted retries after deleting fallbackKey,
+	// the fallback group (fallbackKey and extraFallbackAlias) must be restored to auth-b.
+	if got, ok := selector.cache.Get(fallbackKey); !ok || got != "auth-b" {
+		t.Fatalf("fallbackKey must be restored to auth-b, got %q, %v", got, ok)
+	}
+	if got, ok := selector.cache.Get(extraFallbackAlias); !ok || got != "auth-b" {
+		t.Fatalf("extraFallbackAlias must be restored to auth-b, got %q, %v", got, ok)
+	}
+}

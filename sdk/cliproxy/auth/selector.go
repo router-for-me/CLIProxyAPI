@@ -853,6 +853,7 @@ func (s *SessionAffinitySelector) mergeSplitAliasGroupsCAS(cacheKey, fallbackKey
 	//
 	// Mirror of CLIProxyAPI e768fba9.
 	var retainedF []string
+	var deletedAuthF string
 	for attempt := 0; attempt < 3; attempt++ {
 		authP, genP, aliasesP, okP := s.cache.GetWithGeneration(cacheKey)
 		authF, genF, aliasesF, okF := s.cache.GetWithGeneration(fallbackKey)
@@ -866,6 +867,7 @@ func (s *SessionAffinitySelector) mergeSplitAliasGroupsCAS(cacheKey, fallbackKey
 			if removed == nil {
 				continue
 			}
+			deletedAuthF = authF
 			retainedF = mergeSessionAliases(retainedF, removed...)
 		}
 		if okP {
@@ -876,6 +878,9 @@ func (s *SessionAffinitySelector) mergeSplitAliasGroupsCAS(cacheKey, fallbackKey
 		}
 		s.cache.SetAliases(authID, merged...)
 		return true
+	}
+	if len(retainedF) > 0 && deletedAuthF != "" {
+		s.cache.SetAliases(deletedAuthF, retainedF...)
 	}
 	return false
 }
