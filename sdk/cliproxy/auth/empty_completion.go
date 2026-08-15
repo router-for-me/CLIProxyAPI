@@ -1005,6 +1005,20 @@ func isEmptyCompletionPayload(payload []byte) bool {
 	}
 
 	acc.evalJSON(trimmed)
+	// A complete non-SSE OpenAI chat completion body is terminal by
+	// construction: zero-choice payloads such as {"choices":[]} or
+	// {"choices":[],"usage":null} never enter the per-choice terminal paths,
+	// so without this they would be accepted as successful responses instead
+	// of being judged as empty completions. Other recognized shapes (for
+	// example Claude messages) keep their per-shape terminal rules.
+	//
+	// Mirror of CLIProxyAPI fb7c2675.
+	var probe struct {
+		Choices json.RawMessage `json:"choices"`
+	}
+	if json.Unmarshal(trimmed, &probe) == nil && probe.Choices != nil {
+		acc.terminal = true
+	}
 	return acc.empty()
 }
 

@@ -522,9 +522,14 @@ func TestEmptyCompletionTolerantUsage(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "openai empty choices without usage is not judged terminal",
+			name:     "openai empty choices without usage is terminal and empty",
 			payload:  []byte(`{"choices":[]}`),
-			expected: false,
+			expected: true,
+		},
+		{
+			name:     "openai empty choices with null usage is terminal and empty",
+			payload:  []byte(`{"choices":[],"usage":null}`),
+			expected: true,
 		},
 		{
 			name:     "openai completion_tokens negative stays empty",
