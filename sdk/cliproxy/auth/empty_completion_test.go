@@ -1928,6 +1928,20 @@ func TestClaudeEmptyThinkingBlockStartEmptyCompletion(t *testing.T) {
 			t.Fatal("IsEmptyCompletionPayload() = true for thinking block with thinking_delta text, want false")
 		}
 	})
+
+	t.Run("empty redacted_thinking content_block_start followed by message_stop is empty completion", func(t *testing.T) {
+		payload := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3\",\"usage\":{\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for empty redacted_thinking block start with message_stop, want true")
+		}
+	})
+
+	t.Run("non-empty redacted_thinking content_block_start followed by message_stop is not empty", func(t *testing.T) {
+		payload := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3\",\"usage\":{\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"abc123encryptedpayload\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		if IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = true for non-empty redacted_thinking block, want false")
+		}
+	})
 }
 
 func TestRecognizedContentlessEOFEmptyStream(t *testing.T) {
