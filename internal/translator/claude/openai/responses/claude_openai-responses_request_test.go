@@ -41,6 +41,41 @@ func TestConvertOpenAIResponsesRequestToClaude_SanitizesToolCallIDsForClaude(t *
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_DeduplicatesReplayedToolResults(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"function_call","call_id":"call.1","name":"lookup","arguments":"{}"},
+			{"type":"custom_tool_call","call_id":"call_2","name":"exec","input":"pwd"},
+			{"type":"function_call_output","call_id":"call.1","output":"stale function result"},
+			{"type":"custom_tool_call_output","call_id":"call_2","output":"stale custom result"},
+			{"type":"function_call_output","call_id":"call:1","output":"final function result"},
+			{"type":"custom_tool_call_output","call_id":"call_2","output":"final custom result"}
+		]
+	}`)
+
+	result := ConvertOpenAIResponsesRequestToClaude("claude-test", inputJSON, false)
+	toolResults := gjson.GetBytes(result, "messages.1.content").Array()
+	if len(toolResults) != 2 {
+		t.Fatalf("tool result count = %d, want 2. Output: %s", len(toolResults), string(result))
+	}
+	wants := []struct {
+		id      string
+		content string
+	}{
+		{id: "call_1", content: "final function result"},
+		{id: "call_2", content: "final custom result"},
+	}
+	for i, want := range wants {
+		if got := toolResults[i].Get("tool_use_id").String(); got != want.id {
+			t.Fatalf("tool result %d id = %q, want %q", i, got, want.id)
+		}
+		if got := toolResults[i].Get("content").String(); got != want.content {
+			t.Fatalf("tool result %d content = %q, want %q", i, got, want.content)
+		}
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_ReasoningItemToThinkingBlock(t *testing.T) {
 	rawSignature, expectedSignature := testClaudeResponsesThinkingSignature(t)
 	raw := []byte(`{

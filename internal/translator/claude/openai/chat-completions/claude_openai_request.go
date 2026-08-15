@@ -175,6 +175,19 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		systemBlocks := make([][]byte, 0)
 		messageAccumulator := common.NewClaudeMessageAccumulator(int(root.Get("messages.#").Int()))
+		finalToolResultByID := make(map[string]gjson.Result)
+		messages.ForEach(func(_, message gjson.Result) bool {
+			if message.Get("role").String() == "tool" {
+				rawToolCallID := message.Get("tool_call_id").String()
+				if rawToolCallID != "" {
+					toolCallID := util.SanitizeClaudeToolID(rawToolCallID)
+					finalToolResultByID[toolCallID] = message
+				}
+			}
+			return true
+		})
+		emittedToolResultIDs := make(map[string]struct{}, len(finalToolResultByID))
+
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
@@ -282,9 +295,17 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 
 			case "tool":
 				// Handle tool result messages conversion
-				toolCallID := message.Get("tool_call_id").String()
-				toolCallID = util.SanitizeClaudeToolID(toolCallID)
-				toolContentResult := message.Get("content")
+				rawToolCallID := message.Get("tool_call_id").String()
+				toolCallID := util.SanitizeClaudeToolID(rawToolCallID)
+				toolResultMessage := message
+				if rawToolCallID != "" {
+					if _, exists := emittedToolResultIDs[toolCallID]; exists {
+						return true
+					}
+					emittedToolResultIDs[toolCallID] = struct{}{}
+					toolResultMessage = finalToolResultByID[toolCallID]
+				}
+				toolContentResult := toolResultMessage.Get("content")
 
 				msg := []byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`)
 				msg, _ = sjson.SetBytes(msg, "content.0.tool_use_id", toolCallID)
@@ -294,7 +315,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				} else {
 					msg, _ = sjson.SetBytes(msg, "content.0.content", toolResultContent)
 				}
-				msg = common.AttachMessageCacheControl(msg, message)
+				msg = common.AttachMessageCacheControl(msg, toolResultMessage)
 				messageAccumulator.Append(msg)
 			}
 			return true

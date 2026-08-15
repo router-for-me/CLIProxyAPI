@@ -131,6 +131,44 @@ func TestConvertOpenAIRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_DeduplicatesReplayedToolResults(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{
+				"role":"assistant",
+				"tool_calls":[
+					{"id":"call_1","type":"function","function":{"name":"first","arguments":"{}"}},
+					{"id":"call_2","type":"function","function":{"name":"second","arguments":"{}"}}
+				]
+			},
+			{"role":"tool","tool_call_id":"call_1","content":"stale result"},
+			{"role":"tool","tool_call_id":"call_2","content":"parallel result"},
+			{"role":"tool","tool_call_id":"call_1","content":"final result"}
+		]
+	}`)
+
+	result := ConvertOpenAIRequestToClaude("claude-test", inputJSON, false)
+	toolResults := gjson.GetBytes(result, "messages.1.content").Array()
+	if len(toolResults) != 2 {
+		t.Fatalf("tool result count = %d, want 2. Output: %s", len(toolResults), string(result))
+	}
+	wants := []struct {
+		id      string
+		content string
+	}{
+		{id: "call_1", content: "final result"},
+		{id: "call_2", content: "parallel result"},
+	}
+	for i, want := range wants {
+		if got := toolResults[i].Get("tool_use_id").String(); got != want.id {
+			t.Fatalf("tool result %d id = %q, want %q", i, got, want.id)
+		}
+		if got := toolResults[i].Get("content").String(); got != want.content {
+			t.Fatalf("tool result %d content = %q, want %q", i, got, want.content)
+		}
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_GroupsConsecutiveParallelToolResults(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",
