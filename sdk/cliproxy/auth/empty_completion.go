@@ -378,7 +378,8 @@ func (a *emptyCompletionAccum) evalOpenAI(data []byte) bool {
 		if strings.TrimSpace(content) != "" {
 			a.hasContent = true
 		}
-		if ch.Delta.Refusal != nil || ch.Message.Refusal != nil {
+		if (ch.Delta.Refusal != nil && strings.TrimSpace(*ch.Delta.Refusal) != "") ||
+			(ch.Message.Refusal != nil && strings.TrimSpace(*ch.Message.Refusal) != "") {
 			a.hasContent = true
 		}
 		if len(ch.Delta.ToolCalls) > 0 || len(ch.Message.ToolCalls) > 0 {

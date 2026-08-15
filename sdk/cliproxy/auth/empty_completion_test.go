@@ -537,6 +537,16 @@ func TestEmptyCompletionTolerantUsage(t *testing.T) {
 			expected: false,
 		},
 		{
+			name:     "openai empty refusal string is terminal and empty",
+			payload:  []byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":"","refusal":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":0,"total_tokens":5}}`),
+			expected: true,
+		},
+		{
+			name:     "openai real refusal string is not empty",
+			payload:  []byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":"I cannot help with that"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":0,"total_tokens":5}}`),
+			expected: false,
+		},
+		{
 			name:     "openai completion_tokens negative stays empty",
 			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":-5}}`),
 			expected: true,
