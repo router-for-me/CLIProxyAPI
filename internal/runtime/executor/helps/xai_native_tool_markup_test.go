@@ -165,24 +165,25 @@ func TestParseXAINativeToolMarkupInlineCommandKey(t *testing.T) {
 	}
 }
 
-func TestParseXAINativeToolMarkupTruncatedCallMissingEndTags(t *testing.T) {
+func TestParseXAINativeToolMarkupRejectsTruncatedCallMissingEndTags(t *testing.T) {
 	text := "keep going<|tool_calls_begin|><|tool_call_begin|>\n" +
 		"Execute\n" +
 		"<|tool_sep|>command\n" +
 		"ls\n"
 
-	parsed, ok := parseXAINativeToolMarkup(text)
-	if !ok {
-		t.Fatal("parseXAINativeToolMarkup() = false, want true")
+	if _, ok := parseXAINativeToolMarkup(text); ok {
+		t.Fatal("truncated markup without a value terminator should not parse")
 	}
-	if parsed.Prefix != "keep going" {
-		t.Fatalf("prefix = %q", parsed.Prefix)
-	}
-	if parsed.Calls[0].Name != "Execute" {
-		t.Fatalf("name = %q", parsed.Calls[0].Name)
-	}
-	if parsed.Calls[0].Arguments["command"] != "ls" {
-		t.Fatalf("command = %#v", parsed.Calls[0].Arguments["command"])
+}
+
+func TestParseXAINativeToolMarkupRejectsMidValueCutoff(t *testing.T) {
+	text := "<|tool_calls_begin|><|tool_call_begin|>\n" +
+		"Execute\n" +
+		"<|tool_sep|>command\n" +
+		"rm -rf /tmp/project"
+
+	if _, ok := parseXAINativeToolMarkup(text); ok {
+		t.Fatal("a command cut off mid-value should not be lifted")
 	}
 }
 
@@ -447,6 +448,18 @@ func TestXAINativeToolMarkupChatStreamBuffersUntilComplete(t *testing.T) {
 	}
 	if strings.Contains(joined, "tool_calls_begin") {
 		t.Fatalf("flush leaked markup: %s", joined)
+	}
+}
+
+func TestXAINativeToolMarkupChatStreamPassThroughWhenNoToolsDeclared(t *testing.T) {
+	stream := NewXAINativeToolMarkupChatStream(sdktranslator.FormatOpenAI, []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"explain"}]}`))
+	markup := []byte(`{"choices":[{"delta":{"content":"<|tool_calls_begin|><|tool_call_begin|>\nExecute\n<|tool_sep|>command\nls\n<|tool_call_end|><|tool_calls_end|>"}}]}`)
+	got := stream.Ingest(markup)
+	if len(got) != 1 || !bytes.Equal(got[0], markup) {
+		t.Fatalf("quoted markup with no declared tools should stream immediately, got %#v", got)
+	}
+	if flushed := stream.Flush(); len(flushed) != 0 {
+		t.Fatalf("Flush() = %#v, want empty", flushed)
 	}
 }
 

@@ -40,9 +40,9 @@ type xaiNativeToolMarkup struct {
 }
 
 // parseXAINativeToolMarkup extracts Factory/Droid tool markup from assistant
-// text. It returns false when the text has no usable calls. Truncated markup
-// that still contains a complete name/argument block is accepted so a stalled
-// stream can be recovered.
+// text. It returns false when the text has no usable calls. A call whose final
+// argument value is cut off at EOF without a native marker is rejected so a
+// dropped stream cannot emit a corrupted prefix such as a partial command.
 func parseXAINativeToolMarkup(text string) (xaiNativeToolMarkup, bool) {
 	begin := strings.Index(text, xaiNativeToolCallsBegin)
 	if begin < 0 {
@@ -93,11 +93,17 @@ func parseXAINativeToolCall(text string, start, limit int) (xaiNativeToolCall, i
 	}
 
 	nameEnd := nextXAINativeMarkerUntil(text, cursor, []string{xaiNativeToolSep, xaiNativeToolCallEnd, xaiNativeToolCallsEnd, xaiNativeToolCallBegin}, limit)
+	nameClosedByMarker := nameEnd >= 0
 	if nameEnd < 0 {
 		nameEnd = nextXAINativeNewline(text, cursor, limit)
 	}
 	if nameEnd < 0 {
-		nameEnd = limit
+		if xaiNativeClosedByLimitMarker(text, limit) {
+			nameEnd = limit
+			nameClosedByMarker = true
+		} else {
+			return xaiNativeToolCall{}, cursor, false
+		}
 	}
 	name := strings.TrimSpace(text[cursor:nameEnd])
 	if name == "" {
@@ -128,7 +134,11 @@ func parseXAINativeToolCall(text string, start, limit int) (xaiNativeToolCall, i
 			keyEnd = nextXAINativeMarkerUntil(text, cursor, []string{xaiNativeToolSep, xaiNativeToolCallEnd, xaiNativeToolCallsEnd}, limit)
 		}
 		if keyEnd < 0 {
-			keyEnd = limit
+			if xaiNativeClosedByLimitMarker(text, limit) {
+				keyEnd = limit
+			} else {
+				return xaiNativeToolCall{}, cursor, false
+			}
 		}
 		key := strings.TrimSpace(text[cursor:keyEnd])
 		cursor = keyEnd
@@ -141,7 +151,11 @@ func parseXAINativeToolCall(text string, start, limit int) (xaiNativeToolCall, i
 
 		valueEnd := nextXAINativeMarkerUntil(text, cursor, []string{xaiNativeToolSep, xaiNativeToolCallEnd, xaiNativeToolCallsEnd, xaiNativeToolCallBegin}, limit)
 		if valueEnd < 0 {
-			valueEnd = limit
+			if xaiNativeClosedByLimitMarker(text, limit) {
+				valueEnd = limit
+			} else {
+				return xaiNativeToolCall{}, cursor, false
+			}
 		}
 		value := text[cursor:valueEnd]
 		if strings.HasSuffix(value, "\r\n") {
@@ -162,7 +176,26 @@ func parseXAINativeToolCall(text string, start, limit int) (xaiNativeToolCall, i
 		cursor = valueEnd
 	}
 
+	if !nameClosedByMarker && len(arguments) == 0 && !xaiNativeClosedByLimitMarker(text, limit) {
+		if cursor >= limit ||
+			!(strings.HasPrefix(text[cursor:], xaiNativeToolCallEnd) ||
+				strings.HasPrefix(text[cursor:], xaiNativeToolCallsEnd) ||
+				strings.HasPrefix(text[cursor:], xaiNativeToolCallBegin)) {
+			return xaiNativeToolCall{}, cursor, false
+		}
+	}
+
 	return xaiNativeToolCall{Name: name, Arguments: arguments}, cursor, true
+}
+
+func xaiNativeClosedByLimitMarker(text string, limit int) bool {
+	if limit < 0 || limit >= len(text) {
+		return false
+	}
+	return strings.HasPrefix(text[limit:], xaiNativeToolCallEnd) ||
+		strings.HasPrefix(text[limit:], xaiNativeToolCallsEnd) ||
+		strings.HasPrefix(text[limit:], xaiNativeToolCallBegin) ||
+		strings.HasPrefix(text[limit:], xaiNativeToolSep)
 }
 
 func coerceXAINativeJSONValue(raw string) any {
@@ -357,9 +390,10 @@ type XAINativeToolMarkupChatStream struct {
 // OpenAI chat-completion client streams. originalRequest supplies the declared
 // tool set used to gate lifts and restore shortened names.
 func NewXAINativeToolMarkupChatStream(format sdktranslator.Format, originalRequest []byte) *XAINativeToolMarkupChatStream {
+	declared := parseXAINativeDeclaredTools(originalRequest)
 	return &XAINativeToolMarkupChatStream{
-		enabled:  format == sdktranslator.FormatOpenAI,
-		declared: parseXAINativeDeclaredTools(originalRequest),
+		enabled:  format == sdktranslator.FormatOpenAI && len(declared.restore) > 0,
+		declared: declared,
 	}
 }
 
