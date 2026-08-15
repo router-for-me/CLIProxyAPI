@@ -547,6 +547,16 @@ func TestEmptyCompletionTolerantUsage(t *testing.T) {
 			expected: false,
 		},
 		{
+			name:     "zero-length body is an empty completion",
+			payload:  []byte(``),
+			expected: true,
+		},
+		{
+			name:     "whitespace-only body is an empty completion",
+			payload:  []byte("  \n\t "),
+			expected: true,
+		},
+		{
 			name:     "openai completion_tokens negative stays empty",
 			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":-5}}`),
 			expected: true,

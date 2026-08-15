@@ -1001,7 +1001,11 @@ func couldBeSSEPrefix(payload []byte) bool {
 func isEmptyCompletionPayload(payload []byte) bool {
 	trimmed := bytes.TrimSpace(payload)
 	if len(trimmed) == 0 {
-		return false
+		// A zero-length or whitespace-only body on an HTTP success is the
+		// canonical empty completion: without this, Execute and plugin
+		// executors returned it as a successful response and never rotated
+		// credentials.
+		return true
 	}
 
 	var acc emptyCompletionAccum
