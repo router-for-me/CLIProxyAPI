@@ -36,6 +36,7 @@ type xaiNativeToolCall struct {
 
 type xaiNativeToolMarkup struct {
 	Prefix string
+	Suffix string
 	Calls  []xaiNativeToolCall
 }
 
@@ -55,7 +56,11 @@ func parseXAINativeToolMarkup(text string) (xaiNativeToolMarkup, bool) {
 
 	for cursor < len(text) {
 		if strings.HasPrefix(text[cursor:], xaiNativeToolCallsEnd) {
-			break
+			suffix := text[cursor+len(xaiNativeToolCallsEnd):]
+			if len(calls) == 0 {
+				return xaiNativeToolMarkup{}, false
+			}
+			return xaiNativeToolMarkup{Prefix: prefix, Suffix: suffix, Calls: calls}, true
 		}
 		rel := strings.Index(text[cursor:], xaiNativeToolCallBegin)
 		if rel < 0 {
@@ -240,10 +245,10 @@ func rewriteXAINativeToolMarkupChatJSON(body []byte, declared xaiNativeDeclaredT
 	}
 
 	out := body
-	if parsed.Prefix == "" {
+	if content := parsed.Prefix + parsed.Suffix; content == "" {
 		out, _ = sjson.SetRawBytes(out, "choices.0.message.content", []byte("null"))
 	} else {
-		out, _ = sjson.SetBytes(out, "choices.0.message.content", parsed.Prefix)
+		out, _ = sjson.SetBytes(out, "choices.0.message.content", content)
 	}
 	out, _ = sjson.SetRawBytes(out, "choices.0.message.tool_calls", encodeXAINativeToolCalls(calls, false))
 	out, _ = sjson.SetBytes(out, "choices.0.finish_reason", "tool_calls")
@@ -326,10 +331,10 @@ func rewriteXAINativeToolMarkupSSE(sse []byte, declared xaiNativeDeclaredTools) 
 	}
 
 	var out bytes.Buffer
-	if parsed.Prefix != "" {
+	if content := parsed.Prefix + parsed.Suffix; content != "" {
 		out.Write(xaiNativeSSELine(xaiNativeChatChunk(id, model, created, map[string]any{
 			"role":    "assistant",
-			"content": parsed.Prefix,
+			"content": content,
 		}, "", nil)))
 	} else {
 		out.Write(xaiNativeSSELine(xaiNativeChatChunk(id, model, created, map[string]any{
@@ -437,6 +442,20 @@ func (s *XAINativeToolMarkupChatStream) Ingest(chunk []byte) [][]byte {
 	return [][]byte{chunk}
 }
 
+// Release emits any buffered chat chunks unchanged. Use this when the
+// upstream stream did not complete successfully so we do not synthesize
+// a finished tool_calls turn from an incomplete response.
+func (s *XAINativeToolMarkupChatStream) Release() [][]byte {
+	if s == nil || len(s.held) == 0 {
+		return nil
+	}
+	held := s.held
+	s.held = nil
+	s.buffering = false
+	s.confirmed = false
+	return held
+}
+
 // Flush emits any buffered chat chunks, rewriting assembled markup into
 // tool_calls when parsing succeeds.
 func (s *XAINativeToolMarkupChatStream) Flush() [][]byte {
@@ -541,7 +560,7 @@ func (d xaiNativeDeclaredTools) filter(calls []xaiNativeToolCall) []xaiNativeToo
 	for _, call := range calls {
 		originalName, ok := d.resolve(call.Name)
 		if !ok {
-			continue
+			return nil
 		}
 		call.Name = originalName
 		call.Arguments = applyXAINativeDeclaredArgumentTypes(originalName, call.Arguments, d.properties)

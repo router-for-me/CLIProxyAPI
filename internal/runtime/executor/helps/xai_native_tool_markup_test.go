@@ -219,6 +219,43 @@ func TestParseXAINativeToolMarkupPreservesLargeJSONIntegers(t *testing.T) {
 	}
 }
 
+func TestParseXAINativeToolMarkupPreservesTextAfterBlock(t *testing.T) {
+	text := "Before.<|tool_calls_begin|><|tool_call_begin|>\n" +
+		"Execute\n" +
+		"<|tool_sep|>command\n" +
+		"ls\n" +
+		"<|tool_call_end|><|tool_calls_end|>After."
+
+	parsed, ok := parseXAINativeToolMarkup(text)
+	if !ok {
+		t.Fatal("parseXAINativeToolMarkup() = false, want true")
+	}
+	if parsed.Prefix != "Before." {
+		t.Fatalf("prefix = %q", parsed.Prefix)
+	}
+	if parsed.Suffix != "After." {
+		t.Fatalf("suffix = %q", parsed.Suffix)
+	}
+}
+
+func TestRewriteXAINativeToolMarkupChatJSONPreservesTextAfterBlock(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"Before.<|tool_calls_begin|><|tool_call_begin|>\nExecute\n<|tool_sep|>command\nls\n<|tool_call_end|><|tool_calls_end|>After."}}]}`)
+	rewritten, ok := rewriteXAINativeToolMarkupChatJSON(body, xaiNativeDeclared("Execute"))
+	if !ok {
+		t.Fatal("rewrite should succeed")
+	}
+	if got := gjson.GetBytes(rewritten, "choices.0.message.content").String(); got != "Before.After." {
+		t.Fatalf("content = %q, want Before.After.", got)
+	}
+}
+
+func TestRewriteXAINativeToolMarkupChatJSONRejectsUndeclaredCallInBlock(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"<|tool_calls_begin|><|tool_call_begin|>\nExecute\n<|tool_sep|>command\nls\n<|tool_call_end|><|tool_call_begin|>\nHallucinated\n<|tool_sep|>path\n/tmp/a\n<|tool_call_end|><|tool_calls_end|>"}}]}`)
+	if _, ok := rewriteXAINativeToolMarkupChatJSON(body, xaiNativeDeclared("Execute")); ok {
+		t.Fatal("a block with any undeclared call should not be lifted")
+	}
+}
+
 func TestParseXAINativeToolMarkupLeavesPlainTextUnchanged(t *testing.T) {
 	if _, ok := parseXAINativeToolMarkup("just a sentence"); ok {
 		t.Fatal("plain text should not parse as markup")

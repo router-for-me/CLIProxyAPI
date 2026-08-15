@@ -136,6 +136,42 @@ func TestXAIExecutorExecuteStreamLiftsSplitNativeToolMarkup(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorExecuteStreamReleasesMarkupWithoutCompleted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"item_id\":\"msg_1\",\"delta\":\"<|tool_calls_begin|><|tool_call_begin|>\\nExecute\\n<|tool_sep|>command\\nls\\n<|tool_call_end|><|tool_calls_end|>\"}\n\n"))
+		_, _ = w.Write([]byte("event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"status\":\"incomplete\"}}\n\n"))
+	}))
+	defer server.Close()
+
+	result, err := NewXAIExecutor(&config.Config{}).ExecuteStream(context.Background(), xaiNativeTestAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "grok-4.6",
+		Payload: xaiNativeChatPayload("Execute"),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var stream bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		stream.Write(chunk.Payload)
+		stream.WriteByte('\n')
+	}
+	text := stream.String()
+	if strings.Contains(text, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("incomplete stream synthesized tool_calls: %s", text)
+	}
+	if !strings.Contains(text, "tool_calls_begin") {
+		t.Fatalf("incomplete stream should release markup as text: %s", text)
+	}
+}
+
 func TestXAIExecutorExecuteDoesNotRewriteWhenFunctionCallAlreadyPresent(t *testing.T) {
 	functionCall := `{"id":"fc_1","type":"function_call","call_id":"call_1","name":"Read","arguments":"{\"path\":\"/tmp/a\"}","status":"completed"}`
 	message := xaiNativeMessageItem("x<|tool_calls_begin|>")

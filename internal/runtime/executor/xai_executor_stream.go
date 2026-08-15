@@ -82,6 +82,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		var outputItemsFallback [][]byte
 		responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
 		markupStream := helps.NewXAINativeToolMarkupChatStream(prepared.responseFormat, prepared.originalPayload)
+		sawCompleted := false
 		var pendingEventLine []byte
 		emitPayloads := func(payloads [][]byte) bool {
 			for i := range payloads {
@@ -131,6 +132,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 					case "response.output_item.done":
 						xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
 					case "response.completed":
+						sawCompleted = true
 						if detail, ok := helps.ParseCodexUsage(eventData); ok {
 							reporter.Publish(ctx, detail)
 						}
@@ -170,7 +172,11 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		if pendingEventLine != nil {
 			emitTranslatedLine(xaiNormalizeReasoningSummaryEventLine(pendingEventLine, ""))
 		}
-		if !emitPayloads(markupStream.Flush()) {
+		if sawCompleted {
+			if !emitPayloads(markupStream.Flush()) {
+				return
+			}
+		} else if !emitPayloads(markupStream.Release()) {
 			return
 		}
 		if errScan := scanner.Err(); errScan != nil {
