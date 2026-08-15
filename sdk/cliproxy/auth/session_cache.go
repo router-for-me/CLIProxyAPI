@@ -308,6 +308,37 @@ func (c *SessionCache) CompareAndDeleteAliases(sessionID, expectedAuthID string)
 	return aliases
 }
 
+// CompareAndDeleteGroup removes a binding only when its auth ID, generation,
+// and alias set all still match the observed values, and returns the removed
+// aliases. A concurrent refresh or extension of the group bumps the
+// generation or changes the aliases, so a stale observation cannot delete
+// newer state; callers retry their merge on a nil result.
+//
+// Mirror of CLIProxyAPI dd8c72a3.
+func (c *SessionCache) CompareAndDeleteGroup(sessionID, expectedAuthID string, expectedGen uint64, expectedAliases []string) []string {
+	if c == nil || sessionID == "" || expectedAuthID == "" {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, ok := c.entries[sessionID]
+	if !ok || entry.authID != expectedAuthID || entry.generation != expectedGen {
+		return nil
+	}
+	if !equalSessionAliases(compactSessionAliases(entry.aliases), compactSessionAliases(expectedAliases)) {
+		return nil
+	}
+	removed := append([]string(nil), entry.aliases...)
+	c.generation++
+	for _, alias := range removed {
+		if current, exists := c.entries[alias]; exists && current.authID == expectedAuthID && equalSessionAliases(current.aliases, entry.aliases) {
+			delete(c.entries, alias)
+		}
+	}
+	return removed
+}
+
 // CompareAndReplaceAliases atomically validates that every observed alias still
 // maps to expectedAuthID with expectedGen, that all observed aliases belong to the
 // exact same group, and that no additional alias is currently bound to

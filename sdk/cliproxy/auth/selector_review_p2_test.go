@@ -165,3 +165,46 @@ func TestPickRebindsSplitAffinityGroupsOnFailover(t *testing.T) {
 		t.Fatalf("primary group aliases %v missing fallback key %q", aliasesPrimary, fallbackKey)
 	}
 }
+
+// TestCompareAndDeleteGroupRejectsStaleObservation covers the codex P2
+// follow-up on PR #4881: when a concurrent request refreshes or extends the
+// fallback group between the observation and the delete, a stale merge
+// observation must not remove the newer group, otherwise the newly attached
+// aliases lose their affinity binding.
+//
+// Mirror of CLIProxyAPI dd8c72a3.
+func TestCompareAndDeleteGroupRejectsStaleObservation(t *testing.T) {
+	t.Parallel()
+
+	cache := NewSessionCache(time.Minute)
+	key := "gemini::conv:c1::test-model"
+	extended := "gemini::conv:c2::test-model"
+	cache.SetAliases("auth-a", key)
+
+	authID, gen, aliases, ok := cache.GetWithGeneration(key)
+	if !ok || authID != "auth-a" {
+		t.Fatalf("GetWithGeneration() = %q, ok=%v; want auth-a bound", authID, ok)
+	}
+
+	// A concurrent request extends the same group on the same auth.
+	cache.SetAliases("auth-a", key, extended)
+
+	if removed := cache.CompareAndDeleteGroup(key, "auth-a", gen, aliases); removed != nil {
+		t.Fatalf("CompareAndDeleteGroup with stale observation removed %v; want nil (group must survive)", removed)
+	}
+	if got, _, gotAliases, ok := cache.GetWithGeneration(key); !ok || got != "auth-a" || !slices.Contains(gotAliases, extended) {
+		t.Fatalf("group after stale delete = %q, aliases=%v, ok=%v; want intact auth-a group", got, gotAliases, ok)
+	}
+
+	// A fresh observation still deletes successfully.
+	authID, gen, aliases, ok = cache.GetWithGeneration(key)
+	if !ok {
+		t.Fatal("GetWithGeneration() after extension lost the group")
+	}
+	if removed := cache.CompareAndDeleteGroup(key, authID, gen, aliases); removed == nil {
+		t.Fatal("CompareAndDeleteGroup with fresh observation returned nil; want removed aliases")
+	}
+	if _, _, _, ok := cache.GetWithGeneration(key); ok {
+		t.Fatal("group still present after fresh CompareAndDeleteGroup")
+	}
+}
