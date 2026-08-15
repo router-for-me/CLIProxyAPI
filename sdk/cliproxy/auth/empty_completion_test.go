@@ -826,6 +826,87 @@ func TestStreamBootstrapDetectorMetadataOnlyEOF(t *testing.T) {
 	})
 }
 
+func TestStreamBootstrapDetectorTerminalBlockedForwardsImmediately(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{
+			name:    "openai content_filter",
+			payload: "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n\n",
+		},
+		{
+			name:    "openai length",
+			payload: "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+		},
+		{
+			name:    "gemini safety candidate",
+			payload: "data: {\"candidates\":[{\"finishReason\":\"SAFETY\"}]}\n\n",
+		},
+		{
+			name:    "gemini prompt feedback block",
+			payload: "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"}}\n\n",
+		},
+		{
+			name:    "claude refusal",
+			payload: "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"}}\n\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var detector StreamBootstrapDetector
+			if !detector.Observe([]byte(tt.payload)) {
+				t.Fatalf("Observe() = false, want terminal blocked frame to forward immediately without waiting for EOF")
+			}
+			if detector.Finish() {
+				t.Fatalf("Finish() = true, want terminal blocked stream not to be classified as empty completion")
+			}
+		})
+	}
+}
+
+func TestStreamBootstrapDetectorEmptyDataEventsClassifyAsEmpty(t *testing.T) {
+	t.Run("single empty data event", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe([]byte("data:\n\n")) {
+			t.Fatal("Observe() forwarded empty data event")
+		}
+		if !detector.Finish() {
+			t.Fatal("Finish() = false, want empty data event stream classified as empty completion at EOF")
+		}
+	})
+
+	t.Run("empty data event with whitespace", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe([]byte("data:   \n\n")) {
+			t.Fatal("Observe() forwarded whitespace empty data event")
+		}
+		if !detector.Finish() {
+			t.Fatal("Finish() = false, want whitespace empty data event stream classified as empty completion at EOF")
+		}
+	})
+
+	t.Run("multiple empty data events", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe([]byte("data:\n\ndata:\n\n")) {
+			t.Fatal("Observe() forwarded multiple empty data events")
+		}
+		if !detector.Finish() {
+			t.Fatal("Finish() = false, want multiple empty data events classified as empty completion at EOF")
+		}
+	})
+
+	t.Run("isEmptyCompletionPayload classifies empty data event as empty", func(t *testing.T) {
+		if !IsEmptyCompletionPayload([]byte("data:\n\n")) {
+			t.Fatal("IsEmptyCompletionPayload() = false for empty data: event")
+		}
+		if !IsEmptyCompletionPayload([]byte("data:   \n\n")) {
+			t.Fatal("IsEmptyCompletionPayload() = false for whitespace empty data: event")
+		}
+	})
+}
+
 func TestStreamBootstrapDetectorMultilineSSE(t *testing.T) {
 	t.Run("empty completion split across data fields remains buffered and recognized", func(t *testing.T) {
 		var detector StreamBootstrapDetector

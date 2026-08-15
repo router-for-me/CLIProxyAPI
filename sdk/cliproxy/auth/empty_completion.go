@@ -890,6 +890,7 @@ func (s *streamBootstrapState) flushData() {
 		return
 	}
 	if len(data) == 0 {
+		s.acc.sawMetadataOnly = true
 		return
 	}
 	if !s.acc.evalJSON(data) {
@@ -1049,7 +1050,7 @@ func (s *streamBootstrapState) isEmptyCompletion() bool {
 }
 
 func (s *streamBootstrapState) shouldForward() bool {
-	return s.acc.hasContent || s.acc.hasToolCalls || s.acc.sawUnknownData || (!s.acc.recognized && !s.sawSSE)
+	return s.acc.hasContent || s.acc.hasToolCalls || s.acc.blocked || s.acc.sawUnknownData || (!s.acc.recognized && !s.sawSSE)
 }
 
 type jsonBufferStatus int
@@ -1206,6 +1207,7 @@ func (a *emptyCompletionAccum) evalSSE(payload []byte) {
 			return
 		}
 		if len(data) == 0 {
+			a.sawMetadataOnly = true
 			return
 		}
 		if !a.evalJSON(data) {
