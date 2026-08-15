@@ -426,6 +426,255 @@ func TestBackupImportSoftFailureFirstChunkWipes(t *testing.T) {
 	}
 }
 
+// usageErrorJSON builds a single valid usage_errors row for the given explicit
+// serial id. It mirrors usageEventJSON but includes the error_message column,
+// which is NOT NULL on usage_errors (and absent from usage_events).
+func usageErrorJSON(id int64) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(
+		`{"id":%d,"request_id":"req-%d","api_key_principal":"sk-test","provider":"anthropic","model":"claude-opus","input_tokens":10,"output_tokens":5,"reasoning_tokens":0,"cached_tokens":0,"cache_creation_tokens":0,"total_tokens":15,"cost_usd":0.001,"error_message":"boom","failed":true,"fail_status_code":500,"generate":false,"requested_at":"2026-08-15T00:00:00Z","flushed_at":"2026-08-15T00:00:00Z","discount_pct":0,"original_cost_usd":0.001}`,
+		id, id))
+}
+
+// TestBackupImportConfigAllOrNothing verifies that a malformed config row
+// aborts the entire config phase: prior config resources that already imported
+// inside the single transaction are rolled back too (all-or-nothing across
+// config resources), and the data phase never runs.
+func TestBackupImportConfigAllOrNothing(t *testing.T) {
+	st := roundTripTestStore(t, "backup_cfg_rollback_"+randSuffix())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Two config resources in one bundle: api_keys (imported first) and
+	// internal_users (carries a malformed row). The api_keys rows must be rolled
+	// back when internal_users fails.
+	apiKeyRow := json.RawMessage(
+		`{"id":"ak-1","name":"test","key_hash":"hash-1","key_prefix":"sk-","status":"active","created_at":"2026-08-15T00:00:00Z","updated_at":"2026-08-15T00:00:00Z","metadata":{}}`)
+	// All NOT NULL backfill columns on api_key_policies must be supplied
+	// (model_routes, allowed_ips, blocked_ips) because jsonb_populate_recordset
+	// does not apply column defaults.
+	policyRow := json.RawMessage(
+		`{"api_key_id":"ak-1","allowed_models":[],"blocked_models":[],"model_routes":[],"allowed_ips":[],"blocked_ips":[],"updated_at":"2026-08-15T00:00:00Z"}`)
+	// A non-numeric into the NUMERIC spend column fails jsonb_populate_recordset.
+	badUser := json.RawMessage(
+		`{"id":"u-bad","user_alias":"bad","user_role":"internal_user","models":[],"metadata":{},"spend":"not-a-number","created_at":"2026-08-15T00:00:00Z","updated_at":"2026-08-15T00:00:00Z"}`)
+	// A data row (usage) that must never be inserted because the config phase
+	// aborts before the data phase runs.
+	usageRow := usageEventJSON(1)
+
+	bundle := BackupBundle{
+		Version:    1,
+		ExportedAt: time.Now().UTC(),
+		Resources: map[string]backupResourceData{
+			string(ResourceAPIKeys): {
+				Tables: map[string][]json.RawMessage{
+					st.APIKeysTable():  {apiKeyRow},
+					st.PoliciesTable(): {policyRow},
+				},
+			},
+			string(ResourceInternalUsers): {
+				Tables: map[string][]json.RawMessage{
+					st.InternalUsersTable(): {badUser},
+				},
+			},
+			string(ResourceUsage): {
+				Tables: map[string][]json.RawMessage{
+					st.UsageEventsTable(): {usageRow},
+				},
+			},
+		},
+	}
+
+	var progressCalls []int
+	report, err := st.ImportData(ctx, bundle, BackupImportOpts{
+		Progress: func(n int) { progressCalls = append(progressCalls, n) },
+	})
+	if err == nil {
+		t.Fatal("expected ImportData to fail on the malformed config row")
+	}
+	// The data phase must never run on a config failure, so no data progress
+	// callback fires (and the config offset is never announced).
+	if len(progressCalls) != 0 {
+		t.Fatalf("expected no progress callbacks on config failure, got %v", progressCalls)
+	}
+	// The config transaction never committed, so the report must not claim any
+	// inserted total (Tasks 6/7 read this on the error path too).
+	if report.Total != 0 {
+		t.Fatalf("report.Total = %d on config failure; want 0", report.Total)
+	}
+
+	// All-or-nothing across config resources: the api_keys rows that imported
+	// before the internal_users failure must be rolled back with the transaction.
+	var keyCount int
+	if err := st.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM "+st.APIKeysTable()+" WHERE id = 'ak-1'").Scan(&keyCount); err != nil {
+		t.Fatalf("count api key: %v", err)
+	}
+	if keyCount != 0 {
+		t.Fatalf("api key rolled back expected; found %d row(s)", keyCount)
+	}
+	var userCount int
+	if err := st.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM "+st.InternalUsersTable()).Scan(&userCount); err != nil {
+		t.Fatalf("count internal users: %v", err)
+	}
+	if userCount != 0 {
+		t.Fatalf("internal user rolled back expected; found %d row(s)", userCount)
+	}
+	// The data phase never ran: the usage row is absent.
+	var usageCount int
+	if err := st.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM "+st.UsageEventsTable()).Scan(&usageCount); err != nil {
+		t.Fatalf("count usage rows: %v", err)
+	}
+	if usageCount != 0 {
+		t.Fatalf("data phase ran despite config failure; found %d usage row(s)", usageCount)
+	}
+}
+
+// TestBackupImportMultiTableProgress verifies that the Progress callback stays
+// strictly increasing across table boundaries within one data resource (usage
+// spans usage_events + usage_errors), with no reset at the boundary.
+func TestBackupImportMultiTableProgress(t *testing.T) {
+	st := roundTripTestStore(t, "backup_chunk_multi_"+randSuffix())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const events = importBatchSize + 500 // forces at least two chunks
+	const errors = 200
+	eventRows := make([]json.RawMessage, 0, events)
+	for i := int64(1); i <= events; i++ {
+		eventRows = append(eventRows, usageEventJSON(i))
+	}
+	errorRows := make([]json.RawMessage, 0, errors)
+	for i := int64(1); i <= errors; i++ {
+		errorRows = append(errorRows, usageErrorJSON(events+int64(i))) // distinct ids
+	}
+	bundle := BackupBundle{
+		Version:    1,
+		ExportedAt: time.Now().UTC(),
+		Resources: map[string]backupResourceData{
+			string(ResourceUsage): {
+				Tables: map[string][]json.RawMessage{
+					st.UsageEventsTable(): eventRows,
+					st.UsageErrorsTable(): errorRows,
+				},
+			},
+		},
+	}
+
+	var progressCalls []int
+	report, err := st.ImportData(ctx, bundle, BackupImportOpts{
+		Resources: []BackupResource{ResourceUsage},
+		Progress: func(n int) {
+			progressCalls = append(progressCalls, n)
+		},
+	})
+	if err != nil {
+		t.Fatalf("ImportData: %v", err)
+	}
+	if got := report.Resources[ResourceUsage].Inserted; got != events+errors {
+		t.Fatalf("inserted = %d, want %d", got, events+errors)
+	}
+	if len(progressCalls) < 3 {
+		t.Fatalf("expected >=3 progress calls (events chunks + errors chunk), got %d: %v", len(progressCalls), progressCalls)
+	}
+	// Strictly increasing with no reset or decrease at the usage_events ->
+	// usage_errors boundary.
+	for i := 1; i < len(progressCalls); i++ {
+		if progressCalls[i] <= progressCalls[i-1] {
+			t.Fatalf("progress not strictly increasing at call %d: %v", i, progressCalls)
+		}
+	}
+	if last := progressCalls[len(progressCalls)-1]; last != events+errors {
+		t.Fatalf("last progress call = %d, want %d", last, events+errors)
+	}
+	// Both tables must hold their rows.
+	var evCount, erCount int
+	if err := st.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM "+st.UsageEventsTable()).Scan(&evCount); err != nil {
+		t.Fatalf("count usage_events: %v", err)
+	}
+	if evCount != events {
+		t.Fatalf("usage_events count = %d, want %d", evCount, events)
+	}
+	if err := st.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM "+st.UsageErrorsTable()).Scan(&erCount); err != nil {
+		t.Fatalf("count usage_errors: %v", err)
+	}
+	if erCount != errors {
+		t.Fatalf("usage_errors count = %d, want %d", erCount, errors)
+	}
+}
+
+// TestBackupImportProgressIncludesConfig verifies that the Progress callback
+// counts config rows as well: it fires once after the config phase commits (the
+// config total) and again after each data chunk, with the running total. The
+// final call must equal the combined config+data total, so a progress bar scaled
+// to the bundle summary reaches 100%.
+func TestBackupImportProgressIncludesConfig(t *testing.T) {
+	st := roundTripTestStore(t, "backup_cfg_progress_"+randSuffix())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// One config resource (api_keys: 1 key + 1 policy) plus a small usage set.
+	apiKeyRow := json.RawMessage(
+		`{"id":"ak-1","name":"test","key_hash":"hash-1","key_prefix":"sk-","status":"active","created_at":"2026-08-15T00:00:00Z","updated_at":"2026-08-15T00:00:00Z","metadata":{}}`)
+	policyRow := json.RawMessage(
+		`{"api_key_id":"ak-1","allowed_models":[],"blocked_models":[],"model_routes":[],"allowed_ips":[],"blocked_ips":[],"updated_at":"2026-08-15T00:00:00Z"}`)
+	const events = importBatchSize + 100 // forces chunking for the data phase
+	eventRows := make([]json.RawMessage, 0, events)
+	for i := int64(1); i <= events; i++ {
+		eventRows = append(eventRows, usageEventJSON(i))
+	}
+
+	bundle := BackupBundle{
+		Version:    1,
+		ExportedAt: time.Now().UTC(),
+		Resources: map[string]backupResourceData{
+			string(ResourceAPIKeys): {
+				Tables: map[string][]json.RawMessage{
+					st.APIKeysTable():  {apiKeyRow},
+					st.PoliciesTable(): {policyRow},
+				},
+			},
+			string(ResourceUsage): {
+				Tables: map[string][]json.RawMessage{
+					st.UsageEventsTable(): eventRows,
+				},
+			},
+		},
+	}
+
+	const configTotal = 2 // 1 api key + 1 policy
+	var progressCalls []int
+	report, err := st.ImportData(ctx, bundle, BackupImportOpts{
+		Progress: func(n int) { progressCalls = append(progressCalls, n) },
+	})
+	if err != nil {
+		t.Fatalf("ImportData: %v", err)
+	}
+	// First call must announce the committed config total; subsequent calls must
+	// stay strictly increasing and end at the combined total.
+	if len(progressCalls) < 2 {
+		t.Fatalf("expected >=2 progress calls (config + data chunks), got %d: %v", len(progressCalls), progressCalls)
+	}
+	if progressCalls[0] != configTotal {
+		t.Fatalf("first progress call = %d, want config total %d", progressCalls[0], configTotal)
+	}
+	for i := 1; i < len(progressCalls); i++ {
+		if progressCalls[i] <= progressCalls[i-1] {
+			t.Fatalf("progress not strictly increasing at call %d: %v", i, progressCalls)
+		}
+	}
+	want := configTotal + events
+	if last := progressCalls[len(progressCalls)-1]; last != want {
+		t.Fatalf("last progress call = %d, want %d", last, want)
+	}
+	if report.Total != want {
+		t.Fatalf("report.Total = %d, want %d", report.Total, want)
+	}
+}
+
 // TestBackupSummaryCounts verifies the bundle header embeds a per-resource
 // row-count summary that matches the actual exported rows, so the frontend can
 // render a pre-import preview without parsing every row.

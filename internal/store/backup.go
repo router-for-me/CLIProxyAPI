@@ -240,8 +240,12 @@ type BackupExportOpts struct {
 // present in the bundle.
 type BackupImportOpts struct {
 	Resources []BackupResource
-	// Progress, when non-nil, is invoked after each chunk of a data resource
-	// with the cumulative number of rows inserted so far across all resources.
+	// Progress, when non-nil, reports the cumulative number of rows restored so
+	// far, across all resources. It fires once after the config phase commits
+	// (with the config row total, so a bar scaled to the bundle summary reaches
+	// 100% when all data rows also land), and again after each data chunk with
+	// the running total including config rows. It never fires on the config
+	// failure path, since nothing was committed.
 	Progress func(inserted int)
 }
 
@@ -797,7 +801,10 @@ func (s *PostgresStore) ImportData(ctx context.Context, bundle BackupBundle, opt
 		}
 	}
 
-	// Config resources first, all-or-nothing in a single transaction.
+	// Config resources first, all-or-nothing in a single transaction. The total
+	// is accumulated locally and only folded into report.Total once the config
+	// transaction commits; a config failure returns an error and the caller
+	// discards the report, so a half-applied Total must never be reported.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return report, fmt.Errorf("postgres store: import begin: %w", err)
@@ -808,6 +815,7 @@ func (s *PostgresStore) ImportData(ctx context.Context, bundle BackupBundle, opt
 		}
 	}()
 
+	configTotal := 0
 	for _, res := range resources {
 		if dataResource(res) {
 			continue
@@ -826,15 +834,20 @@ func (s *PostgresStore) ImportData(ctx context.Context, bundle BackupBundle, opt
 			return report, err
 		}
 		report.Resources[res] = r
-		report.Total += r.Inserted
+		configTotal += r.Inserted
 	}
 
 	if err := tx.Commit(); err != nil {
 		return report, fmt.Errorf("postgres store: import commit: %w", err)
 	}
+	report.Total = configTotal
+	if opts.Progress != nil {
+		opts.Progress(configTotal)
+	}
 
 	// Data resources afterwards, per-chunk transactions with continue-to-end
 	// soft-failure handling.
+	progressBase := configTotal
 	for _, res := range resources {
 		if !dataResource(res) {
 			continue
@@ -843,12 +856,13 @@ func (s *PostgresStore) ImportData(ctx context.Context, bundle BackupBundle, opt
 		if !ok {
 			continue
 		}
-		r, partial := s.importDataResource(ctx, sealer, res, &data, opts.Progress)
+		r, partial := s.importDataResource(ctx, sealer, res, &data, opts.Progress, progressBase)
 		if partial {
 			report.Partial = true
 		}
 		report.Resources[res] = r
 		report.Total += r.Inserted
+		progressBase += r.Inserted
 	}
 	return report, nil
 }
@@ -905,8 +919,11 @@ func (s *PostgresStore) importConfigResource(ctx context.Context, tx *sql.Tx, se
 // transactions. Each chunk (up to importBatchSize rows) gets its own
 // transaction: the first chunk of the first table also wipes that table. A
 // failed chunk is skipped and reported; import continues with the next chunk.
-// The returned partial flag is set when any chunk was skipped.
-func (s *PostgresStore) importDataResource(ctx context.Context, sealer *Sealer, res BackupResource, data *backupResourceData, progress func(int)) (BackupImportResourceReport, bool) {
+// The returned partial flag is set when any chunk was skipped. progressBase is
+// the count of rows restored before this resource (config rows plus any earlier
+// data resources); it is added to each chunk's cumulative count so the Progress
+// callback stays monotonic across table and resource boundaries.
+func (s *PostgresStore) importDataResource(ctx context.Context, sealer *Sealer, res BackupResource, data *backupResourceData, progress func(int), progressBase int) (BackupImportResourceReport, bool) {
 	r := BackupImportResourceReport{}
 	partial := false
 	var firstErr error
@@ -918,7 +935,7 @@ func (s *PostgresStore) importDataResource(ctx context.Context, sealer *Sealer, 
 		}
 		inserted, skipped, chunkErr := s.importChunkedTable(ctx, sealer, bt, rows, func(n int) {
 			if progress != nil {
-				progress(totalInserted + n)
+				progress(progressBase + totalInserted + n)
 			}
 		})
 		r.Inserted += inserted
