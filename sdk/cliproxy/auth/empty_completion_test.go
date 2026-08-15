@@ -722,6 +722,70 @@ func TestStreamBootstrapDetectorSSEMetadataFields(t *testing.T) {
 	}
 }
 
+func TestStreamBootstrapDetectorMetadataOnlyEOF(t *testing.T) {
+	t.Run("comments and keepalive only then EOF classifies as empty", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe([]byte(": keep-alive\n\n")) {
+			t.Fatal("Observe() forwarded keep-alive comment")
+		}
+		if !detector.Finish() {
+			t.Fatal("Finish() = false, want metadata-only stream recognized as empty completion at EOF")
+		}
+	})
+
+	t.Run("id and retry metadata only then EOF classifies as empty", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe([]byte("id: evt_12345\nretry: 5000\n\n")) {
+			t.Fatal("Observe() forwarded id/retry metadata")
+		}
+		if !detector.Finish() {
+			t.Fatal("Finish() = false, want id/retry-only stream recognized as empty completion at EOF")
+		}
+	})
+
+	t.Run("claude ping only then EOF classifies as empty", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe([]byte("event: ping\ndata: {\"type\":\"ping\"}\n\n")) {
+			t.Fatal("Observe() forwarded ping metadata")
+		}
+		if !detector.Finish() {
+			t.Fatal("Finish() = false, want ping-only stream recognized as empty completion at EOF")
+		}
+	})
+
+	t.Run("data-bearing stream still forwards and does not classify as empty", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")) {
+			t.Fatal("Observe() = false, want data-bearing stream to forward")
+		}
+		if detector.Finish() {
+			t.Fatal("Finish() = true, want data-bearing stream not recognized as empty completion")
+		}
+	})
+
+	t.Run("unknown non-SSE format keeps existing behavior", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe([]byte("{\"status\":\"running\"}")) {
+			t.Fatal("Observe() = false, want unknown format to forward")
+		}
+		if detector.Finish() {
+			t.Fatal("Finish() = true, want unknown format not recognized as empty completion")
+		}
+	})
+
+	t.Run("isEmptyCompletionPayload classifies metadata-only SSE payloads as empty", func(t *testing.T) {
+		if !IsEmptyCompletionPayload([]byte(": keep-alive\n\n")) {
+			t.Fatal("IsEmptyCompletionPayload() = false for comment-only SSE")
+		}
+		if !IsEmptyCompletionPayload([]byte("id: evt_12345\nretry: 5000\n\n")) {
+			t.Fatal("IsEmptyCompletionPayload() = false for id/retry-only SSE")
+		}
+		if !IsEmptyCompletionPayload([]byte("event: ping\ndata: {\"type\":\"ping\"}\n\n")) {
+			t.Fatal("IsEmptyCompletionPayload() = false for ping-only SSE")
+		}
+	})
+}
+
 func TestStreamBootstrapDetectorMultilineSSE(t *testing.T) {
 	t.Run("empty completion split across data fields remains buffered and recognized", func(t *testing.T) {
 		var detector StreamBootstrapDetector
