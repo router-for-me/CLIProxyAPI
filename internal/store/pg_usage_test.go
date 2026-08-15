@@ -97,36 +97,43 @@ func TestFillCostBreakdown(t *testing.T) {
 		OutputTokens:    500_000,
 		ReasoningTokens: 100_000,
 	}
-	if err := us.FillCostBreakdown(ctx, []UsageEventRow{row}); err != nil {
+	rows := []UsageEventRow{row}
+	if err := us.FillCostBreakdown(ctx, rows); err != nil {
 		t.Fatalf("FillCostBreakdown: %v", err)
 	}
-	if row.CostBreakdown == nil {
+	// FillCostBreakdown mutates slice elements in place (see
+	// TestFillCostBreakdownSliceCopyConvention) — read the mutated element back
+	// from the slice, not the original stack variable.
+	filled := rows[0]
+	if filled.CostBreakdown == nil {
 		t.Fatalf("expected CostBreakdown to be populated; got nil")
 	}
-	if !approxEqual(row.CostBreakdown.Sum(), ComputeCost(pricing, row.InputTokens, row.OutputTokens, row.ReasoningTokens, 0, 0)) {
-		t.Errorf("breakdown sum = %v; want %v", row.CostBreakdown.Sum(), ComputeCost(pricing, row.InputTokens, row.OutputTokens, row.ReasoningTokens, 0, 0))
+	if !approxEqual(filled.CostBreakdown.Sum(), ComputeCost(pricing, filled.InputTokens, filled.OutputTokens, filled.ReasoningTokens, 0, 0)) {
+		t.Errorf("breakdown sum = %v; want %v", filled.CostBreakdown.Sum(), ComputeCost(pricing, filled.InputTokens, filled.OutputTokens, filled.ReasoningTokens, 0, 0))
 	}
-	if row.AppliedPricing == nil {
+	if filled.AppliedPricing == nil {
 		t.Fatalf("expected AppliedPricing to be populated; got nil")
 	}
-	if row.AppliedPricing.ID != pricing.ID {
-		t.Errorf("AppliedPricing.ID = %q; want %q", row.AppliedPricing.ID, pricing.ID)
+	if filled.AppliedPricing.ID != pricing.ID {
+		t.Errorf("AppliedPricing.ID = %q; want %q", filled.AppliedPricing.ID, pricing.ID)
 	}
-	if !approxEqual(row.AppliedPricing.InputPer1M, pricing.InputPer1M) || !approxEqual(row.AppliedPricing.OutputPer1M, pricing.OutputPer1M) {
-		t.Errorf("AppliedPricing = %+v; want rates %+v", row.AppliedPricing, pricing)
+	if !approxEqual(filled.AppliedPricing.InputPer1M, pricing.InputPer1M) || !approxEqual(filled.AppliedPricing.OutputPer1M, pricing.OutputPer1M) {
+		t.Errorf("AppliedPricing = %+v; want rates %+v", filled.AppliedPricing, pricing)
 	}
 
 	// A missing pricing row yields a present-but-all-zero AppliedPricing so the
 	// dashboard can show "no pricing configured" (HasRates() == false).
 	missing := UsageEventRow{Model: "fill-unpriced", InputTokens: 1_000_000}
-	if err := us.FillCostBreakdown(ctx, []UsageEventRow{missing}); err != nil {
+	missingRows := []UsageEventRow{missing}
+	if err := us.FillCostBreakdown(ctx, missingRows); err != nil {
 		t.Fatalf("FillCostBreakdown (unpriced): %v", err)
 	}
-	if missing.AppliedPricing == nil {
+	missingFilled := missingRows[0]
+	if missingFilled.AppliedPricing == nil {
 		t.Fatalf("expected AppliedPricing to be present-but-zero for an unpriced model; got nil")
 	}
-	if missing.AppliedPricing.HasRates() {
-		t.Errorf("unpriced model AppliedPricing.HasRates() = true; want false: %+v", missing.AppliedPricing)
+	if missingFilled.AppliedPricing.HasRates() {
+		t.Errorf("unpriced model AppliedPricing.HasRates() = true; want false: %+v", missingFilled.AppliedPricing)
 	}
 
 	// nil store must return nil (no panic).

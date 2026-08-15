@@ -18,7 +18,9 @@ func TestUsageFlusherHandleUsageQueuesRecord(t *testing.T) {
 	}
 	t.Cleanup(flusher.Stop)
 
-	key, _, err := apiKeys.Create(ctx, "fk", "", "", nil, nil, nil)
+	// Use the key's real plaintext secret in the record so the flusher resolves
+	// api_key_id via LookupByHash and the aggregate filter by key.ID below matches.
+	key, secret, err := apiKeys.Create(ctx, "fk", "", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -28,7 +30,7 @@ func TestUsageFlusherHandleUsageQueuesRecord(t *testing.T) {
 	}
 
 	rec := coreusage.Record{
-		Provider: "test", Model: "m", APIKey: "fake-secret", AuthType: "api_key", Source: "test",
+		Provider: "test", Model: "m", APIKey: secret, AuthType: "api_key", Source: "test",
 		RequestedAt: time.Now().UTC(),
 		Detail: coreusage.Detail{
 			InputTokens: 1_000_000, OutputTokens: 1_000_000,

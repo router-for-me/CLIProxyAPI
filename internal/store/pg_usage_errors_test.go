@@ -288,26 +288,30 @@ func TestFillCostBreakdownErrors(t *testing.T) {
 		InputTokens:  1_000_000,
 		OutputTokens: 1_000_000,
 	}
-	if err := us.FillCostBreakdownErrors(ctx, []UsageErrorRow{row}); err != nil {
+	rows := []UsageErrorRow{row}
+	if err := us.FillCostBreakdownErrors(ctx, rows); err != nil {
 		t.Fatalf("FillCostBreakdownErrors: %v", err)
 	}
-	if row.CostBreakdown == nil {
+	// FillCostBreakdownErrors mutates slice elements in place — read the mutated
+	// element back from the slice, not the original stack variable.
+	filled := rows[0]
+	if filled.CostBreakdown == nil {
 		t.Fatalf("expected CostBreakdown to be populated; got nil")
 	}
-	if !approxEqual(row.CostBreakdown.Sum(), ComputeCost(pricing, 1_000_000, 1_000_000, 0, 0, 0)) {
-		t.Errorf("breakdown sum = %v; want %v", row.CostBreakdown.Sum(), ComputeCost(pricing, 1_000_000, 1_000_000, 0, 0, 0))
+	if !approxEqual(filled.CostBreakdown.Sum(), ComputeCost(pricing, 1_000_000, 1_000_000, 0, 0, 0)) {
+		t.Errorf("breakdown sum = %v; want %v", filled.CostBreakdown.Sum(), ComputeCost(pricing, 1_000_000, 1_000_000, 0, 0, 0))
 	}
 	// AppliedPricing must be populated alongside CostBreakdown so the dashboard
 	// can render the tokens × rate → cost derivation; the rates must match the
 	// row that produced the breakdown.
-	if row.AppliedPricing == nil {
+	if filled.AppliedPricing == nil {
 		t.Fatalf("expected AppliedPricing to be populated; got nil")
 	}
-	if row.AppliedPricing.ID != pricing.ID {
-		t.Errorf("AppliedPricing.ID = %q; want %q", row.AppliedPricing.ID, pricing.ID)
+	if filled.AppliedPricing.ID != pricing.ID {
+		t.Errorf("AppliedPricing.ID = %q; want %q", filled.AppliedPricing.ID, pricing.ID)
 	}
-	if !approxEqual(row.AppliedPricing.InputPer1M, pricing.InputPer1M) || !approxEqual(row.AppliedPricing.OutputPer1M, pricing.OutputPer1M) {
-		t.Errorf("AppliedPricing = %+v; want rates %+v", row.AppliedPricing, pricing)
+	if !approxEqual(filled.AppliedPricing.InputPer1M, pricing.InputPer1M) || !approxEqual(filled.AppliedPricing.OutputPer1M, pricing.OutputPer1M) {
+		t.Errorf("AppliedPricing = %+v; want rates %+v", filled.AppliedPricing, pricing)
 	}
 
 	// nil store must return nil (no panic).

@@ -51,6 +51,7 @@ func newTestPostgresStore(t *testing.T, schema string) *PostgresStore {
 		store.cfg.ModelPricingTable,
 		store.cfg.APIKeysTable,
 		store.cfg.InternalUsersTable,
+		store.cfg.ModelGroupsTable,
 		store.cfg.AlertsTable,
 		store.cfg.AlertSettingsTable,
 	} {
