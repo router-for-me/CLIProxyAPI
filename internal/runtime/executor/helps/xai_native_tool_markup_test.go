@@ -145,6 +145,22 @@ func TestParseXAINativeToolMarkupMultipleToolCalls(t *testing.T) {
 	}
 }
 
+func TestParseXAINativeToolMarkupKeepsColonInMultilineKey(t *testing.T) {
+	text := "<|tool_calls_begin|><|tool_call_begin|>\n" +
+		"Request\n" +
+		"<|tool_sep|>http:method\n" +
+		"GET\n" +
+		"<|tool_call_end|><|tool_calls_end|>"
+
+	parsed, ok := parseXAINativeToolMarkup(text)
+	if !ok {
+		t.Fatal("parseXAINativeToolMarkup() = false, want true")
+	}
+	if parsed.Calls[0].Arguments["http:method"] != "GET" {
+		t.Fatalf("arguments = %#v, want http:method=GET", parsed.Calls[0].Arguments)
+	}
+}
+
 func TestParseXAINativeToolMarkupInlineCommandKey(t *testing.T) {
 	text := "<|tool_calls_begin|><|tool_call_begin|>\n" +
 		"Execute\n" +

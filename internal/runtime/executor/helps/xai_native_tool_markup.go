@@ -168,8 +168,8 @@ func parseXAINativeToolCall(text string, start, limit int) (xaiNativeToolCall, i
 		}
 		if colon := strings.IndexByte(key, ':'); colon >= 0 {
 			inline := strings.TrimSpace(key[colon+1:])
-			key = strings.TrimSpace(key[:colon])
 			if inline != "" && strings.TrimSpace(value) == "" {
+				key = strings.TrimSpace(key[:colon])
 				value = inline
 			}
 		}
