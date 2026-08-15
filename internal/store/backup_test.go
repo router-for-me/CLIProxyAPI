@@ -232,6 +232,200 @@ func TestBackupJSONRoundTrip(t *testing.T) {
 	}
 }
 
+// usageEventJSON builds a single valid usage_events row for the given explicit
+// serial id. Every NOT NULL column is supplied because jsonb_populate_recordset
+// does not apply column defaults to absent keys.
+func usageEventJSON(id int64) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(
+		`{"id":%d,"request_id":"req-%d","api_key_principal":"sk-test","provider":"anthropic","model":"claude-opus","input_tokens":10,"output_tokens":5,"reasoning_tokens":0,"cached_tokens":0,"cache_creation_tokens":0,"total_tokens":15,"cost_usd":0.001,"failed":false,"generate":false,"requested_at":"2026-08-15T00:00:00Z","flushed_at":"2026-08-15T00:00:00Z","discount_pct":0,"original_cost_usd":0.001}`,
+		id, id))
+}
+
+// usageEventBundle assembles a minimal BackupBundle holding only the usage
+// resource's usage_events rows, keyed by the store's schema-qualified table name
+// so it matches what resourceTables(ResourceUsage) produces.
+func usageEventBundle(st *PostgresStore, rows []json.RawMessage) BackupBundle {
+	return BackupBundle{
+		Version:    1,
+		ExportedAt: time.Now().UTC(),
+		Resources: map[string]backupResourceData{
+			string(ResourceUsage): {
+				Tables: map[string][]json.RawMessage{
+					st.UsageEventsTable(): rows,
+				},
+			},
+		},
+	}
+}
+
+// TestBackupImportChunkedProgress verifies that importing a data resource with
+// more rows than importBatchSize splits the inserts into per-chunk transactions,
+// fires the Progress callback with cumulative inserted counts, and reports the
+// full inserted total.
+func TestBackupImportChunkedProgress(t *testing.T) {
+	st := roundTripTestStore(t, "backup_chunk_"+randSuffix())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const total = importBatchSize + 1500 // > one batch, forces chunking
+	rows := make([]json.RawMessage, 0, total)
+	for i := int64(1); i <= total; i++ {
+		rows = append(rows, usageEventJSON(i))
+	}
+
+	var progressCalls []int
+	report, err := st.ImportData(ctx, usageEventBundle(st, rows), BackupImportOpts{
+		Resources: []BackupResource{ResourceUsage},
+		Progress: func(inserted int) {
+			progressCalls = append(progressCalls, inserted)
+		},
+	})
+	if err != nil {
+		t.Fatalf("ImportData: %v", err)
+	}
+	if len(progressCalls) == 0 {
+		t.Fatal("expected at least one progress callback")
+	}
+	if got := report.Resources[ResourceUsage].Inserted; got != total {
+		t.Fatalf("inserted = %d, want %d", got, total)
+	}
+	if got := report.Resources[ResourceUsage].Skipped; got != 0 {
+		t.Fatalf("skipped = %d, want 0", got)
+	}
+	if report.Partial {
+		t.Fatal("expected a clean import to not set the partial flag")
+	}
+	// Progress must be cumulative and strictly increasing, ending at the total.
+	for i := 1; i < len(progressCalls); i++ {
+		if progressCalls[i] <= progressCalls[i-1] {
+			t.Fatalf("progress calls not cumulative: %v", progressCalls)
+		}
+	}
+	if last := progressCalls[len(progressCalls)-1]; last != total {
+		t.Fatalf("last progress call = %d, want %d", last, total)
+	}
+	// The actual rows must be present in the table.
+	var count int
+	if err := st.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+st.UsageEventsTable()).Scan(&count); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if count != total {
+		t.Fatalf("rows in table = %d, want %d", count, total)
+	}
+}
+
+// TestBackupImportSoftFailureContinue verifies that a malformed row fails only
+// its own chunk: the chunk is skipped and reported, the import continues past it,
+// and the report is flagged partial while later chunks still land.
+func TestBackupImportSoftFailureContinue(t *testing.T) {
+	st := roundTripTestStore(t, "backup_chunk_soft_"+randSuffix())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const total = importBatchSize + 1500
+	// A valid row inside the second chunk (indices [batch, 2*batch)) whose chunk
+	// carries the malformed row below; it must be absent once the chunk is skipped.
+	badChunkRow := int64(importBatchSize + 1)
+	rows := make([]json.RawMessage, 0, total)
+	for i := int64(1); i <= total; i++ {
+		rows = append(rows, usageEventJSON(i))
+	}
+	// A non-integer into the BIGINT id column fails jsonb_populate_recordset and,
+	// because the whole chunk is one multi-row INSERT, aborts just that chunk.
+	rows[importBatchSize+500] = json.RawMessage(
+		`{"id":"not-an-int","request_id":"req-bad","api_key_principal":"sk-test","provider":"anthropic","model":"claude-opus","input_tokens":10,"output_tokens":5,"reasoning_tokens":0,"cached_tokens":0,"cache_creation_tokens":0,"total_tokens":15,"cost_usd":0.001,"failed":false,"generate":false,"requested_at":"2026-08-15T00:00:00Z","flushed_at":"2026-08-15T00:00:00Z","discount_pct":0,"original_cost_usd":0.001}`)
+
+	report, err := st.ImportData(ctx, usageEventBundle(st, rows), BackupImportOpts{
+		Resources: []BackupResource{ResourceUsage},
+	})
+	if err != nil {
+		t.Fatalf("ImportData: %v", err)
+	}
+	ur := report.Resources[ResourceUsage]
+	if !report.Partial {
+		t.Fatal("expected partial flag set after a skipped chunk")
+	}
+	if ur.Skipped < 1 {
+		t.Fatalf("skipped = %d, want >= 1", ur.Skipped)
+	}
+	if ur.Inserted == 0 {
+		t.Fatal("expected rows inserted after the soft failure (continue-to-end)")
+	}
+	if ur.Error == "" {
+		t.Fatal("expected a soft error recorded on the resource report")
+	}
+	if ur.Inserted+ur.Skipped != total {
+		t.Fatalf("inserted+skipped = %d, want %d", ur.Inserted+ur.Skipped, total)
+	}
+	// Rows in a chunk after the bad one must still be present (continue-to-end).
+	var maxID int64
+	if err := st.db.QueryRowContext(ctx, "SELECT MAX(id) FROM "+st.UsageEventsTable()).Scan(&maxID); err != nil {
+		t.Fatalf("max id: %v", err)
+	}
+	if maxID != total {
+		t.Fatalf("max id = %d, want %d (later chunks must continue)", maxID, total)
+	}
+	// The bad chunk was skipped entirely: a valid row inside it is absent.
+	var badCount int
+	if err := st.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM "+st.UsageEventsTable()+" WHERE id = $1", badChunkRow).Scan(&badCount); err != nil {
+		t.Fatalf("count bad-chunk row: %v", err)
+	}
+	if badCount != 0 {
+		t.Fatalf("valid row id=%d inside the bad chunk is present; want skipped", badChunkRow)
+	}
+}
+
+// TestBackupImportSoftFailureFirstChunkWipes verifies that when the first chunk
+// fails, the wipe it carried is rolled back and retried on the next successful
+// chunk. Pre-existing destination rows must be gone once the import completes,
+// even though the first chunk was skipped.
+func TestBackupImportSoftFailureFirstChunkWipes(t *testing.T) {
+	st := roundTripTestStore(t, "backup_chunk_wipe_"+randSuffix())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Pre-existing destination rows that a successful import must remove.
+	existing := usageEventJSON(1)
+	if _, err := st.db.ExecContext(ctx,
+		"INSERT INTO "+st.UsageEventsTable()+" SELECT * FROM jsonb_populate_record(NULL::"+st.UsageEventsTable()+", $1::jsonb)",
+		string(existing)); err != nil {
+		t.Fatalf("seed existing row: %v", err)
+	}
+
+	const total = importBatchSize + 100
+	rows := make([]json.RawMessage, 0, total)
+	for i := int64(1); i <= total; i++ {
+		rows = append(rows, usageEventJSON(i))
+	}
+	// Malform the first chunk (id 5, inside indices [0, batch)).
+	rows[5] = json.RawMessage(
+		`{"id":"not-an-int","request_id":"req-bad","api_key_principal":"sk-test","provider":"anthropic","model":"claude-opus","input_tokens":10,"output_tokens":5,"reasoning_tokens":0,"cached_tokens":0,"cache_creation_tokens":0,"total_tokens":15,"cost_usd":0.001,"failed":false,"generate":false,"requested_at":"2026-08-15T00:00:00Z","flushed_at":"2026-08-15T00:00:00Z","discount_pct":0,"original_cost_usd":0.001}`)
+
+	report, err := st.ImportData(ctx, usageEventBundle(st, rows), BackupImportOpts{
+		Resources: []BackupResource{ResourceUsage},
+	})
+	if err != nil {
+		t.Fatalf("ImportData: %v", err)
+	}
+	ur := report.Resources[ResourceUsage]
+	if !report.Partial {
+		t.Fatal("expected partial flag set after a skipped first chunk")
+	}
+	if ur.Inserted == 0 {
+		t.Fatal("expected rows inserted after the first-chunk soft failure")
+	}
+	// The pre-existing row must be gone (the wipe was retried on a later chunk).
+	var existingCount int
+	if err := st.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM "+st.UsageEventsTable()+" WHERE id = 1").Scan(&existingCount); err != nil {
+		t.Fatalf("count existing row: %v", err)
+	}
+	if existingCount != 0 {
+		t.Fatalf("pre-existing row id=1 present; wipe must be retried after a skipped first chunk")
+	}
+}
+
 // TestBackupSummaryCounts verifies the bundle header embeds a per-resource
 // row-count summary that matches the actual exported rows, so the frontend can
 // render a pre-import preview without parsing every row.

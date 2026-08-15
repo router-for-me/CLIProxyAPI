@@ -54,6 +54,25 @@ const (
 	ResourceSyncLog BackupResource = "sync_log"
 )
 
+// importBatchSize is the maximum number of rows restored per multi-row INSERT.
+// Config tables restore inside a single transaction regardless of size; data
+// tables (usage, alerts, model_health, sync_log) commit one transaction per
+// batch so huge tables import in bounded chunks with progress callbacks.
+const importBatchSize = 1000
+
+// dataResource reports whether res belongs to the chunked data set. Data tables
+// can grow large, so their import is split into per-chunk transactions with a
+// progress callback and continue-to-end soft-failure handling. All other
+// resources are config tables restored atomically in a single transaction.
+func dataResource(res BackupResource) bool {
+	switch res {
+	case ResourceUsage, ResourceAlerts, ResourceModelHealth, ResourceSyncLog:
+		return true
+	default:
+		return false
+	}
+}
+
 // AllBackupResources is the canonical ordered list of every backup resource,
 // parents before children so that import order satisfies cross-table
 // references (best-effort; the DB does not enforce most FKs).
@@ -221,12 +240,18 @@ type BackupExportOpts struct {
 // present in the bundle.
 type BackupImportOpts struct {
 	Resources []BackupResource
+	// Progress, when non-nil, is invoked after each chunk of a data resource
+	// with the cumulative number of rows inserted so far across all resources.
+	Progress func(inserted int)
 }
 
 // BackupImportReport summarizes the per-resource outcome of ImportData.
 type BackupImportReport struct {
 	Resources map[BackupResource]BackupImportResourceReport `json:"resources,omitempty"`
 	Total     int                                           `json:"total_inserted"`
+	// Partial is set when any chunked data resource skipped a row or chunk, i.e.
+	// the destination holds a subset of the bundle's data rows.
+	Partial bool `json:"partial,omitempty"`
 }
 
 // BackupImportResourceReport reports how many rows were inserted, skipped, and
@@ -300,38 +325,58 @@ func (s *PostgresStore) exportTable(ctx context.Context, sealer *Sealer, bt back
 	return out, nil
 }
 
-// importTable wipes and restores one table from its exported rows, applying the
-// seal transform to sealed columns. Rows are restored via jsonb_populate_record
-// so column types are preserved. Deleting then re-inserting happens within the
-// caller's transaction.
+// importTable wipes and restores one table from its exported rows within the
+// caller's transaction. This is used for config resources, which are
+// all-or-nothing: any wipe, seal, or insert failure aborts the caller's
+// transaction so nothing in it is committed. Rows are inserted in batches of
+// importBatchSize via multi-row jsonb_populate_recordset so column types are
+// preserved.
 func (s *PostgresStore) importTable(ctx context.Context, tx *sql.Tx, sealer *Sealer, bt backupTable, rows []json.RawMessage) (int, int, error) {
-	cols := sealedColumnsByTable[defaultTableHint(bt.name)]
 	if _, err := tx.ExecContext(ctx, "DELETE FROM "+bt.name); err != nil {
 		return 0, 0, fmt.Errorf("postgres store: import wipe %s: %w", bt.name, err)
 	}
-	inserted, skipped := 0, 0
+	inserted := 0
+	for start := 0; start < len(rows); start += importBatchSize {
+		end := start + importBatchSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		if err := s.insertRows(ctx, tx, sealer, bt, rows[start:end]); err != nil {
+			return inserted, 0, err
+		}
+		inserted += end - start
+	}
+	return inserted, 0, nil
+}
+
+// insertRows executes one multi-row INSERT of rows into bt.name via
+// jsonb_populate_recordset, applying the seal transform to sealed columns. The
+// whole statement is atomic: a single malformed row fails the entire batch.
+func (s *PostgresStore) insertRows(ctx context.Context, tx *sql.Tx, sealer *Sealer, bt backupTable, rows []json.RawMessage) error {
+	cols := sealedColumnsByTable[defaultTableHint(bt.name)]
+	arr := make([]json.RawMessage, 0, len(rows))
 	for _, raw := range rows {
 		final := raw
 		if len(cols) > 0 {
 			transformed, err := transformSealedColumns(sealer, raw, cols, false)
 			if err != nil {
-				return inserted, skipped, fmt.Errorf("postgres store: import %s seal: %w", bt.name, err)
+				return fmt.Errorf("postgres store: import %s seal: %w", bt.name, err)
 			}
 			final = transformed
 		}
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(
-			"INSERT INTO %s SELECT * FROM jsonb_populate_record(NULL::%s, $1::jsonb)", bt.name, bt.name),
-			string(final),
-		); err != nil {
-			// A single malformed row should not abort the whole import; skip
-			// it and record the failure so the operator can investigate.
-			log.WithError(err).WithField("table", bt.name).Debug("postgres store: import: skipping row")
-			skipped++
-			continue
-		}
-		inserted++
+		arr = append(arr, final)
 	}
-	return inserted, skipped, nil
+	payload, err := json.Marshal(arr)
+	if err != nil {
+		return fmt.Errorf("postgres store: import %s marshal chunk: %w", bt.name, err)
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+		"INSERT INTO %s SELECT * FROM jsonb_populate_recordset(NULL::%s, $1::jsonb)", bt.name, bt.name),
+		string(payload),
+	); err != nil {
+		return fmt.Errorf("postgres store: import insert %s: %w", bt.name, err)
+	}
+	return nil
 }
 
 // transformSealedColumns unseals (unseal=true, export) or seals (unseal=false,
@@ -720,11 +765,25 @@ func (s *PostgresStore) embedPricingSourceFiles(ctx context.Context, data *backu
 }
 
 // ImportData restores the requested resources (default all present) from a
-// BackupBundle. Selected resources are wiped then re-inserted within a single
-// transaction; on any hard failure the whole import rolls back. Insert failures
-// for individual rows are skipped and reported rather than aborting the batch.
-func (s *PostgresStore) ImportData(ctx context.Context, bundle BackupBundle, opts BackupImportOpts) (BackupImportReport, error) {
-	report := BackupImportReport{Resources: make(map[BackupResource]BackupImportResourceReport)}
+// BackupBundle. The import is hybrid:
+//
+//   - Config resources (api_keys, internal_users, model_groups, auto_routers,
+//     models_catalog, upstream_providers, management_tokens, error_messages,
+//     pricing_sources, auth_files) are wiped and re-inserted atomically inside
+//     one transaction: any failure rolls the whole config restore back.
+//   - Data resources (usage, alerts, model_health, sync_log) are restored
+//     resource-by-resource in per-chunk transactions of up to importBatchSize
+//     rows each, with the Progress callback invoked after every chunk. A chunk
+//     that fails is skipped and reported; the import continues to the next chunk
+//     and the report is flagged Partial. Individual data rows are never
+//     re-inserted row-by-row, so a bad chunk is skipped wholesale.
+//
+// Config resources are restored before data resources because data tables
+// reference config tables (e.g. usage_windows.api_key_id -> api_keys.id), so
+// the FK parents must exist first. Each resource's tables are wiped in reverse
+// order (children before parents).
+func (s *PostgresStore) ImportData(ctx context.Context, bundle BackupBundle, opts BackupImportOpts) (report BackupImportReport, err error) {
+	report = BackupImportReport{Resources: make(map[BackupResource]BackupImportResourceReport)}
 	if s == nil || s.db == nil {
 		return report, fmt.Errorf("postgres store: backup not initialized")
 	}
@@ -738,6 +797,7 @@ func (s *PostgresStore) ImportData(ctx context.Context, bundle BackupBundle, opt
 		}
 	}
 
+	// Config resources first, all-or-nothing in a single transaction.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return report, fmt.Errorf("postgres store: import begin: %w", err)
@@ -748,60 +808,22 @@ func (s *PostgresStore) ImportData(ctx context.Context, bundle BackupBundle, opt
 		}
 	}()
 
-	// Wipe selected resources' tables first, in reverse resource order and
-	// reverse table order (children before parents), so FK-parents are never
-	// deleted before their referencing children.
-	for i := len(resources) - 1; i >= 0; i-- {
-		res := resources[i]
-		data, ok := bundle.Resources[string(res)]
-		if !ok {
-			continue
-		}
-		tables := s.resourceTables(res)
-		for j := len(tables) - 1; j >= 0; j-- {
-			if _, ok := data.Tables[tables[j].name]; !ok {
-				continue
-			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM "+tables[j].name); err != nil {
-				return report, fmt.Errorf("postgres store: import wipe %s: %w", tables[j].name, err)
-			}
-		}
-	}
-
-	// Insert parents before children, resource order as defined.
 	for _, res := range resources {
+		if dataResource(res) {
+			continue
+		}
 		data, ok := bundle.Resources[string(res)]
 		if !ok {
 			continue
 		}
-		r := BackupImportResourceReport{}
-		for _, bt := range s.resourceTables(res) {
-			rows, ok := data.Tables[bt.name]
-			if !ok || len(rows) == 0 {
-				continue
-			}
-			inserted, skipped, err := s.importTable(ctx, tx, sealer, bt, rows)
-			r.Inserted += inserted
-			r.Skipped += skipped
-			if err != nil {
-				r.Error = err.Error()
-				report.Resources[res] = r
-				return report, err
-			}
-			// Rows are restored with their original serial ids, so the id
-			// sequence is still sitting far below the highest imported id.
-			// Advance it to max(id)+1 so subsequent auto-generated ids never
-			// collide with (and silently fail on) restored rows. No-op for
-			// tables without a serial id column.
-			s.resyncIdSequence(ctx, tx, bt.name)
+		if err := s.wipeResourceTables(ctx, tx, res, &data); err != nil {
+			return report, err
 		}
-		// Restore any pricing-source catalog files referenced by the imported rows.
-		if res == ResourcePricingSources {
-			if err := s.restorePricingSourceFiles(ctx, tx, &data); err != nil {
-				r.Error = err.Error()
-				report.Resources[res] = r
-				return report, err
-			}
+		r, err := s.importConfigResource(ctx, tx, sealer, res, &data)
+		if err != nil {
+			r.Error = err.Error()
+			report.Resources[res] = r
+			return report, err
 		}
 		report.Resources[res] = r
 		report.Total += r.Inserted
@@ -810,7 +832,198 @@ func (s *PostgresStore) ImportData(ctx context.Context, bundle BackupBundle, opt
 	if err := tx.Commit(); err != nil {
 		return report, fmt.Errorf("postgres store: import commit: %w", err)
 	}
+
+	// Data resources afterwards, per-chunk transactions with continue-to-end
+	// soft-failure handling.
+	for _, res := range resources {
+		if !dataResource(res) {
+			continue
+		}
+		data, ok := bundle.Resources[string(res)]
+		if !ok {
+			continue
+		}
+		r, partial := s.importDataResource(ctx, sealer, res, &data, opts.Progress)
+		if partial {
+			report.Partial = true
+		}
+		report.Resources[res] = r
+		report.Total += r.Inserted
+	}
 	return report, nil
+}
+
+// wipeResourceTables deletes every table of one resource that is present in the
+// bundle data, in reverse table order (children before parents). It runs inside
+// the caller's transaction for config resources.
+func (s *PostgresStore) wipeResourceTables(ctx context.Context, tx *sql.Tx, res BackupResource, data *backupResourceData) error {
+	tables := s.resourceTables(res)
+	for j := len(tables) - 1; j >= 0; j-- {
+		if _, ok := data.Tables[tables[j].name]; !ok {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+tables[j].name); err != nil {
+			return fmt.Errorf("postgres store: import wipe %s: %w", tables[j].name, err)
+		}
+	}
+	return nil
+}
+
+// importConfigResource restores one config resource's tables in order (parents
+// before children) inside the caller's single transaction. Any failure aborts
+// the caller's transaction (all-or-nothing).
+func (s *PostgresStore) importConfigResource(ctx context.Context, tx *sql.Tx, sealer *Sealer, res BackupResource, data *backupResourceData) (BackupImportResourceReport, error) {
+	r := BackupImportResourceReport{}
+	for _, bt := range s.resourceTables(res) {
+		rows, ok := data.Tables[bt.name]
+		if !ok || len(rows) == 0 {
+			continue
+		}
+		inserted, skipped, err := s.importTable(ctx, tx, sealer, bt, rows)
+		r.Inserted += inserted
+		r.Skipped += skipped
+		if err != nil {
+			return r, err
+		}
+		// Rows are restored with their original serial ids, so the id
+		// sequence is still sitting far below the highest imported id.
+		// Advance it to max(id)+1 so subsequent auto-generated ids never
+		// collide with (and silently fail on) restored rows. No-op for
+		// tables without a serial id column.
+		s.resyncIdSequence(ctx, tx, bt.name)
+	}
+	// Restore any pricing-source catalog files referenced by the imported rows.
+	if res == ResourcePricingSources {
+		if err := s.restorePricingSourceFiles(ctx, tx, data); err != nil {
+			return r, err
+		}
+	}
+	return r, nil
+}
+
+// importDataResource restores one data resource's tables in per-chunk
+// transactions. Each chunk (up to importBatchSize rows) gets its own
+// transaction: the first chunk of the first table also wipes that table. A
+// failed chunk is skipped and reported; import continues with the next chunk.
+// The returned partial flag is set when any chunk was skipped.
+func (s *PostgresStore) importDataResource(ctx context.Context, sealer *Sealer, res BackupResource, data *backupResourceData, progress func(int)) (BackupImportResourceReport, bool) {
+	r := BackupImportResourceReport{}
+	partial := false
+	var firstErr error
+	totalInserted := 0
+	for _, bt := range s.resourceTables(res) {
+		rows, ok := data.Tables[bt.name]
+		if !ok || len(rows) == 0 {
+			continue
+		}
+		inserted, skipped, chunkErr := s.importChunkedTable(ctx, sealer, bt, rows, func(n int) {
+			if progress != nil {
+				progress(totalInserted + n)
+			}
+		})
+		r.Inserted += inserted
+		r.Skipped += skipped
+		totalInserted += inserted
+		if chunkErr != nil {
+			partial = true
+			if firstErr == nil {
+				firstErr = chunkErr
+			}
+		}
+		// Rows are restored with their original serial ids; resync the sequence
+		// in its own transaction so subsequent auto-generated ids never collide.
+		if err := s.resyncTableSequence(ctx, bt.name); err != nil {
+			partial = true
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	if partial {
+		r.Error = firstErr.Error()
+	}
+	return r, partial
+}
+
+// importChunkedTable restores one data table in per-chunk transactions. The
+// first chunk's transaction also wipes the table; each subsequent chunk commits
+// independently. A chunk that fails is skipped and reported, and import
+// continues with the next chunk. The progress callback is invoked after each
+// successfully committed chunk with the cumulative inserted count for this
+// table.
+func (s *PostgresStore) importChunkedTable(ctx context.Context, sealer *Sealer, bt backupTable, rows []json.RawMessage, progress func(int)) (inserted int, skipped int, firstErr error) {
+	wiped := false
+	for start := 0; start < len(rows); start += importBatchSize {
+		end := start + importBatchSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("postgres store: import chunk begin %s: %w", bt.name, err)
+			}
+			skipped += end - start
+			continue
+		}
+		// The wipe rides in the first successfully committed chunk. It is only
+		// marked done once that chunk commits, so a first-chunk failure rolls the
+		// wipe back and the next chunk retries it (the destination table keeps its
+		// old rows until a chunk actually lands).
+		if !wiped {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM "+bt.name); err != nil {
+				_ = tx.Rollback()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("postgres store: import wipe %s: %w", bt.name, err)
+				}
+				skipped += end - start
+				continue
+			}
+		}
+		if err := s.insertRows(ctx, tx, sealer, bt, rows[start:end]); err != nil {
+			_ = tx.Rollback()
+			if firstErr == nil {
+				firstErr = fmt.Errorf("postgres store: import chunk %s: %w", bt.name, err)
+			}
+			skipped += end - start
+			continue
+		}
+		if err := tx.Commit(); err != nil {
+			_ = tx.Rollback()
+			if firstErr == nil {
+				firstErr = fmt.Errorf("postgres store: import chunk commit %s: %w", bt.name, err)
+			}
+			skipped += end - start
+			continue
+		}
+		wiped = true
+		inserted += end - start
+		if progress != nil {
+			progress(inserted)
+		}
+	}
+	return inserted, skipped, firstErr
+}
+
+// resyncTableSequence runs resyncIdSequence for one table in a short-lived
+// transaction of its own. Data tables restore in per-chunk transactions, so
+// there is no caller transaction to run it inside; a separate commit keeps the
+// sequence resync durable once the last chunk has landed.
+func (s *PostgresStore) resyncTableSequence(ctx context.Context, table string) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("postgres store: resync begin %s: %w", table, err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	s.resyncIdSequence(ctx, tx, table)
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("postgres store: resync commit %s: %w", table, err)
+	}
+	return nil
 }
 
 // restorePricingSourceFiles materializes any embedded pricing-source catalog
