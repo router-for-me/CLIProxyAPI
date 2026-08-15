@@ -805,11 +805,31 @@ func isEmptyCompletionError(err error) bool {
 // streamBootstrapState incrementally evaluates chunks so a metadata-heavy
 // prefix is processed once instead of reparsing the entire prefix per chunk.
 type streamBootstrapState struct {
-	acc     emptyCompletionAccum
-	bytes   int
-	pending []byte
-	forward bool
-	sawSSE  bool
+	acc       emptyCompletionAccum
+	bytes     int
+	pending   []byte
+	dataLines [][]byte
+	forward   bool
+	sawSSE    bool
+}
+
+func (s *streamBootstrapState) flushData() {
+	if len(s.dataLines) == 0 {
+		return
+	}
+	data := bytes.Join(s.dataLines, []byte("\n"))
+	s.dataLines = s.dataLines[:0]
+	if bytes.Equal(data, []byte("[DONE]")) {
+		s.acc.recognized = true
+		s.acc.terminal = true
+		return
+	}
+	if len(data) == 0 {
+		return
+	}
+	if !s.acc.evalJSON(data) {
+		s.acc.sawUnknownData = true
+	}
 }
 
 func (s *streamBootstrapState) observe(fragment []byte) bool {
@@ -826,11 +846,25 @@ func (s *streamBootstrapState) observe(fragment []byte) bool {
 		if newline := bytes.IndexByte(s.pending, '\n'); newline >= 0 {
 			line := bytes.TrimSpace(s.pending[:newline])
 			s.pending = s.pending[newline+1:]
-			if len(line) > 0 {
+			if len(line) == 0 {
+				s.flushData()
+			} else {
 				switch {
-				case bytes.HasPrefix(line, []byte("event:")), bytes.HasPrefix(line, []byte("data:")), bytes.HasPrefix(line, []byte("id:")), bytes.HasPrefix(line, []byte("retry:")), bytes.HasPrefix(line, []byte(":")), bytes.HasPrefix(line, []byte("{")):
+				case bytes.HasPrefix(line, []byte("event:")):
 					s.sawSSE = true
-					s.acc.evalSSE(line)
+					s.flushData()
+					event := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:")))
+					if bytes.Equal(event, []byte("message_stop")) {
+						s.acc.recognized = true
+					}
+				case bytes.HasPrefix(line, []byte("id:")), bytes.HasPrefix(line, []byte("retry:")), bytes.HasPrefix(line, []byte(":")):
+					s.sawSSE = true
+				case bytes.HasPrefix(line, []byte("data:")):
+					s.sawSSE = true
+					s.dataLines = append(s.dataLines, parseSSEDataLine(line))
+				case bytes.HasPrefix(line, []byte("{")):
+					s.sawSSE = true
+					s.dataLines = append(s.dataLines, line)
 				default:
 					s.acc.sawUnknownData = true
 				}
@@ -851,9 +885,10 @@ func (s *streamBootstrapState) observe(fragment []byte) bool {
 
 	if bytes.HasPrefix(trimmed, []byte("data:")) {
 		payload := bytes.TrimSpace(trimmed[len("data:"):])
-		if bytes.Equal(payload, []byte("[DONE]")) || classifyJSONBuffer(payload) == jsonBufComplete {
+		if len(s.dataLines) == 0 && (bytes.Equal(payload, []byte("[DONE]")) || classifyJSONBuffer(payload) == jsonBufComplete) {
 			s.sawSSE = true
-			s.acc.evalSSE(trimmed)
+			s.dataLines = append(s.dataLines, parseSSEDataLine(trimmed))
+			s.flushData()
 			s.pending = s.pending[:0]
 			s.forward = s.shouldForward()
 			return s.forward
@@ -880,32 +915,39 @@ func (s *streamBootstrapState) observe(fragment []byte) bool {
 }
 
 func (s *streamBootstrapState) finish() {
-	if len(s.pending) == 0 {
-		return
-	}
-	trimmed := bytes.TrimSpace(s.pending)
-	s.pending = s.pending[:0]
-	if len(trimmed) == 0 {
-		return
-	}
-
-	switch {
-	case bytes.HasPrefix(trimmed, []byte("event:")), bytes.HasPrefix(trimmed, []byte("data:")), bytes.HasPrefix(trimmed, []byte("id:")), bytes.HasPrefix(trimmed, []byte("retry:")), bytes.HasPrefix(trimmed, []byte(":")):
-		s.sawSSE = true
-		s.acc.evalSSE(trimmed)
-	case bytes.HasPrefix(trimmed, []byte("{")), bytes.HasPrefix(trimmed, []byte("[")):
-		if !s.acc.evalJSON(trimmed) {
-			s.acc.sawUnknownData = true
-		}
-	default:
-		if classify := classifyJSONBuffer(trimmed); classify == jsonBufComplete || classify == jsonBufIncomplete {
-			if !s.acc.evalJSON(trimmed) {
-				s.acc.sawUnknownData = true
+	if len(s.pending) > 0 {
+		trimmed := bytes.TrimSpace(s.pending)
+		s.pending = s.pending[:0]
+		if len(trimmed) > 0 {
+			switch {
+			case bytes.HasPrefix(trimmed, []byte("event:")):
+				s.sawSSE = true
+				s.flushData()
+				event := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("event:")))
+				if bytes.Equal(event, []byte("message_stop")) {
+					s.acc.recognized = true
+				}
+			case bytes.HasPrefix(trimmed, []byte("id:")), bytes.HasPrefix(trimmed, []byte("retry:")), bytes.HasPrefix(trimmed, []byte(":")):
+				s.sawSSE = true
+			case bytes.HasPrefix(trimmed, []byte("data:")):
+				s.sawSSE = true
+				s.dataLines = append(s.dataLines, parseSSEDataLine(trimmed))
+			case bytes.HasPrefix(trimmed, []byte("{")), bytes.HasPrefix(trimmed, []byte("[")):
+				if !s.acc.evalJSON(trimmed) {
+					s.acc.sawUnknownData = true
+				}
+			default:
+				if classify := classifyJSONBuffer(trimmed); classify == jsonBufComplete || classify == jsonBufIncomplete {
+					if !s.acc.evalJSON(trimmed) {
+						s.acc.sawUnknownData = true
+					}
+				} else {
+					s.acc.sawUnknownData = true
+				}
 			}
-		} else {
-			s.acc.sawUnknownData = true
 		}
 	}
+	s.flushData()
 }
 
 func (s *streamBootstrapState) isEmptyCompletion() bool {
@@ -1047,13 +1089,43 @@ func isEmptyCompletionPayload(payload []byte) bool {
 	return acc.empty()
 }
 
+func parseSSEDataLine(line []byte) []byte {
+	data := bytes.TrimPrefix(line, []byte("data:"))
+	if len(data) > 0 && data[0] == ' ' {
+		data = data[1:]
+	}
+	return data
+}
+
 func (a *emptyCompletionAccum) evalSSE(payload []byte) {
+	var dataLines [][]byte
+	flush := func() {
+		if len(dataLines) == 0 {
+			return
+		}
+		data := bytes.Join(dataLines, []byte("\n"))
+		dataLines = dataLines[:0]
+		if bytes.Equal(data, []byte("[DONE]")) {
+			a.recognized = true
+			a.terminal = true
+			return
+		}
+		if len(data) == 0 {
+			return
+		}
+		if !a.evalJSON(data) {
+			a.sawUnknownData = true
+		}
+	}
+
 	for _, line := range bytes.Split(payload, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
+			flush()
 			continue
 		}
 		if bytes.HasPrefix(line, []byte("event:")) {
+			flush()
 			event := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:")))
 			if bytes.Equal(event, []byte("message_stop")) {
 				a.recognized = true
@@ -1063,28 +1135,16 @@ func (a *emptyCompletionAccum) evalSSE(payload []byte) {
 		if bytes.HasPrefix(line, []byte("id:")) || bytes.HasPrefix(line, []byte("retry:")) || bytes.HasPrefix(line, []byte(":")) {
 			continue
 		}
-		var data []byte
 		switch {
 		case bytes.HasPrefix(line, []byte("data:")):
-			data = bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+			dataLines = append(dataLines, parseSSEDataLine(line))
 		case bytes.HasPrefix(line, []byte("{")):
-			data = line
+			dataLines = append(dataLines, line)
 		default:
-			a.sawUnknownData = true
-			continue
-		}
-		if bytes.Equal(data, []byte("[DONE]")) {
-			a.recognized = true
-			a.terminal = true
-			continue
-		}
-		if len(data) == 0 {
-			continue
-		}
-		if !a.evalJSON(data) {
 			a.sawUnknownData = true
 		}
 	}
+	flush()
 }
 
 // markEmptyCompletion records a failed retriable empty-completion result and

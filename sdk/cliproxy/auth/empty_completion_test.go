@@ -722,6 +722,83 @@ func TestStreamBootstrapDetectorSSEMetadataFields(t *testing.T) {
 	}
 }
 
+func TestStreamBootstrapDetectorMultilineSSE(t *testing.T) {
+	t.Run("empty completion split across data fields remains buffered and recognized", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		fragments := [][]byte{
+			[]byte("data: {\n"),
+			[]byte("data:   \"id\": \"chatcmpl-test\",\n"),
+			[]byte("data:   \"choices\": [\n"),
+			[]byte("data:     {\n"),
+			[]byte("data:       \"index\": 0,\n"),
+			[]byte("data:       \"delta\": {},\n"),
+			[]byte("data:       \"finish_reason\": \"stop\"\n"),
+			[]byte("data:     }\n"),
+			[]byte("data:   ],\n"),
+			[]byte("data:   \"usage\": {\n"),
+			[]byte("data:     \"prompt_tokens\": 5,\n"),
+			[]byte("data:     \"completion_tokens\": 0,\n"),
+			[]byte("data:     \"total_tokens\": 5\n"),
+			[]byte("data:   }\n"),
+			[]byte("data: }\n\n"),
+			[]byte("data: [DONE]\n\n"),
+		}
+		for i, f := range fragments {
+			if detector.Observe(f) {
+				t.Fatalf("Observe(fragment %d: %q) forwarded empty completion stream", i, string(f))
+			}
+		}
+		if !detector.Finish() {
+			t.Fatal("Finish() = false, want multiline empty completion recognized")
+		}
+	})
+
+	t.Run("multiline SSE with content forwards at event boundary", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		fragments := [][]byte{
+			[]byte("data: {\n"),
+			[]byte("data:   \"choices\": [\n"),
+			[]byte("data:     {\n"),
+			[]byte("data:       \"delta\": {\n"),
+			[]byte("data:         \"content\": \"Hello\"\n"),
+			[]byte("data:       }\n"),
+			[]byte("data:     }\n"),
+			[]byte("data:   ]\n"),
+			[]byte("data: }\n\n"),
+		}
+		forwarded := false
+		for _, f := range fragments {
+			if detector.Observe(f) {
+				forwarded = true
+				break
+			}
+		}
+		if !forwarded {
+			t.Fatal("Observe() = false, want multiline content event to forward")
+		}
+		if detector.Finish() {
+			t.Fatal("Finish() = true, want non-empty multiline stream not recognized as empty completion")
+		}
+	})
+
+	t.Run("isEmptyCompletionPayload handles multiline SSE payloads", func(t *testing.T) {
+		openaiEmpty := []byte("data: {\ndata:   \"choices\": [{\"delta\":{},\"finish_reason\":\"stop\"}],\ndata:   \"usage\": {\"completion_tokens\": 0}\ndata: }\n\ndata: [DONE]\n\n")
+		if !IsEmptyCompletionPayload(openaiEmpty) {
+			t.Fatal("IsEmptyCompletionPayload() = false for multiline OpenAI empty completion")
+		}
+
+		geminiEmpty := []byte("data: {\ndata:   \"candidates\": [\ndata:     {\"finishReason\": \"STOP\"}\ndata:   ],\ndata:   \"usageMetadata\": {\"candidatesTokenCount\": 0}\ndata: }\n\n")
+		if !IsEmptyCompletionPayload(geminiEmpty) {
+			t.Fatal("IsEmptyCompletionPayload() = false for multiline Gemini empty completion")
+		}
+
+		malformed := []byte("data: {\ndata:   not valid json\ndata: }\n\n")
+		if IsEmptyCompletionPayload(malformed) {
+			t.Fatal("IsEmptyCompletionPayload() = true for multiline malformed SSE")
+		}
+	})
+}
+
 func TestStreamBootstrapStateForwardsAtMetadataLimit(t *testing.T) {
 	var state streamBootstrapState
 	metadata := []byte("data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n")
