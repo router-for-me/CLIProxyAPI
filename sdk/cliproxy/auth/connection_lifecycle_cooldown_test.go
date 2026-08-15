@@ -513,9 +513,11 @@ func newVertexSATestAuth(id, location string) *Auth {
 // registerClientModelForTest registers a route model for an auth in the global
 // registry, mirroring production where client models are registered at the
 // service layer. Only auths that register the model count as pollable peers
-// for request selection (see Manager.authSupportsRouteModel).
-func registerClientModelForTest(authID, model string) {
+// for request selection (see Manager.authSupportsRouteModel). The registration
+// is removed on test cleanup so the global registry is not polluted.
+func registerClientModelForTest(t *testing.T, authID, model string) {
 	registry.GetGlobalRegistry().RegisterClient(authID, "vertex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
 }
 
 func TestManager_MarkResult_TransportFailureWithUniqueVertexLocationStillCooldowns(t *testing.T) {
@@ -540,8 +542,8 @@ func TestManager_MarkResult_TransportFailureWithUniqueVertexLocationStillCooldow
 	transportErr := resultErrorFromError(fmt.Errorf("dial tcp: lookup europe-west4-aiplatform.googleapis.com: no such host"))
 
 	model := "gemini-2.5-pro"
-	registerClientModelForTest(authA.ID, model)
-	registerClientModelForTest(authB.ID, model)
+	registerClientModelForTest(t, authA.ID, model)
+	registerClientModelForTest(t, authB.ID, model)
 	m.MarkResult(context.Background(), Result{
 		AuthID:   authB.ID,
 		Provider: authB.Provider,
@@ -764,8 +766,8 @@ func TestManager_MarkResult_TransportFailureWithSharedVertexLocationSkipsCooldow
 	}
 	// Both auths register the route model, so the shared-location peer is a
 	// pollable alternative and the endpoint is not unique.
-	registerClientModelForTest(sharedA.ID, model)
-	registerClientModelForTest(sharedB.ID, model)
+	registerClientModelForTest(t, sharedA.ID, model)
+	registerClientModelForTest(t, sharedB.ID, model)
 	mShared.MarkResult(context.Background(), Result{
 		AuthID:   sharedA.ID,
 		Provider: sharedA.Provider,
@@ -880,8 +882,8 @@ func TestManager_MarkResult_VertexEndpointConnectionRefusedStillCooldowns(t *tes
 	model := "gemini-2.5-pro"
 	// The US peer must register the route model to count as a pollable
 	// alternative endpoint for the model-level attribution below.
-	registerClientModelForTest(authUS.ID, model)
-	registerClientModelForTest(authEU.ID, model)
+	registerClientModelForTest(t, authUS.ID, model)
+	registerClientModelForTest(t, authEU.ID, model)
 	m.MarkResult(context.Background(), Result{
 		AuthID:   authEU.ID,
 		Provider: authEU.Provider,
@@ -1006,9 +1008,9 @@ func TestManager_MarkResult_VertexCoolingPeerStillCooldowns(t *testing.T) {
 	}
 	// The US auth must register the route model to count as the only reachable
 	// alternative endpoint for the model-level attribution below.
-	registerClientModelForTest(authUS.ID, model)
-	registerClientModelForTest(authEU.ID, model)
-	registerClientModelForTest(authEUPeer.ID, model)
+	registerClientModelForTest(t, authUS.ID, model)
+	registerClientModelForTest(t, authEU.ID, model)
+	registerClientModelForTest(t, authEUPeer.ID, model)
 	if blocked, _, _ := isAuthBlockedForModel(authEUPeer, model, now); !blocked {
 		t.Fatalf("expected cooling peer to be blocked for model")
 	}
@@ -1095,8 +1097,8 @@ func TestManager_MarkResult_VertexExpiredCooldownPeerSkipsCooldown(t *testing.T)
 	}
 	// The same-location peer must also register the route model: its cooldown
 	// expired and it can serve the model, so the endpoint stays shared.
-	registerClientModelForTest(authEU.ID, model)
-	registerClientModelForTest(authPeer.ID, model)
+	registerClientModelForTest(t, authEU.ID, model)
+	registerClientModelForTest(t, authPeer.ID, model)
 	if blocked, _, _ := isAuthBlockedForModel(authPeer, model, now); blocked {
 		t.Fatalf("expected expired-cooldown peer to be pollable")
 	}
@@ -1138,7 +1140,7 @@ func TestManager_MarkResult_VertexModelIneligiblePeerStillCooldowns(t *testing.T
 	}
 	// Only the US credential registers the route model, so it is the only
 	// pollable alternative endpoint for this model.
-	registerClientModelForTest(authUS.ID, model)
+	registerClientModelForTest(t, authUS.ID, model)
 
 	now := time.Now()
 	if blocked, _, _ := isAuthBlockedForModel(authEUPeer, model, now); blocked {
@@ -1166,5 +1168,118 @@ func TestManager_MarkResult_VertexModelIneligiblePeerStillCooldowns(t *testing.T
 	state := updated.ModelStates[model]
 	if state == nil || state.NextRetryAfter.IsZero() {
 		t.Fatalf("expected model-ineligible same-location peer to keep model cooldown")
+	}
+}
+
+func TestManager_MarkResult_TransportFailureWithSocksProxyDialSkipsVertexAttribution(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	m := NewManager(nil, nil, nil)
+	authUS := newVertexSATestAuth("auth-vertex-socks-us", "us-central1")
+	authEU := newVertexSATestAuth("auth-vertex-socks-eu", "europe-west4")
+	for _, a := range []*Auth{authUS, authEU} {
+		if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+	}
+	model := "gemini-2.5-pro"
+
+	// x/net/proxy SOCKS5 dialer failures surface as
+	// "socks connect tcp <proxy>-><target>: <err>" (net.OpError with
+	// Op "socks connect", see golang.org/x/net/internal/socks). The message
+	// carries no "proxyconnect tcp", so it previously matched both the
+	// transport and vertex endpoint pattern tables and drained the pool by
+	// attributing a shared socks5 proxy outage to each unique-location
+	// Vertex credential (cfg-level proxy, no per-auth ProxyURL override).
+	socksErr := resultErrorFromError(fmt.Errorf("socks connect tcp 127.0.0.1:1080->europe-west4-aiplatform.googleapis.com:443: connection refused"))
+	if !isTransportFailureResultError(socksErr) {
+		t.Fatalf("isTransportFailureResultError(%#v) = false, want true", socksErr)
+	}
+	if isVertexEndpointFailureMessage(socksErr.Message) {
+		t.Fatalf("isVertexEndpointFailureMessage(%q) = true, want false", socksErr.Message)
+	}
+
+	// Model-level path: the socks dial failure must skip cooldown even though
+	// the failing auth's location is unique in the pool.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authEU.ID,
+		Provider: authEU.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    socksErr,
+	})
+	assertNoCooldown(t, m, authEU.ID, model)
+
+	// Auth-level path (empty model) must behave identically.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authUS.ID,
+		Provider: authUS.Provider,
+		Success:  false,
+		Error:    socksErr,
+	})
+	updatedUS, okUS := m.GetByID(authUS.ID)
+	if !okUS || updatedUS == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updatedUS.Unavailable || !updatedUS.NextRetryAfter.IsZero() {
+		t.Fatalf("expected socks dial failure to skip auth-level cooldown, got unavailable=%v next=%v", updatedUS.Unavailable, updatedUS.NextRetryAfter)
+	}
+}
+
+func TestManager_MarkResult_VertexEndpointConnectionTimedOutStillCooldowns(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	m := NewManager(nil, nil, nil)
+	authUS := newVertexSATestAuth("auth-vertex-timedout-us", "us-central1")
+	authEU := newVertexSATestAuth("auth-vertex-timedout-eu", "europe-west4")
+	for _, a := range []*Auth{authUS, authEU} {
+		if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+	}
+	// A direct dial timeout against the regional endpoint is a per-endpoint
+	// fault (unlike "operation timed out", which is shared-host) and must
+	// keep cooldown when the location is unique in the pool. This guards the
+	// "connection timed out" pattern in vertexEndpointFailureMessagePatterns
+	// from being dropped as shared-host.
+	endpointErr := resultErrorFromError(fmt.Errorf("dial tcp 142.250.4.1:443: connect: connection timed out"))
+	if !isTransportFailureResultError(endpointErr) {
+		t.Fatalf("isTransportFailureResultError(%#v) = false, want true", endpointErr)
+	}
+	if !isVertexEndpointFailureMessage(endpointErr.Message) {
+		t.Fatalf("isVertexEndpointFailureMessage(%q) = false, want true", endpointErr.Message)
+	}
+
+	model := "gemini-2.5-pro"
+	// The US peer must register the route model to count as a pollable
+	// alternative endpoint for the model-level attribution below.
+	registerClientModelForTest(t, authUS.ID, model)
+	registerClientModelForTest(t, authEU.ID, model)
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authEU.ID,
+		Provider: authEU.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    endpointErr,
+	})
+	updated, ok := m.GetByID(authEU.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil || state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected unique-location vertex connection timed out to keep cooldown")
 	}
 }

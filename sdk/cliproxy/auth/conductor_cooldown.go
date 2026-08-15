@@ -1365,18 +1365,20 @@ func vertexSALocation(auth *Auth) string {
 
 // vertexTransportFailureIsAuthSpecificLocked reports whether the given Vertex
 // service-account auth routes through a regional endpoint that no other
-// pollable Vertex service-account auth in the pool shares. Disabled peers
-// (auth.Disabled or Status StatusDisabled) and peers currently blocked for
-// the model (quota cooldown, retry-after, or auth-level unavailability, as
-// judged by isAuthBlockedForModel) cannot serve requests, so they are ignored
-// when judging whether an alternative endpoint exists. Peers that do not
-// support the route model (per authSupportsRouteModel, the same judgment
-// request selection applies) can never be picked for this model and are
-// ignored too, otherwise a healthy but model-ineligible peer would hide the
-// endpoint uniqueness and leave polling stuck on the failing auth. When
-// pollable peers exist, a transport failure is specific to this auth's
-// endpoint and rotation can only reach a healthy credential if this auth
-// cools down. Caller must hold m.mu.
+// pollable Vertex service-account auth in the pool shares. Peers currently
+// blocked for the model (disabled, quota cooldown, retry-after, or auth-level
+// unavailability, as judged by isAuthBlockedForModel) cannot serve requests,
+// so they are ignored when judging whether an alternative endpoint exists.
+// Peers that do not support the route model (per authSupportsRouteModel, the
+// same judgment request selection applies) can never be picked for this model
+// and are ignored too, otherwise a healthy but model-ineligible peer would
+// hide the endpoint uniqueness and leave polling stuck on the failing auth.
+// On the auth-level path (empty model key) authSupportsRouteModel is always
+// true, so peers are not filtered by model; this limitation only affects SDK
+// users who call Manager.MarkResult directly with an empty Model, since the
+// production path always sets result.Model. When pollable peers exist, a
+// transport failure is specific to this auth's endpoint and rotation can only
+// reach a healthy credential if this auth cools down. Caller must hold m.mu.
 func (m *Manager) vertexTransportFailureIsAuthSpecificLocked(auth *Auth, modelKey string, now time.Time) bool {
 	loc := vertexSALocation(auth)
 	if loc == "" {
@@ -1388,14 +1390,13 @@ func (m *Manager) vertexTransportFailureIsAuthSpecificLocked(auth *Auth, modelKe
 		if peer == nil || peer.ID == auth.ID {
 			continue
 		}
-		if peer.Disabled || peer.Status == StatusDisabled {
+		// Skip non-service-account peers first: they have no regional
+		// endpoint to compare, so avoid the blocked/model checks on them.
+		peerLoc := vertexSALocation(peer)
+		if peerLoc == "" {
 			continue
 		}
 		if blocked, _, _ := isAuthBlockedForModel(peer, modelKey, now); blocked {
-			continue
-		}
-		peerLoc := vertexSALocation(peer)
-		if peerLoc == "" {
 			continue
 		}
 		if !m.authSupportsRouteModel(registryRef, peer, modelKey) {
@@ -1515,11 +1516,12 @@ func hasTransportFailureMessage(message string) bool {
 // endpoint itself qualify: NXDOMAIN ("no such host"), refused/reset
 // connections, broken pipes, dial/read timeouts and TLS handshake timeouts.
 // Shared-host or shared-layer faults ("network is unreachable", DNS "server
-// misbehaving", "operation timed out") and "proxyconnect tcp" proxy dial
-// failures do not prove the endpoint failed and are never attributed.
+// misbehaving", "operation timed out") and proxy dial failures
+// ("proxyconnect tcp" for HTTP proxies, "socks connect" for SOCKS5) do not
+// prove the endpoint failed and are never attributed.
 func isVertexEndpointFailureMessage(message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
-	if lower == "" || strings.Contains(lower, "proxyconnect tcp") {
+	if lower == "" || strings.Contains(lower, "proxyconnect tcp") || strings.Contains(lower, "socks connect") {
 		return false
 	}
 	for _, pattern := range vertexEndpointFailureMessagePatterns {
