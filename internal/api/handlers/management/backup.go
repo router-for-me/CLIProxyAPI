@@ -71,7 +71,9 @@ func (h *Handler) ListBackupResources(c *gin.Context) {
 
 // ExportAllData produces a portable JSON snapshot of the requested PG-backed
 // resources (default all). Use ?resources=api_keys,usage to select a subset.
-// Passing ?download=1 sets Content-Disposition so callers can save it as a file.
+// Passing ?download=1 streams the bundle straight to the response (memory stays
+// bounded on huge tables) and sets Content-Disposition so callers can save it as
+// a file; without it the bundle is returned as a regular in-memory JSON body.
 func (h *Handler) ExportAllData(c *gin.Context) {
 	pg, ok := h.requireBackupPG(c)
 	if !ok {
@@ -82,15 +84,29 @@ func (h *Handler) ExportAllData(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_resource", "message": errMsg}})
 		return
 	}
-	bundle, err := pg.ExportData(c.Request.Context(), store.BackupExportOpts{Resources: resources})
+	opts := store.BackupExportOpts{Resources: resources}
+	if c.Query("download") == "1" {
+		filename := strings.ReplaceAll(time.Now().UTC().Format("2006-01-02T150405"), "T", "_") + "_nixllm_export.json"
+		c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
+		c.Header("Content-Type", "application/json")
+		if err := pg.StreamExport(c.Request.Context(), opts, c.Writer); err != nil {
+			log.WithError(err).Error("management: stream export failed")
+			// The status can no longer be changed once the stream has started
+			// writing; surface a 500 only when nothing has been flushed yet.
+			if !c.Writer.Written() {
+				// Drop the download header so a download-style client doesn't save
+				// the error body as an attachment file instead of seeing the 500.
+				c.Header("Content-Disposition", "")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "export_failed", "message": err.Error()}})
+			}
+		}
+		return
+	}
+	bundle, err := pg.ExportData(c.Request.Context(), opts)
 	if err != nil {
 		log.WithError(err).Error("management: export all data failed")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "export_failed", "message": err.Error()}})
 		return
-	}
-	if c.Query("download") == "1" {
-		filename := strings.ReplaceAll(time.Now().UTC().Format("2006-01-02T150405"), "T", "_") + "_nixllm_export.json"
-		c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
 	}
 	c.JSON(http.StatusOK, bundle)
 }
@@ -133,6 +149,12 @@ func (h *Handler) ImportAllData(c *gin.Context) {
 		// The store rolls back on hard failure, so existing data is untouched.
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "import_failed", "message": err.Error()}})
 		return
+	}
+	if report.Partial {
+		log.WithFields(log.Fields{
+			"resources":      len(report.Resources),
+			"total_inserted": report.Total,
+		}).Warn("management: import completed with skipped chunks; destination holds a partial subset of the bundle")
 	}
 	c.JSON(http.StatusOK, gin.H{"import": report})
 }
