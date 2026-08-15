@@ -163,8 +163,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 			if message.Get("role").String() == "tool" {
 				rawID := message.Get("tool_call_id").String()
 				if rawID != "" {
-					toolCallID := util.SanitizeClaudeToolID(rawID)
-					lastToolMessage[toolCallID] = message
+					lastToolMessage[rawID] = message
 				}
 			}
 			return true
@@ -283,15 +282,15 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				rawID := message.Get("tool_call_id").String()
 				toolCallID := util.SanitizeClaudeToolID(rawID)
 				if rawID != "" {
-					if _, exists := emittedToolResults[toolCallID]; exists {
+					if _, exists := emittedToolResults[rawID]; exists {
 						return true
 					}
-					emittedToolResults[toolCallID] = struct{}{}
+					emittedToolResults[rawID] = struct{}{}
 				}
 
 				targetMsg := message
 				if rawID != "" {
-					if lastMsg, exists := lastToolMessage[toolCallID]; exists {
+					if lastMsg, exists := lastToolMessage[rawID]; exists {
 						targetMsg = lastMsg
 					}
 				}

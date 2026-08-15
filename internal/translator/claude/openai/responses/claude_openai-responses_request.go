@@ -248,8 +248,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			case "function_call_output", "custom_tool_call_output":
 				rawID := item.Get("call_id").String()
 				if rawID != "" {
-					callID := util.SanitizeClaudeToolID(rawID)
-					lastToolResult[callID] = item
+					lastToolResult[rawID] = item
 				}
 			}
 			return true
@@ -418,14 +417,14 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				rawID := item.Get("call_id").String()
 				callID := util.SanitizeClaudeToolID(rawID)
 				if rawID != "" {
-					if _, exists := emittedToolResults[callID]; exists {
+					if _, exists := emittedToolResults[rawID]; exists {
 						return true
 					}
-					emittedToolResults[callID] = struct{}{}
+					emittedToolResults[rawID] = struct{}{}
 				}
 				output := item.Get("output")
 				if rawID != "" {
-					if lastItem, exists := lastToolResult[callID]; exists {
+					if lastItem, exists := lastToolResult[rawID]; exists {
 						output = lastItem.Get("output")
 					}
 				}
