@@ -342,6 +342,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
 				if sess != nil {
+					unlockStreamSession()
 					e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
 				}
 				if errClearReplay := clearCodexReasoningReplayOnWebsocketError(ctx, replayScope, payload); errClearReplay != nil {
@@ -399,6 +400,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					return
 				}
 				if isTerminalEvent {
+					if (eventType == "error" || eventType == "response.incomplete" || eventType == "response.failed") && sess != nil {
+						unlockStreamSession()
+						e.invalidateUpstreamConn(sess, conn, "terminal_error", nil)
+					}
 					return
 				}
 				continue
