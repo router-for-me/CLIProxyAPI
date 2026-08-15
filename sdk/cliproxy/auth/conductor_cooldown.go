@@ -1,18 +1,25 @@
 package auth
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
+	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -693,6 +700,577 @@ func cooldownReason(statusMessage string, quota QuotaState, lastErr *Error) stri
 	return ""
 }
 
+func authServiceAccountCredential(auth *Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	raw, ok := auth.Metadata["service_account"]
+	if !ok || raw == nil {
+		return ""
+	}
+	encoded, errMarshal := json.Marshal(raw)
+	if errMarshal != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func authRawJSONCredential(auth *Auth) string {
+	if auth == nil || auth.Storage == nil {
+		return ""
+	}
+	source, ok := auth.Storage.(interface{ RawJSON() []byte })
+	if !ok {
+		return ""
+	}
+	raw := bytes.TrimSpace(source.RawJSON())
+	if len(raw) == 0 {
+		return ""
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if errDecode := decoder.Decode(&value); errDecode != nil {
+		return string(raw)
+	}
+	var trailing any
+	if errTrailing := decoder.Decode(&trailing); errTrailing != io.EOF {
+		return string(raw)
+	}
+	canonical, errMarshal := json.Marshal(value)
+	if errMarshal != nil {
+		return string(raw)
+	}
+	return string(canonical)
+}
+
+func authCredentialHeaderMaterial(auth *Auth) []string {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return nil
+	}
+	material := make([]string, 0)
+	for key, value := range auth.Attributes {
+		if !strings.HasPrefix(key, "header:") {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(key, "header:")))
+		if !authHeaderCarriesCredential(name) && !authHeaderCarriesAuthorizationScope(name) {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		material = append(material, name+"="+value)
+	}
+	sort.Strings(material)
+	return material
+}
+
+func authHeaderCarriesCredential(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	switch {
+	case strings.Contains(name, "authorization"),
+		strings.Contains(name, "api-key"),
+		strings.Contains(name, "apikey"),
+		strings.Contains(name, "api_key"),
+		strings.Contains(name, "token"),
+		strings.Contains(name, "secret"),
+		name == "cookie":
+		return true
+	default:
+		return false
+	}
+}
+
+func authHeaderCarriesAuthorizationScope(name string) bool {
+	normalized := normalizeAuthorizationScopeHeaderName(name)
+	switch normalized {
+	case "organization", "organisation", "project", "tenant", "workspace", "team", "subscription",
+		"openaiorganization", "openaiproject", "chatgptaccountid", "xgooguserproject":
+		return true
+	}
+	for _, suffix := range []string{
+		"organizationid", "organisationid", "projectid", "accountid",
+		"tenantid", "workspaceid", "teamid", "subscriptionid",
+	} {
+		if strings.HasSuffix(normalized, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func authCredentialEndpoint(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	endpoint := strings.TrimSpace(authAttribute(auth, "base_url"))
+	if endpoint == "" {
+		switch provider {
+		case "antigravity", "xai":
+			// Both executors resolve metadata base_url only when the attribute is absent.
+			endpoint = strings.TrimSpace(authMetadataString(auth, "base_url"))
+		}
+	}
+	return normalizeCredentialEndpoint(endpoint)
+}
+
+func normalizeCredentialEndpoint(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return ""
+	}
+	parsed, errParse := url.Parse(endpoint)
+	if errParse != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return strings.TrimRight(endpoint, "/")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = strings.TrimRight(parsed.RawPath, "/")
+	return parsed.String()
+}
+
+func authXAIEffectiveChatEndpoint(auth *Auth, baseURL string) string {
+	baseURL = strings.TrimSpace(baseURL)
+	if authXAIUsingAPI(auth) {
+		if baseURL == "" {
+			return xaiauth.DefaultAPIBaseURL
+		}
+		return baseURL
+	}
+	if baseURL != "" && normalizeCredentialEndpoint(baseURL) != normalizeCredentialEndpoint(xaiauth.DefaultAPIBaseURL) {
+		return baseURL
+	}
+	return xaiauth.CLIChatProxyBaseURL
+}
+
+func authXAIUsingAPI(auth *Auth) bool {
+	if auth == nil {
+		return true
+	}
+	if raw := strings.TrimSpace(authAttribute(auth, "using_api")); raw != "" {
+		if parsed, errParse := strconv.ParseBool(raw); errParse == nil {
+			return parsed
+		}
+	}
+	if auth.Metadata != nil {
+		raw, ok := auth.Metadata["using_api"]
+		if ok && raw != nil {
+			switch value := raw.(type) {
+			case bool:
+				return value
+			case string:
+				if parsed, errParse := strconv.ParseBool(strings.TrimSpace(value)); errParse == nil {
+					return parsed
+				}
+			}
+		}
+	}
+	if kind := strings.TrimSpace(authAttribute(auth, "auth_kind")); kind != "" {
+		return !strings.EqualFold(kind, AuthKindOAuth)
+	}
+	return !strings.EqualFold(strings.TrimSpace(authMetadataString(auth, "auth_kind")), AuthKindOAuth)
+}
+
+func normalizeAuthorizationScopeHeaderName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	replacer := strings.NewReplacer("-", "", "_", "", " ", "")
+	return replacer.Replace(name)
+}
+
+func authCustomHeaderValues(auth *Auth, normalizedName string) []string {
+	if auth == nil || len(auth.Attributes) == 0 || normalizedName == "" {
+		return nil
+	}
+	unique := make(map[string]struct{})
+	for key, value := range auth.Attributes {
+		if !strings.HasPrefix(key, "header:") {
+			continue
+		}
+		name := strings.TrimPrefix(key, "header:")
+		if normalizeAuthorizationScopeHeaderName(name) != normalizedName {
+			continue
+		}
+		if value = strings.TrimSpace(value); value != "" {
+			unique[value] = struct{}{}
+		}
+	}
+	values := make([]string, 0, len(unique))
+	for value := range unique {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return values
+}
+
+func authAuthorizationScopeMaterial(auth *Auth) []string {
+	if auth == nil {
+		return nil
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	switch provider {
+	case "codex":
+		if customAccounts := authCustomHeaderValues(auth, "chatgptaccountid"); len(customAccounts) > 0 {
+			material := make([]string, 0, len(customAccounts))
+			for _, accountID := range customAccounts {
+				material = append(material, "account_header="+accountID)
+			}
+			return material
+		}
+		// The Codex executor suppresses its metadata account header for API-key auth.
+		if strings.TrimSpace(authAttribute(auth, AttributeAPIKey)) != "" {
+			return nil
+		}
+		if accountID := strings.TrimSpace(authMetadataString(auth, "account_id")); accountID != "" {
+			return []string{"account_id=" + accountID}
+		}
+	case "antigravity":
+		if projectID := strings.TrimSpace(authMetadataString(auth, "project_id")); projectID != "" {
+			return []string{"project_id=" + projectID}
+		}
+	case "vertex":
+		// Vertex bypasses project/location when it can execute through its API-key path.
+		if strings.TrimSpace(authAttribute(auth, AttributeAPIKey)) != "" ||
+			strings.TrimSpace(authMetadataString(auth, "access_token")) != "" {
+			return nil
+		}
+		projectID := strings.TrimSpace(authMetadataString(auth, "project_id"))
+		if projectID == "" {
+			projectID = strings.TrimSpace(authMetadataString(auth, "project"))
+		}
+		if projectID == "" {
+			return nil
+		}
+		location := strings.TrimSpace(authMetadataString(auth, "location"))
+		if location == "" {
+			location = "us-central1"
+		}
+		return []string{
+			"project_id=" + projectID,
+			"location=" + location,
+		}
+	}
+	return nil
+}
+
+func authCredentialFingerprint(auth *Auth) ([sha256.Size]byte, bool) {
+	if auth == nil {
+		return [sha256.Size]byte{}, false
+	}
+	firstCredential := func(values ...string) string {
+		for _, value := range values {
+			if value = strings.TrimSpace(value); value != "" {
+				return value
+			}
+		}
+		return ""
+	}
+	material := baseauth.CredentialFingerprintMaterial{
+		APIKey: firstCredential(
+			authAttribute(auth, AttributeAPIKey),
+			authMetadataString(auth, AttributeAPIKey),
+		),
+		AccessToken: authAccessToken(auth),
+		RefreshToken: firstCredential(
+			authMetadataString(auth, "refresh_token"),
+			authMetadataString(auth, "refreshToken"),
+		),
+		IDToken: firstCredential(
+			authMetadataString(auth, "id_token"),
+			authMetadataString(auth, "idToken"),
+		),
+	}
+	storageHasCredential := false
+	if source, ok := auth.Storage.(baseauth.CredentialFingerprintSource); ok && source != nil {
+		stored := source.CredentialFingerprintMaterial()
+		stored.APIKey = strings.TrimSpace(stored.APIKey)
+		stored.AccessToken = strings.TrimSpace(stored.AccessToken)
+		stored.RefreshToken = strings.TrimSpace(stored.RefreshToken)
+		stored.IDToken = strings.TrimSpace(stored.IDToken)
+		stored.Opaque = strings.TrimSpace(stored.Opaque)
+		storageHasCredential = stored != (baseauth.CredentialFingerprintMaterial{})
+		if material.APIKey == "" {
+			material.APIKey = stored.APIKey
+		}
+		if material.AccessToken == "" {
+			material.AccessToken = stored.AccessToken
+		}
+		if material.RefreshToken == "" {
+			material.RefreshToken = stored.RefreshToken
+		}
+		if material.IDToken == "" {
+			material.IDToken = stored.IDToken
+		}
+		material.Opaque = stored.Opaque
+	}
+
+	kind := auth.AuthKind()
+	if kind == "" {
+		switch {
+		case material.APIKey != "":
+			kind = AuthKindAPIKey
+		case material.AccessToken != "" || material.RefreshToken != "" || material.IDToken != "":
+			kind = AuthKindOAuth
+		}
+	}
+	parts := []string{
+		"provider=" + strings.ToLower(strings.TrimSpace(auth.Provider)),
+		"kind=" + kind,
+	}
+	if endpoint := authCredentialEndpoint(auth); endpoint != "" {
+		parts = append(parts, "endpoint="+endpoint)
+	}
+	for _, scope := range authAuthorizationScopeMaterial(auth) {
+		parts = append(parts, "scope="+scope)
+	}
+	credentialCount := 0
+	appendCredential := func(name, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		parts = append(parts, name+"="+value)
+		credentialCount++
+	}
+
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "kimi") {
+		// Kimi prefers access_token (metadata, then attributes) before api_key.
+		// Fingerprint the credential it will execute with, plus refresh identity.
+		if material.AccessToken != "" {
+			appendCredential("access_token", material.AccessToken)
+		} else {
+			appendCredential("api_key", material.APIKey)
+		}
+		appendCredential("refresh_token", material.RefreshToken)
+		appendCredential("id_token", material.IDToken)
+	} else {
+		switch kind {
+		case AuthKindAPIKey:
+			appendCredential("api_key", material.APIKey)
+		case AuthKindOAuth:
+			// Some OAuth-classified credentials execute with Attributes["api_key"]
+			// (for example Claude), so that material remains revision-authoritative.
+			appendCredential("api_key", material.APIKey)
+			appendCredential("access_token", material.AccessToken)
+			appendCredential("refresh_token", material.RefreshToken)
+			appendCredential("id_token", material.IDToken)
+		default:
+			appendCredential("api_key", material.APIKey)
+			appendCredential("access_token", material.AccessToken)
+			appendCredential("refresh_token", material.RefreshToken)
+			appendCredential("id_token", material.IDToken)
+		}
+	}
+	for _, header := range authCredentialHeaderMaterial(auth) {
+		appendCredential("header", header)
+	}
+	appendCredential("service_account", authServiceAccountCredential(auth))
+	appendCredential("opaque_storage", material.Opaque)
+	if !storageHasCredential {
+		appendCredential("raw_storage_json", authRawJSONCredential(auth))
+	}
+	if credentialCount == 0 {
+		return [sha256.Size]byte{}, false
+	}
+	return sha256.Sum256([]byte(strings.Join(parts, "\x00"))), true
+}
+
+type authCredentialRevisionScope uint8
+
+const (
+	authCredentialRevisionScopeDefault authCredentialRevisionScope = iota
+	authCredentialRevisionScopeXAIHTTPChat
+)
+
+func authCredentialFingerprintForScope(auth *Auth, scope authCredentialRevisionScope) ([sha256.Size]byte, bool) {
+	fingerprint, ok := authCredentialFingerprint(auth)
+	if !ok || scope != authCredentialRevisionScopeXAIHTTPChat || auth == nil ||
+		!strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") {
+		return fingerprint, ok
+	}
+	route := normalizeCredentialEndpoint(authXAIEffectiveChatEndpoint(auth, authCredentialEndpoint(auth)))
+	scoped := make([]byte, 0, sha256.Size+len(route)+24)
+	scoped = append(scoped, fingerprint[:]...)
+	scoped = append(scoped, 0)
+	scoped = append(scoped, "xai_http_chat_route="...)
+	scoped = append(scoped, route...)
+	return sha256.Sum256(scoped), true
+}
+
+func sameCredentialRevision(left, right *Auth, sameGeneration bool) bool {
+	leftFingerprint, leftOK := authCredentialFingerprint(left)
+	rightFingerprint, rightOK := authCredentialFingerprint(right)
+	if leftOK || rightOK {
+		return leftOK && rightOK && leftFingerprint == rightFingerprint
+	}
+	return sameGeneration
+}
+
+func sameReferenceValue(left, right any) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	leftValue := reflect.ValueOf(left)
+	rightValue := reflect.ValueOf(right)
+	if leftValue.Type() != rightValue.Type() {
+		return false
+	}
+	switch leftValue.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return leftValue.Pointer() == rightValue.Pointer()
+	default:
+		if leftValue.Comparable() {
+			return leftValue.Interface() == rightValue.Interface()
+		}
+		return false
+	}
+}
+
+func refreshLifecycleUnchanged(current, before *Auth) bool {
+	if current == nil || before == nil {
+		return false
+	}
+	return current.Disabled == before.Disabled &&
+		current.Status == before.Status &&
+		current.StatusMessage == before.StatusMessage &&
+		current.Unavailable == before.Unavailable &&
+		current.NextRetryAfter.Equal(before.NextRetryAfter) &&
+		reflect.DeepEqual(current.Quota, before.Quota) &&
+		reflect.DeepEqual(current.LastError, before.LastError) &&
+		reflect.DeepEqual(current.ModelStates, before.ModelStates)
+}
+
+func mergeRefreshMetadata(current, before, refreshed map[string]any) map[string]any {
+	merged := make(map[string]any, len(current)+len(refreshed))
+	for key, value := range current {
+		merged[key] = value
+	}
+	keys := make(map[string]struct{}, len(before)+len(refreshed))
+	for key := range before {
+		keys[key] = struct{}{}
+	}
+	for key := range refreshed {
+		keys[key] = struct{}{}
+	}
+	for key := range keys {
+		beforeValue, beforeOK := before[key]
+		refreshedValue, refreshedOK := refreshed[key]
+		if beforeOK == refreshedOK && reflect.DeepEqual(beforeValue, refreshedValue) {
+			continue
+		}
+		currentValue, currentOK := current[key]
+		if currentOK != beforeOK || !reflect.DeepEqual(currentValue, beforeValue) {
+			continue
+		}
+		if refreshedOK {
+			merged[key] = refreshedValue
+		} else {
+			delete(merged, key)
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
+func mergeRefreshAttributes(current, before, refreshed map[string]string) map[string]string {
+	merged := make(map[string]string, len(current)+len(refreshed))
+	for key, value := range current {
+		merged[key] = value
+	}
+	keys := make(map[string]struct{}, len(before)+len(refreshed))
+	for key := range before {
+		keys[key] = struct{}{}
+	}
+	for key := range refreshed {
+		keys[key] = struct{}{}
+	}
+	for key := range keys {
+		beforeValue, beforeOK := before[key]
+		refreshedValue, refreshedOK := refreshed[key]
+		if beforeOK == refreshedOK && beforeValue == refreshedValue {
+			continue
+		}
+		currentValue, currentOK := current[key]
+		if currentOK != beforeOK || currentValue != beforeValue {
+			continue
+		}
+		if refreshedOK {
+			merged[key] = refreshedValue
+		} else {
+			delete(merged, key)
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
+func mergeCredentialRefresh(current, before, refreshed *Auth) *Auth {
+	if current == nil {
+		return nil
+	}
+	merged := current.Clone()
+	if before == nil || refreshed == nil {
+		return merged
+	}
+	merged.Metadata = mergeRefreshMetadata(current.Metadata, before.Metadata, refreshed.Metadata)
+	merged.Attributes = mergeRefreshAttributes(current.Attributes, before.Attributes, refreshed.Attributes)
+	if current.Prefix == before.Prefix && refreshed.Prefix != before.Prefix {
+		merged.Prefix = refreshed.Prefix
+	}
+	if current.FileName == before.FileName && refreshed.FileName != before.FileName {
+		merged.FileName = refreshed.FileName
+	}
+	if current.Label == before.Label && refreshed.Label != before.Label {
+		merged.Label = refreshed.Label
+	}
+	if current.ProxyURL == before.ProxyURL && refreshed.ProxyURL != before.ProxyURL {
+		merged.ProxyURL = refreshed.ProxyURL
+	}
+	if current.Disabled == before.Disabled && refreshed.Disabled != before.Disabled {
+		merged.Disabled = refreshed.Disabled
+	}
+	if current.Unavailable == before.Unavailable && refreshed.Unavailable != before.Unavailable {
+		merged.Unavailable = refreshed.Unavailable
+	}
+	if current.Status == before.Status && refreshed.Status != before.Status {
+		merged.Status = refreshed.Status
+	}
+	if current.StatusMessage == before.StatusMessage && refreshed.StatusMessage != before.StatusMessage {
+		merged.StatusMessage = refreshed.StatusMessage
+	}
+	if current.NextRetryAfter.Equal(before.NextRetryAfter) && !refreshed.NextRetryAfter.Equal(before.NextRetryAfter) {
+		merged.NextRetryAfter = refreshed.NextRetryAfter
+	}
+	if reflect.DeepEqual(current.Quota, before.Quota) && !reflect.DeepEqual(refreshed.Quota, before.Quota) {
+		merged.Quota = refreshed.Quota
+	}
+	if reflect.DeepEqual(current.LastError, before.LastError) && !reflect.DeepEqual(refreshed.LastError, before.LastError) {
+		merged.LastError = cloneError(refreshed.LastError)
+	}
+	if reflect.DeepEqual(current.ModelStates, before.ModelStates) && !reflect.DeepEqual(refreshed.ModelStates, before.ModelStates) {
+		merged.ModelStates = refreshed.Clone().ModelStates
+	}
+	// applyCredentialRefresh has already verified that the current credential
+	// revision still matches before. Equivalent hot reloads may replace the
+	// storage object for noncredential changes, so pointer identity is not an
+	// ownership signal here.
+	if !sameReferenceValue(refreshed.Storage, before.Storage) {
+		merged.Storage = refreshed.Storage
+	}
+	if sameReferenceValue(current.Runtime, before.Runtime) && !sameReferenceValue(refreshed.Runtime, before.Runtime) {
+		merged.Runtime = refreshed.Runtime
+	}
+	return merged
+}
+
 // MarkResult records an execution result and notifies hooks.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
@@ -707,6 +1285,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	setModelQuota := false
 	var authSnapshot *Auth
 	cooldownStateChanged := false
+	suppressErrorEvent := false
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -723,7 +1302,21 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			auth.Failed++
 		}
 
-		if result.Success {
+		staleCredentialResult := false
+		if result.hasCredentialFingerprint {
+			currentFingerprint, okFingerprint := authCredentialFingerprintForScope(auth, result.credentialRevisionScope)
+			staleCredentialResult = !okFingerprint || currentFingerprint != result.credentialFingerprint
+		} else if result.hasCredentialGeneration {
+			staleCredentialResult = auth.credentialGeneration == 0 || auth.credentialGeneration != result.credentialGeneration
+		}
+		staleSuccessfulResult := staleCredentialResult && result.Success
+		staleAvailabilityFailure := staleCredentialResult && !result.Success && isCredentialScopedAvailabilityError(result.Error)
+		if staleSuccessfulResult || staleAvailabilityFailure {
+			// Keep request metrics, but never let a superseded credential change
+			// availability owned by its replacement.
+			authSnapshot = auth.Clone()
+			suppressErrorEvent = staleAvailabilityFailure
+		} else if result.Success {
 			if modelKey != "" {
 				state := ensureModelState(auth, modelKey)
 				resetModelState(state, now)
@@ -883,11 +1476,216 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	m.hook.OnResult(ctx, result)
-	m.publishErrorEvent(result, authSnapshot)
+	if !suppressErrorEvent {
+		m.publishErrorEvent(result, authSnapshot)
+	}
+}
+
+type authCredentialRevision struct {
+	fingerprint    [sha256.Size]byte
+	hasFingerprint bool
+	generation     uint64
+	scope          authCredentialRevisionScope
+}
+
+func captureAuthCredentialRevision(auth *Auth) authCredentialRevision {
+	return captureAuthCredentialRevisionWithScope(auth, authCredentialRevisionScopeDefault)
+}
+
+func captureAuthCredentialRevisionWithScope(auth *Auth, scope authCredentialRevisionScope) authCredentialRevision {
+	fingerprint, ok := authCredentialFingerprintForScope(auth, scope)
+	var generation uint64
+	if auth != nil {
+		generation = auth.credentialGeneration
+	}
+	return authCredentialRevision{fingerprint: fingerprint, hasFingerprint: ok, generation: generation, scope: scope}
+}
+
+func captureAuthCredentialRevisionForExecution(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) authCredentialRevision {
+	scope := authCredentialRevisionScopeForExecution(ctx, auth, req, opts)
+	return captureAuthCredentialRevisionWithScope(auth, scope)
+}
+
+func authCredentialRevisionScopeForExecution(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) authCredentialRevisionScope {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") {
+		return authCredentialRevisionScopeDefault
+	}
+	if opts.Alt == "responses/compact" || authXAIExecutionIsMedia(req, opts) {
+		return authCredentialRevisionScopeDefault
+	}
+	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) ||
+		(cliproxyexecutor.DownstreamWebsocket(ctx) && authXAIWebsocketsEnabled(auth)) {
+		return authCredentialRevisionScopeDefault
+	}
+	return authCredentialRevisionScopeXAIHTTPChat
+}
+
+func authXAIExecutionIsMedia(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) bool {
+	for _, format := range []string{opts.SourceFormat.String(), req.Format.String()} {
+		switch strings.ToLower(strings.TrimSpace(format)) {
+		case "openai-image", "openai-video":
+			return true
+		}
+	}
+	for _, metadata := range []map[string]any{opts.Metadata, req.Metadata} {
+		path := strings.ToLower(strings.TrimSpace(authExecutionMetadataString(metadata, cliproxyexecutor.RequestPathMetadataKey)))
+		if path == "" {
+			continue
+		}
+		if parsed, errParse := url.Parse(path); errParse == nil && parsed.Path != "" {
+			path = strings.ToLower(strings.TrimSpace(parsed.Path))
+		}
+		if strings.Contains(path, "/images/") || strings.HasSuffix(path, "/images") ||
+			strings.Contains(path, "/videos/") || strings.HasSuffix(path, "/videos") {
+			return true
+		}
+	}
+	return false
+}
+
+func authExecutionMetadataString(metadata map[string]any, key string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	switch value := metadata[key].(type) {
+	case string:
+		return value
+	case []byte:
+		return string(value)
+	default:
+		return ""
+	}
+}
+
+func authXAIWebsocketsEnabled(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if raw := strings.TrimSpace(authAttribute(auth, "websockets")); raw != "" {
+		if parsed, errParse := strconv.ParseBool(raw); errParse == nil {
+			return parsed
+		}
+	}
+	if auth.Metadata == nil {
+		return false
+	}
+	switch value := auth.Metadata["websockets"].(type) {
+	case bool:
+		return value
+	case string:
+		parsed, errParse := strconv.ParseBool(strings.TrimSpace(value))
+		return errParse == nil && parsed
+	default:
+		return false
+	}
+}
+
+type executionCredentialStorage struct {
+	rawJSON     []byte
+	fingerprint baseauth.CredentialFingerprintMaterial
+}
+
+func (s *executionCredentialStorage) RawJSON() []byte {
+	if s == nil {
+		return nil
+	}
+	return bytes.Clone(s.rawJSON)
+}
+
+func (s *executionCredentialStorage) CredentialFingerprintMaterial() baseauth.CredentialFingerprintMaterial {
+	if s == nil {
+		return baseauth.CredentialFingerprintMaterial{}
+	}
+	return s.fingerprint
+}
+
+func (*executionCredentialStorage) SaveTokenToFile(string) error {
+	return errors.New("execution credential snapshot is read-only")
+}
+
+func cloneCredentialMetadataValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(typed))
+		for key, item := range typed {
+			cloned[key] = cloneCredentialMetadataValue(item)
+		}
+		return cloned
+	case []any:
+		cloned := make([]any, len(typed))
+		for i, item := range typed {
+			cloned[i] = cloneCredentialMetadataValue(item)
+		}
+		return cloned
+	case map[string]string:
+		cloned := make(map[string]string, len(typed))
+		for key, item := range typed {
+			cloned[key] = item
+		}
+		return cloned
+	case []string:
+		cloned := make([]string, len(typed))
+		copy(cloned, typed)
+		return cloned
+	default:
+		return value
+	}
+}
+
+func snapshotAuthCredential(auth *Auth) (*Auth, authCredentialRevision) {
+	snapshot := auth.Clone()
+	if snapshot == nil {
+		return nil, authCredentialRevision{}
+	}
+
+	if source, ok := snapshot.Storage.(baseauth.CredentialSnapshotSource); ok && source != nil {
+		rawJSON, metadata, fingerprint := source.CredentialSnapshot()
+		if metadata == nil {
+			snapshot.Metadata = nil
+		} else {
+			snapshot.Metadata = cloneCredentialMetadataValue(metadata).(map[string]any)
+		}
+		snapshot.Storage = &executionCredentialStorage{
+			rawJSON:     bytes.Clone(rawJSON),
+			fingerprint: fingerprint,
+		}
+	} else {
+		var fingerprint baseauth.CredentialFingerprintMaterial
+		if source, okFingerprint := snapshot.Storage.(baseauth.CredentialFingerprintSource); okFingerprint && source != nil {
+			fingerprint = source.CredentialFingerprintMaterial()
+		}
+		if source, okRawJSON := snapshot.Storage.(interface{ RawJSON() []byte }); okRawJSON {
+			snapshot.Storage = &executionCredentialStorage{
+				rawJSON:     bytes.Clone(source.RawJSON()),
+				fingerprint: fingerprint,
+			}
+		}
+	}
+	if serviceAccount, ok := snapshot.Metadata["service_account"]; ok {
+		snapshot.Metadata["service_account"] = cloneCredentialMetadataValue(serviceAccount)
+	}
+	return snapshot, captureAuthCredentialRevision(snapshot)
+}
+
+func snapshotAuthCredentialForExecution(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*Auth, authCredentialRevision) {
+	snapshot, _ := snapshotAuthCredential(auth)
+	if snapshot == nil {
+		return nil, authCredentialRevision{}
+	}
+	return snapshot, captureAuthCredentialRevisionForExecution(ctx, snapshot, req, opts)
 }
 
 func (m *Manager) recordExecutionResult(ctx context.Context, result Result, auth *Auth, ephemeral bool) {
+	m.recordExecutionResultWithRevision(ctx, result, auth, ephemeral, captureAuthCredentialRevision(auth))
+}
+
+func (m *Manager) recordExecutionResultWithRevision(ctx context.Context, result Result, auth *Auth, ephemeral bool, revision authCredentialRevision) {
 	if !ephemeral {
+		result.credentialFingerprint = revision.fingerprint
+		result.hasCredentialFingerprint = revision.hasFingerprint
+		result.credentialGeneration = revision.generation
+		result.hasCredentialGeneration = revision.generation != 0
+		result.credentialRevisionScope = revision.scope
 		m.MarkResult(ctx, result)
 		return
 	}
@@ -1368,6 +2166,18 @@ func retryAfterFromError(err error) *time.Duration {
 	}
 	value := *retryAfter
 	return &value
+}
+
+func isCredentialScopedAvailabilityError(err *Error) bool {
+	if isUnauthorizedError(err) || isInvalidGrantResultError(err) {
+		return true
+	}
+	switch statusCodeFromResult(err) {
+	case http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
+		return true
+	default:
+		return false
+	}
 }
 
 func statusCodeFromResult(err *Error) int {

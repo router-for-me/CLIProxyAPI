@@ -702,6 +702,11 @@ func (s *GitTokenStore) idFor(path, baseDir string) string {
 	return rel
 }
 
+// ResolveAuthPersistenceTarget returns the exact path Save would use.
+func (s *GitTokenStore) ResolveAuthPersistenceTarget(auth *cliproxyauth.Auth) (string, error) {
+	return s.resolveAuthPath(auth)
+}
+
 func (s *GitTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error) {
 	if auth == nil {
 		return "", fmt.Errorf("auth filestore: auth is nil")

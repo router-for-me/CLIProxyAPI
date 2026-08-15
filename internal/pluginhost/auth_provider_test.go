@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -368,6 +369,214 @@ func TestPluginTokenStorageMergesRawMetadataAndProviderType(t *testing.T) {
 	}
 	if decoded["old"] != "override" || decoded["new"] != "value" || decoded["type"] != "plugin-provider" {
 		t.Fatalf("saved token decoded = %#v, want merged metadata and provider type", decoded)
+	}
+}
+
+func TestPluginTokenStorageSnapshotsMatchingMetadataAndStorage(t *testing.T) {
+	storage := &pluginTokenStorage{
+		provider: "plugin-provider",
+		rawJSON:  []byte(`{"token":"secret"}`),
+	}
+	storage.SetMetadata(map[string]any{
+		"access_token": "current-token",
+		"nested":       map[string]any{"note": "current"},
+	})
+
+	source, ok := any(storage).(interface {
+		CredentialSnapshot() ([]byte, map[string]any, baseauth.CredentialFingerprintMaterial)
+	})
+	if !ok {
+		t.Fatalf("plugin token storage = %T, want credential snapshot source", storage)
+	}
+	raw, metadata, _ := source.CredentialSnapshot()
+
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("credential snapshot decode error = %v", errUnmarshal)
+	}
+	if decoded["access_token"] != metadata["access_token"] {
+		t.Fatalf("credential snapshot storage=%#v metadata=%#v, want matching generation", decoded, metadata)
+	}
+	metadata["access_token"] = "mutated"
+	metadata["nested"].(map[string]any)["note"] = "mutated"
+	_, current, _ := source.CredentialSnapshot()
+	if current["access_token"] != "current-token" || current["nested"].(map[string]any)["note"] != "current" {
+		t.Fatalf("credential snapshot metadata aliases storage state: %#v", current)
+	}
+}
+
+func TestPluginTokenStorageFingerprintIgnoresHostMetadata(t *testing.T) {
+	storage := &pluginTokenStorage{
+		provider: "plugin-provider",
+		rawJSON:  []byte(`{ "token": "secret", "refresh_token": "refresh" }`),
+	}
+	source, ok := any(storage).(baseauth.CredentialFingerprintSource)
+	if !ok {
+		t.Fatalf("plugin token storage = %T, want credential fingerprint source", storage)
+	}
+	before := source.CredentialFingerprintMaterial()
+	if before == (baseauth.CredentialFingerprintMaterial{}) {
+		t.Fatal("credential fingerprint material is empty")
+	}
+
+	storage.SetMetadata(map[string]any{
+		"note":     "changed",
+		"disabled": true,
+		"prefix":   "changed",
+		"headers":  map[string]any{"X-Trace-ID": "changed"},
+	})
+	after := source.CredentialFingerprintMaterial()
+	if before != after {
+		t.Fatalf("host metadata changed credential fingerprint material: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestPluginTokenStorageFingerprintPreservesCollidingCredentialHeaders(t *testing.T) {
+	storage := &pluginTokenStorage{
+		provider: "plugin-provider",
+		rawJSON:  []byte(`{"provider_state":"stable"}`),
+	}
+	storage.SetMetadata(map[string]any{
+		"headers": map[string]any{
+			"Authorization": "Bearer first-token",
+		},
+		"requestHeaders": map[string]any{
+			"authorization": "Bearer stable-second-token",
+		},
+	})
+	before := storage.CredentialFingerprintMaterial()
+
+	storage.SetMetadata(map[string]any{
+		"headers": map[string]any{
+			"Authorization": "Bearer rotated-first-token",
+		},
+		"requestHeaders": map[string]any{
+			"authorization": "Bearer stable-second-token",
+		},
+	})
+	after := storage.CredentialFingerprintMaterial()
+
+	if before == after {
+		t.Fatal("rotating one colliding credential-header source did not change the fingerprint")
+	}
+}
+
+func TestPluginTokenStorageFingerprintCanonicalizesCredentialHeaderNames(t *testing.T) {
+	storage := &pluginTokenStorage{
+		provider: "plugin-provider",
+		rawJSON:  []byte(`{"provider_state":"stable"}`),
+	}
+	storage.SetMetadata(map[string]any{
+		"headers": map[string]any{
+			"Authorization": "Bearer same-token",
+		},
+	})
+	before := storage.CredentialFingerprintMaterial()
+
+	storage.SetMetadata(map[string]any{
+		"REQUEST_HEADERS": map[string]any{
+			"authorization": "Bearer same-token",
+		},
+	})
+	after := storage.CredentialFingerprintMaterial()
+
+	if before != after {
+		t.Fatalf("equivalent credential header casing changed fingerprint: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestPluginTokenStorageFingerprintIncludesMetadataCredentialHeaders(t *testing.T) {
+	for _, header := range []string{"Authorization", "X-API-Key", "X-Access-Token", "X-Client-Secret"} {
+		t.Run(header, func(t *testing.T) {
+			storage := &pluginTokenStorage{
+				provider: "plugin-provider",
+				rawJSON:  []byte(`{"provider_state":"stable"}`),
+			}
+			storage.SetMetadata(map[string]any{
+				"headers": map[string]any{
+					header:       "old-credential",
+					"X-Trace-ID": "stable",
+				},
+			})
+
+			before := storage.CredentialFingerprintMaterial()
+			storage.SetMetadata(map[string]any{
+				"headers": map[string]any{
+					header:       "new-credential",
+					"X-Trace-ID": "stable",
+				},
+			})
+			after := storage.CredentialFingerprintMaterial()
+
+			if before == after {
+				t.Fatalf("metadata %s replacement did not change credential fingerprint material", header)
+			}
+		})
+	}
+}
+
+func TestPluginTokenStoragePersistenceSnapshotIsDetached(t *testing.T) {
+	storage := &pluginTokenStorage{
+		provider: "plugin-provider",
+		rawJSON:  []byte(`{"provider_state":"stable"}`),
+	}
+	storage.SetMetadata(map[string]any{"token": "replacement-token"})
+
+	detached, ok := storage.CredentialPersistenceSnapshot().(*pluginTokenStorage)
+	if !ok || detached == nil {
+		t.Fatalf("persistence snapshot = %T, want detached plugin storage", detached)
+	}
+	detached.SetMetadata(map[string]any{"token": "stale-refresh-token"})
+
+	_, originalMetadata, _ := storage.CredentialSnapshot()
+	if got, _ := originalMetadata["token"].(string); got != "replacement-token" {
+		t.Fatalf("original storage token = %q, want replacement token", got)
+	}
+	_, detachedMetadata, _ := detached.CredentialSnapshot()
+	if got, _ := detachedMetadata["token"].(string); got != "stale-refresh-token" {
+		t.Fatalf("detached storage token = %q, want stale refresh token", got)
+	}
+}
+
+func TestPluginTokenStorageFingerprintPreservesCollidingTopLevelCredentialKeys(t *testing.T) {
+	storage := &pluginTokenStorage{
+		provider: "plugin-provider",
+		rawJSON:  []byte(`{"provider_state":"stable"}`),
+	}
+	storage.SetMetadata(map[string]any{
+		"apiToken":  "first-token",
+		"api_token": "stable-second-token",
+	})
+	before := storage.CredentialFingerprintMaterial()
+
+	storage.SetMetadata(map[string]any{
+		"apiToken":  "rotated-first-token",
+		"api_token": "stable-second-token",
+	})
+	after := storage.CredentialFingerprintMaterial()
+
+	if before == after {
+		t.Fatal("rotating one colliding top-level credential alias did not change the fingerprint")
+	}
+}
+
+func TestPluginTokenStorageFingerprintIncludesMetadataToken(t *testing.T) {
+	for _, key := range []string{"token", "api_token", "apiToken"} {
+		t.Run(key, func(t *testing.T) {
+			storage := &pluginTokenStorage{
+				provider: "plugin-provider",
+				rawJSON:  []byte(`{"provider_state":"stable"}`),
+			}
+			storage.SetMetadata(map[string]any{key: "old-token", "note": "same"})
+
+			before := storage.CredentialFingerprintMaterial()
+			storage.SetMetadata(map[string]any{key: "new-token", "note": "same"})
+			after := storage.CredentialFingerprintMaterial()
+
+			if before == after {
+				t.Fatalf("metadata %s replacement did not change credential fingerprint material", key)
+			}
+		})
 	}
 }
 

@@ -327,7 +327,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				return cliproxyexecutor.Response{}, errCancel
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare)}
-			m.MarkResult(execCtx, result)
+			m.recordExecutionResult(execCtx, result, auth, false)
 			lastErr = errPrepare
 			continue
 		}
@@ -349,7 +349,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if !restoreExecutionModel {
 				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel)
 			}
-			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+			requestAuth, credentialRevision := snapshotAuthCredentialForExecution(execCtx, auth, execReq, execOpts)
+			resp, errExec := executor.Execute(execCtx, requestAuth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
@@ -357,7 +358,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(execCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
 					auth = refreshed
 					didRefreshOnUnauthorized = true
-					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
+					requestAuth, credentialRevision = snapshotAuthCredentialForExecution(execCtx, auth, execReq, execOpts)
+					resp, errExec = executor.Execute(execCtx, requestAuth, execReq, execOpts)
 					if errExec != nil {
 						if errCtx := execCtx.Err(); errCtx != nil {
 							return cliproxyexecutor.Response{}, errCtx
@@ -374,14 +376,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
+				m.recordExecutionResultWithRevision(execCtx, result, auth, false, credentialRevision)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
 				continue
 			}
-			m.MarkResult(execCtx, result)
+			m.recordExecutionResultWithRevision(execCtx, result, auth, false, credentialRevision)
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)
 			return resp, nil
@@ -454,7 +456,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				return cliproxyexecutor.Response{}, errCancel
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare)}
-			m.MarkResult(execCtx, result)
+			m.recordExecutionResult(execCtx, result, auth, false)
 			lastErr = errPrepare
 			continue
 		}
@@ -476,7 +478,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if !restoreExecutionModel {
 				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel)
 			}
-			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
+			requestAuth, credentialRevision := snapshotAuthCredential(auth)
+			resp, errExec := executor.CountTokens(execCtx, requestAuth, execReq, execOpts)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
@@ -484,7 +487,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(execCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
 					auth = refreshed
 					didRefreshOnUnauthorized = true
-					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
+					requestAuth, credentialRevision = snapshotAuthCredential(auth)
+					resp, errExec = executor.CountTokens(execCtx, requestAuth, execReq, execOpts)
 					if errExec != nil {
 						if errCtx := execCtx.Err(); errCtx != nil {
 							return cliproxyexecutor.Response{}, errCtx
@@ -508,7 +512,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if isCountTokensEndpointNotFoundError(errExec, execReq.Model) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
-					m.MarkResult(execCtx, result)
+					m.recordExecutionResultWithRevision(execCtx, result, auth, false, credentialRevision)
 				}
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
@@ -516,7 +520,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				authErr = errExec
 				continue
 			}
-			m.MarkResult(execCtx, result)
+			m.recordExecutionResultWithRevision(execCtx, result, auth, false, credentialRevision)
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)
 			return resp, nil
@@ -655,7 +659,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				m.reportHomeResult(execCtx, result, auth)
 				releaseAttempt()
 			} else {
-				m.MarkResult(execCtx, result)
+				m.recordExecutionResult(execCtx, result, auth, false)
 			}
 			lastErr = errPrepare
 			if selection != nil {
@@ -901,7 +905,7 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 
 	updated, errPrepare := preparer.PrepareRequestAuth(ctx, target)
 	if errPrepare != nil {
-		return auth, errPrepare
+		return target, errPrepare
 	}
 	if updated == nil {
 		return target, nil

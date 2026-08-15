@@ -131,6 +131,49 @@ func (e *requestPrepareExecutor) HttpRequest(context.Context, *Auth, *http.Reque
 	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "http not implemented"}
 }
 
+type replacementPrepareFailureExecutor struct {
+	shouldCalls atomic.Int32
+	selected    chan struct{}
+	release     chan struct{}
+}
+
+func (*replacementPrepareFailureExecutor) Identifier() string { return "antigravity" }
+
+func (e *replacementPrepareFailureExecutor) ShouldPrepareRequestAuth(*Auth) bool {
+	if e.shouldCalls.Add(1) == 1 {
+		close(e.selected)
+		<-e.release
+	}
+	return true
+}
+
+func (*replacementPrepareFailureExecutor) PrepareRequestAuth(_ context.Context, auth *Auth) (*Auth, error) {
+	if got := authMetadataString(auth, "access_token"); got != "replacement-token" {
+		return nil, &Error{HTTPStatus: http.StatusInternalServerError, Message: "preparer did not receive replacement auth"}
+	}
+	return nil, &Error{HTTPStatus: http.StatusUnauthorized, Message: "replacement preparation unauthorized"}
+}
+
+func (*replacementPrepareFailureExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusInternalServerError, Message: "execute should not run"}
+}
+
+func (*replacementPrepareFailureExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, &Error{HTTPStatus: http.StatusInternalServerError, Message: "stream should not run"}
+}
+
+func (*replacementPrepareFailureExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (*replacementPrepareFailureExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusInternalServerError, Message: "count should not run"}
+}
+
+func (*replacementPrepareFailureExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "http not implemented"}
+}
+
 type homeRequestPrepareDispatcher struct {
 	calls atomic.Int32
 }
@@ -348,6 +391,76 @@ func assertHomeExecutionResultStateUnchanged(t *testing.T, manager *Manager, sto
 	}
 	if results := hook.Results(); len(results) != 1 {
 		t.Fatalf("Home execution hook results = %#v, want exactly one ephemeral result", results)
+	}
+}
+
+func TestPrepareRequestAuthFailureUsesReplacementRevision(t *testing.T) {
+	const model = "gemini-3.1-pro"
+	executor := &replacementPrepareFailureExecutor{
+		selected: make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	manager.SetRetryConfig(0, 0, 1)
+
+	auth := &Auth{
+		ID:       "prepare-replacement-revision",
+		Provider: "antigravity",
+		Status:   StatusActive,
+		Metadata: map[string]any{"access_token": "old-token"},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	manager.RefreshSchedulerEntry(auth.ID)
+
+	done := make(chan error, 1)
+	go func() {
+		_, errExecute := manager.Execute(context.Background(), []string{auth.Provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		done <- errExecute
+	}()
+	select {
+	case <-executor.selected:
+	case <-time.After(time.Second):
+		t.Fatal("request auth selection did not reach preparation")
+	}
+
+	current, ok := manager.GetByID(auth.ID)
+	if !ok || current == nil {
+		t.Fatal("selected auth disappeared")
+	}
+	replacement := current.Clone()
+	replacement.Metadata["access_token"] = "replacement-token"
+	if _, errUpdate := manager.Update(WithSkipPersist(context.Background()), replacement); errUpdate != nil {
+		t.Fatalf("update replacement: %v", errUpdate)
+	}
+	close(executor.release)
+
+	select {
+	case errExecute := <-done:
+		if errExecute == nil {
+			t.Fatal("Execute error = nil, want preparation unauthorized")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("execution did not finish")
+	}
+
+	current, ok = manager.GetByID(auth.ID)
+	if !ok || current == nil {
+		t.Fatal("replacement auth disappeared")
+	}
+	if got := authMetadataString(current, "access_token"); got != "replacement-token" {
+		t.Fatalf("current access token = %q, want replacement token", got)
+	}
+	if current.Status != StatusError || !current.Unavailable || current.LastError == nil {
+		t.Fatalf("replacement preparation failure was not recorded: %#v", current)
+	}
+	state := current.ModelStates[model]
+	if state == nil || state.Status != StatusError || !state.Unavailable || state.LastError == nil {
+		t.Fatalf("replacement model preparation failure was not recorded: %#v", current.ModelStates)
 	}
 }
 

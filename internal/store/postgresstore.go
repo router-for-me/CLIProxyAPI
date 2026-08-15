@@ -589,6 +589,11 @@ func (s *PostgresStore) deleteConfigRecord(ctx context.Context) error {
 	return nil
 }
 
+// ResolveAuthPersistenceTarget returns the exact path Save would use.
+func (s *PostgresStore) ResolveAuthPersistenceTarget(auth *cliproxyauth.Auth) (string, error) {
+	return s.resolveAuthPath(auth)
+}
+
 func (s *PostgresStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error) {
 	if auth == nil {
 		return "", fmt.Errorf("postgres store: auth is nil")

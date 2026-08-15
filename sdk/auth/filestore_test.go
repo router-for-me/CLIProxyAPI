@@ -87,6 +87,24 @@ func TestExtractAccessToken(t *testing.T) {
 	}
 }
 
+func TestFileTokenStoreResolveAuthPersistenceTargetPreservesRelativeSubdirectories(t *testing.T) {
+	store := NewFileTokenStore()
+	root := t.TempDir()
+	store.SetBaseDir(root)
+
+	target, errResolve := store.ResolveAuthPersistenceTarget(&cliproxyauth.Auth{
+		ID:       "runtime-id",
+		FileName: filepath.Join("new", "auth.json"),
+	})
+	if errResolve != nil {
+		t.Fatalf("ResolveAuthPersistenceTarget: %v", errResolve)
+	}
+	want := filepath.Join(root, "new", "auth.json")
+	if target != want {
+		t.Fatalf("resolved target = %q, want %q", target, want)
+	}
+}
+
 func TestFileTokenStoreSaveExistingMetadataSetsFileAttributes(t *testing.T) {
 	tests := []struct {
 		name          string

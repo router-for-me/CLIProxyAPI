@@ -404,6 +404,11 @@ func (s *FileTokenStore) idFor(path, baseDir string) string {
 	return id
 }
 
+// ResolveAuthPersistenceTarget returns the exact path Save would use.
+func (s *FileTokenStore) ResolveAuthPersistenceTarget(auth *cliproxyauth.Auth) (string, error) {
+	return s.resolveAuthPath(auth)
+}
+
 func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error) {
 	if auth == nil {
 		return "", fmt.Errorf("auth filestore: auth is nil")

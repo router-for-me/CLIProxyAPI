@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -56,6 +57,12 @@ type Result struct {
 	RetryAfter *time.Duration
 	// Error describes the failure when Success is false.
 	Error *Error
+
+	credentialFingerprint    [sha256.Size]byte
+	hasCredentialFingerprint bool
+	credentialGeneration     uint64
+	hasCredentialGeneration  bool
+	credentialRevisionScope  authCredentialRevisionScope
 }
 
 // Selector chooses an auth candidate for execution.
@@ -111,6 +118,7 @@ type Manager struct {
 	mu                        sync.RWMutex
 	configCooldownMu          sync.Mutex
 	auths                     map[string]*Auth
+	authGeneration            atomic.Uint64
 	scheduler                 *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler

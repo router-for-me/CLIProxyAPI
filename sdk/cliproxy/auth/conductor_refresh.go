@@ -346,7 +346,12 @@ func authAccessToken(auth *Auth) string {
 	if token := authMetadataString(auth, "access_token"); token != "" {
 		return token
 	}
-	return authMetadataString(auth, "accessToken")
+	if token := authMetadataString(auth, "accessToken"); token != "" {
+		return token
+	}
+	// Kimi executes with Attributes["access_token"] when metadata does not
+	// carry an access token, so that fallback is credential-revision material.
+	return authAttribute(auth, "access_token")
 }
 
 func authHasRefreshCredential(auth *Auth) bool {
@@ -484,6 +489,56 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	_, _ = m.refreshAuthForRequest(ctx, id, "")
 }
 
+func (m *Manager) applyCredentialRefresh(ctx context.Context, before, expectedGeneration, refreshed *Auth, now time.Time) (*Auth, []string, bool, error) {
+	if m == nil || before == nil || expectedGeneration == nil || refreshed == nil {
+		return nil, nil, false, nil
+	}
+	for {
+		m.mu.RLock()
+		currentGeneration := m.auths[before.ID]
+		var current *Auth
+		if currentGeneration != nil {
+			current = currentGeneration.Clone()
+		}
+		m.mu.RUnlock()
+		if current == nil {
+			return nil, nil, false, nil
+		}
+		if !sameCredentialRevision(before, current, currentGeneration == expectedGeneration) {
+			return current, nil, false, nil
+		}
+
+		merged := mergeCredentialRefresh(current, before, refreshed)
+		if merged.Runtime == nil {
+			merged.Runtime = current.Runtime
+		}
+		merged.LastRefreshedAt = now
+		merged.NextRefreshAfter = time.Time{}
+		merged.UpdatedAt = now
+		var modelsToResume []string
+		if refreshLifecycleUnchanged(current, before) && refreshLifecycleUnchanged(refreshed, before) {
+			merged.LastError = nil
+			merged.StatusMessage = ""
+			merged.Unavailable = false
+			if merged.Status == StatusError {
+				merged.Status = StatusActive
+			}
+			modelsToResume = clearUnauthorizedModelStates(merged, now)
+		}
+		if m.shouldRefresh(merged, now) {
+			merged.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
+		}
+
+		saved, applied, errUpdate := m.updateAuth(ctx, merged, currentGeneration)
+		if applied {
+			return saved, modelsToResume, true, errUpdate
+		}
+		if errUpdate != nil || saved == nil {
+			return saved, nil, false, errUpdate
+		}
+	}
+}
+
 // refreshAuthForRequest performs a synchronous credential refresh for the given auth.
 // failedAccessToken lets concurrent callers reuse a refresh that already replaced the
 // access token that produced the unauthorized response.
@@ -528,7 +583,8 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		}
 	}
 
-	cloned := auth.Clone()
+	beforeRefresh, _ := snapshotAuthCredential(auth)
+	cloned := beforeRefresh.Clone()
 	updated, err := exec.Refresh(ctx, cloned)
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
@@ -540,7 +596,13 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		unauthorized := isUnauthorizedError(err)
 		shouldReschedule := false
 		m.mu.Lock()
-		if current := m.auths[id]; current != nil {
+		current := m.auths[id]
+		if current != nil && !sameCredentialRevision(beforeRefresh, current, current == auth) {
+			replacement := current.Clone()
+			m.mu.Unlock()
+			return replacement, nil
+		}
+		if current != nil {
 			current.LastError = refreshErrorFromError(err)
 			if unauthorized {
 				current.NextRefreshAfter = time.Time{}
@@ -565,25 +627,13 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if updated == nil {
 		updated = cloned
 	}
-	// Preserve runtime created by the executor during Refresh.
-	// If executor didn't set one, fall back to the previous runtime.
-	if updated.Runtime == nil {
-		updated.Runtime = auth.Runtime
+	saved, modelsToResume, applied, errUpdate := m.applyCredentialRefresh(ctx, beforeRefresh, auth, updated, now)
+	if !applied {
+		if saved != nil {
+			return saved, nil
+		}
+		return nil, errUpdate
 	}
-	updated.LastRefreshedAt = now
-	updated.NextRefreshAfter = time.Time{}
-	updated.LastError = nil
-	updated.StatusMessage = ""
-	updated.Unavailable = false
-	if updated.Status == StatusError {
-		updated.Status = StatusActive
-	}
-	updated.UpdatedAt = now
-	modelsToResume := clearUnauthorizedModelStates(updated, now)
-	if m.shouldRefresh(updated, now) {
-		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
-	}
-	saved, errUpdate := m.Update(ctx, updated)
 	for _, model := range modelsToResume {
 		registry.GetGlobalRegistry().ResumeClientModel(id, model)
 	}
