@@ -1369,15 +1369,20 @@ func vertexSALocation(auth *Auth) string {
 // (auth.Disabled or Status StatusDisabled) and peers currently blocked for
 // the model (quota cooldown, retry-after, or auth-level unavailability, as
 // judged by isAuthBlockedForModel) cannot serve requests, so they are ignored
-// when judging whether an alternative endpoint exists. When pollable peers
-// exist, a transport failure is specific to this auth's endpoint and rotation
-// can only reach a healthy credential if this auth cools down. Caller must
-// hold m.mu.
+// when judging whether an alternative endpoint exists. Peers that do not
+// support the route model (per authSupportsRouteModel, the same judgment
+// request selection applies) can never be picked for this model and are
+// ignored too, otherwise a healthy but model-ineligible peer would hide the
+// endpoint uniqueness and leave polling stuck on the failing auth. When
+// pollable peers exist, a transport failure is specific to this auth's
+// endpoint and rotation can only reach a healthy credential if this auth
+// cools down. Caller must hold m.mu.
 func (m *Manager) vertexTransportFailureIsAuthSpecificLocked(auth *Auth, modelKey string, now time.Time) bool {
 	loc := vertexSALocation(auth)
 	if loc == "" {
 		return false
 	}
+	registryRef := registry.GetGlobalRegistry()
 	hasPeer := false
 	for _, peer := range m.auths {
 		if peer == nil || peer.ID == auth.ID {
@@ -1391,6 +1396,9 @@ func (m *Manager) vertexTransportFailureIsAuthSpecificLocked(auth *Auth, modelKe
 		}
 		peerLoc := vertexSALocation(peer)
 		if peerLoc == "" {
+			continue
+		}
+		if !m.authSupportsRouteModel(registryRef, peer, modelKey) {
 			continue
 		}
 		hasPeer = true

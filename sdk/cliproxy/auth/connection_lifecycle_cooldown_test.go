@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 func TestManager_MarkResult_ConnectionLifecycleDoesNotCooldown(t *testing.T) {
@@ -509,6 +510,14 @@ func newVertexSATestAuth(id, location string) *Auth {
 	return &Auth{ID: id, Provider: "vertex", Metadata: metadata}
 }
 
+// registerClientModelForTest registers a route model for an auth in the global
+// registry, mirroring production where client models are registered at the
+// service layer. Only auths that register the model count as pollable peers
+// for request selection (see Manager.authSupportsRouteModel).
+func registerClientModelForTest(authID, model string) {
+	registry.GetGlobalRegistry().RegisterClient(authID, "vertex", []*registry.ModelInfo{{ID: model}})
+}
+
 func TestManager_MarkResult_TransportFailureWithUniqueVertexLocationStillCooldowns(t *testing.T) {
 	previous := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
@@ -526,9 +535,13 @@ func TestManager_MarkResult_TransportFailureWithUniqueVertexLocationStillCooldow
 			t.Fatalf("register auth: %v", errRegister)
 		}
 	}
+	// The US peer must register the route model to count as a pollable
+	// alternative endpoint for the model-level attribution below.
 	transportErr := resultErrorFromError(fmt.Errorf("dial tcp: lookup europe-west4-aiplatform.googleapis.com: no such host"))
 
 	model := "gemini-2.5-pro"
+	registerClientModelForTest(authA.ID, model)
+	registerClientModelForTest(authB.ID, model)
 	m.MarkResult(context.Background(), Result{
 		AuthID:   authB.ID,
 		Provider: authB.Provider,
@@ -749,6 +762,10 @@ func TestManager_MarkResult_TransportFailureWithSharedVertexLocationSkipsCooldow
 			t.Fatalf("register auth: %v", errRegister)
 		}
 	}
+	// Both auths register the route model, so the shared-location peer is a
+	// pollable alternative and the endpoint is not unique.
+	registerClientModelForTest(sharedA.ID, model)
+	registerClientModelForTest(sharedB.ID, model)
 	mShared.MarkResult(context.Background(), Result{
 		AuthID:   sharedA.ID,
 		Provider: sharedA.Provider,
@@ -861,6 +878,10 @@ func TestManager_MarkResult_VertexEndpointConnectionRefusedStillCooldowns(t *tes
 	// A direct endpoint failure (connection refused) must keep cooldown when
 	// the location is unique in the pool.
 	model := "gemini-2.5-pro"
+	// The US peer must register the route model to count as a pollable
+	// alternative endpoint for the model-level attribution below.
+	registerClientModelForTest(authUS.ID, model)
+	registerClientModelForTest(authEU.ID, model)
 	m.MarkResult(context.Background(), Result{
 		AuthID:   authEU.ID,
 		Provider: authEU.Provider,
@@ -983,6 +1004,11 @@ func TestManager_MarkResult_VertexCoolingPeerStillCooldowns(t *testing.T) {
 			t.Fatalf("register auth: %v", errRegister)
 		}
 	}
+	// The US auth must register the route model to count as the only reachable
+	// alternative endpoint for the model-level attribution below.
+	registerClientModelForTest(authUS.ID, model)
+	registerClientModelForTest(authEU.ID, model)
+	registerClientModelForTest(authEUPeer.ID, model)
 	if blocked, _, _ := isAuthBlockedForModel(authEUPeer, model, now); !blocked {
 		t.Fatalf("expected cooling peer to be blocked for model")
 	}
@@ -1067,6 +1093,10 @@ func TestManager_MarkResult_VertexExpiredCooldownPeerSkipsCooldown(t *testing.T)
 			t.Fatalf("register auth: %v", errRegister)
 		}
 	}
+	// The same-location peer must also register the route model: its cooldown
+	// expired and it can serve the model, so the endpoint stays shared.
+	registerClientModelForTest(authEU.ID, model)
+	registerClientModelForTest(authPeer.ID, model)
 	if blocked, _, _ := isAuthBlockedForModel(authPeer, model, now); blocked {
 		t.Fatalf("expected expired-cooldown peer to be pollable")
 	}
@@ -1080,4 +1110,61 @@ func TestManager_MarkResult_VertexExpiredCooldownPeerSkipsCooldown(t *testing.T)
 	// The same-location peer's cooldown has expired, so it is pollable again
 	// and the endpoint is shared: cooldown must stay skipped.
 	assertNoCooldown(t, m, authEU.ID, model)
+}
+
+func TestManager_MarkResult_VertexModelIneligiblePeerStillCooldowns(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	model := "gemini-2.5-pro"
+	endpointErr := resultErrorFromError(fmt.Errorf("dial tcp 142.250.4.1:443: connect: connection refused"))
+
+	m := NewManager(nil, nil, nil)
+	authEU := newVertexSATestAuth("auth-vertex-model-ineligible-eu", "europe-west4")
+	// Same-location peer that is ready but does not register the route model.
+	// Request selection would never pick it for this model, so it must not
+	// hide endpoint uniqueness either.
+	authEUPeer := newVertexSATestAuth("auth-vertex-model-ineligible-eu-peer", "europe-west4")
+	authUS := newVertexSATestAuth("auth-vertex-model-ineligible-us", "us-central1")
+	for _, a := range []*Auth{authEU, authEUPeer, authUS} {
+		if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+	}
+	// Only the US credential registers the route model, so it is the only
+	// pollable alternative endpoint for this model.
+	registerClientModelForTest(authUS.ID, model)
+
+	now := time.Now()
+	if blocked, _, _ := isAuthBlockedForModel(authEUPeer, model, now); blocked {
+		t.Fatalf("expected same-location peer to be ready")
+	}
+	registryRef := registry.GetGlobalRegistry()
+	if m.authSupportsRouteModel(registryRef, authEUPeer, model) {
+		t.Fatalf("expected model-ineligible peer to be excluded from selection")
+	}
+	if !m.authSupportsRouteModel(registryRef, authUS, model) {
+		t.Fatalf("expected US auth to support the route model")
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authEU.ID,
+		Provider: authEU.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    endpointErr,
+	})
+	updated, ok := m.GetByID(authEU.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil || state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected model-ineligible same-location peer to keep model cooldown")
+	}
 }
