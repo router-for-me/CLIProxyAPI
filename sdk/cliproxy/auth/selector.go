@@ -842,15 +842,28 @@ func (s *SessionAffinitySelector) rebindAliasGroupCAS(sessionKey string, expecte
 // keep selecting a failed auth. The merge is retried with fresh observation
 // when a concurrent writer invalidates the expectations (bounded).
 func (s *SessionAffinitySelector) mergeSplitAliasGroupsCAS(cacheKey, fallbackKey string, authID string) bool {
+	// retainedF holds the fallback group's aliases once its delete has
+	// committed. A retry after a lost primary CAS would otherwise re-observe
+	// the (now deleted) fallback entry and rebuild merged from cacheKey and
+	// fallbackKey alone, permanently dropping the fallback group's
+	// historical aliases from the rebound group.
+	//
+	// Mirror of CLIProxyAPI e768fba9.
+	var retainedF []string
 	for attempt := 0; attempt < 3; attempt++ {
 		authP, genP, aliasesP, okP := s.cache.GetWithGeneration(cacheKey)
 		authF, genF, aliasesF, okF := s.cache.GetWithGeneration(fallbackKey)
+		if !okF {
+			aliasesF = retainedF
+		}
 		merged := mergeSessionAliases(aliasesP, aliasesF...)
 		merged = mergeSessionAliases(merged, cacheKey, fallbackKey)
 		if okF && authF != authID {
-			if removed := s.cache.CompareAndDeleteGroup(fallbackKey, authF, genF, aliasesF); removed == nil {
+			removed := s.cache.CompareAndDeleteGroup(fallbackKey, authF, genF, aliasesF)
+			if removed == nil {
 				continue
 			}
+			retainedF = mergeSessionAliases(retainedF, removed...)
 		}
 		if okP {
 			if s.cache.CompareAndReplaceAliases(authP, genP, aliasesP, authID, merged...) {

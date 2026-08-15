@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"testing"
@@ -206,5 +207,76 @@ func TestCompareAndDeleteGroupRejectsStaleObservation(t *testing.T) {
 	}
 	if _, _, _, ok := cache.GetWithGeneration(key); ok {
 		t.Fatal("group still present after fresh CompareAndDeleteGroup")
+	}
+}
+
+// TestMergeSplitGroupsRetainsFallbackAliasesUnderCASContention covers the
+// codex P2 follow-up on PR #4881: the fallback delete commits before the
+// primary CAS, so a primary CAS that loses to a concurrent writer must not
+// rebuild merged from cacheKey and fallbackKey alone — the fallback group's
+// historical aliases have to survive via the retained observation.
+//
+// The contending writer uses CompareAndReplaceAliases itself, so its bump
+// only lands while the primary group is still in its pre-merge state; once
+// the merge commits, the contender's CAS refuses and cannot corrupt the
+// result. Both interleavings are therefore valid and the assertions hold
+// either way.
+//
+// Mirror of CLIProxyAPI e768fba9.
+func TestMergeSplitGroupsRetainsFallbackAliasesUnderCASContention(t *testing.T) {
+	t.Parallel()
+
+	for i := 0; i < 2000; i++ {
+		selector := NewSessionAffinitySelector(&FillFirstSelector{})
+		cacheKey := fmt.Sprintf("gemini::pck:pk%d::test-model", i)
+		fallbackKey := fmt.Sprintf("gemini::conv:c1-%d::test-model", i)
+		historical := fmt.Sprintf("gemini::conv:c0-%d::test-model", i)
+		scratch := fmt.Sprintf("gemini::scratch:%d::test-model", i)
+		selector.cache.SetAliases("auth-a", cacheKey)
+		selector.cache.SetAliases("auth-b", fallbackKey, historical)
+
+		// A concurrent writer attaches a scratch alias to the primary group
+		// right after the fallback group disappears — the interleaving that
+		// makes the merge's first primary CAS lose.
+		done := make(chan struct{})
+		finished := make(chan struct{})
+		go func() {
+			defer close(done)
+			bumps := 0
+			for {
+				select {
+				case <-finished:
+					return
+				default:
+				}
+				if _, _, _, ok := selector.cache.GetWithGeneration(fallbackKey); ok {
+					continue
+				}
+				if bumps >= 2 {
+					return
+				}
+				authP, genP, aliasesP, okP := selector.cache.GetWithGeneration(cacheKey)
+				if okP {
+					bumped := append(append([]string(nil), aliasesP...), scratch)
+					if selector.cache.CompareAndReplaceAliases(authP, genP, aliasesP, authP, bumped...) {
+						bumps++
+					}
+				}
+			}
+		}()
+
+		merged := selector.mergeSplitAliasGroupsCAS(cacheKey, fallbackKey, "auth-c")
+		close(finished)
+		<-done
+		if !merged {
+			t.Fatalf("iteration %d: mergeSplitAliasGroupsCAS() = false under single-bump contention, want true", i)
+		}
+		got, _, aliases, ok := selector.cache.GetWithGeneration(cacheKey)
+		if !ok || got != "auth-c" {
+			t.Fatalf("iteration %d: merged group = %q, ok=%v; want auth-c", i, got, ok)
+		}
+		if !slices.Contains(aliases, historical) {
+			t.Fatalf("iteration %d: merged aliases %v missing historical fallback alias %q", i, aliases, historical)
+		}
 	}
 }
