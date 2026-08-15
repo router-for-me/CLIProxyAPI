@@ -532,6 +532,11 @@ func TestEmptyCompletionTolerantUsage(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "openai array content parts pass through as unknown data",
+			payload:  []byte(`{"id":"chatcmpl-x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":[{"type":"output_text","text":"hello"}]},"finish_reason":"stop"}]}`),
+			expected: false,
+		},
+		{
 			name:     "openai completion_tokens negative stays empty",
 			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":-5}}`),
 			expected: true,

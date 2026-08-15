@@ -350,6 +350,12 @@ func (a *emptyCompletionAccum) evalOpenAI(data []byte) bool {
 	a.recognized = true
 	var chunk openAIChunk
 	if err := json.Unmarshal(data, &chunk); err != nil {
+		// A recognized choices-bearing payload whose shape does not decode
+		// (for example message.content as an array of content parts) carries
+		// forward-compatible output we cannot inspect. Treat it as unknown
+		// data so it passes through instead of being misjudged as an empty
+		// completion.
+		a.sawUnknownData = true
 		return true
 	}
 	if chunk.Usage != nil && chunk.Usage.CompletionTokens != nil {
