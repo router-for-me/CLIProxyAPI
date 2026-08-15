@@ -694,48 +694,6 @@ func TestBackupSummaryCounts(t *testing.T) {
 	if got := bundle.Summary["internal_users"]; got != 1 {
 		t.Fatalf("internal_users summary = %d, want 1", got)
 	}
-	// The handler-facing helper must surface the same counts from the header.
-	if got := bundle.ResourceRowCounts()["api_keys"]; got != 2 {
-		t.Fatalf("ResourceRowCounts api_keys = %d, want 2", got)
-	}
-	if got := bundle.ResourceRowCounts()["internal_users"]; got != 1 {
-		t.Fatalf("ResourceRowCounts internal_users = %d, want 1", got)
-	}
-}
-
-// TestBackupResourceRowCountsLegacyFallback pins the compatibility contract for
-// bundles exported before the header summary existed: when Summary is absent,
-// ResourceRowCounts must derive the per-resource counts from the exported rows
-// themselves.
-func TestBackupResourceRowCountsLegacyFallback(t *testing.T) {
-	st := roundTripTestStore(t, "backup_sum_legacy_"+randSuffix())
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	seedBackupTestData(t, st)
-
-	bundle, err := st.ExportData(ctx, BackupExportOpts{})
-	if err != nil {
-		t.Fatalf("ExportData: %v", err)
-	}
-	// Simulate a legacy bundle by round-tripping through JSON and dropping the
-	// header summary entirely.
-	enc, err := json.Marshal(bundle)
-	if err != nil {
-		t.Fatalf("marshal bundle: %v", err)
-	}
-	var legacy BackupBundle
-	if err := json.Unmarshal(enc, &legacy); err != nil {
-		t.Fatalf("unmarshal bundle: %v", err)
-	}
-	legacy.Summary = nil
-
-	counts := legacy.ResourceRowCounts()
-	if got := counts["api_keys"]; got != 2 { // 1 api key + 1 policy row
-		t.Fatalf("legacy fallback api_keys = %d, want 2", got)
-	}
-	if got := counts["internal_users"]; got != 1 {
-		t.Fatalf("legacy fallback internal_users = %d, want 1", got)
-	}
 }
 
 // TestBackupStreamExportKeysMatch verifies that the streaming export emits a

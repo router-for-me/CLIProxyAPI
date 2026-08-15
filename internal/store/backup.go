@@ -198,21 +198,6 @@ type BackupBundle struct {
 	Resources  map[string]backupResourceData `json:"resources"`
 }
 
-// ResourceRowCounts returns the per-resource total exported row counts from the
-// bundle's header summary, used by handlers to preview a bundle before import.
-// For bundles exported before the summary header existed, it falls back to
-// deriving the counts from the exported rows themselves.
-func (b BackupBundle) ResourceRowCounts() map[string]int {
-	if len(b.Summary) > 0 {
-		return b.Summary
-	}
-	out := make(map[string]int, len(b.Resources))
-	for key, data := range b.Resources {
-		out[key] = rowCount(data)
-	}
-	return out
-}
-
 // rowCount sums the exported rows across all tables of one resource data set.
 func rowCount(data backupResourceData) int {
 	n := 0

@@ -1967,11 +1967,14 @@ export async function listBackupResources() {
 
 // exportData downloads the exported bundle for the requested resource
 // categories. resources may be null/empty for "all data". When download is
-// true the browser saves the resulting JSON to a file; otherwise the bundle is
-// returned so callers can inspect it.
+// true the browser requests the server's streaming export (?download=1) and
+// saves the streamed bytes straight to a file — the Go side never assembles
+// the whole bundle in memory and the browser never re-serializes it. When
+// download is false the parsed bundle is returned so callers can inspect it.
 export async function exportData(resources, { download = false } = {}) {
   const qs = new URLSearchParams();
   if (resources && resources.length) qs.set('resources', resources.join(','));
+  if (download) qs.set('download', '1');
   const path = `/export${qs.toString() ? `?${qs.toString()}` : ''}`;
 
   const token = getStoredToken();
@@ -1986,10 +1989,9 @@ export async function exportData(resources, { download = false } = {}) {
     } catch { /* keep default */ }
     throw new ApiError(message, res.status);
   }
-  const bundle = await res.json();
 
   if (download) {
-    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+    const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1998,8 +2000,10 @@ export async function exportData(resources, { download = false } = {}) {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+    return;
   }
-  return bundle;
+
+  return res.json();
 }
 
 // bundleSummary reads the header-only per-resource row-count summary the
