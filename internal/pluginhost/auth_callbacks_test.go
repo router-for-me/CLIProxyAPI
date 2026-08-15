@@ -393,3 +393,86 @@ func TestHostAuthDeleteCallbackRequiresSelector(t *testing.T) {
 		t.Fatal("callFromPlugin() error = nil, want missing selector error")
 	}
 }
+
+func TestHostAuthDeleteCallbackRejectsIndividualVirtualAuth(t *testing.T) {
+	authDir := t.TempDir()
+	sourcePath := filepath.Join(authDir, "source.json")
+	if errWrite := os.WriteFile(sourcePath, []byte(`{"type":"demo","email":"src@example.com","api_key":"ks"}`), 0o600); errWrite != nil {
+		t.Fatalf("write source file: %v", errWrite)
+	}
+	host := New()
+	host.runtimeConfig = &config.Config{AuthDir: authDir}
+	manager := coreauth.NewManager(nil, nil, nil)
+	host.SetAuthManager(manager)
+	virtualAuth := &coreauth.Auth{
+		ID:       "source.json::child",
+		Provider: "demo",
+		FileName: "source.json::child",
+		Label:    "child@example.com",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path":                          sourcePath,
+			coreauth.AttributePluginVirtual: "true",
+			coreauth.AttributeVirtualSource: sourcePath,
+		},
+		Metadata: map[string]any{"type": "demo", "email": "child@example.com"},
+	}
+	if _, errRegister := manager.Register(context.Background(), virtualAuth); errRegister != nil {
+		t.Fatalf("register virtual auth: %v", errRegister)
+	}
+
+	byIndex, errMarshal := json.Marshal(pluginapi.HostAuthDeleteRequest{AuthIndex: virtualAuth.Index})
+	if errMarshal != nil {
+		t.Fatalf("marshal delete by index: %v", errMarshal)
+	}
+	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthDelete, byIndex); errCall == nil {
+		t.Fatal("delete by virtual auth index error = nil, want virtual source guard")
+	}
+	if _, errStat := os.Stat(sourcePath); errStat != nil {
+		t.Fatalf("stat source file after rejected delete: %v", errStat)
+	}
+
+	byName, errMarshal := json.Marshal(pluginapi.HostAuthDeleteRequest{Name: "source.json::child"})
+	if errMarshal != nil {
+		t.Fatalf("marshal delete by name: %v", errMarshal)
+	}
+	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthDelete, byName); errCall == nil {
+		t.Fatal("delete by virtual auth name error = nil, want virtual source guard")
+	}
+
+	bySource, errMarshal := json.Marshal(pluginapi.HostAuthDeleteRequest{Name: "source.json"})
+	if errMarshal != nil {
+		t.Fatalf("marshal delete by source: %v", errMarshal)
+	}
+	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthDelete, bySource); errCall != nil {
+		t.Fatalf("delete by source file name error = %v, want success", errCall)
+	}
+	if _, errStat := os.Stat(sourcePath); !os.IsNotExist(errStat) {
+		t.Fatalf("stat source file after source delete err = %v, want not-exist", errStat)
+	}
+	if auths := manager.List(); len(auths) != 0 {
+		t.Fatalf("auths = %#v, want virtual expansion removed with source", auths)
+	}
+}
+
+func TestHostAuthDeleteCallbackRejectsNonJSONFallback(t *testing.T) {
+	authDir := t.TempDir()
+	notePath := filepath.Join(authDir, "notes.txt")
+	if errWrite := os.WriteFile(notePath, []byte("keep me"), 0o600); errWrite != nil {
+		t.Fatalf("write note file: %v", errWrite)
+	}
+	host := New()
+	host.runtimeConfig = &config.Config{AuthDir: authDir}
+	host.SetAuthManager(coreauth.NewManager(nil, nil, nil))
+
+	req, errMarshal := json.Marshal(pluginapi.HostAuthDeleteRequest{Name: "notes.txt"})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthDelete, req); errCall == nil {
+		t.Fatal("callFromPlugin() error = nil, want non-json rejection")
+	}
+	if _, errStat := os.Stat(notePath); errStat != nil {
+		t.Fatalf("stat note file after rejected delete: %v", errStat)
+	}
+}

@@ -214,6 +214,9 @@ func (h *Host) resolveAuthForDelete(req pluginapi.HostAuthDeleteRequest) (*corea
 		if path == "" {
 			return nil, "", "", fmt.Errorf("auth file path not found for auth_index %s", authIndex)
 		}
+		if errGuard := guardVirtualAuthDelete(auth, ""); errGuard != nil {
+			return nil, "", "", errGuard
+		}
 		return auth, path, deleteNameForAuth(auth, path), nil
 	}
 	manager := h.currentAuthManager()
@@ -222,6 +225,9 @@ func (h *Host) resolveAuthForDelete(req pluginapi.HostAuthDeleteRequest) (*corea
 			path := strings.TrimSpace(authAttribute(auth, "path"))
 			if path == "" {
 				return nil, "", "", fmt.Errorf("auth file path not found for name %s", name)
+			}
+			if errGuard := guardVirtualAuthDelete(auth, name); errGuard != nil {
+				return nil, "", "", errGuard
 			}
 			return auth, path, deleteNameForAuth(auth, path), nil
 		}
@@ -234,12 +240,18 @@ func (h *Host) resolveAuthForDelete(req pluginapi.HostAuthDeleteRequest) (*corea
 				if path == "" {
 					return nil, "", "", fmt.Errorf("auth file path not found for name %s", name)
 				}
+				if errGuard := guardVirtualAuthDelete(auth, name); errGuard != nil {
+					return nil, "", "", errGuard
+				}
 				return auth, path, deleteNameForAuth(auth, path), nil
 			}
 		}
 	}
 	if isUnsafeAuthFileName(name) {
 		return nil, "", "", fmt.Errorf("invalid auth file name")
+	}
+	if !strings.HasSuffix(strings.ToLower(name), ".json") {
+		return nil, "", "", fmt.Errorf("auth file name must end with .json")
 	}
 	authDir := h.resolvedAuthDir()
 	if authDir == "" {
@@ -258,6 +270,30 @@ func (h *Host) resolveAuthForDelete(req pluginapi.HostAuthDeleteRequest) (*corea
 		return nil, "", "", fmt.Errorf("failed to stat auth file: %w", errStat)
 	}
 	return nil, path, filepath.Base(name), nil
+}
+
+// guardVirtualAuthDelete rejects deleting an individual plugin-virtual auth.
+// Virtual auths expanded from one plugin-owned source file share the same backing
+// path, so deleting one child would remove the source file and every sibling.
+// Selecting the physical source file name deletes the whole expansion, matching
+// the management deletion flow.
+func guardVirtualAuthDelete(auth *coreauth.Auth, selectedName string) error {
+	if !coreauth.IsPluginVirtualAuth(auth) {
+		return nil
+	}
+	sourcePath := strings.TrimSpace(authAttribute(auth, coreauth.AttributeVirtualSource))
+	if sourcePath == "" {
+		sourcePath = strings.TrimSpace(authAttribute(auth, "path"))
+	}
+	if sourcePath != "" && selectedName != "" &&
+		strings.EqualFold(filepath.Base(selectedName), filepath.Base(sourcePath)) {
+		return nil
+	}
+	source := filepath.Base(sourcePath)
+	if source == "" || source == "." {
+		source = "its source file"
+	}
+	return fmt.Errorf("auth %s is expanded from a plugin-owned source file; delete %s instead", strings.TrimSpace(auth.ID), source)
 }
 
 func deleteNameForAuth(auth *coreauth.Auth, path string) string {
