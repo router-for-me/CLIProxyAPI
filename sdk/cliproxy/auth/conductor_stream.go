@@ -490,9 +490,16 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		scope.stop()
 
-		buffered, closed, bootstrapErr := readStreamBootstrap(attemptCtx, streamResult.Chunks)
-		if bootstrapErr == nil && scope.timedOut() {
-			bootstrapErr = scope.timeoutError()
+		var (
+			buffered     []cliproxyexecutor.StreamChunk
+			closed       bool
+			bootstrapErr error
+		)
+		if !cliproxyexecutor.DownstreamWebsocket(ctx) {
+			buffered, closed, bootstrapErr = readStreamBootstrap(attemptCtx, streamResult.Chunks)
+			if bootstrapErr == nil && scope.timedOut() {
+				bootstrapErr = scope.timeoutError()
+			}
 		}
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
