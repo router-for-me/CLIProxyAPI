@@ -2002,6 +2002,15 @@ export async function exportData(resources, { download = false } = {}) {
   return bundle;
 }
 
+// bundleSummary reads the header-only per-resource row-count summary the
+// server embeds in the bundle (BackupBundle.Summary: { resourceKey: count }).
+// It lets the import preview show "this file contains N api keys, M users, ..."
+// without parsing every row of content. Returns {} for a null bundle or a
+// bundle with no summary.
+export function bundleSummary(bundle) {
+  return (bundle && bundle.summary) || {};
+}
+
 // importData restores the supplied backup bundle. resources optionally limits
 // the import to a subset of categories; null/empty restores every category
 // present in the bundle. Returns the per-resource import report.
