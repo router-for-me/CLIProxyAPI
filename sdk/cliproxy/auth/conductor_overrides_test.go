@@ -633,6 +633,82 @@ func TestManagerExecute_InvalidAPIKeyFallsBackAndSuspendsAuth(t *testing.T) {
 	}
 }
 
+func TestManagerExecute_InvalidAPIKeyQuarantinesAcrossModels(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	invalidKeyErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `bad response status code 400, body: {"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}`,
+	}
+	executor := &authFallbackExecutor{
+		id: "gemini",
+		executeErrors: map[string]error{
+			"dead-key-auth": invalidKeyErr,
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	modelA := "gemini-2.5-flash"
+	modelB := "gemini-2.5-pro"
+	badAuth := &Auth{ID: "dead-key-auth", Provider: "gemini"}
+	goodAuth := &Auth{ID: "live-key-auth", Provider: "gemini"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "gemini", []*registry.ModelInfo{{ID: modelA}, {ID: modelB}})
+	reg.RegisterClient(goodAuth.ID, "gemini", []*registry.ModelInfo{{ID: modelA}, {ID: modelB}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	respA, errExecute := m.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: modelA}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute model A error = %v, want success", errExecute)
+	}
+	if string(respA.Payload) != goodAuth.ID {
+		t.Fatalf("execute model A payload = %q, want %q", string(respA.Payload), goodAuth.ID)
+	}
+
+	respB, errExecute := m.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: modelB}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute model B error = %v, want success", errExecute)
+	}
+	if string(respB.Payload) != goodAuth.ID {
+		t.Fatalf("execute model B payload = %q, want %q", string(respB.Payload), goodAuth.ID)
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{badAuth.ID, goodAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	for _, targetModel := range []string{modelA, modelB, "gemini-3-flash"} {
+		blocked, reason, next := isAuthBlockedForModel(updatedBad, targetModel, time.Now())
+		if !blocked {
+			t.Fatalf("model %q was unblocked despite invalid API key failure on credential", targetModel)
+		}
+		if reason != blockReasonCooldown || next.IsZero() {
+			t.Fatalf("model %q block reason=%v next=%v, want cooldown ~30m", targetModel, reason, next)
+		}
+	}
+}
+
 func TestManagerExecuteStream_AntigravityInvalidGrantFallsBackAndSuspendsAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	invalidGrantErr := &Error{
