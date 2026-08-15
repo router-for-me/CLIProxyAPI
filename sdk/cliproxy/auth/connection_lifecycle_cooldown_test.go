@@ -774,3 +774,169 @@ func TestManager_MarkResult_TransportFailureWithSharedVertexLocationSkipsCooldow
 	})
 	assertNoCooldown(t, mSingle, single.ID, model)
 }
+
+func TestManager_MarkResult_VertexSharedHostNetworkFailureSkipsCooldown(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	model := "gemini-2.5-pro"
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{name: "network unreachable", err: fmt.Errorf("dial tcp 142.250.4.1:443: connect: network is unreachable")},
+		{name: "dns server misbehaving", err: fmt.Errorf("dial tcp: lookup europe-west4-aiplatform.googleapis.com: server misbehaving")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !isTransportFailureResultError(resultErrorFromError(tc.err)) {
+				t.Fatalf("isTransportFailureResultError(%v) = false, want true", tc.err)
+			}
+
+			// Unique-location vertex auths: shared-host faults cannot prove the
+			// regional endpoint failed, so cooldown must stay skipped.
+			m := NewManager(nil, nil, nil)
+			authUS := newVertexSATestAuth("auth-vertex-shared-fault-us", "us-central1")
+			authEU := newVertexSATestAuth("auth-vertex-shared-fault-eu", "europe-west4")
+			for _, a := range []*Auth{authUS, authEU} {
+				if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+					t.Fatalf("register auth: %v", errRegister)
+				}
+			}
+			m.MarkResult(context.Background(), Result{
+				AuthID:   authEU.ID,
+				Provider: authEU.Provider,
+				Model:    model,
+				Success:  false,
+				Error:    resultErrorFromError(tc.err),
+			})
+			assertNoCooldown(t, m, authEU.ID, model)
+
+			// Auth-level path (empty model) must behave identically.
+			m.MarkResult(context.Background(), Result{
+				AuthID:   authUS.ID,
+				Provider: authUS.Provider,
+				Success:  false,
+				Error:    resultErrorFromError(tc.err),
+			})
+			updatedUS, okUS := m.GetByID(authUS.ID)
+			if !okUS || updatedUS == nil {
+				t.Fatalf("expected auth to be present")
+			}
+			if updatedUS.Unavailable || !updatedUS.NextRetryAfter.IsZero() {
+				t.Fatalf("expected shared-host fault to skip auth-level cooldown, got unavailable=%v next=%v", updatedUS.Unavailable, updatedUS.NextRetryAfter)
+			}
+		})
+	}
+}
+
+func TestManager_MarkResult_VertexEndpointConnectionRefusedStillCooldowns(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	m := NewManager(nil, nil, nil)
+	authUS := newVertexSATestAuth("auth-vertex-refused-us", "us-central1")
+	authEU := newVertexSATestAuth("auth-vertex-refused-eu", "europe-west4")
+	for _, a := range []*Auth{authUS, authEU} {
+		if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+	}
+	endpointErr := resultErrorFromError(fmt.Errorf("dial tcp 142.250.4.1:443: connect: connection refused"))
+	if !isTransportFailureResultError(endpointErr) {
+		t.Fatalf("isTransportFailureResultError(%#v) = false, want true", endpointErr)
+	}
+
+	// A direct endpoint failure (connection refused) must keep cooldown when
+	// the location is unique in the pool.
+	model := "gemini-2.5-pro"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authEU.ID,
+		Provider: authEU.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    endpointErr,
+	})
+	updated, ok := m.GetByID(authEU.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil || state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected unique-location vertex endpoint failure (connection refused) to keep cooldown")
+	}
+
+	// Auth-level path (empty model) must also keep cooldown.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authUS.ID,
+		Provider: authUS.Provider,
+		Success:  false,
+		Error:    endpointErr,
+	})
+	updatedUS, okUS := m.GetByID(authUS.ID)
+	if !okUS || updatedUS == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updatedUS.NextRetryAfter.IsZero() {
+		t.Fatalf("expected auth-level unique-location vertex endpoint failure to keep cooldown")
+	}
+}
+
+func TestManager_MarkResult_VertexDisabledPeerSkipsCooldown(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	m := NewManager(nil, nil, nil)
+	authUS := newVertexSATestAuth("auth-vertex-disabled-peer-us", "us-central1")
+	authUS.Disabled = true
+	authEU := newVertexSATestAuth("auth-vertex-disabled-peer-eu", "europe-west4")
+	for _, a := range []*Auth{authUS, authEU} {
+		if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+	}
+	endpointErr := resultErrorFromError(fmt.Errorf("dial tcp 142.250.4.1:443: connect: connection refused"))
+
+	model := "gemini-2.5-pro"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authEU.ID,
+		Provider: authEU.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    endpointErr,
+	})
+	// The only other vertex SA auth is disabled, so the failing auth is the
+	// only pollable credential and must not be cooled down.
+	assertNoCooldown(t, m, authEU.ID, model)
+
+	// Auth-level path (empty model) must behave identically.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authEU.ID,
+		Provider: authEU.Provider,
+		Success:  false,
+		Error:    endpointErr,
+	})
+	updated, ok := m.GetByID(authEU.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected disabled-peer failure to skip auth-level cooldown, got unavailable=%v next=%v", updated.Unavailable, updated.NextRetryAfter)
+	}
+}

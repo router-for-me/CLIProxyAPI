@@ -1327,15 +1327,17 @@ func shouldSkipCredentialCooldownForAuth(err *Error, auth *Auth) bool {
 // pool-aware Vertex regional-endpoint disambiguation. A transport failure on
 // a Vertex service-account auth whose regional endpoint is unique in the pool
 // (other Vertex service-account auths exist, none sharing its location) is an
-// auth-specific routing fault and must keep credential cooldown. Failures in
-// the shared proxy dial layer never reach a regional endpoint, so they are
-// never attributed to one. Caller must hold m.mu.
+// auth-specific routing fault and must keep credential cooldown. Only failure
+// messages that can point to the failing endpoint are attributed; shared-host
+// faults (network unreachable, DNS server misbehaving, operation timed out)
+// and proxy dial failures never reach a regional endpoint and are never
+// attributed to one. Caller must hold m.mu.
 func (m *Manager) shouldSkipCredentialCooldownPoolAware(err *Error, auth *Auth) bool {
 	if !shouldSkipCredentialCooldownForAuth(err, auth) {
 		return false
 	}
 	if isTransportFailureResultError(err) &&
-		!isProxyConnectFailureMessage(err.Message) &&
+		isVertexEndpointFailureMessage(err.Message) &&
 		m.vertexTransportFailureIsAuthSpecificLocked(auth) {
 		return false
 	}
@@ -1361,10 +1363,13 @@ func vertexSALocation(auth *Auth) string {
 }
 
 // vertexTransportFailureIsAuthSpecificLocked reports whether the given Vertex
-// service-account auth routes through a regional endpoint that no other Vertex
-// service-account auth in the pool shares. When such peers exist, a transport
-// failure is specific to this auth's endpoint and rotation can only reach a
-// healthy credential if this auth cools down. Caller must hold m.mu.
+// service-account auth routes through a regional endpoint that no other
+// pollable Vertex service-account auth in the pool shares. Disabled peers
+// (auth.Disabled or Status StatusDisabled) cannot serve requests, so they are
+// ignored when judging whether an alternative endpoint exists. When such peers
+// exist, a transport failure is specific to this auth's endpoint and rotation
+// can only reach a healthy credential if this auth cools down. Caller must
+// hold m.mu.
 func (m *Manager) vertexTransportFailureIsAuthSpecificLocked(auth *Auth) bool {
 	loc := vertexSALocation(auth)
 	if loc == "" {
@@ -1373,6 +1378,9 @@ func (m *Manager) vertexTransportFailureIsAuthSpecificLocked(auth *Auth) bool {
 	hasPeer := false
 	for _, peer := range m.auths {
 		if peer == nil || peer.ID == auth.ID {
+			continue
+		}
+		if peer.Disabled || peer.Status == StatusDisabled {
 			continue
 		}
 		peerLoc := vertexSALocation(peer)
@@ -1487,14 +1495,39 @@ func hasTransportFailureMessage(message string) bool {
 	return false
 }
 
-// isProxyConnectFailureMessage reports whether a message indicates a failure
-// establishing the proxy connection itself (e.g. "proxyconnect tcp: dial tcp
-// 127.0.0.1:7890: connect: connection refused"). Such failures occur in the
-// shared proxy dial layer before any provider regional endpoint is reached, so
-// they must not be attributed to a Vertex location endpoint.
-func isProxyConnectFailureMessage(message string) bool {
+// isVertexEndpointFailureMessage reports whether a message can be attributed
+// to a specific provider regional endpoint, so it may restore credential
+// cooldown for a unique-location Vertex auth. Only failures targeting the
+// endpoint itself qualify: NXDOMAIN ("no such host"), refused/reset
+// connections, broken pipes, dial/read timeouts and TLS handshake timeouts.
+// Shared-host or shared-layer faults ("network is unreachable", DNS "server
+// misbehaving", "operation timed out") and "proxyconnect tcp" proxy dial
+// failures do not prove the endpoint failed and are never attributed.
+func isVertexEndpointFailureMessage(message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
-	return lower != "" && strings.Contains(lower, "proxyconnect tcp")
+	if lower == "" || strings.Contains(lower, "proxyconnect tcp") {
+		return false
+	}
+	for _, pattern := range vertexEndpointFailureMessagePatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// vertexEndpointFailureMessagePatterns are lowercase substrings identifying
+// transport failures that point at a specific regional endpoint. Messages not
+// matching any pattern are treated as shared-host or shared-layer faults and
+// never attributed to a Vertex location endpoint.
+var vertexEndpointFailureMessagePatterns = []string{
+	"no such host",
+	"connection refused",
+	"connection reset",
+	"broken pipe",
+	"i/o timeout",
+	"connection timed out",
+	"tls handshake timeout",
 }
 
 // transportFailureMessagePatterns are lowercase substrings identifying
