@@ -77,6 +77,7 @@ const maxStreamBootstrapBytes = 1 << 20
 // completions.
 type openAIChunk struct {
 	Choices []struct {
+		Text  string `json:"text"`
 		Delta struct {
 			Content          string            `json:"content"`
 			ReasoningContent string            `json:"reasoning_content"`
@@ -103,11 +104,26 @@ type openAIChunk struct {
 // nonEmptyJSONPayload reports whether raw holds a payload beyond an empty
 // null, empty string, empty object, or empty array.
 func nonEmptyJSONPayload(raw json.RawMessage) bool {
-	s := strings.TrimSpace(string(raw))
-	if s == "" || s == "null" || s == `""` || s == "{}" || s == "[]" {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		return false
 	}
-	return true
+	var val any
+	if err := json.Unmarshal(trimmed, &val); err != nil {
+		return false
+	}
+	switch v := val.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(v) != ""
+	case map[string]any:
+		return len(v) > 0
+	case []any:
+		return len(v) > 0
+	default:
+		return true
+	}
 }
 
 func nonEmptyAudioPayload(raw json.RawMessage) bool {
@@ -374,7 +390,7 @@ func (a *emptyCompletionAccum) evalOpenAI(data []byte) bool {
 				a.blocked = true
 			}
 		}
-		content := ch.Delta.Content + ch.Message.Content + ch.Delta.ReasoningContent + ch.Message.ReasoningContent
+		content := ch.Text + ch.Delta.Content + ch.Message.Content + ch.Delta.ReasoningContent + ch.Message.ReasoningContent
 		if strings.TrimSpace(content) != "" {
 			a.hasContent = true
 		}

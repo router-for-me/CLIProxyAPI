@@ -56,7 +56,7 @@ func (e *emptyCompletionTestExecutor) Execute(ctx context.Context, auth *Auth, _
 	// The first auth picked returns an empty completion; every subsequent auth
 	// returns real content. This guarantees the rotation test exercises the
 	// empty-completion failure path regardless of global selector state.
-	if e.firstExecute == auth.ID {
+	if len(e.executePayloads) == 0 && e.firstExecute == auth.ID {
 		return cliproxyexecutor.Response{Payload: []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`)}, nil
 	}
 	if p, ok := e.executePayloads[auth.ID]; ok {
@@ -312,6 +312,26 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "gemini non-stream whitespace object inlineData part is empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"inlineData":{  }}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`),
+			expected: true,
+		},
+		{
+			name:     "gemini non-stream whitespace array functionCall part is empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":[  ]}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`),
+			expected: true,
+		},
+		{
+			name:     "gemini sse whitespace inlineData stream is empty",
+			payload:  []byte("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"inlineData\":{ }}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"candidatesTokenCount\":0}}\n\n"),
+			expected: true,
+		},
+		{
+			name:     "gemini sse whitespace functionCall array stream is empty",
+			payload:  []byte("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":[ ]}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"candidatesTokenCount\":0}}\n\n"),
+			expected: true,
+		},
+		{
 			name:     "gemini non-stream null functionResponse part is empty",
 			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionResponse":null}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`),
 			expected: true,
@@ -394,6 +414,41 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 		{
 			name:     "openai non-stream stop empty is empty",
 			payload:  []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`),
+			expected: true,
+		},
+		{
+			name:     "openai legacy non-stream text content is not empty",
+			payload:  []byte(`{"choices":[{"text":"hello","finish_reason":"stop"}]}`),
+			expected: false,
+		},
+		{
+			name:     "openai legacy non-stream text content with zero usage is not empty",
+			payload:  []byte(`{"choices":[{"text":"hello","finish_reason":"stop"}],"usage":{"completion_tokens":0}}`),
+			expected: false,
+		},
+		{
+			name:     "openai legacy non-stream empty text is empty",
+			payload:  []byte(`{"choices":[{"text":"","finish_reason":"stop"}],"usage":{"completion_tokens":0}}`),
+			expected: true,
+		},
+		{
+			name:     "openai legacy non-stream whitespace text is empty",
+			payload:  []byte(`{"choices":[{"text":"   ","finish_reason":"stop"}],"usage":{"completion_tokens":0}}`),
+			expected: true,
+		},
+		{
+			name:     "openai legacy sse text content stream is not empty",
+			payload:  []byte("data: {\"choices\":[{\"text\":\"hello\",\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"text\":\"\",\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+			expected: false,
+		},
+		{
+			name:     "openai legacy sse empty text stream is empty",
+			payload:  []byte("data: {\"choices\":[{\"text\":\"\",\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}\n\ndata: [DONE]\n\n"),
+			expected: true,
+		},
+		{
+			name:     "openai legacy sse whitespace text stream is empty",
+			payload:  []byte("data: {\"choices\":[{\"text\":\"   \",\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}\n\ndata: [DONE]\n\n"),
 			expected: true,
 		},
 		{
@@ -1013,6 +1068,11 @@ func TestEmptyCompletionMeaningfulFields(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "gemini executableCode whitespace object stays empty",
+			payload:  []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"executableCode":{  }}]},"finishReason":"STOP"}]}`),
+			expected: true,
+		},
+		{
 			name:     "gemini codeExecutionResult with payload is not empty",
 			payload:  []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"codeExecutionResult":{"outcome":"OK","output":"1"}}]},"finishReason":"STOP"}]}`),
 			expected: false,
@@ -1025,6 +1085,11 @@ func TestEmptyCompletionMeaningfulFields(t *testing.T) {
 		{
 			name:     "gemini codeExecutionResult empty object stays empty",
 			payload:  []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"codeExecutionResult":{}}]},"finishReason":"STOP"}]}`),
+			expected: true,
+		},
+		{
+			name:     "gemini codeExecutionResult whitespace object stays empty",
+			payload:  []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"codeExecutionResult":{  }}]},"finishReason":"STOP"}]}`),
 			expected: true,
 		},
 		{
@@ -1301,4 +1366,42 @@ func TestEmptyCompletion_MultiChunkBoundarySafety(t *testing.T) {
 			t.Fatal("detector.Finish() = false, want true")
 		}
 	})
+}
+
+func TestExecuteLegacyOpenAICompletionNotRotated(t *testing.T) {
+	executor := &emptyCompletionTestExecutor{
+		executePayloads: map[string][]byte{},
+		executeCalls:    map[string]int{},
+	}
+	manager, ids, model, _ := newEmptyCompletionTestManager(t, executor)
+
+	legacyPayload := []byte(`{"choices":[{"text":"hello legacy completion","finish_reason":"stop"}]}`)
+	executor.executePayloads[ids[0]] = legacyPayload
+	executor.executePayloads[ids[1]] = legacyPayload
+
+	resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(string(resp.Payload), "hello legacy completion") {
+		t.Fatalf("resp payload = %q, want legacy completion text", string(resp.Payload))
+	}
+	if auth, ok := manager.GetByID(ids[0]); ok && auth != nil {
+		if auth.Unavailable || !auth.NextRetryAfter.IsZero() {
+			t.Fatalf("auth %q was cooled despite returning legacy completion text", ids[0])
+		}
+	}
+}
+
+func TestStreamBootstrapDetectorLegacyOpenAI(t *testing.T) {
+	d := &StreamBootstrapDetector{}
+	if got := d.Observe([]byte("data: {\"choices\":[{\"text\":\"hello\",\"finish_reason\":null}]}\n\n")); got != true {
+		t.Fatalf("Observe(legacy choices.text chunk) = %v, want true (forwarded immediately)", got)
+	}
+	if !d.state.forward {
+		t.Fatal("state.forward = false, want true")
+	}
+	if d.state.isEmptyCompletion() {
+		t.Fatal("isEmptyCompletion = true, want false")
+	}
 }
