@@ -743,7 +743,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		} else {
 			if modelKey != "" {
-				if !shouldSkipCredentialCooldownForAuth(result.Error, auth) {
+				if !m.shouldSkipCredentialCooldownPoolAware(result.Error, auth) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, modelKey)
 					state.Unavailable = true
@@ -884,7 +884,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 			} else {
 				disableCooling := m.cooldownDisabledForAuth(auth)
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				skipCooldown := m.shouldSkipCredentialCooldownPoolAware(result.Error, auth)
+				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling, skipCooldown)
 			}
 		}
 
@@ -1320,6 +1321,67 @@ func shouldSkipCredentialCooldownForAuth(err *Error, auth *Auth) bool {
 		return false
 	}
 	return true
+}
+
+// shouldSkipCredentialCooldownPoolAware extends the per-auth check with
+// pool-aware Vertex regional-endpoint disambiguation. A transport failure on
+// a Vertex service-account auth whose regional endpoint is unique in the pool
+// (other Vertex service-account auths exist, none sharing its location) is an
+// auth-specific routing fault and must keep credential cooldown. Caller must
+// hold m.mu.
+func (m *Manager) shouldSkipCredentialCooldownPoolAware(err *Error, auth *Auth) bool {
+	if !shouldSkipCredentialCooldownForAuth(err, auth) {
+		return false
+	}
+	if isTransportFailureResultError(err) && m.vertexTransportFailureIsAuthSpecificLocked(auth) {
+		return false
+	}
+	return true
+}
+
+// vertexSALocation returns the effective regional location of a Vertex
+// service-account auth, mirroring the executor-side default of us-central1.
+// Non-service-account auths (e.g. vertex apikey compat entries) return "".
+func vertexSALocation(auth *Auth) string {
+	if auth == nil || auth.Provider != "vertex" || auth.Metadata == nil {
+		return ""
+	}
+	if _, ok := auth.Metadata["service_account"]; !ok {
+		return ""
+	}
+	loc, _ := auth.Metadata["location"].(string)
+	loc = strings.TrimSpace(loc)
+	if loc == "" {
+		return "us-central1"
+	}
+	return loc
+}
+
+// vertexTransportFailureIsAuthSpecificLocked reports whether the given Vertex
+// service-account auth routes through a regional endpoint that no other Vertex
+// service-account auth in the pool shares. When such peers exist, a transport
+// failure is specific to this auth's endpoint and rotation can only reach a
+// healthy credential if this auth cools down. Caller must hold m.mu.
+func (m *Manager) vertexTransportFailureIsAuthSpecificLocked(auth *Auth) bool {
+	loc := vertexSALocation(auth)
+	if loc == "" {
+		return false
+	}
+	hasPeer := false
+	for _, peer := range m.auths {
+		if peer == nil || peer.ID == auth.ID {
+			continue
+		}
+		peerLoc := vertexSALocation(peer)
+		if peerLoc == "" {
+			continue
+		}
+		hasPeer = true
+		if peerLoc == loc {
+			return false
+		}
+	}
+	return hasPeer
 }
 
 // authHasProxyOverride reports whether the auth carries its own proxy configuration.
@@ -1863,11 +1925,11 @@ func isRequestInvalidError(err error) bool {
 	return false
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool, skipCooldown bool) {
 	if auth == nil {
 		return
 	}
-	if shouldSkipCredentialCooldownForAuth(resultErr, auth) {
+	if skipCooldown {
 		return
 	}
 	defer func() {

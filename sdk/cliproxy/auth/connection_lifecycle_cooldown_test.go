@@ -494,3 +494,138 @@ func TestManager_MarkResult_RequestScopedTransportTextWithAuthProxySkipsCooldown
 	})
 	assertNoCooldown(t, m, auth.ID, model)
 }
+
+func newVertexSATestAuth(id, location string) *Auth {
+	metadata := map[string]any{
+		"service_account": map[string]any{
+			"project_id":   "test-project",
+			"client_email": "sa@test-project.iam.gserviceaccount.com",
+		},
+		"project_id": "test-project",
+	}
+	if location != "" {
+		metadata["location"] = location
+	}
+	return &Auth{ID: id, Provider: "vertex", Metadata: metadata}
+}
+
+func TestManager_MarkResult_TransportFailureWithUniqueVertexLocationStillCooldowns(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	m := NewManager(nil, nil, nil)
+	authA := newVertexSATestAuth("auth-vertex-us", "us-central1")
+	authB := newVertexSATestAuth("auth-vertex-eu", "europe-west4")
+	for _, a := range []*Auth{authA, authB} {
+		if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+	}
+	transportErr := resultErrorFromError(fmt.Errorf("dial tcp: lookup europe-west4-aiplatform.googleapis.com: no such host"))
+
+	model := "gemini-2.5-pro"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authB.ID,
+		Provider: authB.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    transportErr,
+	})
+
+	updated, ok := m.GetByID(authB.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil || state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected unique-location vertex transport failure to keep cooldown")
+	}
+
+	// Auth-level path (empty model) must also keep cooldown. It needs a
+	// location not used by other pool members to count as auth-specific.
+	authLevel := newVertexSATestAuth("auth-vertex-eu-level", "asia-south1")
+	if _, errRegister := m.Register(context.Background(), authLevel); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authLevel.ID,
+		Provider: authLevel.Provider,
+		Success:  false,
+		Error:    transportErr,
+	})
+	updatedAuthLevel, okAuthLevel := m.GetByID(authLevel.ID)
+	if !okAuthLevel || updatedAuthLevel == nil {
+		t.Fatalf("expected auth-level auth to be present")
+	}
+	if updatedAuthLevel.NextRetryAfter.IsZero() {
+		t.Fatalf("expected auth-level unique-location vertex transport failure to keep cooldown")
+	}
+
+	// Non-transport lifecycle failures (client cancellation) still skip cooldown
+	// even with a unique vertex location.
+	authCancel := newVertexSATestAuth("auth-vertex-ap-cancel", "asia-east1")
+	if _, errRegister := m.Register(context.Background(), authCancel); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authCancel.ID,
+		Provider: authCancel.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    resultErrorFromError(context.Canceled),
+	})
+	assertNoCooldown(t, m, authCancel.ID, model)
+}
+
+func TestManager_MarkResult_TransportFailureWithSharedVertexLocationSkipsCooldown(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	transportErr := resultErrorFromError(fmt.Errorf("dial tcp: lookup us-central1-aiplatform.googleapis.com: no such host"))
+	model := "gemini-2.5-pro"
+
+	// Shared location: the fault may be regional and affect both auths, so
+	// cooldown must stay skipped.
+	mShared := NewManager(nil, nil, nil)
+	sharedA := newVertexSATestAuth("auth-vertex-shared-a", "us-central1")
+	sharedB := newVertexSATestAuth("auth-vertex-shared-b", "us-central1")
+	for _, a := range []*Auth{sharedA, sharedB} {
+		if _, errRegister := mShared.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+	}
+	mShared.MarkResult(context.Background(), Result{
+		AuthID:   sharedA.ID,
+		Provider: sharedA.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    transportErr,
+	})
+	assertNoCooldown(t, mShared, sharedA.ID, model)
+
+	// Single vertex auth: no peer offers an alternative endpoint, so skipping
+	// cooldown must stay in effect (original transport-failure fix).
+	mSingle := NewManager(nil, nil, nil)
+	single := newVertexSATestAuth("auth-vertex-single", "us-central1")
+	if _, errRegister := mSingle.Register(context.Background(), single); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	mSingle.MarkResult(context.Background(), Result{
+		AuthID:   single.ID,
+		Provider: single.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    transportErr,
+	})
+	assertNoCooldown(t, mSingle, single.ID, model)
+}
