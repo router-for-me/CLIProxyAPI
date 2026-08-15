@@ -352,6 +352,26 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: false,
 		},
 		{
+			name:     "gemini non-stream with empty text and thought flag is empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`),
+			expected: true,
+		},
+		{
+			name:     "gemini non-stream with thought flag only is empty",
+			payload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thought":true}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`),
+			expected: true,
+		},
+		{
+			name:     "gemini sse stream with empty text and thought flag is empty",
+			payload:  []byte("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"thought\":true,\"text\":\"\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"candidatesTokenCount\":0}}\n\n"),
+			expected: true,
+		},
+		{
+			name:     "antigravity stream with empty text and thought flag is empty",
+			payload:  []byte("data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"thought\":true,\"text\":\"\"}]},\"finishReason\":\"STOP\"}]}}\n\n"),
+			expected: true,
+		},
+		{
 			name:     "gemini sse empty stream is empty",
 			payload:  []byte("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"candidatesTokenCount\":0}}\n\n"),
 			expected: true,

@@ -218,7 +218,6 @@ type geminiPart struct {
 	FunctionResponse    json.RawMessage `json:"functionResponse"`
 	ExecutableCode      json.RawMessage `json:"executableCode"`
 	CodeExecutionResult json.RawMessage `json:"codeExecutionResult"`
-	Thought             json.RawMessage `json:"thought"`
 }
 
 type geminiCandidate struct {
@@ -745,12 +744,6 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 					nonEmptyJSONPayload(part.FileData) ||
 					nonEmptyJSONPayload(part.FunctionResponse) {
 					a.hasContent = true
-				}
-				if len(part.Thought) > 0 {
-					thoughtStr := strings.TrimSpace(string(part.Thought))
-					if thoughtStr != "" && thoughtStr != "false" && thoughtStr != "null" {
-						a.hasContent = true
-					}
 				}
 				if nonEmptyJSONPayload(part.ExecutableCode) || nonEmptyJSONPayload(part.CodeExecutionResult) {
 					a.hasContent = true
