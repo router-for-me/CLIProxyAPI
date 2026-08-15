@@ -2,6 +2,7 @@ package responses
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1253,5 +1254,111 @@ func TestConvertOpenAIResponsesRequestToClaude_DeduplicatesToolOutputs(t *testin
 
 	if got := msg4Blocks[2].Get("content").String(); got != "empty id output" {
 		t.Fatalf("msg4Blocks[2].content = %q, want 'empty id output'", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_ServiceTierToSpeed(t *testing.T) {
+	tests := []struct {
+		name            string
+		serviceTier     string
+		hasServiceTier  bool
+		reasoningEffort string
+		wantSpeed       string
+		wantSpeedExist  bool
+	}{
+		{
+			name:           "absent service_tier omits speed",
+			hasServiceTier: false,
+			wantSpeedExist: false,
+		},
+		{
+			name:           "default service_tier omits speed",
+			serviceTier:    "default",
+			hasServiceTier: true,
+			wantSpeedExist: false,
+		},
+		{
+			name:           "standard service_tier omits speed",
+			serviceTier:    "standard",
+			hasServiceTier: true,
+			wantSpeedExist: false,
+		},
+		{
+			name:           "unsupported service_tier omits speed",
+			serviceTier:    "flex",
+			hasServiceTier: true,
+			wantSpeedExist: false,
+		},
+		{
+			name:           "priority service_tier emits fast speed",
+			serviceTier:    "priority",
+			hasServiceTier: true,
+			wantSpeed:      "fast",
+			wantSpeedExist: true,
+		},
+		{
+			name:            "priority with low reasoning effort",
+			serviceTier:     "priority",
+			hasServiceTier:  true,
+			reasoningEffort: "low",
+			wantSpeed:       "fast",
+			wantSpeedExist:  true,
+		},
+		{
+			name:            "priority with medium reasoning effort",
+			serviceTier:     "priority",
+			hasServiceTier:  true,
+			reasoningEffort: "medium",
+			wantSpeed:       "fast",
+			wantSpeedExist:  true,
+		},
+		{
+			name:            "priority with high reasoning effort",
+			serviceTier:     "priority",
+			hasServiceTier:  true,
+			reasoningEffort: "high",
+			wantSpeed:       "fast",
+			wantSpeedExist:  true,
+		},
+		{
+			name:            "priority with xhigh reasoning effort",
+			serviceTier:     "priority",
+			hasServiceTier:  true,
+			reasoningEffort: "xhigh",
+			wantSpeed:       "fast",
+			wantSpeedExist:  true,
+		},
+		{
+			name:            "priority with max reasoning effort",
+			serviceTier:     "priority",
+			hasServiceTier:  true,
+			reasoningEffort: "max",
+			wantSpeed:       "fast",
+			wantSpeedExist:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := `{"model":"claude-3-7-sonnet-20250219","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]`
+			if tt.hasServiceTier {
+				raw = fmt.Sprintf(`%s,"service_tier":%q`, raw, tt.serviceTier)
+			}
+			if tt.reasoningEffort != "" {
+				raw = fmt.Sprintf(`%s,"reasoning":{"effort":%q}`, raw, tt.reasoningEffort)
+			}
+			raw += `}`
+
+			out := ConvertOpenAIResponsesRequestToClaude("claude-3-7-sonnet-20250219", []byte(raw), false)
+			root := gjson.ParseBytes(out)
+
+			speedResult := root.Get("speed")
+			if speedResult.Exists() != tt.wantSpeedExist {
+				t.Fatalf("speed exists = %v, want %v. Output: %s", speedResult.Exists(), tt.wantSpeedExist, string(out))
+			}
+			if tt.wantSpeedExist && speedResult.String() != tt.wantSpeed {
+				t.Fatalf("speed = %q, want %q. Output: %s", speedResult.String(), tt.wantSpeed, string(out))
+			}
+		})
 	}
 }
