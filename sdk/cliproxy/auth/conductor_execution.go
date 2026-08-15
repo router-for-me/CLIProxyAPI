@@ -51,6 +51,13 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	tried := extractExcludedAuthIDs(opts.Metadata)
+	// Snapshot the exclusions supplied by the caller through metadata before
+	// the rotation loop starts adding its own; cooldown retries prune only
+	// rotation-added exclusions and must keep the caller-provided set intact.
+	callerExcluded := make(map[string]struct{}, len(tried))
+	for id := range tried {
+		callerExcluded[id] = struct{}{}
+	}
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, tracker, tried)
 		if errExec == nil {
@@ -75,7 +82,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		// a recovered credential instead of failing auth_not_found instantly.
 		// Auths with disable_cooling stay excluded: they never enter cooldown,
 		// so the exclusion is the only anti-hammer guard within one request.
-		tried = m.resetRecoveredExclusions(tried)
+		tried = m.resetRecoveredExclusions(tried, callerExcluded)
 	}
 	if lastErr != nil {
 		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
@@ -107,6 +114,10 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	tried := extractExcludedAuthIDs(opts.Metadata)
+	callerExcluded := make(map[string]struct{}, len(tried))
+	for id := range tried {
+		callerExcluded[id] = struct{}{}
+	}
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, tracker, tried)
 		if errExec == nil {
@@ -131,7 +142,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		// a recovered credential instead of failing auth_not_found instantly.
 		// Auths with disable_cooling stay excluded: they never enter cooldown,
 		// so the exclusion is the only anti-hammer guard within one request.
-		tried = m.resetRecoveredExclusions(tried)
+		tried = m.resetRecoveredExclusions(tried, callerExcluded)
 	}
 	if lastErr != nil {
 		return cliproxyexecutor.Response{}, wrapRouteExhaustion(lastErr, tracker)
@@ -159,6 +170,10 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	tried := extractExcludedAuthIDs(opts.Metadata)
+	callerExcluded := make(map[string]struct{}, len(tried))
+	for id := range tried {
+		callerExcluded[id] = struct{}{}
+	}
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, tracker, tried)
 		if errStream == nil {
@@ -183,7 +198,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		// a recovered credential instead of failing auth_not_found instantly.
 		// Auths with disable_cooling stay excluded: they never enter cooldown,
 		// so the exclusion is the only anti-hammer guard within one request.
-		tried = m.resetRecoveredExclusions(tried)
+		tried = m.resetRecoveredExclusions(tried, callerExcluded)
 	}
 	if lastErr != nil {
 		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
@@ -1379,8 +1394,10 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 // on stale exclusions (auth_not_found) without executing anything. Exclusions
 // are kept for auths with disable_cooling, and while the global disable-cooling
 // flag is on: those never enter cooldown, so the exclusion remains the only
-// guard against re-hammering them within one request.
-func (m *Manager) resetRecoveredExclusions(tried map[string]struct{}) map[string]struct{} {
+// guard against re-hammering them within one request. Entries listed in
+// preserve are kept unconditionally: they came from caller-supplied request
+// metadata, not from this rotation, so a cooldown retry must not discard them.
+func (m *Manager) resetRecoveredExclusions(tried, preserve map[string]struct{}) map[string]struct{} {
 	if len(tried) == 0 {
 		return tried
 	}
@@ -1397,6 +1414,9 @@ func (m *Manager) resetRecoveredExclusions(tried map[string]struct{}) map[string
 		}
 	}
 	m.mu.RUnlock()
+	for id := range preserve {
+		kept[id] = struct{}{}
+	}
 	return kept
 }
 

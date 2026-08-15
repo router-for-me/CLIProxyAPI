@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -112,4 +113,98 @@ func TestCooldownRetryResetsExclusions(t *testing.T) {
 			t.Fatalf("expected 2 executor calls (initial + post-cooldown retry), got %d", got)
 		}
 	})
+}
+
+// idRecordingRateLimitedExecutor behaves like rateLimitedExecutor and records
+// which auth IDs were executed, so a test can prove a caller-excluded
+// credential is never picked after a cooldown retry.
+type idRecordingRateLimitedExecutor struct {
+	mu    sync.Mutex
+	calls map[string]int
+	err   error
+}
+
+func (e *idRecordingRateLimitedExecutor) Identifier() string { return "gemini" }
+
+func (e *idRecordingRateLimitedExecutor) record(id string) {
+	e.mu.Lock()
+	e.calls[id]++
+	e.mu.Unlock()
+}
+
+func (e *idRecordingRateLimitedExecutor) Execute(_ context.Context, a *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.record(a.ID)
+	return cliproxyexecutor.Response{}, e.err
+}
+
+func (e *idRecordingRateLimitedExecutor) ExecuteStream(_ context.Context, a *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.record(a.ID)
+	return nil, e.err
+}
+
+func (e *idRecordingRateLimitedExecutor) CountTokens(_ context.Context, a *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.record(a.ID)
+	return cliproxyexecutor.Response{}, e.err
+}
+
+func (e *idRecordingRateLimitedExecutor) Refresh(_ context.Context, a *Auth) (*Auth, error) {
+	return a, nil
+}
+
+func (e *idRecordingRateLimitedExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *idRecordingRateLimitedExecutor) count(id string) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls[id]
+}
+
+// TestCooldownRetryPreservesCallerExclusions is a regression guard for the
+// codex P2 follow-up on PR #4881: resetRecoveredExclusions must prune only
+// rotation-added exclusions. Caller-provided exclusions from request metadata
+// must survive the cooldown retry, otherwise a credential the caller already
+// ruled out can be executed once the wait completes.
+func TestCooldownRetryPreservesCallerExclusions(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetRetryConfig(1, 5*time.Second, 0)
+	authRateLimited := &Auth{ID: "auth-429", Provider: "gemini", Status: StatusActive}
+	authCallerExcluded := &Auth{ID: "auth-caller", Provider: "gemini", Status: StatusActive}
+	for _, a := range []*Auth{authRateLimited, authCallerExcluded} {
+		if _, err := manager.Register(context.Background(), a); err != nil {
+			t.Fatalf("register auth %s: %v", a.ID, err)
+		}
+	}
+	reg := registry.GetGlobalRegistry()
+	for _, a := range []*Auth{authRateLimited, authCallerExcluded} {
+		reg.RegisterClient(a.ID, "gemini", []*registry.ModelInfo{{ID: "test-model"}})
+	}
+	t.Cleanup(func() {
+		reg.UnregisterClient(authRateLimited.ID)
+		reg.UnregisterClient(authCallerExcluded.ID)
+	})
+	manager.RefreshSchedulerEntry(authRateLimited.ID)
+	manager.RefreshSchedulerEntry(authCallerExcluded.ID)
+	exec := &idRecordingRateLimitedExecutor{
+		calls: make(map[string]int),
+		err:   &retryableRateLimitError{status: http.StatusTooManyRequests, retryAfter: 50 * time.Millisecond},
+	}
+	manager.RegisterExecutor(exec)
+
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.ExcludedAuthIDsMetadataKey: []string{"auth-caller"},
+		},
+	}
+	_, err := manager.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: "test-model"}, opts)
+	if err == nil {
+		t.Fatal("expected rate-limit error")
+	}
+	if got := exec.count("auth-caller"); got != 0 {
+		t.Fatalf("caller-excluded auth executed %d times across cooldown retry", got)
+	}
+	if got := exec.count("auth-429"); got != 2 {
+		t.Fatalf("expected rotation auth to run twice (initial + post-cooldown retry), got %d", got)
+	}
 }
