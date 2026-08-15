@@ -2080,3 +2080,155 @@ func TestManager_RequestScopedNotFoundStopsRetryWithoutSuspendingAuth(t *testing
 		t.Fatalf("expected request-scoped 404 to avoid bad auth model cooldown state, got %#v", state)
 	}
 }
+
+func TestManager_MarkResult_RequestFaultBodyDoesNotCooldownModelOrAuth(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-request-fault",
+		Provider: "deepseek",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "deepseek-chat"
+	// SDK consumer reports a 401 request-fault body directly without knowing the internal requestScopedErrorCode.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusUnauthorized,
+			Message:    `{"error":{"message":"Invalid request parameter","type":"invalid_request_error"}}`,
+		},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Unavailable {
+		t.Fatalf("expected request-scoped 401 to keep auth available, got unavailable=true")
+	}
+	if !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected request-scoped 401 to keep auth cooldown unset, got %v", updated.NextRetryAfter)
+	}
+	if state := updated.ModelStates[model]; state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
+		t.Fatalf("expected request-scoped 401 to avoid model cooldown state, got %#v", state)
+	}
+
+	// SDK consumer uses NewRequestScopedError or MarkRequestScoped explicitly.
+	explicitReqErr := NewRequestScopedError("explicit request fault", http.StatusUnauthorized)
+	if !explicitReqErr.IsRequestScoped() || explicitReqErr.Code != ErrorCodeRequestScoped {
+		t.Fatalf("NewRequestScopedError code = %q, want %q", explicitReqErr.Code, ErrorCodeRequestScoped)
+	}
+	customErr := (&Error{Message: "custom fault", HTTPStatus: http.StatusUnauthorized}).MarkRequestScoped()
+	if !customErr.IsRequestScoped() || customErr.Code != ErrorCodeRequestScoped {
+		t.Fatalf("MarkRequestScoped code = %q, want %q", customErr.Code, ErrorCodeRequestScoped)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    explicitReqErr,
+	})
+	updated, _ = m.GetByID(auth.ID)
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected explicit request-scoped error to keep auth available")
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    customErr,
+	})
+	updated, _ = m.GetByID(auth.ID)
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected MarkRequestScoped error to keep auth available")
+	}
+
+	// Custom non-empty Code with request-fault message payload.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			Code:       "custom_upstream_code",
+			HTTPStatus: http.StatusUnauthorized,
+			Message:    `{"error":{"message":"Invalid request parameter","type":"invalid_request_error"}}`,
+		},
+	})
+	updated, _ = m.GetByID(auth.ID)
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected custom code with request-fault message to keep auth available")
+	}
+
+	// Auth-level request-fault error (empty Model) must also avoid cooling auth.
+	authEmptyModel := &Auth{
+		ID:       "auth-empty-model",
+		Provider: "deepseek",
+	}
+	if _, errRegister := m.Register(context.Background(), authEmptyModel); errRegister != nil {
+		t.Fatalf("register authEmptyModel: %v", errRegister)
+	}
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authEmptyModel.ID,
+		Provider: authEmptyModel.Provider,
+		Model:    "",
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusUnauthorized,
+			Message:    `{"error":{"message":"Invalid request parameter","type":"invalid_request_error"}}`,
+		},
+	})
+	updatedEmptyModel, ok := m.GetByID(authEmptyModel.ID)
+	if !ok || updatedEmptyModel == nil {
+		t.Fatalf("expected authEmptyModel to be present")
+	}
+	if updatedEmptyModel.Unavailable || !updatedEmptyModel.NextRetryAfter.IsZero() {
+		t.Fatalf("expected auth-level request-fault 401 to keep auth available")
+	}
+
+	// Real authentication error must still trigger cooldown.
+	authFail := &Auth{
+		ID:       "auth-real-fail",
+		Provider: "deepseek",
+	}
+	if _, errRegister := m.Register(context.Background(), authFail); errRegister != nil {
+		t.Fatalf("register authFail: %v", errRegister)
+	}
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authFail.ID,
+		Provider: authFail.Provider,
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusUnauthorized,
+			Message:    `{"error":{"message":"Authentication Fails, Your api key is invalid","type":"authentication_error"}}`,
+		},
+	})
+	updatedFail, ok := m.GetByID(authFail.ID)
+	if !ok || updatedFail == nil {
+		t.Fatalf("expected authFail to be present")
+	}
+	if !updatedFail.Unavailable {
+		t.Fatalf("expected real 401 authentication error to mark auth unavailable")
+	}
+	if updatedFail.NextRetryAfter.IsZero() {
+		t.Fatalf("expected real 401 authentication error to set auth cooldown NextRetryAfter")
+	}
+	if state := updatedFail.ModelStates[model]; state == nil || !state.Unavailable || state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected real 401 authentication error to set model cooldown state, got %#v", state)
+	}
+}

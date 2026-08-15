@@ -239,7 +239,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
-			return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, statusErr{code: httpResp.StatusCode, msg: msg})
+			errClassified := classifyClaudeUpstreamError(httpResp.StatusCode, httpResp.Header, []byte(msg))
+			if fastRequest {
+				return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errClassified)
+			}
+			return resp, errClassified
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
@@ -256,7 +260,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		if fastRequest {
 			return resp, newClaudeFastDirectResponseError(httpResp, b)
 		}
-		return resp, classifyClaudeUpstreamError(httpResp.StatusCode, b)
+		return resp, classifyClaudeUpstreamError(httpResp.StatusCode, httpResp.Header, b)
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, claudeResponseContentEncoding(httpResp.Header))
 	if err != nil {
@@ -321,6 +325,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		data,
 		&param,
 	)
+	if responseFormat == sdktranslator.FormatOpenAIResponse {
+		out = helps.EnsureResponsesUsageDetails(out)
+	}
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }

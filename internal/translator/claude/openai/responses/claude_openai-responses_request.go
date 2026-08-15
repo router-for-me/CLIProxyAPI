@@ -1,11 +1,9 @@
 package responses
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"math/big"
 	"strings"
 
 	"github.com/google/uuid"
@@ -114,17 +112,6 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 			}
 		}
-	}
-
-	// Helper for generating tool call IDs when missing
-	genToolCallID := func() string {
-		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-		var b strings.Builder
-		for i := 0; i < 24; i++ {
-			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
-			b.WriteByte(letters[n.Int64()])
-		}
-		return "toolu_" + b.String()
 	}
 
 	// Model
@@ -253,6 +240,21 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		pendingRole = "assistant"
 		pendingToolUseParts = append(pendingToolUseParts, toolUse)
 	}
+
+	lastToolResult := map[string]gjson.Result{}
+	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			switch item.Get("type").String() {
+			case "function_call_output", "custom_tool_call_output":
+				rawID := item.Get("call_id").String()
+				if rawID != "" {
+					lastToolResult[rawID] = item
+				}
+			}
+			return true
+		})
+	}
+	emittedToolResults := map[string]struct{}{}
 
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
@@ -383,7 +385,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				// object because Claude tool_use input must be a JSON object.
 				callID := item.Get("call_id").String()
 				if callID == "" {
-					callID = genToolCallID()
+					callID = common.GenerateClaudeToolCallID()
 				}
 				callID = util.SanitizeClaudeToolID(callID)
 				name := item.Get("name").String()
@@ -412,9 +414,20 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 			case "function_call_output", "custom_tool_call_output":
 				// Map to user tool_result
-				callID := item.Get("call_id").String()
-				callID = util.SanitizeClaudeToolID(callID)
+				rawID := item.Get("call_id").String()
+				callID := util.SanitizeClaudeToolID(rawID)
+				if rawID != "" {
+					if _, exists := emittedToolResults[rawID]; exists {
+						return true
+					}
+					emittedToolResults[rawID] = struct{}{}
+				}
 				output := item.Get("output")
+				if rawID != "" {
+					if lastItem, exists := lastToolResult[rawID]; exists {
+						output = lastItem.Get("output")
+					}
+				}
 				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
 				toolResult = applyResponsesToolResultContent(toolResult, output)

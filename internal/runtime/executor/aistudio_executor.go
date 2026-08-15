@@ -187,6 +187,9 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, body.toFormat, responseFormat, req.Model, opts.OriginalRequest, translatedReq, wsResp.Body, &param)
+	if responseFormat == sdktranslator.FormatOpenAIResponse {
+		out = helps.EnsureResponsesUsageDetails(out)
+	}
 	resp = cliproxyexecutor.Response{Payload: ensureColonSpacedJSON(out), Headers: wsResp.Headers.Clone()}
 	return resp, nil
 }
@@ -290,6 +293,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func(first wsrelay.StreamEvent) {
 		defer close(out)
+		defer reporter.EnsurePublished(ctx)
 		responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 		originalRequest := opts.OriginalRequest
 		if len(originalRequest) == 0 {

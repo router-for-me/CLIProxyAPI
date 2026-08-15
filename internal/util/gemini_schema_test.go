@@ -799,6 +799,64 @@ func TestCleanJSONSchemaForAntigravityResponsePreservesUnions(t *testing.T) {
 	}
 }
 
+func TestCleanJSONSchemaForAntigravityResponsePreservesAdditionalPropertiesFalse(t *testing.T) {
+	input := `{
+		"type":"object",
+		"properties":{
+			"name":{"type":"string"},
+			"nested":{
+				"type":"object",
+				"properties":{
+					"age":{"type":"integer"}
+				},
+				"additionalProperties":false
+			}
+		},
+		"additionalProperties":false
+	}`
+
+	result := gjson.Parse(CleanJSONSchemaForAntigravityResponse(input))
+
+	// Root additionalProperties should be preserved as false
+	rootAP := result.Get("additionalProperties")
+	if !rootAP.Exists() || rootAP.Type != gjson.False {
+		t.Errorf("root additionalProperties = %v, want false; cleaned: %s", rootAP, result.Raw)
+	}
+
+	// Nested additionalProperties should be preserved as false
+	nestedAP := result.Get("properties.nested.additionalProperties")
+	if !nestedAP.Exists() || nestedAP.Type != gjson.False {
+		t.Errorf("nested additionalProperties = %v, want false; cleaned: %s", nestedAP, result.Raw)
+	}
+
+	// Should not have converted additionalProperties into description hints
+	if strings.Contains(result.Raw, "No extra properties allowed") {
+		t.Errorf("expected no description hint for additionalProperties:false, got: %s", result.Raw)
+	}
+
+	// But CleanJSONSchemaForAntigravity (tool path) must still strip it and add hint
+	toolResult := CleanJSONSchemaForAntigravity(input)
+	if strings.Contains(toolResult, `"additionalProperties"`) {
+		t.Errorf("tool schema should not have additionalProperties: %s", toolResult)
+	}
+	if !strings.Contains(toolResult, "No extra properties allowed") {
+		t.Errorf("tool schema should have description hint: %s", toolResult)
+	}
+
+	// Non-false additionalProperties (e.g. true or schema-valued) should still be stripped in response schemas
+	nonFalseInput := `{
+		"type":"object",
+		"properties":{
+			"map":{"type":"object","additionalProperties":{"type":"string"}}
+		},
+		"additionalProperties":true
+	}`
+	nonFalseResult := CleanJSONSchemaForAntigravityResponse(nonFalseInput)
+	if strings.Contains(nonFalseResult, `"additionalProperties"`) {
+		t.Errorf("non-false additionalProperties should be stripped in response schema: %s", nonFalseResult)
+	}
+}
+
 func TestCleanJSONSchemaForAntigravityResponsePreservesEnumType(t *testing.T) {
 	input := `{
 		"type":"object",
@@ -1285,6 +1343,110 @@ func TestCleanJSONSchemaKeepsPropertiesNamedLikeKeywords(t *testing.T) {
 			if !got.Get(path).Exists() {
 				t.Errorf("%s: property %s was removed: %s", cleaner, path, got.Raw)
 			}
+		}
+	}
+}
+
+func TestCleanJSONSchema_ConditionalKeywords(t *testing.T) {
+	// 1. Root-level if/then/else
+	rootInput := `{
+		"type": "object",
+		"properties": { "kind": { "type": "string", "enum": ["buy", "sell"] } },
+		"required": ["kind"],
+		"if":   { "properties": { "kind": { "const": "sell" } } },
+		"then": { "properties": { "sell_reason": { "type": "string", "description": "why the position is being sold" } }, "required": ["sell_reason"] },
+		"else": { "properties": { "buy_reason": { "type": "string" } } }
+	}`
+
+	for name, clean := range map[string]func(string) string{
+		"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"Antigravity":         CleanJSONSchemaForAntigravity,
+		"Gemini":              CleanJSONSchemaForGemini,
+	} {
+		res := gjson.Parse(clean(rootInput))
+		if res.Get("if").Exists() {
+			t.Errorf("[%s] root 'if' was not removed: %s", name, res.Raw)
+		}
+		if res.Get("then").Exists() {
+			t.Errorf("[%s] root 'then' was not removed: %s", name, res.Raw)
+		}
+		if res.Get("else").Exists() {
+			t.Errorf("[%s] root 'else' was not removed: %s", name, res.Raw)
+		}
+		if !res.Get("properties.sell_reason").Exists() {
+			t.Errorf("[%s] then.properties.sell_reason was lost: %s", name, res.Raw)
+		}
+		if !res.Get("properties.buy_reason").Exists() {
+			t.Errorf("[%s] else.properties.buy_reason was lost: %s", name, res.Raw)
+		}
+		if res.Get("properties.sell_reason.description").String() != "why the position is being sold" {
+			t.Errorf("[%s] sell_reason description mismatch: %s", name, res.Raw)
+		}
+	}
+
+	// 2. allOf with if/then
+	allOfInput := `{
+		"type": "object",
+		"properties": { "kind": { "type": "string", "enum": ["buy", "sell"] } },
+		"required": ["kind"],
+		"allOf": [
+			{
+				"if":   { "properties": { "kind": { "const": "sell" } } },
+				"then": {
+					"properties": { "sell_reason": { "type": "string", "description": "why the position is being sold" } },
+					"required": ["sell_reason"]
+				}
+			}
+		]
+	}`
+
+	for name, clean := range map[string]func(string) string{
+		"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"Antigravity":         CleanJSONSchemaForAntigravity,
+		"Gemini":              CleanJSONSchemaForGemini,
+	} {
+		res := gjson.Parse(clean(allOfInput))
+		if res.Get("allOf").Exists() {
+			t.Errorf("[%s] 'allOf' was not removed: %s", name, res.Raw)
+		}
+		if res.Get("if").Exists() || strings.Contains(res.Raw, `"if":`) {
+			t.Errorf("[%s] 'if' keyword present: %s", name, res.Raw)
+		}
+		if !res.Get("properties.sell_reason").Exists() {
+			t.Errorf("[%s] allOf.then.properties.sell_reason was lost: %s", name, res.Raw)
+		}
+		if res.Get("properties.sell_reason.description").String() != "why the position is being sold" {
+			t.Errorf("[%s] sell_reason description mismatch: %s", name, res.Raw)
+		}
+	}
+
+	// 3. Nested property with if/then
+	nestedInput := `{
+		"type": "object",
+		"properties": {
+			"trade": {
+				"type": "object",
+				"properties": { "kind": { "type": "string" } },
+				"if":   { "properties": { "kind": { "const": "sell" } } },
+				"then": { "properties": { "sell_reason": { "type": "string" } } }
+			}
+		}
+	}`
+
+	for name, clean := range map[string]func(string) string{
+		"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"Antigravity":         CleanJSONSchemaForAntigravity,
+		"Gemini":              CleanJSONSchemaForGemini,
+	} {
+		res := gjson.Parse(clean(nestedInput))
+		if res.Get("properties.trade.if").Exists() {
+			t.Errorf("[%s] nested 'if' was not removed: %s", name, res.Raw)
+		}
+		if res.Get("properties.trade.then").Exists() {
+			t.Errorf("[%s] nested 'then' was not removed: %s", name, res.Raw)
+		}
+		if !res.Get("properties.trade.properties.sell_reason").Exists() {
+			t.Errorf("[%s] nested then.properties.sell_reason was lost: %s", name, res.Raw)
 		}
 	}
 }

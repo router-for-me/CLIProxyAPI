@@ -820,9 +820,16 @@ func injectClaudeCodeCurrentDate(payload []byte, now time.Time) []byte {
 		rawBlocks = append(rawBlocks, block.Raw)
 	}
 
+	// Anthropic requires the user message following an assistant tool_use turn
+	// to lead with its tool_result blocks, so the reminder goes after them.
+	// Every other content shape keeps the native first-block placement.
+	insertAt := 0
+	for insertAt < len(rawBlocks) && gjson.Parse(rawBlocks[insertAt]).Get("type").String() == "tool_result" {
+		insertAt++
+	}
 	rawBlocks = append(rawBlocks, "")
-	copy(rawBlocks[1:], rawBlocks)
-	rawBlocks[0] = dateBlock
+	copy(rawBlocks[insertAt+1:], rawBlocks[insertAt:])
+	rawBlocks[insertAt] = dateBlock
 	payload, _ = sjson.SetRawBytes(payload, contentPath, []byte("["+strings.Join(rawBlocks, ",")+"]"))
 	return payload
 }

@@ -695,10 +695,48 @@ func (h *Handler) tokenStoreWithBaseDir() coreauth.Store {
 	return store
 }
 
+func (h *Handler) mergeExistingAuthFileMetadata(record *coreauth.Auth) {
+	if h == nil || record == nil {
+		return
+	}
+	var existingMap map[string]any
+
+	if h.cfg != nil && strings.TrimSpace(h.cfg.AuthDir) != "" {
+		targetFile := record.FileName
+		if targetFile == "" {
+			targetFile = record.ID
+		}
+		if targetFile != "" {
+			fullPath := filepath.Join(h.cfg.AuthDir, targetFile)
+			if raw, errRead := os.ReadFile(fullPath); errRead == nil && len(raw) > 0 {
+				_ = json.Unmarshal(raw, &existingMap)
+			}
+		}
+	}
+
+	if existingMap == nil && h.authManager != nil {
+		if existing, ok := h.authManager.GetByID(record.ID); ok && existing != nil && existing.Metadata != nil {
+			existingMap = existing.Metadata
+		} else {
+			for _, auth := range h.authManager.List() {
+				if auth != nil && auth.FileName == record.FileName && auth.Metadata != nil {
+					existingMap = auth.Metadata
+					break
+				}
+			}
+		}
+	}
+
+	if len(existingMap) > 0 {
+		coreauth.MergeExistingAuthMetadata(record, existingMap)
+	}
+}
+
 func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (string, error) {
 	if record == nil {
 		return "", fmt.Errorf("token record is nil")
 	}
+	h.mergeExistingAuthFileMetadata(record)
 	store := h.tokenStoreWithBaseDir()
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")

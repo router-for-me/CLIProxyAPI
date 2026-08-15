@@ -61,6 +61,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 			entry := cloneCodexClientModelMap(template)
 			applyCodexClientDisplayName(entry, model)
 			applyCodexClientMaxContextLengthOverride(entry, model)
+			applyCodexClientMaxTokens(entry, model)
 			applyCodexClientSearchToolSupport(entry, id, true, providersForModel)
 			sanitizeCodexClientReasoningMetadata(entry)
 			applyCodexClientVisibilityOverride(entry, id)
@@ -73,6 +74,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 
 		entry := cloneCodexClientModelMap(defaultTemplate)
 		applyCodexClientModelMetadata(entry, id, model, optimizeMultiAgentV2)
+		applyCodexClientMaxTokens(entry, model)
 		applyCodexClientSearchToolSupport(entry, id, false, providersForModel)
 		sanitizeCodexClientReasoningMetadata(entry)
 		applyCodexClientVisibilityOverride(entry, id)
@@ -190,6 +192,12 @@ func applyCodexClientMaxContextLengthOverride(entry map[string]any, model map[st
 	if maxContextLength := intModelValue(model, "max_context_length"); maxContextLength > 0 {
 		entry["context_window"] = maxContextLength
 		entry["max_context_window"] = maxContextLength
+	}
+}
+
+func applyCodexClientMaxTokens(entry map[string]any, model map[string]any) {
+	if maxCompletionTokens := intModelValue(model, "max_completion_tokens"); maxCompletionTokens > 0 {
+		entry["max_tokens"] = maxCompletionTokens
 	}
 }
 

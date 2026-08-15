@@ -675,6 +675,9 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
 			model["display_name"] = entry.displayName
 			model["description"] = entry.displayName
 		}
+		if entry.maxCompletionTokens > 0 {
+			model["max_completion_tokens"] = entry.maxCompletionTokens
+		}
 		models = append(models, model)
 	}
 

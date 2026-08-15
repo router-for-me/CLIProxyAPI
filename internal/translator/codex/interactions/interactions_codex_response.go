@@ -101,19 +101,31 @@ func ConvertCodexResponseToInteractionsNonStream(ctx context.Context, modelName 
 	} else {
 		out, _ = sjson.SetBytes(out, "model", modelName)
 	}
+	var steps [][]byte
 	response.Get("output").ForEach(func(_, item gjson.Result) bool {
 		switch item.Get("type").String() {
 		case "message":
-			out = appendCodexMessageItemToInteractions(out, item)
+			if step := buildCodexMessageItemToInteractions(item); len(step) > 0 {
+				steps = append(steps, step)
+			}
 		case "reasoning":
-			out = appendCodexReasoningItemToInteractions(out, item)
+			if step := buildCodexReasoningItemToInteractions(item); len(step) > 0 {
+				steps = append(steps, step)
+			}
 		case "function_call", "tool_call":
-			out = appendCodexFunctionCallItemToInteractions(out, item)
+			if step := buildCodexFunctionCallItemToInteractions(item); len(step) > 0 {
+				steps = append(steps, step)
+			}
 		case "image_generation_call":
-			out = appendCodexImageItemToInteractions(out, item)
+			if step := buildCodexImageItemToInteractions(item); len(step) > 0 {
+				steps = append(steps, step)
+			}
 		}
 		return true
 	})
+	if len(steps) > 0 {
+		out = translatorcommon.SetRawArrayItems(out, "steps", steps)
+	}
 	out = setCodexInteractionsUsage(out, "usage", response.Get("usage"), false)
 	return out
 }
@@ -303,33 +315,32 @@ func appendCodexInteractionsStepStop(out [][]byte, st *codexToInteractionsStream
 	return out
 }
 
-func appendCodexMessageItemToInteractions(out []byte, item gjson.Result) []byte {
-	step := []byte(`{"type":"model_output","content":[]}`)
+func buildCodexMessageItemToInteractions(item gjson.Result) []byte {
+	var contents [][]byte
 	item.Get("content").ForEach(func(_, content gjson.Result) bool {
 		if contentItem := codexContentToInteractionsContent(content); len(contentItem) > 0 {
-			step, _ = sjson.SetRawBytes(step, "content.-1", contentItem)
+			contents = append(contents, contentItem)
 		}
 		return true
 	})
-	if gjson.GetBytes(step, "content.#").Int() == 0 {
-		return out
+	if len(contents) == 0 {
+		return nil
 	}
-	out, _ = sjson.SetRawBytes(out, "steps.-1", step)
-	return out
+	step := []byte(`{"type":"model_output","content":[]}`)
+	return translatorcommon.SetRawArrayItems(step, "content", contents)
 }
 
-func appendCodexReasoningItemToInteractions(out []byte, item gjson.Result) []byte {
+func buildCodexReasoningItemToInteractions(item gjson.Result) []byte {
 	text := codexReasoningText(item)
 	if text == "" {
-		return out
+		return nil
 	}
 	step := []byte(`{"type":"thought","content":[{"type":"text","text":""}]}`)
 	step, _ = sjson.SetBytes(step, "content.0.text", text)
-	out, _ = sjson.SetRawBytes(out, "steps.-1", step)
-	return out
+	return step
 }
 
-func appendCodexFunctionCallItemToInteractions(out []byte, item gjson.Result) []byte {
+func buildCodexFunctionCallItemToInteractions(item gjson.Result) []byte {
 	step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
 	step, _ = sjson.SetBytes(step, "name", item.Get("name").String())
 	if callID := codexItemCallID(item); callID != "" {
@@ -338,19 +349,45 @@ func appendCodexFunctionCallItemToInteractions(out []byte, item gjson.Result) []
 	if args := codexArgumentsJSON(item.Get("arguments")); len(args) > 0 {
 		step, _ = sjson.SetRawBytes(step, "arguments", args)
 	}
-	out, _ = sjson.SetRawBytes(out, "steps.-1", step)
-	return out
+	return step
 }
 
-func appendCodexImageItemToInteractions(out []byte, item gjson.Result) []byte {
+func buildCodexImageItemToInteractions(item gjson.Result) []byte {
 	result := item.Get("result").String()
 	if result == "" {
-		return out
+		return nil
 	}
 	step := []byte(`{"type":"model_output","content":[{"type":"image","mime_type":"","data":""}]}`)
 	step, _ = sjson.SetBytes(step, "content.0.mime_type", mimeTypeFromCodexOutputFormat(item.Get("output_format").String()))
 	step, _ = sjson.SetBytes(step, "content.0.data", result)
-	out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+	return step
+}
+
+func appendCodexMessageItemToInteractions(out []byte, item gjson.Result) []byte {
+	if step := buildCodexMessageItemToInteractions(item); len(step) > 0 {
+		out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+	}
+	return out
+}
+
+func appendCodexReasoningItemToInteractions(out []byte, item gjson.Result) []byte {
+	if step := buildCodexReasoningItemToInteractions(item); len(step) > 0 {
+		out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+	}
+	return out
+}
+
+func appendCodexFunctionCallItemToInteractions(out []byte, item gjson.Result) []byte {
+	if step := buildCodexFunctionCallItemToInteractions(item); len(step) > 0 {
+		out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+	}
+	return out
+}
+
+func appendCodexImageItemToInteractions(out []byte, item gjson.Result) []byte {
+	if step := buildCodexImageItemToInteractions(item); len(step) > 0 {
+		out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+	}
 	return out
 }
 

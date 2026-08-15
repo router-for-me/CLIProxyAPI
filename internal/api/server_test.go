@@ -1832,15 +1832,16 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	clientID := "test-client-version-catalog"
 	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
 		{
-			ID:            "gpt-5.5",
-			Object:        "model",
-			Created:       1776902400,
-			OwnedBy:       "openai",
-			Type:          "openai",
-			DisplayName:   "GPT 5.5",
-			Description:   "Frontier model for complex coding, research, and real-world work.",
-			ContextLength: 272000,
-			Thinking:      &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+			ID:                  "gpt-5.5",
+			Object:              "model",
+			Created:             1776902400,
+			OwnedBy:             "openai",
+			Type:                "openai",
+			DisplayName:         "GPT 5.5",
+			Description:         "Frontier model for complex coding, research, and real-world work.",
+			ContextLength:       272000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 		},
 		{
 			ID:            "custom-codex-model-test",
@@ -1907,6 +1908,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	}
 	if _, ok := gpt55["minimal_client_version"]; !ok {
 		t.Fatal("expected minimal_client_version in codex catalog")
+	}
+	if got, _ := gpt55["max_tokens"].(float64); got != 64000 {
+		t.Fatalf("gpt-5.5 max_tokens = %v, want 64000", gpt55["max_tokens"])
 	}
 	serviceTiers, ok := gpt55["service_tiers"].([]any)
 	if !ok || len(serviceTiers) != 1 {

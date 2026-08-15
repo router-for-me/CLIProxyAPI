@@ -53,6 +53,9 @@ func TestConvertClaudeRequestToGemini_StringSystemInstruction(t *testing.T) {
 	if got := gjson.GetBytes(output, "systemInstruction.parts.0.text").String(); got != "Be concise" {
 		t.Fatalf("Expected systemInstruction text %q, got %q", "Be concise", got)
 	}
+	if gjson.GetBytes(output, "systemInstruction.role").Exists() {
+		t.Fatalf("Expected systemInstruction.role to not exist, got %q", gjson.GetBytes(output, "systemInstruction.role").String())
+	}
 	if gjson.GetBytes(output, "system_instruction").Exists() {
 		t.Fatalf("Legacy system_instruction field should not be emitted: %s", output)
 	}

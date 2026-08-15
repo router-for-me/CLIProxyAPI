@@ -206,6 +206,9 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
 	// the original model name in the response for client compatibility.
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, data, &param)
+	if responseFormat == sdktranslator.FormatOpenAIResponse {
+		out = helps.EnsureResponsesUsageDetails(out)
+	}
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }

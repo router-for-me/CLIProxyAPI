@@ -420,10 +420,19 @@ func coalesceAdjacentOpenAIResponsesModelContents(contents [][]byte) [][]byte {
 			coalesced = append(coalesced, content)
 			continue
 		}
+		var extraParts [][]byte
 		parts.ForEach(func(_, part gjson.Result) bool {
-			merged, _ = sjson.SetRawBytes(merged, "parts.-1", []byte(part.Raw))
+			extraParts = append(extraParts, []byte(part.Raw))
 			return true
 		})
+		if len(extraParts) > 0 {
+			var existingParts [][]byte
+			gjson.GetBytes(merged, "parts").ForEach(func(_, p gjson.Result) bool {
+				existingParts = append(existingParts, []byte(p.Raw))
+				return true
+			})
+			merged = translatorcommon.SetRawArrayItems(merged, "parts", append(existingParts, extraParts...))
+		}
 		coalesced[lastIndex] = merged
 	}
 	return coalesced
@@ -809,31 +818,30 @@ func buildOpenAIResponsesReasoningModelContent(thoughtText, visibleText, signatu
 		if thoughtText == "" && visibleText == "" {
 			carrier := []byte(`{"text":"","thoughtSignature":""}`)
 			carrier, _ = sjson.SetBytes(carrier, "thoughtSignature", signature)
-			modelContent, _ = sjson.SetRawBytes(modelContent, "parts.-1", carrier)
-			return modelContent
+			return translatorcommon.SetRawArrayItems(modelContent, "parts", [][]byte{carrier})
 		}
+		var parts [][]byte
 		if thoughtText != "" {
 			thought := []byte(`{"text":"","thought":true}`)
 			thought, _ = sjson.SetBytes(thought, "text", thoughtText)
 			if visibleText == "" {
 				thought, _ = sjson.SetBytes(thought, "thoughtSignature", signature)
 			}
-			modelContent, _ = sjson.SetRawBytes(modelContent, "parts.-1", thought)
+			parts = append(parts, thought)
 		}
 		if visibleText != "" {
 			visible := []byte(`{"text":"","thoughtSignature":""}`)
 			visible, _ = sjson.SetBytes(visible, "text", visibleText)
 			visible, _ = sjson.SetBytes(visible, "thoughtSignature", signature)
-			modelContent, _ = sjson.SetRawBytes(modelContent, "parts.-1", visible)
+			parts = append(parts, visible)
 		}
-		return modelContent
+		return translatorcommon.SetRawArrayItems(modelContent, "parts", parts)
 	}
 
 	thought := []byte(`{"text":"","thoughtSignature":"","thought":true}`)
 	thought, _ = sjson.SetBytes(thought, "text", thoughtText)
 	thought, _ = sjson.SetBytes(thought, "thoughtSignature", signature)
-	modelContent, _ = sjson.SetRawBytes(modelContent, "parts.-1", thought)
-	return modelContent
+	return translatorcommon.SetRawArrayItems(modelContent, "parts", [][]byte{thought})
 }
 
 func openAIResponsesGeminiThoughtSignature(rawSignature string) string {

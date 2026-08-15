@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -518,7 +519,11 @@ func executorNativeStreamResponseTranslatorExists(from, to sdktranslator.Format)
 
 func (a *executorAdapter) translateExecutorResponse(ctx context.Context, prepared preparedExecutorCall, payload []byte, stream bool, param *any) []byte {
 	if prepared.requestedFormat == "" || prepared.outputFormat == prepared.requestedFormat {
-		return bytes.Clone(payload)
+		out := bytes.Clone(payload)
+		if prepared.requestedFormat == sdktranslator.FormatOpenAIResponse {
+			out = helps.EnsureResponsesUsageDetails(out)
+		}
+		return out
 	}
 	originalRequest := prepared.opts.OriginalRequest
 	if len(originalRequest) == 0 {
@@ -534,11 +539,15 @@ func (a *executorAdapter) translateExecutorResponse(ctx context.Context, prepare
 		}
 		return bytes.Join(frames, nil)
 	}
-	return sdktranslator.TranslateNonStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
+	out := sdktranslator.TranslateNonStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
+	if prepared.requestedFormat == sdktranslator.FormatOpenAIResponse {
+		out = helps.EnsureResponsesUsageDetails(out)
+	}
+	return out
 }
 
 func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, prepared preparedExecutorCall, in <-chan pluginapi.ExecutorStreamChunk) <-chan pluginapi.ExecutorStreamChunk {
-	if prepared.requestedFormat == "" || prepared.outputFormat == prepared.requestedFormat {
+	if prepared.requestedFormat == "" || (prepared.outputFormat == prepared.requestedFormat && prepared.requestedFormat != sdktranslator.FormatOpenAIResponse) {
 		return in
 	}
 	if in == nil {
@@ -577,6 +586,13 @@ func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, pre
 }
 
 func (a *executorAdapter) translateExecutorStreamPayload(ctx context.Context, prepared preparedExecutorCall, payload []byte, param *any) [][]byte {
+	if prepared.requestedFormat != "" && prepared.outputFormat == prepared.requestedFormat {
+		out := payload
+		if prepared.requestedFormat == sdktranslator.FormatOpenAIResponse {
+			out = helps.EnsureResponsesUsageDetails(out)
+		}
+		return [][]byte{out}
+	}
 	originalRequest := prepared.opts.OriginalRequest
 	if len(originalRequest) == 0 {
 		originalRequest = prepared.req.Payload
@@ -584,6 +600,11 @@ func (a *executorAdapter) translateExecutorStreamPayload(ctx context.Context, pr
 	frames := sdktranslator.TranslateStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
 	if executorStreamTranslationFellBack(prepared, payload, frames) {
 		return nil
+	}
+	if prepared.requestedFormat == sdktranslator.FormatOpenAIResponse {
+		for i, frame := range frames {
+			frames[i] = helps.EnsureResponsesUsageDetails(frame)
+		}
 	}
 	return frames
 }
