@@ -41,9 +41,10 @@ type xaiNativeToolMarkup struct {
 }
 
 // parseXAINativeToolMarkup extracts Factory/Droid tool markup from assistant
-// text. It returns false when the text has no usable calls. A call whose final
-// argument value is cut off at EOF without a native marker is rejected so a
-// dropped stream cannot emit a corrupted prefix such as a partial command.
+// text. It returns false when the text has no usable calls, when any call is
+// truncated, or when the block never reaches <|tool_calls_end|>. A batch that
+// ends after a closed call but before the aggregate terminator is left as
+// text so a dropped stream cannot execute only the first side effect.
 func parseXAINativeToolMarkup(text string) (xaiNativeToolMarkup, bool) {
 	begin := strings.Index(text, xaiNativeToolCallsBegin)
 	if begin < 0 {
@@ -83,10 +84,7 @@ func parseXAINativeToolMarkup(text string) (xaiNativeToolMarkup, bool) {
 			cursor += len(xaiNativeToolCallEnd)
 		}
 	}
-	if len(calls) == 0 {
-		return xaiNativeToolMarkup{}, false
-	}
-	return xaiNativeToolMarkup{Prefix: prefix, Calls: calls}, true
+	return xaiNativeToolMarkup{}, false
 }
 
 func parseXAINativeToolCall(text string, start, limit int) (xaiNativeToolCall, int, bool) {

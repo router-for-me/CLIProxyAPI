@@ -192,6 +192,25 @@ func TestParseXAINativeToolMarkupRejectsTruncatedCallMissingEndTags(t *testing.T
 	}
 }
 
+func TestParseXAINativeToolMarkupRejectsMissingBlockEnd(t *testing.T) {
+	text := "Before.<|tool_calls_begin|><|tool_call_begin|>\n" +
+		"Execute\n" +
+		"<|tool_sep|>command\n" +
+		"ls\n" +
+		"<|tool_call_end|>After."
+
+	if _, ok := parseXAINativeToolMarkup(text); ok {
+		t.Fatal("a closed call without <|tool_calls_end|> should not be lifted")
+	}
+}
+
+func TestRewriteXAINativeToolMarkupChatJSONRejectsMissingBlockEnd(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"Before.<|tool_calls_begin|><|tool_call_begin|>\nExecute\n<|tool_sep|>command\nls\n<|tool_call_end|>After."}}]}`)
+	if _, ok := rewriteXAINativeToolMarkupChatJSON(body, xaiNativeDeclared("Execute")); ok {
+		t.Fatal("unterminated markup must stay text so trailing content is not discarded")
+	}
+}
+
 func TestParseXAINativeToolMarkupRejectsBlockWhenLaterCallIsIncomplete(t *testing.T) {
 	text := "<|tool_calls_begin|><|tool_call_begin|>\n" +
 		"Grep\n" +
