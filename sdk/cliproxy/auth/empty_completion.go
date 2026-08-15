@@ -962,18 +962,6 @@ func (s *streamBootstrapState) observe(fragment []byte) bool {
 		s.forward = true
 		return true
 	}
-	if len(s.pending) > 0 {
-		trimmedPending := bytes.TrimSpace(s.pending)
-		trimmedFrag := bytes.TrimSpace(fragment)
-		if isSSEMetadataLine(trimmedPending) && isSSEPrefix(trimmedFrag) {
-			s.processLine(trimmedPending)
-			s.pending = s.pending[:0]
-			if s.shouldForward() {
-				s.forward = true
-				return true
-			}
-		}
-	}
 	s.pending = append(s.pending, fragment...)
 	for {
 		if newline := bytes.IndexByte(s.pending, '\n'); newline >= 0 {

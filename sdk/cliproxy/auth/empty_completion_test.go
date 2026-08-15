@@ -953,6 +953,52 @@ func TestStreamBootstrapDetectorOpaqueSSEMetadata(t *testing.T) {
 			t.Fatal("Finish() = true, want content stream not classified as empty")
 		}
 	})
+
+	t.Run("split metadata line across chunk boundary followed by data-like content", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		// Chunk 1 has partial metadata line: "event:" without newline
+		// Chunk 2 has continuation of event name "data:ping\n" followed by empty completion data line
+		chunk1 := []byte("event:")
+		chunk2 := []byte("data:ping\n")
+		chunk3 := []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+
+		if detector.Observe(chunk1) {
+			t.Fatal("Observe(chunk1) forwarded partial event line")
+		}
+		if detector.Observe(chunk2) {
+			t.Fatal("Observe(chunk2) forwarded event line continuation")
+		}
+		if detector.state.acc.sawUnknownData {
+			t.Fatal("sawUnknownData = true after event: continuation, want metadata field value to remain opaque")
+		}
+		if detector.Observe(chunk3) {
+			t.Fatal("Observe(chunk3) forwarded empty completion stream")
+		}
+		if !detector.Finish() {
+			t.Fatal("Finish() = false, want empty completion recognized when metadata line split across chunk boundary")
+		}
+	})
+
+	t.Run("arbitrary split points of metadata lines do not set sawUnknownData", func(t *testing.T) {
+		fullPayload := "event: metadata:ping_data:123\n: data: keep-alive\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+		for split := 1; split < 40; split++ {
+			var detector StreamBootstrapDetector
+			c1 := []byte(fullPayload[:split])
+			c2 := []byte(fullPayload[split:])
+			if detector.Observe(c1) {
+				t.Fatalf("split %d: Observe(c1) forwarded unexpectedly", split)
+			}
+			if detector.Observe(c2) {
+				t.Fatalf("split %d: Observe(c2) forwarded unexpectedly", split)
+			}
+			if detector.state.acc.sawUnknownData {
+				t.Fatalf("split %d: sawUnknownData = true, want metadata value to remain opaque across split", split)
+			}
+			if !detector.Finish() {
+				t.Fatalf("split %d: Finish() = false, want empty completion recognized", split)
+			}
+		}
+	})
 }
 
 func TestStreamBootstrapDetectorMultilineSSE(t *testing.T) {
@@ -1064,8 +1110,10 @@ func TestStreamBootstrapDetectorMultilineSSE(t *testing.T) {
 		for _, f := range fragments {
 			detector.Observe(f)
 		}
-		if detector.Finish() {
-			t.Fatal("Finish() = true, want response.completed without newline not recognized as empty completion")
+		// Without a newline between chunks, "event: response.completeddata: ..." is an event line whose value happens to contain "data: ...".
+		// Because SSE metadata is opaque and chunks without newlines are buffered as a single line, Finish() recognizes the stream as metadata-only (empty completion).
+		if !detector.Finish() {
+			t.Fatal("Finish() = false, want response.completed without newline recognized as metadata-only empty completion")
 		}
 
 		// When concatenated without a newline, "event: response.completeddata: ..." is a single event header with value "response.completeddata: ...".
