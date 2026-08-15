@@ -877,7 +877,10 @@ func TestManager_MarkResult_VertexEndpointConnectionRefusedStillCooldowns(t *tes
 		t.Fatalf("expected unique-location vertex endpoint failure (connection refused) to keep cooldown")
 	}
 
-	// Auth-level path (empty model) must also keep cooldown.
+	// Auth-level path (empty model): the only other vertex SA peer (authEU)
+	// is already cooling from the model-level step above, so it cannot serve
+	// requests and the failing auth is the only pollable credential. It must
+	// not cool down (same principle as the disabled-peer case).
 	m.MarkResult(context.Background(), Result{
 		AuthID:   authUS.ID,
 		Provider: authUS.Provider,
@@ -888,8 +891,8 @@ func TestManager_MarkResult_VertexEndpointConnectionRefusedStillCooldowns(t *tes
 	if !okUS || updatedUS == nil {
 		t.Fatalf("expected auth to be present")
 	}
-	if updatedUS.NextRetryAfter.IsZero() {
-		t.Fatalf("expected auth-level unique-location vertex endpoint failure to keep cooldown")
+	if updatedUS.Unavailable || !updatedUS.NextRetryAfter.IsZero() {
+		t.Fatalf("expected cooling-peer failure to skip auth-level cooldown, got unavailable=%v next=%v", updatedUS.Unavailable, updatedUS.NextRetryAfter)
 	}
 }
 
@@ -939,4 +942,142 @@ func TestManager_MarkResult_VertexDisabledPeerSkipsCooldown(t *testing.T) {
 	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
 		t.Fatalf("expected disabled-peer failure to skip auth-level cooldown, got unavailable=%v next=%v", updated.Unavailable, updated.NextRetryAfter)
 	}
+}
+
+func TestManager_MarkResult_VertexCoolingPeerStillCooldowns(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	now := time.Now()
+	model := "gemini-2.5-pro"
+	endpointErr := resultErrorFromError(fmt.Errorf("dial tcp 142.250.4.1:443: connect: connection refused"))
+
+	// Model-level path: the failing EU auth shares its location only with a
+	// peer that is itself cooling down (quota cooldown for the same model),
+	// so the scheduler would never rotate to that peer. The healthy US auth
+	// offers the only reachable endpoint, so the failing auth must cool down
+	// to let rotation switch locations.
+	mModel := NewManager(nil, nil, nil)
+	authEU := newVertexSATestAuth("auth-vertex-cool-peer-eu", "europe-west4")
+	authEUPeer := newVertexSATestAuth("auth-vertex-cool-peer-eu-peer", "europe-west4")
+	authEUPeer.ModelStates = map[string]*ModelState{
+		model: {
+			Status:         StatusError,
+			Unavailable:    true,
+			NextRetryAfter: now.Add(10 * time.Minute),
+			Quota: QuotaState{
+				Exceeded:      true,
+				Reason:        "quota",
+				NextRecoverAt: now.Add(10 * time.Minute),
+			},
+		},
+	}
+	authUS := newVertexSATestAuth("auth-vertex-cool-peer-us", "us-central1")
+	for _, a := range []*Auth{authEU, authEUPeer, authUS} {
+		if _, errRegister := mModel.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+	}
+	if blocked, _, _ := isAuthBlockedForModel(authEUPeer, model, now); !blocked {
+		t.Fatalf("expected cooling peer to be blocked for model")
+	}
+	mModel.MarkResult(context.Background(), Result{
+		AuthID:   authEU.ID,
+		Provider: authEU.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    endpointErr,
+	})
+	updated, ok := mModel.GetByID(authEU.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil || state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected cooling same-location peer to keep model cooldown")
+	}
+
+	// Auth-level path (empty model): same scenario with an auth-level cooling
+	// peer.
+	mAuth := NewManager(nil, nil, nil)
+	authEULevel := newVertexSATestAuth("auth-vertex-cool-peer-level-eu", "europe-west4")
+	authPeerLevel := newVertexSATestAuth("auth-vertex-cool-peer-level-eu-peer", "europe-west4")
+	authPeerLevel.Unavailable = true
+	authPeerLevel.NextRetryAfter = now.Add(10 * time.Minute)
+	authPeerLevel.Quota = QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(10 * time.Minute)}
+	authUSLevel := newVertexSATestAuth("auth-vertex-cool-peer-level-us", "us-central1")
+	for _, a := range []*Auth{authEULevel, authPeerLevel, authUSLevel} {
+		if _, errRegister := mAuth.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+	}
+	if blocked, _, _ := isAuthBlockedForModel(authPeerLevel, "", now); !blocked {
+		t.Fatalf("expected auth-level cooling peer to be blocked")
+	}
+	mAuth.MarkResult(context.Background(), Result{
+		AuthID:   authEULevel.ID,
+		Provider: authEULevel.Provider,
+		Success:  false,
+		Error:    endpointErr,
+	})
+	updatedLevel, okLevel := mAuth.GetByID(authEULevel.ID)
+	if !okLevel || updatedLevel == nil {
+		t.Fatalf("expected auth-level auth to be present")
+	}
+	if updatedLevel.NextRetryAfter.IsZero() {
+		t.Fatalf("expected cooling same-location peer to keep auth-level cooldown")
+	}
+}
+
+func TestManager_MarkResult_VertexExpiredCooldownPeerSkipsCooldown(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	now := time.Now()
+	model := "gemini-2.5-pro"
+	endpointErr := resultErrorFromError(fmt.Errorf("dial tcp 142.250.4.1:443: connect: connection refused"))
+
+	m := NewManager(nil, nil, nil)
+	authEU := newVertexSATestAuth("auth-vertex-expired-peer-eu", "europe-west4")
+	authPeer := newVertexSATestAuth("auth-vertex-expired-peer-eu-peer", "europe-west4")
+	authPeer.ModelStates = map[string]*ModelState{
+		model: {
+			Status:         StatusError,
+			Unavailable:    true,
+			NextRetryAfter: now.Add(-time.Minute),
+			Quota: QuotaState{
+				Exceeded:      true,
+				Reason:        "quota",
+				NextRecoverAt: now.Add(-time.Minute),
+			},
+		},
+	}
+	for _, a := range []*Auth{authEU, authPeer} {
+		if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+	}
+	if blocked, _, _ := isAuthBlockedForModel(authPeer, model, now); blocked {
+		t.Fatalf("expected expired-cooldown peer to be pollable")
+	}
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authEU.ID,
+		Provider: authEU.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    endpointErr,
+	})
+	// The same-location peer's cooldown has expired, so it is pollable again
+	// and the endpoint is shared: cooldown must stay skipped.
+	assertNoCooldown(t, m, authEU.ID, model)
 }

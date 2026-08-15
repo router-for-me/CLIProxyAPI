@@ -743,7 +743,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		} else {
 			if modelKey != "" {
-				if !m.shouldSkipCredentialCooldownPoolAware(result.Error, auth) {
+				if !m.shouldSkipCredentialCooldownPoolAware(result.Error, auth, modelKey, now) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, modelKey)
 					state.Unavailable = true
@@ -884,7 +884,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 			} else {
 				disableCooling := m.cooldownDisabledForAuth(auth)
-				skipCooldown := m.shouldSkipCredentialCooldownPoolAware(result.Error, auth)
+				skipCooldown := m.shouldSkipCredentialCooldownPoolAware(result.Error, auth, modelKey, now)
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling, skipCooldown)
 			}
 		}
@@ -1325,20 +1325,21 @@ func shouldSkipCredentialCooldownForAuth(err *Error, auth *Auth) bool {
 
 // shouldSkipCredentialCooldownPoolAware extends the per-auth check with
 // pool-aware Vertex regional-endpoint disambiguation. A transport failure on
-// a Vertex service-account auth whose regional endpoint is unique in the pool
-// (other Vertex service-account auths exist, none sharing its location) is an
-// auth-specific routing fault and must keep credential cooldown. Only failure
-// messages that can point to the failing endpoint are attributed; shared-host
-// faults (network unreachable, DNS server misbehaving, operation timed out)
-// and proxy dial failures never reach a regional endpoint and are never
-// attributed to one. Caller must hold m.mu.
-func (m *Manager) shouldSkipCredentialCooldownPoolAware(err *Error, auth *Auth) bool {
+// a Vertex service-account auth whose regional endpoint is unique among the
+// pollable Vertex service-account auths (other auths exist, none sharing its
+// location and currently available for the model) is an auth-specific routing
+// fault and must keep credential cooldown. Only failure messages that can
+// point to the failing endpoint are attributed; shared-host faults (network
+// unreachable, DNS server misbehaving, operation timed out) and proxy dial
+// failures never reach a regional endpoint and are never attributed to one.
+// Caller must hold m.mu.
+func (m *Manager) shouldSkipCredentialCooldownPoolAware(err *Error, auth *Auth, modelKey string, now time.Time) bool {
 	if !shouldSkipCredentialCooldownForAuth(err, auth) {
 		return false
 	}
 	if isTransportFailureResultError(err) &&
 		isVertexEndpointFailureMessage(err.Message) &&
-		m.vertexTransportFailureIsAuthSpecificLocked(auth) {
+		m.vertexTransportFailureIsAuthSpecificLocked(auth, modelKey, now) {
 		return false
 	}
 	return true
@@ -1365,12 +1366,14 @@ func vertexSALocation(auth *Auth) string {
 // vertexTransportFailureIsAuthSpecificLocked reports whether the given Vertex
 // service-account auth routes through a regional endpoint that no other
 // pollable Vertex service-account auth in the pool shares. Disabled peers
-// (auth.Disabled or Status StatusDisabled) cannot serve requests, so they are
-// ignored when judging whether an alternative endpoint exists. When such peers
+// (auth.Disabled or Status StatusDisabled) and peers currently blocked for
+// the model (quota cooldown, retry-after, or auth-level unavailability, as
+// judged by isAuthBlockedForModel) cannot serve requests, so they are ignored
+// when judging whether an alternative endpoint exists. When pollable peers
 // exist, a transport failure is specific to this auth's endpoint and rotation
 // can only reach a healthy credential if this auth cools down. Caller must
 // hold m.mu.
-func (m *Manager) vertexTransportFailureIsAuthSpecificLocked(auth *Auth) bool {
+func (m *Manager) vertexTransportFailureIsAuthSpecificLocked(auth *Auth, modelKey string, now time.Time) bool {
 	loc := vertexSALocation(auth)
 	if loc == "" {
 		return false
@@ -1381,6 +1384,9 @@ func (m *Manager) vertexTransportFailureIsAuthSpecificLocked(auth *Auth) bool {
 			continue
 		}
 		if peer.Disabled || peer.Status == StatusDisabled {
+			continue
+		}
+		if blocked, _, _ := isAuthBlockedForModel(peer, modelKey, now); blocked {
 			continue
 		}
 		peerLoc := vertexSALocation(peer)
