@@ -907,6 +907,54 @@ func TestStreamBootstrapDetectorEmptyDataEventsClassifyAsEmpty(t *testing.T) {
 	})
 }
 
+func TestStreamBootstrapDetectorOpaqueSSEMetadata(t *testing.T) {
+	t.Run("event containing data: substring does not parse suffix as data", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		payload := []byte("event: metadata:ping\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+		if detector.Observe(payload) {
+			t.Fatal("Observe() forwarded empty completion stream with event: metadata:ping")
+		}
+		if !detector.Finish() {
+			t.Fatal("Finish() = false, want empty completion recognized despite event: metadata:ping")
+		}
+		if detector.state.acc.sawUnknownData {
+			t.Fatal("sawUnknownData = true, want event field value to remain opaque")
+		}
+	})
+
+	t.Run("comment containing data: substring does not parse suffix as data", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		payload := []byte(": data: keep-alive\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+		if detector.Observe(payload) {
+			t.Fatal("Observe() forwarded empty completion stream with : data: keep-alive comment")
+		}
+		if !detector.Finish() {
+			t.Fatal("Finish() = false, want empty completion recognized despite : data: keep-alive comment")
+		}
+		if detector.state.acc.sawUnknownData {
+			t.Fatal("sawUnknownData = true, want comment field value to remain opaque")
+		}
+	})
+
+	t.Run("isEmptyCompletionPayload classifies payload with metadata containing data: as empty", func(t *testing.T) {
+		payload := []byte("event: metadata:ping\n: data: keep-alive\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for payload with metadata containing data:")
+		}
+	})
+
+	t.Run("control: real data field with data: inside JSON value parses correctly", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		payload := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"data: hello\"},\"finish_reason\":null}]}\n\n")
+		if !detector.Observe(payload) {
+			t.Fatal("Observe() = false, want content payload to forward")
+		}
+		if detector.Finish() {
+			t.Fatal("Finish() = true, want content stream not classified as empty")
+		}
+	})
+}
+
 func TestStreamBootstrapDetectorMultilineSSE(t *testing.T) {
 	t.Run("empty completion split across data fields remains buffered and recognized", func(t *testing.T) {
 		var detector StreamBootstrapDetector
@@ -1020,9 +1068,11 @@ func TestStreamBootstrapDetectorMultilineSSE(t *testing.T) {
 			t.Fatal("Finish() = true, want response.completed without newline not recognized as empty completion")
 		}
 
-		singlePayload := []byte("event: response.completeddata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}")
-		if IsEmptyCompletionPayload(singlePayload) {
-			t.Fatal("IsEmptyCompletionPayload() = true for single buffer with split event: and data: without newline")
+		// When concatenated without a newline, "event: response.completeddata: ..." is a single event header with value "response.completeddata: ...".
+		// Because SSE metadata values are treated as opaque, it must NOT split on the internal "data:" substring.
+		singlePayload := []byte("event: response.completeddata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}\n\n")
+		if !IsEmptyCompletionPayload(singlePayload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for metadata-only payload without newline between event and data prefix")
 		}
 	})
 }
