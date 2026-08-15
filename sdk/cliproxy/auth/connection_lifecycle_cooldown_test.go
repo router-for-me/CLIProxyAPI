@@ -466,3 +466,31 @@ func TestManager_MarkResult_TransportFailureWithAuthProxyStillCooldowns(t *testi
 		t.Fatalf("expected auth-level transport failure via per-auth proxy to keep cooldown")
 	}
 }
+
+func TestManager_MarkResult_RequestScopedTransportTextWithAuthProxySkipsCooldown(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-request-scoped-proxy", Provider: "claude", ProxyURL: "http://127.0.0.1:7890"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	model := "claude-sonnet-4-5"
+
+	// request_scoped code must win over the per-auth proxy transport override.
+	scopedErr := &Error{Code: "request_scoped", Message: "Post \"https://example.com/v1/messages\": net/http: TLS handshake timeout"}
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    scopedErr,
+	})
+	assertNoCooldown(t, m, auth.ID, model)
+}

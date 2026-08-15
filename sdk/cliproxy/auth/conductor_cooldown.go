@@ -1332,10 +1332,11 @@ func authHasProxyOverride(auth *Auth) bool {
 // isTransportFailureResultError reports whether the result error is classified as a
 // transport-level failure (as opposed to client cancellation or stream EOF), so
 // callers can restore cooldown when the failure is auth-specific. Only errors that
-// were classified connection-lifecycle, carry no HTTP status, and whose message
-// matches a transport pattern qualify.
+// were classified connection-lifecycle (request-scoped errors, Code "request_scoped",
+// are explicitly excluded), carry no HTTP status, and whose message matches a
+// transport pattern qualify.
 func isTransportFailureResultError(err *Error) bool {
-	if err == nil || statusCodeFromResult(err) != 0 {
+	if err == nil || err.Code != connectionLifecycleErrorCode || statusCodeFromResult(err) != 0 {
 		return false
 	}
 	return hasTransportFailureMessage(err.Message)
