@@ -1327,13 +1327,16 @@ func shouldSkipCredentialCooldownForAuth(err *Error, auth *Auth) bool {
 // pool-aware Vertex regional-endpoint disambiguation. A transport failure on
 // a Vertex service-account auth whose regional endpoint is unique in the pool
 // (other Vertex service-account auths exist, none sharing its location) is an
-// auth-specific routing fault and must keep credential cooldown. Caller must
-// hold m.mu.
+// auth-specific routing fault and must keep credential cooldown. Failures in
+// the shared proxy dial layer never reach a regional endpoint, so they are
+// never attributed to one. Caller must hold m.mu.
 func (m *Manager) shouldSkipCredentialCooldownPoolAware(err *Error, auth *Auth) bool {
 	if !shouldSkipCredentialCooldownForAuth(err, auth) {
 		return false
 	}
-	if isTransportFailureResultError(err) && m.vertexTransportFailureIsAuthSpecificLocked(auth) {
+	if isTransportFailureResultError(err) &&
+		!isProxyConnectFailureMessage(err.Message) &&
+		m.vertexTransportFailureIsAuthSpecificLocked(auth) {
 		return false
 	}
 	return true
@@ -1484,6 +1487,16 @@ func hasTransportFailureMessage(message string) bool {
 	return false
 }
 
+// isProxyConnectFailureMessage reports whether a message indicates a failure
+// establishing the proxy connection itself (e.g. "proxyconnect tcp: dial tcp
+// 127.0.0.1:7890: connect: connection refused"). Such failures occur in the
+// shared proxy dial layer before any provider regional endpoint is reached, so
+// they must not be attributed to a Vertex location endpoint.
+func isProxyConnectFailureMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	return lower != "" && strings.Contains(lower, "proxyconnect tcp")
+}
+
 // transportFailureMessagePatterns are lowercase substrings identifying
 // transport-level failures such as "net/http: TLS handshake timeout",
 // "dial tcp ...: connect: connection refused" or "read tcp ...: i/o timeout".
@@ -1498,6 +1511,9 @@ var transportFailureMessagePatterns = []string{
 	"proxyconnect tcp",
 	"i/o timeout",
 	"tls handshake timeout",
+	"connection timed out",
+	"operation timed out",
+	"server misbehaving",
 }
 
 func isUnauthorizedError(err error) bool {
