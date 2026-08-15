@@ -41,7 +41,7 @@ func TestXAIExecutorExecuteLiftsNativeToolMarkupForOpenAIChat(t *testing.T) {
 
 	resp, err := NewXAIExecutor(&config.Config{}).Execute(context.Background(), xaiNativeTestAuth(server.URL), cliproxyexecutor.Request{
 		Model:   "grok-4.6",
-		Payload: []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"continue"}]}`),
+		Payload: xaiNativeChatPayload("Execute"),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatOpenAI,
 		Stream:       false,
@@ -104,7 +104,7 @@ func TestXAIExecutorExecuteStreamLiftsSplitNativeToolMarkup(t *testing.T) {
 
 	result, err := NewXAIExecutor(&config.Config{}).ExecuteStream(context.Background(), xaiNativeTestAuth(server.URL), cliproxyexecutor.Request{
 		Model:   "grok-4.6",
-		Payload: []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"continue"}]}`),
+		Payload: xaiNativeChatPayload("Execute"),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatOpenAI,
 		Stream:       true,
@@ -167,6 +167,80 @@ func TestXAIExecutorExecuteDoesNotRewriteWhenFunctionCallAlreadyPresent(t *testi
 	if gjson.GetBytes(resp.Payload, "choices.0.message.tool_calls.#").Int() != 1 {
 		t.Fatalf("tool_calls count = %s", resp.Payload)
 	}
+}
+
+func TestXAIExecutorExecuteLeavesQuotedMarkupWithoutDeclaredTools(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":%s}\n\n", xaiNativeMessageItem(xaiStalledExecuteMarkup))
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", xaiNativeCompletedResponse(xaiStalledExecuteMarkup))
+	}))
+	defer server.Close()
+
+	resp, err := NewXAIExecutor(&config.Config{}).Execute(context.Background(), xaiNativeTestAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "grok-4.6",
+		Payload: []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"explain this markup"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if gjson.GetBytes(resp.Payload, "choices.0.message.tool_calls.0").Exists() {
+		t.Fatalf("undeclared markup was lifted: %s", resp.Payload)
+	}
+	if !strings.Contains(gjson.GetBytes(resp.Payload, "choices.0.message.content").String(), "tool_calls_begin") {
+		t.Fatalf("quoted markup was stripped: %s", resp.Payload)
+	}
+}
+
+func TestXAIExecutorExecuteRestoresShortenedDeclaredToolName(t *testing.T) {
+	longName := "mcp__factory__" + strings.Repeat("collect_workspace_diagnostics_detail", 2)
+	if len(longName) <= 64 {
+		t.Fatalf("test setup: longName len=%d, want > 64", len(longName))
+	}
+	shortName := longName
+	if strings.HasPrefix(longName, "mcp__") {
+		if idx := strings.LastIndex(longName, "__"); idx > 0 {
+			shortName = "mcp__" + longName[idx+2:]
+			if len(shortName) > 64 {
+				shortName = shortName[:64]
+			}
+		}
+	}
+	markup := "<|tool_calls_begin|><|tool_call_begin|>\n" + shortName + "\n<|tool_sep|>path\n/tmp/a\n<|tool_call_end|><|tool_calls_end|>"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":%s}\n\n", xaiNativeMessageItem(markup))
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", xaiNativeCompletedResponse(markup))
+	}))
+	defer server.Close()
+
+	resp, err := NewXAIExecutor(&config.Config{}).Execute(context.Background(), xaiNativeTestAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "grok-4.6",
+		Payload: xaiNativeChatPayload(longName),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := gjson.GetBytes(resp.Payload, "choices.0.message.tool_calls.0.function.name").String(); got != longName {
+		t.Fatalf("function name = %q, want original %q; payload=%s", got, longName, resp.Payload)
+	}
+}
+
+func xaiNativeChatPayload(toolNames ...string) []byte {
+	body := []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"continue"}]}`)
+	for _, name := range toolNames {
+		tool := []byte(`{"type":"function","function":{"name":"","parameters":{"type":"object"}}}`)
+		tool, _ = sjson.SetBytes(tool, "function.name", name)
+		body, _ = sjson.SetRawBytes(body, "tools.-1", tool)
+	}
+	return body
 }
 
 func xaiNativeTestAuth(baseURL string) *cliproxyauth.Auth {

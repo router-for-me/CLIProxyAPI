@@ -197,8 +197,8 @@ func coerceXAINativeJSONValue(raw string) any {
 
 // rewriteXAINativeToolMarkupChatJSON lifts markup out of choices[0].message.content
 // into OpenAI tool_calls. It returns false when the body is unchanged, including
-// when tool_calls are already present.
-func rewriteXAINativeToolMarkupChatJSON(body []byte) ([]byte, bool) {
+// when tool_calls are already present or no parsed call matches a declared tool.
+func rewriteXAINativeToolMarkupChatJSON(body []byte, declared xaiNativeDeclaredTools) ([]byte, bool) {
 	if !gjson.ValidBytes(body) {
 		return nil, false
 	}
@@ -218,6 +218,10 @@ func rewriteXAINativeToolMarkupChatJSON(body []byte) ([]byte, bool) {
 	if !ok {
 		return nil, false
 	}
+	calls := declared.filter(parsed.Calls)
+	if len(calls) == 0 {
+		return nil, false
+	}
 
 	out := body
 	if parsed.Prefix == "" {
@@ -225,7 +229,7 @@ func rewriteXAINativeToolMarkupChatJSON(body []byte) ([]byte, bool) {
 	} else {
 		out, _ = sjson.SetBytes(out, "choices.0.message.content", parsed.Prefix)
 	}
-	out, _ = sjson.SetRawBytes(out, "choices.0.message.tool_calls", encodeXAINativeToolCalls(parsed.Calls, false))
+	out, _ = sjson.SetRawBytes(out, "choices.0.message.tool_calls", encodeXAINativeToolCalls(calls, false))
 	out, _ = sjson.SetBytes(out, "choices.0.finish_reason", "tool_calls")
 	if choice.Get("native_finish_reason").Exists() {
 		out, _ = sjson.SetBytes(out, "choices.0.native_finish_reason", "tool_calls")
@@ -237,7 +241,7 @@ func rewriteXAINativeToolMarkupChatJSON(body []byte) ([]byte, bool) {
 // and replaces leaked markup with tool_calls deltas. Markup split across
 // content deltas is handled because the body is assembled first. Returns false
 // when unchanged, including when any chunk already carries tool_calls.
-func rewriteXAINativeToolMarkupSSE(sse []byte) ([]byte, bool) {
+func rewriteXAINativeToolMarkupSSE(sse []byte, declared xaiNativeDeclaredTools) ([]byte, bool) {
 	events := xaiNativeSSEDataPayloads(sse)
 	if len(events) == 0 {
 		return nil, false
@@ -300,6 +304,10 @@ func rewriteXAINativeToolMarkupSSE(sse []byte) ([]byte, bool) {
 	if !ok {
 		return nil, false
 	}
+	calls := declared.filter(parsed.Calls)
+	if len(calls) == 0 {
+		return nil, false
+	}
 
 	var out bytes.Buffer
 	if parsed.Prefix != "" {
@@ -313,7 +321,7 @@ func rewriteXAINativeToolMarkupSSE(sse []byte) ([]byte, bool) {
 		}, "", nil)))
 	}
 
-	toolCalls := encodeXAINativeToolCalls(parsed.Calls, true)
+	toolCalls := encodeXAINativeToolCalls(calls, true)
 	out.Write(xaiNativeSSELine(xaiNativeChatChunk(id, model, created, map[string]any{
 		"tool_calls": json.RawMessage(toolCalls),
 	}, "", nil)))
@@ -333,12 +341,13 @@ func (r rawJSON) MarshalJSON() ([]byte, error) {
 
 // ApplyXAINativeToolMarkupChatJSON rewrites an OpenAI chat-completion body when
 // the client format is OpenAI chat and assistant content contains native Grok
-// tool markup. Other formats are returned unchanged.
-func ApplyXAINativeToolMarkupChatJSON(format sdktranslator.Format, body []byte) []byte {
+// tool markup that matches a tool declared on originalRequest. Other formats
+// and undeclared/quoted markup examples are returned unchanged.
+func ApplyXAINativeToolMarkupChatJSON(format sdktranslator.Format, body, originalRequest []byte) []byte {
 	if format != sdktranslator.FormatOpenAI {
 		return body
 	}
-	rewritten, ok := rewriteXAINativeToolMarkupChatJSON(body)
+	rewritten, ok := rewriteXAINativeToolMarkupChatJSON(body, parseXAINativeDeclaredTools(originalRequest))
 	if !ok {
 		return body
 	}
@@ -356,12 +365,17 @@ type XAINativeToolMarkupChatStream struct {
 	buffering bool
 	confirmed bool
 	held      [][]byte
+	declared  xaiNativeDeclaredTools
 }
 
 // NewXAINativeToolMarkupChatStream returns a rewriter that is active only for
-// OpenAI chat-completion client streams.
-func NewXAINativeToolMarkupChatStream(format sdktranslator.Format) *XAINativeToolMarkupChatStream {
-	return &XAINativeToolMarkupChatStream{enabled: format == sdktranslator.FormatOpenAI}
+// OpenAI chat-completion client streams. originalRequest supplies the declared
+// tool set used to gate lifts and restore shortened names.
+func NewXAINativeToolMarkupChatStream(format sdktranslator.Format, originalRequest []byte) *XAINativeToolMarkupChatStream {
+	return &XAINativeToolMarkupChatStream{
+		enabled:  format == sdktranslator.FormatOpenAI,
+		declared: parseXAINativeDeclaredTools(originalRequest),
+	}
 }
 
 // Ingest forwards a translated chat chunk or holds it until Flush when markup
@@ -419,7 +433,7 @@ func (s *XAINativeToolMarkupChatStream) Flush() [][]byte {
 	if s.passthru {
 		return held
 	}
-	rewritten, ok := rewriteXAINativeToolMarkupChatChunks(held)
+	rewritten, ok := rewriteXAINativeToolMarkupChatChunks(held, s.declared)
 	if !ok {
 		return held
 	}
@@ -427,7 +441,7 @@ func (s *XAINativeToolMarkupChatStream) Flush() [][]byte {
 	return rewritten
 }
 
-func rewriteXAINativeToolMarkupChatChunks(chunks [][]byte) ([][]byte, bool) {
+func rewriteXAINativeToolMarkupChatChunks(chunks [][]byte, declared xaiNativeDeclaredTools) ([][]byte, bool) {
 	var assembled bytes.Buffer
 	for _, chunk := range chunks {
 		payload := bytes.TrimSpace(chunk)
@@ -445,7 +459,7 @@ func rewriteXAINativeToolMarkupChatChunks(chunks [][]byte) ([][]byte, bool) {
 		assembled.Write(payload)
 		assembled.WriteString("\n\n")
 	}
-	rewritten, ok := rewriteXAINativeToolMarkupSSE(assembled.Bytes())
+	rewritten, ok := rewriteXAINativeToolMarkupSSE(assembled.Bytes(), declared)
 	if !ok {
 		return nil, false
 	}
@@ -461,6 +475,139 @@ func xaiNativeSSEToChatChunks(sse []byte) [][]byte {
 		chunks = append(chunks, []byte(payload))
 	}
 	return chunks
+}
+
+// xaiNativeDeclaredTools is the request-local set of client tool names plus the
+// Codex-style short→original reverse map. Markup is lifted only when the parsed
+// name matches a declared original or its shortened upstream form.
+type xaiNativeDeclaredTools struct {
+	restore map[string]string
+}
+
+func parseXAINativeDeclaredTools(original []byte) xaiNativeDeclaredTools {
+	names := collectXAINativeDeclaredToolNames(original)
+	if len(names) == 0 {
+		return xaiNativeDeclaredTools{}
+	}
+	restore := make(map[string]string, len(names)*2)
+	for originalName, shortName := range buildXAINativeShortNameMap(names) {
+		restore[originalName] = originalName
+		restore[shortName] = originalName
+	}
+	return xaiNativeDeclaredTools{restore: restore}
+}
+
+func (d xaiNativeDeclaredTools) filter(calls []xaiNativeToolCall) []xaiNativeToolCall {
+	if len(d.restore) == 0 || len(calls) == 0 {
+		return nil
+	}
+	out := make([]xaiNativeToolCall, 0, len(calls))
+	for _, call := range calls {
+		originalName, ok := d.restore[call.Name]
+		if !ok {
+			continue
+		}
+		call.Name = originalName
+		out = append(out, call)
+	}
+	return out
+}
+
+func collectXAINativeDeclaredToolNames(original []byte) []string {
+	if len(original) == 0 || !gjson.ValidBytes(original) {
+		return nil
+	}
+	tools := gjson.GetBytes(original, "tools")
+	if !tools.IsArray() || len(tools.Array()) == 0 {
+		return nil
+	}
+	var names []string
+	seen := map[string]struct{}{}
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		if _, exists := seen[name]; exists {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	for _, tool := range tools.Array() {
+		switch tool.Get("type").String() {
+		case "function":
+			if name := tool.Get("function.name").String(); name != "" {
+				add(name)
+			} else {
+				add(tool.Get("name").String())
+			}
+		case "custom":
+			add(tool.Get("name").String())
+		default:
+			if name := tool.Get("function.name").String(); name != "" {
+				add(name)
+			} else {
+				add(tool.Get("name").String())
+			}
+		}
+	}
+	return names
+}
+
+// buildXAINativeShortNameMap mirrors the Codex OpenAI request translator: names
+// longer than 64 characters are shortened the same way before they are sent
+// upstream, so leaked markup may contain the short form.
+func buildXAINativeShortNameMap(names []string) map[string]string {
+	const limit = 64
+	used := map[string]struct{}{}
+	m := make(map[string]string, len(names))
+
+	baseCandidate := func(n string) string {
+		if len(n) <= limit {
+			return n
+		}
+		if strings.HasPrefix(n, "mcp__") {
+			idx := strings.LastIndex(n, "__")
+			if idx > 0 {
+				cand := "mcp__" + n[idx+2:]
+				if len(cand) > limit {
+					cand = cand[:limit]
+				}
+				return cand
+			}
+		}
+		return n[:limit]
+	}
+
+	makeUnique := func(cand string) string {
+		if _, ok := used[cand]; !ok {
+			return cand
+		}
+		base := cand
+		for i := 1; ; i++ {
+			suffix := "_" + strconv.Itoa(i)
+			allowed := limit - len(suffix)
+			if allowed < 0 {
+				allowed = 0
+			}
+			tmp := base
+			if len(tmp) > allowed {
+				tmp = tmp[:allowed]
+			}
+			tmp += suffix
+			if _, ok := used[tmp]; !ok {
+				return tmp
+			}
+		}
+	}
+
+	for _, n := range names {
+		uniq := makeUnique(baseCandidate(n))
+		used[uniq] = struct{}{}
+		m[n] = uniq
+	}
+	return m
 }
 
 func encodeXAINativeToolCalls(calls []xaiNativeToolCall, indexed bool) []byte {

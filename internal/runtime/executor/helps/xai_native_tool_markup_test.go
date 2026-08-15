@@ -7,6 +7,7 @@ import (
 
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const xaiStalledExecuteMarkup = "Checking the working tree and remaining over-cap files so I can continue the editorial demotions from the last batch.<|tool_calls_begin|><|tool_call_begin|>\n" +
@@ -206,7 +207,7 @@ func TestParseXAINativeToolMarkupLeavesPlainTextUnchanged(t *testing.T) {
 	if _, ok := parseXAINativeToolMarkup("just a sentence"); ok {
 		t.Fatal("plain text should not parse as markup")
 	}
-	if _, ok := rewriteXAINativeToolMarkupChatJSON([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"}}]}`)); ok {
+	if _, ok := rewriteXAINativeToolMarkupChatJSON([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"}}]}`), xaiNativeDeclared("Execute")); ok {
 		t.Fatal("plain chat completion should not rewrite")
 	}
 }
@@ -214,7 +215,7 @@ func TestParseXAINativeToolMarkupLeavesPlainTextUnchanged(t *testing.T) {
 func TestRewriteXAINativeToolMarkupChatJSON(t *testing.T) {
 	body := []byte(`{"id":"chatcmpl_abc","choices":[{"index":0,"message":{"role":"assistant","content":"Working.<|tool_calls_begin|><|tool_call_begin|>\nExecute\n<|tool_sep|>command\nls\n<|tool_call_end|><|tool_calls_end|>"},"finish_reason":"stop"}]}`)
 
-	rewritten, ok := rewriteXAINativeToolMarkupChatJSON(body)
+	rewritten, ok := rewriteXAINativeToolMarkupChatJSON(body, xaiNativeDeclared("Execute"))
 	if !ok {
 		t.Fatal("rewriteXAINativeToolMarkupChatJSON() = false, want true")
 	}
@@ -244,7 +245,7 @@ func TestRewriteXAINativeToolMarkupChatJSON(t *testing.T) {
 
 func TestRewriteXAINativeToolMarkupChatJSONTreatsNullToolCallsAsAbsent(t *testing.T) {
 	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"Working.<|tool_calls_begin|><|tool_call_begin|>\nExecute\n<|tool_sep|>command\nls\n<|tool_call_end|><|tool_calls_end|>","tool_calls":null},"finish_reason":"stop"}]}`)
-	rewritten, ok := rewriteXAINativeToolMarkupChatJSON(body)
+	rewritten, ok := rewriteXAINativeToolMarkupChatJSON(body, xaiNativeDeclared("Execute"))
 	if !ok {
 		t.Fatal("null tool_calls should still rewrite leaked markup")
 	}
@@ -255,8 +256,44 @@ func TestRewriteXAINativeToolMarkupChatJSONTreatsNullToolCallsAsAbsent(t *testin
 
 func TestRewriteXAINativeToolMarkupChatJSONSkipsWhenToolCallsPresent(t *testing.T) {
 	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"x<|tool_calls_begin|>","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}}]}`)
-	if _, ok := rewriteXAINativeToolMarkupChatJSON(body); ok {
+	if _, ok := rewriteXAINativeToolMarkupChatJSON(body, xaiNativeDeclared("Read")); ok {
 		t.Fatal("already-present tool_calls should not rewrite")
+	}
+}
+
+func TestRewriteXAINativeToolMarkupChatJSONSkipsWhenNoToolsDeclared(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"Example:<|tool_calls_begin|><|tool_call_begin|>\nExecute\n<|tool_sep|>command\nls\n<|tool_call_end|><|tool_calls_end|>"}}]}`)
+	if _, ok := rewriteXAINativeToolMarkupChatJSON(body, xaiNativeDeclaredTools{}); ok {
+		t.Fatal("markup without declared tools should stay text")
+	}
+}
+
+func TestRewriteXAINativeToolMarkupChatJSONSkipsUnmatchedToolName(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"Example:<|tool_calls_begin|><|tool_call_begin|>\nExecute\n<|tool_sep|>command\nls\n<|tool_call_end|><|tool_calls_end|>"}}]}`)
+	if _, ok := rewriteXAINativeToolMarkupChatJSON(body, xaiNativeDeclared("Read")); ok {
+		t.Fatal("markup whose name is not a declared tool should stay text")
+	}
+}
+
+func TestRewriteXAINativeToolMarkupChatJSONRestoresShortenedToolName(t *testing.T) {
+	longName := "mcp__factory__" + strings.Repeat("collect_workspace_diagnostics_detail", 2)
+	if len(longName) <= 64 {
+		t.Fatalf("test setup: longName len=%d, want > 64", len(longName))
+	}
+	declared := parseXAINativeDeclaredTools(xaiNativeOpenAIRequestWithTools(longName))
+	shortName := buildXAINativeShortNameMap([]string{longName})[longName]
+	if shortName == "" || shortName == longName {
+		t.Fatalf("short name = %q, want a distinct shortened form", shortName)
+	}
+
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":""}}]}`)
+	body, _ = sjson.SetBytes(body, "choices.0.message.content", "<|tool_calls_begin|><|tool_call_begin|>\n"+shortName+"\n<|tool_sep|>path\n/tmp/a\n<|tool_call_end|><|tool_calls_end|>")
+	rewritten, ok := rewriteXAINativeToolMarkupChatJSON(body, declared)
+	if !ok {
+		t.Fatal("shortened markup name should rewrite")
+	}
+	if got := gjson.GetBytes(rewritten, "choices.0.message.tool_calls.0.function.name").String(); got != longName {
+		t.Fatalf("function name = %q, want original %q", got, longName)
 	}
 }
 
@@ -267,7 +304,7 @@ func TestRewriteXAINativeToolMarkupSSE(t *testing.T) {
 		"data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"grok-4.6-fast\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
 		"data: [DONE]\n\n"
 
-	rewritten, ok := rewriteXAINativeToolMarkupSSE([]byte(sse))
+	rewritten, ok := rewriteXAINativeToolMarkupSSE([]byte(sse), xaiNativeDeclared("Execute"))
 	if !ok {
 		t.Fatal("rewriteXAINativeToolMarkupSSE() = false, want true")
 	}
@@ -295,7 +332,7 @@ func TestRewriteXAINativeToolMarkupChatChunksSplitAcrossDeltas(t *testing.T) {
 		[]byte(`{"id":"chatcmpl_1","object":"chat.completion.chunk","created":1,"model":"grok-4.6","choices":[{"index":0,"delta":{"content":"ls_begin|><|tool_call_begin|>\nExecute\n<|tool_sep|>command\nls\n<|tool_call_end|><|tool_calls_end|>"},"finish_reason":null}]}`),
 		[]byte(`{"id":"chatcmpl_1","object":"chat.completion.chunk","created":1,"model":"grok-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`),
 	}
-	rewritten, ok := rewriteXAINativeToolMarkupChatChunks(chunks)
+	rewritten, ok := rewriteXAINativeToolMarkupChatChunks(chunks, xaiNativeDeclared("Execute"))
 	if !ok {
 		t.Fatal("split markup should rewrite after assembly")
 	}
@@ -312,7 +349,7 @@ func TestRewriteXAINativeToolMarkupChatChunksSplitAcrossDeltas(t *testing.T) {
 }
 
 func TestXAINativeToolMarkupChatStreamPassThroughWithoutMarkup(t *testing.T) {
-	stream := NewXAINativeToolMarkupChatStream(sdktranslator.FormatOpenAI)
+	stream := NewXAINativeToolMarkupChatStream(sdktranslator.FormatOpenAI, xaiNativeOpenAIRequestWithTools("Execute"))
 	first := []byte(`{"choices":[{"delta":{"content":"hello"}}]}`)
 	got := stream.Ingest(first)
 	if len(got) != 1 || !bytes.Equal(got[0], first) {
@@ -324,7 +361,7 @@ func TestXAINativeToolMarkupChatStreamPassThroughWithoutMarkup(t *testing.T) {
 }
 
 func TestXAINativeToolMarkupChatStreamBuffersUntilComplete(t *testing.T) {
-	stream := NewXAINativeToolMarkupChatStream(sdktranslator.FormatOpenAI)
+	stream := NewXAINativeToolMarkupChatStream(sdktranslator.FormatOpenAI, xaiNativeOpenAIRequestWithTools("Execute"))
 	prefix := []byte(`{"id":"chatcmpl_1","choices":[{"delta":{"content":"Working."}}]}`)
 	if got := stream.Ingest(prefix); len(got) != 1 {
 		t.Fatalf("prefix should pass through, got %#v", got)
@@ -348,7 +385,7 @@ func TestXAINativeToolMarkupChatStreamBuffersUntilComplete(t *testing.T) {
 }
 
 func TestXAINativeToolMarkupChatStreamReleasesFalseMarkerPrefix(t *testing.T) {
-	stream := NewXAINativeToolMarkupChatStream(sdktranslator.FormatOpenAI)
+	stream := NewXAINativeToolMarkupChatStream(sdktranslator.FormatOpenAI, xaiNativeOpenAIRequestWithTools("Execute"))
 	prefix := []byte(`{"id":"chatcmpl_1","choices":[{"delta":{"content":"compare a <"}}]}`)
 	if got := stream.Ingest(prefix); len(got) != 0 {
 		t.Fatalf("trailing < should buffer pending a marker check, got %#v", got)
@@ -365,7 +402,21 @@ func TestXAINativeToolMarkupChatStreamReleasesFalseMarkerPrefix(t *testing.T) {
 
 func TestApplyXAINativeToolMarkupChatJSONIgnoresResponsesFormat(t *testing.T) {
 	body := []byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"Working.<|tool_calls_begin|>"}]}]}`)
-	if got := ApplyXAINativeToolMarkupChatJSON(sdktranslator.FormatOpenAIResponse, body); !bytes.Equal(got, body) {
+	if got := ApplyXAINativeToolMarkupChatJSON(sdktranslator.FormatOpenAIResponse, body, xaiNativeOpenAIRequestWithTools("Execute")); !bytes.Equal(got, body) {
 		t.Fatal("Responses payloads must not be rewritten by the chat-completion hook")
 	}
+}
+
+func xaiNativeDeclared(names ...string) xaiNativeDeclaredTools {
+	return parseXAINativeDeclaredTools(xaiNativeOpenAIRequestWithTools(names...))
+}
+
+func xaiNativeOpenAIRequestWithTools(names ...string) []byte {
+	req := []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"continue"}]}`)
+	for _, name := range names {
+		tool := []byte(`{"type":"function","function":{"name":"","parameters":{"type":"object"}}}`)
+		tool, _ = sjson.SetBytes(tool, "function.name", name)
+		req, _ = sjson.SetRawBytes(req, "tools.-1", tool)
+	}
+	return req
 }

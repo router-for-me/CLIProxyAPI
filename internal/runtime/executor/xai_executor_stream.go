@@ -81,7 +81,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
-		markupStream := helps.NewXAINativeToolMarkupChatStream(prepared.responseFormat)
+		markupStream := helps.NewXAINativeToolMarkupChatStream(prepared.responseFormat, prepared.originalPayload)
 		var pendingEventLine []byte
 		emitPayloads := func(payloads [][]byte) bool {
 			for i := range payloads {
