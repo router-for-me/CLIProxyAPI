@@ -764,9 +764,18 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	// Authoritative stale observation conducted under bindMu using non-refreshing token read.
+	// Observe both alias groups: they may be split across different auths, in
+	// which case failover must reconcile both, not just the first one found.
+	staleKey := cacheKey
 	staleAuthID, staleGen, staleAliases, hasStale := s.cache.GetWithGeneration(cacheKey)
-	if !hasStale && fallbackKey != "" {
-		staleAuthID, staleGen, staleAliases, hasStale = s.cache.GetWithGeneration(fallbackKey)
+	splitAuthID, splitGen, splitAliases, hasSplit := "", uint64(0), []string(nil), false
+	if fallbackKey != "" {
+		splitAuthID, splitGen, splitAliases, hasSplit = s.cache.GetWithGeneration(fallbackKey)
+	}
+	splitGroups := hasStale && hasSplit && staleAuthID != splitAuthID
+	if !hasStale && hasSplit {
+		staleKey = fallbackKey
+		staleAuthID, staleGen, staleAliases, hasStale = splitAuthID, splitGen, splitAliases, true
 	}
 
 	auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
@@ -775,14 +784,27 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	if hasStale {
-		additional := []string{cacheKey}
-		if fallbackKey != "" {
-			additional = append(additional, fallbackKey)
-		}
-		if s.cache.CompareAndReplaceAliases(staleAuthID, staleGen, staleAliases, auth.ID, additional...) {
-			entry.Infof("session-affinity: rebound stale alias group | session=%s oldAuth=%s newAuth=%s gen=%d", truncateSessionID(primaryID), staleAuthID, auth.ID, staleGen)
+		if splitGroups {
+			// Split alias groups (prompt-cache and conversation aliases bound to
+			// different auths): reconcile each observed group onto the selected
+			// auth, otherwise the failover leaves the session pinned to the dead
+			// split bindings and affinity breaks across the failover.
+			if !s.rebindAliasGroupCAS(cacheKey, staleAuthID, staleGen, staleAliases, auth.ID, nil) {
+				entry.Infof("session-affinity: split-group rebind (primary) lost to concurrent writer after retries | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+			}
+			if !s.rebindAliasGroupCAS(fallbackKey, splitAuthID, splitGen, splitAliases, auth.ID, nil) {
+				entry.Infof("session-affinity: split-group rebind (fallback) lost to concurrent writer after retries | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+			}
 		} else {
-			entry.Infof("session-affinity: CAS rebind aborted due to concurrent mutation, serving selected auth statelessly | session=%s auth=%s", truncateSessionID(primaryID), auth.ID)
+			additional := []string{cacheKey}
+			if fallbackKey != "" {
+				additional = append(additional, fallbackKey)
+			}
+			if s.rebindAliasGroupCAS(staleKey, staleAuthID, staleGen, staleAliases, auth.ID, additional) {
+				entry.Infof("session-affinity: rebound stale alias group | session=%s oldAuth=%s newAuth=%s gen=%d", truncateSessionID(primaryID), staleAuthID, auth.ID, staleGen)
+			} else {
+				entry.Infof("session-affinity: CAS rebind aborted due to concurrent mutation, serving selected auth statelessly | session=%s auth=%s", truncateSessionID(primaryID), auth.ID)
+			}
 		}
 		return auth, nil
 	}
@@ -790,6 +812,24 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	bind(auth.ID)
 	entry.Infof("session-affinity: cache miss, bound candidate | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	return auth, nil
+}
+
+// rebindAliasGroupCAS atomically rebinds a session alias group to newAuthID.
+// When the compare-and-swap loses to a concurrent writer, the group is
+// re-observed and the binding retried (bounded), so the auth selected for
+// this request is not silently dropped by a stale generation.
+func (s *SessionAffinitySelector) rebindAliasGroupCAS(sessionKey string, expectedAuthID string, expectedGen uint64, expectedAliases []string, newAuthID string, additionalAliases []string) bool {
+	for attempt := 0; attempt < 3; attempt++ {
+		if s.cache.CompareAndReplaceAliases(expectedAuthID, expectedGen, expectedAliases, newAuthID, additionalAliases...) {
+			return true
+		}
+		authID, gen, aliases, ok := s.cache.GetWithGeneration(sessionKey)
+		if !ok {
+			return false
+		}
+		expectedAuthID, expectedGen, expectedAliases = authID, gen, aliases
+	}
+	return false
 }
 
 // OnResult handles session affinity binding or release based on execution outcome.
