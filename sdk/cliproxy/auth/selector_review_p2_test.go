@@ -324,3 +324,70 @@ func TestSessionAffinitySelector_SplitGroupMergeExhaustionRestoresFallbackAliase
 		t.Fatalf("extraFallbackAlias must be restored to auth-b, got %q, %v", got, ok)
 	}
 }
+
+func TestSessionAffinitySelector_SplitGroupMergeExhaustionDoesNotClobberConcurrentRebind(t *testing.T) {
+	for i := 0; i < 500; i++ {
+		selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+			Fallback: &RoundRobinSelector{},
+			TTL:      time.Minute,
+		})
+		provider := fmt.Sprintf("responses-split-exhaustion-concurrent-%d", i)
+		model := "gpt-test"
+
+		cacheKey := provider + "::pck:shared-prompt::" + model
+		fallbackKey := provider + "::conv:conversation-session::" + model
+		extraFallbackAlias := provider + "::extra:alias::" + model
+		missingPrimaryAlias := provider + "::conv:missing::" + model
+
+		// 1. Group 1 on cacheKey + missingPrimaryAlias bound to auth-a
+		selector.cache.SetAliases("auth-a", cacheKey, missingPrimaryAlias)
+
+		// Invalidate missingPrimaryAlias from entries table while leaving cacheKey's entry
+		// expecting it, so CompareAndReplaceAliases on cacheKey fails on all CAS attempts.
+		selector.cache.mu.Lock()
+		delete(selector.cache.entries, missingPrimaryAlias)
+		selector.cache.mu.Unlock()
+
+		// 2. Group 2 on fallbackKey + extraFallbackAlias bound to auth-b
+		selector.cache.SetAliases("auth-b", fallbackKey, extraFallbackAlias)
+
+		// Start a concurrent goroutine that observes when fallbackKey is deleted by attempt 0,
+		// and immediately rebinds extraFallbackAlias to auth-x.
+		done := make(chan struct{})
+		finished := make(chan struct{})
+		rebound := false
+		go func() {
+			defer close(done)
+			for {
+				select {
+				case <-finished:
+					return
+				default:
+				}
+				if _, ok := selector.cache.Get(fallbackKey); ok {
+					continue
+				}
+				selector.cache.SetAliases("auth-x", extraFallbackAlias)
+				rebound = true
+				return
+			}
+		}()
+
+		// 3. mergeSplitAliasGroupsCAS attempts to merge cacheKey and fallbackKey into auth-c.
+		// Since cacheKey expects missingPrimaryAlias which is missing from entries,
+		// CompareAndReplaceAliases fails on all 3 attempts.
+		merged := selector.mergeSplitAliasGroupsCAS(cacheKey, fallbackKey, "auth-c")
+		close(finished)
+		<-done
+		if merged {
+			t.Fatalf("iteration %d: mergeSplitAliasGroupsCAS must fail due to CAS exhaustion", i)
+		}
+
+		if rebound {
+			if got, ok := selector.cache.Get(extraFallbackAlias); !ok || got != "auth-x" {
+				t.Fatalf("iteration %d: concurrent rebind extraFallbackAlias clobbered; got %q, %v, want auth-x", i, got, ok)
+			}
+		}
+		selector.Stop()
+	}
+}

@@ -880,7 +880,7 @@ func (s *SessionAffinitySelector) mergeSplitAliasGroupsCAS(cacheKey, fallbackKey
 		return true
 	}
 	if len(retainedF) > 0 && deletedAuthF != "" {
-		s.cache.SetAliases(deletedAuthF, retainedF...)
+		s.cache.RestoreAliasesIfAbsent(deletedAuthF, retainedF...)
 	}
 	return false
 }
