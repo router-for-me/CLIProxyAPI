@@ -1095,3 +1095,91 @@ func TestConfigSynthesizer_RequestScopedErrors(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigSynthesizer_VertexADC verifies vertex-adc entries synthesize a
+// vertex auth that carries project/location and the explicit ADC marker, with
+// no api_key attribute (so the executor resolves tokens via ADC).
+func TestConfigSynthesizer_VertexADC(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			VertexADC: []config.VertexADCConfig{
+				{ProjectID: "proj-1", Location: "global", Prefix: "adc"},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	a := auths[0]
+	if a.Provider != "vertex" {
+		t.Errorf("provider = %s, want vertex", a.Provider)
+	}
+	if a.Label != "vertex-adc" {
+		t.Errorf("label = %s, want vertex-adc", a.Label)
+	}
+	if a.Prefix != "adc" {
+		t.Errorf("prefix = %s, want adc", a.Prefix)
+	}
+	if a.Metadata["project_id"] != "proj-1" {
+		t.Errorf("metadata project_id = %v, want proj-1", a.Metadata["project_id"])
+	}
+	if a.Metadata["location"] != "global" {
+		t.Errorf("metadata location = %v, want global", a.Metadata["location"])
+	}
+	if adc, _ := a.Metadata["adc"].(bool); !adc {
+		t.Errorf("metadata adc = %v, want true", a.Metadata["adc"])
+	}
+	if key := a.Attributes["api_key"]; key != "" {
+		t.Errorf("attributes api_key = %q, want empty (ADC must not look like an API-key credential)", key)
+	}
+	if index := a.Attributes["config_index"]; index != "" {
+		t.Errorf("attributes config_index = %q, want empty (index resolvers would cross-match vertex-api-key entries)", index)
+	}
+	if kind := a.AuthKind(); kind != coreauth.AuthKindOAuth {
+		t.Errorf("AuthKind() = %q, want %q (kind-scoped selection must find ADC credentials)", kind, coreauth.AuthKindOAuth)
+	}
+}
+
+// TestConfigSynthesizer_VertexADCSkipsMalformedEntries verifies a malformed
+// vertex-adc entry is skipped without an error: ValidateVertexADC rejects it
+// at load time, and an error here would drop every other family's auths from
+// the synthesis snapshot (config auths of a snapshot that fails to synthesize
+// are treated as removed).
+func TestConfigSynthesizer_VertexADCSkipsMalformedEntries(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GeminiKey: []config.GeminiKey{{APIKey: "key-1"}},
+			VertexADC: []config.VertexADCConfig{
+				{Location: "global"},
+				{ProjectID: "proj-1"},
+				{ProjectID: "proj-2", Prefix: "a/b"},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths (gemini + valid adc), got %d", len(auths))
+	}
+	for _, a := range auths {
+		if a.Label != "vertex-adc" {
+			continue
+		}
+		if a.Metadata["project_id"] != "proj-1" {
+			t.Errorf("adc project_id = %v, want proj-1 (malformed entries must be skipped)", a.Metadata["project_id"])
+		}
+	}
+}

@@ -205,15 +205,14 @@ func (e *GeminiVertexExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	if errCreds != nil {
 		return errCreds
 	}
-	token, errToken := vertexAccessToken(req.Context(), e.cfg, auth, saJSON)
+	token, quotaProject, errToken := vertexAccessToken(req.Context(), e.cfg, auth, saJSON)
 	if errToken != nil {
 		return errToken
 	}
 	if strings.TrimSpace(token) == "" {
 		return statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Del("x-goog-api-key")
+	applyVertexAuthHeader(req.Header, token, quotaProject)
 	return nil
 }
 
@@ -363,8 +362,8 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		return resp, errNewReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+token)
+	if token, quotaProject, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
+		applyVertexAuthHeader(httpReq.Header, token, quotaProject)
 	} else if errTok != nil {
 		log.Errorf("vertex executor: access token error: %v", errTok)
 		return resp, statusErr{code: 500, msg: "internal server error"}
@@ -608,8 +607,8 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		return nil, errNewReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+token)
+	if token, quotaProject, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
+		applyVertexAuthHeader(httpReq.Header, token, quotaProject)
 	} else if errTok != nil {
 		log.Errorf("vertex executor: access token error: %v", errTok)
 		return nil, statusErr{code: 500, msg: "internal server error"}
@@ -883,8 +882,8 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 		return cliproxyexecutor.Response{}, errNewReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+token)
+	if token, quotaProject, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
+		applyVertexAuthHeader(httpReq.Header, token, quotaProject)
 	} else if errTok != nil {
 		log.Errorf("vertex executor: access token error: %v", errTok)
 		return cliproxyexecutor.Response{}, statusErr{code: 500, msg: "internal server error"}
@@ -1061,6 +1060,14 @@ func vertexCreds(a *cliproxyauth.Auth) (projectID, location string, serviceAccou
 		sa = raw
 	}
 	if sa == nil {
+		if adc, _ := a.Metadata["adc"].(bool); adc {
+			// ADC mode: explicitly opted in via a vertex-adc config entry.
+			// project_id/location come from auth metadata; the access token is
+			// obtained via Application Default Credentials by vertexAccessToken —
+			// on GCE it reads the metadata server automatically, elsewhere it
+			// honors GOOGLE_APPLICATION_CREDENTIALS.
+			return projectID, location, nil, nil
+		}
 		return "", "", nil, fmt.Errorf("vertex executor: missing service_account in credentials")
 	}
 	normalized, errNorm := vertexauth.NormalizeServiceAccountMap(sa)
@@ -1101,20 +1108,67 @@ func vertexBaseURL(location string) string {
 	return fmt.Sprintf("https://%s-aiplatform.googleapis.com", loc)
 }
 
-func vertexAccessToken(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, saJSON []byte) (string, error) {
+// vertexAccessToken returns the bearer token for a Vertex request, plus the
+// ADC quota project when the credential carries one. File-backed ADC
+// credentials (e.g. `gcloud auth application-default login`) carry
+// quota_project_id; their tokens are not project-bound, so every request must
+// also send x-goog-user-project or Vertex rejects it with a service-usage
+// error. Metadata-server and service-account tokens are project-bound and
+// need no quota project.
+func vertexAccessToken(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, saJSON []byte) (string, string, error) {
 	if httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0); httpClient != nil {
 		ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 	}
 	// Use cloud-platform scope for Vertex AI.
-	creds, errCreds := google.CredentialsFromJSON(ctx, saJSON, "https://www.googleapis.com/auth/cloud-platform")
+	const scope = "https://www.googleapis.com/auth/cloud-platform"
+	if len(saJSON) == 0 {
+		// ADC mode: Application Default Credentials with no service account. On GCE
+		// this reads the metadata server automatically; elsewhere it honors the
+		// GOOGLE_APPLICATION_CREDENTIALS file.
+		creds, errCreds := google.FindDefaultCredentials(ctx, scope)
+		if errCreds != nil {
+			return "", "", fmt.Errorf("vertex executor: ADC token source failed: %w", errCreds)
+		}
+		tok, errTok := creds.TokenSource.Token()
+		if errTok != nil {
+			return "", "", fmt.Errorf("vertex executor: ADC get access token failed: %w", errTok)
+		}
+		return tok.AccessToken, adcQuotaProject(creds.JSON), nil
+	}
+	creds, errCreds := google.CredentialsFromJSON(ctx, saJSON, scope)
 	if errCreds != nil {
-		return "", fmt.Errorf("vertex executor: parse service account json failed: %w", errCreds)
+		return "", "", fmt.Errorf("vertex executor: parse service account json failed: %w", errCreds)
 	}
 	tok, errTok := creds.TokenSource.Token()
 	if errTok != nil {
-		return "", fmt.Errorf("vertex executor: get access token failed: %w", errTok)
+		return "", "", fmt.Errorf("vertex executor: get access token failed: %w", errTok)
 	}
-	return tok.AccessToken, nil
+	return tok.AccessToken, "", nil
+}
+
+// adcQuotaProject extracts quota_project_id from raw ADC credentials JSON.
+// google.Credentials (x/oauth2) does not surface the field, so parse it here.
+func adcQuotaProject(rawCreds []byte) string {
+	if len(rawCreds) == 0 {
+		return ""
+	}
+	var file struct {
+		QuotaProjectID string `json:"quota_project_id"`
+	}
+	if errUnmarshal := json.Unmarshal(rawCreds, &file); errUnmarshal != nil {
+		return ""
+	}
+	return strings.TrimSpace(file.QuotaProjectID)
+}
+
+// applyVertexAuthHeader sets the bearer token plus, for file-backed ADC
+// credentials, the quota project header Vertex requires to attribute usage.
+func applyVertexAuthHeader(h http.Header, token, quotaProject string) {
+	h.Set("Authorization", "Bearer "+token)
+	h.Del("x-goog-api-key")
+	if quotaProject != "" {
+		h.Set("x-goog-user-project", quotaProject)
+	}
 }
 
 // resolveVertexConfig finds the matching vertex-api-key configuration entry for the given auth.
