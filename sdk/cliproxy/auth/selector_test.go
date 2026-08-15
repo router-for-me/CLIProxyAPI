@@ -1277,6 +1277,42 @@ func TestExtractSessionID_OpenAIResponsesAPI(t *testing.T) {
 	}
 }
 
+func TestSessionCache_RestoreAliasesIfAbsent_IndependentRestoration(t *testing.T) {
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	// Initial fallback group with 3 aliases bound to auth-b
+	cache.SetAliases("auth-b", "fallbackKey", "reboundAlias", "stillAbsentAlias")
+
+	// Fallback group gets deleted during merge attempt
+	removed := cache.CompareAndDeleteGroup("fallbackKey", "auth-b", 1, []string{"fallbackKey", "reboundAlias", "stillAbsentAlias"})
+	if len(removed) == 0 {
+		t.Fatalf("CompareAndDeleteGroup failed")
+	}
+
+	// Concurrent writer rebinds reboundAlias to auth-x
+	cache.SetAliases("auth-x", "reboundAlias")
+
+	// Merge exhaustion attempts to restore remaining aliases
+	restored := cache.RestoreAliasesIfAbsent("auth-b", removed...)
+	if !restored {
+		t.Fatalf("RestoreAliasesIfAbsent should return true when some aliases are still absent")
+	}
+
+	// reboundAlias must remain bound to auth-x
+	if got, ok := cache.Get("reboundAlias"); !ok || got != "auth-x" {
+		t.Fatalf("reboundAlias must remain auth-x, got %q, %v", got, ok)
+	}
+
+	// fallbackKey and stillAbsentAlias must be restored to auth-b
+	if got, ok := cache.Get("fallbackKey"); !ok || got != "auth-b" {
+		t.Fatalf("fallbackKey must be restored to auth-b, got %q, %v", got, ok)
+	}
+	if got, ok := cache.Get("stillAbsentAlias"); !ok || got != "auth-b" {
+		t.Fatalf("stillAbsentAlias must be restored to auth-b, got %q, %v", got, ok)
+	}
+}
+
 func TestSessionAffinitySelector_ThreeScenarios(t *testing.T) {
 	t.Parallel()
 
