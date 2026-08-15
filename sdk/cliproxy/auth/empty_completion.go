@@ -704,7 +704,9 @@ func (a *emptyCompletionAccum) evalClaudeBlocks(blocks []claudeContentBlock) {
 			continue
 		}
 		if b.Type == "thinking" || b.Type == "redacted_thinking" || strings.TrimSpace(b.Thinking) != "" {
-			a.hasContent = true
+			if strings.TrimSpace(b.Thinking) != "" {
+				a.hasContent = true
+			}
 			continue
 		}
 		if strings.TrimSpace(b.Text) != "" {
