@@ -91,6 +91,162 @@ func TestGeminiExecutorExecuteCapsMaxOutputTokensBeforeUpstream(t *testing.T) {
 	}
 }
 
+func TestGeminiExecutorExecutePrependsLeadingUser(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		upstreamBody = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewGeminiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "test-key",
+		"base_url": server.URL,
+	}}
+	request := cliproxyexecutor.Request{
+		Model: "gemini-3.7-flash",
+		Payload: []byte(`{"contents":[` +
+			`{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"key":"value"}}}]},` +
+			`{"role":"user","parts":[{"functionResponse":{"name":"lookup","response":{"result":"ok"}}}]}` +
+			`]}`),
+	}
+
+	if _, errExecute := executor.Execute(context.Background(), auth, request, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	contents := gjson.GetBytes(upstreamBody, "contents").Array()
+	if len(contents) != 3 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" || contents[2].Get("role").String() != "user" {
+		t.Fatalf("upstream roles malformed: %s", upstreamBody)
+	}
+	if got := contents[0].Get("parts.0.text").String(); got != "" {
+		t.Fatalf("leading user prompt = %q, want empty string; body=%s", got, upstreamBody)
+	}
+}
+
+func TestGeminiExecutorExecutePrependsLeadingUserForIssue4959ResponsesHistory(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		upstreamBody = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewGeminiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "test-key",
+		"base_url": server.URL,
+	}}
+	if _, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-3.7-flash",
+		Payload: issue4959ResponsesModelFirstPayload(),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	assertIssue4959LeadingUserContents(t, gjson.GetBytes(upstreamBody, "contents").Array())
+}
+
+func TestGeminiExecutorCountTokensPrependsLeadingUser(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		upstreamBody = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"totalTokens":7}`))
+	}))
+	defer server.Close()
+
+	executor := NewGeminiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "test-key",
+		"base_url": server.URL,
+	}}
+	request := cliproxyexecutor.Request{
+		Model:   "gemini-3.7-flash",
+		Payload: []byte(`{"contents":[{"role":"model","parts":[{"text":"prior output"}]}]}`),
+	}
+
+	if _, errCount := executor.CountTokens(context.Background(), auth, request, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); errCount != nil {
+		t.Fatalf("CountTokens() error = %v", errCount)
+	}
+	contents := gjson.GetBytes(upstreamBody, "contents").Array()
+	if len(contents) != 2 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" {
+		t.Fatalf("countTokens roles malformed: %s", upstreamBody)
+	}
+	if text := contents[0].Get("parts.0.text"); !text.Exists() || text.String() != "" {
+		t.Fatalf("countTokens synthetic user missing: %s", upstreamBody)
+	}
+	if got := contents[1].Get("parts.0.text").String(); got != "prior output" {
+		t.Fatalf("countTokens model text = %q, want prior output; body=%s", got, upstreamBody)
+	}
+
+	request.Metadata = map[string]any{"action": "countTokens"}
+	if _, errExecute := executor.Execute(context.Background(), auth, request, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); errExecute != nil {
+		t.Fatalf("Execute(countTokens) error = %v", errExecute)
+	}
+	contents = gjson.GetBytes(upstreamBody, "contents").Array()
+	if len(contents) != 2 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" {
+		t.Fatalf("Execute(countTokens) roles malformed: %s", upstreamBody)
+	}
+}
+
+func TestGeminiExecutorAppliesPayloadRulesBeforeLeadingUserNormalization(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		upstreamBody = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`))
+	}))
+	defer server.Close()
+
+	executor := NewGeminiExecutor(&config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+		Models: []config.PayloadModelRule{{Name: "gemini-3.7-flash", Protocol: "gemini"}},
+		Params: map[string]any{"contents.0.parts.0.text": "payload override"},
+	}}}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "test-key",
+		"base_url": server.URL,
+	}}
+	request := cliproxyexecutor.Request{
+		Model: "gemini-3.7-flash",
+		Payload: []byte(`{"contents":[` +
+			`{"role":"model","parts":[{"text":"prior output"}]},` +
+			`{"role":"user","parts":[{"text":"continue"}]}` +
+			`]}`),
+	}
+
+	if _, errExecute := executor.Execute(context.Background(), auth, request, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	contents := gjson.GetBytes(upstreamBody, "contents").Array()
+	if len(contents) != 3 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" {
+		t.Fatalf("upstream roles malformed: %s", upstreamBody)
+	}
+	if text := contents[0].Get("parts.0.text"); !text.Exists() || text.String() != "" {
+		t.Fatalf("synthetic leading user changed: %s", upstreamBody)
+	}
+	if got := contents[1].Get("parts.0.text").String(); got != "payload override" {
+		t.Fatalf("payload rule applied to %q, want original first model turn; body=%s", got, upstreamBody)
+	}
+}
+
 func TestGeminiExecutorInteractionsWithGeminiAPIKeyUsesGeminiEndpoint(t *testing.T) {
 	var gotPath string
 	var gotRevision string
