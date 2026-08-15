@@ -444,8 +444,16 @@ func TestHostAuthDeleteCallbackRejectsIndividualVirtualAuth(t *testing.T) {
 	if errMarshal != nil {
 		t.Fatalf("marshal delete by source: %v", errMarshal)
 	}
-	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthDelete, bySource); errCall != nil {
+	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthDelete, bySource)
+	if errCall != nil {
 		t.Fatalf("delete by source file name error = %v, want success", errCall)
+	}
+	resp, errDecode := decodeRPCEnvelope[pluginapi.HostAuthDeleteResponse](rawResp)
+	if errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+	if resp.Name != "source.json" {
+		t.Fatalf("response.Name = %q, want physical source name", resp.Name)
 	}
 	if _, errStat := os.Stat(sourcePath); !os.IsNotExist(errStat) {
 		t.Fatalf("stat source file after source delete err = %v, want not-exist", errStat)

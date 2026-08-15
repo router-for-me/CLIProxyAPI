@@ -229,7 +229,7 @@ func (h *Host) resolveAuthForDelete(req pluginapi.HostAuthDeleteRequest) (*corea
 			if errGuard := guardVirtualAuthDelete(auth, name); errGuard != nil {
 				return nil, "", "", errGuard
 			}
-			return auth, path, deleteNameForAuth(auth, path), nil
+			return auth, path, deleteNameForDelete(auth, path), nil
 		}
 		for _, auth := range manager.List() {
 			if auth == nil {
@@ -243,7 +243,7 @@ func (h *Host) resolveAuthForDelete(req pluginapi.HostAuthDeleteRequest) (*corea
 				if errGuard := guardVirtualAuthDelete(auth, name); errGuard != nil {
 					return nil, "", "", errGuard
 				}
-				return auth, path, deleteNameForAuth(auth, path), nil
+				return auth, path, deleteNameForDelete(auth, path), nil
 			}
 		}
 	}
@@ -306,6 +306,16 @@ func deleteNameForAuth(auth *coreauth.Auth, path string) string {
 		}
 	}
 	return filepath.Base(path)
+}
+
+// deleteNameForDelete reports the credential identity a delete actually removed.
+// A virtual auth deleted through its physical source name removes the whole
+// expansion, so report the source file identity rather than the matched child.
+func deleteNameForDelete(auth *coreauth.Auth, path string) string {
+	if coreauth.IsPluginVirtualAuth(auth) {
+		return filepath.Base(path)
+	}
+	return deleteNameForAuth(auth, path)
 }
 
 func (h *Host) removeAuth(ctx context.Context, id string) {
