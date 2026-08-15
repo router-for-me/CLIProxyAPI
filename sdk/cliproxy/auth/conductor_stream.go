@@ -373,14 +373,6 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	}
 	for idx, execModel := range execModels {
 		ttftTimeout := m.streamFirstChunkTimeout(opts)
-		scope := newTTFTScope(ctx, ttftTimeout)
-		attemptCtx := scope.ctx
-		checkTTFTErr := func(err error) error {
-			if t := scope.timeoutError(); t != nil {
-				return t
-			}
-			return err
-		}
 
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
@@ -392,15 +384,25 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		var errIntercept error
 		execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 		if errIntercept != nil {
-			scope.release()
 			return nil, errIntercept
 		}
 		if executionModel == "" {
 			execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, execModel)
 		}
 		if errCtx := ctx.Err(); errCtx != nil {
-			scope.release()
 			return nil, errCtx
+		}
+		// Arm the TTFT scope only after local interception and request
+		// preparation: the budget measures upstream responsiveness, so a slow
+		// after-auth interceptor must not cancel the attempt before any
+		// upstream request was even made.
+		scope := newTTFTScope(ctx, ttftTimeout)
+		attemptCtx := scope.ctx
+		checkTTFTErr := func(err error) error {
+			if t := scope.timeoutError(); t != nil {
+				return t
+			}
+			return err
 		}
 		streamResult, errStream := executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
 		if errStream != nil {

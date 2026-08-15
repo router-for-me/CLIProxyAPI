@@ -396,7 +396,7 @@ func (a *emptyCompletionAccum) evalClaude(data []byte) bool {
 
 	isClaude := false
 	switch chunk.Type {
-	case "message", "message_start", "content_block_start", "content_block_delta", "message_delta", "message_stop":
+	case "message", "message_start", "content_block_start", "content_block_delta", "message_delta", "message_stop", "ping":
 		isClaude = true
 	default:
 		if chunk.StopReason != nil || (chunk.Message != nil && (chunk.Message.Type == "message" || chunk.Message.StopReason != nil)) {

@@ -546,6 +546,21 @@ func TestEmptyCompletionTolerantUsage(t *testing.T) {
 	}
 }
 
+// TestStreamBootstrapDetectorClaudePing is a regression guard for the codex
+// P2 finding on PR #4881: Claude streams may emit {"type":"ping"} keep-alive
+// events. evalClaude used to treat them as unknown payloads, permanently
+// switching the detector to forwarding mode, so a terminally empty completion
+// after a ping bypassed failover and surfaced as a successful empty stream.
+func TestStreamBootstrapDetectorClaudePing(t *testing.T) {
+	var detector StreamBootstrapDetector
+	if detector.Observe([]byte("event: ping\ndata: {\"type\":\"ping\"}\n\n")) {
+		t.Fatal("Observe() forwarded after Claude ping keep-alive")
+	}
+	if detector.Observe([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")) {
+		t.Fatal("Observe() forwarded terminal empty Claude stream preceded by ping")
+	}
+}
+
 func TestStreamBootstrapStateForwardsAtMetadataLimit(t *testing.T) {
 	var state streamBootstrapState
 	metadata := []byte("data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n")
