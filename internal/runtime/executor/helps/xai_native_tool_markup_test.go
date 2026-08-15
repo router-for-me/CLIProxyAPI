@@ -45,8 +45,8 @@ func TestParseXAINativeToolMarkupExecuteFromStalledSession(t *testing.T) {
 	if got := parsed.Calls[0].Arguments["command"]; got != "cd /tmp && git status" {
 		t.Fatalf("command = %#v", got)
 	}
-	if got := parsed.Calls[0].Arguments["timeout"]; got != int64(30) {
-		t.Fatalf("timeout = %#v, want int64(30)", got)
+	if got := parsed.Calls[0].Arguments["timeout"]; got != "30" {
+		t.Fatalf("timeout = %#v, want the raw scalar text", got)
 	}
 	if got := parsed.Calls[0].Arguments["riskLevel"]; got != "low" {
 		t.Fatalf("riskLevel = %#v", got)
@@ -79,10 +79,10 @@ func TestParseXAINativeToolMarkupEndFeatureRunWithJSONHandoff(t *testing.T) {
 	if parsed.Calls[0].Arguments["successState"] != "partial" {
 		t.Fatalf("successState = %#v", parsed.Calls[0].Arguments["successState"])
 	}
-	if parsed.Calls[0].Arguments["returnToOrchestrator"] != true {
+	if parsed.Calls[0].Arguments["returnToOrchestrator"] != "true" {
 		t.Fatalf("returnToOrchestrator = %#v", parsed.Calls[0].Arguments["returnToOrchestrator"])
 	}
-	if parsed.Calls[0].Arguments["validatorsPassed"] != false {
+	if parsed.Calls[0].Arguments["validatorsPassed"] != "false" {
 		t.Fatalf("validatorsPassed = %#v", parsed.Calls[0].Arguments["validatorsPassed"])
 	}
 	handoff, ok := parsed.Calls[0].Arguments["handoff"].(map[string]any)
@@ -275,6 +275,22 @@ func TestRewriteXAINativeToolMarkupChatJSONSkipsUnmatchedToolName(t *testing.T) 
 	}
 }
 
+func TestRewriteXAINativeToolMarkupChatJSONPreservesSchemaStringScalars(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"<|tool_calls_begin|><|tool_call_begin|>\nExecute\n<|tool_sep|>command\ntrue\n<|tool_sep|>timeout\n30\n<|tool_call_end|><|tool_calls_end|>"}}]}`)
+	declared := parseXAINativeDeclaredTools(xaiNativeOpenAIRequestWithToolSchema("Execute", `{"command":{"type":"string"},"timeout":{"type":"number"}}`))
+	rewritten, ok := rewriteXAINativeToolMarkupChatJSON(body, declared)
+	if !ok {
+		t.Fatal("schema-backed markup should rewrite")
+	}
+	args := gjson.GetBytes(rewritten, "choices.0.message.tool_calls.0.function.arguments").String()
+	if gjson.Get(args, "command").Type != gjson.String || gjson.Get(args, "command").String() != "true" {
+		t.Fatalf("command should stay a string: %s", args)
+	}
+	if gjson.Get(args, "timeout").Type != gjson.Number || gjson.Get(args, "timeout").Int() != 30 {
+		t.Fatalf("timeout should follow number schema: %s", args)
+	}
+}
+
 func TestRewriteXAINativeToolMarkupChatJSONRestoresShortenedToolName(t *testing.T) {
 	longName := "mcp__factory__" + strings.Repeat("collect_workspace_diagnostics_detail", 2)
 	if len(longName) <= 64 {
@@ -323,6 +339,9 @@ func TestRewriteXAINativeToolMarkupSSE(t *testing.T) {
 	}
 	if !strings.Contains(text, "data: [DONE]") {
 		t.Fatalf("missing [DONE]: %s", text)
+	}
+	if !strings.Contains(text, `"native_finish_reason":"tool_calls"`) {
+		t.Fatalf("missing native_finish_reason tool_calls: %s", text)
 	}
 }
 
@@ -418,5 +437,14 @@ func xaiNativeOpenAIRequestWithTools(names ...string) []byte {
 		tool, _ = sjson.SetBytes(tool, "function.name", name)
 		req, _ = sjson.SetRawBytes(req, "tools.-1", tool)
 	}
+	return req
+}
+
+func xaiNativeOpenAIRequestWithToolSchema(name, properties string) []byte {
+	req := []byte(`{"model":"grok-4.6","messages":[{"role":"user","content":"continue"}]}`)
+	tool := []byte(`{"type":"function","function":{"name":"","parameters":{"type":"object","properties":{}}}}`)
+	tool, _ = sjson.SetBytes(tool, "function.name", name)
+	tool, _ = sjson.SetRawBytes(tool, "function.parameters.properties", []byte(properties))
+	req, _ = sjson.SetRawBytes(req, "tools.-1", tool)
 	return req
 }

@@ -3,6 +3,7 @@ package helps
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -166,22 +167,6 @@ func parseXAINativeToolCall(text string, start, limit int) (xaiNativeToolCall, i
 
 func coerceXAINativeJSONValue(raw string) any {
 	trimmed := strings.TrimSpace(raw)
-	switch trimmed {
-	case "true":
-		return true
-	case "false":
-		return false
-	case "null":
-		return nil
-	}
-	if intVal, err := strconv.ParseInt(trimmed, 10, 64); err == nil && strconv.FormatInt(intVal, 10) == trimmed {
-		return intVal
-	}
-	if strings.Contains(trimmed, ".") {
-		if floatVal, err := strconv.ParseFloat(trimmed, 64); err == nil {
-			return floatVal
-		}
-	}
 	if ((strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) ||
 		(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]"))) &&
 		gjson.Valid(trimmed) {
@@ -481,7 +466,8 @@ func xaiNativeSSEToChatChunks(sse []byte) [][]byte {
 // Codex-style short→original reverse map. Markup is lifted only when the parsed
 // name matches a declared original or its shortened upstream form.
 type xaiNativeDeclaredTools struct {
-	restore map[string]string
+	restore    map[string]string
+	properties map[string]map[string]string
 }
 
 func parseXAINativeDeclaredTools(original []byte) xaiNativeDeclaredTools {
@@ -494,7 +480,10 @@ func parseXAINativeDeclaredTools(original []byte) xaiNativeDeclaredTools {
 		restore[originalName] = originalName
 		restore[shortName] = originalName
 	}
-	return xaiNativeDeclaredTools{restore: restore}
+	return xaiNativeDeclaredTools{
+		restore:    restore,
+		properties: collectXAINativeToolPropertyTypes(original),
+	}
 }
 
 func (d xaiNativeDeclaredTools) filter(calls []xaiNativeToolCall) []xaiNativeToolCall {
@@ -508,6 +497,7 @@ func (d xaiNativeDeclaredTools) filter(calls []xaiNativeToolCall) []xaiNativeToo
 			continue
 		}
 		call.Name = originalName
+		call.Arguments = applyXAINativeDeclaredArgumentTypes(originalName, call.Arguments, d.properties)
 		out = append(out, call)
 	}
 	return out
@@ -553,6 +543,140 @@ func collectXAINativeDeclaredToolNames(original []byte) []string {
 		}
 	}
 	return names
+}
+
+func collectXAINativeToolPropertyTypes(original []byte) map[string]map[string]string {
+	if len(original) == 0 || !gjson.ValidBytes(original) {
+		return nil
+	}
+	tools := gjson.GetBytes(original, "tools")
+	if !tools.IsArray() {
+		return nil
+	}
+	out := make(map[string]map[string]string)
+	for _, tool := range tools.Array() {
+		name := strings.TrimSpace(tool.Get("function.name").String())
+		if name == "" {
+			name = strings.TrimSpace(tool.Get("name").String())
+		}
+		if name == "" {
+			continue
+		}
+		props := tool.Get("function.parameters.properties")
+		if !props.IsObject() {
+			props = tool.Get("parameters.properties")
+		}
+		if !props.IsObject() {
+			continue
+		}
+		types := make(map[string]string)
+		props.ForEach(func(key, value gjson.Result) bool {
+			if declared := firstXAINativeSchemaType(value.Get("type")); declared != "" {
+				types[key.String()] = declared
+			}
+			return true
+		})
+		if len(types) > 0 {
+			out[name] = types
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func firstXAINativeSchemaType(value gjson.Result) string {
+	if value.Type == gjson.String {
+		if value.String() == "null" {
+			return ""
+		}
+		return value.String()
+	}
+	if value.IsArray() {
+		for _, item := range value.Array() {
+			if s := item.String(); s != "" && s != "null" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func applyXAINativeDeclaredArgumentTypes(toolName string, arguments map[string]any, properties map[string]map[string]string) map[string]any {
+	if len(arguments) == 0 {
+		return arguments
+	}
+	schema := properties[toolName]
+	out := make(map[string]any, len(arguments))
+	for key, value := range arguments {
+		out[key] = coerceXAINativeArgumentForType(value, schema[key])
+	}
+	return out
+}
+
+func coerceXAINativeArgumentForType(value any, declaredType string) any {
+	raw, isString := value.(string)
+	switch declaredType {
+	case "string":
+		return xaiNativeValueAsString(value)
+	case "boolean":
+		if isString {
+			switch strings.TrimSpace(raw) {
+			case "true":
+				return true
+			case "false":
+				return false
+			}
+		}
+		return value
+	case "integer":
+		if isString {
+			if intVal, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+				return intVal
+			}
+		}
+		return value
+	case "number":
+		if isString {
+			trimmed := strings.TrimSpace(raw)
+			if intVal, err := strconv.ParseInt(trimmed, 10, 64); err == nil && strconv.FormatInt(intVal, 10) == trimmed {
+				return intVal
+			}
+			if floatVal, err := strconv.ParseFloat(trimmed, 64); err == nil {
+				return floatVal
+			}
+		}
+		return value
+	default:
+		return value
+	}
+}
+
+func xaiNativeValueAsString(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
+	case nil:
+		return "null"
+	case json.Number:
+		return v.String()
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	default:
+		data, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Sprint(v)
+		}
+		return string(data)
+	}
 }
 
 // buildXAINativeShortNameMap mirrors the Codex OpenAI request translator: names
@@ -659,6 +783,7 @@ func xaiNativeChatChunk(id, model string, created int64, delta map[string]any, f
 	}
 	if finishReason != "" {
 		chunk, _ = sjson.SetBytes(chunk, "choices.0.finish_reason", finishReason)
+		chunk, _ = sjson.SetBytes(chunk, "choices.0.native_finish_reason", finishReason)
 	}
 	if len(usage) > 0 {
 		chunk, _ = sjson.SetRawBytes(chunk, "usage", usage)
