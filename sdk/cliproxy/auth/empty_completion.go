@@ -852,7 +852,6 @@ func (s *streamBootstrapState) observe(fragment []byte) bool {
 				switch {
 				case bytes.HasPrefix(line, []byte("event:")):
 					s.sawSSE = true
-					s.flushData()
 					event := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:")))
 					if bytes.Equal(event, []byte("message_stop")) {
 						s.acc.recognized = true
@@ -922,7 +921,6 @@ func (s *streamBootstrapState) finish() {
 			switch {
 			case bytes.HasPrefix(trimmed, []byte("event:")):
 				s.sawSSE = true
-				s.flushData()
 				event := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("event:")))
 				if bytes.Equal(event, []byte("message_stop")) {
 					s.acc.recognized = true
@@ -1125,7 +1123,6 @@ func (a *emptyCompletionAccum) evalSSE(payload []byte) {
 			continue
 		}
 		if bytes.HasPrefix(line, []byte("event:")) {
-			flush()
 			event := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:")))
 			if bytes.Equal(event, []byte("message_stop")) {
 				a.recognized = true

@@ -797,6 +797,30 @@ func TestStreamBootstrapDetectorMultilineSSE(t *testing.T) {
 			t.Fatal("IsEmptyCompletionPayload() = true for multiline malformed SSE")
 		}
 	})
+
+	t.Run("event field between data fragments does not flush partial data prematurely", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		fragments := [][]byte{
+			[]byte("data: {\"choices\":[\n"),
+			[]byte("event: message\n"),
+			[]byte("id: evt_999\n"),
+			[]byte("data: ]}\n\n"),
+			[]byte("data: [DONE]\n\n"),
+		}
+		for i, f := range fragments {
+			if detector.Observe(f) {
+				t.Fatalf("Observe(fragment %d: %q) forwarded stream with interleaved event/id fields", i, string(f))
+			}
+		}
+		if !detector.Finish() {
+			t.Fatal("Finish() = false, want empty completion recognized when event: field is interleaved between data lines")
+		}
+
+		interleavedPayload := []byte("data: {\"choices\":[\nevent: message\nid: evt_999\ndata: ]}\n\ndata: [DONE]\n\n")
+		if !IsEmptyCompletionPayload(interleavedPayload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for payload with event: field between data: lines")
+		}
+	})
 }
 
 func TestStreamBootstrapStateForwardsAtMetadataLimit(t *testing.T) {
