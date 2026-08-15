@@ -241,6 +241,22 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		pendingToolUseParts = append(pendingToolUseParts, toolUse)
 	}
 
+	lastToolResult := map[string]gjson.Result{}
+	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			switch item.Get("type").String() {
+			case "function_call_output", "custom_tool_call_output":
+				rawID := item.Get("call_id").String()
+				if rawID != "" {
+					callID := util.SanitizeClaudeToolID(rawID)
+					lastToolResult[callID] = item
+				}
+			}
+			return true
+		})
+	}
+	emittedToolResults := map[string]struct{}{}
+
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
 			// System-level items already became top-level system blocks.
@@ -399,9 +415,20 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 			case "function_call_output", "custom_tool_call_output":
 				// Map to user tool_result
-				callID := item.Get("call_id").String()
-				callID = util.SanitizeClaudeToolID(callID)
+				rawID := item.Get("call_id").String()
+				callID := util.SanitizeClaudeToolID(rawID)
+				if rawID != "" {
+					if _, exists := emittedToolResults[callID]; exists {
+						return true
+					}
+					emittedToolResults[callID] = struct{}{}
+				}
 				output := item.Get("output")
+				if rawID != "" {
+					if lastItem, exists := lastToolResult[callID]; exists {
+						output = lastItem.Get("output")
+					}
+				}
 				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
 				toolResult = applyResponsesToolResultContent(toolResult, output)

@@ -1123,3 +1123,135 @@ func TestConvertOpenAIResponsesRequestToClaude_SystemItemCacheControlAppliesToLa
 		t.Fatalf("system[1].cache_control.type = %q, want ephemeral", got)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToClaude_DeduplicatesToolOutputs(t *testing.T) {
+	// Tests that duplicate outputs are deduplicated to the final payload,
+	// emitted at the first occurrence position (before subsequent assistant turns),
+	// and that non-empty/empty IDs behave properly.
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{
+				"type":"message",
+				"role":"user",
+				"content":[{"type":"input_text","text":"Use lookup."}]
+			},
+			{
+				"type":"function_call",
+				"call_id":"toolu_dup",
+				"name":"lookup",
+				"arguments":"{}"
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"toolu_dup",
+				"output":"first result"
+			},
+			{
+				"type":"message",
+				"role":"assistant",
+				"content":[{"type":"output_text","text":"Intermediate step"}]
+			},
+			{
+				"type":"function_call",
+				"call_id":"toolu_parallel",
+				"name":"other",
+				"arguments":"{}"
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"toolu_dup",
+				"output":"final result"
+			},
+			{
+				"type":"custom_tool_call_output",
+				"call_id":"call.custom:dup",
+				"output":"custom first"
+			},
+			{
+				"type":"custom_tool_call_output",
+				"call_id":"call.custom:dup",
+				"output":"custom final"
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"toolu_parallel",
+				"output":"parallel result"
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"",
+				"output":"empty id output"
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	messages := root.Get("messages").Array()
+	if len(messages) < 5 {
+		t.Fatalf("expected at least 5 messages, got %d. Output: %s", len(messages), string(out))
+	}
+
+	// Message 0: user message
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("messages[0].role = %q, want user", got)
+	}
+
+	// Message 1: assistant tool_use toolu_dup
+	if got := messages[1].Get("content.0.type").String(); got != "tool_use" {
+		t.Fatalf("messages[1].content.0.type = %q, want tool_use", got)
+	}
+	if got := messages[1].Get("content.0.id").String(); got != "toolu_dup" {
+		t.Fatalf("messages[1].content.0.id = %q, want toolu_dup", got)
+	}
+
+	// Message 2: user tool_result for toolu_dup with final payload, BEFORE assistant message 3
+	if got := messages[2].Get("role").String(); got != "user" {
+		t.Fatalf("messages[2].role = %q, want user", got)
+	}
+	if got := messages[2].Get("content.0.type").String(); got != "tool_result" {
+		t.Fatalf("messages[2].content.0.type = %q, want tool_result", got)
+	}
+	if got := messages[2].Get("content.0.tool_use_id").String(); got != "toolu_dup" {
+		t.Fatalf("messages[2].content.0.tool_use_id = %q, want toolu_dup", got)
+	}
+	if got := messages[2].Get("content.0.content").String(); got != "final result" {
+		t.Fatalf("messages[2].content.0.content = %q, want 'final result'", got)
+	}
+
+	// Message 3: assistant intermediate text + tool_use for toolu_parallel
+	if got := messages[3].Get("role").String(); got != "assistant" {
+		t.Fatalf("messages[3].role = %q, want assistant", got)
+	}
+	if got := messages[3].Get("content.0.text").String(); got != "Intermediate step" {
+		t.Fatalf("messages[3].content.0.text = %q, want 'Intermediate step'", got)
+	}
+	if got := messages[3].Get("content.1.id").String(); got != "toolu_parallel" {
+		t.Fatalf("messages[3].content.1.id = %q, want toolu_parallel", got)
+	}
+
+	// Message 4: user tool_results: call_custom_dup (custom final), toolu_parallel (parallel result), and empty id output
+	msg4Blocks := messages[4].Get("content").Array()
+	if len(msg4Blocks) != 3 {
+		t.Fatalf("expected 3 tool_result blocks in message 4, got %d. Output: %s", len(msg4Blocks), string(out))
+	}
+	if got := msg4Blocks[0].Get("tool_use_id").String(); got != "call_custom_dup" {
+		t.Fatalf("msg4Blocks[0].tool_use_id = %q, want call_custom_dup", got)
+	}
+	if got := msg4Blocks[0].Get("content").String(); got != "custom final" {
+		t.Fatalf("msg4Blocks[0].content = %q, want 'custom final'", got)
+	}
+
+	if got := msg4Blocks[1].Get("tool_use_id").String(); got != "toolu_parallel" {
+		t.Fatalf("msg4Blocks[1].tool_use_id = %q, want toolu_parallel", got)
+	}
+	if got := msg4Blocks[1].Get("content").String(); got != "parallel result" {
+		t.Fatalf("msg4Blocks[1].content = %q, want 'parallel result'", got)
+	}
+
+	if got := msg4Blocks[2].Get("content").String(); got != "empty id output" {
+		t.Fatalf("msg4Blocks[2].content = %q, want 'empty id output'", got)
+	}
+}
