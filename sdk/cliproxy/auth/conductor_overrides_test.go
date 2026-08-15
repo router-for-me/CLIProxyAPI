@@ -552,6 +552,87 @@ func TestManagerExecute_AntigravityInvalidGrantFallsBackAndSuspendsAuth(t *testi
 	}
 }
 
+// TestManagerExecute_InvalidAPIKeyFallsBackAndSuspendsAuth covers a dead Gemini API
+// key: Google answers 400 INVALID_ARGUMENT ("API key not valid"), which is an
+// auth-level failure, not a request fault. The conductor must rotate to the next
+// auth and cool down the dead key for 30 minutes instead of surfacing the error.
+func TestManagerExecute_InvalidAPIKeyFallsBackAndSuspendsAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	invalidKeyErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `bad response status code 400, body: {"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}`,
+	}
+	executor := &authFallbackExecutor{
+		id: "gemini",
+		executeErrors: map[string]error{
+			"dead-key-auth": invalidKeyErr,
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "gemini-2.5-flash"
+	badAuth := &Auth{ID: "dead-key-auth", Provider: "gemini"}
+	goodAuth := &Auth{ID: "live-key-auth", Provider: "gemini"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "gemini", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "gemini", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	request := cliproxyexecutor.Request{Model: model}
+	for i := 0; i < 2; i++ {
+		resp, errExecute := m.Execute(context.Background(), []string{"gemini"}, request, cliproxyexecutor.Options{})
+		if errExecute != nil {
+			t.Fatalf("execute %d error = %v, want success", i, errExecute)
+		}
+		if string(resp.Payload) != goodAuth.ID {
+			t.Fatalf("execute %d payload = %q, want %q", i, string(resp.Payload), goodAuth.ID)
+		}
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{badAuth.ID, goodAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	state := updatedBad.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state for %q", model)
+	}
+	if !state.Unavailable {
+		t.Fatalf("expected bad auth model state to be unavailable")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected bad auth model state cooldown to be set")
+	}
+	if cooldown := time.Until(state.NextRetryAfter); cooldown < 29*time.Minute || cooldown > 31*time.Minute {
+		t.Fatalf("cooldown = %v, want about 30 minutes", cooldown)
+	}
+	if state.StatusMessage != invalidKeyErr.Message {
+		t.Fatalf("status message = %q, want %q", state.StatusMessage, invalidKeyErr.Message)
+	}
+}
+
 func TestManagerExecuteStream_AntigravityInvalidGrantFallsBackAndSuspendsAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	invalidGrantErr := &Error{
