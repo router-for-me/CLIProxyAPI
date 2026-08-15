@@ -169,10 +169,37 @@ func (s *PostgresStore) resourceTables(res BackupResource) []backupTable {
 
 // BackupBundle is the portable JSON document produced by ExportData and consumed
 // by ImportData. Resources maps a resource key to a per-table set of rows.
+// Summary carries a per-resource total row count so the frontend can render a
+// pre-import preview without parsing every row.
 type BackupBundle struct {
 	Version    int                           `json:"version"`
 	ExportedAt time.Time                     `json:"exported_at"`
+	Summary    map[string]int                `json:"summary,omitempty"`
 	Resources  map[string]backupResourceData `json:"resources"`
+}
+
+// ResourceRowCounts returns the per-resource total exported row counts from the
+// bundle's header summary, used by handlers to preview a bundle before import.
+// For bundles exported before the summary header existed, it falls back to
+// deriving the counts from the exported rows themselves.
+func (b BackupBundle) ResourceRowCounts() map[string]int {
+	if len(b.Summary) > 0 {
+		return b.Summary
+	}
+	out := make(map[string]int, len(b.Resources))
+	for key, data := range b.Resources {
+		out[key] = rowCount(data)
+	}
+	return out
+}
+
+// rowCount sums the exported rows across all tables of one resource data set.
+func rowCount(data backupResourceData) int {
+	n := 0
+	for _, rows := range data.Tables {
+		n += len(rows)
+	}
+	return n
 }
 
 // backupResourceData holds the exported rows for one resource. Tables maps a
@@ -357,6 +384,7 @@ func (s *PostgresStore) ExportData(ctx context.Context, opts BackupExportOpts) (
 	bundle := BackupBundle{
 		Version:    1,
 		ExportedAt: time.Now().UTC(),
+		Summary:    make(map[string]int),
 		Resources:  make(map[string]backupResourceData),
 	}
 	if s == nil || s.db == nil {
@@ -386,6 +414,7 @@ func (s *PostgresStore) ExportData(ctx context.Context, opts BackupExportOpts) (
 			}
 		}
 		bundle.Resources[string(res)] = data
+		bundle.Summary[string(res)] = rowCount(data)
 	}
 	return bundle, nil
 }
@@ -562,13 +591,50 @@ func defaultTableHint(qualified string) string {
 	return name
 }
 
+// unquoteTable strips the schema prefix and surrounding quotes from a
+// fully-qualified table name, yielding the bare unquoted table name.
+func unquoteTable(qualified string) string {
+	name := qualified
+	if idx := strings.LastIndex(name, "."); idx >= 0 {
+		name = name[idx+1:]
+	}
+	name = strings.Trim(name, `"`)
+	// A name may end up with a leading quote when the schema prefix and the
+	// table name are quoted independently (e.g. "schema"."table"); strip it.
+	name = strings.TrimPrefix(name, `"`)
+	return name
+}
+
+// tableSchema extracts the schema part of a fully-qualified table name,
+// falling back to the default schema when the name is unqualified.
+func tableSchema(qualified string) string {
+	if idx := strings.LastIndex(qualified, "."); idx >= 0 {
+		return strings.Trim(qualified[:idx], `"`)
+	}
+	return "public"
+}
+
 // resyncIdSequence advances a table's serial-id sequence past the highest
 // currently stored id. Import restores rows with their original explicit ids,
 // which the sequence does not know about; without a resync the next
 // auto-generated id can collide with a restored id and fail the insert. The
 // function discovers the owning sequence via pg_get_serial_sequence and only
-// touches tables that actually carry one (no-op otherwise).
+// touches tables that actually carry one (no-op otherwise). Tables without an
+// id column (e.g. api_key_policies, keyed by api_key_id) are skipped without
+// error — pg_get_serial_sequence raises SQLSTATE 42703 for a missing column,
+// and a failed statement would abort the caller's import transaction.
 func (s *PostgresStore) resyncIdSequence(ctx context.Context, tx *sql.Tx, table string) {
+	var hasID bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = 'id')`,
+		tableSchema(table), unquoteTable(table),
+	).Scan(&hasID); err != nil {
+		log.WithError(err).WithField("table", table).Debug("postgres store: import: id column lookup failed")
+		return
+	}
+	if !hasID {
+		return // no id column on this table
+	}
 	var seqName sql.NullString
 	if err := tx.QueryRowContext(ctx,
 		`SELECT pg_get_serial_sequence($1, 'id')`, table,

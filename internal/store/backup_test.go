@@ -43,7 +43,8 @@ func seedBackupTestData(t *testing.T, st *PostgresStore) {
 		t.Fatalf("create user: %v", err)
 	}
 	expires := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
-	if _, _, err := apiKeys.Create(ctx, "test-key", "test-alias", "sk-testsecret123", &expires, nil, nil); err != nil {
+	rpm := 60
+	if _, _, err := apiKeys.Create(ctx, "test-key", "test-alias", "sk-testsecret123", &expires, nil, &Policy{RPMLimit: &rpm}); err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
 }
@@ -224,6 +225,69 @@ func TestBackupJSONRoundTrip(t *testing.T) {
 	// Import from the unmarshaled copy to prove transport survives JSON.
 	if _, err := st.ImportData(ctx, decoded, BackupImportOpts{}); err != nil {
 		t.Fatalf("ImportData from JSON: %v", err)
+	}
+}
+
+// TestBackupSummaryCounts verifies the bundle header embeds a per-resource
+// row-count summary that matches the actual exported rows, so the frontend can
+// render a pre-import preview without parsing every row.
+func TestBackupSummaryCounts(t *testing.T) {
+	st := roundTripTestStore(t, "backup_sum_"+randSuffix())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	seedBackupTestData(t, st)
+
+	bundle, err := st.ExportData(ctx, BackupExportOpts{})
+	if err != nil {
+		t.Fatalf("ExportData: %v", err)
+	}
+	if got := bundle.Summary["api_keys"]; got != 2 { // 1 api key + 1 policy row
+		t.Fatalf("api_keys summary = %d, want 2", got)
+	}
+	if got := bundle.Summary["internal_users"]; got != 1 {
+		t.Fatalf("internal_users summary = %d, want 1", got)
+	}
+	// The handler-facing helper must surface the same counts from the header.
+	if got := bundle.ResourceRowCounts()["api_keys"]; got != 2 {
+		t.Fatalf("ResourceRowCounts api_keys = %d, want 2", got)
+	}
+	if got := bundle.ResourceRowCounts()["internal_users"]; got != 1 {
+		t.Fatalf("ResourceRowCounts internal_users = %d, want 1", got)
+	}
+}
+
+// TestBackupResourceRowCountsLegacyFallback pins the compatibility contract for
+// bundles exported before the header summary existed: when Summary is absent,
+// ResourceRowCounts must derive the per-resource counts from the exported rows
+// themselves.
+func TestBackupResourceRowCountsLegacyFallback(t *testing.T) {
+	st := roundTripTestStore(t, "backup_sum_legacy_"+randSuffix())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	seedBackupTestData(t, st)
+
+	bundle, err := st.ExportData(ctx, BackupExportOpts{})
+	if err != nil {
+		t.Fatalf("ExportData: %v", err)
+	}
+	// Simulate a legacy bundle by round-tripping through JSON and dropping the
+	// header summary entirely.
+	enc, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatalf("marshal bundle: %v", err)
+	}
+	var legacy BackupBundle
+	if err := json.Unmarshal(enc, &legacy); err != nil {
+		t.Fatalf("unmarshal bundle: %v", err)
+	}
+	legacy.Summary = nil
+
+	counts := legacy.ResourceRowCounts()
+	if got := counts["api_keys"]; got != 2 { // 1 api key + 1 policy row
+		t.Fatalf("legacy fallback api_keys = %d, want 2", got)
+	}
+	if got := counts["internal_users"]; got != 1 {
+		t.Fatalf("legacy fallback internal_users = %d, want 1", got)
 	}
 }
 
