@@ -573,6 +573,10 @@ func parseXAINativeToolChoice(original []byte) (none bool, allowed map[string]st
 		if name != "" {
 			return false, map[string]struct{}{name: {}}
 		}
+	case "custom":
+		if name := strings.TrimSpace(choice.Get("name").String()); name != "" {
+			return false, map[string]struct{}{name: {}}
+		}
 	case "tool":
 		if name := strings.TrimSpace(choice.Get("name").String()); name != "" {
 			return false, map[string]struct{}{name: {}}
@@ -1023,7 +1027,7 @@ func xaiNativeContentMarkupState(content string) xaiNativeMarkupState {
 	if content == "" {
 		return xaiNativeMarkupNone
 	}
-	if strings.Contains(content, xaiNativeToolCallsBegin) || strings.Contains(content, xaiNativeToolCallBegin) {
+	if strings.Contains(content, xaiNativeToolCallsBegin) {
 		return xaiNativeMarkupConfirmed
 	}
 	if xaiHasMarkerPrefixSuffix(content, xaiNativeToolCallsBegin) || xaiHasMarkerPrefixSuffix(content, xaiNativeToolCallBegin) {

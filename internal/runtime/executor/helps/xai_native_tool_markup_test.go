@@ -327,6 +327,30 @@ func TestRewriteXAINativeToolMarkupChatJSONCapsCallIDLength(t *testing.T) {
 	}
 }
 
+func TestRewriteXAINativeToolMarkupChatJSONHonorsCustomToolChoice(t *testing.T) {
+	req := xaiNativeOpenAIRequestWithTools("Execute", "apply_patch")
+	req, _ = sjson.SetRawBytes(req, "tool_choice", []byte(`{"type":"custom","name":"apply_patch"}`))
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"<|tool_calls_begin|><|tool_call_begin|>\nExecute\n<|tool_sep|>command\nls\n<|tool_call_end|><|tool_calls_end|>"}}]}`)
+	if _, ok := rewriteXAINativeToolMarkupChatJSON(body, parseXAINativeDeclaredTools(req)); ok {
+		t.Fatal("forced custom apply_patch must not lift an Execute markup block")
+	}
+}
+
+func TestXAINativeToolMarkupChatStreamReleasesLoneCallBegin(t *testing.T) {
+	stream := NewXAINativeToolMarkupChatStream(sdktranslator.FormatOpenAI, xaiNativeOpenAIRequestWithTools("Execute"))
+	chunk := []byte(`{"id":"chatcmpl_1","choices":[{"delta":{"content":"see <|tool_call_begin|> in docs"}}]}`)
+	got := stream.Ingest(chunk)
+	if len(got) != 1 {
+		t.Fatalf("a lone tool_call_begin must keep streaming, got %#v", got)
+	}
+	if stream.confirmed {
+		t.Fatal("inner marker alone must not confirm a recoverable block")
+	}
+	if flushed := stream.Flush(); len(flushed) != 0 {
+		t.Fatalf("Flush() = %#v, want empty", flushed)
+	}
+}
+
 func TestXAINativeToolMarkupChatStreamPassThroughWhenToolChoiceNone(t *testing.T) {
 	req, _ := sjson.SetBytes(xaiNativeOpenAIRequestWithTools("Execute"), "tool_choice", "none")
 	stream := NewXAINativeToolMarkupChatStream(sdktranslator.FormatOpenAI, req)
