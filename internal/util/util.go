@@ -16,6 +16,7 @@ import (
 )
 
 var functionNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_.:-]`)
+var claudeFunctionNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 
 // SanitizeFunctionName ensures a function name matches the requirements for Gemini/Vertex AI.
 // It replaces invalid characters with underscores, ensures it starts with a letter or underscore,
@@ -125,4 +126,27 @@ func WritablePath() string {
 		}
 	}
 	return ""
+}
+
+// SanitizeClaudeFunctionName ensures a function name matches Anthropic Claude requirements: ^[a-zA-Z0-9_-]{1,128}$
+func SanitizeClaudeFunctionName(name string) string {
+	if name == "" {
+		return ""
+	}
+	sanitized := claudeFunctionNameSanitizer.ReplaceAllString(name, "_")
+	if len(sanitized) > 0 {
+		first := sanitized[0]
+		if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
+			if len(sanitized) >= 64 {
+				sanitized = sanitized[:63]
+			}
+			sanitized = "_" + sanitized
+		}
+	} else {
+		sanitized = "_"
+	}
+	if len(sanitized) > 64 {
+		sanitized = sanitized[:64]
+	}
+	return sanitized
 }
