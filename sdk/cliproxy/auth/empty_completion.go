@@ -231,6 +231,8 @@ func isMeaningfulToolCall(raw json.RawMessage) bool {
 }
 
 type claudeContentBlock struct {
+	ID       string          `json:"id"`
+	Name     string          `json:"name"`
 	Type     string          `json:"type"`
 	Text     string          `json:"text"`
 	Thinking string          `json:"thinking"`
@@ -686,7 +688,13 @@ func (a *emptyCompletionAccum) evalOpenAIResponseOutput(items []openAIResponseOu
 
 func (a *emptyCompletionAccum) evalClaudeBlocks(blocks []claudeContentBlock) {
 	for _, b := range blocks {
-		if b.Type == "tool_use" || len(b.Input) > 0 {
+		if b.Type == "tool_use" || b.Type == "server_tool_use" {
+			if strings.TrimSpace(b.ID) != "" || strings.TrimSpace(b.Name) != "" || nonEmptyJSONPayload(b.Input) {
+				a.hasToolCalls = true
+			}
+			continue
+		}
+		if nonEmptyJSONPayload(b.Input) {
 			a.hasToolCalls = true
 			continue
 		}
@@ -840,6 +848,9 @@ func (a *emptyCompletionAccum) empty() bool {
 	if a.recognized && a.terminal {
 		return true
 	}
+	if a.recognized {
+		return true
+	}
 	if a.sawMetadataOnly && !a.sawMessageData {
 		return true
 	}
@@ -902,7 +913,10 @@ func isSSEMetadataLine(b []byte) bool {
 	return bytes.HasPrefix(b, []byte("event:")) ||
 		bytes.HasPrefix(b, []byte("id:")) ||
 		bytes.HasPrefix(b, []byte("retry:")) ||
-		bytes.HasPrefix(b, []byte(":"))
+		bytes.HasPrefix(b, []byte(":")) ||
+		bytes.Equal(b, []byte("event")) ||
+		bytes.Equal(b, []byte("id")) ||
+		bytes.Equal(b, []byte("retry"))
 }
 
 func isSSEPrefix(b []byte) bool {
@@ -910,7 +924,11 @@ func isSSEPrefix(b []byte) bool {
 		bytes.HasPrefix(b, []byte("event:")) ||
 		bytes.HasPrefix(b, []byte("id:")) ||
 		bytes.HasPrefix(b, []byte("retry:")) ||
-		bytes.HasPrefix(b, []byte(":"))
+		bytes.HasPrefix(b, []byte(":")) ||
+		bytes.Equal(b, []byte("data")) ||
+		bytes.Equal(b, []byte("event")) ||
+		bytes.Equal(b, []byte("id")) ||
+		bytes.Equal(b, []byte("retry"))
 }
 
 func (s *streamBootstrapState) processLine(line []byte) {
@@ -933,12 +951,21 @@ func (s *streamBootstrapState) processSingleLine(line []byte) {
 		} else {
 			s.acc.sawMetadataOnly = true
 		}
+	case bytes.Equal(line, []byte("event")):
+		s.sawSSE = true
+		s.acc.sawMetadataOnly = true
 	case bytes.HasPrefix(line, []byte("id:")), bytes.HasPrefix(line, []byte("retry:")), bytes.HasPrefix(line, []byte(":")):
+		s.sawSSE = true
+		s.acc.sawMetadataOnly = true
+	case bytes.Equal(line, []byte("id")), bytes.Equal(line, []byte("retry")):
 		s.sawSSE = true
 		s.acc.sawMetadataOnly = true
 	case bytes.HasPrefix(line, []byte("data:")):
 		s.sawSSE = true
 		s.dataLines = append(s.dataLines, parseSSEDataLine(line))
+	case bytes.Equal(line, []byte("data")):
+		s.sawSSE = true
+		s.dataLines = append(s.dataLines, []byte(""))
 	case bytes.HasPrefix(line, []byte("{")), bytes.HasPrefix(line, []byte("[")):
 		s.sawSSE = true
 		s.dataLines = append(s.dataLines, line)
@@ -1123,7 +1150,8 @@ func couldBeSSEPrefix(payload []byte) bool {
 		strings.HasPrefix(dataPrefix, value) || strings.HasPrefix(eventPrefix, value) ||
 		strings.HasPrefix(idPrefix, value) || strings.HasPrefix(retryPrefix, value) ||
 		strings.HasPrefix(value, dataPrefix) || strings.HasPrefix(value, eventPrefix) ||
-		strings.HasPrefix(value, idPrefix) || strings.HasPrefix(value, retryPrefix)
+		strings.HasPrefix(value, idPrefix) || strings.HasPrefix(value, retryPrefix) ||
+		value == "data" || value == "event" || value == "id" || value == "retry"
 }
 
 // isEmptyCompletionPayload reports whether a payload (aggregated SSE chunks or
@@ -1140,7 +1168,7 @@ func isEmptyCompletionPayload(payload []byte) bool {
 
 	var acc emptyCompletionAccum
 
-	if bytes.Contains(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("id:")) || bytes.HasPrefix(trimmed, []byte("retry:")) || bytes.HasPrefix(trimmed, []byte(":")) {
+	if isSSEPayload(trimmed) {
 		acc.evalSSE(trimmed)
 		return acc.empty()
 	}
@@ -1161,6 +1189,19 @@ func isEmptyCompletionPayload(payload []byte) bool {
 		acc.terminal = true
 	}
 	return acc.empty()
+}
+
+func isSSEPayload(trimmed []byte) bool {
+	if bytes.Contains(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("id:")) || bytes.HasPrefix(trimmed, []byte("retry:")) || bytes.HasPrefix(trimmed, []byte(":")) {
+		return true
+	}
+	for _, line := range bytes.Split(trimmed, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if bytes.Equal(line, []byte("data")) || bytes.Equal(line, []byte("event")) || bytes.Equal(line, []byte("id")) || bytes.Equal(line, []byte("retry")) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseSSEDataLine(line []byte) []byte {
@@ -1205,13 +1246,23 @@ func (a *emptyCompletionAccum) evalSSE(payload []byte) {
 			}
 			return
 		}
+		if bytes.Equal(line, []byte("event")) {
+			a.sawMetadataOnly = true
+			return
+		}
 		if bytes.HasPrefix(line, []byte("id:")) || bytes.HasPrefix(line, []byte("retry:")) || bytes.HasPrefix(line, []byte(":")) {
+			a.sawMetadataOnly = true
+			return
+		}
+		if bytes.Equal(line, []byte("id")) || bytes.Equal(line, []byte("retry")) {
 			a.sawMetadataOnly = true
 			return
 		}
 		switch {
 		case bytes.HasPrefix(line, []byte("data:")):
 			dataLines = append(dataLines, parseSSEDataLine(line))
+		case bytes.Equal(line, []byte("data")):
+			dataLines = append(dataLines, []byte(""))
 		case bytes.HasPrefix(line, []byte("{")), bytes.HasPrefix(line, []byte("[")):
 			// Some executors translate upstream SSE into the client format and
 			// emit raw JSON payloads without SSE framing (the HTTP handler adds

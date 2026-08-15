@@ -227,14 +227,14 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:     "unterminated is not empty",
+			name:     "unterminated is empty",
 			payload:  []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":null}]}\n\n"),
-			expected: false,
+			expected: true,
 		},
 		{
-			name:     "claude sse message_stop without end_turn is not empty",
+			name:     "claude sse message_stop without end_turn is empty",
 			payload:  []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
-			expected: false,
+			expected: true,
 		},
 		{
 			name:     "unrecognized format is not empty",
@@ -1818,6 +1818,126 @@ func TestEmptyCompletion_MultiChunkBoundarySafety(t *testing.T) {
 		}
 		if !detector.Finish() {
 			t.Fatal("detector.Finish() = false, want true")
+		}
+	})
+}
+
+func TestClaudeToolBlocksEmptyCompletion(t *testing.T) {
+	t.Run("empty tool block without id name or input is empty completion", func(t *testing.T) {
+		payload := []byte(`{"type":"message","role":"assistant","content":[{"type":"tool_use","input":null}],"stop_reason":"end_turn"}`)
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for tool_use with null input and no name/id, want true")
+		}
+	})
+
+	t.Run("empty tool block with empty input object and no id/name is empty completion", func(t *testing.T) {
+		payload := []byte(`{"type":"message","role":"assistant","content":[{"type":"tool_use","input":{}}],"stop_reason":"end_turn"}`)
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for tool_use with empty input and no name/id, want true")
+		}
+	})
+
+	t.Run("tool block with valid name is recognized as tool call", func(t *testing.T) {
+		payload := []byte(`{"type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}],"stop_reason":"tool_use"}`)
+		if IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = true for valid tool_use with name/id, want false")
+		}
+	})
+
+	t.Run("text block with lexical null input does not treat null as tool call", func(t *testing.T) {
+		payload := []byte(`{"type":"message","role":"assistant","content":[{"type":"text","text":"","input":null}],"stop_reason":"end_turn"}`)
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for text block with lexical null input, want true")
+		}
+	})
+}
+
+func TestRecognizedContentlessEOFEmptyStream(t *testing.T) {
+	t.Run("OpenAI role-only delta stream closed at EOF without [DONE] is empty completion", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		payload := []byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n")
+		if detector.Observe(payload) {
+			t.Fatal("Observe() = true for role-only delta, want false")
+		}
+		if !detector.Finish() {
+			t.Fatal("Finish() = false at EOF for recognized role-only stream without content, want true")
+		}
+	})
+
+	t.Run("Claude message_start stream closed at EOF without message_stop is empty completion", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		payload := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3\",\"usage\":{\"output_tokens\":0}}}\n\n")
+		if detector.Observe(payload) {
+			t.Fatal("Observe() = true for message_start, want false")
+		}
+		if !detector.Finish() {
+			t.Fatal("Finish() = false at EOF for recognized message_start stream without content, want true")
+		}
+	})
+
+	t.Run("OpenAI delta stream with content closed at EOF is not empty", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		payload := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		if !detector.Observe(payload) {
+			t.Fatal("Observe() = false for stream with content, want true")
+		}
+		if detector.Finish() {
+			t.Fatal("Finish() = true for stream with content, want false")
+		}
+	})
+
+	t.Run("unknown-format stream closed at EOF remains non-empty and forwards", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		payload := []byte("data: {\"unknown_payload\":true}\n\n")
+		if !detector.Observe(payload) {
+			t.Fatal("Observe() = false for unknown-format, want true (force forward)")
+		}
+		if detector.Finish() {
+			t.Fatal("Finish() = true for unknown-format, want false")
+		}
+	})
+}
+
+func TestColonlessSSEFields(t *testing.T) {
+	t.Run("stream with colonless event and id fields then empty data is recognized as empty completion", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		payload := []byte("event\nid\nretry\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+		if detector.Observe(payload) {
+			t.Fatal("Observe() = true for stream with colonless metadata lines, want false")
+		}
+		if !detector.Finish() {
+			t.Fatal("Finish() = false, want empty completion recognized for colonless metadata")
+		}
+		if detector.state.acc.sawUnknownData {
+			t.Fatal("sawUnknownData = true for colonless metadata lines, want false")
+		}
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for colonless metadata lines")
+		}
+	})
+
+	t.Run("colonless data field treated as empty data event", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		payload := []byte("data\n\ndata: [DONE]\n\n")
+		if detector.Observe(payload) {
+			t.Fatal("Observe() = true for colonless data event, want false")
+		}
+		if !detector.Finish() {
+			t.Fatal("Finish() = false, want empty completion recognized for colonless data event")
+		}
+		if detector.state.acc.sawUnknownData {
+			t.Fatal("sawUnknownData = true for colonless data, want false")
+		}
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for colonless data event payload")
+		}
+	})
+
+	t.Run("couldBeSSEPrefix recognizes colonless prefixes", func(t *testing.T) {
+		for _, prefix := range []string{"data", "event", "id", "retry"} {
+			if !couldBeSSEPrefix([]byte(prefix)) {
+				t.Fatalf("couldBeSSEPrefix(%q) = false, want true", prefix)
+			}
 		}
 	})
 }
