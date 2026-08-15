@@ -453,6 +453,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					if errStream != nil {
 						if errCtx := ctx.Err(); errCtx != nil {
 							scope.release()
+							if streamResult != nil {
+								discardStreamChunks(streamResult.Chunks)
+							}
 							return nil, errCtx
 						}
 					}
@@ -462,12 +465,18 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		if !ephemeralResult {
 			if errCancel := claudeOAuthRequestCancellation(ctx, auth, errStream); errCancel != nil {
 				scope.release()
+				if streamResult != nil {
+					discardStreamChunks(streamResult.Chunks)
+				}
 				return nil, errCancel
 			}
 		}
 		streamResult, errStream = validateStreamResult(streamResult, errStream)
 		if errStream != nil {
 			scope.release()
+			if streamResult != nil {
+				discardStreamChunks(streamResult.Chunks)
+			}
 			errStream = checkTTFTErr(errStream)
 			rerr := resultErrorFromError(errStream)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: execOpts}
@@ -522,6 +531,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					scope.stop()
 					retryErr = checkTTFTErr(retryErr)
 					if retryErr != nil {
+						if retryStream != nil {
+							discardStreamChunks(retryStream.Chunks)
+						}
 						if errCtx := ctx.Err(); errCtx != nil {
 							scope.release()
 							return nil, errCtx
