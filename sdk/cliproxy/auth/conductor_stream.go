@@ -13,11 +13,11 @@ import (
 )
 
 // ttftScope owns exactly one TTFT attempt with a single-winner decision
-// between the first observed chunk and the timeout fire. A fresh scope is
+// between stream establishment and the timeout fire. A fresh scope is
 // created for every attempt, including the in-function retry after a
-// credential refresh, so each retry gets a full TTFT budget. Once the first
-// chunk commits the scope, a racing timer callback can never cancel the stream
-// that already won; if the timer fired first, callers observe a typed TTFT
+// credential refresh, so each retry gets a full TTFT budget. Once the stream
+// is established, the timer is stopped and can never cancel the connected
+// stream afterward; if the timer fired first, callers observe a typed TTFT
 // timeout error and failover as before.
 type ttftScope struct {
 	mu        sync.Mutex
@@ -67,6 +67,21 @@ func (s *ttftScope) fire() {
 	s.fired = true
 	if s.cancel != nil {
 		s.cancel()
+	}
+}
+
+// stop halts the TTFT timer once the upstream executor stream is established,
+// ensuring the deadline only guards time-to-first-connect and never cancels a
+// connected stream during subsequent chunk reads.
+func (s *ttftScope) stop() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.committed = true
+	if s.timer != nil {
+		s.timer.Stop()
 	}
 }
 
@@ -463,8 +478,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			lastErr = errStream
 			continue
 		}
+		scope.stop()
 
-		buffered, closed, bootstrapErr := readStreamBootstrap(attemptCtx, streamResult.Chunks, func() { scope.commit() })
+		buffered, closed, bootstrapErr := readStreamBootstrap(attemptCtx, streamResult.Chunks)
 		if bootstrapErr == nil && scope.timedOut() {
 			bootstrapErr = scope.timeoutError()
 		}
@@ -501,6 +517,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					attemptCtx = scope.ctx
 					retryStream, retryErr := executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
+					scope.stop()
 					retryErr = checkTTFTErr(retryErr)
 					if retryErr != nil {
 						if errCtx := ctx.Err(); errCtx != nil {
@@ -511,7 +528,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 						streamResult = &cliproxyexecutor.StreamResult{}
 					} else {
 						streamResult = retryStream
-						buffered, closed, bootstrapErr = readStreamBootstrap(attemptCtx, streamResult.Chunks, func() { scope.commit() })
+						buffered, closed, bootstrapErr = readStreamBootstrap(attemptCtx, streamResult.Chunks)
 						if bootstrapErr == nil && scope.timedOut() {
 							bootstrapErr = scope.timeoutError()
 						}
