@@ -284,6 +284,30 @@ func (c *SessionCache) Invalidate(sessionID string) {
 	}
 }
 
+// CompareAndDeleteAliases removes the alias group holding sessionID when it is
+// still bound to expectedAuthID, and returns the group's aliases. A stale
+// expectation cannot remove a newer group.
+func (c *SessionCache) CompareAndDeleteAliases(sessionID, expectedAuthID string) []string {
+	if c == nil || sessionID == "" || expectedAuthID == "" {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, ok := c.entries[sessionID]
+	if !ok || entry.authID != expectedAuthID {
+		return nil
+	}
+	aliases := append([]string(nil), entry.aliases...)
+	c.generation++
+	for _, alias := range aliases {
+		if current, exists := c.entries[alias]; exists && current.authID == expectedAuthID && equalSessionAliases(current.aliases, entry.aliases) {
+			delete(c.entries, alias)
+		}
+	}
+	return aliases
+}
+
 // CompareAndReplaceAliases atomically validates that every observed alias still
 // maps to expectedAuthID with expectedGen, that all observed aliases belong to the
 // exact same group, and that no additional alias is currently bound to

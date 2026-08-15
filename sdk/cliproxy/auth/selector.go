@@ -768,7 +768,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// which case failover must reconcile both, not just the first one found.
 	staleKey := cacheKey
 	staleAuthID, staleGen, staleAliases, hasStale := s.cache.GetWithGeneration(cacheKey)
-	splitAuthID, splitGen, splitAliases, hasSplit := "", uint64(0), []string(nil), false
+	splitAuthID := ""
+	var splitGen uint64
+	var splitAliases []string
+	hasSplit := false
 	if fallbackKey != "" {
 		splitAuthID, splitGen, splitAliases, hasSplit = s.cache.GetWithGeneration(fallbackKey)
 	}
@@ -786,14 +789,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if hasStale {
 		if splitGroups {
 			// Split alias groups (prompt-cache and conversation aliases bound to
-			// different auths): reconcile each observed group onto the selected
-			// auth, otherwise the failover leaves the session pinned to the dead
-			// split bindings and affinity breaks across the failover.
-			if !s.rebindAliasGroupCAS(cacheKey, staleAuthID, staleGen, staleAliases, auth.ID, nil) {
-				entry.Infof("session-affinity: split-group rebind (primary) lost to concurrent writer after retries | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-			}
-			if !s.rebindAliasGroupCAS(fallbackKey, splitAuthID, splitGen, splitAliases, auth.ID, nil) {
-				entry.Infof("session-affinity: split-group rebind (fallback) lost to concurrent writer after retries | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+			// different auths): merge BOTH alias sets into a single group bound
+			// to the selected auth. Rebinding the groups separately would leave
+			// two groups on the same auth, and later housekeeping (OnResult)
+			// processes only the group holding the request's primary key — the
+			// surviving split group would keep selecting a failed auth.
+			if !s.mergeSplitAliasGroupsCAS(cacheKey, fallbackKey, auth.ID) {
+				entry.Infof("session-affinity: split-group merge lost to concurrent writer after retries | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 			}
 		} else {
 			additional := []string{cacheKey}
@@ -828,6 +830,36 @@ func (s *SessionAffinitySelector) rebindAliasGroupCAS(sessionKey string, expecte
 			return false
 		}
 		expectedAuthID, expectedGen, expectedAliases = authID, gen, aliases
+	}
+	return false
+}
+
+// mergeSplitAliasGroupsCAS reconciles two split session alias groups (a
+// prompt-cache alias and a conversation alias previously bound to different
+// auths) into a single group bound to authID. Merging matters because later
+// housekeeping (OnResult) processes only the group holding the request's
+// primary key: two surviving groups would let the conversation-only alias
+// keep selecting a failed auth. The merge is retried with fresh observation
+// when a concurrent writer invalidates the expectations (bounded).
+func (s *SessionAffinitySelector) mergeSplitAliasGroupsCAS(cacheKey, fallbackKey string, authID string) bool {
+	for attempt := 0; attempt < 3; attempt++ {
+		authP, genP, aliasesP, okP := s.cache.GetWithGeneration(cacheKey)
+		authF, _, aliasesF, okF := s.cache.GetWithGeneration(fallbackKey)
+		merged := mergeSessionAliases(aliasesP, aliasesF...)
+		merged = mergeSessionAliases(merged, cacheKey, fallbackKey)
+		if okF && authF != authID {
+			if removed := s.cache.CompareAndDeleteAliases(fallbackKey, authF); removed == nil {
+				continue
+			}
+		}
+		if okP {
+			if s.cache.CompareAndReplaceAliases(authP, genP, aliasesP, authID, merged...) {
+				return true
+			}
+			continue
+		}
+		s.cache.SetAliases(authID, merged...)
+		return true
 	}
 	return false
 }
