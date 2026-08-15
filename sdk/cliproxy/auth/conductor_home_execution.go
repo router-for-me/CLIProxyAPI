@@ -76,7 +76,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		}
 		preparedAuth, errPrepare := m.prepareHomeRequestAuth(execCtx, selection.Executor, selection)
 		if errPrepare != nil {
-			m.reportHomeResult(execCtx, Result{AuthID: auth.ID, Provider: selection.Provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare)}, auth)
+			m.reportHomeResult(execCtx, Result{AuthID: auth.ID, Provider: selection.Provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: opts}, auth)
 			releaseAttempt()
 			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "prepare_failed"); errEnd != nil {
 				return cliproxyexecutor.Response{}, errEnd
@@ -165,7 +165,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 					}
 				}
 			}
-			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, Success: errExecute == nil}
+			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, Success: errExecute == nil, Options: execOpts}
 			if errExecute == nil {
 				m.reportHomeResult(execCtx, result, preparedAuth)
 				releaseAttempt()
@@ -178,12 +178,18 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			}
 			result.Error = resultErrorFromError(errExecute)
 			result.RetryAfter = retryAfterFromError(errExecute)
+			if isCredentialScopedError(errExecute) {
+				result.CredentialScope = true
+			}
 			m.reportHomeResult(execCtx, result, preparedAuth)
 			lastErr = errExecute
 			if isRequestInvalidError(errExecute) {
 				releaseAttempt()
 				selection.End("request_invalid")
 				return cliproxyexecutor.Response{}, errExecute
+			}
+			if result.CredentialScope {
+				break
 			}
 		}
 		releaseAttempt()

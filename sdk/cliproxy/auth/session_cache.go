@@ -222,6 +222,55 @@ func mergeSessionAliases(existing []string, candidates ...string) []string {
 	return aliases
 }
 
+// Touch refreshes the expiration for a session binding if it currently matches expectedAuthID.
+func (c *SessionCache) Touch(sessionID, expectedAuthID string) bool {
+	if sessionID == "" || expectedAuthID == "" {
+		return false
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[sessionID]
+	if !ok || entry.authID != expectedAuthID || !now.Before(entry.expiresAt) {
+		return false
+	}
+	aliases := compactSessionAliases(mergeSessionAliases([]string{sessionID}, entry.aliases...))
+	c.replaceAliasGroupsLocked(expectedAuthID, now.Add(c.ttl), aliases, entry)
+	return true
+}
+
+// CompareAndDelete removes the session binding only if it is currently bound to expectedAuthID.
+func (c *SessionCache) CompareAndDelete(sessionID, expectedAuthID string) bool {
+	if sessionID == "" || expectedAuthID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[sessionID]
+	if !ok || entry.authID != expectedAuthID {
+		return false
+	}
+	delete(c.entries, sessionID)
+	for _, alias := range entry.aliases {
+		if alias == sessionID {
+			continue
+		}
+		current, exists := c.entries[alias]
+		if !exists || current.authID != entry.authID {
+			continue
+		}
+		filtered := make([]string, 0, len(current.aliases))
+		for _, candidate := range current.aliases {
+			if candidate != sessionID {
+				filtered = append(filtered, candidate)
+			}
+		}
+		current.aliases = filtered
+		c.entries[alias] = current
+	}
+	return true
+}
+
 // Invalidate removes a specific session binding without allowing another alias
 // in the same group to recreate it on its next refresh.
 func (c *SessionCache) Invalidate(sessionID string) {

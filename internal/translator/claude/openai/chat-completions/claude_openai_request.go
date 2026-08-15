@@ -6,11 +6,9 @@
 package chat_completions
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"math/big"
 	"strings"
 
 	"github.com/google/uuid"
@@ -126,19 +124,6 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 		}
 	}
 
-	// Helper for generating tool call IDs in the form: toolu_<alphanum>
-	// This ensures unique identifiers for tool calls in the Claude Code format
-	genToolCallID := func() string {
-		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-		var b strings.Builder
-		// 24 chars random suffix for uniqueness
-		for i := 0; i < 24; i++ {
-			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
-			b.WriteByte(letters[n.Int64()])
-		}
-		return "toolu_" + b.String()
-	}
-
 	// Model mapping to specify which Claude Code model to use
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
@@ -173,6 +158,18 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
+		lastToolMessage := map[string]gjson.Result{}
+		messages.ForEach(func(_, message gjson.Result) bool {
+			if message.Get("role").String() == "tool" {
+				rawID := message.Get("tool_call_id").String()
+				if rawID != "" {
+					lastToolMessage[rawID] = message
+				}
+			}
+			return true
+		})
+		emittedToolResults := map[string]struct{}{}
+
 		systemBlocks := make([][]byte, 0)
 		messageAccumulator := common.NewClaudeMessageAccumulator(int(root.Get("messages.#").Int()))
 		messages.ForEach(func(_, message gjson.Result) bool {
@@ -242,7 +239,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 						if toolCall.Get("type").String() == "function" {
 							toolCallID := toolCall.Get("id").String()
 							if toolCallID == "" {
-								toolCallID = genToolCallID()
+								toolCallID = common.GenerateClaudeToolCallID()
 							}
 							toolCallID = util.SanitizeClaudeToolID(toolCallID)
 
@@ -282,9 +279,22 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 
 			case "tool":
 				// Handle tool result messages conversion
-				toolCallID := message.Get("tool_call_id").String()
-				toolCallID = util.SanitizeClaudeToolID(toolCallID)
-				toolContentResult := message.Get("content")
+				rawID := message.Get("tool_call_id").String()
+				toolCallID := util.SanitizeClaudeToolID(rawID)
+				if rawID != "" {
+					if _, exists := emittedToolResults[rawID]; exists {
+						return true
+					}
+					emittedToolResults[rawID] = struct{}{}
+				}
+
+				targetMsg := message
+				if rawID != "" {
+					if lastMsg, exists := lastToolMessage[rawID]; exists {
+						targetMsg = lastMsg
+					}
+				}
+				toolContentResult := targetMsg.Get("content")
 
 				msg := []byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`)
 				msg, _ = sjson.SetBytes(msg, "content.0.tool_use_id", toolCallID)
@@ -294,7 +304,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				} else {
 					msg, _ = sjson.SetBytes(msg, "content.0.content", toolResultContent)
 				}
-				msg = common.AttachMessageCacheControl(msg, message)
+				msg = common.AttachMessageCacheControl(msg, targetMsg)
 				messageAccumulator.Append(msg)
 			}
 			return true

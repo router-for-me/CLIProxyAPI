@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/andybalholm/brotli"
 	"github.com/google/uuid"
@@ -262,6 +263,23 @@ func (claudeEntitlementError) IsRequestScoped() bool {
 	return true
 }
 
+func (claudeEntitlementError) IsCredentialScoped() bool {
+	return false
+}
+
+type claudeRateLimitError struct {
+	statusErr
+	credentialScoped bool
+}
+
+func (e claudeRateLimitError) IsCredentialScoped() bool {
+	return e.credentialScoped
+}
+
+func (e claudeRateLimitError) IsRequestScoped() bool {
+	return false
+}
+
 // classifyClaudeUpstreamError promotes upstream refusals that no other credential
 // can satisfy into request-scoped errors.
 //
@@ -272,10 +290,21 @@ func (claudeEntitlementError) IsRequestScoped() bool {
 // next one, which returns the same 429. A single speed:"fast" request would walk
 // the whole Claude pool and cool down every credential, all of which remain
 // perfectly healthy for ordinary traffic. The refusal belongs to the request.
-func classifyClaudeUpstreamError(statusCode int, body []byte) error {
-	err := statusErr{code: statusCode, msg: string(body)}
-	if statusCode == http.StatusTooManyRequests && claudeBodyIndicatesFastModeCredits(body) {
-		return claudeEntitlementError{err}
+func classifyClaudeUpstreamError(statusCode int, headers http.Header, body []byte) error {
+	var retryAfter *time.Duration
+	if statusCode == http.StatusTooManyRequests || (statusCode >= 400 && statusCode < 600) {
+		retryAfter = helps.ParseClaudeRateLimitReset(headers, time.Now())
+	}
+	err := statusErr{code: statusCode, msg: string(body), retryAfter: retryAfter}
+	if statusCode == http.StatusTooManyRequests {
+		if helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
+			return claudeRateLimitError{statusErr: err, credentialScoped: true}
+		}
+		if claudeBodyIndicatesFastModeCredits(body) {
+			return claudeEntitlementError{err}
+		}
+		// Ordinary model-level Claude 429 (not a unified 5h/7d rejection)
+		return claudeRateLimitError{statusErr: err, credentialScoped: false}
 	}
 	return err
 }
@@ -287,8 +316,9 @@ func claudeBodyIndicatesFastModeCredits(body []byte) bool {
 	if message == "" {
 		message = strings.ToLower(string(body))
 	}
-	return strings.Contains(message, "fast mode") &&
-		(strings.Contains(message, "usage credits") || strings.Contains(message, "credits are required"))
+	return strings.Contains(message, "fast request rejected") ||
+		(strings.Contains(message, "fast") &&
+			(strings.Contains(message, "usage credits") || strings.Contains(message, "credits are required")))
 }
 
 // claudeRequestedBetas collects every beta the caller asked for, from the

@@ -25,10 +25,11 @@ const placeholderReasonDescription = "Brief explanation of why you are calling t
 // once already; scope every call site to the schema itself.
 
 type jsonSchemaCleanOptions struct {
-	addPlaceholder       bool
-	removeGeminiMetadata bool
-	flattenUnions        bool
-	forceEnumStringType  bool
+	addPlaceholder                    bool
+	removeGeminiMetadata              bool
+	flattenUnions                     bool
+	forceEnumStringType               bool
+	preserveAdditionalPropertiesFalse bool
 }
 
 // CleanJSONSchemaForAntigravity transforms a tool schema to be compatible with Antigravity API.
@@ -44,8 +45,20 @@ func CleanJSONSchemaForAntigravity(jsonStr string) string {
 
 // CleanJSONSchemaForAntigravityResponse transforms a response schema without applying tool-only
 // compatibility rewrites that would alter the client's structured output contract.
+//
+// Sanitization policy:
+//   - Passthrough: type, properties, items, required, description, enum, union structures (anyOf/oneOf),
+//     and additionalProperties: false (which Antigravity natively enforces as a closed-object constraint).
+//   - Description hints + deletion: unsupported constraints (minLength, maxLength, pattern, minItems,
+//     maxItems, uniqueItems, format, default, examples).
+//   - Flattened: allOf merged into properties/required.
+//   - Dropped: $schema, $defs, definitions, const (converted to enum first), $ref (converted to hint),
+//     $id, propertyNames, patternProperties, conditional schemas (if/then/else), non-false additionalProperties,
+//     and x-* extensions.
 func CleanJSONSchemaForAntigravityResponse(jsonStr string) string {
-	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{})
+	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{
+		preserveAdditionalPropertiesFalse: true,
+	})
 }
 
 // CleanJSONSchemaForGemini transforms a JSON schema to be compatible with Gemini tool calling.
@@ -65,10 +78,13 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	jsonStr = convertConstToEnum(jsonStr)
 	jsonStr = convertEnumValuesToStrings(jsonStr, options.forceEnumStringType)
 	jsonStr = addEnumHints(jsonStr)
-	jsonStr = addAdditionalPropertiesHints(jsonStr)
+	if !options.preserveAdditionalPropertiesFalse {
+		jsonStr = addAdditionalPropertiesHints(jsonStr)
+	}
 	jsonStr = moveConstraintsToDescription(jsonStr)
 
 	// Phase 2: Flatten complex structures
+	jsonStr = mergeConditionals(jsonStr)
 	jsonStr = mergeAllOf(jsonStr)
 	if options.flattenUnions {
 		jsonStr = flattenAnyOfOneOf(jsonStr)
@@ -76,7 +92,7 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	jsonStr = flattenTypeArrays(jsonStr)
 
 	// Phase 3: Cleanup
-	jsonStr = removeUnsupportedKeywords(jsonStr)
+	jsonStr = removeUnsupportedKeywords(jsonStr, options)
 	if options.removeGeminiMetadata {
 		// Gemini schema cleanup: remove nullable/title and placeholder-only fields.
 		jsonStr = removeKeywords(jsonStr, []string{"nullable", "title"})
@@ -297,6 +313,48 @@ func moveConstraintsToDescription(jsonStr string) string {
 	return jsonStr
 }
 
+func mergeConditionals(jsonStr string) string {
+	pathsByField := findPathsByFields(jsonStr, []string{"then", "else"})
+	var paths []string
+	for _, key := range []string{"then", "else"} {
+		for _, p := range pathsByField[key] {
+			parentPath := trimSuffix(p, "."+key)
+			if isPropertyDefinition(parentPath) {
+				continue
+			}
+			paths = append(paths, p)
+		}
+	}
+	sortByDepth(paths)
+
+	for _, p := range paths {
+		props := gjson.Get(jsonStr, joinPath(p, "properties"))
+		if !props.IsObject() {
+			continue
+		}
+		var parentPath string
+		if strings.HasSuffix(p, ".then") {
+			parentPath = trimSuffix(p, ".then")
+		} else if strings.HasSuffix(p, ".else") {
+			parentPath = trimSuffix(p, ".else")
+		} else if p == "then" || p == "else" {
+			parentPath = ""
+		} else {
+			continue
+		}
+
+		props.ForEach(func(key, value gjson.Result) bool {
+			destPath := joinPath(parentPath, "properties."+escapeGJSONPathKey(key.String()))
+			if !gjson.Get(jsonStr, destPath).Exists() {
+				updated, _ := sjson.SetRawBytes([]byte(jsonStr), destPath, []byte(value.Raw))
+				jsonStr = string(updated)
+			}
+			return true
+		})
+	}
+	return jsonStr
+}
+
 func mergeAllOf(jsonStr string) string {
 	paths := findPaths(jsonStr, "allOf")
 	sortByDepth(paths)
@@ -469,10 +527,11 @@ func flattenTypeArrays(jsonStr string) string {
 	return jsonStr
 }
 
-func removeUnsupportedKeywords(jsonStr string) string {
+func removeUnsupportedKeywords(jsonStr string, options jsonSchemaCleanOptions) string {
 	keywords := append(unsupportedConstraints,
 		"$schema", "$defs", "definitions", "const", "$ref", "$id", "additionalProperties",
 		"propertyNames", "patternProperties", // Gemini doesn't support these schema keywords
+		"if", "then", "else",
 		"$comment", "enumDescriptions", "enumTitles", "prefill", "deprecated", // Schema metadata fields unsupported by Gemini
 	)
 
@@ -482,6 +541,11 @@ func removeUnsupportedKeywords(jsonStr string) string {
 		for _, p := range pathsByField[key] {
 			if isPropertyDefinition(trimSuffix(p, "."+key)) {
 				continue
+			}
+			if options.preserveAdditionalPropertiesFalse && key == "additionalProperties" {
+				if gjson.Get(jsonStr, p).Type == gjson.False {
+					continue
+				}
 			}
 			deletePaths = append(deletePaths, p)
 		}

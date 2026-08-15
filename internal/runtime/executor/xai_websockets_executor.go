@@ -803,12 +803,12 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				}
 
 				if cliproxyexecutor.DownstreamWebsocket(ctx) {
-					downstreamPayload := payload
-					downstreamWarmupCompletedPayload := warmupCompletedPayload
+					downstreamPayload := helps.EnsureResponsesUsageDetails(payload)
+					downstreamWarmupCompletedPayload := helps.EnsureResponsesUsageDetails(warmupCompletedPayload)
 					if idMapper != nil {
-						downstreamPayload = idMapper.downstreamResponsePayload(payload)
+						downstreamPayload = idMapper.downstreamResponsePayload(downstreamPayload)
 						if len(warmupCompletedPayload) > 0 {
-							downstreamWarmupCompletedPayload = idMapper.downstreamResponsePayload(warmupCompletedPayload)
+							downstreamWarmupCompletedPayload = idMapper.downstreamResponsePayload(downstreamWarmupCompletedPayload)
 						}
 					}
 					if !send(cliproxyexecutor.StreamChunk{Payload: downstreamPayload}) {
@@ -960,7 +960,7 @@ func xaiWebsocketGenerateFalse(payload []byte) bool {
 }
 
 func buildXAIWebsocketWarmupCompletedPayload(createdPayload []byte) []byte {
-	completed := []byte(`{"type":"response.completed","response":{"output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+	completed := []byte(`{"type":"response.completed","response":{"output":[],"usage":{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":0}}}`)
 	if sequence := gjson.GetBytes(createdPayload, "sequence_number"); sequence.Exists() {
 		completed, _ = sjson.SetBytes(completed, "sequence_number", sequence.Int()+1)
 	}
@@ -971,11 +971,11 @@ func buildXAIWebsocketWarmupCompletedPayload(createdPayload []byte) []byte {
 			responsePayload, _ = sjson.SetRawBytes(responsePayload, "output", []byte("[]"))
 		}
 		if !gjson.GetBytes(responsePayload, "usage").Exists() {
-			responsePayload, _ = sjson.SetRawBytes(responsePayload, "usage", []byte(`{"input_tokens":0,"output_tokens":0,"total_tokens":0}`))
+			responsePayload, _ = sjson.SetRawBytes(responsePayload, "usage", []byte(`{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":0}`))
 		}
 		completed, _ = sjson.SetRawBytes(completed, "response", responsePayload)
 	}
-	return completed
+	return helps.EnsureResponsesUsageDetails(completed)
 }
 
 func parseXAIWebsocketError(payload []byte) (error, bool) {

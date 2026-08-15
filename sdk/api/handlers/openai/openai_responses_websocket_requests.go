@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -129,10 +131,10 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	// skip merging with stale lastRequest/lastResponseOutput to avoid breaking
 	// function_call / function_call_output pairings.
 	// See: https://github.com/router-for-me/CLIProxyAPI/issues/2207
-	var mergedInput string
+	var mergedInput []byte
 	if allowCompactionReplayBypass && inputContainsFullTranscript(nextInput) {
 		log.Infof("responses websocket: full transcript detected, skipping stale merge (input items=%d)", len(nextInput.Array()))
-		mergedInput = nextInput.Raw
+		mergedInput = []byte(nextInput.Raw)
 	} else {
 		appendInputRaw := nextInput.Raw
 		if inputContainsFullTranscript(nextInput) {
@@ -168,7 +170,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
 	var errSet error
-	normalized, errSet = sjson.SetRawBytes(normalized, "input", []byte(mergedInput))
+	normalized, errSet = sjson.SetRawBytes(normalized, "input", mergedInput)
 	if errSet != nil {
 		return nil, lastRequest, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
@@ -319,38 +321,220 @@ type responsesWebsocketInputItem struct {
 	callID   string
 }
 
-func mergeResponsesWebsocketInput(lastRequest []byte, lastResponseOutput []byte, appendRaw string) (string, error) {
+type responsesWebsocketMergeInputItem struct {
+	// raw may reference a caller-owned request buffer. Merge items must remain
+	// local to mergeResponsesWebsocketInput, which copies every item into the
+	// owned output buffer before returning.
+	raw      string
+	itemType string
+	id       string
+	callID   string
+}
+
+func mergeResponsesWebsocketInput(lastRequest []byte, lastResponseOutput []byte, appendRaw string) ([]byte, error) {
+	previousInput, errPrevious := responsesWebsocketPreviousInputNoCopy(lastRequest)
+	if errPrevious != nil {
+		return nil, fmt.Errorf("invalid previous request input: %w", errPrevious)
+	}
+	items, errExisting := appendResponsesWebsocketMergeInputResult(nil, previousInput)
+	if errExisting != nil {
+		return nil, fmt.Errorf("invalid previous request input: %w", errExisting)
+	}
+
+	trimmedResponse := bytes.TrimSpace(lastResponseOutput)
+	if len(trimmedResponse) > 0 && trimmedResponse[0] == '[' && json.Valid(trimmedResponse) {
+		responseInput := util.ParseGJSONBytesNoCopy(trimmedResponse)
+		var errResponse error
+		items, errResponse = appendResponsesWebsocketMergeInputResult(items, responseInput)
+		if errResponse != nil {
+			return nil, fmt.Errorf("invalid previous response output: %w", errResponse)
+		}
+	}
+
+	items, errAppend := appendResponsesWebsocketMergeInputItems(items, appendRaw)
+	if errAppend != nil {
+		return nil, fmt.Errorf("invalid request input: %w", errAppend)
+	}
+
+	items = dedupeResponsesWebsocketMergeFunctionCalls(items)
+	items = dedupeResponsesWebsocketMergeInputItems(items)
+	return marshalResponsesWebsocketMergeInputItems(items), nil
+}
+
+func responsesWebsocketPreviousInputNoCopy(lastRequest []byte) (gjson.Result, error) {
+	if !json.Valid(lastRequest) {
+		return gjson.Result{}, responsesWebsocketPreviousInputDecodeError(lastRequest)
+	}
+
+	root := util.ParseGJSONBytesNoCopy(lastRequest)
+	if root.Type == gjson.Null {
+		return gjson.Parse("[]"), nil
+	}
+	if !root.IsObject() {
+		return gjson.Result{}, responsesWebsocketPreviousInputDecodeError(lastRequest)
+	}
+
+	var input gjson.Result
+	inputFound := false
+	invalidInput := false
+	root.ForEach(func(key, value gjson.Result) bool {
+		if !strings.EqualFold(key.String(), "input") {
+			return true
+		}
+		// encoding/json processes matching duplicate fields in source order,
+		// retains the last value, and still reports a type error from any
+		// incompatible duplicate. Preserve those semantics without copying the
+		// selected array out of the caller-owned request buffer.
+		inputFound = true
+		input = value
+		if value.Type != gjson.Null && !value.IsArray() {
+			invalidInput = true
+		}
+		return true
+	})
+	if invalidInput {
+		return gjson.Result{}, responsesWebsocketPreviousInputDecodeError(lastRequest)
+	}
+	if !inputFound || input.Type == gjson.Null {
+		return gjson.Parse("[]"), nil
+	}
+	return input, nil
+}
+
+func responsesWebsocketPreviousInputDecodeError(lastRequest []byte) error {
 	var previousRequest struct {
 		Input []json.RawMessage `json:"input"`
 	}
-	if errUnmarshal := json.Unmarshal(lastRequest, &previousRequest); errUnmarshal != nil {
-		return "", fmt.Errorf("invalid previous request input: %w", errUnmarshal)
+	return json.Unmarshal(lastRequest, &previousRequest)
+}
+
+func appendResponsesWebsocketMergeInputItems(items []responsesWebsocketMergeInputItem, rawArray string) ([]responsesWebsocketMergeInputItem, error) {
+	rawArray = strings.TrimSpace(rawArray)
+	if rawArray == "" {
+		rawArray = "[]"
 	}
-	items, errExisting := appendResponsesWebsocketRawInputItems(nil, previousRequest.Input)
-	if errExisting != nil {
-		return "", fmt.Errorf("invalid previous request input: %w", errExisting)
+	parsed := gjson.Parse(rawArray)
+	if gjson.Valid(rawArray) {
+		return appendResponsesWebsocketMergeInputResult(items, parsed)
 	}
 
-	var responseItems []json.RawMessage
-	trimmedResponse := bytes.TrimSpace(lastResponseOutput)
-	if len(trimmedResponse) > 0 && trimmedResponse[0] == '[' && json.Valid(trimmedResponse) {
-		if errUnmarshal := json.Unmarshal(trimmedResponse, &responseItems); errUnmarshal != nil {
-			return "", fmt.Errorf("invalid previous response output: %w", errUnmarshal)
+	var rawItems []json.RawMessage
+	if errUnmarshal := json.Unmarshal([]byte(rawArray), &rawItems); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+	return items, nil
+}
+
+func appendResponsesWebsocketMergeInputResult(items []responsesWebsocketMergeInputItem, input gjson.Result) ([]responsesWebsocketMergeInputItem, error) {
+	if input.Type == gjson.Null {
+		return items, nil
+	}
+	if !input.IsArray() {
+		var rawItems []json.RawMessage
+		if errUnmarshal := json.Unmarshal([]byte(input.Raw), &rawItems); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		return items, nil
+	}
+
+	rawItems := input.Array()
+	items = slices.Grow(items, len(rawItems))
+	for _, rawItem := range rawItems {
+		item := responsesWebsocketMergeInputItem{raw: rawItem.Raw}
+		if rawItem.IsObject() {
+			rawItem.ForEach(func(key, value gjson.Result) bool {
+				metadataKey := key.String()
+				switch {
+				case strings.EqualFold(metadataKey, "type"):
+					item.itemType = strings.TrimSpace(value.String())
+				case strings.EqualFold(metadataKey, "id"):
+					item.id = strings.TrimSpace(value.String())
+				case strings.EqualFold(metadataKey, "call_id"):
+					item.callID = strings.TrimSpace(value.String())
+				}
+				return true
+			})
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func dedupeResponsesWebsocketMergeFunctionCalls(items []responsesWebsocketMergeInputItem) []responsesWebsocketMergeInputItem {
+	seenCallIDs := make(map[string]struct{}, len(items))
+	filtered := items[:0]
+	for _, item := range items {
+		if isResponsesToolCallType(item.itemType) && item.callID != "" {
+			if _, ok := seenCallIDs[item.callID]; ok {
+				continue
+			}
+			seenCallIDs[item.callID] = struct{}{}
+		}
+		filtered = append(filtered, item)
+	}
+	clear(items[len(filtered):])
+	return filtered
+}
+
+func dedupeResponsesWebsocketMergeInputItems(items []responsesWebsocketMergeInputItem) []responsesWebsocketMergeInputItem {
+	referencedCallIDs := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if isResponsesToolCallOutputType(item.itemType) && item.callID != "" {
+			referencedCallIDs[item.callID] = struct{}{}
 		}
 	}
-	items, errResponse := appendResponsesWebsocketRawInputItems(items, responseItems)
-	if errResponse != nil {
-		return "", fmt.Errorf("invalid previous response output: %w", errResponse)
+
+	keepIndexByID := make(map[string]int, len(items))
+	keepReferencedByID := make(map[string]bool, len(items))
+	for index, item := range items {
+		if item.id == "" {
+			continue
+		}
+		_, referenced := referencedCallIDs[item.callID]
+		referenced = referenced && item.callID != ""
+		if _, seen := keepIndexByID[item.id]; !seen {
+			keepIndexByID[item.id] = index
+			keepReferencedByID[item.id] = referenced
+			continue
+		}
+		if referenced || !keepReferencedByID[item.id] {
+			keepIndexByID[item.id] = index
+			keepReferencedByID[item.id] = referenced
+		}
 	}
 
-	items, errAppend := appendResponsesWebsocketInputItems(items, appendRaw)
-	if errAppend != nil {
-		return "", fmt.Errorf("invalid request input: %w", errAppend)
+	filtered := items[:0]
+	for index, item := range items {
+		if item.id != "" && keepIndexByID[item.id] != index {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	clear(items[len(filtered):])
+	return filtered
+}
+
+func marshalResponsesWebsocketMergeInputItems(items []responsesWebsocketMergeInputItem) []byte {
+	outputLength := 2
+	if len(items) > 1 {
+		outputLength += len(items) - 1
+	}
+	for _, item := range items {
+		outputLength += len(item.raw)
 	}
 
-	items = dedupeResponsesWebsocketFunctionCalls(items)
-	items = dedupeResponsesWebsocketInputItems(items)
-	return marshalResponsesWebsocketInputItems(items)
+	// This allocation establishes ownership of the merged transcript and is the
+	// only large allocation the merge path retains after it returns.
+	out := make([]byte, 0, outputLength)
+	out = append(out, '[')
+	for index, item := range items {
+		if index > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, item.raw...)
+	}
+	out = append(out, ']')
+	return out
 }
 
 func parseResponsesWebsocketInputItems(rawArray string) ([]responsesWebsocketInputItem, error) {

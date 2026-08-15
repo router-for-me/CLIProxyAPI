@@ -1515,11 +1515,13 @@ func TestNormalizeAuthNil(t *testing.T) {
 
 // stubStore implements coreauth.Store plus watcher-specific persistence helpers.
 type stubStore struct {
+	mu              sync.Mutex
 	authDir         string
-	cfgPersisted    int32
-	authPersisted   int32
+	cfgPersisted    int
+	authPersisted   int
 	lastAuthMessage string
 	lastAuthPaths   []string
+	persisted       chan struct{}
 }
 
 func (s *stubStore) List(context.Context) ([]*coreauth.Auth, error) { return nil, nil }
@@ -1528,16 +1530,38 @@ func (s *stubStore) Save(context.Context, *coreauth.Auth) (string, error) {
 }
 func (s *stubStore) Delete(context.Context, string) error { return nil }
 func (s *stubStore) PersistConfig(context.Context) error {
-	atomic.AddInt32(&s.cfgPersisted, 1)
+	s.mu.Lock()
+	s.cfgPersisted++
+	s.mu.Unlock()
+	s.signalPersisted()
 	return nil
 }
 func (s *stubStore) PersistAuthFiles(_ context.Context, message string, paths ...string) error {
-	atomic.AddInt32(&s.authPersisted, 1)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.lastAuthMessage = message
-	s.lastAuthPaths = paths
+	s.lastAuthPaths = append([]string(nil), paths...)
+	s.authPersisted++
+	s.signalPersisted()
 	return nil
 }
 func (s *stubStore) AuthDir() string { return s.authDir }
+
+func (s *stubStore) signalPersisted() {
+	if s.persisted == nil {
+		return
+	}
+	select {
+	case s.persisted <- struct{}{}:
+	default:
+	}
+}
+
+func (s *stubStore) persistenceSnapshot() (cfgPersisted, authPersisted int, message string, paths []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfgPersisted, s.authPersisted, s.lastAuthMessage, append([]string(nil), s.lastAuthPaths...)
+}
 
 func TestNewWatcherDetectsPersisterAndAuthDir(t *testing.T) {
 	tmp := t.TempDir()
@@ -1559,26 +1583,33 @@ func TestNewWatcherDetectsPersisterAndAuthDir(t *testing.T) {
 }
 
 func TestPersistConfigAndAuthAsyncInvokePersister(t *testing.T) {
+	store := &stubStore{persisted: make(chan struct{}, 2)}
 	w := &Watcher{
-		storePersister: &stubStore{},
+		storePersister: store,
 	}
 
 	w.persistConfigAsync()
 	w.persistAuthAsync("msg", " a ", "", "b ")
 
-	time.Sleep(30 * time.Millisecond)
-	store := w.storePersister.(*stubStore)
-	if atomic.LoadInt32(&store.cfgPersisted) != 1 {
-		t.Fatalf("expected PersistConfig to be called once, got %d", store.cfgPersisted)
+	for range 2 {
+		select {
+		case <-store.persisted:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for asynchronous persistence")
+		}
 	}
-	if atomic.LoadInt32(&store.authPersisted) != 1 {
-		t.Fatalf("expected PersistAuthFiles to be called once, got %d", store.authPersisted)
+	cfgPersisted, authPersisted, message, paths := store.persistenceSnapshot()
+	if cfgPersisted != 1 {
+		t.Fatalf("expected PersistConfig to be called once, got %d", cfgPersisted)
 	}
-	if store.lastAuthMessage != "msg" {
-		t.Fatalf("unexpected auth message: %s", store.lastAuthMessage)
+	if authPersisted != 1 {
+		t.Fatalf("expected PersistAuthFiles to be called once, got %d", authPersisted)
 	}
-	if len(store.lastAuthPaths) != 2 || store.lastAuthPaths[0] != "a" || store.lastAuthPaths[1] != "b" {
-		t.Fatalf("unexpected filtered paths: %#v", store.lastAuthPaths)
+	if message != "msg" {
+		t.Fatalf("unexpected auth message: %s", message)
+	}
+	if len(paths) != 2 || paths[0] != "a" || paths[1] != "b" {
+		t.Fatalf("unexpected filtered paths: %#v", paths)
 	}
 }
 
@@ -1601,13 +1632,21 @@ func TestScheduleConfigReloadDebounces(t *testing.T) {
 	w.scheduleConfigReload()
 	w.scheduleConfigReload()
 
-	time.Sleep(400 * time.Millisecond)
-
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("expected single debounced reload, got %d", reloads)
+	deadline := time.Now().Add(time.Second)
+	for {
+		w.clientsMutex.RLock()
+		hashSet := w.lastConfigHash != ""
+		w.clientsMutex.RUnlock()
+		if hashSet {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for debounced config reload")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if w.lastConfigHash == "" {
-		t.Fatal("expected lastConfigHash to be set after reload")
+	if got := atomic.LoadInt32(&reloads); got != 1 {
+		t.Fatalf("expected single debounced reload, got %d", got)
 	}
 }
 

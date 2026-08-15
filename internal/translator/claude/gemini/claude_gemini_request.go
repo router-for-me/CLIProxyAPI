@@ -6,11 +6,9 @@
 package gemini
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"math/big"
 	"strings"
 
 	"github.com/google/uuid"
@@ -68,19 +66,6 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 	root := gjson.ParseBytes(rawJSON)
 	messageAccumulator := translatorcommon.NewClaudeMessageAccumulator(int(root.Get("contents.#").Int()) + 1)
-
-	// Helper for generating tool call IDs in the form: toolu_<alphanum>
-	// This ensures unique identifiers for tool calls in the Claude Code format
-	genToolCallID := func() string {
-		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-		var b strings.Builder
-		// 24 chars random suffix for uniqueness
-		for i := 0; i < 24; i++ {
-			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
-			b.WriteByte(letters[n.Int64()])
-		}
-		return "toolu_" + b.String()
-	}
 
 	getGeminiToolID := func(value gjson.Result) string {
 		if toolID := strings.TrimSpace(value.Get("id").String()); toolID != "" {
@@ -287,7 +272,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						// Reuse gateway-provided IDs when present, otherwise generate one for pairing.
 						toolID := getGeminiToolID(fc)
 						if toolID == "" {
-							toolID = genToolCallID()
+							toolID = translatorcommon.GenerateClaudeToolCallID()
 						}
 						pendingToolIDs = append(pendingToolIDs, toolID)
 						toolUse, _ = sjson.SetBytes(toolUse, "id", toolID)
@@ -318,7 +303,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 							pendingToolIDs = pendingToolIDs[1:]
 						} else {
 							// Fallback: generate new ID if no pending tool_use found
-							toolID = genToolCallID()
+							toolID = translatorcommon.GenerateClaudeToolCallID()
 						}
 						toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", toolID)
 

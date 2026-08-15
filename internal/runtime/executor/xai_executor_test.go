@@ -2202,8 +2202,8 @@ func TestXAIExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testing
 	if !strings.Contains(output, `"type":"compaction"`) || !strings.Contains(output, `"encrypted_content":"opaque"`) {
 		t.Fatalf("compaction output missing from stream: %s", output)
 	}
-	if !strings.Contains(output, `"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}`) {
-		t.Fatalf("usage missing from completed stream: %s", output)
+	if !strings.Contains(output, `"output_tokens_details":{"reasoning_tokens":0}`) || !strings.Contains(output, `"input_tokens_details":{"cached_tokens":0}`) {
+		t.Fatalf("usage details missing from completed stream: %s", output)
 	}
 }
 
@@ -5041,4 +5041,24 @@ func testValidGrokEncryptedContent() string {
 		buf = append(buf, sum[:]...)
 	}
 	return base64.RawStdEncoding.EncodeToString(buf[:256])
+}
+
+func TestXAIPatchCompletedOutput_EnsuresUsageDetails(t *testing.T) {
+	eventData := []byte(`{"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14}}}`)
+	outputItemsByIndex := make(map[int64][]byte)
+	var outputItemsFallback [][]byte
+
+	got := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+	if !gjson.GetBytes(got, "response.usage.output_tokens_details").Exists() {
+		t.Fatalf("expected output_tokens_details to exist, got %s", string(got))
+	}
+	if gjson.GetBytes(got, "response.usage.output_tokens_details.reasoning_tokens").Int() != 0 {
+		t.Fatalf("expected reasoning_tokens == 0, got %d", gjson.GetBytes(got, "response.usage.output_tokens_details.reasoning_tokens").Int())
+	}
+	if !gjson.GetBytes(got, "response.usage.input_tokens_details").Exists() {
+		t.Fatalf("expected input_tokens_details to exist, got %s", string(got))
+	}
+	if gjson.GetBytes(got, "response.usage.input_tokens_details.cached_tokens").Int() != 0 {
+		t.Fatalf("expected cached_tokens == 0, got %d", gjson.GetBytes(got, "response.usage.input_tokens_details.cached_tokens").Int())
+	}
 }

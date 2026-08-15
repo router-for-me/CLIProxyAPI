@@ -61,13 +61,14 @@ func ConvertInteractionsResponseToClaudeNonStream(_ context.Context, modelName s
 		steps = root.Get("steps")
 	}
 	sawToolCall := false
+	var contentBlocks [][]byte
 	steps.ForEach(func(_, step gjson.Result) bool {
 		switch step.Get("type").String() {
 		case "thought":
 			for _, text := range interactionsContentTexts(step.Get("content")) {
 				block := []byte(`{"type":"thinking","thinking":""}`)
 				block, _ = sjson.SetBytes(block, "thinking", text)
-				out, _ = sjson.SetRawBytes(out, "content.-1", block)
+				contentBlocks = append(contentBlocks, block)
 			}
 		case "function_call":
 			sawToolCall = true
@@ -81,16 +82,19 @@ func ConvertInteractionsResponseToClaudeNonStream(_ context.Context, modelName s
 			if args.Exists() && args.IsObject() {
 				block, _ = sjson.SetRawBytes(block, "input", []byte(args.Raw))
 			}
-			out, _ = sjson.SetRawBytes(out, "content.-1", block)
+			contentBlocks = append(contentBlocks, block)
 		default:
 			for _, text := range interactionsContentTexts(step.Get("content")) {
 				block := []byte(`{"type":"text","text":""}`)
 				block, _ = sjson.SetBytes(block, "text", text)
-				out, _ = sjson.SetRawBytes(out, "content.-1", block)
+				contentBlocks = append(contentBlocks, block)
 			}
 		}
 		return true
 	})
+	if len(contentBlocks) > 0 {
+		out = translatorcommon.SetRawArrayItems(out, "content", contentBlocks)
+	}
 	if sawToolCall {
 		out, _ = sjson.SetBytes(out, "stop_reason", "tool_use")
 	}
