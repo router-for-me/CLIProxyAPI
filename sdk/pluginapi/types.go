@@ -767,6 +767,38 @@ type HostAuthSaveResponse struct {
 	Path string `json:"path"`
 }
 
+// HostAuthSaveBatchRequest asks the host to persist multiple credential JSON files in one call.
+// The host validates every entry before writing; if any entry is invalid, nothing is saved.
+// Saving is performed sequentially after validation; a failure mid-batch reports the error
+// and leaves the already saved files in place.
+type HostAuthSaveBatchRequest struct {
+	// Files contains the ordered auth files to save.
+	Files []HostAuthSaveRequest `json:"files"`
+}
+
+// HostAuthSaveBatchResponse reports every auth file saved by a batch request.
+type HostAuthSaveBatchResponse struct {
+	// Files contains one response entry per saved auth file, in request order.
+	Files []HostAuthSaveResponse `json:"files"`
+}
+
+// HostAuthDeleteRequest asks the host to delete a credential through the authoritative token store.
+// Plugins must not delete auth paths themselves.
+type HostAuthDeleteRequest struct {
+	// AuthIndex identifies the credential index when known.
+	AuthIndex string `json:"auth_index,omitempty"`
+	// Name identifies the auth file name or auth ID when auth_index is unavailable.
+	Name string `json:"name,omitempty"`
+}
+
+// HostAuthDeleteResponse reports the deleted credential identity.
+type HostAuthDeleteResponse struct {
+	// Name is the deleted auth file name or auth ID.
+	Name string `json:"name"`
+	// Path is the deleted auth file path when available.
+	Path string `json:"path,omitempty"`
+}
+
 // HTTPRequest describes an upstream HTTP request issued through the host.
 type HTTPRequest struct {
 	// Method is the HTTP method.

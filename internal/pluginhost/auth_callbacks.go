@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -130,6 +131,219 @@ func (h *Host) callHostAuthSave(ctx context.Context, request []byte) ([]byte, er
 		Name: name,
 		Path: path,
 	})
+}
+
+func (h *Host) callHostAuthSaveBatch(ctx context.Context, request []byte) ([]byte, error) {
+	var req pluginapi.HostAuthSaveBatchRequest
+	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+		return nil, fmt.Errorf("decode host auth save_batch request: %w", errUnmarshal)
+	}
+	if len(req.Files) == 0 {
+		return nil, fmt.Errorf("files are required")
+	}
+	type validatedAuthFile struct {
+		name string
+		data []byte
+	}
+	validated := make([]validatedAuthFile, 0, len(req.Files))
+	seenNames := make(map[string]struct{}, len(req.Files))
+	for _, file := range req.Files {
+		name, rawJSON, errValidate := validateHostAuthSaveRequest(file)
+		if errValidate != nil {
+			return nil, errValidate
+		}
+		if _, exists := seenNames[strings.ToLower(name)]; exists {
+			return nil, fmt.Errorf("duplicate auth file name %s", name)
+		}
+		seenNames[strings.ToLower(name)] = struct{}{}
+		validated = append(validated, validatedAuthFile{name: name, data: rawJSON})
+	}
+	files := make([]pluginapi.HostAuthSaveResponse, 0, len(validated))
+	for index, file := range validated {
+		path, errSave := h.saveAuthFile(ctx, file.name, file.data)
+		if errSave != nil {
+			return nil, fmt.Errorf("save auth file %s (%d of %d already saved): %w", file.name, index, len(validated), errSave)
+		}
+		files = append(files, pluginapi.HostAuthSaveResponse{Name: file.name, Path: path})
+	}
+	return marshalRPCResult(pluginapi.HostAuthSaveBatchResponse{Files: files})
+}
+
+func (h *Host) callHostAuthDelete(ctx context.Context, request []byte) ([]byte, error) {
+	var req pluginapi.HostAuthDeleteRequest
+	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+		return nil, fmt.Errorf("decode host auth delete request: %w", errUnmarshal)
+	}
+	auth, path, name, errResolve := h.resolveAuthForDelete(req)
+	if errResolve != nil {
+		return nil, errResolve
+	}
+	store := sdkAuth.GetTokenStore()
+	if store == nil {
+		return nil, fmt.Errorf("token store unavailable")
+	}
+	if errDelete := store.Delete(ctx, path); errDelete != nil {
+		return nil, fmt.Errorf("delete auth file: %w", errDelete)
+	}
+	targetID := ""
+	if auth != nil {
+		targetID = strings.TrimSpace(auth.ID)
+	}
+	h.removeAuthsForPath(ctx, path, targetID)
+	if name == "" {
+		name = filepath.Base(path)
+	}
+	return marshalRPCResult(pluginapi.HostAuthDeleteResponse{
+		Name: name,
+		Path: path,
+	})
+}
+
+func (h *Host) resolveAuthForDelete(req pluginapi.HostAuthDeleteRequest) (*coreauth.Auth, string, string, error) {
+	authIndex := strings.TrimSpace(req.AuthIndex)
+	name := strings.TrimSpace(req.Name)
+	if authIndex == "" && name == "" {
+		return nil, "", "", fmt.Errorf("auth_index or name is required")
+	}
+	if authIndex != "" {
+		auth, errGet := h.authByIndex(authIndex)
+		if errGet != nil {
+			return nil, "", "", errGet
+		}
+		path := strings.TrimSpace(authAttribute(auth, "path"))
+		if path == "" {
+			return nil, "", "", fmt.Errorf("auth file path not found for auth_index %s", authIndex)
+		}
+		return auth, path, deleteNameForAuth(auth, path), nil
+	}
+	manager := h.currentAuthManager()
+	if manager != nil {
+		if auth, ok := manager.GetByID(name); ok && auth != nil {
+			path := strings.TrimSpace(authAttribute(auth, "path"))
+			if path == "" {
+				return nil, "", "", fmt.Errorf("auth file path not found for name %s", name)
+			}
+			return auth, path, deleteNameForAuth(auth, path), nil
+		}
+		for _, auth := range manager.List() {
+			if auth == nil {
+				continue
+			}
+			if strings.TrimSpace(auth.FileName) == name || filepath.Base(strings.TrimSpace(authAttribute(auth, "path"))) == name {
+				path := strings.TrimSpace(authAttribute(auth, "path"))
+				if path == "" {
+					return nil, "", "", fmt.Errorf("auth file path not found for name %s", name)
+				}
+				return auth, path, deleteNameForAuth(auth, path), nil
+			}
+		}
+	}
+	if isUnsafeAuthFileName(name) {
+		return nil, "", "", fmt.Errorf("invalid auth file name")
+	}
+	authDir := h.resolvedAuthDir()
+	if authDir == "" {
+		return nil, "", "", fmt.Errorf("auth directory is unavailable")
+	}
+	path := filepath.Join(authDir, filepath.Base(name))
+	if !filepath.IsAbs(path) {
+		if abs, errAbs := filepath.Abs(path); errAbs == nil {
+			path = abs
+		}
+	}
+	if _, errStat := os.Stat(path); errStat != nil {
+		if os.IsNotExist(errStat) {
+			return nil, "", "", fmt.Errorf("auth file not found for name %s", name)
+		}
+		return nil, "", "", fmt.Errorf("failed to stat auth file: %w", errStat)
+	}
+	return nil, path, filepath.Base(name), nil
+}
+
+func deleteNameForAuth(auth *coreauth.Auth, path string) string {
+	if auth != nil {
+		if name := strings.TrimSpace(auth.FileName); name != "" {
+			return name
+		}
+		if id := strings.TrimSpace(auth.ID); id != "" {
+			return id
+		}
+	}
+	return filepath.Base(path)
+}
+
+func (h *Host) removeAuth(ctx context.Context, id string) {
+	if h == nil {
+		return
+	}
+	manager := h.currentAuthManager()
+	if manager == nil {
+		return
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	if _, ok := manager.GetByID(id); ok {
+		manager.Remove(ctx, id)
+		return
+	}
+	authID := h.authIDForPath(id)
+	if authID == "" {
+		return
+	}
+	manager.Remove(ctx, authID)
+}
+
+func (h *Host) removeAuthsForPath(ctx context.Context, path string, fallbackID string) {
+	if h == nil {
+		return
+	}
+	manager := h.currentAuthManager()
+	if manager == nil {
+		return
+	}
+	removed := false
+	for _, auth := range manager.List() {
+		if auth == nil {
+			continue
+		}
+		if sameAuthFilePath(authAttribute(auth, "path"), path) {
+			h.removeAuth(ctx, auth.ID)
+			removed = true
+		}
+	}
+	if removed {
+		return
+	}
+	if strings.TrimSpace(fallbackID) != "" {
+		h.removeAuth(ctx, fallbackID)
+		return
+	}
+	h.removeAuth(ctx, path)
+}
+
+func sameAuthFilePath(left, right string) bool {
+	left = cleanAuthFilePath(left)
+	right = cleanAuthFilePath(right)
+	if left == "" || right == "" {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+func cleanAuthFilePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if abs, errAbs := filepath.Abs(path); errAbs == nil && strings.TrimSpace(abs) != "" {
+		path = abs
+	}
+	return filepath.Clean(path)
 }
 
 func (h *Host) listAuthFiles() ([]pluginapi.HostAuthFileEntry, error) {

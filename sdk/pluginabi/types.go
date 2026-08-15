@@ -77,6 +77,8 @@ const (
 	MethodHostAuthGet            = "host.auth.get"
 	MethodHostAuthGetRuntime     = "host.auth.get_runtime"
 	MethodHostAuthSave           = "host.auth.save"
+	MethodHostAuthSaveBatch      = "host.auth.save_batch"
+	MethodHostAuthDelete         = "host.auth.delete"
 )
 
 type Envelope struct {
