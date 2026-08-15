@@ -285,8 +285,13 @@ func guardVirtualAuthDelete(auth *coreauth.Auth, selectedName string) error {
 	if sourcePath == "" {
 		sourcePath = strings.TrimSpace(authAttribute(auth, "path"))
 	}
+	// Only the physical source file name itself selects the whole expansion.
+	// An expanded auth ID may contain directory components (for example
+	// "nested/source.json") whose basename collides with the source name, so a
+	// selector carrying path components never matches the physical source.
 	if sourcePath != "" && selectedName != "" &&
-		strings.EqualFold(filepath.Base(selectedName), filepath.Base(sourcePath)) {
+		!strings.ContainsAny(selectedName, "/\\") &&
+		strings.EqualFold(selectedName, filepath.Base(sourcePath)) {
 		return nil
 	}
 	source := filepath.Base(sourcePath)

@@ -484,3 +484,42 @@ func TestHostAuthDeleteCallbackRejectsNonJSONFallback(t *testing.T) {
 		t.Fatalf("stat note file after rejected delete: %v", errStat)
 	}
 }
+
+func TestHostAuthDeleteCallbackRejectsVirtualIDWithDirectoryComponents(t *testing.T) {
+	authDir := t.TempDir()
+	sourcePath := filepath.Join(authDir, "source.json")
+	if errWrite := os.WriteFile(sourcePath, []byte(`{"type":"demo","email":"src@example.com","api_key":"ks"}`), 0o600); errWrite != nil {
+		t.Fatalf("write source file: %v", errWrite)
+	}
+	host := New()
+	host.runtimeConfig = &config.Config{AuthDir: authDir}
+	manager := coreauth.NewManager(nil, nil, nil)
+	host.SetAuthManager(manager)
+	virtualAuth := &coreauth.Auth{
+		ID:       "nested/source.json",
+		Provider: "demo",
+		FileName: "nested/source.json",
+		Label:    "child@example.com",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path":                          sourcePath,
+			coreauth.AttributePluginVirtual: "true",
+			coreauth.AttributeVirtualSource: sourcePath,
+		},
+		Metadata: map[string]any{"type": "demo", "email": "child@example.com"},
+	}
+	if _, errRegister := manager.Register(context.Background(), virtualAuth); errRegister != nil {
+		t.Fatalf("register virtual auth: %v", errRegister)
+	}
+
+	byVirtualID, errMarshal := json.Marshal(pluginapi.HostAuthDeleteRequest{Name: "nested/source.json"})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthDelete, byVirtualID); errCall == nil {
+		t.Fatal("delete by directory-carrying virtual ID error = nil, want virtual source guard")
+	}
+	if _, errStat := os.Stat(sourcePath); errStat != nil {
+		t.Fatalf("stat source file after rejected delete: %v", errStat)
+	}
+}
