@@ -3,6 +3,7 @@ import {
   listBackupResources, exportData, importData, bundleSummary,
 } from '../api/client.js';
 import { ErrorBanner } from '../components/Primitives.jsx';
+import { useToast } from '../components/Toast.jsx';
 
 // Resource category labels shown beside each checkbox. Keys match the backend
 // backup resource identifiers returned by /export/resources.
@@ -63,6 +64,7 @@ export default function ImportExportPage() {
   const [preview, setPreview] = useState(null); // { resourceKey: rowCount } | null
   const [progress, setProgress] = useState(null); // { active, total } | null
   const fileRef = useRef(null);
+  const toast = useToast();
 
   useEffect(() => {
     let alive = true;
@@ -156,8 +158,15 @@ export default function ImportExportPage() {
     setProgress({ active: true, total: null });
     try {
       const resp = await importData(bundle, importList);
+      const report = resp?.import;
+      const inserted = report?.total_inserted || 0;
       setResult({ type: 'import', resp });
-      setProgress({ active: false, total: resp?.import?.total_inserted || 0 });
+      setProgress({ active: false, total: inserted });
+      if (report?.partial) {
+        toast.error(`Import completed with skipped chunks — ${inserted} inserted. See the per-category Error column.`);
+      } else {
+        toast.success(`Import complete — ${inserted} ${inserted === 1 ? 'row' : 'rows'} inserted.`);
+      }
     } catch (e) {
       setError(e);
       setProgress(null);
@@ -177,6 +186,10 @@ export default function ImportExportPage() {
     const resourcesReport = imp.resources || {};
     const entries = Object.entries(resourcesReport);
     const partial = !!imp.partial;
+    // Total rows that were skipped across every category, for the banner copy.
+    const skippedTotal = entries.reduce(
+      (sum, [, r]) => sum + (Number(r?.skipped) || 0), 0,
+    );
     return (
       <div className="card" style={{ marginTop: 16 }}>
         <h3 className="card__title" style={{ margin: 0 }}>Import result</h3>
@@ -192,7 +205,8 @@ export default function ImportExportPage() {
               color: 'var(--warning)',
             }}
           >
-            Some data could not be restored — see details below.
+            Some data could not be restored — {skippedTotal} row{skippedTotal === 1 ? '' : 's'} skipped.
+            Check the Error column below for the affected categories.
           </div>
         )}
         {entries.length === 0 ? (
