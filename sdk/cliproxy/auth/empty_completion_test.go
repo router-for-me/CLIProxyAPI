@@ -1852,6 +1852,43 @@ func TestClaudeToolBlocksEmptyCompletion(t *testing.T) {
 	})
 }
 
+func TestClaudeToolUseStopReasonEmptyCompletion(t *testing.T) {
+	t.Run("empty tool_use blocks with stop_reason tool_use is empty completion", func(t *testing.T) {
+		payload := []byte(`{"type":"message","role":"assistant","content":[{"type":"tool_use","input":null}],"stop_reason":"tool_use"}`)
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for empty tool_use block with stop_reason tool_use, want true")
+		}
+	})
+
+	t.Run("empty tool_use blocks in sse stream with stop_reason tool_use is empty completion", func(t *testing.T) {
+		payload := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3\",\"usage\":{\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"input\":null}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for stream with empty tool_use and stop_reason tool_use, want true")
+		}
+	})
+
+	t.Run("control real tool_use with stop_reason tool_use is not empty", func(t *testing.T) {
+		payload := []byte(`{"type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"location":"San Francisco"}}],"stop_reason":"tool_use"}`)
+		if IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = true for real tool_use with stop_reason tool_use, want false")
+		}
+	})
+
+	t.Run("control stop_reason max_tokens without content is blocked and not empty completion", func(t *testing.T) {
+		payload := []byte(`{"type":"message","role":"assistant","content":[],"stop_reason":"max_tokens"}`)
+		if IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = true for stop_reason max_tokens, want false (blocked)")
+		}
+	})
+
+	t.Run("control stop_reason refusal without content is blocked and not empty completion", func(t *testing.T) {
+		payload := []byte(`{"type":"message","role":"assistant","content":[],"stop_reason":"refusal"}`)
+		if IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = true for stop_reason refusal, want false (blocked)")
+		}
+	})
+}
+
 func TestRecognizedContentlessEOFEmptyStream(t *testing.T) {
 	t.Run("OpenAI role-only delta stream closed at EOF without [DONE] is empty completion", func(t *testing.T) {
 		var detector StreamBootstrapDetector

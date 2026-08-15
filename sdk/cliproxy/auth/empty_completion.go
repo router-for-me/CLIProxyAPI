@@ -553,7 +553,7 @@ func (a *emptyCompletionAccum) evalClaudeStopReason(stopReason *string) {
 		return
 	}
 	reason := strings.TrimSpace(*stopReason)
-	if strings.EqualFold(reason, "end_turn") {
+	if strings.EqualFold(reason, "end_turn") || strings.EqualFold(reason, "tool_use") {
 		a.terminal = true
 	} else if reason != "" {
 		// Request/output limits, refusals, and control stop reasons must reach the
