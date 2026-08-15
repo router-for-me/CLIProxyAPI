@@ -176,6 +176,21 @@ func TestParseXAINativeToolMarkupRejectsTruncatedCallMissingEndTags(t *testing.T
 	}
 }
 
+func TestParseXAINativeToolMarkupRejectsBlockWhenLaterCallIsIncomplete(t *testing.T) {
+	text := "<|tool_calls_begin|><|tool_call_begin|>\n" +
+		"Grep\n" +
+		"<|tool_sep|>pattern\n" +
+		"uppercase\n" +
+		"<|tool_call_end|><|tool_call_begin|>\n" +
+		"Execute\n" +
+		"<|tool_sep|>command\n" +
+		"rm -rf /tmp/project"
+
+	if _, ok := parseXAINativeToolMarkup(text); ok {
+		t.Fatal("a complete first call must not be lifted when a later call is truncated")
+	}
+}
+
 func TestParseXAINativeToolMarkupRejectsMidValueCutoff(t *testing.T) {
 	text := "<|tool_calls_begin|><|tool_call_begin|>\n" +
 		"Execute\n" +

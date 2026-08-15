@@ -68,11 +68,9 @@ func parseXAINativeToolMarkup(text string) (xaiNativeToolMarkup, bool) {
 		}
 		call, end, ok := parseXAINativeToolCall(text, cursor, limit)
 		if !ok {
-			cursor = limit
-			if cursor < len(text) && strings.HasPrefix(text[cursor:], xaiNativeToolCallEnd) {
-				cursor += len(xaiNativeToolCallEnd)
-			}
-			continue
+			// A later truncated/malformed call must invalidate the whole
+			// block so we do not execute a prefix of a parallel batch.
+			return xaiNativeToolMarkup{}, false
 		}
 		calls = append(calls, call)
 		cursor = end
