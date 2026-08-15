@@ -13,7 +13,7 @@ import (
 
 func TestWrapStreamEmptyCompletionWithholdsTerminalFrames(t *testing.T) {
 	src := make(chan coreexecutor.StreamChunk, 2)
-	src <- coreexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\n")}
+	src <- coreexecutor.StreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}\n\n")}
 	src <- coreexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
 	close(src)
 
@@ -58,8 +58,8 @@ func TestWrapStreamEmptyCompletionRejectsZeroChunkStream(t *testing.T) {
 func TestWrapStreamEmptyCompletionWithholdsSplitTerminalFrames(t *testing.T) {
 	fragments := [][]byte{
 		[]byte("da"),
-		[]byte("ta: {\"type\":\"response.com"),
-		[]byte("pleted\",\"response\":{\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\n"),
+		[]byte("ta: {\"choices\":[{\"delta\":{},\"finish_rea"),
+		[]byte("son\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}\n\n"),
 		[]byte("data: [DO"),
 		[]byte("NE]\n"),
 		[]byte("\n"),

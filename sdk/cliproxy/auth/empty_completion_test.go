@@ -482,19 +482,19 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "codex responses-api sse completed with empty output is empty",
+			name:     "codex responses-api sse completed with empty output passes through (never empty by contract)",
 			payload:  []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n"),
-			expected: true,
+			expected: false,
 		},
 		{
-			name:     "codex responses-api non-stream completed with empty output is empty",
+			name:     "codex responses-api non-stream completed with empty output passes through (never empty by contract)",
 			payload:  []byte(`{"object":"response","id":"r","status":"completed","output":[],"usage":{"output_tokens":0}}`),
-			expected: true,
+			expected: false,
 		},
 		{
-			name:     "codex responses-api sse output_item message empty then completed is empty",
+			name:     "codex responses-api sse output_item message empty then completed passes through",
 			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"output\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]}],\"status\":\"completed\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]}]}],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n"),
-			expected: true,
+			expected: false,
 		},
 		{
 			name:     "codex responses-api non-stream with function_call is not empty",
@@ -883,6 +883,25 @@ func TestStreamBootstrapDetectorMultilineSSE(t *testing.T) {
 		interleavedPayload := []byte("data: {\"choices\":[\nevent: message\nid: evt_999\ndata: ]}\n\ndata: [DONE]\n\n")
 		if !IsEmptyCompletionPayload(interleavedPayload) {
 			t.Fatal("IsEmptyCompletionPayload() = false for payload with event: field between data: lines")
+		}
+	})
+
+	t.Run("split event metadata and data without newline", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		fragments := [][]byte{
+			[]byte("event: response.completed"),
+			[]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}"),
+		}
+		for _, f := range fragments {
+			detector.Observe(f)
+		}
+		if detector.Finish() {
+			t.Fatal("Finish() = true, want response.completed without newline not recognized as empty completion")
+		}
+
+		singlePayload := []byte("event: response.completeddata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}")
+		if IsEmptyCompletionPayload(singlePayload) {
+			t.Fatal("IsEmptyCompletionPayload() = true for single buffer with split event: and data: without newline")
 		}
 	})
 }

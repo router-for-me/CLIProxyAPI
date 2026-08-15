@@ -536,7 +536,10 @@ func (a *emptyCompletionAccum) evalOpenAIResponse(data []byte) bool {
 
 	switch evType {
 	case "response.completed":
+		// Terminal Responses-API frames are valid completions even with empty
+		// output (see codex responses tests); never judge them empty.
 		a.terminal = true
+		a.blocked = true
 	case "response.incomplete", "response.failed":
 		a.terminal = true
 		a.blocked = true
@@ -581,6 +584,7 @@ func (a *emptyCompletionAccum) evalOpenAIResponseStatus(status string) {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "completed":
 		a.terminal = true
+		a.blocked = true
 	case "incomplete", "failed":
 		a.terminal = true
 		a.blocked = true
@@ -841,6 +845,70 @@ func (s *streamBootstrapState) flushData() {
 	}
 }
 
+func isSSEMetadataLine(b []byte) bool {
+	return bytes.HasPrefix(b, []byte("event:")) ||
+		bytes.HasPrefix(b, []byte("id:")) ||
+		bytes.HasPrefix(b, []byte("retry:")) ||
+		bytes.HasPrefix(b, []byte(":"))
+}
+
+func isSSEPrefix(b []byte) bool {
+	return bytes.HasPrefix(b, []byte("data:")) ||
+		bytes.HasPrefix(b, []byte("event:")) ||
+		bytes.HasPrefix(b, []byte("id:")) ||
+		bytes.HasPrefix(b, []byte("retry:")) ||
+		bytes.HasPrefix(b, []byte(":"))
+}
+
+func (s *streamBootstrapState) processLine(line []byte) {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		s.flushData()
+		return
+	}
+	if isSSEMetadataLine(line) {
+		if idx := bytes.Index(line, []byte("data:")); idx > 0 {
+			metaPart := bytes.TrimSpace(line[:idx])
+			dataPart := bytes.TrimSpace(line[idx:])
+			s.processSingleLine(metaPart)
+			s.processSingleLine(dataPart)
+			return
+		}
+	}
+	s.processSingleLine(line)
+}
+
+func (s *streamBootstrapState) processSingleLine(line []byte) {
+	switch {
+	case bytes.HasPrefix(line, []byte("event:")):
+		s.sawSSE = true
+		event := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:")))
+		if bytes.Equal(event, []byte("message_stop")) {
+			s.acc.recognized = true
+			s.acc.sawMessageData = true
+		} else {
+			s.acc.sawMetadataOnly = true
+		}
+	case bytes.HasPrefix(line, []byte("id:")), bytes.HasPrefix(line, []byte("retry:")), bytes.HasPrefix(line, []byte(":")):
+		s.sawSSE = true
+		s.acc.sawMetadataOnly = true
+	case bytes.HasPrefix(line, []byte("data:")):
+		s.sawSSE = true
+		s.dataLines = append(s.dataLines, parseSSEDataLine(line))
+	case bytes.HasPrefix(line, []byte("{")), bytes.HasPrefix(line, []byte("[")):
+		s.sawSSE = true
+		s.dataLines = append(s.dataLines, line)
+	default:
+		if classify := classifyJSONBuffer(line); classify == jsonBufComplete || classify == jsonBufIncomplete {
+			if !s.acc.evalJSON(line) {
+				s.acc.sawUnknownData = true
+			}
+		} else {
+			s.acc.sawUnknownData = true
+		}
+	}
+}
+
 func (s *streamBootstrapState) observe(fragment []byte) bool {
 	if s.forward {
 		return true
@@ -850,37 +918,24 @@ func (s *streamBootstrapState) observe(fragment []byte) bool {
 		s.forward = true
 		return true
 	}
+	if len(s.pending) > 0 {
+		trimmedPending := bytes.TrimSpace(s.pending)
+		trimmedFrag := bytes.TrimSpace(fragment)
+		if isSSEMetadataLine(trimmedPending) && isSSEPrefix(trimmedFrag) {
+			s.processLine(trimmedPending)
+			s.pending = s.pending[:0]
+			if s.shouldForward() {
+				s.forward = true
+				return true
+			}
+		}
+	}
 	s.pending = append(s.pending, fragment...)
 	for {
 		if newline := bytes.IndexByte(s.pending, '\n'); newline >= 0 {
 			line := bytes.TrimSpace(s.pending[:newline])
 			s.pending = s.pending[newline+1:]
-			if len(line) == 0 {
-				s.flushData()
-			} else {
-				switch {
-				case bytes.HasPrefix(line, []byte("event:")):
-					s.sawSSE = true
-					event := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:")))
-					if bytes.Equal(event, []byte("message_stop")) {
-						s.acc.recognized = true
-						s.acc.sawMessageData = true
-					} else {
-						s.acc.sawMetadataOnly = true
-					}
-				case bytes.HasPrefix(line, []byte("id:")), bytes.HasPrefix(line, []byte("retry:")), bytes.HasPrefix(line, []byte(":")):
-					s.sawSSE = true
-					s.acc.sawMetadataOnly = true
-				case bytes.HasPrefix(line, []byte("data:")):
-					s.sawSSE = true
-					s.dataLines = append(s.dataLines, parseSSEDataLine(line))
-				case bytes.HasPrefix(line, []byte("{")):
-					s.sawSSE = true
-					s.dataLines = append(s.dataLines, line)
-				default:
-					s.acc.sawUnknownData = true
-				}
-			}
+			s.processLine(line)
 			if s.shouldForward() {
 				s.forward = true
 				return true
@@ -931,35 +986,7 @@ func (s *streamBootstrapState) finish() {
 		trimmed := bytes.TrimSpace(s.pending)
 		s.pending = s.pending[:0]
 		if len(trimmed) > 0 {
-			switch {
-			case bytes.HasPrefix(trimmed, []byte("event:")):
-				s.sawSSE = true
-				event := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("event:")))
-				if bytes.Equal(event, []byte("message_stop")) {
-					s.acc.recognized = true
-					s.acc.sawMessageData = true
-				} else {
-					s.acc.sawMetadataOnly = true
-				}
-			case bytes.HasPrefix(trimmed, []byte("id:")), bytes.HasPrefix(trimmed, []byte("retry:")), bytes.HasPrefix(trimmed, []byte(":")):
-				s.sawSSE = true
-				s.acc.sawMetadataOnly = true
-			case bytes.HasPrefix(trimmed, []byte("data:")):
-				s.sawSSE = true
-				s.dataLines = append(s.dataLines, parseSSEDataLine(trimmed))
-			case bytes.HasPrefix(trimmed, []byte("{")), bytes.HasPrefix(trimmed, []byte("[")):
-				if !s.acc.evalJSON(trimmed) {
-					s.acc.sawUnknownData = true
-				}
-			default:
-				if classify := classifyJSONBuffer(trimmed); classify == jsonBufComplete || classify == jsonBufIncomplete {
-					if !s.acc.evalJSON(trimmed) {
-						s.acc.sawUnknownData = true
-					}
-				} else {
-					s.acc.sawUnknownData = true
-				}
-			}
+			s.processLine(trimmed)
 		}
 	}
 	s.flushData()
@@ -1134,12 +1161,7 @@ func (a *emptyCompletionAccum) evalSSE(payload []byte) {
 		}
 	}
 
-	for _, line := range bytes.Split(payload, []byte("\n")) {
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 {
-			flush()
-			continue
-		}
+	processSingle := func(line []byte) {
 		if bytes.HasPrefix(line, []byte("event:")) {
 			event := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:")))
 			if bytes.Equal(event, []byte("message_stop")) {
@@ -1148,20 +1170,45 @@ func (a *emptyCompletionAccum) evalSSE(payload []byte) {
 			} else {
 				a.sawMetadataOnly = true
 			}
-			continue
+			return
 		}
 		if bytes.HasPrefix(line, []byte("id:")) || bytes.HasPrefix(line, []byte("retry:")) || bytes.HasPrefix(line, []byte(":")) {
 			a.sawMetadataOnly = true
-			continue
+			return
 		}
 		switch {
 		case bytes.HasPrefix(line, []byte("data:")):
 			dataLines = append(dataLines, parseSSEDataLine(line))
-		case bytes.HasPrefix(line, []byte("{")):
+		case bytes.HasPrefix(line, []byte("{")), bytes.HasPrefix(line, []byte("[")):
+			// Some executors translate upstream SSE into the client format and
+			// emit raw JSON payloads without SSE framing (the HTTP handler adds
+			// the data: prefix later). Treat bare JSON lines as chunk data.
 			dataLines = append(dataLines, line)
 		default:
 			a.sawUnknownData = true
 		}
+	}
+
+	processLine := func(line []byte) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			flush()
+			return
+		}
+		if isSSEMetadataLine(line) {
+			if idx := bytes.Index(line, []byte("data:")); idx > 0 {
+				metaPart := bytes.TrimSpace(line[:idx])
+				dataPart := bytes.TrimSpace(line[idx:])
+				processSingle(metaPart)
+				processSingle(dataPart)
+				return
+			}
+		}
+		processSingle(line)
+	}
+
+	for _, line := range bytes.Split(payload, []byte("\n")) {
+		processLine(line)
 	}
 	flush()
 }
