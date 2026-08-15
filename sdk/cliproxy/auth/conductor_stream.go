@@ -555,10 +555,18 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 		}
 
-		if closed && (len(buffered) == 0 || isEmptyCompletion(buffered)) {
+		payloadBytes := 0
+		for _, chunk := range buffered {
+			payloadBytes += len(chunk.Payload)
+		}
+		// Determine emptiness by buffered payload bytes, not chunk count:
+		// zero-payload chunks are dropped downstream by wrapStreamResult, so a
+		// stream of only such chunks would surface as a successful empty
+		// completion without failover.
+		if closed && (payloadBytes == 0 || isEmptyCompletion(buffered)) {
 			scope.release()
 			emptyErr := errEmptyCompletion
-			if len(buffered) == 0 {
+			if payloadBytes == 0 {
 				emptyErr = &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr, Options: execOpts}
