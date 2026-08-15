@@ -1693,6 +1693,80 @@ func TestSessionAffinitySelectorCachedAuthUnavailableConcurrencyNewerBinding(t *
 	}
 }
 
+type interceptingFallbackSelector struct {
+	inner  Selector
+	onPick func()
+}
+
+func (s *interceptingFallbackSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	if s.onPick != nil {
+		s.onPick()
+	}
+	return s.inner.Pick(ctx, provider, model, opts, auths)
+}
+
+func TestSessionAffinitySelector_CachedAuthUnavailableConcurrencyFallbackGroupRebind(t *testing.T) {
+	fallback := &interceptingFallbackSelector{inner: &RoundRobinSelector{}}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	provider := "responses-fallback-rebound-concurrent"
+	model := "gpt-test"
+
+	// 1. Initial request with conversation ID only (bound to auth-a)
+	convOpts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"conversation":{"id":"conversation-session"}}`)}
+	first, err := selector.Pick(context.Background(), provider, model, convOpts, auths)
+	if err != nil {
+		t.Fatalf("first Pick() error = %v", err)
+	}
+	if first.ID != "auth-a" {
+		t.Fatalf("first Pick() = %q, want auth-a", first.ID)
+	}
+	selector.OnResult(Result{AuthID: first.ID, Provider: provider, Model: model, Options: convOpts, Success: true})
+
+	// 2. Prepare rebind with prompt_cache_key (primary) + conversation.id (fallback).
+	// Primary key is absent in cache; fallback key is present.
+	// When fallback.Pick is invoked (after selector observes the fallback key),
+	// simulate concurrent modification of the fallback group in cache to invalidate expectedGen.
+	combinedOpts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"conversation":{"id":"conversation-session"},"prompt_cache_key":"shared-cache-bucket"}`)}
+	fallbackKey := provider + "::conv:conversation-session::" + model
+
+	fallback.onPick = func() {
+		authID, gen, aliases, ok := selector.cache.GetWithGeneration(fallbackKey)
+		if !ok {
+			t.Fatalf("expected fallbackKey %q in cache", fallbackKey)
+		}
+		// Bump generation concurrently
+		if !selector.cache.CompareAndReplaceAliases(authID, gen, aliases, authID, fallbackKey) {
+			t.Fatalf("CompareAndReplaceAliases failed in onPick")
+		}
+	}
+
+	availableWithoutFirst := []*Auth{{ID: "auth-b"}}
+	picked, err := selector.Pick(context.Background(), provider, model, combinedOpts, availableWithoutFirst)
+	if err != nil {
+		t.Fatalf("rebind Pick() error = %v", err)
+	}
+	if picked.ID != "auth-b" {
+		t.Fatalf("rebind Pick() = %q, want auth-b", picked.ID)
+	}
+	selector.OnResult(Result{AuthID: picked.ID, Provider: provider, Model: model, Options: combinedOpts, Success: true})
+
+	// 3. Subsequent request with conversation only must route to rebound auth-b
+	fallback.onPick = nil
+	convQueryOpts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"conversation":{"id":"conversation-session"}}`)}
+	queryPicked, err := selector.Pick(context.Background(), provider, model, convQueryOpts, auths)
+	if err != nil {
+		t.Fatalf("subsequent conversation Pick() error = %v", err)
+	}
+	if queryPicked.ID != "auth-b" {
+		t.Fatalf("subsequent conversation Pick() = %q, want rebound auth-b", queryPicked.ID)
+	}
+}
+
 func TestSessionAffinitySelector_ABAMutationCycleRejected(t *testing.T) {
 	cache := NewSessionCache(time.Minute)
 	defer cache.Stop()
