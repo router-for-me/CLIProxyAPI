@@ -155,6 +155,21 @@ error-logs-max-files: 10
 #   PGSTORE_MAX_OPEN_CONNS=200  # cap concurrent database connections (suggested)
 #   PGSTORE_MAX_IDLE_CONNS=50   # cap idle pooled connections (suggested)
 
+# Full backup to S3 (optional, independent of OBJECTSTORE_*).
+# Snapshots the full server state (config.yaml, auths/ files, and all PG tables)
+# to an S3-compatible object store. Active only when BACKUP_S3_ENDPOINT is set;
+# the /v0/management/backup routes return 503 otherwise.
+#   BACKUP_S3_ENDPOINT=https://s3.your-cloud.example.com
+#   BACKUP_S3_BUCKET=nixllm-backups
+#   BACKUP_S3_ACCESS_KEY=your_access_key
+#   BACKUP_S3_SECRET_KEY=your_secret_key
+#   BACKUP_S3_REGION=us-east-1
+#   BACKUP_S3_PREFIX=nixllm
+#   BACKUP_S3_USE_SSL=true
+#   BACKUP_S3_PATH_STYLE=true
+#   BACKUP_SCHEDULE_INTERVAL=24h   # empty disables the automatic schedule
+#   BACKUP_RETENTION=7             # snapshots kept; 0 = keep all
+
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
