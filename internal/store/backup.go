@@ -219,6 +219,17 @@ func (s *PostgresStore) resourceTables(res BackupResource) []backupTable {
 	}
 }
 
+// backupBundleVersion is the current BackupBundle format version. Version 2
+// adds the config_yaml and auth_files sections for full-backup coverage.
+const backupBundleVersion = 2
+
+// BackupAuthFile carries one auths/ file (OAuth/file-backed credential) from
+// the active store's AuthDir, keyed by its path relative to AuthDir.
+type BackupAuthFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
 // BackupBundle is the portable JSON document produced by ExportData and consumed
 // by ImportData. Resources maps a resource key to a per-table set of rows.
 // Summary carries a per-resource total row count so the frontend can render a
@@ -226,8 +237,16 @@ func (s *PostgresStore) resourceTables(res BackupResource) []backupTable {
 type BackupBundle struct {
 	Version    int                           `json:"version"`
 	ExportedAt time.Time                     `json:"exported_at"`
+	Mode       string                        `json:"mode,omitempty"`
 	Summary    map[string]int                `json:"summary,omitempty"`
 	Resources  map[string]backupResourceData `json:"resources"`
+	// ConfigYAML is the full contents of the active config.yaml, embedded so a
+	// full backup restores provider credentials, model routing, and all other
+	// file-based settings that the PG tables do not cover.
+	ConfigYAML string `json:"config_yaml,omitempty"`
+	// AuthFiles is the set of auths/ files (OAuth/file-backed credentials)
+	// present in the active store's AuthDir at backup time.
+	AuthFiles []BackupAuthFile `json:"auth_files,omitempty"`
 }
 
 // rowCount sums the exported rows across all tables of one resource data set.
@@ -474,7 +493,7 @@ func (s *PostgresStore) exportResource(ctx context.Context, sealer *Sealer, res 
 // bundle is portable across instances regardless of encryption keys.
 func (s *PostgresStore) ExportData(ctx context.Context, opts BackupExportOpts) (BackupBundle, error) {
 	bundle := BackupBundle{
-		Version:    1,
+		Version:    backupBundleVersion,
 		ExportedAt: time.Now().UTC(),
 		Summary:    make(map[string]int),
 		Resources:  make(map[string]backupResourceData),

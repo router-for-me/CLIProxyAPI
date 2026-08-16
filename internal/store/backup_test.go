@@ -64,7 +64,7 @@ func TestBackupRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExportData: %v", err)
 	}
-	if bundle.Version != 1 {
+	if bundle.Version != 2 {
 		t.Fatalf("unexpected version %d", bundle.Version)
 	}
 	if _, ok := bundle.Resources["api_keys"]; !ok {
@@ -904,4 +904,38 @@ func TestAllBackupResourcesIncludesMissingTables(t *testing.T) {
 
 func randSuffix() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
+func TestBackupBundleV2JSON(t *testing.T) {
+	b := BackupBundle{
+		Version:    backupBundleVersion,
+		ExportedAt: time.Now().UTC(),
+		Mode:       "full",
+		Summary:    map[string]int{"config": 1, "auth_files": 1},
+		Resources:  map[string]backupResourceData{},
+		ConfigYAML: "api_key: sk-test\n",
+		AuthFiles: []BackupAuthFile{
+			{Path: "openai.json", Content: `{"api_key":"x"}`},
+		},
+	}
+	raw, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back BackupBundle
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Version != backupBundleVersion {
+		t.Errorf("version round-trip failed: %d", back.Version)
+	}
+	if back.Mode != "full" {
+		t.Errorf("mode round-trip failed: %q", back.Mode)
+	}
+	if back.ConfigYAML != b.ConfigYAML {
+		t.Errorf("config_yaml round-trip failed: %q", back.ConfigYAML)
+	}
+	if len(back.AuthFiles) != 1 || back.AuthFiles[0].Path != "openai.json" || back.AuthFiles[0].Content != `{"api_key":"x"}` {
+		t.Errorf("auth_files round-trip failed: %+v", back.AuthFiles)
+	}
 }
