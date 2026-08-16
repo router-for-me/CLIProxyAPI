@@ -481,18 +481,19 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	if err != nil {
 		return nil, err
 	}
-	// For the antigravity agent, a tool-calling continuation turn must resume
-	// the upstream interaction (previous_interaction_id + environment_id) and
-	// send only its function_result — NOT replay the assistant tool-call
-	// history. Otherwise Google rejects with "Cannot specify tool calls
-	// outside of Turn items".
-	body = goframeApplyAntigravityInteractionsContinuation(ctx, targetName, originalRequestRawJSON(req, opts), opts, body)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	fromProtocol := opts.SourceFormat.String()
 	originalTranslated := geminiInteractionsPayloadConfigSource(ctx, e.cfg, targetName, req.Payload, opts, true, helps.APIKeyModelIsCompat(req))
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = helps.SetBoolIfDifferent(body, "stream", true)
+	// For the antigravity agent, a tool-calling continuation turn must resume
+	// the upstream interaction (previous_interaction_id + environment_id) and
+	// send only its function_result — NOT replay the assistant tool-call
+	// history. Otherwise Google rejects with "Cannot specify tool calls
+	// outside of Turn items". Applied AFTER payload-config so the rewrite is
+	// the final authoritative body.
+	body = goframeApplyAntigravityInteractionsContinuation(ctx, targetName, originalRequestRawJSON(req, opts), opts, body)
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/interactions", baseURL, glAPIVersion)
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
