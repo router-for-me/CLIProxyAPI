@@ -269,27 +269,33 @@ func (m *Manager) SetSelector(selector Selector) {
 	m.mu.Lock()
 	previous := m.selector
 	previousSlot := m.selectorSlot
+	if sameSelectorInstance(previous, selector) {
+		// Re-setting the same instance must keep its generation: a fresh slot
+		// would drop tracking of picks still in flight on this selector.
+		m.mu.Unlock()
+		if m.scheduler != nil {
+			m.scheduler.setSelector(selector)
+			m.syncScheduler()
+		}
+		return
+	}
 	m.selector = selector
 	m.selectorSlot = &selectorSlot{selector: selector}
+	retirees := m.planSelectorRetireesLocked(previous, previousSlot, selector)
 	m.mu.Unlock()
-	// Release resources of the replaced selector (e.g. the session affinity
-	// cache cleanup goroutine) so routing config changes do not leak them.
-	// Identity is checked without a bare interface comparison: the public
-	// Selector interface does not require comparable dynamic types, and
-	// comparing two uncomparable implementations would panic. A selector that
-	// the replacement still references as its fallback (e.g. wrapping the
-	// previous selector via NewSessionAffinitySelector) stays alive, because
-	// the active selector keeps invoking its Pick.
-	if stoppable, ok := previous.(StoppableSelector); ok &&
-		!sameSelectorInstance(previous, selector) && !selectorRetainedAsFallback(selector, previous) {
-		// Pick paths release m.mu before invoking the selector, so a hot reload
-		// could otherwise stop it mid-request; wait for in-flight picks to drain.
-		go func(slot *selectorSlot) {
-			if slot != nil {
-				slot.inflight.Wait()
+
+	// Stop retired selectors asynchronously: pick paths release m.mu before
+	// invoking the selector, so each retiree first waits for the generations
+	// it was reachable through to drain.
+	if len(retirees) > 0 {
+		go func() {
+			for _, retiree := range retirees {
+				for _, slot := range retiree.slots {
+					slot.inflight.Wait()
+				}
+				retiree.stoppable.Stop()
 			}
-			stoppable.Stop()
-		}(previousSlot)
+		}()
 	}
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
@@ -297,20 +303,108 @@ func (m *Manager) SetSelector(selector Selector) {
 	}
 }
 
-// selectorRetainedAsFallback reports whether candidate is still referenced
-// through the fallback chain of selector, in which case stopping it would
-// break the active composition.
-func selectorRetainedAsFallback(selector, candidate Selector) bool {
-	for {
-		affinity, ok := selector.(*SessionAffinitySelector)
-		if !ok || affinity == nil {
-			return false
+// retiredStoppable is a selector instance no longer referenced by the active
+// selection chain, together with the generations whose in-flight picks must
+// drain before the instance can be stopped.
+type retiredStoppable struct {
+	stoppable StoppableSelector
+	slots     []*selectorSlot
+}
+
+// planSelectorRetireesLocked decides which stoppable selectors reachable from
+// the replaced selector are no longer referenced by next, parking the ones
+// still in use. Lifecycle policy:
+//   - a selector still referenced through the replacement's fallback chain
+//     (e.g. wrapped via NewSessionAffinitySelector) is parked, not stopped,
+//     because the active selector keeps invoking its Pick;
+//   - a parked selector is stopped once no active chain references it, after
+//     every generation it was reachable through has drained;
+//   - implementations with uncomparable dynamic types are conservatively kept
+//     alive: identity cannot be established without panicking, and a re-set
+//     value may share pointer-backed state with the active one.
+//
+// Must be called with m.mu held.
+func (m *Manager) planSelectorRetireesLocked(previous Selector, previousSlot *selectorSlot, next Selector) []retiredStoppable {
+	var retirees []retiredStoppable
+	for _, instance := range selectorChain(previous) {
+		stoppable, ok := instance.(StoppableSelector)
+		if !ok || !selectorIdentityComparable(instance) {
+			continue
 		}
-		if sameSelectorInstance(affinity.fallback, candidate) {
+		if selectorChainContains(next, instance) {
+			m.parkSelectorSlotLocked(instance, previousSlot)
+			continue
+		}
+		slots := m.takeParkedSelectorSlotsLocked(instance)
+		slots = appendSelectorSlotIfMissing(slots, previousSlot)
+		retirees = append(retirees, retiredStoppable{stoppable: stoppable, slots: slots})
+	}
+	return retirees
+}
+
+// selectorChain walks root and its SessionAffinitySelector fallback chain,
+// returning every reachable selector. The walk is depth-capped as a defensive
+// measure against malformed wrappers.
+func selectorChain(root Selector) []Selector {
+	chain := make([]Selector, 0, 2)
+	for root != nil && len(chain) < 16 {
+		chain = append(chain, root)
+		affinity, ok := root.(*SessionAffinitySelector)
+		if !ok || affinity == nil {
+			break
+		}
+		root = affinity.fallback
+	}
+	return chain
+}
+
+// selectorChainContains reports whether target appears in the fallback chain
+// of root, in which case stopping it would break the active composition.
+func selectorChainContains(root, target Selector) bool {
+	for _, instance := range selectorChain(root) {
+		if sameSelectorInstance(instance, target) {
 			return true
 		}
-		selector = affinity.fallback
 	}
+	return false
+}
+
+// selectorIdentityComparable reports whether values of the selector's dynamic
+// type can be compared without panicking, the precondition for tracking the
+// instance in Manager bookkeeping.
+func selectorIdentityComparable(selector Selector) bool {
+	if selector == nil {
+		return false
+	}
+	return reflect.TypeOf(selector).Comparable()
+}
+
+func (m *Manager) parkSelectorSlotLocked(selector Selector, slot *selectorSlot) {
+	if slot == nil {
+		return
+	}
+	if m.parkedSelectorSlots == nil {
+		m.parkedSelectorSlots = make(map[Selector][]*selectorSlot)
+	}
+	m.parkedSelectorSlots[selector] = appendSelectorSlotIfMissing(m.parkedSelectorSlots[selector], slot)
+}
+
+func (m *Manager) takeParkedSelectorSlotsLocked(selector Selector) []*selectorSlot {
+	slots := m.parkedSelectorSlots[selector]
+	delete(m.parkedSelectorSlots, selector)
+	return slots
+}
+
+func appendSelectorSlotIfMissing(slots []*selectorSlot, slot *selectorSlot) []*selectorSlot {
+	if slot == nil {
+		return slots
+	}
+	for _, existing := range slots {
+		if existing == slot {
+			return slots
+		}
+	}
+	return append(slots, slot)
 }
 
 // sameSelectorInstance reports whether two selectors reference the same

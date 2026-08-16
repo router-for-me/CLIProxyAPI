@@ -37,6 +37,23 @@ func waitForStopCount(t *testing.T, counter *atomic.Int32, want int32) {
 	}
 }
 
+// waitForChannelClosed polls until ch is closed.
+func waitForChannelClosed(t *testing.T, ch <-chan struct{}, message string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		select {
+		case <-ch:
+			return
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(message)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // Replacing a selector must release resources held by the previous one;
 // otherwise every routing config change leaks the replaced selector's
 // background cleanup goroutine and cache.
@@ -88,8 +105,9 @@ func (s uncomparableStoppableSelector) Stop() {
 
 // Replacing an uncomparable custom selector with another value of the same
 // type must not panic: a bare previous != selector comparison panics exactly
-// in this case. The replaced instance is still stopped because identity
-// cannot be established for uncomparable types.
+// in this case. Because identity cannot be established, the previous value is
+// conservatively kept alive — it may share pointer-backed state with the
+// active one, so stopping it could break routing.
 func TestManagerSetSelectorUncomparableSelectorDoesNotPanic(t *testing.T) {
 	t.Parallel()
 
@@ -97,7 +115,9 @@ func TestManagerSetSelectorUncomparableSelectorDoesNotPanic(t *testing.T) {
 	manager := NewManager(nil, uncomparableStoppableSelector{stopped: &stopped}, nil)
 
 	manager.SetSelector(uncomparableStoppableSelector{stopped: &atomic.Int32{}})
-	waitForStopCount(t, &stopped, 1)
+	if got := stopped.Load(); got != 0 {
+		t.Fatalf("ambiguous-identity selector Stop() calls = %d, want 0 (conservatively kept alive)", got)
+	}
 }
 
 // Enabling affinity by wrapping the current selector via
@@ -198,4 +218,87 @@ func TestManagerSetSelectorDefersStopUntilInFlightPickDrains(t *testing.T) {
 	}
 
 	waitForStopCount(t, &stub.stopped, 1)
+}
+
+// Re-setting the same selector instance while one of its picks is in flight
+// must preserve the in-flight tracking: a fresh generation would let a later
+// replacement stop the selector while the original pick is still running.
+func TestManagerSetSelectorSameInstanceKeepsInFlightTracking(t *testing.T) {
+	t.Parallel()
+
+	stub := &blockingStoppableSelector{entered: make(chan struct{}), proceed: make(chan struct{})}
+	manager := NewManager(nil, stub, nil)
+	manager.RegisterExecutor(&replaceAwareExecutor{id: "blocking"})
+	if _, err := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "blocking"}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	pickDone := make(chan error, 1)
+	go func() {
+		_, errPick := manager.SelectAuth(context.Background(), "blocking", "", cliproxyexecutor.Options{})
+		pickDone <- errPick
+	}()
+	<-stub.entered
+
+	// Same instance re-set mid-pick, then a real replacement. The replacement
+	// must still wait for the pick that started before both swaps.
+	manager.SetSelector(stub)
+	manager.SetSelector(&RoundRobinSelector{})
+
+	time.Sleep(50 * time.Millisecond)
+	if got := stub.stopped.Load(); got != 0 {
+		t.Fatalf("selector Stop() calls = %d while its Pick was still in flight, want 0", got)
+	}
+
+	close(stub.proceed)
+	if errPick := <-pickDone; errPick != nil {
+		t.Fatalf("SelectAuth() error = %v", errPick)
+	}
+	waitForStopCount(t, &stub.stopped, 1)
+}
+
+// A selector retained as an affinity fallback is parked, not stopped; once the
+// wrapper chain that referenced it is retired and nothing references it
+// anymore, it must eventually be stopped instead of leaking forever.
+func TestManagerSetSelectorEventuallyStopsRetiredFallback(t *testing.T) {
+	t.Parallel()
+
+	stub := &stubStoppableSelector{}
+	manager := NewManager(nil, stub, nil)
+
+	direct := NewSessionAffinitySelector(stub)
+	manager.SetSelector(direct)
+	if got := stub.stopped.Load(); got != 0 {
+		t.Fatalf("retained fallback selector Stop() calls = %d, want 0", got)
+	}
+
+	manager.SetSelector(&RoundRobinSelector{})
+	waitForStopCount(t, &stub.stopped, 1)
+	select {
+	case <-direct.cache.stopCh:
+	default:
+		t.Fatal("retired affinity wrapper was not stopped")
+	}
+}
+
+// A fallback shared by two affinity wrappers must survive the retirement of
+// one wrapper while the other is still active.
+func TestManagerSetSelectorSharedFallbackSurvivesWrapperRetirement(t *testing.T) {
+	t.Parallel()
+
+	stub := &stubStoppableSelector{}
+	manager := NewManager(nil, stub, nil)
+
+	first := NewSessionAffinitySelector(stub)
+	manager.SetSelector(first)
+	second := NewSessionAffinitySelector(stub)
+	defer second.Stop()
+	manager.SetSelector(second)
+
+	// The first wrapper is retired, but the shared fallback still serves the
+	// active second wrapper and must not be stopped.
+	waitForChannelClosed(t, first.cache.stopCh, "first affinity wrapper was not stopped after retirement")
+	if got := stub.stopped.Load(); got != 0 {
+		t.Fatalf("shared fallback selector Stop() calls = %d while still referenced, want 0", got)
+	}
 }

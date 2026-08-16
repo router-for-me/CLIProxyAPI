@@ -113,12 +113,17 @@ type Manager struct {
 	selector                  Selector
 	// selectorSlot pins the active selector generation so a replaced selector
 	// is stopped only after its in-flight Pick calls have drained.
-	selectorSlot     *selectorSlot
-	hook             Hook
-	mu               sync.RWMutex
-	configCooldownMu sync.Mutex
-	auths            map[string]*Auth
-	scheduler        *authScheduler
+	selectorSlot *selectorSlot
+	// parkedSelectorSlots remembers selectors that stay referenced as affinity
+	// fallbacks after serving as the active selector, along with the
+	// generations they were reachable through, so they can be stopped once no
+	// active chain references them anymore.
+	parkedSelectorSlots map[Selector][]*selectorSlot
+	hook                Hook
+	mu                  sync.RWMutex
+	configCooldownMu    sync.Mutex
+	auths               map[string]*Auth
+	scheduler           *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
 	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.
