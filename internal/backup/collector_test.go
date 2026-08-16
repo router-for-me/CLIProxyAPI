@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 )
@@ -120,5 +121,13 @@ func TestCollectorNilSources(t *testing.T) {
 	}
 	if bundle.Summary["auth_files"] != 0 {
 		t.Errorf("Summary[auth_files] = %d, want 0", bundle.Summary["auth_files"])
+	}
+	// The non-PG path must stamp ExportedAt itself; otherwise every snapshot
+	// collides on the zero-time object key and history silently collapses.
+	if bundle.ExportedAt.IsZero() {
+		t.Error("ExportedAt = zero, want a stamped timestamp (non-PG path)")
+	}
+	if !bundle.ExportedAt.After(time.Now().Add(-time.Hour)) {
+		t.Errorf("ExportedAt = %v, want roughly now", bundle.ExportedAt)
 	}
 }

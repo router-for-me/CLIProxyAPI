@@ -74,6 +74,47 @@ func TestRunnerRetentionZeroKeepsAll(t *testing.T) {
 	}
 }
 
+// TestRunnerRotationDoesNotDeleteUnrelatedObjects: when the bucket shares the
+// prefix (or is a shared bucket with empty prefix), rotation must only prune
+// objects whose basename is a backup snapshot — never unrelated objects.
+func TestRunnerRotationDoesNotDeleteUnrelatedObjects(t *testing.T) {
+	stub := newStubMinioClient()
+	cli := newTestClient(stub)
+	r := NewRunner(cli, stubCollector{}, 1)
+
+	// A non-backup object sharing the prefix/bucket.
+	if _, err := cli.Upload(context.Background(), "unrelated-object.json", []byte("keep me"), "application/json"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two backups: with retention=1, one should be pruned, but only the
+	// snapshot one.
+	for i := 0; i < 2; i++ {
+		r.collector = stubCollector{stamp: time.Date(2026, 8, 16, 12, i, 0, 0, time.UTC)}
+		if _, err := r.RunBackup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	snaps, err := cli.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps) != 2 {
+		t.Fatalf("want 2 objects (1 snapshot + 1 unrelated), got %d: %v", len(snaps), snaps)
+	}
+	// The unrelated object must still be present.
+	foundUnrelated := false
+	for _, s := range snaps {
+		if s.Key == "bk/unrelated-object.json" {
+			foundUnrelated = true
+		}
+	}
+	if !foundUnrelated {
+		t.Error("unrelated object was pruned by rotation; only snapshots may be deleted")
+	}
+}
+
 // TestRunnerUploadedKeyNeverPrunedOnClockSkew: when List returns entries in
 // order that puts the just-uploaded key in the prune range (e.g. stale
 // S3 clock), rotation must NOT delete the snapshot that was just uploaded.
@@ -172,12 +213,15 @@ func TestRunnerRestoreFromS3(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := r.RestoreFromS3(context.Background(), "snap.json", RestoreModeMerge)
+	res, err := r.RestoreFromS3(context.Background(), "snap.json", RestoreModeMerge)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report != nil {
-		t.Errorf("report = %+v, want nil (importer is nil)", report)
+	if res.Report != nil {
+		t.Errorf("report = %+v, want nil (importer is nil)", res.Report)
+	}
+	if res.Files != 1 {
+		t.Errorf("files = %d, want 1 (a.json written)", res.Files)
 	}
 	if _, err := os.Stat(filepath.Join(authDir, "a.json")); err != nil {
 		t.Errorf("a.json not restored: %v", err)

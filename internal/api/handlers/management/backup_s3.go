@@ -6,7 +6,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/backup"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 )
 
 // backupRunner is the subset of the backup subsystem the management /backup
@@ -21,7 +20,7 @@ type backupRunner interface {
 // RestoreFromS3 (which delegates bundle application to its attached
 // *Restorer).
 type backupRestorer interface {
-	RestoreFromS3(ctx context.Context, key string, mode backup.RestoreMode) (*store.BackupImportReport, error)
+	RestoreFromS3(ctx context.Context, key string, mode backup.RestoreMode) (backup.RestoreResult, error)
 }
 
 // backupSettings describes the current backup configuration for status display.
@@ -105,12 +104,12 @@ func (h *Handler) RestoreBackup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "confirmation_required", "message": "replace restore requires confirm=true"}})
 		return
 	}
-	report, err := restorer.RestoreFromS3(c.Request.Context(), req.ObjectKey, req.Mode)
+	res, err := restorer.RestoreFromS3(c.Request.Context(), req.ObjectKey, req.Mode)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "restore_failed", "message": err.Error()}})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"restore": report})
+	c.JSON(http.StatusOK, gin.H{"restore": res})
 }
 
 // BackupSettings returns the current backup configuration for status display

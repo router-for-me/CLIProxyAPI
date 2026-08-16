@@ -78,12 +78,14 @@ export default function BackupPage() {
         mode,
         confirm: mode === 'replace',
       });
-      const report = resp?.restore;
+      const result = resp?.restore;
+      const report = result?.report;
       const inserted = report?.total_inserted || 0;
+      const files = result?.files || 0;
       if (report?.partial) {
-        toast.warn(`Restore completed with skipped chunks — ${inserted} inserted.`);
+        toast.warn(`Restore completed with skipped chunks — ${inserted} inserted, ${files} file${files === 1 ? '' : 's'} written.`);
       } else {
-        toast.success(`Restore complete — ${inserted} ${inserted === 1 ? 'row' : 'rows'} applied.`);
+        toast.success(`Restore complete — ${inserted} ${inserted === 1 ? 'row' : 'rows'} applied, ${files} file${files === 1 ? '' : 's'} written.`);
       }
       setConfirming(null);
     } catch (e) {

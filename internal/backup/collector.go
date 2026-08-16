@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	log "github.com/sirupsen/logrus"
@@ -62,6 +63,13 @@ func (c *Collector) Collect(ctx context.Context) (store.BackupBundle, error) {
 	}
 	bundle.Version = 2
 	bundle.Mode = "full"
+	// Ensure the bundle carries a timestamp. The PG exporter sets ExportedAt
+	// itself; the non-PG path starts from a zero-valued bundle, so stamp it
+	// here — otherwise every snapshot collides on the zero-time object key and
+	// history silently collapses.
+	if bundle.ExportedAt.IsZero() {
+		bundle.ExportedAt = time.Now().UTC()
+	}
 
 	// Read config.yaml. A missing file is not an error — non-PG deployments
 	// may not have one yet — other read failures abort the backup.

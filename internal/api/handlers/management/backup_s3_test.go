@@ -36,16 +36,16 @@ func (s *stubBackupRunner) List(ctx context.Context) ([]backup.SnapshotMeta, err
 
 // stubBackupRestorer implements backupRestorer for handler tests.
 type stubBackupRestorer struct {
-	report *store.BackupImportReport
+	result backup.RestoreResult
 	err    error
 	key    string
 	mode   backup.RestoreMode
 }
 
-func (s *stubBackupRestorer) RestoreFromS3(ctx context.Context, key string, mode backup.RestoreMode) (*store.BackupImportReport, error) {
+func (s *stubBackupRestorer) RestoreFromS3(ctx context.Context, key string, mode backup.RestoreMode) (backup.RestoreResult, error) {
 	s.key = key
 	s.mode = mode
-	return s.report, s.err
+	return s.result, s.err
 }
 
 // newBackupRouter builds a router with the /backup routes wired to the given
@@ -173,7 +173,7 @@ func TestRestoreBackupMissingObjectKey(t *testing.T) {
 }
 
 func TestRestoreBackupSuccess(t *testing.T) {
-	stub := &stubBackupRestorer{report: &store.BackupImportReport{}}
+	stub := &stubBackupRestorer{result: backup.RestoreResult{Report: &store.BackupImportReport{}}}
 	r := newBackupRouter(nil, stub)
 
 	body := `{"object_key":"bk/snap.json","mode":"merge"}`

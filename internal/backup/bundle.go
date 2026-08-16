@@ -10,13 +10,14 @@ import (
 )
 
 // backupKeyPrefix is the deterministic object key prefix for backup snapshots.
-// Snapshot keys look like: nixllm_backup_2026-08-16T02_30_00Z.json
+// Snapshot keys look like: nixllm_backup_2026-08-16T02_30_00.123Z.json
 const backupKeyPrefix = "nixllm_backup"
 
 // snapshotKey returns a deterministic, sortable object key for a backup taken
-// at time t.
+// at time t. Millisecond precision is included so two backups created within
+// the same second (e.g. a double-clicked "Backup now") never collide.
 func snapshotKey(t time.Time) string {
-	return backupKeyPrefix + "_" + t.UTC().Format("2006-01-02T15_04_05Z") + ".json"
+	return backupKeyPrefix + "_" + t.UTC().Format("2006-01-02T15_04_05.000Z") + ".json"
 }
 
 // WriteBundle serializes a BackupBundle v2 to w as JSON. HTML-escaping is

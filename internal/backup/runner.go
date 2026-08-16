@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
@@ -60,23 +61,24 @@ func (r *Runner) List(ctx context.Context) ([]SnapshotMeta, error) {
 // runner itself does not lock runnerMu here: the attached Restorer.Restore
 // already serializes bundle application against RunBackup, and taking the lock
 // twice would self-deadlock.
-func (r *Runner) RestoreFromS3(ctx context.Context, key string, mode RestoreMode) (*store.BackupImportReport, error) {
+func (r *Runner) RestoreFromS3(ctx context.Context, key string, mode RestoreMode) (RestoreResult, error) {
+	var result RestoreResult
 	data, err := r.client.Download(ctx, key)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	bundle, err := ReadBundle(bytes.NewReader(data))
 	if err != nil {
-		return nil, fmt.Errorf("backup runner: parse snapshot %s: %w", key, err)
+		return result, fmt.Errorf("backup runner: parse snapshot %s: %w", key, err)
 	}
 	if r.restorer == nil {
-		return nil, errors.New("backup runner: restorer not configured")
+		return result, errors.New("backup runner: restorer not configured")
 	}
 	res, err := r.restorer.Restore(ctx, bundle, mode)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
-	return res.Report, nil
+	return res, nil
 }
 
 // RunBackup performs one full backup and returns the snapshot metadata. It is
@@ -109,6 +111,11 @@ func (r *Runner) RunBackup(ctx context.Context) (SnapshotMeta, error) {
 // rotate deletes snapshots beyond the retention window, keeping the newest N.
 // It is called after a successful upload so an upload failure never causes
 // deletion of older snapshots. retention<=0 means keep-all and returns early.
+//
+// Only objects whose key is a backup snapshot (starts with backupKeyPrefix)
+// are eligible for pruning: the bucket may hold unrelated objects under the
+// same prefix (or the whole bucket when BACKUP_S3_PREFIX is empty), and those
+// must never be deleted by rotation.
 func (r *Runner) rotate(ctx context.Context, uploadedKey string) error {
 	if r.retention <= 0 {
 		return nil
@@ -117,10 +124,24 @@ func (r *Runner) rotate(ctx context.Context, uploadedKey string) error {
 	if err != nil {
 		return err
 	}
-	if len(snaps) <= r.retention {
+	var eligible []SnapshotMeta
+	for _, s := range snaps {
+		// s.Key is the full object key, which may carry a configured prefix
+		// (e.g. "bk/nixllm_backup_..."). A snapshot's basename always starts
+		// with backupKeyPrefix; match on that so unrelated objects sharing the
+		// bucket/prefix are never pruned.
+		base := s.Key
+		if i := strings.LastIndex(base, "/"); i >= 0 {
+			base = base[i+1:]
+		}
+		if strings.HasPrefix(base, backupKeyPrefix) {
+			eligible = append(eligible, s)
+		}
+	}
+	if len(eligible) <= r.retention {
 		return nil
 	}
-	for _, s := range snaps[r.retention:] {
+	for _, s := range eligible[r.retention:] {
 		if s.Key == uploadedKey {
 			continue
 		}
