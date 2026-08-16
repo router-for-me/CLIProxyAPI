@@ -21,6 +21,12 @@ type SDKConfig struct {
 	//     sent it and do not inject it otherwise; on /v1/images/generations and /v1/images/edits behave like "chat".
 	DisableImageGeneration DisableImageGenerationMode `yaml:"disable-image-generation" json:"disable-image-generation"`
 
+	// CodexImageOutputDir enables local persistence for hosted image_generation
+	// results returned through the Responses API. When set, completed images are
+	// written to this directory and a Markdown preview path is appended to the
+	// following assistant text. Leave empty for remote or general-purpose servers.
+	CodexImageOutputDir string `yaml:"codex-image-output-dir,omitempty" json:"codex-image-output-dir,omitempty"`
+
 	// GPTImage2BaseModel sets the base (mainline) model used by the legacy hosted
 	// image_generation tool path when a Codex image request is not proxied directly
 	// through the Image API.

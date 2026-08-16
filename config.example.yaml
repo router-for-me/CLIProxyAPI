@@ -182,6 +182,12 @@ claude-code:
 # - "passthrough": never inject or strip image_generation on non-images endpoints (forward the client payload unchanged); behaves like "chat" on /v1/images/* endpoints.
 disable-image-generation: false
 
+# Optional local compatibility mode for Codex Desktop/CLI custom providers.
+# When set, completed Responses image_generation results are saved here and an
+# absolute Markdown preview path is appended to the following assistant text.
+# Leave empty on remote servers because the path must be readable by the client.
+# codex-image-output-dir: "~/.codex/generated_images/cliproxy"
+
 # Base model used by the legacy hosted image_generation tool path when a Codex image request is not proxied directly through the Image API.
 # Must start with "gpt-" (case-insensitive). If unset or invalid, defaults to "gpt-5.4-mini".
 # gpt-image-2-base-model: "gpt-5.4-mini"

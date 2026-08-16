@@ -153,6 +153,92 @@ func TestForwardResponsesStreamRepairsEmptyCompletedOutputFromDoneItems(t *testi
 	}
 }
 
+func TestForwardResponsesStreamSynthesizesMissingImageGenerationCompleted(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 2)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte("event: response.output_item.done\n" +
+		`data: {"type":"response.output_item.done","sequence_number":6,"output_index":0,"item":{"id":"ig-1","type":"image_generation_call","status":"generating","result":"aW1hZ2U="}}`)
+	data <- []byte("event: response.completed\n" +
+		`data: {"type":"response.completed","sequence_number":7,"response":{"id":"resp-1","status":"completed","output":[{"id":"ig-1","type":"image_generation_call","status":"generating","result":"aW1hZ2U="}]}}`)
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+	frames := strings.Split(strings.TrimSpace(recorder.Body.String()), "\n\n")
+	if len(frames) != 3 {
+		t.Fatalf("expected synthesized completed, done, and response.completed frames; got %d: %q", len(frames), recorder.Body.String())
+	}
+
+	payloadAt := func(index int) gjson.Result {
+		payload, ok := responsesSSEDataPayload([]byte(frames[index]))
+		if !ok {
+			t.Fatalf("frame %d has no data payload: %q", index, frames[index])
+		}
+		return gjson.ParseBytes(payload)
+	}
+
+	synthesized := payloadAt(0)
+	if got := synthesized.Get("type").String(); got != "response.image_generation_call.completed" {
+		t.Fatalf("synthesized type = %q, want response.image_generation_call.completed", got)
+	}
+	if got := synthesized.Get("item_id").String(); got != "ig-1" {
+		t.Fatalf("synthesized item_id = %q, want ig-1", got)
+	}
+	if got := synthesized.Get("sequence_number").Int(); got != 6 {
+		t.Fatalf("synthesized sequence_number = %d, want 6", got)
+	}
+
+	done := payloadAt(1)
+	if got := done.Get("item.status").String(); got != "completed" {
+		t.Fatalf("done item status = %q, want completed", got)
+	}
+	if got := done.Get("sequence_number").Int(); got != 7 {
+		t.Fatalf("done sequence_number = %d, want 7", got)
+	}
+
+	completed := payloadAt(2)
+	if got := completed.Get("sequence_number").Int(); got != 8 {
+		t.Fatalf("response.completed sequence_number = %d, want 8", got)
+	}
+	if got := completed.Get("response.output.0.status").String(); got != "completed" {
+		t.Fatalf("completed output image status = %q, want completed", got)
+	}
+}
+
+func TestForwardResponsesStreamDoesNotDuplicateImageGenerationCompleted(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 3)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte("event: response.image_generation_call.completed\n" +
+		`data: {"type":"response.image_generation_call.completed","sequence_number":5,"output_index":0,"item_id":"ig-1"}`)
+	data <- []byte("event: response.output_item.done\n" +
+		`data: {"type":"response.output_item.done","sequence_number":6,"output_index":0,"item":{"id":"ig-1","type":"image_generation_call","status":"generating","result":"aW1hZ2U="}}`)
+	data <- []byte("event: response.completed\n" +
+		`data: {"type":"response.completed","sequence_number":7,"response":{"id":"resp-1","status":"completed","output":[{"id":"ig-1","type":"image_generation_call","status":"generating","result":"aW1hZ2U="}]}}`)
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+	body := recorder.Body.String()
+	if got := strings.Count(body, `"type":"response.image_generation_call.completed"`); got != 1 {
+		t.Fatalf("image generation completed event count = %d, want 1; body=%q", got, body)
+	}
+	if got := gjson.Get(strings.Split(strings.TrimSpace(body), "\n\n")[1], "item.status").String(); got != "completed" {
+		payload, _ := responsesSSEDataPayload([]byte(strings.Split(strings.TrimSpace(body), "\n\n")[1]))
+		if got = gjson.GetBytes(payload, "item.status").String(); got != "completed" {
+			t.Fatalf("done item status = %q, want completed", got)
+		}
+	}
+	if !strings.Contains(body, `"sequence_number":7,"response"`) {
+		t.Fatalf("existing completion should not shift sequence numbers: %q", body)
+	}
+}
+
 func TestForwardResponsesStreamRepairsMixedIndexedAndUnindexedDoneItems(t *testing.T) {
 	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
 
