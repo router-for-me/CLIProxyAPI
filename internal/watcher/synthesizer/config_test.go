@@ -1033,3 +1033,65 @@ func TestConfigSynthesizer_RequestRetry(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigSynthesizer_RequestScopedErrors(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	rules := []config.RequestScopedErrorRule{
+		{
+			Status: 400,
+			Match:  []string{"maximum_context_length"},
+			Action: "stop",
+		},
+	}
+
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GeminiKey: []config.GeminiKey{
+				{APIKey: "gemini-key", RequestScopedErrors: rules},
+			},
+			InteractionsKey: []config.GeminiKey{
+				{APIKey: "interactions-key", RequestScopedErrors: rules},
+			},
+			ClaudeKey: []config.ClaudeKey{
+				{APIKey: "claude-key", RequestScopedErrors: rules},
+			},
+			CodexKey: []config.CodexKey{
+				{APIKey: "codex-key", BaseURL: "https://codex.api", RequestScopedErrors: rules},
+			},
+			XAIKey: []config.CodexKey{
+				{APIKey: "xai-key", BaseURL: "https://xai.api", RequestScopedErrors: rules},
+			},
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:                "compat",
+					BaseURL:             "https://compat.api",
+					RequestScopedErrors: rules,
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "compat-key"},
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+
+	for _, auth := range auths {
+		if auth.Metadata == nil {
+			t.Fatalf("auth %s has nil metadata", auth.ID)
+		}
+		val, exists := auth.Metadata["request_scoped_errors"]
+		if !exists {
+			t.Fatalf("auth %s missing request_scoped_errors in metadata", auth.ID)
+		}
+		extracted, ok := val.([]config.RequestScopedErrorRule)
+		if !ok || len(extracted) != 1 || extracted[0].Action != "stop" {
+			t.Fatalf("auth %s unexpected request_scoped_errors: %#v", auth.ID, val)
+		}
+	}
+}

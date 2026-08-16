@@ -113,6 +113,7 @@ type Manager struct {
 	selector                  Selector
 	hook                      Hook
 	mu                        sync.RWMutex
+	selectorMu                sync.Mutex
 	configCooldownMu          sync.Mutex
 	auths                     map[string]*Auth
 	scheduler                 *authScheduler

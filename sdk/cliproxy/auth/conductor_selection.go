@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -234,6 +235,20 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	}
 }
 
+func isSameSelector(a, b Selector) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	ta, tb := reflect.TypeOf(a), reflect.TypeOf(b)
+	if ta != tb {
+		return false
+	}
+	if ta.Comparable() {
+		return a == b
+	}
+	return false
+}
+
 func (m *Manager) SetSelector(selector Selector) {
 	if m == nil {
 		return
@@ -241,9 +256,23 @@ func (m *Manager) SetSelector(selector Selector) {
 	if selector == nil {
 		selector = &RoundRobinSelector{}
 	}
+	m.selectorMu.Lock()
+	defer m.selectorMu.Unlock()
+
 	m.mu.Lock()
+	oldSelector := m.selector
+	if isSameSelector(oldSelector, selector) {
+		m.mu.Unlock()
+		return
+	}
 	m.selector = selector
 	m.mu.Unlock()
+
+	if oldSelector != nil {
+		if stoppable, ok := oldSelector.(StoppableSelector); ok {
+			stoppable.Stop()
+		}
+	}
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
@@ -799,7 +828,7 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if status == http.StatusOK {
 		return 0, false
 	}
-	if isRequestInvalidError(err) {
+	if isRequestInvalidError(err) || isRequestStopError(err) {
 		return 0, false
 	}
 	wait, found := m.closestCooldownWait(providers, model, attempt)

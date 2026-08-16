@@ -285,17 +285,9 @@ VS Code 扩展，可将你的 Claude、ChatGPT/Codex、Antigravity、Grok 和 Ki
 
 OmniRoute 是一个面向多供应商大语言模型的 AI 网关：它提供兼容 OpenAI 的端点，具备智能路由、负载均衡、重试及回退机制。通过添加策略、速率限制、缓存和可观测性，确保推理过程既可靠又具备成本意识。
 
-### [Playful Proxy API Panel (PPAP)](https://github.com/daishuge/playful-proxy-api-panel)
-
-一个公开的 CLIProxyAPI 兼容二开版本和配套管理面板，尽量保持与上游一致的使用方式，同时恢复内置使用量统计，并补充缓存命中率、首字响应时间、TPS 记录和面向 Docker 自托管的安装说明。
-
 ### [Codex Switch](https://github.com/9ycrooked/CodexSwitch)
 
 这是一个使用 Tauri 2 + Vue 3 构建的工具，用于管理多个 OpenAI Codex 桌面账户。它可以在已保存的 ChatGPT/Codex 认证配置之间切换，实时查看 5 小时和每周配额使用情况，验证 token 健康状态，查看当前账户详情，并在无需手动复制的情况下导入或保存 auth.json 文件。
-
-### [Alex](https://github.com/madhavajay/alex)
-
-受 CLIProxyAPI 启发、带可选 UI 的本地 Rust LLM 代理。它可将编码 Agent 路由到多个提供商，支持本地链路追踪、可脚本化中间件、多订阅聚合、故障转移，以及通过即时通讯完成重新认证。
 
 > [!NOTE]  
 > 如果你开发了 CLIProxyAPI 的移植或衍生项目，请提交 PR 将其添加到此列表中。
