@@ -157,6 +157,13 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 	// Convert ModeAuto to mid-range if dynamic not allowed
 	if config.Mode == ModeAuto && !support.DynamicAllowed {
 		config = convertAutoToMidRange(config, support, toFormat, model)
+		// The canonical mid-range level may not be present in a model's discrete
+		// level subset (for example, Levels=[low, high]). Clamp the generated
+		// fallback just like a budget-derived level so providers never receive an
+		// unsupported value.
+		if config.Mode == ModeLevel && len(support.Levels) > 0 && !isLevelSupported(string(config.Level), support.Levels) {
+			config.Level = clampLevel(config.Level, modelInfo, toFormat)
+		}
 	}
 
 	if config.Mode == ModeNone && toFormat == "claude" {
@@ -170,9 +177,12 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 			config.Budget = clampBudget(config.Budget, modelInfo, toFormat)
 		}
 
-		// ModeNone with clamped Budget > 0: set Level to lowest for Level-only/Hybrid models
-		// This ensures Apply layer doesn't need to access support.Levels
-		if config.Mode == ModeNone && config.Budget > 0 && len(support.Levels) > 0 {
+		// ModeNone for a model that cannot be disabled falls back to the lowest
+		// supported level. Budget-capable models reach this path with Budget > 0;
+		// level-only models need the capability flags checked explicitly because
+		// their Min/Max range is zero.
+		cannotDisableLevelModel := !support.ZeroAllowed && !isLevelSupported(string(LevelNone), support.Levels)
+		if config.Mode == ModeNone && len(support.Levels) > 0 && (config.Budget > 0 || cannotDisableLevelModel) {
 			config.Level = ThinkingLevel(support.Levels[0])
 		}
 	}

@@ -93,12 +93,16 @@ func ConvertAntigravityResponseToInteractionsNonStream(ctx context.Context, mode
 	}
 	out, _ = sjson.SetBytes(out, "id", id)
 	out, _ = sjson.SetBytes(out, "model", modelName)
+	var steps [][]byte
 	root.Get("candidates.0.content.parts").ForEach(func(_, part gjson.Result) bool {
 		if step := antigravityPartToInteractionsStep(part); len(step) > 0 {
-			out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+			steps = append(steps, step)
 		}
 		return true
 	})
+	if len(steps) > 0 {
+		out = translatorcommon.SetRawArrayItems(out, "steps", steps)
+	}
 	out = setInteractionsUsageFromAntigravity(out, "usage", root)
 	return out
 }
@@ -143,12 +147,17 @@ func restoreInteractionsFunctionNames(root gjson.Result, nameMap map[string]stri
 	for candidateIndex, candidate := range candidates.Array() {
 		for partIndex, part := range candidate.Get("content.parts").Array() {
 			for _, field := range []string{"functionCall", "functionResponse"} {
-				name := part.Get(field + ".name").String()
+				nameResult := part.Get(field + ".name")
+				name := nameResult.String()
 				if name == "" {
 					continue
 				}
+				restoredName := util.RestoreSanitizedToolName(nameMap, name)
+				if nameResult.Type == gjson.String && restoredName == name {
+					continue
+				}
 				path := fmt.Sprintf("candidates.%d.content.parts.%d.%s.name", candidateIndex, partIndex, field)
-				raw, _ = sjson.SetBytes(raw, path, util.RestoreSanitizedToolName(nameMap, name))
+				raw, _ = sjson.SetBytes(raw, path, restoredName)
 			}
 		}
 	}
@@ -333,7 +342,7 @@ func antigravityPartToInteractionsStep(part gjson.Result) []byte {
 		}
 		item := []byte(`{"type":"text","text":""}`)
 		item, _ = sjson.SetBytes(item, "text", text.String())
-		step, _ = sjson.SetRawBytes(step, "content.-1", item)
+		step = translatorcommon.SetRawArrayItems(step, "content", [][]byte{item})
 		return step
 	}
 	if inline := part.Get("inlineData"); inline.Exists() {

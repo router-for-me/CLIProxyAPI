@@ -26,10 +26,19 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 
 // ApplyPayloadConfigWithRequest applies payload config using source protocol and request header gates.
 func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header) []byte {
+	out, _ := ApplyPayloadConfigWithRequestTracked(cfg, model, protocol, fromProtocol, root, payload, original, requestedModel, requestPath, headers, "")
+	return out
+}
+
+// ApplyPayloadConfigWithRequestTracked applies payload config and reports whether
+// an applied rule targeted trackedPath or one of its descendants.
+func ApplyPayloadConfigWithRequestTracked(cfg *config.Config, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header, trackedPath string) ([]byte, bool) {
 	if cfg == nil || len(payload) == 0 {
-		return payload
+		return payload, false
 	}
 	out := payload
+	trackedPath = strings.TrimSpace(trackedPath)
+	trackedPathTouched := false
 
 	// Apply disable-image-generation filtering before payload rules so config payload
 	// overrides can explicitly re-enable image_generation when desired.
@@ -74,6 +83,7 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 						}
 						out = updated
 						appliedDefaults[resolvedPath] = struct{}{}
+						trackedPathTouched = trackedPathTouched || payloadRuleTargetsPath(resolvedPath, trackedPath)
 					}
 				}
 			}
@@ -105,6 +115,7 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 						}
 						out = updated
 						appliedDefaults[resolvedPath] = struct{}{}
+						trackedPathTouched = trackedPathTouched || payloadRuleTargetsPath(resolvedPath, trackedPath)
 					}
 				}
 			}
@@ -120,11 +131,11 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 						continue
 					}
 					for _, resolvedPath := range resolvePayloadRulePaths(out, fullPath) {
-						updated, errSet := sjson.SetBytes(out, resolvedPath, value)
-						if errSet != nil {
-							continue
+						var applied bool
+						out, applied = setPayloadValueIfDifferentTracked(out, resolvedPath, value)
+						if applied {
+							trackedPathTouched = trackedPathTouched || payloadRuleTargetsPath(resolvedPath, trackedPath)
 						}
-						out = updated
 					}
 				}
 			}
@@ -144,11 +155,11 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 						continue
 					}
 					for _, resolvedPath := range resolvePayloadRulePaths(out, fullPath) {
-						updated, errSet := sjson.SetRawBytes(out, resolvedPath, rawValue)
-						if errSet != nil {
-							continue
+						var applied bool
+						out, applied = setPayloadRawValueIfDifferentTracked(out, resolvedPath, rawValue)
+						if applied {
+							trackedPathTouched = trackedPathTouched || payloadRuleTargetsPath(resolvedPath, trackedPath)
 						}
-						out = updated
 					}
 				}
 			}
@@ -171,12 +182,13 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 							continue
 						}
 						out = updated
+						trackedPathTouched = trackedPathTouched || payloadRuleTargetsPath(resolvedPath, trackedPath)
 					}
 				}
 			}
 		}
 	}
-	return out
+	return out, trackedPathTouched
 }
 
 func isImagesEndpointRequestPath(path string) bool {
@@ -497,6 +509,13 @@ func buildPayloadPath(root, path string) string {
 	return r + "." + p
 }
 
+func payloadRuleTargetsPath(path, trackedPath string) bool {
+	if trackedPath == "" {
+		return false
+	}
+	return path == trackedPath || strings.HasPrefix(path, trackedPath+".")
+}
+
 func resolvePayloadRulePaths(payload []byte, path string) []string {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -792,27 +811,85 @@ func removeToolTypeFromToolsArray(payload []byte, toolsPath string, toolType str
 	if !tools.Exists() || !tools.IsArray() {
 		return payload
 	}
+	toolItems := tools.Array()
 	removed := false
-	filtered := []byte(`[]`)
-	for _, tool := range tools.Array() {
+	for _, tool := range toolItems {
 		if tool.Get("type").String() == toolType {
 			removed = true
-			continue
+			break
 		}
-		updated, errSet := sjson.SetRawBytes(filtered, "-1", []byte(tool.Raw))
-		if errSet != nil {
-			continue
-		}
-		filtered = updated
 	}
 	if !removed {
 		return payload
 	}
-	updated, errSet := sjson.SetRawBytes(payload, toolsPath, filtered)
+	filtered := make([][]byte, 0, len(toolItems))
+	for _, tool := range toolItems {
+		if tool.Get("type").String() != toolType {
+			filtered = append(filtered, []byte(tool.Raw))
+		}
+	}
+	updated, errSet := sjson.SetRawBytes(payload, toolsPath, JoinRawJSONArray(filtered))
 	if errSet != nil {
 		return payload
 	}
 	return updated
+}
+
+func setPayloadValueIfDifferent(payload []byte, path string, value any) []byte {
+	updated, _ := setPayloadValueIfDifferentTracked(payload, path, value)
+	return updated
+}
+
+func setPayloadValueIfDifferentTracked(payload []byte, path string, value any) ([]byte, bool) {
+	current := gjson.GetBytes(payload, path)
+	switch typed := value.(type) {
+	case string:
+		if current.Type == gjson.String && current.String() == typed {
+			return payload, true
+		}
+	case bool:
+		if (typed && current.Type == gjson.True) || (!typed && current.Type == gjson.False) {
+			return payload, true
+		}
+	case nil:
+		if current.Raw == "null" {
+			return payload, true
+		}
+	default:
+		expectedJSON, errSet := sjson.SetBytes([]byte(`{}`), "value", value)
+		if errSet != nil {
+			return payload, false
+		}
+		expected := gjson.GetBytes(expectedJSON, "value")
+		if expected.Raw == "" {
+			return payload, false
+		}
+		if len(current.Indexes) == 0 && current.Raw == expected.Raw {
+			return payload, true
+		}
+		updated, errSet := sjson.SetRawBytes(payload, path, []byte(expected.Raw))
+		if errSet != nil {
+			return payload, false
+		}
+		return updated, true
+	}
+	updated, errSet := sjson.SetBytes(payload, path, value)
+	if errSet != nil {
+		return payload, false
+	}
+	return updated, true
+}
+
+func setPayloadRawValueIfDifferentTracked(payload []byte, path string, value []byte) ([]byte, bool) {
+	current := gjson.GetBytes(payload, path)
+	if current.Exists() && len(current.Indexes) == 0 && current.Raw == string(value) {
+		return payload, true
+	}
+	updated, errSet := sjson.SetRawBytes(payload, path, value)
+	if errSet != nil {
+		return payload, false
+	}
+	return updated, true
 }
 
 func payloadRawValue(value any) ([]byte, bool) {

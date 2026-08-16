@@ -3,11 +3,22 @@ package claude
 import (
 	"strings"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 func ConvertClaudeRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
+	return convertClaudeRequestToInteractions(modelName, inputRawJSON, stream, false)
+}
+
+// ConvertClaudeRequestToInteractionsWithCompat preserves empty assistant
+// thinking blocks for configured compatibility endpoints.
+func ConvertClaudeRequestToInteractionsWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
+	return convertClaudeRequestToInteractions(modelName, inputRawJSON, stream, true)
+}
+
+func convertClaudeRequestToInteractions(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","input":[]}`)
 	out, _ = sjson.SetBytes(out, "model", firstNonEmpty(modelName, root.Get("model").String()))
@@ -16,7 +27,7 @@ func ConvertClaudeRequestToInteractions(modelName string, inputRawJSON []byte, s
 	}
 	out = copyClaudeSystemToInteractions(out, root)
 	out = copyClaudeGenerationConfigToInteractions(out, root)
-	out = appendClaudeMessagesToInteractions(out, root.Get("messages"))
+	out = appendClaudeMessagesToInteractions(out, root.Get("messages"), preserveEmptyThinkingBlocks)
 	out = copyClaudeToolsToInteractions(out, root)
 	return out
 }
@@ -111,18 +122,20 @@ func copyClaudeToolChoiceToInteractions(out []byte, toolChoice gjson.Result) []b
 	return out
 }
 
-func appendClaudeMessagesToInteractions(out []byte, messages gjson.Result) []byte {
+func appendClaudeMessagesToInteractions(out []byte, messages gjson.Result, preserveEmptyThinkingBlocks bool) []byte {
 	if !messages.Exists() || !messages.IsArray() {
 		return out
 	}
+	inputItems := translatorcommon.NewRawArrayItems(messages.Get("#").Int())
 	messages.ForEach(func(_, message gjson.Result) bool {
-		out = appendClaudeMessageToInteractions(out, message)
+		appendClaudeMessageToInteractions(&inputItems, message, preserveEmptyThinkingBlocks)
 		return true
 	})
+	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
 	return out
 }
 
-func appendClaudeMessageToInteractions(out []byte, message gjson.Result) []byte {
+func appendClaudeMessageToInteractions(items *[][]byte, message gjson.Result, preserveEmptyThinkingBlocks bool) {
 	role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
 	defaultStepType := "user_input"
 	if role == "assistant" {
@@ -133,22 +146,22 @@ func appendClaudeMessageToInteractions(out []byte, message gjson.Result) []byte 
 		step := []byte(`{"type":"","content":[{"type":"text","text":""}]}`)
 		step, _ = sjson.SetBytes(step, "type", defaultStepType)
 		step, _ = sjson.SetBytes(step, "content.0.text", content.String())
-		out, _ = sjson.SetRawBytes(out, "input.-1", step)
-		return out
+		*items = append(*items, step)
+		return
 	}
 	if !content.IsArray() {
-		return out
+		return
 	}
-	stepContent := []byte(`[]`)
+	stepContent := make([][]byte, 0, 4)
 	flushContent := func() {
-		if len(gjson.ParseBytes(stepContent).Array()) == 0 {
+		if len(stepContent) == 0 {
 			return
 		}
 		step := []byte(`{"type":"","content":[]}`)
 		step, _ = sjson.SetBytes(step, "type", defaultStepType)
-		step, _ = sjson.SetRawBytes(step, "content", stepContent)
-		out, _ = sjson.SetRawBytes(out, "input.-1", step)
-		stepContent = []byte(`[]`)
+		step, _ = sjson.SetRawBytes(step, "content", translatorcommon.JoinRawArray(stepContent))
+		*items = append(*items, step)
+		stepContent = stepContent[:0]
 	}
 	content.ForEach(func(_, part gjson.Result) bool {
 		partType := strings.ToLower(strings.TrimSpace(part.Get("type").String()))
@@ -157,30 +170,30 @@ func appendClaudeMessageToInteractions(out []byte, message gjson.Result) []byte 
 			if text := part.Get("text").String(); text != "" {
 				contentPart := []byte(`{"type":"text","text":""}`)
 				contentPart, _ = sjson.SetBytes(contentPart, "text", text)
-				stepContent, _ = sjson.SetRawBytes(stepContent, "-1", contentPart)
+				stepContent = append(stepContent, contentPart)
 			}
 		case "thinking":
 			flushContent()
-			if text := part.Get("thinking").String(); text != "" {
+			text := part.Get("thinking").String()
+			if text != "" || preserveEmptyThinkingBlocks {
 				step := []byte(`{"type":"thought","content":[{"type":"text","text":""}]}`)
 				step, _ = sjson.SetBytes(step, "content.0.text", text)
-				out, _ = sjson.SetRawBytes(out, "input.-1", step)
+				*items = append(*items, step)
 			}
 		case "image", "document":
 			if mediaPart, ok := claudeMediaPartToInteractions(part, partType); ok {
-				stepContent, _ = sjson.SetRawBytes(stepContent, "-1", mediaPart)
+				stepContent = append(stepContent, mediaPart)
 			}
 		case "tool_use":
 			flushContent()
-			out = appendClaudeToolUseToInteractions(out, part)
+			*items = append(*items, claudeToolUseToInteractions(part))
 		case "tool_result":
 			flushContent()
-			out = appendClaudeToolResultToInteractions(out, part)
+			*items = append(*items, claudeToolResultToInteractions(part))
 		}
 		return true
 	})
 	flushContent()
-	return out
 }
 
 func claudeMediaPartToInteractions(part gjson.Result, partType string) ([]byte, bool) {
@@ -197,7 +210,7 @@ func claudeMediaPartToInteractions(part gjson.Result, partType string) ([]byte, 
 	return out, true
 }
 
-func appendClaudeToolUseToInteractions(out []byte, part gjson.Result) []byte {
+func claudeToolUseToInteractions(part gjson.Result) []byte {
 	step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
 	step, _ = sjson.SetBytes(step, "name", part.Get("name").String())
 	if id := part.Get("id").String(); id != "" {
@@ -208,11 +221,10 @@ func appendClaudeToolUseToInteractions(out []byte, part gjson.Result) []byte {
 	if input.Exists() && input.IsObject() {
 		step, _ = sjson.SetRawBytes(step, "arguments", []byte(input.Raw))
 	}
-	out, _ = sjson.SetRawBytes(out, "input.-1", step)
-	return out
+	return step
 }
 
-func appendClaudeToolResultToInteractions(out []byte, part gjson.Result) []byte {
+func claudeToolResultToInteractions(part gjson.Result) []byte {
 	step := []byte(`{"type":"function_result","call_id":"","result":""}`)
 	if id := part.Get("tool_use_id").String(); id != "" {
 		step, _ = sjson.SetBytes(step, "id", id)
@@ -224,22 +236,21 @@ func appendClaudeToolResultToInteractions(out []byte, part gjson.Result) []byte 
 		case result.Type == gjson.String:
 			step, _ = sjson.SetBytes(step, "result", result.String())
 		case result.IsArray():
-			converted := []byte(`[]`)
+			contentItems := make([][]byte, 0, 4)
 			result.ForEach(func(_, item gjson.Result) bool {
 				if item.Get("type").String() == "text" {
 					contentPart := []byte(`{"type":"text","text":""}`)
 					contentPart, _ = sjson.SetBytes(contentPart, "text", item.Get("text").String())
-					converted, _ = sjson.SetRawBytes(converted, "-1", contentPart)
+					contentItems = append(contentItems, contentPart)
 				}
 				return true
 			})
-			step, _ = sjson.SetRawBytes(step, "result", converted)
+			step, _ = sjson.SetRawBytes(step, "result", translatorcommon.JoinRawArray(contentItems))
 		default:
 			step, _ = sjson.SetRawBytes(step, "result", []byte(result.Raw))
 		}
 	}
-	out, _ = sjson.SetRawBytes(out, "input.-1", step)
-	return out
+	return step
 }
 
 func copyClaudeToolsToInteractions(out []byte, root gjson.Result) []byte {
@@ -247,7 +258,7 @@ func copyClaudeToolsToInteractions(out []byte, root gjson.Result) []byte {
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
-	converted := []byte(`[]`)
+	var toolItems [][]byte
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		name := strings.TrimSpace(tool.Get("name").String())
 		if name == "" {
@@ -261,11 +272,11 @@ func copyClaudeToolsToInteractions(out []byte, root gjson.Result) []byte {
 		if schema := tool.Get("input_schema"); schema.Exists() && schema.IsObject() {
 			item, _ = sjson.SetRawBytes(item, "parameters", []byte(schema.Raw))
 		}
-		converted, _ = sjson.SetRawBytes(converted, "-1", item)
+		toolItems = append(toolItems, item)
 		return true
 	})
-	if len(gjson.ParseBytes(converted).Array()) > 0 {
-		out, _ = sjson.SetRawBytes(out, "tools", converted)
+	if len(toolItems) > 0 {
+		out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolItems))
 	}
 	return out
 }

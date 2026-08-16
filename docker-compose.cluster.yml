@@ -15,8 +15,9 @@ services:
     ports:
       - "8317:8317"
     volumes:
-      - ./home:/root/.cli-proxy-api
-      - ./logs:/CLIProxyAPI/logs
+      - ${CLI_PROXY_HOME_PATH:-./home}:/root/.cli-proxy-api
+      - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+      - ${CLI_PROXY_PLUGIN_PATH:-./plugins}:/CLIProxyAPI/plugins
     command: >
       sh -eu -c '
         if [ -z "$$HOME_JWT" ]; then

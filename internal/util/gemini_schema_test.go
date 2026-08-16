@@ -733,6 +733,165 @@ func TestCleanJSONSchemaForAntigravity_EmptySchemaWithDescription(t *testing.T) 
 	}
 }
 
+func TestCleanJSONSchemaForAntigravityResponseDoesNotAddToolPlaceholders(t *testing.T) {
+	bare := gjson.Parse(CleanJSONSchemaForAntigravityResponse(`{"type":"object"}`))
+	if bare.Get("properties.reason").Exists() || bare.Get("required").Exists() {
+		t.Fatalf("bare response schema gained tool placeholders: %s", bare.Raw)
+	}
+
+	input := `{
+		"type":"object",
+		"title":"Response",
+		"nullable":true,
+		"properties":{
+			"empty":{"type":"object"},
+			"optional":{"type":"object","properties":{"value":{"type":"string"}}}
+		}
+	}`
+	result := gjson.Parse(CleanJSONSchemaForAntigravityResponse(input))
+	for _, path := range []string{
+		"properties.empty.properties.reason",
+		"properties.empty.required",
+		"properties.optional.properties._",
+		"properties.optional.required",
+	} {
+		if result.Get(path).Exists() {
+			t.Errorf("response schema gained tool-only field %s: %s", path, result.Raw)
+		}
+	}
+	if result.Get("title").String() != "Response" || !result.Get("nullable").Bool() {
+		t.Errorf("Antigravity response metadata was removed: %s", result.Raw)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravityResponsePreservesUnions(t *testing.T) {
+	input := `{
+		"type":"object",
+		"properties":{
+			"action":{"anyOf":[
+				{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]},
+				{"type":"null"}
+			]},
+			"label":{"oneOf":[{"type":"string"},{"type":"null"}]}
+		}
+	}`
+
+	result := gjson.Parse(CleanJSONSchemaForAntigravityResponse(input))
+	for _, testCase := range []struct {
+		path      string
+		wantTypes []string
+	}{
+		{path: "properties.action.anyOf", wantTypes: []string{"object", "null"}},
+		{path: "properties.label.oneOf", wantTypes: []string{"string", "null"}},
+	} {
+		union := result.Get(testCase.path)
+		if !union.IsArray() {
+			t.Errorf("response union %s was flattened: %s", testCase.path, result.Raw)
+			continue
+		}
+		var gotTypes []string
+		for _, branch := range union.Array() {
+			gotTypes = append(gotTypes, branch.Get("type").String())
+		}
+		if !reflect.DeepEqual(gotTypes, testCase.wantTypes) {
+			t.Errorf("response union %s types = %v, want %v: %s", testCase.path, gotTypes, testCase.wantTypes, result.Raw)
+		}
+	}
+}
+
+func TestCleanJSONSchemaForAntigravityResponsePreservesAdditionalPropertiesFalse(t *testing.T) {
+	input := `{
+		"type":"object",
+		"properties":{
+			"name":{"type":"string"},
+			"nested":{
+				"type":"object",
+				"properties":{
+					"age":{"type":"integer"}
+				},
+				"additionalProperties":false
+			}
+		},
+		"additionalProperties":false
+	}`
+
+	result := gjson.Parse(CleanJSONSchemaForAntigravityResponse(input))
+
+	// Root additionalProperties should be preserved as false
+	rootAP := result.Get("additionalProperties")
+	if !rootAP.Exists() || rootAP.Type != gjson.False {
+		t.Errorf("root additionalProperties = %v, want false; cleaned: %s", rootAP, result.Raw)
+	}
+
+	// Nested additionalProperties should be preserved as false
+	nestedAP := result.Get("properties.nested.additionalProperties")
+	if !nestedAP.Exists() || nestedAP.Type != gjson.False {
+		t.Errorf("nested additionalProperties = %v, want false; cleaned: %s", nestedAP, result.Raw)
+	}
+
+	// Should not have converted additionalProperties into description hints
+	if strings.Contains(result.Raw, "No extra properties allowed") {
+		t.Errorf("expected no description hint for additionalProperties:false, got: %s", result.Raw)
+	}
+
+	// But CleanJSONSchemaForAntigravity (tool path) must still strip it and add hint
+	toolResult := CleanJSONSchemaForAntigravity(input)
+	if strings.Contains(toolResult, `"additionalProperties"`) {
+		t.Errorf("tool schema should not have additionalProperties: %s", toolResult)
+	}
+	if !strings.Contains(toolResult, "No extra properties allowed") {
+		t.Errorf("tool schema should have description hint: %s", toolResult)
+	}
+
+	// Non-false additionalProperties (e.g. true or schema-valued) should still be stripped in response schemas
+	nonFalseInput := `{
+		"type":"object",
+		"properties":{
+			"map":{"type":"object","additionalProperties":{"type":"string"}}
+		},
+		"additionalProperties":true
+	}`
+	nonFalseResult := CleanJSONSchemaForAntigravityResponse(nonFalseInput)
+	if strings.Contains(nonFalseResult, `"additionalProperties"`) {
+		t.Errorf("non-false additionalProperties should be stripped in response schema: %s", nonFalseResult)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravityResponsePreservesEnumType(t *testing.T) {
+	input := `{
+		"type":"object",
+		"properties":{
+			"conviction":{"type":"number","enum":[0.25,0.5,1]},
+			"count":{"type":"integer","enum":[1,2]}
+		}
+	}`
+
+	result := gjson.Parse(CleanJSONSchemaForAntigravityResponse(input))
+	for _, testCase := range []struct {
+		path       string
+		wantType   string
+		wantValues []string
+	}{
+		{path: "properties.conviction", wantType: "number", wantValues: []string{"0.25", "0.5", "1"}},
+		{path: "properties.count", wantType: "integer", wantValues: []string{"1", "2"}},
+	} {
+		schema := result.Get(testCase.path)
+		if gotType := schema.Get("type").String(); gotType != testCase.wantType {
+			t.Errorf("%s type = %q, want %q: %s", testCase.path, gotType, testCase.wantType, result.Raw)
+		}
+		var gotValues []string
+		for _, enumValue := range schema.Get("enum").Array() {
+			if enumValue.Type != gjson.String {
+				t.Errorf("%s enum value is not a string: %s", testCase.path, enumValue.Raw)
+			}
+			gotValues = append(gotValues, enumValue.String())
+		}
+		if !reflect.DeepEqual(gotValues, testCase.wantValues) {
+			t.Errorf("%s enum values = %v, want %v: %s", testCase.path, gotValues, testCase.wantValues, result.Raw)
+		}
+	}
+}
+
 // ============================================================================
 // Format field handling (ad-hoc patch removal)
 // ============================================================================
@@ -831,6 +990,14 @@ func TestCleanJSONSchemaForAntigravity_NumericEnumToString(t *testing.T) {
 	}`
 
 	result := CleanJSONSchemaForAntigravity(input)
+	parsed := gjson.Parse(result)
+
+	// Tool enum schemas require both string values and a string type.
+	for _, path := range []string{"properties.priority", "properties.level"} {
+		if gotType := parsed.Get(path + ".type").String(); gotType != "string" {
+			t.Errorf("Tool enum type at %s = %q, want string: %s", path, gotType, result)
+		}
+	}
 
 	// Numeric enum values should be converted to strings
 	if strings.Contains(result, `"enum":[0,1,2]`) {
@@ -1087,5 +1254,199 @@ func TestCleanJSONSchemaForAntigravity_UniqueItemsStripped(t *testing.T) {
 	}
 	if !strings.Contains(result, "uniqueItems: true") {
 		t.Errorf("uniqueItems hint missing in description")
+	}
+}
+
+// TestIsPropertyDefinitionDistinguishesPropertyNamedProperties covers the classification that
+// decides whether a key spelled like a schema keyword is a keyword or an author-chosen name.
+// Matching a trailing ".properties" alone mistook the schema of a property named "properties" for
+// a property map, which disabled cleaning inside it.
+func TestIsPropertyDefinitionDistinguishesPropertyNamedProperties(t *testing.T) {
+	for path, want := range map[string]bool{
+		"":                                    false,
+		"properties":                          true,
+		"properties.properties":               false,
+		"properties.properties.properties":    true,
+		"properties.records.items.properties": true,
+		"properties.records.items":            false,
+		// Any prefix the caller nests the schema under must not change the answer.
+		"schema.properties": true,
+		"request.tools.0.functionDeclarations.0.parameters":                       false,
+		"request.tools.0.functionDeclarations.0.parameters.properties":            true,
+		"request.tools.0.functionDeclarations.0.parameters.properties.properties": false,
+		// $defs and patternProperties are name maps for the same reason as properties.
+		"$defs":                          true,
+		"$defs.properties":               false,
+		"properties.$defs":               false,
+		"properties.a.patternProperties": true,
+		"properties.patternProperties":   false,
+	} {
+		if got := isPropertyDefinition(path); got != want {
+			t.Errorf("isPropertyDefinition(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+// TestCleanJSONSchemaStripsPropertyNamesUnderPropertyNamedProperties covers the reported failure:
+// the private Gemini backend rejects "propertyNames" with an unknown-field 400, and MCP tool
+// schemas place it inside a property that is itself named "properties".
+func TestCleanJSONSchemaStripsPropertyNamesUnderPropertyNamedProperties(t *testing.T) {
+	shapes := map[string]string{
+		// Nested in an array item, alongside the item's own properties map.
+		"arrayItem": `{"type":"object","properties":{"records":{"type":"array","items":{"type":"object",` +
+			`"properties":{"name":{"type":"string"}},"propertyNames":{"type":"string"}}}}}`,
+		// A dynamic map declared by a property named "properties".
+		"propertyNamedProperties": `{"type":"object","properties":{"properties":{"type":"object",` +
+			`"propertyNames":{"type":"string"}}}}`,
+		// Both shapes combined, as the reported tool schemas did.
+		"combined": `{"type":"object","properties":{"pages":{"type":"array","items":{"type":"object",` +
+			`"properties":{"properties":{"type":"object","propertyNames":{"type":"string"},` +
+			`"additionalProperties":true}},"propertyNames":{"type":"string"}}}}}`,
+	}
+
+	for name, schema := range shapes {
+		for cleaner, clean := range map[string]func(string) string{
+			"antigravity":         CleanJSONSchemaForAntigravity,
+			"gemini":              CleanJSONSchemaForGemini,
+			"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		} {
+			got := clean(schema)
+			if strings.Contains(got, `"propertyNames"`) {
+				t.Errorf("%s/%s: propertyNames survived cleaning: %s", name, cleaner, got)
+			}
+			if strings.Contains(got, `"additionalProperties"`) {
+				t.Errorf("%s/%s: additionalProperties survived cleaning: %s", name, cleaner, got)
+			}
+		}
+	}
+}
+
+// TestCleanJSONSchemaKeepsPropertiesNamedLikeKeywords guards the other half of the rule: a schema
+// may legitimately declare properties named after schema keywords, and those must survive.
+func TestCleanJSONSchemaKeepsPropertiesNamedLikeKeywords(t *testing.T) {
+	input := `{"type":"object","properties":{
+		"propertyNames":{"type":"string"},
+		"patternProperties":{"type":"string"},
+		"properties":{"type":"object","properties":{"propertyNames":{"type":"string"}}}
+	}}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity": CleanJSONSchemaForAntigravity,
+		"gemini":      CleanJSONSchemaForGemini,
+	} {
+		got := gjson.Parse(clean(input))
+		for _, path := range []string{
+			"properties.propertyNames",
+			"properties.patternProperties",
+			"properties.properties.properties.propertyNames",
+		} {
+			if !got.Get(path).Exists() {
+				t.Errorf("%s: property %s was removed: %s", cleaner, path, got.Raw)
+			}
+		}
+	}
+}
+
+func TestCleanJSONSchema_ConditionalKeywords(t *testing.T) {
+	// 1. Root-level if/then/else
+	rootInput := `{
+		"type": "object",
+		"properties": { "kind": { "type": "string", "enum": ["buy", "sell"] } },
+		"required": ["kind"],
+		"if":   { "properties": { "kind": { "const": "sell" } } },
+		"then": { "properties": { "sell_reason": { "type": "string", "description": "why the position is being sold" } }, "required": ["sell_reason"] },
+		"else": { "properties": { "buy_reason": { "type": "string" } } }
+	}`
+
+	for name, clean := range map[string]func(string) string{
+		"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"Antigravity":         CleanJSONSchemaForAntigravity,
+		"Gemini":              CleanJSONSchemaForGemini,
+	} {
+		res := gjson.Parse(clean(rootInput))
+		if res.Get("if").Exists() {
+			t.Errorf("[%s] root 'if' was not removed: %s", name, res.Raw)
+		}
+		if res.Get("then").Exists() {
+			t.Errorf("[%s] root 'then' was not removed: %s", name, res.Raw)
+		}
+		if res.Get("else").Exists() {
+			t.Errorf("[%s] root 'else' was not removed: %s", name, res.Raw)
+		}
+		if !res.Get("properties.sell_reason").Exists() {
+			t.Errorf("[%s] then.properties.sell_reason was lost: %s", name, res.Raw)
+		}
+		if !res.Get("properties.buy_reason").Exists() {
+			t.Errorf("[%s] else.properties.buy_reason was lost: %s", name, res.Raw)
+		}
+		if res.Get("properties.sell_reason.description").String() != "why the position is being sold" {
+			t.Errorf("[%s] sell_reason description mismatch: %s", name, res.Raw)
+		}
+	}
+
+	// 2. allOf with if/then
+	allOfInput := `{
+		"type": "object",
+		"properties": { "kind": { "type": "string", "enum": ["buy", "sell"] } },
+		"required": ["kind"],
+		"allOf": [
+			{
+				"if":   { "properties": { "kind": { "const": "sell" } } },
+				"then": {
+					"properties": { "sell_reason": { "type": "string", "description": "why the position is being sold" } },
+					"required": ["sell_reason"]
+				}
+			}
+		]
+	}`
+
+	for name, clean := range map[string]func(string) string{
+		"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"Antigravity":         CleanJSONSchemaForAntigravity,
+		"Gemini":              CleanJSONSchemaForGemini,
+	} {
+		res := gjson.Parse(clean(allOfInput))
+		if res.Get("allOf").Exists() {
+			t.Errorf("[%s] 'allOf' was not removed: %s", name, res.Raw)
+		}
+		if res.Get("if").Exists() || strings.Contains(res.Raw, `"if":`) {
+			t.Errorf("[%s] 'if' keyword present: %s", name, res.Raw)
+		}
+		if !res.Get("properties.sell_reason").Exists() {
+			t.Errorf("[%s] allOf.then.properties.sell_reason was lost: %s", name, res.Raw)
+		}
+		if res.Get("properties.sell_reason.description").String() != "why the position is being sold" {
+			t.Errorf("[%s] sell_reason description mismatch: %s", name, res.Raw)
+		}
+	}
+
+	// 3. Nested property with if/then
+	nestedInput := `{
+		"type": "object",
+		"properties": {
+			"trade": {
+				"type": "object",
+				"properties": { "kind": { "type": "string" } },
+				"if":   { "properties": { "kind": { "const": "sell" } } },
+				"then": { "properties": { "sell_reason": { "type": "string" } } }
+			}
+		}
+	}`
+
+	for name, clean := range map[string]func(string) string{
+		"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"Antigravity":         CleanJSONSchemaForAntigravity,
+		"Gemini":              CleanJSONSchemaForGemini,
+	} {
+		res := gjson.Parse(clean(nestedInput))
+		if res.Get("properties.trade.if").Exists() {
+			t.Errorf("[%s] nested 'if' was not removed: %s", name, res.Raw)
+		}
+		if res.Get("properties.trade.then").Exists() {
+			t.Errorf("[%s] nested 'then' was not removed: %s", name, res.Raw)
+		}
+		if !res.Get("properties.trade.properties.sell_reason").Exists() {
+			t.Errorf("[%s] nested then.properties.sell_reason was lost: %s", name, res.Raw)
+		}
 	}
 }

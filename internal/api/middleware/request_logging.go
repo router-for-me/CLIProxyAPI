@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -24,22 +25,54 @@ const (
 	maxDeferredErrorRequestBodyBytes     int64 = 32 << 20 // 32 MiB
 )
 
-// noLogChecker is implemented by loggers that can skip logging for specific API keys.
 type noLogChecker interface {
 	ShouldSkipLog(apiKey string) bool
+}
+
+type denyAuthenticatedRequestLogging struct{}
+
+func (denyAuthenticatedRequestLogging) ShouldSkipLog(apiKey string) bool {
+	return strings.TrimSpace(apiKey) != ""
+}
+
+func selectNoLogChecker(logger logging.RequestLogger, policies []*logging.RequestLogPolicy) noLogChecker {
+	if len(policies) > 0 {
+		if policies[0] == nil {
+			return denyAuthenticatedRequestLogging{}
+		}
+		return policies[0]
+	}
+	if loggerChecker, ok := logger.(noLogChecker); ok {
+		return loggerChecker
+	}
+	return denyAuthenticatedRequestLogging{}
+}
+
+func isNilLike(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }
 
 // RequestLoggingMiddleware creates a Gin middleware that logs HTTP requests and responses.
 // It captures detailed information about the request and response, including headers and body,
 // and uses the provided RequestLogger to record this data. When full request logging is disabled,
 // large and unknown-size bodies are spooled to disk and retained only for error logs.
-func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if logger == nil {
+func RequestLoggingMiddleware(logger logging.RequestLogger, policies ...*logging.RequestLogPolicy) gin.HandlerFunc {
+	if isNilLike(logger) {
+		return func(c *gin.Context) {
 			c.Next()
-			return
 		}
-
+	}
+	checker := selectNoLogChecker(logger, policies)
+	return func(c *gin.Context) {
 		if shouldSkipMethodForRequestLogging(c.Request) {
 			c.Next()
 			return
@@ -51,17 +84,12 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			return
 		}
 
-		// Skip logging entirely for API keys configured in the no-log list.
-		if checker, ok := logger.(noLogChecker); ok {
-			if rawKey := requestAPIKey(c.Request); rawKey != "" && checker.ShouldSkipLog(rawKey) {
-				c.Next()
-				return
-			}
+		rawKey := requestAPIKey(c.Request)
+		if rawKey != "" && checker.ShouldSkipLog(rawKey) {
+			c.Next()
+			return
 		}
-
-		// Provisional scope from the raw credential (pre-auth). After AuthMiddleware
-		// runs, the wrapper rebinds to plugin Key ID / Principal when available.
-		requestLogger := scopeRequestLogger(logger, requestAPIKey(c.Request), false)
+		requestLogger := scopeRequestLogger(logger, rawKey, false)
 
 		loggerEnabled := requestLogger.IsEnabled()
 		captureBody := shouldCaptureRequestBody(loggerEnabled, c.Request)

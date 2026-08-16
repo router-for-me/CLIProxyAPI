@@ -3,10 +3,13 @@ package executor
 import (
 	"context"
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
 )
+
+var benchmarkSanitizeOpenAIResponsesReasoningOutput []byte
 
 func validOpenAIResponsesReasoningEncryptedContentForTest() string {
 	payload := make([]byte, 1+8+16+16+32)
@@ -76,5 +79,15 @@ func TestSanitizeOpenAIResponsesReasoningEncryptedContent_NoopReturnsOriginalBod
 	}
 	if len(got) > 0 && len(body) > 0 && &got[0] != &body[0] {
 		t.Fatalf("noop path should return the original body slice")
+	}
+}
+
+func BenchmarkSanitizeOpenAIResponsesReasoningEncryptedContentLargeNoopPayload(b *testing.B) {
+	body := []byte(`{"store":false,"input":[{"type":"message","role":"user","content":"` + strings.Repeat("x", 8<<20) + `"}]}`)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	b.ResetTimer()
+	for b.Loop() {
+		benchmarkSanitizeOpenAIResponsesReasoningOutput = sanitizeOpenAIResponsesReasoningEncryptedContent(context.Background(), "benchmark", body)
 	}
 }

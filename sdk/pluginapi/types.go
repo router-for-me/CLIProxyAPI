@@ -15,6 +15,9 @@ type Plugin struct {
 	Metadata Metadata
 	// Capabilities declares the optional integration points implemented by the plugin.
 	Capabilities Capabilities
+	// SchemaVersion is the plugin contract version negotiated at registration.
+	// Zero means unset (treated as legacy by the host).
+	SchemaVersion uint32
 }
 
 // Metadata describes a plugin for registry, logging, and diagnostics.
@@ -103,6 +106,8 @@ type Capabilities struct {
 	ResponseAfterTranslator ResponseNormalizer
 	// RequestInterceptor rewrites execution requests before and after credential selection.
 	RequestInterceptor RequestInterceptor
+	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
+	RequestLifecyclePlugin RequestLifecyclePlugin
 	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
 	ResponseInterceptor ResponseInterceptor
 	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
@@ -929,6 +934,11 @@ type RequestInterceptor interface {
 	InterceptRequestAfterAuth(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error)
 }
 
+// RequestLifecyclePlugin receives asynchronous terminal events after execution finishes, fails, is rejected, or is canceled.
+type RequestLifecyclePlugin interface {
+	HandleRequestComplete(context.Context, RequestCompletion) error
+}
+
 // ResponseInterceptor rewrites successful non-streaming execution responses before downstream delivery.
 type ResponseInterceptor interface {
 	InterceptResponse(context.Context, ResponseInterceptRequest) (ResponseInterceptResponse, error)
@@ -976,6 +986,10 @@ type ResponseTransformRequest struct {
 
 // RequestInterceptRequest describes a request about to be executed upstream.
 type RequestInterceptRequest struct {
+	// RequestID uniquely identifies one model execution and correlates it with RequestCompletion.
+	RequestID string
+	// TraceID identifies the parent inbound HTTP request when available.
+	TraceID string
 	// SourceFormat is the original client protocol format.
 	SourceFormat string
 	// ToFormat is the selected upstream protocol format. It is empty before credential selection.
@@ -1002,10 +1016,49 @@ type RequestInterceptResponse struct {
 	Body []byte
 	// ClearHeaders explicitly removes current request headers before Headers is applied.
 	ClearHeaders []string
+	// Terminate stops the interceptor chain and prevents the request from reaching an upstream executor.
+	Terminate bool
+	// StatusCode is the downstream HTTP status used when Terminate is true. Invalid values default to 403.
+	StatusCode int
+	// ResponseHeaders contains downstream response headers used when Terminate is true.
+	ResponseHeaders http.Header
+	// ResponseBody contains the downstream response body used when Terminate is true.
+	ResponseBody []byte
+}
+
+// RequestCompletionOutcome identifies how an intercepted request ended.
+type RequestCompletionOutcome string
+
+const (
+	// RequestCompletionSucceeded means the request completed successfully.
+	RequestCompletionSucceeded RequestCompletionOutcome = "succeeded"
+	// RequestCompletionFailed means model execution failed.
+	RequestCompletionFailed RequestCompletionOutcome = "failed"
+	// RequestCompletionRejected means a request interceptor terminated the request before execution.
+	RequestCompletionRejected RequestCompletionOutcome = "rejected"
+	// RequestCompletionCanceled means the request context was canceled or the downstream client disconnected.
+	RequestCompletionCanceled RequestCompletionOutcome = "canceled"
+)
+
+// RequestCompletion describes the terminal state of an intercepted request.
+type RequestCompletion struct {
+	RequestID      string
+	TraceID        string
+	SourceFormat   string
+	Model          string
+	RequestedModel string
+	Stream         bool
+	Outcome        RequestCompletionOutcome
+	StatusCode     int
+	Error          string
+	StartedAt      time.Time
+	CompletedAt    time.Time
+	Metadata       map[string]any
 }
 
 // ResponseInterceptRequest describes a successful non-streaming response.
 type ResponseInterceptRequest struct {
+	RequestID       string
 	SourceFormat    string
 	Model           string
 	RequestedModel  string
@@ -1031,14 +1084,23 @@ type ResponseInterceptResponse struct {
 
 // StreamChunkInterceptRequest describes a successful stream chunk before downstream delivery.
 type StreamChunkInterceptRequest struct {
+	RequestID       string
 	SourceFormat    string
 	Model           string
 	RequestedModel  string
 	RequestHeaders  http.Header
 	ResponseHeaders http.Header
+	// OriginalRequest contains the raw client request body.
+	// Always populated on header-init (ChunkIndex == StreamChunkHeaderInitIndex), as a fresh clone.
+	// On payload chunks (ChunkIndex >= 0):
+	//   - schema_version >= 3: omitted (nil); cache from header-init or request intercept hooks
+	//   - schema_version < 3: populated as a fresh clone each call (legacy compatibility)
+	// Callers must treat this slice as read-only; hosts clone before delivery to keep snapshots isolated.
 	OriginalRequest []byte
-	RequestBody     []byte
-	Body            []byte
+	// RequestBody contains the provider/executed request payload.
+	// Same population / cloning / schema-version rules as OriginalRequest.
+	RequestBody []byte
+	Body        []byte
 	// HistoryChunks contains a bounded recent history of chunks already delivered downstream.
 	// The host currently retains at most 64 chunks and 1 MiB total history bytes.
 	HistoryChunks [][]byte
@@ -1276,6 +1338,9 @@ type UsageRecord struct {
 	ReasoningEffort string
 	// ServiceTier records the requested or reported service tier.
 	ServiceTier string
+	// Generate reports whether the client requested actual generation.
+	// The host normalizes omitted usage.Record values to true before delivery.
+	Generate bool
 	// RequestedAt is the time the request was received.
 	RequestedAt time.Time
 	// Latency is the total request latency.

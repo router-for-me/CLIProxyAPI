@@ -21,11 +21,25 @@ func NewConfigSynthesizer() *ConfigSynthesizer {
 	return &ConfigSynthesizer{}
 }
 
+func addWeightToAttrs(weight *int, attrs map[string]string) {
+	if weight == nil {
+		return
+	}
+	normalized := *weight
+	if normalized <= 0 {
+		normalized = 0
+	}
+	attrs[coreauth.AttributeWeight] = strconv.Itoa(normalized)
+}
+
 // Synthesize generates Auth entries from config API keys.
 func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
 	out := make([]*coreauth.Auth, 0, 32)
 	if ctx == nil || ctx.Config == nil {
 		return out, nil
+	}
+	if errValidate := ctx.Config.ValidateCredentialWeights(); errValidate != nil {
+		return nil, fmt.Errorf("synthesize config API key auths: %w", errValidate)
 	}
 
 	// Gemini API Keys
@@ -73,16 +87,19 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 		proxyURL := strings.TrimSpace(entry.ProxyURL)
 		id, token := idGen.Next(idKind, key, base)
 		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:%s[%s]", sourceName, token),
-			"api_key": key,
+			"source":       fmt.Sprintf("config:%s[%s]", sourceName, token),
+			"api_key":      key,
+			"config_index": strconv.Itoa(i),
 		}
 		metadata := map[string]any{}
 		if entry.DisableCooling {
 			metadata["disable_cooling"] = true
 		}
+		addRequestRetryToMetadata(entry.RequestRetry, metadata)
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
 		}
+		addWeightToAttrs(entry.Weight, attrs)
 		if base != "" {
 			attrs["base_url"] = base
 		}
@@ -128,16 +145,19 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		base := strings.TrimSpace(ck.BaseURL)
 		id, token := idGen.Next("claude:apikey", key, base)
 		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:claude[%s]", token),
-			"api_key": key,
+			"source":       fmt.Sprintf("config:claude[%s]", token),
+			"api_key":      key,
+			"config_index": strconv.Itoa(i),
 		}
 		metadata := map[string]any{}
 		if ck.DisableCooling {
 			metadata["disable_cooling"] = true
 		}
+		addRequestRetryToMetadata(ck.RequestRetry, metadata)
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
 		}
+		addWeightToAttrs(ck.Weight, attrs)
 		if base != "" {
 			attrs["base_url"] = base
 		}
@@ -196,21 +216,27 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 		baseURL := strings.TrimSpace(entry.BaseURL)
 		id, token := idGen.Next(provider+":apikey", key, baseURL)
 		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:%s[%s]", provider, token),
-			"api_key": key,
+			"source":       fmt.Sprintf("config:%s[%s]", provider, token),
+			"api_key":      key,
+			"config_index": strconv.Itoa(i),
 		}
 		metadata := map[string]any{}
 		if entry.DisableCooling {
 			metadata["disable_cooling"] = true
 		}
+		addRequestRetryToMetadata(entry.RequestRetry, metadata)
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
 		}
+		addWeightToAttrs(entry.Weight, attrs)
 		if baseURL != "" {
 			attrs["base_url"] = baseURL
 		}
 		if entry.Websockets {
 			attrs["websockets"] = "true"
+		}
+		if provider == "codex" && entry.AlphaSearch {
+			attrs[coreauth.AttributeCodexAlphaSearch] = "true"
 		}
 		if hash := diff.ComputeCodexModelsHash(entry.Models); hash != "" {
 			attrs["models_hash"] = hash
@@ -271,14 +297,17 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"base_url":     base,
 				"compat_name":  compat.Name,
 				"provider_key": internalProviderKey,
+				"config_index": strconv.Itoa(i),
 			}
 			metadata := map[string]any{}
 			if disableCooling {
 				metadata["disable_cooling"] = true
 			}
+			addRequestRetryToMetadata(compat.RequestRetry, metadata)
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
+			addWeightToAttrs(entry.Weight, attrs)
 			if key != "" {
 				attrs["api_key"] = key
 			}
@@ -313,11 +342,13 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"base_url":     base,
 				"compat_name":  compat.Name,
 				"provider_key": internalProviderKey,
+				"config_index": strconv.Itoa(i),
 			}
 			metadata := map[string]any{}
 			if disableCooling {
 				metadata["disable_cooling"] = true
 			}
+			addRequestRetryToMetadata(compat.RequestRetry, metadata)
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
@@ -366,10 +397,12 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			"source":       fmt.Sprintf("config:vertex-apikey[%s]", token),
 			"base_url":     base,
 			"provider_key": providerName,
+			"config_index": strconv.Itoa(i),
 		}
 		if compat.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(compat.Priority)
 		}
+		addWeightToAttrs(compat.Weight, attrs)
 		if key != "" {
 			attrs["api_key"] = key
 		}
@@ -377,6 +410,8 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(compat.Headers, attrs)
+		metadata := map[string]any{}
+		addRequestRetryToMetadata(compat.RequestRetry, metadata)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   providerName,
@@ -385,10 +420,14 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
 			Attributes: attrs,
+			Metadata:   metadata,
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, compat.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
 		out = append(out, a)
 	}
 	return out

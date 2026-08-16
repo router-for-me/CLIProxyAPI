@@ -2,7 +2,10 @@ package middleware
 
 import (
 	"bytes"
+	"errors"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -154,6 +157,80 @@ func TestFinalizeStreamingWritesAPIWebsocketTimeline(t *testing.T) {
 	}
 }
 
+func TestResponseWriterFinalizeStreamingClosesWriterAfterSourceMergeError(t *testing.T) {
+	closeFailure := errors.New("close streaming writer")
+	tests := []struct {
+		name     string
+		closeErr error
+	}{
+		{name: "merge error"},
+		{name: "merge and close errors", closeErr: closeFailure},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+
+			source, errSource := logging.NewFileBodySourceInDir(t.TempDir(), "invalid-api-request")
+			if errSource != nil {
+				t.Fatalf("NewFileBodySourceInDir: %v", errSource)
+			}
+			part, errPart := source.CreatePart("part")
+			if errPart != nil {
+				t.Fatalf("CreatePart: %v", errPart)
+			}
+			partPath := part.Name()
+			if errClose := part.Close(); errClose != nil {
+				t.Fatalf("close part: %v", errClose)
+			}
+			if errRemove := os.Remove(partPath); errRemove != nil {
+				t.Fatalf("remove part: %v", errRemove)
+			}
+			if errMkdir := os.Mkdir(partPath, 0o755); errMkdir != nil {
+				t.Fatalf("replace part with directory: %v", errMkdir)
+			}
+
+			streamWriter := &testStreamingLogWriter{closeErr: test.closeErr}
+			wrapper := &ResponseWriterWrapper{
+				ResponseWriter: c.Writer,
+				logger:         &testRequestLogger{enabled: true},
+				requestInfo: &RequestInfo{
+					URL:       "/v1/responses",
+					Method:    "POST",
+					RequestID: "req-merge-error",
+					Timestamp: time.Now(),
+				},
+				isStreaming:  true,
+				streamWriter: streamWriter,
+			}
+			c.Set(logging.APIRequestSourceContextKey, source)
+
+			errFinalize := wrapper.Finalize(c)
+			if errFinalize == nil {
+				t.Fatal("Finalize error = nil, want source merge error")
+			}
+			var pathError *os.PathError
+			if !errors.As(errFinalize, &pathError) {
+				t.Fatalf("Finalize error = %v, want source path error", errFinalize)
+			}
+			if test.closeErr != nil && !errors.Is(errFinalize, test.closeErr) {
+				t.Fatalf("Finalize error = %v, want joined close error %v", errFinalize, test.closeErr)
+			}
+			if streamWriter.closeCount != 1 {
+				t.Fatalf("stream writer Close count = %d, want 1", streamWriter.closeCount)
+			}
+			if wrapper.streamWriter != nil {
+				t.Fatal("stream writer state was not cleared")
+			}
+			if _, errStat := os.Stat(filepath.Dir(partPath)); !os.IsNotExist(errStat) {
+				t.Fatalf("source directory still exists after Finalize: %v", errStat)
+			}
+		})
+	}
+}
+
 type testRequestLogger struct {
 	enabled bool
 }
@@ -173,6 +250,8 @@ func (l *testRequestLogger) IsEnabled() bool {
 type testStreamingLogWriter struct {
 	apiWebsocketTimeline []byte
 	closed               bool
+	closeCount           int
+	closeErr             error
 }
 
 func (w *testStreamingLogWriter) WriteChunkAsync([]byte) {}
@@ -198,5 +277,6 @@ func (w *testStreamingLogWriter) SetFirstChunkTimestamp(time.Time) {}
 
 func (w *testStreamingLogWriter) Close() error {
 	w.closed = true
-	return nil
+	w.closeCount++
+	return w.closeErr
 }

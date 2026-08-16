@@ -352,6 +352,22 @@ func TestApplyOAuthModelAliasWithResult_ForceMappingUsesConfigAliasNotRequestSuf
 		t.Fatalf("OriginalAlias = %q want gpt-5.4-fast", res.OriginalAlias)
 	}
 }
+func TestApplyOAuthModelAliasWithResultPrefersExactSuffixedAlias(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		"codex": {
+			{Name: "base-upstream", Alias: "public", Fork: true},
+			{Name: "low-upstream", Alias: "public(low)", Fork: true, ForceMapping: true},
+		},
+	})
+	auth := &Auth{ID: "exact-suffix", Provider: "codex"}
+	result := manager.applyOAuthModelAliasWithResult(auth, "public(low)")
+	if result.UpstreamModel != "low-upstream(low)" || !result.ForceMapping {
+		t.Fatalf("exact suffixed alias result = %+v, want low-upstream(low) with force mapping", result)
+	}
+}
+
 func TestApplyOAuthModelAliasWithResult_NoForceMappingPreservesRequestedModelInOriginalAlias(t *testing.T) {
 	t.Parallel()
 	mgr := NewManager(nil, nil, nil)

@@ -6,9 +6,14 @@ const (
 	// ABIVersion tracks the native C ABI shape (native plugin exports).
 	ABIVersion uint32 = 1
 	// SchemaVersion tracks the RPC JSON contract exchanged at plugin.register.
-	// Increment only for breaking RPC changes. New capabilities such as ModelRouter
-	// are gated by capability flags and method names while the version stays at 1.
-	SchemaVersion uint32 = 1
+	// Version 2 adds request lifecycle completion and active request termination.
+	// Version 3 omits OriginalRequest/RequestBody on payload stream chunks
+	// (ChunkIndex >= 0); those fields remain on StreamChunkHeaderInitIndex only.
+	// Plugins that still need per-chunk request bodies should keep schema_version < 3.
+	SchemaVersion uint32 = 3
+	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
+	// request bodies on payload stream-chunk interceptor calls.
+	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
 )
 
 const (
@@ -44,6 +49,7 @@ const (
 	MethodRequestNormalize       = "request.normalize"
 	MethodRequestInterceptBefore = "request.intercept_before"
 	MethodRequestInterceptAfter  = "request.intercept_after"
+	MethodRequestComplete        = "request.complete"
 
 	MethodResponseTranslate            = "response.translate"
 	MethodResponseNormalizeBefore      = "response.normalize_before"

@@ -19,6 +19,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
@@ -904,6 +905,23 @@ func TestRegisterExecutorsPrunesStaleProviderAfterMigration(t *testing.T) {
 	}
 }
 
+func TestOwnsExecutorDistinguishesHostAdapters(t *testing.T) {
+	host := New()
+	owned := &executorAdapter{host: host}
+	foreign := &executorAdapter{host: New()}
+	external := &fakeProviderExecutor{provider: "provider-a"}
+
+	if !host.OwnsExecutor(owned) {
+		t.Fatal("host did not recognize its executor adapter")
+	}
+	if host.OwnsExecutor(foreign) {
+		t.Fatal("host claimed another host's executor adapter")
+	}
+	if host.OwnsExecutor(external) {
+		t.Fatal("host claimed an externally owned executor")
+	}
+}
+
 func TestRegisterExecutorsDoesNotUnregisterStaleProviderOwnedExternally(t *testing.T) {
 	manager := newFakeExecutorManager()
 	exec := &fakeExecutor{identifier: "fallback-provider"}
@@ -1674,6 +1692,84 @@ func TestHasStreamInterceptorsReflectsActiveStreamInterceptors(t *testing.T) {
 	}
 }
 
+func TestStreamChunkRequestBodyPolicyBySchemaVersion(t *testing.T) {
+	var legacyGot, modernGot pluginapi.StreamChunkInterceptRequest
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "legacy",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: 2,
+				Capabilities: pluginapi.Capabilities{
+					StreamChunkInterceptor: responseInterceptorFunc{
+						interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+							legacyGot = req
+							return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+						},
+					},
+				},
+			},
+		},
+		capabilityRecord{
+			id: "modern",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionStreamChunkOmitRequestBody,
+				Capabilities: pluginapi.Capabilities{
+					StreamChunkInterceptor: responseInterceptorFunc{
+						interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+							modernGot = req
+							return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+						},
+					},
+				},
+			},
+		},
+	)
+	if !host.StreamChunkPayloadIncludesRequestBody() {
+		t.Fatal("StreamChunkPayloadIncludesRequestBody() = false, want true when legacy stream interceptor is active")
+	}
+
+	_ = host.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		OriginalRequest: []byte("original"),
+		RequestBody:     []byte("request"),
+		Body:            []byte("chunk"),
+		ChunkIndex:      0,
+	})
+	if string(legacyGot.OriginalRequest) != "original" || string(legacyGot.RequestBody) != "request" {
+		t.Fatalf("legacy payload bodies = original:%q body:%q, want preserved", legacyGot.OriginalRequest, legacyGot.RequestBody)
+	}
+	if len(modernGot.OriginalRequest) != 0 || len(modernGot.RequestBody) != 0 {
+		t.Fatalf("modern payload bodies = original:%q body:%q, want omitted", modernGot.OriginalRequest, modernGot.RequestBody)
+	}
+
+	legacyGot = pluginapi.StreamChunkInterceptRequest{}
+	modernGot = pluginapi.StreamChunkInterceptRequest{}
+	_ = host.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		OriginalRequest: []byte("original"),
+		RequestBody:     []byte("request"),
+		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+	})
+	if string(legacyGot.OriginalRequest) != "original" || string(modernGot.OriginalRequest) != "original" {
+		t.Fatalf("header-init bodies not preserved: legacy=%q modern=%q", legacyGot.OriginalRequest, modernGot.OriginalRequest)
+	}
+
+	modernOnly := newHostWithRecords(capabilityRecord{
+		id: "modern-only",
+		plugin: pluginapi.Plugin{
+			SchemaVersion: pluginabi.SchemaVersionStreamChunkOmitRequestBody,
+			Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						return pluginapi.StreamChunkInterceptResponse{}, nil
+					},
+				},
+			},
+		},
+	})
+	if modernOnly.StreamChunkPayloadIncludesRequestBody() {
+		t.Fatal("StreamChunkPayloadIncludesRequestBody() = true, want false for schema v3+ only")
+	}
+}
+
 func TestHasRequestInterceptorsReflectsActiveRequestInterceptors(t *testing.T) {
 	responseOnly := newHostWithRecords(capabilityRecord{
 		id: "response",
@@ -2135,6 +2231,55 @@ func TestUsageAdapterPanicFusesPlugin(t *testing.T) {
 	adapter.HandleUsage(context.Background(), coreusage.Record{Provider: "plugin-provider"})
 	if !host.isPluginFused("usage-panic") {
 		t.Fatal("usage-panic was not fused")
+	}
+}
+
+func TestUsageAdapterNormalizesOmittedGenerateToTrue(t *testing.T) {
+	var gotGenerate bool
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotGenerate = record.Generate
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-generate",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-generate",
+	}
+
+	// Legacy callers construct usage.Record without Generate; adapter must publish true.
+	adapter.HandleUsage(context.Background(), coreusage.Record{Provider: "provider", Model: "gpt-5.4"})
+	if !gotGenerate {
+		t.Fatalf("plugin Generate = %v, want true for omitted field", gotGenerate)
+	}
+}
+
+func TestUsageAdapterPreservesExplicitGenerateFalse(t *testing.T) {
+	var gotGenerate bool
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotGenerate = record.Generate
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-generate-false",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-generate-false",
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "provider",
+		Model:    "gpt-5.4",
+		Generate: coreusage.GenerateFlag(false),
+	})
+	if gotGenerate {
+		t.Fatalf("plugin Generate = %v, want false", gotGenerate)
 	}
 }
 

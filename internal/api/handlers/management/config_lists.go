@@ -1,13 +1,41 @@
 package management
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
+
+func parseCredentialWeightPatch(raw json.RawMessage) (*int, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("weight is missing")
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil
+	}
+	var weight int
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if errDecode := decoder.Decode(&weight); errDecode != nil {
+		return nil, fmt.Errorf("weight must be an integer")
+	}
+	if errValidate := config.ValidateCredentialWeight(&weight); errValidate != nil {
+		return nil, errValidate
+	}
+	return &weight, nil
+}
+
+func rejectInvalidCredentialWeight(c *gin.Context, field string, weight *int) bool {
+	if errValidate := config.ValidateCredentialWeight(weight); errValidate != nil {
+		c.JSON(400, gin.H{"error": fmt.Sprintf("%s: %v", field, errValidate)})
+		return true
+	}
+	return false
+}
 
 // Generic helpers for list[string]
 func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()) {
@@ -106,39 +134,76 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 
 // api-keys
 func (h *Handler) GetAPIKeys(c *gin.Context) {
-	c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys, "api-key-names": h.cfg.APIKeyNames})
+	c.JSON(http.StatusOK, gin.H{"api-keys": h.cfg.APIKeys, "api-key-names": h.cfg.APIKeyNames})
 }
 func (h *Handler) PutAPIKeys(c *gin.Context) {
 	oldKeys := append([]string(nil), h.cfg.APIKeys...)
 	oldNames := append([]string(nil), h.cfg.APIKeyNames...)
-	h.putStringList(c, func(v []string) {
-		h.cfg.APIKeys = append([]string(nil), v...)
+	h.putStringList(c, func(values []string) {
+		h.cfg.APIKeys = append([]string(nil), values...)
 		h.cfg.APIKeyNames = realignAPIKeyNames(oldKeys, oldNames, h.cfg.APIKeys)
 	}, nil)
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	h.patchStringList(c, &h.cfg.APIKeys, func() {
+		h.cfg.APIKeyNames = normalizeAPIKeyNames(h.cfg.APIKeyNames, len(h.cfg.APIKeys))
+	})
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	oldKeys := append([]string(nil), h.cfg.APIKeys...)
-	oldNames := append([]string(nil), h.cfg.APIKeyNames...)
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {
-		h.cfg.APIKeyNames = realignAPIKeyNames(oldKeys, oldNames, h.cfg.APIKeys)
-	})
+	names := normalizeAPIKeyNames(h.cfg.APIKeyNames, len(h.cfg.APIKeys))
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, errScan := fmt.Sscanf(idxStr, "%d", &idx)
+		if errScan == nil && idx >= 0 && idx < len(h.cfg.APIKeys) {
+			h.cfg.APIKeys = append(h.cfg.APIKeys[:idx], h.cfg.APIKeys[idx+1:]...)
+			h.cfg.APIKeyNames = append(names[:idx], names[idx+1:]...)
+			h.persist(c)
+			return
+		}
+	}
+	if value := strings.TrimSpace(c.Query("value")); value != "" {
+		keys := make([]string, 0, len(h.cfg.APIKeys))
+		filteredNames := make([]string, 0, len(names))
+		for index, key := range h.cfg.APIKeys {
+			if strings.TrimSpace(key) == value {
+				continue
+			}
+			keys = append(keys, key)
+			filteredNames = append(filteredNames, names[index])
+		}
+		h.cfg.APIKeys = keys
+		h.cfg.APIKeyNames = filteredNames
+		h.persist(c)
+		return
+	}
+	c.JSON(http.StatusBadRequest, gin.H{"error": "missing index or value"})
 }
 
 func realignAPIKeyNames(oldKeys, oldNames, newKeys []string) []string {
-	namesByKey := make(map[string]string, len(oldKeys))
+	namesByKey := make(map[string][]string, len(oldKeys))
 	for index, key := range oldKeys {
+		name := ""
 		if index < len(oldNames) {
-			namesByKey[key] = oldNames[index]
+			name = oldNames[index]
 		}
+		namesByKey[key] = append(namesByKey[key], name)
 	}
 	names := make([]string, len(newKeys))
 	for index, key := range newKeys {
-		names[index] = namesByKey[key]
+		queuedNames := namesByKey[key]
+		if len(queuedNames) == 0 {
+			continue
+		}
+		names[index] = queuedNames[0]
+		namesByKey[key] = queuedNames[1:]
 	}
 	return names
+}
+
+func normalizeAPIKeyNames(names []string, keyCount int) []string {
+	normalized := make([]string, keyCount)
+	copy(normalized, names)
+	return normalized
 }
 
 // gemini-api-key: []GeminiKey
@@ -162,6 +227,11 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	for index := range arr {
+		if rejectInvalidCredentialWeight(c, fmt.Sprintf("gemini-api-key[%d].weight", index), arr[index].Weight) {
+			return
+		}
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.cfg.GeminiKey = append([]config.GeminiKey(nil), arr...)
@@ -171,11 +241,13 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	type geminiKeyPatch struct {
 		APIKey         *string            `json:"api-key"`
+		Weight         json.RawMessage    `json:"weight"`
 		Prefix         *string            `json:"prefix"`
 		BaseURL        *string            `json:"base-url"`
 		ProxyURL       *string            `json:"proxy-url"`
 		Headers        *map[string]string `json:"headers"`
 		ExcludedModels *[]string          `json:"excluded-models"`
+		RequestRetry   *int               `json:"request-retry"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -220,6 +292,14 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 		}
 		entry.APIKey = trimmed
 	}
+	if len(body.Value.Weight) > 0 {
+		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
+		if errWeight != nil {
+			c.JSON(400, gin.H{"error": errWeight.Error()})
+			return
+		}
+		entry.Weight = weight
+	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
 	}
@@ -234,6 +314,9 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.RequestRetry != nil {
+		entry.RequestRetry = body.Value.RequestRetry
 	}
 	h.cfg.GeminiKey[targetIndex] = entry
 	h.cfg.SanitizeGeminiKeys()
@@ -321,6 +404,11 @@ func (h *Handler) PutInteractionsKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	for index := range arr {
+		if rejectInvalidCredentialWeight(c, fmt.Sprintf("interactions-api-key[%d].weight", index), arr[index].Weight) {
+			return
+		}
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.cfg.InteractionsKey = append([]config.GeminiKey(nil), arr...)
@@ -330,11 +418,13 @@ func (h *Handler) PutInteractionsKeys(c *gin.Context) {
 func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 	type geminiKeyPatch struct {
 		APIKey         *string            `json:"api-key"`
+		Weight         json.RawMessage    `json:"weight"`
 		Prefix         *string            `json:"prefix"`
 		BaseURL        *string            `json:"base-url"`
 		ProxyURL       *string            `json:"proxy-url"`
 		Headers        *map[string]string `json:"headers"`
 		ExcludedModels *[]string          `json:"excluded-models"`
+		RequestRetry   *int               `json:"request-retry"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -380,6 +470,14 @@ func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 		}
 		entry.APIKey = trimmed
 	}
+	if len(body.Value.Weight) > 0 {
+		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
+		if errWeight != nil {
+			c.JSON(400, gin.H{"error": errWeight.Error()})
+			return
+		}
+		entry.Weight = weight
+	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
 	}
@@ -394,6 +492,9 @@ func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.RequestRetry != nil {
+		entry.RequestRetry = body.Value.RequestRetry
 	}
 	h.cfg.InteractionsKey[targetIndex] = entry
 	h.cfg.SanitizeInteractionsKeys()
@@ -482,6 +583,9 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 	}
 	for i := range arr {
 		normalizeClaudeKey(&arr[i])
+		if rejectInvalidCredentialWeight(c, fmt.Sprintf("claude-api-key[%d].weight", i), arr[i].Weight) {
+			return
+		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -492,6 +596,7 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
 		APIKey                  *string               `json:"api-key"`
+		Weight                  json.RawMessage       `json:"weight"`
 		Prefix                  *string               `json:"prefix"`
 		BaseURL                 *string               `json:"base-url"`
 		ProxyURL                *string               `json:"proxy-url"`
@@ -499,6 +604,7 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		Headers                 *map[string]string    `json:"headers"`
 		ExcludedModels          *[]string             `json:"excluded-models"`
 		RebuildMidSystemMessage *bool                 `json:"rebuild-mid-system-message"`
+		RequestRetry            *int                  `json:"request-retry"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -534,6 +640,14 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
 	}
+	if len(body.Value.Weight) > 0 {
+		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
+		if errWeight != nil {
+			c.JSON(400, gin.H{"error": errWeight.Error()})
+			return
+		}
+		entry.Weight = weight
+	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
 	}
@@ -554,6 +668,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 	if body.Value.RebuildMidSystemMessage != nil {
 		entry.RebuildMidSystemMessage = *body.Value.RebuildMidSystemMessage
+	}
+	if body.Value.RequestRetry != nil {
+		entry.RequestRetry = body.Value.RequestRetry
 	}
 	normalizeClaudeKey(&entry)
 	h.cfg.ClaudeKey[targetIndex] = entry
@@ -638,9 +755,16 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 	filtered := make([]config.OpenAICompatibility, 0, len(arr))
 	for i := range arr {
 		normalizeOpenAICompatibilityEntry(&arr[i])
-		if strings.TrimSpace(arr[i].BaseURL) != "" {
-			filtered = append(filtered, arr[i])
+		if strings.TrimSpace(arr[i].BaseURL) == "" {
+			continue
 		}
+		for keyIndex := range arr[i].APIKeyEntries {
+			field := fmt.Sprintf("openai-compatibility[%d].api-key-entries[%d].weight", i, keyIndex)
+			if rejectInvalidCredentialWeight(c, field, arr[i].APIKeyEntries[keyIndex].Weight) {
+				return
+			}
+		}
+		filtered = append(filtered, arr[i])
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -650,14 +774,16 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	type openAICompatPatch struct {
-		Name           *string                             `json:"name"`
-		Prefix         *string                             `json:"prefix"`
-		Disabled       *bool                               `json:"disabled"`
-		DisableCooling *bool                               `json:"disable-cooling"`
-		BaseURL        *string                             `json:"base-url"`
-		APIKeyEntries  *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
-		Models         *[]config.OpenAICompatibilityModel  `json:"models"`
-		Headers        *map[string]string                  `json:"headers"`
+		Name                  *string                             `json:"name"`
+		Prefix                *string                             `json:"prefix"`
+		Disabled              *bool                               `json:"disabled"`
+		DisableCooling        *bool                               `json:"disable-cooling"`
+		BaseURL               *string                             `json:"base-url"`
+		APIKeyEntries         *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
+		Models                *[]config.OpenAICompatibilityModel  `json:"models"`
+		Headers               *map[string]string                  `json:"headers"`
+		SupportPromptCacheKey *bool                               `json:"support-prompt-cache-key"`
+		RequestRetry          *int                                `json:"request-retry"`
 	}
 	var body struct {
 		Name  *string            `json:"name"`
@@ -702,6 +828,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	if body.Value.DisableCooling != nil {
 		entry.DisableCooling = *body.Value.DisableCooling
 	}
+	if body.Value.RequestRetry != nil {
+		entry.RequestRetry = body.Value.RequestRetry
+	}
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
 		if trimmed == "" {
@@ -713,6 +842,12 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		entry.BaseURL = trimmed
 	}
 	if body.Value.APIKeyEntries != nil {
+		for keyIndex := range *body.Value.APIKeyEntries {
+			weight := (*body.Value.APIKeyEntries)[keyIndex].Weight
+			if rejectInvalidCredentialWeight(c, fmt.Sprintf("api-key-entries[%d].weight", keyIndex), weight) {
+				return
+			}
+		}
 		entry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), (*body.Value.APIKeyEntries)...)
 	}
 	if body.Value.Models != nil {
@@ -720,6 +855,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.Headers != nil {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+	}
+	if body.Value.SupportPromptCacheKey != nil {
+		entry.SupportPromptCacheKey = *body.Value.SupportPromptCacheKey
 	}
 	normalizeOpenAICompatibilityEntry(&entry)
 	h.cfg.OpenAICompatibility[targetIndex] = entry
@@ -782,6 +920,9 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 			c.JSON(400, gin.H{"error": fmt.Sprintf("vertex-api-key[%d].api-key is required", i)})
 			return
 		}
+		if rejectInvalidCredentialWeight(c, fmt.Sprintf("vertex-api-key[%d].weight", i), arr[i].Weight) {
+			return
+		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -792,12 +933,14 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	type vertexCompatPatch struct {
 		APIKey         *string                     `json:"api-key"`
+		Weight         json.RawMessage             `json:"weight"`
 		Prefix         *string                     `json:"prefix"`
 		BaseURL        *string                     `json:"base-url"`
 		ProxyURL       *string                     `json:"proxy-url"`
 		Headers        *map[string]string          `json:"headers"`
 		Models         *[]config.VertexCompatModel `json:"models"`
 		ExcludedModels *[]string                   `json:"excluded-models"`
+		RequestRetry   *int                        `json:"request-retry"`
 	}
 	var body struct {
 		Index *int               `json:"index"`
@@ -842,6 +985,14 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 		}
 		entry.APIKey = trimmed
 	}
+	if len(body.Value.Weight) > 0 {
+		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
+		if errWeight != nil {
+			c.JSON(400, gin.H{"error": errWeight.Error()})
+			return
+		}
+		entry.Weight = weight
+	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
 	}
@@ -866,6 +1017,9 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.RequestRetry != nil {
+		entry.RequestRetry = body.Value.RequestRetry
 	}
 	normalizeVertexCompatKey(&entry)
 	h.cfg.VertexCompatAPIKey[targetIndex] = entry
@@ -1137,6 +1291,9 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 		if entry.BaseURL == "" {
 			continue
 		}
+		if rejectInvalidCredentialWeight(c, fmt.Sprintf("codex-api-key[%d].weight", i), entry.Weight) {
+			return
+		}
 		filtered = append(filtered, entry)
 	}
 	h.mu.Lock()
@@ -1148,12 +1305,15 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
 		APIKey         *string              `json:"api-key"`
+		Weight         json.RawMessage      `json:"weight"`
 		Prefix         *string              `json:"prefix"`
 		BaseURL        *string              `json:"base-url"`
 		ProxyURL       *string              `json:"proxy-url"`
+		AlphaSearch    *bool                `json:"alpha-search"`
 		Models         *[]config.CodexModel `json:"models"`
 		Headers        *map[string]string   `json:"headers"`
 		ExcludedModels *[]string            `json:"excluded-models"`
+		RequestRetry   *int                 `json:"request-retry"`
 	}
 	var body struct {
 		Index *int           `json:"index"`
@@ -1189,6 +1349,14 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
 	}
+	if len(body.Value.Weight) > 0 {
+		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
+		if errWeight != nil {
+			c.JSON(400, gin.H{"error": errWeight.Error()})
+			return
+		}
+		entry.Weight = weight
+	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
 	}
@@ -1205,6 +1373,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
 	}
+	if body.Value.AlphaSearch != nil {
+		entry.AlphaSearch = *body.Value.AlphaSearch
+	}
 	if body.Value.Models != nil {
 		entry.Models = append([]config.CodexModel(nil), (*body.Value.Models)...)
 	}
@@ -1213,6 +1384,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.RequestRetry != nil {
+		entry.RequestRetry = body.Value.RequestRetry
 	}
 	normalizeCodexKey(&entry)
 	h.cfg.CodexKey[targetIndex] = entry
@@ -1302,6 +1476,9 @@ func (h *Handler) PutXAIKeys(c *gin.Context) {
 		if entry.BaseURL == "" {
 			continue
 		}
+		if rejectInvalidCredentialWeight(c, fmt.Sprintf("xai-api-key[%d].weight", i), entry.Weight) {
+			return
+		}
 		filtered = append(filtered, entry)
 	}
 	h.mu.Lock()
@@ -1315,6 +1492,7 @@ func (h *Handler) PatchXAIKey(c *gin.Context) {
 	type xaiKeyPatch struct {
 		APIKey         *string            `json:"api-key"`
 		Priority       *int               `json:"priority"`
+		Weight         json.RawMessage    `json:"weight"`
 		Prefix         *string            `json:"prefix"`
 		BaseURL        *string            `json:"base-url"`
 		Websockets     *bool              `json:"websockets"`
@@ -1323,6 +1501,7 @@ func (h *Handler) PatchXAIKey(c *gin.Context) {
 		Headers        *map[string]string `json:"headers"`
 		ExcludedModels *[]string          `json:"excluded-models"`
 		DisableCooling *bool              `json:"disable-cooling"`
+		RequestRetry   *int               `json:"request-retry"`
 	}
 	var body struct {
 		Index *int         `json:"index"`
@@ -1361,6 +1540,14 @@ func (h *Handler) PatchXAIKey(c *gin.Context) {
 	if body.Value.Priority != nil {
 		entry.Priority = *body.Value.Priority
 	}
+	if len(body.Value.Weight) > 0 {
+		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
+		if errWeight != nil {
+			c.JSON(400, gin.H{"error": errWeight.Error()})
+			return
+		}
+		entry.Weight = weight
+	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
 	}
@@ -1391,6 +1578,9 @@ func (h *Handler) PatchXAIKey(c *gin.Context) {
 	}
 	if body.Value.DisableCooling != nil {
 		entry.DisableCooling = *body.Value.DisableCooling
+	}
+	if body.Value.RequestRetry != nil {
+		entry.RequestRetry = body.Value.RequestRetry
 	}
 	normalizeCodexKey(&entry)
 	h.cfg.XAIKey[targetIndex] = entry

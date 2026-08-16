@@ -5,6 +5,7 @@ package middleware
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -214,7 +215,7 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 			w.streamDone = doneChan
 
 			// Start async chunk processor
-			go w.processStreamingChunks(doneChan)
+			go w.processStreamingChunks(w.chunkChannel, streamWriter, doneChan)
 
 			// Write status immediately
 			_ = streamWriter.WriteStatus(statusCode, w.headers)
@@ -276,19 +277,19 @@ func (w *ResponseWriterWrapper) detectStreaming(contentType string) bool {
 
 // processStreamingChunks runs in a separate goroutine to process response chunks from the chunkChannel.
 // It asynchronously writes each chunk to the streaming log writer.
-func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}) {
+func (w *ResponseWriterWrapper) processStreamingChunks(chunks <-chan []byte, streamWriter logging.StreamingLogWriter, done chan<- struct{}) {
 	if done == nil {
 		return
 	}
 
 	defer close(done)
 
-	if w.streamWriter == nil || w.chunkChannel == nil {
+	if streamWriter == nil || chunks == nil {
 		return
 	}
 
-	for chunk := range w.chunkChannel {
-		w.streamWriter.WriteChunkAsync(chunk)
+	for chunk := range chunks {
+		streamWriter.WriteChunkAsync(chunk)
 	}
 }
 
@@ -341,74 +342,73 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	}
 
 	if w.isStreaming && w.streamWriter != nil {
-		if w.chunkChannel != nil {
-			close(w.chunkChannel)
-			w.chunkChannel = nil
-		}
-
-		if w.streamDone != nil {
-			<-w.streamDone
-			w.streamDone = nil
-		}
-
-		w.streamWriter.SetFirstChunkTimestamp(w.firstChunkTimestamp)
-
-		// Write API Request and Response to the streaming log before closing
-		apiRequest := w.extractAPIRequest(c)
-		apiResponse := w.extractAPIResponse(c)
-		if sourceWriter, ok := w.streamWriter.(interface {
-			WriteAPIRequestSource(*logging.FileBodySource) error
-			WriteAPIResponseSource(*logging.FileBodySource) error
-		}); ok {
-			if len(apiRequest) > 0 {
-				_ = w.streamWriter.WriteAPIRequest(apiRequest)
-			}
-			if apiRequestSource != nil && apiRequestSource.HasPayload() {
-				_ = sourceWriter.WriteAPIRequestSource(apiRequestSource)
-			}
-			if len(apiResponse) > 0 {
-				_ = w.streamWriter.WriteAPIResponse(apiResponse)
-			}
-			if apiResponseSource != nil && apiResponseSource.HasPayload() {
-				_ = sourceWriter.WriteAPIResponseSource(apiResponseSource)
-			}
-		} else {
-			var errMerge error
-			apiRequest, errMerge = mergeFileBodySource(apiRequest, apiRequestSource)
-			if errMerge != nil {
-				cleanupFileBodySources(websocketTimelineSource, apiResponseSource, apiWebsocketTimelineSource)
-				return errMerge
-			}
-			apiResponse, errMerge = mergeFileBodySource(apiResponse, apiResponseSource)
-			if errMerge != nil {
-				cleanupFileBodySources(websocketTimelineSource, apiWebsocketTimelineSource)
-				return errMerge
-			}
-			if len(apiRequest) > 0 {
-				_ = w.streamWriter.WriteAPIRequest(apiRequest)
-			}
-			if len(apiResponse) > 0 {
-				_ = w.streamWriter.WriteAPIResponse(apiResponse)
-			}
-		}
-		apiWebsocketTimeline := w.extractAPIWebsocketTimeline(c)
-		var errMerge error
-		apiWebsocketTimeline, errMerge = mergeFileBodySource(apiWebsocketTimeline, apiWebsocketTimelineSource)
-		if errMerge != nil {
-			cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource)
-			return errMerge
-		}
-		if len(apiWebsocketTimeline) > 0 {
-			_ = w.streamWriter.WriteAPIWebsocketTimeline(apiWebsocketTimeline)
-		}
-		if err := w.streamWriter.Close(); err != nil {
-			w.streamWriter = nil
-			cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource)
-			return err
-		}
+		chunkChannel := w.chunkChannel
+		streamDone := w.streamDone
+		streamWriter := w.streamWriter
 		w.streamWriter = nil
-		cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource)
-		return nil
+
+		if chunkChannel != nil {
+			close(chunkChannel)
+		}
+		if streamDone != nil {
+			<-streamDone
+		}
+		w.chunkChannel = nil
+		w.streamDone = nil
+
+		streamWriter.SetFirstChunkTimestamp(w.firstChunkTimestamp)
+		defer cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
+
+		finalizeErr := func() error {
+			// Write API Request and Response to the streaming log before closing.
+			apiRequest := w.extractAPIRequest(c)
+			apiResponse := w.extractAPIResponse(c)
+			if sourceWriter, ok := streamWriter.(interface {
+				WriteAPIRequestSource(*logging.FileBodySource) error
+				WriteAPIResponseSource(*logging.FileBodySource) error
+			}); ok {
+				if len(apiRequest) > 0 {
+					_ = streamWriter.WriteAPIRequest(apiRequest)
+				}
+				if apiRequestSource != nil && apiRequestSource.HasPayload() {
+					_ = sourceWriter.WriteAPIRequestSource(apiRequestSource)
+				}
+				if len(apiResponse) > 0 {
+					_ = streamWriter.WriteAPIResponse(apiResponse)
+				}
+				if apiResponseSource != nil && apiResponseSource.HasPayload() {
+					_ = sourceWriter.WriteAPIResponseSource(apiResponseSource)
+				}
+			} else {
+				var errMerge error
+				apiRequest, errMerge = mergeFileBodySource(apiRequest, apiRequestSource)
+				if errMerge != nil {
+					return errMerge
+				}
+				apiResponse, errMerge = mergeFileBodySource(apiResponse, apiResponseSource)
+				if errMerge != nil {
+					return errMerge
+				}
+				if len(apiRequest) > 0 {
+					_ = streamWriter.WriteAPIRequest(apiRequest)
+				}
+				if len(apiResponse) > 0 {
+					_ = streamWriter.WriteAPIResponse(apiResponse)
+				}
+			}
+			apiWebsocketTimeline := w.extractAPIWebsocketTimeline(c)
+			var errMerge error
+			apiWebsocketTimeline, errMerge = mergeFileBodySource(apiWebsocketTimeline, apiWebsocketTimelineSource)
+			if errMerge != nil {
+				return errMerge
+			}
+			if len(apiWebsocketTimeline) > 0 {
+				_ = streamWriter.WriteAPIWebsocketTimeline(apiWebsocketTimeline)
+			}
+			return nil
+		}()
+
+		return errors.Join(finalizeErr, streamWriter.Close())
 	}
 
 	apiRequest := w.extractAPIRequest(c)

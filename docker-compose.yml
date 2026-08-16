@@ -27,7 +27,8 @@ services:
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/CLIProxyAPI/auths
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
       # Persist store-installed plugins across container recreate (default plugins.dir).
-      - ${CLI_PROXY_PLUGINS_PATH:-./plugins}:/CLIProxyAPI/plugins
+      # Prefer the fork variable while remaining compatible with upstream deployments.
+      - ${CLI_PROXY_PLUGINS_PATH:-${CLI_PROXY_PLUGIN_PATH:-./plugins}}:/CLIProxyAPI/plugins
       # Persist plugin runtime databases and other plugin-owned state.
       - ${CLI_PROXY_DATA_PATH:-./data}:/CLIProxyAPI/data
       - ./log-uploader.yaml:/CLIProxyAPI/log-uploader.yaml
