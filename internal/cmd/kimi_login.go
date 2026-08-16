@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -28,7 +27,7 @@ func DoKimiLogin(cfg *config.Config, options *LoginOptions) {
 		Prompt:    options.Prompt,
 	}
 
-	record, savedPath, err := manager.Login(context.Background(), "kimi", cfg, authOpts)
+	record, savedPath, err := manager.Login(loginContext(options), "kimi", cfg, authOpts)
 	if err != nil {
 		log.Errorf("Kimi authentication failed: %v", err)
 		return

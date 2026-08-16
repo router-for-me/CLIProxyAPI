@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/outbound"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
@@ -313,6 +314,36 @@ func (m *Manager) SetRoundTripperProvider(p RoundTripperProvider) {
 	m.mu.Lock()
 	m.rtProvider = p
 	m.mu.Unlock()
+}
+
+// SetOutboundHeaderFinalizer installs the host used by provider network send boundaries.
+func (m *Manager) SetOutboundHeaderFinalizer(finalizer outbound.HeaderFinalizer) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.outboundHeaderFinalizer = finalizer
+	m.mu.Unlock()
+}
+
+func (m *Manager) outboundContext(ctx context.Context, provider string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if m == nil {
+		return outbound.WithProvider(ctx, provider)
+	}
+	m.mu.RLock()
+	finalizer := m.outboundHeaderFinalizer
+	m.mu.RUnlock()
+	ctx = outbound.WithHeaderFinalizer(ctx, finalizer)
+	return outbound.WithProvider(ctx, provider)
+}
+
+// FinalizeProviderHeaders applies the configured outbound hook to a provider send boundary.
+func (m *Manager) FinalizeProviderHeaders(ctx context.Context, provider string, transport pluginapi.OutboundTransport, headers http.Header) (http.Header, error) {
+	ctx = m.outboundContext(ctx, provider)
+	return outbound.FinalizeHeaders(ctx, provider, transport, headers)
 }
 
 func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeModel string, now time.Time) ([]*Auth, error) {
@@ -671,6 +702,39 @@ func (m *Manager) AvailableProviders() []string {
 			continue
 		}
 		seen[provider] = struct{}{}
+		out = append(out, provider)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ProviderCatalog returns canonical provider keys known to the auth manager through
+// registered executors or auth records. Unlike AvailableProviders, it includes providers
+// that do not currently have an enabled credential so management clients can preconfigure them.
+func (m *Manager) ProviderCatalog() []string {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	seen := make(map[string]struct{}, len(m.executors)+len(m.auths))
+	for provider := range m.executors {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider != "" {
+			seen[provider] = struct{}{}
+		}
+	}
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+		if provider != "" {
+			seen[provider] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for provider := range seen {
 		out = append(out, provider)
 	}
 	sort.Strings(out)

@@ -106,6 +106,7 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 	}
 	if s.coreManager != nil {
 		s.coreManager.SetPluginScheduler(s.pluginHost)
+		s.coreManager.SetOutboundHeaderFinalizer(s.pluginHost)
 	}
 	s.registerPluginAuthParser()
 	if s.pluginHost == nil {

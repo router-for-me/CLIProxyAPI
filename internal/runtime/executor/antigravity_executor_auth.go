@@ -162,7 +162,7 @@ func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth
 	httpReq.Header.Set("User-Agent", "Go-http-client/2.0")
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
+	httpResp, errDo := helps.DoProviderRequest(ctx, "", httpClient, httpReq)
 	if errDo != nil {
 		return nil, errDo
 	}

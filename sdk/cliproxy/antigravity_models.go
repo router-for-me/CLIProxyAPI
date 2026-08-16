@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/outbound"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
@@ -36,6 +37,10 @@ func (s *Service) fetchAntigravityModelCapabilityHintsForAuth(ctx context.Contex
 	if accessToken == "" {
 		return antigravityModelCapabilityHints{}
 	}
+	if s != nil {
+		ctx = outbound.WithHeaderFinalizer(ctx, s.pluginHost)
+	}
+	ctx = outbound.WithProvider(ctx, "antigravity")
 
 	client := &http.Client{}
 	if transport, _, errProxy := proxyutil.BuildHTTPTransport(s.antigravityModelFetchProxyURL(auth)); errProxy == nil && transport != nil {
@@ -52,7 +57,7 @@ func (s *Service) fetchAntigravityModelCapabilityHintsForAuth(ctx context.Contex
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 		req.Header.Set("User-Agent", misc.AntigravityUserAgent())
 
-		resp, errDo := client.Do(req)
+		resp, errDo := outbound.Do(ctx, "antigravity", client, req)
 		if errDo != nil {
 			continue
 		}

@@ -73,6 +73,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 		// Missing schema_version is treated as the original contract.
 		schemaVersion = 1
 	}
+	if resp.Capabilities.OutboundHeaderInterceptor && schemaVersion < pluginabi.SchemaVersionOutboundHeaderInterceptor {
+		return pluginapi.Plugin{}, fmt.Errorf("outbound header interceptor requires plugin schema version %d or newer", pluginabi.SchemaVersionOutboundHeaderInterceptor)
+	}
 	plugin := pluginapi.Plugin{
 		Metadata:      resp.Metadata,
 		SchemaVersion: schemaVersion,
@@ -112,6 +115,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	}
 	if resp.Capabilities.RequestInterceptor {
 		plugin.Capabilities.RequestInterceptor = adapter
+	}
+	if resp.Capabilities.OutboundHeaderInterceptor {
+		plugin.Capabilities.OutboundHeaderInterceptor = adapter
 	}
 	if resp.Capabilities.RequestLifecyclePlugin {
 		plugin.Capabilities.RequestLifecyclePlugin = adapter
@@ -488,6 +494,15 @@ func (a *rpcPluginAdapter) InterceptRequestAfterAuth(ctx context.Context, req pl
 	return callPlugin[pluginapi.RequestInterceptResponse](ctx, a.client, pluginabi.MethodRequestInterceptAfter, rpcRequestInterceptRequest{
 		RequestInterceptRequest: req,
 		HostCallbackID:          callbackID,
+	})
+}
+
+func (a *rpcPluginAdapter) InterceptOutboundHeaders(ctx context.Context, req pluginapi.OutboundHeaderInterceptRequest) (pluginapi.OutboundHeaderInterceptResponse, error) {
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	return callPlugin[pluginapi.OutboundHeaderInterceptResponse](ctx, a.client, pluginabi.MethodOutboundHeadersIntercept, rpcOutboundHeaderInterceptRequest{
+		OutboundHeaderInterceptRequest: req,
+		HostCallbackID:                 callbackID,
 	})
 }
 

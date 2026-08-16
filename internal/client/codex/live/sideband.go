@@ -408,6 +408,11 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		if errPrepare := h.authManager.PrepareHttpRequest(ctx, current, req); errPrepare != nil {
 			return nil, nil, errPrepare
 		}
+		finalHeaders, errFinalize := h.finalizeCodexWebsocketHeaders(ctx, req.Header)
+		if errFinalize != nil {
+			return nil, nil, errFinalize
+		}
+		req.Header = finalHeaders
 		authType, authValue := current.AccountInfo()
 		helps.RecordAPIWebsocketRequest(ctx, runtimeConfig, helps.UpstreamRequestLog{
 			URL:       upstreamURL,

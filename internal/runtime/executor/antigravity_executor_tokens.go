@@ -124,7 +124,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			AuthValue: authValue,
 		})
 
-		httpResp, errDo := httpClient.Do(httpReq)
+		httpResp, errDo := helps.DoProviderRequest(ctx, "", httpClient, httpReq)
 		if errDo != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 			if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {

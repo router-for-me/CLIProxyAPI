@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/outbound"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -138,7 +139,7 @@ func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*code
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := client.Do(req)
+	resp, err := outbound.Do(ctx, "codex", client, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to request codex device code: %w", err)
 	}
@@ -191,7 +192,7 @@ func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 
-		resp, err := client.Do(req)
+		resp, err := outbound.Do(ctx, "codex", client, req)
 		if err != nil {
 			return nil, fmt.Errorf("failed to poll codex device token: %w", err)
 		}

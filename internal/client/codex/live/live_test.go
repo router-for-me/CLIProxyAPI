@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 type apiKeyFirstSelector struct{}
@@ -752,6 +753,11 @@ func TestHandleSidebandPinsAuthAndRelaysBidirectionally(t *testing.T) {
 	defer upstreamServer.Close()
 
 	manager := auth.NewManager(nil, nil, nil)
+	manager.SetOutboundHeaderFinalizer(liveHeaderFinalizerFunc(func(_ context.Context, req pluginapi.OutboundHeaderInterceptRequest) (http.Header, error) {
+		headers := req.Headers.Clone()
+		headers.Set("User-Agent", "sideband-plugin/1.0")
+		return headers, nil
+	}))
 	executor := &captureExecutor{}
 	manager.RegisterExecutor(executor)
 	registerCredential(t, manager, &auth.Auth{
@@ -804,6 +810,9 @@ func TestHandleSidebandPinsAuthAndRelaysBidirectionally(t *testing.T) {
 
 	select {
 	case captured := <-upstreamHeaders:
+		if got := captured.Get("User-Agent"); got != "sideband-plugin/1.0" {
+			t.Fatalf("upstream User-Agent = %q", got)
+		}
 		if got := captured.Get("Authorization"); got != "Bearer pinned-token" {
 			t.Fatalf("upstream Authorization = %q, want pinned OAuth token", got)
 		}

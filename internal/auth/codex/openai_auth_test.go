@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/outbound"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -20,9 +22,47 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+type oauthHeaderFinalizerFunc func(context.Context, pluginapi.OutboundHeaderInterceptRequest) (http.Header, error)
+
+func (f oauthHeaderFinalizerFunc) FinalizeOutboundHeaders(ctx context.Context, req pluginapi.OutboundHeaderInterceptRequest) (http.Header, error) {
+	return f(ctx, req)
+}
+
 func TestNewCodexAuthDoesNotSetRequestTimeout(t *testing.T) {
 	if got := NewCodexAuth(nil).httpClient.Timeout; got != 0 {
 		t.Fatalf("HTTP client timeout = %s, want zero", got)
+	}
+}
+
+func TestExchangeCodeForTokensFinalizesOAuthHeaders(t *testing.T) {
+	var sawRequest bool
+	auth := &CodexAuth{httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		sawRequest = true
+		if req.Header.Get("User-Agent") != "oauth-plugin/1.0" {
+			t.Fatalf("User-Agent = %q", req.Header.Get("User-Agent"))
+		}
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":"probe"}`)),
+			Request:    req,
+		}, nil
+	})}}
+	ctx := outbound.WithHeaderFinalizer(context.Background(), oauthHeaderFinalizerFunc(func(_ context.Context, req pluginapi.OutboundHeaderInterceptRequest) (http.Header, error) {
+		if req.Provider != "codex" || req.Transport != pluginapi.OutboundTransportHTTP {
+			t.Fatalf("finalizer request identity = %#v", req)
+		}
+		headers := req.Headers.Clone()
+		headers.Set("User-Agent", "oauth-plugin/1.0")
+		return headers, nil
+	}))
+
+	_, errExchange := auth.ExchangeCodeForTokensWithRedirect(ctx, "code", "http://localhost/callback", &PKCECodes{CodeVerifier: "verifier"})
+	if errExchange == nil || !strings.Contains(errExchange.Error(), "status 400") {
+		t.Fatalf("ExchangeCodeForTokensWithRedirect() error = %v, want status 400", errExchange)
+	}
+	if !sawRequest {
+		t.Fatal("OAuth request was not sent")
 	}
 }
 

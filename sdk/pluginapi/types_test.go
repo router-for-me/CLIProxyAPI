@@ -24,6 +24,7 @@ var _ RequestNormalizer = (*compileTimePlugin)(nil)
 var _ ResponseTranslator = (*compileTimePlugin)(nil)
 var _ ResponseNormalizer = (*compileTimePlugin)(nil)
 var _ RequestInterceptor = (*compileTimePlugin)(nil)
+var _ OutboundHeaderInterceptor = (*compileTimePlugin)(nil)
 var _ RequestLifecyclePlugin = (*compileTimePlugin)(nil)
 var _ ResponseInterceptor = (*compileTimePlugin)(nil)
 var _ StreamChunkInterceptor = (*compileTimePlugin)(nil)
@@ -517,6 +518,10 @@ func (compileTimePlugin) InterceptRequestBeforeAuth(context.Context, RequestInte
 
 func (compileTimePlugin) InterceptRequestAfterAuth(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error) {
 	return RequestInterceptResponse{}, nil
+}
+
+func (compileTimePlugin) InterceptOutboundHeaders(context.Context, OutboundHeaderInterceptRequest) (OutboundHeaderInterceptResponse, error) {
+	return OutboundHeaderInterceptResponse{}, nil
 }
 
 func (compileTimePlugin) HandleRequestComplete(context.Context, RequestCompletion) error { return nil }

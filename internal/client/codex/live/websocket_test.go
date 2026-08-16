@@ -1,6 +1,7 @@
 package live
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 func TestHandleDirectWebsocketRejectsClientSecretModelMismatch(t *testing.T) {
@@ -125,6 +127,11 @@ func TestHandleDirectWebsocketRelaysStandardRealtimeFrames(t *testing.T) {
 	defer upstreamServer.Close()
 
 	manager := auth.NewManager(nil, nil, nil)
+	manager.SetOutboundHeaderFinalizer(liveHeaderFinalizerFunc(func(_ context.Context, req pluginapi.OutboundHeaderInterceptRequest) (http.Header, error) {
+		headers := req.Headers.Clone()
+		headers.Set("User-Agent", "direct-live-plugin/1.0")
+		return headers, nil
+	}))
 	manager.RegisterExecutor(&captureExecutor{})
 	registerCredential(t, manager, &auth.Auth{
 		ID:       "codex-oauth",
@@ -173,6 +180,9 @@ func TestHandleDirectWebsocketRelaysStandardRealtimeFrames(t *testing.T) {
 
 	select {
 	case request := <-upstreamRequest:
+		if request.Header.Get("User-Agent") != "direct-live-plugin/1.0" {
+			t.Fatalf("User-Agent = %q", request.Header.Get("User-Agent"))
+		}
 		if request.Header.Get("Authorization") != "Bearer oauth-token" {
 			t.Fatalf("Authorization = %q", request.Header.Get("Authorization"))
 		}

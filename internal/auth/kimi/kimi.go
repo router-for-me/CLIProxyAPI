@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/outbound"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -192,7 +193,7 @@ func (c *DeviceFlowClient) RequestDeviceCode(ctx context.Context) (*DeviceCodeRe
 		req.Header.Set(k, v)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := outbound.Do(ctx, "kimi", c.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("kimi: device code request failed: %w", err)
 	}
@@ -280,7 +281,7 @@ func (c *DeviceFlowClient) exchangeDeviceCode(ctx context.Context, deviceCode st
 		req.Header.Set(k, v)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := outbound.Do(ctx, "kimi", c.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("kimi: token request failed: %w", err), false
 	}
@@ -382,7 +383,7 @@ func (c *DeviceFlowClient) refreshTokenSingleFlight(ctx context.Context, refresh
 		req.Header.Set(k, v)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := outbound.Do(ctx, "kimi", c.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("kimi: refresh request failed: %w", err)
 	}

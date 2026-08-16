@@ -106,6 +106,8 @@ type Capabilities struct {
 	ResponseAfterTranslator ResponseNormalizer
 	// RequestInterceptor rewrites execution requests before and after credential selection.
 	RequestInterceptor RequestInterceptor
+	// OutboundHeaderInterceptor rewrites provider request headers at the final network boundary.
+	OutboundHeaderInterceptor OutboundHeaderInterceptor
 	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
 	RequestLifecyclePlugin RequestLifecyclePlugin
 	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
@@ -670,6 +672,17 @@ type HostRecentRequestEntry struct {
 	Failed int64 `json:"failed"`
 }
 
+// HostProviderInfo identifies one canonical provider available to plugins.
+type HostProviderInfo struct {
+	// ID is the canonical provider key used for execution and outbound interception.
+	ID string `json:"id"`
+}
+
+// HostProviderListResponse returns the host provider catalog.
+type HostProviderListResponse struct {
+	Providers []HostProviderInfo `json:"providers"`
+}
+
 // HostAuthFileEntry describes one credential exposed through host auth callbacks.
 type HostAuthFileEntry struct {
 	// ID identifies the credential record.
@@ -934,6 +947,12 @@ type RequestInterceptor interface {
 	InterceptRequestAfterAuth(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error)
 }
 
+// OutboundHeaderInterceptor rewrites provider request headers after provider defaults,
+// credentials, and request cloaking have been applied.
+type OutboundHeaderInterceptor interface {
+	InterceptOutboundHeaders(context.Context, OutboundHeaderInterceptRequest) (OutboundHeaderInterceptResponse, error)
+}
+
 // RequestLifecyclePlugin receives asynchronous terminal events after execution finishes, fails, is rejected, or is canceled.
 type RequestLifecyclePlugin interface {
 	HandleRequestComplete(context.Context, RequestCompletion) error
@@ -1024,6 +1043,35 @@ type RequestInterceptResponse struct {
 	ResponseHeaders http.Header
 	// ResponseBody contains the downstream response body used when Terminate is true.
 	ResponseBody []byte
+}
+
+// OutboundTransport identifies the provider network transport being finalized.
+type OutboundTransport string
+
+const (
+	// OutboundTransportHTTP identifies an outbound HTTP request, including streaming requests.
+	OutboundTransportHTTP OutboundTransport = "http"
+	// OutboundTransportWebSocket identifies an outbound websocket handshake.
+	OutboundTransportWebSocket OutboundTransport = "websocket"
+)
+
+// OutboundHeaderInterceptRequest describes mutable provider headers immediately before network I/O.
+// Credential and transport-owned headers are omitted by the host.
+type OutboundHeaderInterceptRequest struct {
+	// Provider is the canonical runtime provider identifier.
+	Provider string
+	// Transport identifies the HTTP or websocket send boundary.
+	Transport OutboundTransport
+	// Headers contains only headers the plugin may inspect or modify.
+	Headers http.Header
+}
+
+// OutboundHeaderInterceptResponse returns final outbound-header modifications.
+type OutboundHeaderInterceptResponse struct {
+	// Headers replaces matching mutable headers and preserves headers not mentioned here.
+	Headers http.Header
+	// ClearHeaders removes mutable headers before Headers is applied.
+	ClearHeaders []string
 }
 
 // RequestCompletionOutcome identifies how an intercepted request ended.

@@ -14,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/outbound"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -149,7 +150,7 @@ func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redir
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, errDo := o.httpClient.Do(req)
+	resp, errDo := outbound.Do(ctx, "antigravity", o.httpClient, req)
 	if errDo != nil {
 		return nil, fmt.Errorf("antigravity token exchange: execute request: %w", errDo)
 	}
@@ -191,7 +192,7 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("User-Agent", o.shortUserAgent())
 
-	resp, errDo := o.httpClient.Do(req)
+	resp, errDo := outbound.Do(ctx, "antigravity", o.httpClient, req)
 	if errDo != nil {
 		return "", fmt.Errorf("antigravity userinfo: execute request: %w", errDo)
 	}
@@ -245,7 +246,7 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", userAgent)
 
-	resp, errDo := o.httpClient.Do(req)
+	resp, errDo := outbound.Do(ctx, "antigravity", o.httpClient, req)
 	if errDo != nil {
 		return "", fmt.Errorf("execute request: %w", errDo)
 	}
@@ -322,7 +323,7 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 		req.Header.Set("User-Agent", userAgent)
 		req.Header.Set("X-Goog-Api-Client", misc.AntigravityGoogAPIClientUA)
 
-		resp, errDo := o.httpClient.Do(req)
+		resp, errDo := outbound.Do(ctx, "antigravity", o.httpClient, req)
 		if errDo != nil {
 			cancel()
 			return "", fmt.Errorf("execute request: %w", errDo)

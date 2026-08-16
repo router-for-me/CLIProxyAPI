@@ -16,6 +16,9 @@ import (
 // It provides configuration for authentication flows including browser behavior
 // and interactive prompting capabilities.
 type LoginOptions struct {
+	// Context carries request-scoped provider integrations into authentication flows.
+	Context context.Context
+
 	// NoBrowser indicates whether to skip opening the browser automatically.
 	NoBrowser bool
 
@@ -24,6 +27,13 @@ type LoginOptions struct {
 
 	// Prompt allows the caller to provide interactive input when needed.
 	Prompt func(prompt string) (string, error)
+}
+
+func loginContext(options *LoginOptions) context.Context {
+	if options != nil && options.Context != nil {
+		return options.Context
+	}
+	return context.Background()
 }
 
 // DoCodexLogin triggers the Codex OAuth flow through the shared authentication manager.
@@ -52,7 +62,7 @@ func DoCodexLogin(cfg *config.Config, options *LoginOptions) {
 		Prompt:       promptFn,
 	}
 
-	_, savedPath, err := manager.Login(context.Background(), "codex", cfg, authOpts)
+	_, savedPath, err := manager.Login(loginContext(options), "codex", cfg, authOpts)
 	if err != nil {
 		if authErr, ok := errors.AsType[*codex.AuthenticationError](err); ok {
 			log.Error(codex.GetUserFriendlyMessage(authErr))

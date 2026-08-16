@@ -10,10 +10,14 @@ const (
 	// Version 3 omits OriginalRequest/RequestBody on payload stream chunks
 	// (ChunkIndex >= 0); those fields remain on StreamChunkHeaderInitIndex only.
 	// Plugins that still need per-chunk request bodies should keep schema_version < 3.
-	SchemaVersion uint32 = 3
+	// Version 4 adds provider-tagged final outbound-header interception.
+	SchemaVersion uint32 = 4
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
+	// SchemaVersionOutboundHeaderInterceptor is the first schema version that supports
+	// final provider-tagged HTTP and websocket header interception.
+	SchemaVersionOutboundHeaderInterceptor uint32 = 4
 )
 
 const (
@@ -45,11 +49,12 @@ const (
 	MethodExecutorCountTokens   = "executor.count_tokens"
 	MethodExecutorHTTPRequest   = "executor.http_request"
 
-	MethodRequestTranslate       = "request.translate"
-	MethodRequestNormalize       = "request.normalize"
-	MethodRequestInterceptBefore = "request.intercept_before"
-	MethodRequestInterceptAfter  = "request.intercept_after"
-	MethodRequestComplete        = "request.complete"
+	MethodRequestTranslate         = "request.translate"
+	MethodRequestNormalize         = "request.normalize"
+	MethodRequestInterceptBefore   = "request.intercept_before"
+	MethodRequestInterceptAfter    = "request.intercept_after"
+	MethodOutboundHeadersIntercept = "outbound_headers.intercept"
+	MethodRequestComplete          = "request.complete"
 
 	MethodResponseTranslate            = "response.translate"
 	MethodResponseNormalizeBefore      = "response.normalize_before"
@@ -83,6 +88,7 @@ const (
 	MethodHostAuthGet            = "host.auth.get"
 	MethodHostAuthGetRuntime     = "host.auth.get_runtime"
 	MethodHostAuthSave           = "host.auth.save"
+	MethodHostProviderList       = "host.provider.list"
 )
 
 type Envelope struct {

@@ -280,7 +280,7 @@ func (h *Host) callStartLogin(ctx context.Context, record capabilityRecord, prov
 		Provider:   normalizeProviderID(provider),
 		BaseURL:    strings.TrimSpace(baseURL),
 		Host:       h.hostConfigSummary(),
-		HTTPClient: h.newHTTPClient(nil),
+		HTTPClient: h.newHTTPClient(nil, provider),
 	}
 	resp, errStart := authProvider.StartLogin(ctx, req)
 	if errStart != nil {
@@ -318,7 +318,7 @@ func (h *Host) callPollLogin(ctx context.Context, record capabilityRecord, provi
 		Provider:   normalizeProviderID(provider),
 		State:      strings.TrimSpace(state),
 		Host:       h.hostConfigSummary(),
-		HTTPClient: h.newHTTPClient(nil),
+		HTTPClient: h.newHTTPClient(nil, provider),
 		Metadata:   cloneAnyMap(metadata),
 	}
 	resp, errPoll := authProvider.PollLogin(ctx, req)

@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/outbound"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
@@ -35,7 +36,7 @@ type codexOAuthService interface {
 
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	ctx := context.Background()
-	ctx = PopulateAuthContext(ctx, c)
+	ctx = h.populateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Claude authentication...")
 
@@ -195,7 +196,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 func (h *Handler) RequestCodexToken(c *gin.Context) {
 	ctx := context.Background()
-	ctx = PopulateAuthContext(ctx, c)
+	ctx = h.populateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Codex authentication...")
 
@@ -343,7 +344,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	ctx := context.Background()
-	ctx = PopulateAuthContext(ctx, c)
+	ctx = h.populateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Antigravity authentication...")
 
@@ -510,7 +511,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 func (h *Handler) RequestXAIToken(c *gin.Context) {
 	ctx := context.Background()
-	ctx = PopulateAuthContext(ctx, c)
+	ctx = h.populateAuthContext(ctx, c)
 
 	fmt.Println("Initializing xAI authentication...")
 
@@ -623,7 +624,7 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 
 func (h *Handler) RequestKimiToken(c *gin.Context) {
 	ctx := context.Background()
-	ctx = PopulateAuthContext(ctx, c)
+	ctx = h.populateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Kimi authentication...")
 
@@ -782,7 +783,7 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 	host := h.pluginHost
 	h.mu.Unlock()
 	if isPlugin && host != nil && host.HasAuthProvider(provider) {
-		ctx := PopulateAuthContext(context.Background(), c)
+		ctx := h.populateAuthContext(context.Background(), c)
 		resp, handled, errPoll := host.PollLogin(ctx, provider, state, metadata)
 		if handled {
 			if errPoll != nil {
@@ -885,4 +886,15 @@ func PopulateAuthContext(ctx context.Context, c *gin.Context) context.Context {
 		Headers: c.Request.Header,
 	}
 	return coreauth.WithRequestInfo(ctx, info)
+}
+
+func (h *Handler) populateAuthContext(ctx context.Context, c *gin.Context) context.Context {
+	ctx = PopulateAuthContext(ctx, c)
+	if h == nil {
+		return ctx
+	}
+	h.mu.Lock()
+	host := h.pluginHost
+	h.mu.Unlock()
+	return outbound.WithHeaderFinalizer(ctx, host)
 }

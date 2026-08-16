@@ -105,6 +105,23 @@ func TestManager_AvailableProvidersAndHasProviderAuth_ExcludeDisabled(t *testing
 	}
 }
 
+func TestManagerProviderCatalogIncludesExecutorsAndDisabledAuths(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.executors[" CODEX "] = nil
+	if _, errRegister := manager.Register(context.Background(), &Auth{
+		ID:       "disabled-claude",
+		Provider: " Claude ",
+		Disabled: true,
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	providers := manager.ProviderCatalog()
+	if len(providers) != 2 || providers[0] != "claude" || providers[1] != "codex" {
+		t.Fatalf("ProviderCatalog() = %v, want [claude codex]", providers)
+	}
+}
+
 func TestManager_ResetQuotaClearsRuntimeAndRegistryState(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	ctx := context.Background()

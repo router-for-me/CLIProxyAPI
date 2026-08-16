@@ -52,6 +52,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			selection.End("attempt_bind_failed")
 			return cliproxyexecutor.Response{}, errBind
 		}
+		execCtx = m.outboundContext(execCtx, selection.Provider)
 		// Enrich before auth preparation so prepare-stage usage records observe the client request.
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 		if rt := m.roundTripperFor(auth); rt != nil {

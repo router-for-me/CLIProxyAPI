@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/outbound"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
@@ -122,6 +124,16 @@ func (c *hostHTTPClient) doHTTP(ctx context.Context, req pluginapi.HTTPRequest) 
 		return nil, cfg, fmt.Errorf("create host http request: %w", errNewRequest)
 	}
 	httpReq.Header = cloneHeader(req.Headers)
+	provider := strings.TrimSpace(c.provider)
+	if provider == "" && c.auth != nil {
+		provider = strings.TrimSpace(c.auth.Provider)
+	}
+	ctx = outbound.WithHeaderFinalizer(ctx, c.host)
+	ctx = outbound.WithProvider(ctx, provider)
+	httpReq = httpReq.WithContext(ctx)
+	if errFinalize := outbound.FinalizeRequest(ctx, provider, httpReq); errFinalize != nil {
+		return nil, cfg, fmt.Errorf("finalize host http request: %w", errFinalize)
+	}
 	c.recordHTTPRequest(ctx, cfg, httpReq, req.Body)
 	client := helps.NewProxyAwareHTTPClient(ctx, cfg, c.auth, 0)
 	if client == nil {

@@ -262,6 +262,7 @@ func (b *Builder) Build() (*Service, error) {
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
 	if pluginHost != nil {
 		coreManager.SetPluginScheduler(pluginHost)
+		coreManager.SetOutboundHeaderFinalizer(pluginHost)
 	}
 
 	service := &Service{

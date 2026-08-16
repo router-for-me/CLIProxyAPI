@@ -20,6 +20,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/wsrelay"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/outbound"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -47,6 +49,18 @@ func NewAIStudioExecutor(cfg *config.Config, provider string, relay *wsrelay.Man
 
 // Identifier returns the executor identifier.
 func (e *AIStudioExecutor) Identifier() string { return "aistudio" }
+
+func finalizeAIStudioRequest(ctx context.Context, req *wsrelay.HTTPRequest) error {
+	if req == nil {
+		return fmt.Errorf("aistudio executor: outbound request is nil")
+	}
+	headers, errFinalize := outbound.FinalizeHeaders(ctx, "aistudio", pluginapi.OutboundTransportHTTP, req.Headers)
+	if errFinalize != nil {
+		return errFinalize
+	}
+	req.Headers = headers
+	return nil
+}
 
 // PrepareRequest prepares the HTTP request for execution.
 func (e *AIStudioExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
@@ -99,6 +113,9 @@ func (e *AIStudioExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.A
 		Headers: httpReq.Header.Clone(),
 		Body:    body,
 	}
+	if errFinalize := finalizeAIStudioRequest(ctx, wsReq); errFinalize != nil {
+		return nil, errFinalize
+	}
 	wsResp, errRelay := e.relay.NonStream(ctx, auth.ID, wsReq)
 	if errRelay != nil {
 		return nil, errRelay
@@ -149,6 +166,9 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: wsReq.Headers}, attrs)
+	if errFinalize := finalizeAIStudioRequest(ctx, wsReq); errFinalize != nil {
+		return resp, errFinalize
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -221,6 +241,9 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: wsReq.Headers}, attrs)
+	if errFinalize := finalizeAIStudioRequest(ctx, wsReq); errFinalize != nil {
+		return nil, errFinalize
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -400,6 +423,9 @@ func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.A
 		URL:     endpoint,
 		Headers: http.Header{"Content-Type": []string{"application/json"}},
 		Body:    body.payload,
+	}
+	if errFinalize := finalizeAIStudioRequest(ctx, wsReq); errFinalize != nil {
+		return cliproxyexecutor.Response{}, errFinalize
 	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {

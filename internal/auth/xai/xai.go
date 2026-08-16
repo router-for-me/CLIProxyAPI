@@ -13,6 +13,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/outbound"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -73,7 +74,7 @@ func (a *XAIAuth) Discover(ctx context.Context) (*Discovery, error) {
 		return nil, fmt.Errorf("xai discovery: create request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := a.httpClient.Do(req)
+	resp, err := outbound.Do(ctx, "xai", a.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("xai discovery: request failed: %w", err)
 	}
@@ -140,7 +141,7 @@ func (a *XAIAuth) RequestDeviceCode(ctx context.Context, deviceAuthorizationEndp
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := a.httpClient.Do(req)
+	resp, err := outbound.Do(ctx, "xai", a.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("xai device code request failed: %w", err)
 	}
@@ -268,7 +269,7 @@ func (a *XAIAuth) exchangeDeviceCode(ctx context.Context, tokenEndpoint, deviceC
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := a.httpClient.Do(req)
+	resp, err := outbound.Do(ctx, "xai", a.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("xai device token request failed: %w", err), interval, false
 	}
@@ -377,7 +378,7 @@ func (a *XAIAuth) postTokenForm(ctx context.Context, tokenEndpoint string, form 
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	resp, err := a.httpClient.Do(req)
+	resp, err := outbound.Do(ctx, "xai", a.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("xai token request failed: %w", err)
 	}

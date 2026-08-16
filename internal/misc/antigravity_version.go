@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/outbound"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -211,7 +212,7 @@ func fetchAntigravityHubLatestManifestVersion(ctx context.Context, client *http.
 	httpReq.Header.Set("User-Agent", "electron-builder")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 
-	resp, errDo := client.Do(httpReq)
+	resp, errDo := outbound.Do(ctx, "antigravity", client, httpReq)
 	if errDo != nil {
 		return "", fmt.Errorf("fetch antigravity Hub updater manifest: %w", errDo)
 	}

@@ -393,6 +393,7 @@ func (m *Manager) tryRefreshExecutionAuthAfterUnauthorized(ctx context.Context, 
 
 	log.Debugf("unauthorized Home response for %s (%s), refreshing credentials before redispatch", auth.Provider, auth.ID)
 	target := auth.Clone()
+	ctx = m.outboundContext(ctx, executor.Identifier())
 	updated, errRefresh := executor.Refresh(ctx, target)
 	if errRefresh != nil {
 		log.Debugf("Home credential refresh before redispatch failed for %s (%s)", auth.Provider, auth.ID)
@@ -529,6 +530,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	}
 
 	cloned := auth.Clone()
+	ctx = m.outboundContext(ctx, executorKeyFromAuth(auth))
 	updated, err := exec.Refresh(ctx, cloned)
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)

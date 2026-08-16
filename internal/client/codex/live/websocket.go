@@ -3,6 +3,7 @@ package live
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,10 +15,18 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
 const defaultStandardRealtimeModel = "gpt-realtime"
+
+func (h *Handler) finalizeCodexWebsocketHeaders(ctx context.Context, headers http.Header) (http.Header, error) {
+	if h == nil || h.authManager == nil {
+		return nil, fmt.Errorf("codex live auth manager is unavailable")
+	}
+	return h.authManager.FinalizeProviderHeaders(ctx, "codex", pluginapi.OutboundTransportWebSocket, headers)
+}
 
 // HandleRealtimeWebsocket dispatches a standard Realtime WebSocket or an existing call sideband.
 func (h *Handler) HandleRealtimeWebsocket(c *gin.Context) {
@@ -93,6 +102,11 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		if errPrepare := h.authManager.PrepareHttpRequest(ctx, current, request); errPrepare != nil {
 			return nil, nil, errPrepare
 		}
+		finalHeaders, errFinalize := h.finalizeCodexWebsocketHeaders(ctx, request.Header)
+		if errFinalize != nil {
+			return nil, nil, errFinalize
+		}
+		request.Header = finalHeaders
 		authType, authValue := current.AccountInfo()
 		helpersConfig := h.currentConfig()
 		helps.RecordAPIWebsocketRequest(ctx, helpersConfig, helps.UpstreamRequestLog{

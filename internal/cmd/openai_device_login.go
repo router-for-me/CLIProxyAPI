@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -40,7 +39,7 @@ func DoCodexDeviceLogin(cfg *config.Config, options *LoginOptions) {
 		Prompt: promptFn,
 	}
 
-	_, savedPath, err := manager.Login(context.Background(), "codex", cfg, authOpts)
+	_, savedPath, err := manager.Login(loginContext(options), "codex", cfg, authOpts)
 	if err != nil {
 		if authErr, ok := errors.AsType[*codex.AuthenticationError](err); ok {
 			log.Error(codex.GetUserFriendlyMessage(authErr))

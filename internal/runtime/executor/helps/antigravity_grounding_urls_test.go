@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/outbound"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"github.com/tidwall/gjson"
 )
 
@@ -16,6 +18,12 @@ func (f groundingURLRoundTripper) RoundTrip(req *http.Request) (*http.Response, 
 	return f(req)
 }
 
+type groundingHeaderFinalizerFunc func(context.Context, pluginapi.OutboundHeaderInterceptRequest) (http.Header, error)
+
+func (f groundingHeaderFinalizerFunc) FinalizeOutboundHeaders(ctx context.Context, req pluginapi.OutboundHeaderInterceptRequest) (http.Header, error) {
+	return f(ctx, req)
+}
+
 func TestResolveAntigravityGroundingURLsResolvesVertexRedirects(t *testing.T) {
 	t.Parallel()
 
@@ -23,6 +31,7 @@ func TestResolveAntigravityGroundingURLsResolvesVertexRedirects(t *testing.T) {
 	const resolvedURL = "https://example.com/weather"
 
 	var sawRedirectRequest bool
+	var finalizerCalled bool
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", groundingURLRoundTripper(func(req *http.Request) (*http.Response, error) {
 		if req.Method != http.MethodHead {
 			t.Fatalf("method = %s, want HEAD", req.Method)
@@ -38,6 +47,10 @@ func TestResolveAntigravityGroundingURLsResolvesVertexRedirects(t *testing.T) {
 			},
 			Body: io.NopCloser(strings.NewReader("")),
 		}, nil
+	}))
+	ctx = outbound.WithHeaderFinalizer(ctx, groundingHeaderFinalizerFunc(func(_ context.Context, req pluginapi.OutboundHeaderInterceptRequest) (http.Header, error) {
+		finalizerCalled = true
+		return req.Headers, nil
 	}))
 
 	input := []byte(`{
@@ -56,6 +69,9 @@ func TestResolveAntigravityGroundingURLsResolvesVertexRedirects(t *testing.T) {
 	output := ResolveAntigravityGroundingURLs(ctx, nil, nil, input)
 	if !sawRedirectRequest {
 		t.Fatal("expected resolver to request the vertex redirect")
+	}
+	if finalizerCalled {
+		t.Fatal("provider-returned grounding URL unexpectedly used outbound header interception")
 	}
 	if got := gjson.GetBytes(output, "response.candidates.0.groundingMetadata.groundingChunks.0.web.uri").String(); got != resolvedURL {
 		t.Fatalf("resolved uri = %q, want %q; output=%s", got, resolvedURL, output)

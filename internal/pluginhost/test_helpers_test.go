@@ -94,6 +94,19 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 			return nil, errIntercept
 		}
 		return marshalRPCResult(resp)
+	case pluginabi.MethodOutboundHeadersIntercept:
+		if l.active.Capabilities.OutboundHeaderInterceptor == nil {
+			return nil, fmt.Errorf("missing outbound header interceptor")
+		}
+		var req rpcOutboundHeaderInterceptRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errIntercept := l.active.Capabilities.OutboundHeaderInterceptor.InterceptOutboundHeaders(ctx, req.OutboundHeaderInterceptRequest)
+		if errIntercept != nil {
+			return nil, errIntercept
+		}
+		return marshalRPCResult(resp)
 	case pluginabi.MethodRequestComplete:
 		if l.active.Capabilities.RequestLifecyclePlugin == nil {
 			return nil, fmt.Errorf("missing request lifecycle plugin")
@@ -291,6 +304,15 @@ type requestInterceptorFunc func(context.Context, pluginapi.RequestInterceptRequ
 func (f requestInterceptorFunc) InterceptRequestBeforeAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
 	if f == nil {
 		return pluginapi.RequestInterceptResponse{}, fmt.Errorf("missing request interceptor callback")
+	}
+	return f(ctx, req)
+}
+
+type outboundHeaderInterceptorFunc func(context.Context, pluginapi.OutboundHeaderInterceptRequest) (pluginapi.OutboundHeaderInterceptResponse, error)
+
+func (f outboundHeaderInterceptorFunc) InterceptOutboundHeaders(ctx context.Context, req pluginapi.OutboundHeaderInterceptRequest) (pluginapi.OutboundHeaderInterceptResponse, error) {
+	if f == nil {
+		return pluginapi.OutboundHeaderInterceptResponse{}, fmt.Errorf("missing outbound header interceptor callback")
 	}
 	return f(ctx, req)
 }

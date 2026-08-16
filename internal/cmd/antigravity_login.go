@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -28,7 +27,7 @@ func DoAntigravityLogin(cfg *config.Config, options *LoginOptions) {
 		Prompt:       promptFn,
 	}
 
-	record, savedPath, err := manager.Login(context.Background(), "antigravity", cfg, authOpts)
+	record, savedPath, err := manager.Login(loginContext(options), "antigravity", cfg, authOpts)
 	if err != nil {
 		log.Errorf("Antigravity authentication failed: %v", err)
 		return

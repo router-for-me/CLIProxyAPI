@@ -857,7 +857,7 @@ func applyClaudeHeadersWithNativeProfile(
 // exactly how the streaming and non-streaming beta sets diverged before.
 func doClaudeUpstreamRequest(client *http.Client, req *http.Request) (*http.Response, error) {
 	applyClaudeWireHeaderCasing(req)
-	return client.Do(req)
+	return helps.DoProviderRequest(req.Context(), "", client, req)
 }
 
 // claudeWireHeaderCasing maps Go's canonical header name to the exact casing

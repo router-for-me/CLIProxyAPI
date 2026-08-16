@@ -27,11 +27,14 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 }
 
 func TestMethodNamesAreStable(t *testing.T) {
-	if SchemaVersion != 3 {
-		t.Fatalf("SchemaVersion = %d, want 3", SchemaVersion)
+	if SchemaVersion != 4 {
+		t.Fatalf("SchemaVersion = %d, want 4", SchemaVersion)
 	}
 	if SchemaVersionStreamChunkOmitRequestBody != 3 {
 		t.Fatalf("SchemaVersionStreamChunkOmitRequestBody = %d, want 3", SchemaVersionStreamChunkOmitRequestBody)
+	}
+	if SchemaVersionOutboundHeaderInterceptor != 4 {
+		t.Fatalf("SchemaVersionOutboundHeaderInterceptor = %d, want 4", SchemaVersionOutboundHeaderInterceptor)
 	}
 	if MethodPluginRegister != "plugin.register" {
 		t.Fatalf("MethodPluginRegister = %q", MethodPluginRegister)
@@ -41,6 +44,9 @@ func TestMethodNamesAreStable(t *testing.T) {
 	}
 	if MethodRequestInterceptAfter != "request.intercept_after" {
 		t.Fatalf("MethodRequestInterceptAfter = %q", MethodRequestInterceptAfter)
+	}
+	if MethodOutboundHeadersIntercept != "outbound_headers.intercept" {
+		t.Fatalf("MethodOutboundHeadersIntercept = %q", MethodOutboundHeadersIntercept)
 	}
 	if MethodRequestComplete != "request.complete" {
 		t.Fatalf("MethodRequestComplete = %q", MethodRequestComplete)
@@ -80,6 +86,9 @@ func TestMethodNamesAreStable(t *testing.T) {
 	}
 	if MethodHostAuthSave != "host.auth.save" {
 		t.Fatalf("MethodHostAuthSave = %q", MethodHostAuthSave)
+	}
+	if MethodHostProviderList != "host.provider.list" {
+		t.Fatalf("MethodHostProviderList = %q", MethodHostProviderList)
 	}
 	if MethodExecutorExecuteStream != "executor.execute_stream" {
 		t.Fatalf("MethodExecutorExecuteStream = %q", MethodExecutorExecuteStream)

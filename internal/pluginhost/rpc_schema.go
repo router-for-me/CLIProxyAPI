@@ -33,6 +33,7 @@ type rpcCapabilities struct {
 	RequestTranslator             bool                         `json:"request_translator"`
 	RequestNormalizer             bool                         `json:"request_normalizer"`
 	RequestInterceptor            bool                         `json:"request_interceptor"`
+	OutboundHeaderInterceptor     bool                         `json:"outbound_header_interceptor"`
 	RequestLifecyclePlugin        bool                         `json:"request_lifecycle_plugin"`
 	ResponseTranslator            bool                         `json:"response_translator"`
 	ResponseBeforeTranslator      bool                         `json:"response_before_translator"`
@@ -90,6 +91,11 @@ type rpcRequestInterceptRequest struct {
 	HostCallbackID string `json:"host_callback_id,omitempty"`
 }
 
+type rpcOutboundHeaderInterceptRequest struct {
+	pluginapi.OutboundHeaderInterceptRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
 type rpcModelRouteRequest struct {
 	pluginapi.ModelRouteRequest
 	HostCallbackID string `json:"host_callback_id,omitempty"`
@@ -144,6 +150,7 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 		RequestTranslator:             caps.RequestTranslator != nil,
 		RequestNormalizer:             caps.RequestNormalizer != nil,
 		RequestInterceptor:            caps.RequestInterceptor != nil,
+		OutboundHeaderInterceptor:     caps.OutboundHeaderInterceptor != nil,
 		RequestLifecyclePlugin:        caps.RequestLifecyclePlugin != nil,
 		ResponseTranslator:            caps.ResponseTranslator != nil,
 		ResponseBeforeTranslator:      caps.ResponseBeforeTranslator != nil,

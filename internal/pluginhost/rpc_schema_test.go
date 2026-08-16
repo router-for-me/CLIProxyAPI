@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -103,6 +104,32 @@ func TestRPCCapabilitiesIncludeModelRouter(t *testing.T) {
 	}
 }
 
+func TestRPCCapabilitiesIncludeOutboundHeaderInterceptor(t *testing.T) {
+	plugin := pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			OutboundHeaderInterceptor: outboundHeaderInterceptorFunc(func(context.Context, pluginapi.OutboundHeaderInterceptRequest) (pluginapi.OutboundHeaderInterceptResponse, error) {
+				return pluginapi.OutboundHeaderInterceptResponse{}, nil
+			}),
+		},
+	}
+
+	caps := rpcCapabilitiesFromPlugin(plugin)
+	if !caps.OutboundHeaderInterceptor {
+		t.Fatal("OutboundHeaderInterceptor = false, want true")
+	}
+	raw, errMarshal := json.Marshal(caps)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if decoded["outbound_header_interceptor"] != true {
+		t.Fatalf("outbound_header_interceptor = %#v, want true", decoded["outbound_header_interceptor"])
+	}
+}
+
 func TestRegisterRPCPluginSendsHostSchemaVersion(t *testing.T) {
 	lookup := newTestSymbolLookup(&testPlugin{
 		registerResult: validTestPlugin("schema"),
@@ -132,6 +159,49 @@ func TestRegisterRPCPluginRejectsFutureSchemaVersion(t *testing.T) {
 	_, errRegister := registerRPCPlugin(context.Background(), nil, "future-schema", lookup, pluginabi.MethodPluginRegister, nil)
 	if errRegister == nil || !strings.Contains(errRegister.Error(), "schema version") {
 		t.Fatalf("registerRPCPlugin() error = %v, want unsupported schema version", errRegister)
+	}
+}
+
+func TestRegisterRPCPluginRejectsOutboundHeaderInterceptorBeforeSchema4(t *testing.T) {
+	plugin := validTestPlugin("headers-schema3")
+	plugin.Capabilities.OutboundHeaderInterceptor = outboundHeaderInterceptorFunc(func(context.Context, pluginapi.OutboundHeaderInterceptRequest) (pluginapi.OutboundHeaderInterceptResponse, error) {
+		return pluginapi.OutboundHeaderInterceptResponse{}, nil
+	})
+	lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
+	lookup.schemaVersion = pluginabi.SchemaVersionOutboundHeaderInterceptor - 1
+
+	_, errRegister := registerRPCPlugin(context.Background(), nil, "headers-schema3", lookup, pluginabi.MethodPluginRegister, nil)
+	if errRegister == nil || !strings.Contains(errRegister.Error(), "outbound header interceptor requires") {
+		t.Fatalf("registerRPCPlugin() error = %v, want schema requirement", errRegister)
+	}
+}
+
+func TestRPCOutboundHeaderInterceptorUsesAdapter(t *testing.T) {
+	var gotReq pluginapi.OutboundHeaderInterceptRequest
+	plugin := validTestPlugin("headers")
+	plugin.Capabilities.OutboundHeaderInterceptor = outboundHeaderInterceptorFunc(func(_ context.Context, req pluginapi.OutboundHeaderInterceptRequest) (pluginapi.OutboundHeaderInterceptResponse, error) {
+		gotReq = req
+		return pluginapi.OutboundHeaderInterceptResponse{Headers: http.Header{"User-Agent": {"plugin/1.0"}}}, nil
+	})
+	lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
+
+	registered, errRegister := registerRPCPlugin(context.Background(), nil, "headers", lookup, pluginabi.MethodPluginRegister, nil)
+	if errRegister != nil {
+		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+	}
+	resp, errIntercept := registered.Capabilities.OutboundHeaderInterceptor.InterceptOutboundHeaders(context.Background(), pluginapi.OutboundHeaderInterceptRequest{
+		Provider:  "codex",
+		Transport: pluginapi.OutboundTransportHTTP,
+		Headers:   http.Header{"User-Agent": {"host/1.0"}},
+	})
+	if errIntercept != nil {
+		t.Fatalf("InterceptOutboundHeaders() error = %v", errIntercept)
+	}
+	if gotReq.Provider != "codex" || gotReq.Transport != pluginapi.OutboundTransportHTTP || gotReq.Headers.Get("User-Agent") != "host/1.0" {
+		t.Fatalf("interceptor request = %#v", gotReq)
+	}
+	if resp.Headers.Get("User-Agent") != "plugin/1.0" {
+		t.Fatalf("interceptor response = %#v", resp)
 	}
 }
 
