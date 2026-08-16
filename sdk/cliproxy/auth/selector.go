@@ -684,10 +684,14 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 	fallbackAuths := highestPriorityAuths(available)
 
-	cacheKey := provider + "::" + primaryID + "::" + model
+	// Canonicalize the route model so thinking-suffix variants of the same base
+	// model (e.g. "claude-3" and "claude-3(high)") share one session binding,
+	// matching the canonicalization used for cursors and cooldown states.
+	keyModel := canonicalModelKey(model)
+	cacheKey := provider + "::" + primaryID + "::" + keyModel
 	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey = provider + "::" + fallbackID + "::" + model
+		fallbackKey = provider + "::" + fallbackID + "::" + keyModel
 	}
 	bind := func(authID string) {
 		if fallbackKey != "" {
@@ -787,6 +791,9 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	if raw, ok := res.Options.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey].(string); ok && raw != "" {
 		nsModel = raw
 	}
+	// Match the canonical model key used when the binding was created in Pick,
+	// so thinking-suffix variants resolve to the same cache entry.
+	nsModel = canonicalModelKey(nsModel)
 
 	cacheKey := ns + "::" + primaryID + "::" + nsModel
 	var fallbackKey string
