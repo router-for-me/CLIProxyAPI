@@ -7,6 +7,7 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -40,12 +41,14 @@ func goframeCacheAntigravityInteractionsState(ctx context.Context, modelName str
 	}
 	sessionKey := antigravityExecSessionKey(opts, originalRequest)
 	if sessionKey == "" {
+		log.Debugf("antigravity interactions state: no session key for model=%s", modelName)
 		return
 	}
 	internalcache.CacheAntigravityInteractionsStateBestEffort(ctx, modelName, sessionKey, internalcache.AntigravityInteractionsState{
 		InteractionID: interactionID,
 		EnvironmentID: envID,
 	})
+	log.Debugf("antigravity interactions state: cached model=%s session=%s interaction=%s env=%s", modelName, sessionKey, interactionID, envID)
 }
 
 // antigravityExecSessionKey derives a stable continuity key for the agent
@@ -126,12 +129,15 @@ func goframeApplyAntigravityInteractionsContinuation(ctx context.Context, modelN
 	}
 	sessionKey := antigravityExecSessionKey(opts, originalRequest)
 	if sessionKey == "" {
+		log.Debugf("antigravity continuation: no session key model=%s", modelName)
 		return body
 	}
 	state, ok := internalcache.GetAntigravityInteractionsState(modelName, sessionKey)
 	if !ok {
+		log.Debugf("antigravity continuation: no cached state model=%s session=%s", modelName, sessionKey)
 		return body
 	}
+	log.Debugf("antigravity continuation: resuming interaction=%s env=%s session=%s", state.InteractionID, state.EnvironmentID, sessionKey)
 
 	// Rebuild the body keeping only function_result input items so the
 	// continuation is a clean "turn" on the prior interaction.

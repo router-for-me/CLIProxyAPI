@@ -406,6 +406,13 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	fromProtocol := opts.SourceFormat.String()
 	originalTranslated := geminiInteractionsPayloadConfigSource(ctx, e.cfg, targetName, req.Payload, opts, false, helps.APIKeyModelIsCompat(req))
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	// For the antigravity agent, a tool-calling continuation turn must resume
+	// the upstream interaction (previous_interaction_id + environment_id) and
+	// send only its function_result — NOT replay the assistant tool-call
+	// history. Otherwise Google rejects with "Cannot specify tool calls
+	// outside of Turn items". Applied AFTER payload-config so the rewrite is
+	// the final authoritative body.
+	body = goframeApplyAntigravityInteractionsContinuation(ctx, targetName, originalRequestRawJSON(req, opts), opts, body)
 
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/interactions", baseURL, glAPIVersion)
@@ -458,6 +465,9 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 		return resp, err
 	}
 	reporter.Publish(ctx, helps.ParseInteractionsUsage(data))
+	// Capture the upstream continuation coordinates so a later tool-calling
+	// turn can resume this antigravity agent (non-stream variant).
+	goframeCacheAntigravityInteractionsState(ctx, targetName, originalRequestRawJSON(req, opts), opts, data)
 	targetFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatInteractions, targetFormat, req.Model, opts.OriginalRequest, body, data, &param)
