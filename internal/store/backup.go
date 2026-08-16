@@ -52,6 +52,20 @@ const (
 	ResourceModelHealth BackupResource = "model_health"
 	// ResourceSyncLog covers the upstream_sync_log table.
 	ResourceSyncLog BackupResource = "sync_log"
+	// ResourceConfigStore covers the PG mirror of config.yaml (config_store).
+	ResourceConfigStore BackupResource = "config_store"
+	// ResourceCooldownStore covers runtime auth/model cooldown state
+	// (cooldown_store).
+	ResourceCooldownStore BackupResource = "cooldown_store"
+	// ResourceUsageStatDay covers the pre-aggregated daily usage rollup
+	// (usage_stat_day).
+	ResourceUsageStatDay BackupResource = "usage_stat_day"
+	// ResourceModelRouting covers per-model-id global routing overrides
+	// (model_routing).
+	ResourceModelRouting BackupResource = "model_routing"
+	// ResourceManagementAuditLog covers the management API audit trail
+	// (management_audit_log).
+	ResourceManagementAuditLog BackupResource = "management_audit_log"
 )
 
 // importBatchSize is the maximum number of rows restored per multi-row INSERT.
@@ -66,7 +80,8 @@ const importBatchSize = 1000
 // resources are config tables restored atomically in a single transaction.
 func dataResource(res BackupResource) bool {
 	switch res {
-	case ResourceUsage, ResourceAlerts, ResourceModelHealth, ResourceSyncLog:
+	case ResourceUsage, ResourceAlerts, ResourceModelHealth, ResourceSyncLog,
+		ResourceUsageStatDay, ResourceManagementAuditLog:
 		return true
 	default:
 		return false
@@ -91,6 +106,11 @@ var AllBackupResources = []BackupResource{
 	ResourceAlerts,
 	ResourceModelHealth,
 	ResourceSyncLog,
+	ResourceConfigStore,
+	ResourceCooldownStore,
+	ResourceUsageStatDay,
+	ResourceModelRouting,
+	ResourceManagementAuditLog,
 }
 
 // ValidBackupResource reports whether s names a known backup resource.
@@ -182,6 +202,18 @@ func (s *PostgresStore) resourceTables(res BackupResource) []backupTable {
 		}
 	case ResourceSyncLog:
 		return []backupTable{{s.UpstreamSyncLogTable(), "id"}}
+	case ResourceConfigStore:
+		return []backupTable{{s.ConfigTable(), "id"}}
+	case ResourceCooldownStore:
+		return []backupTable{{s.CooldownTable(), ""}}
+	case ResourceUsageStatDay:
+		// usage_stat_day has no surrogate id column; order by stat_day so the
+		// dump is deterministic.
+		return []backupTable{{s.RollupTable(), "stat_day"}}
+	case ResourceModelRouting:
+		return []backupTable{{s.ModelRoutingTable(), "id"}}
+	case ResourceManagementAuditLog:
+		return []backupTable{{s.ManagementAuditLogTable(), "id"}}
 	default:
 		return nil
 	}

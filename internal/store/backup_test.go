@@ -830,6 +830,78 @@ func TestBackupStreamExportOmitsEmptyFiles(t *testing.T) {
 	}
 }
 
+// TestAllBackupResourcesIncludesMissingTables verifies that the five tables
+// previously absent from the backup bundle (config_store, cooldown_store,
+// usage_stat_day, model_routing, management_audit_log) are covered by
+// AllBackupResources and mapped to the right schema-qualified table names.
+func TestAllBackupResourcesIncludesMissingTables(t *testing.T) {
+	st := &PostgresStore{cfg: PostgresStoreConfig{
+		Schema:                  "backup_missing",
+		ConfigTable:             "config_store",
+		CooldownTable:           "cooldown_store",
+		UsageStatDayTable:       "usage_stat_day",
+		ModelRoutingTable:       "model_routing",
+		ManagementAuditLogTable: "management_audit_log",
+	}}
+
+	newResources := []BackupResource{
+		ResourceConfigStore,
+		ResourceCooldownStore,
+		ResourceUsageStatDay,
+		ResourceModelRouting,
+		ResourceManagementAuditLog,
+	}
+	seen := make(map[BackupResource]bool, len(AllBackupResources))
+	for _, r := range AllBackupResources {
+		seen[r] = true
+	}
+	for _, r := range newResources {
+		if !seen[r] {
+			t.Errorf("AllBackupResources missing %q", r)
+		}
+	}
+
+	want := map[BackupResource]struct {
+		name        string
+		orderColumn string
+	}{
+		ResourceConfigStore:        {`"backup_missing"."config_store"`, "id"},
+		ResourceCooldownStore:      {`"backup_missing"."cooldown_store"`, ""},
+		ResourceUsageStatDay:       {`"backup_missing"."usage_stat_day"`, "stat_day"},
+		ResourceModelRouting:       {`"backup_missing"."model_routing"`, "id"},
+		ResourceManagementAuditLog: {`"backup_missing"."management_audit_log"`, "id"},
+	}
+	for res, exp := range want {
+		tables := st.resourceTables(res)
+		if len(tables) != 1 {
+			t.Errorf("resourceTables(%q) returned %d tables, want 1", res, len(tables))
+			continue
+		}
+		if tables[0].name != exp.name {
+			t.Errorf("resourceTables(%q)[0].name = %q, want %q", res, tables[0].name, exp.name)
+		}
+		if tables[0].orderColumn != exp.orderColumn {
+			t.Errorf("resourceTables(%q)[0].orderColumn = %q, want %q", res, tables[0].orderColumn, exp.orderColumn)
+		}
+	}
+
+	// Chunked (data) vs atomic (config): usage_stat_day and the audit log can
+	// grow large so they import in per-chunk transactions; the others restore
+	// atomically.
+	wantData := map[BackupResource]bool{
+		ResourceConfigStore:        false,
+		ResourceCooldownStore:      false,
+		ResourceUsageStatDay:       true,
+		ResourceModelRouting:       false,
+		ResourceManagementAuditLog: true,
+	}
+	for res, exp := range wantData {
+		if got := dataResource(res); got != exp {
+			t.Errorf("dataResource(%q) = %v, want %v", res, got, exp)
+		}
+	}
+}
+
 func randSuffix() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }

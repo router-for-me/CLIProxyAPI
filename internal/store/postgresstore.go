@@ -1959,6 +1959,22 @@ func (s *PostgresStore) Schema() string {
 	return s.cfg.Schema
 }
 
+// ConfigTable returns the fully-qualified name of the config mirror table.
+func (s *PostgresStore) ConfigTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultConfigTable)
+	}
+	return s.fullTableName(s.cfg.ConfigTable)
+}
+
+// CooldownTable returns the fully-qualified name of the runtime cooldown state table.
+func (s *PostgresStore) CooldownTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultCooldownTable)
+	}
+	return s.fullTableName(s.cfg.CooldownTable)
+}
+
 // APIKeysTable returns the fully-qualified name of the client-facing API keys table.
 func (s *PostgresStore) APIKeysTable() string {
 	if s == nil {
