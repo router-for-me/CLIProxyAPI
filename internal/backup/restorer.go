@@ -77,6 +77,9 @@ func mergeImportResources(bundle store.BackupBundle) []store.BackupResource {
 // restored via the store's ImportData (skipped when no importer); config.yaml
 // and auths/ files are written per mode (replace overwrites, merge fills gaps).
 func (r *Restorer) Restore(ctx context.Context, bundle store.BackupBundle, mode RestoreMode) (RestoreResult, error) {
+	if !ValidRestoreMode(mode) {
+		return RestoreResult{}, fmt.Errorf("backup restore: invalid mode %q (must be replace or merge)", mode)
+	}
 	runnerMu.Lock()
 	defer runnerMu.Unlock()
 
@@ -123,14 +126,14 @@ func (r *Restorer) writeConfig(bundle store.BackupBundle, mode RestoreMode) (int
 		if _, err := os.Stat(r.cfgPath); err == nil {
 			return 0, nil
 		} else if !os.IsNotExist(err) {
-			return 0, err
+			return 0, fmt.Errorf("backup restore: stat config: %w", err)
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(r.cfgPath), 0o700); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("backup restore: mkdir config dir: %w", err)
 	}
 	if err := os.WriteFile(r.cfgPath, []byte(bundle.ConfigYAML), 0o600); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("backup restore: write config: %w", err)
 	}
 	return 1, nil
 }
@@ -154,14 +157,14 @@ func (r *Restorer) writeAuthFiles(bundle store.BackupBundle, mode RestoreMode) (
 			if _, err := os.Stat(dest); err == nil {
 				continue
 			} else if !os.IsNotExist(err) {
-				return written, err
+				return written, fmt.Errorf("backup restore: stat auth file %q: %w", f.Path, err)
 			}
 		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
-			return written, err
+			return written, fmt.Errorf("backup restore: mkdir auth dir for %q: %w", f.Path, err)
 		}
 		if err := os.WriteFile(dest, []byte(f.Content), 0o600); err != nil {
-			return written, err
+			return written, fmt.Errorf("backup restore: write auth file %q: %w", f.Path, err)
 		}
 		written = append(written, dest)
 	}

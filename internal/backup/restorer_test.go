@@ -191,6 +191,29 @@ func TestRestoreRejectsPathTraversal(t *testing.T) {
 	}
 }
 
+func TestRestoreRejectsInvalidMode(t *testing.T) {
+	dir := t.TempDir()
+	authDir := filepath.Join(dir, "auths")
+	imp := &stubImporter{}
+	r := NewRestorer(imp, &stubPersister{}, "", authDir)
+	bundle := store.BackupBundle{
+		AuthFiles: []store.BackupAuthFile{{Path: "a.json", Content: "a"}},
+	}
+	_, err := r.Restore(context.Background(), bundle, RestoreMode("silly"))
+	if err == nil {
+		t.Fatal("Restore succeeded, want invalid-mode error")
+	}
+	if !strings.Contains(err.Error(), "invalid mode") {
+		t.Errorf("error = %q, want mention of invalid mode", err.Error())
+	}
+	if imp.called {
+		t.Error("importer called despite invalid mode")
+	}
+	if _, statErr := os.Stat(filepath.Join(authDir, "a.json")); !os.IsNotExist(statErr) {
+		t.Error("auth file written despite invalid mode")
+	}
+}
+
 func TestRestoreNilImporterSkipsPG(t *testing.T) {
 	dir := t.TempDir()
 	authDir := filepath.Join(dir, "auths")
