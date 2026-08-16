@@ -1,54 +1,28 @@
-# AGENTS.md
+# Repository Guidelines
 
-Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with OAuth and round-robin load balancing.
+## Project Structure & Module Organization
 
-## Commands
-```bash
-gofmt -w . # Format (required after Go changes)
-go build -o cli-proxy-api ./cmd/server # Build
-go run ./cmd/server # Run dev server
-go test ./... # Run all tests
-go test -v -run TestName ./path/to/pkg # Run single test
-go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRED after changes)
-```
-- Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`
+CLIProxyAPI is a Go 1.26 proxy server exposing OpenAI-, Gemini-, Claude-, and Codex-compatible APIs. The executable entry point is `cmd/server/`; maintenance utilities live in other `cmd/*` directories. Core implementation is under `internal/`, grouped by responsibility such as API handlers, authentication, provider executors, protocol translators, storage, configuration, and WebSocket relay. Reusable public packages belong in `sdk/`. Cross-module integration tests are in `test/`, while unit tests sit beside their source as `*_test.go`. Examples, plugin samples, documentation, and images live in `examples/`, `docs/`, and `assets/` respectively.
 
-## Config
-- Default config: `config.yaml` (template: `config.example.yaml`)
-- `.env` is auto-loaded from the working directory
-- Auth material defaults under `auths/`
-- Storage backends: file-based default; optional Postgres/git/object store (`PGSTORE_*`, `GITSTORE_*`, `OBJECTSTORE_*`)
+## Build, Test, and Development Commands
 
-## Architecture
-- `cmd/server/` — Server entrypoint
-- `internal/api/` — Gin HTTP API (routes, middleware, modules)
-- `internal/api/modules/amp/` — Amp integration (Amp-style routes + reverse proxy)
-- `internal/thinking/` — Main thinking/reasoning pipeline. `ApplyThinking()` (apply.go) parses suffixes (`suffix.go`, suffix overrides body), normalizes config to canonical `ThinkingConfig` (`types.go`), normalizes and validates centrally (`validate.go`/`convert.go`), then applies provider-specific output via `ProviderApplier`. Do not break this "canonical representation → per-provider translation" architecture.
-- `internal/runtime/executor/` — Per-provider runtime executors (incl. Codex WebSocket)
-- `internal/translator/` — Provider protocol translators (and shared `common`)
-- `internal/registry/` — Model registry + remote updater (`StartModelsUpdater`); `--local-model` disables remote updates
-- `internal/store/` — Storage implementations and secret resolution
-- `internal/managementasset/` — Config snapshots and management assets
-- `internal/cache/` — Request signature caching
-- `internal/watcher/` — Config hot-reload and watchers
-- `internal/wsrelay/` — WebSocket relay sessions
-- `internal/usage/` — Usage and token accounting
-- `internal/tui/` — Bubbletea terminal UI (`--tui`, `--standalone`)
-- `sdk/cliproxy/` — Embeddable SDK entry (service/builder/watchers/pipeline)
-- `test/` — Cross-module integration tests
+- `go run ./cmd/server` starts the server locally; it reads `config.yaml` by default.
+- `go build -o cc-proxy ./cmd/server` builds the main binary.
+- `make build` creates a stripped `cc-proxy` binary; `make build-amd` cross-compiles for Linux AMD64.
+- `go test ./path/to/pkg` runs the tests for one affected package.
+- `go test -v -run TestName ./path/to/pkg` runs one focused test.
+- `gofmt -w path/to/file.go` formats changed Go files before review.
 
-## Code Conventions
-- Keep changes small and simple (KISS)
-- Comments in English only
-- If editing code that already contains non-English comments, translate them to English (don’t add new non-English comments)
-- For user-visible strings, keep the existing language used in that file/area
-- New Markdown docs should be in English unless the file is explicitly language-specific (e.g. `README_CN.md`)
-- As a rule, do not make standalone changes to `internal/translator/`. You may modify it only as part of broader changes elsewhere.
-- `internal/runtime/executor/` should contain executors and their unit tests only. Place any helper/supporting files under `internal/runtime/executor/helps/`.
-- Follow `gofmt`; keep imports goimports-style; wrap errors with context where helpful
-- Do not use `log.Fatal`/`log.Fatalf` (terminates the process); prefer returning errors and logging via logrus
-- Shadowed variables: use method suffix (`errStart := server.Start()`)
-- Wrap defer errors: `defer func() { if err := f.Close(); err != nil { log.Errorf(...) } }()`
-- Use logrus structured logging; avoid leaking secrets/tokens in logs
-- Avoid panics in HTTP handlers; prefer logged errors and meaningful HTTP status codes
-- Timeouts are allowed only during credential acquisition; after an upstream connection is established, do not set timeouts for any subsequent network behavior. Intentional exceptions that must remain allowed are the Codex websocket liveness deadlines in `internal/runtime/executor/codex_websockets_executor.go`, the wsrelay session deadlines in `internal/wsrelay/session.go`, the management APICall timeout in `internal/api/handlers/management/api_tools.go`, and the `cmd/fetch_antigravity_models` utility timeouts
+Copy `config.example.yaml` to `config.yaml` for local setup. Environment variables can be placed in `.env`; never commit credentials or files generated under `auths/`.
+
+## Coding Style & Naming Conventions
+
+Follow standard Go conventions and `gofmt`. Package names should be short and lowercase; exported identifiers use `PascalCase`, local identifiers use `camelCase`, and test functions use `TestDescriptiveBehavior`. Keep changes small, keep provider-specific logic in its existing package, and return contextual errors instead of panicking. Preserve established user-facing language in each file and write new code comments in English.
+
+## Testing Guidelines
+
+Use Go's `testing` package and table-driven tests where multiple cases share behavior. Add or update tests beside the changed package; use `test/` only for behavior spanning modules or provider pipelines. During development, run only the necessary package or named tests rather than the full suite. Verify that the affected command still compiles when changing runtime code.
+
+## Commit & Pull Request Guidelines
+
+Recent history generally follows Conventional Commit-style subjects such as `feat(cursor): ...`, `fix(config): ...`, and `perf(translator): ...`. Use an imperative, focused subject and keep unrelated changes separate. Pull requests should explain the problem and solution, list tests run, link relevant issues, and call out configuration or compatibility changes. Include screenshots only for UI or management-asset changes. Do not create a Git commit unless explicitly requested.
