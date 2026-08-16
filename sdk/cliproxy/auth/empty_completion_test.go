@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -2395,6 +2396,95 @@ func TestGeminiThoughtSignatureEmptyCompletion(t *testing.T) {
 		payload := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thought_signature":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`)
 		if !IsEmptyCompletionPayload(payload) {
 			t.Fatal("IsEmptyCompletionPayload() = false for empty thought_signature, want true")
+		}
+	})
+}
+
+func TestReadStreamBootstrapForwardsPositiveUsageTerminalFrameImmediately(t *testing.T) {
+	t.Run("positive completion tokens forwards immediately without stream close", func(t *testing.T) {
+		ch := make(chan cliproxyexecutor.StreamChunk, 2)
+		ch <- cliproxyexecutor.StreamChunk{
+			Payload: []byte("data: {\"choices\":[],\"usage\":{\"completion_tokens\":1}}\n\n"),
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+
+		buffered, closed, err := readStreamBootstrap(ctx, ch)
+		if err != nil {
+			t.Fatalf("readStreamBootstrap error = %v, want immediate forward", err)
+		}
+		if closed {
+			t.Fatalf("readStreamBootstrap returned closed = true, want false (channel still open)")
+		}
+		if len(buffered) != 1 {
+			t.Fatalf("buffered chunks count = %d, want 1", len(buffered))
+		}
+	})
+
+	t.Run("zero completion tokens is withheld and not forwarded while stream open", func(t *testing.T) {
+		ch := make(chan cliproxyexecutor.StreamChunk, 2)
+		ch <- cliproxyexecutor.StreamChunk{
+			Payload: []byte("data: {\"choices\":[],\"usage\":{\"completion_tokens\":0}}\n\n"),
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+
+		_, _, err := readStreamBootstrap(ctx, ch)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("readStreamBootstrap error = %v, want context.DeadlineExceeded (withheld)", err)
+		}
+	})
+}
+
+func TestResponsesReasoningOutputItemBootstrap(t *testing.T) {
+	emptyReasoning := []byte("data: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"status\":\"in_progress\",\"encrypted_content\":\"\",\"summary\":[]}}\n\n")
+	encryptedReasoning := []byte("data: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"status\":\"in_progress\",\"encrypted_content\":\"gAAAA_signature_123\",\"summary\":[]}}\n\n")
+	summaryReasoning := []byte("data: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"status\":\"in_progress\",\"encrypted_content\":\"\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"reasoning step\"}]}}\n\n")
+
+	t.Run("empty reasoning item does not mark meaningful and allows bootstrap error failover", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe(emptyReasoning) {
+			t.Fatal("detector.Observe() = true for empty reasoning scaffolding, want false")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = true for empty reasoning scaffolding, want false")
+		}
+
+		errUpstream := errors.New("upstream failed immediately after scaffolding")
+		ch := make(chan cliproxyexecutor.StreamChunk, 2)
+		ch <- cliproxyexecutor.StreamChunk{Payload: emptyReasoning}
+		ch <- cliproxyexecutor.StreamChunk{Err: errUpstream}
+		close(ch)
+
+		buffered, closed, err := readStreamBootstrap(context.Background(), ch)
+		if !errors.Is(err, errUpstream) {
+			t.Fatalf("readStreamBootstrap error = %v, want %v for failover", err, errUpstream)
+		}
+		if len(buffered) != 0 {
+			t.Fatalf("readStreamBootstrap buffered = %d, want 0 on failover error", len(buffered))
+		}
+		if closed {
+			t.Fatal("readStreamBootstrap returned closed = true, want false on error")
+		}
+	})
+
+	t.Run("reasoning item with encrypted_content marks meaningful and forwards", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe(encryptedReasoning) {
+			t.Fatal("detector.Observe() = false for reasoning with encrypted_content, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for reasoning with encrypted_content, want true")
+		}
+	})
+
+	t.Run("reasoning item with summary marks meaningful and forwards", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe(summaryReasoning) {
+			t.Fatal("detector.Observe() = false for reasoning with summary, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for reasoning with summary, want true")
 		}
 	})
 }

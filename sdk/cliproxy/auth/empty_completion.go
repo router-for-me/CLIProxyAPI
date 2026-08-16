@@ -336,10 +336,12 @@ type openAIResponseContentPart struct {
 }
 
 type openAIResponseOutputItem struct {
-	Type      string                      `json:"type"`
-	Text      string                      `json:"text"`
-	Arguments string                      `json:"arguments"`
-	Content   []openAIResponseContentPart `json:"content"`
+	Type             string                      `json:"type"`
+	Text             string                      `json:"text"`
+	Arguments        string                      `json:"arguments"`
+	Content          []openAIResponseContentPart `json:"content"`
+	EncryptedContent string                      `json:"encrypted_content"`
+	Summary          json.RawMessage             `json:"summary"`
 }
 
 type openAIResponseObject struct {
@@ -704,6 +706,10 @@ func (a *emptyCompletionAccum) evalOpenAIResponseOutput(items []openAIResponseOu
 			a.hasContent = true
 		case strings.HasSuffix(itemType, "_call"):
 			a.hasToolCalls = true
+		case itemType == "reasoning":
+			if strings.TrimSpace(item.EncryptedContent) != "" || nonEmptyJSONPayload(item.Summary) {
+				a.hasContent = true
+			}
 		case itemType != "" && itemType != "message":
 			// Responses may add output item types over time. A complete, typed
 			// non-message item is output unless the protocol proves otherwise.
@@ -1110,7 +1116,7 @@ func (s *streamBootstrapState) hasMeaningfulOutput() bool {
 }
 
 func (s *streamBootstrapState) shouldForward() bool {
-	return s.acc.hasContent || s.acc.hasToolCalls || s.acc.blocked || s.acc.sawUnknownData || (!s.acc.recognized && !s.sawSSE)
+	return s.acc.hasContent || s.acc.hasToolCalls || s.acc.blocked || (s.acc.sawUsage && s.acc.completionTokens > 0) || s.acc.sawUnknownData || (!s.acc.recognized && !s.sawSSE)
 }
 
 type jsonBufferStatus int
