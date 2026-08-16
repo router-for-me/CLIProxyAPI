@@ -86,3 +86,44 @@ func TestSessionAffinityOnResult_ThinkingSuffixReleasesBinding(t *testing.T) {
 		t.Fatalf("Pick() after failure auth.ID = %q, want reselection after the binding was released", third.ID)
 	}
 }
+
+// Parenthesized names that the thinking parsers do not recognize (e.g. a
+// configured alias like "claude-3(custom)") are distinct models, not thinking
+// variants, and must not be collapsed into the base model's session binding.
+func TestSessionAffinitySelector_UnrecognizedSuffixKeepsSeparateBinding(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+	}
+	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_suffix-distinct"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+
+	first, err := selector.Pick(context.Background(), "claude", "claude-3(custom)", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+
+	// The unrecognized suffix must not collapse onto the base model's binding:
+	// the base model's first pick is a cache miss and round-robin moves on.
+	second, errPick := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if errPick != nil {
+		t.Fatalf("Pick() error = %v", errPick)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("Pick() auth.ID = %q, want a separate binding for an unrecognized suffix", second.ID)
+	}
+
+	// Sanity: a recognized thinking level still shares the base binding.
+	third, errPick := selector.Pick(context.Background(), "claude", "claude-3(high)", opts, auths)
+	if errPick != nil {
+		t.Fatalf("Pick() error = %v", errPick)
+	}
+	if third.ID != second.ID {
+		t.Fatalf("Pick() auth.ID = %q, want sticky auth %q for a recognized thinking variant", third.ID, second.ID)
+	}
+}
