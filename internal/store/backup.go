@@ -79,6 +79,13 @@ const importBatchSize = 1000
 // progress callback and continue-to-end soft-failure handling. All other
 // resources are config tables restored atomically in a single transaction.
 func dataResource(res BackupResource) bool {
+	return IsBackupDataResource(res)
+}
+
+// IsBackupDataResource reports whether res belongs to the chunked data set
+// (see dataResource). Exported so backup/restore orchestration can distinguish
+// data resources (safe to merge) from config resources (always wipe+replace).
+func IsBackupDataResource(res BackupResource) bool {
 	switch res {
 	case ResourceUsage, ResourceAlerts, ResourceModelHealth, ResourceSyncLog,
 		ResourceUsageStatDay, ResourceManagementAuditLog:
