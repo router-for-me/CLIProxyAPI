@@ -1035,7 +1035,7 @@ var (
 	// (= or :), preceded by a boundary and optional quote/escape syntax.
 	// Group 1 is the leading boundary/quote syntax, group 2 the key, group 3
 	// the trailing quote/space syntax plus separator.
-	openAIStreamKeyPattern = regexp.MustCompile(`(?i)((?:^|[^A-Za-z0-9_])(?:\\*["']?)?)(api[_-]?key|apikey|access[_-]?key[_-]?id|aws[_-]?access[_-]?key[_-]?id|api[_-]?key[_-]?id|access[_-]?token|authorization|token|secret|credential|aws[_-]?credential|(?:[A-Za-z0-9]+(?:[_-][A-Za-z0-9]+)*)[_-](?:key|token|secret|credential|key[_-]?id))((?:\\*["']?)?\s*[=:])`)
+	openAIStreamKeyPattern = regexp.MustCompile(`(?i)((?:^|[^A-Za-z0-9_])(?:\\*["']?)?)(api[_-]?key|apikey|access[_-]?key[_-]?id|aws[_-]?access[_-]?key[_-]?id|api[_-]?key[_-]?id|access[_-]?token|authorization|token|secret|credential|aws[_-]?credential|refresh[_-]?token|client[_-]?secret|(?:[A-Za-z0-9]+(?:[_-][A-Za-z0-9]+)*)[_-](?:key|token|secret|credential|key[_-]?id)|(?-i:[A-Za-z0-9]*(?:[a-z0-9]|_[a-z0-9]|-[a-z0-9])(?:Key|Token|Secret|Credential|KeyId|Key_Id|Key-Id)))((?:\\*["']?)?\s*[=:])`)
 	// openAIStreamSpaceAPIKeyPattern matches the "api key:" spelling with a
 	// space between api and key, in header/assignment contexts.
 	openAIStreamSpaceAPIKeyPattern = regexp.MustCompile(`(?i)((?:^|[^A-Za-z0-9_]))(api[ _]key)(["']?\s*[=:])`)

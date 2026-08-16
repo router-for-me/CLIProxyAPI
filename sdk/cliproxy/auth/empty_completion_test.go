@@ -3059,3 +3059,34 @@ func TestEmptyCompletionImages(t *testing.T) {
 		})
 	}
 }
+
+func TestEmptyCompletionClaudeCitations(t *testing.T) {
+	cases := []struct {
+		name     string
+		payload  []byte
+		expected bool
+	}{
+		{
+			name:     "citations_delta with non-empty citation object is not empty",
+			payload:  []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"citations_delta\",\"citation\":{\"type\":\"char_location\",\"cited_text\":\"some cited text\",\"document_index\":0}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+			expected: false,
+		},
+		{
+			name:     "citations_delta with empty citation object is empty",
+			payload:  []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"citations_delta\",\"citation\":{}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+			expected: true,
+		},
+		{
+			name:     "citations_delta with null citation is empty",
+			payload:  []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"citations_delta\",\"citation\":null}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+			expected: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isEmptyCompletionPayload(tc.payload); got != tc.expected {
+				t.Fatalf("isEmptyCompletionPayload() = %v, want %v", got, tc.expected)
+			}
+		})
+	}
+}

@@ -295,6 +295,7 @@ type claudeContentBlock struct {
 	Signature string          `json:"signature"`
 	Data      string          `json:"data"`
 	Input     json.RawMessage `json:"input"`
+	Citation  json.RawMessage `json:"citation"`
 }
 
 type claudeChunk struct {
@@ -314,12 +315,13 @@ type claudeChunk struct {
 	} `json:"message"`
 	ContentBlock *claudeContentBlock `json:"content_block"`
 	Delta        *struct {
-		Type        string  `json:"type"`
-		Text        string  `json:"text"`
-		Thinking    string  `json:"thinking"`
-		Signature   string  `json:"signature"`
-		PartialJSON string  `json:"partial_json"`
-		StopReason  *string `json:"stop_reason"`
+		Type        string          `json:"type"`
+		Text        string          `json:"text"`
+		Thinking    string          `json:"thinking"`
+		Signature   string          `json:"signature"`
+		Citation    json.RawMessage `json:"citation"`
+		PartialJSON string          `json:"partial_json"`
+		StopReason  *string         `json:"stop_reason"`
 	} `json:"delta"`
 }
 
@@ -620,12 +622,16 @@ func (a *emptyCompletionAccum) evalClaude(data []byte) bool {
 			if strings.TrimSpace(chunk.Delta.Signature) != "" {
 				a.hasContent = true
 			}
+		case "citations_delta":
+			if nonEmptyJSONPayload(chunk.Delta.Citation) {
+				a.hasContent = true
+			}
 		case "input_json_delta":
 			if hasMeaningfulClaudePartialJSON(chunk.Delta.PartialJSON) {
 				a.hasToolCalls = true
 			}
 		default:
-			if strings.TrimSpace(chunk.Delta.Text) != "" || strings.TrimSpace(chunk.Delta.Thinking) != "" || strings.TrimSpace(chunk.Delta.Signature) != "" {
+			if strings.TrimSpace(chunk.Delta.Text) != "" || strings.TrimSpace(chunk.Delta.Thinking) != "" || strings.TrimSpace(chunk.Delta.Signature) != "" || nonEmptyJSONPayload(chunk.Delta.Citation) {
 				a.hasContent = true
 			}
 		}
@@ -827,6 +833,10 @@ func (a *emptyCompletionAccum) evalClaudeBlocks(blocks []claudeContentBlock) {
 			continue
 		}
 		if strings.TrimSpace(b.Text) != "" {
+			a.hasContent = true
+			continue
+		}
+		if nonEmptyJSONPayload(b.Citation) {
 			a.hasContent = true
 			continue
 		}
