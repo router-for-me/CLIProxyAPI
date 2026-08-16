@@ -349,6 +349,8 @@ func main() {
 	if value, ok := lookupEnv("BACKUP_RETENTION", "backup_retention"); ok && value != "" {
 		if n, err := strconv.Atoi(value); err == nil {
 			backupRetention = n
+		} else {
+			log.WithError(err).Warn("main: ignoring invalid BACKUP_RETENTION")
 		}
 	}
 
