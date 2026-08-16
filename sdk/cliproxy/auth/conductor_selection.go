@@ -5,10 +5,8 @@ import (
 	"errors"
 	"math/rand/v2"
 	"net/http"
-	"reflect"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -236,29 +234,6 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	}
 }
 
-// selectorSlot pins one selector generation and counts its in-flight Pick
-// calls, so a replaced selector can be stopped only after active uses drain.
-type selectorSlot struct {
-	selector Selector
-	inflight sync.WaitGroup
-}
-
-// acquireSelector returns the current selector and pins its generation. The
-// returned release func must be called once the caller no longer invokes the
-// selector; SetSelector defers stopping the replaced selector until then.
-func (m *Manager) acquireSelector() (Selector, func()) {
-	m.mu.RLock()
-	slot := m.selectorSlot
-	if slot != nil {
-		slot.inflight.Add(1)
-	}
-	m.mu.RUnlock()
-	if slot == nil {
-		return nil, func() {}
-	}
-	return slot.selector, func() { slot.inflight.Done() }
-}
-
 func (m *Manager) SetSelector(selector Selector) {
 	if m == nil {
 		return
@@ -268,157 +243,42 @@ func (m *Manager) SetSelector(selector Selector) {
 	}
 	m.mu.Lock()
 	previous := m.selector
-	previousSlot := m.selectorSlot
-	if sameSelectorInstance(previous, selector) {
-		// Re-setting the same instance must keep its generation: a fresh slot
-		// would drop tracking of picks still in flight on this selector.
-		m.mu.Unlock()
-		if m.scheduler != nil {
-			m.scheduler.setSelector(selector)
-			m.syncScheduler()
-		}
-		return
-	}
 	m.selector = selector
-	m.selectorSlot = &selectorSlot{selector: selector}
-	retirees := m.planSelectorRetireesLocked(previous, previousSlot, selector)
 	m.mu.Unlock()
 
-	// Stop retired selectors asynchronously: pick paths release m.mu before
-	// invoking the selector, so each retiree first waits for the generations
-	// it was reachable through to drain.
-	if len(retirees) > 0 {
-		go func() {
-			for _, retiree := range retirees {
-				for _, slot := range retiree.slots {
-					slot.inflight.Wait()
-				}
-				retiree.stoppable.Stop()
-			}
-		}()
+	// Only the built-in session affinity selector is stopped here: its Stop is
+	// idempotent and Pick remains safe afterwards (Stop merely halts the cache
+	// cleanup goroutine), so an in-flight pick cannot break. A previous
+	// affinity selector that the replacement still wraps as its fallback is
+	// left running, since the active selector keeps invoking its Pick. Custom
+	// selectors are owned by the SDK caller, which manages their lifecycle.
+	if prev, ok := previous.(*SessionAffinitySelector); ok && prev != selector && !selectorRetainedAsFallback(selector, prev) {
+		prev.Stop()
 	}
+
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
 	}
 }
 
-// retiredStoppable is a selector instance no longer referenced by the active
-// selection chain, together with the generations whose in-flight picks must
-// drain before the instance can be stopped.
-type retiredStoppable struct {
-	stoppable StoppableSelector
-	slots     []*selectorSlot
-}
-
-// planSelectorRetireesLocked decides which stoppable selectors reachable from
-// the replaced selector are no longer referenced by next, parking the ones
-// still in use. Lifecycle policy:
-//   - a selector still referenced through the replacement's fallback chain
-//     (e.g. wrapped via NewSessionAffinitySelector) is parked, not stopped,
-//     because the active selector keeps invoking its Pick;
-//   - a parked selector is stopped once no active chain references it, after
-//     every generation it was reachable through has drained;
-//   - implementations with uncomparable dynamic types are conservatively kept
-//     alive: identity cannot be established without panicking, and a re-set
-//     value may share pointer-backed state with the active one.
-//
-// Must be called with m.mu held.
-func (m *Manager) planSelectorRetireesLocked(previous Selector, previousSlot *selectorSlot, next Selector) []retiredStoppable {
-	var retirees []retiredStoppable
-	for _, instance := range selectorChain(previous) {
-		stoppable, ok := instance.(StoppableSelector)
-		if !ok || !selectorIdentityComparable(instance) {
-			continue
-		}
-		if selectorChainContains(next, instance) {
-			m.parkSelectorSlotLocked(instance, previousSlot)
-			continue
-		}
-		slots := m.takeParkedSelectorSlotsLocked(instance)
-		slots = appendSelectorSlotIfMissing(slots, previousSlot)
-		retirees = append(retirees, retiredStoppable{stoppable: stoppable, slots: slots})
-	}
-	return retirees
-}
-
-// selectorChain walks root and its SessionAffinitySelector fallback chain,
-// returning every reachable selector. The walk is depth-capped as a defensive
-// measure against malformed wrappers.
-func selectorChain(root Selector) []Selector {
-	chain := make([]Selector, 0, 2)
-	for root != nil && len(chain) < 16 {
-		chain = append(chain, root)
-		affinity, ok := root.(*SessionAffinitySelector)
+// selectorRetainedAsFallback reports whether prev still serves as a fallback
+// somewhere in the SessionAffinitySelector wrapper chain of next; stopping it
+// would break the active composition.
+func selectorRetainedAsFallback(next Selector, prev *SessionAffinitySelector) bool {
+	current := next
+	// Depth-capped as a defensive measure against malformed wrapper chains.
+	for depth := 0; depth < 16; depth++ {
+		affinity, ok := current.(*SessionAffinitySelector)
 		if !ok || affinity == nil {
-			break
+			return false
 		}
-		root = affinity.fallback
-	}
-	return chain
-}
-
-// selectorChainContains reports whether target appears in the fallback chain
-// of root, in which case stopping it would break the active composition.
-func selectorChainContains(root, target Selector) bool {
-	for _, instance := range selectorChain(root) {
-		if sameSelectorInstance(instance, target) {
+		if affinity.fallback == prev {
 			return true
 		}
+		current = affinity.fallback
 	}
 	return false
-}
-
-// selectorIdentityComparable reports whether values of the selector's dynamic
-// type can be compared without panicking, the precondition for tracking the
-// instance in Manager bookkeeping.
-func selectorIdentityComparable(selector Selector) bool {
-	if selector == nil {
-		return false
-	}
-	return reflect.TypeOf(selector).Comparable()
-}
-
-func (m *Manager) parkSelectorSlotLocked(selector Selector, slot *selectorSlot) {
-	if slot == nil {
-		return
-	}
-	if m.parkedSelectorSlots == nil {
-		m.parkedSelectorSlots = make(map[Selector][]*selectorSlot)
-	}
-	m.parkedSelectorSlots[selector] = appendSelectorSlotIfMissing(m.parkedSelectorSlots[selector], slot)
-}
-
-func (m *Manager) takeParkedSelectorSlotsLocked(selector Selector) []*selectorSlot {
-	slots := m.parkedSelectorSlots[selector]
-	delete(m.parkedSelectorSlots, selector)
-	return slots
-}
-
-func appendSelectorSlotIfMissing(slots []*selectorSlot, slot *selectorSlot) []*selectorSlot {
-	if slot == nil {
-		return slots
-	}
-	for _, existing := range slots {
-		if existing == slot {
-			return slots
-		}
-	}
-	return append(slots, slot)
-}
-
-// sameSelectorInstance reports whether two selectors reference the same
-// instance. It returns false for uncomparable dynamic types instead of
-// panicking on a direct interface comparison.
-func sameSelectorInstance(a, b Selector) bool {
-	if a == nil || b == nil {
-		return false
-	}
-	typeA, typeB := reflect.TypeOf(a), reflect.TypeOf(b)
-	if typeA != typeB || !typeA.Comparable() {
-		return false
-	}
-	return a == b
 }
 
 // Selector returns the current credential selector.
@@ -1170,17 +1030,15 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return auth, exec, err
 	}
 
-	selector, releaseSelector := m.acquireSelector()
-	defer releaseSelector()
-
 	opts.EnsureMetadata()
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
-	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(selector, model)
+	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(m.selector, model)
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 
 	m.mu.RLock()
+	selector := m.selector
 	pluginScheduler := m.pluginScheduler
 	executor, okExecutor := m.executors[provider]
 	if !okExecutor {
@@ -1482,12 +1340,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
 
-	selector, releaseSelector := m.acquireSelector()
-	defer releaseSelector()
-
 	opts.EnsureMetadata()
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
-	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(selector, model)
+	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(m.selector, model)
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
@@ -1505,6 +1360,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 
 	m.mu.RLock()
+	selector := m.selector
 	pluginScheduler := m.pluginScheduler
 	candidates := make([]*Auth, 0, len(m.auths))
 	modelKey := strings.TrimSpace(model)
