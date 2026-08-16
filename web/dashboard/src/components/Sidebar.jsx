@@ -452,6 +452,7 @@ const NAV_GROUPS = [
       { to: '/settings', label: 'Settings', icon: 'gear' },
       { to: '/branding', label: 'Branding', icon: 'tag' },
       { to: '/import-export', label: 'Import / Export', icon: 'transfer' },
+      { to: '/backup', label: 'Backups', icon: 'archive' },
     ],
   },
 ];
@@ -555,4 +556,5 @@ const ICON_MAP = {
   transfer: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2 5h11M9 2l3 3-3 3M14 11H3M7 8l-3 3 3 3" /></svg>,
   route: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="3" cy="8" r="1.6" /><circle cx="13" cy="8" r="1.6" /><path d="M4.6 8h6.8" /><path d="M5 6c0-1.5 1-2.5 3-2.5S11 4.5 11 6v.5" /><path d="M5 10c0 1.5 1 2.5 3 2.5s3-1 3-2.5V9.5" /></svg>,
   litellm: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><ellipse cx="8" cy="3.5" rx="6" ry="2.2" /><path d="M2 3.5v9c0 1.2 2.7 2.2 6 2.2s6-1 6-2.2v-9" /><path d="M2 8c0 1.2 2.7 2.2 6 2.2s6-1 6-2.2" /></svg>,
+  archive: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="12" height="3" rx="0.5" /><path d="M3 6v6.5a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V6" /><path d="M6.5 9h3" /></svg>,
 };

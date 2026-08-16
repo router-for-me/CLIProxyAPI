@@ -2027,3 +2027,32 @@ export async function importData(bundle, resources) {
     body: JSON.stringify(bundle),
   });
 }
+
+// --- Full backup to S3 ---
+
+// listBackups returns the snapshots currently stored on the object store
+// (GET /backup): [{ key, size, exported_at }].
+export async function listBackups() {
+  return fetchJSON('/backup');
+}
+
+// createBackup triggers a manual full backup (POST /backup) and returns the
+// created snapshot metadata.
+export async function createBackup() {
+  return fetchJSON('/backup', { method: 'POST' });
+}
+
+// restoreBackup restores a snapshot by object key. mode is "replace" (wipe,
+// destructive — requires confirm=true) or "merge" (non-destructive add).
+export async function restoreBackup({ objectKey, mode, confirm = false }) {
+  return fetchJSON('/backup/restore', {
+    method: 'POST',
+    body: JSON.stringify({ object_key: objectKey, mode, confirm }),
+  });
+}
+
+// backupSettings returns the current full-backup configuration:
+// { s3_configured, interval, retention }.
+export async function backupSettings() {
+  return fetchJSON('/backup/settings');
+}
