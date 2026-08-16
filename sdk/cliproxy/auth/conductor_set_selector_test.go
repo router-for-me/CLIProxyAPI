@@ -54,3 +54,38 @@ func TestManagerSetSelectorSameInstanceIsNotStopped(t *testing.T) {
 		t.Fatalf("Selector() = %T, want the re-set stub instance", current)
 	}
 }
+
+// uncomparableStoppableSelector carries a slice, so values of this type panic
+// on a direct == interface comparison. The public Selector interface does not
+// require comparable implementations, so SetSelector must tolerate them.
+type uncomparableStoppableSelector struct {
+	tags    []string
+	stopped *atomic.Int32
+}
+
+func (s uncomparableStoppableSelector) Pick(_ context.Context, _, _ string, _ cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	if len(auths) == 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
+	}
+	return auths[0], nil
+}
+
+func (s uncomparableStoppableSelector) Stop() {
+	s.stopped.Add(1)
+}
+
+// Replacing an uncomparable custom selector with another value of the same
+// type must not panic: a bare previous != selector comparison panics exactly
+// in this case. The replaced instance is still stopped because identity
+// cannot be established for uncomparable types.
+func TestManagerSetSelectorUncomparableSelectorDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	var stopped atomic.Int32
+	manager := NewManager(nil, uncomparableStoppableSelector{stopped: &stopped}, nil)
+
+	manager.SetSelector(uncomparableStoppableSelector{stopped: &atomic.Int32{}})
+	if got := stopped.Load(); got != 1 {
+		t.Fatalf("replaced uncomparable selector Stop() calls = %d, want 1", got)
+	}
+}

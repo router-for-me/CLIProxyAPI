@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -247,15 +248,30 @@ func (m *Manager) SetSelector(selector Selector) {
 	m.mu.Unlock()
 	// Release resources of the replaced selector (e.g. the session affinity
 	// cache cleanup goroutine) so routing config changes do not leak them.
-	if previous != nil && previous != selector {
-		if stoppable, ok := previous.(StoppableSelector); ok {
-			stoppable.Stop()
-		}
+	// Identity is checked without a bare interface comparison: the public
+	// Selector interface does not require comparable dynamic types, and
+	// comparing two uncomparable implementations would panic.
+	if stoppable, ok := previous.(StoppableSelector); ok && !sameSelectorInstance(previous, selector) {
+		stoppable.Stop()
 	}
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
 	}
+}
+
+// sameSelectorInstance reports whether two selectors reference the same
+// instance. It returns false for uncomparable dynamic types instead of
+// panicking on a direct interface comparison.
+func sameSelectorInstance(a, b Selector) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	typeA, typeB := reflect.TypeOf(a), reflect.TypeOf(b)
+	if typeA != typeB || !typeA.Comparable() {
+		return false
+	}
+	return a == b
 }
 
 // Selector returns the current credential selector.
