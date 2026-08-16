@@ -674,3 +674,55 @@ func TestManagerExecuteStream_RefreshRetryGetsFreshTTFTTimer(t *testing.T) {
 		t.Fatalf("Stream calls = %d, want 2 (initial + refreshed retry)", got)
 	}
 }
+
+func TestStreamConnectTimeout_ConfigAndMetadata(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	// Canonical config key
+	cfg := &internalconfig.Config{
+		SDKConfig: internalconfig.SDKConfig{
+			Streaming: internalconfig.StreamingConfig{
+				StreamConnectTimeoutSeconds: 15,
+			},
+		},
+	}
+	m.runtimeConfig.Store(cfg)
+	if got := m.streamFirstChunkTimeout(cliproxyexecutor.Options{}); got != 15*time.Second {
+		t.Fatalf("canonical StreamConnectTimeoutSeconds = %v, want 15s", got)
+	}
+
+	// Precedence: canonical config overrides legacy alias
+	cfgBoth := &internalconfig.Config{
+		SDKConfig: internalconfig.SDKConfig{
+			Streaming: internalconfig.StreamingConfig{
+				StreamConnectTimeoutSeconds:    20,
+				StreamFirstChunkTimeoutSeconds: 5,
+			},
+		},
+	}
+	m.runtimeConfig.Store(cfgBoth)
+	if got := m.streamFirstChunkTimeout(cliproxyexecutor.Options{}); got != 20*time.Second {
+		t.Fatalf("StreamConnectTimeoutSeconds precedence = %v, want 20s", got)
+	}
+
+	// Canonical metadata key
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			"stream_connect_timeout_ms": 60,
+		},
+	}
+	if got := m.streamFirstChunkTimeout(opts); got != 60*time.Millisecond {
+		t.Fatalf("canonical stream_connect_timeout_ms = %v, want 60ms", got)
+	}
+
+	// Precedence: canonical metadata overrides legacy metadata alias
+	optsBoth := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			"stream_connect_timeout_ms":     90,
+			"stream_first_chunk_timeout_ms": 30,
+		},
+	}
+	if got := m.streamFirstChunkTimeout(optsBoth); got != 90*time.Millisecond {
+		t.Fatalf("stream_connect_timeout_ms metadata precedence = %v, want 90ms", got)
+	}
+}

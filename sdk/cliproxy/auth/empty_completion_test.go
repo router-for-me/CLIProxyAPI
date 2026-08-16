@@ -1162,7 +1162,7 @@ func TestStreamBootstrapDetector(t *testing.T) {
 	if detector.Observe([]byte("data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n")) {
 		t.Fatal("StreamBootstrapDetector.Observe() = true for metadata-only prefix")
 	}
-	if !detector.Observe([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"custom_tool_call\"}}\n\n")) {
+	if !detector.Observe([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"custom_tool_call\",\"name\":\"shell\",\"input\":\"pwd\"}}\n\n")) {
 		t.Fatal("StreamBootstrapDetector.Observe() = false after complete custom tool output")
 	}
 }
@@ -2752,6 +2752,51 @@ func TestResponsesEmptyToolCallScaffold(t *testing.T) {
 		}
 		if !detector.HasMeaningfulOutput() {
 			t.Fatal("detector.HasMeaningfulOutput() = false for custom_tool_call with input, want true")
+		}
+	})
+
+	t.Run("output_item.done with empty function_call does not mark meaningful and allows bootstrap error failover", func(t *testing.T) {
+		emptyDoneFuncItems := [][]byte{
+			[]byte("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\"}}\n\n"),
+			[]byte("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"\",\"type\":\"function_call\",\"status\":\"completed\",\"arguments\":\"\",\"call_id\":\"\",\"name\":\"\"}}\n\n"),
+			[]byte("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"output\":{\"type\":\"function_call\"}}\n\n"),
+			[]byte("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\"}}\n\n"),
+		}
+		for i, payload := range emptyDoneFuncItems {
+			var detector StreamBootstrapDetector
+			if detector.Observe(payload) {
+				t.Fatalf("case %d: detector.Observe() = true for empty output_item.done, want false", i)
+			}
+			if detector.HasMeaningfulOutput() {
+				t.Fatalf("case %d: detector.HasMeaningfulOutput() = true for empty output_item.done, want false", i)
+			}
+		}
+
+		errUpstream := errors.New("upstream failed immediately after output_item.done empty scaffold")
+		ch := make(chan cliproxyexecutor.StreamChunk, 2)
+		ch <- cliproxyexecutor.StreamChunk{Payload: emptyDoneFuncItems[0]}
+		ch <- cliproxyexecutor.StreamChunk{Err: errUpstream}
+		close(ch)
+		buffered, closed, err := readStreamBootstrap(context.Background(), ch)
+		if !errors.Is(err, errUpstream) {
+			t.Fatalf("readStreamBootstrap error = %v, want %v for failover", err, errUpstream)
+		}
+		if len(buffered) != 0 {
+			t.Fatalf("readStreamBootstrap buffered = %d, want 0 on failover error", len(buffered))
+		}
+		if closed {
+			t.Fatal("readStreamBootstrap returned closed = true, want false on error")
+		}
+	})
+
+	t.Run("output_item.done with valid function_call marks meaningful and forwards", func(t *testing.T) {
+		validDoneFunc := []byte("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"fc_123\",\"type\":\"function_call\",\"status\":\"completed\",\"arguments\":\"{\\\"query\\\":\\\"go\\\"}\",\"call_id\":\"call_123\",\"name\":\"search\"}}\n\n")
+		var detector StreamBootstrapDetector
+		if !detector.Observe(validDoneFunc) {
+			t.Fatal("detector.Observe() = false for valid output_item.done function_call, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for valid output_item.done function_call, want true")
 		}
 	})
 }

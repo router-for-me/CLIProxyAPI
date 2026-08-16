@@ -158,6 +158,12 @@ func newTTFTTimeoutError(timeout time.Duration) error {
 
 func (m *Manager) streamFirstChunkTimeout(opts cliproxyexecutor.Options) time.Duration {
 	if opts.Metadata != nil {
+		if ms, ok := opts.Metadata["stream_connect_timeout_ms"].(int); ok {
+			if ms <= 0 {
+				return 0
+			}
+			return time.Duration(ms) * time.Millisecond
+		}
 		if ms, ok := opts.Metadata["stream_first_chunk_timeout_ms"].(int); ok {
 			if ms <= 0 {
 				return 0
@@ -169,10 +175,16 @@ func (m *Manager) streamFirstChunkTimeout(opts cliproxyexecutor.Options) time.Du
 		return 0
 	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	if cfg == nil || cfg.Streaming.StreamFirstChunkTimeoutSeconds <= 0 {
+	if cfg == nil {
 		return 0
 	}
-	return time.Duration(cfg.Streaming.StreamFirstChunkTimeoutSeconds) * time.Second
+	if cfg.Streaming.StreamConnectTimeoutSeconds > 0 {
+		return time.Duration(cfg.Streaming.StreamConnectTimeoutSeconds) * time.Second
+	}
+	if cfg.Streaming.StreamFirstChunkTimeoutSeconds > 0 {
+		return time.Duration(cfg.Streaming.StreamFirstChunkTimeoutSeconds) * time.Second
+	}
+	return 0
 }
 
 func discardStreamChunks(ch <-chan cliproxyexecutor.StreamChunk) {

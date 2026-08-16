@@ -688,13 +688,17 @@ func (a *emptyCompletionAccum) evalOpenAIResponse(data []byte) bool {
 		if err := json.Unmarshal(chunk.Item, &item); err == nil {
 			itemType := strings.ToLower(strings.TrimSpace(item.Type))
 			if strings.HasSuffix(itemType, "_call") {
-				a.hasToolCalls = true
+				if hasMeaningfulResponsesCallItem(item) {
+					a.hasToolCalls = true
+				}
 			}
 		}
 		if err := json.Unmarshal(chunk.Output, &item); err == nil {
 			itemType := strings.ToLower(strings.TrimSpace(item.Type))
 			if strings.HasSuffix(itemType, "_call") {
-				a.hasToolCalls = true
+				if hasMeaningfulResponsesCallItem(item) {
+					a.hasToolCalls = true
+				}
 			}
 		}
 	case "response.function_call_arguments.delta", "response.function_call_arguments.done":
