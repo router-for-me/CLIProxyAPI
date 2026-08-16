@@ -242,8 +242,16 @@ func (m *Manager) SetSelector(selector Selector) {
 		selector = &RoundRobinSelector{}
 	}
 	m.mu.Lock()
+	previous := m.selector
 	m.selector = selector
 	m.mu.Unlock()
+	// Release resources of the replaced selector (e.g. the session affinity
+	// cache cleanup goroutine) so routing config changes do not leak them.
+	if previous != nil && previous != selector {
+		if stoppable, ok := previous.(StoppableSelector); ok {
+			stoppable.Stop()
+		}
+	}
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
