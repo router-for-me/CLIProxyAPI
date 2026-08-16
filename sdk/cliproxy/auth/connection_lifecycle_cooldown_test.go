@@ -448,8 +448,12 @@ func TestManager_MarkResult_TransportFailureWithAuthProxyStillCooldowns(t *testi
 	assertNoCooldown(t, m, authCancel.ID, model)
 
 	// Auth-level path (empty model) must also keep cooldown for transport
-	// failures through a per-auth proxy.
-	authLevel := &Auth{ID: "auth-transport-proxy-auth-level", Provider: "codex", ProxyURL: "http://127.0.0.1:7890"}
+	// failures through a per-auth proxy. The dedicated proxy must differ from
+	// the one used by the credentials above: a proxy shared by several
+	// pollable credentials is now treated as shared infrastructure and skips
+	// cooldown (see
+	// TestManager_MarkResult_TransportFailureWithSharedProxySkipsCooldown).
+	authLevel := &Auth{ID: "auth-transport-proxy-auth-level", Provider: "codex", ProxyURL: "http://127.0.0.1:7892"}
 	if _, errRegister := m.Register(context.Background(), authLevel); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
 	}
@@ -1469,4 +1473,222 @@ func TestManager_MarkResult_VertexRoundRobinIgnoresWeightSkipsCooldown(t *testin
 		Error:    endpointErr,
 	})
 	assertNoCooldown(t, m, authEU.ID, model)
+}
+
+func TestManager_MarkResult_TransportFailureWithSharedProxySkipsCooldown(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	// Multiple credentials can share one real ProxyURL (the synthesizer passes
+	// the proxy through verbatim), so they route through the same proxy layer.
+	// A proxy dial failure is then a shared infrastructure fault, not an
+	// auth-specific routing problem: cooling every credential behind the dead
+	// proxy would drain the pool.
+	transportErr := resultErrorFromError(fmt.Errorf("proxyconnect tcp: dial tcp 127.0.0.1:7890: connect: connection refused"))
+	if !isTransportFailureResultError(transportErr) {
+		t.Fatalf("isTransportFailureResultError(%#v) = false, want true", transportErr)
+	}
+
+	model := "gpt-5.6-sol"
+	m := NewManager(nil, nil, nil)
+	authA := &Auth{ID: "auth-shared-proxy-a", Provider: "codex", ProxyURL: "http://127.0.0.1:7890"}
+	authB := &Auth{ID: "auth-shared-proxy-b", Provider: "codex", ProxyURL: "http://127.0.0.1:7890"}
+	for _, a := range []*Auth{authA, authB} {
+		if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+	}
+	// The shared-proxy peer must support the route model to count as pollable
+	// for the model-level path.
+	registerClientModelForTest(t, authA.ID, model)
+	registerClientModelForTest(t, authB.ID, model)
+
+	// Model-level path: the shared proxy peer keeps the failure non-specific.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authA.ID,
+		Provider: authA.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    transportErr,
+	})
+	assertNoCooldown(t, m, authA.ID, model)
+
+	// Auth-level path (empty model) must behave identically.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authB.ID,
+		Provider: authB.Provider,
+		Success:  false,
+		Error:    transportErr,
+	})
+	updated, ok := m.GetByID(authB.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected shared-proxy failure to skip auth-level cooldown, got unavailable=%v next=%v", updated.Unavailable, updated.NextRetryAfter)
+	}
+}
+
+func TestManager_MarkResult_TransportFailureWithDedicatedProxyStillCooldowns(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	// Distinct per-auth proxies: each credential owns its proxy endpoint, so a
+	// proxy dial failure on one credential is auth-specific routing and must
+	// keep cooldown. The single-credential dedicated-proxy case is covered by
+	// TestManager_MarkResult_TransportFailureWithAuthProxyStillCooldowns.
+	transportErr := resultErrorFromError(fmt.Errorf("proxyconnect tcp: dial tcp 127.0.0.1:7890: connect: connection refused"))
+	model := "gpt-5.6-sol"
+
+	m := NewManager(nil, nil, nil)
+	authA := &Auth{ID: "auth-dedicated-proxy-a", Provider: "codex", ProxyURL: "http://127.0.0.1:7890"}
+	authB := &Auth{ID: "auth-dedicated-proxy-b", Provider: "codex", ProxyURL: "http://127.0.0.1:7891"}
+	for _, a := range []*Auth{authA, authB} {
+		if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+	}
+	registerClientModelForTest(t, authA.ID, model)
+	registerClientModelForTest(t, authB.ID, model)
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authA.ID,
+		Provider: authA.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    transportErr,
+	})
+	updated, ok := m.GetByID(authA.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil || state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected dedicated-proxy transport failure to keep cooldown")
+	}
+}
+
+func TestManager_MarkResult_VertexSessionAffinityWeightedZeroWeightStillCooldowns(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	// Session affinity can wrap a WeightedRoundRobinSelector as its fallback
+	// (see newRoutingSelector in sdk/cliproxy/service_config.go). Selection
+	// still routes through positiveWeightAuths in that configuration, so the
+	// zero-weight same-location peer must not hide endpoint uniqueness.
+	endpointErr := resultErrorFromError(fmt.Errorf("dial tcp 142.250.4.1:443: connect: connection refused"))
+	model := "gemini-2.5-pro"
+
+	cases := []struct {
+		name     string
+		selector Selector
+	}{
+		{name: "NewSessionAffinitySelector", selector: NewSessionAffinitySelector(&WeightedRoundRobinSelector{})},
+		{name: "NewSessionAffinitySelectorWithConfig", selector: NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+			Fallback: &WeightedRoundRobinSelector{},
+			TTL:      time.Hour,
+		})},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, tc.selector, nil)
+			authEU := newVertexSATestAuth("auth-vertex-affinity-weight-eu", "europe-west4")
+			authEU2 := newVertexSATestAuth("auth-vertex-affinity-weight-eu2", "europe-west4")
+			authUS := newVertexSATestAuth("auth-vertex-affinity-weight-us", "us-central1")
+			authEU2.Attributes = map[string]string{AttributeWeight: "0"}
+			authUS.Attributes = map[string]string{AttributeWeight: "1"}
+			for _, a := range []*Auth{authEU, authEU2, authUS} {
+				if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+					t.Fatalf("register auth: %v", errRegister)
+				}
+			}
+			for _, a := range []*Auth{authEU, authEU2, authUS} {
+				registerClientModelForTest(t, a.ID, model)
+			}
+			m.MarkResult(context.Background(), Result{
+				AuthID:   authEU.ID,
+				Provider: authEU.Provider,
+				Model:    model,
+				Success:  false,
+				Error:    endpointErr,
+			})
+			updated, ok := m.GetByID(authEU.ID)
+			if !ok || updated == nil {
+				t.Fatalf("expected auth to be present")
+			}
+			state := updated.ModelStates[model]
+			if state == nil || state.NextRetryAfter.IsZero() {
+				t.Fatalf("expected session-affinity weighted zero-weight same-location peer to keep cooldown")
+			}
+		})
+	}
+}
+
+func TestManager_MarkResult_VertexLowPrioritySameLocationPeerStillCooldowns(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	// The same-location EU peer runs at a lower priority than the failing EU
+	// auth, so request selection (availableAuthsForRouteModel,
+	// allPriorities=false) never hands it to the round-robin selector; only
+	// the healthy US peer at the same high priority is a real alternative
+	// endpoint. The low-priority peer must not hide endpoint uniqueness. The
+	// equal-priority control (two same-location peers sharing the top tier)
+	// still skips cooldown and is covered by
+	// TestManager_MarkResult_TransportFailureWithSharedVertexLocationSkipsCooldown.
+	endpointErr := resultErrorFromError(fmt.Errorf("dial tcp 142.250.4.1:443: connect: connection refused"))
+	model := "gemini-2.5-pro"
+
+	m := NewManager(nil, nil, nil)
+	authEU := newVertexSATestAuth("auth-vertex-priority-eu", "europe-west4")
+	authEU2 := newVertexSATestAuth("auth-vertex-priority-eu2", "europe-west4")
+	authUS := newVertexSATestAuth("auth-vertex-priority-us", "us-central1")
+	authEU.Attributes = map[string]string{"priority": "10"}
+	authEU2.Attributes = map[string]string{"priority": "0"}
+	authUS.Attributes = map[string]string{"priority": "10"}
+	for _, a := range []*Auth{authEU, authEU2, authUS} {
+		if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+	}
+	for _, a := range []*Auth{authEU, authEU2, authUS} {
+		registerClientModelForTest(t, a.ID, model)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authEU.ID,
+		Provider: authEU.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    endpointErr,
+	})
+	updated, ok := m.GetByID(authEU.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil || state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected low-priority same-location peer to keep cooldown")
+	}
 }

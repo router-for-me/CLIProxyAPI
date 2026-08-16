@@ -1311,37 +1311,35 @@ func shouldSkipCredentialCooldown(err *Error) bool {
 	return isRequestScopedResultError(err) || isConnectionLifecycleResultError(err)
 }
 
-// shouldSkipCredentialCooldownForAuth reports failures that must not mark auth/model cooling.
-// Transport-level failures still cool down credentials that carry their own proxy
-// override, because those failures indicate auth-specific routing problems.
-func shouldSkipCredentialCooldownForAuth(err *Error, auth *Auth) bool {
+// shouldSkipCredentialCooldownPoolAware extends the per-auth check with
+// pool-aware judgments. A transport failure through a per-auth proxy that is
+// shared with another pollable credential (same ProxyURL) is a shared
+// infrastructure fault and must not cool the failing credential down; a proxy
+// used by a single credential remains an auth-specific routing fault and
+// keeps cooldown. A transport failure on a Vertex service-account auth whose
+// regional endpoint is unique among the selectable Vertex service-account
+// auths (other auths exist, none sharing its location and currently pickable
+// for the model) is likewise an auth-specific routing fault and must keep
+// credential cooldown. Only failure messages that can point to the failing
+// endpoint are attributed; shared-host faults (network unreachable, DNS
+// server misbehaving, operation timed out) and proxy dial failures never
+// reach a regional endpoint and are never attributed to one. Caller must hold
+// m.mu.
+func (m *Manager) shouldSkipCredentialCooldownPoolAware(err *Error, auth *Auth, modelKey string, now time.Time) bool {
 	if !shouldSkipCredentialCooldown(err) {
 		return false
 	}
-	if isTransportFailureResultError(err) && authHasProxyOverride(auth) {
-		return false
-	}
-	return true
-}
-
-// shouldSkipCredentialCooldownPoolAware extends the per-auth check with
-// pool-aware Vertex regional-endpoint disambiguation. A transport failure on
-// a Vertex service-account auth whose regional endpoint is unique among the
-// pollable Vertex service-account auths (other auths exist, none sharing its
-// location and currently available for the model) is an auth-specific routing
-// fault and must keep credential cooldown. Only failure messages that can
-// point to the failing endpoint are attributed; shared-host faults (network
-// unreachable, DNS server misbehaving, operation timed out) and proxy dial
-// failures never reach a regional endpoint and are never attributed to one.
-// Caller must hold m.mu.
-func (m *Manager) shouldSkipCredentialCooldownPoolAware(err *Error, auth *Auth, modelKey string, now time.Time) bool {
-	if !shouldSkipCredentialCooldownForAuth(err, auth) {
-		return false
-	}
-	if isTransportFailureResultError(err) &&
-		isVertexEndpointFailureMessage(err.Message) &&
-		m.vertexTransportFailureIsAuthSpecificLocked(auth, modelKey, now) {
-		return false
+	if isTransportFailureResultError(err) {
+		if authHasProxyOverride(auth) {
+			// A per-auth proxy makes the transport failure auth-specific
+			// unless another pollable credential shares the same proxy
+			// endpoint, in which case the fault is a shared proxy outage.
+			return m.authHasSharedProxyPeerLocked(auth, modelKey, now)
+		}
+		if isVertexEndpointFailureMessage(err.Message) &&
+			m.vertexTransportFailureIsAuthSpecificLocked(auth, modelKey, now) {
+			return false
+		}
 	}
 	return true
 }
@@ -1369,43 +1367,57 @@ func vertexSALocation(auth *Auth) string {
 
 // vertexTransportFailureIsAuthSpecificLocked reports whether the given Vertex
 // service-account auth routes through a regional endpoint that no other
-// pollable Vertex service-account auth in the pool shares. Peers currently
-// blocked for the model (disabled, quota cooldown, retry-after, or auth-level
-// unavailability, as judged by isAuthBlockedForModel) cannot serve requests,
-// so they are ignored when judging whether an alternative endpoint exists.
-// Peers that do not support the route model (per authSupportsRouteModel, the
-// same judgment request selection applies) can never be picked for this model
-// and are ignored too, otherwise a healthy but model-ineligible peer would
-// hide the endpoint uniqueness and leave polling stuck on the failing auth.
-// On the auth-level path (empty model key) authSupportsRouteModel is always
-// true, so peers are not filtered by model; this limitation only affects SDK
-// users who call Manager.MarkResult directly with an empty Model, since the
-// production path always sets result.Model. When pollable peers exist, a
-// transport failure is specific to this auth's endpoint and rotation can only
-// reach a healthy credential if this auth cools down. Caller must hold m.mu.
+// selectable Vertex service-account auth in the pool shares. Peers are judged
+// exactly like the request-selection candidate set: pollable (disabled, quota
+// cooldown, retry-after, or auth-level unavailability, as judged by
+// isAuthBlockedForModel, cannot serve requests), route-model eligible (per
+// authSupportsRouteModel, the same judgment request selection applies),
+// restricted to the current highest available priority tier (matching
+// availableAuthsForRouteModel's allPriorities=false semantics so lower
+// priority peers cannot hide endpoint uniqueness), and to positive weights
+// when the strategy is weighted (see isWeightedSelector). Peers outside this
+// set can never be picked for this model, so they must not hide the endpoint
+// uniqueness, otherwise a healthy but unreachable peer would leave polling
+// stuck on the failing auth. On the auth-level path (empty model key)
+// authSupportsRouteModel is always true, so peers are not filtered by model;
+// this limitation only affects SDK users who call Manager.MarkResult directly
+// with an empty Model, since the production path always sets result.Model.
+// When selectable peers exist, a transport failure is specific to this auth's
+// endpoint and rotation can only reach a healthy credential if this auth
+// cools down. Caller must hold m.mu.
 func (m *Manager) vertexTransportFailureIsAuthSpecificLocked(auth *Auth, modelKey string, now time.Time) bool {
 	loc := vertexSALocation(auth)
 	if loc == "" {
 		return false
 	}
+	peers := m.vertexPeerCandidatesLocked(auth, modelKey, now)
+	if len(peers) == 0 {
+		return false
+	}
+	for _, peer := range peers {
+		if vertexSALocation(peer) == loc {
+			return false
+		}
+	}
+	return true
+}
+
+// vertexPeerCandidatesLocked returns the Vertex service-account peers that
+// request selection could actually pick for the same model, mirroring the
+// selector's candidate set: pollable, route-model eligible, restricted to the
+// current highest available priority tier, and to positive weights when the
+// selector is weighted. It reuses availableAuthsForSelector, which never
+// takes m.mu, so it is safe under the caller-held lock. Caller must hold m.mu.
+func (m *Manager) vertexPeerCandidatesLocked(auth *Auth, modelKey string, now time.Time) []*Auth {
+	candidates := make([]*Auth, 0, len(m.auths))
 	registryRef := registry.GetGlobalRegistry()
-	hasPeer := false
 	for _, peer := range m.auths {
 		if peer == nil || peer.ID == auth.ID {
 			continue
 		}
 		// Skip non-service-account peers first: they have no regional
 		// endpoint to compare, so avoid the blocked/model checks on them.
-		peerLoc := vertexSALocation(peer)
-		if peerLoc == "" {
-			continue
-		}
-		// Under a weighted selection strategy peers with a non-positive weight
-		// are never picked for this model (see positiveWeightAuths), so they
-		// cannot serve requests and must not hide endpoint uniqueness. The
-		// default round-robin strategy ignores weights entirely and keeps the
-		// legacy peer set. Caller holds m.mu, so reading m.selector is safe.
-		if _, weighted := m.selector.(*WeightedRoundRobinSelector); weighted && authWeight(peer) <= 0 {
+		if vertexSALocation(peer) == "" {
 			continue
 		}
 		if blocked, _, _ := isAuthBlockedForModel(peer, modelKey, now); blocked {
@@ -1414,22 +1426,96 @@ func (m *Manager) vertexTransportFailureIsAuthSpecificLocked(auth *Auth, modelKe
 		if !m.authSupportsRouteModel(registryRef, peer, modelKey) {
 			continue
 		}
-		hasPeer = true
-		if peerLoc == loc {
+		candidates = append(candidates, peer)
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	priorityTier, _, errAvailable := m.availableAuthsForSelector(m.selector, candidates, provider, modelKey, now)
+	if errAvailable != nil {
+		return nil
+	}
+	// Under a weighted selection strategy peers with a non-positive weight are
+	// never picked for this model (see positiveWeightAuths), so they cannot
+	// serve requests and must not hide endpoint uniqueness. The default
+	// round-robin strategy ignores weights entirely and keeps the legacy peer
+	// set. Caller holds m.mu, so reading m.selector is safe.
+	if isWeightedSelector(m.selector) {
+		priorityTier = positiveWeightAuths(priorityTier)
+	}
+	return priorityTier
+}
+
+// isWeightedSelector reports whether the selector routes through a
+// WeightedRoundRobinSelector, either directly or as the fallback of a
+// SessionAffinitySelector. Both configurations exclude non-positive-weight
+// auths before picking (positiveWeightAuths), so peer-eligibility judgments
+// that mirror selection must apply the same exclusion.
+func isWeightedSelector(selector Selector) bool {
+	switch sel := selector.(type) {
+	case *WeightedRoundRobinSelector:
+		return true
+	case *SessionAffinitySelector:
+		if sel == nil {
 			return false
 		}
+		_, weighted := sel.fallback.(*WeightedRoundRobinSelector)
+		return weighted
+	default:
+		return false
 	}
-	return hasPeer
+}
+
+// authHasSharedProxyPeerLocked reports whether another pollable credential
+// routes through the same per-auth proxy endpoint as auth (ProxyURL compared
+// after TrimSpace). When the proxy is shared, a transport failure against it
+// is a shared infrastructure fault: cooling the failing credential would only
+// drain the pool, since its peers hit the same dead endpoint. Peers currently
+// blocked for the model (isAuthBlockedForModel) or ineligible for the route
+// model (authSupportsRouteModel, model-level path only) cannot serve requests
+// and are ignored, so a single-credential dedicated proxy keeps restoring
+// cooldown. On the auth-level path (empty model key) model support is always
+// true, so peers are not filtered by model; this limitation only affects SDK
+// users who call Manager.MarkResult directly with an empty Model, since the
+// production path always sets result.Model. Caller must hold m.mu.
+func (m *Manager) authHasSharedProxyPeerLocked(auth *Auth, modelKey string, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	proxyURL := strings.TrimSpace(auth.ProxyURL)
+	if proxyURL == "" {
+		return false
+	}
+	registryRef := registry.GetGlobalRegistry()
+	for _, peer := range m.auths {
+		if peer == nil || peer.ID == auth.ID {
+			continue
+		}
+		if strings.TrimSpace(peer.ProxyURL) != proxyURL {
+			continue
+		}
+		if blocked, _, _ := isAuthBlockedForModel(peer, modelKey, now); blocked {
+			continue
+		}
+		if modelKey != "" && !m.authSupportsRouteModel(registryRef, peer, modelKey) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // authHasProxyOverride reports whether the auth carries its own proxy
 // configuration. Transport failures through a per-auth proxy are auth-specific
 // routing faults, not shared network outages, so they should keep credential
-// cooldown. The judgment mirrors proxyutil.Parse: only a real proxy mode
-// (ModeProxy) counts as an override; the explicit direct modes "direct"/"none"
-// (ModeDirect) and empty values (ModeInherit) route through no proxy endpoint;
-// malformed or unsupported values (ModeInvalid) are the credential's own
-// configuration problem, so cooldown is restored like a real override.
+// cooldown unless another credential shares the proxy endpoint (see
+// authHasSharedProxyPeerLocked). The judgment mirrors proxyutil.Parse: only a
+// real proxy mode (ModeProxy) counts as an override; the explicit direct
+// modes "direct"/"none" (ModeDirect) and empty values (ModeInherit) route
+// through no proxy endpoint; malformed or unsupported values (ModeInvalid)
+// are the credential's own configuration problem, so cooldown is restored
+// like a real override.
 func authHasProxyOverride(auth *Auth) bool {
 	if auth == nil {
 		return false
