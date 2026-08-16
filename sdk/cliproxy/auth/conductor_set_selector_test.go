@@ -46,3 +46,38 @@ func TestSessionCacheStopIsConcurrencySafe(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// StopSelectorIfInactive retires an owned selector only when it is no longer
+// active: a concurrent SetSelector re-installing the same instance must win,
+// otherwise the republished selector's cleanup goroutine would be stopped
+// underneath it.
+func TestManagerStopSelectorIfInactiveSkipsActiveSelector(t *testing.T) {
+	t.Parallel()
+
+	affinity := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer affinity.Stop()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.SetSelector(affinity)
+
+	manager.StopSelectorIfInactive(affinity)
+	select {
+	case <-affinity.cache.stopCh:
+		t.Fatal("active selector was stopped")
+	default:
+	}
+}
+
+func TestManagerStopSelectorIfInactiveStopsReplacedSelector(t *testing.T) {
+	t.Parallel()
+
+	affinity := NewSessionAffinitySelector(&RoundRobinSelector{})
+	manager := NewManager(nil, affinity, nil)
+	manager.SetSelector(&RoundRobinSelector{})
+
+	manager.StopSelectorIfInactive(affinity)
+	select {
+	case <-affinity.cache.stopCh:
+	default:
+		t.Fatal("inactive selector was not stopped")
+	}
+}

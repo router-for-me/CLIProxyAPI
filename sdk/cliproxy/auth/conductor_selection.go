@@ -250,6 +250,23 @@ func (m *Manager) SetSelector(selector Selector) {
 	}
 }
 
+// StopSelectorIfInactive stops target unless it is currently the active
+// selector, atomically with respect to SetSelector. It lets the owner of a
+// replaced selector retire it safely: a concurrent SetSelector re-installing
+// target wins and the stop is skipped. The Manager never stops selectors
+// implicitly; lifecycle stays with the selector's owner.
+func (m *Manager) StopSelectorIfInactive(target *SessionAffinitySelector) {
+	if m == nil || target == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.selector == target {
+		return
+	}
+	target.Stop()
+}
+
 // Selector returns the current credential selector.
 func (m *Manager) Selector() Selector {
 	if m == nil {

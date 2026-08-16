@@ -208,10 +208,12 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 		s.coreManager.SetSelector(selector)
 		// Stop the routing selector this Service installed previously: only the
 		// affinity selector holds resources (a cache cleanup goroutine), and
-		// without this every routing config change leaks it. Selectors supplied
+		// without this every routing config change leaks it. The conditional
+		// stop is atomic with respect to SetSelector, so a concurrent re-install
+		// of the previous selector wins and keeps it running. Selectors supplied
 		// by SDK callers are caller-owned and never stopped here.
 		if prev, ok := s.appliedRoutingSelector.(*coreauth.SessionAffinitySelector); ok {
-			prev.Stop()
+			s.coreManager.StopSelectorIfInactive(prev)
 		}
 		s.appliedRoutingSelector = selector
 		s.appliedRoutingState = &routingState
