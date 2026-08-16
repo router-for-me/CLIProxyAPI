@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -1348,8 +1349,11 @@ func (m *Manager) shouldSkipCredentialCooldownPoolAware(err *Error, auth *Auth, 
 // vertexSALocation returns the effective regional location of a Vertex
 // service-account auth, mirroring the executor-side default of us-central1.
 // Non-service-account auths (e.g. vertex apikey compat entries) return "".
+// The provider comparison is normalized exactly like the selection path does
+// (executorKeyFromAuth trims and lowercases the provider), so "Vertex" and
+// "vertex" select the same executor and must be judged the same here.
 func vertexSALocation(auth *Auth) string {
-	if auth == nil || auth.Provider != "vertex" || auth.Metadata == nil {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "vertex") || auth.Metadata == nil {
 		return ""
 	}
 	if _, ok := auth.Metadata["service_account"]; !ok {
@@ -1396,6 +1400,14 @@ func (m *Manager) vertexTransportFailureIsAuthSpecificLocked(auth *Auth, modelKe
 		if peerLoc == "" {
 			continue
 		}
+		// Under a weighted selection strategy peers with a non-positive weight
+		// are never picked for this model (see positiveWeightAuths), so they
+		// cannot serve requests and must not hide endpoint uniqueness. The
+		// default round-robin strategy ignores weights entirely and keeps the
+		// legacy peer set. Caller holds m.mu, so reading m.selector is safe.
+		if _, weighted := m.selector.(*WeightedRoundRobinSelector); weighted && authWeight(peer) <= 0 {
+			continue
+		}
 		if blocked, _, _ := isAuthBlockedForModel(peer, modelKey, now); blocked {
 			continue
 		}
@@ -1410,11 +1422,23 @@ func (m *Manager) vertexTransportFailureIsAuthSpecificLocked(auth *Auth, modelKe
 	return hasPeer
 }
 
-// authHasProxyOverride reports whether the auth carries its own proxy configuration.
-// Transport failures through a per-auth proxy are auth-specific routing faults,
-// not shared network outages, so they should keep credential cooldown.
+// authHasProxyOverride reports whether the auth carries its own proxy
+// configuration. Transport failures through a per-auth proxy are auth-specific
+// routing faults, not shared network outages, so they should keep credential
+// cooldown. The judgment mirrors proxyutil.Parse: only a real proxy mode
+// (ModeProxy) counts as an override; the explicit direct modes "direct"/"none"
+// (ModeDirect) and empty values (ModeInherit) route through no proxy endpoint;
+// malformed or unsupported values (ModeInvalid) are the credential's own
+// configuration problem, so cooldown is restored like a real override.
 func authHasProxyOverride(auth *Auth) bool {
-	return auth != nil && strings.TrimSpace(auth.ProxyURL) != ""
+	if auth == nil {
+		return false
+	}
+	setting, errParse := proxyutil.Parse(auth.ProxyURL)
+	if errParse != nil {
+		return setting.Mode == proxyutil.ModeInvalid
+	}
+	return setting.Mode == proxyutil.ModeProxy
 }
 
 // isTransportFailureResultError reports whether the result error is classified as a
