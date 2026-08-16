@@ -913,7 +913,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().SetModelQuotaExceeded(result.AuthID, modelKey)
 	}
 	if shouldResumeModel {
-		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, modelKey)
+		for _, m := range modelsForRegisteredAuth(result.AuthID) {
+			registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, m)
+		}
+		if modelKey != "" {
+			registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, modelKey)
+		}
 	} else if shouldSuspendModel {
 		if suspendReason == "invalid_api_key" {
 			for _, m := range modelsForRegisteredAuth(result.AuthID) {

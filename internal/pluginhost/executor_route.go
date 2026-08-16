@@ -214,12 +214,23 @@ func wrapStreamEmptyCompletion(ctx context.Context, streamResult *coreexecutor.S
 				}
 			}
 			if detector.IsTerminalEmpty() {
+				discardStreamChunks(src)
 				_ = forward(coreexecutor.StreamChunk{Err: coreauth.EmptyCompletionError()})
 				return
 			}
 		}
 	}()
 	return &coreexecutor.StreamResult{Chunks: wrapped, Headers: streamResult.Headers}
+}
+
+func discardStreamChunks(ch <-chan coreexecutor.StreamChunk) {
+	if ch == nil {
+		return
+	}
+	go func() {
+		for range ch {
+		}
+	}()
 }
 
 func streamChunkPayload(chunks []coreexecutor.StreamChunk) []byte {

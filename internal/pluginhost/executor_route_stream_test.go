@@ -297,3 +297,41 @@ func TestWrapStreamEmptyCompletionStopsAtTerminalEmptyMarkersWithoutChannelClose
 		})
 	}
 }
+
+func TestWrapStreamEmptyCompletionDrainsSourceAfterTerminalEmpty(t *testing.T) {
+	src := make(chan coreexecutor.StreamChunk)
+	producerDone := make(chan struct{})
+
+	go func() {
+		defer close(producerDone)
+		// Send terminal empty chunk (OpenAI [DONE])
+		src <- coreexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
+		// Send trailing chunk on unbuffered channel
+		src <- coreexecutor.StreamChunk{Payload: []byte("trailing chunk")}
+		close(src)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	wrapped := wrapStreamEmptyCompletion(ctx, &coreexecutor.StreamResult{Chunks: src})
+	select {
+	case first, ok := <-wrapped.Chunks:
+		if !ok {
+			t.Fatal("wrapped stream closed without emitting error")
+		}
+		var authErr *coreauth.Error
+		if !errors.As(first.Err, &authErr) || authErr.Code != "empty_completion" {
+			t.Fatalf("first error = %v, want empty_completion error", first.Err)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for empty_completion error")
+	}
+
+	select {
+	case <-producerDone:
+		// Success: producer unblocked because src was drained
+	case <-time.After(time.Second):
+		t.Fatal("producer remained blocked after terminal empty return; source was not drained")
+	}
+}
