@@ -21,6 +21,8 @@ type SessionCache struct {
 	entries map[string]sessionEntry
 	ttl     time.Duration
 	stopCh  chan struct{}
+	// stopped makes Stop idempotent; guarded by mu.
+	stopped bool
 }
 
 // NewSessionCache creates a cache with the specified TTL.
@@ -34,7 +36,7 @@ func NewSessionCache(ttl time.Duration) *SessionCache {
 		ttl:     ttl,
 		stopCh:  make(chan struct{}),
 	}
-	go c.cleanupLoop()
+	go c.cleanupLoop(c.stopCh)
 	return c
 }
 
@@ -317,21 +319,23 @@ func (c *SessionCache) InvalidateAuth(authID string) {
 	c.mu.Unlock()
 }
 
-// Stop terminates the background cleanup goroutine.
+// Stop terminates the background cleanup goroutine. It is safe to call
+// multiple times, including from concurrent goroutines.
 func (c *SessionCache) Stop() {
-	select {
-	case <-c.stopCh:
-	default:
+	c.mu.Lock()
+	if !c.stopped {
+		c.stopped = true
 		close(c.stopCh)
 	}
+	c.mu.Unlock()
 }
 
-func (c *SessionCache) cleanupLoop() {
+func (c *SessionCache) cleanupLoop(stopCh chan struct{}) {
 	ticker := time.NewTicker(c.ttl / 2)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-c.stopCh:
+		case <-stopCh:
 			return
 		case <-ticker.C:
 			c.cleanup()

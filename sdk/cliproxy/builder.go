@@ -241,6 +241,7 @@ func (b *Builder) Build() (*Service, error) {
 	coreManager := b.coreManager
 	cooldownStateStore := b.cooldownStateStore
 	var appliedRoutingState *routingRuntimeState
+	var appliedRoutingSelector coreauth.Selector
 	if coreManager == nil {
 		tokenStore := sdkAuth.GetTokenStore()
 		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok && b.cfg != nil {
@@ -253,7 +254,8 @@ func (b *Builder) Build() (*Service, error) {
 		}
 
 		routingState := normalizedRoutingRuntimeState(b.cfg)
-		coreManager = coreauth.NewManager(tokenStore, newRoutingSelector(routingState), nil)
+		appliedRoutingSelector = newRoutingSelector(routingState)
+		coreManager = coreauth.NewManager(tokenStore, appliedRoutingSelector, nil)
 		appliedRoutingState = &routingState
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
@@ -265,19 +267,20 @@ func (b *Builder) Build() (*Service, error) {
 	}
 
 	service := &Service{
-		cfg:                 b.cfg,
-		configPath:          b.configPath,
-		tokenProvider:       tokenProvider,
-		apiKeyProvider:      apiKeyProvider,
-		watcherFactory:      watcherFactory,
-		hooks:               b.hooks,
-		authManager:         authManager,
-		accessManager:       accessManager,
-		coreManager:         coreManager,
-		cooldownStateStore:  cooldownStateStore,
-		pluginHost:          pluginHost,
-		appliedRoutingState: appliedRoutingState,
-		serverOptions:       append([]api.ServerOption(nil), b.serverOptions...),
+		cfg:                    b.cfg,
+		configPath:             b.configPath,
+		tokenProvider:          tokenProvider,
+		apiKeyProvider:         apiKeyProvider,
+		watcherFactory:         watcherFactory,
+		hooks:                  b.hooks,
+		authManager:            authManager,
+		accessManager:          accessManager,
+		coreManager:            coreManager,
+		cooldownStateStore:     cooldownStateStore,
+		pluginHost:             pluginHost,
+		appliedRoutingState:    appliedRoutingState,
+		appliedRoutingSelector: appliedRoutingSelector,
+		serverOptions:          append([]api.ServerOption(nil), b.serverOptions...),
 	}
 	if b.postAuthHook != nil {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))
