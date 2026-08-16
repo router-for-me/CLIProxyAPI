@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -119,12 +120,18 @@ func TestCooldownRetryResetsExclusions(t *testing.T) {
 // which auth IDs were executed, so a test can prove a caller-excluded
 // credential is never picked after a cooldown retry.
 type idRecordingRateLimitedExecutor struct {
-	mu    sync.Mutex
-	calls map[string]int
-	err   error
+	mu         sync.Mutex
+	identifier string
+	calls      map[string]int
+	err        error
 }
 
-func (e *idRecordingRateLimitedExecutor) Identifier() string { return "gemini" }
+func (e *idRecordingRateLimitedExecutor) Identifier() string {
+	if e.identifier != "" {
+		return e.identifier
+	}
+	return "gemini"
+}
 
 func (e *idRecordingRateLimitedExecutor) record(id string) {
 	e.mu.Lock()
@@ -207,4 +214,102 @@ func TestCooldownRetryPreservesCallerExclusions(t *testing.T) {
 	if got := exec.count("auth-429"); got != 2 {
 		t.Fatalf("expected rotation auth to run twice (initial + post-cooldown retry), got %d", got)
 	}
+}
+
+func TestCooldownRetryPreservesConfigDisabledCoolingExclusions(t *testing.T) {
+	t.Run("global config disable cooling retains exclusion on retry", func(t *testing.T) {
+		manager := NewManager(nil, nil, nil)
+		manager.SetConfigSnapshot(&internalconfig.Config{DisableCooling: true})
+		manager.SetRetryConfig(1, 5*time.Second, 0)
+		auth := &Auth{ID: "auth-global-disabled", Provider: "gemini", Status: StatusActive}
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth: %v", err)
+		}
+		reg := registry.GetGlobalRegistry()
+		reg.RegisterClient(auth.ID, "gemini", []*registry.ModelInfo{{ID: "test-model"}})
+		t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+		manager.RefreshSchedulerEntry(auth.ID)
+		exec := &idRecordingRateLimitedExecutor{
+			calls: make(map[string]int),
+			err:   &retryableRateLimitError{status: http.StatusTooManyRequests, retryAfter: 50 * time.Millisecond},
+		}
+		manager.RegisterExecutor(exec)
+
+		_, err := manager.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{})
+		if err == nil {
+			t.Fatal("expected rate-limit error")
+		}
+		if got := exec.count("auth-global-disabled"); got != 1 {
+			t.Fatalf("expected config-disabled cooling auth to run once (exclusion retained on retry), got %d", got)
+		}
+	})
+
+	t.Run("provider compat config disable cooling retains exclusion on retry", func(t *testing.T) {
+		manager := NewManager(nil, nil, nil)
+		manager.SetConfigSnapshot(&internalconfig.Config{
+			OpenAICompatibility: []internalconfig.OpenAICompatibility{
+				{
+					Name:           "custom-openai",
+					DisableCooling: true,
+				},
+			},
+		})
+		manager.SetRetryConfig(1, 5*time.Second, 0)
+		auth := &Auth{
+			ID:       "auth-compat-disabled",
+			Provider: "openai-compatibility",
+			Status:   StatusActive,
+			Attributes: map[string]string{
+				"provider_key": "custom-openai",
+			},
+		}
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth: %v", err)
+		}
+		reg := registry.GetGlobalRegistry()
+		reg.RegisterClient(auth.ID, "openai-compatibility", []*registry.ModelInfo{{ID: "test-model"}})
+		t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+		manager.RefreshSchedulerEntry(auth.ID)
+		exec := &idRecordingRateLimitedExecutor{
+			identifier: "openai-compatibility",
+			calls:      make(map[string]int),
+			err:        &retryableRateLimitError{status: http.StatusTooManyRequests, retryAfter: 50 * time.Millisecond},
+		}
+		manager.RegisterExecutor(exec)
+
+		_, err := manager.Execute(context.Background(), []string{"openai-compatibility"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{})
+		if err == nil {
+			t.Fatal("expected rate-limit error")
+		}
+		if got := exec.count("auth-compat-disabled"); got != 1 {
+			t.Fatalf("expected provider-config-disabled cooling auth to run once (exclusion retained on retry), got %d", got)
+		}
+	})
+
+	t.Run("control cooling enabled normally resets exclusion on retry", func(t *testing.T) {
+		manager := NewManager(nil, nil, nil)
+		manager.SetConfigSnapshot(&internalconfig.Config{DisableCooling: false})
+		manager.SetRetryConfig(1, 5*time.Second, 0)
+		auth := &Auth{ID: "auth-cooling-enabled", Provider: "gemini", Status: StatusActive}
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth: %v", err)
+		}
+		reg := registry.GetGlobalRegistry()
+		reg.RegisterClient(auth.ID, "gemini", []*registry.ModelInfo{{ID: "test-model"}})
+		t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+		manager.RefreshSchedulerEntry(auth.ID)
+		exec := &idRecordingRateLimitedExecutor{
+			calls: make(map[string]int),
+			err:   &retryableRateLimitError{status: http.StatusTooManyRequests, retryAfter: 50 * time.Millisecond},
+		}
+		manager.RegisterExecutor(exec)
+
+		_, err := manager.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{})
+		if err == nil {
+			t.Fatal("expected rate-limit error")
+		}
+		if got := exec.count("auth-cooling-enabled"); got != 2 {
+			t.Fatalf("expected cooling-enabled auth to run twice (initial + post-cooldown retry), got %d", got)
+		}
+	})
 }

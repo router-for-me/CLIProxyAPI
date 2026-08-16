@@ -1408,7 +1408,7 @@ func (m *Manager) resetRecoveredExclusions(tried, preserve map[string]struct{}) 
 	m.mu.RLock()
 	for id := range tried {
 		if a, ok := m.auths[id]; ok && a != nil {
-			if _, disabled := a.DisableCoolingOverride(); disabled {
+			if m.cooldownDisabledForAuth(a) {
 				kept[id] = struct{}{}
 			}
 		}
