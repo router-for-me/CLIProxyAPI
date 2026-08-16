@@ -204,7 +204,16 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
-		s.coreManager.SetSelector(newRoutingSelector(routingState))
+		selector := newRoutingSelector(routingState)
+		s.coreManager.SetSelector(selector)
+		// Stop the routing selector this Service installed previously: only the
+		// affinity selector holds resources (a cache cleanup goroutine), and
+		// without this every routing config change leaks it. Selectors supplied
+		// by SDK callers are caller-owned and never stopped here.
+		if prev, ok := s.appliedRoutingSelector.(*coreauth.SessionAffinitySelector); ok {
+			prev.Stop()
+		}
+		s.appliedRoutingSelector = selector
 		s.appliedRoutingState = &routingState
 	}
 	s.applyRetryConfig(commit.cfg)

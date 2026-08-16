@@ -40,6 +40,10 @@ type Service struct {
 	executorRegistrationMu sync.Mutex
 	configSequence         uint64
 	appliedRoutingState    *routingRuntimeState
+	// appliedRoutingSelector is the routing selector installed by this Service's
+	// config path. The Service owns its lifecycle and stops it when a config
+	// reload replaces it; caller-supplied selectors are never stopped.
+	appliedRoutingSelector coreauth.Selector
 
 	// configPath is the path to the configuration file.
 	configPath string
