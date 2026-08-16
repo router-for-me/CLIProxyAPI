@@ -238,7 +238,7 @@ func runCursorResponseLoop(ctx context.Context, body io.ReadCloser, writer *curs
 				return
 			}
 		case *cursorproto.AgentServerMessage_ExecServerMessage:
-			toolCall, errExec := respondCursorExec(writer, run.Tools, item.ExecServerMessage)
+			toolCall, errExec := respondCursorExec(writer, run.Tools, run.SystemPrompt, item.ExecServerMessage)
 			if errExec != nil {
 				emitCursorEvent(ctx, events, CursorStreamEvent{Err: errExec})
 				return
@@ -359,7 +359,7 @@ func respondCursorKV(writer *cursorRequestWriter, blobs map[string][]byte, messa
 	return writeCursorClientMessage(writer, &cursorproto.AgentClientMessage{Message: &cursorproto.AgentClientMessage_KvClientMessage{KvClientMessage: response}})
 }
 
-func respondCursorExec(writer *cursorRequestWriter, tools []*cursorproto.McpToolDefinition, message *cursorproto.ExecServerMessage) (*CursorStreamEvent, error) {
+func respondCursorExec(writer *cursorRequestWriter, tools []*cursorproto.McpToolDefinition, systemPrompt string, message *cursorproto.ExecServerMessage) (*CursorStreamEvent, error) {
 	if message == nil {
 		return nil, nil
 	}
@@ -367,7 +367,10 @@ func respondCursorExec(writer *cursorRequestWriter, tools []*cursorproto.McpTool
 	response := &cursorproto.ExecClientMessage{Id: message.Id, ExecId: message.ExecId}
 	switch item := message.Message.(type) {
 	case *cursorproto.ExecServerMessage_RequestContextArgs:
-		response.Message = &cursorproto.ExecClientMessage_RequestContextResult{RequestContextResult: &cursorproto.RequestContextResult{Result: &cursorproto.RequestContextResult_Success{Success: &cursorproto.RequestContextSuccess{RequestContext: &cursorproto.RequestContext{Tools: tools}}}}}
+		response.Message = &cursorproto.ExecClientMessage_RequestContextResult{RequestContextResult: &cursorproto.RequestContextResult{Result: &cursorproto.RequestContextResult_Success{Success: &cursorproto.RequestContextSuccess{RequestContext: &cursorproto.RequestContext{
+			Tools:     tools,
+			CloudRule: proto.String(systemPrompt),
+		}}}}}
 	case *cursorproto.ExecServerMessage_McpArgs:
 		if item.McpArgs == nil {
 			return nil, &CursorStatusError{Status: http.StatusBadGateway, Message: "cursor stream: empty MCP arguments"}

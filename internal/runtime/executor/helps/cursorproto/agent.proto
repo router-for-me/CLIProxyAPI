@@ -219,6 +219,7 @@ message RequestContextArgs {}
 
 message RequestContext {
   repeated McpToolDefinition tools = 7;
+  optional string cloud_rule = 16;
 }
 
 message RequestContextSuccess { RequestContext request_context = 1; }

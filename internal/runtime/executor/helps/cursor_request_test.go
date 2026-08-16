@@ -3,6 +3,7 @@ package helps
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 
@@ -38,10 +39,48 @@ func TestBuildCursorRunPayloadWithImageAndTools(t *testing.T) {
 		t.Fatalf("decode run message: %v", errDecode)
 	}
 	runRequest := message.GetRunRequest()
+	if run.SystemPrompt != "Be concise." {
+		t.Fatalf("system prompt = %q, want %q", run.SystemPrompt, "Be concise.")
+	}
 	userAction := runRequest.GetAction().GetUserMessageAction()
 	if userAction == nil || len(userAction.GetUserMessage().GetSelectedContext().GetSelectedImages()) != 1 {
 		t.Fatal("current image was not encoded")
 	}
+}
+
+func TestRespondCursorExecIncludesSystemPromptInRequestContext(t *testing.T) {
+	pipeReader, pipeWriter := io.Pipe()
+	writer := &cursorRequestWriter{pipe: pipeWriter}
+	tool := &cursorproto.McpToolDefinition{Name: "inspect_project"}
+	done := make(chan error, 1)
+	go func() {
+		_, err := respondCursorExec(writer, []*cursorproto.McpToolDefinition{tool}, "Follow the coding agent instructions.", &cursorproto.ExecServerMessage{
+			Id:      7,
+			Message: &cursorproto.ExecServerMessage_RequestContextArgs{RequestContextArgs: &cursorproto.RequestContextArgs{}},
+		})
+		done <- err
+	}()
+
+	_, frame, errFrame := readCursorConnectFrame(pipeReader)
+	if errFrame != nil {
+		t.Fatalf("read response frame: %v", errFrame)
+	}
+	var message cursorproto.AgentClientMessage
+	if errDecode := proto.Unmarshal(frame, &message); errDecode != nil {
+		t.Fatalf("decode response frame: %v", errDecode)
+	}
+	context := message.GetExecClientMessage().GetRequestContextResult().GetSuccess().GetRequestContext()
+	if got := context.GetCloudRule(); got != "Follow the coding agent instructions." {
+		t.Fatalf("cloud rule = %q", got)
+	}
+	if len(context.GetTools()) != 1 || context.GetTools()[0].GetName() != "inspect_project" {
+		t.Fatalf("tools = %#v", context.GetTools())
+	}
+	if errExec := <-done; errExec != nil {
+		t.Fatalf("respondCursorExec() error = %v", errExec)
+	}
+	writer.close()
+	_ = pipeReader.Close()
 }
 
 func TestBuildCursorRunPayloadRejectsRemoteImage(t *testing.T) {

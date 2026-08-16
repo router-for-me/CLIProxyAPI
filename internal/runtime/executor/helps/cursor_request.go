@@ -79,6 +79,7 @@ type CursorRunPayload struct {
 	Message        []byte
 	Blobs          map[string][]byte
 	Tools          []*cursorproto.McpToolDefinition
+	SystemPrompt   string
 	ConversationID string
 }
 
@@ -125,7 +126,10 @@ func BuildCursorRunPayload(payload []byte, modelID string) (*CursorRunPayload, e
 	var action *cursorproto.ConversationAction
 	if parsed.Resume {
 		action = &cursorproto.ConversationAction{Action: &cursorproto.ConversationAction_ResumeAction{
-			ResumeAction: &cursorproto.ResumeAction{RequestContext: &cursorproto.RequestContext{Tools: tools}},
+			ResumeAction: &cursorproto.ResumeAction{RequestContext: &cursorproto.RequestContext{
+				Tools:     tools,
+				CloudRule: proto.String(parsed.SystemPrompt),
+			}},
 		}}
 	} else {
 		userMessage := buildCursorUserMessage(parsed.UserText, parsed.UserImages, selectedContextBlob)
@@ -155,6 +159,7 @@ func BuildCursorRunPayload(payload []byte, modelID string) (*CursorRunPayload, e
 		Message:        message,
 		Blobs:          blobs,
 		Tools:          tools,
+		SystemPrompt:   parsed.SystemPrompt,
 		ConversationID: conversationID,
 	}, nil
 }

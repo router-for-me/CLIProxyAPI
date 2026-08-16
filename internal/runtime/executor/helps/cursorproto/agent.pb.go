@@ -2692,6 +2692,7 @@ func (*RequestContextArgs) Descriptor() ([]byte, []int) {
 type RequestContext struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Tools         []*McpToolDefinition   `protobuf:"bytes,7,rep,name=tools,proto3" json:"tools,omitempty"`
+	CloudRule     *string                `protobuf:"bytes,16,opt,name=cloud_rule,json=cloudRule,proto3,oneof" json:"cloud_rule,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2731,6 +2732,13 @@ func (x *RequestContext) GetTools() []*McpToolDefinition {
 		return x.Tools
 	}
 	return nil
+}
+
+func (x *RequestContext) GetCloudRule() string {
+	if x != nil && x.CloudRule != nil {
+		return *x.CloudRule
+	}
+	return ""
 }
 
 type RequestContextSuccess struct {
@@ -6101,9 +6109,12 @@ const file_internal_runtime_executor_helps_cursorproto_agent_proto_rawDesc = "" 
 	"\x0fget_blob_result\x18\x02 \x01(\v2\x17.agent.v1.GetBlobResultH\x00R\rgetBlobResult\x12A\n" +
 	"\x0fset_blob_result\x18\x03 \x01(\v2\x17.agent.v1.SetBlobResultH\x00R\rsetBlobResultB\t\n" +
 	"\amessage\"\x14\n" +
-	"\x12RequestContextArgs\"C\n" +
+	"\x12RequestContextArgs\"v\n" +
 	"\x0eRequestContext\x121\n" +
-	"\x05tools\x18\a \x03(\v2\x1b.agent.v1.McpToolDefinitionR\x05tools\"Z\n" +
+	"\x05tools\x18\a \x03(\v2\x1b.agent.v1.McpToolDefinitionR\x05tools\x12\"\n" +
+	"\n" +
+	"cloud_rule\x18\x10 \x01(\tH\x00R\tcloudRule\x88\x01\x01B\r\n" +
+	"\v_cloud_rule\"Z\n" +
 	"\x15RequestContextSuccess\x12A\n" +
 	"\x0frequest_context\x18\x01 \x01(\v2\x18.agent.v1.RequestContextR\x0erequestContext\"+\n" +
 	"\x13RequestContextError\x12\x14\n" +
@@ -6573,6 +6584,7 @@ func file_internal_runtime_executor_helps_cursorproto_agent_proto_init() {
 		(*KvClientMessage_GetBlobResult)(nil),
 		(*KvClientMessage_SetBlobResult)(nil),
 	}
+	file_internal_runtime_executor_helps_cursorproto_agent_proto_msgTypes[42].OneofWrappers = []any{}
 	file_internal_runtime_executor_helps_cursorproto_agent_proto_msgTypes[46].OneofWrappers = []any{
 		(*RequestContextResult_Success)(nil),
 		(*RequestContextResult_Error)(nil),
