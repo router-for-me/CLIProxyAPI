@@ -10,9 +10,16 @@ import (
 
 func ConvertOpenAIRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
-	out := []byte(`{"model":"","input":[]}`)
+	out := []byte(`{"input":[]}`)
 	model := firstNonEmpty(modelName, root.Get("model").String())
-	out, _ = sjson.SetBytes(out, "model", model)
+	// The Interactions API identifies the agent via the "agent" field, not "model".
+	// Google rejects requests that put the antigravity agent name under "model"
+	// (400: unknown provider / Function calling is not enabled).
+	if isAntigravityModel(model) {
+		out, _ = sjson.SetBytes(out, "agent", model)
+	} else {
+		out, _ = sjson.SetBytes(out, "model", model)
+	}
 	if streamValue, ok := openAIRequestStreamValue(root, stream); ok {
 		out, _ = sjson.SetBytes(out, "stream", streamValue)
 	}
@@ -21,9 +28,6 @@ func ConvertOpenAIRequestToInteractions(modelName string, inputRawJSON []byte, s
 	}
 	if environmentID := firstNonEmpty(root.Get("environment_id").String(), root.Get("environment.id").String()); environmentID != "" {
 		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
-	}
-	if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
-		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(agentConfig.Raw))
 	}
 	out = appendOpenAIMessagesToInteractions(out, root.Get("messages"))
 	out = copyOpenAIChatGenerationConfigToInteractions(out, root, model)
@@ -203,8 +207,10 @@ func openAIChatImagePartToInteractions(part gjson.Result) []byte {
 
 func openAIToolResultToInteractions(message gjson.Result) []byte {
 	out := []byte(`{"type":"function_result","result":""}`)
+	// Google's Interactions function_result step accepts only
+	// type/name/call_id/result — it REJECTS an "id" field
+	// (400: Unknown parameter 'id' at 'input[N]').
 	if callID := firstNonEmpty(message.Get("tool_call_id").String(), message.Get("id").String()); callID != "" {
-		out, _ = sjson.SetBytes(out, "id", callID)
 		out, _ = sjson.SetBytes(out, "call_id", callID)
 	}
 	if name := message.Get("name").String(); name != "" {
@@ -225,8 +231,13 @@ func isAntigravityModel(model string) bool {
 
 func copyOpenAIChatGenerationConfigToInteractions(out []byte, root gjson.Result, model string) []byte {
 	if isAntigravityModel(model) {
+		// agent_config for the antigravity agent REQUIRES the discriminator
+		// field "type": "antigravity". Without it Google rejects the request
+		// with 400 "Unknown parameter 'agent_config'".
 		if maxOutputTokens := firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens"), root.Get("max_output_tokens")); maxOutputTokens.Exists() && !root.Get("agent_config.max_total_tokens").Exists() {
-			out, _ = sjson.SetBytes(out, "agent_config.max_total_tokens", maxOutputTokens.Int())
+			cfg := `{"type":"antigravity"}`
+			cfg, _ = sjson.Set(cfg, "max_total_tokens", maxOutputTokens.Int())
+			out, _ = sjson.SetRawBytes(out, "agent_config", []byte(cfg))
 		}
 	} else {
 		copyNumber(&out, "generation_config.max_output_tokens", firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens")))

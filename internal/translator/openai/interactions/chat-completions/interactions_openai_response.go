@@ -334,10 +334,9 @@ func openAIToolCallToInteractionsStep(toolCall gjson.Result) ([]byte, bool) {
 		return nil, false
 	}
 	step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
-	if id := toolCall.Get("id").String(); id != "" {
-		step, _ = sjson.SetBytes(step, "id", id)
-		step, _ = sjson.SetBytes(step, "call_id", id)
-	}
+	// Google's Interactions function_call step accepts only
+	// type/name/arguments — it REJECTS an "id"/"call_id" field
+	// (400: Unknown parameter 'call_id' at 'input[N]').
 	step, _ = sjson.SetBytes(step, "name", function.Get("name").String())
 	setRawJSONValue(&step, "arguments", function.Get("arguments"), []byte(`{}`))
 	return step, true
