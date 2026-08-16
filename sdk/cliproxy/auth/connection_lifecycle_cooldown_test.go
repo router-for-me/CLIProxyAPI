@@ -1692,3 +1692,118 @@ func TestManager_MarkResult_VertexLowPrioritySameLocationPeerStillCooldowns(t *t
 		t.Fatalf("expected low-priority same-location peer to keep cooldown")
 	}
 }
+
+func TestManager_MarkResult_TransportFailureWithSharedProxyWeightedZeroWeightPeerStillCooldowns(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	// Review bot #17: under a WeightedRoundRobinSelector the failing credential
+	// and a zero-weight peer share the same real ProxyURL, while a healthy
+	// positive-weight credential routes through a different proxy. Weighted
+	// selection removes the zero-weight peer before picking
+	// (positiveWeightAuths), so the failing credential's proxy is effectively
+	// dedicated: only cooling the failing credential down lets the weighted
+	// route switch to the healthy credential. The zero-weight peer must not
+	// count as a shared-proxy peer.
+	transportErr := resultErrorFromError(fmt.Errorf("proxyconnect tcp: dial tcp 127.0.0.1:7890: connect: connection refused"))
+	if !isTransportFailureResultError(transportErr) {
+		t.Fatalf("isTransportFailureResultError(%#v) = false, want true", transportErr)
+	}
+
+	model := "gpt-5.6-sol"
+	m := NewManager(nil, &WeightedRoundRobinSelector{}, nil)
+	authFail := &Auth{ID: "auth-weighted-shared-proxy-fail", Provider: "codex", ProxyURL: "http://127.0.0.1:7890"}
+	authZero := &Auth{ID: "auth-weighted-shared-proxy-zero", Provider: "codex", ProxyURL: "http://127.0.0.1:7890", Attributes: map[string]string{AttributeWeight: "0"}}
+	authHealthy := &Auth{ID: "auth-weighted-shared-proxy-healthy", Provider: "codex", ProxyURL: "http://127.0.0.1:7891", Attributes: map[string]string{AttributeWeight: "1"}}
+	for _, a := range []*Auth{authFail, authZero, authHealthy} {
+		if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+	}
+	for _, a := range []*Auth{authFail, authZero, authHealthy} {
+		registerClientModelForTest(t, a.ID, model)
+	}
+
+	// Model-level path: the zero-weight same-proxy peer is never picked by the
+	// weighted selector, so it must not hide proxy uniqueness and cooldown is
+	// restored.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authFail.ID,
+		Provider: authFail.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    transportErr,
+	})
+	updated, ok := m.GetByID(authFail.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil || state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected weighted zero-weight shared-proxy peer to keep cooldown")
+	}
+
+	// Auth-level path behaves identically: model eligibility is always true on
+	// this path, but the weighted positive-weight filter still excludes the
+	// zero-weight peer, so cooldown is restored.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authFail.ID,
+		Provider: authFail.Provider,
+		Success:  false,
+		Error:    transportErr,
+	})
+	updated, ok = m.GetByID(authFail.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if !updated.Unavailable || updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected weighted zero-weight shared-proxy peer to keep auth-level cooldown, got unavailable=%v next=%v", updated.Unavailable, updated.NextRetryAfter)
+	}
+}
+
+func TestManager_MarkResult_TransportFailureWithSharedProxyRoundRobinIgnoresWeightSkipsCooldown(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	// Default round-robin selector ignores weights entirely, so the zero-weight
+	// same-proxy peer is still a pollable alternative and the proxy fault is a
+	// shared infrastructure fault: cooldown is skipped. Guards against the
+	// weighted positive-weight filter leaking into the legacy selector.
+	transportErr := resultErrorFromError(fmt.Errorf("proxyconnect tcp: dial tcp 127.0.0.1:7890: connect: connection refused"))
+	if !isTransportFailureResultError(transportErr) {
+		t.Fatalf("isTransportFailureResultError(%#v) = false, want true", transportErr)
+	}
+
+	model := "gpt-5.6-sol"
+	m := NewManager(nil, nil, nil)
+	authFail := &Auth{ID: "auth-rr-shared-proxy-fail", Provider: "codex", ProxyURL: "http://127.0.0.1:7890"}
+	authZero := &Auth{ID: "auth-rr-shared-proxy-zero", Provider: "codex", ProxyURL: "http://127.0.0.1:7890", Attributes: map[string]string{AttributeWeight: "0"}}
+	authHealthy := &Auth{ID: "auth-rr-shared-proxy-healthy", Provider: "codex", ProxyURL: "http://127.0.0.1:7891", Attributes: map[string]string{AttributeWeight: "1"}}
+	for _, a := range []*Auth{authFail, authZero, authHealthy} {
+		if _, errRegister := m.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+	}
+	for _, a := range []*Auth{authFail, authZero, authHealthy} {
+		registerClientModelForTest(t, a.ID, model)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authFail.ID,
+		Provider: authFail.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    transportErr,
+	})
+	assertNoCooldown(t, m, authFail.ID, model)
+}

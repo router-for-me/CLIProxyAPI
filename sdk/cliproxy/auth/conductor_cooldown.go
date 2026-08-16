@@ -1471,14 +1471,25 @@ func isWeightedSelector(selector Selector) bool {
 // routes through the same per-auth proxy endpoint as auth (ProxyURL compared
 // after TrimSpace). When the proxy is shared, a transport failure against it
 // is a shared infrastructure fault: cooling the failing credential would only
-// drain the pool, since its peers hit the same dead endpoint. Peers currently
-// blocked for the model (isAuthBlockedForModel) or ineligible for the route
-// model (authSupportsRouteModel, model-level path only) cannot serve requests
-// and are ignored, so a single-credential dedicated proxy keeps restoring
-// cooldown. On the auth-level path (empty model key) model support is always
-// true, so peers are not filtered by model; this limitation only affects SDK
-// users who call Manager.MarkResult directly with an empty Model, since the
-// production path always sets result.Model. Caller must hold m.mu.
+// drain the pool, since its peers hit the same dead endpoint. Peers are judged
+// exactly like the request-selection candidate set (mirroring
+// vertexPeerCandidatesLocked): same provider as the failing auth (selection
+// only ever considers candidates of one provider, so a cross-provider peer
+// sharing the proxy can never serve the failing auth's requests and must not
+// hide proxy uniqueness), pollable (disabled, quota cooldown, retry-after, or
+// auth-level unavailability, as judged by isAuthBlockedForModel, cannot serve
+// requests), route-model eligible (per authSupportsRouteModel, the same
+// judgment request selection applies), restricted to the current highest
+// available priority tier (matching availableAuthsForSelector's
+// allPriorities=false semantics so lower priority peers cannot hide proxy
+// uniqueness), and to positive weights when the strategy is weighted (see
+// isWeightedSelector). Peers outside this set can never be picked for this
+// model, so they must not hide the proxy uniqueness, otherwise a healthy but
+// unreachable peer would leave polling stuck on the failing auth. On the
+// auth-level path (empty model key) authSupportsRouteModel is always true, so
+// peers are not filtered by model; this limitation only affects SDK users who
+// call Manager.MarkResult directly with an empty Model, since the production
+// path always sets result.Model. Caller must hold m.mu.
 func (m *Manager) authHasSharedProxyPeerLocked(auth *Auth, modelKey string, now time.Time) bool {
 	if auth == nil {
 		return false
@@ -1487,21 +1498,43 @@ func (m *Manager) authHasSharedProxyPeerLocked(auth *Auth, modelKey string, now 
 	if proxyURL == "" {
 		return false
 	}
+	provider := executorKeyFromAuth(auth)
+	candidates := make([]*Auth, 0, len(m.auths))
 	registryRef := registry.GetGlobalRegistry()
 	for _, peer := range m.auths {
 		if peer == nil || peer.ID == auth.ID {
 			continue
 		}
-		if strings.TrimSpace(peer.ProxyURL) != proxyURL {
+		if executorKeyFromAuth(peer) != provider {
 			continue
 		}
 		if blocked, _, _ := isAuthBlockedForModel(peer, modelKey, now); blocked {
 			continue
 		}
-		if modelKey != "" && !m.authSupportsRouteModel(registryRef, peer, modelKey) {
+		if !m.authSupportsRouteModel(registryRef, peer, modelKey) {
 			continue
 		}
-		return true
+		candidates = append(candidates, peer)
+	}
+	if len(candidates) == 0 {
+		return false
+	}
+	priorityTier, _, errAvailable := m.availableAuthsForSelector(m.selector, candidates, provider, modelKey, now)
+	if errAvailable != nil {
+		return false
+	}
+	// Under a weighted selection strategy peers with a non-positive weight are
+	// never picked for this model (see positiveWeightAuths), so they cannot
+	// serve requests and must not hide the proxy uniqueness. The default
+	// round-robin strategy ignores weights entirely and keeps the legacy peer
+	// set. Caller holds m.mu, so reading m.selector is safe.
+	if isWeightedSelector(m.selector) {
+		priorityTier = positiveWeightAuths(priorityTier)
+	}
+	for _, peer := range priorityTier {
+		if strings.TrimSpace(peer.ProxyURL) == proxyURL {
+			return true
+		}
 	}
 	return false
 }
