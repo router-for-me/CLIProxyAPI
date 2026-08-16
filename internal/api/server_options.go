@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/backup"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/errormessages"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -40,6 +41,14 @@ type serverOptionConfig struct {
 	// management routes for API Keys, Usage Stats, and Model Catalog. nil
 	// when the PG backend is inactive.
 	pgStores *PgStoreHandles
+
+	// backupSubsystem is the full-backup-to-S3 runner (which also implements
+	// restore-from-S3 via RestoreFromS3). nil when BACKUP_S3_ENDPOINT is not
+	// set — the /v0/management/backup routes then return 503. The interval
+	// and retention are surfaced by GET /backup/settings for status display.
+	backupSubsystem *backup.Runner
+	backupInterval  time.Duration
+	backupRetention int
 }
 
 // PgStoreHandles bundles the optional PG-backed stores and adapters that the
@@ -226,5 +235,18 @@ func WithPolicyService(svc policy.PolicyService, handles *PgStoreHandles) Server
 	return func(cfg *serverOptionConfig) {
 		cfg.policyService = svc
 		cfg.pgStores = handles
+	}
+}
+
+// WithBackupS3 wires the full-backup-to-S3 subsystem (runner + interval +
+// retention) into the management handler so the /v0/management/backup routes
+// can list, create, and restore snapshots. Pass a nil runner when
+// BACKUP_S3_ENDPOINT is not configured — the /backup routes then return 503.
+// This wiring is independent of the PG backend.
+func WithBackupS3(runner *backup.Runner, interval time.Duration, retention int) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.backupSubsystem = runner
+		cfg.backupInterval = interval
+		cfg.backupRetention = retention
 	}
 }

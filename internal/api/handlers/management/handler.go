@@ -165,6 +165,15 @@ type Handler struct {
 	// configured — those routes return 503.
 	pgBackup *store.PostgresStore
 
+	// backupS3Runner / backupS3Restorer wire the full-backup-to-S3 subsystem
+	// into the /backup management routes. Both are nil when BACKUP_S3_ENDPOINT
+	// is not configured — those routes return 503. *backup.Runner satisfies
+	// both interfaces (RestoreFromS3 lives on the Runner, delegating bundle
+	// application to its attached *Restorer).
+	backupS3Runner   backupRunner
+	backupS3Restorer backupRestorer
+	backupS3Settings backupSettings
+
 	// litellmUsers / litellmKeys are the Manage-LiteLLM stores backed by the
 	// dedicated litellm_internal_users / litellm_api_keys / litellm_key_policies
 	// tables. nil when PG is not configured — the /v0/management/litellm/*
@@ -532,6 +541,50 @@ func (h *Handler) SetBackupStore(pg *store.PostgresStore) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pgBackup = pg
+}
+
+// SetBackupS3 wires the full-backup-to-S3 subsystem into the /backup routes.
+// runner/restorer are nil when S3 backup is not configured — those routes
+// return 503 via backupNotConfigured. interval/retention are surfaced by the
+// GET /backup/settings endpoint for operator status display.
+func (h *Handler) SetBackupS3(runner backupRunner, restorer backupRestorer, interval time.Duration, retention int) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.backupS3Runner = runner
+	h.backupS3Restorer = restorer
+	h.backupS3Settings.S3Configured = runner != nil
+	h.backupS3Settings.Interval = interval.String()
+	h.backupS3Settings.Retention = retention
+}
+
+func (h *Handler) backupRunner() backupRunner {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.backupS3Runner
+}
+
+func (h *Handler) backupRestorer() backupRestorer {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.backupS3Restorer
+}
+
+func (h *Handler) backupSettings() backupSettings {
+	if h == nil {
+		return backupSettings{}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.backupS3Settings
 }
 
 // SetConfig updates the in-memory config reference when the server hot-reloads.

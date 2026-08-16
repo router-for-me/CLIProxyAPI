@@ -853,11 +853,11 @@ func main() {
 	}
 
 	// Construct the full-backup-to-S3 subsystem. Activates only when
-	// BACKUP_S3_ENDPOINT is set; without it the components are skipped and any
-	// future management /backup routes will surface 503 (handler has nil runner).
-	// Note: this task constructs the pieces but deliberately does NOT attach
-	// them to the HTTP handler — Task 9 of "Full Backup to S3" will call a
-	// SetBackupS3-style setter on the handler once it exists.
+	// BACKUP_S3_ENDPOINT is set; without it the components are skipped and the
+	// management /backup routes surface 503 (handler has nil runner). The
+	// runner + restorer are attached to the handler via the WithBackupS3
+	// server option so the /v0/management/backup routes can list, create, and
+	// restore snapshots; the restorer is set on the runner for RestoreFromS3.
 	if backupS3Cfg.Endpoint != "" {
 		backupClient, errBackupClient := internalBackup.NewS3Client(backupS3Cfg)
 		if errBackupClient != nil {
@@ -878,10 +878,12 @@ func main() {
 				backupRestorer = internalBackup.NewRestorer(nil, nil, configFilePath, cfg.AuthDir)
 			}
 			backupRunner := internalBackup.NewRunner(backupClient, backupCollector, backupRetention)
-			// backupRestorer is constructed now so this wiring is fully
-			// typechecked, but will only become live once Task 9 attaches both
-			// runner and restorer to the management handler via a backup setter.
-			_ = backupRestorer
+			backupRunner.SetRestorer(backupRestorer)
+			// Attach the runner (which doubles as the restore-from-S3 facade)
+			// to the management handler via a server option, so the
+			// /v0/management/backup routes resolve. The option applies the
+			// handler setter inside api.NewServer.
+			serverOptions = append(serverOptions, api.WithBackupS3(backupRunner, backupInterval, backupRetention))
 			if backupInterval > 0 {
 				backupSched := internalBackup.NewScheduler(backupInterval, func() {
 					if _, err := backupRunner.RunBackup(context.Background()); err != nil {

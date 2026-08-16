@@ -1,8 +1,11 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -142,4 +145,61 @@ func bundleRoundTrip(t *testing.T, b store.BackupBundle) store.BackupBundle {
 		t.Fatal(err)
 	}
 	return back
+}
+
+// TestRunnerRestoreFromS3 verifies RestoreFromS3 downloads a snapshot by key,
+// parses the bundle, and applies it (merge mode writes missing auth files).
+func TestRunnerRestoreFromS3(t *testing.T) {
+	stub := newStubMinioClient()
+	cli := newTestClient(stub)
+	authDir := filepath.Join(t.TempDir(), "auths")
+
+	r := NewRunner(cli, stubCollector{}, 0)
+	r.SetRestorer(NewRestorer(nil, nil, "", authDir))
+
+	bundle := store.BackupBundle{
+		Version: 2,
+		Mode:    "full",
+		AuthFiles: []store.BackupAuthFile{
+			{Path: "a.json", Content: "a"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := WriteBundle(&buf, bundle); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cli.Upload(context.Background(), "snap.json", buf.Bytes(), "application/json"); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := r.RestoreFromS3(context.Background(), "snap.json", RestoreModeMerge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report != nil {
+		t.Errorf("report = %+v, want nil (importer is nil)", report)
+	}
+	if _, err := os.Stat(filepath.Join(authDir, "a.json")); err != nil {
+		t.Errorf("a.json not restored: %v", err)
+	}
+}
+
+// TestRunnerRestoreFromS3NoRestorer verifies RestoreFromS3 returns an error
+// when the runner has no attached restorer.
+func TestRunnerRestoreFromS3NoRestorer(t *testing.T) {
+	stub := newStubMinioClient()
+	cli := newTestClient(stub)
+	r := NewRunner(cli, stubCollector{}, 0)
+
+	var buf bytes.Buffer
+	if err := WriteBundle(&buf, store.BackupBundle{Version: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cli.Upload(context.Background(), "snap.json", buf.Bytes(), "application/json"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.RestoreFromS3(context.Background(), "snap.json", RestoreModeMerge); err == nil {
+		t.Fatal("expected error when restorer not configured")
+	}
 }

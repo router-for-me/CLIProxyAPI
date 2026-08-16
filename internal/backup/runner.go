@@ -3,6 +3,8 @@ package backup
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
@@ -28,16 +30,53 @@ type s3 interface {
 }
 
 // Runner orchestrates full backups: collect state, upload to S3, rotate to
-// retention.
+// retention. It also exposes restore-from-S3 via RestoreFromS3, delegating the
+// bundle application to the attached *Restorer (see SetRestorer).
 type Runner struct {
 	client    s3
 	collector collector
+	restorer  *Restorer
 	retention int // 0 = keep all
 }
 
 // NewRunner builds a Runner.
 func NewRunner(client s3, col collector, retention int) *Runner {
 	return &Runner{client: client, collector: col, retention: retention}
+}
+
+// SetRestorer attaches the bundle-applying Restorer so RestoreFromS3 can work.
+// Required before the first RestoreFromS3 call; otherwise it returns an error.
+func (r *Runner) SetRestorer(restorer *Restorer) {
+	r.restorer = restorer
+}
+
+// List returns the snapshots currently stored on the object store, newest
+// first. Read-only; does not serialize with backups/restores.
+func (r *Runner) List(ctx context.Context) ([]SnapshotMeta, error) {
+	return r.client.List(ctx)
+}
+
+// RestoreFromS3 downloads a snapshot by key and applies it with mode. The
+// runner itself does not lock runnerMu here: the attached Restorer.Restore
+// already serializes bundle application against RunBackup, and taking the lock
+// twice would self-deadlock.
+func (r *Runner) RestoreFromS3(ctx context.Context, key string, mode RestoreMode) (*store.BackupImportReport, error) {
+	data, err := r.client.Download(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	bundle, err := ReadBundle(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("backup runner: parse snapshot %s: %w", key, err)
+	}
+	if r.restorer == nil {
+		return nil, errors.New("backup runner: restorer not configured")
+	}
+	res, err := r.restorer.Restore(ctx, bundle, mode)
+	if err != nil {
+		return nil, err
+	}
+	return res.Report, nil
 }
 
 // RunBackup performs one full backup and returns the snapshot metadata. It is

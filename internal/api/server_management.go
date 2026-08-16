@@ -445,6 +445,15 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/export/resources", s.mgmt.ListBackupResources)
 		mgmt.GET("/export", s.mgmt.ExportAllData)
 		mgmt.POST("/import", s.mgmt.ImportAllData)
+
+		// Full-backup-to-S3 subsystem. GET /backup lists available snapshots,
+		// POST /backup creates one, POST /backup/restore applies a snapshot,
+		// and GET /backup/settings reports the current configuration. Return
+		// 503 when BACKUP_S3_ENDPOINT is not configured.
+		mgmt.GET("/backup", s.mgmt.ListBackups)
+		mgmt.POST("/backup", s.mgmt.CreateBackup)
+		mgmt.POST("/backup/restore", s.mgmt.RestoreBackup)
+		mgmt.GET("/backup/settings", s.mgmt.BackupSettings)
 	}
 }
 

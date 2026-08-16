@@ -295,6 +295,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		// the raw internal provider key (e.g. "claude").
 		s.mgmt.SetModelsCatalogResolver(store.NewModelsCatalogResolver(handles.Models))
 	}
+	// Wire the full-backup-to-S3 subsystem (runner + interval + retention)
+	// into the management handler so the /v0/management/backup routes can
+	// list, create, and restore snapshots. The runner also satisfies the
+	// restore-from-S3 interface via RestoreFromS3. runner is nil when
+	// BACKUP_S3_ENDPOINT is not set — the routes return 503. This wiring is
+	// independent of the PG backend.
+	s.mgmt.SetBackupS3(optionState.backupSubsystem, optionState.backupSubsystem, optionState.backupInterval, optionState.backupRetention)
 	// Wire the /v1/models invoker so the management endpoint
 	// POST /v0/management/models-catalog/sync-from-v1 can probe the live
 	// caller-facing model list in-process (no network loopback). The
