@@ -3023,3 +3023,39 @@ func TestClaudeDataOnlyMessageStopTerminalEmpty(t *testing.T) {
 		}
 	})
 }
+
+func TestEmptyCompletionImages(t *testing.T) {
+	cases := []struct {
+		name     string
+		payload  []byte
+		expected bool
+	}{
+		{
+			name:     "delta images with image_url is not empty",
+			payload:  []byte(`data: {"id":"1","choices":[{"index":0,"delta":{"images":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AQID"}}]},"finish_reason":"stop"}]}` + "\n\n" + `data: [DONE]` + "\n\n"),
+			expected: false,
+		},
+		{
+			name:     "message images non-stream is not empty",
+			payload:  []byte(`{"id":"1","choices":[{"index":0,"message":{"role":"assistant","content":"","images":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AQID"}}]},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`),
+			expected: false,
+		},
+		{
+			name:     "delta images empty array stays empty",
+			payload:  []byte(`data: {"id":"1","choices":[{"index":0,"delta":{"images":[]},"finish_reason":"stop"}]}` + "\n\n" + `data: [DONE]` + "\n\n"),
+			expected: true,
+		},
+		{
+			name:     "delta images null stays empty",
+			payload:  []byte(`data: {"id":"1","choices":[{"index":0,"delta":{"images":null},"finish_reason":"stop"}]}` + "\n\n" + `data: [DONE]` + "\n\n"),
+			expected: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isEmptyCompletionPayload(tc.payload); got != tc.expected {
+				t.Fatalf("isEmptyCompletionPayload() = %v, want %v", got, tc.expected)
+			}
+		})
+	}
+}

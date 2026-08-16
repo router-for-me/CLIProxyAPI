@@ -914,7 +914,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 	if shouldResumeModel {
 		for _, m := range modelsForRegisteredAuth(result.AuthID) {
-			registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, m)
+			if registry.GetGlobalRegistry().GetClientModelSuspensionReason(result.AuthID, m) == "invalid_api_key" {
+				registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, m)
+			}
 		}
 		if modelKey != "" {
 			registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, modelKey)

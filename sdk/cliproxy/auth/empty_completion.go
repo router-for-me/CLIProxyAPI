@@ -85,6 +85,7 @@ type openAIChunk struct {
 			ToolCalls        []json.RawMessage `json:"tool_calls"`
 			FunctionCall     json.RawMessage   `json:"function_call"`
 			Audio            json.RawMessage   `json:"audio"`
+			Images           []json.RawMessage `json:"images"`
 		} `json:"delta"`
 		Message struct {
 			Content          string            `json:"content"`
@@ -93,6 +94,7 @@ type openAIChunk struct {
 			ToolCalls        []json.RawMessage `json:"tool_calls"`
 			FunctionCall     json.RawMessage   `json:"function_call"`
 			Audio            json.RawMessage   `json:"audio"`
+			Images           []json.RawMessage `json:"images"`
 		} `json:"message"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
@@ -204,6 +206,15 @@ func nonEmptyFunctionCall(raw json.RawMessage) bool {
 		return false
 	}
 	return strings.TrimSpace(fc.Name) != "" || hasMeaningfulJSONArguments(fc.Arguments)
+}
+
+func hasMeaningfulImages(rawImages []json.RawMessage) bool {
+	for _, raw := range rawImages {
+		if nonEmptyJSONPayload(raw) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasMeaningfulToolCalls(rawCalls []json.RawMessage) bool {
@@ -523,6 +534,9 @@ func (a *emptyCompletionAccum) evalOpenAI(data []byte) bool {
 			a.hasToolCalls = true
 		}
 		if nonEmptyAudioPayload(ch.Delta.Audio) || nonEmptyAudioPayload(ch.Message.Audio) {
+			a.hasContent = true
+		}
+		if hasMeaningfulImages(ch.Delta.Images) || hasMeaningfulImages(ch.Message.Images) {
 			a.hasContent = true
 		}
 	}

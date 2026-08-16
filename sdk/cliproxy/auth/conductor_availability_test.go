@@ -258,3 +258,63 @@ func TestManager_ResumeEveryModelAfterCredentialRecovery(t *testing.T) {
 		}
 	}
 }
+
+func TestManager_ModelSpecificSuspensionSurvivesSiblingSuccess(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	authID := "sibling-suspension-auth"
+	modelA := "model-a"
+	modelB := "model-b"
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "openai", []*registry.ModelInfo{
+		{ID: modelA},
+		{ID: modelB},
+	})
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	if _, errRegister := manager.Register(ctx, &Auth{
+		ID:       authID,
+		Provider: "openai",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			modelA: {Status: StatusActive},
+			modelB: {Status: StatusActive},
+		},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	// Fail modelB with model_not_supported -> modelB should be suspended, modelA available
+	manager.MarkResult(ctx, Result{
+		AuthID:   authID,
+		Provider: "openai",
+		Model:    modelB,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusBadRequest, Code: "model_not_supported", Message: "model not supported"},
+	})
+
+	if count := reg.GetModelCount(modelB); count != 0 {
+		t.Fatalf("registry model count for modelB after suspension = %d, want 0", count)
+	}
+	if count := reg.GetModelCount(modelA); count != 1 {
+		t.Fatalf("registry model count for modelA = %d, want 1", count)
+	}
+
+	// Success on modelA -> should NOT resume modelB
+	manager.MarkResult(ctx, Result{
+		AuthID:   authID,
+		Provider: "openai",
+		Model:    modelA,
+		Success:  true,
+	})
+
+	if count := reg.GetModelCount(modelA); count != 1 {
+		t.Fatalf("registry model count for modelA after success = %d, want 1", count)
+	}
+	if count := reg.GetModelCount(modelB); count != 0 {
+		t.Fatalf("registry model count for modelB after modelA success = %d, want 0 (suspension should survive)", count)
+	}
+}
