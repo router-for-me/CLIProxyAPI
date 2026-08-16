@@ -22,6 +22,7 @@ import (
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	pgaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/pg_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	internalBackup "github.com/router-for-me/CLIProxyAPI/v7/internal/backup"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -301,6 +302,54 @@ func main() {
 	}
 	if value, ok := lookupEnv("OBJECTSTORE_LOCAL_PATH", "objectstore_local_path"); ok {
 		objectStoreLocalPath = value
+	}
+
+	// Full-backup-to-S3 configuration. Independent of OBJECTSTORE_* so a
+	// deployment can use a separate backup bucket / credentials. Backup is
+	// active only when BACKUP_S3_ENDPOINT is set.
+	var backupS3Cfg internalBackup.S3Config
+	if value, ok := lookupEnv("BACKUP_S3_ENDPOINT", "backup_s3_endpoint"); ok {
+		backupS3Cfg.Endpoint = value
+	}
+	if value, ok := lookupEnv("BACKUP_S3_BUCKET", "backup_s3_bucket"); ok {
+		backupS3Cfg.Bucket = value
+	}
+	if value, ok := lookupEnv("BACKUP_S3_ACCESS_KEY", "backup_s3_access_key"); ok {
+		backupS3Cfg.AccessKey = value
+	}
+	if value, ok := lookupEnv("BACKUP_S3_SECRET_KEY", "backup_s3_secret_key"); ok {
+		backupS3Cfg.SecretKey = value
+	}
+	if value, ok := lookupEnv("BACKUP_S3_REGION", "backup_s3_region"); ok {
+		backupS3Cfg.Region = value
+	}
+	if value, ok := lookupEnv("BACKUP_S3_PREFIX", "backup_s3_prefix"); ok {
+		backupS3Cfg.Prefix = value
+	}
+	if value, ok := lookupEnv("BACKUP_S3_USE_SSL", "backup_s3_use_ssl"); ok {
+		backupS3Cfg.UseSSL = value == "1" || value == "true"
+	}
+	// PathStyle defaults to true to match the project's existing object store
+	// convention (MinIO-style endpoints); operators on AWS S3 can flip it off.
+	backupS3Cfg.PathStyle = true
+	if value, ok := lookupEnv("BACKUP_S3_PATH_STYLE", "backup_s3_path_style"); ok {
+		backupS3Cfg.PathStyle = value == "1" || value == "true"
+	}
+
+	var backupInterval time.Duration
+	if value, ok := lookupEnv("BACKUP_SCHEDULE_INTERVAL", "backup_schedule_interval"); ok && value != "" {
+		if d, err := time.ParseDuration(value); err == nil {
+			backupInterval = d
+		} else {
+			log.WithError(err).Warn("main: ignoring invalid BACKUP_SCHEDULE_INTERVAL")
+		}
+	}
+
+	backupRetention := 7
+	if value, ok := lookupEnv("BACKUP_RETENTION", "backup_retention"); ok && value != "" {
+		if n, err := strconv.Atoi(value); err == nil {
+			backupRetention = n
+		}
 	}
 
 	// Check for cloud deploy mode only on first execution
@@ -799,6 +848,51 @@ func main() {
 			LiteLLMSync:       pgLiteLLMSync,
 			Flusher:           usageFlusher,
 		}))
+	}
+
+	// Construct the full-backup-to-S3 subsystem. Activates only when
+	// BACKUP_S3_ENDPOINT is set; without it the components are skipped and any
+	// future management /backup routes will surface 503 (handler has nil runner).
+	// Note: this task constructs the pieces but deliberately does NOT attach
+	// them to the HTTP handler — Task 9 of "Full Backup to S3" will call a
+	// SetBackupS3-style setter on the handler once it exists.
+	if backupS3Cfg.Endpoint != "" {
+		backupClient, errBackupClient := internalBackup.NewS3Client(backupS3Cfg)
+		if errBackupClient != nil {
+			log.WithError(errBackupClient).Warn("main: backup S3 client init failed; full backup disabled")
+		} else {
+			backupSrc := internalBackup.NewPathSource(configFilePath, cfg.AuthDir)
+			// pgStoreInst is a typed *store.PostgresStore; pass nil interfaces
+			// explicitly when no PG store was constructed so the collector /
+			// restorer fallback paths trigger (a typed-nil *PG store would not
+			// compare equal to nil).
+			var backupCollector *internalBackup.Collector
+			var backupRestorer *internalBackup.Restorer
+			if pgStoreInst != nil {
+				backupCollector = internalBackup.NewCollector(pgStoreInst, backupSrc)
+				backupRestorer = internalBackup.NewRestorer(pgStoreInst, pgStoreInst, configFilePath, cfg.AuthDir)
+			} else {
+				backupCollector = internalBackup.NewCollector(nil, backupSrc)
+				backupRestorer = internalBackup.NewRestorer(nil, nil, configFilePath, cfg.AuthDir)
+			}
+			backupRunner := internalBackup.NewRunner(backupClient, backupCollector, backupRetention)
+			// backupRestorer is constructed now so this wiring is fully
+			// typechecked, but will only become live once Task 9 attaches both
+			// runner and restorer to the management handler via a backup setter.
+			_ = backupRestorer
+			if backupInterval > 0 {
+				backupSched := internalBackup.NewScheduler(backupInterval, func() {
+					if _, err := backupRunner.RunBackup(context.Background()); err != nil {
+						log.WithError(err).Error("main: scheduled full backup failed")
+					} else {
+						log.Info("main: scheduled full backup completed")
+					}
+				})
+				backupSched.Start()
+				// Note: scheduler lifetime is bound to the process; Stop() is
+				// not explicitly invoked at shutdown.
+			}
+		}
 	}
 
 	// Register built-in access providers before constructing services.
