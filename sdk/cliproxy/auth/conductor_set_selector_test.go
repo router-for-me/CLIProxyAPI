@@ -81,3 +81,31 @@ func TestManagerStopSelectorIfInactiveStopsReplacedSelector(t *testing.T) {
 		t.Fatal("inactive selector was not stopped")
 	}
 }
+
+// A cache stopped while still in service resumes cleanup on the next binding
+// write, so retiring a selector that a concurrent caller re-installs cannot
+// leave bindings without expiration sweeps. Reads keep lazily filtering
+// expired entries in the meantime.
+func TestSessionCacheStopResumesCleanupOnNextWrite(t *testing.T) {
+	t.Parallel()
+
+	cache := NewSessionCache(time.Minute)
+	firstStopCh := cache.stopCh
+	cache.Stop()
+	select {
+	case <-firstStopCh:
+	default:
+		t.Fatal("first Stop did not close stopCh")
+	}
+
+	cache.Set("session-1", "auth-1")
+	if cache.stopCh == firstStopCh {
+		t.Fatal("write after Stop did not resume cleanup")
+	}
+	select {
+	case <-cache.stopCh:
+		t.Fatal("resumed cleanup channel is already closed")
+	default:
+	}
+	cache.Stop()
+}

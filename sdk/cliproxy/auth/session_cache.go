@@ -17,11 +17,14 @@ type sessionEntry struct {
 
 // SessionCache provides TTL-based session to auth mapping with automatic cleanup.
 type SessionCache struct {
-	mu       sync.RWMutex
-	entries  map[string]sessionEntry
-	ttl      time.Duration
-	stopCh   chan struct{}
-	stopOnce sync.Once
+	mu      sync.RWMutex
+	entries map[string]sessionEntry
+	ttl     time.Duration
+	stopCh  chan struct{}
+	// stopped reports whether cleanup is paused; guarded by mu. A paused cache
+	// resumes cleanup on the next binding write, so Stop is a pause, not a
+	// terminal state.
+	stopped bool
 }
 
 // NewSessionCache creates a cache with the specified TTL.
@@ -35,7 +38,7 @@ func NewSessionCache(ttl time.Duration) *SessionCache {
 		ttl:     ttl,
 		stopCh:  make(chan struct{}),
 	}
-	go c.cleanupLoop()
+	go c.cleanupLoop(c.stopCh)
 	return c
 }
 
@@ -107,6 +110,13 @@ func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Resume cleanup if the cache was stopped while still in service (e.g. its
+	// owner retired the selector but a concurrent caller re-installed it).
+	if c.stopped {
+		c.stopped = false
+		c.stopCh = make(chan struct{})
+		go c.cleanupLoop(c.stopCh)
+	}
 
 	aliases := mergeSessionAliases(nil, sessionIDs...)
 	previousGroups := make([]sessionEntry, 0, len(sessionIDs))
@@ -318,18 +328,25 @@ func (c *SessionCache) InvalidateAuth(authID string) {
 	c.mu.Unlock()
 }
 
-// Stop terminates the background cleanup goroutine. It is safe to call
-// multiple times, including from concurrent goroutines.
+// Stop pauses the background cleanup goroutine. It is safe to call multiple
+// times, including from concurrent goroutines. The cache stays fully usable:
+// reads keep lazily filtering expired entries, and the next binding write
+// resumes cleanup, so a cache stopped while still in service heals itself.
 func (c *SessionCache) Stop() {
-	c.stopOnce.Do(func() { close(c.stopCh) })
+	c.mu.Lock()
+	if !c.stopped {
+		c.stopped = true
+		close(c.stopCh)
+	}
+	c.mu.Unlock()
 }
 
-func (c *SessionCache) cleanupLoop() {
+func (c *SessionCache) cleanupLoop(stopCh chan struct{}) {
 	ticker := time.NewTicker(c.ttl / 2)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-c.stopCh:
+		case <-stopCh:
 			return
 		case <-ticker.C:
 			c.cleanup()
