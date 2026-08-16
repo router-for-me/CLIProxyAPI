@@ -229,7 +229,7 @@ func TestGuardOAuthSessionPendingForSave(t *testing.T) {
 	store := newOAuthSessionStore(time.Minute)
 	replaceOAuthSessionStoreForTest(t, store)
 
-	providers := []string{"anthropic", "codex", "antigravity", "xai", "kimi"}
+	providers := []string{"anthropic", "codex", "antigravity", "xai", "kimi", "cursor"}
 	for _, provider := range providers {
 		state := provider + "-save-guard"
 		store.Register(state, provider)

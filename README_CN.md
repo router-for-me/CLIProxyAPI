@@ -117,6 +117,7 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 - 新增 OpenAI Codex（GPT 系列）支持（OAuth 登录）
 - 新增 Claude Code 支持（OAuth 登录）
 - 新增 Grok Build 支持（OAuth 登录）
+- 新增 Cursor 订阅模型支持（浏览器 OAuth 登录和动态模型发现）
 - 支持流式、非流式响应，以及受支持场景下的 WebSocket 响应
 - 函数调用/工具支持
 - 多模态输入（文本、图片）
@@ -133,6 +134,21 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 ## 新手入门
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
+
+### Cursor OAuth Provider
+
+无需安装本地 Cursor，也不会读取本地 Cursor 的数据库、Keychain 或配置文件：
+
+```bash
+./cli-proxy-api --cursor-login
+# 无图形界面的服务器仅输出登录 URL：
+./cli-proxy-api --cursor-login --no-browser
+```
+
+该 Provider 会注册 Cursor 动态返回的原始模型 ID，并通过现有 OpenAI、Responses、Claude 和 Gemini 兼容端点支持流式、多轮、reasoning、base64 `data:image/...` 图片以及调用方提供的函数工具。远程图片 URL 会被拒绝，代理不会执行 Cursor 内置的文件、终端、浏览器或计算机工具。
+
+> [!WARNING]
+> Cursor 未公开本集成所使用的 Agent 协议。此功能面向个人/研究兼容用途，可能因 Cursor 服务更新而失效，并仍受 Cursor 服务条款及账号额度限制。
 
 ## 管理 API 文档
 

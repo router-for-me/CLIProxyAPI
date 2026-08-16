@@ -25,6 +25,7 @@ var oauthProviders = []oauthProvider{
 	{"Antigravity", "antigravity-auth-url", "🟪", false},
 	{"Kimi", "kimi-auth-url", "🟫", true},
 	{"xAI", "xai-auth-url", "⬛", true},
+	{"Cursor", "cursor-auth-url", "🟦", true},
 }
 
 // oauthTabModel handles OAuth login flows.
@@ -358,6 +359,8 @@ func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 					providerKey = "kimi"
 				case "xai-auth-url":
 					providerKey = "xai"
+				case "cursor-auth-url":
+					providerKey = "cursor"
 				}
 				break
 			}

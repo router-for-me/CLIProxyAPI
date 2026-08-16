@@ -117,6 +117,7 @@ PackyCode provides special discounts for our software users: register using <a h
 - OpenAI Codex support (GPT models) via OAuth login
 - Claude Code support via OAuth login
 - Grok Build support via OAuth login
+- Cursor subscription models via browser OAuth login and dynamic model discovery
 - Streaming, non-streaming, and WebSocket responses where supported
 - Function calling/tools support
 - Multimodal input support (text and images)
@@ -133,6 +134,21 @@ PackyCode provides special discounts for our software users: register using <a h
 ## Getting Started
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
+
+### Cursor OAuth provider
+
+Authenticate without installing or reading data from the local Cursor application:
+
+```bash
+./cli-proxy-api --cursor-login
+# For headless hosts, print the URL instead of opening a browser:
+./cli-proxy-api --cursor-login --no-browser
+```
+
+The provider registers the raw model IDs returned by Cursor and supports streaming, multi-turn conversations, reasoning, base64 `data:image/...` inputs, and caller-supplied function tools through the existing OpenAI, Responses, Claude, and Gemini-compatible endpoints. Remote image URLs are rejected, and Cursor's native file, shell, browser, and computer tools are never executed by the proxy.
+
+> [!WARNING]
+> Cursor does not publish the Agent protocol used by this integration. It is intended for personal/research compatibility, may stop working after Cursor service changes, and remains subject to Cursor's terms and account limits.
 
 ## Management API
 

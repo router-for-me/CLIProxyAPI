@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -715,6 +716,103 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 		response["expires_in"] = deviceFlow.ExpiresIn
 	}
 	c.JSON(200, response)
+}
+
+// RequestCursorToken starts Cursor's browser PKCE polling flow.
+func (h *Handler) RequestCursorToken(c *gin.Context) {
+	ctx := PopulateAuthContext(context.Background(), c)
+	params, errParams := cursorauth.GenerateAuthParams()
+	if errParams != nil {
+		log.WithError(errParams).Error("cursor oauth: failed to generate PKCE parameters")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate Cursor authorization URL"})
+		return
+	}
+	state := params.UUID
+	RegisterOAuthSession(state, cursorauth.Provider)
+
+	go func() {
+		pollCtx, cancelPoll := context.WithTimeout(ctx, time.Duration(cursorauth.LoginTimeout)*time.Second)
+		defer cancelPoll()
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, cursorauth.Provider)
+
+		client := cursorauth.NewClient(h.cfg, "")
+		tokens, errPoll := client.Poll(pollCtx, params.UUID, params.Verifier)
+		if errPoll != nil {
+			if !IsOAuthSessionPending(state, cursorauth.Provider) {
+				return
+			}
+			log.WithError(errPoll).Error("cursor oauth: authentication failed")
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Cursor authentication failed", errPoll))
+			return
+		}
+		models, errModels := client.DiscoverModels(pollCtx, tokens.AccessToken)
+		if errModels != nil {
+			if !IsOAuthSessionPending(state, cursorauth.Provider) {
+				return
+			}
+			log.WithError(errModels).Error("cursor oauth: initial model discovery failed")
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Cursor model discovery failed", errModels))
+			return
+		}
+		if errGuard := guardOAuthSessionPendingForSave(state, cursorauth.Provider); errGuard != nil {
+			return
+		}
+
+		now := time.Now().UTC()
+		expired := tokens.ExpiresAt.UTC().Format(time.RFC3339)
+		email := cursorauth.JWTEmail(tokens.AccessToken)
+		metadata := map[string]any{
+			"type":                   cursorauth.Provider,
+			"auth_kind":              cursorauth.OAuthKind,
+			"access_token":           tokens.AccessToken,
+			"refresh_token":          tokens.RefreshToken,
+			"expired":                expired,
+			"last_refresh":           now.Format(time.RFC3339),
+			cursorauth.ModelCacheKey: models,
+		}
+		if email != "" {
+			metadata["email"] = email
+		}
+		fileName := cursorauth.CredentialFileName(tokens.AccessToken)
+		label := strings.TrimSpace(email)
+		if label == "" {
+			label = "Cursor User"
+		}
+		storage := &cursorauth.TokenStorage{
+			AccessToken:  tokens.AccessToken,
+			RefreshToken: tokens.RefreshToken,
+			Expired:      expired,
+			LastRefresh:  now.Format(time.RFC3339),
+			AuthKind:     cursorauth.OAuthKind,
+			Type:         cursorauth.Provider,
+			Models:       models,
+		}
+		record := &coreauth.Auth{
+			ID:         fileName,
+			Provider:   cursorauth.Provider,
+			FileName:   fileName,
+			Label:      label,
+			Storage:    storage,
+			Metadata:   metadata,
+			Attributes: map[string]string{"auth_kind": cursorauth.OAuthKind},
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.WithError(errSave).Error("cursor oauth: failed to save credentials")
+			SetOAuthSessionError(state, "Failed to save Cursor credentials")
+			return
+		}
+		CompleteOAuthSession(state)
+		fmt.Printf("Cursor authentication successful! Token saved to %s\n", savedPath)
+	}()
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":     "ok",
+		"url":        params.LoginURL,
+		"state":      state,
+		"flow":       "poll",
+		"expires_in": cursorauth.LoginTimeout,
+	})
 }
 
 // watchOAuthSessionCancel cancels pollCtx once the OAuth session is no longer pending.

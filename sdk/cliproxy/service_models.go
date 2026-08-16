@@ -2,10 +2,12 @@ package cliproxy
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
 
+	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -155,6 +157,9 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case "cursor":
+		models = buildCursorCachedModels(a)
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -277,6 +282,90 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	}
 
 	GlobalModelRegistry().UnregisterClient(a.ID)
+}
+
+func buildCursorCachedModels(auth *coreauth.Auth) []*ModelInfo {
+	if auth == nil || auth.Metadata == nil {
+		return nil
+	}
+	raw, errMarshal := json.Marshal(auth.Metadata[cursorauth.ModelCacheKey])
+	if errMarshal != nil {
+		return nil
+	}
+	var snapshot []cursorauth.ModelDetails
+	if errJSON := json.Unmarshal(raw, &snapshot); errJSON != nil || len(snapshot) == 0 {
+		return nil
+	}
+	availableRoots := make(map[string]bool, len(snapshot))
+	levelsByRoot := make(map[string]map[string]bool)
+	for _, model := range snapshot {
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		root, level := cursorModelRootAndLevel(id)
+		if level == "" {
+			availableRoots[root] = true
+			continue
+		}
+		if levelsByRoot[root] == nil {
+			levelsByRoot[root] = make(map[string]bool)
+		}
+		levelsByRoot[root][level] = true
+	}
+	models := make([]*ModelInfo, 0, len(snapshot))
+	for _, model := range snapshot {
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		displayName := strings.TrimSpace(model.DisplayName)
+		if displayName == "" {
+			displayName = id
+		}
+		info := &ModelInfo{
+			ID:                         id,
+			Object:                     "model",
+			OwnedBy:                    cursorauth.Provider,
+			Type:                       cursorauth.Provider,
+			DisplayName:                displayName,
+			ContextLength:              cursorauth.DefaultContext,
+			InputTokenLimit:            cursorauth.DefaultContext,
+			OutputTokenLimit:           cursorauth.DefaultOutput,
+			MaxCompletionTokens:        cursorauth.DefaultOutput,
+			SupportedGenerationMethods: []string{"generateContent", "streamGenerateContent"},
+			SupportedParameters:        []string{"tools", "reasoning_effort"},
+			SupportedInputModalities:   []string{"TEXT", "IMAGE"},
+			SupportedOutputModalities:  []string{"TEXT"},
+		}
+		root, _ := cursorModelRootAndLevel(id)
+		levelSet := levelsByRoot[root]
+		if model.Thinking || len(levelSet) > 0 {
+			levels := make([]string, 0, len(levelSet)+1)
+			if availableRoots[root] {
+				levels = append(levels, "none")
+			}
+			for _, level := range []string{"minimal", "low", "medium", "high", "xhigh", "max"} {
+				if levelSet[level] {
+					levels = append(levels, level)
+				}
+			}
+			info.Thinking = &registry.ThinkingSupport{Levels: levels, ZeroAllowed: availableRoots[root]}
+		}
+		models = append(models, info)
+	}
+	return models
+}
+
+func cursorModelRootAndLevel(id string) (string, string) {
+	lower := strings.ToLower(id)
+	for _, level := range []string{"minimal", "low", "medium", "high", "xhigh", "max"} {
+		suffix := "-" + level
+		if strings.HasSuffix(lower, suffix) {
+			return id[:len(id)-len(suffix)], level
+		}
+	}
+	return id, ""
 }
 
 // refreshModelRegistrationForAuth re-applies the latest model registration for

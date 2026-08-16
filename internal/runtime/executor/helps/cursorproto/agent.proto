@@ -1,0 +1,362 @@
+syntax = "proto3";
+
+package agent.v1;
+
+option go_package = "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps/cursorproto;cursorproto";
+
+// This is the minimal Cursor Agent protocol surface used by CLIProxyAPI.
+// Cursor does not publish this protocol, so field numbers are intentionally pinned.
+
+message ModelDetails {
+  string model_id = 1;
+  ThinkingDetails thinking_details = 2;
+  string display_model_id = 3;
+  string display_name = 4;
+  string display_name_short = 5;
+  repeated string aliases = 6;
+  optional bool max_mode = 7;
+}
+
+message ThinkingDetails {}
+
+message GetUsableModelsRequest {
+  repeated string custom_model_ids = 1;
+}
+
+message GetUsableModelsResponse {
+  repeated ModelDetails models = 1;
+}
+
+message ConversationTokenDetails {
+  uint32 used_tokens = 1;
+  uint32 max_tokens = 2;
+}
+
+message ConversationStateStructure {
+  repeated bytes root_prompt_messages_json = 1;
+  repeated bytes turns_old = 2;
+  repeated bytes todos = 3;
+  repeated string pending_tool_calls = 4;
+  ConversationTokenDetails token_details = 5;
+  optional bytes summary = 6;
+  optional bytes plan = 7;
+  repeated bytes turns = 8;
+  repeated string previous_workspace_uris = 9;
+  optional int32 mode = 10;
+  optional bytes summary_archive = 11;
+  repeated bytes summary_archives = 13;
+  uint32 self_summary_count = 17;
+  repeated string read_paths = 18;
+  bytes extra_state = 21;
+  string client_name = 22;
+}
+
+message SelectedImage {
+  oneof data_or_blob_id {
+    bytes blob_id = 1;
+    bytes data = 8;
+  }
+  string uuid = 2;
+  string path = 3;
+  string mime_type = 7;
+}
+
+message SelectedContext {
+  repeated SelectedImage selected_images = 1;
+}
+
+message UserMessage {
+  string text = 1;
+  string message_id = 2;
+  SelectedContext selected_context = 3;
+  int32 mode = 4;
+  bytes selected_context_blob = 10;
+  string correlation_id = 17;
+}
+
+message AssistantMessage { string text = 1; }
+
+message ThinkingMessage {
+  string text = 1;
+  uint32 duration_ms = 2;
+}
+
+message McpTextContent { string text = 1; }
+
+message McpToolResultContentItem {
+  oneof content {
+    McpTextContent text = 1;
+  }
+}
+
+message McpSuccess {
+  repeated McpToolResultContentItem content = 1;
+  bool is_error = 2;
+}
+
+message McpToolError { string error = 1; }
+message McpRejected { string reason = 1; bool is_readonly = 2; }
+message McpPermissionDenied { string error = 1; bool is_readonly = 2; }
+
+message McpToolResult {
+  oneof result {
+    McpSuccess success = 1;
+    McpToolError error = 2;
+    McpRejected rejected = 3;
+    McpPermissionDenied permission_denied = 4;
+  }
+}
+
+message McpArgs {
+  string name = 1;
+  map<string, bytes> args = 2;
+  string tool_call_id = 3;
+  string provider_identifier = 4;
+  string tool_name = 5;
+}
+
+message McpToolCall {
+  McpArgs args = 1;
+  McpToolResult result = 2;
+}
+
+message ToolCall {
+  oneof tool {
+    McpToolCall mcp_tool_call = 15;
+  }
+}
+
+message ConversationStep {
+  oneof message {
+    AssistantMessage assistant_message = 1;
+    ToolCall tool_call = 2;
+    ThinkingMessage thinking_message = 3;
+  }
+}
+
+message AgentConversationTurnStructure {
+  bytes user_message = 1;
+  repeated bytes steps = 2;
+  optional string request_id = 3;
+}
+
+message ConversationTurnStructure {
+  oneof turn {
+    AgentConversationTurnStructure agent_conversation_turn = 1;
+  }
+}
+
+message UserMessageAction {
+  UserMessage user_message = 1;
+  RequestContext request_context = 2;
+  optional bool send_to_interaction_listener = 3;
+}
+
+message CancelAction {}
+message ResumeAction { RequestContext request_context = 2; }
+
+message ConversationAction {
+  oneof action {
+    UserMessageAction user_message_action = 1;
+    ResumeAction resume_action = 2;
+    CancelAction cancel_action = 3;
+  }
+}
+
+message McpToolDefinition {
+  string name = 1;
+  string description = 2;
+  bytes input_schema = 3;
+  string provider_identifier = 4;
+  string tool_name = 5;
+}
+
+message McpTools { repeated McpToolDefinition mcp_tools = 1; }
+
+message AgentRunRequest {
+  ConversationStateStructure conversation_state = 1;
+  ConversationAction action = 2;
+  ModelDetails model_details = 3;
+  McpTools mcp_tools = 4;
+  optional string conversation_id = 5;
+  optional string custom_system_prompt = 8;
+}
+
+message TextDeltaUpdate { string text = 1; }
+message ThinkingDeltaUpdate { string text = 1; }
+message TokenDeltaUpdate { int32 tokens = 1; }
+
+message InteractionUpdate {
+  oneof message {
+    TextDeltaUpdate text_delta = 1;
+    ThinkingDeltaUpdate thinking_delta = 4;
+    TokenDeltaUpdate token_delta = 8;
+  }
+}
+
+message GetBlobArgs { bytes blob_id = 1; }
+message GetBlobResult { bytes blob_data = 1; }
+message SetBlobArgs { bytes blob_id = 1; bytes blob_data = 2; }
+message SetBlobResult {}
+
+message KvServerMessage {
+  uint32 id = 1;
+  oneof message {
+    GetBlobArgs get_blob_args = 2;
+    SetBlobArgs set_blob_args = 3;
+  }
+}
+
+message KvClientMessage {
+  uint32 id = 1;
+  oneof message {
+    GetBlobResult get_blob_result = 2;
+    SetBlobResult set_blob_result = 3;
+  }
+}
+
+message RequestContextArgs {}
+
+message RequestContext {
+  repeated McpToolDefinition tools = 7;
+}
+
+message RequestContextSuccess { RequestContext request_context = 1; }
+message RequestContextError { string error = 1; }
+message RequestContextRejected { string reason = 1; }
+
+message RequestContextResult {
+  oneof result {
+    RequestContextSuccess success = 1;
+    RequestContextError error = 2;
+    RequestContextRejected rejected = 3;
+  }
+}
+
+message McpError { string error = 1; }
+message McpToolNotFound { string name = 1; }
+
+message McpResult {
+  oneof result {
+    McpSuccess success = 1;
+    McpError error = 2;
+    McpRejected rejected = 3;
+    McpPermissionDenied permission_denied = 4;
+    McpToolNotFound tool_not_found = 5;
+  }
+}
+
+message ReadArgs { string path = 1; string tool_call_id = 2; }
+message ReadRejected { string path = 1; string reason = 2; }
+message ReadResult { oneof result { ReadRejected rejected = 3; } }
+
+message LsArgs { string path = 1; string tool_call_id = 3; }
+message LsRejected { string path = 1; string reason = 2; }
+message LsResult { oneof result { LsRejected rejected = 3; } }
+
+message GrepArgs { string pattern = 1; string path = 2; string tool_call_id = 14; }
+message GrepError { string error = 1; }
+message GrepResult { oneof result { GrepError error = 2; } }
+
+message WriteArgs { string path = 1; string tool_call_id = 3; }
+message WriteRejected { string path = 1; string reason = 2; }
+message WriteResult { oneof result { WriteRejected rejected = 6; } }
+
+message DeleteArgs { string path = 1; string tool_call_id = 2; }
+message DeleteRejected { string path = 1; string reason = 2; }
+message DeleteResult { oneof result { DeleteRejected rejected = 6; } }
+
+message ShellArgs { string command = 1; string working_directory = 2; string tool_call_id = 4; }
+message ShellRejected { string command = 1; string working_directory = 2; string reason = 3; bool is_readonly = 4; }
+message ShellResult { oneof result { ShellRejected rejected = 4; } }
+message ShellStream { oneof event { ShellRejected rejected = 5; } }
+
+message BackgroundShellSpawnArgs { string command = 1; string working_directory = 2; string tool_call_id = 3; }
+message BackgroundShellSpawnResult { oneof result { ShellRejected rejected = 3; } }
+
+message WriteShellStdinArgs { uint32 shell_id = 1; string chars = 2; }
+message WriteShellStdinError { string error = 1; }
+message WriteShellStdinResult { oneof result { WriteShellStdinError error = 2; } }
+
+message FetchArgs { string url = 1; string tool_call_id = 2; }
+message FetchError { string url = 1; string error = 2; }
+message FetchResult { oneof result { FetchError error = 2; } }
+
+message DiagnosticsArgs { string path = 1; string tool_call_id = 2; }
+message DiagnosticsRejected { string path = 1; string reason = 2; }
+message DiagnosticsResult { oneof result { DiagnosticsRejected rejected = 3; } }
+message EmptyExec {}
+
+message ExecServerMessage {
+  uint32 id = 1;
+  oneof message {
+    ShellArgs shell_args = 2;
+    WriteArgs write_args = 3;
+    DeleteArgs delete_args = 4;
+    GrepArgs grep_args = 5;
+    ReadArgs read_args = 7;
+    LsArgs ls_args = 8;
+    DiagnosticsArgs diagnostics_args = 9;
+    RequestContextArgs request_context_args = 10;
+    McpArgs mcp_args = 11;
+    ShellArgs shell_stream_args = 14;
+    BackgroundShellSpawnArgs background_shell_spawn_args = 16;
+    EmptyExec list_mcp_resources_exec_args = 17;
+    EmptyExec read_mcp_resource_exec_args = 18;
+    FetchArgs fetch_args = 20;
+    EmptyExec record_screen_args = 21;
+    EmptyExec computer_use_args = 22;
+    WriteShellStdinArgs write_shell_stdin_args = 23;
+  }
+  string exec_id = 15;
+}
+
+message ExecClientMessage {
+  uint32 id = 1;
+  oneof message {
+    ShellResult shell_result = 2;
+    WriteResult write_result = 3;
+    DeleteResult delete_result = 4;
+    GrepResult grep_result = 5;
+    ReadResult read_result = 7;
+    LsResult ls_result = 8;
+    DiagnosticsResult diagnostics_result = 9;
+    RequestContextResult request_context_result = 10;
+    McpResult mcp_result = 11;
+    ShellStream shell_stream = 14;
+    BackgroundShellSpawnResult background_shell_spawn_result = 16;
+    EmptyExec list_mcp_resources_exec_result = 17;
+    EmptyExec read_mcp_resource_exec_result = 18;
+    FetchResult fetch_result = 20;
+    EmptyExec record_screen_result = 21;
+    EmptyExec computer_use_result = 22;
+    WriteShellStdinResult write_shell_stdin_result = 23;
+  }
+  string exec_id = 15;
+}
+
+message ClientHeartbeat {}
+
+message AgentClientMessage {
+  oneof message {
+    AgentRunRequest run_request = 1;
+    ExecClientMessage exec_client_message = 2;
+    KvClientMessage kv_client_message = 3;
+    ConversationAction conversation_action = 4;
+    ClientHeartbeat client_heartbeat = 7;
+  }
+}
+
+message AgentServerMessage {
+  oneof message {
+    InteractionUpdate interaction_update = 1;
+    ExecServerMessage exec_server_message = 2;
+    ConversationStateStructure conversation_checkpoint_update = 3;
+    KvServerMessage kv_server_message = 4;
+  }
+}
+
+service AgentService {
+  rpc Run(stream AgentClientMessage) returns (stream AgentServerMessage);
+  rpc GetUsableModels(GetUsableModelsRequest) returns (GetUsableModelsResponse);
+}
