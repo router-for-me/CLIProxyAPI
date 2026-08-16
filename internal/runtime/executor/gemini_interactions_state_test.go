@@ -71,8 +71,8 @@ func TestGoframeApplyAntigravityInteractionsContinuation(t *testing.T) {
 	if got := root.Get("previous_interaction_id").String(); got != "inter_cont" {
 		t.Errorf("previous_interaction_id = %q, want inter_cont", got)
 	}
-	if got := root.Get("environment_id").String(); got != "env_cont" {
-		t.Errorf("environment_id = %q, want env_cont", got)
+	if got := root.Get("environment").String(); got != "env_cont" {
+		t.Errorf("environment = %q, want env_cont (field must be literally 'environment')", got)
 	}
 	// Only function_result should survive in input.
 	types := make([]string, 0, 1)

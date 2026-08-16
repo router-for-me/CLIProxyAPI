@@ -155,8 +155,12 @@ func goframeApplyAntigravityInteractionsContinuation(ctx context.Context, modelN
 	if state.InteractionID != "" {
 		out, _ = sjson.SetBytes(out, "previous_interaction_id", state.InteractionID)
 	}
+	// The continuation requires the field literally named "environment"
+	// (carrying the environment_id captured from the prior interaction).
+	// Google returns 400 "Missing required field 'environment'" if it is
+	// sent as "environment_id" instead.
 	if state.EnvironmentID != "" {
-		out, _ = sjson.SetBytes(out, "environment_id", state.EnvironmentID)
+		out, _ = sjson.SetBytes(out, "environment", state.EnvironmentID)
 	}
 	// Preserve stream / payload config the translator may have set.
 	if v := root.Get("stream"); v.Exists() {
