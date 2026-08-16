@@ -89,3 +89,33 @@ func TestManagerSetSelectorUncomparableSelectorDoesNotPanic(t *testing.T) {
 		t.Fatalf("replaced uncomparable selector Stop() calls = %d, want 1", got)
 	}
 }
+
+// Enabling affinity by wrapping the current selector via
+// NewSessionAffinitySelector(previous) keeps the previous selector in service
+// as the fallback, so SetSelector must not stop it. The same holds when the
+// fallback is nested inside another affinity wrapper.
+func TestManagerSetSelectorDoesNotStopRetainedFallback(t *testing.T) {
+	t.Parallel()
+
+	stub := &stubStoppableSelector{}
+	manager := NewManager(nil, stub, nil)
+
+	direct := NewSessionAffinitySelector(stub)
+	defer direct.Stop()
+	manager.SetSelector(direct)
+	if got := stub.stopped.Load(); got != 0 {
+		t.Fatalf("retained fallback selector Stop() calls = %d, want 0", got)
+	}
+
+	nested := NewSessionAffinitySelector(direct)
+	defer nested.Stop()
+	manager.SetSelector(nested)
+	if got := stub.stopped.Load(); got != 0 {
+		t.Fatalf("nested retained fallback selector Stop() calls = %d, want 0", got)
+	}
+	select {
+	case <-direct.cache.stopCh:
+		t.Fatalf("direct affinity wrapper was stopped while still serving as nested fallback")
+	default:
+	}
+}

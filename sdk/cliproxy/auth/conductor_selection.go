@@ -250,13 +250,33 @@ func (m *Manager) SetSelector(selector Selector) {
 	// cache cleanup goroutine) so routing config changes do not leak them.
 	// Identity is checked without a bare interface comparison: the public
 	// Selector interface does not require comparable dynamic types, and
-	// comparing two uncomparable implementations would panic.
-	if stoppable, ok := previous.(StoppableSelector); ok && !sameSelectorInstance(previous, selector) {
+	// comparing two uncomparable implementations would panic. A selector that
+	// the replacement still references as its fallback (e.g. wrapping the
+	// previous selector via NewSessionAffinitySelector) stays alive, because
+	// the active selector keeps invoking its Pick.
+	if stoppable, ok := previous.(StoppableSelector); ok &&
+		!sameSelectorInstance(previous, selector) && !selectorRetainedAsFallback(selector, previous) {
 		stoppable.Stop()
 	}
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
+	}
+}
+
+// selectorRetainedAsFallback reports whether candidate is still referenced
+// through the fallback chain of selector, in which case stopping it would
+// break the active composition.
+func selectorRetainedAsFallback(selector, candidate Selector) bool {
+	for {
+		affinity, ok := selector.(*SessionAffinitySelector)
+		if !ok || affinity == nil {
+			return false
+		}
+		if sameSelectorInstance(affinity.fallback, candidate) {
+			return true
+		}
+		selector = affinity.fallback
 	}
 }
 
