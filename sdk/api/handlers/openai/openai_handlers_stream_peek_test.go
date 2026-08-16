@@ -700,6 +700,26 @@ func TestRedactOpenAIStreamErrorTextBearerTokens(t *testing.T) {
 			want: `{"error":"Bearer [REDACTED]"}`,
 		},
 		{
+			name: "short 2-char bearer token",
+			text: "upstream error: Bearer ab",
+			want: "upstream error: Bearer [REDACTED]",
+		},
+		{
+			name: "short 1-char bearer token",
+			text: "upstream error: Bearer a",
+			want: "upstream error: Bearer [REDACTED]",
+		},
+		{
+			name: "short 2-char basic token",
+			text: "upstream error: Basic ab",
+			want: "upstream error: Basic [REDACTED]",
+		},
+		{
+			name: "short 1-char basic token",
+			text: "upstream error: Basic a",
+			want: "upstream error: Basic [REDACTED]",
+		},
+		{
 			name: "control: bearer of bad news not redacted",
 			text: "bearer of bad news",
 			want: "bearer of bad news",

@@ -1047,7 +1047,11 @@ var (
 	openAIStreamAuthSchemePattern = regexp.MustCompile(`(?i)^(Bearer|Basic)\s+`)
 	// openAIStreamAuthPattern redacts standalone Bearer/Basic credentials
 	// that appear outside key/value contexts.
-	openAIStreamAuthPattern = regexp.MustCompile(`(?i)(\b(?:Bearer|Basic)\s+)([-A-Za-z0-9._~+/=]{3,})`)
+	openAIStreamAuthPattern = regexp.MustCompile(`(?i)(\b(?:Bearer|Basic)\s+)([-A-Za-z0-9._~+/=]+)`)
+	// openAIStreamAuthDenyWords marks prose words that follow Bearer/Basic in
+	// natural English ("bearer of bad news", "the bearer to the manager") so
+	// prose is not misclassified as a standalone credential.
+	openAIStreamAuthDenyWords = regexp.MustCompile(`(?i)^(?:of|to|in|is|and|the|for|from|with|by|at|or)$`)
 )
 
 func truncateOpenAIStreamErrorText(text string, limit int) string {
@@ -1060,7 +1064,16 @@ func truncateOpenAIStreamErrorText(text string, limit int) string {
 
 func redactOpenAIStreamErrorText(text string) string {
 	text = redactOpenAIStreamKeyValues(text)
-	return openAIStreamAuthPattern.ReplaceAllString(text, `${1}[REDACTED]`)
+	return openAIStreamAuthPattern.ReplaceAllStringFunc(text, func(m string) string {
+		sub := openAIStreamAuthPattern.FindStringSubmatch(m)
+		if len(sub) < 3 {
+			return m
+		}
+		if openAIStreamAuthDenyWords.MatchString(sub[2]) {
+			return m
+		}
+		return sub[1] + "[REDACTED]"
+	})
 }
 
 // redactOpenAIStreamKeyValues locates sensitive key/value pairs and replaces

@@ -126,6 +126,29 @@ func nonEmptyJSONPayload(raw json.RawMessage) bool {
 	}
 }
 
+func hasMeaningfulClaudePartialJSON(partial string) bool {
+	trimmed := strings.TrimSpace(partial)
+	if trimmed == "" || trimmed == "null" {
+		return false
+	}
+	var val any
+	if err := json.Unmarshal([]byte(trimmed), &val); err == nil {
+		switch v := val.(type) {
+		case nil:
+			return false
+		case string:
+			return strings.TrimSpace(v) != ""
+		case map[string]any:
+			return len(v) > 0
+		case []any:
+			return len(v) > 0
+		default:
+			return true
+		}
+	}
+	return true
+}
+
 func nonEmptyAudioPayload(raw json.RawMessage) bool {
 	var value any
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -570,8 +593,7 @@ func (a *emptyCompletionAccum) evalClaude(data []byte) bool {
 				a.hasContent = true
 			}
 		case "input_json_delta":
-			partial := strings.TrimSpace(chunk.Delta.PartialJSON)
-			if partial != "" && partial != "null" && partial != "{}" {
+			if hasMeaningfulClaudePartialJSON(chunk.Delta.PartialJSON) {
 				a.hasToolCalls = true
 			}
 		default:

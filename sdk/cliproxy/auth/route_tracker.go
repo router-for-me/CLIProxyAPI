@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -146,7 +147,22 @@ func (e *routeExhaustionClonedError) Error() string {
 	if e.summary == "" {
 		return e.cause.Error()
 	}
-	return e.cause.Error() + "; " + e.summary
+	causeStr := e.cause.Error()
+	if isStructuredJSON(causeStr) {
+		return causeStr
+	}
+	return causeStr + "; " + e.summary
+}
+
+func isStructuredJSON(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	if len(trimmed) < 2 {
+		return false
+	}
+	if (trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}') || (trimmed[0] == '[' && trimmed[len(trimmed)-1] == ']') {
+		return json.Valid([]byte(trimmed))
+	}
+	return false
 }
 
 func (e *routeExhaustionClonedError) Unwrap() error {

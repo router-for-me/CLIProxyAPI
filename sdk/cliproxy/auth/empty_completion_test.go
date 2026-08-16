@@ -2488,3 +2488,76 @@ func TestResponsesReasoningOutputItemBootstrap(t *testing.T) {
 		}
 	})
 }
+
+func TestClaudeInputJSONDeltaSemanticallyEmpty(t *testing.T) {
+	emptyObjectDelta := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{ }"}}`)
+	emptyArrayDelta := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"[]"}}`)
+	nullSpaceDelta := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"null "}}`)
+	validCompleteDelta := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"test\"}"}}`)
+	validIncompleteDelta := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":"}}`)
+
+	t.Run("whitespace empty object does not mark meaningful and allows bootstrap error failover", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe(emptyObjectDelta) {
+			t.Fatal("detector.Observe() = true for empty object partial_json, want false")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = true for empty object partial_json, want false")
+		}
+		errUpstream := errors.New("upstream failed after empty arg delta")
+		ch := make(chan cliproxyexecutor.StreamChunk, 2)
+		ch <- cliproxyexecutor.StreamChunk{Payload: emptyObjectDelta}
+		ch <- cliproxyexecutor.StreamChunk{Err: errUpstream}
+		close(ch)
+		buffered, closed, err := readStreamBootstrap(context.Background(), ch)
+		if !errors.Is(err, errUpstream) {
+			t.Fatalf("readStreamBootstrap error = %v, want %v for failover", err, errUpstream)
+		}
+		if len(buffered) != 0 {
+			t.Fatalf("readStreamBootstrap buffered = %d, want 0 on failover error", len(buffered))
+		}
+		if closed {
+			t.Fatal("readStreamBootstrap returned closed = true, want false on error")
+		}
+	})
+
+	t.Run("empty array does not mark meaningful and allows bootstrap error failover", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe(emptyArrayDelta) {
+			t.Fatal("detector.Observe() = true for empty array partial_json, want false")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = true for empty array partial_json, want false")
+		}
+	})
+
+	t.Run("null with space does not mark meaningful and allows bootstrap error failover", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe(nullSpaceDelta) {
+			t.Fatal("detector.Observe() = true for null space partial_json, want false")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = true for null space partial_json, want false")
+		}
+	})
+
+	t.Run("valid complete partial_json marks meaningful and forwards", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe(validCompleteDelta) {
+			t.Fatal("detector.Observe() = false for valid complete partial_json, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for valid complete partial_json, want true")
+		}
+	})
+
+	t.Run("valid incomplete partial_json marks meaningful and forwards", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe(validIncompleteDelta) {
+			t.Fatal("detector.Observe() = false for valid incomplete partial_json, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for valid incomplete partial_json, want true")
+		}
+	})
+}
