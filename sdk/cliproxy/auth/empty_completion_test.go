@@ -2659,3 +2659,99 @@ func (e *customStreamOpenChannelExecutor) HttpRequest(context.Context, *Auth, *h
 func (e *customStreamOpenChannelExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	return &cliproxyexecutor.StreamResult{Chunks: e.chunks}, nil
 }
+
+func TestResponsesEmptyToolCallScaffold(t *testing.T) {
+	emptyFuncScaffold := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"\",\"type\":\"function_call\",\"status\":\"in_progress\",\"arguments\":\"\",\"call_id\":\"\",\"name\":\"\"}}\n\n")
+	emptyCustomToolScaffold := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"\",\"type\":\"custom_tool_call\",\"status\":\"in_progress\",\"input\":\"\",\"call_id\":\"\",\"name\":\"\"}}\n\n")
+	funcWithID := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"fc_123\",\"type\":\"function_call\",\"status\":\"in_progress\",\"arguments\":\"\",\"call_id\":\"\",\"name\":\"\"}}\n\n")
+	funcWithCallID := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"\",\"type\":\"function_call\",\"status\":\"in_progress\",\"arguments\":\"\",\"call_id\":\"call_123\",\"name\":\"\"}}\n\n")
+	funcWithName := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"\",\"type\":\"function_call\",\"status\":\"in_progress\",\"arguments\":\"\",\"call_id\":\"\",\"name\":\"lookup\"}}\n\n")
+	funcWithArgs := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"\",\"type\":\"function_call\",\"status\":\"in_progress\",\"arguments\":\"{\\\"q\\\":\\\"search\\\"}\",\"call_id\":\"\",\"name\":\"\"}}\n\n")
+	customToolWithInput := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":0,\"output_index\":0,\"item\":{\"id\":\"\",\"type\":\"custom_tool_call\",\"status\":\"in_progress\",\"input\":\"{\\\"cmd\\\":\\\"run\\\"}\",\"call_id\":\"\",\"name\":\"\"}}\n\n")
+
+	t.Run("empty function_call scaffold does not mark meaningful and allows bootstrap error failover", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe(emptyFuncScaffold) {
+			t.Fatal("detector.Observe() = true for empty function_call scaffold, want false")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = true for empty function_call scaffold, want false")
+		}
+
+		errUpstream := errors.New("upstream failed immediately after function_call scaffold")
+		ch := make(chan cliproxyexecutor.StreamChunk, 2)
+		ch <- cliproxyexecutor.StreamChunk{Payload: emptyFuncScaffold}
+		ch <- cliproxyexecutor.StreamChunk{Err: errUpstream}
+		close(ch)
+		buffered, closed, err := readStreamBootstrap(context.Background(), ch)
+		if !errors.Is(err, errUpstream) {
+			t.Fatalf("readStreamBootstrap error = %v, want %v for failover", err, errUpstream)
+		}
+		if len(buffered) != 0 {
+			t.Fatalf("readStreamBootstrap buffered = %d, want 0 on failover error", len(buffered))
+		}
+		if closed {
+			t.Fatal("readStreamBootstrap returned closed = true, want false on error")
+		}
+	})
+
+	t.Run("empty custom_tool_call scaffold does not mark meaningful and allows bootstrap error failover", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe(emptyCustomToolScaffold) {
+			t.Fatal("detector.Observe() = true for empty custom_tool_call scaffold, want false")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = true for empty custom_tool_call scaffold, want false")
+		}
+	})
+
+	t.Run("scaffold with non-empty id marks meaningful and forwards", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe(funcWithID) {
+			t.Fatal("detector.Observe() = false for function_call with id, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for function_call with id, want true")
+		}
+	})
+
+	t.Run("scaffold with non-empty call_id marks meaningful and forwards", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe(funcWithCallID) {
+			t.Fatal("detector.Observe() = false for function_call with call_id, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for function_call with call_id, want true")
+		}
+	})
+
+	t.Run("scaffold with non-empty name marks meaningful and forwards", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe(funcWithName) {
+			t.Fatal("detector.Observe() = false for function_call with name, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for function_call with name, want true")
+		}
+	})
+
+	t.Run("scaffold with non-empty arguments marks meaningful and forwards", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe(funcWithArgs) {
+			t.Fatal("detector.Observe() = false for function_call with arguments, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for function_call with arguments, want true")
+		}
+	})
+
+	t.Run("custom tool with non-empty input marks meaningful and forwards", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe(customToolWithInput) {
+			t.Fatal("detector.Observe() = false for custom_tool_call with input, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("detector.HasMeaningfulOutput() = false for custom_tool_call with input, want true")
+		}
+	})
+}

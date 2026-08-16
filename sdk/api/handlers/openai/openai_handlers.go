@@ -1048,9 +1048,6 @@ var (
 	// openAIStreamAuthPattern redacts standalone Bearer/Basic credentials
 	// that appear outside key/value contexts.
 	openAIStreamAuthPattern = regexp.MustCompile(`(?i)(\b(?:Bearer|Basic)\s+)([-A-Za-z0-9._~+/=]+)`)
-	// openAIStreamProseFollowPattern detects when a lowercase scheme is
-	// followed by natural prose words ("bearer of bad news", "the bearer to the manager").
-	openAIStreamProseFollowPattern = regexp.MustCompile(`^\s+[a-z]+`)
 )
 
 func truncateOpenAIStreamErrorText(text string, limit int) string {
@@ -1063,33 +1060,7 @@ func truncateOpenAIStreamErrorText(text string, limit int) string {
 
 func redactOpenAIStreamErrorText(text string) string {
 	text = redactOpenAIStreamKeyValues(text)
-	locs := openAIStreamAuthPattern.FindAllStringSubmatchIndex(text, -1)
-	if len(locs) == 0 {
-		return text
-	}
-	var b strings.Builder
-	b.Grow(len(text))
-	last := 0
-	for _, loc := range locs {
-		matchStart, matchEnd := loc[0], loc[1]
-		if matchStart < last {
-			continue
-		}
-		scheme := text[loc[2]:loc[3]]
-		tail := text[matchEnd:]
-		// Prose check: lowercase scheme ("bearer", "basic") followed by space + lowercase prose words
-		if scheme[0] >= 'a' && scheme[0] <= 'z' && openAIStreamProseFollowPattern.MatchString(tail) {
-			b.WriteString(text[last:matchEnd])
-			last = matchEnd
-			continue
-		}
-		b.WriteString(text[last:loc[2]])
-		b.WriteString(scheme)
-		b.WriteString("[REDACTED]")
-		last = matchEnd
-	}
-	b.WriteString(text[last:])
-	return b.String()
+	return openAIStreamAuthPattern.ReplaceAllString(text, "${1}[REDACTED]")
 }
 
 // redactOpenAIStreamKeyValues locates sensitive key/value pairs and replaces

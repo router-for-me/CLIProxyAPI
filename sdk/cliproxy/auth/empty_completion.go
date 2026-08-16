@@ -359,6 +359,10 @@ type openAIResponseContentPart struct {
 }
 
 type openAIResponseOutputItem struct {
+	ID               string                      `json:"id"`
+	CallID           string                      `json:"call_id"`
+	Name             string                      `json:"name"`
+	Input            string                      `json:"input"`
 	Type             string                      `json:"type"`
 	Text             string                      `json:"text"`
 	Arguments        string                      `json:"arguments"`
@@ -679,6 +683,20 @@ func (a *emptyCompletionAccum) evalOpenAIResponse(data []byte) bool {
 		if strings.TrimSpace(chunk.Text) != "" {
 			a.hasContent = true
 		}
+	case "response.output_item.done":
+		var item openAIResponseOutputItem
+		if err := json.Unmarshal(chunk.Item, &item); err == nil {
+			itemType := strings.ToLower(strings.TrimSpace(item.Type))
+			if strings.HasSuffix(itemType, "_call") {
+				a.hasToolCalls = true
+			}
+		}
+		if err := json.Unmarshal(chunk.Output, &item); err == nil {
+			itemType := strings.ToLower(strings.TrimSpace(item.Type))
+			if strings.HasSuffix(itemType, "_call") {
+				a.hasToolCalls = true
+			}
+		}
 	case "response.function_call_arguments.delta", "response.function_call_arguments.done":
 		if strings.TrimSpace(chunk.Delta) != "" || strings.TrimSpace(chunk.Arguments) != "" || a.hasToolCalls {
 			a.hasToolCalls = true
@@ -720,14 +738,26 @@ func (a *emptyCompletionAccum) evalOpenAIResponseRawOutput(raw json.RawMessage) 
 	}
 }
 
+func hasMeaningfulResponsesCallItem(item openAIResponseOutputItem) bool {
+	return strings.TrimSpace(item.ID) != "" ||
+		strings.TrimSpace(item.CallID) != "" ||
+		strings.TrimSpace(item.Name) != "" ||
+		strings.TrimSpace(item.Arguments) != "" ||
+		strings.TrimSpace(item.Input) != ""
+}
+
 func (a *emptyCompletionAccum) evalOpenAIResponseOutput(items []openAIResponseOutputItem) {
 	for _, item := range items {
 		itemType := strings.ToLower(strings.TrimSpace(item.Type))
 		switch {
 		case itemType == "image_generation_call":
-			a.hasContent = true
+			if hasMeaningfulResponsesCallItem(item) || strings.TrimSpace(item.Text) != "" {
+				a.hasContent = true
+			}
 		case strings.HasSuffix(itemType, "_call"):
-			a.hasToolCalls = true
+			if hasMeaningfulResponsesCallItem(item) {
+				a.hasToolCalls = true
+			}
 		case itemType == "reasoning":
 			if strings.TrimSpace(item.EncryptedContent) != "" || nonEmptyJSONPayload(item.Summary) {
 				a.hasContent = true

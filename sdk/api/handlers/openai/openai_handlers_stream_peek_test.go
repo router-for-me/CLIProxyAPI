@@ -760,29 +760,40 @@ func TestRedactOpenAIStreamErrorTextBearerTokens(t *testing.T) {
 			want: "Authorization: Bearer [REDACTED]\r\n",
 		},
 		{
-			name: "control: bearer of bad news not redacted",
+			name: "lowercase bearer token followed by prose word",
+			text: "upstream error: bearer abc expired",
+			want: "upstream error: bearer [REDACTED] expired",
+		},
+		{
+			name: "lowercase basic token followed by prose word",
+			text: "upstream error: basic dGVzdA== rejected",
+			want: "upstream error: basic [REDACTED] rejected",
+		},
+		// Prose controls: collateral prose masking is accepted in exchange for no credential leaks (reviewer trade-off).
+		{
+			name: "control: bearer of bad news partially masked per reviewer trade-off",
 			text: "bearer of bad news",
-			want: "bearer of bad news",
+			want: "bearer [REDACTED] bad news",
 		},
 		{
-			name: "control: the bearer of good news not redacted",
+			name: "control: the bearer of good news partially masked per reviewer trade-off",
 			text: "the bearer of good news",
-			want: "the bearer of good news",
+			want: "the bearer [REDACTED] good news",
 		},
 		{
-			name: "control: bearer to the manager not redacted",
+			name: "control: bearer to the manager partially masked per reviewer trade-off",
 			text: "the bearer to the manager",
-			want: "the bearer to the manager",
+			want: "the bearer [REDACTED] the manager",
 		},
 		{
-			name: "control: bearer in header not redacted",
+			name: "control: bearer in header partially masked per reviewer trade-off",
 			text: "the bearer in header",
-			want: "the bearer in header",
+			want: "the bearer [REDACTED] header",
 		},
 		{
-			name: "control: bearer is invalid not redacted",
+			name: "control: bearer is invalid partially masked per reviewer trade-off",
 			text: "the bearer is invalid",
-			want: "the bearer is invalid",
+			want: "the bearer [REDACTED] invalid",
 		},
 	}
 
