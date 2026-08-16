@@ -287,6 +287,9 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 		if bootstrap.observe(chunk.Payload) {
 			return buffered, false, nil
 		}
+		if bootstrap.isTerminalEmpty() {
+			return buffered, true, nil
+		}
 	}
 }
 

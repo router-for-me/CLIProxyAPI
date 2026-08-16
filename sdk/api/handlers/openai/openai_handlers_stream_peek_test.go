@@ -720,6 +720,46 @@ func TestRedactOpenAIStreamErrorTextBearerTokens(t *testing.T) {
 			want: "upstream error: Basic [REDACTED]",
 		},
 		{
+			name: "bearer of standalone at end",
+			text: "upstream error: Bearer of",
+			want: "upstream error: Bearer [REDACTED]",
+		},
+		{
+			name: "bearer to standalone at end",
+			text: "upstream error: Bearer to",
+			want: "upstream error: Bearer [REDACTED]",
+		},
+		{
+			name: "bearer of bare token",
+			text: "Bearer of",
+			want: "Bearer [REDACTED]",
+		},
+		{
+			name: "bearer to bare token",
+			text: "Bearer to",
+			want: "Bearer [REDACTED]",
+		},
+		{
+			name: "bearer of in json quotes",
+			text: `{"error":"Bearer of"}`,
+			want: `{"error":"Bearer [REDACTED]"}`,
+		},
+		{
+			name: "bearer to in json quotes",
+			text: `{"error":"Bearer to"}`,
+			want: `{"error":"Bearer [REDACTED]"}`,
+		},
+		{
+			name: "bearer of with comma punctuation",
+			text: "upstream error: Bearer of, please retry",
+			want: "upstream error: Bearer [REDACTED], please retry",
+		},
+		{
+			name: "authorization header bearer of",
+			text: "Authorization: Bearer of\r\n",
+			want: "Authorization: Bearer [REDACTED]\r\n",
+		},
+		{
 			name: "control: bearer of bad news not redacted",
 			text: "bearer of bad news",
 			want: "bearer of bad news",

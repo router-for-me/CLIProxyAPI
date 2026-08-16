@@ -36,6 +36,7 @@ type emptyCompletionTestExecutor struct {
 	// non-OpenAI stream formats).
 	emptyStreamPayload   [][]byte
 	contentStreamPayload [][]byte
+	leaveStreamOpen      bool
 }
 
 func (e *emptyCompletionTestExecutor) Identifier() string { return "claude" }
@@ -94,7 +95,9 @@ func (e *emptyCompletionTestExecutor) ExecuteStream(ctx context.Context, auth *A
 		for _, p := range empty {
 			chunks <- cliproxyexecutor.StreamChunk{Payload: p}
 		}
-		close(chunks)
+		if !e.leaveStreamOpen {
+			close(chunks)
+		}
 		return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 	}
 	if payloads, ok := e.streamPayloads[auth.ID]; ok && len(payloads) > 0 {
@@ -2560,4 +2563,99 @@ func TestClaudeInputJSONDeltaSemanticallyEmpty(t *testing.T) {
 			t.Fatal("detector.HasMeaningfulOutput() = false for valid incomplete partial_json, want true")
 		}
 	})
+}
+
+func TestExecuteStream_TerminalDoneWithoutClosingChannelRotatesAuth(t *testing.T) {
+	executor := &emptyCompletionTestExecutor{
+		streamPayloads:  map[string][][]byte{},
+		streamCalls:     map[string]int{},
+		leaveStreamOpen: true,
+		emptyStreamPayload: [][]byte{
+			[]byte(": keep-alive\n\n"),
+			[]byte("data: [DONE]\n\n"),
+		},
+	}
+	manager, ids, model, capture := newEmptyCompletionTestManager(t, executor)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	stream, err := manager.ExecuteStream(ctx, []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if stream == nil {
+		t.Fatal("ExecuteStream() returned nil stream")
+	}
+
+	var got strings.Builder
+	for chunk := range stream.Chunks {
+		got.Write(chunk.Payload)
+	}
+	assertRotatesToContent(t, ids, executor.firstStream, got.String(), "hello", capture)
+}
+
+func TestExecuteStream_MeaningfulContentWithOpenChannelForwardsImmediately(t *testing.T) {
+	chunks := make(chan cliproxyexecutor.StreamChunk, 2)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"meaningful_content\"}}]}\n\n")}
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
+	// Leave channel open
+
+	customExec := &customStreamOpenChannelExecutor{chunks: chunks}
+
+	manager := NewManager(nil, nil, nil)
+	manager.SetRetryConfig(3, 5*time.Second, 3)
+	model := "open-channel-meaningful-" + uuid.NewString()
+
+	auth := &Auth{ID: "auth-1", Provider: "claude", Status: StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register error: %v", err)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	manager.RefreshSchedulerEntry(auth.ID)
+	manager.RegisterExecutor(customExec)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	stream, err := manager.ExecuteStream(ctx, []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if stream == nil {
+		t.Fatal("ExecuteStream() returned nil stream")
+	}
+
+	firstChunk := <-stream.Chunks
+	if !strings.Contains(string(firstChunk.Payload), "meaningful_content") {
+		t.Fatalf("first chunk payload = %q, want meaningful_content", string(firstChunk.Payload))
+	}
+}
+
+type customStreamOpenChannelExecutor struct {
+	chunks chan cliproxyexecutor.StreamChunk
+}
+
+func (e *customStreamOpenChannelExecutor) Identifier() string { return "claude" }
+
+func (e *customStreamOpenChannelExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
+}
+
+func (e *customStreamOpenChannelExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
+}
+
+func (e *customStreamOpenChannelExecutor) Refresh(_ context.Context, a *Auth) (*Auth, error) {
+	return a, nil
+}
+
+func (e *customStreamOpenChannelExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *customStreamOpenChannelExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return &cliproxyexecutor.StreamResult{Chunks: e.chunks}, nil
 }

@@ -51,3 +51,12 @@ func (d *StreamBootstrapDetector) Finish() bool {
 	d.state.finish()
 	return d.state.isEmptyCompletion()
 }
+
+// IsTerminalEmpty reports whether the accumulated stream has reached a terminal
+// marker without any meaningful output.
+func (d *StreamBootstrapDetector) IsTerminalEmpty() bool {
+	if d == nil {
+		return false
+	}
+	return d.state.isTerminalEmpty()
+}

@@ -955,6 +955,7 @@ type streamBootstrapState struct {
 	dataLines [][]byte
 	forward   bool
 	sawSSE    bool
+	sawDone   bool
 }
 
 func (s *streamBootstrapState) flushData() {
@@ -967,6 +968,7 @@ func (s *streamBootstrapState) flushData() {
 		s.acc.recognized = true
 		s.acc.terminal = true
 		s.acc.sawMessageData = true
+		s.sawDone = true
 		return
 	}
 	if len(data) == 0 {
@@ -1122,6 +1124,10 @@ func (s *streamBootstrapState) finish() {
 
 func (s *streamBootstrapState) isEmptyCompletion() bool {
 	return s.acc.empty()
+}
+
+func (s *streamBootstrapState) isTerminalEmpty() bool {
+	return s.sawDone && s.acc.empty()
 }
 
 func (s *streamBootstrapState) hasMeaningfulOutput() bool {
