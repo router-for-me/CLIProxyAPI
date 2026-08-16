@@ -13,6 +13,29 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
+func TestNormalizeOAuthProvider(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		want     string
+	}{
+		{name: "codex", provider: "codex", want: "codex"},
+		{name: "openai account alias", provider: "OpenAI", want: "codex"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, errNormalize := NormalizeOAuthProvider(tt.provider)
+			if errNormalize != nil {
+				t.Fatalf("NormalizeOAuthProvider(%q) error = %v", tt.provider, errNormalize)
+			}
+			if got != tt.want {
+				t.Fatalf("NormalizeOAuthProvider(%q) = %q, want %q", tt.provider, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestOAuthSessionStoreCompleteKeepsShortLivedSession(t *testing.T) {
 	store := newOAuthSessionStore(time.Minute)
 	store.Register("completed-state", "codex")

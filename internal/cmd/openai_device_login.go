@@ -20,6 +20,16 @@ const (
 // DoCodexDeviceLogin triggers the Codex device-code flow while keeping the
 // existing codex-login OAuth callback flow intact.
 func DoCodexDeviceLogin(cfg *config.Config, options *LoginOptions) {
+	doCodexDeviceLogin(cfg, options, "Codex")
+}
+
+// DoOpenAIDeviceLogin triggers the OpenAI account device-code flow while
+// retaining the canonical Codex credential provider internally.
+func DoOpenAIDeviceLogin(cfg *config.Config, options *LoginOptions) {
+	doCodexDeviceLogin(cfg, options, "OpenAI account")
+}
+
+func doCodexDeviceLogin(cfg *config.Config, options *LoginOptions, providerLabel string) {
 	if options == nil {
 		options = &LoginOptions{}
 	}
@@ -49,12 +59,12 @@ func DoCodexDeviceLogin(cfg *config.Config, options *LoginOptions) {
 			}
 			return
 		}
-		fmt.Printf("Codex device authentication failed: %v\n", err)
+		fmt.Printf("%s device authentication failed: %v\n", providerLabel, err)
 		return
 	}
 
 	if savedPath != "" {
 		fmt.Printf("Authentication saved to %s\n", savedPath)
 	}
-	fmt.Println("Codex device authentication successful!")
+	fmt.Printf("%s device authentication successful!\n", providerLabel)
 }

@@ -141,7 +141,7 @@ func (s *Server) setupRoutes() {
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
 	})
 
-	s.engine.GET("/codex/callback", func(c *gin.Context) {
+	codexOAuthCallback := func(c *gin.Context) {
 		code := c.Query("code")
 		state := c.Query("state")
 		errStr := c.Query("error")
@@ -153,7 +153,10 @@ func (s *Server) setupRoutes() {
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
+	}
+	s.engine.GET("/codex/callback", codexOAuthCallback)
+	// OpenAI account is an external alias for the canonical Codex OAuth flow.
+	s.engine.GET("/openai/callback", codexOAuthCallback)
 
 	s.engine.GET("/antigravity/callback", func(c *gin.Context) {
 		code := c.Query("code")

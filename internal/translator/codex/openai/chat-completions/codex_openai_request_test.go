@@ -6,6 +6,16 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertOpenAIRequestToCodexPreservesFastServiceTier(t *testing.T) {
+	input := []byte(`{"model":"gpt-5.6","service_tier":"fast","messages":[{"role":"user","content":"hello"}]}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6", input, true)
+
+	if got := gjson.GetBytes(out, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want priority", got)
+	}
+}
+
 // Basic tool-call: system + user + assistant(tool_calls, no content) + tool result.
 // Expects developer msg + user msg + function_call + function_call_output.
 // No empty assistant message should appear between user and function_call.

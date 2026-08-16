@@ -30,6 +30,8 @@ auths/*
 
 # Documentation
 docs/*
+!docs/adr/
+!docs/adr/*.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md

@@ -289,6 +289,16 @@ func TestConvertOpenAIResponsesRequestToCodexNormalizesRequiredFields(t *testing
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodexNormalizesFastServiceTier(t *testing.T) {
+	inputJSON := []byte(`{"model":"gpt-5.6","service_tier":"fast","input":"hello"}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, false)
+
+	if got := gjson.GetBytes(output, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want priority", got)
+	}
+}
+
 // TestConvertSystemRoleToDeveloper_AssistantRole tests that assistant role is preserved
 func TestConvertSystemRoleToDeveloper_AssistantRole(t *testing.T) {
 	inputJSON := []byte(`{

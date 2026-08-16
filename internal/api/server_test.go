@@ -1096,6 +1096,19 @@ func TestManagementResponseExposesPluginSupportHeaderForCORS(t *testing.T) {
 	}
 }
 
+func TestManagementExposesOpenAIAccountOAuthRoute(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/openai-auth-url", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	}
+}
+
 func TestOAuthCallbackRouteSkipsManagementKeyMiddleware(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
@@ -1117,6 +1130,25 @@ func TestOAuthCallbackRouteSkipsManagementKeyMiddleware(t *testing.T) {
 	callbackPath := filepath.Join(server.cfg.AuthDir, ".oauth-gemini-cli-"+state+".oauth")
 	if _, errRead := os.ReadFile(callbackPath); errRead != nil {
 		t.Fatalf("expected callback file to be written without management key: %v", errRead)
+	}
+}
+
+func TestOpenAIOAuthCallbackRouteWritesCodexSessionFile(t *testing.T) {
+	server := newTestServer(t)
+	state := "openai-account-callback-state"
+	managementHandlers.RegisterOAuthSession(state, "codex")
+	defer managementHandlers.CompleteOAuthSession(state)
+
+	req := httptest.NewRequest(http.MethodGet, "/openai/callback?state="+state+"&code=test-code", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	callbackPath := filepath.Join(server.cfg.AuthDir, ".oauth-codex-"+state+".oauth")
+	if _, errRead := os.ReadFile(callbackPath); errRead != nil {
+		t.Fatalf("expected OpenAI callback to write Codex session file: %v", errRead)
 	}
 }
 

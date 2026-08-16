@@ -34,6 +34,16 @@ type LoginOptions struct {
 //   - cfg: The application configuration
 //   - options: Login options including browser behavior and prompts
 func DoCodexLogin(cfg *config.Config, options *LoginOptions) {
+	doCodexLogin(cfg, options, "Codex")
+}
+
+// DoOpenAILogin triggers the OpenAI account OAuth flow while retaining the
+// canonical Codex credential provider internally.
+func DoOpenAILogin(cfg *config.Config, options *LoginOptions) {
+	doCodexLogin(cfg, options, "OpenAI account")
+}
+
+func doCodexLogin(cfg *config.Config, options *LoginOptions, providerLabel string) {
 	if options == nil {
 		options = &LoginOptions{}
 	}
@@ -61,12 +71,12 @@ func DoCodexLogin(cfg *config.Config, options *LoginOptions) {
 			}
 			return
 		}
-		fmt.Printf("Codex authentication failed: %v\n", err)
+		fmt.Printf("%s authentication failed: %v\n", providerLabel, err)
 		return
 	}
 
 	if savedPath != "" {
 		fmt.Printf("Authentication saved to %s\n", savedPath)
 	}
-	fmt.Println("Codex authentication successful!")
+	fmt.Printf("%s authentication successful!\n", providerLabel)
 }

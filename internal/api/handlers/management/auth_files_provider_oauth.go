@@ -194,10 +194,34 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 }
 
 func (h *Handler) RequestCodexToken(c *gin.Context) {
+	h.requestCodexToken(c, "codex")
+}
+
+// RequestOpenAIToken starts the OpenAI account OAuth flow using the Codex
+// credential and execution path.
+func (h *Handler) RequestOpenAIToken(c *gin.Context) {
+	h.requestCodexToken(c, "openai")
+}
+
+func (h *Handler) requestCodexToken(c *gin.Context, surfaceProvider string) {
+	surfaceProvider = strings.ToLower(strings.TrimSpace(surfaceProvider))
+	canonicalProvider, errProvider := NormalizeOAuthProvider(surfaceProvider)
+	if errProvider != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported OAuth provider"})
+		return
+	}
+
+	providerLabel := "Codex"
+	callbackPath := "/codex/callback"
+	if surfaceProvider == "openai" {
+		providerLabel = "OpenAI account"
+		callbackPath = "/openai/callback"
+	}
+
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
-	fmt.Println("Initializing Codex authentication...")
+	fmt.Printf("Initializing %s authentication...\n", providerLabel)
 
 	// Generate PKCE codes
 	pkceCodes, err := codex.GeneratePKCECodes()
@@ -226,20 +250,20 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		return
 	}
 
-	RegisterOAuthSession(state, "codex")
+	RegisterOAuthSession(state, canonicalProvider)
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
 	if isWebUI {
-		targetURL, errTarget := h.managementCallbackURL("/codex/callback")
+		targetURL, errTarget := h.managementCallbackURL(callbackPath)
 		if errTarget != nil {
-			log.WithError(errTarget).Error("failed to compute codex callback target")
+			log.WithError(errTarget).WithField("provider", surfaceProvider).Error("failed to compute OAuth callback target")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
 			return
 		}
 		var errStart error
-		if forwarder, errStart = startCallbackForwarder(codexCallbackPort, "codex", targetURL); errStart != nil {
-			log.WithError(errStart).Error("failed to start codex callback forwarder")
+		if forwarder, errStart = startCallbackForwarder(codexCallbackPort, surfaceProvider, targetURL); errStart != nil {
+			log.WithError(errStart).WithField("provider", surfaceProvider).Error("failed to start OAuth callback server")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return
 		}
@@ -255,7 +279,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		deadline := time.Now().Add(5 * time.Minute)
 		var code string
 		for {
-			if !IsOAuthSessionPending(state, "codex") {
+			if !IsOAuthSessionPending(state, canonicalProvider) {
 				return
 			}
 			if time.Now().After(deadline) {
@@ -313,7 +337,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
 		record := &coreauth.Auth{
 			ID:       fileName,
-			Provider: "codex",
+			Provider: canonicalProvider,
 			FileName: fileName,
 			Storage:  tokenStorage,
 			Metadata: map[string]any{
@@ -321,7 +345,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 				"account_id": tokenStorage.AccountID,
 			},
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
+		if errGuard := guardOAuthSessionPendingForSave(state, canonicalProvider); errGuard != nil {
 			return
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
@@ -334,11 +358,17 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		if bundle.APIKey != "" {
 			fmt.Println("API key obtained and saved")
 		}
-		fmt.Println("You can now use Codex services through this CLI")
+		fmt.Printf("You can now use %s services through this CLI\n", providerLabel)
 		CompleteOAuthSession(state)
 	}()
 
-	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+	c.JSON(http.StatusOK, gin.H{
+		"status":             "ok",
+		"url":                authURL,
+		"state":              state,
+		"provider":           surfaceProvider,
+		"canonical_provider": canonicalProvider,
+	})
 }
 
 func (h *Handler) RequestAntigravityToken(c *gin.Context) {

@@ -63,6 +63,12 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	} else {
 		out, _ = sjson.SetBytes(out, "reasoning.effort", "medium")
 	}
+	if serviceTier := gjson.GetBytes(rawJSON, "service_tier"); serviceTier.Exists() {
+		switch strings.ToLower(strings.TrimSpace(serviceTier.String())) {
+		case "fast", "priority":
+			out, _ = sjson.SetBytes(out, "service_tier", "priority")
+		}
+	}
 	out, _ = sjson.SetBytes(out, "parallel_tool_calls", true)
 	// OpenAI documents reasoning summaries as explicit opt-in output. Leave
 	// reasoning.summary to the source request's canonical summary intent instead

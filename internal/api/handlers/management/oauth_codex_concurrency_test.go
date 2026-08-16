@@ -75,6 +75,42 @@ func TestRequestCodexTokenCompletionKeepsConcurrentSessionPending(t *testing.T) 
 	}
 }
 
+func TestRequestOpenAITokenUsesCodexSession(t *testing.T) {
+	authDir := filepath.Join(t.TempDir(), "auths")
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	router := gin.New()
+	router.GET("/openai-auth-url", handler.RequestOpenAIToken)
+
+	req := httptest.NewRequest(http.MethodGet, "/openai-auth-url", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var payload struct {
+		State             string `json:"state"`
+		Provider          string `json:"provider"`
+		CanonicalProvider string `json:"canonical_provider"`
+	}
+	if errDecode := json.Unmarshal(w.Body.Bytes(), &payload); errDecode != nil {
+		t.Fatalf("decode OpenAI auth URL response: %v", errDecode)
+	}
+	if payload.State == "" {
+		t.Fatal("expected OpenAI auth URL response to include state")
+	}
+	if payload.Provider != "openai" || payload.CanonicalProvider != "codex" {
+		t.Fatalf("provider identity = (%q, %q), want (openai, codex)", payload.Provider, payload.CanonicalProvider)
+	}
+	provider, _, ok := GetOAuthSession(payload.State)
+	if !ok || provider != "codex" {
+		t.Fatalf("OAuth session = (%q, %t), want (codex, true)", provider, ok)
+	}
+	if !CancelOAuthSession(payload.State) {
+		t.Fatalf("CancelOAuthSession(%q) = false, want true", payload.State)
+	}
+}
+
 func requestCodexTokenState(t *testing.T, router http.Handler) string {
 	t.Helper()
 

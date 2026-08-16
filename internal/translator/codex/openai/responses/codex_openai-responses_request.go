@@ -2,6 +2,7 @@ package responses
 
 import (
 	"encoding/json"
+	"strings"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	log "github.com/sirupsen/logrus"
@@ -25,8 +26,16 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON = setCodexRequiredInclude(rawJSON)
 	// Codex Responses rejects token limit fields, so strip them out before forwarding.
 	rawJSON = deleteCodexRequestFields(rawJSON, "max_output_tokens", "max_completion_tokens", "temperature", "top_p")
-	if serviceTier := gjson.GetBytes(rawJSON, "service_tier"); serviceTier.Exists() && serviceTier.String() != "priority" {
-		rawJSON = deleteCodexRequestFields(rawJSON, "service_tier")
+	if serviceTier := gjson.GetBytes(rawJSON, "service_tier"); serviceTier.Exists() {
+		switch strings.ToLower(strings.TrimSpace(serviceTier.String())) {
+		case "fast":
+			// Accept the client-facing Fast mode name and send the upstream
+			// Codex service-tier value.
+			rawJSON, _ = sjson.SetBytes(rawJSON, "service_tier", "priority")
+		case "priority":
+		default:
+			rawJSON = deleteCodexRequestFields(rawJSON, "service_tier")
+		}
 	}
 
 	rawJSON = deleteCodexRequestFields(rawJSON, "truncation")
