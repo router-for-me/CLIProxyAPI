@@ -2049,6 +2049,175 @@ func TestColonlessSSEFields(t *testing.T) {
 	})
 }
 
+func TestStreamBootstrapDetectorMeaningfulOutput(t *testing.T) {
+	t.Run("openai role-only delta is not meaningful output", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n")) {
+			t.Fatal("Observe() = true for role-only delta")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("HasMeaningfulOutput() = true for role-only delta")
+		}
+	})
+
+	t.Run("claude message_start is not meaningful output", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"role\":\"assistant\"}}\n\n")) {
+			t.Fatal("Observe() = true for message_start")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("HasMeaningfulOutput() = true for message_start")
+		}
+	})
+
+	t.Run("responses response.created is not meaningful output", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe([]byte(`{"type":"response.created","response":{"id":"r1"}}`)) {
+			t.Fatal("Observe() = true for response.created")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("HasMeaningfulOutput() = true for response.created")
+		}
+	})
+
+	t.Run("sse ping comment is not meaningful output", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if detector.Observe([]byte(": ping\n\n")) {
+			t.Fatal("Observe() = true for SSE ping comment")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("HasMeaningfulOutput() = true for SSE ping comment")
+		}
+	})
+
+	t.Run("openai content delta is meaningful output", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")) {
+			t.Fatal("Observe() = false for content delta")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("HasMeaningfulOutput() = false for content delta")
+		}
+	})
+
+	t.Run("openai tool call is meaningful output", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"search\"}}]}}]}\n\n")) {
+			t.Fatal("Observe() = false for tool_calls")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("HasMeaningfulOutput() = false for tool_calls")
+		}
+	})
+
+	t.Run("content filter block is meaningful output", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		if !detector.Observe([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n\n")) {
+			t.Fatal("Observe() = false for content_filter finish_reason")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("HasMeaningfulOutput() = false for content_filter finish_reason")
+		}
+	})
+}
+
+func TestReadStreamBootstrapErrorHandling(t *testing.T) {
+	errUpstream := errors.New("upstream failed")
+
+	t.Run("error following openai role delta propagates as failover error", func(t *testing.T) {
+		ch := make(chan cliproxyexecutor.StreamChunk, 2)
+		ch <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n")}
+		ch <- cliproxyexecutor.StreamChunk{Err: errUpstream}
+		close(ch)
+
+		buffered, closed, err := readStreamBootstrap(context.Background(), ch)
+		if err == nil {
+			t.Fatal("readStreamBootstrap error = nil, want errUpstream propagated for failover")
+		}
+		if !errors.Is(err, errUpstream) {
+			t.Fatalf("readStreamBootstrap error = %v, want %v", err, errUpstream)
+		}
+		if len(buffered) != 0 {
+			t.Fatalf("len(buffered) = %d, want 0 when error propagates", len(buffered))
+		}
+		if closed {
+			t.Fatal("closed = true, want false")
+		}
+	})
+
+	t.Run("error following claude message_start propagates as failover error", func(t *testing.T) {
+		ch := make(chan cliproxyexecutor.StreamChunk, 2)
+		ch <- cliproxyexecutor.StreamChunk{Payload: []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"role\":\"assistant\"}}\n\n")}
+		ch <- cliproxyexecutor.StreamChunk{Err: errUpstream}
+		close(ch)
+
+		buffered, _, err := readStreamBootstrap(context.Background(), ch)
+		if err == nil {
+			t.Fatal("readStreamBootstrap error = nil, want errUpstream propagated")
+		}
+		if !errors.Is(err, errUpstream) {
+			t.Fatalf("readStreamBootstrap error = %v, want %v", err, errUpstream)
+		}
+		if len(buffered) != 0 {
+			t.Fatalf("len(buffered) = %d, want 0", len(buffered))
+		}
+	})
+
+	t.Run("error following zero payload chunk propagates as failover error", func(t *testing.T) {
+		ch := make(chan cliproxyexecutor.StreamChunk, 2)
+		ch <- cliproxyexecutor.StreamChunk{Payload: nil}
+		ch <- cliproxyexecutor.StreamChunk{Err: errUpstream}
+		close(ch)
+
+		buffered, _, err := readStreamBootstrap(context.Background(), ch)
+		if err == nil {
+			t.Fatal("readStreamBootstrap error = nil, want errUpstream propagated")
+		}
+		if !errors.Is(err, errUpstream) {
+			t.Fatalf("readStreamBootstrap error = %v, want %v", err, errUpstream)
+		}
+		if len(buffered) != 0 {
+			t.Fatalf("len(buffered) = %d, want 0", len(buffered))
+		}
+	})
+
+	t.Run("error following responses created event propagates as failover error", func(t *testing.T) {
+		ch := make(chan cliproxyexecutor.StreamChunk, 2)
+		ch <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"type":"response.created","response":{"id":"r1"}}`)}
+		ch <- cliproxyexecutor.StreamChunk{Err: errUpstream}
+		close(ch)
+
+		buffered, _, err := readStreamBootstrap(context.Background(), ch)
+		if err == nil {
+			t.Fatal("readStreamBootstrap error = nil, want errUpstream propagated")
+		}
+		if !errors.Is(err, errUpstream) {
+			t.Fatalf("readStreamBootstrap error = %v, want %v", err, errUpstream)
+		}
+		if len(buffered) != 0 {
+			t.Fatalf("len(buffered) = %d, want 0", len(buffered))
+		}
+	})
+
+	t.Run("meaningful content starts stream immediately", func(t *testing.T) {
+		ch := make(chan cliproxyexecutor.StreamChunk, 2)
+		ch <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")}
+		ch <- cliproxyexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
+		close(ch)
+
+		buffered, closed, err := readStreamBootstrap(context.Background(), ch)
+		if err != nil {
+			t.Fatalf("readStreamBootstrap error = %v, want nil", err)
+		}
+		if len(buffered) != 1 {
+			t.Fatalf("len(buffered) = %d, want 1", len(buffered))
+		}
+		if closed {
+			t.Fatal("closed = true, want false (started stream)")
+		}
+	})
+}
+
 func TestExecuteLegacyOpenAICompletionNotRotated(t *testing.T) {
 	executor := &emptyCompletionTestExecutor{
 		executePayloads: map[string][]byte{},

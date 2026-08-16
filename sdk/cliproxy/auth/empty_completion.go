@@ -1081,6 +1081,19 @@ func (s *streamBootstrapState) isEmptyCompletion() bool {
 	return s.acc.empty()
 }
 
+func (s *streamBootstrapState) hasMeaningfulOutput() bool {
+	if s.forward {
+		return true
+	}
+	if s.acc.hasContent || s.acc.hasToolCalls || s.acc.blocked || (s.acc.sawUsage && s.acc.completionTokens > 0) || s.acc.sawUnknownData {
+		return true
+	}
+	if !s.acc.recognized && !s.sawSSE && s.bytes > 0 {
+		return true
+	}
+	return false
+}
+
 func (s *streamBootstrapState) shouldForward() bool {
 	return s.acc.hasContent || s.acc.hasToolCalls || s.acc.blocked || s.acc.sawUnknownData || (!s.acc.recognized && !s.sawSSE)
 }
