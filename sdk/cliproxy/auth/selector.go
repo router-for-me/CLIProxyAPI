@@ -192,6 +192,36 @@ func canonicalModelKey(model string) string {
 	return modelName
 }
 
+// affinityModelKey canonicalizes only suffixes the thinking parsers recognize
+// (numeric budget, none/auto, discrete levels), so variants like "model" and
+// "model(high)" share one session binding. Parenthesized names that are not
+// thinking suffixes are kept intact: they may denote a distinct model or
+// configured alias rather than a thinking variant.
+func affinityModelKey(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	parsed := thinking.ParseSuffix(model)
+	if !parsed.HasSuffix {
+		return model
+	}
+	modelName := strings.TrimSpace(parsed.ModelName)
+	if modelName == "" {
+		return model
+	}
+	if _, ok := thinking.ParseNumericSuffix(parsed.RawSuffix); ok {
+		return modelName
+	}
+	if _, ok := thinking.ParseSpecialSuffix(parsed.RawSuffix); ok {
+		return modelName
+	}
+	if _, ok := thinking.ParseLevelSuffix(parsed.RawSuffix); ok {
+		return modelName
+	}
+	return model
+}
+
 func authWebsocketsEnabled(auth *Auth) bool {
 	if auth == nil {
 		return false
@@ -684,10 +714,14 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 	fallbackAuths := highestPriorityAuths(available)
 
-	cacheKey := provider + "::" + primaryID + "::" + model
+	// Canonicalize the route model so thinking-suffix variants of the same base
+	// model (e.g. "claude-3" and "claude-3(high)") share one session binding,
+	// matching the canonicalization used for cursors and cooldown states.
+	keyModel := affinityModelKey(model)
+	cacheKey := provider + "::" + primaryID + "::" + keyModel
 	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey = provider + "::" + fallbackID + "::" + model
+		fallbackKey = provider + "::" + fallbackID + "::" + keyModel
 	}
 	bind := func(authID string) {
 		if fallbackKey != "" {
@@ -787,6 +821,9 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	if raw, ok := res.Options.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey].(string); ok && raw != "" {
 		nsModel = raw
 	}
+	// Match the canonical model key used when the binding was created in Pick,
+	// so thinking-suffix variants resolve to the same cache entry.
+	nsModel = affinityModelKey(nsModel)
 
 	cacheKey := ns + "::" + primaryID + "::" + nsModel
 	var fallbackKey string
