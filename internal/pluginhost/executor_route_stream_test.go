@@ -255,6 +255,10 @@ func TestWrapStreamEmptyCompletionStopsAtTerminalEmptyMarkersWithoutChannelClose
 			payload: []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
 		},
 		{
+			name:    "claude_data_only_message_stop_on_open_channel",
+			payload: []byte("data: {\"type\":\"message_stop\"}\n\n"),
+		},
+		{
 			name:    "gemini_empty_stop_on_open_channel",
 			payload: []byte("data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n"),
 		},

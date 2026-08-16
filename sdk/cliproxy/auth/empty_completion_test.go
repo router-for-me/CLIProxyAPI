@@ -2974,3 +2974,52 @@ func TestGeminiStreamBootstrapTerminalEmptyOnSTOP(t *testing.T) {
 		}
 	})
 }
+
+func TestClaudeDataOnlyMessageStopTerminalEmpty(t *testing.T) {
+	t.Run("empty claude data-only message_stop marks terminal empty without waiting for channel close", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		stopChunk := []byte("data: {\"type\":\"message_stop\"}\n\n")
+
+		if detector.Observe(stopChunk) {
+			t.Fatal("Observe(claude data-only message_stop) = true, want false")
+		}
+		if !detector.IsTerminalEmpty() {
+			t.Fatal("IsTerminalEmpty() = false on claude data-only message_stop, want true")
+		}
+	})
+
+	t.Run("claude stream with content then data-only message_stop is not terminal empty", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		contentChunk := []byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n")
+		stopChunk := []byte("data: {\"type\":\"message_stop\"}\n\n")
+
+		if !detector.Observe(contentChunk) {
+			t.Fatal("Observe(claude content) = false, want true")
+		}
+		if !detector.Observe(stopChunk) {
+			t.Fatal("Observe(claude message_stop after content) = false, want true")
+		}
+		if detector.IsTerminalEmpty() {
+			t.Fatal("IsTerminalEmpty() = true for stream with content, want false")
+		}
+	})
+
+	t.Run("conductor readStreamBootstrap with data-only claude message_stop over open channel classifies empty", func(t *testing.T) {
+		ch := make(chan cliproxyexecutor.StreamChunk, 2)
+		ch <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"message_stop\"}\n\n")}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		buffered, terminalEmpty, err := readStreamBootstrap(ctx, ch)
+		if err != nil {
+			t.Fatalf("readStreamBootstrap error = %v, want nil", err)
+		}
+		if !terminalEmpty {
+			t.Fatal("readStreamBootstrap terminalEmpty = false, want true")
+		}
+		if len(buffered) != 1 {
+			t.Fatalf("len(buffered) = %d, want 1", len(buffered))
+		}
+	})
+}

@@ -426,6 +426,7 @@ type emptyCompletionAccum struct {
 	sawMetadataOnly  bool
 	sawMessageData   bool
 	geminiTerminal   bool
+	claudeTerminal   bool
 }
 
 func (a *emptyCompletionAccum) evalJSON(data []byte) bool {
@@ -561,6 +562,10 @@ func (a *emptyCompletionAccum) evalClaude(data []byte) bool {
 		a.sawMetadataOnly = true
 	} else {
 		a.sawMessageData = true
+	}
+	if chunk.Type == "message_stop" {
+		a.terminal = true
+		a.claudeTerminal = true
 	}
 
 	a.evalClaudeStopReason(chunk.StopReason)
@@ -1174,7 +1179,7 @@ func (s *streamBootstrapState) isEmptyCompletion() bool {
 }
 
 func (s *streamBootstrapState) isTerminalEmpty() bool {
-	return (s.sawDone || s.acc.geminiTerminal) && s.acc.empty()
+	return (s.sawDone || s.acc.geminiTerminal || s.acc.claudeTerminal) && s.acc.empty()
 }
 
 func (s *streamBootstrapState) hasMeaningfulOutput() bool {
