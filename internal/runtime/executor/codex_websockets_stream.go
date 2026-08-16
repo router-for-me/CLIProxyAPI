@@ -378,7 +378,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			eventType := gjson.GetBytes(payload, "type").String()
-			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
+			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" || eventType == "response.failed" || eventType == "error"
 			if eventType == "response.output_item.done" {
 				collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
 			}
@@ -424,7 +424,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					return
 				}
 			}
-			if eventType == "response.completed" || eventType == "response.done" {
+			if isTerminalEvent {
 				return
 			}
 		}

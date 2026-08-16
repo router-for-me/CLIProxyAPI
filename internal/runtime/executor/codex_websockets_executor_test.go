@@ -682,6 +682,76 @@ func TestCodexWebsocketsExecuteStreamPropagatesUpstreamErrorForDownstreamWebsock
 	}
 }
 
+func TestCodexWebsocketsExecuteStreamDownstreamWebsocketResponseIncomplete(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	incompletePayload := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete"}}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Errorf("read first message: %v", errRead)
+			return
+		}
+		if errWrite := conn.WriteMessage(websocket.TextMessage, incompletePayload); errWrite != nil {
+			t.Errorf("write incomplete message: %v", errWrite)
+			return
+		}
+		// Keep connection open without closing or sending more messages
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "sess-incomplete-test",
+		},
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	select {
+	case chunk, ok := <-result.Chunks:
+		if !ok {
+			t.Fatal("stream closed before response.incomplete chunk")
+		}
+		if !bytes.Contains(chunk.Payload, []byte("response.incomplete")) {
+			t.Fatalf("chunk payload = %q, want response.incomplete", chunk.Payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for response.incomplete stream chunk")
+	}
+
+	select {
+	case chunk, ok := <-result.Chunks:
+		if ok {
+			t.Fatalf("unexpected chunk after terminal event: %#v", chunk)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("result.Chunks not closed after response.incomplete; executor hung reading open socket")
+	}
+
+	req2Ctx, req2Cancel := context.WithTimeout(ctx, 1*time.Second)
+	defer req2Cancel()
+	_, _ = exec.ExecuteStream(req2Ctx, auth, req, opts)
+}
+
 func TestSendTerminalWebsocketReadInvalidatesBeforeWaitingForCapacity(t *testing.T) {
 	terminalErr := &websocket.CloseError{Code: websocket.CloseMessageTooBig}
 

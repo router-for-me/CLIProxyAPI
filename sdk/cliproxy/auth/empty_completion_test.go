@@ -2381,6 +2381,79 @@ func TestOpenAIResponsesFunctionCallArgumentsEmptyCompletion(t *testing.T) {
 			t.Fatal("HasMeaningfulOutput() = false for stream with prior function_call item, want true")
 		}
 	})
+
+	t.Run("semantically empty function_call_arguments delta ({}) without prior call item does not set tool calls", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		chunk := []byte("event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{}\"}\n\n")
+		if detector.Observe(chunk) {
+			t.Fatal("Observe() = true for semantically empty function_call_arguments.delta, want false")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("HasMeaningfulOutput() = true for semantically empty function_call_arguments.delta, want false")
+		}
+	})
+
+	t.Run("semantically empty function_call_arguments done ({}) without prior call item does not set tool calls", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		chunk := []byte("event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"arguments\":\"{}\"}\n\n")
+		if detector.Observe(chunk) {
+			t.Fatal("Observe() = true for semantically empty function_call_arguments.done, want false")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("HasMeaningfulOutput() = true for semantically empty function_call_arguments.done, want false")
+		}
+	})
+
+	t.Run("semantically empty function_call_arguments done ([]) without prior call item does not set tool calls", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		chunk := []byte("event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"arguments\":\"[]\"}\n\n")
+		if detector.Observe(chunk) {
+			t.Fatal("Observe() = true for semantically empty function_call_arguments.done, want false")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("HasMeaningfulOutput() = true for semantically empty function_call_arguments.done, want false")
+		}
+	})
+
+	t.Run("semantically empty function_call_arguments done (null) without prior call item does not set tool calls", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		chunk := []byte("event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"arguments\":\"null\"}\n\n")
+		if detector.Observe(chunk) {
+			t.Fatal("Observe() = true for semantically empty function_call_arguments.done, want false")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("HasMeaningfulOutput() = true for semantically empty function_call_arguments.done, want false")
+		}
+	})
+
+	t.Run("meaningful function_call_arguments done with real args sets tool calls", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		chunk := []byte("event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"arguments\":\"{\\\"location\\\":\\\"Paris\\\"}\"}\n\n")
+		if !detector.Observe(chunk) {
+			t.Fatal("Observe() = false for meaningful function_call_arguments.done, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("HasMeaningfulOutput() = false for meaningful function_call_arguments.done, want true")
+		}
+	})
+}
+
+func TestClaudeStreamBootstrapShortCircuitsOnMessageStop(t *testing.T) {
+	t.Run("empty claude stream message_stop marks terminal empty without waiting for channel close", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		startChunk := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3-5-sonnet\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n")
+		stopChunk := []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+
+		if detector.Observe(startChunk) {
+			t.Fatal("Observe(message_start) = true, want false")
+		}
+		if detector.Observe(stopChunk) {
+			t.Fatal("Observe(message_stop) = true, want false")
+		}
+		if !detector.IsTerminalEmpty() {
+			t.Fatal("IsTerminalEmpty() = false on message_stop, want true (sawDone equivalent)")
+		}
+	})
 }
 
 func TestMultiValueJSONMixedUnknownEmptyCompletion(t *testing.T) {
