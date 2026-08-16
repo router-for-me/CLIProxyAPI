@@ -172,6 +172,34 @@ func TestS3ClientPrefixing(t *testing.T) {
 	}
 }
 
+func TestS3ClientDeleteAcceptsPrefixedKey(t *testing.T) {
+	stub := newStubMinioClient()
+	cli := newTestClient(stub)
+	ctx := context.Background()
+
+	if _, err := cli.Upload(ctx, "snap.json", []byte("x"), "application/json"); err != nil {
+		t.Fatal(err)
+	}
+	snaps, err := cli.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps) != 1 {
+		t.Fatalf("setup: want 1 snapshot, got %d", len(snaps))
+	}
+	// Delete the key exactly as returned by List (already carries the prefix).
+	if err := cli.Delete(ctx, snaps[0].Key); err != nil {
+		t.Fatal(err)
+	}
+	snaps, err = cli.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps) != 0 {
+		t.Fatalf("expected object gone after delete with prefixed key, got %d remaining", len(snaps))
+	}
+}
+
 func TestNewS3ClientValidation(t *testing.T) {
 	if _, err := NewS3Client(S3Config{Bucket: "b"}); err == nil {
 		t.Error("expected error for empty endpoint")

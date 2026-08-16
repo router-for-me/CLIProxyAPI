@@ -154,9 +154,15 @@ func (c *S3Client) List(ctx context.Context) ([]SnapshotMeta, error) {
 	return out, nil
 }
 
-// Delete removes a single snapshot object.
+// Delete removes a snapshot object. Accepts either a short key (relative to
+// the configured prefix, e.g. "snap.json") or a fully-prefixed key as returned
+// by List (e.g. "bk/snap.json"). When the key already carries the prefix it is
+// passed through unchanged; otherwise the prefix is applied.
 func (c *S3Client) Delete(ctx context.Context, key string) error {
 	full := c.prefixedKey(key)
+	if c.prefix != "" && strings.HasPrefix(key, c.prefix+"/") {
+		full = key // already absolute
+	}
 	if err := c.client.RemoveObject(ctx, c.bucket, full, minio.RemoveObjectOptions{}); err != nil {
 		return fmt.Errorf("backup s3: delete %s: %w", full, err)
 	}
