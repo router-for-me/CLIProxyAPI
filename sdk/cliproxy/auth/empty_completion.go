@@ -293,6 +293,8 @@ type geminiPart struct {
 	FunctionResponse    json.RawMessage `json:"functionResponse"`
 	ExecutableCode      json.RawMessage `json:"executableCode"`
 	CodeExecutionResult json.RawMessage `json:"codeExecutionResult"`
+	ThoughtSignature    string          `json:"thoughtSignature"`
+	Thought_Signature   string          `json:"thought_signature"`
 }
 
 type geminiCandidate struct {
@@ -860,6 +862,9 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 					a.hasContent = true
 				}
 				if strings.TrimSpace(part.Text) != "" {
+					a.hasContent = true
+				}
+				if strings.TrimSpace(part.ThoughtSignature) != "" || strings.TrimSpace(part.Thought_Signature) != "" {
 					a.hasContent = true
 				}
 			}

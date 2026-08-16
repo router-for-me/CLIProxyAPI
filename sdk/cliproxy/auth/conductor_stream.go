@@ -444,6 +444,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				if errRefresh != nil {
 					errStream = errRefresh
 				} else if okRefresh {
+					if streamResult != nil {
+						discardStreamChunks(streamResult.Chunks)
+					}
 					auth = refreshed
 					m.replaceHomeExecutionLifecycleAuth(execOpts.ExecutionLifecycle, auth)
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)

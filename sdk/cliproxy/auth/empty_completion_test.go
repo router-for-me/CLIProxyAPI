@@ -2354,3 +2354,47 @@ func TestMultiValueJSONMixedUnknownEmptyCompletion(t *testing.T) {
 		}
 	})
 }
+
+func TestGeminiThoughtSignatureEmptyCompletion(t *testing.T) {
+	t.Run("gemini STOP with thoughtSignature and omitted candidatesTokenCount is not empty", func(t *testing.T) {
+		payload := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"sig_gemini_thought_123"}]},"finishReason":"STOP"}]}`)
+		if IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = true for non-empty thoughtSignature with omitted token count, want false")
+		}
+	})
+
+	t.Run("gemini STOP with thought_signature and omitted candidatesTokenCount is not empty", func(t *testing.T) {
+		payload := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thought_signature":"sig_gemini_thought_123"}]},"finishReason":"STOP"}]}`)
+		if IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = true for non-empty thought_signature with omitted token count, want false")
+		}
+	})
+
+	t.Run("gemini STOP with thoughtSignature and zero candidatesTokenCount is not empty", func(t *testing.T) {
+		payload := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":"sig_gemini_thought_123"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`)
+		if IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = true for non-empty thoughtSignature with zero token count, want false")
+		}
+	})
+
+	t.Run("gemini STOP with thought_signature and zero candidatesTokenCount is not empty", func(t *testing.T) {
+		payload := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thought_signature":"sig_gemini_thought_123"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`)
+		if IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = true for non-empty thought_signature with zero token count, want false")
+		}
+	})
+
+	t.Run("gemini STOP with empty thoughtSignature is empty", func(t *testing.T) {
+		payload := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`)
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for empty thoughtSignature, want true")
+		}
+	})
+
+	t.Run("gemini STOP with empty thought_signature is empty", func(t *testing.T) {
+		payload := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thought_signature":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}`)
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for empty thought_signature, want true")
+		}
+	})
+}
