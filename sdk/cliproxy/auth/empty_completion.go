@@ -712,8 +712,8 @@ func (a *emptyCompletionAccum) evalOpenAIResponseOutput(items []openAIResponseOu
 
 func (a *emptyCompletionAccum) evalClaudeBlocks(blocks []claudeContentBlock) {
 	for _, b := range blocks {
-		if b.Type == "tool_use" || b.Type == "server_tool_use" {
-			if strings.TrimSpace(b.ID) != "" || strings.TrimSpace(b.Name) != "" || nonEmptyJSONPayload(b.Input) {
+		if b.Type == "tool_use" || b.Type == "server_tool_use" || b.Type == "mcp_tool_use" {
+			if (strings.TrimSpace(b.ID) != "" && strings.TrimSpace(b.Name) != "") || nonEmptyJSONPayload(b.Input) {
 				a.hasToolCalls = true
 			}
 			continue

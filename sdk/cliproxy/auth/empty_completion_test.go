@@ -1889,6 +1889,34 @@ func TestClaudeToolUseStopReasonEmptyCompletion(t *testing.T) {
 		}
 	})
 
+	t.Run("claude mcp_tool_use with id and name is not empty completion", func(t *testing.T) {
+		payload := []byte(`{"type":"message","role":"assistant","content":[{"type":"mcp_tool_use","id":"mcp_1","name":"server__tool","input":{}}],"stop_reason":"tool_use"}`)
+		if IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = true for mcp_tool_use with id and name, want false")
+		}
+	})
+
+	t.Run("claude mcp_tool_use in sse stream with id and name is not empty completion", func(t *testing.T) {
+		payload := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3\",\"usage\":{\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"mcp_tool_use\",\"id\":\"mcp_1\",\"name\":\"server__tool\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		if IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = true for mcp_tool_use stream with id and name, want false")
+		}
+	})
+
+	t.Run("claude mcp_tool_use missing id is empty completion", func(t *testing.T) {
+		payload := []byte(`{"type":"message","role":"assistant","content":[{"type":"mcp_tool_use","id":"","name":"server__tool","input":{}}],"stop_reason":"tool_use"}`)
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for mcp_tool_use missing id, want true")
+		}
+	})
+
+	t.Run("claude mcp_tool_use missing name is empty completion", func(t *testing.T) {
+		payload := []byte(`{"type":"message","role":"assistant","content":[{"type":"mcp_tool_use","id":"mcp_1","name":"","input":{}}],"stop_reason":"tool_use"}`)
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for mcp_tool_use missing name, want true")
+		}
+	})
+
 	t.Run("control stop_reason max_tokens without content is blocked and not empty completion", func(t *testing.T) {
 		payload := []byte(`{"type":"message","role":"assistant","content":[],"stop_reason":"max_tokens"}`)
 		if IsEmptyCompletionPayload(payload) {
