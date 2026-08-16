@@ -2913,3 +2913,64 @@ func TestResponsesEmptyToolCallScaffold(t *testing.T) {
 		}
 	})
 }
+
+func TestGeminiStreamBootstrapTerminalEmptyOnSTOP(t *testing.T) {
+	t.Run("empty gemini stream STOP marks terminal empty without waiting for channel close", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		stopChunk := []byte("data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n")
+
+		if detector.Observe(stopChunk) {
+			t.Fatal("Observe(gemini STOP) = true, want false")
+		}
+		if !detector.IsTerminalEmpty() {
+			t.Fatal("IsTerminalEmpty() = false on gemini STOP, want true")
+		}
+	})
+
+	t.Run("gemini stream with content then STOP is not terminal empty", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		contentChunk := []byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n")
+		stopChunk := []byte("data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n")
+
+		if !detector.Observe(contentChunk) {
+			t.Fatal("Observe(gemini content) = false, want true")
+		}
+		if !detector.Observe(stopChunk) {
+			t.Fatal("Observe(gemini STOP after content) = false, want true")
+		}
+		if detector.IsTerminalEmpty() {
+			t.Fatal("IsTerminalEmpty() = true for stream with content, want false")
+		}
+	})
+
+	t.Run("gemini stream with blocked finishReason is forwarded and not terminal empty", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		safetyChunk := []byte("data: {\"candidates\":[{\"finishReason\":\"SAFETY\"}]}\n\n")
+
+		if !detector.Observe(safetyChunk) {
+			t.Fatal("Observe(gemini SAFETY) = false, want true (blocked reasons must reach client)")
+		}
+		if detector.IsTerminalEmpty() {
+			t.Fatal("IsTerminalEmpty() = true on gemini SAFETY, want false")
+		}
+	})
+
+	t.Run("conductor readStreamBootstrap with empty gemini STOP over open channel classifies empty", func(t *testing.T) {
+		ch := make(chan cliproxyexecutor.StreamChunk, 2)
+		ch <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n")}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		buffered, terminalEmpty, err := readStreamBootstrap(ctx, ch)
+		if err != nil {
+			t.Fatalf("readStreamBootstrap error = %v, want nil", err)
+		}
+		if !terminalEmpty {
+			t.Fatal("readStreamBootstrap terminalEmpty = false, want true")
+		}
+		if len(buffered) != 1 {
+			t.Fatalf("len(buffered) = %d, want 1", len(buffered))
+		}
+	})
+}

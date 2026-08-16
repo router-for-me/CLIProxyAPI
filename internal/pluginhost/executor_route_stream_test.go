@@ -240,3 +240,56 @@ func assertStreamPayload(t *testing.T, chunks <-chan coreexecutor.StreamChunk, w
 		t.Fatalf("timed out waiting for payload %q", want)
 	}
 }
+
+func TestWrapStreamEmptyCompletionStopsAtTerminalEmptyMarkersWithoutChannelClose(t *testing.T) {
+	testCases := []struct {
+		name    string
+		payload []byte
+	}{
+		{
+			name:    "openai_done_on_open_channel",
+			payload: []byte("data: [DONE]\n\n"),
+		},
+		{
+			name:    "claude_message_stop_on_open_channel",
+			payload: []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+		},
+		{
+			name:    "gemini_empty_stop_on_open_channel",
+			payload: []byte("data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n"),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := make(chan coreexecutor.StreamChunk, 2)
+			src <- coreexecutor.StreamChunk{Payload: tc.payload}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			wrapped := wrapStreamEmptyCompletion(ctx, &coreexecutor.StreamResult{Chunks: src})
+			select {
+			case first, ok := <-wrapped.Chunks:
+				if !ok {
+					t.Fatal("wrapped stream closed without emitting error")
+				}
+				var authErr *coreauth.Error
+				if !errors.As(first.Err, &authErr) || authErr.Code != "empty_completion" {
+					t.Fatalf("first error = %v, want empty_completion error", first.Err)
+				}
+			case <-ctx.Done():
+				t.Fatal("timed out waiting for empty_completion error; stream blocked on open channel")
+			}
+
+			select {
+			case chunk, ok := <-wrapped.Chunks:
+				if ok {
+					t.Fatalf("wrapped stream emitted unexpected trailing chunk: %#v", chunk)
+				}
+			case <-time.After(500 * time.Millisecond):
+				t.Fatal("wrapped stream did not close after empty_completion error")
+			}
+		})
+	}
+}
