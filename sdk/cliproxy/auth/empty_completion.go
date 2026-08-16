@@ -249,13 +249,14 @@ func isMeaningfulToolCall(raw json.RawMessage) bool {
 }
 
 type claudeContentBlock struct {
-	ID       string          `json:"id"`
-	Name     string          `json:"name"`
-	Type     string          `json:"type"`
-	Text     string          `json:"text"`
-	Thinking string          `json:"thinking"`
-	Data     string          `json:"data"`
-	Input    json.RawMessage `json:"input"`
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text"`
+	Thinking  string          `json:"thinking"`
+	Signature string          `json:"signature"`
+	Data      string          `json:"data"`
+	Input     json.RawMessage `json:"input"`
 }
 
 type claudeChunk struct {
@@ -278,6 +279,7 @@ type claudeChunk struct {
 		Type        string  `json:"type"`
 		Text        string  `json:"text"`
 		Thinking    string  `json:"thinking"`
+		Signature   string  `json:"signature"`
 		PartialJSON string  `json:"partial_json"`
 		StopReason  *string `json:"stop_reason"`
 	} `json:"delta"`
@@ -399,6 +401,8 @@ func (a *emptyCompletionAccum) evalJSON(data []byte) bool {
 	for _, v := range values {
 		if a.evalOpenAI(v) || a.evalClaude(v) || a.evalOpenAIResponse(v) || a.evalGemini(v) {
 			recognized = true
+		} else {
+			a.sawUnknownData = true
 		}
 	}
 	return recognized
@@ -553,8 +557,12 @@ func (a *emptyCompletionAccum) evalClaude(data []byte) bool {
 			if strings.TrimSpace(chunk.Delta.Text) != "" {
 				a.hasContent = true
 			}
-		case "thinking_delta", "signature_delta":
+		case "thinking_delta":
 			if strings.TrimSpace(chunk.Delta.Thinking) != "" {
+				a.hasContent = true
+			}
+		case "signature_delta":
+			if strings.TrimSpace(chunk.Delta.Signature) != "" {
 				a.hasContent = true
 			}
 		case "input_json_delta":
@@ -563,7 +571,7 @@ func (a *emptyCompletionAccum) evalClaude(data []byte) bool {
 				a.hasToolCalls = true
 			}
 		default:
-			if strings.TrimSpace(chunk.Delta.Text) != "" || strings.TrimSpace(chunk.Delta.Thinking) != "" {
+			if strings.TrimSpace(chunk.Delta.Text) != "" || strings.TrimSpace(chunk.Delta.Thinking) != "" || strings.TrimSpace(chunk.Delta.Signature) != "" {
 				a.hasContent = true
 			}
 		}
@@ -646,7 +654,9 @@ func (a *emptyCompletionAccum) evalOpenAIResponse(data []byte) bool {
 			a.hasContent = true
 		}
 	case "response.function_call_arguments.delta", "response.function_call_arguments.done":
-		a.hasToolCalls = true
+		if strings.TrimSpace(chunk.Delta) != "" || strings.TrimSpace(chunk.Arguments) != "" || a.hasToolCalls {
+			a.hasToolCalls = true
+		}
 	}
 
 	a.evalOpenAIResponseRawOutput(chunk.Output)
@@ -722,8 +732,8 @@ func (a *emptyCompletionAccum) evalClaudeBlocks(blocks []claudeContentBlock) {
 			a.hasToolCalls = true
 			continue
 		}
-		if b.Type == "thinking" || b.Type == "redacted_thinking" || strings.TrimSpace(b.Thinking) != "" || strings.TrimSpace(b.Data) != "" {
-			if strings.TrimSpace(b.Thinking) != "" || strings.TrimSpace(b.Data) != "" {
+		if b.Type == "thinking" || b.Type == "redacted_thinking" || strings.TrimSpace(b.Thinking) != "" || strings.TrimSpace(b.Signature) != "" || strings.TrimSpace(b.Data) != "" {
+			if strings.TrimSpace(b.Thinking) != "" || strings.TrimSpace(b.Signature) != "" || strings.TrimSpace(b.Data) != "" {
 				a.hasContent = true
 			}
 			continue

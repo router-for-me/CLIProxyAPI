@@ -2283,3 +2283,74 @@ func TestStreamBootstrapDetectorLegacyOpenAI(t *testing.T) {
 		t.Fatal("isEmptyCompletion = true, want false")
 	}
 }
+
+func TestClaudeSignatureDeltaEmptyCompletion(t *testing.T) {
+	t.Run("thinking content_block_start followed by signature_delta with signature is not empty", func(t *testing.T) {
+		payload := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3\",\"usage\":{\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_encrypted_carrier_payload\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		if IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = true for thinking stream with non-empty signature_delta, want false")
+		}
+	})
+
+	t.Run("thinking content_block_start followed by empty signature_delta is empty completion", func(t *testing.T) {
+		payload := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3\",\"usage\":{\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for thinking stream with empty signature_delta, want true")
+		}
+	})
+}
+
+func TestOpenAIResponsesFunctionCallArgumentsEmptyCompletion(t *testing.T) {
+	t.Run("empty function_call_arguments delta without prior call item does not set tool calls", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		chunk := []byte("event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"\"}\n\n")
+		if detector.Observe(chunk) {
+			t.Fatal("Observe() = true for empty function_call_arguments.delta, want false")
+		}
+		if detector.HasMeaningfulOutput() {
+			t.Fatal("HasMeaningfulOutput() = true for empty function_call_arguments.delta, want false")
+		}
+	})
+
+	t.Run("non-empty function_call_arguments delta sets tool calls", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		chunk := []byte("event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"q\\\":\\\"search\\\"}\"}\n\n")
+		if !detector.Observe(chunk) {
+			t.Fatal("Observe() = false for meaningful function_call_arguments.delta, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("HasMeaningfulOutput() = false for meaningful function_call_arguments.delta, want true")
+		}
+	})
+
+	t.Run("empty function_call_arguments delta with prior established call item retains tool calls", func(t *testing.T) {
+		var detector StreamBootstrapDetector
+		itemChunk := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"name\":\"search\",\"arguments\":\"\"}}\n\n")
+		if !detector.Observe(itemChunk) {
+			t.Fatal("Observe() = false for output_item.added function_call, want true")
+		}
+		deltaChunk := []byte("event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"\"}\n\n")
+		if !detector.Observe(deltaChunk) {
+			t.Fatal("Observe() = false for stream with prior function_call item, want true")
+		}
+		if !detector.HasMeaningfulOutput() {
+			t.Fatal("HasMeaningfulOutput() = false for stream with prior function_call item, want true")
+		}
+	})
+}
+
+func TestMultiValueJSONMixedUnknownEmptyCompletion(t *testing.T) {
+	t.Run("multi-value json with recognized empty and unknown object is not empty completion", func(t *testing.T) {
+		payload := []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}]}{"custom_provider_event":{"data":"foo"}}`)
+		if IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = true for mixed recognized-empty and unknown JSON values, want false")
+		}
+	})
+
+	t.Run("multi-value json with only recognized empty completions is empty completion", func(t *testing.T) {
+		payload := []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}]}{"choices":[{"message":{"content":""},"finish_reason":"stop"}]}`)
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for multiple recognized empty completions, want true")
+		}
+	})
+}
