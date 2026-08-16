@@ -1431,6 +1431,17 @@ func retryAfterFromError(err error) *time.Duration {
 	return &value
 }
 
+func isCredentialScopedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type credentialScopedProvider interface {
+		IsCredentialScoped() bool
+	}
+	var csp credentialScopedProvider
+	return (errors.As(err, &csp) && csp != nil && csp.IsCredentialScoped()) || isInvalidAPIKeyError(err)
+}
+
 func statusCodeFromResult(err *Error) int {
 	if err == nil {
 		return 0

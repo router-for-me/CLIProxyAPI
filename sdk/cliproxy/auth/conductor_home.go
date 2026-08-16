@@ -1121,7 +1121,13 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
+				if isCredentialScopedError(errExec) {
+					result.CredentialScope = true
+				}
 				m.MarkResult(creditsCtx, result)
+				if result.CredentialScope {
+					break
+				}
 				continue
 			}
 			if isEmptyCompletionPayload(resp.Payload) {

@@ -2177,3 +2177,202 @@ func TestManager_ClassifierMixedLoop_RotatesCredentialOnAuthAndQuota(t *testing.
 		})
 	}
 }
+
+func TestIsCredentialScopedError_InvalidAPIKey(t *testing.T) {
+	invalidKey400 := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `bad response status code 400, body: {"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}`,
+	}
+	if !isCredentialScopedError(invalidKey400) {
+		t.Fatalf("expected isCredentialScopedError(invalidKey400) = true, got false")
+	}
+
+	invalidKey401 := &Error{
+		HTTPStatus: http.StatusUnauthorized,
+		Message:    `{"error":{"code":"api_key_invalid","message":"Invalid API key"}}`,
+	}
+	if !isCredentialScopedError(invalidKey401) {
+		t.Fatalf("expected isCredentialScopedError(invalidKey401) = true, got false")
+	}
+
+	normal400 := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `invalid argument: field "prompt" cannot be empty`,
+	}
+	if isCredentialScopedError(normal400) {
+		t.Fatalf("expected isCredentialScopedError(normal400) = false, got true")
+	}
+}
+
+func TestManagerExecute_InvalidAPIKeyStopsModelPoolRetries(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name: "gemini",
+				Models: []internalconfig.OpenAICompatibilityModel{
+					{
+						Name:  "gemini-pool",
+						Alias: "gemini-2.5-flash,gemini-2.5-pro,gemini-1.5-flash",
+					},
+				},
+			},
+		},
+	}
+	m.SetConfig(cfg)
+
+	invalidKeyErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `bad response status code 400, body: {"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}`,
+	}
+	executor := &authFallbackExecutor{
+		id: "openai-compatibility",
+		executeErrors: map[string]error{
+			"dead-key-auth": invalidKeyErr,
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	badAuth := &Auth{
+		ID:       "dead-key-auth",
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"api_key":      "key1",
+			"provider_key": "gemini",
+		},
+	}
+	goodAuth := &Auth{
+		ID:       "live-key-auth",
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"api_key":      "key2",
+			"provider_key": "gemini",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	models := []*registry.ModelInfo{
+		{ID: "gemini-pool"},
+		{ID: "gemini-2.5-flash"},
+		{ID: "gemini-2.5-pro"},
+		{ID: "gemini-1.5-flash"},
+	}
+	reg.RegisterClient(badAuth.ID, "openai-compatibility", models)
+	reg.RegisterClient(goodAuth.ID, "openai-compatibility", models)
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"openai-compatibility"}, cliproxyexecutor.Request{Model: "gemini-pool"}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != goodAuth.ID {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), goodAuth.ID)
+	}
+
+	calls := executor.ExecuteCalls()
+	wantCalls := []string{badAuth.ID, goodAuth.ID}
+	if len(calls) != len(wantCalls) {
+		t.Fatalf("execute calls = %v, want %v", calls, wantCalls)
+	}
+}
+
+func TestManagerExecuteStream_InvalidAPIKeyStopsModelPoolRetries(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name: "gemini",
+				Models: []internalconfig.OpenAICompatibilityModel{
+					{
+						Name:  "gemini-pool",
+						Alias: "gemini-2.5-flash,gemini-2.5-pro,gemini-1.5-flash",
+					},
+				},
+			},
+		},
+	}
+	m.SetConfig(cfg)
+
+	invalidKeyErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `bad response status code 400, body: {"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}`,
+	}
+	executor := &authFallbackExecutor{
+		id: "openai-compatibility",
+		streamFirstErrors: map[string]error{
+			"dead-key-auth": invalidKeyErr,
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	badAuth := &Auth{
+		ID:       "dead-key-auth",
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"api_key":      "key1",
+			"provider_key": "gemini",
+		},
+	}
+	goodAuth := &Auth{
+		ID:       "live-key-auth",
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"api_key":      "key2",
+			"provider_key": "gemini",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	models := []*registry.ModelInfo{
+		{ID: "gemini-pool"},
+		{ID: "gemini-2.5-flash"},
+		{ID: "gemini-2.5-pro"},
+		{ID: "gemini-1.5-flash"},
+	}
+	reg.RegisterClient(badAuth.ID, "openai-compatibility", models)
+	reg.RegisterClient(goodAuth.ID, "openai-compatibility", models)
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	streamResult, errStream := m.ExecuteStream(context.Background(), []string{"openai-compatibility"}, cliproxyexecutor.Request{Model: "gemini-pool"}, cliproxyexecutor.Options{})
+	if errStream != nil {
+		t.Fatalf("execute stream error = %v, want success", errStream)
+	}
+	if streamResult == nil {
+		t.Fatalf("execute stream result is nil")
+	}
+	var payloads []string
+	for chunk := range streamResult.Chunks {
+		if len(chunk.Payload) > 0 {
+			payloads = append(payloads, string(chunk.Payload))
+		}
+	}
+	if len(payloads) == 0 || payloads[0] != goodAuth.ID {
+		t.Fatalf("stream payloads = %v, want [%s]", payloads, goodAuth.ID)
+	}
+
+	calls := executor.StreamCalls()
+	wantCalls := []string{badAuth.ID, goodAuth.ID}
+	if len(calls) != len(wantCalls) {
+		t.Fatalf("stream calls = %v, want %v", calls, wantCalls)
+	}
+}

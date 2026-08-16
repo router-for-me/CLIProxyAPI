@@ -126,8 +126,8 @@ func nonEmptyJSONPayload(raw json.RawMessage) bool {
 	}
 }
 
-func hasMeaningfulClaudePartialJSON(partial string) bool {
-	trimmed := strings.TrimSpace(partial)
+func hasMeaningfulJSONArguments(args string) bool {
+	trimmed := strings.TrimSpace(args)
 	if trimmed == "" || trimmed == "null" {
 		return false
 	}
@@ -147,6 +147,10 @@ func hasMeaningfulClaudePartialJSON(partial string) bool {
 		}
 	}
 	return true
+}
+
+func hasMeaningfulClaudePartialJSON(partial string) bool {
+	return hasMeaningfulJSONArguments(partial)
 }
 
 func nonEmptyAudioPayload(raw json.RawMessage) bool {
@@ -199,7 +203,7 @@ func nonEmptyFunctionCall(raw json.RawMessage) bool {
 	if err := json.Unmarshal(raw, &fc); err != nil {
 		return false
 	}
-	return strings.TrimSpace(fc.Name) != "" || strings.TrimSpace(fc.Arguments) != ""
+	return strings.TrimSpace(fc.Name) != "" || hasMeaningfulJSONArguments(fc.Arguments)
 }
 
 func hasMeaningfulToolCalls(rawCalls []json.RawMessage) bool {
@@ -259,10 +263,10 @@ func isMeaningfulToolCall(raw json.RawMessage) bool {
 	if strings.TrimSpace(call.ID) != "" {
 		return true
 	}
-	if strings.TrimSpace(call.Function.Name) != "" || strings.TrimSpace(call.Function.Arguments) != "" {
+	if strings.TrimSpace(call.Function.Name) != "" || hasMeaningfulJSONArguments(call.Function.Arguments) {
 		return true
 	}
-	if strings.TrimSpace(call.Name) != "" || strings.TrimSpace(call.Arguments) != "" {
+	if strings.TrimSpace(call.Name) != "" || hasMeaningfulJSONArguments(call.Arguments) {
 		return true
 	}
 	if nonEmptyJSONPayload(call.Custom) {
@@ -746,7 +750,7 @@ func hasMeaningfulResponsesCallItem(item openAIResponseOutputItem) bool {
 	return strings.TrimSpace(item.ID) != "" ||
 		strings.TrimSpace(item.CallID) != "" ||
 		strings.TrimSpace(item.Name) != "" ||
-		strings.TrimSpace(item.Arguments) != "" ||
+		hasMeaningfulJSONArguments(item.Arguments) ||
 		strings.TrimSpace(item.Input) != ""
 }
 

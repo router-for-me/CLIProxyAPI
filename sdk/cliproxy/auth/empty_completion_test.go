@@ -206,9 +206,49 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "openai sse semantically empty tool_calls empty fields",
-			payload:  []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"),
+			name:     "openai json semantically empty tool_calls empty fields",
+			payload:  []byte(`{"choices":[{"message":{"tool_calls":[{"id":"","type":"function","function":{"name":"","arguments":""}}]},"finish_reason":"tool_calls"}]}`),
 			expected: true,
+		},
+		{
+			name:     "openai json semantically empty tool_calls empty object args",
+			payload:  []byte(`{"choices":[{"message":{"tool_calls":[{"id":"","type":"function","function":{"name":"","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`),
+			expected: true,
+		},
+		{
+			name:     "openai json semantically empty tool_calls empty array args",
+			payload:  []byte(`{"choices":[{"message":{"tool_calls":[{"id":"","type":"function","function":{"name":"","arguments":"[]"}}]},"finish_reason":"tool_calls"}]}`),
+			expected: true,
+		},
+		{
+			name:     "openai json semantically empty tool_calls null args",
+			payload:  []byte(`{"choices":[{"message":{"tool_calls":[{"id":"","type":"function","function":{"name":"","arguments":"null"}}]},"finish_reason":"tool_calls"}]}`),
+			expected: true,
+		},
+		{
+			name:     "openai sse semantically empty tool_calls empty object args",
+			payload:  []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"),
+			expected: true,
+		},
+		{
+			name:     "openai json semantically empty legacy function_call empty object args",
+			payload:  []byte(`{"choices":[{"message":{"function_call":{"name":"","arguments":"{}"}},"finish_reason":"function_call"}]}`),
+			expected: true,
+		},
+		{
+			name:     "openai json semantically empty legacy function_call null args",
+			payload:  []byte(`{"choices":[{"message":{"function_call":{"name":"","arguments":"null"}},"finish_reason":"function_call"}]}`),
+			expected: true,
+		},
+		{
+			name:     "openai json meaningful tool_calls with real args",
+			payload:  []byte(`{"choices":[{"message":{"tool_calls":[{"id":"","type":"function","function":{"name":"","arguments":"{\"location\":\"Paris\"}"}}]},"finish_reason":"tool_calls"}]}`),
+			expected: false,
+		},
+		{
+			name:     "openai json meaningful legacy function_call with real args",
+			payload:  []byte(`{"choices":[{"message":{"function_call":{"name":"","arguments":"{\"query\":\"test\"}"}},"finish_reason":"function_call"}]}`),
+			expected: false,
 		},
 		{
 			name:     "openai json meaningful tool_calls",

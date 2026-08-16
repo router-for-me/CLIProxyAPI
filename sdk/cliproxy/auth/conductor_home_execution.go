@@ -192,6 +192,9 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			}
 			result.Error = resultErrorFromError(errExecute)
 			result.RetryAfter = retryAfterFromError(errExecute)
+			if isCredentialScopedError(errExecute) {
+				result.CredentialScope = true
+			}
 			m.reportHomeResult(execCtx, result, preparedAuth)
 			lastErr = errExecute
 			if isRequestInvalidError(errExecute) {
@@ -200,6 +203,9 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 				return cliproxyexecutor.Response{}, errExecute
 			}
 			tracker.Record(preparedAuth, errExecute)
+			if result.CredentialScope {
+				break
+			}
 		}
 		releaseAttempt()
 		if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "execution_failed"); errEnd != nil {
