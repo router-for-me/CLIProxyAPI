@@ -1,330 +1,261 @@
+// Package interactions provides request translation functionality for Gemini Interactions to Claude Code API compatibility.
+// It handles parsing and transforming Interactions API requests into Claude Code API format,
+// extracting model information, system instructions, message contents, and tool declarations.
+// The package performs JSON data transformation to ensure compatibility
+// between Interactions API format and Claude Code API's expected format.
 package interactions
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"math/big"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/google/uuid"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
+var (
+	user    = ""
+	account = ""
+	session = ""
+)
+
+// ConvertInteractionsRequestToClaude parses and transforms a Gemini Interactions API request into Claude Code API format.
+// It extracts the model name, system instruction, message contents, and tool declarations
+// from the raw JSON request and returns them in the format expected by the Claude Code API.
+// The function performs comprehensive transformation including:
+// 1. Model name mapping and parameter extraction (max_tokens, top_p, etc.)
+// 2. Message content conversion from Interactions to Claude Code format
+// 3. Tool call and tool result handling with proper ID mapping
+// 4. Input items (user input, function calls, function results) conversion
+// 5. System instruction and thinking configuration handling
+//
+// Parameters:
+//   - modelName: The name of the model to use for the request
+//   - inputRawJSON: The raw JSON request data from the Interactions API
+//   - stream: A boolean indicating if the request is for a streaming response
+//
+// Returns:
+//   - []byte: The transformed request data in Claude Code API format
 func ConvertInteractionsRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
-	root := gjson.ParseBytes(inputRawJSON)
-	out := []byte(`{"model":"","max_tokens":32000,"messages":[]}`)
+	rawJSON := inputRawJSON
+
+	if account == "" {
+		u, _ := uuid.NewRandom()
+		account = u.String()
+	}
+	if session == "" {
+		u, _ := uuid.NewRandom()
+		session = u.String()
+	}
+	if user == "" {
+		sum := sha256.Sum256([]byte(account + session))
+		user = hex.EncodeToString(sum[:])
+	}
+	userID := fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
+
+	out := []byte(fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID))
+	root := gjson.ParseBytes(rawJSON)
+
 	out, _ = sjson.SetBytes(out, "model", modelName)
-	if stream || root.Get("stream").Bool() {
-		out, _ = sjson.SetBytes(out, "stream", true)
+	if maxTokens := firstClaudeInteractionsExisting(root, "generation_config.max_output_tokens", "generationConfig.maxOutputTokens", "max_tokens"); maxTokens.Exists() {
+		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
 	}
-	out = copyInteractionsSystemToClaude(out, root)
-	out = copyInteractionsGenerationConfigToClaude(out, root)
-	messageAccumulator := translatorcommon.NewClaudeMessageAccumulator(int(root.Get("input.#").Int()))
-	appendInteractionsInputToClaudeMessages(messageAccumulator, root.Get("input"))
-	out = translatorcommon.SetRawArrayItems(out, "messages", messageAccumulator.Messages())
-	out = copyInteractionsToolsToClaude(out, root)
-	return out
-}
+	if temperature := firstClaudeInteractionsExisting(root, "generation_config.temperature", "generationConfig.temperature", "temperature"); temperature.Exists() {
+		out, _ = sjson.SetBytes(out, "temperature", temperature.Float())
+	}
+	if topP := firstClaudeInteractionsExisting(root, "generation_config.top_p", "generationConfig.topP", "top_p"); topP.Exists() {
+		out, _ = sjson.SetBytes(out, "top_p", topP.Float())
+	}
+	if topK := firstClaudeInteractionsExisting(root, "generation_config.top_k", "generationConfig.topK", "top_k"); topK.Exists() {
+		out, _ = sjson.SetBytes(out, "top_k", topK.Int())
+	}
 
-func copyInteractionsSystemToClaude(out []byte, root gjson.Result) []byte {
-	sys := root.Get("system_instruction")
-	if !sys.Exists() {
-		sys = root.Get("systemInstruction")
-	}
-	text := interactionsClaudeText(sys)
-	if text == "" {
-		return out
-	}
-	out, _ = sjson.SetBytes(out, "system", text)
-	return out
-}
-
-func copyInteractionsGenerationConfigToClaude(out []byte, root gjson.Result) []byte {
-	cfg := root.Get("generation_config")
-	if !cfg.Exists() {
-		cfg = root.Get("generationConfig")
-	}
-	if cfg.Exists() {
-		out = copyJSONField(out, cfg, "max_output_tokens", "max_tokens")
-		out = copyJSONField(out, cfg, "maxOutputTokens", "max_tokens")
-		out = copyJSONField(out, cfg, "top_p", "top_p")
-		out = copyJSONField(out, cfg, "topP", "top_p")
-		out = copyJSONField(out, cfg, "temperature", "temperature")
-		out = copyJSONField(out, cfg, "stop_sequences", "stop_sequences")
-		out = copyJSONField(out, cfg, "stopSequences", "stop_sequences")
-		out = copyInteractionsThinkingConfigToClaude(out, cfg)
-		out = copyInteractionsToolChoiceToClaude(out, cfg.Get("tool_choice"))
-		out = copyInteractionsToolChoiceToClaude(out, cfg.Get("toolChoice"))
-	}
-	out = copyInteractionsReasoningToClaude(out, root.Get("reasoning"))
-	out = copyInteractionsToolChoiceToClaude(out, root.Get("tool_choice"))
-	out = copyInteractionsToolChoiceToClaude(out, root.Get("toolChoice"))
-	return out
-}
-
-func copyJSONField(out []byte, root gjson.Result, from, to string) []byte {
-	value := root.Get(from)
-	if !value.Exists() {
-		return out
-	}
-	out, _ = sjson.SetRawBytes(out, to, []byte(value.Raw))
-	return out
-}
-
-func copyInteractionsThinkingConfigToClaude(out []byte, cfg gjson.Result) []byte {
-	level := firstClaudeInteractionsExisting(cfg, "thinking_level", "thinkingLevel", "reasoning.effort")
-	if !level.Exists() {
-		return out
-	}
-	return setClaudeThinkingFromLevel(out, level.String())
-}
-
-func copyInteractionsReasoningToClaude(out []byte, reasoning gjson.Result) []byte {
-	if !reasoning.Exists() {
-		return out
-	}
-	if effort := reasoning.Get("effort"); effort.Exists() {
-		return setClaudeThinkingFromLevel(out, effort.String())
-	}
-	if level := reasoning.Get("thinking_level"); level.Exists() {
-		return setClaudeThinkingFromLevel(out, level.String())
-	}
-	return out
-}
-
-func setClaudeThinkingFromLevel(out []byte, level string) []byte {
-	normalized := strings.ToLower(strings.TrimSpace(level))
-	if normalized == "" {
-		return out
-	}
-	switch normalized {
-	case "none", "disabled", "off", "false":
-		out, _ = sjson.SetBytes(out, "thinking.type", "disabled")
-		out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
-		return out
-	case "auto", "adaptive":
-		out, _ = sjson.SetBytes(out, "thinking.type", "adaptive")
-		out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
-		return out
-	}
-	if budget, ok := thinking.ConvertLevelToBudget(normalized); ok {
-		switch {
-		case budget == 0:
+	if thinkingBudget := firstClaudeInteractionsExisting(root, "generation_config.thinking_config.thinking_budget", "generationConfig.thinkingConfig.thinkingBudget", "thinking.budget_tokens"); thinkingBudget.Exists() {
+		switch thinkingBudget.Int() {
+		case 0:
 			out, _ = sjson.SetBytes(out, "thinking.type", "disabled")
-		case budget < 0:
+		case -1:
 			out, _ = sjson.SetBytes(out, "thinking.type", "enabled")
 		default:
-			out, _ = sjson.SetBytes(out, "thinking.type", "enabled")
-			out, _ = sjson.SetBytes(out, "thinking.budget_tokens", budget)
-		}
-		return out
-	}
-	out, _ = sjson.SetBytes(out, "thinking.type", "adaptive")
-	out, _ = sjson.SetBytes(out, "output_config.effort", normalized)
-	return out
-}
-
-func appendInteractionsInputToClaudeMessages(accumulator *translatorcommon.ClaudeMessageAccumulator, input gjson.Result) {
-	if !input.Exists() {
-		return
-	}
-	if input.Type == gjson.String {
-		step := []byte(`{"type":"user_input","content":[{"type":"text","text":""}]}`)
-		step, _ = sjson.SetBytes(step, "content.0.text", input.String())
-		appendInteractionsStepToClaude(accumulator, gjson.ParseBytes(step), "user")
-		return
-	}
-	if input.IsObject() {
-		appendInteractionsInputItemToClaude(accumulator, input)
-		return
-	}
-	input.ForEach(func(_, step gjson.Result) bool {
-		appendInteractionsInputItemToClaude(accumulator, step)
-		return true
-	})
-}
-
-func appendInteractionsInputItemToClaude(accumulator *translatorcommon.ClaudeMessageAccumulator, step gjson.Result) {
-	if step.Get("steps").IsArray() {
-		defaultRole := "user"
-		if role := step.Get("role").String(); role == "model" || role == "assistant" {
-			defaultRole = "assistant"
-		}
-		step.Get("steps").ForEach(func(_, nestedStep gjson.Result) bool {
-			appendInteractionsStepToClaude(accumulator, nestedStep, defaultRole)
-			return true
-		})
-		return
-	}
-	if step.Get("parts").Exists() {
-		wrapped := []byte(`{"type":"user_input","content":[]}`)
-		if role := step.Get("role").String(); role == "model" || role == "assistant" {
-			wrapped, _ = sjson.SetBytes(wrapped, "type", "model_output")
-		}
-		wrapped, _ = sjson.SetRawBytes(wrapped, "content", []byte(step.Get("parts").Raw))
-		appendInteractionsStepToClaude(accumulator, gjson.ParseBytes(wrapped), "user")
-		return
-	}
-	stepType := step.Get("type").String()
-	switch stepType {
-	case "function_call":
-		appendInteractionsFunctionCallToClaude(accumulator, step)
-	case "function_result":
-		appendInteractionsFunctionResultToClaude(accumulator, step)
-	case "model_output", "thought":
-		appendInteractionsStepToClaude(accumulator, step, "assistant")
-	default:
-		appendInteractionsStepToClaude(accumulator, step, "user")
-	}
-}
-
-func appendInteractionsStepToClaude(accumulator *translatorcommon.ClaudeMessageAccumulator, step gjson.Result, defaultRole string) {
-	role := defaultRole
-	if stepRole := step.Get("role").String(); stepRole == "user" || stepRole == "assistant" {
-		role = stepRole
-	}
-	contentItems := make([][]byte, 0, 4)
-	stepContent := step.Get("content")
-	if stepContent.Type == gjson.String {
-		part := []byte(`{"type":"text","text":""}`)
-		part, _ = sjson.SetBytes(part, "text", stepContent.String())
-		contentItems = append(contentItems, part)
-	} else if stepContent.IsArray() {
-		stepContent.ForEach(func(_, part gjson.Result) bool {
-			if converted := interactionsContentToClaude(part, role); len(converted) > 0 {
-				contentItems = append(contentItems, converted)
+			if thinkingBudget.Int() > 0 {
+				out, _ = sjson.SetBytes(out, "thinking.type", "enabled")
+				out, _ = sjson.SetBytes(out, "thinking.budget_tokens", thinkingBudget.Int())
 			}
-			return true
-		})
-	} else if text := step.Get("text"); text.Exists() {
-		part := []byte(`{"type":"text","text":""}`)
-		part, _ = sjson.SetBytes(part, "text", text.String())
-		contentItems = append(contentItems, part)
-	}
-	if len(contentItems) == 0 {
-		return
-	}
-	msg := []byte(`{"role":"","content":[]}`)
-	msg, _ = sjson.SetBytes(msg, "role", role)
-	msg, _ = sjson.SetRawBytes(msg, "content", translatorcommon.JoinRawArray(contentItems))
-	accumulator.Append(msg)
-}
-
-func interactionsContentToClaude(part gjson.Result, role string) []byte {
-	partType := part.Get("type").String()
-	if partType == "" && part.Get("text").Exists() {
-		partType = "text"
-	}
-	switch partType {
-	case "text":
-		textPart := []byte(`{"type":"text","text":""}`)
-		textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
-		return textPart
-	case "thinking", "reasoning":
-		if role != "assistant" {
-			return nil
-		}
-		thinkingPart := []byte(`{"type":"thinking","thinking":""}`)
-		thinkingPart, _ = sjson.SetBytes(thinkingPart, "thinking", interactionsClaudeText(part))
-		return thinkingPart
-	case "image":
-		imagePart, _ := interactionsClaudeMediaPart(part, "image")
-		return imagePart
-	case "document", "file":
-		documentPart, _ := interactionsClaudeMediaPart(part, "document")
-		return documentPart
-	default:
-		if text := interactionsClaudeText(part); text != "" {
-			textPart := []byte(`{"type":"text","text":""}`)
-			textPart, _ = sjson.SetBytes(textPart, "text", text)
-			return textPart
-		}
-		if part.Get("data").String() != "" || part.Get("file_data").String() != "" {
-			textPart := []byte(`{"type":"text","text":""}`)
-			textPart, _ = sjson.SetBytes(textPart, "text", fmt.Sprintf("[%s content omitted]", partType))
-			return textPart
 		}
 	}
-	return nil
-}
 
-func appendInteractionsFunctionCallToClaude(accumulator *translatorcommon.ClaudeMessageAccumulator, step gjson.Result) {
-	toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-	toolUse, _ = sjson.SetBytes(toolUse, "id", interactionsClaudeToolID(step))
-	toolUse, _ = sjson.SetBytes(toolUse, "name", step.Get("name").String())
-	args := step.Get("arguments")
-	if !args.Exists() {
-		args = step.Get("args")
-	}
-	if args.Exists() && args.IsObject() {
-		toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(args.Raw))
-	}
-	msg := []byte(`{"role":"assistant","content":[]}`)
-	msg, _ = sjson.SetRawBytes(msg, "content", translatorcommon.JoinRawArray([][]byte{toolUse}))
-	accumulator.Append(msg)
-}
-
-func appendInteractionsFunctionResultToClaude(accumulator *translatorcommon.ClaudeMessageAccumulator, step gjson.Result) {
-	toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
-	toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", interactionsClaudeToolID(step))
-	result := step.Get("result")
-	if !result.Exists() {
-		result = step.Get("output")
-	}
-	switch {
-	case result.IsArray():
-		contentItems := make([][]byte, 0, 4)
-		result.ForEach(func(_, part gjson.Result) bool {
-			if converted := interactionsContentToClaude(part, "user"); len(converted) > 0 {
-				contentItems = append(contentItems, converted)
+	if systemInstruction := firstClaudeInteractionsExisting(root, "system_instruction", "systemInstruction", "system"); systemInstruction.Exists() {
+		if systemInstruction.Type == gjson.String {
+			out, _ = sjson.SetBytes(out, "system", systemInstruction.String())
+		} else if parts := systemInstruction.Get("parts"); parts.IsArray() {
+			var systemText []string
+			parts.ForEach(func(_, part gjson.Result) bool {
+				if text := part.Get("text"); text.Exists() {
+					systemText = append(systemText, text.String())
+				}
+				return true
+			})
+			if len(systemText) > 0 {
+				out, _ = sjson.SetBytes(out, "system", strings.Join(systemText, "\n\n"))
 			}
-			return true
-		})
-		toolResult, _ = sjson.SetRawBytes(toolResult, "content", translatorcommon.JoinRawArray(contentItems))
-	case result.Exists() && result.Raw != "":
-		toolResult, _ = sjson.SetBytes(toolResult, "content", result.Raw)
-	default:
-		toolResult, _ = sjson.SetBytes(toolResult, "content", "")
+		}
 	}
-	msg := []byte(`{"role":"user","content":[]}`)
-	msg, _ = sjson.SetRawBytes(msg, "content", translatorcommon.JoinRawArray([][]byte{toolResult}))
-	accumulator.Append(msg)
-}
 
-func copyInteractionsToolsToClaude(out []byte, root gjson.Result) []byte {
+	toolIDMap := make(map[string]string)
+	genToolCallID := func(name string) string {
+		if id, exists := toolIDMap[name]; exists {
+			return id
+		}
+		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+		var b strings.Builder
+		for i := 0; i < 24; i++ {
+			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
+			b.WriteByte(letters[n.Int64()])
+		}
+		id := "toolu_" + b.String()
+		toolIDMap[name] = id
+		return id
+	}
+
+	input := root.Get("input")
+	if input.Exists() {
+		if input.Type == gjson.String {
+			msg := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
+			msg, _ = sjson.SetBytes(msg, "content.0.text", input.String())
+			out, _ = sjson.SetRawBytes(out, "messages", []byte(`[`+string(msg)+`]`))
+		} else if input.IsArray() {
+			messageAccumulator := translatorcommon.NewClaudeMessageAccumulator(int(input.Get("#").Int()))
+			input.ForEach(func(_, item gjson.Result) bool {
+				itemType := item.Get("type").String()
+				switch itemType {
+				case "user_input", "user":
+					content := item.Get("content")
+					var contentItems [][]byte
+					if content.Type == gjson.String {
+						part := []byte(`{"type":"text","text":""}`)
+						part, _ = sjson.SetBytes(part, "text", content.String())
+						contentItems = append(contentItems, part)
+					} else if content.IsArray() {
+						content.ForEach(func(_, part gjson.Result) bool {
+							switch part.Get("type").String() {
+							case "text":
+								textPart := []byte(`{"type":"text","text":""}`)
+								textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
+								contentItems = append(contentItems, textPart)
+							case "image":
+								source := part.Get("source")
+								imagePart := []byte(`{"type":"image","source":{}}`)
+								imagePart, _ = sjson.SetRawBytes(imagePart, "source", []byte(source.Raw))
+								contentItems = append(contentItems, imagePart)
+							}
+							return true
+						})
+					}
+					if len(contentItems) > 0 {
+						msg := []byte(`{"role":"user","content":[]}`)
+						msg, _ = sjson.SetRawBytes(msg, "content", translatorcommon.JoinRawArray(contentItems))
+						messageAccumulator.Append(msg)
+					}
+
+				case "function_call":
+					name := item.Get("name").String()
+					callID := item.Get("call_id").String()
+					if callID == "" {
+						callID = genToolCallID(name)
+					}
+					part := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+					part, _ = sjson.SetBytes(part, "id", callID)
+					part, _ = sjson.SetBytes(part, "name", name)
+					if args := item.Get("arguments"); args.Exists() {
+						part, _ = sjson.SetRawBytes(part, "input", []byte(args.Raw))
+					}
+					msg := []byte(`{"role":"assistant","content":[]}`)
+					msg, _ = sjson.SetRawBytes(msg, "content", []byte(`[`+string(part)+`]`))
+					messageAccumulator.Append(msg)
+
+				case "function_result":
+					name := item.Get("name").String()
+					callID := item.Get("call_id").String()
+					if callID == "" {
+						callID = genToolCallID(name)
+					}
+					part := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
+					part, _ = sjson.SetBytes(part, "tool_use_id", callID)
+					if result := item.Get("result"); result.Exists() {
+						part, _ = sjson.SetBytes(part, "content", result.Raw)
+					}
+					msg := []byte(`{"role":"user","content":[]}`)
+					msg, _ = sjson.SetRawBytes(msg, "content", []byte(`[`+string(part)+`]`))
+					messageAccumulator.Append(msg)
+				}
+				return true
+			})
+			out = translatorcommon.SetRawArrayItems(out, "messages", messageAccumulator.Messages())
+		}
+	}
+
 	tools := root.Get("tools")
-	if !tools.Exists() || !tools.IsArray() {
-		return out
-	}
-	var toolItems [][]byte
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		if tool.Get("function_declarations").IsArray() {
-			tool.Get("function_declarations").ForEach(func(_, decl gjson.Result) bool {
-				if converted := interactionsClaudeTool(decl); len(converted) > 0 {
-					toolItems = append(toolItems, converted)
-				}
+	if tools.IsArray() {
+		var toolItems [][]byte
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			if tool.Get("function_declarations").IsArray() {
+				tool.Get("function_declarations").ForEach(func(_, decl gjson.Result) bool {
+					if converted := interactionsClaudeTool(decl); len(converted) > 0 {
+						toolItems = append(toolItems, converted)
+					}
+					return true
+				})
 				return true
-			})
-			return true
-		}
-		if tool.Get("functionDeclarations").IsArray() {
-			tool.Get("functionDeclarations").ForEach(func(_, decl gjson.Result) bool {
-				if converted := interactionsClaudeTool(decl); len(converted) > 0 {
-					toolItems = append(toolItems, converted)
-				}
+			}
+			if tool.Get("functionDeclarations").IsArray() {
+				tool.Get("functionDeclarations").ForEach(func(_, decl gjson.Result) bool {
+					if converted := interactionsClaudeTool(decl); len(converted) > 0 {
+						toolItems = append(toolItems, converted)
+					}
+					return true
+				})
 				return true
-			})
+			}
+			if converted := interactionsClaudeTool(tool); len(converted) > 0 {
+				toolItems = append(toolItems, converted)
+			}
 			return true
+		})
+		if len(toolItems) > 0 {
+			out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolItems))
 		}
-		if converted := interactionsClaudeTool(tool); len(converted) > 0 {
-			toolItems = append(toolItems, converted)
-		}
-		return true
-	})
-	if len(toolItems) > 0 {
-		out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolItems))
 	}
+
+	if toolChoice := firstClaudeInteractionsExisting(root, "generation_config.tool_choice", "generationConfig.toolChoice", "tool_choice"); toolChoice.Exists() {
+		switch toolChoice.Type {
+		case gjson.String:
+			switch strings.ToLower(toolChoice.String()) {
+			case "none":
+				out, _ = sjson.SetBytes(out, "tool_choice.type", "none")
+			case "auto":
+				out, _ = sjson.SetBytes(out, "tool_choice.type", "auto")
+			case "required", "any":
+				out, _ = sjson.SetBytes(out, "tool_choice.type", "any")
+			}
+		case gjson.JSON:
+			if toolChoice.Get("type").String() == "function" {
+				fnName := toolChoice.Get("function.name").String()
+				if fnName != "" {
+					out, _ = sjson.SetBytes(out, "tool_choice.type", "tool")
+					out, _ = sjson.SetBytes(out, "tool_choice.name", fnName)
+				}
+			}
+		}
+	}
+
+	out, _ = sjson.SetBytes(out, "stream", stream)
 	return out
 }
 
@@ -336,125 +267,26 @@ func interactionsClaudeTool(tool gjson.Result) []byte {
 	if name == "" {
 		return nil
 	}
-	converted := []byte(`{"name":"","input_schema":{}}`)
-	converted, _ = sjson.SetBytes(converted, "name", name)
+	sanitizedName := util.SanitizeClaudeFunctionName(name)
+	converted := []byte(`{"name":"","input_schema":{"type":"object","properties":{}}}`)
+	converted, _ = sjson.SetBytes(converted, "name", sanitizedName)
 	if desc := tool.Get("description"); desc.Exists() {
 		converted, _ = sjson.SetBytes(converted, "description", desc.String())
 	} else if desc := tool.Get("function.description"); desc.Exists() {
 		converted, _ = sjson.SetBytes(converted, "description", desc.String())
 	}
+
 	params := firstClaudeInteractionsExisting(tool, "parameters", "parametersJsonSchema", "parameters_json_schema", "input_schema")
-	if params.Exists() && params.IsObject() {
+	if params.Exists() {
 		converted, _ = sjson.SetRawBytes(converted, "input_schema", []byte(params.Raw))
 	}
 	return converted
 }
 
-func copyInteractionsToolChoiceToClaude(out []byte, toolChoice gjson.Result) []byte {
-	if !toolChoice.Exists() {
-		return out
-	}
-	switch toolChoice.Type {
-	case gjson.String:
-		switch strings.ToLower(strings.TrimSpace(toolChoice.String())) {
-		case "auto":
-			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
-		case "required", "any":
-			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
-		}
-	case gjson.JSON:
-		toolType := strings.ToLower(strings.TrimSpace(toolChoice.Get("type").String()))
-		switch toolType {
-		case "auto":
-			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
-		case "required", "any":
-			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
-		case "function", "tool":
-			name := toolChoice.Get("name").String()
-			if name == "" {
-				name = toolChoice.Get("function.name").String()
-			}
-			if name != "" {
-				choice := []byte(`{"type":"tool","name":""}`)
-				choice, _ = sjson.SetBytes(choice, "name", name)
-				out, _ = sjson.SetRawBytes(out, "tool_choice", choice)
-			}
-		}
-	}
-	return out
-}
-
-func interactionsClaudeToolID(step gjson.Result) string {
-	for _, path := range []string{"call_id", "id", "tool_use_id"} {
-		if value := step.Get(path).String(); value != "" {
-			return util.SanitizeClaudeToolID(value)
-		}
-	}
-	if name := step.Get("name").String(); name != "" {
-		return util.SanitizeClaudeToolID("toolu_" + name)
-	}
-	return "toolu_interactions"
-}
-
-func interactionsClaudeText(value gjson.Result) string {
-	if !value.Exists() {
-		return ""
-	}
-	if value.Type == gjson.String {
-		return value.String()
-	}
-	if text := value.Get("text"); text.Exists() {
-		return text.String()
-	}
-	if thinking := value.Get("thinking"); thinking.Exists() {
-		return thinking.String()
-	}
-	if content := value.Get("content"); content.Exists() {
-		return interactionsClaudeText(content)
-	}
-	if parts := value.Get("parts"); parts.Exists() && parts.IsArray() {
-		var builder strings.Builder
-		parts.ForEach(func(_, part gjson.Result) bool {
-			text := interactionsClaudeText(part)
-			if text == "" {
-				return true
-			}
-			if builder.Len() > 0 {
-				builder.WriteByte('\n')
-			}
-			builder.WriteString(text)
-			return true
-		})
-		return builder.String()
-	}
-	return ""
-}
-
-func interactionsClaudeMediaPart(part gjson.Result, claudeType string) ([]byte, bool) {
-	mimeType := firstClaudeInteractionsExisting(part, "mime_type", "mimeType", "media_type", "mediaType").String()
-	data := firstClaudeInteractionsExisting(part, "data", "file_data", "fileData").String()
-	if source := part.Get("source"); source.Exists() {
-		if mimeType == "" {
-			mimeType = source.Get("media_type").String()
-		}
-		if data == "" {
-			data = source.Get("data").String()
-		}
-	}
-	if mimeType == "" || data == "" {
-		return nil, false
-	}
-	out := []byte(`{"type":"","source":{"type":"base64","media_type":"","data":""}}`)
-	out, _ = sjson.SetBytes(out, "type", claudeType)
-	out, _ = sjson.SetBytes(out, "source.media_type", mimeType)
-	out, _ = sjson.SetBytes(out, "source.data", data)
-	return out, true
-}
-
 func firstClaudeInteractionsExisting(root gjson.Result, paths ...string) gjson.Result {
-	for _, path := range paths {
-		if value := root.Get(path); value.Exists() {
-			return value
+	for _, p := range paths {
+		if r := root.Get(p); r.Exists() {
+			return r
 		}
 	}
 	return gjson.Result{}

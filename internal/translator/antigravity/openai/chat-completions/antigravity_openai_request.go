@@ -390,6 +390,9 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						decl, _ = sjson.SetRawBytes(decl, "parametersJsonSchema", schemaRaw)
 					}
 					mappedName := util.MapSanitizedFunctionName(functionNameMap, name)
+					if strings.Contains(strings.ToLower(modelName), "claude") {
+						mappedName = util.SanitizeClaudeFunctionName(name)
+					}
 					if mappedName != name {
 						decl, _ = sjson.SetBytes(decl, "name", mappedName)
 					}
