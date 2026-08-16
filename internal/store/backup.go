@@ -239,7 +239,7 @@ type BackupBundle struct {
 	ExportedAt time.Time                     `json:"exported_at"`
 	Mode       string                        `json:"mode,omitempty"`
 	Summary    map[string]int                `json:"summary,omitempty"`
-	Resources  map[string]backupResourceData `json:"resources"`
+	Resources  map[string]BackupResourceData `json:"resources"`
 	// ConfigYAML is the full contents of the active config.yaml, embedded so a
 	// full backup restores provider credentials, model routing, and all other
 	// file-based settings that the PG tables do not cover.
@@ -250,7 +250,7 @@ type BackupBundle struct {
 }
 
 // rowCount sums the exported rows across all tables of one resource data set.
-func rowCount(data backupResourceData) int {
+func rowCount(data BackupResourceData) int {
 	n := 0
 	for _, rows := range data.Tables {
 		n += len(rows)
@@ -258,11 +258,11 @@ func rowCount(data backupResourceData) int {
 	return n
 }
 
-// backupResourceData holds the exported rows for one resource. Tables maps a
+// BackupResourceData holds the exported rows for one resource. Tables maps a
 // table name to its exported rows; Files carries base64-encoded on-disk
 // payloads (currently only pricing-source catalog files) keyed by the absolute
 // path recorded in the corresponding table row.
-type backupResourceData struct {
+type BackupResourceData struct {
 	Tables map[string][]json.RawMessage `json:"tables,omitempty"`
 	Files  map[string]string            `json:"files,omitempty"`
 }
@@ -462,12 +462,12 @@ func transformSealedColumns(sealer *Sealer, raw json.RawMessage, cols []string, 
 	return json.RawMessage(enc), nil
 }
 
-// exportResource dumps every table of one resource into backupResourceData,
+// exportResource dumps every table of one resource into BackupResourceData,
 // applying the unseal transform to sealed columns and embedding pricing-source
 // catalog files. It is the shared row fixture for both ExportData and
 // StreamExport.
-func (s *PostgresStore) exportResource(ctx context.Context, sealer *Sealer, res BackupResource) (backupResourceData, error) {
-	data := backupResourceData{Tables: make(map[string][]json.RawMessage), Files: make(map[string]string)}
+func (s *PostgresStore) exportResource(ctx context.Context, sealer *Sealer, res BackupResource) (BackupResourceData, error) {
+	data := BackupResourceData{Tables: make(map[string][]json.RawMessage), Files: make(map[string]string)}
 	for _, bt := range s.resourceTables(res) {
 		rows, err := s.exportTable(ctx, sealer, bt)
 		if err != nil {
@@ -496,7 +496,7 @@ func (s *PostgresStore) ExportData(ctx context.Context, opts BackupExportOpts) (
 		Version:    backupBundleVersion,
 		ExportedAt: time.Now().UTC(),
 		Summary:    make(map[string]int),
-		Resources:  make(map[string]backupResourceData),
+		Resources:  make(map[string]BackupResourceData),
 	}
 	if s == nil || s.db == nil {
 		return bundle, fmt.Errorf("postgres store: backup not initialized")
@@ -780,7 +780,7 @@ func writeJSONKey(w io.Writer, s string) error {
 // embedPricingSourceFiles reads each source_type=file pricing source's on-disk
 // catalog and stores it base64-encoded in the resource data, keyed by the
 // absolute file_path recorded in the row.
-func (s *PostgresStore) embedPricingSourceFiles(ctx context.Context, data *backupResourceData) error {
+func (s *PostgresStore) embedPricingSourceFiles(ctx context.Context, data *BackupResourceData) error {
 	table := s.PricingSourcesTable()
 	rows, _ := data.Tables[table]
 	for _, raw := range rows {
@@ -906,7 +906,7 @@ func (s *PostgresStore) ImportData(ctx context.Context, bundle BackupBundle, opt
 // wipeResourceTables deletes every table of one resource that is present in the
 // bundle data, in reverse table order (children before parents). It runs inside
 // the caller's transaction for config resources.
-func (s *PostgresStore) wipeResourceTables(ctx context.Context, tx *sql.Tx, res BackupResource, data *backupResourceData) error {
+func (s *PostgresStore) wipeResourceTables(ctx context.Context, tx *sql.Tx, res BackupResource, data *BackupResourceData) error {
 	tables := s.resourceTables(res)
 	for j := len(tables) - 1; j >= 0; j-- {
 		if _, ok := data.Tables[tables[j].name]; !ok {
@@ -922,7 +922,7 @@ func (s *PostgresStore) wipeResourceTables(ctx context.Context, tx *sql.Tx, res 
 // importConfigResource restores one config resource's tables in order (parents
 // before children) inside the caller's single transaction. Any failure aborts
 // the caller's transaction (all-or-nothing).
-func (s *PostgresStore) importConfigResource(ctx context.Context, tx *sql.Tx, sealer *Sealer, res BackupResource, data *backupResourceData) (BackupImportResourceReport, error) {
+func (s *PostgresStore) importConfigResource(ctx context.Context, tx *sql.Tx, sealer *Sealer, res BackupResource, data *BackupResourceData) (BackupImportResourceReport, error) {
 	r := BackupImportResourceReport{}
 	for _, bt := range s.resourceTables(res) {
 		rows, ok := data.Tables[bt.name]
@@ -959,7 +959,7 @@ func (s *PostgresStore) importConfigResource(ctx context.Context, tx *sql.Tx, se
 // the count of rows restored before this resource (config rows plus any earlier
 // data resources); it is added to each chunk's cumulative count so the Progress
 // callback stays monotonic across table and resource boundaries.
-func (s *PostgresStore) importDataResource(ctx context.Context, sealer *Sealer, res BackupResource, data *backupResourceData, progress func(int), progressBase int) (BackupImportResourceReport, bool) {
+func (s *PostgresStore) importDataResource(ctx context.Context, sealer *Sealer, res BackupResource, data *BackupResourceData, progress func(int), progressBase int) (BackupImportResourceReport, bool) {
 	r := BackupImportResourceReport{}
 	partial := false
 	var firstErr error
@@ -1082,7 +1082,7 @@ func (s *PostgresStore) resyncTableSequence(ctx context.Context, table string) (
 // restorePricingSourceFiles materializes any embedded pricing-source catalog
 // files into the destination pricing-sources directory and rewrites the file_path
 // column of the corresponding rows to the new on-disk location.
-func (s *PostgresStore) restorePricingSourceFiles(ctx context.Context, tx *sql.Tx, data *backupResourceData) error {
+func (s *PostgresStore) restorePricingSourceFiles(ctx context.Context, tx *sql.Tx, data *BackupResourceData) error {
 	table := s.PricingSourcesTable()
 	rows, ok := data.Tables[table]
 	if !ok {

@@ -248,7 +248,7 @@ func usageEventBundle(st *PostgresStore, rows []json.RawMessage) BackupBundle {
 	return BackupBundle{
 		Version:    1,
 		ExportedAt: time.Now().UTC(),
-		Resources: map[string]backupResourceData{
+		Resources: map[string]BackupResourceData{
 			string(ResourceUsage): {
 				Tables: map[string][]json.RawMessage{
 					st.UsageEventsTable(): rows,
@@ -464,7 +464,7 @@ func TestBackupImportConfigAllOrNothing(t *testing.T) {
 	bundle := BackupBundle{
 		Version:    1,
 		ExportedAt: time.Now().UTC(),
-		Resources: map[string]backupResourceData{
+		Resources: map[string]BackupResourceData{
 			string(ResourceAPIKeys): {
 				Tables: map[string][]json.RawMessage{
 					st.APIKeysTable():  {apiKeyRow},
@@ -552,7 +552,7 @@ func TestBackupImportMultiTableProgress(t *testing.T) {
 	bundle := BackupBundle{
 		Version:    1,
 		ExportedAt: time.Now().UTC(),
-		Resources: map[string]backupResourceData{
+		Resources: map[string]BackupResourceData{
 			string(ResourceUsage): {
 				Tables: map[string][]json.RawMessage{
 					st.UsageEventsTable(): eventRows,
@@ -630,7 +630,7 @@ func TestBackupImportProgressIncludesConfig(t *testing.T) {
 	bundle := BackupBundle{
 		Version:    1,
 		ExportedAt: time.Now().UTC(),
-		Resources: map[string]backupResourceData{
+		Resources: map[string]BackupResourceData{
 			string(ResourceAPIKeys): {
 				Tables: map[string][]json.RawMessage{
 					st.APIKeysTable():  {apiKeyRow},
@@ -912,7 +912,7 @@ func TestBackupBundleV2JSON(t *testing.T) {
 		ExportedAt: time.Now().UTC(),
 		Mode:       "full",
 		Summary:    map[string]int{"config": 1, "auth_files": 1},
-		Resources:  map[string]backupResourceData{},
+		Resources:  map[string]BackupResourceData{},
 		ConfigYAML: "api_key: sk-test\n",
 		AuthFiles: []BackupAuthFile{
 			{Path: "openai.json", Content: `{"api_key":"x"}`},
