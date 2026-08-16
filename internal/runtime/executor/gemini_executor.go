@@ -479,6 +479,12 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	if err != nil {
 		return nil, err
 	}
+	// For the antigravity agent, a tool-calling continuation turn must resume
+	// the upstream interaction (previous_interaction_id + environment_id) and
+	// send only its function_result — NOT replay the assistant tool-call
+	// history. Otherwise Google rejects with "Cannot specify tool calls
+	// outside of Turn items".
+	body = goframeApplyAntigravityInteractionsContinuation(ctx, targetName, originalRequestRawJSON(req, opts), opts, body)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	fromProtocol := opts.SourceFormat.String()
@@ -564,6 +570,11 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 				if detail, ok := helps.ParseInteractionsStreamUsage(payload); ok {
 					reporter.Publish(ctx, detail)
 				}
+				// Capture the upstream continuation coordinates so a later
+				// tool-calling turn can resume this antigravity agent instead
+				// of replaying the full assistant tool-call history (Google:
+				// "Cannot specify tool calls outside of Turn items").
+				goframeCacheAntigravityInteractionsState(ctx, targetName, originalRequest, opts, payload)
 			}
 			if responseFormat == sdktranslator.FormatInteractions {
 				visibleFrame := append(bytes.TrimRight(rawFrame, "\r\n"), '\n', '\n')
