@@ -383,6 +383,7 @@ type openAIResponseOutputItem struct {
 	Type             string                      `json:"type"`
 	Text             string                      `json:"text"`
 	Arguments        string                      `json:"arguments"`
+	Result           string                      `json:"result"`
 	Content          []openAIResponseContentPart `json:"content"`
 	EncryptedContent string                      `json:"encrypted_content"`
 	Summary          json.RawMessage             `json:"summary"`
@@ -777,7 +778,8 @@ func hasMeaningfulResponsesCallItem(item openAIResponseOutputItem) bool {
 		strings.TrimSpace(item.CallID) != "" ||
 		strings.TrimSpace(item.Name) != "" ||
 		hasMeaningfulJSONArguments(item.Arguments) ||
-		strings.TrimSpace(item.Input) != ""
+		strings.TrimSpace(item.Input) != "" ||
+		strings.TrimSpace(item.Result) != ""
 }
 
 func (a *emptyCompletionAccum) evalOpenAIResponseOutput(items []openAIResponseOutputItem) {

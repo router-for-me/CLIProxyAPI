@@ -3090,3 +3090,25 @@ func TestEmptyCompletionClaudeCitations(t *testing.T) {
 		})
 	}
 }
+
+func TestEmptyCompletionResponsesImageGenerationCallResult(t *testing.T) {
+	meaningfulPayload := []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"status\":\"completed\",\"result\":\"image-data\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n")
+	if got := isEmptyCompletionPayload(meaningfulPayload); got != false {
+		t.Fatalf("isEmptyCompletionPayload(meaningful image_generation_call result) = %v, want false", got)
+	}
+
+	detector := &StreamBootstrapDetector{}
+	if got := detector.Observe([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"status\":\"completed\",\"result\":\"image-data\"}}\n\n")); got != true {
+		t.Fatalf("StreamBootstrapDetector.Observe(meaningful result) = %v, want true", got)
+	}
+
+	emptyDetector := &StreamBootstrapDetector{}
+	if got := emptyDetector.Observe([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"status\":\"completed\",\"result\":\"\"}}\n\n")); got != false {
+		t.Fatalf("StreamBootstrapDetector.Observe(empty result) = %v, want false", got)
+	}
+
+	wsDetector := &StreamBootstrapDetector{}
+	if got := wsDetector.Observe([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"status\":\"completed\",\"result\":\"   \"}}\n\n")); got != false {
+		t.Fatalf("StreamBootstrapDetector.Observe(whitespace result) = %v, want false", got)
+	}
+}

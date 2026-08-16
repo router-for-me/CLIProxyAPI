@@ -5804,3 +5804,57 @@ func TestNormalizeSubsequentRequestAssistantInputTriggersTranscriptReplacement(t
 		t.Fatalf("input[0].id = %q, want %q", input[0].Get("id").String(), "msg-3")
 	}
 }
+
+func TestResponsesWebsocketPreservesTopLevelErrorFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(`{"type":"error","code":"context_length_exceeded","message":"prompt exceeds token limit","param":"max_tokens","secret_param":"leaked-token"}`),
+	}
+	payload, err := buildResponsesWebsocketErrorPayload(errMsg)
+	if err != nil {
+		t.Fatalf("buildResponsesWebsocketErrorPayload: %v", err)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("type = %q, want %q", got, wsEventTypeError)
+	}
+	if status := int(gjson.GetBytes(payload, "status").Int()); status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+	}
+	if got := gjson.GetBytes(payload, "error.type").String(); got != "error" {
+		t.Fatalf("error.type = %q, want error", got)
+	}
+	if got := gjson.GetBytes(payload, "error.code").String(); got != "context_length_exceeded" {
+		t.Fatalf("error.code = %q, want context_length_exceeded", got)
+	}
+	if got := gjson.GetBytes(payload, "error.message").String(); got != "prompt exceeds token limit" {
+		t.Fatalf("error.message = %q, want 'prompt exceeds token limit'", got)
+	}
+	if got := gjson.GetBytes(payload, "error.param").String(); got != "max_tokens" {
+		t.Fatalf("error.param = %q, want max_tokens", got)
+	}
+	if strings.Contains(string(payload), "leaked-token") {
+		t.Fatalf("leaked secret from top-level error: %s", payload)
+	}
+
+	nestedErrMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(`{"error":{"type":"invalid_request_error","code":"rate_limit_exceeded","message":"too many requests","param":"rate"}}`),
+	}
+	nestedPayload, err := buildResponsesWebsocketErrorPayload(nestedErrMsg)
+	if err != nil {
+		t.Fatalf("buildResponsesWebsocketErrorPayload(nested): %v", err)
+	}
+	if got := gjson.GetBytes(nestedPayload, "error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("nested error.type = %q, want invalid_request_error", got)
+	}
+	if got := gjson.GetBytes(nestedPayload, "error.code").String(); got != "rate_limit_exceeded" {
+		t.Fatalf("nested error.code = %q, want rate_limit_exceeded", got)
+	}
+	if got := gjson.GetBytes(nestedPayload, "error.message").String(); got != "too many requests" {
+		t.Fatalf("nested error.message = %q, want 'too many requests'", got)
+	}
+	if got := gjson.GetBytes(nestedPayload, "error.param").String(); got != "rate" {
+		t.Fatalf("nested error.param = %q, want rate", got)
+	}
+}

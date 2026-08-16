@@ -573,10 +573,46 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 
 	if len(body) > 0 && json.Valid(body) {
 		errorNode := gjson.GetBytes(body, "error")
-		if errorNode.Exists() {
-			payload, errSet = sjson.SetRawBytes(payload, "error", []byte(errorNode.Raw))
+		if !errorNode.Exists() || !errorNode.IsObject() {
+			errorNode = gjson.GetBytes(body, "response.error")
+		}
+		if errorNode.Exists() && errorNode.IsObject() {
+			errObj := []byte(`{}`)
+			copied := false
+			for _, field := range []string{"type", "code", "message", "param"} {
+				v := errorNode.Get(field)
+				if !v.Exists() || v.Type == gjson.Null {
+					continue
+				}
+				errObj, _ = sjson.SetBytes(errObj, field, v.Value())
+				copied = true
+			}
+			if copied {
+				payload, errSet = sjson.SetRawBytes(payload, "error", errObj)
+			} else {
+				payload, errSet = sjson.SetRawBytes(payload, "error", []byte(errorNode.Raw))
+			}
 		} else {
-			payload, errSet = sjson.SetRawBytes(payload, "error", body)
+			root := gjson.ParseBytes(body)
+			if root.IsObject() {
+				errObj := []byte(`{}`)
+				copied := false
+				for _, field := range []string{"type", "code", "message", "param"} {
+					v := root.Get(field)
+					if !v.Exists() || v.Type == gjson.Null {
+						continue
+					}
+					errObj, _ = sjson.SetBytes(errObj, field, v.Value())
+					copied = true
+				}
+				if copied {
+					payload, errSet = sjson.SetRawBytes(payload, "error", errObj)
+				} else {
+					payload, errSet = sjson.SetRawBytes(payload, "error", body)
+				}
+			} else {
+				payload, errSet = sjson.SetRawBytes(payload, "error", body)
+			}
 		}
 		if errSet != nil {
 			return nil, errSet
