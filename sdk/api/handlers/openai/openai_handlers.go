@@ -1047,7 +1047,7 @@ var (
 	openAIStreamAuthSchemePattern = regexp.MustCompile(`(?i)^(Bearer|Basic)\s+`)
 	// openAIStreamAuthPattern redacts standalone Bearer/Basic credentials
 	// that appear outside key/value contexts.
-	openAIStreamAuthPattern = regexp.MustCompile(`(?i)(\b(?:Bearer|Basic)\s+)([^\s,;"'\\]*[0-9A-Z._~+/=-][^\s,;"'\\]*)`)
+	openAIStreamAuthPattern = regexp.MustCompile(`(?i)(\b(?:Bearer|Basic)\s+)([-A-Za-z0-9._~+/=]{3,})`)
 )
 
 func truncateOpenAIStreamErrorText(text string, limit int) string {

@@ -647,3 +647,91 @@ func TestSanitizeOpenAIErrorMessageTrustedPreservation(t *testing.T) {
 		t.Fatalf("untrusted sanitized error leaked %q: %q", secret, got.Error.Error())
 	}
 }
+
+func TestRedactOpenAIStreamErrorTextBearerTokens(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "lowercase-only standalone bearer token",
+			text: "upstream error: Bearer abcdef",
+			want: "upstream error: Bearer [REDACTED]",
+		},
+		{
+			name: "lowercase-only bare bearer token",
+			text: "Bearer abcdef",
+			want: "Bearer [REDACTED]",
+		},
+		{
+			name: "lowercase-only bearer in sentence",
+			text: "upstream error with Bearer abcdef in request",
+			want: "upstream error with Bearer [REDACTED] in request",
+		},
+		{
+			name: "lowercase-only bearer comma delimited",
+			text: "upstream error: Bearer abcdef, request failed",
+			want: "upstream error: Bearer [REDACTED], request failed",
+		},
+		{
+			name: "mixed case and digit bearer token",
+			text: "upstream error: Bearer abc123XYZ",
+			want: "upstream error: Bearer [REDACTED]",
+		},
+		{
+			name: "numeric bearer token",
+			text: "upstream error: Bearer 123456",
+			want: "upstream error: Bearer [REDACTED]",
+		},
+		{
+			name: "RFC6750 b64token characters",
+			text: "upstream error: Bearer abc-def_123.xyz~456+789/0==",
+			want: "upstream error: Bearer [REDACTED]",
+		},
+		{
+			name: "lowercase-only basic token",
+			text: "upstream error: Basic abcdef",
+			want: "upstream error: Basic [REDACTED]",
+		},
+		{
+			name: "json embedded standalone bearer",
+			text: `{"error":"Bearer abcdef"}`,
+			want: `{"error":"Bearer [REDACTED]"}`,
+		},
+		{
+			name: "control: bearer of bad news not redacted",
+			text: "bearer of bad news",
+			want: "bearer of bad news",
+		},
+		{
+			name: "control: the bearer of good news not redacted",
+			text: "the bearer of good news",
+			want: "the bearer of good news",
+		},
+		{
+			name: "control: bearer to the manager not redacted",
+			text: "the bearer to the manager",
+			want: "the bearer to the manager",
+		},
+		{
+			name: "control: bearer in header not redacted",
+			text: "the bearer in header",
+			want: "the bearer in header",
+		},
+		{
+			name: "control: bearer is invalid not redacted",
+			text: "the bearer is invalid",
+			want: "the bearer is invalid",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactOpenAIStreamErrorText(tc.text)
+			if got != tc.want {
+				t.Fatalf("redactOpenAIStreamErrorText(%q) = %q, want %q", tc.text, got, tc.want)
+			}
+		})
+	}
+}
