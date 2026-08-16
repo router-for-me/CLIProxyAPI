@@ -218,7 +218,19 @@ func openAIToolResultToInteractions(message gjson.Result) []byte {
 	}
 	content := message.Get("content")
 	if content.Exists() && content.Type == gjson.String {
-		out, _ = sjson.SetBytes(out, "result", content.String())
+		// Google's Interactions function_result REQUIRES a structured "result"
+		// (a JSON object / number / boolean) and rejects a bare string with
+		// 400 "Request contains an invalid argument". If the tool output parses
+		// as valid JSON, send it raw; otherwise wrap it in an object so the
+		// result is structured rather than a plain string.
+		raw := strings.TrimSpace(content.String())
+		if raw != "" && (gjson.Valid(raw)) && !(strings.HasPrefix(raw, "\"") && strings.HasSuffix(raw, "\"")) {
+			out, _ = sjson.SetRawBytes(out, "result", []byte(raw))
+		} else {
+			o := `{}`
+			o, _ = sjson.Set(o, "result", content.String())
+			out, _ = sjson.SetRawBytes(out, "result", []byte(o))
+		}
 	} else if content.Exists() {
 		out, _ = sjson.SetRawBytes(out, "result", []byte(content.Raw))
 	}
@@ -235,8 +247,12 @@ func copyOpenAIChatGenerationConfigToInteractions(out []byte, root gjson.Result,
 		// field "type": "antigravity". Without it Google rejects the request
 		// with 400 "Unknown parameter 'agent_config'".
 		if maxOutputTokens := firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens"), root.Get("max_output_tokens")); maxOutputTokens.Exists() && !root.Get("agent_config.max_total_tokens").Exists() {
+			// Note: antigravity's Interactions API does NOT support
+			// max_total_tokens / max_output_tokens. Sending it makes Google
+			// truncate the agent run and return an "incomplete" interaction
+			// with an empty model_output on the tool-continuation turn, so we
+			// deliberately drop the limit for the antigravity agent.
 			cfg := `{"type":"antigravity"}`
-			cfg, _ = sjson.Set(cfg, "max_total_tokens", maxOutputTokens.Int())
 			out, _ = sjson.SetRawBytes(out, "agent_config", []byte(cfg))
 		}
 	} else {

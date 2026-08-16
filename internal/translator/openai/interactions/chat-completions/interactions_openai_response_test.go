@@ -80,8 +80,8 @@ func TestConvertOpenAIResponseToInteractionsNonStreamDirectToolCall(t *testing.T
 	if got := gjson.GetBytes(out, "steps.0.type").String(); got != "function_call" {
 		t.Fatalf("step type = %q, want function_call. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "steps.0.call_id").String(); got != "call_1" {
-		t.Fatalf("call_id = %q, want call_1. Output: %s", got, string(out))
+	if got := gjson.GetBytes(out, "steps.0.call_id").Exists(); got {
+		t.Fatalf("call_id should NOT be set on function_call input steps (Google rejects 'call_id' at input[N]). Output: %s", string(out))
 	}
 	if got := gjson.GetBytes(out, "steps.0.arguments.q").String(); got != "x" {
 		t.Fatalf("arguments.q = %q, want x. Output: %s", got, string(out))

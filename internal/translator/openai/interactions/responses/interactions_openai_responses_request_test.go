@@ -340,8 +340,13 @@ func TestConvertOpenAIResponsesRequestToInteractions_AntigravitySanitizesGenerat
 			t.Fatalf("generation_config.%s should be stripped for antigravity model. Output: %s", knob, string(out))
 		}
 	}
-	// max_output_tokens should be mapped to agent_config.max_total_tokens
-	if got := gjson.GetBytes(out, "agent_config.max_total_tokens").Int(); got != 2048 {
-		t.Fatalf("agent_config.max_total_tokens = %d, want 2048. Output: %s", got, string(out))
+	// max_total_tokens must NOT be set for antigravity: Google truncates the
+	// agent run and returns an "incomplete" interaction with empty
+	// model_output on the tool-continuation turn when it is present.
+	if got := gjson.GetBytes(out, "agent_config.max_total_tokens").Exists(); got {
+		t.Fatalf("agent_config.max_total_tokens should NOT be set for antigravity. Output: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "agent_config.type").String(); got != "antigravity" {
+		t.Fatalf("agent_config.type = %q, want antigravity. Output: %s", got, string(out))
 	}
 }

@@ -54,8 +54,12 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 		// field "type": "antigravity". Without it Google rejects the request
 		// with 400 "Unknown parameter 'agent_config'".
 		if maxOutputTokens := firstExisting(root.Get("max_output_tokens"), root.Get("max_tokens"), root.Get("max_completion_tokens")); maxOutputTokens.Exists() && !root.Get("agent_config.max_total_tokens").Exists() {
+			// Note: antigravity's Interactions API does NOT support
+			// max_total_tokens / max_output_tokens. Sending it makes Google
+			// truncate the agent run and return an "incomplete" interaction
+			// with an empty model_output on the tool-continuation turn, so we
+			// deliberately drop the limit for the antigravity agent.
 			cfg := `{"type":"antigravity"}`
-			cfg, _ = sjson.Set(cfg, "max_total_tokens", maxOutputTokens.Int())
 			out, _ = sjson.SetRawBytes(out, "agent_config", []byte(cfg))
 		}
 		for _, knob := range []string{"temperature", "top_p", "top_k", "stop_sequences", "max_output_tokens", "presence_penalty", "frequency_penalty", "candidate_count"} {

@@ -66,8 +66,12 @@ func TestConvertOpenAIRequestToInteractionsMapsToolCallsAndResults(t *testing.T)
 	if got := gjson.GetBytes(out, "input.0.type").String(); got != "function_call" {
 		t.Fatalf("input.0.type = %q, want function_call. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "input.0.call_id").String(); got != "call_1" {
-		t.Fatalf("call_id = %q, want call_1. Output: %s", got, string(out))
+	// Google's Interactions input steps REJECT an "id"/"call_id" field on
+	// function_call steps (400: Unknown parameter 'call_id' at 'input[N]'),
+	// so the translator deliberately drops it; function_result steps keep
+	// their call_id for continuation matching.
+	if got := gjson.GetBytes(out, "input.0.call_id").Exists(); got {
+		t.Fatalf("call_id should NOT be set on function_call input step. Output: %s", string(out))
 	}
 	if got := gjson.GetBytes(out, "input.0.arguments.q").String(); got != "x" {
 		t.Fatalf("arguments.q = %q, want x. Output: %s", got, string(out))
@@ -75,8 +79,11 @@ func TestConvertOpenAIRequestToInteractionsMapsToolCallsAndResults(t *testing.T)
 	if got := gjson.GetBytes(out, "input.1.type").String(); got != "function_result" {
 		t.Fatalf("input.1.type = %q, want function_result. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "input.1.result").String(); got != "ok" {
-		t.Fatalf("result = %q, want ok. Output: %s", got, string(out))
+	// Bare-string results are wrapped in an object because Google's
+	// Interactions API rejects a plain-string "result" (400 invalid argument);
+	// structured JSON (numbers/objects/booleans) is passed through raw.
+	if got := gjson.GetBytes(out, "input.1.result.result").String(); got != "ok" {
+		t.Fatalf("result.result = %q, want ok (wrapped object). Output: %s", got, string(out))
 	}
 }
 
@@ -136,8 +143,11 @@ func TestConvertOpenAIRequestToInteractions_AntigravitySanitizesGenerationConfig
 			t.Fatalf("generation_config.%s should be stripped for antigravity model. Output: %s", knob, string(out))
 		}
 	}
-	if got := gjson.GetBytes(out, "agent_config.max_total_tokens").Int(); got != 1024 {
-		t.Fatalf("agent_config.max_total_tokens = %d, want 1024. Output: %s", got, string(out))
+	if got := gjson.GetBytes(out, "agent_config.max_total_tokens").Exists(); got {
+		t.Fatalf("agent_config.max_total_tokens should NOT be set for antigravity (Google returns incomplete interactions when it is). Output: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "agent_config.type").String(); got != "antigravity" {
+		t.Fatalf("agent_config.type = %q, want antigravity. Output: %s", got, string(out))
 	}
 }
 
