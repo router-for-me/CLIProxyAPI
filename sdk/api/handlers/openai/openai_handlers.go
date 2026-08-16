@@ -94,6 +94,29 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	})
 }
 
+// OpenAIModel handles the GET /v1/models/:model endpoint.
+// OpenAI SDK clients (including Hermes) validate a model by fetching its
+// individual record before use; without this route they get 404 and fall
+// back to another provider.
+func (h *OpenAIAPIHandler) OpenAIModel(c *gin.Context) {
+	if _, ok := c.Request.URL.Query()["client_version"]; ok {
+		c.JSON(http.StatusOK, h.codexClientModelsResponse())
+		return
+	}
+	modelID := c.Param("model")
+	if modelID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing model id"})
+		return
+	}
+	for _, model := range h.Models() {
+		if id, _ := model["id"].(string); id == modelID {
+			c.JSON(http.StatusOK, model)
+			return
+		}
+	}
+	c.JSON(http.StatusNotFound, gin.H{"error": "model not found"})
+}
+
 // ChatCompletions handles the /v1/chat/completions endpoint.
 // It determines whether the request is for a streaming or non-streaming response
 // and calls the appropriate handler based on the model provider.
