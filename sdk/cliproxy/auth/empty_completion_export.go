@@ -33,6 +33,15 @@ func (d *StreamBootstrapDetector) Observe(payload []byte) bool {
 	return d.state.observe(payload)
 }
 
+// HasMeaningfulOutput reports whether any client-visible meaningful output
+// (content, tool calls, blocked state, or non-scaffolding data) has been observed.
+func (d *StreamBootstrapDetector) HasMeaningfulOutput() bool {
+	if d == nil {
+		return false
+	}
+	return d.state.hasMeaningfulOutput()
+}
+
 // Finish flushes any trailing pending fragment at EOF and reports whether the
 // accumulated stream chunks represent a terminal empty completion.
 func (d *StreamBootstrapDetector) Finish() bool {
