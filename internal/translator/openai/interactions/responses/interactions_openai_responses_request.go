@@ -10,9 +10,15 @@ import (
 
 func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
-	out := []byte(`{"model":"","input":[]}`)
+	out := []byte(`{"input":[]}`)
 	model := requestModel(modelName, root)
-	out, _ = sjson.SetBytes(out, "model", model)
+	// The Interactions API identifies the agent via the "agent" field, not "model".
+	// Google rejects requests that put the antigravity agent name under "model".
+	if isAntigravityModel(model) {
+		out, _ = sjson.SetBytes(out, "agent", model)
+	} else {
+		out, _ = sjson.SetBytes(out, "model", model)
+	}
 	if streamValue, ok := requestStreamValue(root, stream); ok {
 		out, _ = sjson.SetBytes(out, "stream", streamValue)
 	}
@@ -24,9 +30,6 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 	}
 	if environmentID := firstNonEmpty(root.Get("environment_id").String(), root.Get("environment.id").String()); environmentID != "" {
 		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
-	}
-	if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
-		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(agentConfig.Raw))
 	}
 	if input := root.Get("input"); input.Exists() {
 		out = setResponsesInputOnInteractions(out, input)
@@ -47,8 +50,13 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 		out, _ = sjson.SetRawBytes(out, "response_format", []byte(format.Raw))
 	}
 	if isAntigravityModel(model) {
+		// agent_config for the antigravity agent REQUIRES the discriminator
+		// field "type": "antigravity". Without it Google rejects the request
+		// with 400 "Unknown parameter 'agent_config'".
 		if maxOutputTokens := firstExisting(root.Get("max_output_tokens"), root.Get("max_tokens"), root.Get("max_completion_tokens")); maxOutputTokens.Exists() && !root.Get("agent_config.max_total_tokens").Exists() {
-			out, _ = sjson.SetBytes(out, "agent_config.max_total_tokens", maxOutputTokens.Int())
+			cfg := `{"type":"antigravity"}`
+			cfg, _ = sjson.Set(cfg, "max_total_tokens", maxOutputTokens.Int())
+			out, _ = sjson.SetRawBytes(out, "agent_config", []byte(cfg))
 		}
 		for _, knob := range []string{"temperature", "top_p", "top_k", "stop_sequences", "max_output_tokens", "presence_penalty", "frequency_penalty", "candidate_count"} {
 			out, _ = sjson.DeleteBytes(out, "generation_config."+knob)
