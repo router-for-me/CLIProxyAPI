@@ -111,11 +111,14 @@ type Manager struct {
 	pendingCooldownStateStore CooldownStateStore
 	executors                 map[string]ProviderExecutor
 	selector                  Selector
-	hook                      Hook
-	mu                        sync.RWMutex
-	configCooldownMu          sync.Mutex
-	auths                     map[string]*Auth
-	scheduler                 *authScheduler
+	// selectorSlot pins the active selector generation so a replaced selector
+	// is stopped only after its in-flight Pick calls have drained.
+	selectorSlot     *selectorSlot
+	hook             Hook
+	mu               sync.RWMutex
+	configCooldownMu sync.Mutex
+	auths            map[string]*Auth
+	scheduler        *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
 	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.
@@ -174,6 +177,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		store:                 store,
 		executors:             make(map[string]ProviderExecutor),
 		selector:              selector,
+		selectorSlot:          &selectorSlot{selector: selector},
 		hook:                  hook,
 		auths:                 make(map[string]*Auth),
 		homeRuntimeAuths:      make(map[string]map[string]*Auth),

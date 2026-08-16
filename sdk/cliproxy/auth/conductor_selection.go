@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -235,6 +236,29 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	}
 }
 
+// selectorSlot pins one selector generation and counts its in-flight Pick
+// calls, so a replaced selector can be stopped only after active uses drain.
+type selectorSlot struct {
+	selector Selector
+	inflight sync.WaitGroup
+}
+
+// acquireSelector returns the current selector and pins its generation. The
+// returned release func must be called once the caller no longer invokes the
+// selector; SetSelector defers stopping the replaced selector until then.
+func (m *Manager) acquireSelector() (Selector, func()) {
+	m.mu.RLock()
+	slot := m.selectorSlot
+	if slot != nil {
+		slot.inflight.Add(1)
+	}
+	m.mu.RUnlock()
+	if slot == nil {
+		return nil, func() {}
+	}
+	return slot.selector, func() { slot.inflight.Done() }
+}
+
 func (m *Manager) SetSelector(selector Selector) {
 	if m == nil {
 		return
@@ -244,7 +268,9 @@ func (m *Manager) SetSelector(selector Selector) {
 	}
 	m.mu.Lock()
 	previous := m.selector
+	previousSlot := m.selectorSlot
 	m.selector = selector
+	m.selectorSlot = &selectorSlot{selector: selector}
 	m.mu.Unlock()
 	// Release resources of the replaced selector (e.g. the session affinity
 	// cache cleanup goroutine) so routing config changes do not leak them.
@@ -256,7 +282,14 @@ func (m *Manager) SetSelector(selector Selector) {
 	// the active selector keeps invoking its Pick.
 	if stoppable, ok := previous.(StoppableSelector); ok &&
 		!sameSelectorInstance(previous, selector) && !selectorRetainedAsFallback(selector, previous) {
-		stoppable.Stop()
+		// Pick paths release m.mu before invoking the selector, so a hot reload
+		// could otherwise stop it mid-request; wait for in-flight picks to drain.
+		go func(slot *selectorSlot) {
+			if slot != nil {
+				slot.inflight.Wait()
+			}
+			stoppable.Stop()
+		}(previousSlot)
 	}
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
@@ -1043,15 +1076,17 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return auth, exec, err
 	}
 
+	selector, releaseSelector := m.acquireSelector()
+	defer releaseSelector()
+
 	opts.EnsureMetadata()
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
-	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(m.selector, model)
+	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(selector, model)
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 
 	m.mu.RLock()
-	selector := m.selector
 	pluginScheduler := m.pluginScheduler
 	executor, okExecutor := m.executors[provider]
 	if !okExecutor {
@@ -1353,9 +1388,12 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
 
+	selector, releaseSelector := m.acquireSelector()
+	defer releaseSelector()
+
 	opts.EnsureMetadata()
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
-	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(m.selector, model)
+	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(selector, model)
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
@@ -1373,7 +1411,6 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 
 	m.mu.RLock()
-	selector := m.selector
 	pluginScheduler := m.pluginScheduler
 	candidates := make([]*Auth, 0, len(m.auths))
 	modelKey := strings.TrimSpace(model)
