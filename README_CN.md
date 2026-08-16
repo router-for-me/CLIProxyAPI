@@ -135,6 +135,22 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+### 后台运行模式
+
+使用 `-d` 将代理作为独立后台进程启动。后台进程会保留启动时的工作目录及配置参数，运行状态则保存在当前系统用户的配置目录中：
+
+```bash
+./cli-proxy-api -d --config /path/to/config.yaml
+```
+
+之后可在任意工作目录优雅关闭。`stop` 命令通过带随机令牌的本机回环控制端点通知服务，并等待现有的正常关闭流程完成：
+
+```bash
+/path/to/cli-proxy-api stop
+```
+
+每个系统用户只管理一个后台实例；启动成功信息会显示后台日志路径。
+
 ### Cursor OAuth Provider
 
 无需安装本地 Cursor，也不会读取本地 Cursor 的数据库、Keychain 或配置文件：

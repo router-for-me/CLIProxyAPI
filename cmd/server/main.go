@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/daemon"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -70,6 +71,29 @@ func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode,
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
 func main() {
+	if daemon.IsStopCommand(os.Args[1:]) {
+		if len(os.Args) != 2 {
+			fmt.Fprintln(os.Stderr, "Usage: cli-proxy-api stop")
+			return
+		}
+		daemonManager, errManager := daemon.DefaultManager()
+		if errManager != nil {
+			fmt.Fprintf(os.Stderr, "Failed to stop background service: %v\n", errManager)
+			return
+		}
+		result, errStop := daemonManager.Stop()
+		if errStop != nil {
+			fmt.Fprintf(os.Stderr, "Failed to stop background service: %v\n", errStop)
+			return
+		}
+		if !result.WasRunning {
+			fmt.Println("CLIProxyAPI is not running in background")
+			return
+		}
+		fmt.Printf("CLIProxyAPI stopped gracefully (pid %d)\n", result.PID)
+		return
+	}
+
 	fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
 
 	// Command-line flags to control the application's behavior.
@@ -91,6 +115,7 @@ func main() {
 	var tuiMode bool
 	var standalone bool
 	var localModel bool
+	var daemonMode bool
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
@@ -111,6 +136,7 @@ func main() {
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded models.json and codex_client_models.json only, skip remote model catalog fetching")
+	flag.BoolVar(&daemonMode, "d", false, "Run the proxy server in the background")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -147,6 +173,47 @@ func main() {
 
 	// Parse the command-line flags.
 	flag.Parse()
+
+	backgroundCommandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin || cursorLogin
+	backgroundIncompatible := backgroundCommandMode || tuiMode || standalone || pluginHost.HasTriggeredCommandLineFlags() || len(flag.Args()) > 0
+	if (daemonMode || daemon.IsChild()) && backgroundIncompatible {
+		fmt.Fprintln(os.Stderr, "Background mode only supports the proxy server; login, import, TUI, plugin commands, and positional arguments are not allowed")
+		return
+	}
+
+	daemonContext := context.Background()
+	if daemonMode && !daemon.IsChild() {
+		daemonManager, errManager := daemon.DefaultManager()
+		if errManager != nil {
+			fmt.Fprintf(os.Stderr, "Failed to start background service: %v\n", errManager)
+			return
+		}
+		state, errStart := daemonManager.Start(os.Args[1:])
+		if errStart != nil {
+			fmt.Fprintf(os.Stderr, "Failed to start background service: %v\n", errStart)
+			return
+		}
+		fmt.Printf("CLIProxyAPI started in background (pid %d). Log: %s\n", state.PID, state.LogPath)
+		return
+	}
+	if daemon.IsChild() {
+		daemonManager, errManager := daemon.DefaultManager()
+		if errManager != nil {
+			fmt.Fprintf(os.Stderr, "Failed to register background service: %v\n", errManager)
+			return
+		}
+		registration, errRegister := daemonManager.RegisterChild()
+		if errRegister != nil {
+			fmt.Fprintf(os.Stderr, "Failed to register background service: %v\n", errRegister)
+			return
+		}
+		defer func() {
+			if errClose := registration.Close(); errClose != nil {
+				log.Errorf("failed to clean up background service state: %v", errClose)
+			}
+		}()
+		daemonContext = registration.Context()
+	}
 
 	// Core application variables.
 	var err error
@@ -670,7 +737,7 @@ func main() {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
 			// No config file available, just wait for shutdown
-			cmd.WaitForCloudDeploy()
+			cmd.WaitForCloudDeployContext(daemonContext)
 			return
 		}
 		if localModel && (!tuiMode || standalone) {
@@ -756,7 +823,7 @@ func main() {
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
 			startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
-			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
+			cmd.StartServiceWithPluginHostContext(daemonContext, cfg, configFilePath, password, pluginHost, serverOptions...)
 		}
 	}
 }

@@ -135,6 +135,22 @@ PackyCode provides special discounts for our software users: register using <a h
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+### Background mode
+
+Start the proxy as a detached background process with `-d`. The original working directory and configuration arguments are preserved, while runtime state is stored in the current user's OS configuration directory:
+
+```bash
+./cli-proxy-api -d --config /path/to/config.yaml
+```
+
+Stop it gracefully from any working directory. The `stop` command contacts the authenticated loopback control endpoint and waits for the normal service shutdown sequence to finish:
+
+```bash
+/path/to/cli-proxy-api stop
+```
+
+Only one background instance is managed per OS user. The startup message prints the background log path.
+
 ### Cursor OAuth provider
 
 Authenticate without installing or reading data from the local Cursor application:

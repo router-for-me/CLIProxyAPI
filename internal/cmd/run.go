@@ -31,6 +31,15 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 
 // StartServiceWithPluginHost builds and runs the proxy service with a shared plugin host.
 func StartServiceWithPluginHost(cfg *config.Config, configPath string, localPassword string, host *pluginhost.Host, serverOptions ...api.ServerOption) {
+	StartServiceWithPluginHostContext(context.Background(), cfg, configPath, localPassword, host, serverOptions...)
+}
+
+// StartServiceWithPluginHostContext builds and runs the proxy service until the
+// parent context is cancelled or an operating-system shutdown signal arrives.
+func StartServiceWithPluginHostContext(parent context.Context, cfg *config.Config, configPath string, localPassword string, host *pluginhost.Host, serverOptions ...api.ServerOption) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
@@ -42,7 +51,7 @@ func StartServiceWithPluginHost(cfg *config.Config, configPath string, localPass
 		builder = builder.WithServerOptions(serverOptions...)
 	}
 
-	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctxSignal, cancel := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	runCtx := ctxSignal
@@ -109,10 +118,18 @@ func StartServiceBackgroundWithPluginHost(cfg *config.Config, configPath string,
 // WaitForCloudDeploy waits indefinitely for shutdown signals in cloud deploy mode
 // when no configuration file is available.
 func WaitForCloudDeploy() {
+	WaitForCloudDeployContext(context.Background())
+}
+
+// WaitForCloudDeployContext waits for a shutdown signal or parent cancellation.
+func WaitForCloudDeployContext(parent context.Context) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	// Clarify that we are intentionally idle for configuration and not running the API server.
 	log.Info("Cloud deploy mode: No config found; standing by for configuration. API server is not started. Press Ctrl+C to exit.")
 
-	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctxSignal, cancel := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	// Block until shutdown signal is received
