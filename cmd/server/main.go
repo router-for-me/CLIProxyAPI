@@ -95,6 +95,7 @@ func main() {
 	}
 
 	fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+	defaultConfigPath := resolveDefaultConfigPath(DefaultConfigPath)
 
 	// Command-line flags to control the application's behavior.
 	var codexLogin bool
@@ -127,7 +128,7 @@ func main() {
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.BoolVar(&cursorLogin, "cursor-login", false, "Login to Cursor using browser OAuth")
-	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
+	flag.StringVar(&configPath, "config", defaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
 	flag.StringVar(&password, "password", "", "")
@@ -166,7 +167,7 @@ func main() {
 	}
 
 	pluginHost := pluginhost.New()
-	if bootstrapCfg := loadPluginBootstrapConfig(pluginBootstrapConfigPath(os.Args[1:], DefaultConfigPath)); bootstrapCfg != nil {
+	if bootstrapCfg := loadPluginBootstrapConfig(pluginBootstrapConfigPath(os.Args[1:], defaultConfigPath)); bootstrapCfg != nil {
 		pluginHost.ApplyConfig(context.Background(), bootstrapCfg)
 		pluginHost.RegisterCommandLineFlags(context.Background(), flag.CommandLine)
 	}
@@ -879,6 +880,17 @@ func defaultPluginBootstrapConfigPath(defaultPath string) string {
 		return "config.yaml"
 	}
 	return filepath.Join(wd, "config.yaml")
+}
+
+func resolveDefaultConfigPath(configuredPath string) string {
+	if strings.TrimSpace(configuredPath) != "" {
+		return configuredPath
+	}
+	homeDir, errHomeDir := os.UserHomeDir()
+	if errHomeDir == nil && strings.TrimSpace(homeDir) != "" {
+		return filepath.Join(homeDir, ".cc-proxy", "config.yaml")
+	}
+	return defaultPluginBootstrapConfigPath("")
 }
 
 func loadPluginBootstrapConfig(path string) *config.Config {

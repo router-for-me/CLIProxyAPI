@@ -1,10 +1,30 @@
 package main
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
+
+func TestResolveDefaultConfigPath(t *testing.T) {
+	t.Run("uses cc-proxy directory in user home", func(t *testing.T) {
+		homeDir := t.TempDir()
+		t.Setenv("HOME", homeDir)
+		got := resolveDefaultConfigPath("")
+		want := filepath.Join(homeDir, ".cc-proxy", "config.yaml")
+		if got != want {
+			t.Fatalf("resolveDefaultConfigPath() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("keeps build-time override", func(t *testing.T) {
+		want := "/opt/cc-proxy/custom.yaml"
+		if got := resolveDefaultConfigPath(want); got != want {
+			t.Fatalf("resolveDefaultConfigPath() = %q, want %q", got, want)
+		}
+	})
+}
 
 func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
 	cfgWithExampleKey := &config.Config{

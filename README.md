@@ -151,6 +151,8 @@ Stop it gracefully from any working directory. The `stop` command contacts the a
 
 Only one background instance is managed per OS user. The startup message prints the background log path.
 
+When `--config` is omitted, CLIProxyAPI reads `~/.cc-proxy/config.yaml` by default. An explicit `--config` path continues to take precedence.
+
 ### Cursor OAuth provider
 
 Authenticate without installing or reading data from the local Cursor application:

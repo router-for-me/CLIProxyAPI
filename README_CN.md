@@ -151,6 +151,8 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 每个系统用户只管理一个后台实例；启动成功信息会显示后台日志路径。
 
+未指定 `--config` 时，CLIProxyAPI 默认读取 `~/.cc-proxy/config.yaml`；显式传入的 `--config` 路径仍具有最高优先级。
+
 ### Cursor OAuth Provider
 
 无需安装本地 Cursor，也不会读取本地 Cursor 的数据库、Keychain 或配置文件：
