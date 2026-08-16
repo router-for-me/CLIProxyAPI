@@ -115,9 +115,15 @@ func (c *S3Client) Upload(ctx context.Context, key string, data []byte, contentT
 	return full, nil
 }
 
-// Download fetches the object's bytes from the bucket under key (prefixed).
+// Download fetches the object's bytes from the bucket under key. Accepts
+// either a short key (relative to the configured prefix) or a fully-prefixed
+// key as returned by List; an already-prefixed key is passed through unchanged
+// so the List → restore round trip works with a non-empty prefix.
 func (c *S3Client) Download(ctx context.Context, key string) ([]byte, error) {
 	full := c.prefixedKey(key)
+	if c.prefix != "" && strings.HasPrefix(key, c.prefix+"/") {
+		full = key // already absolute (e.g. key returned by List)
+	}
 	obj, err := c.getter.Get(ctx, c.bucket, full)
 	if err != nil {
 		return nil, fmt.Errorf("backup s3: get %s: %w", full, err)

@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -192,6 +193,75 @@ func TestRestoreBackupSuccess(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "restore") {
 		t.Errorf("response missing restore key: %s", w.Body.String())
+	}
+}
+
+func TestListBackupsError(t *testing.T) {
+	stub := &stubBackupRunner{listErr: errors.New("list boom")}
+	r := newBackupRouter(stub, nil)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/backup", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d; want 500; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "backup_list_failed") {
+		t.Errorf("response missing backup_list_failed type: %s", w.Body.String())
+	}
+}
+
+func TestCreateBackupError(t *testing.T) {
+	stub := &stubBackupRunner{runErr: errors.New("run boom")}
+	r := newBackupRouter(stub, nil)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/backup", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d; want 500; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "backup_failed") {
+		t.Errorf("response missing backup_failed type: %s", w.Body.String())
+	}
+}
+
+func TestRestoreBackupError(t *testing.T) {
+	stub := &stubBackupRestorer{err: errors.New("restore boom")}
+	r := newBackupRouter(nil, stub)
+
+	body := `{"object_key":"bk/snap.json","mode":"merge"}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/backup/restore", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d; want 500; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "restore_failed") {
+		t.Errorf("response missing restore_failed type: %s", w.Body.String())
+	}
+}
+
+func TestRestoreBackupInvalidBody(t *testing.T) {
+	stub := &stubBackupRestorer{}
+	r := newBackupRouter(nil, stub)
+
+	// Malformed JSON body → ShouldBindJSON fails.
+	body := `{"object_key":`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/backup/restore", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_body") {
+		t.Errorf("response missing invalid_body type: %s", w.Body.String())
 	}
 }
 

@@ -200,6 +200,33 @@ func TestS3ClientDeleteAcceptsPrefixedKey(t *testing.T) {
 	}
 }
 
+func TestS3ClientDownloadAcceptsPrefixedKey(t *testing.T) {
+	stub := newStubMinioClient()
+	cli := newTestClient(stub)
+	ctx := context.Background()
+
+	data := []byte(`{"version":2}`)
+	if _, err := cli.Upload(ctx, "snap.json", data, "application/json"); err != nil {
+		t.Fatal(err)
+	}
+	snaps, err := cli.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps) != 1 {
+		t.Fatalf("setup: want 1 snapshot, got %d", len(snaps))
+	}
+	// Download the key exactly as returned by List (already carries the prefix);
+	// this is the List → restore round trip and must not double-prefix.
+	got, err := cli.Download(ctx, snaps[0].Key)
+	if err != nil {
+		t.Fatalf("Download(listedKey %q): %v", snaps[0].Key, err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("Download mismatch: got %q, want %q", got, data)
+	}
+}
+
 func TestNewS3ClientValidation(t *testing.T) {
 	if _, err := NewS3Client(S3Config{Bucket: "b"}); err == nil {
 		t.Error("expected error for empty endpoint")
