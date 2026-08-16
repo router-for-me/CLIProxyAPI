@@ -244,6 +244,13 @@ func (m *Manager) SetSelector(selector Selector) {
 	m.mu.Lock()
 	m.selector = selector
 	m.mu.Unlock()
+	// Re-installing a selector that was stopped while retired must restart its
+	// background resources. The install path is the only place that can tell
+	// this apart from in-flight picks on a retired selector, whose writes must
+	// not resume cleanup.
+	if resumable, ok := selector.(ResumableSelector); ok {
+		resumable.Resume()
+	}
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()

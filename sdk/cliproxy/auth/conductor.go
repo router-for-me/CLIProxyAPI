@@ -82,6 +82,15 @@ type StoppableSelector interface {
 	Stop()
 }
 
+// ResumableSelector is an optional interface for selectors whose background
+// resources can restart after a Stop. SetSelector calls Resume on the
+// installed selector, so a selector that was stopped while retired becomes
+// fully operational again when it is re-installed.
+type ResumableSelector interface {
+	Selector
+	Resume()
+}
+
 // Hook captures lifecycle callbacks for observing auth changes.
 type Hook interface {
 	// OnAuthRegistered fires when a new auth is registered.

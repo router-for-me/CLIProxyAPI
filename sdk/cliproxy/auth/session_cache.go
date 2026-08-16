@@ -21,9 +21,9 @@ type SessionCache struct {
 	entries map[string]sessionEntry
 	ttl     time.Duration
 	stopCh  chan struct{}
-	// stopped reports whether cleanup is paused; guarded by mu. A paused cache
-	// resumes cleanup on the next binding write, so Stop is a pause, not a
-	// terminal state.
+	// stopped reports whether cleanup is paused; guarded by mu. Cleanup resumes
+	// only via Resume (triggered when the selector is installed again), never
+	// from in-flight picks on a retired selector.
 	stopped bool
 }
 
@@ -110,13 +110,6 @@ func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Resume cleanup if the cache was stopped while still in service (e.g. its
-	// owner retired the selector but a concurrent caller re-installed it).
-	if c.stopped {
-		c.stopped = false
-		c.stopCh = make(chan struct{})
-		go c.cleanupLoop(c.stopCh)
-	}
 
 	aliases := mergeSessionAliases(nil, sessionIDs...)
 	previousGroups := make([]sessionEntry, 0, len(sessionIDs))
@@ -330,13 +323,26 @@ func (c *SessionCache) InvalidateAuth(authID string) {
 
 // Stop pauses the background cleanup goroutine. It is safe to call multiple
 // times, including from concurrent goroutines. The cache stays fully usable:
-// reads keep lazily filtering expired entries, and the next binding write
-// resumes cleanup, so a cache stopped while still in service heals itself.
+// reads keep lazily filtering expired entries, and Resume restarts cleanup.
 func (c *SessionCache) Stop() {
 	c.mu.Lock()
 	if !c.stopped {
 		c.stopped = true
 		close(c.stopCh)
+	}
+	c.mu.Unlock()
+}
+
+// Resume restarts the cleanup goroutine after Stop. It is a no-op when
+// cleanup is already running. Only installation of a selector may resume its
+// cache — in-flight picks on a retired selector must not, otherwise reloads
+// under traffic would keep leaking one cleanup goroutine apiece.
+func (c *SessionCache) Resume() {
+	c.mu.Lock()
+	if c.stopped {
+		c.stopped = false
+		c.stopCh = make(chan struct{})
+		go c.cleanupLoop(c.stopCh)
 	}
 	c.mu.Unlock()
 }

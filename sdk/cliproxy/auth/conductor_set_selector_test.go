@@ -82,11 +82,11 @@ func TestManagerStopSelectorIfInactiveStopsReplacedSelector(t *testing.T) {
 	}
 }
 
-// A cache stopped while still in service resumes cleanup on the next binding
-// write, so retiring a selector that a concurrent caller re-installs cannot
-// leave bindings without expiration sweeps. Reads keep lazily filtering
-// expired entries in the meantime.
-func TestSessionCacheStopResumesCleanupOnNextWrite(t *testing.T) {
+// A stopped cache must stay paused on writes: in-flight picks on a retired
+// selector call SetAliases, and resuming there would leak one cleanup
+// goroutine per reload under traffic. Only an explicit Resume (issued when a
+// selector is installed again) restarts cleanup.
+func TestSessionCacheStopStaysPausedUntilResume(t *testing.T) {
 	t.Parallel()
 
 	cache := NewSessionCache(time.Minute)
@@ -99,13 +99,45 @@ func TestSessionCacheStopResumesCleanupOnNextWrite(t *testing.T) {
 	}
 
 	cache.Set("session-1", "auth-1")
+	if cache.stopCh != firstStopCh {
+		t.Fatal("write after Stop resumed cleanup; only Resume may restart it")
+	}
+
+	cache.Resume()
+	defer cache.Stop()
 	if cache.stopCh == firstStopCh {
-		t.Fatal("write after Stop did not resume cleanup")
+		t.Fatal("Resume did not restart cleanup")
 	}
 	select {
 	case <-cache.stopCh:
 		t.Fatal("resumed cleanup channel is already closed")
 	default:
 	}
-	cache.Stop()
+}
+
+// SetSelector must resume a selector that was stopped while retired, so
+// re-installing it restores its expiration sweeps.
+func TestManagerSetSelectorResumesResumableSelector(t *testing.T) {
+	t.Parallel()
+
+	affinity := NewSessionAffinitySelector(&RoundRobinSelector{})
+	manager := NewManager(nil, affinity, nil)
+	manager.SetSelector(&RoundRobinSelector{})
+	manager.StopSelectorIfInactive(affinity)
+	stoppedCh := affinity.cache.stopCh
+	select {
+	case <-stoppedCh:
+	default:
+		t.Fatal("retired selector was not stopped")
+	}
+
+	manager.SetSelector(affinity)
+	if affinity.cache.stopCh == stoppedCh {
+		t.Fatal("re-installed selector was not resumed")
+	}
+	select {
+	case <-affinity.cache.stopCh:
+		t.Fatal("resumed selector cleanup channel is already closed")
+	default:
+	}
 }

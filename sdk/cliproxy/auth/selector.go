@@ -765,6 +765,14 @@ func (s *SessionAffinitySelector) Stop() {
 	}
 }
 
+// Resume restarts the cache cleanup after a Stop, e.g. when the selector is
+// installed again after being retired. It is a no-op while cleanup runs.
+func (s *SessionAffinitySelector) Resume() {
+	if s.cache != nil {
+		s.cache.Resume()
+	}
+}
+
 // InvalidateAuth removes all session bindings for a specific auth.
 // Called when an auth becomes rate-limited or unavailable.
 func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
