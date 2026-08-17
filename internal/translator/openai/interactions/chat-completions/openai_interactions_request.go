@@ -11,12 +11,22 @@ import (
 func ConvertOpenAIRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","input":[]}`)
-	out, _ = sjson.SetBytes(out, "model", firstNonEmpty(modelName, root.Get("model").String()))
+	model := firstNonEmpty(modelName, root.Get("model").String())
+	out, _ = sjson.SetBytes(out, "model", model)
 	if streamValue, ok := openAIRequestStreamValue(root, stream); ok {
 		out, _ = sjson.SetBytes(out, "stream", streamValue)
 	}
+	if previousResponseID := firstNonEmpty(root.Get("previous_response_id").String(), root.Get("previous_interaction_id").String()); previousResponseID != "" {
+		out, _ = sjson.SetBytes(out, "previous_interaction_id", previousResponseID)
+	}
+	if environmentID := firstNonEmpty(root.Get("environment_id").String(), root.Get("environment.id").String()); environmentID != "" {
+		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
+	}
+	if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
+		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(agentConfig.Raw))
+	}
 	out = appendOpenAIMessagesToInteractions(out, root.Get("messages"))
-	out = copyOpenAIChatGenerationConfigToInteractions(out, root)
+	out = copyOpenAIChatGenerationConfigToInteractions(out, root, model)
 	out = appendOpenAIChatToolsToInteractions(out, root.Get("tools"))
 	return out
 }
@@ -209,15 +219,25 @@ func openAIToolResultToInteractions(message gjson.Result) []byte {
 	return out
 }
 
-func copyOpenAIChatGenerationConfigToInteractions(out []byte, root gjson.Result) []byte {
-	copyNumber(&out, "generation_config.max_output_tokens", firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens")))
-	copyNumber(&out, "generation_config.temperature", root.Get("temperature"))
-	copyNumber(&out, "generation_config.top_p", root.Get("top_p"))
-	copyNumber(&out, "generation_config.presence_penalty", root.Get("presence_penalty"))
-	copyNumber(&out, "generation_config.frequency_penalty", root.Get("frequency_penalty"))
-	copyNumber(&out, "generation_config.candidate_count", root.Get("n"))
-	if stop := root.Get("stop"); stop.Exists() {
-		out, _ = sjson.SetRawBytes(out, "generation_config.stop_sequences", []byte(stop.Raw))
+func isAntigravityModel(model string) bool {
+	return strings.Contains(strings.ToLower(model), "antigravity")
+}
+
+func copyOpenAIChatGenerationConfigToInteractions(out []byte, root gjson.Result, model string) []byte {
+	if isAntigravityModel(model) {
+		if maxOutputTokens := firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens"), root.Get("max_output_tokens")); maxOutputTokens.Exists() && !root.Get("agent_config.max_total_tokens").Exists() {
+			out, _ = sjson.SetBytes(out, "agent_config.max_total_tokens", maxOutputTokens.Int())
+		}
+	} else {
+		copyNumber(&out, "generation_config.max_output_tokens", firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens")))
+		copyNumber(&out, "generation_config.temperature", root.Get("temperature"))
+		copyNumber(&out, "generation_config.top_p", root.Get("top_p"))
+		copyNumber(&out, "generation_config.presence_penalty", root.Get("presence_penalty"))
+		copyNumber(&out, "generation_config.frequency_penalty", root.Get("frequency_penalty"))
+		copyNumber(&out, "generation_config.candidate_count", root.Get("n"))
+		if stop := root.Get("stop"); stop.Exists() {
+			out, _ = sjson.SetRawBytes(out, "generation_config.stop_sequences", []byte(stop.Raw))
+		}
 	}
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
 		out, _ = sjson.SetRawBytes(out, "generation_config.tool_choice", []byte(toolChoice.Raw))

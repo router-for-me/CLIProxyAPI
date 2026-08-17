@@ -163,6 +163,85 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompleted
 	}
 }
 
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FinalizesOpenMessageAtStreamEnd(t *testing.T) {
+	t.Parallel()
+
+	request := []byte(`{"model":"gpt-5.4"}`)
+	tests := []struct {
+		name  string
+		chunk string
+	}{
+		{
+			name:  "missing finish reason",
+			chunk: `data: {"id":"resp_missing_finish_reason","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}`,
+		},
+		{
+			name:  "null finish reason",
+			chunk: `data: {"id":"resp_null_finish_reason","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":null}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			var events []string
+			var textDone gjson.Result
+			var partDone gjson.Result
+			var itemDone gjson.Result
+			var completed gjson.Result
+
+			for _, line := range []string{tt.chunk, `data: [DONE]`} {
+				for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param) {
+					event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+					events = append(events, event)
+					switch event {
+					case "response.output_text.done":
+						textDone = data
+					case "response.content_part.done":
+						partDone = data
+					case "response.output_item.done":
+						itemDone = data
+					case "response.completed":
+						completed = data
+					}
+				}
+			}
+
+			wantEvents := []string{
+				"response.created",
+				"response.in_progress",
+				"response.output_item.added",
+				"response.content_part.added",
+				"response.output_text.delta",
+				"response.output_text.done",
+				"response.content_part.done",
+				"response.output_item.done",
+				"response.completed",
+			}
+			if len(events) != len(wantEvents) {
+				t.Fatalf("events = %v, want %v", events, wantEvents)
+			}
+			for i := range wantEvents {
+				if events[i] != wantEvents[i] {
+					t.Fatalf("event %d = %q, want %q; events = %v", i, events[i], wantEvents[i], events)
+				}
+			}
+			if got := textDone.Get("text").String(); got != "hello" {
+				t.Fatalf("output_text.done text = %q, want hello", got)
+			}
+			if got := partDone.Get("part.text").String(); got != "hello" {
+				t.Fatalf("content_part.done text = %q, want hello", got)
+			}
+			if got := itemDone.Get("item.content.0.text").String(); got != "hello" {
+				t.Fatalf("output_item.done text = %q, want hello", got)
+			}
+			if got := completed.Get("response.status").String(); got != "completed" {
+				t.Fatalf("response.completed status = %q, want completed", got)
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MultipleToolCallsRemainSeparate(t *testing.T) {
 	in := []string{
 		`data: {"id":"resp_test","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_read","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
@@ -894,13 +973,13 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresAdditiona
 			"type":"additional_tools",
 			"tools":[{
 				"type":"namespace",
-				"name":"terminal",
+				"name":"functions",
 				"tools":[{"type":"custom","name":"exec"}]
 			}]
 		}]
 	}`)
 	chunks := []string{
-		`data: {"id":"chatcmpl_additional_namespace_custom_stream","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_exec","type":"function","function":{"name":"terminal__exec","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl_additional_namespace_custom_stream","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_exec","type":"function","function":{"name":"functions__exec","arguments":""}}]},"finish_reason":null}]}`,
 		`data: {"id":"chatcmpl_additional_namespace_custom_stream","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"input\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}`,
 		`data: [DONE]`,
 	}
@@ -943,8 +1022,11 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresAdditiona
 		if got := tc.got.Get(tc.path + ".type").String(); got != "custom_tool_call" {
 			t.Fatalf("%s type = %q, want custom_tool_call", tc.label, got)
 		}
-		if got := tc.got.Get(tc.path + ".name").String(); got != "terminal__exec" {
-			t.Fatalf("%s name = %q, want terminal__exec", tc.label, got)
+		if got := tc.got.Get(tc.path + ".name").String(); got != "exec" {
+			t.Fatalf("%s name = %q, want exec", tc.label, got)
+		}
+		if got := tc.got.Get(tc.path + ".namespace").String(); got != "functions" {
+			t.Fatalf("%s namespace = %q, want functions", tc.label, got)
 		}
 	}
 	if got := inputDone.Get("input").String(); got != "pwd" {
@@ -965,22 +1047,215 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Restores
 			"type":"additional_tools",
 			"tools":[{
 				"type":"namespace",
-				"name":"terminal",
+				"name":"functions",
 				"tools":[{"type":"custom","name":"exec"}]
 			}]
 		}]
 	}`)
-	raw := []byte(`{"id":"chatcmpl_additional_namespace_custom_nonstream","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_exec","type":"function","function":{"name":"terminal__exec","arguments":"{\"input\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}`)
+	raw := []byte(`{"id":"chatcmpl_additional_namespace_custom_nonstream","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_exec","type":"function","function":{"name":"functions__exec","arguments":"{\"input\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}`)
 
 	resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "model", originalRequest, nil, raw, nil)
 	data := gjson.ParseBytes(resp)
 	if got := data.Get("output.0.type").String(); got != "custom_tool_call" {
 		t.Fatalf("output type = %q, want custom_tool_call; response=%s", got, resp)
 	}
-	if got := data.Get("output.0.name").String(); got != "terminal__exec" {
-		t.Fatalf("output name = %q, want terminal__exec; response=%s", got, resp)
+	if got := data.Get("output.0.name").String(); got != "exec" {
+		t.Fatalf("output name = %q, want exec; response=%s", got, resp)
+	}
+	if got := data.Get("output.0.namespace").String(); got != "functions" {
+		t.Fatalf("output namespace = %q, want functions; response=%s", got, resp)
 	}
 	if got := data.Get("output.0.input").String(); got != "pwd" {
 		t.Fatalf("output input = %q, want pwd; response=%s", got, resp)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoesNotCompleteReasoningOnlyStream(t *testing.T) {
+	request := []byte(`{"model":"deepseek-v4-flash"}`)
+	chunks := []string{
+		`data: {"id":"resp_reasoning_only","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"still thinking"},"finish_reason":null}]}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	reasoningSeen := false
+	for _, line := range chunks {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "deepseek-v4-flash", request, request, []byte(line), &param) {
+			event, _ := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event == "response.reasoning_summary_text.delta" {
+				reasoningSeen = true
+			}
+			if event == "response.completed" {
+				t.Fatalf("reasoning-only stream was finalized as response.completed: %s", chunk)
+			}
+		}
+	}
+	if !reasoningSeen {
+		t.Fatal("test stream did not exercise reasoning output")
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_IncompleteToolStreamDoesNotFinalizeAsCompleted(t *testing.T) {
+	request := []byte(`{"model":"gpt-5.6-terra"}`)
+
+	tests := []struct {
+		name   string
+		chunks []string
+	}{
+		{
+			name: "zero argument bytes without finish reason",
+			chunks: []string{
+				`data: {"id":"resp_interrupted_tool","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-terra","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":""}}]},"finish_reason":null}]}`,
+				`data: [DONE]`,
+			},
+		},
+		{
+			name: "partial json arguments without finish reason",
+			chunks: []string{
+				`data: {"id":"resp_interrupted_partial","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-terra","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":"{\"filePath\":\"foo"}}]},"finish_reason":null}]}`,
+				`data: [DONE]`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			for _, line := range tt.chunks {
+				for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "gpt-5.6-terra", request, request, []byte(line), &param) {
+					event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+					if event == "response.completed" {
+						t.Fatalf("incomplete tool stream was finalized as response.completed: %s", chunk)
+					}
+					if event == "response.output_item.done" {
+						t.Fatalf("incomplete tool stream emitted output_item.done: %s", chunk)
+					}
+					if event == "response.function_call_arguments.done" {
+						t.Fatalf("incomplete tool stream emitted function_call_arguments.done: %s", chunk)
+					}
+					_ = data
+				}
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FinishReasonLengthEmitsIncomplete(t *testing.T) {
+	request := []byte(`{"model":"gpt-5.6-luna"}`)
+	chunks := []string{
+		`data: {"id":"resp_length_tool","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-luna","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_length_tool","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-luna","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var incompleteSeen bool
+	var itemDoneSeen bool
+	for _, line := range chunks {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "gpt-5.6-luna", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event == "response.completed" {
+				t.Fatalf("stream with finish_reason=length was finalized as response.completed: %s", chunk)
+			}
+			if event == "response.output_item.done" {
+				itemDoneSeen = true
+				if got := data.Get("item.status").String(); got != "incomplete" {
+					t.Fatalf("item.status = %q, want incomplete", got)
+				}
+				if got := data.Get("item.arguments").String(); got == "{}" {
+					t.Fatalf("item.arguments synthesized empty object {}, want raw args or empty string")
+				}
+			}
+			if event == "response.incomplete" {
+				incompleteSeen = true
+				if got := data.Get("response.status").String(); got != "incomplete" {
+					t.Fatalf("response.status = %q, want incomplete", got)
+				}
+				if got := data.Get("response.incomplete_details.reason").String(); got != "max_output_tokens" {
+					t.Fatalf("response.incomplete_details.reason = %q, want max_output_tokens", got)
+				}
+				if got := data.Get("response.output.0.status").String(); got != "incomplete" {
+					t.Fatalf("response.output.0.status = %q, want incomplete", got)
+				}
+			}
+		}
+	}
+	if !itemDoneSeen {
+		t.Fatal("expected response.output_item.done event for finish_reason=length")
+	}
+	if !incompleteSeen {
+		t.Fatal("expected response.incomplete event for finish_reason=length")
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FinishReasonContentFilterEmitsIncomplete(t *testing.T) {
+	request := []byte(`{"model":"gpt-5.6-luna"}`)
+	chunks := []string{
+		`data: {"id":"resp_filter_tool","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-luna","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_filter_tool","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-luna","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var incompleteSeen bool
+	var itemDoneSeen bool
+	for _, line := range chunks {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "gpt-5.6-luna", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event == "response.completed" {
+				t.Fatalf("stream with finish_reason=content_filter was finalized as response.completed: %s", chunk)
+			}
+			if event == "response.output_item.done" {
+				itemDoneSeen = true
+				if got := data.Get("item.status").String(); got != "incomplete" {
+					t.Fatalf("item.status = %q, want incomplete", got)
+				}
+			}
+			if event == "response.incomplete" {
+				incompleteSeen = true
+				if got := data.Get("response.status").String(); got != "incomplete" {
+					t.Fatalf("response.status = %q, want incomplete", got)
+				}
+				if got := data.Get("response.incomplete_details.reason").String(); got != "content_filter" {
+					t.Fatalf("response.incomplete_details.reason = %q, want content_filter", got)
+				}
+			}
+		}
+	}
+	if !itemDoneSeen {
+		t.Fatal("expected response.output_item.done event for finish_reason=content_filter")
+	}
+	if !incompleteSeen {
+		t.Fatal("expected response.incomplete event for finish_reason=content_filter")
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FinishReasonLength(t *testing.T) {
+	raw := []byte(`{"id":"chatcmpl_len","object":"chat.completion","created":1773896263,"model":"gpt-5.6","choices":[{"index":0,"message":{"role":"assistant","content":"truncated text"},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-5.6", nil, nil, raw, nil)
+	data := gjson.ParseBytes(out)
+	if got := data.Get("status").String(); got != "incomplete" {
+		t.Fatalf("status = %q, want incomplete; out=%s", got, out)
+	}
+	if got := data.Get("incomplete_details.reason").String(); got != "max_output_tokens" {
+		t.Fatalf("incomplete_details.reason = %q, want max_output_tokens; out=%s", got, out)
+	}
+	if got := data.Get("output.0.status").String(); got != "incomplete" {
+		t.Fatalf("output.0.status = %q, want incomplete; out=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FinishReasonContentFilter(t *testing.T) {
+	raw := []byte(`{"id":"chatcmpl_filter","object":"chat.completion","created":1773896263,"model":"gpt-5.6","choices":[{"index":0,"message":{"role":"assistant","content":"blocked text"},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-5.6", nil, nil, raw, nil)
+	data := gjson.ParseBytes(out)
+	if got := data.Get("status").String(); got != "incomplete" {
+		t.Fatalf("status = %q, want incomplete; out=%s", got, out)
+	}
+	if got := data.Get("incomplete_details.reason").String(); got != "content_filter" {
+		t.Fatalf("incomplete_details.reason = %q, want content_filter; out=%s", got, out)
+	}
+	if got := data.Get("output.0.status").String(); got != "incomplete" {
+		t.Fatalf("output.0.status = %q, want incomplete; out=%s", got, out)
 	}
 }

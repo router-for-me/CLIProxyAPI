@@ -182,6 +182,24 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 	return []string{resolved}
 }
 
+// ResolveExecutionModel returns the credential-aware upstream model used by
+// normal execution. It strips auth prefixes, applies configured aliases, and
+// prefers Home-dispatched upstream models when present.
+func (m *Manager) ResolveExecutionModel(auth *Auth, routeModel string) string {
+	routeModel = strings.TrimSpace(routeModel)
+	if m == nil {
+		return routeModel
+	}
+	candidates := m.executionModelCandidates(auth, routeModel)
+	if len(candidates) == 0 {
+		return routeModel
+	}
+	if resolved := strings.TrimSpace(candidates[0]); resolved != "" {
+		return resolved
+	}
+	return routeModel
+}
+
 func (m *Manager) selectionModelForAuth(auth *Auth, routeModel string) string {
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	if strings.TrimSpace(requestedModel) == "" {

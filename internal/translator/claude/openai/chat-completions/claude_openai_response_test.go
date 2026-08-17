@@ -130,3 +130,79 @@ func TestConvertClaudeResponseToOpenAINonStream_UsageMergesMessageStartUsage(t *
 	}
 	assertCachedCreationTokens(t, out, 31)
 }
+
+func TestConvertClaudeResponseToOpenAI_RefusalStopReason(t *testing.T) {
+	testCases := []struct {
+		name                string
+		anthropicStopReason string
+		wantFinishReason    string
+	}{
+		{
+			name:                "refusal maps to content_filter",
+			anthropicStopReason: "refusal",
+			wantFinishReason:    "content_filter",
+		},
+		{
+			name:                "sensitive maps to content_filter",
+			anthropicStopReason: "sensitive",
+			wantFinishReason:    "content_filter",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			var param any
+
+			out := ConvertClaudeResponseToOpenAI(
+				ctx,
+				"claude-opus-4-6",
+				nil,
+				nil,
+				[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"`+tc.anthropicStopReason+`"},"usage":{"output_tokens":10}}`),
+				&param,
+			)
+			if len(out) != 1 {
+				t.Fatalf("expected 1 chunk, got %d", len(out))
+			}
+
+			gotFinishReason := gjson.GetBytes(out[0], "choices.0.finish_reason").String()
+			if gotFinishReason != tc.wantFinishReason {
+				t.Fatalf("expected finish_reason %q, got %q, payload=%s", tc.wantFinishReason, gotFinishReason, string(out[0]))
+			}
+		})
+	}
+}
+
+func TestConvertClaudeResponseToOpenAINonStream_RefusalStopReason(t *testing.T) {
+	testCases := []struct {
+		name                string
+		anthropicStopReason string
+		wantFinishReason    string
+	}{
+		{
+			name:                "refusal maps to content_filter",
+			anthropicStopReason: "refusal",
+			wantFinishReason:    "content_filter",
+		},
+		{
+			name:                "sensitive maps to content_filter",
+			anthropicStopReason: "sensitive",
+			wantFinishReason:    "content_filter",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rawJSON := []byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"model\":\"claude-opus-4-6\"}}\n" +
+				"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"" + tc.anthropicStopReason + "\"},\"usage\":{\"input_tokens\":10,\"output_tokens\":20}}\n")
+
+			out := ConvertClaudeResponseToOpenAINonStream(context.Background(), "", nil, nil, rawJSON, nil)
+
+			gotFinishReason := gjson.GetBytes(out, "choices.0.finish_reason").String()
+			if gotFinishReason != tc.wantFinishReason {
+				t.Fatalf("expected finish_reason %q, got %q, payload=%s", tc.wantFinishReason, gotFinishReason, string(out))
+			}
+		})
+	}
+}

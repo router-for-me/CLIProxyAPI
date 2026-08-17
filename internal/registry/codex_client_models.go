@@ -39,6 +39,13 @@ func GetCodexClientModelsJSON() []byte {
 	return data
 }
 
+// GetCodexClientModelsRevision returns the current revision of the Codex client model catalog.
+func GetCodexClientModelsRevision() uint64 {
+	codexClientCatalogStore.mu.RLock()
+	defer codexClientCatalogStore.mu.RUnlock()
+	return codexClientCatalogStore.revision
+}
+
 // GetCodexClientModelsSnapshot returns a consistent catalog copy and revision.
 // The revision changes only when validated catalog content changes.
 func GetCodexClientModelsSnapshot() ([]byte, uint64) {

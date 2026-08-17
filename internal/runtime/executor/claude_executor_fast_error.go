@@ -2,20 +2,25 @@ package executor
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 // claudeFastRequestError marks a Fast request failure as request-scoped. Fast
 // errors must stop at the caller: they do not justify retrying another
-// credential or changing the selected credential's availability.
+// credential or changing the selected credential's availability, unless the failure
+// is a genuine credential-level rate limit.
 type claudeFastRequestError struct {
-	cause  error
-	status int
+	cause      error
+	status     int
+	retryAfter *time.Duration
 }
 
 func (e *claudeFastRequestError) Error() string {
@@ -40,14 +45,43 @@ func (e *claudeFastRequestError) StatusCode() int {
 }
 
 func (e *claudeFastRequestError) IsRequestScoped() bool {
-	return e != nil
+	if e == nil {
+		return false
+	}
+	if e.IsCredentialScoped() {
+		return false
+	}
+	return true
+}
+
+func (e *claudeFastRequestError) IsCredentialScoped() bool {
+	if e == nil {
+		return false
+	}
+	type credentialScopedProvider interface {
+		IsCredentialScoped() bool
+	}
+	var csp credentialScopedProvider
+	if errors.As(e.cause, &csp) && csp != nil {
+		return csp.IsCredentialScoped()
+	}
+	return false
+}
+
+func (e *claudeFastRequestError) RetryAfter() *time.Duration {
+	if e == nil {
+		return nil
+	}
+	return e.retryAfter
 }
 
 // claudeFastDirectResponseError carries an upstream HTTP error response through
 // the auth manager and protocol handlers without retrying or rebuilding its
 // status and JSON body.
 type claudeFastDirectResponseError struct {
-	response *cliproxyexecutor.RequestTerminatedError
+	response         *cliproxyexecutor.RequestTerminatedError
+	retryAfter       *time.Duration
+	credentialScoped bool
 }
 
 func (e *claudeFastDirectResponseError) Error() string {
@@ -65,14 +99,38 @@ func (e *claudeFastDirectResponseError) Unwrap() error {
 }
 
 func (e *claudeFastDirectResponseError) IsRequestScoped() bool {
-	return e != nil
+	if e == nil {
+		return false
+	}
+	if e.credentialScoped {
+		return false
+	}
+	return true
+}
+
+func (e *claudeFastDirectResponseError) IsCredentialScoped() bool {
+	if e == nil {
+		return false
+	}
+	return e.credentialScoped
+}
+
+func (e *claudeFastDirectResponseError) RetryAfter() *time.Duration {
+	if e == nil {
+		return nil
+	}
+	return e.retryAfter
 }
 
 func wrapClaudeFastRequestError(fastRequest bool, status int, err error) error {
 	if err == nil || !fastRequest {
 		return err
 	}
-	return &claudeFastRequestError{cause: err, status: status}
+	var retryAfter *time.Duration
+	if rap, ok := err.(interface{ RetryAfter() *time.Duration }); ok && rap != nil {
+		retryAfter = rap.RetryAfter()
+	}
+	return &claudeFastRequestError{cause: err, status: status, retryAfter: retryAfter}
 }
 
 func newClaudeFastDirectResponseError(resp *http.Response, body []byte) error {
@@ -84,11 +142,25 @@ func newClaudeFastDirectResponseError(resp *http.Response, body []byte) error {
 	// length headers that describe the compressed upstream bytes.
 	headers.Del("Content-Encoding")
 	headers.Del("Content-Length")
-	return &claudeFastDirectResponseError{response: &cliproxyexecutor.RequestTerminatedError{
-		HTTPStatus: resp.StatusCode,
-		Header:     headers,
-		Body:       bytes.Clone(body),
-	}}
+
+	var retryAfter *time.Duration
+	credentialScoped := false
+	if resp.StatusCode == http.StatusTooManyRequests {
+		retryAfter = helps.ParseClaudeRateLimitReset(resp.Header, time.Now())
+		if helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(resp.Header) {
+			credentialScoped = true
+		}
+	}
+
+	return &claudeFastDirectResponseError{
+		response: &cliproxyexecutor.RequestTerminatedError{
+			HTTPStatus: resp.StatusCode,
+			Header:     headers,
+			Body:       bytes.Clone(body),
+		},
+		retryAfter:       retryAfter,
+		credentialScoped: credentialScoped,
+	}
 }
 
 func claudeRequestIsFast(req *http.Request, body []byte) bool {

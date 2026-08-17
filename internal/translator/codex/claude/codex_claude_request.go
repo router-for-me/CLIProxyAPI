@@ -38,7 +38,17 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in internal client format
-func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
+func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
+	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, false)
+}
+
+// ConvertClaudeRequestToCodexWithCompat preserves assistant thinking blocks with
+// empty signatures for configured compatibility endpoints.
+func ConvertClaudeRequestToCodexWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
+	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, true)
+}
+
+func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, preserveEmptyThinkingBlocks bool) []byte {
 	rawJSON := inputRawJSON
 
 	template := []byte(`{"model":"","instructions":"","input":[]}`)
@@ -143,13 +153,17 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				rawSignature := part.Get("signature").String()
 				signature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, rawSignature)
 				if !ok {
-					if !codexClaudeTargetAcceptsGrokSignature(modelName) {
-						return
+					if preserveEmptyThinkingBlocks && strings.TrimSpace(rawSignature) == "" {
+						signature = rawSignature
+					} else {
+						if !codexClaudeTargetAcceptsGrokSignature(modelName) {
+							return
+						}
+						if _, err := sigcompat.InspectGrokEncryptedContent(rawSignature); err != nil {
+							return
+						}
+						signature = rawSignature
 					}
-					if _, err := sigcompat.InspectGrokEncryptedContent(rawSignature); err != nil {
-						return
-					}
-					signature = rawSignature
 				}
 
 				flushMessage()

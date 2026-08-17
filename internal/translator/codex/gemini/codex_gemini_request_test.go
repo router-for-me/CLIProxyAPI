@@ -85,3 +85,33 @@ func TestConvertGeminiRequestToCodex_SplitsNonImageInlineDataByMIME(t *testing.T
 		t.Fatalf("document content type = %q, want input_file. Output: %s", got, string(out))
 	}
 }
+
+func TestConvertGeminiRequestToCodex_DropsHiddenThoughtParts(t *testing.T) {
+	t.Run("thought-only turn", func(t *testing.T) {
+		out := ConvertGeminiRequestToCodex("codex-test", []byte(`{
+			"contents":[
+				{"role":"model","parts":[{"thought":true,"text":"internal reasoning","thoughtSignature":"opaque-provider-state"}]},
+				{"role":"user","parts":[{"text":"continue"}]}
+			]
+		}`), false)
+
+		input := gjson.GetBytes(out, "input").Array()
+		if len(input) != 1 || input[0].Get("role").String() != "user" || input[0].Get("content.0.text").String() != "continue" {
+			t.Fatalf("hidden thought turn was not dropped. Output: %s", string(out))
+		}
+	})
+
+	t.Run("mixed turn", func(t *testing.T) {
+		out := ConvertGeminiRequestToCodex("codex-test", []byte(`{
+			"contents":[{"role":"model","parts":[
+				{"thought":true,"text":"internal reasoning","thoughtSignature":"opaque-provider-state"},
+				{"text":"visible answer"}
+			]}]
+		}`), false)
+
+		input := gjson.GetBytes(out, "input").Array()
+		if len(input) != 1 || input[0].Get("content.0.type").String() != "output_text" || input[0].Get("content.0.text").String() != "visible answer" {
+			t.Fatalf("hidden thought was not dropped independently of visible text. Output: %s", string(out))
+		}
+	})
+}

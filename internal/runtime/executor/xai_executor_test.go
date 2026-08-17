@@ -802,6 +802,46 @@ func TestEnsureXAINativeXSearchTool(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorPrepareNormalizesClaudeWebSearchToolChoice(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.5",
+		Payload: []byte(`{
+			"model":"grok-4.5",
+			"max_tokens":4096,
+			"stream":true,
+			"output_config":{"effort":"high"},
+			"thinking":{"type":"disabled"},
+			"messages":[{"role":"user","content":[{"type":"text","text":"Perform a web search"}]}],
+			"tool_choice":{"type":"tool","name":"web_search"},
+			"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Stream:       true,
+	}, true)
+	if errPrepare != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", errPrepare)
+	}
+
+	choice := gjson.GetBytes(prepared.body, "tool_choice")
+	if got := choice.Get("type").String(); got != "allowed_tools" {
+		t.Fatalf("tool_choice.type = %q, want allowed_tools; body=%s", got, prepared.body)
+	}
+	if got := choice.Get("mode").String(); got != "required" {
+		t.Fatalf("tool_choice.mode = %q, want required; body=%s", got, prepared.body)
+	}
+	allowed := choice.Get("tools").Array()
+	if len(allowed) != 1 {
+		t.Fatalf("tool_choice.tools length = %d, want 1; body=%s", len(allowed), prepared.body)
+	}
+	if got := allowed[0].Get("type").String(); got != "web_search" {
+		t.Fatalf("tool_choice.tools.0.type = %q, want web_search; body=%s", got, prepared.body)
+	}
+}
+
 func TestPruneXAIOrphanedToolChoice(t *testing.T) {
 	t.Parallel()
 
@@ -2162,8 +2202,8 @@ func TestXAIExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testing
 	if !strings.Contains(output, `"type":"compaction"`) || !strings.Contains(output, `"encrypted_content":"opaque"`) {
 		t.Fatalf("compaction output missing from stream: %s", output)
 	}
-	if !strings.Contains(output, `"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}`) {
-		t.Fatalf("usage missing from completed stream: %s", output)
+	if !strings.Contains(output, `"output_tokens_details":{"reasoning_tokens":0}`) || !strings.Contains(output, `"input_tokens_details":{"cached_tokens":0}`) {
+		t.Fatalf("usage details missing from completed stream: %s", output)
 	}
 }
 
@@ -5001,4 +5041,24 @@ func testValidGrokEncryptedContent() string {
 		buf = append(buf, sum[:]...)
 	}
 	return base64.RawStdEncoding.EncodeToString(buf[:256])
+}
+
+func TestXAIPatchCompletedOutput_EnsuresUsageDetails(t *testing.T) {
+	eventData := []byte(`{"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14}}}`)
+	outputItemsByIndex := make(map[int64][]byte)
+	var outputItemsFallback [][]byte
+
+	got := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+	if !gjson.GetBytes(got, "response.usage.output_tokens_details").Exists() {
+		t.Fatalf("expected output_tokens_details to exist, got %s", string(got))
+	}
+	if gjson.GetBytes(got, "response.usage.output_tokens_details.reasoning_tokens").Int() != 0 {
+		t.Fatalf("expected reasoning_tokens == 0, got %d", gjson.GetBytes(got, "response.usage.output_tokens_details.reasoning_tokens").Int())
+	}
+	if !gjson.GetBytes(got, "response.usage.input_tokens_details").Exists() {
+		t.Fatalf("expected input_tokens_details to exist, got %s", string(got))
+	}
+	if gjson.GetBytes(got, "response.usage.input_tokens_details.cached_tokens").Int() != 0 {
+		t.Fatalf("expected cached_tokens == 0, got %d", gjson.GetBytes(got, "response.usage.input_tokens_details.cached_tokens").Int())
+	}
 }

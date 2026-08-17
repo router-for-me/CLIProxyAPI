@@ -528,6 +528,84 @@ func TestCodexLiveRoutesRequireAuthAndAreRegistered(t *testing.T) {
 	}
 }
 
+func TestRealtimeStandardRoutesAndClientSecretAuth(t *testing.T) {
+	server := newTestServer(t)
+
+	unauthorizedSecret := httptest.NewRequest(http.MethodPost, "/v1/realtime/client_secrets", strings.NewReader(`{"session":{"type":"realtime","model":"gpt-realtime"}}`))
+	unauthorizedSecretRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(unauthorizedSecretRecorder, unauthorizedSecret)
+	if unauthorizedSecretRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("client_secrets unauthorized status = %d, want %d", unauthorizedSecretRecorder.Code, http.StatusUnauthorized)
+	}
+	var unauthorizedResponse struct {
+		Error struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if errUnmarshal := json.Unmarshal(unauthorizedSecretRecorder.Body.Bytes(), &unauthorizedResponse); errUnmarshal != nil {
+		t.Fatalf("unmarshal unauthorized response: %v", errUnmarshal)
+	}
+	if unauthorizedResponse.Error.Type != "authentication_error" || unauthorizedResponse.Error.Code != "invalid_api_key" {
+		t.Fatalf("unauthorized error = %+v", unauthorizedResponse.Error)
+	}
+
+	secretRequest := httptest.NewRequest(http.MethodPost, "/v1/realtime/client_secrets", strings.NewReader(`{"session":{"type":"realtime","model":"gpt-realtime"}}`))
+	secretRequest.Header.Set("Authorization", "Bearer test-key")
+	secretRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(secretRecorder, secretRequest)
+	if secretRecorder.Code != http.StatusOK {
+		t.Fatalf("client_secrets status = %d, want %d; body=%s", secretRecorder.Code, http.StatusOK, secretRecorder.Body.String())
+	}
+	var secretResponse struct {
+		Value string `json:"value"`
+	}
+	if errUnmarshal := json.Unmarshal(secretRecorder.Body.Bytes(), &secretResponse); errUnmarshal != nil {
+		t.Fatalf("unmarshal client secret: %v", errUnmarshal)
+	}
+	if secretResponse.Value == "" {
+		t.Fatal("client secret is empty")
+	}
+
+	callRequest := httptest.NewRequest(http.MethodPost, "/v1/realtime/calls", strings.NewReader("v=0\r\n"))
+	callRequest.Header.Set("Authorization", "Bearer "+secretResponse.Value)
+	callRequest.Header.Set("Content-Type", "application/sdp")
+	callRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(callRecorder, callRequest)
+	if callRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ephemeral call status = %d, want %d; body=%s", callRecorder.Code, http.StatusServiceUnavailable, callRecorder.Body.String())
+	}
+
+	for _, testCase := range []struct {
+		method string
+		path   string
+		status int
+	}{
+		{method: http.MethodGet, path: "/v1/realtime?model=gpt-realtime", status: http.StatusUpgradeRequired},
+		{method: http.MethodPost, path: "/v1/realtime", status: http.StatusServiceUnavailable},
+		{method: http.MethodPost, path: "/v1/realtime/sessions", status: http.StatusOK},
+		{method: http.MethodPost, path: "/v1/realtime/transcription_sessions", status: http.StatusNotImplemented},
+		{method: http.MethodGet, path: "/v1/realtime/translations", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/translations", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/translations/client_secrets", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/calls/call-123/accept", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/calls/call-123/reject", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/calls/call-123/refer", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/calls/call-123/hangup", status: http.StatusNotFound},
+	} {
+		request := httptest.NewRequest(testCase.method, testCase.path, nil)
+		request.Header.Set("Authorization", "Bearer test-key")
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, request)
+		if recorder.Code != testCase.status {
+			t.Errorf("%s %s status = %d, want %d; body=%s", testCase.method, testCase.path, recorder.Code, testCase.status, recorder.Body.String())
+		}
+		if testCase.method == http.MethodGet && testCase.path == "/v1/realtime?model=gpt-realtime" && recorder.Header().Get("Upgrade") != "websocket" {
+			t.Errorf("Upgrade header = %q, want websocket", recorder.Header().Get("Upgrade"))
+		}
+	}
+}
+
 func TestCodexAlphaSearchForwardsRequest(t *testing.T) {
 	server := newTestServer(t)
 	executor := &codexSearchCaptureExecutor{}
@@ -901,6 +979,136 @@ func TestCodexAlphaSearchOptInAPIKeyUsesConfiguredEndpoint(t *testing.T) {
 		if _, exists := upstreamBody[field]; exists {
 			t.Fatalf("upstream body contains %s: %s", field, executor.body)
 		}
+	}
+}
+
+func TestCodexAlphaSearchOptInAPIKeyStripsCredentialPrefix(t *testing.T) {
+	server := newTestServer(t)
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	credential := &auth.Auth{
+		ID:       "codex-alpha-api-key-prefix",
+		Provider: "codex",
+		Prefix:   "vendor",
+		Status:   auth.StatusActive,
+		Attributes: map[string]string{
+			auth.AttributeAPIKey:           "codex-alpha-key",
+			auth.AttributeCodexAlphaSearch: "true",
+			"base_url":                     "https://codex.example.com/v1",
+		},
+	}
+	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), credential); errRegister != nil {
+		t.Fatalf("register Codex API key: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "vendor/gpt-5.6-sol"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(credential.ID)
+	})
+
+	payload := `{"id":"00000000-0000-4000-8000-000000000003","model":"vendor/gpt-5.6-sol","commands":{"search_query":[{"q":"Go programming language official website"}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if executor.request == nil {
+		t.Fatal("Codex executor did not receive a request")
+	}
+	var upstreamBody map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(executor.body, &upstreamBody); errUnmarshal != nil {
+		t.Fatalf("unmarshal upstream body: %v", errUnmarshal)
+	}
+	var upstreamModel string
+	if errUnmarshal := json.Unmarshal(upstreamBody["model"], &upstreamModel); errUnmarshal != nil {
+		t.Fatalf("unmarshal upstream model: %v", errUnmarshal)
+	}
+	if upstreamModel != "gpt-5.6-sol" {
+		t.Fatalf("upstream model = %q, want gpt-5.6-sol", upstreamModel)
+	}
+}
+
+func TestCodexAlphaSearchOptInAPIKeyResolvesModelAlias(t *testing.T) {
+	server := newTestServer(t)
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	server.handlers.AuthManager.SetConfig(&proxyconfig.Config{
+		CodexKey: []proxyconfig.CodexKey{{
+			APIKey:      "codex-alpha-key",
+			Prefix:      "vendor",
+			BaseURL:     "https://codex.example.com/v1",
+			AlphaSearch: true,
+			Models: []proxyconfig.CodexModel{{
+				Name:  "gpt-5.6-sol",
+				Alias: "sol-alias",
+			}},
+		}},
+	})
+	credential := &auth.Auth{
+		ID:       "codex-alpha-api-key-alias",
+		Provider: "codex",
+		Prefix:   "vendor",
+		Status:   auth.StatusActive,
+		Attributes: map[string]string{
+			auth.AttributeAPIKey:           "codex-alpha-key",
+			auth.AttributeCodexAlphaSearch: "true",
+			"base_url":                     "https://codex.example.com/v1",
+		},
+	}
+	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), credential); errRegister != nil {
+		t.Fatalf("register Codex API key: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "vendor/sol-alias"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(credential.ID)
+	})
+
+	payload := `{"model":"vendor/sol-alias","commands":{"search_query":[{"q":"golang"}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if executor.request == nil {
+		t.Fatal("Codex executor did not receive a request")
+	}
+	var upstreamBody map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(executor.body, &upstreamBody); errUnmarshal != nil {
+		t.Fatalf("unmarshal upstream body: %v", errUnmarshal)
+	}
+	var upstreamModel string
+	if errUnmarshal := json.Unmarshal(upstreamBody["model"], &upstreamModel); errUnmarshal != nil {
+		t.Fatalf("unmarshal upstream model: %v", errUnmarshal)
+	}
+	if upstreamModel != "gpt-5.6-sol" {
+		t.Fatalf("upstream model = %q, want gpt-5.6-sol", upstreamModel)
+	}
+}
+
+func TestRewriteCodexAlphaSearchModel(t *testing.T) {
+	original := []byte(`{"id":"search-1","model":"vendor/gpt-5.6-sol","commands":{"search_query":[{"q":"golang"}]}}`)
+	rewritten := rewriteCodexAlphaSearchModel(original, "gpt-5.6-sol")
+	var payload map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(rewritten, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal rewritten body: %v", errUnmarshal)
+	}
+	var model string
+	if errUnmarshal := json.Unmarshal(payload["model"], &model); errUnmarshal != nil {
+		t.Fatalf("unmarshal rewritten model: %v", errUnmarshal)
+	}
+	if model != "gpt-5.6-sol" {
+		t.Fatalf("model = %q, want gpt-5.6-sol", model)
+	}
+	if _, exists := payload["commands"]; !exists {
+		t.Fatal("commands field was dropped")
+	}
+	if string(rewriteCodexAlphaSearchModel([]byte(`{"query":"x"}`), "gpt-5.6-sol")) != `{"query":"x"}` {
+		t.Fatal("body without model should remain unchanged")
 	}
 }
 
@@ -1624,15 +1832,16 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	clientID := "test-client-version-catalog"
 	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
 		{
-			ID:            "gpt-5.5",
-			Object:        "model",
-			Created:       1776902400,
-			OwnedBy:       "openai",
-			Type:          "openai",
-			DisplayName:   "GPT 5.5",
-			Description:   "Frontier model for complex coding, research, and real-world work.",
-			ContextLength: 272000,
-			Thinking:      &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+			ID:                  "gpt-5.5",
+			Object:              "model",
+			Created:             1776902400,
+			OwnedBy:             "openai",
+			Type:                "openai",
+			DisplayName:         "GPT 5.5",
+			Description:         "Frontier model for complex coding, research, and real-world work.",
+			ContextLength:       272000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 		},
 		{
 			ID:            "custom-codex-model-test",
@@ -1647,6 +1856,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		{ID: "grok-imagine-image-quality", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "gpt-image-2", Object: "model", OwnedBy: "openai", Type: "openai"},
 		{ID: "grok-imagine-image", Object: "model", OwnedBy: "xai", Type: "openai"},
+		{ID: "grok-imagine-image-2.0", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-video", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-video-1.5", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-video-1.5-preview", Object: "model", OwnedBy: "xai", Type: "openai"},
@@ -1699,6 +1909,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if _, ok := gpt55["minimal_client_version"]; !ok {
 		t.Fatal("expected minimal_client_version in codex catalog")
 	}
+	if got, _ := gpt55["max_tokens"].(float64); got != 64000 {
+		t.Fatalf("gpt-5.5 max_tokens = %v, want 64000", gpt55["max_tokens"])
+	}
 	serviceTiers, ok := gpt55["service_tiers"].([]any)
 	if !ok || len(serviceTiers) != 1 {
 		t.Fatalf("expected gpt-5.5 priority service tier, got %#v", gpt55["service_tiers"])
@@ -1747,6 +1960,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		"grok-imagine-image-quality":     false,
 		"gpt-image-2":                    false,
 		"grok-imagine-image":             false,
+		"grok-imagine-image-2.0":         false,
 		"grok-imagine-video":             false,
 		"grok-imagine-video-1.5":         false,
 		"grok-imagine-video-1.5-preview": false,

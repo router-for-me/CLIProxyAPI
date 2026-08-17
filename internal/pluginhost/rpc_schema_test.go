@@ -108,11 +108,15 @@ func TestRegisterRPCPluginSendsHostSchemaVersion(t *testing.T) {
 		registerResult: validTestPlugin("schema"),
 	})
 
-	if _, errRegister := registerRPCPlugin(context.Background(), nil, "schema", lookup, pluginabi.MethodPluginRegister, []byte("mode: test")); errRegister != nil {
+	registered, errRegister := registerRPCPlugin(context.Background(), nil, "schema", lookup, pluginabi.MethodPluginRegister, []byte("mode: test"))
+	if errRegister != nil {
 		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
 	}
 	if lookup.lastLifecycle.SchemaVersion != pluginabi.SchemaVersion {
 		t.Fatalf("lifecycle schema_version = %d, want %d", lookup.lastLifecycle.SchemaVersion, pluginabi.SchemaVersion)
+	}
+	if registered.SchemaVersion != pluginabi.SchemaVersion {
+		t.Fatalf("registered SchemaVersion = %d, want %d", registered.SchemaVersion, pluginabi.SchemaVersion)
 	}
 	if string(lookup.lastLifecycle.ConfigYAML) != "mode: test" {
 		t.Fatalf("lifecycle config = %q, want input config", lookup.lastLifecycle.ConfigYAML)
@@ -145,6 +149,9 @@ func TestRegisterRPCPluginAcceptsModelRouterOnSchema1(t *testing.T) {
 	}
 	if registered.Capabilities.ModelRouter == nil {
 		t.Fatal("ModelRouter = nil, want adapter")
+	}
+	if registered.SchemaVersion != 1 {
+		t.Fatalf("registered SchemaVersion = %d, want 1", registered.SchemaVersion)
 	}
 }
 

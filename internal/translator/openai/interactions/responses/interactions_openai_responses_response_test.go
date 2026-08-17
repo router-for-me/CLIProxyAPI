@@ -599,3 +599,33 @@ func responsesEventNames(events [][]byte) []string {
 	}
 	return names
 }
+
+func TestConvertInteractionsResponseToOpenAIResponsesNonStream_PreservesEnvironmentID(t *testing.T) {
+	raw := []byte(`{"id":"interaction_1","object":"interaction","environment_id":"env_abc123","status":"completed","steps":[{"type":"model_output","content":[{"text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`)
+	out := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "antigravity-preview-05-2026", []byte(`{"model":"antigravity-preview-05-2026"}`), nil, raw, nil)
+	if got := gjson.GetBytes(out, "environment_id").String(); got != "env_abc123" {
+		t.Fatalf("environment_id = %q, want env_abc123. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponsesStream_PreservesEnvironmentID(t *testing.T) {
+	var param any
+	var out [][]byte
+	rawEvents := [][]byte{
+		[]byte("event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1\",\"environment_id\":\"env_stream123\",\"model\":\"antigravity-preview-05-2026\"},\"event_type\":\"interaction.created\"}\n\n"),
+		[]byte("event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1\",\"environment_id\":\"env_stream123\",\"status\":\"completed\"},\"event_type\":\"interaction.completed\"}\n\n"),
+		[]byte("event: done\ndata: [DONE]\n\n"),
+	}
+	for _, raw := range rawEvents {
+		out = append(out, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "antigravity-preview-05-2026", []byte(`{"model":"antigravity-preview-05-2026"}`), nil, raw, &param)...)
+	}
+
+	createdPayload := findResponsesEventPayload(out, "response.created")
+	if got := gjson.GetBytes(createdPayload, "response.environment_id").String(); got != "env_stream123" {
+		t.Fatalf("response.created environment_id = %q, want env_stream123. Payload: %s", got, string(createdPayload))
+	}
+	completedPayload := findResponsesEventPayload(out, "response.completed")
+	if got := gjson.GetBytes(completedPayload, "response.environment_id").String(); got != "env_stream123" {
+		t.Fatalf("response.completed environment_id = %q, want env_stream123. Payload: %s", got, string(completedPayload))
+	}
+}

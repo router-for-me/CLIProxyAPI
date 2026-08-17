@@ -15,6 +15,9 @@ type Plugin struct {
 	Metadata Metadata
 	// Capabilities declares the optional integration points implemented by the plugin.
 	Capabilities Capabilities
+	// SchemaVersion is the plugin contract version negotiated at registration.
+	// Zero means unset (treated as legacy by the host).
+	SchemaVersion uint32
 }
 
 // Metadata describes a plugin for registry, logging, and diagnostics.
@@ -1087,9 +1090,17 @@ type StreamChunkInterceptRequest struct {
 	RequestedModel  string
 	RequestHeaders  http.Header
 	ResponseHeaders http.Header
+	// OriginalRequest contains the raw client request body.
+	// Always populated on header-init (ChunkIndex == StreamChunkHeaderInitIndex), as a fresh clone.
+	// On payload chunks (ChunkIndex >= 0):
+	//   - schema_version >= 3: omitted (nil); cache from header-init or request intercept hooks
+	//   - schema_version < 3: populated as a fresh clone each call (legacy compatibility)
+	// Callers must treat this slice as read-only; hosts clone before delivery to keep snapshots isolated.
 	OriginalRequest []byte
-	RequestBody     []byte
-	Body            []byte
+	// RequestBody contains the provider/executed request payload.
+	// Same population / cloning / schema-version rules as OriginalRequest.
+	RequestBody []byte
+	Body        []byte
 	// HistoryChunks contains a bounded recent history of chunks already delivered downstream.
 	// The host currently retains at most 64 chunks and 1 MiB total history bytes.
 	HistoryChunks [][]byte

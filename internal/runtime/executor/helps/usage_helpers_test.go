@@ -2,12 +2,15 @@ package helps
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -404,6 +407,29 @@ func TestParseGeminiUsageIncludesToolUsePromptTokens(t *testing.T) {
 	}
 }
 
+func TestParseGeminiStreamUsageSkipsZeroPlaceholder(t *testing.T) {
+	lines := [][]byte{
+		[]byte(`data: {"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"thoughtsTokenCount":0,"totalTokenCount":0}}`),
+		[]byte(`data: {"usageMetadata":{"promptTokenCount":17984,"candidatesTokenCount":2668,"thoughtsTokenCount":1028,"totalTokenCount":21680}}`),
+	}
+
+	accepted := make([]usage.Detail, 0, len(lines))
+	for _, line := range lines {
+		detail, ok := ParseGeminiStreamUsage(line)
+		if ok {
+			accepted = append(accepted, detail)
+		}
+	}
+
+	if len(accepted) != 1 {
+		t.Fatalf("accepted usage count = %d, want 1", len(accepted))
+	}
+	detail := accepted[0]
+	if detail.InputTokens != 17984 || detail.OutputTokens != 2668 || detail.ReasoningTokens != 1028 || detail.TotalTokens != 21680 {
+		t.Fatalf("accepted usage detail = %+v", detail)
+	}
+}
+
 func TestParseGeminiUsageRejectsInvalidToolUseSums(t *testing.T) {
 	tests := map[string]string{
 		"negative": `{"usageMetadata":{"promptTokenCount":10,"toolUsePromptTokenCount":-1,"totalTokenCount":10}}`,
@@ -657,6 +683,39 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	}
 	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
 		t.Fatalf("expected non-zero cached token usage to be recorded")
+	}
+}
+
+func TestFailFromErrorsMapsContextStatuses(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "canceled", err: context.Canceled, want: clienterror.StatusClientClosedRequest},
+		{name: "deadline", err: context.DeadlineExceeded, want: http.StatusGatewayTimeout},
+		{
+			name: "url error wraps canceled",
+			err:  &url.Error{Op: "Post", URL: "https://example.com", Err: context.Canceled},
+			want: clienterror.StatusClientClosedRequest,
+		},
+		{name: "plain error", err: errors.New("boom"), want: 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fail := failFromErrors(tc.err)
+			if fail.StatusCode != tc.want {
+				t.Fatalf("StatusCode = %d, want %d; body=%q", fail.StatusCode, tc.want, fail.Body)
+			}
+			if strings.TrimSpace(fail.Body) == "" {
+				t.Fatalf("expected non-empty failure body")
+			}
+		})
+	}
+
+	if fail := failFromErrors(nil, nil); fail.StatusCode != 0 || fail.Body != "" {
+		t.Fatalf("failFromErrors(nil) = %+v, want empty failure", fail)
 	}
 }
 

@@ -77,6 +77,10 @@ type ModelInfo struct {
 	// array (e.g., openai-compatibility.*.models[], *-api-key.models[]).
 	// UserDefined models have thinking configuration passed through without validation.
 	UserDefined bool `json:"-"`
+
+	// IsCompat enables compatibility handling for this configured API-key model.
+	// It is internal metadata and is not exposed in model listings.
+	IsCompat bool `json:"-"`
 }
 
 // ModelConfig holds optional runtime overrides for a model definition.
@@ -147,6 +151,8 @@ type ModelRegistry struct {
 	mutex *sync.RWMutex
 	// availableModelsCache stores per-handler snapshots for GetAvailableModels.
 	availableModelsCache map[string]availableModelsCacheEntry
+	// generation tracks changes to model registrations and availability.
+	generation uint64
 	// hook is an optional callback sink for model registration changes
 	hook ModelRegistryHook
 }
@@ -176,10 +182,18 @@ func (r *ModelRegistry) ensureAvailableModelsCacheLocked() {
 }
 
 func (r *ModelRegistry) invalidateAvailableModelsCacheLocked() {
+	r.generation++
 	if len(r.availableModelsCache) == 0 {
 		return
 	}
 	clear(r.availableModelsCache)
+}
+
+// GetGeneration returns the current generation counter of model registrations.
+func (r *ModelRegistry) GetGeneration() uint64 {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	return r.generation
 }
 
 // LookupModelInfo searches dynamic registry (provider-specific > global) then static definitions.

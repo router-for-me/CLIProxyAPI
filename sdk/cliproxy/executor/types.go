@@ -48,6 +48,12 @@ const (
 	DerivedSessionIDMetadataKey = "derived_session_id"
 	// CallerScopeMetadataKey isolates inferred session identities between downstream callers.
 	CallerScopeMetadataKey = "caller_scope"
+	// SessionAffinityProviderMetadataKey carries the affinity selection namespace
+	// (provider string, e.g. the literal "mixed" pool key) used by SessionAffinitySelector.Pick,
+	// so OnResult keys the session cache identically to how selection read it.
+	SessionAffinityProviderMetadataKey = "session_affinity_provider"
+	// SessionAffinityModelMetadataKey carries the model used during session affinity selection.
+	SessionAffinityModelMetadataKey = "session_affinity_model"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.
@@ -161,6 +167,14 @@ type Options struct {
 	RequestAfterAuthInterceptor RequestAfterAuthInterceptor
 	// ExecutionLifecycle owns Home-dispatched execution resources. Executors must not add it to request metadata.
 	ExecutionLifecycle ExecutionLifecycle
+}
+
+// EnsureMetadata initializes and returns Metadata, ensuring it is non-nil.
+func (o *Options) EnsureMetadata() map[string]any {
+	if o.Metadata == nil {
+		o.Metadata = make(map[string]any)
+	}
+	return o.Metadata
 }
 
 // ResponseFormatOrSource returns the response target format for an execution.
