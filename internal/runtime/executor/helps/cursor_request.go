@@ -14,7 +14,10 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
-const cursorMCPProvider = "cliproxy"
+const (
+	cursorMCPProvider          = "cliproxy"
+	cursorToolContinuationText = "Continue the previous assistant response using the tool results already present in the conversation."
+)
 
 type cursorOpenAIRequest struct {
 	Model      string                `json:"model"`
@@ -66,6 +69,20 @@ type cursorTurnStep struct {
 type cursorToolResult struct {
 	Content string
 	IsError bool
+}
+
+type cursorTranscriptMessage struct {
+	Role       string                    `json:"role"`
+	Content    string                    `json:"content,omitempty"`
+	ToolCall   *cursorTranscriptToolCall `json:"tool_call,omitempty"`
+	ToolCallID string                    `json:"tool_call_id,omitempty"`
+	IsError    bool                      `json:"is_error,omitempty"`
+}
+
+type cursorTranscriptToolCall struct {
+	ID        string         `json:"id"`
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
 }
 
 type cursorTurn struct {
@@ -123,20 +140,18 @@ func BuildCursorRunPayload(payload []byte, modelID string) (*CursorRunPayload, e
 		ClientName:             cursorMCPProvider,
 	}
 
-	var action *cursorproto.ConversationAction
-	if parsed.Resume {
-		action = &cursorproto.ConversationAction{Action: &cursorproto.ConversationAction_ResumeAction{
-			ResumeAction: &cursorproto.ResumeAction{RequestContext: &cursorproto.RequestContext{
-				Tools:     tools,
-				CloudRule: proto.String(parsed.SystemPrompt),
-			}},
-		}}
-	} else {
-		userMessage := buildCursorUserMessage(parsed.UserText, parsed.UserImages, selectedContextBlob)
-		action = &cursorproto.ConversationAction{Action: &cursorproto.ConversationAction_UserMessageAction{
-			UserMessageAction: &cursorproto.UserMessageAction{UserMessage: userMessage},
-		}}
+	actionText, errActionText := buildCursorActionText(parsed)
+	if errActionText != nil {
+		return nil, errActionText
 	}
+	actionImages := parsed.UserImages
+	if parsed.Resume {
+		actionImages = nil
+	}
+	userMessage := buildCursorUserMessage(actionText, actionImages, selectedContextBlob)
+	action := &cursorproto.ConversationAction{Action: &cursorproto.ConversationAction_UserMessageAction{
+		UserMessageAction: &cursorproto.UserMessageAction{UserMessage: userMessage},
+	}}
 	conversationID := uuid.NewString()
 	run := &cursorproto.AgentRunRequest{
 		ConversationState: state,
@@ -162,6 +177,59 @@ func BuildCursorRunPayload(payload []byte, modelID string) (*CursorRunPayload, e
 		SystemPrompt:   parsed.SystemPrompt,
 		ConversationID: conversationID,
 	}, nil
+}
+
+// buildCursorActionText makes history visible to the model on a stateless Run.
+// ResumeAction only resumes a live Cursor conversation; every proxy request uses
+// a new conversation ID, so content-addressed turn blobs alone are not restored.
+func buildCursorActionText(parsed *parsedCursorMessages) (string, error) {
+	if len(parsed.Turns) == 0 && !parsed.Resume {
+		return parsed.UserText, nil
+	}
+
+	transcript := make([]cursorTranscriptMessage, 0, len(parsed.Turns)*3)
+	for _, turn := range parsed.Turns {
+		transcript = append(transcript, cursorTranscriptMessage{Role: "user", Content: turn.UserText})
+		for _, step := range turn.Steps {
+			switch step.Kind {
+			case "assistant":
+				transcript = append(transcript, cursorTranscriptMessage{Role: "assistant", Content: step.Text})
+			case "tool":
+				transcript = append(transcript, cursorTranscriptMessage{
+					Role: "assistant",
+					ToolCall: &cursorTranscriptToolCall{
+						ID:        step.ToolCallID,
+						Name:      step.ToolName,
+						Arguments: step.Arguments,
+					},
+				})
+				if step.Result != nil {
+					transcript = append(transcript, cursorTranscriptMessage{
+						Role:       "tool",
+						Content:    step.Result.Content,
+						ToolCallID: step.ToolCallID,
+						IsError:    step.Result.IsError,
+					})
+				}
+			}
+		}
+	}
+	encoded, errMarshal := json.Marshal(transcript)
+	if errMarshal != nil {
+		return "", fmt.Errorf("cursor request: encode conversation transcript: %w", errMarshal)
+	}
+
+	var prompt strings.Builder
+	prompt.WriteString("Use this JSON conversation transcript as prior context:\n")
+	prompt.Write(encoded)
+	if parsed.Resume {
+		prompt.WriteString("\n\n")
+		prompt.WriteString(cursorToolContinuationText)
+	} else {
+		prompt.WriteString("\n\nLatest user request:\n")
+		prompt.WriteString(parsed.UserText)
+	}
+	return prompt.String(), nil
 }
 
 func filterCursorTools(tools []cursorOpenAITool, rawChoice json.RawMessage) []cursorOpenAITool {
