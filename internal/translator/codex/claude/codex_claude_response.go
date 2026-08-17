@@ -101,6 +101,8 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	switch typeStr {
 	case "error":
 		output = append(output, codexStreamErrorToClaudeError(rootResult)...)
+	case "keepalive":
+		output = translatorcommon.AppendSSEEventBytes(output, "ping", []byte(`{"type":"ping"}`), 2)
 	case "response.created":
 		template = []byte(`{"type":"message_start","message":{"id":"","type":"message","role":"assistant","model":"claude-opus-4-1-20250805","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0},"content":[],"stop_reason":null}}`)
 		template, _ = sjson.SetBytes(template, "message.model", rootResult.Get("response.model").String())
@@ -279,7 +281,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 
 func shouldDeferCodexStreamEvent(typeStr string, rootResult gjson.Result) bool {
 	switch typeStr {
-	case "error", "response.completed", "response.incomplete", "response.function_call_arguments.delta", "response.function_call_arguments.done":
+	case "error", "keepalive", "response.completed", "response.incomplete", "response.function_call_arguments.delta", "response.function_call_arguments.done":
 		return false
 	case "response.output_item.added", "response.output_item.done":
 		return rootResult.Get("item.type").String() != "function_call"

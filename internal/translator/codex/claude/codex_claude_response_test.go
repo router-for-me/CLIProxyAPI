@@ -9,6 +9,38 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertCodexResponseToClaude_StreamKeepaliveEmitsPingAndContinues(t *testing.T) {
+	const pingFrame = "event: ping\ndata: {\"type\":\"ping\"}\n\n"
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-sol"}}`),
+		[]byte(`data: {"type":"keepalive","sequence_number":1}`),
+		[]byte(`data: {"type":"response.output_text.delta","output_index":0,"delta":"hello"}`),
+		[]byte(`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.6-sol","stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"output":[]}}`),
+	}
+
+	var param any
+	var output bytes.Buffer
+	for _, chunk := range chunks {
+		translated := ConvertCodexResponseToClaude(context.Background(), "", []byte(`{"messages":[]}`), nil, chunk, &param)
+		for _, part := range translated {
+			output.Write(part)
+		}
+		if bytes.Contains(chunk, []byte(`"type":"keepalive"`)) {
+			if len(translated) != 1 || string(translated[0]) != pingFrame {
+				t.Fatalf("keepalive output = %q, want %q", translated, pingFrame)
+			}
+		}
+	}
+
+	raw := output.String()
+	for _, want := range []string{pingFrame, `"text":"hello"`, "event: message_stop"} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("stream output missing %q: %s", want, raw)
+		}
+	}
+}
+
 func TestConvertCodexResponseToClaude_StreamThinkingIncludesSignature(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"messages":[]}`)
