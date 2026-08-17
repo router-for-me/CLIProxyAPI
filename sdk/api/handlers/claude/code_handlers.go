@@ -257,6 +257,7 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 				continue
 			}
 			// Upstream failed immediately. Return proper error status and JSON.
+			logClaudeStreamBootstrapDiagnostic(c, cliCtx, "initial_error", modelName, errMsg)
 			h.WriteErrorResponse(c, errMsg)
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
@@ -267,6 +268,7 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 		case chunk, ok := <-dataChan:
 			if !ok {
 				if errMsg, hasPendingError := handlers.PendingStreamError(errChan); hasPendingError {
+					logClaudeStreamBootstrapDiagnostic(c, cliCtx, "closed_before_first_chunk", modelName, errMsg)
 					h.WriteErrorResponse(c, errMsg)
 					if errMsg != nil {
 						cliCancel(errMsg.Error)
