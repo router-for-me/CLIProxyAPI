@@ -196,6 +196,48 @@ func TestNewCodexStatusErrPreservesUnclassifiedErrors(t *testing.T) {
 	}
 }
 
+func TestNewCodexStatusErrWithHeadersKeepsOnlyDocumentedRateLimits(t *testing.T) {
+	names := []string{
+		"Retry-After",
+		"X-Ratelimit-Limit-Project-Tokens",
+		"X-Ratelimit-Limit-Requests",
+		"X-Ratelimit-Limit-Tokens",
+		"X-Ratelimit-Remaining-Project-Tokens",
+		"X-Ratelimit-Remaining-Requests",
+		"X-Ratelimit-Remaining-Tokens",
+		"X-Ratelimit-Reset-Project-Tokens",
+		"X-Ratelimit-Reset-Requests",
+		"X-Ratelimit-Reset-Tokens",
+	}
+	headers := make(http.Header)
+	for _, name := range names {
+		headers.Set(name, "safe-value")
+	}
+	headers.Set("Authorization", "Bearer secret")
+	headers.Set("Set-Cookie", "credential=secret")
+	headers.Set("X-Upstream-Token", "secret")
+	headers.Set("X-Ratelimit-Limit-Requests", "safe\nunsafe")
+
+	err := newCodexStatusErrWithHeaders(http.StatusTooManyRequests, []byte(`{"error":{"message":"limited"}}`), headers)
+	got := err.Headers()
+	for _, name := range names {
+		if name == "X-Ratelimit-Limit-Requests" {
+			if got.Get(name) != "" {
+				t.Fatalf("invalid %s value was preserved", name)
+			}
+			continue
+		}
+		if got.Get(name) != "safe-value" {
+			t.Fatalf("%s = %q, want safe-value", name, got.Get(name))
+		}
+	}
+	for _, name := range []string{"Authorization", "Set-Cookie", "X-Upstream-Token"} {
+		if got.Get(name) != "" {
+			t.Fatalf("sensitive %s header was preserved", name)
+		}
+	}
+}
+
 func assertCodexErrorCode(t *testing.T, raw string, wantType string, wantCode string) {
 	t.Helper()
 
