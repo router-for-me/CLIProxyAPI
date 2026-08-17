@@ -56,6 +56,11 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	rootResult := gjson.ParseBytes(rawJSON)
 	toolNameMap := buildReverseMapFromClaudeOriginalToShort(rawJSON)
 	template, _ = sjson.SetBytes(template, "model", modelName)
+	if format := rootResult.Get("output_config.format"); format.IsObject() && format.Get("type").String() == "json_schema" && format.Get("schema").IsObject() {
+		translatedFormat := []byte(`{"type":"json_schema","name":"cli_proxy_structured_output","strict":true,"schema":{}}`)
+		translatedFormat, _ = sjson.SetRawBytes(translatedFormat, "schema", []byte(format.Get("schema").Raw))
+		template, _ = sjson.SetRawBytes(template, "text.format", translatedFormat)
+	}
 	inputItems := translatorcommon.NewRawArrayItems(rootResult.Get("messages.#").Int())
 
 	// Process system messages and convert them to input content format.
