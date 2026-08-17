@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -49,7 +50,12 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 
 	usageJSON := fmt.Sprintf(`{"response":{"usage":{"input_tokens":%d,"output_tokens":0,"total_tokens":%d}}}`, count, count)
 	translated := sdktranslator.TranslateTokenCount(ctx, to, responseFormat, count, []byte(usageJSON))
-	return cliproxyexecutor.Response{Payload: translated}, nil
+	if sourceFormatEqual(responseFormat, sdktranslator.FormatClaude) && gjson.GetBytes(req.Payload, "context_management").Exists() {
+		translated, _ = sjson.SetBytes(translated, "context_management.original_input_tokens", count)
+	}
+	headers := make(http.Header)
+	headers.Set("X-CLIProxyAPI-Token-Count-Mode", "estimate")
+	return cliproxyexecutor.Response{Payload: translated, Headers: headers}, nil
 }
 
 func tokenizerForCodexModel(model string) (tokenizer.Codec, error) {
