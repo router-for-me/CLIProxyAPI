@@ -48,6 +48,41 @@ type BudgetApplyConfig struct {
 	Now     func() time.Time
 }
 
+const budgetReasonPrefix = "budget:"
+
+// BudgetReason is the Quota.Reason written for a supplier park. It is
+// distinct from credential_quota (Anthropic-window cooldown) so a host
+// budget observation cannot be mistaken for a provider 429.
+func BudgetReason(kind string) string {
+	return budgetReasonPrefix + normalizeBudgetKind(kind)
+}
+
+func isBudgetReason(reason string) bool {
+	return strings.HasPrefix(reason, budgetReasonPrefix)
+}
+
+// isCredentialWideQuotaReason is the conductor predicate for "this quota
+// parks the whole credential". credential_quota stays for Anthropic-window
+// cooldowns; budget:* is the supplier's own reason.
+func isCredentialWideQuotaReason(reason string) bool {
+	return reason == "credential_quota" || isBudgetReason(reason)
+}
+
+// ApplyBudgetSupplier is the honest host hook: Snapshot then apply.
+// A nil supplier is a no-op. Snapshot errors are returned and leave
+// auths unchanged (fail-open).
+func ApplyBudgetSupplier(ctx context.Context, auths []*Auth, supplier BudgetSupplier, cfg BudgetApplyConfig) error {
+	if supplier == nil || len(auths) == 0 {
+		return nil
+	}
+	obs, err := supplier.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	ApplyBudgetObservations(auths, obs, cfg)
+	return nil
+}
+
 // ApplyBudgetObservations marks auths exhausted from supplier observations.
 // It never sets Result.CredentialScope — that flag is Anthropic-window
 // scoped and is the wrong tool for prepaid $ and non-Anthropic windows.
@@ -79,7 +114,7 @@ func ApplyBudgetObservations(auths []*Auth, obs []BudgetObservation, cfg BudgetA
 		}
 		until, exhausted := observationExhausted(o, cfg.Threshold, recheck, now)
 		if !exhausted {
-			if a.Quota.Reason == "credential_quota" || strings.HasPrefix(a.Quota.Reason, "budget:") {
+			if isBudgetReason(a.Quota.Reason) {
 				a.Unavailable = false
 				a.Quota.Exceeded = false
 				a.Quota.Reason = ""
@@ -87,11 +122,9 @@ func ApplyBudgetObservations(auths []*Auth, obs []BudgetObservation, cfg BudgetA
 			}
 			continue
 		}
-		// Reason credential_quota is what isAuthBlockedForModel already
-		// treats as credential-wide. Do not set Result.CredentialScope.
 		a.Unavailable = true
 		a.Quota.Exceeded = true
-		a.Quota.Reason = "credential_quota"
+		a.Quota.Reason = BudgetReason(o.Kind)
 		a.Quota.NextRecoverAt = until
 	}
 }

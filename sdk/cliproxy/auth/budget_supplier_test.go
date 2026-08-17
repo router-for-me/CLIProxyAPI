@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -19,7 +21,7 @@ func TestApplyBudgetObservations_WindowExhaustedUntilRecoverAt(t *testing.T) {
 	if !auth.Quota.NextRecoverAt.Equal(recoverAt) {
 		t.Fatalf("recover = %v, want %v", auth.Quota.NextRecoverAt, recoverAt)
 	}
-	if auth.Quota.Reason != "credential_quota" {
+	if auth.Quota.Reason != "budget:window" {
 		t.Fatalf("reason = %q", auth.Quota.Reason)
 	}
 	blocked, _, until := isAuthBlockedForModel(auth, "", now)
@@ -34,7 +36,7 @@ func TestApplyBudgetObservations_BalanceZeroUsesRecheck(t *testing.T) {
 	ApplyBudgetObservations([]*Auth{auth}, []BudgetObservation{{
 		AuthID: "ds", Kind: BudgetKindBalance, Amount: "0", Currency: "CNY",
 	}}, BudgetApplyConfig{Now: func() time.Time { return now }, Recheck: 5 * time.Minute})
-	if !auth.Quota.Exceeded || auth.Quota.Reason != "credential_quota" {
+	if !auth.Quota.Exceeded || auth.Quota.Reason != "budget:balance" {
 		t.Fatalf("quota = %+v", auth.Quota)
 	}
 	if !auth.Quota.NextRecoverAt.Equal(now.Add(5 * time.Minute)) {
@@ -71,7 +73,7 @@ func TestApplyBudgetObservations_PositiveRemainingStaysEligible(t *testing.T) {
 
 func TestApplyBudgetObservations_ClearsWhenRecovered(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
-	auth := &Auth{ID: "a1", Unavailable: true, Quota: QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: now.Add(time.Hour)}}
+	auth := &Auth{ID: "a1", Unavailable: true, Quota: QuotaState{Exceeded: true, Reason: "budget:window", NextRecoverAt: now.Add(time.Hour)}}
 	half := 0.5
 	ApplyBudgetObservations([]*Auth{auth}, []BudgetObservation{{
 		AuthID: "a1", Kind: BudgetKindWindow, Remaining: &half,
@@ -90,6 +92,46 @@ func TestApplyBudgetObservations_PastRecoverAtFailsOpen(t *testing.T) {
 	}}, BudgetApplyConfig{Now: func() time.Time { return now }})
 	if auth.Quota.Exceeded {
 		t.Fatal("stale window remaining after reset must not park")
+	}
+}
+
+type snapshotSupplier struct {
+	obs []BudgetObservation
+	err error
+	n   int
+}
+
+func (s *snapshotSupplier) Snapshot(context.Context) ([]BudgetObservation, error) {
+	s.n++
+	return s.obs, s.err
+}
+
+func TestApplyBudgetSupplier_CallsSnapshot(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	zero := 0.0
+	auth := &Auth{ID: "a1"}
+	sup := &snapshotSupplier{obs: []BudgetObservation{{
+		AuthID: "a1", Kind: BudgetKindWindow, Remaining: &zero, RecoverAt: now.Add(time.Hour),
+	}}}
+	if err := ApplyBudgetSupplier(context.Background(), []*Auth{auth}, sup, BudgetApplyConfig{Now: func() time.Time { return now }}); err != nil {
+		t.Fatalf("ApplyBudgetSupplier: %v", err)
+	}
+	if sup.n != 1 {
+		t.Fatalf("Snapshot called %d times, want 1", sup.n)
+	}
+	if auth.Quota.Reason != "budget:window" || !auth.Quota.Exceeded {
+		t.Fatalf("quota = %+v", auth.Quota)
+	}
+}
+
+func TestApplyBudgetSupplier_SnapshotErrorFailsOpen(t *testing.T) {
+	auth := &Auth{ID: "a1"}
+	sup := &snapshotSupplier{err: errors.New("collector down")}
+	if err := ApplyBudgetSupplier(context.Background(), []*Auth{auth}, sup, BudgetApplyConfig{}); err == nil {
+		t.Fatal("expected snapshot error")
+	}
+	if auth.Quota.Exceeded {
+		t.Fatal("snapshot error must leave auth eligible")
 	}
 }
 
