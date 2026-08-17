@@ -62,7 +62,7 @@ type Config struct {
 	// Default: 60. Max: 3600.
 	RedisUsageQueueRetentionSeconds int `yaml:"redis-usage-queue-retention-seconds" json:"redis-usage-queue-retention-seconds"`
 
-	// DisableCooling disables quota cooldown scheduling when true.
+	// DisableCooling disables auth/model cooldown scheduling when true unless a credential or provider overrides it.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
 	// SaveCooldownStatus persists runtime cooldown status next to auth files when true.

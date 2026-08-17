@@ -24,7 +24,7 @@ var quotaCooldownDisabled atomic.Bool
 
 var transientErrorCooldownSeconds atomic.Int64
 
-// SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
+// SetQuotaCooldownDisabled toggles auth/model cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
 }
@@ -40,12 +40,16 @@ func quotaCooldownDisabledForAuth(auth *Auth) bool {
 }
 
 func quotaCooldownDisabledForAuthWithConfig(auth *Auth, cfg *internalconfig.Config) bool {
+	// Home owns cooldown state, so downstream instances must not schedule local cooldowns.
+	if cfg != nil && cfg.Home.Enabled {
+		return true
+	}
 	if auth != nil {
 		if override, ok := auth.DisableCoolingOverride(); ok {
 			return override
 		}
-		if providerCoolingDisabledForAuth(auth, cfg) {
-			return true
+		if override, ok := providerCoolingOverrideForAuth(auth, cfg); ok {
+			return override
 		}
 	}
 	if cfg != nil && cfg.DisableCooling {
@@ -54,13 +58,13 @@ func quotaCooldownDisabledForAuthWithConfig(auth *Auth, cfg *internalconfig.Conf
 	return quotaCooldownDisabled.Load()
 }
 
-func providerCoolingDisabledForAuth(auth *Auth, cfg *internalconfig.Config) bool {
+func providerCoolingOverrideForAuth(auth *Auth, cfg *internalconfig.Config) (bool, bool) {
 	if auth == nil || cfg == nil {
-		return false
+		return false, false
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	if provider == "" {
-		return false
+		return false, false
 	}
 	providerKey := ""
 	compatName := ""
@@ -69,13 +73,16 @@ func providerCoolingDisabledForAuth(auth *Auth, cfg *internalconfig.Config) bool
 		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 	}
 	if providerKey == "" && compatName == "" && provider != "openai-compatibility" {
-		return false
+		return false, false
 	}
 	if providerKey == "" {
 		providerKey = provider
 	}
 	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, provider)
-	return entry != nil && entry.DisableCooling
+	if entry == nil || entry.DisableCooling == nil {
+		return false, false
+	}
+	return *entry.DisableCooling, true
 }
 
 func nextTransientErrorRetryAfter(now time.Time) time.Time {
