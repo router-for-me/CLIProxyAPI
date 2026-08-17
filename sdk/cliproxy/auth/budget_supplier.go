@@ -79,11 +79,19 @@ func ApplyBudgetObservations(auths []*Auth, obs []BudgetObservation, cfg BudgetA
 		}
 		until, exhausted := observationExhausted(o, cfg.Threshold, recheck, now)
 		if !exhausted {
+			if a.Quota.Reason == "credential_quota" || strings.HasPrefix(a.Quota.Reason, "budget:") {
+				a.Unavailable = false
+				a.Quota.Exceeded = false
+				a.Quota.Reason = ""
+				a.Quota.NextRecoverAt = time.Time{}
+			}
 			continue
 		}
+		// Reason credential_quota is what isAuthBlockedForModel already
+		// treats as credential-wide. Do not set Result.CredentialScope.
 		a.Unavailable = true
 		a.Quota.Exceeded = true
-		a.Quota.Reason = "budget:" + normalizeBudgetKind(o.Kind)
+		a.Quota.Reason = "credential_quota"
 		a.Quota.NextRecoverAt = until
 	}
 }
@@ -98,12 +106,18 @@ func observationExhausted(o BudgetObservation, threshold float64, recheck time.D
 		if amt, ok := parseBudgetAmount(o.Amount); ok && amt <= 0 {
 			return recoverOrRecheck(o.RecoverAt, recheck, now), true
 		}
+		if o.Remaining != nil && *o.Remaining <= threshold {
+			return recoverOrRecheck(o.RecoverAt, recheck, now), true
+		}
 		return time.Time{}, false
 	default:
 		if o.Remaining == nil {
 			return time.Time{}, false
 		}
 		if *o.Remaining > threshold {
+			return time.Time{}, false
+		}
+		if !o.RecoverAt.IsZero() && !o.RecoverAt.After(now) {
 			return time.Time{}, false
 		}
 		return recoverOrRecheck(o.RecoverAt, recheck, now), true
