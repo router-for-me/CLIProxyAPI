@@ -257,7 +257,7 @@ func openAIChatToolCallFromInteractions(step, fallbackArgs gjson.Result) []byte 
 	toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":"{}"}}`)
 	callID := firstNonEmpty(step.Get("call_id").String(), step.Get("id").String(), "call_0")
 	toolCall, _ = sjson.SetBytes(toolCall, "id", callID)
-	toolCall, _ = sjson.SetBytes(toolCall, "function.name", step.Get("name").String())
+	toolCall, _ = sjson.SetBytes(toolCall, "function.name", antigravityUpstreamToolNameToClient(step.Get("name").String()))
 	args := step.Get("arguments")
 	if !args.Exists() {
 		args = fallbackArgs

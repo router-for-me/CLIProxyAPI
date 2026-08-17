@@ -31,7 +31,7 @@ func ConvertOpenAIRequestToInteractions(modelName string, inputRawJSON []byte, s
 	}
 	out = appendOpenAIMessagesToInteractions(out, root.Get("messages"))
 	out = copyOpenAIChatGenerationConfigToInteractions(out, root, model)
-	out = appendOpenAIChatToolsToInteractions(out, root.Get("tools"))
+	out = appendOpenAIChatToolsToInteractions(out, root.Get("tools"), model)
 	return out
 }
 
@@ -284,13 +284,17 @@ func copyOpenAIChatGenerationConfigToInteractions(out []byte, root gjson.Result,
 	return out
 }
 
-func appendOpenAIChatToolsToInteractions(out []byte, tools gjson.Result) []byte {
+func appendOpenAIChatToolsToInteractions(out []byte, tools gjson.Result, model string) []byte {
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
+	forAntigravity := isAntigravityModel(model)
 	var toolItems [][]byte
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		if converted, ok := openAIChatToolToInteractions(tool); ok {
+			if forAntigravity {
+				converted = renameConflictingAntigravityToolName(converted)
+			}
 			toolItems = append(toolItems, converted)
 		}
 		return true
@@ -299,6 +303,42 @@ func appendOpenAIChatToolsToInteractions(out []byte, tools gjson.Result) []byte 
 		out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolItems))
 	}
 	return out
+}
+
+// renameConflictingAntigravityToolName prefixes tool names that collide with
+// the antigravity agent's built-in tools (e.g. read_file / write_file). Google
+// returns 500 "Unknown Error" when a user-defined function re-declares one of
+// the agent's intrinsic tools. The OpenAI client keeps seeing the original
+// names because the response translator strips the prefix again.
+func renameConflictingAntigravityToolName(tool []byte) []byte {
+	root := gjson.ParseBytes(tool)
+	name := root.Get("name").String()
+	if mapped, ok := antigravityToolNameToUpstream(name); ok && mapped != name {
+		tool, _ = sjson.SetBytes(tool, "name", mapped)
+	}
+	return tool
+}
+
+// antigravityToolNameToUpstream maps client-facing tool names to the names
+// actually sent to the antigravity Interactions API (prefixing built-in
+// collisions), and antigravityUpstreamToolNameToClient maps them back.
+var antigravityToolNameMap = map[string]string{
+	"read_file":  "hermes_read_file",
+	"write_file": "hermes_write_file",
+}
+
+func antigravityToolNameToUpstream(name string) (string, bool) {
+	mapped, ok := antigravityToolNameMap[name]
+	return mapped, ok
+}
+
+func antigravityUpstreamToolNameToClient(name string) string {
+	for client, upstream := range antigravityToolNameMap {
+		if upstream == name {
+			return client
+		}
+	}
+	return name
 }
 
 func openAIChatToolToInteractions(tool gjson.Result) ([]byte, bool) {

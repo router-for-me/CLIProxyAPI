@@ -151,6 +151,35 @@ func TestConvertOpenAIRequestToInteractions_AntigravitySanitizesGenerationConfig
 	}
 }
 
+func TestConvertOpenAIRequestToInteractionsRenamesConflictingAntigravityTools(t *testing.T) {
+	// read_file/write_file collide with the antigravity agent's built-in tools
+	// and cause Google to return 500 "Unknown Error" — they must be prefixed.
+	raw := []byte(`{"model":"antigravity-preview-05-2026","messages":[{"role":"user","content":"read it"}],"tools":[
+		{"type":"function","function":{"name":"read_file","description":"r","parameters":{"type":"object"}}},
+		{"type":"function","function":{"name":"write_file","description":"w","parameters":{"type":"object"}}},
+		{"type":"function","function":{"name":"web_search","description":"s","parameters":{"type":"object"}}}
+	]}`)
+	out := ConvertOpenAIRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "hermes_read_file" {
+		t.Fatalf("tools.0.name = %q, want hermes_read_file. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "hermes_write_file" {
+		t.Fatalf("tools.1.name = %q, want hermes_write_file. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.2.name").String(); got != "web_search" {
+		t.Fatalf("tools.2.name = %q, want web_search (unchanged). Output: %s", got, string(out))
+	}
+	// Non-antigravity models must stay untouched.
+	out = ConvertOpenAIRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "read_file" {
+		t.Fatalf("gemini tools.0.name = %q, want read_file (no rename). Output: %s", got, string(out))
+	}
+	// Round-trip: upstream name maps back to the client name.
+	if got := antigravityUpstreamToolNameToClient("hermes_read_file"); got != "read_file" {
+		t.Fatalf("antigravityUpstreamToolNameToClient(hermes_read_file) = %q, want read_file", got)
+	}
+}
+
 func TestConvertOpenAIRequestToInteractions_PreservesEnvironmentIDAndPreviousInteractionID(t *testing.T) {
 	raw := []byte(`{
 		"model":"antigravity-preview-05-2026",

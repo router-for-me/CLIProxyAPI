@@ -152,7 +152,7 @@ func appendOpenAIToolCallDelta(out [][]byte, st *openAIToInteractionsStreamState
 	}
 	function := toolCall.Get("function")
 	if name := function.Get("name").String(); name != "" {
-		st.ToolCallNames[index] = name
+		st.ToolCallNames[index] = antigravityUpstreamToolNameToClient(name)
 	}
 	stepID := firstNonEmpty(st.ToolCallIDs[index], fmt.Sprintf("call_%d", index))
 	stepName := st.ToolCallNames[index]
