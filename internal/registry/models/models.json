@@ -2441,6 +2441,88 @@
       }
     }
   ],
+  "deepseek": [
+    {
+      "id": "deepseek-v4-flash",
+      "object": "model",
+      "created": 1677610602,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek V4 Flash",
+      "description": "DeepSeek V4 Flash - default chat model accessed via the DeepSeek web client; supports tool calling and optional thinking",
+      "context_length": 131072,
+      "max_completion_tokens": 8192,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "object": "model",
+      "created": 1677610602,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek V4 Pro",
+      "description": "DeepSeek V4 Pro - expert reasoning model accessed via the DeepSeek web client; supports tool calling and optional thinking",
+      "context_length": 131072,
+      "max_completion_tokens": 8192,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "deepseek-v4-flash-search",
+      "object": "model",
+      "created": 1677610602,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek V4 Flash Search",
+      "description": "DeepSeek V4 Flash with native web search enabled via the DeepSeek web client; supports tool calling and optional thinking",
+      "context_length": 131072,
+      "max_completion_tokens": 8192,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "deepseek-v4-vision",
+      "object": "model",
+      "created": 1677610602,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek V4 Vision",
+      "description": "DeepSeek V4 Vision - multimodal model with image input accessed via the DeepSeek web client; supports tool calling and optional thinking",
+      "context_length": 131072,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "TEXT",
+        "IMAGE"
+      ],
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    }
+  ],
   "antigravity": [
     {
       "id": "claude-opus-4-6-thinking",

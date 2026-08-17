@@ -490,6 +490,14 @@ type XAIKey = CodexKey
 // XAIModel uses the Codex model mapping structure for xAI models.
 type XAIModel = CodexModel
 
+// DeepSeekKey uses the Codex API key structure for DeepSeek web-client auth.
+// The APIKey field carries the long-lived userToken extracted from the
+// DeepSeek web client; DeepSeek does not use OAuth or refresh tokens.
+type DeepSeekKey = CodexKey
+
+// DeepSeekModel uses the Codex model mapping structure for DeepSeek models.
+type DeepSeekModel = CodexModel
+
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
 type GeminiKey struct {

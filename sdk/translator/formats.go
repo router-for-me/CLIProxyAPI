@@ -9,4 +9,5 @@ const (
 	FormatCodex          Format = "codex"
 	FormatAntigravity    Format = "antigravity"
 	FormatInteractions   Format = "interactions"
+	FormatDeepSeek       Format = "deepseek"
 )

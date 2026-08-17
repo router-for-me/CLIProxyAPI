@@ -126,6 +126,14 @@ func tryRefreshModels(ctx context.Context, label string) {
 
 	// Update store with new data regardless.
 	modelsCatalogStore.mu.Lock()
+	// Preserve non-empty sections from the existing catalog when the new
+	// catalog has empty sections. This prevents remote catalogs that lack a
+	// provider (e.g. deepseek) from wiping out the embedded definitions.
+	if oldData != nil {
+		if len(parsed.DeepSeek) == 0 && len(oldData.DeepSeek) > 0 {
+			parsed.DeepSeek = oldData.DeepSeek
+		}
+	}
 	modelsCatalogStore.data = parsed
 	modelsCatalogStore.mu.Unlock()
 
@@ -215,6 +223,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"kimi", oldData.Kimi, newData.Kimi},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 		{"xai", oldData.XAI, newData.XAI},
+		{"deepseek", oldData.DeepSeek, newData.DeepSeek},
 	}
 
 	seen := make(map[string]bool, len(sections))
@@ -304,6 +313,14 @@ func loadModelsFromBytes(data []byte, source string) error {
 	}
 
 	modelsCatalogStore.mu.Lock()
+	// Preserve non-empty sections from the existing catalog when the new
+	// catalog has empty sections. This prevents remote catalogs that lack a
+	// provider (e.g. deepseek) from wiping out the embedded definitions.
+	if existing := modelsCatalogStore.data; existing != nil {
+		if len(parsed.DeepSeek) == 0 && len(existing.DeepSeek) > 0 {
+			parsed.DeepSeek = existing.DeepSeek
+		}
+	}
 	modelsCatalogStore.data = &parsed
 	modelsCatalogStore.mu.Unlock()
 	return nil
@@ -335,6 +352,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "kimi", models: data.Kimi},
 		{name: "antigravity", models: data.Antigravity},
 		{name: "xai", models: data.XAI},
+		{name: "deepseek", models: data.DeepSeek},
 	}
 
 	for _, section := range requiredSections {
