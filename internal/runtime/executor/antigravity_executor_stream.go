@@ -277,6 +277,7 @@ attemptLoop:
 						select {
 						case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 						case <-ctx.Done():
+							reporter.PublishFailure(ctx, ctx.Err())
 							return
 						}
 					}
@@ -286,6 +287,7 @@ attemptLoop:
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Payload: tail[i]}:
 					case <-ctx.Done():
+						reporter.PublishFailure(ctx, ctx.Err())
 						return
 					}
 				}

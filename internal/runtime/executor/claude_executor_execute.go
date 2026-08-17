@@ -237,9 +237,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		commitClaudeDiagnostics(diagnosticsState, claudeMessageIDFromSSE(data))
 		lines := bytes.Split(data, []byte("\n"))
 		for i, line := range lines {
-			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
-			}
 			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
 			if errRestore != nil {
 				errRestore = fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore)
@@ -248,10 +245,18 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			}
 			lines[i] = restoredLine
 		}
+		// Publish usage only after every line was restored successfully. A
+		// failure above returns early, so the first Publish here can never lock
+		// the record to success for a request that actually errored (see the
+		// once-based UsageReporter semantics in usage_helpers.go).
+		for _, line := range lines {
+			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
+				reporter.Publish(ctx, detail)
+			}
+		}
 		data = bytes.Join(lines, []byte("\n"))
 	} else {
 		commitClaudeDiagnostics(diagnosticsState, claudeMessageIDFromResponse(data))
-		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 		var errRestore error
 		data, errRestore = restoreClaudeOAuthToolNamesFromResponse(data, oauthToolNamesReverseMap)
 		if errRestore != nil {
@@ -259,6 +264,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			helps.RecordAPIResponseError(ctx, e.cfg, errRestore)
 			return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errRestore)
 		}
+		// Publish usage only after the restore succeeded, so a failed restore
+		// returns before the success-publish can lock the record (the deferred
+		// TrackFailure in Execute then correctly records it as an error).
+		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 	}
 	data = e.restoreResponseModel(data, req.Model)
 	cacheClaudeThinkingReplayResponse(ctx, replayScope, data)

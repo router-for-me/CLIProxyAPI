@@ -1,0 +1,110 @@
+package executor
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+)
+
+// captureOpenAICompatUsagePlugin captures usage records emitted for
+// openai-compatibility providers so tests can assert classification (Failed
+// true/false) without a full Postgres wiring.
+type captureOpenAICompatUsagePlugin struct {
+	records chan usage.Record
+}
+
+func (p *captureOpenAICompatUsagePlugin) HandleUsage(_ context.Context, record usage.Record) {
+	if p == nil || record.Provider != "openai-compatibility" {
+		return
+	}
+	select {
+	case p.records <- record:
+	default:
+	}
+}
+
+// TestOpenAICompatStreamCancelPublishesFailure guards the Class A fix: an
+// upstream SSE stream that is cancelled mid-stream (client disconnect before
+// any [DONE]) must be recorded as a failed attempt (record.Failed == true),
+// so the flusher routes it to usage_errors instead of usage_events.
+//
+// Prior to the fix, the streaming goroutine's unconditional deferred success
+// publish (streamUsage.Publish / EnsurePublished) could claim
+// UsageReporter.once with Failed=false before the cancellation was recorded,
+// sending the aborted request to Recent Events instead of Errors.
+func TestOpenAICompatStreamCancelPublishesFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("httptest server does not support Flusher")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Emit one usage-less chunk, then hang until the request context is
+		// cancelled — emulating an upstream that never sends [DONE].
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		flusher.Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	plugin := &captureOpenAICompatUsagePlugin{records: make(chan usage.Record, 8)}
+	usage.RegisterPlugin(plugin)
+
+	executorObj := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{Name: "compat"}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url":     server.URL + "/v1",
+			"api_key":      "test",
+			"compat_name":  "compat",
+			"provider_key": "compat",
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	result, errExecute := executorObj.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6",
+		Payload: []byte(`{"model":"gpt-5.6","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+		Metadata:     map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:usage-cancel"},
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream error: %v", errExecute)
+	}
+
+	// Cancel the request context shortly after the stream begins, emulating a
+	// client disconnect mid-stream (before any [DONE]).
+	time.AfterFunc(50*time.Millisecond, cancel)
+
+	for chunk := range result.Chunks {
+		// A context-cancellation error chunk is expected on this path; any
+		// other error is a real failure.
+		if chunk.Err != nil && !errors.Is(chunk.Err, context.Canceled) {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+	}
+
+	select {
+	case record := <-plugin.records:
+		if !record.Failed {
+			t.Fatalf("stream record Failed = false; want true (cancelled mid-stream): %+v", record)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for usage record")
+	}
+}

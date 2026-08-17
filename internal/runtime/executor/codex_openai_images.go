@@ -155,10 +155,6 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 		case "response.output_item.done":
 			collectCodexOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
 		case "response.completed":
-			if detail, ok := helps.ParseCodexUsage(eventData); ok {
-				reporter.Publish(ctx, detail)
-			}
-			publishCodexImageToolUsage(ctx, reporter, body, eventData)
 			results, createdAt, usageRaw, firstMeta, errExtract := codexExtractImageResults(eventData, outputItemsByIndex, outputItemsFallback)
 			if errExtract != nil {
 				return resp, errExtract
@@ -170,6 +166,14 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 			if errOutput != nil {
 				return resp, errOutput
 			}
+			// Publish usage/image-tool usage only after every transform above
+			// succeeded, so a failure returns before the success-publish can
+			// lock the record (the deferred TrackFailure then records the
+			// error instead of a success event).
+			if detail, ok := helps.ParseCodexUsage(eventData); ok {
+				reporter.Publish(ctx, detail)
+			}
+			publishCodexImageToolUsage(ctx, reporter, body, eventData)
 			return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 		}
 	}
@@ -284,10 +288,6 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 					return
 				}
 			case "response.completed":
-				if detail, ok := helps.ParseCodexUsage(eventData); ok {
-					reporter.Publish(ctx, detail)
-				}
-				publishCodexImageToolUsage(ctx, reporter, body, eventData)
 				results, _, usageRaw, _, errExtract := codexExtractImageResults(eventData, outputItemsByIndex, outputItemsFallback)
 				if errExtract != nil {
 					sendError(errExtract)
@@ -303,6 +303,13 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 						return
 					}
 				}
+				// Publish usage/image-tool usage only after the transforms above
+				// succeeded, so a failure returns before the success-publish can
+				// lock the record (see UsageReporter once semantics).
+				if detail, ok := helps.ParseCodexUsage(eventData); ok {
+					reporter.Publish(ctx, detail)
+				}
+				publishCodexImageToolUsage(ctx, reporter, body, eventData)
 				return
 			}
 		}
@@ -437,8 +444,6 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
-			streamUsage.Publish(ctx, reporter)
-			reporter.EnsurePublished(ctx)
 		}()
 
 		buffer := make([]byte, 32*1024)
@@ -454,6 +459,7 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
 				case <-ctx.Done():
+					reporter.PublishFailure(ctx, ctx.Err())
 					return
 				}
 			}
@@ -466,6 +472,11 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 					case <-ctx.Done():
 					}
 				}
+				// Publish success only on the normal EOF path; any non-EOF error
+				// or cancellation above already published a failure via the
+				// once-based reporter, so this is a no-op there.
+				streamUsage.Publish(ctx, reporter)
+				reporter.EnsurePublished(ctx)
 				return
 			}
 		}

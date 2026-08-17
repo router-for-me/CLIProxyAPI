@@ -88,6 +88,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
+					reporter.PublishFailure(ctx, ctx.Err())
 					return false
 				}
 			}

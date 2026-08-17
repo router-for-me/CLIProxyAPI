@@ -443,7 +443,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		var param any
 		var streamUsage helps.StreamUsageBuffer
 		var seenDone bool
-		defer streamUsage.Publish(ctx, reporter)
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -483,6 +482,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
+					reporter.PublishFailure(ctx, ctx.Err())
 					return
 				}
 			}
@@ -507,6 +507,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
+					reporter.PublishFailure(ctx, ctx.Err())
 					return
 				}
 			}
@@ -607,7 +608,6 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
-			reporter.EnsurePublished(ctx)
 		}()
 		buffer := make([]byte, 32*1024)
 		for {
@@ -618,6 +618,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
 				case <-ctx.Done():
+					reporter.PublishFailure(ctx, ctx.Err())
 					return
 				}
 			}
@@ -630,6 +631,10 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 					case <-ctx.Done():
 					}
 				}
+				// Publish success only on the normal EOF path; any non-EOF error
+				// or cancellation above already published a failure via the
+				// once-based reporter, so this EnsurePublished is a no-op there.
+				reporter.EnsurePublished(ctx)
 				return
 			}
 		}
