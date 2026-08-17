@@ -1554,6 +1554,18 @@ type claudeMCPAliasResolver struct {
 	servers map[string]struct{}
 }
 
+type claudeMCPAliasRestoreError struct {
+	error
+}
+
+func (e claudeMCPAliasRestoreError) Unwrap() error {
+	return e.error
+}
+
+func (claudeMCPAliasRestoreError) IsRequestScoped() bool {
+	return true
+}
+
 func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResolver {
 	resolver := claudeMCPAliasResolver{
 		exact:   reverseMap,
@@ -1667,7 +1679,7 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return matchedOriginal, true, nil
 	}
 	if matchCount > 1 {
-		return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: matched multiple declared aliases", name)
+		return "", false, claudeMCPAliasRestoreError{fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: matched multiple declared aliases", name)}
 	}
 
 	parts, validAlias := parseClaudeMCPAlias(normalizedName)
@@ -1722,10 +1734,10 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return matchedOriginal, true, nil
 	}
 	if matchCount > 1 {
-		return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: semantic suffix matches multiple declared tools", name)
+		return "", false, claudeMCPAliasRestoreError{fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: semantic suffix matches multiple declared tools", name)}
 	}
 
-	return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: no unique request-local match", name)
+	return "", false, claudeMCPAliasRestoreError{fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: no unique request-local match", name)}
 }
 
 // reverseRemapOAuthToolNames reverses the tool name mapping for non-stream responses

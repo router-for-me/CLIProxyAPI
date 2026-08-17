@@ -2,12 +2,14 @@ package executor
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
 
@@ -343,15 +345,57 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, test.alias))
-			if _, errReverse := reverseRemapOAuthToolNames(response, reverseMap); errReverse == nil || !strings.Contains(errReverse.Error(), test.wantError) {
+			_, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+			if errReverse == nil || !strings.Contains(errReverse.Error(), test.wantError) {
 				t.Fatalf("reverseRemapOAuthToolNames() error = %v, want %q", errReverse, test.wantError)
+			}
+			var requestErr cliproxyexecutor.RequestScopedError
+			if !errors.As(errReverse, &requestErr) || !requestErr.IsRequestScoped() {
+				t.Fatalf("reverseRemapOAuthToolNames() error = %T %v, want request-scoped", errReverse, errReverse)
 			}
 
 			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, test.alias))
-			if _, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap); errStream == nil || !strings.Contains(errStream.Error(), test.wantError) {
+			_, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+			if errStream == nil || !strings.Contains(errStream.Error(), test.wantError) {
 				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v, want %q", errStream, test.wantError)
 			}
+			requestErr = nil
+			if !errors.As(errStream, &requestErr) || !requestErr.IsRequestScoped() {
+				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %T %v, want request-scoped", errStream, errStream)
+			}
 		})
+	}
+}
+
+func TestReverseRemapOAuthToolNamesMarksTrailingMarkupFailureRequestScoped(t *testing.T) {
+	const alias = "mcp__hmzqrngkulqv__xuo7jlxlpzee_clear_thinking"
+	malformedAlias := alias + "</parameter>\n<parameter name=\"merge\""
+	reverseMap := map[string]string{alias: "clear_thinking"}
+
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, malformedAlias))
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse == nil {
+		t.Fatal("reverseRemapOAuthToolNames() error = nil, want fail-closed alias error")
+	}
+	if !bytes.Equal(restored, response) {
+		t.Fatalf("reverseRemapOAuthToolNames() returned modified response: %s", restored)
+	}
+	var requestErr cliproxyexecutor.RequestScopedError
+	if !errors.As(errReverse, &requestErr) || !requestErr.IsRequestScoped() {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %T %v, want request-scoped", errReverse, errReverse)
+	}
+
+	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, malformedAlias))
+	restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+	if errStream == nil {
+		t.Fatal("reverseRemapOAuthToolNamesFromStreamLine() error = nil, want fail-closed alias error")
+	}
+	if !bytes.Equal(restoredLine, line) {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() returned modified line: %s", restoredLine)
+	}
+	requestErr = nil
+	if !errors.As(errStream, &requestErr) || !requestErr.IsRequestScoped() {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %T %v, want request-scoped", errStream, errStream)
 	}
 }
 
