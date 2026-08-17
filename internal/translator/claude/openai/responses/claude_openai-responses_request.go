@@ -125,6 +125,11 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	// Stream
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
+	// Service Tier -> Speed
+	if st := root.Get("service_tier"); st.Type == gjson.String && st.String() == "priority" {
+		out, _ = sjson.SetBytes(out, "speed", "fast")
+	}
+
 	// System-level inputs become canonical top-level Claude system blocks in
 	// source order: instructions first, then every input item whose role is
 	// system or developer. Each source block stays a separate Claude block and

@@ -14,6 +14,7 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 
 	requestRetry := 0
+	disableCooling := true
 	h := NewHandlerWithoutConfigFilePath(&config.Config{
 		OpenAICompatibility: []config.OpenAICompatibility{
 			{
@@ -26,7 +27,7 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 					{Name: "mimo-v2.5", Alias: ""},
 				},
 				SupportPromptCacheKey: true,
-				DisableCooling:        true,
+				DisableCooling:        &disableCooling,
 				RequestRetry:          &requestRetry,
 			},
 		},

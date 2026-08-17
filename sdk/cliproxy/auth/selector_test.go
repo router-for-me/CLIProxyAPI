@@ -779,6 +779,75 @@ func TestSessionAffinitySelector_SameSessionSameAuth(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_ThinkingSuffixVariantsPreserveBindingAndRelease(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelector(fallback)
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+		{ID: "auth-c"},
+	}
+
+	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+
+	first, errFirst := selector.Pick(context.Background(), "anthropic", "claude-sonnet-4-5", opts, auths)
+	if errFirst != nil {
+		t.Fatalf("first Pick() error = %v", errFirst)
+	}
+	if first == nil {
+		t.Fatalf("first Pick() returned nil")
+	}
+
+	// Suffix variant claude-sonnet-4-5(high) should reuse the exact same auth binding
+	second, errSecond := selector.Pick(context.Background(), "anthropic", "claude-sonnet-4-5(high)", opts, auths)
+	if errSecond != nil {
+		t.Fatalf("second Pick() error = %v", errSecond)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("second Pick() auth.ID = %q, want %q (thinking suffix variant should keep session stickiness)", second.ID, first.ID)
+	}
+
+	// Third request with claude-sonnet-4-5(medium) should also reuse the same auth
+	third, errThird := selector.Pick(context.Background(), "anthropic", "claude-sonnet-4-5(medium)", opts, auths)
+	if errThird != nil {
+		t.Fatalf("third Pick() error = %v", errThird)
+	}
+	if third.ID != first.ID {
+		t.Fatalf("third Pick() auth.ID = %q, want %q (thinking suffix variant should keep session stickiness)", third.ID, first.ID)
+	}
+
+	// Failure on a thinking-suffix variant (with explicit metadata) should properly release the session binding
+	optsWithMetadata := cliproxyexecutor.Options{
+		OriginalRequest: payload,
+		Metadata: map[string]any{
+			cliproxyexecutor.SessionAffinityProviderMetadataKey: "anthropic",
+			cliproxyexecutor.SessionAffinityModelMetadataKey:    "claude-sonnet-4-5(high)",
+		},
+	}
+	selector.OnResult(Result{
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-5(high)",
+		AuthID:   first.ID,
+		Success:  false,
+		Error:    &Error{Code: "rate_limited", Message: "rate limited"},
+		Options:  optsWithMetadata,
+	})
+
+	// After release, next pick should reselect using fallback selector
+	next, errNext := selector.Pick(context.Background(), "anthropic", "claude-sonnet-4-5", opts, auths)
+	if errNext != nil {
+		t.Fatalf("next Pick() error = %v", errNext)
+	}
+	if next.ID == first.ID {
+		t.Fatalf("next Pick() auth.ID = %q, should have reselected a different auth after failure release", next.ID)
+	}
+}
+
 func TestSessionAffinitySelector_WeightedBindingRebindsAfterWeightBecomesZero(t *testing.T) {
 	t.Parallel()
 
@@ -2130,4 +2199,131 @@ func TestSessionAffinitySelectorUsesRequestPayloadWhenOriginalRequestMissing(t *
 	if second.ID != first.ID {
 		t.Fatalf("request-only conversation changed auth from %q to %q", first.ID, second.ID)
 	}
+}
+
+func TestSessionCache_StopConcurrent(t *testing.T) {
+	t.Parallel()
+	for iter := 0; iter < 100; iter++ {
+		cache := NewSessionCache(time.Minute)
+		var wg sync.WaitGroup
+		for i := 0; i < 20; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				cache.Stop()
+			}()
+		}
+		wg.Wait()
+	}
+}
+
+type mockStoppableSelector struct {
+	stopped bool
+}
+
+func (m *mockStoppableSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	return nil, nil
+}
+
+func (m *mockStoppableSelector) Stop() {
+	m.stopped = true
+}
+
+func TestManagerSetSelectorStopsReplacedStoppableSelector(t *testing.T) {
+	t.Parallel()
+	mockSelector := &mockStoppableSelector{}
+	manager := NewManager(nil, mockSelector, nil)
+
+	manager.SetSelector(&RoundRobinSelector{})
+
+	if !mockSelector.stopped {
+		t.Fatal("expected previous StoppableSelector to be stopped when replaced via SetSelector")
+	}
+}
+
+type zeroSizeSelectorA struct {
+	stopped *bool
+}
+
+func (z zeroSizeSelectorA) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	return nil, nil
+}
+
+func (z zeroSizeSelectorA) Stop() {
+	if z.stopped != nil {
+		*z.stopped = true
+	}
+}
+
+type zeroSizeSelectorB struct{}
+
+func (z zeroSizeSelectorB) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	return nil, nil
+}
+
+func TestManagerSetSelectorDifferentZeroSizedSelectors(t *testing.T) {
+	t.Parallel()
+	stoppedA := false
+	selA := zeroSizeSelectorA{stopped: &stoppedA}
+	selB := zeroSizeSelectorB{}
+
+	manager := NewManager(nil, selA, nil)
+	manager.SetSelector(selB)
+
+	if !stoppedA {
+		t.Fatal("expected zeroSizeSelectorA to be stopped when replaced by zeroSizeSelectorB")
+	}
+	if manager.Selector() != selB {
+		t.Fatalf("expected manager selector to be selB, got %#v", manager.Selector())
+	}
+}
+
+type uncomparableSelector struct {
+	fn func()
+}
+
+func (u uncomparableSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	return nil, nil
+}
+
+func TestManagerSetSelectorUncomparableTypes(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+
+	sel1 := uncomparableSelector{fn: func() {}}
+	sel2 := uncomparableSelector{fn: func() {}}
+
+	// Setting uncomparable types must not panic
+	manager.SetSelector(sel1)
+	manager.SetSelector(sel2)
+	manager.SetSelector(nil)
+}
+
+func TestManagerSetSelectorSameInstanceDoesNotStop(t *testing.T) {
+	t.Parallel()
+	mockSelector := &mockStoppableSelector{}
+	manager := NewManager(nil, mockSelector, nil)
+
+	// Setting the same instance should be a no-op and not call Stop
+	manager.SetSelector(mockSelector)
+	if mockSelector.stopped {
+		t.Fatal("setting the same selector instance unexpectedly called Stop")
+	}
+}
+
+func TestManagerSetSelectorConcurrent(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				sel := &mockStoppableSelector{}
+				manager.SetSelector(sel)
+			}
+		}()
+	}
+	wg.Wait()
 }

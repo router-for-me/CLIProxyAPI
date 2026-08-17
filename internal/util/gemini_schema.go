@@ -2,6 +2,7 @@
 package util
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -26,9 +27,13 @@ const placeholderReasonDescription = "Brief explanation of why you are calling t
 
 type jsonSchemaCleanOptions struct {
 	addPlaceholder                    bool
+	antigravitySemantics              bool
+	removeToolTitle                   bool
 	removeGeminiMetadata              bool
 	flattenUnions                     bool
 	forceEnumStringType               bool
+	dropAllEnums                      bool
+	dropBooleanEnums                  bool
 	preserveAdditionalPropertiesFalse bool
 }
 
@@ -36,10 +41,20 @@ type jsonSchemaCleanOptions struct {
 // It handles unsupported keywords, type flattening, and schema simplification while preserving
 // semantic information as description hints and adding placeholders required by VALIDATED mode.
 func CleanJSONSchemaForAntigravity(jsonStr string) string {
+	return CleanJSONSchemaForAntigravityTool(jsonStr, true)
+}
+
+// CleanJSONSchemaForAntigravityTool transforms an Antigravity function schema. The private
+// backend accepts enum members only as strings, but the declared type still controls the JSON
+// type of generated function arguments, so numeric and boolean types must not be rewritten.
+// requirePlaceholder is used only for Claude VALIDATED mode.
+func CleanJSONSchemaForAntigravityTool(jsonStr string, requirePlaceholder bool) string {
 	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{
-		addPlaceholder:      true,
-		flattenUnions:       true,
-		forceEnumStringType: true,
+		addPlaceholder:       requirePlaceholder,
+		antigravitySemantics: true,
+		removeToolTitle:      !requirePlaceholder,
+		flattenUnions:        true,
+		dropAllEnums:         true,
 	})
 }
 
@@ -47,16 +62,19 @@ func CleanJSONSchemaForAntigravity(jsonStr string) string {
 // compatibility rewrites that would alter the client's structured output contract.
 //
 // Sanitization policy:
-//   - Passthrough: type, properties, items, required, description, enum, union structures (anyOf/oneOf),
-//     and additionalProperties: false (which Antigravity natively enforces as a closed-object constraint).
-//   - Description hints + deletion: unsupported constraints (minLength, maxLength, pattern, minItems,
-//     maxItems, uniqueItems, format, default, examples).
+//   - Passthrough: type, properties, items, required, description, enum, nullable, and
+//     additionalProperties: false (which Antigravity natively enforces for response schemas).
+//   - Description hints + deletion: unsupported or accepted-but-ignored constraints.
 //   - Flattened: allOf merged into properties/required.
-//   - Dropped: $schema, $defs, definitions, const (converted to enum first), $ref (converted to hint),
-//     $id, propertyNames, patternProperties, conditional schemas (if/then/else), non-false additionalProperties,
-//     and x-* extensions.
+//   - Projected: anyOf/oneOf select the strongest branch; null branches become nullable:true.
+//   - Resolved: local $ref targets are inlined before $defs/definitions are removed.
+//   - Dropped: unresolved $ref (after a hint), metadata, unsupported object-key constraints,
+//     conditional keywords (after non-conflicting properties are retained), and x-* extensions.
 func CleanJSONSchemaForAntigravityResponse(jsonStr string) string {
 	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{
+		antigravitySemantics:              true,
+		flattenUnions:                     true,
+		dropBooleanEnums:                  true,
 		preserveAdditionalPropertiesFalse: true,
 	})
 }
@@ -74,14 +92,21 @@ func CleanJSONSchemaForGemini(jsonStr string) string {
 // cleanJSONSchema performs the core cleaning operations on the JSON schema.
 func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	// Phase 1: Convert and add hints
-	jsonStr = convertRefsToHints(jsonStr)
+	if options.antigravitySemantics {
+		jsonStr = inlineLocalRefs(jsonStr)
+	}
+	jsonStr = convertRefsToHints(jsonStr, options.antigravitySemantics)
 	jsonStr = convertConstToEnum(jsonStr)
 	jsonStr = convertEnumValuesToStrings(jsonStr, options.forceEnumStringType)
 	jsonStr = addEnumHints(jsonStr)
+	jsonStr = dropIgnoredEnumsToHints(jsonStr, options)
 	if !options.preserveAdditionalPropertiesFalse {
 		jsonStr = addAdditionalPropertiesHints(jsonStr)
 	}
-	jsonStr = moveConstraintsToDescription(jsonStr)
+	jsonStr = moveConstraintsToDescription(jsonStr, options)
+	if options.antigravitySemantics {
+		jsonStr = moveNotToDescription(jsonStr)
+	}
 
 	// Phase 2: Flatten complex structures
 	jsonStr = mergeConditionals(jsonStr)
@@ -89,7 +114,7 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	if options.flattenUnions {
 		jsonStr = flattenAnyOfOneOf(jsonStr)
 	}
-	jsonStr = flattenTypeArrays(jsonStr)
+	jsonStr = flattenTypeArrays(jsonStr, options.antigravitySemantics)
 
 	// Phase 3: Cleanup
 	jsonStr = removeUnsupportedKeywords(jsonStr, options)
@@ -97,6 +122,10 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 		// Gemini schema cleanup: remove nullable/title and placeholder-only fields.
 		jsonStr = removeKeywords(jsonStr, []string{"nullable", "title"})
 		jsonStr = removePlaceholderFields(jsonStr)
+	} else if options.removeToolTitle {
+		// Legacy non-VALIDATED Antigravity requests used the Gemini cleaner, which drops title.
+		// Keep that harmless metadata policy without losing Antigravity's native nullable support.
+		jsonStr = removeKeywords(jsonStr, []string{"title"})
 	}
 	jsonStr = cleanupRequiredFields(jsonStr)
 	// Phase 4: Add placeholder for empty object schemas (Claude VALIDATED mode requirement)
@@ -193,28 +222,151 @@ func removePlaceholderFields(jsonStr string) string {
 	return jsonStr
 }
 
-// convertRefsToHints converts $ref to description hints (Lazy Hint strategy).
-func convertRefsToHints(jsonStr string) string {
+// inlineLocalRefs resolves JSON Pointer references against the original schema before definition
+// containers are stripped. Each expansion receives its own copy, sibling keywords override the
+// referenced definition, and cycles terminate as a typed hint instead of recursing forever.
+func inlineLocalRefs(jsonStr string) string {
+	if !strings.Contains(jsonStr, `"$ref"`) {
+		return jsonStr
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(jsonStr))
+	decoder.UseNumber()
+	var root any
+	if err := decoder.Decode(&root); err != nil {
+		return jsonStr
+	}
+
+	resolved := resolveLocalRefs(root, root, make(map[string]bool))
+	out, err := json.Marshal(resolved)
+	if err != nil {
+		return jsonStr
+	}
+	return string(out)
+}
+
+func resolveLocalRefs(root, value any, active map[string]bool) any {
+	switch node := value.(type) {
+	case []any:
+		out := make([]any, len(node))
+		for i, item := range node {
+			out[i] = resolveLocalRefs(root, item, active)
+		}
+		return out
+	case map[string]any:
+		ref, hasRef := node["$ref"].(string)
+		if hasRef && strings.HasPrefix(ref, "#/") {
+			if target, ok := resolveJSONPointer(root, ref); ok {
+				if active[ref] {
+					return cyclicRefFallback(node, target, ref)
+				}
+				active[ref] = true
+				resolvedTarget := resolveLocalRefs(root, target, active)
+				delete(active, ref)
+				if targetMap, okTarget := resolvedTarget.(map[string]any); okTarget {
+					out := make(map[string]any, len(targetMap)+len(node))
+					for key, item := range targetMap {
+						out[key] = item
+					}
+					for key, item := range node {
+						if key == "$ref" {
+							continue
+						}
+						out[key] = resolveLocalRefs(root, item, active)
+					}
+					return out
+				}
+			}
+		}
+
+		out := make(map[string]any, len(node))
+		for key, item := range node {
+			out[key] = resolveLocalRefs(root, item, active)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func resolveJSONPointer(root any, ref string) (any, bool) {
+	current := root
+	for _, rawPart := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
+		part := strings.ReplaceAll(strings.ReplaceAll(rawPart, "~1", "/"), "~0", "~")
+		switch node := current.(type) {
+		case map[string]any:
+			var ok bool
+			current, ok = node[part]
+			if !ok {
+				return nil, false
+			}
+		case []any:
+			index, err := strconv.Atoi(part)
+			if err != nil || index < 0 || index >= len(node) {
+				return nil, false
+			}
+			current = node[index]
+		default:
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+func cyclicRefFallback(node map[string]any, target any, ref string) map[string]any {
+	out := make(map[string]any, len(node)+2)
+	if targetMap, ok := target.(map[string]any); ok {
+		for _, key := range []string{"type", "nullable", "description"} {
+			if value, exists := targetMap[key]; exists {
+				out[key] = value
+			}
+		}
+	}
+	for key, value := range node {
+		if key != "$ref" {
+			out[key] = value
+		}
+	}
+	name := refName(ref)
+	hint := "See: " + name
+	if description, _ := out["description"].(string); description != "" {
+		out["description"] = mergeHint(description, hint)
+	} else {
+		out["description"] = hint
+	}
+	return out
+}
+
+func refName(ref string) string {
+	if index := strings.LastIndex(ref, "/"); index >= 0 && index+1 < len(ref) {
+		return strings.ReplaceAll(strings.ReplaceAll(ref[index+1:], "~1", "/"), "~0", "~")
+	}
+	return ref
+}
+
+// convertRefsToHints retains sibling keywords and converts only unresolved or external references
+// to descriptions. Local references have already been expanded by inlineLocalRefs.
+func convertRefsToHints(jsonStr string, preserveSiblings bool) string {
 	paths := findPaths(jsonStr, "$ref")
 	sortByDepth(paths)
 
 	for _, p := range paths {
 		refVal := gjson.Get(jsonStr, p).String()
-		defName := refVal
-		if idx := strings.LastIndex(refVal, "/"); idx >= 0 {
-			defName = refVal[idx+1:]
-		}
+		defName := refName(refVal)
 
 		parentPath := trimSuffix(p, ".$ref")
 		hint := fmt.Sprintf("See: %s", defName)
-		if existing := gjson.Get(jsonStr, descriptionPath(parentPath)).String(); existing != "" {
-			hint = fmt.Sprintf("%s (%s)", existing, hint)
+		if !preserveSiblings {
+			if existing := gjson.Get(jsonStr, descriptionPath(parentPath)).String(); existing != "" {
+				hint = fmt.Sprintf("%s (%s)", existing, hint)
+			}
+			replacement := `{"type":"object","description":""}`
+			replacementBytes, _ := sjson.SetBytes([]byte(replacement), "description", hint)
+			jsonStr = setRawAt(jsonStr, parentPath, string(replacementBytes))
+			continue
 		}
-
-		replacement := `{"type":"object","description":""}`
-		replacementBytes, _ := sjson.SetBytes([]byte(replacement), "description", hint)
-		replacement = string(replacementBytes)
-		jsonStr = setRawAt(jsonStr, parentPath, replacement)
+		jsonStr, _ = sjson.Delete(jsonStr, p)
+		jsonStr = appendHint(jsonStr, parentPath, hint)
 	}
 	return jsonStr
 }
@@ -235,8 +387,8 @@ func convertConstToEnum(jsonStr string) string {
 }
 
 // convertEnumValuesToStrings ensures all enum values use the string representation required by
-// Gemini's proto schema. Tool schemas also require a string type, while response schemas preserve
-// their declared type because the upstream decoder uses it to select the emitted JSON value type.
+// Gemini's proto schema. The declared type remains independent: Antigravity uses it to choose the
+// emitted JSON type on both response and function-argument paths.
 func convertEnumValuesToStrings(jsonStr string, forceStringType bool) string {
 	for _, p := range findPaths(jsonStr, "enum") {
 		arr := gjson.Get(jsonStr, p)
@@ -280,6 +432,25 @@ func addEnumHints(jsonStr string) string {
 	return jsonStr
 }
 
+// Antigravity does not enforce enum on function arguments and ignores boolean response enums.
+// Preserve the advisory values in description, but do not leave an unenforced constraint in the
+// schema contract. Response enums for string, number, and integer remain native constraints.
+func dropIgnoredEnumsToHints(jsonStr string, options jsonSchemaCleanOptions) string {
+	for _, path := range findPaths(jsonStr, "enum") {
+		parentPath := trimSuffix(path, ".enum")
+		shouldDrop := options.dropAllEnums || (options.dropBooleanEnums && gjson.Get(jsonStr, joinPath(parentPath, "type")).String() == "boolean")
+		if !shouldDrop {
+			continue
+		}
+		enum := gjson.Get(jsonStr, path)
+		if enum.IsArray() && len(enum.Array()) == 1 {
+			jsonStr = appendHint(jsonStr, parentPath, "Allowed: "+enum.Array()[0].String())
+		}
+		jsonStr, _ = sjson.Delete(jsonStr, path)
+	}
+	return jsonStr
+}
+
 func addAdditionalPropertiesHints(jsonStr string) string {
 	for _, p := range findPaths(jsonStr, "additionalProperties") {
 		if gjson.Get(jsonStr, p).Type == gjson.False {
@@ -295,9 +466,18 @@ var unsupportedConstraints = []string{
 	"default", "examples", // Claude rejects these in VALIDATED mode
 }
 
-func moveConstraintsToDescription(jsonStr string) string {
-	pathsByField := findPathsByFields(jsonStr, unsupportedConstraints)
-	for _, key := range unsupportedConstraints {
+func constraintKeywords(options jsonSchemaCleanOptions) []string {
+	keywords := append([]string(nil), unsupportedConstraints...)
+	if options.antigravitySemantics {
+		keywords = append(keywords, "minimum", "maximum", "multipleOf")
+	}
+	return keywords
+}
+
+func moveConstraintsToDescription(jsonStr string, options jsonSchemaCleanOptions) string {
+	constraints := constraintKeywords(options)
+	pathsByField := findPathsByFields(jsonStr, constraints)
+	for _, key := range constraints {
 		for _, p := range pathsByField[key] {
 			val := gjson.Get(jsonStr, p)
 			if !val.Exists() || val.IsObject() || val.IsArray() {
@@ -309,6 +489,17 @@ func moveConstraintsToDescription(jsonStr string) string {
 			}
 			jsonStr = appendHint(jsonStr, parentPath, fmt.Sprintf("%s: %s", key, val.String()))
 		}
+	}
+	return jsonStr
+}
+
+func moveNotToDescription(jsonStr string) string {
+	for _, path := range findPaths(jsonStr, "not") {
+		value := gjson.Get(jsonStr, path)
+		if !value.Exists() || isPropertyDefinition(trimSuffix(path, ".not")) {
+			continue
+		}
+		jsonStr = appendHint(jsonStr, trimSuffix(path, ".not"), "not: "+value.Raw)
 	}
 	return jsonStr
 }
@@ -367,28 +558,56 @@ func mergeAllOf(jsonStr string) string {
 		parentPath := trimSuffix(p, ".allOf")
 
 		for _, item := range allOf.Array() {
-			if props := item.Get("properties"); props.IsObject() {
-				props.ForEach(func(key, value gjson.Result) bool {
-					destPath := joinPath(parentPath, "properties."+escapeGJSONPathKey(key.String()))
-					updated, _ := sjson.SetRawBytes([]byte(jsonStr), destPath, []byte(value.Raw))
-					jsonStr = string(updated)
-					return true
-				})
+			if !item.IsObject() {
+				continue
 			}
-			if req := item.Get("required"); req.IsArray() {
-				reqPath := joinPath(parentPath, "required")
-				current := getStrings(jsonStr, reqPath)
-				for _, r := range req.Array() {
-					if s := r.String(); !contains(current, s) {
-						current = append(current, s)
+			item.ForEach(func(key, value gjson.Result) bool {
+				field := key.String()
+				switch field {
+				case "required":
+					if !value.IsArray() {
+						return true
 					}
+					reqPath := joinPath(parentPath, "required")
+					current := getStrings(jsonStr, reqPath)
+					for _, required := range value.Array() {
+						if name := required.String(); !contains(current, name) {
+							current = append(current, name)
+						}
+					}
+					updated, _ := sjson.SetBytes([]byte(jsonStr), reqPath, current)
+					jsonStr = string(updated)
+				case "if", "then", "else", "allOf":
+					// Conditional applicability cannot be represented by the upstream schema.
+				default:
+					destination := joinPath(parentPath, escapeGJSONPathKey(field))
+					jsonStr = mergeMissingSchemaAtPath(jsonStr, destination, value)
 				}
-				updated, _ := sjson.SetBytes([]byte(jsonStr), reqPath, current)
-				jsonStr = string(updated)
-			}
+				return true
+			})
 		}
 		jsonStr, _ = sjson.Delete(jsonStr, p)
 	}
+	return jsonStr
+}
+
+// mergeMissingSchemaAtPath recursively fills absent fields without replacing any existing
+// definition. A parent schema is the canonical definition; allOf and conditional branches may
+// enrich gaps in it, but can never replace it with a narrower branch shell.
+func mergeMissingSchemaAtPath(jsonStr, destination string, incoming gjson.Result) string {
+	existing := gjson.Get(jsonStr, destination)
+	if !existing.Exists() {
+		updated, _ := sjson.SetRawBytes([]byte(jsonStr), destination, []byte(incoming.Raw))
+		return string(updated)
+	}
+	if !existing.IsObject() || !incoming.IsObject() {
+		return jsonStr
+	}
+	incoming.ForEach(func(key, value gjson.Result) bool {
+		child := joinPath(destination, escapeGJSONPathKey(key.String()))
+		jsonStr = mergeMissingSchemaAtPath(jsonStr, child, value)
+		return true
+	})
 	return jsonStr
 }
 
@@ -409,6 +628,17 @@ func flattenAnyOfOneOf(jsonStr string) string {
 			items := arr.Array()
 			bestIdx, allTypes := selectBest(items)
 			selected := items[bestIdx].Raw
+			hasNull := false
+			for _, item := range items {
+				if item.Get("type").String() == "null" {
+					hasNull = true
+					break
+				}
+			}
+			if hasNull && items[bestIdx].Get("type").String() != "null" {
+				updated, _ := sjson.SetBytes([]byte(selected), "nullable", true)
+				selected = string(updated)
+			}
 
 			if parentDesc != "" {
 				selected = mergeDescriptionRaw(selected, parentDesc)
@@ -452,7 +682,7 @@ func selectBest(items []gjson.Result) (bestIdx int, types []string) {
 	return
 }
 
-func flattenTypeArrays(jsonStr string) string {
+func flattenTypeArrays(jsonStr string, preserveNativeNullable bool) string {
 	paths := findPaths(jsonStr, "type")
 	sortByDepth(paths)
 
@@ -490,15 +720,20 @@ func flattenTypeArrays(jsonStr string) string {
 		}
 
 		if hasNull {
+			if preserveNativeNullable {
+				updated, _ = sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "nullable"), true)
+				jsonStr = string(updated)
+				jsonStr = appendHint(jsonStr, parentPath, "(nullable)")
+				continue
+			}
+
 			parts := splitGJSONPath(p)
 			if len(parts) >= 3 && parts[len(parts)-3] == "properties" {
 				fieldNameEscaped := parts[len(parts)-2]
 				fieldName := unescapeGJSONPathKey(fieldNameEscaped)
 				objectPath := strings.Join(parts[:len(parts)-3], ".")
 				nullableFields[objectPath] = append(nullableFields[objectPath], fieldName)
-
-				propPath := joinPath(objectPath, "properties."+fieldNameEscaped)
-				jsonStr = appendHint(jsonStr, propPath, "(nullable)")
+				jsonStr = appendHint(jsonStr, joinPath(objectPath, "properties."+fieldNameEscaped), "(nullable)")
 			}
 		}
 	}
@@ -511,12 +746,11 @@ func flattenTypeArrays(jsonStr string) string {
 		}
 
 		var filtered []string
-		for _, r := range req.Array() {
-			if !contains(fields, r.String()) {
-				filtered = append(filtered, r.String())
+		for _, required := range req.Array() {
+			if !contains(fields, required.String()) {
+				filtered = append(filtered, required.String())
 			}
 		}
-
 		if len(filtered) == 0 {
 			jsonStr, _ = sjson.Delete(jsonStr, reqPath)
 		} else {
@@ -528,12 +762,15 @@ func flattenTypeArrays(jsonStr string) string {
 }
 
 func removeUnsupportedKeywords(jsonStr string, options jsonSchemaCleanOptions) string {
-	keywords := append(unsupportedConstraints,
+	keywords := append(constraintKeywords(options),
 		"$schema", "$defs", "definitions", "const", "$ref", "$id", "additionalProperties",
 		"propertyNames", "patternProperties", // Gemini doesn't support these schema keywords
 		"if", "then", "else",
 		"$comment", "enumDescriptions", "enumTitles", "prefill", "deprecated", // Schema metadata fields unsupported by Gemini
 	)
+	if options.antigravitySemantics {
+		keywords = append(keywords, "not")
+	}
 
 	deletePaths := make([]string, 0)
 	pathsByField := findPathsByFields(jsonStr, keywords)
@@ -746,7 +983,9 @@ func walkForFields(value gjson.Result, path string, fields map[string]struct{}, 
 }
 
 func sortByDepth(paths []string) {
-	sort.Slice(paths, func(i, j int) bool { return len(paths[i]) > len(paths[j]) })
+	sort.SliceStable(paths, func(i, j int) bool {
+		return len(splitGJSONPath(paths[i])) > len(splitGJSONPath(paths[j]))
+	})
 }
 
 func trimSuffix(path, suffix string) string {

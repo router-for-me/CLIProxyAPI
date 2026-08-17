@@ -181,8 +181,21 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			if isCredentialScopedError(errExecute) {
 				result.CredentialScope = true
 			}
+			action, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.runtimeConfigSnapshot())
+			applyRequestScopedActionToResult(action, okAction, &result)
 			m.reportHomeResult(execCtx, result, preparedAuth)
 			lastErr = errExecute
+			if okAction {
+				if isRequestScopedStop(action, okAction) {
+					releaseAttempt()
+					selection.End("request_stopped")
+					return cliproxyexecutor.Response{}, wrapRequestStopError(errExecute)
+				}
+				if result.CredentialScope {
+					break
+				}
+				continue
+			}
 			if isRequestInvalidError(errExecute) {
 				releaseAttempt()
 				selection.End("request_invalid")

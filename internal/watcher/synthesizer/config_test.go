@@ -81,7 +81,7 @@ func TestConfigSynthesizer_GeminiKeys(t *testing.T) {
 		{
 			name: "gemini key disable cooling",
 			geminiKeys: []config.GeminiKey{
-				{APIKey: "test-key-123", Prefix: "team-a", DisableCooling: true},
+				{APIKey: "test-key-123", Prefix: "team-a", DisableCooling: boolPointer(true)},
 			},
 			wantLen: 1,
 			validate: func(t *testing.T, auths []*coreauth.Auth) {
@@ -227,7 +227,7 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 					APIKey:                  "sk-ant-api-xxx",
 					Prefix:                  "main",
 					BaseURL:                 "https://api.anthropic.com",
-					DisableCooling:          true,
+					DisableCooling:          boolPointer(true),
 					RebuildMidSystemMessage: true,
 					Models: []config.ClaudeModel{
 						{Name: "claude-3-opus"},
@@ -312,7 +312,7 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 					ProxyURL:       "http://proxy.local",
 					Websockets:     true,
 					AlphaSearch:    true,
-					DisableCooling: true,
+					DisableCooling: boolPointer(true),
 				},
 			},
 		},
@@ -359,7 +359,7 @@ func TestConfigSynthesizer_XAIKeys(t *testing.T) {
 				ProxyURL:       "http://proxy.local",
 				Websockets:     true,
 				AlphaSearch:    true,
-				DisableCooling: true,
+				DisableCooling: boolPointer(true),
 				Headers:        map[string]string{"X-Custom": "value"},
 				Models:         []config.XAIModel{{Name: "grok-4.5", Alias: "grok-latest"}},
 			}},
@@ -446,7 +446,7 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 				{
 					Name:           "CustomProvider",
 					BaseURL:        "https://custom.api.com",
-					DisableCooling: true,
+					DisableCooling: boolPointer(true),
 					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
 						{APIKey: "key-1"},
 						{APIKey: "key-2"},
@@ -1030,6 +1030,68 @@ func TestConfigSynthesizer_RequestRetry(t *testing.T) {
 		}
 		if actual != expected {
 			t.Fatalf("%s request_retry = %v, want %v", key, actual, expected)
+		}
+	}
+}
+
+func TestConfigSynthesizer_RequestScopedErrors(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	rules := []config.RequestScopedErrorRule{
+		{
+			Status: 400,
+			Match:  []string{"maximum_context_length"},
+			Action: "stop",
+		},
+	}
+
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GeminiKey: []config.GeminiKey{
+				{APIKey: "gemini-key", RequestScopedErrors: rules},
+			},
+			InteractionsKey: []config.GeminiKey{
+				{APIKey: "interactions-key", RequestScopedErrors: rules},
+			},
+			ClaudeKey: []config.ClaudeKey{
+				{APIKey: "claude-key", RequestScopedErrors: rules},
+			},
+			CodexKey: []config.CodexKey{
+				{APIKey: "codex-key", BaseURL: "https://codex.api", RequestScopedErrors: rules},
+			},
+			XAIKey: []config.CodexKey{
+				{APIKey: "xai-key", BaseURL: "https://xai.api", RequestScopedErrors: rules},
+			},
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:                "compat",
+					BaseURL:             "https://compat.api",
+					RequestScopedErrors: rules,
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "compat-key"},
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+
+	for _, auth := range auths {
+		if auth.Metadata == nil {
+			t.Fatalf("auth %s has nil metadata", auth.ID)
+		}
+		val, exists := auth.Metadata["request_scoped_errors"]
+		if !exists {
+			t.Fatalf("auth %s missing request_scoped_errors in metadata", auth.ID)
+		}
+		extracted, ok := val.([]config.RequestScopedErrorRule)
+		if !ok || len(extracted) != 1 || extracted[0].Action != "stop" {
+			t.Fatalf("auth %s unexpected request_scoped_errors: %#v", auth.ID, val)
 		}
 	}
 }

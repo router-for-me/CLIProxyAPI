@@ -284,17 +284,9 @@ CLIProxyAPIに触発されたNext.js実装。インストールと使用が簡�
 
 OmniRouteはマルチプロバイダーLLM向けのAIゲートウェイです：スマートルーティング、負荷分散、リトライ、フォールバックを備えたOpenAI互換エンドポイント。ポリシー、レート制限、キャッシュ、可観測性を追加して、信頼性が高くコストを意識した推論を実現します。
 
-### [Playful Proxy API Panel (PPAP)](https://github.com/daishuge/playful-proxy-api-panel)
-
-上流に近い使い方を維持する公開CLIProxyAPI互換フォーク兼管理パネルです。内蔵の使用量統計を復元し、キャッシュヒット率、初回バイト待ち時間、TPSの記録、Docker向けのセルフホスト手順を追加しています。
-
 ### [Codex Switch](https://github.com/9ycrooked/CodexSwitch)
 
 Tauri 2 + Vue 3で構築された、複数のOpenAI Codexデスクトップアカウントを管理するためのツールです。保存済みのChatGPT/Codex認証プロファイルを切り替え、5時間および週次クォータ使用量をリアルタイムで確認し、tokenの状態を検証し、現在のアカウント詳細を表示し、手動コピーなしでauth.jsonファイルをインポートまたは保存できます。
-
-### [Alex](https://github.com/madhavajay/alex)
-
-CLIProxyAPIに着想を得た、オプションUI付きのローカルRust LLMプロキシ。コーディングエージェントを複数プロバイダーへルーティングし、ローカルトレース、スクリプト可能なミドルウェア、複数サブスクリプションの統合、フェイルオーバー、インスタントメッセンジャー経由の再認証に対応します。
 
 > [!NOTE]
 > CLIProxyAPIの移植版またはそれに触発されたプロジェクトを開発した場合は、PRを送ってこのリストに追加してください。
