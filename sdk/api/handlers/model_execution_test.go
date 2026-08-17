@@ -253,6 +253,40 @@ func TestExecuteModelCarriesEntryAndExitProtocols(t *testing.T) {
 	}
 }
 
+func TestExecuteModelRoutesClaudeProtocolToCodexProvider(t *testing.T) {
+	model := "claude-codex-route-model"
+	requestBody := []byte(fmt.Sprintf(`{"model":%q,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`, model))
+	executor := &modelExecutionCaptureExecutor{}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{})
+
+	resp, errMsg := handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol: constant.Claude,
+		ExitProtocol:  constant.Claude,
+		Model:         model,
+		Body:          requestBody,
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() error = %+v", errMsg)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	gotReq, gotOpts := executor.captured()
+	if gotReq.Model != model {
+		t.Fatalf("executor model = %q, want %q", gotReq.Model, model)
+	}
+	if string(gotReq.Payload) != string(requestBody) {
+		t.Fatalf("executor payload = %q, want %q", gotReq.Payload, requestBody)
+	}
+	if gotOpts.SourceFormat != sdktranslator.FormatClaude {
+		t.Fatalf("SourceFormat = %q, want %q", gotOpts.SourceFormat, sdktranslator.FormatClaude)
+	}
+	if gotOpts.ResponseFormat != sdktranslator.FormatClaude {
+		t.Fatalf("ResponseFormat = %q, want %q", gotOpts.ResponseFormat, sdktranslator.FormatClaude)
+	}
+}
+
 func TestExecuteModelSkipsOriginatingPluginInterceptors(t *testing.T) {
 	model := "model-execution-skip-origin-model"
 	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))

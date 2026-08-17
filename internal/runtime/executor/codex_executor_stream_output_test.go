@@ -18,6 +18,56 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestCodexExecutorExecuteTranslatesClaudeRequestAndResponse(t *testing.T) {
+	var requestBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		requestBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]},"output_index":0}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.4","output":[],"usage":{"input_tokens":8,"output_tokens":1,"total_tokens":9}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","max_tokens":64,"messages":[{"role":"user","content":"Say ok"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatClaude,
+		ResponseFormat: sdktranslator.FormatClaude,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if got := gjson.GetBytes(requestBody, "model").String(); got != "gpt-5.4" {
+		t.Fatalf("upstream model = %q, want gpt-5.4; body=%s", got, requestBody)
+	}
+	if got := gjson.GetBytes(requestBody, "input.0.content.0.text").String(); got != "Say ok" {
+		t.Fatalf("upstream input text = %q, want Say ok; body=%s", got, requestBody)
+	}
+	for _, field := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+		if gjson.GetBytes(requestBody, field).Exists() {
+			t.Fatalf("upstream field %q should be omitted; body=%s", field, requestBody)
+		}
+	}
+	if got := gjson.GetBytes(resp.Payload, "type").String(); got != "message" {
+		t.Fatalf("response type = %q, want message; payload=%s", got, resp.Payload)
+	}
+	if got := gjson.GetBytes(resp.Payload, "content.0.text").String(); got != "ok" {
+		t.Fatalf("response text = %q, want ok; payload=%s", got, resp.Payload)
+	}
+}
+
 func TestCodexExecutorExecute_NonEmptyCompletionOutputHydratesMissingItemID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
