@@ -306,9 +306,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 	// Handle generation config from OpenAI format
 	if maxOutputTokens := root.Get("max_output_tokens"); maxOutputTokens.Exists() {
-		genConfig := []byte(`{"maxOutputTokens":0}`)
-		genConfig, _ = sjson.SetBytes(genConfig, "maxOutputTokens", maxOutputTokens.Int())
-		out, _ = sjson.SetRawBytes(out, "generationConfig", genConfig)
+		out, _ = sjson.SetBytes(out, "generationConfig.maxOutputTokens", maxOutputTokens.Int())
 	}
 
 	// Handle temperature if present
