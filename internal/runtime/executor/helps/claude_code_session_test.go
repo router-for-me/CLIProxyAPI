@@ -72,6 +72,21 @@ func TestClaudeCodeExecutionScopeAcceptsLowercaseHeaderMapKeys(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeAgentIDHeaderValueKeepsAbsenceRaw(t *testing.T) {
+	if got := ClaudeCodeAgentIDHeaderValue(context.Background(), http.Header{}); got != "" {
+		t.Fatalf("ClaudeCodeAgentIDHeaderValue(absent) = %q, want empty", got)
+	}
+	headers := http.Header{}
+	headers.Set(ClaudeCodeAgentHeader, "agent-raw")
+	if got := ClaudeCodeAgentIDHeaderValue(context.Background(), headers); got != "agent-raw" {
+		t.Fatalf("ClaudeCodeAgentIDHeaderValue() = %q, want agent-raw", got)
+	}
+	// The sentinel stays confined to ExtractClaudeCodeAgentID.
+	if got := ExtractClaudeCodeAgentID(context.Background(), http.Header{}); got != ClaudeCodeMainAgentID {
+		t.Fatalf("ExtractClaudeCodeAgentID(absent) = %q, want %q", got, ClaudeCodeMainAgentID)
+	}
+}
+
 func TestClaudeCodeExecutionScopeIsolatesAgents(t *testing.T) {
 	rootHeaders := http.Header{}
 	rootHeaders.Set(ClaudeCodeSessionHeader, "session-agents")

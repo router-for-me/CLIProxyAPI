@@ -786,6 +786,17 @@ func applyClaudeHeadersWithNativeProfile(
 		}
 		identityHeader("X-Claude-Code-Session-Id", sessionID)
 	}
+	// X-Claude-Code-Agent-Id separates subagent traffic inside one session. The
+	// client sends it only for subagents, so there is no fallback: relay the
+	// incoming value when present and add nothing otherwise. Direct Anthropic
+	// keeps its measured header set untouched; Anthropic-compatible custom
+	// upstreams (often a chained CPA) need the header, or every subagent
+	// collapses into the main-agent execution scope downstream.
+	if !isAnthropicBase {
+		if agentID := helps.ClaudeCodeAgentIDHeaderValue(r.Context(), incomingHeaders); agentID != "" {
+			r.Header.Set(helps.ClaudeCodeAgentHeader, agentID)
+		}
+	}
 	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
 	// identityHeader prefers the incoming value for a confirmed client, so a confirmed
 	// helper keeps its own native request ID and this fresh UUID only covers a caller

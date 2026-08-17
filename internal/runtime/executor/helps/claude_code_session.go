@@ -29,10 +29,18 @@ func ExtractClaudeCodeSessionID(ctx context.Context, payload []byte, headers htt
 
 // ExtractClaudeCodeAgentID resolves the Claude Code agent ID and uses a stable sentinel for the root agent.
 func ExtractClaudeCodeAgentID(ctx context.Context, headers http.Header) string {
-	if agentID := claudeCodeHeader(ctx, headers, ClaudeCodeAgentHeader); agentID != "" {
+	if agentID := ClaudeCodeAgentIDHeaderValue(ctx, headers); agentID != "" {
 		return agentID
 	}
 	return ClaudeCodeMainAgentID
+}
+
+// ClaudeCodeAgentIDHeaderValue returns the incoming Claude Code agent ID verbatim,
+// or an empty string when the request carries none. Relay paths need the raw value:
+// the client only sends the header for subagents, so absence must stay absence
+// rather than becoming the root-agent sentinel.
+func ClaudeCodeAgentIDHeaderValue(ctx context.Context, headers http.Header) string {
+	return claudeCodeHeader(ctx, headers, ClaudeCodeAgentHeader)
 }
 
 // ClaudeCodeExecutionScope returns the stable root-session and agent identity used by Codex execution state.
