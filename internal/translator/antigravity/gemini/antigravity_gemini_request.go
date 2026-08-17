@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -125,11 +126,11 @@ func ConvertAntigravityRequestToGemini(modelName string, inputRawJSON []byte, st
 						declarationJSON, _ = sjson.SetBytes(declarationJSON, "name", mappedName)
 						declarationsChanged = true
 					}
-					if parameters := declaration.Get("parameters"); parameters.Exists() && parameters.Raw != "" && parameters.Raw != "null" {
+					if parameters := declaration.Get("parameters"); parameters.Exists() && parameters.Raw != "" && parameters.Raw != "null" && parameters.Raw != "{}" {
 						declarationJSON, _ = sjson.SetRawBytes(declarationJSON, "parametersJsonSchema", []byte(parameters.Raw))
 						declarationJSON, _ = sjson.DeleteBytes(declarationJSON, "parameters")
 						declarationsChanged = true
-					} else if !declaration.Get("parametersJsonSchema").Exists() {
+					} else if pjs := declaration.Get("parametersJsonSchema"); !pjs.Exists() || pjs.Raw == "" || pjs.Raw == "{}" || pjs.Raw == "null" {
 						declarationJSON, _ = sjson.SetRawBytes(declarationJSON, "parametersJsonSchema", []byte(`{"type":"object","properties":{}}`))
 						declarationsChanged = true
 					}
@@ -139,20 +140,26 @@ func ConvertAntigravityRequestToGemini(modelName string, inputRawJSON []byte, st
 				if declarationsChanged {
 					var errSet error
 					toolJSON, errSet = sjson.SetRawBytes(toolJSON, key, translatorcommon.JoinRawArray(declarationItems))
-					if errSet == nil {
+					if errSet != nil {
+						log.Warnf("failed to normalize function declarations in tool %d: %v", toolIndex.Int(), errSet)
+					} else {
 						toolChanged = true
 					}
 				}
 			}
-			if toolChanged {
-				toolsChanged = true
-			}
+			toolsChanged = toolsChanged || toolChanged
 			toolItems = append(toolItems, toolJSON)
 			return true
 		})
 		if toolsChanged {
 			rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.tools", translatorcommon.JoinRawArray(toolItems))
 		}
+		rawJSON = removeEmptyGeminiFunctionTools(rawJSON)
+	}
+	rawJSON = rewriteGeminiFunctionNames(rawJSON, functionNameMap)
+
+	if strings.Contains(strings.ToLower(modelName), "claude") {
+		rawJSON = SanitizeAntigravityClaudeGeminiRequestSignatures(modelName, rawJSON)
 	}
 
 	// Copy all fields from request to root
