@@ -8,6 +8,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	codexclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/claude"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -22,6 +23,11 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("codex")
+	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
+		if errValidate := codexclaude.ValidateClaudeRequestForCodex(req.Payload); errValidate != nil {
+			return cliproxyexecutor.Response{}, newCodexClaudeValidationError("token-count request", errValidate)
+		}
+	}
 	body := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false, helps.APIKeyModelIsCompat(req))
 
 	body, err := helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())

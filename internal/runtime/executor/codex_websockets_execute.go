@@ -44,7 +44,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false)
+	originalTranslated, body, errTranslate := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false)
+	if errTranslate != nil {
+		return resp, errTranslate
+	}
 
 	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
