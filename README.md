@@ -288,17 +288,9 @@ Never stop coding. Smart routing to FREE & low-cost AI models with automatic fal
 
 OmniRoute is an AI gateway for multi-provider LLMs: an OpenAI-compatible endpoint with smart routing, load balancing, retries, and fallbacks. Add policies, rate limits, caching, and observability for reliable, cost-aware inference.
 
-### [Playful Proxy API Panel (PPAP)](https://github.com/daishuge/playful-proxy-api-panel)
-
-A public CLIProxyAPI-compatible fork and bundled management panel. It keeps upstream-style usage while restoring built-in usage statistics, adding cache hit rate, first-byte latency, TPS tracking, and Docker-oriented self-hosted installation docs.
-
 ### [Codex Switch](https://github.com/9ycrooked/CodexSwitch)
 
 This is a tool built with Tauri 2 + Vue 3 for managing multiple OpenAI Codex desktop accounts. Switch between saved ChatGPT/Codex certification profiles, check 5-hour and weekly quota usage in real time, verify token health, view active account details, and import or save auth.json files without manual copying.
-
-### [Alex](https://github.com/madhavajay/alex)
-
-A local Rust LLM proxy with an optional UI, inspired by CLIProxyAPI. It routes coding agents across providers with local trace capture, scriptable middleware, subscription bonding, failover, and messenger-assisted re-authentication.
 
 > [!NOTE]  
 > If you have developed a port of CLIProxyAPI or a project inspired by it, please open a PR to add it to this list.

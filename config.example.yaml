@@ -298,6 +298,16 @@ nonstream-keepalive-interval: 0
 #     prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
+#     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
+#       - status: 400        # HTTP status code to match
+#         match:             # optional: string contains matching
+#           - "maximum_context_length"
+#           - "context_length_exceeded"
+#         match-regexr:      # optional: regular expression matching
+#           - "maximum_context_length$"
+#           - "^context_length_exceeded"
+#         action: "stop"     # "stop" (return error, no cooling), "stop-and-cooldown" (return error and cool down),
+#                            # "continue" (try next credential, no cooling), "continue-and-cooldown" (try next credential and cool down)
 #     base-url: "https://generativelanguage.googleapis.com"
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -327,6 +337,11 @@ nonstream-keepalive-interval: 0
 #     prefix: "native" # optional: require calls like "native/gemini-3-pro-preview" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
+#     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
+#       - status: 400
+#         match:
+#           - "invalid_argument"
+#         action: "continue"
 #     base-url: "https://generativelanguage.googleapis.com"
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -349,6 +364,11 @@ nonstream-keepalive-interval: 0
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
+#     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
+#       - status: 400
+#         match:
+#           - "context_window_exceeded"
+#         action: "stop-and-cooldown"
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
 #     alpha-search: false # optional: allow this key to serve /v1/alpha/search via base-url + /alpha/search
 #     headers:
@@ -383,6 +403,11 @@ nonstream-keepalive-interval: 0
 #     prefix: "xai" # optional: require calls like "xai/grok-4.5" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
+#     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
+#       - status: 400
+#         match:
+#           - "rate_limit_exceeded"
+#         action: "continue-and-cooldown"
 #     base-url: "https://api.x.ai/v1" # xAI-compatible Responses API endpoint
 #     websockets: true # optional: use the xAI upstream websocket transport for downstream websocket requests
 #     headers:
@@ -410,6 +435,11 @@ nonstream-keepalive-interval: 0
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
+#     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
+#       - status: 400
+#         match:
+#           - "prompt is too long"
+#         action: "stop"
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -493,6 +523,15 @@ nonstream-keepalive-interval: 0
 #     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     request-retry: 3 # optional: per-provider override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
+#     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
+#       - status: 400
+#         match:
+#           - "maximum_context_length"
+#           - "context_length_exceeded"
+#         match-regexr:
+#           - "maximum_context_length$"
+#           - "^context_length_exceeded"
+#         action: "stop" # "stop", "stop-and-cooldown", "continue", "continue-and-cooldown"
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:

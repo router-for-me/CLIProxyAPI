@@ -112,6 +112,14 @@ func addRequestRetryToMetadata(requestRetry *int, metadata map[string]any) {
 	metadata["request_retry"] = *requestRetry
 }
 
+// addRequestScopedErrorsToMetadata copies per-credential request-scoped error rules into metadata.
+func addRequestScopedErrorsToMetadata(rules []config.RequestScopedErrorRule, metadata map[string]any) {
+	if len(rules) == 0 || metadata == nil {
+		return
+	}
+	metadata["request_scoped_errors"] = rules
+}
+
 // addConfigHeadersToAttrs adds header configuration to auth attributes.
 // Headers are prefixed with "header:" in the attributes map.
 func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string) {
