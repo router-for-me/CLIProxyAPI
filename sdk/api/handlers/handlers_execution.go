@@ -8,11 +8,55 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"golang.org/x/net/context"
 )
+
+// recordPreExecutionFailure records a usage_errors row for a request that
+// failed before any provider executor ran. The executors record their own
+// failures via a deferred TrackFailure, so this must only be called on
+// branches where no executor was invoked; otherwise attempts would be
+// double-counted in the dashboard Errors feed.
+func recordPreExecutionFailure(ctx context.Context, provider, model, alias string, errMsg *interfaces.ErrorMessage) {
+	if errMsg == nil || errMsg.Error == nil {
+		return
+	}
+	helps.PublishPreExecutionFailure(ctx, provider, model, alias, errMsg.StatusCode, errMsg.Error.Error())
+}
+
+// recordAuthManagerFailure records the conductor-level failure when it is
+// certain the executor never ran (credential selection failed before any
+// attempt, or a post-auth interceptor terminated the request). When an
+// executor did run, its deferred TrackFailure already recorded the failure, so
+// re-recording here would double-count the attempt.
+func recordAuthManagerFailure(ctx context.Context, provider, model, alias string, err error) {
+	if !isPreExecutionError(err) {
+		return
+	}
+	statusCode := clienterror.HTTPStatusFromError(err)
+	helps.PublishPreExecutionFailure(ctx, provider, model, alias, statusCode, err.Error())
+}
+
+// isPreExecutionError reports whether err is produced only before any provider
+// executor runs. Conductor credential-selection failures (no usable auth,
+// unknown provider/credential policy) qualify. Executor-produced errors
+// (including auth-terminated and upstream status errors) are already recorded
+// by the executor's deferred TrackFailure and must not be re-recorded here.
+func isPreExecutionError(err error) bool {
+	var authErr *coreauth.Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
+	}
+	switch authErr.Code {
+	case "auth_not_found", "auth_unavailable", "provider_not_found", "invalid_auth_kind", "invalid_credential_policy":
+		return true
+	}
+	return false
+}
 
 // PluginExecutorHost executes a routed request with a specific plugin executor.
 type PluginExecutorHost interface {
@@ -45,6 +89,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
 	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
+		recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, modelName, errMsg)
 		return nil, nil, errMsg
 	}
 	if routeDecision.ExecutorPluginID != "" {
@@ -73,6 +118,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	}
 	providers, normalizedModel, errMsg := h.providersForExecution(ctx, executionModel, originalRequestedModel, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
+		recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, errMsg)
 		return nil, nil, errMsg
 	}
 	if autoRoute != nil {
@@ -112,10 +158,12 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
 	if interceptErr != nil {
 		lifecycle.completeError(ctx, interceptErr)
+		recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, interceptErr)
 		return nil, nil, interceptErr
 	}
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
+		recordAuthManagerFailure(ctx, providers[0], originalRequestedModel, normalizedModel, err)
 		err = enrichAuthSelectionError(h, ctx, err, providers, normalizedModel)
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
@@ -154,6 +202,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	}
 	providers, normalizedModel, errMsg := h.providersForExecution(ctx, executionModel, originalRequestedModel, false, routeDecision, execOptions)
 	if errMsg != nil {
+		recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, errMsg)
 		return nil, nil, errMsg
 	}
 	if autoRoute != nil {
@@ -195,6 +244,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	}
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
+		recordAuthManagerFailure(ctx, providers[0], originalRequestedModel, normalizedModel, err)
 		err = enrichAuthSelectionError(h, ctx, err, providers, normalizedModel)
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
@@ -210,11 +260,15 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 
 func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryProtocol, responseProtocol, modelName, originalRequestedModel string, rawJSON []byte, alt, executorPluginID string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	if h.AuthManager != nil && h.AuthManager.HomeEnabled() {
-		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: fmt.Errorf("plugin executor routing is unavailable while Home is enabled")}
+		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: fmt.Errorf("plugin executor routing is unavailable while Home is enabled")}
+		recordPreExecutionFailure(ctx, "", originalRequestedModel, modelName, errMsg)
+		return nil, nil, errMsg
 	}
 	host := h.pluginExecutorHost()
 	if host == nil {
-		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("plugin executor host is unavailable")}
+		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("plugin executor host is unavailable")}
+		recordPreExecutionFailure(ctx, "", originalRequestedModel, modelName, errMsg)
+		return nil, nil, errMsg
 	}
 	req, opts := h.pluginExecutorRequest(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, false, execOptions)
 	lifecycle := h.newRequestLifecycleTracker(ctx, entryProtocol, modelName, originalRequestedModel, false, opts.Metadata, execOptions.SkipInterceptorPluginID)

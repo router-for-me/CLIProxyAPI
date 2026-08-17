@@ -287,6 +287,57 @@ func normalizeUsageDetailTotal(detail usage.Detail, provider, executorType strin
 	return usage.EnsureTokenBreakdownForProvider(detail, provider, executorType)
 }
 
+// preExecutionFailureRecord builds the usage record for a request failure that
+// occurs before any provider executor runs (e.g. model→provider route
+// resolution, or a forced-provider validation reject). These paths never create
+// a UsageReporter, so without this the failure would never reach
+// usage_errors and the dashboard Errors feed. Executor-level failures are
+// already recorded by the executor's deferred TrackFailure; callers must only
+// use this for branches where no executor was invoked, to avoid double-counting.
+func preExecutionFailureRecord(ctx context.Context, provider, model, alias string, statusCode int, failText string) usage.Record {
+	requestedAt := time.Now()
+	model = strings.TrimSpace(model)
+	if alias == "" {
+		alias = model
+	}
+	clientIP, forwardedFor := clientInfoFromContext(ctx)
+	return usage.Record{
+		Provider:        strings.TrimSpace(provider),
+		Model:           model,
+		Alias:           strings.TrimSpace(alias),
+		RouteModel:      model,
+		APIKey:          APIKeyFromContext(ctx),
+		Source:          resolveUsageSource(nil, APIKeyFromContext(ctx)),
+		ReasoningEffort: usage.ReasoningEffortFromContext(ctx),
+		ClientIP:        clientIP,
+		ForwardedFor:    forwardedFor,
+		RequestID:       internallogging.GetRequestID(ctx),
+		RequestedAt:     requestedAt,
+		Failed:          true,
+		Fail:            usage.Failure{StatusCode: statusCode, Body: failText},
+		Generate:        usage.GenerateFlag(true),
+	}
+}
+
+// PublishPreExecutionFailure records a failed usage record for a request that
+// failed before any provider executor ran (model→provider route resolution,
+// forced-provider validation, pre-auth interceptor rejection). It emits onto
+// the same usage bus the executors use, so the Postgres flusher routes it to
+// usage_errors. When failText is empty the HTTP status text is used; with an
+// empty status as well the call is a no-op.
+func PublishPreExecutionFailure(ctx context.Context, provider, model, alias string, statusCode int, failText string) {
+	if ctx == nil {
+		return
+	}
+	if strings.TrimSpace(failText) == "" {
+		if statusCode <= 0 {
+			return
+		}
+		failText = http.StatusText(statusCode)
+	}
+	usage.PublishRecord(ctx, preExecutionFailureRecord(ctx, provider, model, alias, statusCode, failText))
+}
+
 func hasNonZeroTokenUsage(detail usage.Detail) bool {
 	return detail.InputTokens != 0 ||
 		detail.OutputTokens != 0 ||
