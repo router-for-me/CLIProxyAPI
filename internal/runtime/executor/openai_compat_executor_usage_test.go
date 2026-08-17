@@ -108,3 +108,69 @@ func TestOpenAICompatStreamCancelPublishesFailure(t *testing.T) {
 		t.Fatal("timed out waiting for usage record")
 	}
 }
+
+// TestOpenAICompatStreamHTTP200DataErrorPublishesFailure guards the fix for
+// OpenAI Responses API delivering an {"error":{...}} object inside a still-200
+// SSE data line: the attempt must be recorded as Failed and surfaced as an
+// error chunk, rather than forwarded as a successful stream.
+func TestOpenAICompatStreamHTTP200DataErrorPublishesFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("httptest server does not support Flusher")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"API Malformed and missing params\",\"type\":\"invalid_request_error\",\"code\":400}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	plugin := &captureOpenAICompatUsagePlugin{records: make(chan usage.Record, 8)}
+	usage.RegisterPlugin(plugin)
+
+	executorObj := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{Name: "compat"}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url":     server.URL + "/v1",
+			"api_key":      "test",
+			"compat_name":  "compat",
+			"provider_key": "compat",
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	result, errExecute := executorObj.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6",
+		Payload: []byte(`{"model":"gpt-5.6","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream error: %v", errExecute)
+	}
+
+	sawErrChunk := false
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			sawErrChunk = true
+		}
+	}
+	if !sawErrChunk {
+		t.Fatal("stream did not surface an error chunk for the HTTP 200 data error")
+	}
+
+	select {
+	case record := <-plugin.records:
+		if !record.Failed {
+			t.Fatalf("stream record Failed = false; want true for upstream error-in-200: %+v", record)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for usage record")
+	}
+}

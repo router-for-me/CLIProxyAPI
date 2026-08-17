@@ -476,6 +476,19 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			dataPayload := bytes.TrimSpace(trimmedLine[len("data:"):])
 			isDone := bytes.Equal(dataPayload, []byte("[DONE]"))
 
+			// OpenAI Responses API can deliver an {"error":{...}} object in a
+			// data line while the HTTP status is still 200; record it as a
+			// failed attempt instead of forwarding it as a successful stream.
+			if upstreamErr, ok := streamErrorFromPayload(dataPayload); ok {
+				helps.RecordAPIResponseError(ctx, e.cfg, upstreamErr)
+				reporter.PublishFailure(ctx, upstreamErr)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: upstreamErr}:
+				case <-ctx.Done():
+				}
+				return
+			}
+
 			// OpenAI-compatible streams must use SSE data lines.
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param, claudeInputTokens)
 			for i := range chunks {

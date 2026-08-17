@@ -349,6 +349,17 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if len(payload) == 0 {
 				continue
 			}
+			// A still-200 SSE stream can carry {"error":{code,message}}: treat
+			// it as a failed attempt rather than forwarding it as a success.
+			if upstreamErr, ok := streamErrorFromPayload(payload); ok {
+				helps.RecordAPIResponseError(ctx, e.cfg, upstreamErr)
+				reporter.PublishFailure(ctx, upstreamErr)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: upstreamErr}:
+				case <-ctx.Done():
+				}
+				return
+			}
 			if detail, ok := helps.ParseGeminiStreamUsage(payload); ok {
 				reporter.Publish(ctx, detail)
 			}
@@ -449,6 +460,13 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return resp, err
+	}
+	// The Interactions API can still return an error object inside a 200 body;
+	// treat it as a failed attempt rather than recording a success event.
+	if upstreamErr, ok := streamErrorFromPayload(data); ok {
+		helps.RecordAPIResponseError(ctx, e.cfg, upstreamErr)
+		err = upstreamErr
 		return resp, err
 	}
 	reporter.Publish(ctx, helps.ParseInteractionsUsage(data))
@@ -553,6 +571,19 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 				payload = trimmed
 			}
 			if len(payload) > 0 {
+				// Gemini Interactions / Responses API delivers upstream errors
+				// inside a still-200 SSE stream as {"error":{code,message,...}}.
+				// Detect them here so the attempt is recorded as a failure and
+				// the client sees an error chunk instead of a successful stream.
+				if upstreamErr, ok := streamErrorFromPayload(payload); ok {
+					helps.RecordAPIResponseError(ctx, e.cfg, upstreamErr)
+					reporter.PublishFailure(ctx, upstreamErr)
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: upstreamErr}:
+					case <-ctx.Done():
+					}
+					return false
+				}
 				if detail, ok := helps.ParseInteractionsStreamUsage(payload); ok {
 					reporter.Publish(ctx, detail)
 				}
@@ -878,6 +909,36 @@ func geminiInteractionsSSEDone(frame []byte) bool {
 		}
 	}
 	return sawDoneEvent
+}
+
+// streamErrorFromPayload reports an upstream API error embedded in a
+// (still-200) streamed payload. Providers like Gemini Interactions / Responses
+// API signal invalid requests as {"error":{"code":400,"message":"...",
+// "status":"..."}} inside an HTTP 200 SSE stream rather than a non-2xx HTTP
+// status; callers treat that as a failed attempt. Returns the synthesized
+// statusErr with the upstream code/message, and ok=false when the payload is
+// not an error object.
+func streamErrorFromPayload(payload []byte) (statusErr, bool) {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return statusErr{}, false
+	}
+	root := gjson.ParseBytes(payload)
+	errNode := root.Get("error")
+	if !errNode.Exists() || errNode.Type != gjson.JSON {
+		return statusErr{}, false
+	}
+	msg := strings.TrimSpace(errNode.Get("message").String())
+	if msg == "" {
+		msg = strings.TrimSpace(errNode.Get("status").String())
+	}
+	if msg == "" {
+		return statusErr{}, false
+	}
+	code := int(errNode.Get("code").Int())
+	if code < 400 || code > 599 {
+		code = http.StatusBadRequest
+	}
+	return statusErr{code: code, msg: msg}, true
 }
 
 func geminiAuthLogFields(auth *cliproxyauth.Auth) (string, string, string, string) {
