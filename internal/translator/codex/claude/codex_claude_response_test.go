@@ -150,6 +150,168 @@ func TestConvertCodexResponseToClaude_StreamErrorTypeFallbackMessage(t *testing.
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamResponseFailedClosesBlocksAndTerminates(t *testing.T) {
+	var param any
+	original := []byte(`{"messages":[]}`)
+
+	_ = ConvertCodexResponseToClaude(context.Background(), "", original, nil, []byte(`data: {"type":"response.output_text.delta","delta":"before"}`), &param)
+	failed := ConvertCodexResponseToClaude(context.Background(), "", original, nil, []byte(`data: {"type":"response.failed","response":{"error":{"type":"server_error","message":"upstream failed"}}}`), &param)
+	after := ConvertCodexResponseToClaude(context.Background(), "", original, nil, []byte(`data: {"type":"response.output_text.delta","delta":"after"}`), &param)
+
+	if len(failed) != 1 {
+		t.Fatalf("response.failed chunks = %d, want 1", len(failed))
+	}
+	raw := string(failed[0])
+	stopAt := strings.Index(raw, "event: content_block_stop")
+	errorAt := strings.Index(raw, "event: error")
+	if stopAt < 0 || errorAt < 0 || stopAt > errorAt {
+		t.Fatalf("content block was not closed before error: %s", raw)
+	}
+	if !strings.Contains(raw, `"type":"server_error"`) || !strings.Contains(raw, `"message":"upstream failed"`) {
+		t.Fatalf("nested failure was not preserved: %s", raw)
+	}
+	if len(after) != 0 {
+		t.Fatalf("output after terminal failure = %q, want none", after)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamResponseFailedClosesToolBlock(t *testing.T) {
+	var param any
+	original := []byte(`{"messages":[]}`)
+
+	_ = ConvertCodexResponseToClaude(context.Background(), "", original, nil, []byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_1","name":"lookup"}}`), &param)
+	failed := ConvertCodexResponseToClaude(context.Background(), "", original, nil, []byte(`data: {"type":"response.failed","response":{"error":{"type":"server_error","message":"upstream failed"}}}`), &param)
+
+	if len(failed) != 1 {
+		t.Fatalf("response.failed chunks = %d, want 1", len(failed))
+	}
+	raw := string(failed[0])
+	stopAt := strings.Index(raw, "event: content_block_stop")
+	errorAt := strings.Index(raw, "event: error")
+	if stopAt < 0 || errorAt < 0 || stopAt > errorAt {
+		t.Fatalf("tool block was not closed before error: %s", raw)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamTerminalIsEmittedOnce(t *testing.T) {
+	var param any
+	original := []byte(`{"messages":[]}`)
+	terminal := []byte(`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","usage":{"input_tokens":5,"output_tokens":1},"output":[]}}`)
+
+	first := ConvertCodexResponseToClaude(context.Background(), "", original, nil, terminal, &param)
+	second := ConvertCodexResponseToClaude(context.Background(), "", original, nil, terminal, &param)
+
+	if len(first) != 1 || strings.Count(string(first[0]), "event: message_stop") != 1 {
+		t.Fatalf("first terminal output = %q, want one message_stop", first)
+	}
+	if len(second) != 0 {
+		t.Fatalf("second terminal output = %q, want none", second)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamRefusalUsesRefusalStopReason(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+		[]byte(`data: {"type":"response.refusal.delta","delta":"I cannot help with that."}`),
+		[]byte(`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","status":"completed","usage":{"input_tokens":5,"output_tokens":4},"output":[]}}`),
+		[]byte(`data: {"type":"response.output_text.delta","delta":"after"}`),
+	}
+
+	var param any
+	var output bytes.Buffer
+	for _, chunk := range chunks {
+		for _, part := range ConvertCodexResponseToClaude(context.Background(), "", []byte(`{"messages":[]}`), nil, chunk, &param) {
+			output.Write(part)
+		}
+	}
+	raw := output.String()
+	if !strings.Contains(raw, `"text":"I cannot help with that."`) {
+		t.Fatalf("refusal text missing: %s", raw)
+	}
+	if !strings.Contains(raw, `"stop_reason":"refusal"`) {
+		t.Fatalf("refusal stop reason missing: %s", raw)
+	}
+	if strings.Contains(raw, `"text":"after"`) {
+		t.Fatalf("output continued after message_stop: %s", raw)
+	}
+	if got := strings.Count(raw, "event: message_stop"); got != 1 {
+		t.Fatalf("message_stop count = %d, want 1: %s", got, raw)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamMalformedEventTerminates(t *testing.T) {
+	var param any
+	outputs := ConvertCodexResponseToClaude(context.Background(), "", []byte(`{"messages":[]}`), nil, []byte(`data: {not-json`), &param)
+	if len(outputs) != 1 || !strings.Contains(string(outputs[0]), "event: error") {
+		t.Fatalf("malformed event output = %q, want protocol error", outputs)
+	}
+	after := ConvertCodexResponseToClaude(context.Background(), "", []byte(`{"messages":[]}`), nil, []byte(`data: {"type":"response.output_text.delta","delta":"after"}`), &param)
+	if len(after) != 0 {
+		t.Fatalf("output after malformed terminal event = %q, want none", after)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamValidUnknownMetadataIsIgnored(t *testing.T) {
+	var param any
+	original := []byte(`{"messages":[]}`)
+	chunks := [][]byte{
+		[]byte(`data: null`),
+		[]byte(`data: {"type":"response.metadata","metadata":{"future":true}}`),
+		[]byte(`data: {"type":"response.output_text.delta","delta":"after"}`),
+	}
+
+	var output bytes.Buffer
+	for _, chunk := range chunks {
+		for _, part := range ConvertCodexResponseToClaude(context.Background(), "", original, nil, chunk, &param) {
+			output.Write(part)
+		}
+	}
+	if strings.Contains(output.String(), "event: error") {
+		t.Fatalf("valid unknown metadata produced an error: %s", output.String())
+	}
+	if !strings.Contains(output.String(), `"text":"after"`) {
+		t.Fatalf("stream did not continue after valid unknown metadata: %s", output.String())
+	}
+}
+
+func TestConvertCodexResponseToClaude_ContextManagementAppliedEdits(t *testing.T) {
+	original := []byte(`{"messages":[],"context_management":{"edits":[]}}`)
+	terminal := []byte(`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","stop_reason":"stop","usage":{"input_tokens":5,"output_tokens":1},"output":[]}}`)
+	var param any
+	stream := ConvertCodexResponseToClaude(context.Background(), "", original, nil, terminal, &param)
+	if len(stream) != 1 || !strings.Contains(string(stream[0]), `"context_management":{"applied_edits":[]}`) {
+		t.Fatalf("stream context management missing: %q", stream)
+	}
+
+	nonStream := ConvertCodexResponseToClaudeNonStream(context.Background(), "", original, nil, []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","stop_reason":"stop","usage":{"input_tokens":5,"output_tokens":1},"output":[]}}`), nil)
+	if got := gjson.GetBytes(nonStream, "context_management.applied_edits").Raw; got != "[]" {
+		t.Fatalf("non-stream applied_edits = %s, want []; payload=%s", got, nonStream)
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_ResponseFailed(t *testing.T) {
+	out := ConvertCodexResponseToClaudeNonStream(context.Background(), "", []byte(`{"messages":[]}`), nil, []byte(`{"type":"response.failed","response":{"error":{"type":"server_error","message":"upstream failed"}}}`), nil)
+	if got := gjson.GetBytes(out, "type").String(); got != "error" {
+		t.Fatalf("response type = %q, want error; payload=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "error.type").String(); got != "server_error" {
+		t.Fatalf("error type = %q, want server_error; payload=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "error.message").String(); got != "upstream failed" {
+		t.Fatalf("error message = %q; payload=%s", got, out)
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_RefusalContent(t *testing.T) {
+	out := ConvertCodexResponseToClaudeNonStream(context.Background(), "", []byte(`{"messages":[]}`), nil, []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","status":"completed","usage":{"input_tokens":5,"output_tokens":4},"output":[{"type":"message","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}}`), nil)
+	if got := gjson.GetBytes(out, "content.0.text").String(); got != "I cannot help with that." {
+		t.Fatalf("refusal text = %q; payload=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "stop_reason").String(); got != "refusal" {
+		t.Fatalf("stop_reason = %q, want refusal; payload=%s", got, out)
+	}
+}
+
 func TestConvertCodexResponseToClaude_StreamThinkingWithoutReasoningItemStillIncludesSignatureField(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"messages":[]}`)

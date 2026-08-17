@@ -28,6 +28,8 @@ const codexThinkingSummaryPartSeparator = "\n\n"
 // ConvertCodexResponseToClaudeParams holds parameters for response conversion.
 type ConvertCodexResponseToClaudeParams struct {
 	HasEmittedToolUse      bool
+	HasRefusal             bool
+	Terminal               bool
 	BlockIndex             int
 	HasTextDelta           bool
 	TextBlockOpen          bool
@@ -79,16 +81,26 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			BlockIndex: 0,
 		}
 	}
+	params := (*param).(*ConvertCodexResponseToClaudeParams)
+	if params.Terminal {
+		return [][]byte{}
+	}
 
 	if !bytes.HasPrefix(rawJSON, dataTag) {
 		return [][]byte{}
 	}
 	streamEventRawJSON := bytes.Clone(rawJSON)
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
+	if !gjson.ValidBytes(rawJSON) {
+		params.Terminal = true
+		return [][]byte{codexProtocolError("Malformed Responses stream event JSON.")}
+	}
+	rootResult := gjson.ParseBytes(rawJSON)
+	if !rootResult.IsObject() {
+		return [][]byte{}
+	}
 
 	output := make([]byte, 0, 512)
-	rootResult := gjson.ParseBytes(rawJSON)
-	params := (*param).(*ConvertCodexResponseToClaudeParams)
 
 	typeResult := rootResult.Get("type")
 	typeStr := typeResult.String()
@@ -99,8 +111,12 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	var template []byte
 
 	switch typeStr {
-	case "error":
+	case "error", "response.failed":
+		output = append(output, finalizeCodexThinkingBlock(params)...)
+		output = append(output, stopCodexTextBlock(params)...)
+		output = append(output, closeOpenCodexFunctionCall(params)...)
 		output = append(output, codexStreamErrorToClaudeError(rootResult)...)
+		params.Terminal = true
 	case "keepalive":
 		output = translatorcommon.AppendSSEEventBytes(output, "ping", []byte(`{"type":"ping"}`), 2)
 	case "response.created":
@@ -133,8 +149,9 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		if rootResult.Get("part.type").String() == "output_text" {
 			output = append(output, startCodexTextBlock(params)...)
 		}
-	case "response.output_text.delta":
+	case "response.output_text.delta", "response.refusal.delta":
 		params.HasTextDelta = true
+		params.HasRefusal = params.HasRefusal || typeStr == "response.refusal.delta"
 		output = append(output, finalizeCodexThinkingBlock(params)...)
 		output = append(output, startCodexTextBlock(params)...)
 		template = []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`)
@@ -157,7 +174,11 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		output = appendDeferredCodexStreamEvents(output, originalRequestRawJSON, param)
 		output = append(output, finalizeCodexThinkingBlock(params)...)
 		output = append(output, stopCodexTextBlock(params)...)
-		template, _ = sjson.SetBytes(template, "delta.stop_reason", mapCodexStopReasonToClaude(codexStopReason(responseData), params.HasEmittedToolUse))
+		stopReason := codexStopReason(responseData)
+		if stopReason == "" && params.HasRefusal {
+			stopReason = "refusal"
+		}
+		template, _ = sjson.SetBytes(template, "delta.stop_reason", mapCodexStopReasonToClaude(stopReason, params.HasEmittedToolUse))
 		template = setClaudeStopSequence(template, "delta.stop_sequence", responseData)
 		inputTokens, outputTokens, cachedTokens := extractResponsesUsage(responseData.Get("usage"))
 		template, _ = sjson.SetBytes(template, "usage.input_tokens", inputTokens)
@@ -165,9 +186,13 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		if cachedTokens > 0 {
 			template, _ = sjson.SetBytes(template, "usage.cache_read_input_tokens", cachedTokens)
 		}
+		if gjson.GetBytes(originalRequestRawJSON, "context_management").Exists() {
+			template, _ = sjson.SetRawBytes(template, "context_management.applied_edits", []byte(`[]`))
+		}
 
 		output = translatorcommon.AppendSSEEventBytes(output, "message_delta", template, 2)
 		output = translatorcommon.AppendSSEEventBytes(output, "message_stop", []byte(`{"type":"message_stop"}`), 2)
+		params.Terminal = true
 	case "response.output_item.added":
 		itemResult := rootResult.Get("item")
 		itemType := itemResult.Get("type").String()
@@ -199,23 +224,28 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		itemType := itemResult.Get("type").String()
 		switch itemType {
 		case "message":
-			if params.HasTextDelta {
-				return [][]byte{output}
-			}
 			contentResult := itemResult.Get("content")
 			if !contentResult.Exists() || !contentResult.IsArray() {
 				return [][]byte{output}
 			}
 			var textBuilder strings.Builder
 			contentResult.ForEach(func(_, part gjson.Result) bool {
-				if part.Get("type").String() != "output_text" {
-					return true
-				}
-				if txt := part.Get("text").String(); txt != "" {
-					textBuilder.WriteString(txt)
+				switch part.Get("type").String() {
+				case "output_text":
+					if txt := part.Get("text").String(); txt != "" {
+						textBuilder.WriteString(txt)
+					}
+				case "refusal":
+					params.HasRefusal = true
+					if txt := part.Get("refusal").String(); txt != "" {
+						textBuilder.WriteString(txt)
+					}
 				}
 				return true
 			})
+			if params.HasTextDelta {
+				return [][]byte{output}
+			}
 			text := textBuilder.String()
 			if text == "" {
 				return [][]byte{output}
@@ -281,7 +311,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 
 func shouldDeferCodexStreamEvent(typeStr string, rootResult gjson.Result) bool {
 	switch typeStr {
-	case "error", "keepalive", "response.completed", "response.incomplete", "response.function_call_arguments.delta", "response.function_call_arguments.done":
+	case "error", "response.failed", "keepalive", "response.completed", "response.incomplete", "response.function_call_arguments.delta", "response.function_call_arguments.done":
 		return false
 	case "response.output_item.added", "response.output_item.done":
 		return rootResult.Get("item.type").String() != "function_call"
@@ -311,7 +341,14 @@ func appendDeferredCodexStreamEvents(output []byte, originalRequestRawJSON []byt
 }
 
 func codexStreamErrorToClaudeError(rootResult gjson.Result) []byte {
+	return translatorcommon.AppendSSEEventBytes(nil, "error", codexErrorToClaudeError(rootResult), 2)
+}
+
+func codexErrorToClaudeError(rootResult gjson.Result) []byte {
 	errorResult := rootResult.Get("error")
+	if !errorResult.Exists() || !errorResult.IsObject() {
+		errorResult = rootResult.Get("response.error")
+	}
 	errType := strings.TrimSpace(errorResult.Get("type").String())
 	if errType == "" {
 		errType = strings.TrimSpace(rootResult.Get("error_type").String())
@@ -339,6 +376,12 @@ func codexStreamErrorToClaudeError(rootResult gjson.Result) []byte {
 	out := []byte(`{"type":"error","error":{"type":"api_error","message":""}}`)
 	out, _ = sjson.SetBytes(out, "error.type", errType)
 	out, _ = sjson.SetBytes(out, "error.message", message)
+	return out
+}
+
+func codexProtocolError(message string) []byte {
+	out := []byte(`{"type":"error","error":{"type":"api_error","message":""}}`)
+	out, _ = sjson.SetBytes(out, "error.message", message)
 	return translatorcommon.AppendSSEEventBytes(nil, "error", out, 2)
 }
 
@@ -351,6 +394,9 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 
 	rootResult := gjson.ParseBytes(rawJSON)
 	typeStr := rootResult.Get("type").String()
+	if typeStr == "response.failed" || typeStr == "error" {
+		return codexErrorToClaudeError(rootResult)
+	}
 	if typeStr != "response.completed" && typeStr != "response.incomplete" {
 		return []byte{}
 	}
@@ -371,6 +417,7 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 	}
 
 	hasToolCall := false
+	hasRefusal := false
 	webSearchSeen := make(map[string]struct{})
 	var contentBlocks [][]byte
 
@@ -422,13 +469,18 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 				if content := item.Get("content"); content.Exists() {
 					if content.IsArray() {
 						content.ForEach(func(_, part gjson.Result) bool {
-							if part.Get("type").String() == "output_text" {
-								text := part.Get("text").String()
-								if text != "" {
-									block := []byte(`{"type":"text","text":""}`)
-									block, _ = sjson.SetBytes(block, "text", text)
-									contentBlocks = append(contentBlocks, block)
-								}
+							text := ""
+							switch part.Get("type").String() {
+							case "output_text":
+								text = part.Get("text").String()
+							case "refusal":
+								hasRefusal = true
+								text = part.Get("refusal").String()
+							}
+							if text != "" {
+								block := []byte(`{"type":"text","text":""}`)
+								block, _ = sjson.SetBytes(block, "text", text)
+								contentBlocks = append(contentBlocks, block)
 							}
 							return true
 						})
@@ -471,8 +523,15 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 		out = translatorcommon.SetRawArrayItems(out, "content", contentBlocks)
 	}
 
-	out, _ = sjson.SetBytes(out, "stop_reason", mapCodexStopReasonToClaude(codexStopReason(responseData), hasToolCall))
+	stopReason := codexStopReason(responseData)
+	if stopReason == "" && hasRefusal {
+		stopReason = "refusal"
+	}
+	out, _ = sjson.SetBytes(out, "stop_reason", mapCodexStopReasonToClaude(stopReason, hasToolCall))
 	out = setClaudeStopSequence(out, "stop_sequence", responseData)
+	if gjson.GetBytes(originalRequestRawJSON, "context_management").Exists() {
+		out, _ = sjson.SetRawBytes(out, "context_management.applied_edits", []byte(`[]`))
+	}
 
 	return out
 }
@@ -775,6 +834,20 @@ func appendCodexFunctionCallsFromTerminal(output []byte, params *ConvertCodexRes
 	output = appendCodexFunctionCallQueue(output, params, originalRequestRawJSON)
 
 	clearCodexFunctionCalls(params)
+	return output
+}
+
+func closeOpenCodexFunctionCall(params *ConvertCodexResponseToClaudeParams) []byte {
+	if params == nil {
+		return nil
+	}
+	var output []byte
+	if call := params.ActiveFunctionCall; call != nil && call.Started && !call.Closed {
+		output = appendCodexFunctionCallStop(output, call.BlockIndex)
+		call.Closed = true
+	}
+	clearCodexFunctionCalls(params)
+	params.DeferredStreamEvents = nil
 	return output
 }
 
