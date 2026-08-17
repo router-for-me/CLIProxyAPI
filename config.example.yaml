@@ -159,6 +159,8 @@ error-logs-max-files: 10
 # Snapshots the full server state (config.yaml, auths/ files, and all PG tables)
 # to an S3-compatible object store. Active only when BACKUP_S3_ENDPOINT is set;
 # the /v0/management/backup routes return 503 otherwise.
+# BACKUP_S3_ENDPOINT may be a bare host (minio-style) or an explicit scheme:
+# "https://host" implies SSL on, "http://host" implies SSL off.
 #   BACKUP_S3_ENDPOINT=https://s3.your-cloud.example.com
 #   BACKUP_S3_BUCKET=nixllm-backups
 #   BACKUP_S3_ACCESS_KEY=your_access_key

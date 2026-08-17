@@ -2,11 +2,42 @@ package management
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
+	"runtime/debug"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/backup"
+	log "github.com/sirupsen/logrus"
 )
+
+// recoverBackupHandler converts a panic inside the /backup routes into a
+// documented 500 error response instead of letting the raw panic propagate.
+// The panic value and full panic stack are logged so the root cause is always
+// captured even when the response body cannot reflect it. Call via defer at
+// the top of each /backup handler. If the response has already been committed
+// (e.g. the panic happened during JSON rendering), no second write is attempted.
+func recoverBackupHandler(c *gin.Context, errorType, route string) {
+	if r := recover(); r != nil {
+		stack := string(debug.Stack())
+		// Embed the panic value and stack in the message, not just fields:
+		// LogFormatter only prints a curated set of fields and would silently
+		// drop "panic"/"stack", leaving no way to diagnose the root cause.
+		message := fmt.Sprintf("management %s panicked: %v\npanic stack:\n%s", route, r, stack)
+		log.WithFields(log.Fields{
+			"panic": r,
+			"stack": stack,
+			"route": route,
+		}).Error(message)
+		if c != nil && !c.Writer.Written() {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+				"type":    errorType + "_panic",
+				"message": "internal error while processing backup request",
+			}})
+		}
+	}
+}
 
 // backupRunner is the subset of the backup subsystem the management /backup
 // routes need to list and create snapshots. Kept small for testability.
@@ -49,12 +80,25 @@ func (h *Handler) ListBackups(c *gin.Context) {
 		h.backupNotConfigured(c)
 		return
 	}
+	defer recoverBackupHandler(c, "backup_list", "GET /backup")
 	snaps, err := runner.List(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "backup_list_failed", "message": err.Error()}})
+		h.backupOperationFailed(c, "backup_list_failed", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"snapshots": snaps})
+}
+
+// backupOperationFailed renders a backup-subystem operation error. When the
+// runner reports the S3 client is missing the operation is treated as "backup
+// not configured" (503), mirroring the explicit backupNotConfigured path;
+// otherwise it is a generic 500.
+func (h *Handler) backupOperationFailed(c *gin.Context, errorType string, err error) {
+	if errors.Is(err, backup.ErrS3NotConfigured) {
+		h.backupNotConfigured(c)
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": errorType, "message": err.Error()}})
 }
 
 // CreateBackup triggers a manual full backup (POST /backup). 503 when the
@@ -65,9 +109,10 @@ func (h *Handler) CreateBackup(c *gin.Context) {
 		h.backupNotConfigured(c)
 		return
 	}
+	defer recoverBackupHandler(c, "backup_create", "POST /backup")
 	meta, err := runner.RunBackup(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "backup_failed", "message": err.Error()}})
+		h.backupOperationFailed(c, "backup_failed", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"snapshot": meta})
@@ -83,6 +128,7 @@ func (h *Handler) RestoreBackup(c *gin.Context) {
 		h.backupNotConfigured(c)
 		return
 	}
+	defer recoverBackupHandler(c, "backup_restore", "POST /backup/restore")
 	var req struct {
 		ObjectKey string             `json:"object_key"`
 		Mode      backup.RestoreMode `json:"mode"`
@@ -106,7 +152,7 @@ func (h *Handler) RestoreBackup(c *gin.Context) {
 	}
 	res, err := restorer.RestoreFromS3(c.Request.Context(), req.ObjectKey, req.Mode)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "restore_failed", "message": err.Error()}})
+		h.backupOperationFailed(c, "restore_failed", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"restore": res})

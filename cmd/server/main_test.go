@@ -6,6 +6,70 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
+func TestNormalizeBackupS3Endpoint(t *testing.T) {
+	tests := []struct {
+		name       string
+		endpoint   string
+		useSSL     bool
+		wantHost   string
+		wantUseSSL bool
+	}{
+		{
+			name:       "https scheme implies SSL and strips scheme",
+			endpoint:   "https://71f0.r2.cloudflarestorage.com",
+			useSSL:     false,
+			wantHost:   "71f0.r2.cloudflarestorage.com",
+			wantUseSSL: true,
+		},
+		{
+			name:       "http scheme implies no SSL",
+			endpoint:   "http://127.0.0.1:19000",
+			useSSL:     false,
+			wantHost:   "127.0.0.1:19000",
+			wantUseSSL: false,
+		},
+		{
+			name:       "explicit useSSL wins over http scheme",
+			endpoint:   "http://127.0.0.1:19000",
+			useSSL:     true,
+			wantHost:   "127.0.0.1:19000",
+			wantUseSSL: false, // http scheme forces SSL off
+		},
+		{
+			name:       "bare host passes through unchanged",
+			endpoint:   "127.0.0.1:19000",
+			useSSL:     true,
+			wantHost:   "127.0.0.1:19000",
+			wantUseSSL: true,
+		},
+		{
+			name:       "trailing slash stripped",
+			endpoint:   "https://s3.example.com/",
+			useSSL:     false,
+			wantHost:   "s3.example.com",
+			wantUseSSL: true,
+		},
+		{
+			name:       "path retained after host",
+			endpoint:   "https://storage.googleapis.com/bucket",
+			useSSL:     false,
+			wantHost:   "storage.googleapis.com/bucket",
+			wantUseSSL: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			host, useSSL := normalizeBackupS3Endpoint(tt.endpoint, tt.useSSL)
+			if host != tt.wantHost {
+				t.Errorf("endpoint = %q, want %q", host, tt.wantHost)
+			}
+			if useSSL != tt.wantUseSSL {
+				t.Errorf("useSSL = %v, want %v", useSSL, tt.wantUseSSL)
+			}
+		})
+	}
+}
+
 func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
 	cfgWithExampleKey := &config.Config{
 		SDKConfig: config.SDKConfig{

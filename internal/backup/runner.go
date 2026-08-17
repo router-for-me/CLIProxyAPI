@@ -17,6 +17,12 @@ import (
 // backup.
 var runnerMu sync.Mutex
 
+// ErrS3NotConfigured is returned by Runner operations when the runner was
+// wired without a backing S3 client (or without a collector). Callers can
+// detect it with errors.Is to surface a 503 "backup not configured" instead
+// of a generic 500.
+var ErrS3NotConfigured = errors.New("backup runner: S3 client not configured")
+
 // collector is the subset of Collector used by Runner, kept small for tests.
 type collector interface {
 	Collect(ctx context.Context) (store.BackupBundle, error)
@@ -54,6 +60,9 @@ func (r *Runner) SetRestorer(restorer *Restorer) {
 // List returns the snapshots currently stored on the object store, newest
 // first. Read-only; does not serialize with backups/restores.
 func (r *Runner) List(ctx context.Context) ([]SnapshotMeta, error) {
+	if r == nil || r.client == nil {
+		return nil, ErrS3NotConfigured
+	}
 	return r.client.List(ctx)
 }
 
@@ -63,6 +72,9 @@ func (r *Runner) List(ctx context.Context) ([]SnapshotMeta, error) {
 // twice would self-deadlock.
 func (r *Runner) RestoreFromS3(ctx context.Context, key string, mode RestoreMode) (RestoreResult, error) {
 	var result RestoreResult
+	if r == nil || r.client == nil {
+		return result, ErrS3NotConfigured
+	}
 	data, err := r.client.Download(ctx, key)
 	if err != nil {
 		return result, err
@@ -88,6 +100,9 @@ func (r *Runner) RunBackup(ctx context.Context) (SnapshotMeta, error) {
 	runnerMu.Lock()
 	defer runnerMu.Unlock()
 
+	if r == nil || r.client == nil || r.collector == nil {
+		return SnapshotMeta{}, ErrS3NotConfigured
+	}
 	bundle, err := r.collector.Collect(ctx)
 	if err != nil {
 		return SnapshotMeta{}, err

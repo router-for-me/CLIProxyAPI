@@ -113,6 +113,11 @@ func isAIAPIPath(path string) bool {
 // them using logrus. When a panic occurs, it captures the panic value, stack trace,
 // and request path, then returns a 500 Internal Server Error response to the client.
 //
+// The panic value and full stack are embedded in the log MESSAGE (not just fields)
+// because the project's LogFormatter only prints a curated set of fields — without
+// this, the panic value and the handler frame would be silently dropped from logs
+// and production panics would be impossible to diagnose.
+//
 // Returns:
 //   - gin.HandlerFunc: A middleware handler for panic recovery
 func GinLogrusRecovery() gin.HandlerFunc {
@@ -122,11 +127,13 @@ func GinLogrusRecovery() gin.HandlerFunc {
 			panic(http.ErrAbortHandler)
 		}
 
+		stack := string(debug.Stack())
+		message := fmt.Sprintf("recovered from panic: %v\npanic stack:\n%s", recovered, stack)
 		log.WithFields(log.Fields{
 			"panic": recovered,
-			"stack": string(debug.Stack()),
+			"stack": stack,
 			"path":  c.Request.URL.Path,
-		}).Error("recovered from panic")
+		}).Error(message)
 
 		c.AbortWithStatus(http.StatusInternalServerError)
 	})

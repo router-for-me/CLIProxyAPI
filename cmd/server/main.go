@@ -326,9 +326,14 @@ func main() {
 	if value, ok := lookupEnv("BACKUP_S3_PREFIX", "backup_s3_prefix"); ok {
 		backupS3Cfg.Prefix = value
 	}
+	// BACKUP_S3_USE_SSL can be set explicitly. When it is left unset and the
+	// endpoint carries an http/https scheme, the scheme decides: https -> SSL
+	// on, http -> SSL off. This mirrors the OBJECTSTORE_ENDPOINT handling below
+	// and keeps minio.New happy (it rejects endpoints that start with a scheme).
 	if value, ok := lookupEnv("BACKUP_S3_USE_SSL", "backup_s3_use_ssl"); ok {
 		backupS3Cfg.UseSSL = value == "1" || value == "true"
 	}
+	backupS3Cfg.Endpoint, backupS3Cfg.UseSSL = normalizeBackupS3Endpoint(backupS3Cfg.Endpoint, backupS3Cfg.UseSSL)
 	// PathStyle defaults to true to match the project's existing object store
 	// convention (MinIO-style endpoints); operators on AWS S3 can flip it off.
 	backupS3Cfg.PathStyle = true
@@ -1066,6 +1071,33 @@ func startModelCatalogUpdaters(localModel, homeEnabled bool) {
 	} else if homeEnabled {
 		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
 	}
+}
+
+// normalizeBackupS3Endpoint prepares a BACKUP_S3_ENDPOINT value for minio.New,
+// which rejects endpoints that begin with a scheme (e.g. "https://host"). When
+// the endpoint carries an explicit http/https scheme, the scheme also decides
+// UseSSL unless it was set explicitly by the operator. The returned endpoint is
+// the bare host[:port][/path] without a trailing slash.
+func normalizeBackupS3Endpoint(endpoint string, useSSL bool) (string, bool) {
+	endpoint = strings.TrimSpace(endpoint)
+	if strings.Contains(endpoint, "://") {
+		if parsed, errParse := url.Parse(endpoint); errParse == nil {
+			switch strings.ToLower(parsed.Scheme) {
+			case "http":
+				useSSL = false
+			case "https":
+				useSSL = true
+			default:
+				log.WithError(errParse).Warnf("main: unsupported backup S3 endpoint scheme %q (only http/https allowed)", parsed.Scheme)
+			}
+			if parsed.Host != "" {
+				endpoint = strings.TrimSuffix(parsed.Host+parsed.Path, "/")
+			}
+		} else {
+			log.WithError(errParse).Warnf("main: invalid backup S3 endpoint %q", endpoint)
+		}
+	}
+	return strings.TrimRight(strings.TrimSpace(endpoint), "/"), useSSL
 }
 
 // loadEmbeddedModelsToPG seeds the PostgreSQL models_catalog table from the

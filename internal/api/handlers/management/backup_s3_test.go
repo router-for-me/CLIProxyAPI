@@ -48,6 +48,28 @@ func (s *stubBackupRestorer) RestoreFromS3(ctx context.Context, key string, mode
 	return s.result, s.err
 }
 
+// panicBackupRunner simulates an unexpected panic inside the S3 subsystem so
+// tests can assert the handler turns it into a documented 500 instead of
+// letting a raw panic propagate to the gin recovery.
+type panicBackupRunner struct {
+	panicInList   bool
+	panicInCreate bool
+}
+
+func (p *panicBackupRunner) RunBackup(ctx context.Context) (backup.SnapshotMeta, error) {
+	if p.panicInCreate {
+		panic("boom: create")
+	}
+	return backup.SnapshotMeta{}, nil
+}
+
+func (p *panicBackupRunner) List(ctx context.Context) ([]backup.SnapshotMeta, error) {
+	if p.panicInList {
+		panic("boom: list")
+	}
+	return nil, nil
+}
+
 // newBackupRouter builds a router with the /backup routes wired to the given
 // runner/restorer via SetBackupS3.
 func newBackupRouter(runner backupRunner, restorer backupRestorer) *gin.Engine {
@@ -209,6 +231,70 @@ func TestListBackupsError(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "backup_list_failed") {
 		t.Errorf("response missing backup_list_failed type: %s", w.Body.String())
+	}
+}
+
+func TestListBackupsNilClientIs503(t *testing.T) {
+	// When the runner is wired without an S3 client, List reports
+	// ErrS3NotConfigured and the handler must surface 503 (backup not
+	// configured) rather than a 500 or a panic.
+	stub := &stubBackupRunner{listErr: backup.ErrS3NotConfigured}
+	r := newBackupRouter(stub, nil)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/backup", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d; want 503; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestListBackupsRealRunnerWithoutClientIs503(t *testing.T) {
+	// Mirrors the production wiring failure: a real *backup.Runner wired
+	// without an S3 client. Prior to the Runner nil-guard this panicked with a
+	// nil-pointer dereference inside Runner.List (backup/runner.go:57).
+	r := newBackupRouter(&backup.Runner{}, nil)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/backup", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d; want 503; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestListBackupsPanicIsContained(t *testing.T) {
+	// A raw panic inside the S3 list must be contained: the handler turns it
+	// into a documented 500 response (not an empty gin-recovery 500) and the
+	// server does not re-raise it.
+	r := newBackupRouter(&panicBackupRunner{panicInList: true}, nil)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/backup", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d; want 500; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "backup_list_panic") {
+		t.Errorf("response missing backup_list_panic type: %s", w.Body.String())
+	}
+}
+
+func TestCreateBackupPanicIsContained(t *testing.T) {
+	r := newBackupRouter(&panicBackupRunner{panicInCreate: true}, nil)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/backup", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d; want 500; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "backup_create_panic") {
+		t.Errorf("response missing backup_create_panic type: %s", w.Body.String())
 	}
 }
 

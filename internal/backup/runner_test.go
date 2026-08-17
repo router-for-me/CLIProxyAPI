@@ -247,3 +247,22 @@ func TestRunnerRestoreFromS3NoRestorer(t *testing.T) {
 		t.Fatal("expected error when restorer not configured")
 	}
 }
+
+// TestRunnerNilClientIsSafe verifies a Runner built without an S3 client does
+// not panic: List / RunBackup / RestoreFromS3 all return a clear error instead
+// of a nil-pointer dereference.
+func TestRunnerNilClientIsSafe(t *testing.T) {
+	// A zero-value *Runner (no NewRunner call) is the worst case that can be
+	// reached via a typed-nil wiring bug; all operations must degrade safely.
+	r := &Runner{}
+
+	if _, err := r.List(context.Background()); err == nil {
+		t.Fatal("List: expected error when S3 client is nil")
+	}
+	if _, err := r.RunBackup(context.Background()); err == nil {
+		t.Fatal("RunBackup: expected error when S3 client is nil")
+	}
+	if _, err := r.RestoreFromS3(context.Background(), "snap.json", RestoreModeMerge); err == nil {
+		t.Fatal("RestoreFromS3: expected error when S3 client is nil")
+	}
+}
