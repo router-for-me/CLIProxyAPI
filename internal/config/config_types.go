@@ -152,6 +152,12 @@ type CodexConfig struct {
 	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
 	LiveMediaRelay CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
+	// EnableWebsocketUpstream enables the WebSocket transport for Codex OAuth
+	// credentials (prolite, etc.) that would otherwise use HTTP/2. The WebSocket
+	// path provides ping/pong keepalives, explicit disconnect detection, and
+	// automatic reconnect-on-send-failure — all of which HTTP/2 lacks.
+	// Per-auth override: set "websockets": false in the auth metadata/attributes.
+	EnableWebsocketUpstream bool `yaml:"enable-websocket-upstream" json:"enable-websocket-upstream"`
 }
 
 // CodexLiveMediaRelayConfig configures the in-process Codex Live WebRTC gateway.
