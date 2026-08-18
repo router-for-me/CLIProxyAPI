@@ -95,6 +95,8 @@ type autoRouterResolved struct {
 	targetModel       string
 	route             *autorouter.Resolved
 	visionBridgeModel string
+	tier              string
+	routerID          string
 	matched           bool
 }
 
@@ -131,6 +133,8 @@ func (h *BaseAPIHandler) resolveAutoRouterModel(ctx context.Context, entryProtoc
 		targetModel:       resolved.Model,
 		route:             resolved,
 		visionBridgeModel: strings.TrimSpace(router.VisionBridgeModel),
+		tier:              string(score.Tier),
+		routerID:          strings.TrimSpace(router.ModelID),
 		matched:           true,
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"golang.org/x/net/context"
@@ -108,6 +109,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		resolvedAR = rr
 		executionModel = resolvedAR.targetModel
 		autoRoute = resolvedAR.route
+		ctx = coreusage.WithRouterTier(ctx, resolvedAR.tier, resolvedAR.routerID)
 	}
 	// Vision bridge: when the tier target lacks vision support and the request
 	// carries images, analyze them via the router's bridge model and replace the
@@ -196,6 +198,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 		resolvedAR = rr
 		executionModel = resolvedAR.targetModel
 		autoRoute = resolvedAR.route
+		ctx = coreusage.WithRouterTier(ctx, resolvedAR.tier, resolvedAR.routerID)
 	}
 	if resolvedAR.matched {
 		rawJSON = h.autoRouterRequestAdjustments(ctx, resolvedAR, rawJSON)
