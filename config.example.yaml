@@ -461,8 +461,8 @@ nonstream-keepalive-interval: 0
 #       - "*-thinking"               # wildcard matching suffix (e.g. claude-opus-4-5-thinking)
 #       - "*haiku*"                  # wildcard matching substring (e.g. claude-3-5-haiku-20241022)
 #     rebuild-mid-system-message: false # optional: default is false; when true, move messages with role "system" into the top-level Claude system field
-#     cloak:                         # optional: request cloaking for non-Claude-Code clients
-#       mode: "auto"                 # "auto" (default): cloak only when client is not Claude Code
+#     cloak:                         # optional: explicitly enable request cloaking for non-Claude-Code clients
+#       mode: "auto"                 # "auto" (default inside this block): cloak only when client is not Claude Code
 #                                    # "always": cloak every unconfirmed client; confirmed native Claude Code still passes through
 #                                    # "never": never apply cloaking
 #       # This "cloak" block applies to this claude-api-key entry only. For Claude OAuth
@@ -477,8 +477,56 @@ nonstream-keepalive-interval: 0
 #         - "proxy"
 #       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
 #       # Every custom tool on a cloaked OAuth request automatically uses a caller-stable opaque mcp__<server>__<tool> alias.
+#
+#     # fingerprint-profile (optional, top-level on this claude-api-key entry; not a cloak sub-field):
+#     # OAuth and API-key fingerprints are different contracts.
+#     #   - Real Claude OAuth stays on the strict Claude Code CLI wire fingerprint.
+#     #   - API keys (official Anthropic, custom gateways, Kimi) stay loose and
+#     #     caller-owned unless this field is set.
+#     #
+#     # Default (omit / empty): keep the caller request fingerprint and headers.
+#     # Official api.anthropic.com API keys do not add extra CLI betas/identity unless
+#     # this field is set. Custom gateways and delegated providers are the same.
+#     #
+#     # Controls request fingerprint only on /v1/messages (and related Claude executor paths).
+#     # Auth scheme stays API key (x-api-key on api.anthropic.com; Bearer on custom base-url).
+#     # Does NOT enable OAuth refresh, profile fetch, or OAuth-cancellation semantics.
+#     #
+#     # Values:
+#     #   omit / empty        = caller-owned API-key fingerprint (respects caller)
+#     #   "claude-code-cli"   = same Messages fingerprint as Claude Code OAuth CLI,
+#     #                         including official Anthropic API keys: OAuth Anthropic-Beta
+#     #                         set, CCH signing, stable CLI metadata.user_id / session_id /
+#     #                         device identity. API keys seed identity from the key;
+#     #                         delegated OAuth providers use stable auth ID instead of
+#     #                         rotating access tokens. "oauth-cli" is a legacy alias.
+#     #
+#     # count_tokens keeps the native model/messages/tools shape for every origin, including
+#     # Kimi opt-in. It does not send billing/CCH, currentDate, metadata, or diagnostics.
+#     #
+#     # CCH warning: the billing block includes a per-request cch hash. api.anthropic.com
+#     # strips that block (0 tokens, no cache impact). Gateways that keep it as prompt text
+#     # will miss cache on every Messages request. Kimi strips the block by default, but an
+#     # explicit fingerprint-profile opt-in keeps and signs it on Messages.
+#     #
+#     # Example (official Anthropic or a custom Messages gateway):
+#     #   - api-key: "your-key"
+#     #     # base-url: "https://gateway.example"   # omit for api.anthropic.com
+#     #     fingerprint-profile: "claude-code-cli"
+#     #     cloak:
+#     #       mode: "always"   # recommended when upstream rejects non-CLI clients
+#     #
+#     # Delegated Anthropic Messages OAuth files (Kimi, etc.) use the same field in the
+#     # auth JSON. Refresh keeps it. Example:
+#     #   {
+#     #     "type": "kimi",
+#     #     "access_token": "...",
+#     #     "refresh_token": "...",
+#     #     "fingerprint-profile": "claude-code-cli"
+#     #   }
+#     # fingerprint-profile: "claude-code-cli" # optional: default is empty (caller-owned); uncomment to opt into Claude Code CLI Messages fingerprinting
 #     experimental-cch-signing: false # deprecated compatibility field; CCH is generated automatically
-#                                     # all Claude OAuth requests sign, including custom gateways; direct Anthropic/Vertex paths also sign
+#                                     # for real Claude OAuth and explicit claude-code-cli profiles; Vertex keeps provider-native signing
 
 # Anthropic-Beta is assembled per request rather than sent as a fixed list, matching
 # Claude Code 2.1.220: context-1m sits right after claude-code, mid-conversation-system

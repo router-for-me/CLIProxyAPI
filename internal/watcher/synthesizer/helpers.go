@@ -122,6 +122,36 @@ func addRequestScopedErrorsToMetadata(rules []config.RequestScopedErrorRule, met
 
 // addConfigHeadersToAttrs adds header configuration to auth attributes.
 // Headers are prefixed with "header:" in the attributes map.
+func fingerprintProfileFromMetadata(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	for _, key := range []string{"fingerprint_profile", "fingerprint-profile"} {
+		raw, _ := metadata[key].(string)
+		if profile := strings.ToLower(strings.TrimSpace(raw)); profile != "" {
+			return profile
+		}
+	}
+	return ""
+}
+
+// applyFingerprintProfileAttribute copies fingerprint-profile from an OAuth JSON
+// file (Kimi, Claude, etc.) onto auth attributes so Claude Messages opt-in works
+// the same way as claude-api-key config.
+func applyFingerprintProfileAttribute(auth *coreauth.Auth, metadata map[string]any) {
+	if auth == nil {
+		return
+	}
+	profile := fingerprintProfileFromMetadata(metadata)
+	if profile == "" {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["fingerprint_profile"] = profile
+}
+
 func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string) {
 	if len(headers) == 0 || attrs == nil {
 		return
