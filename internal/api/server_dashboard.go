@@ -1,6 +1,7 @@
 package api
 
 import (
+	"io/fs"
 	"net/http"
 	"strings"
 
@@ -22,25 +23,38 @@ func (s *Server) mountDashboardRoutes() {
 		return
 	}
 	dashFS := dashboardasset.FileSystem()
-	assetFS := http.FileServer(http.FS(dashFS))
-	s.engine.GET("/dashboard", gin.WrapH(assetFS))
+	// http.FileServer serves a filesystem rooted at index.html, but the SPA is
+	// mounted under /dashboard. StripPrefix removes the /dashboard prefix so a
+	// request for /dashboard/assets/... resolves to assets/... in the FS root.
+	assetFS := http.StripPrefix("/dashboard", http.FileServer(http.FS(dashFS)))
+	// Redirect the bare /dashboard to /dashboard/ so FileServer serves the
+	// directory index (index.html) with relative asset links intact.
+	s.engine.GET("/dashboard", func(c *gin.Context) {
+		c.Redirect(http.StatusMovedPermanently, "/dashboard/")
+	})
 	s.engine.GET("/dashboard/*filepath", func(c *gin.Context) {
-		// SPA fallback: serve index.html for unknown sub-paths so React
-		// Router can handle client-side routes like /dashboard/api-keys/:id.
-		path := strings.TrimPrefix(c.Param("filepath"), "/")
-		if path == "" {
+		// Serve the requested file (index.html for the root; assets/.. for JS/CSS).
+		// SPA fallback: any sub-path that is not an actual file (a client-side
+		// route like /dashboard/api-keys/:id) serves index.html so React Router
+		// can handle it.
+		path := c.Param("filepath") // includes leading slash, e.g. "/index.html"
+		trimmed := strings.TrimPrefix(path, "/")
+		if trimmed == "" || trimmed == "index.html" {
 			assetFS.ServeHTTP(c.Writer, c.Request)
 			return
 		}
-		// Try the file first; if missing, fall back to index.html.
-		if f, err := dashFS.Open(path); err == nil {
+		if f, err := dashFS.Open(trimmed); err == nil {
 			_ = f.Close()
 			assetFS.ServeHTTP(c.Writer, c.Request)
 			return
 		}
-		// Strip the path so http.FileServer serves /index.html instead of 404.
-		c.Request.URL.Path = "/"
-		assetFS.ServeHTTP(c.Writer, c.Request)
+		// Not a real file — fall back to index.html so client-side routes work.
+		idx, err := fs.ReadFile(dashFS, "index.html")
+		if err != nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", idx)
 	})
 }
 

@@ -215,7 +215,16 @@ dash-build: ## Build the production dashboard bundle into web/dashboard/dist.
 dash-preview: ## Preview the production dashboard bundle on :9173.
 	cd $(DASH_DIR) && npm run preview
 
+DASH_EMBED_DIR := $(ROOT)/internal/dashboardasset/dist
+
 dash-embed: dash-build ## Build the dashboard and rebuild the Go binary so /dashboard serves it.
+	@rm -rf $(DASH_EMBED_DIR)
+	@mkdir -p $(DASH_EMBED_DIR)
+	@cp -r $(DASH_DIR)/dist/* $(DASH_EMBED_DIR)/
+	# Keep the tracked .gitkeep placeholder so `go:embed dist/*` always has a
+	# file to compile on a clean checkout (dashboardasset.Available() then
+	# reports false -> dev-mode notice until dash-embed is run again).
+	@touch $(DASH_EMBED_DIR)/.gitkeep
 	$(GOBUILD) -o $(SERVER_BIN) ./cmd/server
 	@echo "Dashboard embedded. Run $(SERVER_BIN) and visit /dashboard."
 

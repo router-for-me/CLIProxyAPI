@@ -131,7 +131,7 @@ export default function AutoRouterAnalysisPage() {
             >
               <option value="">Select a router…</option>
               {routerOptions.map((r) => (
-                <option key={r.id} value={r.id}>
+                <option key={r.id} value={r.model_id}>
                   {r.display_name || r.name} ({r.model_id})
                 </option>
               ))}

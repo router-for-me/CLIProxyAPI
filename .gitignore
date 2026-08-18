@@ -68,6 +68,11 @@ _bmad-output/*
 # Dashboard build output + dependencies
 web/dashboard/node_modules/
 web/dashboard/dist/
+# Embedded dashboard bundle (copied by `make dash-embed` into internal/
+# dashboardasset/dist before go:embed). Keep the .gitkeep placeholder so the
+# go:embed directive always has a file to compile when unbuilt.
+internal/dashboardasset/dist/*
+!internal/dashboardasset/dist/.gitkeep
 
 # Cloudflare Workers local state — .wrangler/ is the wrangler cache and
 # .dev.vars holds local-only secrets (e.g. BACKEND_ORIGIN for `wrangler dev`).
