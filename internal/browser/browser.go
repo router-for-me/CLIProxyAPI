@@ -4,6 +4,7 @@ package browser
 
 import (
 	"fmt"
+	neturl "net/url"
 	"os/exec"
 	"runtime"
 
@@ -45,6 +46,11 @@ func OpenURL(url string) error {
 // Returns:
 //   - An error if the URL cannot be opened, otherwise nil.
 func openURLPlatformSpecific(url string) error {
+	parsed, err := neturl.Parse(url)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("invalid or disallowed URL scheme: %s", url)
+	}
+
 	var cmd *exec.Cmd
 
 	switch runtime.GOOS {
@@ -53,13 +59,19 @@ func openURLPlatformSpecific(url string) error {
 	case "windows":
 		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	case "linux":
-		// Try common Linux browsers in order of preference
-		browsers := []string{"xdg-open", "x-www-browser", "www-browser", "firefox", "chromium", "google-chrome"}
-		for _, browser := range browsers {
-			if _, err := exec.LookPath(browser); err == nil {
-				cmd = exec.Command(browser, url)
-				break
-			}
+		// Try common Linux browsers in order of preference using static command names
+		if _, err := exec.LookPath("xdg-open"); err == nil {
+			cmd = exec.Command("xdg-open", url)
+		} else if _, err := exec.LookPath("x-www-browser"); err == nil {
+			cmd = exec.Command("x-www-browser", url)
+		} else if _, err := exec.LookPath("www-browser"); err == nil {
+			cmd = exec.Command("www-browser", url)
+		} else if _, err := exec.LookPath("firefox"); err == nil {
+			cmd = exec.Command("firefox", url)
+		} else if _, err := exec.LookPath("chromium"); err == nil {
+			cmd = exec.Command("chromium", url)
+		} else if _, err := exec.LookPath("google-chrome"); err == nil {
+			cmd = exec.Command("google-chrome", url)
 		}
 		if cmd == nil {
 			return fmt.Errorf("no suitable browser found on Linux system")
