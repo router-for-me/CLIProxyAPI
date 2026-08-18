@@ -240,6 +240,8 @@ func requestToFormat(provider string, executor ProviderExecutor, req cliproxyexe
 		return sdktranslator.FormatOpenAI
 	case "antigravity":
 		return sdktranslator.FormatAntigravity
+	case "commandcode":
+		return sdktranslator.FormatCommandCode
 	default:
 		return sdktranslator.FormatOpenAI
 	}

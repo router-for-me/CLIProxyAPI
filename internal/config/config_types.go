@@ -548,6 +548,12 @@ type XAIKey = CodexKey
 // XAIModel uses the Codex model mapping structure for xAI models.
 type XAIModel = CodexModel
 
+// CommandCodeKey uses the Codex API key structure for Command Code execution.
+type CommandCodeKey = CodexKey
+
+// CommandCodeModel uses the Codex model mapping structure for Command Code models.
+type CommandCodeModel = CodexModel
+
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
 type GeminiKey struct {

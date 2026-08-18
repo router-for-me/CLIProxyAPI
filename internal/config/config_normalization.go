@@ -145,6 +145,26 @@ func (cfg *Config) SanitizeXAIKeys() {
 	}
 }
 
+// SanitizeCommandCodeKeys normalizes Command Code credentials.
+func (cfg *Config) SanitizeCommandCodeKeys() {
+	if cfg == nil || len(cfg.CommandCodeKey) == 0 {
+		return
+	}
+	out := make([]CommandCodeKey, 0, len(cfg.CommandCodeKey))
+	for i := range cfg.CommandCodeKey {
+		e := cfg.CommandCodeKey[i]
+		if strings.TrimSpace(e.APIKey) == "" {
+			continue
+		}
+		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.Headers = NormalizeHeaders(e.Headers)
+		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
+		out = append(out, e)
+	}
+	cfg.CommandCodeKey = out
+}
+
 func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 	if len(entries) == 0 {
 		return entries
