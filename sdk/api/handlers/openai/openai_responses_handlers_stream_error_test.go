@@ -677,6 +677,8 @@ func TestForwardResponsesStreamPreservesNestedResponseError(t *testing.T) {
 		t.Fatal("expected gin writer to implement http.Flusher")
 	}
 
+}
+
 func TestForwardResponsesStreamTerminalErrorFollowsPartialOutputSequence(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -773,7 +775,6 @@ func TestForwardResponsesStreamSanitizesPayloadErrorsAndStopsAtFailure(t *testin
 			c, _ := gin.CreateTestContext(recorder)
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 			c.Request.Header.Set("User-Agent", "Codex Desktop/26.803.41515")
-=======
 	data := make(chan []byte)
 	errs := make(chan *interfaces.ErrorMessage)
 	go func() {
