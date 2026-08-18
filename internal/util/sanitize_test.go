@@ -2,6 +2,8 @@ package util
 
 import (
 	"testing"
+
+	"github.com/tidwall/gjson"
 )
 
 func TestSanitizeFunctionName(t *testing.T) {
@@ -94,7 +96,17 @@ func TestSanitizedToolNameMap(t *testing.T) {
 		}
 	})
 
-	t.Run("collision keeps first mapping", func(t *testing.T) {
+	t.Run("legacy map ignores nested OpenAI tools", func(t *testing.T) {
+		raw := []byte(`{"tools":[
+			{"type":"function","function":{"name":"web/search"}},
+			{"type":"web_search","name":"web_search"}
+		]}`)
+		if m := SanitizedToolNameMap(raw); m != nil {
+			t.Fatalf("legacy map = %v, want nil", m)
+		}
+	})
+
+	t.Run("collision keeps first legacy mapping", func(t *testing.T) {
 		raw := []byte(`{"tools":[
 			{"name":"read/file","input_schema":{}},
 			{"name":"read@file","input_schema":{}}
@@ -103,10 +115,83 @@ func TestSanitizedToolNameMap(t *testing.T) {
 		if m == nil {
 			t.Fatal("expected non-nil map")
 		}
-		if m["read_file"] != "read/file" {
-			t.Errorf("expected first mapping read/file, got %q", m["read_file"])
+		if got := m["read_file"]; got != "read/file" {
+			t.Errorf("legacy collision mapping = %q, want read/file", got)
 		}
 	})
+}
+
+func TestSanitizedFunctionNameMapDisambiguatesCollisions(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	raw := []byte(`{"tools":[
+		{"name":"` + first + `"},
+		{"name":"` + first + `"},
+		{"name":"` + second + `"}
+	]}`)
+
+	forward := SanitizedFunctionNameMap(raw)
+	firstMapped := forward[first]
+	secondMapped := forward[second]
+	if firstMapped == "" || secondMapped == "" || secondMapped == firstMapped {
+		t.Fatalf("mapped names = %q and %q, want distinct non-empty names", firstMapped, secondMapped)
+	}
+	if len(firstMapped) > 64 || len(secondMapped) > 64 {
+		t.Fatalf("mapped name lengths = %d and %d, want <= 64", len(firstMapped), len(secondMapped))
+	}
+
+	reversed := []byte(`{"tools":[{"name":"` + second + `"},{"name":"` + first + `"}]}`)
+	reversedForward := SanitizedFunctionNameMap(reversed)
+	if reversedForward[first] != firstMapped || reversedForward[second] != secondMapped {
+		t.Fatalf("mapping changed with declaration order: forward=%v reversed=%v", forward, reversedForward)
+	}
+
+	reverse := DisambiguatedToolNameMap(raw)
+	if got := reverse[firstMapped]; got != first {
+		t.Fatalf("reverse[%q] = %q, want %q", firstMapped, got, first)
+	}
+	if got := reverse[secondMapped]; got != second {
+		t.Fatalf("reverse[%q] = %q, want %q", secondMapped, got, second)
+	}
+}
+
+func TestSanitizedFunctionNameMapReadsSupportedToolShapes(t *testing.T) {
+	raw := []byte(`{"tools":[
+		{"type":"function","function":{"name":"nested/name"}},
+		{
+			"functionDeclarations":[{"name":"camel@name"}],
+			"function_declarations":[{"name":"snake name"}]
+		}
+	]}`)
+	forward := SanitizedFunctionNameMap(raw)
+	for original, want := range map[string]string{
+		"nested/name": "nested_name",
+		"camel@name":  "camel_name",
+		"snake name":  "snake_name",
+	} {
+		if got := forward[original]; got != want {
+			t.Errorf("forward[%q] = %q, want %q", original, got, want)
+		}
+	}
+}
+
+func TestDeduplicateFunctionDeclarations(t *testing.T) {
+	raw := []byte(`[
+		{"name":"lookup","description":"first"},
+		{"name":"other"},
+		{"name":"lookup","description":"second"}
+	]`)
+	deduped := DeduplicateFunctionDeclarations(raw)
+	declarations := gjson.ParseBytes(deduped).Array()
+	if len(declarations) != 2 {
+		t.Fatalf("declaration count = %d, want 2: %s", len(declarations), deduped)
+	}
+	if got := declarations[0].Get("description").String(); got != "first" {
+		t.Fatalf("first duplicate description = %q, want first", got)
+	}
+	if got := declarations[1].Get("name").String(); got != "other" {
+		t.Fatalf("second declaration name = %q, want other", got)
+	}
 }
 
 func TestRestoreSanitizedToolName(t *testing.T) {

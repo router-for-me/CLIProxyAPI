@@ -139,6 +139,33 @@ func TestDeleteVertexCompatKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
 	}
 }
 
+func TestDeleteXAIKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg: &config.Config{
+			XAIKey: []config.XAIKey{
+				{APIKey: "shared-key", BaseURL: "https://a.example.com"},
+				{APIKey: "shared-key", BaseURL: "https://b.example.com"},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/xai-api-key?api-key=shared-key", nil)
+
+	h.DeleteXAIKey(c)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if got := len(h.cfg.XAIKey); got != 2 {
+		t.Fatalf("xAI keys len = %d, want 2", got)
+	}
+}
+
 func TestDeleteCodexKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 	t.Parallel()
 

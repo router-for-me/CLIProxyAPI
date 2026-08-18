@@ -231,10 +231,14 @@ func buildInteractionsGeminiChunk(st *interactionsToGeminiStreamState, modelName
 	if len(parts) == 0 && includeEmptyPart {
 		parts = append(parts, geminiTextPartJSON("", false))
 	}
+	validParts := make([][]byte, 0, len(parts))
 	for _, part := range parts {
 		if len(part) > 0 {
-			out, _ = sjson.SetRawBytes(out, "candidates.0.content.parts.-1", part)
+			validParts = append(validParts, part)
 		}
+	}
+	if len(validParts) > 0 {
+		out = translatorcommon.SetRawArrayItems(out, "candidates.0.content.parts", validParts)
 	}
 	if finishReason != "" {
 		out, _ = sjson.SetBytes(out, "candidates.0.finishReason", finishReason)

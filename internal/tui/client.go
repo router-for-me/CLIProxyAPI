@@ -306,6 +306,11 @@ func (c *Client) GetCodexKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/codex-api-key", "codex-api-key")
 }
 
+// GetXAIKeys fetches xAI API keys.
+func (c *Client) GetXAIKeys() ([]map[string]any, error) {
+	return c.getWrappedKeyList("/v0/management/xai-api-key", "xai-api-key")
+}
+
 // GetVertexKeys fetches Vertex API keys.
 func (c *Client) GetVertexKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/vertex-api-key", "vertex-api-key")
@@ -369,6 +374,25 @@ func (c *Client) GetAuthStatus(state string) (string, string, error) {
 	status := getString(wrapper, "status")
 	errMsg := getString(wrapper, "error")
 	return status, errMsg, nil
+}
+
+// CancelAuthSession cancels a pending OAuth session on the management server.
+func (c *Client) CancelAuthSession(state string) error {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return nil
+	}
+	query := url.Values{}
+	query.Set("state", state)
+	path := "/v0/management/oauth-session?" + query.Encode()
+	_, code, err := c.doRequest("DELETE", path, nil)
+	if err != nil {
+		return err
+	}
+	if code >= 400 {
+		return fmt.Errorf("HTTP %d", code)
+	}
+	return nil
 }
 
 // ----- Config field update methods -----

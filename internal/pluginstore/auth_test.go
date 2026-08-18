@@ -3,11 +3,16 @@ package pluginstore
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestPluginStoreAuthMatchesURLHostAndPathBoundaries(t *testing.T) {
@@ -223,5 +228,176 @@ func TestPluginStoreAuthHeaderIsAppliedToMatchingRedirect(t *testing.T) {
 	}
 	if redirectedHeader != "secret-token" {
 		t.Fatalf("redirected auth header = %q, want secret-token", redirectedHeader)
+	}
+}
+
+func TestResolvedPluginStoreAuthTakesPriorityOverEnvironmentAuth(t *testing.T) {
+	t.Setenv("PLUGIN_STORE_TOKEN", "environment-token")
+	headers := http.Header{}
+	resolved := []ResolvedAuthConfig{{
+		Match:   "https://downloads.example/private/",
+		ApplyTo: []string{RequestKindArtifact},
+		Type:    AuthTypeBearer,
+		Token:   Secret("resolved-token"),
+	}}
+	auth := []AuthConfig{{
+		Match:    "https://downloads.example/private/",
+		ApplyTo:  []string{RequestKindArtifact},
+		Type:     AuthTypeBearer,
+		TokenEnv: "PLUGIN_STORE_TOKEN",
+	}}
+
+	applied, errApply := applyPluginStoreAuthForClient(headers, resolved, auth, "https://downloads.example/private/plugin.zip", RequestKindArtifact)
+	if errApply != nil {
+		t.Fatalf("applyPluginStoreAuthForClient() error = %v", errApply)
+	}
+	if !applied || headers.Get("Authorization") != "Bearer resolved-token" {
+		t.Fatalf("Authorization = %q, want resolved token", headers.Get("Authorization"))
+	}
+}
+
+func TestResolvedNoAuthRuleBlocksEnvironmentFallback(t *testing.T) {
+	t.Setenv("PLUGIN_STORE_TOKEN", "environment-token")
+	headers := http.Header{}
+	resolved := []ResolvedAuthConfig{{
+		Match: "https://downloads.example/private/", ApplyTo: []string{RequestKindArtifact}, Type: AuthTypeNone,
+	}}
+	auth := []AuthConfig{{
+		Match: "https://downloads.example/private/", ApplyTo: []string{RequestKindArtifact}, Type: AuthTypeBearer, TokenEnv: "PLUGIN_STORE_TOKEN",
+	}}
+
+	applied, errApply := applyPluginStoreAuthForClient(headers, resolved, auth, "https://downloads.example/private/plugin.zip", RequestKindArtifact)
+	if errApply != nil {
+		t.Fatalf("applyPluginStoreAuthForClient() error = %v", errApply)
+	}
+	if applied || headers.Get("Authorization") != "" {
+		t.Fatalf("resolved none rule applied environment auth: %q", headers.Get("Authorization"))
+	}
+}
+
+func TestResolvedPluginStoreAuthIsNotForwardedAcrossOriginRedirect(t *testing.T) {
+	var redirectedAuth string
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectedAuth = r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, "artifact")
+	}))
+	t.Cleanup(target.Close)
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/artifact.zip", http.StatusFound)
+	}))
+	t.Cleanup(source.Close)
+	client := Client{
+		HTTPClient: &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}, //nolint:gosec -- test servers use ephemeral certificates.
+		ResolvedAuth: []ResolvedAuthConfig{{
+			Match:   source.URL + "/private/",
+			ApplyTo: []string{RequestKindArtifact},
+			Type:    AuthTypeBearer,
+			Token:   Secret("temporary-token"),
+		}},
+	}
+
+	if _, errDownload := client.DownloadArtifact(context.Background(), Artifact{
+		GOOS:   "linux",
+		GOARCH: "amd64",
+		URL:    source.URL + "/private/artifact.zip",
+		SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	}); errDownload != nil && !strings.Contains(errDownload.Error(), "sha256 mismatch") {
+		t.Fatalf("DownloadArtifact() error = %v, want only checksum mismatch", errDownload)
+	}
+	if redirectedAuth != "" {
+		t.Fatalf("redirected Authorization = %q, want empty", redirectedAuth)
+	}
+}
+
+func TestAuthenticatedPluginStoreFailureDoesNotExposeResponseBody(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "secret diagnostic body", http.StatusUnauthorized)
+	}))
+	t.Cleanup(server.Close)
+	client := Client{
+		HTTPClient: server.Client(),
+		ResolvedAuth: []ResolvedAuthConfig{{
+			Match:   server.URL + "/",
+			ApplyTo: []string{RequestKindArtifact},
+			Type:    AuthTypeBearer,
+			Token:   Secret("temporary-token"),
+		}},
+	}
+
+	_, errDownload := client.DownloadArtifact(context.Background(), Artifact{
+		GOOS:   "linux",
+		GOARCH: "amd64",
+		URL:    server.URL + "/artifact.zip",
+		SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	})
+	if errDownload == nil {
+		t.Fatal("DownloadArtifact() error = nil, want unauthorized status")
+	}
+	if strings.Contains(errDownload.Error(), "secret diagnostic body") {
+		t.Fatalf("DownloadArtifact() error leaked response body: %v", errDownload)
+	}
+}
+
+func TestResolvedAuthClearOverwritesSecrets(t *testing.T) {
+	token := Secret("temporary-token")
+	backing := token
+	auth := ResolvedAuthConfig{Token: token, Username: Secret("user"), Password: Secret("pass"), HeaderValue: Secret("header")}
+	auth.Clear()
+	for index, value := range backing {
+		if value != 0 {
+			t.Fatalf("token byte %d = %d, want zero", index, value)
+		}
+	}
+	if auth.Token != nil || auth.Username != nil || auth.Password != nil || auth.HeaderValue != nil {
+		t.Fatalf("cleared auth retains secret references: %#v", auth)
+	}
+}
+
+func TestPluginStoreRequestErrorRedactsQueryAndFragment(t *testing.T) {
+	requestURL := "https://user:password@downloads.example/plugin.zip?trace=private-value#section"
+	cause := context.Canceled
+	errRequest := pluginStoreRequestError(requestURL, &url.Error{URL: requestURL, Err: cause})
+	if strings.Contains(errRequest.Error(), "private-value") || strings.Contains(errRequest.Error(), "section") || strings.Contains(errRequest.Error(), "trace=") || strings.Contains(errRequest.Error(), "password") || strings.Contains(errRequest.Error(), "user@") {
+		t.Fatalf("pluginStoreRequestError() leaked URL query or fragment: %v", errRequest)
+	}
+	if !strings.Contains(errRequest.Error(), "https://downloads.example/plugin.zip") {
+		t.Fatalf("pluginStoreRequestError() = %v, want sanitized URL", errRequest)
+	}
+	if !errors.Is(errRequest, cause) {
+		t.Fatalf("errors.Is(pluginStoreRequestError(), context.Canceled) = false")
+	}
+}
+
+func TestPluginStoreRequestURLRejectsCredentials(t *testing.T) {
+	errValidate := validatePluginStoreRequestURL(nil, "https://user:password@downloads.example/plugin.zip", RequestKindArtifact)
+	if errValidate == nil {
+		t.Fatal("validatePluginStoreRequestURL() error = nil, want URL credentials rejection")
+	}
+	if strings.Contains(errValidate.Error(), "password") {
+		t.Fatalf("validatePluginStoreRequestURL() error leaked URL credentials: %v", errValidate)
+	}
+}
+
+func TestResolvedAuthExpiryRejectsAuthenticatedRequest(t *testing.T) {
+	auth := []ResolvedAuthConfig{{
+		Match:   "https://downloads.example/private/",
+		ApplyTo: []string{RequestKindArtifact},
+		Type:    AuthTypeBearer,
+		Token:   Secret("temporary-token"),
+	}}
+	now := time.Now().UTC()
+	client := Client{
+		HTTPClient:            failingHTTPDoer{},
+		ResolvedAuth:          auth,
+		ResolvedAuthExpiresAt: now.Add(-time.Second),
+	}
+	_, errDownload := client.DownloadArtifact(context.Background(), Artifact{
+		GOOS:   "linux",
+		GOARCH: "amd64",
+		URL:    "https://downloads.example/private/plugin.zip",
+		SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	})
+	if errDownload == nil || !strings.Contains(errDownload.Error(), "resolved auth expired") {
+		t.Fatalf("DownloadArtifact() error = %v, want resolved auth expiry", errDownload)
 	}
 }

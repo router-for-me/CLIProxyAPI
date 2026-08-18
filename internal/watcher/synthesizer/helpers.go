@@ -103,6 +103,23 @@ func ApplyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey
 	}
 }
 
+// addRequestRetryToMetadata copies a per-credential request-retry override into metadata.
+// Nil or negative values are treated as unset and are not written.
+func addRequestRetryToMetadata(requestRetry *int, metadata map[string]any) {
+	if requestRetry == nil || *requestRetry < 0 || metadata == nil {
+		return
+	}
+	metadata["request_retry"] = *requestRetry
+}
+
+// addRequestScopedErrorsToMetadata copies per-credential request-scoped error rules into metadata.
+func addRequestScopedErrorsToMetadata(rules []config.RequestScopedErrorRule, metadata map[string]any) {
+	if len(rules) == 0 || metadata == nil {
+		return
+	}
+	metadata["request_scoped_errors"] = rules
+}
+
 // addConfigHeadersToAttrs adds header configuration to auth attributes.
 // Headers are prefixed with "header:" in the attributes map.
 func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string) {

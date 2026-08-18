@@ -3,100 +3,57 @@ package openai
 import (
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 )
 
-func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
-	modelID := "mimo-v2.5-pro-codex-test"
-	textOnlyModelID := "mimo-text-only-codex-test"
+func TestCodexClientModelsResponseMultiAgentV2FollowsConfig(t *testing.T) {
+	modelID := "codex-client-multi-agent-v2-test"
+	clientID := "codex-client-multi-agent-v2-test-client"
 	modelRegistry := registry.GetGlobalRegistry()
-	modelRegistry.RegisterClient("codex-input-modalities-test", "openai-compatibility", []*registry.ModelInfo{
-		{
-			ID:                       modelID,
-			Object:                   "model",
-			OwnedBy:                  "mimo",
-			Type:                     "openai-compatibility",
-			DisplayName:              modelID,
-			SupportedInputModalities: []string{"text", "image"},
-		},
-		{
-			ID:                       textOnlyModelID,
-			Object:                   "model",
-			OwnedBy:                  "mimo",
-			Type:                     "openai-compatibility",
-			DisplayName:              textOnlyModelID,
-			SupportedInputModalities: []string{"text"},
-		},
-		{
-			ID:      "compat-image-only-codex-test",
-			Object:  "model",
-			OwnedBy: "mimo",
-			Type:    registry.OpenAIImageModelType,
-		},
-	})
+	modelRegistry.RegisterClient(clientID, "openai-compatibility", []*registry.ModelInfo{{ID: modelID}})
 	t.Cleanup(func() {
-		modelRegistry.UnregisterClient("codex-input-modalities-test")
+		modelRegistry.UnregisterClient(clientID)
 	})
 
-	openaiModels := modelRegistry.GetAvailableModels("openai")
-	resp := CodexClientModelsResponse(openaiModels)
-	models, ok := resp["models"].([]map[string]any)
-	if !ok {
-		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
-	}
-
-	var visionEntry map[string]any
-	var textOnlyEntry map[string]any
-	var imageEntry map[string]any
-	for _, entry := range models {
-		slug := stringModelValue(entry, "slug")
-		switch slug {
-		case modelID:
-			visionEntry = entry
-		case textOnlyModelID:
-			textOnlyEntry = entry
-		case "compat-image-only-codex-test":
-			imageEntry = entry
-		}
-	}
-	if visionEntry == nil {
-		t.Fatalf("expected codex entry for %q", modelID)
-	}
-	modalities, ok := visionEntry["input_modalities"].([]any)
-	if !ok || len(modalities) != 2 {
-		t.Fatalf("input_modalities = %#v, want [text image]", visionEntry["input_modalities"])
-	}
-	if got, _ := modalities[0].(string); got != "text" {
-		t.Fatalf("input_modalities[0] = %q, want text", got)
-	}
-	if got, _ := modalities[1].(string); got != "image" {
-		t.Fatalf("input_modalities[1] = %q, want image", got)
-	}
-	if got, ok := visionEntry["supports_image_detail_original"].(bool); !ok || !got {
-		t.Fatalf("supports_image_detail_original = %#v, want true", visionEntry["supports_image_detail_original"])
-	}
-
-	if textOnlyEntry == nil {
-		t.Fatalf("expected codex entry for %q", textOnlyModelID)
-	}
-	textOnlyModalities, ok := textOnlyEntry["input_modalities"].([]any)
-	if !ok || len(textOnlyModalities) != 1 {
-		t.Fatalf("text-only input_modalities = %#v, want [text]", textOnlyEntry["input_modalities"])
-	}
-	if got, _ := textOnlyModalities[0].(string); got != "text" {
-		t.Fatalf("text-only input_modalities[0] = %q, want text", got)
-	}
-	if _, exists := textOnlyEntry["supports_image_detail_original"]; exists {
-		t.Fatalf("text-only model should not expose supports_image_detail_original: %#v", textOnlyEntry["supports_image_detail_original"])
-	}
-
-	if imageEntry == nil {
-		t.Fatal("expected codex entry for image-only compat model")
-	}
-	if got, _ := imageEntry["visibility"].(string); got != "hide" {
-		t.Fatalf("image model visibility = %q, want hide", got)
-	}
-	if _, exists := imageEntry["input_modalities"]; exists {
-		t.Fatalf("image endpoint model should not expose input_modalities from registry: %#v", imageEntry["input_modalities"])
+	base := handlers.NewBaseAPIHandlers(&config.SDKConfig{}, nil)
+	handler := NewOpenAIAPIHandler(base)
+	for _, tt := range []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "disabled", enabled: false},
+		{name: "enabled", enabled: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			base.Cfg.CodexOptimizeMultiAgentV2 = tt.enabled
+			response := handler.codexClientModelsResponse()
+			models, ok := response["models"].([]map[string]any)
+			if !ok {
+				t.Fatalf("models type = %T, want []map[string]any", response["models"])
+			}
+			var entry map[string]any
+			for _, model := range models {
+				slug, _ := model["slug"].(string)
+				if slug == modelID {
+					entry = model
+					break
+				}
+			}
+			if entry == nil {
+				t.Fatalf("missing synthesized model %q", modelID)
+			}
+			value, exists := entry["multi_agent_version"]
+			if tt.enabled {
+				if !exists || value != "v2" {
+					t.Fatalf("multi_agent_version = %#v, want v2", value)
+				}
+				return
+			}
+			if !exists || value != nil {
+				t.Fatalf("multi_agent_version = %#v, want preserved null", value)
+			}
+		})
 	}
 }

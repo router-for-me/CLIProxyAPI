@@ -171,54 +171,83 @@ func TestConvertCodexResponseToClaude_StreamThinkingWithoutReasoningItemStillInc
 	}
 }
 
-func TestConvertCodexResponseToClaude_StreamThinkingFinalizesPendingBlockBeforeNextSummaryPart(t *testing.T) {
+// codexThinkingStreamDigest collects the thinking-related events produced by a Codex
+// stream so tests can assert block/signature counts and the reassembled thinking text.
+type codexThinkingStreamDigest struct {
+	Starts     int
+	Stops      int
+	Signatures []string
+	Thinking   string
+	Raw        string
+}
+
+func digestCodexThinkingStream(t *testing.T, chunks [][]byte) codexThinkingStreamDigest {
+	t.Helper()
+
 	ctx := context.Background()
 	originalRequest := []byte(`{"messages":[]}`)
 	var param any
-
-	chunks := [][]byte{
-		[]byte("data: {\"type\":\"response.reasoning_summary_part.added\"}"),
-		[]byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"First part\"}"),
-		[]byte("data: {\"type\":\"response.reasoning_summary_part.done\"}"),
-		[]byte("data: {\"type\":\"response.reasoning_summary_part.added\"}"),
-	}
 
 	var outputs [][]byte
 	for _, chunk := range chunks {
 		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
 	}
 
-	startCount := 0
-	stopCount := 0
+	var digest codexThinkingStreamDigest
+	var thinking strings.Builder
+	var raw strings.Builder
 	for _, out := range outputs {
+		raw.Write(out)
 		for _, line := range strings.Split(string(out), "\n") {
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
 			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
-			if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "thinking" {
-				startCount++
-			}
-			if data.Get("type").String() == "content_block_stop" {
-				stopCount++
+			switch data.Get("type").String() {
+			case "content_block_start":
+				if data.Get("content_block.type").String() == "thinking" {
+					digest.Starts++
+				}
+			case "content_block_delta":
+				switch data.Get("delta.type").String() {
+				case "thinking_delta":
+					thinking.WriteString(data.Get("delta.thinking").String())
+				case "signature_delta":
+					digest.Signatures = append(digest.Signatures, data.Get("delta.signature").String())
+				}
+			case "content_block_stop":
+				digest.Stops++
 			}
 		}
 	}
+	digest.Thinking = thinking.String()
+	digest.Raw = raw.String()
 
-	if startCount != 2 {
-		t.Fatalf("expected 2 thinking block starts, got %d", startCount)
+	return digest
+}
+
+func TestConvertCodexResponseToClaude_StreamThinkingKeepsSingleBlockAcrossSummaryParts(t *testing.T) {
+	digest := digestCodexThinkingStream(t, [][]byte{
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.added\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"First part\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.done\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.added\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Second part\"}"),
+	})
+
+	if digest.Starts != 1 {
+		t.Fatalf("expected a single thinking block start for one reasoning item, got %d", digest.Starts)
 	}
-	if stopCount != 1 {
-		t.Fatalf("expected pending thinking block to be finalized before second start, got %d stops", stopCount)
+	if digest.Stops != 0 {
+		t.Fatalf("expected the thinking block to stay open until output_item.done, got %d stops", digest.Stops)
+	}
+	if want := "First part\n\nSecond part"; digest.Thinking != want {
+		t.Fatalf("thinking text = %q, want %q", digest.Thinking, want)
 	}
 }
 
-func TestConvertCodexResponseToClaude_StreamThinkingRetainsSignatureAcrossMultipartReasoning(t *testing.T) {
-	ctx := context.Background()
-	originalRequest := []byte(`{"messages":[]}`)
-	var param any
-
-	chunks := [][]byte{
+func TestConvertCodexResponseToClaude_StreamThinkingEmitsSingleSignatureAcrossMultipartReasoning(t *testing.T) {
+	digest := digestCodexThinkingStream(t, [][]byte{
 		[]byte("data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"enc_sig_multipart\"}}"),
 		[]byte("data: {\"type\":\"response.reasoning_summary_part.added\"}"),
 		[]byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"First part\"}"),
@@ -227,31 +256,80 @@ func TestConvertCodexResponseToClaude_StreamThinkingRetainsSignatureAcrossMultip
 		[]byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Second part\"}"),
 		[]byte("data: {\"type\":\"response.reasoning_summary_part.done\"}"),
 		[]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\"}}"),
-	}
+	})
 
-	var outputs [][]byte
-	for _, chunk := range chunks {
-		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	if digest.Starts != 1 || digest.Stops != 1 {
+		t.Fatalf("expected exactly one thinking block, got %d starts and %d stops", digest.Starts, digest.Stops)
 	}
-
-	signatureDeltaCount := 0
-	for _, out := range outputs {
-		for _, line := range strings.Split(string(out), "\n") {
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
-			if data.Get("type").String() == "content_block_delta" && data.Get("delta.type").String() == "signature_delta" {
-				signatureDeltaCount++
-				if got := data.Get("delta.signature").String(); got != "enc_sig_multipart" {
-					t.Fatalf("unexpected signature delta: %q", got)
-				}
-			}
-		}
+	if len(digest.Signatures) != 1 {
+		t.Fatalf("expected one signature_delta for one reasoning item, got %d: %v", len(digest.Signatures), digest.Signatures)
 	}
+	// output_item.done omitted encrypted_content here, so the pre-content fallback is expected.
+	if digest.Signatures[0] != "enc_sig_multipart" {
+		t.Fatalf("unexpected signature delta: %q", digest.Signatures[0])
+	}
+	if want := "First part\n\nSecond part"; digest.Thinking != want {
+		t.Fatalf("thinking text = %q, want %q", digest.Thinking, want)
+	}
+}
 
-	if signatureDeltaCount != 2 {
-		t.Fatalf("expected signature_delta for both multipart thinking blocks, got %d", signatureDeltaCount)
+// TestConvertCodexResponseToClaude_StreamThinkingNeverEmitsPreContentEncryptedContent guards the
+// real-world shape earlier tests missed: output_item.added carries a fixed-size pre-content
+// snapshot of encrypted_content that always differs from the final value on output_item.done.
+// Emitting that snapshot makes the client replay bogus reasoning items for the rest of the session.
+func TestConvertCodexResponseToClaude_StreamThinkingNeverEmitsPreContentEncryptedContent(t *testing.T) {
+	digest := digestCodexThinkingStream(t, [][]byte{
+		[]byte("data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"enc_sig_pre_content_snapshot\"}}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.added\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Part A\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.done\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.added\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Part B\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.done\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.added\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Part C\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.done\"}"),
+		[]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"enc_sig_final\"}}"),
+	})
+
+	if digest.Starts != 1 || digest.Stops != 1 {
+		t.Fatalf("expected one thinking block for one reasoning item with three summary parts, got %d starts and %d stops", digest.Starts, digest.Stops)
+	}
+	if len(digest.Signatures) != 1 || digest.Signatures[0] != "enc_sig_final" {
+		t.Fatalf("expected exactly one signature_delta carrying the final encrypted_content, got %v", digest.Signatures)
+	}
+	if strings.Contains(digest.Raw, "enc_sig_pre_content_snapshot") {
+		t.Fatal("pre-content encrypted_content snapshot leaked into the Claude stream")
+	}
+	if want := "Part A\n\nPart B\n\nPart C"; digest.Thinking != want {
+		t.Fatalf("thinking text = %q, want %q", digest.Thinking, want)
+	}
+}
+
+// TestConvertCodexResponseToClaude_StreamThinkingEmitsOneBlockPerReasoningItem checks that two
+// consecutive reasoning items stay separate blocks, each signed with its own final value.
+func TestConvertCodexResponseToClaude_StreamThinkingEmitsOneBlockPerReasoningItem(t *testing.T) {
+	digest := digestCodexThinkingStream(t, [][]byte{
+		[]byte("data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"enc_pre_1\"}}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.added\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"First item\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.done\"}"),
+		[]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"enc_final_1\"}}"),
+		[]byte("data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"enc_pre_2\"}}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.added\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Second item\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.done\"}"),
+		[]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"enc_final_2\"}}"),
+	})
+
+	if digest.Starts != 2 || digest.Stops != 2 {
+		t.Fatalf("expected two thinking blocks for two reasoning items, got %d starts and %d stops", digest.Starts, digest.Stops)
+	}
+	if len(digest.Signatures) != 2 || digest.Signatures[0] != "enc_final_1" || digest.Signatures[1] != "enc_final_2" {
+		t.Fatalf("expected each block signed with its own final encrypted_content, got %v", digest.Signatures)
+	}
+	if strings.Contains(digest.Raw, "enc_pre_1") || strings.Contains(digest.Raw, "enc_pre_2") {
+		t.Fatal("pre-content encrypted_content snapshot leaked into the Claude stream")
 	}
 }
 
@@ -584,6 +662,225 @@ func TestConvertCodexResponseToClaude_StreamFunctionCallDefersStartUntilDoneName
 	}
 	if toolStopCount != 1 {
 		t.Fatalf("expected one deferred tool_use stop, got %d in %q", toolStopCount, doneOutputs)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamUnnamedFunctionCallDoneByCallIDKeepsPendingSlots(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"lookup","description":"lookup"}]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_first"},"output_index":1}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_second"},"output_index":2}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_first","name":"lookup","arguments":"{\"id\":1}"}}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_second","name":"lookup","arguments":"{\"id\":2}"}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	var toolIDs []string
+	var startIndices []int64
+	var stopIndices []int64
+	var argumentDeltas []string
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			switch data.Get("type").String() {
+			case "content_block_start":
+				if data.Get("content_block.type").String() == "tool_use" {
+					toolIDs = append(toolIDs, data.Get("content_block.id").String())
+					startIndices = append(startIndices, data.Get("index").Int())
+				}
+			case "content_block_delta":
+				if data.Get("delta.type").String() == "input_json_delta" {
+					argumentDeltas = append(argumentDeltas, data.Get("delta.partial_json").String())
+				}
+			case "content_block_stop":
+				stopIndices = append(stopIndices, data.Get("index").Int())
+			}
+		}
+	}
+
+	if len(toolIDs) != 2 || toolIDs[0] != "call_first" || toolIDs[1] != "call_second" {
+		t.Fatalf("unexpected tool IDs: %v; outputs=%q", toolIDs, outputs)
+	}
+	if len(startIndices) != 2 || startIndices[0] != 0 || startIndices[1] != 1 {
+		t.Fatalf("unexpected start indices: %v; outputs=%q", startIndices, outputs)
+	}
+	if len(stopIndices) != 2 || stopIndices[0] != 0 || stopIndices[1] != 1 {
+		t.Fatalf("unexpected stop indices: %v; outputs=%q", stopIndices, outputs)
+	}
+	if len(argumentDeltas) != 2 || argumentDeltas[0] != `{"id":1}` || argumentDeltas[1] != `{"id":2}` {
+		t.Fatalf("unexpected argument deltas: %v; outputs=%q", argumentDeltas, outputs)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamDeferredUnnamedFunctionCallDoesNotReserveBlockIndex(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"lookup","description":"lookup"}]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_hidden"},"output_index":1}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]},"output_index":2}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "text" {
+				if got := data.Get("index").Int(); got != 0 {
+					t.Fatalf("text block index = %d, want 0; outputs=%q", got, outputs)
+				}
+				return
+			}
+		}
+	}
+
+	t.Fatalf("missing text content_block_start; outputs=%q", outputs)
+}
+
+func TestConvertCodexResponseToClaude_StreamTerminalOutputHydratesOpenFunctionCallArguments(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"lookup","description":"lookup"}]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"lookup"},"output_index":1}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"query\":\"example\"}"}]}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	var finalArgumentPosition = -1
+	var stopPosition = -1
+	var messageDeltaPosition = -1
+	position := 0
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			position++
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			switch data.Get("type").String() {
+			case "content_block_delta":
+				if data.Get("delta.type").String() == "input_json_delta" && data.Get("delta.partial_json").String() == `{"query":"example"}` {
+					finalArgumentPosition = position
+				}
+			case "content_block_stop":
+				if data.Get("index").Int() == 0 {
+					stopPosition = position
+				}
+			case "message_delta":
+				messageDeltaPosition = position
+			}
+		}
+	}
+
+	if finalArgumentPosition == -1 {
+		t.Fatalf("missing terminal argument delta; outputs=%q", outputs)
+	}
+	if stopPosition == -1 {
+		t.Fatalf("missing content_block_stop for open function call; outputs=%q", outputs)
+	}
+	if messageDeltaPosition == -1 {
+		t.Fatalf("missing message_delta; outputs=%q", outputs)
+	}
+	if !(finalArgumentPosition < stopPosition && stopPosition < messageDeltaPosition) {
+		t.Fatalf("unexpected event order: args=%d stop=%d message_delta=%d; outputs=%q", finalArgumentPosition, stopPosition, messageDeltaPosition, outputs)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamTerminalOutputEmitsPendingUnnamedFunctionCall(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"lookup","description":"lookup"}]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1"},"output_index":1}`),
+		[]byte(`data: {"type":"response.function_call_arguments.done","arguments":"{\"query\":\"example\"}","output_index":1}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"query\":\"example\"}"}]}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+	outputText := string(bytes.Join(outputs, nil))
+
+	if strings.Count(outputText, `"type":"tool_use"`) != 1 {
+		t.Fatalf("expected one terminal tool_use block, got output:\n%s", outputText)
+	}
+	if !strings.Contains(outputText, `"name":"lookup"`) || !strings.Contains(outputText, `"partial_json":"{\"query\":\"example\"}"`) {
+		t.Fatalf("expected terminal tool name and arguments, got output:\n%s", outputText)
+	}
+	gotReason, ok := findClaudeStreamStopReason(outputs)
+	if !ok {
+		t.Fatalf("missing message_delta; outputs=%q", outputs)
+	}
+	if gotReason != "tool_use" {
+		t.Fatalf("stop_reason = %q, want tool_use. Outputs=%q", gotReason, outputs)
+	}
+	toolUsePosition := strings.Index(outputText, `"type":"tool_use"`)
+	messageDeltaPosition := strings.Index(outputText, `"type":"message_delta"`)
+	if toolUsePosition < 0 || messageDeltaPosition < 0 || toolUsePosition > messageDeltaPosition {
+		t.Fatalf("terminal tool_use must be emitted before message_delta:\n%s", outputText)
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamUnresolvedPendingFunctionCallDoesNotForceToolUseStopReason(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"name":"lookup","description":"lookup"}]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_hidden"},"output_index":1}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":1,"output_tokens":1},"output":[]}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+	outputText := string(bytes.Join(outputs, nil))
+
+	if strings.Contains(outputText, `"type":"tool_use"`) {
+		t.Fatalf("unresolved pending function_call must not emit tool_use:\n%s", outputText)
+	}
+	gotReason, ok := findClaudeStreamStopReason(outputs)
+	if !ok {
+		t.Fatalf("missing message_delta; outputs=%q", outputs)
+	}
+	if gotReason != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn. Outputs=%q", gotReason, outputs)
+	}
+	params, ok := param.(*ConvertCodexResponseToClaudeParams)
+	if !ok || len(params.FunctionCalls) != 0 || len(params.FunctionCallQueue) != 0 || params.LastFunctionCall != nil {
+		t.Fatalf("pending function calls were not cleared: %#v", param)
 	}
 }
 

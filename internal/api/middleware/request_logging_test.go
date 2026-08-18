@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 )
 
 func TestShouldSkipMethodForRequestLogging(t *testing.T) {
@@ -48,6 +51,15 @@ func TestShouldSkipMethodForRequestLogging(t *testing.T) {
 			req: &http.Request{
 				Method: http.MethodGet,
 				URL:    &url.URL{Path: "/v1/responses"},
+				Header: http.Header{"Upgrade": []string{"websocket"}},
+			},
+			skip: false,
+		},
+		{
+			name: "codex responses websocket upgrade should not skip",
+			req: &http.Request{
+				Method: http.MethodGet,
+				URL:    &url.URL{Path: "/backend-api/codex/responses"},
 				Header: http.Header{"Upgrade": []string{"websocket"}},
 			},
 			skip: false,
@@ -144,6 +156,111 @@ func TestShouldCaptureRequestBody(t *testing.T) {
 	}
 }
 
+func TestDeferredRequestBodyCaptureDoesNotDrainUnreadBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	logger := logging.NewFileRequestLogger(false, t.TempDir(), "", 10)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("remaining-body"))
+	request.ContentLength = -1
+	request.Header.Set("Content-Type", "application/json")
+	requestInfo := &RequestInfo{Headers: map[string][]string{"Content-Type": {"application/json"}}}
+	capture := attachDeferredRequestBodyCapture(request, logger, requestInfo, false, false)
+	if capture == nil {
+		t.Fatal("deferred request body capture was not attached")
+	}
+	defer capture.Cleanup()
+
+	firstByte := make([]byte, 1)
+	if _, errRead := request.Body.Read(firstByte); errRead != nil {
+		t.Fatalf("read first request byte: %v", errRead)
+	}
+	captured, marker, errCaptured := capture.Bytes()
+	if errCaptured != nil {
+		t.Fatalf("read captured body: %v", errCaptured)
+	}
+	if string(captured) != "r" {
+		t.Fatalf("captured body = %q, want %q", string(captured), "r")
+	}
+	if !strings.Contains(marker, "REQUEST BODY CAPTURE INCOMPLETE") {
+		t.Fatalf("capture marker = %q, want incomplete marker", marker)
+	}
+	remaining, errRemaining := io.ReadAll(capture.body)
+	if errRemaining != nil {
+		t.Fatalf("read remaining body: %v", errRemaining)
+	}
+	if string(remaining) != "emaining-body" {
+		t.Fatalf("remaining body = %q, want %q", string(remaining), "emaining-body")
+	}
+}
+
+func TestRequestLoggingMiddlewareCapturesLargeErrorRequestAndDeferredAPIRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	logsDir := t.TempDir()
+	logger := logging.NewFileRequestLogger(false, logsDir, "", 10)
+	payload := append([]byte(`{"marker":"large-error-body","padding":"`), bytes.Repeat([]byte("x"), int(maxErrorOnlyCapturedRequestBodyBytes))...)
+	payload = append(payload, []byte(`"}`)...)
+	upstreamBody := []byte(`{"model":"upstream-model","input":"translated"}`)
+
+	router := gin.New()
+	router.Use(RequestLoggingMiddleware(logger))
+	router.POST("/v1/responses", func(c *gin.Context) {
+		body, errRead := io.ReadAll(c.Request.Body)
+		if errRead != nil {
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		if !bytes.Equal(body, payload) {
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		executorCtx := context.WithValue(context.Background(), "gin", c)
+		helps.RecordAPIRequest(executorCtx, &config.Config{}, helps.UpstreamRequestLog{
+			URL:     "https://api.example.com/v1/responses",
+			Method:  http.MethodPost,
+			Headers: http.Header{"Content-Type": []string{"application/json"}},
+			Body:    upstreamBody,
+		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "upstream rejected request"})
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("response status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+	entries, errReadDir := os.ReadDir(logsDir)
+	if errReadDir != nil {
+		t.Fatalf("read logs dir: %v", errReadDir)
+	}
+	var logPath string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
+			logPath = logsDir + string(os.PathSeparator) + entry.Name()
+			break
+		}
+	}
+	if logPath == "" {
+		t.Fatal("forced error log was not created")
+	}
+	content, errReadLog := os.ReadFile(logPath)
+	if errReadLog != nil {
+		t.Fatalf("read error log: %v", errReadLog)
+	}
+	if !bytes.Contains(content, payload) {
+		t.Fatal("error log does not contain the complete large request body")
+	}
+	if !bytes.Contains(content, []byte("=== API REQUEST 1 ===")) {
+		t.Fatal("error log does not contain the deferred API request section")
+	}
+	if !bytes.Contains(content, upstreamBody) {
+		t.Fatal("error log does not contain the deferred upstream request body")
+	}
+}
+
 func TestAttachRequestLogSourcesUsesLoggerLogsDir(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -151,7 +268,7 @@ func TestAttachRequestLogSourcesUsesLoggerLogsDir(t *testing.T) {
 	logger := logging.NewFileRequestLogger(true, logsDir, "", 0)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	c.Request = httptest.NewRequest(http.MethodGet, "/backend-api/codex/responses", nil)
 	c.Request.Header.Set("Upgrade", "websocket")
 
 	attachRequestLogSources(c, logger, true)
@@ -198,6 +315,29 @@ func cleanupFileBodySourcesFromContext(c *gin.Context) {
 		if source, ok := value.(*logging.FileBodySource); ok && source != nil {
 			_ = source.Cleanup()
 		}
+	}
+}
+
+func TestDecodeCapturedRequestBodyForLogWithLimitTruncatesZstdExpansion(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 1024)
+	var compressed bytes.Buffer
+	encoder, errNewWriter := zstd.NewWriter(&compressed)
+	if errNewWriter != nil {
+		t.Fatalf("zstd.NewWriter: %v", errNewWriter)
+	}
+	if _, errWrite := encoder.Write(payload); errWrite != nil {
+		t.Fatalf("zstd write: %v", errWrite)
+	}
+	if errClose := encoder.Close(); errClose != nil {
+		t.Fatalf("zstd close: %v", errClose)
+	}
+
+	decoded := decodeCapturedRequestBodyForLogWithLimit(compressed.Bytes(), "zstd", 64)
+	if len(decoded) > 128 {
+		t.Fatalf("limited decoded body length = %d, want bounded output", len(decoded))
+	}
+	if !bytes.Contains(decoded, []byte("DECOMPRESSED REQUEST BODY TRUNCATED")) {
+		t.Fatalf("decoded body = %q, want truncation marker", string(decoded))
 	}
 }
 

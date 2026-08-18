@@ -1,11 +1,15 @@
 package handlers
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tidwall/gjson"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -119,21 +123,166 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	}
 }
 
+// TestGetRequestDetails_UnknownModelErrorResistsJSONInjection pins the unroutable
+// model error body against client-controlled model names. The name is echoed into
+// the body, so formatting it into a JSON literal would let a caller corrupt the
+// payload or overwrite the error code that clients branch on.
+func TestGetRequestDetails_UnknownModelErrorResistsJSONInjection(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	for _, model := range []string{
+		"unroutable-model",
+		`foo"bar`,
+		`x","code":"insufficient_quota","x":"`,
+		`x"}}`,
+		`foo\bar`,
+		"foo\nbar",
+	} {
+		t.Run(model, func(t *testing.T) {
+			_, _, errMsg := handler.getRequestDetails(model)
+			if errMsg == nil || errMsg.Error == nil {
+				t.Fatal("expected an error for an unroutable model")
+			}
+			if errMsg.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusBadRequest)
+			}
+			body := errMsg.Error.Error()
+			if !json.Valid([]byte(body)) {
+				t.Fatalf("error body is not valid JSON: %s", body)
+			}
+			if got := gjson.Get(body, "error.code").String(); got != "model_not_found" {
+				t.Fatalf("error code = %q, want model_not_found; the caller controlled the body: %s", got, body)
+			}
+			if got, want := gjson.Get(body, "error.message").String(), "unknown provider for model "+model; got != want {
+				t.Fatalf("error message = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
 
-	_, _, errMsg := handler.getRequestDetails("gpt-image-2")
-	if errMsg == nil {
-		t.Fatalf("expected error for gpt-image-2, got nil")
+	imageOnlyModels := []string{
+		"gpt-image-1.5",
+		"gpt-image-2",
+		"codex/gpt-image-2",
+		"grok-imagine-image",
+		"xai/grok-imagine-image",
+		"grok-imagine-image-quality",
+		"xai/grok-imagine-image-quality",
+		"grok-imagine-image-2.0",
+		"xai/grok-imagine-image-2.0",
 	}
-	if errMsg.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("unexpected status code: got %d want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
+	for _, model := range imageOnlyModels {
+		t.Run(model, func(t *testing.T) {
+			_, _, errMsg := handler.getRequestDetails(model)
+			if errMsg == nil {
+				t.Fatalf("expected error for %s, got nil", model)
+			}
+			if errMsg.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("unexpected status code: got %d want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
+			}
+			if errMsg.Error == nil {
+				t.Fatalf("expected error message, got nil")
+			}
+			msg := errMsg.Error.Error()
+			if !strings.Contains(msg, "/v1/images/generations") || !strings.Contains(msg, "/v1/images/edits") {
+				t.Fatalf("unexpected error message: %q", msg)
+			}
+		})
 	}
-	if errMsg.Error == nil {
-		t.Fatalf("expected error message, got nil")
+}
+
+func TestValidateImageOnlyModel_AllowsImageEndpoints(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	imageOnlyModels := []string{
+		"gpt-image-1.5",
+		"gpt-image-2",
+		"codex/gpt-image-2",
+		"grok-imagine-image",
+		"xai/grok-imagine-image",
+		"grok-imagine-image-quality",
+		"xai/grok-imagine-image-quality",
+		"grok-imagine-image-2.0",
+		"xai/grok-imagine-image-2.0",
 	}
-	msg := errMsg.Error.Error()
-	if !strings.Contains(msg, "/v1/images/generations") || !strings.Contains(msg, "/v1/images/edits") {
-		t.Fatalf("unexpected error message: %q", msg)
+	for _, model := range imageOnlyModels {
+		t.Run(model, func(t *testing.T) {
+			if errMsg := handler.validateImageOnlyModel(model, true); errMsg != nil {
+				t.Fatalf("validateImageOnlyModel(%q, true) = %+v, want nil", model, errMsg)
+			}
+			if errMsg := handler.validateImageOnlyModel(model, false); errMsg == nil {
+				t.Fatalf("validateImageOnlyModel(%q, false) = nil, want image-only error", model)
+			} else if errMsg.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("unexpected status code: got %d want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
+			}
+		})
+	}
+}
+
+func TestIsOpenAIImageOnlyModel(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{model: "gpt-image-1.5", want: true},
+		{model: "gpt-image-2", want: true},
+		{model: "codex/gpt-image-1.5", want: true},
+		{model: "grok-imagine-image", want: true},
+		{model: "xai/grok-imagine-image", want: true},
+		{model: "XAI/Grok-Imagine-Image-Quality", want: true},
+		{model: "grok-imagine-image-quality", want: true},
+		{model: "grok-imagine-image-2.0", want: true},
+		{model: "xai/grok-imagine-image-2.0", want: true},
+		{model: "grok-3", want: false},
+		{model: "gpt-5.2", want: false},
+		{model: "grok-imagine-video", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			if got := isOpenAIImageOnlyModel(tt.model); got != tt.want {
+				t.Fatalf("isOpenAIImageOnlyModel(%q) = %v, want %v", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExecuteImageWithAuthManager_AllowsImageOnlyModels(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	imageOnlyModels := []string{
+		"gpt-image-1.5",
+		"gpt-image-2",
+		"grok-imagine-image",
+		"grok-imagine-image-quality",
+		"xai/grok-imagine-image-quality",
+		"grok-imagine-image-2.0",
+		"xai/grok-imagine-image-2.0",
+	}
+	for _, model := range imageOnlyModels {
+		t.Run(model, func(t *testing.T) {
+			body := []byte(`{"model":"` + model + `","prompt":"draw"}`)
+			_, _, errMsg := handler.ExecuteImageWithAuthManager(context.Background(), "openai-image", model, body, "")
+			if errMsg == nil {
+				t.Fatal("expected auth selection error, got nil")
+			}
+			if errMsg.Error == nil {
+				t.Fatal("expected error message, got nil")
+			}
+			msg := errMsg.Error.Error()
+			if strings.Contains(msg, "only supported on /v1/images/generations") {
+				t.Fatalf("ExecuteImageWithAuthManager rejected image-only model: %q", msg)
+			}
+
+			_, _, errMsg = handler.ExecuteWithAuthManager(context.Background(), "openai-image", model, body, "")
+			if errMsg == nil {
+				t.Fatal("expected image-only rejection for non-image execution path, got nil")
+			}
+			if errMsg.Error == nil || !strings.Contains(errMsg.Error.Error(), "only supported on /v1/images/generations") {
+				t.Fatalf("unexpected non-image execution error: %+v", errMsg)
+			}
+		})
 	}
 }

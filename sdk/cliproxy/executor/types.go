@@ -27,6 +27,10 @@ const ReasoningEffortMetadataKey = "reasoning_effort"
 // ServiceTierMetadataKey stores the client-requested service tier for usage logs.
 const ServiceTierMetadataKey = "service_tier"
 
+// GenerateMetadataKey stores whether the client requested actual generation for usage logs.
+// Missing or true means generation is enabled; only an explicit false disables generation.
+const GenerateMetadataKey = "generate"
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
@@ -34,8 +38,22 @@ const (
 	SelectedAuthMetadataKey = "selected_auth_id"
 	// SelectedAuthCallbackMetadataKey carries an optional callback invoked with the selected auth ID.
 	SelectedAuthCallbackMetadataKey = "selected_auth_callback"
+	// SelectedAuthIndexMetadataKey stores the stable index of the auth selected by the scheduler.
+	SelectedAuthIndexMetadataKey = "selected_auth_index"
+	// SelectedAuthIndexCallbackMetadataKey carries an optional callback invoked with the selected auth index.
+	SelectedAuthIndexCallbackMetadataKey = "selected_auth_index_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
+	// DerivedSessionIDMetadataKey stores a stable session identity inferred from request context.
+	DerivedSessionIDMetadataKey = "derived_session_id"
+	// CallerScopeMetadataKey isolates inferred session identities between downstream callers.
+	CallerScopeMetadataKey = "caller_scope"
+	// SessionAffinityProviderMetadataKey carries the affinity selection namespace
+	// (provider string, e.g. the literal "mixed" pool key) used by SessionAffinitySelector.Pick,
+	// so OnResult keys the session cache identically to how selection read it.
+	SessionAffinityProviderMetadataKey = "session_affinity_provider"
+	// SessionAffinityModelMetadataKey carries the model used during session affinity selection.
+	SessionAffinityModelMetadataKey = "session_affinity_model"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.
@@ -81,6 +99,49 @@ type RequestAfterAuthInterceptResponse struct {
 	Body []byte
 	// ClearHeaders explicitly removes current request headers before Headers is applied.
 	ClearHeaders []string
+	// Terminate prevents the selected executor from receiving the request.
+	Terminate bool
+	// StatusCode is the downstream HTTP status used when Terminate is true.
+	StatusCode int
+	// ResponseHeaders contains downstream response headers used when Terminate is true.
+	ResponseHeaders http.Header
+	// ResponseBody contains the downstream response body used when Terminate is true.
+	ResponseBody []byte
+}
+
+// RequestTerminatedError carries a plugin-defined downstream response without executing upstream.
+type RequestTerminatedError struct {
+	HTTPStatus int
+	Header     http.Header
+	Body       []byte
+}
+
+func (e *RequestTerminatedError) Error() string {
+	return "request terminated by plugin"
+}
+
+// StatusCode returns the plugin-defined downstream HTTP status.
+func (e *RequestTerminatedError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.HTTPStatus
+}
+
+// ResponseHeaders returns a copy of the plugin-defined downstream headers.
+func (e *RequestTerminatedError) ResponseHeaders() http.Header {
+	if e == nil {
+		return nil
+	}
+	return e.Header.Clone()
+}
+
+// ResponseBody returns a copy of the plugin-defined downstream body.
+func (e *RequestTerminatedError) ResponseBody() []byte {
+	if e == nil {
+		return nil
+	}
+	return append([]byte(nil), e.Body...)
 }
 
 // Options controls execution behavior for both streaming and non-streaming calls.
@@ -104,6 +165,16 @@ type Options struct {
 	Metadata map[string]any
 	// RequestAfterAuthInterceptor runs after credential selection and before executor translation.
 	RequestAfterAuthInterceptor RequestAfterAuthInterceptor
+	// ExecutionLifecycle owns Home-dispatched execution resources. Executors must not add it to request metadata.
+	ExecutionLifecycle ExecutionLifecycle
+}
+
+// EnsureMetadata initializes and returns Metadata, ensuring it is non-nil.
+func (o *Options) EnsureMetadata() map[string]any {
+	if o.Metadata == nil {
+		o.Metadata = make(map[string]any)
+	}
+	return o.Metadata
 }
 
 // ResponseFormatOrSource returns the response target format for an execution.
@@ -147,4 +218,12 @@ type StreamResult struct {
 type StatusError interface {
 	error
 	StatusCode() int
+}
+
+// RequestScopedError identifies a failure tied to the current request rather
+// than the selected credential. Auth managers should not retry these errors
+// across credentials or change credential availability because of them.
+type RequestScopedError interface {
+	error
+	IsRequestScoped() bool
 }

@@ -19,6 +19,34 @@ func TestSetConfigAPIKeyExcludedAll(t *testing.T) {
 	}
 }
 
+func TestToggleConfigAPIKeyExcludedAll_XAI(t *testing.T) {
+	cfg := &config.Config{
+		XAIKey: []config.XAIKey{{
+			APIKey:  "xai-test",
+			BaseURL: "https://api.x.ai/v1",
+		}},
+	}
+	idGen := synthesizer.NewStableIDGenerator()
+	authID, _ := idGen.Next("xai:apikey", "xai-test", "https://api.x.ai/v1")
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "xai",
+		Attributes: map[string]string{
+			"api_key":  "xai-test",
+			"base_url": "https://api.x.ai/v1",
+			"source":   "config:xai[abc]",
+		},
+	}
+
+	handled, errToggle := toggleConfigAPIKeyExcludedAll(cfg, auth, true)
+	if errToggle != nil || !handled {
+		t.Fatalf("toggle disable: handled=%v err=%v", handled, errToggle)
+	}
+	if len(cfg.XAIKey[0].ExcludedModels) != 1 || cfg.XAIKey[0].ExcludedModels[0] != "*" {
+		t.Fatalf("excluded-models = %#v, want [*]", cfg.XAIKey[0].ExcludedModels)
+	}
+}
+
 func TestToggleConfigAPIKeyExcludedAll_Codex(t *testing.T) {
 	cfg := &config.Config{
 		CodexKey: []config.CodexKey{{

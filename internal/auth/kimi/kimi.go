@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -168,8 +169,8 @@ func getHostname() string {
 // commonHeaders returns headers required for Kimi API requests.
 func (c *DeviceFlowClient) commonHeaders() map[string]string {
 	return map[string]string{
-		"X-Msh-Platform":     "cli-proxy-api",
-		"X-Msh-Version":      "1.0.0",
+		"X-Msh-Platform":     "CLIProxyAPI",
+		"X-Msh-Version":      buildinfo.Version,
 		"X-Msh-Device-Name":  getHostname(),
 		"X-Msh-Device-Model": getDeviceModel(),
 		"X-Msh-Device-Id":    c.deviceID,

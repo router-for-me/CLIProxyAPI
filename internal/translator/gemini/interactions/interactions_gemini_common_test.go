@@ -65,6 +65,24 @@ func TestConvertGeminiResponseToInteractionsNonStream(t *testing.T) {
 	}
 }
 
+func TestConvertGeminiResponseToInteractionsNonStreamSnakeCaseUsage(t *testing.T) {
+	out := convertGeminiResponseToInteractionsNonStreamDirect("gemini-3.5-flash", nil, nil, []byte(`{"responseId":"resp_snake","candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usage_metadata":{"prompt_token_count":11,"candidates_token_count":22,"total_token_count":33,"thoughts_token_count":44,"cached_content_token_count":55}}`))
+	for _, test := range []struct {
+		path string
+		want int64
+	}{
+		{"usage.input_tokens", 11},
+		{"usage.output_tokens", 22},
+		{"usage.reasoning_tokens", 44},
+		{"usage.total_tokens", 33},
+		{"usage.cached_tokens", 55},
+	} {
+		if got := gjson.GetBytes(out, test.path).Int(); got != test.want {
+			t.Fatalf("%s = %d, want %d. Output: %s", test.path, got, test.want, string(out))
+		}
+	}
+}
+
 func TestConvertInteractionsResponseToGeminiStreamFunctionCall(t *testing.T) {
 	var param any
 	created := ConvertInteractionsResponseToGemini(context.Background(), "gemini-3.1-flash-lite", nil, nil, []byte(`data: {"interaction":{"id":"i1","model":"gemini-3.1-flash-lite"},"event_type":"interaction.created"}`), &param)
@@ -328,6 +346,29 @@ func TestConvertGeminiResponseToInteractionsStreamStepLifecycle(t *testing.T) {
 	}
 	if got := gjson.GetBytes(completed, "interaction.usage.total_thought_tokens").Int(); got != 2 {
 		t.Fatalf("total_thought_tokens = %d, want 2. Payload: %s", got, string(completed))
+	}
+}
+
+func TestConvertGeminiResponseToInteractionsStreamSnakeCaseUsage(t *testing.T) {
+	var param any
+	out := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash", nil, nil, []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usage_metadata":{"prompt_token_count":11,"candidates_token_count":22,"total_token_count":33,"thoughts_token_count":44,"cached_content_token_count":55}}`), &param)
+	if got := countEventType(out, "interaction.completed"); got != 1 {
+		t.Fatalf("interaction.completed count = %d, want 1. Events: %s", got, eventTypes(out))
+	}
+	completed := findCompletedPayload(out)
+	for _, test := range []struct {
+		path string
+		want int64
+	}{
+		{"interaction.usage.total_input_tokens", 11},
+		{"interaction.usage.total_output_tokens", 22},
+		{"interaction.usage.total_thought_tokens", 44},
+		{"interaction.usage.total_tokens", 33},
+		{"interaction.usage.total_cached_tokens", 55},
+	} {
+		if got := gjson.GetBytes(completed, test.path).Int(); got != test.want {
+			t.Fatalf("%s = %d, want %d. Payload: %s", test.path, got, test.want, string(completed))
+		}
 	}
 }
 

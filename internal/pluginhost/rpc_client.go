@@ -68,8 +68,14 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 		return pluginapi.Plugin{}, fmt.Errorf("plugin schema version %d is not supported", resp.SchemaVersion)
 	}
 	adapter := &rpcPluginAdapter{id: id, host: host, client: client}
+	schemaVersion := resp.SchemaVersion
+	if schemaVersion == 0 {
+		// Missing schema_version is treated as the original contract.
+		schemaVersion = 1
+	}
 	plugin := pluginapi.Plugin{
-		Metadata: resp.Metadata,
+		Metadata:      resp.Metadata,
+		SchemaVersion: schemaVersion,
 		Capabilities: pluginapi.Capabilities{
 			FrontendAuthProviderExclusive: resp.Capabilities.FrontendAuthProvider && resp.Capabilities.FrontendAuthProviderExclusive,
 			ExecutorModelScope:            resp.Capabilities.ExecutorModelScope,
@@ -106,6 +112,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	}
 	if resp.Capabilities.RequestInterceptor {
 		plugin.Capabilities.RequestInterceptor = adapter
+	}
+	if resp.Capabilities.RequestLifecyclePlugin {
+		plugin.Capabilities.RequestLifecyclePlugin = adapter
 	}
 	if resp.Capabilities.ResponseTranslator {
 		plugin.Capabilities.ResponseTranslator = adapter
@@ -191,6 +200,9 @@ func sanitizePluginRequest(request any) any {
 	case pluginapi.RequestInterceptRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
+	case pluginapi.RequestCompletion:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
 	case pluginapi.ResponseInterceptRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
@@ -201,6 +213,9 @@ func sanitizePluginRequest(request any) any {
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case rpcModelRouteRequest:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
+	case rpcRequestCompletion:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case rpcResponseInterceptRequest:
@@ -474,6 +489,16 @@ func (a *rpcPluginAdapter) InterceptRequestAfterAuth(ctx context.Context, req pl
 		RequestInterceptRequest: req,
 		HostCallbackID:          callbackID,
 	})
+}
+
+func (a *rpcPluginAdapter) HandleRequestComplete(ctx context.Context, completion pluginapi.RequestCompletion) error {
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	_, errCall := callPlugin[rpcEmptyResponse](ctx, a.client, pluginabi.MethodRequestComplete, rpcRequestCompletion{
+		RequestCompletion: completion,
+		HostCallbackID:    callbackID,
+	})
+	return errCall
 }
 
 func (a *rpcPluginAdapter) TranslateResponse(ctx context.Context, req pluginapi.ResponseTransformRequest) (pluginapi.PayloadResponse, error) {
