@@ -777,6 +777,9 @@ func startModelCatalogUpdaters(localModel, homeEnabled bool) {
 	} else if homeEnabled {
 		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
 	}
+	// Command Code catalog comes from the locally installed cmdc CLI package,
+	// so it always starts regardless of local/home mode.
+	registry.StartCommandCodeModelsUpdater(context.Background())
 }
 
 func pluginBootstrapConfigPath(args []string, defaultPath string) string {

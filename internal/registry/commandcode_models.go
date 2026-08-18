@@ -204,8 +204,22 @@ var BuiltinCommandCodeModels = []CommandCodeModelDef{
 	},
 }
 
-// GetCommandCodeModels returns standard Command Code model definitions.
+// GetCommandCodeModels returns Command Code model definitions.
+//
+// It prefers the dynamic catalog discovered from the installed cmdc CLI
+// (last-known-good). When no CLI catalog has been loaded yet, it falls back to
+// the built-in static catalog so startup is never empty. The static catalog is
+// a bootstrap/fallback only — it is never an allowlist, because the CLI catalog
+// can contain newer models than the built-in list.
 func GetCommandCodeModels() []*ModelInfo {
+	if dynamic, ok := getCommandCodeCatalog(); ok {
+		return dynamic
+	}
+	return cloneModelInfos(staticCommandCodeModels())
+}
+
+// staticCommandCodeModels builds the built-in bootstrap catalog.
+func staticCommandCodeModels() []*ModelInfo {
 	infos := make([]*ModelInfo, 0, len(BuiltinCommandCodeModels))
 	for _, m := range BuiltinCommandCodeModels {
 		infos = append(infos, &ModelInfo{
@@ -225,5 +239,5 @@ func GetCommandCodeModels() []*ModelInfo {
 			},
 		})
 	}
-	return cloneModelInfos(infos)
+	return infos
 }
