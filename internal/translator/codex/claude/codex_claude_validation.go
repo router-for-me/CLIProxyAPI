@@ -192,11 +192,121 @@ func validateClaudeCodexToolResult(content gjson.Result) error {
 				return fmt.Errorf("tool_result text must be a string")
 			}
 		case "image":
-			if err := validateClaudeCodexBase64Source(block.Get("source"), "tool_result image", false); err != nil {
+			source := block.Get("source")
+			switch source.Get("type").String() {
+			case "base64", "":
+				if err := validateClaudeCodexBase64Source(source, "tool_result image", false); err != nil {
+					return err
+				}
+			case "url":
+				if url := source.Get("url"); url.Type != gjson.String || url.String() == "" {
+					return fmt.Errorf("tool_result image URL must be a non-empty string")
+				}
+			default:
+				return fmt.Errorf("unsupported tool_result image source type: %s", boundedClaudeCodexLabel(source.Get("type").String()))
+			}
+		case "document":
+			if err := validateClaudeCodexToolResultDocument(block); err != nil {
 				return err
+			}
+		case "search_result":
+			if err := validateClaudeCodexSearchResult(block); err != nil {
+				return err
+			}
+		case "tool_reference":
+			if toolName := block.Get("tool_name"); toolName.Type != gjson.String || toolName.String() == "" {
+				return fmt.Errorf("tool_reference tool_name must be a non-empty string")
 			}
 		default:
 			return fmt.Errorf("unsupported tool_result content block: %s", boundedClaudeCodexLabel(block.Get("type").String()))
+		}
+	}
+	return nil
+}
+
+func validateClaudeCodexToolResultDocument(block gjson.Result) error {
+	source := block.Get("source")
+	if !source.IsObject() {
+		return fmt.Errorf("document source must be an object")
+	}
+	switch source.Get("type").String() {
+	case "base64":
+		return validateClaudeCodexBase64Source(source, "document", true)
+	case "text":
+		if source.Get("media_type").String() != "text/plain" {
+			return fmt.Errorf("document text source media type must be text/plain")
+		}
+		if data := source.Get("data"); data.Type != gjson.String || data.String() == "" {
+			return fmt.Errorf("document text source data must be a non-empty string")
+		}
+	case "url":
+		if url := source.Get("url"); url.Type != gjson.String || url.String() == "" {
+			return fmt.Errorf("document source URL must be a non-empty string")
+		}
+	case "content":
+		if err := validateClaudeCodexDocumentContentSource(source.Get("content")); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported document source type: %s", boundedClaudeCodexLabel(source.Get("type").String()))
+	}
+	return nil
+}
+
+func validateClaudeCodexDocumentContentSource(content gjson.Result) error {
+	if content.Type == gjson.String {
+		return nil
+	}
+	if !content.IsArray() {
+		return fmt.Errorf("document content source must be text or an array")
+	}
+	for _, block := range content.Array() {
+		if !block.IsObject() {
+			return fmt.Errorf("document content source blocks must be objects")
+		}
+		switch block.Get("type").String() {
+		case "text":
+			if block.Get("text").Type != gjson.String {
+				return fmt.Errorf("document content source text must be a string")
+			}
+		case "image":
+			source := block.Get("source")
+			switch source.Get("type").String() {
+			case "base64", "":
+				if err := validateClaudeCodexBase64Source(source, "document image", false); err != nil {
+					return err
+				}
+			case "url":
+				if url := source.Get("url"); url.Type != gjson.String || url.String() == "" {
+					return fmt.Errorf("document image source URL must be a non-empty string")
+				}
+			default:
+				return fmt.Errorf("unsupported document image source type: %s", boundedClaudeCodexLabel(source.Get("type").String()))
+			}
+		default:
+			return fmt.Errorf("unsupported document content source block: %s", boundedClaudeCodexLabel(block.Get("type").String()))
+		}
+	}
+	return nil
+}
+
+func validateClaudeCodexSearchResult(block gjson.Result) error {
+	if source := block.Get("source"); source.Type != gjson.String || source.String() == "" {
+		return fmt.Errorf("search_result source must be a non-empty string")
+	}
+	if title := block.Get("title"); title.Type != gjson.String || title.String() == "" {
+		return fmt.Errorf("search_result title must be a non-empty string")
+	}
+	content := block.Get("content")
+	if !content.IsArray() {
+		return fmt.Errorf("search_result content must be an array")
+	}
+	for _, text := range content.Array() {
+		if !text.IsObject() || text.Get("type").String() != "text" {
+			return fmt.Errorf("search_result content blocks must be text objects")
+		}
+		if text.Get("text").Type != gjson.String {
+			return fmt.Errorf("search_result content text must be a string")
 		}
 	}
 	return nil
