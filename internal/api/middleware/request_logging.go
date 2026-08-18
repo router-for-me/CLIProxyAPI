@@ -74,7 +74,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		if err = wrapper.Finalize(c); err != nil {
 			// Log error but don't interrupt the response
 			// In a real implementation, you might want to use a proper logger here
-		}
+			}
 	}
 }
 
@@ -320,10 +320,7 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 	method := c.Request.Method
 
 	// Capture headers
-	headers := make(map[string][]string)
-	for key, values := range c.Request.Header {
-		headers[key] = values
-	}
+	headers := c.Request.Header.Clone()
 
 	// Capture request body
 	var body []byte
