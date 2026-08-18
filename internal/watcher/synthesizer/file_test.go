@@ -132,6 +132,45 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_KimiFingerprintProfile(t *testing.T) {
+	tempDir := t.TempDir()
+	authData := map[string]any{
+		"type":                "kimi",
+		"access_token":        "kimi-access-token",
+		"refresh_token":       "kimi-refresh-token",
+		"fingerprint-profile": "claude-code-cli",
+	}
+	data, errMarshal := json.Marshal(authData)
+	if errMarshal != nil {
+		t.Fatalf("marshal kimi auth: %v", errMarshal)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "kimi-auth.json"), data, 0644); err != nil {
+		t.Fatalf("failed to write kimi auth file: %v", err)
+	}
+
+	auths, err := NewFileSynthesizer().Synthesize(&SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if auths[0].Provider != "kimi" {
+		t.Fatalf("provider = %q, want kimi", auths[0].Provider)
+	}
+	if got := auths[0].Attributes["fingerprint_profile"]; got != "claude-code-cli" {
+		t.Fatalf("attributes fingerprint_profile = %q, want claude-code-cli", got)
+	}
+	if got, _ := auths[0].Metadata["fingerprint-profile"].(string); got != "claude-code-cli" {
+		t.Fatalf("metadata fingerprint-profile = %q, want claude-code-cli", got)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_IgnoresGeminiProviderFile(t *testing.T) {
 	tempDir := t.TempDir()
 
