@@ -115,6 +115,9 @@ type Config struct {
 	// XAIKey defines xAI API key configurations using the same structure as Codex API keys.
 	XAIKey []XAIKey `yaml:"xai-api-key" json:"xai-api-key"`
 
+	// CodeBuddyCNKey defines CodeBuddy CN (Tencent) API key configurations.
+	CodeBuddyCNKey []CodeBuddyCNKey `yaml:"codebuddy-cn-api-key" json:"codebuddy-cn-api-key"`
+
 	// XAI configures provider-wide xAI request behavior.
 	XAI XAIConfig `yaml:"xai" json:"xai"`
 

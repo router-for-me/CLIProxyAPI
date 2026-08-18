@@ -144,6 +144,17 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case "kimi":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
+	case "codebuddy-cn":
+		models = registry.GetCodeBuddyCNModels()
+		if entry := s.resolveConfigCodeBuddyCNKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildCodeBuddyCNConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
 		if entry := s.resolveConfigXAIKey(a); entry != nil {
@@ -816,6 +827,51 @@ func buildXAIConfigModels(entry *config.XAIKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "xai", "xai")
+}
+
+func buildCodeBuddyCNConfigModels(entry *config.CodeBuddyCNKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, constant.CodeBuddyCN, "openai")
+}
+
+func (s *Service) resolveConfigCodeBuddyCNKey(auth *coreauth.Auth) *config.CodeBuddyCNKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return matchCodeBuddyCNConfigKey(auth, s.cfg.CodeBuddyCNKey)
+}
+
+func matchCodeBuddyCNConfigKey(auth *coreauth.Auth, entries []config.CodeBuddyCNKey) *config.CodeBuddyCNKey {
+	if auth == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	matchesCredentials := func(entry *config.CodeBuddyCNKey) bool {
+		if entry == nil {
+			return false
+		}
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" {
+			return strings.EqualFold(cfgKey, attrKey) && (cfgBase == "" || strings.EqualFold(cfgBase, attrBase))
+		}
+		return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
+	}
+	if entry := configEntryForAuthIndex(auth, entries); entry != nil && matchesCredentials(entry) {
+		return entry
+	}
+	for i := range entries {
+		if entry := &entries[i]; matchesCredentials(entry) {
+			return entry
+		}
+	}
+	return nil
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {

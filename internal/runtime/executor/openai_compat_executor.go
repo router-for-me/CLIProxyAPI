@@ -129,6 +129,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
+	translated = e.applyOutgoingTransforms(ctx, auth, baseModel, opts, translated)
 	if opts.Alt != "responses/compact" {
 		translated, err = e.applyPromptCacheKey(ctx, auth, from, baseModel, req, opts, translated)
 		if err != nil {
@@ -343,6 +344,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
+	translated = e.applyOutgoingTransforms(ctx, auth, baseModel, opts, translated)
 	if opts.Alt != "responses/compact" {
 		translated, err = e.applyPromptCacheKey(ctx, auth, from, baseModel, req, opts, translated)
 		if err != nil {
@@ -913,6 +915,14 @@ func (e *OpenAICompatExecutor) applyPromptCacheKey(ctx context.Context, auth *cl
 	}, "\x00")
 	promptCacheKey := uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity)).String()
 	return helps.SetStringIfDifferent(translated, "prompt_cache_key", promptCacheKey), nil
+}
+
+// applyOutgoingTransforms lets provider-specific executors that embed
+// OpenAICompatExecutor mutate the final translated OpenAI upstream body before
+// it is sent. The base implementation is a no-op; CodeBuddy CN overrides it to
+// force streaming and adjust reasoning/agent prompt fields.
+func (e *OpenAICompatExecutor) applyOutgoingTransforms(ctx context.Context, auth *cliproxyauth.Auth, baseModel string, opts cliproxyexecutor.Options, translated []byte) []byte {
+	return translated
 }
 
 func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string) {

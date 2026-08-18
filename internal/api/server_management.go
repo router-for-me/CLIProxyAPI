@@ -135,6 +135,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/xai-api-key", s.mgmt.PatchXAIKey)
 		mgmt.DELETE("/xai-api-key", s.mgmt.DeleteXAIKey)
 
+		mgmt.GET("/codebuddy-cn-api-key", s.mgmt.GetCodeBuddyCNKeys)
+		mgmt.PUT("/codebuddy-cn-api-key", s.mgmt.PutCodeBuddyCNKeys)
+		mgmt.PATCH("/codebuddy-cn-api-key", s.mgmt.PatchCodeBuddyCNKey)
+		mgmt.DELETE("/codebuddy-cn-api-key", s.mgmt.DeleteCodeBuddyCNKey)
+
 		mgmt.GET("/openai-compatibility", s.mgmt.GetOpenAICompat)
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)

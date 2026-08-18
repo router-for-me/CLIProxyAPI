@@ -532,6 +532,74 @@ type XAIKey = CodexKey
 // XAIModel uses the Codex model mapping structure for xAI models.
 type XAIModel = CodexModel
 
+// CodeBuddyCNKey represents the configuration for a CodeBuddy CN (Tencent)
+// API key, including an optional base URL override and per-key proxy/headers.
+// CodeBuddy CN is an OpenAI-compatible gateway (https://copilot.tencent.com/v2/chat/completions)
+// that forces streaming and maps reasoning_effort to reasoning_summary.
+type CodeBuddyCNKey struct {
+	// APIKey is the authentication key for accessing CodeBuddy CN.
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Priority controls selection preference when multiple credentials match.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Weight controls proportional selection under weighted-round-robin.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
+
+	// Prefix optionally namespaces models for this credential (e.g. "cb/glm-5.2").
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// BaseURL overrides the CodeBuddy CN endpoint. Defaults to the Tencent gateway.
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+
+	// ProxyURL overrides the global proxy setting for this API key if provided.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Models defines upstream model names and aliases for request routing.
+	Models []CodeBuddyCNModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// Headers optionally adds extra HTTP headers for requests sent with this key.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// DisableCooling overrides the global cooling policy for this credential when set.
+	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+}
+
+// CodeBuddyCNModel represents the model mapping for a CodeBuddy CN API key.
+type CodeBuddyCNModel struct {
+	// Name is the upstream model identifier used when issuing requests.
+	Name string `yaml:"name" json:"name"`
+
+	// Alias is the client-facing model name that maps to Name.
+	Alias string `yaml:"alias" json:"alias"`
+
+	// DisplayName is the optional human-readable name shown in model catalogs.
+	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
+
+	// MaxContextLength overrides the context window advertised to clients.
+	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+
+	// ForceMapping rewrites upstream response model fields back to Alias.
+	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+
+	// IsCompat preserves Claude thinking blocks for compatible upstreams.
+	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`
+
+	// Thinking configures the thinking/reasoning capability for this model.
+	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
+}
+
+func (m CodeBuddyCNModel) GetName() string                        { return m.Name }
+func (m CodeBuddyCNModel) GetAlias() string                       { return m.Alias }
+func (m CodeBuddyCNModel) GetDisplayName() string                 { return m.DisplayName }
+func (m CodeBuddyCNModel) GetMaxContextLength() int               { return m.MaxContextLength }
+func (m CodeBuddyCNModel) GetForceMapping() bool                  { return m.ForceMapping }
+func (m CodeBuddyCNModel) GetIsCompat() bool                      { return m.IsCompat }
+func (m CodeBuddyCNModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
+
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
 type GeminiKey struct {

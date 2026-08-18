@@ -1624,6 +1624,211 @@ func (h *Handler) DeleteXAIKey(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
 }
 
+// codebuddy-cn-api-key: []CodeBuddyCNKey
+func (h *Handler) GetCodeBuddyCNKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"codebuddy-cn-api-key": h.codeBuddyCNKeysWithAuthIndex()})
+}
+
+func (h *Handler) PutCodeBuddyCNKeys(c *gin.Context) {
+	data, errRead := c.GetRawData()
+	if errRead != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.CodeBuddyCNKey
+	if errUnmarshal := json.Unmarshal(data, &arr); errUnmarshal != nil {
+		var obj struct {
+			Items []config.CodeBuddyCNKey `json:"items"`
+		}
+		if errObject := json.Unmarshal(data, &obj); errObject != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	filtered := make([]config.CodeBuddyCNKey, 0, len(arr))
+	for i := range arr {
+		entry := arr[i]
+		normalizeCodeBuddyCNKey(&entry)
+		if entry.APIKey == "" {
+			continue
+		}
+		if rejectInvalidCredentialWeight(c, fmt.Sprintf("codebuddy-cn-api-key[%d].weight", i), entry.Weight) {
+			return
+		}
+		filtered = append(filtered, entry)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cfg.CodeBuddyCNKey = filtered
+	h.cfg.SanitizeCodeBuddyCNKeys()
+	h.persistLocked(c)
+}
+
+func (h *Handler) PatchCodeBuddyCNKey(c *gin.Context) {
+	type codeBuddyCNKeyPatch struct {
+		APIKey         *string                   `json:"api-key"`
+		Priority       *int                      `json:"priority"`
+		Weight         json.RawMessage           `json:"weight"`
+		Prefix         *string                   `json:"prefix"`
+		BaseURL        *string                   `json:"base-url"`
+		ProxyURL       *string                   `json:"proxy-url"`
+		Models         *[]config.CodeBuddyCNModel `json:"models"`
+		Headers        *map[string]string        `json:"headers"`
+		ExcludedModels *[]string                 `json:"excluded-models"`
+		DisableCooling json.RawMessage           `json:"disable-cooling"`
+	}
+	var body struct {
+		Index *int                  `json:"index"`
+		Match *string               `json:"match"`
+		Value *codeBuddyCNKeyPatch  `json:"value"`
+	}
+	if errBind := c.ShouldBindJSON(&body); errBind != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.CodeBuddyCNKey) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != nil {
+		match := strings.TrimSpace(*body.Match)
+		for i := range h.cfg.CodeBuddyCNKey {
+			if h.cfg.CodeBuddyCNKey[i].APIKey == match {
+				targetIndex = i
+				break
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+
+	entry := h.cfg.CodeBuddyCNKey[targetIndex]
+	if body.Value.APIKey != nil {
+		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
+	}
+	if len(body.Value.Weight) > 0 {
+		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
+		if errWeight != nil {
+			c.JSON(400, gin.H{"error": errWeight.Error()})
+			return
+		}
+		entry.Weight = weight
+	}
+	if body.Value.Prefix != nil {
+		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.BaseURL != nil {
+		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
+	}
+	if body.Value.ProxyURL != nil {
+		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+	}
+	if body.Value.Models != nil {
+		entry.Models = append([]config.CodeBuddyCNModel(nil), (*body.Value.Models)...)
+	}
+	if body.Value.Headers != nil {
+		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+	}
+	if body.Value.ExcludedModels != nil {
+		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if !applyDisableCoolingPatch(c, body.Value.DisableCooling, &entry.DisableCooling) {
+		return
+	}
+	normalizeCodeBuddyCNKey(&entry)
+	h.cfg.CodeBuddyCNKey[targetIndex] = entry
+	h.cfg.SanitizeCodeBuddyCNKeys()
+	h.persistLocked(c)
+}
+
+func (h *Handler) DeleteCodeBuddyCNKey(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
+		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
+			base := strings.TrimSpace(baseRaw)
+			out := make([]config.CodeBuddyCNKey, 0, len(h.cfg.CodeBuddyCNKey))
+			for _, entry := range h.cfg.CodeBuddyCNKey {
+				if strings.TrimSpace(entry.APIKey) == val && strings.TrimSpace(entry.BaseURL) == base {
+					continue
+				}
+				out = append(out, entry)
+			}
+			h.cfg.CodeBuddyCNKey = out
+			h.cfg.SanitizeCodeBuddyCNKeys()
+			h.persistLocked(c)
+			return
+		}
+
+		matchIndex := -1
+		matchCount := 0
+		for i := range h.cfg.CodeBuddyCNKey {
+			if strings.TrimSpace(h.cfg.CodeBuddyCNKey[i].APIKey) == val {
+				matchCount++
+				if matchIndex == -1 {
+					matchIndex = i
+				}
+			}
+		}
+		if matchCount > 1 {
+			c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
+			return
+		}
+		if matchIndex != -1 {
+			h.cfg.CodeBuddyCNKey = append(h.cfg.CodeBuddyCNKey[:matchIndex], h.cfg.CodeBuddyCNKey[matchIndex+1:]...)
+		}
+		h.cfg.SanitizeCodeBuddyCNKeys()
+		h.persistLocked(c)
+		return
+	}
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(h.cfg.CodeBuddyCNKey) {
+			h.cfg.CodeBuddyCNKey = append(h.cfg.CodeBuddyCNKey[:idx], h.cfg.CodeBuddyCNKey[idx+1:]...)
+			h.cfg.SanitizeCodeBuddyCNKeys()
+			h.persistLocked(c)
+			return
+		}
+	}
+	c.JSON(400, gin.H{"error": "missing api-key or index"})
+}
+
+func normalizeCodeBuddyCNKey(entry *config.CodeBuddyCNKey) {
+	if entry == nil {
+		return
+	}
+	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	if len(entry.Models) == 0 {
+		return
+	}
+	normalized := make([]config.CodeBuddyCNModel, 0, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		model.Name = strings.TrimSpace(model.Name)
+		model.Alias = strings.TrimSpace(model.Alias)
+		if model.Name == "" && model.Alias == "" {
+			continue
+		}
+		normalized = append(normalized, model)
+	}
+	entry.Models = normalized
+}
+
 func applyDisableCoolingPatch(c *gin.Context, raw json.RawMessage, target **bool) bool {
 	if len(raw) == 0 {
 		return true
