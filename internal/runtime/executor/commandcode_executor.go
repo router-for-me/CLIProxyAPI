@@ -36,6 +36,23 @@ const (
 	CommandCodeMaxErrorBodySize = 1 * 1024 * 1024
 )
 
+// commandCodeStatusError carries the upstream HTTP status so auth lifecycle
+// code can classify 401/402/429 etc. via errors.As(... StatusError). It
+// follows the repository convention used by other executors (statusErr).
+type commandCodeStatusError struct {
+	code int
+	msg  string
+}
+
+func (e commandCodeStatusError) Error() string {
+	if e.msg != "" {
+		return e.msg
+	}
+	return fmt.Sprintf("commandcode upstream error (status %d)", e.code)
+}
+
+func (e commandCodeStatusError) StatusCode() int { return e.code }
+
 func init() {
 	// Register custom translators between OpenAI format and Command Code format.
 	sdktranslator.Register(
@@ -240,7 +257,7 @@ func (e *CommandCodeExecutor) Execute(ctx context.Context, a *cliproxyauth.Auth,
 		return cliproxyexecutor.Response{
 			Payload: bodyBytes,
 			Headers: resp.Header,
-		}, fmt.Errorf("commandcode upstream error (status %d): %s", resp.StatusCode, string(bodyBytes))
+		}, commandCodeStatusError{code: resp.StatusCode, msg: fmt.Sprintf("commandcode upstream error (status %d): %s", resp.StatusCode, string(bodyBytes))}
 	}
 
 	// Read and aggregate the NDJSON stream into full ChatCompletion JSON
@@ -290,7 +307,7 @@ func (e *CommandCodeExecutor) ExecuteStream(ctx context.Context, a *cliproxyauth
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, CommandCodeMaxErrorBodySize))
-		return nil, fmt.Errorf("commandcode upstream error (status %d): %s", resp.StatusCode, string(bodyBytes))
+		return nil, commandCodeStatusError{code: resp.StatusCode, msg: fmt.Sprintf("commandcode upstream error (status %d): %s", resp.StatusCode, string(bodyBytes))}
 	}
 
 	chunks := make(chan cliproxyexecutor.StreamChunk, 64)

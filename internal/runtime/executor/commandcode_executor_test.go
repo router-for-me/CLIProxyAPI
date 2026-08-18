@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -225,6 +226,71 @@ func TestCommandCodeExecutor_UpstreamError(t *testing.T) {
 	if !strings.Contains(err.Error(), "upgrade_required") {
 		t.Errorf("expected error message to contain 'upgrade_required', got: %v", err)
 	}
+	assertStatusError(t, err, http.StatusPaymentRequired)
+}
+
+// TestCommandCodeExecutor_UpstreamError_StatusErrorContract verifies the
+// non-stream 4xx path exposes StatusCode() so auth lifecycle code can classify
+// 401/402/429 via errors.As(... executor.StatusError).
+func TestCommandCodeExecutor_UpstreamError_StatusErrorContract(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"code":"invalid_api_key","message":"bad key"}}`, http.StatusUnauthorized)
+	}))
+	defer ts.Close()
+
+	exec := &CommandCodeExecutor{BaseURL: ts.URL}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key"}}
+
+	reqJSON := []byte(`{"model": "deepseek/deepseek-v4-flash", "messages": [{"role": "user", "content": "hi"}]}`)
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek/deepseek-v4-flash",
+		Payload: reqJSON,
+	}, cliproxyexecutor.Options{})
+
+	if err == nil {
+		t.Fatal("expected error for 401 status, got nil")
+	}
+	assertStatusError(t, err, http.StatusUnauthorized)
+}
+
+// TestCommandCodeExecutor_StreamUpstreamError_StatusErrorContract verifies the
+// streaming 4xx path also exposes StatusCode() (stream/non-stream consistency).
+func TestCommandCodeExecutor_StreamUpstreamError_StatusErrorContract(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"code":"rate_limited","message":"slow down"}}`, http.StatusTooManyRequests)
+	}))
+	defer ts.Close()
+
+	exec := &CommandCodeExecutor{BaseURL: ts.URL}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key"}}
+
+	reqJSON := []byte(`{"model": "deepseek/deepseek-v4-flash", "messages": [{"role": "user", "content": "hi"}]}`)
+
+	_, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek/deepseek-v4-flash",
+		Payload: reqJSON,
+	}, cliproxyexecutor.Options{})
+
+	if err == nil {
+		t.Fatal("expected error for 429 status, got nil")
+	}
+	assertStatusError(t, err, http.StatusTooManyRequests)
+}
+
+// assertStatusError asserts err implements StatusError with the given code via
+// errors.As, mirroring how auth lifecycle classifies provider failures.
+func assertStatusError(t *testing.T, err error, wantCode int) {
+	t.Helper()
+	var se interface {
+		StatusCode() int
+	}
+	if !errors.As(err, &se) {
+		t.Fatalf("error %v does not implement StatusError", err)
+	}
+	if se.StatusCode() != wantCode {
+		t.Fatalf("StatusCode() = %d, want %d", se.StatusCode(), wantCode)
+	}
 }
 
 func TestCommandCode_TranslatorRoundTrip(t *testing.T) {
@@ -265,5 +331,33 @@ func TestCommandCode_TranslatorRoundTrip(t *testing.T) {
 	}
 	if msgs[2].Get("content.0.toolName").String() != "foo" {
 		t.Errorf("toolName resolution failed: got %q, want 'foo'", msgs[2].Get("content.0.toolName").String())
+	}
+}
+
+// TestCommandCodeExecutor_200AggregationErrorFailsClosed verifies that a 200
+// response whose NDJSON has no terminal event (e.g. upstream degraded/error)
+// returns an error at the Execute layer — it must never surface as a fake
+// OpenAI completion. This is the real fail-closed path for the main server.
+func TestCommandCodeExecutor_200AggregationErrorFailsClosed(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, `{"type":"text-delta","id":"txt-0","text":"partial"}`)
+		// no finish-step / finish -> AccumulateNDJSON errors
+	}))
+	defer ts.Close()
+
+	exec := &CommandCodeExecutor{BaseURL: ts.URL}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key"}}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek/deepseek-v4-flash",
+		Payload: []byte(`{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{})
+
+	if err == nil {
+		t.Fatal("expected aggregation error for 200 response without terminal event, got nil")
+	}
+	if se, ok := err.(interface{ StatusCode() int }); ok && se.StatusCode() == 200 {
+		t.Fatalf("aggregation error must not carry a fabricated 200 status; got StatusCode()=200")
 	}
 }

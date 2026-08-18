@@ -93,6 +93,7 @@ func tryRefreshCommandCodeCatalog(label string) {
 		log.Warnf("%s: Command Code CLI catalog %s parsed to zero models; keeping current catalog", label, path)
 		return
 	}
+	enrichCommandCodeModelsFromBuiltin(models)
 
 	commandCodeCatalog.mu.Lock()
 	changed := !commandCodeCatalog.loaded || !commandCodeModelsEqual(commandCodeCatalog.models, models)
@@ -146,26 +147,40 @@ func commandCodeCLIFromPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cmdc not found on PATH: %w", err)
 	}
-	// exec.LookPath on Windows may return the .cmd shim; its parent is the npm
-	// bin dir. The package dir is ../node_modules/command-code relative to it.
+	// Resolve launcher symlinks (Linux/macOS npm, Homebrew, nvm) to the real
+	// package location so binDir points at the actual install prefix.
+	if resolved, errResolve := filepath.EvalSymlinks(exePath); errResolve == nil {
+		exePath = resolved
+	}
 	binDir := filepath.Dir(exePath)
-	for _, pkgDir := range []string{
-		filepath.Join(binDir, "node_modules", "command-code"),
-		filepath.Join(binDir, "..", "node_modules", "command-code"),
-		filepath.Join(binDir, "..", "command-code"),
-	} {
+	for _, pkgDir := range commandCodePackageCandidates(binDir) {
 		if fi, errStat := os.Stat(pkgDir); errStat == nil && fi.IsDir() {
 			return pkgDir, nil
 		}
 	}
+	return "", fmt.Errorf("could not locate command-code package from launcher %s", exePath)
+}
+
+// commandCodePackageCandidates returns plausible package dirs relative to a
+// launcher's bin directory. It covers npm prefix/bin, prefix/lib/node_modules
+// (Linux/macOS global installs), prefix/node_modules and the hermes-managed
+// node dir. Order matters: most common first.
+func commandCodePackageCandidates(binDir string) []string {
+	if binDir == "" {
+		return nil
+	}
+	base := []string{
+		filepath.Join(binDir, "node_modules", "command-code"),
+		filepath.Join(binDir, "..", "lib", "node_modules", "command-code"),
+		filepath.Join(binDir, "..", "node_modules", "command-code"),
+		filepath.Join(binDir, "..", "command-code"),
+	}
 	// The hermes-managed npm global root keeps packages directly in the node
 	// dir; cmdc launcher sits beside node_modules/command-code.
 	if strings.Contains(strings.ToLower(binDir), "hermes") {
-		if fi, errStat := os.Stat(filepath.Join(binDir, "node_modules", "command-code")); errStat == nil && fi.IsDir() {
-			return filepath.Join(binDir, "node_modules", "command-code"), nil
-		}
+		base = append(base, filepath.Join(binDir, "node_modules", "command-code"))
 	}
-	return "", fmt.Errorf("could not locate command-code package from launcher %s", exePath)
+	return base
 }
 
 // commandCodeCLIFromWellKnownRoots checks common npm global install roots.
@@ -279,18 +294,33 @@ func parseCommandCodeContextWindow(cell string) int {
 	return int(num * float64(mult))
 }
 
+// commandCodeModelsEqual reports whether two catalogs are semantically equal.
+// Comparison is order-insensitive by model ID so pure reordering never causes
+// a spurious refresh, and it includes the metadata that actually affects the
+// registry (ContextLength, MaxCompletionTokens) so real metadata changes are
+// not missed.
 func commandCodeModelsEqual(a, b []*ModelInfo) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i := range a {
-		if a[i] == nil || b[i] == nil {
-			if a[i] != b[i] {
-				return false
-			}
+	index := make(map[string]*ModelInfo, len(b))
+	for _, m := range b {
+		if m == nil {
 			continue
 		}
-		if a[i].ID != b[i].ID || a[i].DisplayName != b[i].DisplayName {
+		index[m.ID] = m
+	}
+	for _, ma := range a {
+		if ma == nil {
+			return false
+		}
+		mb, ok := index[ma.ID]
+		if !ok || mb == nil {
+			return false
+		}
+		if ma.DisplayName != mb.DisplayName ||
+			ma.ContextLength != mb.ContextLength ||
+			ma.MaxCompletionTokens != mb.MaxCompletionTokens {
 			return false
 		}
 	}
@@ -305,4 +335,29 @@ func getCommandCodeCatalog() ([]*ModelInfo, bool) {
 		return nil, false
 	}
 	return cloneModelInfos(commandCodeCatalog.models), true
+}
+
+// enrichCommandCodeModelsFromBuiltin fills MaxCompletionTokens for dynamic
+// catalog models whose ID exists in the trusted built-in metadata. Models that
+// are dynamic-only (no reliable max-output source) keep MaxCompletionTokens=0
+// (unknown); we never guess values for them.
+func enrichCommandCodeModelsFromBuiltin(models []*ModelInfo) {
+	if len(models) == 0 {
+		return
+	}
+	for _, m := range models {
+		if m == nil {
+			continue
+		}
+		// Already has an explicit value; never overwrite.
+		if m.MaxCompletionTokens > 0 {
+			continue
+		}
+		for _, b := range BuiltinCommandCodeModels {
+			if b.ID == m.ID {
+				m.MaxCompletionTokens = b.MaxTokens
+				break
+			}
+		}
+	}
 }

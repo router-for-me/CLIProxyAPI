@@ -701,12 +701,57 @@ func ConvertCommandCodeStreamToOpenAI(ctx context.Context, modelName string, ori
 }
 
 // ConvertCommandCodeNonStreamToOpenAI converts the aggregated full NDJSON lines into a single ChatCompletion JSON response.
+// On aggregation failure it fails closed: if the input already looks like a
+// valid OpenAI response (e.g. the executor aggregated it before this transform
+// ran) it passes it through unchanged; otherwise it returns a well-formed
+// OpenAI error object instead of leaking raw NDJSON to the client.
 func ConvertCommandCodeNonStreamToOpenAI(ctx context.Context, modelName string, originalReq, translatedReq, rawJSON []byte, param *any) []byte {
 	resp, err := AccumulateNDJSON(ctx, modelName, rawJSON)
-	if err != nil {
+	if err == nil {
+		return resp
+	}
+	if isOpenAICompletionJSON(rawJSON) {
 		return rawJSON
 	}
-	return resp
+	return buildCommandCodeTranslationError(err)
+}
+
+// isOpenAICompletionJSON reports whether rawJSON already parses as a standard
+// OpenAI chat completion object (id + object + choices). Used to distinguish
+// "already aggregated" inputs from raw NDJSON that must not leak through.
+func isOpenAICompletionJSON(rawJSON []byte) bool {
+	if len(rawJSON) == 0 {
+		return false
+	}
+	var v struct {
+		Object  string `json:"object"`
+		Choices []any  `json:"choices"`
+	}
+	if err := json.Unmarshal(rawJSON, &v); err != nil {
+		return false
+	}
+	return v.Object == "chat.completion" && len(v.Choices) > 0
+}
+
+// buildCommandCodeTranslationError returns a well-formed OpenAI error object
+// carrying the aggregation failure so clients see a real error instead of
+// malformed NDJSON.
+func buildCommandCodeTranslationError(err error) []byte {
+	msg := "commandcode: failed to aggregate non-stream response"
+	if err != nil {
+		msg += ": " + err.Error()
+	}
+	out, marshalErr := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message": msg,
+			"type":    "server_error",
+			"code":    "commandcode_aggregation_error",
+		},
+	})
+	if marshalErr != nil {
+		return []byte(`{"error":{"message":"commandcode: failed to aggregate non-stream response","type":"server_error"}}`)
+	}
+	return out
 }
 
 // AccumulateNDJSON parses full raw NDJSON bytes into standard OpenAI Chat Completion JSON.

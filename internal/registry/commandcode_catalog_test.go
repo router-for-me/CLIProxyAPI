@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -296,7 +297,150 @@ func TestCommandCodeModelsEqual(t *testing.T) {
 	if commandCodeModelsEqual(a, d) {
 		t.Error("catalogs with changed display name should compare unequal")
 	}
+	// Order must not matter: same IDs in different order are equal.
+	reversed := []*ModelInfo{{ID: "y", DisplayName: "Y"}, {ID: "x", DisplayName: "X"}}
+	if !commandCodeModelsEqual(c, reversed) {
+		t.Error("pure reordering must not cause a spurious change")
+	}
+	// Context window change must be detected (metadata affecting registry).
+	ctxChanged := []*ModelInfo{{ID: "x", DisplayName: "X", ContextLength: 1_000_000}}
+	if commandCodeModelsEqual(a, ctxChanged) {
+		t.Error("context length change should compare unequal")
+	}
+	// MaxCompletionTokens change must be detected.
+	maxChanged := []*ModelInfo{{ID: "x", DisplayName: "X", MaxCompletionTokens: 65_536}}
+	if commandCodeModelsEqual(a, maxChanged) {
+		t.Error("MaxCompletionTokens change should compare unequal")
+	}
 	if !strings.Contains(sampleCommandCodeModelsMD, "vendor/new-model-test") {
 		t.Fatal("fixture must include the synthetic new model")
+	}
+}
+
+// TestEnrichCommandCodeModelsFromBuiltin verifies static-known models get
+// MaxCompletionTokens enriched from builtin metadata while dynamic-only models
+// keep 0 (unknown, never guessed).
+func TestEnrichCommandCodeModelsFromBuiltin(t *testing.T) {
+	models := []*ModelInfo{
+		{ID: "deepseek/deepseek-v4-flash", Object: "model"},           // static-known
+		{ID: "vendor/brand-new-dynamic", Object: "model"},             // dynamic-only
+		{ID: "zai-org/glm-5.2-fast", Object: "model"},                 // static-known
+		{ID: "x/explicit", Object: "model", MaxCompletionTokens: 999}, // already set
+	}
+	enrichCommandCodeModelsFromBuiltin(models)
+
+	if got := models[0].MaxCompletionTokens; got <= 0 {
+		t.Errorf("deepseek-v4-flash MaxCompletionTokens = %d, want >0 (enriched from builtin)", got)
+	}
+	if got := models[2].MaxCompletionTokens; got <= 0 {
+		t.Errorf("glm-5.2-fast MaxCompletionTokens = %d, want >0 (enriched from builtin)", got)
+	}
+	if got := models[1].MaxCompletionTokens; got != 0 {
+		t.Errorf("dynamic-only model MaxCompletionTokens = %d, want 0 (unknown, never guessed)", got)
+	}
+	if got := models[3].MaxCompletionTokens; got != 999 {
+		t.Errorf("explicit MaxCompletionTokens = %d, want 999 (never overwritten)", got)
+	}
+}
+
+// TestEnrichCommandCodeModelsFromBuiltin_RefreshPath verifies the refresh path
+// (which stores the dynamic catalog) enriches static-known models so the
+// catalog exposed via GetCommandCodeModels carries MaxCompletionTokens.
+func TestEnrichCommandCodeModelsFromBuiltin_RefreshPath(t *testing.T) {
+	writeSampleCatalog(t, sampleCommandCodeModelsMD)
+	commandCodeCatalog = &commandCodeCatalogStore{}
+
+	tryRefreshCommandCodeCatalog("test enrich")
+	models, ok := getCommandCodeCatalog()
+	if !ok {
+		t.Fatal("catalog not loaded")
+	}
+	m, found := findCommandCodeModel(models, "deepseek/deepseek-v4-flash")
+	if !found {
+		t.Fatal("deepseek/deepseek-v4-flash missing from dynamic catalog")
+	}
+	if m.MaxCompletionTokens <= 0 {
+		t.Errorf("deepseek/deepseek-v4-flash MaxCompletionTokens = %d, want >0 after enrich", m.MaxCompletionTokens)
+	}
+}
+
+// TestCommandCodePackageCandidates_LinuxNpmLibLayout verifies the Linux/macOS
+// npm global layout (prefix/bin/cmdc symlink -> ../lib/node_modules/command-code)
+// is covered by candidate discovery.
+func TestCommandCodePackageCandidates_LinuxNpmLibLayout(t *testing.T) {
+	cands := commandCodePackageCandidates(filepath.FromSlash("/usr/local/bin"))
+	want := filepath.FromSlash("/usr/local/lib/node_modules/command-code")
+	found := false
+	for _, c := range cands {
+		if filepath.Clean(c) == filepath.Clean(want) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("candidates %v must include %s", cands, want)
+	}
+}
+
+// TestCommandCodePackageCandidates_WindowsLayout verifies the Windows npm
+// layout (prefix/node_modules/command-code beside the .cmd shim) is covered.
+func TestCommandCodePackageCandidates_WindowsLayout(t *testing.T) {
+	cands := commandCodePackageCandidates(`C:\Users\KK\AppData\Roaming\npm`)
+	want := `C:\Users\KK\AppData\Roaming\npm\node_modules\command-code`
+	found := false
+	for _, c := range cands {
+		if filepath.Clean(c) == filepath.Clean(want) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("candidates %v must include %s", cands, want)
+	}
+}
+
+// TestCommandCodeCLIFromPath_SymlinkResolution verifies that a launcher
+// symlink is resolved before package discovery (npm/Homebrew style), so the
+// real install prefix is used instead of the symlink's directory.
+func TestCommandCodeCLIFromPath_SymlinkResolution(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink layout test targets Linux/macOS style installs")
+	}
+	base := t.TempDir()
+	prefix := filepath.Join(base, "prefix")
+	pkgDir := filepath.Join(prefix, "lib", "node_modules", "command-code")
+	catalogPath := filepath.Join(pkgDir, filepath.FromSlash(commandCodeCLICatalogFileName))
+	if err := os.MkdirAll(filepath.Dir(catalogPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(catalogPath, []byte(sampleCommandCodeModelsMD), 0600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(prefix, "bin")
+	if err := os.MkdirAll(binDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// launcher symlink bin/cmdc -> lib/node_modules/command-code/dist/cli.mjs
+	launcher := filepath.Join(binDir, "cmdc")
+	if err := os.Symlink(filepath.Join(pkgDir, "dist", "cli.mjs"), launcher); err != nil {
+		t.Skipf("symlink not supported on this host: %v", err)
+	}
+
+	// Resolve exactly what commandCodeCLIFromPath does: LookPath -> EvalSymlinks.
+	exePath := launcher
+	if resolved, errResolve := filepath.EvalSymlinks(exePath); errResolve == nil {
+		exePath = resolved
+	}
+	resolvedBin := filepath.Dir(exePath)
+
+	found := false
+	for _, cand := range commandCodePackageCandidates(resolvedBin) {
+		if filepath.Clean(cand) == filepath.Clean(pkgDir) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("after symlink resolution, candidates %v must include package dir %s", commandCodePackageCandidates(resolvedBin), pkgDir)
 	}
 }

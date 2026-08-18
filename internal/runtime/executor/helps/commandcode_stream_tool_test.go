@@ -185,3 +185,58 @@ func TestCommandCodeStream_AllChunksAreValidJSON(t *testing.T) {
 		t.Fatalf("expected at least 4 chunks (init, 2 delta, finish), got %d", len(chunks))
 	}
 }
+
+// TestNonStream_FailClosedOnMalformedNDJSON verifies the non-stream translator
+// fails closed: malformed NDJSON yields a well-formed OpenAI error object, not
+// raw NDJSON leaking to the client.
+func TestNonStream_FailClosedOnMalformedNDJSON(t *testing.T) {
+	raw := []byte(`{"type":"text-delta","id":"txt-0","text":"partial"}` + "\n" + `not-json`)
+	out := ConvertCommandCodeNonStreamToOpenAI(context.Background(), "m", nil, nil, raw, nil)
+
+	var parsed map[string]any
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("output must be valid JSON, got: %q (err=%v)", string(out), err)
+	}
+	msg, hasErr := parsed["error"].(map[string]any)
+	if !hasErr {
+		t.Fatalf("output must contain an error object, got: %q", string(out))
+	}
+	if msg["type"] != "server_error" {
+		t.Errorf("error.type = %v, want server_error", msg["type"])
+	}
+}
+
+// TestNonStream_PassThroughAlreadyOpenAIJSON verifies that when the input is
+// already an aggregated OpenAI response (the real post-executor input), the
+// translator passes it through unchanged on aggregation failure.
+func TestNonStream_PassThroughAlreadyOpenAIJSON(t *testing.T) {
+	openAI := []byte(`{"id":"chatcmpl-x","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`)
+	out := ConvertCommandCodeNonStreamToOpenAI(context.Background(), "m", nil, nil, openAI, nil)
+	if string(out) != string(openAI) {
+		t.Fatalf("already-aggregated OpenAI JSON must pass through unchanged; got: %q", string(out))
+	}
+}
+
+// TestCommandCodeStream_ReverseInterleavedToolEvents verifies that when a
+// later call's delta arrives before an earlier call's start (call_B delta,
+// then call_A start, then call_A delta), indices are assigned by first-observed
+// order and remain stable — the OpenAI stream contract only requires each
+// tool_calls delta to carry a consistent index per call id.
+func TestCommandCodeStream_ReverseInterleavedToolEvents(t *testing.T) {
+	lines := []string{
+		`{"type":"tool-input-start","id":"call_B","toolName":"second_fn"}`,
+		`{"type":"tool-input-delta","id":"call_B","delta":"{\"b\":1}"}`,
+		`{"type":"tool-input-start","id":"call_A","toolName":"first_fn"}`,
+		`{"type":"tool-input-delta","id":"call_A","delta":"{\"a\":1}"}`,
+		`{"type":"tool-input-end","id":"call_A","input":{"a":1}}`,
+		`{"type":"tool-input-end","id":"call_B","input":{"b":1}}`,
+		`{"type":"finish-step","finishReason":"tool-calls","usage":{"inputTokens":5,"outputTokens":3,"totalTokens":8}}`,
+	}
+	chunks := feedLines(t, lines...)
+	_, nameByIndex := collectToolArguments(t, chunks)
+
+	// first-observed order: call_B seen first => index 0, call_A => index 1.
+	if nameByIndex[0] != "second_fn" || nameByIndex[1] != "first_fn" {
+		t.Fatalf("expected first-observed order second_fn=0 first_fn=1, got %v", nameByIndex)
+	}
+}
