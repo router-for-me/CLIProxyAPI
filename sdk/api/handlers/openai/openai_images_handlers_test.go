@@ -2,6 +2,8 @@ package openai
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -43,7 +46,7 @@ func assertUnsupportedImagesModelResponse(t *testing.T, resp *httptest.ResponseR
 	}
 
 	message := gjson.GetBytes(resp.Body.Bytes(), "error.message").String()
-	expectedMessage := "Model " + model + " is not supported on " + imagesGenerationsPath + " or " + imagesEditsPath + ". Use " + gptImage15Model + ", " + defaultImagesToolModel + ", " + defaultXAIImagesModel + ", " + xaiImagesQualityModel + ", or a configured openai-compatibility image model."
+	expectedMessage := "Model " + model + " is not supported on " + imagesGenerationsPath + " or " + imagesEditsPath + ". Use " + gptImage15Model + ", " + defaultImagesToolModel + ", " + defaultXAIImagesModel + ", " + xaiImagesQualityModel + ", " + xaiImages20Model + ", or a configured openai-compatibility image model."
 	if message != expectedMessage {
 		t.Fatalf("error message = %q, want %q", message, expectedMessage)
 	}
@@ -53,7 +56,7 @@ func assertUnsupportedImagesModelResponse(t *testing.T, resp *httptest.ResponseR
 }
 
 func TestImagesModelValidationAllowsGPTImageAndXAIModels(t *testing.T) {
-	for _, model := range []string{"gpt-image-1.5", "codex/gpt-image-1.5", "gpt-image-2", "codex/gpt-image-2", "grok-imagine-image", "xai/grok-imagine-image", "grok-imagine-image-quality", "xai/grok-imagine-image-quality"} {
+	for _, model := range []string{"gpt-image-1.5", "codex/gpt-image-1.5", "gpt-image-2", "codex/gpt-image-2", "grok-imagine-image", "xai/grok-imagine-image", "grok-imagine-image-quality", "xai/grok-imagine-image-quality", "grok-imagine-image-2.0", "xai/grok-imagine-image-2.0"} {
 		if !isSupportedImagesModel(model) {
 			t.Fatalf("expected %s to be supported", model)
 		}
@@ -82,6 +85,14 @@ func TestImagesModelValidationAllowsOpenAICompatImageModels(t *testing.T) {
 	}
 	if isSupportedImagesModel("compat-chat-model") {
 		t.Fatal("expected non-image openai-compatibility model to be rejected")
+	}
+}
+
+func TestCanonicalXAIImagesModelPreservesImage20(t *testing.T) {
+	for _, model := range []string{"grok-imagine-image-2.0", "xai/grok-imagine-image-2.0", "XAI/Grok-Imagine-Image-2.0"} {
+		if got := canonicalXAIImagesModel(model); got != xaiImages20Model {
+			t.Fatalf("canonicalXAIImagesModel(%q) = %q, want %s", model, got, xaiImages20Model)
+		}
 	}
 }
 
@@ -342,5 +353,148 @@ func TestImagesEdits_DisableImageGenerationChat_DoesNotReturn404(t *testing.T) {
 
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
+	}
+}
+
+func TestSSEFrameAccumulatorFlushesDataOnlyFrame(t *testing.T) {
+	accumulator := &sseFrameAccumulator{}
+	chunk := []byte(`data: {"type":"image_generation.partial","partial_image_index":0}`)
+
+	if frames := accumulator.AddChunk(chunk); len(frames) != 0 {
+		t.Fatalf("AddChunk() emitted an unterminated data-only frame: %q", frames)
+	}
+	frames := accumulator.Flush()
+	if len(frames) != 1 || string(frames[0]) != string(chunk) {
+		t.Fatalf("Flush() frames = %q, want [%q]", frames, chunk)
+	}
+}
+
+func TestWriteImagesStreamErrorEventSanitizesPayload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	raw := `{"error":{"code":"upstream_failed","message":"token=image-secret"},"debug":"` + strings.Repeat("x", 8192) + `"}`
+	writeImagesStreamErrorEvent(c, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errors.New(raw)})
+
+	body := recorder.Body.String()
+	if strings.Contains(body, "image-secret") || len(body) > 4096 || !strings.Contains(body, "[REDACTED]") {
+		t.Fatalf("image stream error was not safely bounded: len=%d body=%q", len(body), body)
+	}
+}
+
+func TestCollectImagesRejectsPayloadErrorBeforeCompleted(t *testing.T) {
+	data := make(chan []byte, 1)
+	data <- []byte("event: error\ndata: {\"type\":\"provider.error\",\"error\":{\"code\":\"failed\",\"message\":\"token=image-secret\"}}\n\n" +
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"image_generation_call\",\"result\":\"aW1hZ2U=\"}]}}\n\n")
+	close(data)
+	errs := make(chan *interfaces.ErrorMessage)
+	close(errs)
+
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+	if len(out) != 0 || errMsg == nil || errMsg.Error == nil {
+		t.Fatalf("payload error result out=%q err=%#v", out, errMsg)
+	}
+	if strings.Contains(errMsg.Error.Error(), "image-secret") || !strings.Contains(errMsg.Error.Error(), "[REDACTED]") {
+		t.Fatalf("payload error was not sanitized: %q", errMsg.Error.Error())
+	}
+}
+
+func TestForwardImagesStreamCancelsWithPayloadError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		t.Fatal("expected gin writer to implement http.Flusher")
+	}
+	data := make(chan []byte)
+	close(data)
+	errs := make(chan *interfaces.ErrorMessage)
+	close(errs)
+	var canceled error
+	firstChunk := []byte("event: error\ndata: {\"error\":{\"message\":\"token=image-secret\"}}\n\n")
+
+	h.forwardImagesStream(context.Background(), c, flusher, func(err error) { canceled = err }, data, errs, firstChunk, "b64_json", "image_generation", func(string, []byte) {})
+	if canceled == nil || strings.Contains(canceled.Error(), "image-secret") || !strings.Contains(canceled.Error(), "[REDACTED]") {
+		t.Fatalf("payload error cancel = %v body=%q", canceled, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "event: error") {
+		t.Fatalf("payload error event missing: %q", recorder.Body.String())
+	}
+}
+
+func TestForwardRawImageStreamPrefersPendingErrorOnClose(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+	for i := 0; i < 100; i++ {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+		data := make(chan []byte)
+		close(data)
+		errs := make(chan *interfaces.ErrorMessage, 1)
+		errs <- &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: errors.New("image upstream busy")}
+		close(errs)
+		var canceled error
+
+		h.forwardRawImageStream(context.Background(), c, func(err error) { canceled = err }, data, errs)
+		if canceled == nil || !strings.Contains(canceled.Error(), "image upstream busy") {
+			t.Fatalf("iteration %d: cancel=%v body=%q", i, canceled, recorder.Body.String())
+		}
+	}
+}
+
+func TestCollectImagesPrefersPendingErrorWhenDataChannelCloses(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		data := make(chan []byte)
+		close(data)
+		errs := make(chan *interfaces.ErrorMessage, 1)
+		want := &interfaces.ErrorMessage{
+			StatusCode:     http.StatusTooManyRequests,
+			Error:          errors.New("image upstream busy"),
+			DirectResponse: true,
+			Headers:        http.Header{"Retry-After": []string{"9"}},
+		}
+		errs <- want
+		close(errs)
+
+		_, got := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+		if got != want {
+			t.Fatalf("iteration %d: pending error = %#v, want original %#v", i, got, want)
+		}
+	}
+}
+
+func TestCollectImagesAllowsMultilineSSEData(t *testing.T) {
+	data := make(chan []byte, 1)
+	data <- []byte("event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\n" +
+		"data: \"response\":{\"created_at\":1,\"output\":[{\"type\":\"image_generation_call\",\"result\":\"aW1hZ2U=\"}]}}\n\n")
+	close(data)
+	errs := make(chan *interfaces.ErrorMessage)
+	close(errs)
+
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+	if errMsg != nil {
+		t.Fatalf("collectImagesFromResponsesStream() error = %v", errMsg.Error)
+	}
+	if !strings.Contains(string(out), `"b64_json":"aW1hZ2U="`) {
+		t.Fatalf("multiline image response = %q", out)
+	}
+}
+
+func TestSSEFrameAccumulatorKeepsMultipleFramesDistinct(t *testing.T) {
+	accumulator := &sseFrameAccumulator{}
+	first := "event: first\ndata: {\"type\":\"first\"}\n\n"
+	second := "event: second\ndata: {\"type\":\"second\"}\n\n"
+
+	frames := accumulator.AddChunk([]byte(first + second))
+	if len(frames) != 2 {
+		t.Fatalf("AddChunk() returned %d frames, want 2: %q", len(frames), frames)
+	}
+	if string(frames[0]) != first || string(frames[1]) != second {
+		t.Fatalf("frames were overwritten during buffer compaction: %q", frames)
 	}
 }

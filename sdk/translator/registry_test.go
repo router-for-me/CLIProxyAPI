@@ -61,6 +61,21 @@ func hasCall(calls []string, want string) bool {
 	return false
 }
 
+func TestHasPluginHooks(t *testing.T) {
+	registry := NewRegistry()
+	if registry.HasPluginHooks() {
+		t.Fatal("new registry unexpectedly reports plugin hooks")
+	}
+	registry.SetPluginHooks(&fakePluginHooks{})
+	if !registry.HasPluginHooks() {
+		t.Fatal("registry did not report installed plugin hooks")
+	}
+	registry.SetPluginHooks(nil)
+	if registry.HasPluginHooks() {
+		t.Fatal("registry still reports cleared plugin hooks")
+	}
+}
+
 func TestTranslateRequest_FallbackNormalizesModel(t *testing.T) {
 	r := NewRegistry()
 

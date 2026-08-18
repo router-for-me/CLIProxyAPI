@@ -431,28 +431,20 @@ func (a *Auth) ProxyInfo() string {
 	return "via proxy"
 }
 
-// DisableCoolingOverride returns the auth scoped disable_cooling override when present.
+// DisableCoolingOverride returns the auth-scoped disable_cooling override when present.
 // The value is read from metadata key "disable_cooling" (or legacy "disable-cooling").
-//
-// NOTE: This override is intentionally "true-only". When the metadata value is false, it is treated
-// as "not set" so the global disable-cooling flag can still take effect.
+// The second return value distinguishes explicit false from an absent override.
 func (a *Auth) DisableCoolingOverride() (bool, bool) {
 	if a == nil || a.Metadata == nil {
 		return false, false
 	}
 	if val, ok := a.Metadata["disable_cooling"]; ok {
 		if parsed, okParse := parseBoolAny(val); okParse {
-			if !parsed {
-				return false, false
-			}
 			return parsed, true
 		}
 	}
 	if val, ok := a.Metadata["disable-cooling"]; ok {
 		if parsed, okParse := parseBoolAny(val); okParse {
-			if !parsed {
-				return false, false
-			}
 			return parsed, true
 		}
 	}
@@ -476,8 +468,9 @@ func (a *Auth) ToolPrefixDisabled() bool {
 	return false
 }
 
-// RequestRetryOverride returns the auth-file scoped request_retry override when present.
+// RequestRetryOverride returns the auth-scoped request_retry override when present.
 // The value is read from metadata key "request_retry" (or legacy "request-retry").
+// A negative value is treated as unset and falls back to the global request-retry.
 func (a *Auth) RequestRetryOverride() (int, bool) {
 	if a == nil || a.Metadata == nil {
 		return 0, false
@@ -485,7 +478,7 @@ func (a *Auth) RequestRetryOverride() (int, bool) {
 	if val, ok := a.Metadata["request_retry"]; ok {
 		if parsed, okParse := parseIntAny(val); okParse {
 			if parsed < 0 {
-				parsed = 0
+				return 0, false
 			}
 			return parsed, true
 		}
@@ -493,7 +486,7 @@ func (a *Auth) RequestRetryOverride() (int, bool) {
 	if val, ok := a.Metadata["request-retry"]; ok {
 		if parsed, okParse := parseIntAny(val); okParse {
 			if parsed < 0 {
-				parsed = 0
+				return 0, false
 			}
 			return parsed, true
 		}

@@ -492,6 +492,25 @@ func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.C
 	}()
 
 	var previousClient *home.Client
+	registry := executionregistry.New()
+	cancelBound := atomic.Int64{}
+	cancelBound.Store(int64(internalconfig.CredentialConcurrencyConfig{}.WithDefaults().CPACancelBound))
+	releaseFlusher := home.NewReleaseFlusher(nil, nil)
+	registry.SetReleaseSink(releaseFlusher.MarkDirty)
+	defer func() {
+		registry.SetReleaseSink(nil)
+		drainBound := time.Duration(cancelBound.Load())
+		if drainBound <= 0 {
+			drainBound = internalconfig.CredentialConcurrencyConfig{}.WithDefaults().CPACancelBound
+		}
+		drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(parentCtx), drainBound)
+		errDrain := registry.Drain(drainCtx)
+		cancelDrain()
+		if errDrain != nil && !errors.Is(errDrain, executionregistry.ErrRegistryClosed) && parentCtx.Err() == nil {
+			log.WithError(errDrain).Error("failed to drain detached Home execution registry")
+			s.cancelServiceRun()
+		}
+	}()
 	for homeCtx.Err() == nil {
 		supervisor.setPublisherCompletion(nil)
 		client := previousClient
@@ -501,18 +520,15 @@ func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.C
 			client = client.NewLifetime()
 		}
 		client.SetManagedLifetime(true)
-		registry := executionregistry.New()
 		releaseCtx, releaseCancel := context.WithCancel(context.WithoutCancel(homeCtx))
-		releaseFlusher := home.NewReleaseFlusher(client.LimiterConfig, client.PushConcurrencyRelease)
-		registry.SetReleaseSink(releaseFlusher.MarkDirty)
+		releaseFlusher.SetConfigProvider(client.LimiterConfig)
+		releaseFlusher.SetSender(client.PushConcurrencyRelease)
 		releaseDone := make(chan struct{})
 		go func() {
 			defer close(releaseDone)
 			releaseFlusher.Run(releaseCtx)
 		}()
 		lifetimeCtx, lifetimeCancel := context.WithCancel(homeCtx)
-		cancelBound := atomic.Int64{}
-		cancelBound.Store(int64(internalconfig.CredentialConcurrencyConfig{}.WithDefaults().CPACancelBound))
 		queue := newHomeConfigWorkQueue()
 		ready := make(chan struct{})
 		var readyOnce sync.Once
@@ -552,6 +568,48 @@ func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.C
 		}
 
 		s.detachHomeSubscriberLifetime(client, registry)
+		retry := errRun != nil && homeCtx.Err() == nil
+		if retry {
+			releaseCancel()
+			<-releaseDone
+			client.Close()
+
+			settleBound := time.Duration(cancelBound.Load())
+			settleCtx, cancelSettle := context.WithTimeout(context.WithoutCancel(parentCtx), settleBound)
+			errPending := registry.WaitPending(settleCtx)
+			cancelSettle()
+			if errPending != nil {
+				log.WithError(errPending).Error("failed to settle pending Home dispatches before subscriber replacement")
+				s.cancelServiceRun()
+				return
+			}
+			legacyProtocol := home.IsLegacyMembershipProtocolError(errRun)
+			if legacyProtocol {
+				client.EnableLegacyMembership()
+			}
+			if client.AmbiguousDispatch() || home.IsMembershipTakeoverUnavailableError(errRun) || legacyProtocol || client.LegacyMembership() {
+				registry.SetReleaseSink(nil)
+				drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(parentCtx), settleBound)
+				errDrain := registry.Drain(drainCtx)
+				cancelDrain()
+				if errDrain != nil {
+					log.WithError(errDrain).Error("failed to drain Home executions after unsafe subscriber replacement")
+					s.cancelServiceRun()
+					return
+				}
+				client.SuppressTakeover()
+				registry = executionregistry.New()
+				releaseFlusher = home.NewReleaseFlusher(nil, nil)
+				registry.SetReleaseSink(releaseFlusher.MarkDirty)
+			}
+			log.WithError(errRun).Warn("home config subscription lifetime ended")
+			if !published.Load() && !waitForHomeSubscriberRetry(homeCtx, homeSubscriberPreAckRetryBackoff) {
+				return
+			}
+			previousClient = client
+			continue
+		}
+
 		drainBound := time.Duration(cancelBound.Load())
 		drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(parentCtx), drainBound)
 		errDrain := registry.Drain(drainCtx)
@@ -577,13 +635,7 @@ func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.C
 			}
 			return
 		}
-		if errRun != nil && homeCtx.Err() == nil {
-			log.WithError(errRun).Warn("home config subscription lifetime ended")
-		}
-		if !published.Load() && errRun != nil && !waitForHomeSubscriberRetry(homeCtx, homeSubscriberPreAckRetryBackoff) {
-			return
-		}
-		previousClient = client
+		return
 	}
 }
 

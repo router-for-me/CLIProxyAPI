@@ -17,6 +17,7 @@ import (
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	zaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/zai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -262,6 +263,20 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 						}
 					}
 				}
+				if wv := gjson.GetBytes(data, coreauth.AttributeWeight); wv.Exists() {
+					var rawWeight string
+					switch wv.Type {
+					case gjson.Number:
+						rawWeight = wv.Raw
+					case gjson.String:
+						rawWeight = wv.String()
+					}
+					if rawWeight != "" {
+						if weight, errWeight := credentialweight.ParseString(rawWeight); errWeight == nil {
+							fileData[coreauth.AttributeWeight] = weight
+						}
+					}
+				}
 				if nv := gjson.GetBytes(data, "note"); nv.Exists() && nv.Type == gjson.String {
 					if trimmed := strings.TrimSpace(nv.String()); trimmed != "" {
 						fileData["note"] = trimmed
@@ -405,10 +420,32 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 			}
 		}
 	}
+	if weight, ok := authWeightValue(auth); ok {
+		entry[coreauth.AttributeWeight] = weight
+	}
 	if websockets, ok := authWebsocketsValue(auth); ok {
 		entry["websockets"] = websockets
 	}
 	return entry
+}
+
+func authWeightValue(auth *coreauth.Auth) (int64, bool) {
+	if auth == nil {
+		return 0, false
+	}
+	if rawWeight := strings.TrimSpace(authAttribute(auth, coreauth.AttributeWeight)); rawWeight != "" {
+		weight, errWeight := credentialweight.ParseString(rawWeight)
+		return weight, errWeight == nil
+	}
+	if auth.Metadata == nil {
+		return 0, false
+	}
+	rawWeight, ok := auth.Metadata[coreauth.AttributeWeight]
+	if !ok || rawWeight == nil {
+		return 0, false
+	}
+	weight, errWeight := credentialweight.ParseValue(rawWeight)
+	return weight, errWeight == nil
 }
 
 func authWebsocketsValue(auth *coreauth.Auth) (bool, bool) {

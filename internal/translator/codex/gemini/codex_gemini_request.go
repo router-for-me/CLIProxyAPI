@@ -118,6 +118,9 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		arr := sysParts.Array()
 		for i := 0; i < len(arr); i++ {
 			p := arr[i]
+			if translatorcommon.IsGeminiThoughtPart(p) {
+				continue
+			}
 			if t := p.Get("text"); t.Exists() {
 				part := []byte(`{}`)
 				part, _ = sjson.SetBytes(part, "type", "input_text")
@@ -150,6 +153,10 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			parr := parts.Array()
 			for j := 0; j < len(parr); j++ {
 				p := parr[j]
+				if translatorcommon.IsGeminiThoughtPart(p) {
+					continue
+				}
+
 				// text part
 				if t := p.Get("text"); t.Exists() {
 					partType := "input_text"
@@ -322,7 +329,9 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		// No thinking config, set default effort
 		out, _ = sjson.SetBytes(out, "reasoning.effort", "medium")
 	}
-	out, _ = sjson.SetBytes(out, "reasoning.summary", "auto")
+	// OpenAI documents reasoning summaries as explicit opt-in output. Leave
+	// reasoning.summary to the source request's canonical summary intent instead
+	// of coupling it to reasoning effort.
 	out, _ = sjson.SetBytes(out, "stream", true)
 	out, _ = sjson.SetBytes(out, "store", false)
 	out, _ = sjson.SetBytes(out, "include", []string{"reasoning.encrypted_content"})

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"reflect"
 	"strings"
@@ -196,6 +197,17 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
 	}
 	return meta
+}
+
+func requestClientIP(request *http.Request) string {
+	if request == nil {
+		return ""
+	}
+	remoteAddr := strings.TrimSpace(request.RemoteAddr)
+	if host, _, errSplit := net.SplitHostPort(remoteAddr); errSplit == nil {
+		return strings.TrimSpace(host)
+	}
+	return remoteAddr
 }
 
 func requestCallerScope(ginCtx *gin.Context) string {
@@ -417,6 +429,13 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	if endpoint != "" {
 		newCtx = logging.WithEndpoint(newCtx, endpoint)
+	}
+	if c != nil && c.Request != nil {
+		newCtx = logging.WithClientRequestMetadata(newCtx, logging.ClientRequestMetadata{
+			ClientIP:      requestClientIP(c.Request),
+			XForwardedFor: strings.TrimSpace(strings.Join(c.Request.Header.Values("X-Forwarded-For"), ", ")),
+			UserAgent:     strings.TrimSpace(c.Request.UserAgent()),
+		})
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)
 	newCtx = logging.WithResponseHeadersHolder(newCtx)

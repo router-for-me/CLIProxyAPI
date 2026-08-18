@@ -1,15 +1,18 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -207,5 +210,71 @@ func TestEnrichAuthSelectionError_IgnoresOtherErrors(t *testing.T) {
 	out := enrichAuthSelectionError(in, []string{"claude"}, "claude-sonnet-4-6")
 	if out != in {
 		t.Fatalf("expected original error to be returned unchanged")
+	}
+}
+
+func TestExecutionErrorMessageMapsContextStatuses(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "canceled", err: context.Canceled, want: clienterror.StatusClientClosedRequest},
+		{name: "deadline", err: context.DeadlineExceeded, want: http.StatusGatewayTimeout},
+		{
+			name: "url error wraps canceled",
+			err:  &url.Error{Op: "Post", URL: "https://example.com", Err: context.Canceled},
+			want: clienterror.StatusClientClosedRequest,
+		},
+		{name: "plain error defaults to 500", err: errors.New("boom"), want: http.StatusInternalServerError},
+		{
+			name: "explicit status wins",
+			err:  &coreauth.Error{Code: "rate_limited", Message: "slow down", HTTPStatus: http.StatusTooManyRequests},
+			want: http.StatusTooManyRequests,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := executionErrorMessage(tc.err)
+			if msg == nil {
+				t.Fatalf("executionErrorMessage() returned nil")
+			}
+			if msg.StatusCode != tc.want {
+				t.Fatalf("StatusCode = %d, want %d", msg.StatusCode, tc.want)
+			}
+			if msg.Error != tc.err {
+				t.Fatalf("Error = %v, want original %v", msg.Error, tc.err)
+			}
+		})
+	}
+}
+
+func TestStatusFromErrorMapsContextStatuses(t *testing.T) {
+	if got := statusFromError(context.Canceled); got != clienterror.StatusClientClosedRequest {
+		t.Fatalf("statusFromError(canceled) = %d, want %d", got, clienterror.StatusClientClosedRequest)
+	}
+	if got := statusFromError(context.DeadlineExceeded); got != http.StatusGatewayTimeout {
+		t.Fatalf("statusFromError(deadline) = %d, want %d", got, http.StatusGatewayTimeout)
+	}
+	if got := statusFromError(&url.Error{Op: "Post", URL: "https://example.com", Err: context.Canceled}); got != clienterror.StatusClientClosedRequest {
+		t.Fatalf("statusFromError(url canceled) = %d, want %d", got, clienterror.StatusClientClosedRequest)
+	}
+	if got := statusFromError(errors.New("boom")); got != 0 {
+		t.Fatalf("statusFromError(plain) = %d, want 0", got)
+	}
+}
+
+func TestWriteErrorResponse_ContextCanceledUses499(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	handler := NewBaseAPIHandlers(nil, nil)
+	handler.WriteErrorResponse(c, executionErrorMessage(context.Canceled))
+
+	if recorder.Code != clienterror.StatusClientClosedRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, clienterror.StatusClientClosedRequest)
 	}
 }

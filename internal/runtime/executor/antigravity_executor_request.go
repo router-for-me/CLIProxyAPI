@@ -118,7 +118,10 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	if errReq != nil {
 		return nil, errReq
 	}
-	httpReq.Close = true
+	// Deliberately no httpReq.Close: the native Antigravity client omits the
+	// Connection header and keeps its HTTP/1.1 connections alive, so forcing
+	// "Connection: close" would both deviate from that fingerprint and defeat the
+	// shared connection pool by discarding every established TCP + TLS session.
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
@@ -160,6 +163,35 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 // whole document silently mutated that history, so tools lost required argument fields and the
 // model imitated the corrupted examples on later turns.
 func sanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema bool) string {
+	payloadStr = sanitizeAntigravityToolSchemas(payloadStr, useAntigravitySchema)
+	return sanitizeAntigravityGenerationSchemas(payloadStr)
+}
+
+// sanitizeAntigravityToolSchemas applies the existing declaration rewrites to
+// a small document containing only request.tools, then replaces that subtree
+// once. This preserves rewrite order and bytes without copying the full request
+// for every declaration schema.
+func sanitizeAntigravityToolSchemas(payloadStr string, useAntigravitySchema bool) string {
+	tools := gjson.Get(payloadStr, "request.tools")
+	if !tools.IsArray() {
+		return payloadStr
+	}
+
+	toolDocument := `{"request":{"tools":` + tools.Raw + `}}`
+	toolDocument = sanitizeAntigravityToolSchemaDocument(toolDocument, useAntigravitySchema)
+	cleanedTools := gjson.Get(toolDocument, "request.tools")
+	if !cleanedTools.IsArray() || cleanedTools.Raw == tools.Raw {
+		return payloadStr
+	}
+	updated, errSet := sjson.SetRawBytes([]byte(payloadStr), "request.tools", []byte(cleanedTools.Raw))
+	if errSet != nil {
+		log.Debugf("antigravity: failed to write cleaned request.tools: %v", errSet)
+		return payloadStr
+	}
+	return string(updated)
+}
+
+func sanitizeAntigravityToolSchemaDocument(payloadStr string, useAntigravitySchema bool) string {
 	for _, base := range antigravityFunctionDeclarationPaths(payloadStr) {
 		oldPath := base + ".parametersJsonSchema"
 		if !gjson.Get(payloadStr, oldPath).Exists() {
@@ -173,24 +205,74 @@ func sanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema b
 		payloadStr = renamed
 	}
 
-	clean := util.CleanJSONSchemaForGemini
-	if useAntigravitySchema {
-		clean = util.CleanJSONSchemaForAntigravity
+	toolSchemaCleaner := func(schema string) string {
+		return util.CleanJSONSchemaForAntigravityTool(schema, useAntigravitySchema)
 	}
+	cleanNestedToolSchema := func(schemaRaw string) string {
+		return cleanNestedSchema(toolSchemaCleaner, schemaRaw)
+	}
+	return cleanAntigravitySchemasAtPaths(
+		payloadStr,
+		antigravityDeclarationSchemaPaths(payloadStr),
+		cleanNestedToolSchema,
+	)
+}
 
-	for _, schemaPath := range antigravitySchemaPaths(payloadStr) {
+// sanitizeAntigravityGenerationSchemas batches every schema edit within one
+// generation config before replacing that config in the full request.
+func sanitizeAntigravityGenerationSchemas(payloadStr string) string {
+	for _, container := range antigravityGenerationConfigContainers {
+		generationConfig := gjson.Get(payloadStr, container)
+		if !generationConfig.IsObject() {
+			continue
+		}
+		cleanedConfig := generationConfig.Raw
+		for _, key := range antigravityGenerationSchemaKeys {
+			schema := gjson.Get(cleanedConfig, key)
+			if !schema.IsObject() {
+				continue
+			}
+			cleanedSchema := util.CleanJSONSchemaForAntigravityResponse(schema.Raw)
+			if cleanedSchema == schema.Raw {
+				continue
+			}
+			updated, errSet := sjson.SetRawBytes([]byte(cleanedConfig), key, []byte(cleanedSchema))
+			if errSet != nil {
+				log.Debugf("antigravity: failed to write cleaned schema at %s.%s: %v", container, key, errSet)
+				continue
+			}
+			cleanedConfig = string(updated)
+		}
+		if cleanedConfig == generationConfig.Raw {
+			continue
+		}
+		updated, errSet := sjson.SetRawBytes([]byte(payloadStr), container, []byte(cleanedConfig))
+		if errSet != nil {
+			log.Debugf("antigravity: failed to write cleaned %s: %v", container, errSet)
+			continue
+		}
+		payloadStr = string(updated)
+	}
+	return payloadStr
+}
+
+func cleanAntigravitySchemasAtPaths(payloadStr string, schemaPaths []string, clean func(string) string) string {
+	for _, schemaPath := range schemaPaths {
 		schema := gjson.Get(payloadStr, schemaPath)
 		if !schema.Exists() {
 			continue
 		}
-		updated, errSet := sjson.SetRawBytes([]byte(payloadStr), schemaPath, []byte(cleanNestedSchema(clean, schema.Raw)))
+		cleanedSchema := clean(schema.Raw)
+		if cleanedSchema == schema.Raw {
+			continue
+		}
+		updated, errSet := sjson.SetRawBytes([]byte(payloadStr), schemaPath, []byte(cleanedSchema))
 		if errSet != nil {
 			log.Debugf("antigravity: failed to write cleaned schema at %s: %v", schemaPath, errSet)
 			continue
 		}
 		payloadStr = string(updated)
 	}
-
 	return payloadStr
 }
 
@@ -241,7 +323,12 @@ func antigravityFunctionDeclarationPaths(payloadStr string) []string {
 // A function declaration may carry a schema for its parameters and for its result, so all of
 // them must be cleaned; anything omitted here reaches the upstream API uncleaned.
 func antigravitySchemaPaths(payloadStr string) []string {
-	paths := make([]string, 0, 12)
+	paths := antigravityDeclarationSchemaPaths(payloadStr)
+	return append(paths, antigravityGenerationSchemaPaths(payloadStr)...)
+}
+
+func antigravityDeclarationSchemaPaths(payloadStr string) []string {
+	paths := make([]string, 0, 8)
 	for _, base := range antigravityFunctionDeclarationPaths(payloadStr) {
 		for _, key := range antigravityDeclarationSchemaKeys {
 			if gjson.Get(payloadStr, base+"."+key).IsObject() {
@@ -249,11 +336,16 @@ func antigravitySchemaPaths(payloadStr string) []string {
 			}
 		}
 	}
+	return paths
+}
+
+func antigravityGenerationSchemaPaths(payloadStr string) []string {
+	paths := make([]string, 0, len(antigravityGenerationConfigContainers)*len(antigravityGenerationSchemaKeys))
 	for _, container := range antigravityGenerationConfigContainers {
 		for _, key := range antigravityGenerationSchemaKeys {
-			p := container + "." + key
-			if gjson.Get(payloadStr, p).IsObject() {
-				paths = append(paths, p)
+			path := container + "." + key
+			if gjson.Get(payloadStr, path).IsObject() {
+				paths = append(paths, path)
 			}
 		}
 	}
@@ -432,18 +524,27 @@ func generateSessionID() string {
 }
 
 func generateStableSessionID(payload []byte) string {
-	contents := gjson.GetBytes(payload, "request.contents")
-	if contents.IsArray() {
-		for _, content := range contents.Array() {
-			if content.Get("role").String() == "user" {
-				text := content.Get("parts.0.text").String()
-				if text != "" {
-					h := sha256.Sum256([]byte(text))
-					n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
-					return "-" + strconv.FormatInt(n, 10)
-				}
-			}
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
+	if !contents.IsArray() {
+		return generateSessionID()
+	}
+
+	stableID := ""
+	contents.ForEach(func(_, content gjson.Result) bool {
+		if content.Get("role").String() != "user" {
+			return true
 		}
+		text := content.Get("parts.0.text").String()
+		if text == "" {
+			return true
+		}
+		hash := sha256.Sum256([]byte(text))
+		value := int64(binary.BigEndian.Uint64(hash[:8])) & 0x7FFFFFFFFFFFFFFF
+		stableID = "-" + strconv.FormatInt(value, 10)
+		return false
+	})
+	if stableID != "" {
+		return stableID
 	}
 	return generateSessionID()
 }

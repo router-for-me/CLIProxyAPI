@@ -91,6 +91,42 @@ func TestDrainWaitsForPendingDispatch(t *testing.T) {
 	}
 }
 
+func TestWaitPendingDoesNotDrainActiveScope(t *testing.T) {
+	registry := New()
+	activePending, errBegin := registry.BeginDispatch()
+	if errBegin != nil {
+		t.Fatal(errBegin)
+	}
+	scope, errInstall := registry.Install(activePending, ScopeSpec{})
+	if errInstall != nil {
+		t.Fatal(errInstall)
+	}
+	defer scope.End("test cleanup")
+	pending, errBegin := registry.BeginDispatch()
+	if errBegin != nil {
+		t.Fatal(errBegin)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- registry.WaitPending(ctx) }()
+	select {
+	case errWait := <-done:
+		t.Fatalf("WaitPending() returned before pending dispatch ended: %v", errWait)
+	case <-time.After(20 * time.Millisecond):
+	}
+	pending.End()
+	if errWait := <-done; errWait != nil {
+		t.Fatalf("WaitPending() error = %v", errWait)
+	}
+	nextPending, errNext := registry.BeginDispatch()
+	if errNext != nil {
+		t.Fatalf("WaitPending() stopped registry acceptance: %v", errNext)
+	}
+	nextPending.End()
+}
+
 func TestDrainReturnsWhenBlockingResourceCloseExceedsContext(t *testing.T) {
 	registry := New()
 	pending, errBegin := registry.BeginDispatch()

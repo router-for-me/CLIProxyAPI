@@ -60,15 +60,21 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 		if template, ok := templates[id]; ok {
 			entry := cloneCodexClientModelMap(template)
 			applyCodexClientDisplayName(entry, model)
+			applyCodexClientMaxContextLengthOverride(entry, model)
+			applyCodexClientMaxTokens(entry, model)
 			applyCodexClientSearchToolSupport(entry, id, true, providersForModel)
 			sanitizeCodexClientReasoningMetadata(entry)
 			applyCodexClientVisibilityOverride(entry, id)
+			if optimizeMultiAgentV2 {
+				entry["multi_agent_version"] = "v2"
+			}
 			result = append(result, entry)
 			continue
 		}
 
 		entry := cloneCodexClientModelMap(defaultTemplate)
 		applyCodexClientModelMetadata(entry, id, model, optimizeMultiAgentV2)
+		applyCodexClientMaxTokens(entry, model)
 		applyCodexClientSearchToolSupport(entry, id, false, providersForModel)
 		sanitizeCodexClientReasoningMetadata(entry)
 		applyCodexClientVisibilityOverride(entry, id)
@@ -182,6 +188,19 @@ func applyCodexClientDisplayName(entry map[string]any, model map[string]any) {
 	}
 }
 
+func applyCodexClientMaxContextLengthOverride(entry map[string]any, model map[string]any) {
+	if maxContextLength := intModelValue(model, "max_context_length"); maxContextLength > 0 {
+		entry["context_window"] = maxContextLength
+		entry["max_context_window"] = maxContextLength
+	}
+}
+
+func applyCodexClientMaxTokens(entry map[string]any, model map[string]any) {
+	if maxCompletionTokens := intModelValue(model, "max_completion_tokens"); maxCompletionTokens > 0 {
+		entry["max_tokens"] = maxCompletionTokens
+	}
+}
+
 func applyCodexClientSearchToolSupport(entry map[string]any, id string, templateModel bool, providersForModel ProvidersForModelFunc) {
 	supportsSearch, _ := entry["supports_search_tool"].(bool)
 	if !supportsSearch {
@@ -237,6 +256,10 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		applyCodexClientThinkingMetadata(entry, info.Thinking)
 	}
 
+	if maxContextWindow := intModelValue(model, "max_context_length"); maxContextWindow > 0 {
+		contextWindow = maxContextWindow
+	}
+
 	if displayName == "" {
 		displayName = id
 	}
@@ -271,7 +294,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 
 func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
 	switch strings.TrimSpace(id) {
-	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "grok-imagine-image", "grok-imagine-video", "grok-imagine-video-1.5-preview":
+	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-video", "grok-imagine-video-1.5", "grok-imagine-video-1.5-preview":
 		entry["visibility"] = "hide"
 	}
 }

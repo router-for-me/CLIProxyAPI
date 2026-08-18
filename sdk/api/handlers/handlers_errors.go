@@ -8,21 +8,23 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"golang.org/x/net/context"
 )
 
 func statusFromError(err error) int {
-	if err == nil {
-		return 0
+	return clienterror.HTTPStatusFromError(err)
+}
+
+func isAuthSelectionUnavailable(err error) bool {
+	var authErr *coreauth.Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
 	}
-	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-		if code := se.StatusCode(); code > 0 {
-			return code
-		}
-	}
-	return 0
+	code := strings.TrimSpace(authErr.Code)
+	return code == "auth_not_found" || code == "auth_unavailable"
 }
 
 func enrichAuthSelectionError(err error, providers []string, model string) error {

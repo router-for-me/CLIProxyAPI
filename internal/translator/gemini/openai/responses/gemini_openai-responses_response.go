@@ -366,12 +366,22 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		created, _ = sjson.SetBytes(created, "sequence_number", nextSeq())
 		created, _ = sjson.SetBytes(created, "response.id", st.ResponseID)
 		created, _ = sjson.SetBytes(created, "response.created_at", st.CreatedAt)
+		requestModelName := translatorcommon.RequestModelName(originalRequestRawJSON, requestRawJSON)
+		if requestModelName == "" {
+			requestModelName = modelName
+		}
+		if requestModelName != "" {
+			created, _ = sjson.SetBytes(created, "response.model", requestModelName)
+		}
 		out = append(out, emitEvent("response.created", created))
 
-		inprog := []byte(`{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress"}}`)
+		inprog := []byte(`{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","output":[]}}`)
 		inprog, _ = sjson.SetBytes(inprog, "sequence_number", nextSeq())
 		inprog, _ = sjson.SetBytes(inprog, "response.id", st.ResponseID)
 		inprog, _ = sjson.SetBytes(inprog, "response.created_at", st.CreatedAt)
+		if requestModelName != "" {
+			inprog, _ = sjson.SetBytes(inprog, "response.model", requestModelName)
+		}
 		out = append(out, emitEvent("response.in_progress", inprog))
 
 		st.Started = true
@@ -754,28 +764,28 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		}
 
 		// Compose outputs in output_index order.
-		outputsWrapper := []byte(`{"arr":[]}`)
+		outputs := make([][]byte, 0, st.NextIndex)
 		for idx := 0; idx < st.NextIndex; idx++ {
 			if completedReasoning, ok := st.CompletedReasoning[idx]; ok {
 				item := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[{"type":"summary_text","text":""}]}`)
 				item, _ = sjson.SetBytes(item, "id", completedReasoning.ID)
 				item, _ = sjson.SetBytes(item, "encrypted_content", completedReasoning.Signature)
 				item, _ = sjson.SetBytes(item, "summary.0.text", completedReasoning.Text)
-				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+				outputs = append(outputs, item)
 				continue
 			}
 			if completedMessage, ok := st.CompletedMessages[idx]; ok {
 				item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
 				item, _ = sjson.SetBytes(item, "id", completedMessage.ID)
 				item, _ = sjson.SetBytes(item, "content.0.text", completedMessage.Text)
-				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+				outputs = append(outputs, item)
 				continue
 			}
 			if detached, ok := st.DetachedReasoning[idx]; ok {
 				item := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[]}`)
 				item, _ = sjson.SetBytes(item, "id", detached.ID)
 				item, _ = sjson.SetBytes(item, "encrypted_content", detached.Signature)
-				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+				outputs = append(outputs, item)
 				continue
 			}
 
@@ -789,11 +799,11 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				item, _ = sjson.SetBytes(item, "arguments", args)
 				item, _ = sjson.SetBytes(item, "call_id", callID)
 				item, _ = sjson.SetBytes(item, "name", st.FuncNames[idx])
-				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+				outputs = append(outputs, item)
 			}
 		}
-		if gjson.GetBytes(outputsWrapper, "arr.#").Int() > 0 {
-			completed, _ = sjson.SetRawBytes(completed, "response.output", []byte(gjson.GetBytes(outputsWrapper, "arr").Raw))
+		if len(outputs) > 0 {
+			completed, _ = sjson.SetRawBytes(completed, "response.output", translatorcommon.JoinRawArray(outputs))
 		}
 
 		// usage mapping
@@ -988,17 +998,9 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		currentMessageSignatures = nil
 	}
 
-	haveOutput := false
-	ensureOutput := func() {
-		if haveOutput {
-			return
-		}
-		resp, _ = sjson.SetRawBytes(resp, "output", []byte("[]"))
-		haveOutput = true
-	}
+	var outputs [][]byte
 	appendOutput := func(itemJSON []byte) {
-		ensureOutput()
-		resp, _ = sjson.SetRawBytes(resp, "output.-1", itemJSON)
+		outputs = append(outputs, itemJSON)
 	}
 	detachedOutputIndex := 0
 	seenDetachedOutputs := make(map[string]bool)
@@ -1155,8 +1157,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			if reasoningOutput.text != "" {
 				summaryJSON := []byte(`{"type":"summary_text","text":""}`)
 				summaryJSON, _ = sjson.SetBytes(summaryJSON, "text", reasoningOutput.text)
-				itemJSON, _ = sjson.SetRawBytes(itemJSON, "summary", []byte(`[]`))
-				itemJSON, _ = sjson.SetRawBytes(itemJSON, "summary.-1", summaryJSON)
+				itemJSON, _ = sjson.SetRawBytes(itemJSON, "summary", translatorcommon.JoinRawArray([][]byte{summaryJSON}))
 			}
 			appendOutput(itemJSON)
 		case "message":
@@ -1181,6 +1182,10 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			appendDetachedOutput(functionOutput.signature, geminiResponsesCarrierNext, geminiResponsesCarrierFunction)
 			appendOutput(functionOutput.item)
 		}
+	}
+
+	if len(outputs) > 0 {
+		resp, _ = sjson.SetRawBytes(resp, "output", translatorcommon.JoinRawArray(outputs))
 	}
 
 	// usage mapping

@@ -306,6 +306,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 	thinkingBuilder := strings.Builder{}
 	toolIDCounter := 0
 	hasToolCall := false
+	var blocks [][]byte
 
 	flushText := func() {
 		if textBuilder.Len() == 0 {
@@ -313,7 +314,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 		}
 		block := []byte(`{"type":"text","text":""}`)
 		block, _ = sjson.SetBytes(block, "text", textBuilder.String())
-		out, _ = sjson.SetRawBytes(out, "content.-1", block)
+		blocks = append(blocks, block)
 		textBuilder.Reset()
 	}
 
@@ -323,7 +324,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 		}
 		block := []byte(`{"type":"thinking","thinking":""}`)
 		block, _ = sjson.SetBytes(block, "thinking", thinkingBuilder.String())
-		out, _ = sjson.SetRawBytes(out, "content.-1", block)
+		blocks = append(blocks, block)
 		thinkingBuilder.Reset()
 	}
 
@@ -357,7 +358,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 					inputRaw = args.Raw
 				}
 				toolBlock, _ = sjson.SetRawBytes(toolBlock, "input", []byte(inputRaw))
-				out, _ = sjson.SetRawBytes(out, "content.-1", toolBlock)
+				blocks = append(blocks, toolBlock)
 				continue
 			}
 		}
@@ -365,6 +366,10 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 	flushThinking()
 	flushText()
+
+	if len(blocks) > 0 {
+		out, _ = sjson.SetRawBytes(out, "content", translatorcommon.JoinRawArray(blocks))
+	}
 
 	stopReason := "end_turn"
 	if hasToolCall {

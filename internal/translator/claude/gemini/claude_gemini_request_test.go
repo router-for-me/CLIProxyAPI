@@ -62,6 +62,64 @@ func TestConvertGeminiRequestToClaude_PreservesCustomToolIDs(t *testing.T) {
 	}
 }
 
+func TestConvertGeminiRequestToClaude_GroupsConsecutiveRoleTurns(t *testing.T) {
+	raw := []byte(`{
+		"contents":[
+			{"role":"model","parts":[{"text":"answer"}]},
+			{"role":"model","parts":[{"functionCall":{"name":"first","id":"call_1","args":{}}}]},
+			{"role":"model","parts":[{"functionCall":{"name":"second","id":"call_2","args":{}}}]},
+			{"role":"user","parts":[{"functionResponse":{"name":"first","id":"call_1","response":{"result":"one"}}}]},
+			{"role":"user","parts":[{"functionResponse":{"name":"second","id":"call_2","response":{"result":"two"}}}]}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToClaude("claude-test", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("message count = %d, want 2. Output: %s", len(messages), string(out))
+	}
+	assistantContent := messages[0].Get("content").Array()
+	wantAssistantTypes := []string{"text", "tool_use", "tool_use"}
+	if len(assistantContent) != len(wantAssistantTypes) {
+		t.Fatalf("assistant content count = %d, want %d. Output: %s", len(assistantContent), len(wantAssistantTypes), string(out))
+	}
+	for i, wantType := range wantAssistantTypes {
+		if got := assistantContent[i].Get("type").String(); got != wantType {
+			t.Fatalf("assistant content[%d].type = %q, want %q", i, got, wantType)
+		}
+	}
+	userContent := messages[1].Get("content").Array()
+	if len(userContent) != 2 {
+		t.Fatalf("user content count = %d, want 2. Output: %s", len(userContent), string(out))
+	}
+	for i, wantID := range []string{"call_1", "call_2"} {
+		if got := userContent[i].Get("type").String(); got != "tool_result" {
+			t.Fatalf("user content[%d].type = %q, want tool_result", i, got)
+		}
+		if got := userContent[i].Get("tool_use_id").String(); got != wantID {
+			t.Fatalf("user content[%d].tool_use_id = %q, want %q", i, got, wantID)
+		}
+	}
+}
+
+func TestConvertGeminiRequestToClaude_KeepsSystemInstructionUserSeparate(t *testing.T) {
+	raw := []byte(`{
+		"system_instruction":{"parts":[{"text":"system rule"}]},
+		"contents":[{"role":"user","parts":[{"text":"question"}]}]
+	}`)
+	out := ConvertGeminiRequestToClaude("claude-test", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("message count = %d, want 2. Output: %s", len(messages), string(out))
+	}
+	if got := messages[0].Get("content.0.text").String(); got != "system rule" {
+		t.Fatalf("system user text = %q, want system rule", got)
+	}
+	if got := messages[1].Get("content.0.text").String(); got != "question" {
+		t.Fatalf("ordinary user text = %q, want question", got)
+	}
+}
+
 func TestConvertGeminiRequestToClaude_DropsTemperature(t *testing.T) {
 	raw := []byte(`{
 		"generationConfig": {
@@ -111,4 +169,34 @@ func TestConvertGeminiRequestToClaude_SplitsNonImageInlineDataByMIME(t *testing.
 	if gjson.GetBytes(out, "messages.0.content.#(type==\"image\")").Exists() {
 		t.Fatalf("non-image inlineData must not be converted to image. Output: %s", string(out))
 	}
+}
+
+func TestConvertGeminiRequestToClaude_DropsHiddenThoughtParts(t *testing.T) {
+	t.Run("thought-only turn", func(t *testing.T) {
+		out := ConvertGeminiRequestToClaude("claude-test", []byte(`{
+			"contents":[
+				{"role":"model","parts":[{"thought":true,"text":"internal reasoning","thoughtSignature":"opaque-provider-state"}]},
+				{"role":"user","parts":[{"text":"continue"}]}
+			]
+		}`), false)
+
+		messages := gjson.GetBytes(out, "messages").Array()
+		if len(messages) != 1 || messages[0].Get("role").String() != "user" || messages[0].Get("content.0.text").String() != "continue" {
+			t.Fatalf("hidden thought turn was not dropped. Output: %s", string(out))
+		}
+	})
+
+	t.Run("mixed turn", func(t *testing.T) {
+		out := ConvertGeminiRequestToClaude("claude-test", []byte(`{
+			"contents":[{"role":"model","parts":[
+				{"thought":true,"text":"internal reasoning","thoughtSignature":"opaque-provider-state"},
+				{"text":"visible answer"}
+			]}]
+		}`), false)
+
+		content := gjson.GetBytes(out, "messages.0.content").Array()
+		if len(content) != 1 || content[0].Get("type").String() != "text" || content[0].Get("text").String() != "visible answer" {
+			t.Fatalf("hidden thought was not dropped independently of visible text. Output: %s", string(out))
+		}
+	})
 }

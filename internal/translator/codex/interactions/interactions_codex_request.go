@@ -155,17 +155,11 @@ func interactionsCodexReasoningSummary(cfg gjson.Result) string {
 		"thinkingSummaries",
 		"reasoning.summary",
 	} {
-		if value := cfg.Get(path); value.Exists() {
-			switch value.Type {
-			case gjson.True:
-				return "auto"
-			case gjson.False:
-				return "none"
-			case gjson.String:
-				summary := strings.ToLower(strings.TrimSpace(value.String()))
-				if summary != "" {
-					return summary
-				}
+		if value := cfg.Get(path); value.Type == gjson.String {
+			summary := strings.ToLower(strings.TrimSpace(value.String()))
+			switch summary {
+			case "auto", "none":
+				return summary
 			}
 		}
 	}
@@ -177,10 +171,10 @@ func interactionsCodexReasoningSummary(cfg gjson.Result) string {
 		"thinkingConfig.include_thoughts",
 		"thinkingConfig.includeThoughts",
 	} {
-		if value := cfg.Get(path); value.Exists() {
-			if value.Bool() {
-				return "auto"
-			}
+		switch value := cfg.Get(path); value.Type {
+		case gjson.True:
+			return "auto"
+		case gjson.False:
 			return "none"
 		}
 	}
