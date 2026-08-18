@@ -48,12 +48,8 @@ func TestValidateClaudeRequestForCodexRejectsDroppedContent(t *testing.T) {
 			payload: `{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.test/image.png"}}]}]}`,
 		},
 		{
-			name:    "tool result URL image",
-			payload: `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"image","source":{"type":"url","url":"https://example.test/image.png"}}]}]}]}`,
-		},
-		{
-			name:    "tool result document",
-			payload: `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"document","source":{"type":"url","url":"https://example.test/document.pdf"}}]}]}]}`,
+			name:    "tool result URL image without URL",
+			payload: `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"image","source":{"type":"url"}}]}]}]}`,
 		},
 	}
 

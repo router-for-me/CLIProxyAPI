@@ -8,6 +8,7 @@ package claude
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -248,10 +249,19 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 							contentResults := contentResult.Array()
 							toolResultContentItems := make([][]byte, 0, len(contentResults))
 							for k := 0; k < len(contentResults); k++ {
-								toolResultContentType := contentResults[k].Get("type").String()
-								if toolResultContentType == "image" {
-									sourceResult := contentResults[k].Get("source")
+								contentResult := contentResults[k]
+								switch contentResult.Get("type").String() {
+								case "image":
+									sourceResult := contentResult.Get("source")
 									if sourceResult.Exists() {
+										if sourceResult.Get("type").String() == "url" {
+											if imageURL := sourceResult.Get("url").String(); imageURL != "" {
+												toolResultContent := []byte(`{"type":"input_image","image_url":""}`)
+												toolResultContent, _ = sjson.SetBytes(toolResultContent, "image_url", imageURL)
+												toolResultContentItems = append(toolResultContentItems, toolResultContent)
+											}
+											break
+										}
 										data := sourceResult.Get("data").String()
 										if data == "" {
 											data = sourceResult.Get("base64").String()
@@ -271,13 +281,32 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 											toolResultContentItems = append(toolResultContentItems, toolResultContent)
 										}
 									}
-								} else if toolResultContentType == "text" {
+								case "text":
 									toolResultContent := []byte(`{"type":"input_text","text":""}`)
-									toolResultContent, _ = sjson.SetBytes(toolResultContent, "text", contentResults[k].Get("text").String())
+									toolResultContent, _ = sjson.SetBytes(toolResultContent, "text", contentResult.Get("text").String())
 									toolResultContentItems = append(toolResultContentItems, toolResultContent)
+								case "document":
+									toolResultContentItems = append(toolResultContentItems, convertClaudeToolResultDocument(contentResult))
+								case "search_result":
+									toolResultContentItems = append(toolResultContentItems, codexClaudeToolResultJSON(contentResult.Value()))
+								case "tool_reference":
+									toolName := contentResult.Get("tool_name").String()
+									if short, ok := toolNameMap[toolName]; ok {
+										toolName = short
+									} else {
+										toolName = shortenNameIfNeeded(toolName)
+									}
+									reference := map[string]any{"type": "tool_reference"}
+									if value, ok := contentResult.Value().(map[string]any); ok {
+										reference = value
+									}
+									reference["tool_name"] = toolName
+									toolResultContentItems = append(toolResultContentItems, codexClaudeToolResultJSON(reference))
 								}
 							}
-							if len(toolResultContentItems) > 0 {
+							if len(contentResults) == 0 {
+								functionCallOutputMessage, _ = sjson.SetBytes(functionCallOutputMessage, "output", "")
+							} else if len(toolResultContentItems) > 0 {
 								functionCallOutputMessage, _ = sjson.SetRawBytes(functionCallOutputMessage, "output", translatorcommon.JoinRawArray(toolResultContentItems))
 							} else {
 								functionCallOutputMessage, _ = sjson.SetBytes(functionCallOutputMessage, "output", messageContentResult.Get("content").String())
@@ -530,6 +559,32 @@ func shortenNameIfNeeded(name string) string {
 		}
 	}
 	return name[:limit]
+}
+
+func codexClaudeToolResultJSON(value any) []byte {
+	payload, _ := json.Marshal(value)
+	content := []byte(`{"type":"input_text","text":""}`)
+	content, _ = sjson.SetBytes(content, "text", string(payload))
+	return content
+}
+
+func convertClaudeToolResultDocument(document gjson.Result) []byte {
+	source := document.Get("source")
+	if source.Get("type").String() != "base64" || source.Get("media_type").String() != "application/pdf" ||
+		(document.Get("context").Exists() && document.Get("context").Type != gjson.Null) ||
+		(document.Get("citations").Exists() && document.Get("citations").Type != gjson.Null) {
+		return codexClaudeToolResultJSON(document.Value())
+	}
+	data := source.Get("data").String()
+	if data == "" {
+		return codexClaudeToolResultJSON(document.Value())
+	}
+	content := []byte(`{"type":"input_file","file_data":"","filename":"document.pdf"}`)
+	content, _ = sjson.SetBytes(content, "file_data", "data:application/pdf;base64,"+data)
+	if title := document.Get("title").String(); title != "" {
+		content, _ = sjson.SetBytes(content, "filename", title)
+	}
+	return content
 }
 
 // buildShortNameMap ensures uniqueness of shortened names within a request.
