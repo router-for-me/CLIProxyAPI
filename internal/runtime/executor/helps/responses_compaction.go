@@ -1,8 +1,17 @@
 package helps
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -114,4 +123,98 @@ func (s *ResponsesCompactionStream) Normalize(data []byte) []byte {
 	}
 	data, _ = sjson.SetBytes(data, "type", "response.completed")
 	return data
+}
+
+const (
+	responsesV1CompactionCapsulePrefix = "cpa-responses-v1-compaction-v1."
+	responsesV1CompactionDomain        = "cpa-responses-v1-compaction\x00"
+)
+
+type responsesV1CompactionCapsule struct {
+	Version int    `json:"version"`
+	Summary string `json:"summary"`
+}
+
+func sealResponsesV1CompactionCapsule(summary, scope string, secrets []string) (string, error) {
+	if strings.TrimSpace(summary) == "" {
+		return "", fmt.Errorf("compaction summary is empty")
+	}
+	if strings.TrimSpace(scope) == "" {
+		return "", fmt.Errorf("compaction capsule scope is missing")
+	}
+	keys := responsesV1CompactionKeys(scope, secrets)
+	if len(keys) == 0 {
+		return "", fmt.Errorf("compaction capsule requires a configured credential")
+	}
+	plaintext, errMarshal := json.Marshal(responsesV1CompactionCapsule{Version: 1, Summary: summary})
+	if errMarshal != nil {
+		return "", fmt.Errorf("compaction summary could not be sealed")
+	}
+	block, errCipher := aes.NewCipher(keys[0])
+	if errCipher != nil {
+		return "", fmt.Errorf("compaction summary could not be sealed")
+	}
+	gcm, errGCM := cipher.NewGCM(block)
+	if errGCM != nil {
+		return "", fmt.Errorf("compaction summary could not be sealed")
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, errRead := io.ReadFull(rand.Reader, nonce); errRead != nil {
+		return "", fmt.Errorf("compaction summary could not be sealed")
+	}
+	sealed := gcm.Seal(nonce, nonce, plaintext, responsesV1CompactionAAD(scope))
+	return responsesV1CompactionCapsulePrefix + base64.RawURLEncoding.EncodeToString(sealed), nil
+}
+
+func openResponsesV1CompactionCapsule(encoded, scope string, secrets []string) (string, error) {
+	if !strings.HasPrefix(encoded, responsesV1CompactionCapsulePrefix) || strings.TrimSpace(scope) == "" {
+		return "", fmt.Errorf("compaction capsule is invalid for this provider")
+	}
+	sealed, errDecode := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(encoded, responsesV1CompactionCapsulePrefix))
+	if errDecode != nil {
+		return "", fmt.Errorf("compaction capsule is corrupted")
+	}
+	for _, key := range responsesV1CompactionKeys(scope, secrets) {
+		if summary, ok := responsesV1CompactionSummaryWithKey(sealed, scope, key); ok {
+			return summary, nil
+		}
+	}
+	return "", fmt.Errorf("compaction capsule cannot be authenticated with this provider")
+}
+
+func responsesV1CompactionSummaryWithKey(sealed []byte, scope string, key []byte) (string, bool) {
+	block, errCipher := aes.NewCipher(key)
+	if errCipher != nil {
+		return "", false
+	}
+	gcm, errGCM := cipher.NewGCM(block)
+	if errGCM != nil || len(sealed) < gcm.NonceSize()+gcm.Overhead() {
+		return "", false
+	}
+	plaintext, errOpen := gcm.Open(nil, sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():], responsesV1CompactionAAD(scope))
+	if errOpen != nil {
+		return "", false
+	}
+	var capsule responsesV1CompactionCapsule
+	valid := json.Unmarshal(plaintext, &capsule) == nil && capsule.Version == 1 && strings.TrimSpace(capsule.Summary) != ""
+	return capsule.Summary, valid
+}
+
+func responsesV1CompactionKeys(scope string, secrets []string) [][]byte {
+	seen := make(map[[32]byte]struct{}, len(secrets))
+	keys := make([][]byte, 0, len(secrets))
+	for _, secret := range secrets {
+		if normalizedSecret := strings.TrimSpace(secret); normalizedSecret != "" {
+			digest := sha256.Sum256([]byte(responsesV1CompactionDomain + strings.TrimSpace(scope) + "\x00" + normalizedSecret))
+			if _, exists := seen[digest]; !exists {
+				seen[digest] = struct{}{}
+				keys = append(keys, digest[:])
+			}
+		}
+	}
+	return keys
+}
+
+func responsesV1CompactionAAD(scope string) []byte {
+	return []byte(responsesV1CompactionDomain + strings.TrimSpace(scope))
 }
