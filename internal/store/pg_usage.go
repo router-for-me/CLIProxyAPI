@@ -1895,6 +1895,11 @@ func (s *UsageStore) SelectAutoRouterModelStats(ctx context.Context, filter Usag
 	args := []any{filter.RouterID}
 	addUsageScopeArgs(&b, &args, filter)
 	b.WriteString(` GROUP BY e.model ORDER BY COALESCE(SUM(e.cost_usd), 0) DESC`)
+	if filter.Limit > 0 {
+		args = append(args, filter.Limit)
+		b.WriteString(` LIMIT $`)
+		b.WriteString(itoa(len(args)))
+	}
 	rows, err := s.db.QueryContext(ctx, b.String(), args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres store: select auto-router model stats: %w", err)
