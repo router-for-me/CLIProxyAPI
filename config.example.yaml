@@ -418,7 +418,83 @@ nonstream-keepalive-interval: 0
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
 
-# OpenAI compatibility providers
+# z.ai provider (glm native)
+z.ai:
+  # Base URL for z.ai GLM API. Defaults to https://open.bigmodel.cn/api/paas/v4/ when omitted.
+  base-url: "https://open.bigmodel.cn/api/paas/v4/"
+  # API key entry for z.ai authentication.
+  # When using a single key for all models, provide the key directly.
+  # For multiple keys or prefixed access, use the api-key-entries format below.
+  api-key: ""
+  # Optional per-key proxy override. Set to "direct" or "none" to bypass global proxy.
+  # proxy-url: "socks5://proxy.example.com:1080"
+  # Optional: explicit direct connect for this credential.
+  # proxy-url: "direct"
+  # Models supported by z.ai GLM.
+  models:
+    - name: "glm-4"                # upstream model name
+      alias: "glm-4"               # client-visible alias
+      display-name: "GLM 4"        # optional catalog display name
+      # thinking:                    # optional: omit to default to levels ["low","medium","high"]
+      #   levels: ["low", "medium", "high"]
+    - name: "glm-4-plus"           # upstream model name
+      alias: "glm-4-plus"          # client-visible alias
+      display-name: "GLM 4 Plus"   # optional catalog display name
+    - name: "glm-3-plus"           # upstream model name
+      alias: "glm-3-plus"          # client-visible alias
+      display-name: "GLM 3 Plus"   # optional catalog display name
+    - name: "glm-4-air"            # upstream model name
+      alias: "glm-4-air"           # client-visible alias
+      display-name: "GLM 4 Air"    # optional catalog display name
+    - name: "glm-4-long"           # upstream model name
+      alias: "glm-4-long"          # client-visible alias
+      display-name: "GLM 4 Long"   # optional catalog display name
+    - name: "glm-4-fash"           # upstream model name
+      alias: "glm-4-fash"          # client-visible alias
+      display-name: "GLM 4 Fash"   # optional catalog display name
+    # You may repeat the same alias to build an internal model pool.
+    # The client still sees only one alias in the model list.
+    # Requests to that alias will round-robin across the upstream names below,
+    # and if the chosen upstream fails before producing output, the request will
+    # continue with the next upstream model in the same alias pool.
+    - name: "glm-4"
+      alias: "glm-4-roundrobin"    # client-visible alias for round-robin pool
+    - name: "glm-4-plus"
+      alias: "glm-4-plus-rr"       # client-visible alias for round-robin pool
+
+# OpenCode/Zen provider (model routing/zen-compatible)
+opencode:
+  # Base URL for OpenCode/Zen API endpoint.
+  # When omitted, defaults to a zen-compatible routing endpoint.
+  base-url: ""
+  # API key for OpenCode/Zen authentication.
+  api-key: ""
+  # Optional per-key proxy override.
+  # proxy-url: "socks5://proxy.example.com:1080"
+  # Models supported by OpenCode/Zen.
+  models:
+    - name: "zen-latest"
+      alias: "zen-latest"
+      display-name: "OpenCode Zen Latest"
+    - name: "zen-small"
+      alias: "zen-small"
+      display-name: "OpenCode Zen Small"
+    - name: "zen-medium"
+      alias: "zen-medium"
+      display-name: "OpenCode Zen Medium"
+    - name: "zen-large"
+      alias: "zen-large"
+      display-name: "OpenCode Zen Large"
+    # You may repeat the same alias to build an internal model pool.
+    # The client still sees only one alias in the model list.
+    # Requests to that alias will round-robin across the upstream names below,
+    # and if the chosen upstream fails before producing output, the request will
+    # continue with the next upstream model in the same alias pool.
+    - name: "zen-latest"
+      alias: "zen-roundrobin"
+      display-name: "OpenCode Zen Round Robin"
+
+# Remove or keep the openai-compatibility section as disabled by default
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #     disabled: false # optional: set to true to disable this provider without removing it
