@@ -380,6 +380,17 @@ type StreamTransformState struct {
 	TotalTokens      int64
 	CachedTokens     int64
 	HasToolCalls     bool
+	// ToolCallInitEmitted tracks whether the initial chunk (index/id/type/name)
+	// has been emitted for a callID.
+	ToolCallInitEmitted map[string]bool
+	// ToolCallNameEmitted tracks whether the tool name has been emitted.
+	ToolCallNameEmitted map[string]bool
+	// ToolCallSawDelta tracks whether any arguments delta has been emitted.
+	// Once true, terminal events must NOT re-emit the full arguments.
+	ToolCallSawDelta map[string]bool
+	// ToolCallCompleted tracks whether a terminal event was processed, so a
+	// repeated terminal event for the same callID is a no-op.
+	ToolCallCompleted map[string]bool
 }
 
 // ConvertCommandCodeStreamToOpenAI converts a single NDJSON line into OpenAI SSE chunks.
@@ -392,11 +403,15 @@ func ConvertCommandCodeStreamToOpenAI(ctx context.Context, modelName string, ori
 	if *param == nil {
 		respID := fmt.Sprintf("chatcmpl-%s", uuid.New().String()[:12])
 		state = &StreamTransformState{
-			ResponseID:      respID,
-			CreatedAt:       time.Now().Unix(),
-			Model:           modelName,
-			ToolCallIndices: make(map[string]int),
-			ToolCallNames:   make(map[string]string),
+			ResponseID:          respID,
+			CreatedAt:           time.Now().Unix(),
+			Model:               modelName,
+			ToolCallIndices:     make(map[string]int),
+			ToolCallNames:       make(map[string]string),
+			ToolCallInitEmitted: make(map[string]bool),
+			ToolCallNameEmitted: make(map[string]bool),
+			ToolCallSawDelta:    make(map[string]bool),
+			ToolCallCompleted:   make(map[string]bool),
 		}
 		*param = state
 	} else {
@@ -435,6 +450,41 @@ func ConvertCommandCodeStreamToOpenAI(ctx context.Context, modelName string, ori
 		chunks = append(chunks, b)
 	}
 
+	// ensureToolCallInit emits the first chunk for a tool call carrying the
+	// stable index/id/type/name metadata (OpenAI-compatible opening delta).
+	// It is safe to call multiple times; only the first call emits.
+	ensureToolCallInit := func(callID string) {
+		if callID == "" {
+			return
+		}
+		if state.ToolCallInitEmitted[callID] {
+			return
+		}
+		idx := state.ToolCallIndices[callID]
+		name := state.ToolCallNames[callID]
+		toolCallDelta := map[string]any{
+			"index": idx,
+			"id":    callID,
+			"type":  "function",
+			"function": map[string]any{
+				"name":      name,
+				"arguments": "",
+			},
+		}
+		delta := map[string]any{
+			"tool_calls": []any{toolCallDelta},
+		}
+		if !state.RoleSent {
+			delta["role"] = "assistant"
+			state.RoleSent = true
+		}
+		emitChunk(delta, nil, nil)
+		state.ToolCallInitEmitted[callID] = true
+		if name != "" {
+			state.ToolCallNameEmitted[callID] = true
+		}
+	}
+
 	switch event.Type {
 	case "reasoning-delta":
 		delta := map[string]any{
@@ -459,6 +509,9 @@ func ConvertCommandCodeStreamToOpenAI(ctx context.Context, modelName string, ori
 	case "tool-input-start":
 		state.HasToolCalls = true
 		callID := event.NormalizeToolEventID()
+		if callID == "" {
+			return nil
+		}
 		name := event.NormalizeToolName()
 
 		idx, exists := state.ToolCallIndices[callID]
@@ -470,75 +523,101 @@ func ConvertCommandCodeStreamToOpenAI(ctx context.Context, modelName string, ori
 			state.ToolCallNames[callID] = name
 		}
 
-		toolCallDelta := map[string]any{
-			"index": idx,
-			"id":    callID,
-			"type":  "function",
-			"function": map[string]any{
-				"name":      name,
-				"arguments": "",
-			},
-		}
-
-		delta := map[string]any{
-			"tool_calls": []any{toolCallDelta},
-		}
-		if !state.RoleSent {
-			delta["role"] = "assistant"
-			state.RoleSent = true
-		}
-		emitChunk(delta, nil, nil)
+		// Opening chunk: metadata only, arguments empty.
+		ensureToolCallInit(callID)
 
 	case "tool-input-delta":
 		state.HasToolCalls = true
 		callID := event.NormalizeToolEventID()
+		if callID == "" {
+			return nil
+		}
 		idx, exists := state.ToolCallIndices[callID]
 		if !exists {
 			idx = len(state.ToolCallIndices)
 			state.ToolCallIndices[callID] = idx
 		}
 
-		toolCallDelta := map[string]any{
-			"index": idx,
-			"function": map[string]any{
-				"arguments": event.Delta,
-			},
-		}
+		// If a delta arrives before any start event, synthesize the opening
+		// chunk so the client always sees index/id/type metadata first.
+		ensureToolCallInit(callID)
 
-		delta := map[string]any{
-			"tool_calls": []any{toolCallDelta},
+		if event.Delta != "" {
+			toolCallDelta := map[string]any{
+				"index": idx,
+				"function": map[string]any{
+					"arguments": event.Delta,
+				},
+			}
+
+			delta := map[string]any{
+				"tool_calls": []any{toolCallDelta},
+			}
+			if !state.RoleSent {
+				delta["role"] = "assistant"
+				state.RoleSent = true
+			}
+			emitChunk(delta, nil, nil)
+			state.ToolCallSawDelta[callID] = true
 		}
-		if !state.RoleSent {
-			delta["role"] = "assistant"
-			state.RoleSent = true
-		}
-		emitChunk(delta, nil, nil)
 
 	case "tool-input-end", "tool-call":
 		state.HasToolCalls = true
 		callID := event.NormalizeToolEventID()
+		if callID == "" {
+			return nil
+		}
 		name := event.NormalizeToolName()
-		if name == "" {
-			name = state.ToolCallNames[callID]
+		if name != "" {
+			state.ToolCallNames[callID] = name
+			// If the init chunk was already emitted without a name, emit a
+			// follow-up name-only chunk so the client still learns it.
+			if state.ToolCallInitEmitted[callID] && !state.ToolCallNameEmitted[callID] {
+				idx := state.ToolCallIndices[callID]
+				toolCallDelta := map[string]any{
+					"index": idx,
+					"function": map[string]any{
+						"name": name,
+					},
+				}
+				delta := map[string]any{
+					"tool_calls": []any{toolCallDelta},
+				}
+				if !state.RoleSent {
+					delta["role"] = "assistant"
+					state.RoleSent = true
+				}
+				emitChunk(delta, nil, nil)
+				state.ToolCallNameEmitted[callID] = true
+			}
 		}
 		idx, exists := state.ToolCallIndices[callID]
 		if !exists {
 			idx = len(state.ToolCallIndices)
 			state.ToolCallIndices[callID] = idx
 		}
+
+		// Terminal/confirmation events must never re-emit the full arguments
+		// when the arguments were already streamed via deltas. Only when no
+		// delta was ever seen (upstream sent a complete tool-call directly)
+		// do we fall back to emitting the complete arguments once.
+		if state.ToolCallCompleted[callID] {
+			return nil
+		}
+		state.ToolCallCompleted[callID] = true
 
 		rawInput := event.Input
 		if len(rawInput) == 0 {
 			rawInput = event.Args
 		}
 
-		if len(rawInput) > 0 {
+		if len(rawInput) > 0 && !state.ToolCallSawDelta[callID] {
+			// Fallback path: no deltas seen, so emit the complete arguments
+			// exactly once. The opening metadata chunk may still be missing.
+			ensureToolCallInit(callID)
 			toolCallDelta := map[string]any{
 				"index": idx,
-				"id":    callID,
-				"type":  "function",
 				"function": map[string]any{
-					"name":      name,
 					"arguments": string(rawInput),
 				},
 			}
@@ -550,6 +629,7 @@ func ConvertCommandCodeStreamToOpenAI(ctx context.Context, modelName string, ori
 				state.RoleSent = true
 			}
 			emitChunk(delta, nil, nil)
+			state.ToolCallSawDelta[callID] = true
 		}
 
 	case "finish-step", "finish":
