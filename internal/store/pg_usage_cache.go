@@ -179,6 +179,7 @@ func usageFilterKey(f UsageFilter) string {
 		f.Principal,
 		f.Provider,
 		f.Model,
+		f.RouterID,
 		f.UserID,
 		f.From.Format(time.RFC3339Nano),
 		f.To.Format(time.RFC3339Nano),

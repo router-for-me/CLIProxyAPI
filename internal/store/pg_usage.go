@@ -92,7 +92,10 @@ type UsageFilter struct {
 	Principal string
 	Provider  string
 	Model     string
-	UserID    string
+	// RouterID narrows to events routed by a specific Auto Router id. Exact
+	// match against usage_events.router_id; empty means no constraint.
+	RouterID string
+	UserID   string
 	// RequestID narrows to a single per-request correlation identifier. Exact
 	// match against usage_events.request_id / usage_errors.request_id; empty
 	// means no constraint.
@@ -120,6 +123,23 @@ type UsageAggregate struct {
 	CachedTokens    int64   `json:"cached_tokens"`
 	TotalTokens     int64   `json:"total_tokens"`
 	CostUSD         float64 `json:"cost_usd"`
+}
+
+// AutoRouterTierStat is one aggregated row per complexity tier for a router.
+type AutoRouterTierStat struct {
+	Tier         string  `json:"tier"`
+	RequestCount int64   `json:"request_count"`
+	TotalTokens  int64   `json:"total_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
+}
+
+// AutoRouterModelStat is one aggregated row per target model for a router.
+type AutoRouterModelStat struct {
+	Model         string  `json:"model"`
+	RequestCount  int64   `json:"request_count"`
+	TotalTokens   int64   `json:"total_tokens"`
+	CostUSD       float64 `json:"cost_usd"`
+	AvgCostPerReq float64 `json:"avg_cost_per_request"`
 }
 
 // UsageWindow mirrors a row in usage_windows and is used both for budget
@@ -619,6 +639,11 @@ func (s *UsageStore) selectAggregateMiss(ctx context.Context, filter UsageFilter
 		b.WriteString(" AND e.model = $")
 		b.WriteString(itoa(len(args)))
 	}
+	if filter.RouterID != "" {
+		args = append(args, filter.RouterID)
+		b.WriteString(" AND e.router_id = $")
+		b.WriteString(itoa(len(args)))
+	}
 	if filter.RequestID != "" {
 		args = append(args, filter.RequestID)
 		b.WriteString(" AND e.request_id = $")
@@ -729,9 +754,10 @@ func (s *UsageStore) tryRollupAggregateUser(ctx context.Context, filter UsageFil
 		return nil, false, nil
 	}
 	// The rollup buckets by all six dimensions, so any non-rollup dimension
-	// filter needs a filtered scan — fall back.
+	// filter needs a filtered scan — fall back. router_id is not tracked by the
+	// rollup either, so a router-filtered query must scan usage_events directly.
 	if filter.UserID != "" || filter.APIKeyID != "" || filter.Model != "" ||
-		filter.Provider != "" || filter.RequestID != "" {
+		filter.Provider != "" || filter.RequestID != "" || filter.RouterID != "" {
 		return nil, false, nil
 	}
 	// Day alignment: both bounds, when set, must be UTC calendar-day midnights.
@@ -1662,7 +1688,12 @@ func (s *UsageStore) SelectFilterOptions(ctx context.Context, filter UsageFilter
 // buildWhereClause appends a parameterized WHERE clause to the supplied
 // builder based on the parts of filter the caller populated. Returns the
 // args slice (with new parameters appended) so callers can chain LIMIT. This
-// is shared by all usage_events queries that share the same filter shape.
+// is shared by the usage_events read queries and by the usage_errors queries
+// (pg_usage_errors.go), which operate on a table mirroring only the columns
+// common to both. Only filter fields backed by a column present in BOTH
+// tables (usage_events and usage_errors) may be applied here; columns unique
+// to usage_events (e.g. router_id) must be filtered by the caller's own query
+// instead of being widened into this shared clause.
 //
 // The Principal field is intentionally NOT applied: api_key_principal is
 // sealed at rest and cannot be matched against a plaintext WHERE value.
@@ -1770,4 +1801,118 @@ func metricExpr(metric string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported metric: %q", metric)
 	}
+}
+
+// addUsageScopeArgs appends the api_key_id, user_id and time-range WHERE
+// clauses shared by the auto-router aggregation queries; router_id is handled
+// by each caller. Appends to args and grows b via the builder.
+func addUsageScopeArgs(b *strings.Builder, args *[]any, filter UsageFilter) {
+	if filter.APIKeyID != "" {
+		*args = append(*args, filter.APIKeyID)
+		b.WriteString(` AND e.api_key_id = $`)
+		b.WriteString(itoa(len(*args)))
+	}
+	if filter.UserID != "" {
+		*args = append(*args, filter.UserID)
+		b.WriteString(` AND e.user_id = $`)
+		b.WriteString(itoa(len(*args)))
+	}
+	if !filter.From.IsZero() {
+		*args = append(*args, filter.From)
+		b.WriteString(` AND e.requested_at >= $`)
+		b.WriteString(itoa(len(*args)))
+	}
+	if !filter.To.IsZero() {
+		*args = append(*args, filter.To)
+		b.WriteString(` AND e.requested_at < $`)
+		b.WriteString(itoa(len(*args)))
+	}
+}
+
+// SelectAutoRouterTierStats returns per-tier request/token/cost totals for a
+// router, optionally scoped by api_key_id and time range. It always returns
+// the 4 canonical tiers; tiers with no requests are zero-valued. Events with a
+// NULL tier (non-routed or pre-feature rows) are excluded.
+func (s *UsageStore) SelectAutoRouterTierStats(ctx context.Context, filter UsageFilter) ([]AutoRouterTierStat, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	if strings.TrimSpace(filter.RouterID) == "" {
+		return nil, fmt.Errorf("postgres store: router_id is required for tier stats")
+	}
+	out := []AutoRouterTierStat{
+		{Tier: "simple"}, {Tier: "medium"}, {Tier: "complex"}, {Tier: "reasoning"},
+	}
+	var b strings.Builder
+	b.WriteString(`SELECT e.tier,
+		COUNT(*), COALESCE(SUM(e.total_tokens), 0), COALESCE(SUM(e.cost_usd), 0)
+		FROM `)
+	b.WriteString(s.eventsTable)
+	b.WriteString(` e WHERE e.tier IS NOT NULL AND e.router_id = $1`)
+	args := []any{filter.RouterID}
+	addUsageScopeArgs(&b, &args, filter)
+	b.WriteString(` GROUP BY e.tier ORDER BY e.tier`)
+	rows, err := s.db.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: select auto-router tier stats: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tier string
+		var st AutoRouterTierStat
+		if err := rows.Scan(&tier, &st.RequestCount, &st.TotalTokens, &st.CostUSD); err != nil {
+			return nil, err
+		}
+		for i := range out {
+			if out[i].Tier == tier {
+				st.Tier = tier
+				out[i] = st
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// SelectAutoRouterModelStats returns per-target-model request/token/cost totals
+// for a router, optionally scoped by api_key_id and time range, ordered by cost
+// descending.
+func (s *UsageStore) SelectAutoRouterModelStats(ctx context.Context, filter UsageFilter) ([]AutoRouterModelStat, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	if strings.TrimSpace(filter.RouterID) == "" {
+		return nil, fmt.Errorf("postgres store: router_id is required for model stats")
+	}
+	var b strings.Builder
+	b.WriteString(`SELECT e.model,
+		COUNT(*), COALESCE(SUM(e.total_tokens), 0), COALESCE(SUM(e.cost_usd), 0)
+		FROM `)
+	b.WriteString(s.eventsTable)
+	b.WriteString(` e WHERE e.router_id = $1`)
+	args := []any{filter.RouterID}
+	addUsageScopeArgs(&b, &args, filter)
+	b.WriteString(` GROUP BY e.model ORDER BY COALESCE(SUM(e.cost_usd), 0) DESC`)
+	rows, err := s.db.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: select auto-router model stats: %w", err)
+	}
+	defer rows.Close()
+	out := make([]AutoRouterModelStat, 0, 8)
+	for rows.Next() {
+		var st AutoRouterModelStat
+		if err := rows.Scan(&st.Model, &st.RequestCount, &st.TotalTokens, &st.CostUSD); err != nil {
+			return nil, err
+		}
+		if st.RequestCount > 0 {
+			st.AvgCostPerReq = st.CostUSD / float64(st.RequestCount)
+		}
+		out = append(out, st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
