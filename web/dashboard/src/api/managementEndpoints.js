@@ -158,6 +158,7 @@ function withGlobSuffix(entries) {
     entries: [
       entry('GET', '/auto-routers'),
       entry('POST', '/auto-routers'),
+      entry('GET', '/auto-routers/stats'),
       entry('GET', '/auto-routers/:id'),
       entry('PUT', '/auto-routers/:id'),
       entry('DELETE', '/auto-routers/:id'),

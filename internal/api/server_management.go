@@ -418,6 +418,7 @@ func (s *Server) registerManagementRoutes() {
 		// configured.
 		mgmt.GET("/auto-routers", s.mgmt.ListAutoRouters)
 		mgmt.POST("/auto-routers", s.mgmt.CreateAutoRouter)
+		mgmt.GET("/auto-routers/stats", s.mgmt.GetAutoRouterStats)
 		mgmt.GET("/auto-routers/:id", s.mgmt.GetAutoRouter)
 		mgmt.PUT("/auto-routers/:id", s.mgmt.UpdateAutoRouter)
 		mgmt.DELETE("/auto-routers/:id", s.mgmt.DeleteAutoRouter)
