@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -61,43 +62,59 @@ func (e *OpenCodeExecutor) HttpRequest(ctx context.Context, auth *clipoauth.Auth
 	return httpClient.Do(httpReq)
 }
 
-// Execute handles non-streaming execution for OpenCode/Zen.
-// It prepares the request with credentials and executes the HTTP request via HttpRequest.
-func (e *OpenCodeExecutor) Execute(ctx context.Context, auth *clipoauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+// Execute handles non-streaming execution for OpenCode/Zen with usage tracking.
+func (e *OpenCodeExecutor) Execute(ctx context.Context, auth *clipoauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	reporter := helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
 	httpResp, err := e.HttpRequest(ctx, auth, &http.Request{
 		Header: http.Header{},
 		Body:   http.NoBody,
 	})
 	if err != nil {
-		return cliproxyexecutor.Response{}, err
+		return resp, err
 	}
-	// Read the response body
-	body := make([]byte, 0, 4096)
-	if httpResp.Body != nil {
-		_, err := httpResp.Body.Read(body)
-		httpResp.Body.Close()
-		if err != nil {
-			return cliproxyexecutor.Response{}, fmt.Errorf("opencode executor: read response error: %w", err)
-		}
+	defer httpResp.Body.Close()
+
+	data, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return resp, fmt.Errorf("opencode executor: read response error: %w", err)
 	}
-	return cliproxyexecutor.Response{Payload: body}, nil
+
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
+	reporter.EnsurePublished(ctx)
+
+	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }
 
-// ExecuteStream handles streaming execution for OpenCode/Zen.
-// It returns a StreamResult containing upstream headers and a channel of provider chunks.
-func (e *OpenCodeExecutor) ExecuteStream(ctx context.Context, auth *clipoauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-	httpResp, err := e.HttpRequest(ctx, auth, &http.Request{
-		Header: http.Header{},
-		Body:   http.NoBody,
-	})
+// ExecuteStream handles streaming execution for OpenCode/Zen with usage tracking.
+func (e *OpenCodeExecutor) ExecuteStream(ctx context.Context, auth *clipoauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (result *cliproxyexecutor.StreamResult, err error) {
+	reporter := helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "", http.NoBody)
 	if err != nil {
 		return nil, err
 	}
+	if err = e.PrepareRequest(httpReq, auth); err != nil {
+		return nil, err
+	}
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
+
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	reporter.ObserveResponse(httpResp)
+
 	// Create a channel to stream chunks
 	ch := make(chan cliproxyexecutor.StreamChunk, 100)
 	// Start a goroutine to read and chunk the response
 	go func() {
 		defer close(ch)
+		defer httpResp.Body.Close()
 		// Read the response body in chunks
 		reader := httpResp.Body
 		buf := make([]byte, 4096)
