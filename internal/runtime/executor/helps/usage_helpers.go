@@ -39,6 +39,8 @@ type UsageReporter struct {
 	source          string
 	reasoning       string
 	serviceTier     string
+	tier            string
+	routerID        string
 	generate        bool
 	// requestID is the per-request correlation identifier sourced from the
 	// logging context. Persisted on usage_events/usage_errors so a row can be
@@ -86,6 +88,8 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		authType:     resolveUsageAuthType(auth),
 		reasoning:    usage.ReasoningEffortFromContext(ctx),
 		serviceTier:  usage.ServiceTierFromContext(ctx),
+		tier:         usage.RouterTierFromContext(ctx),
+		routerID:     usage.RouterIDFromContext(ctx),
 		generate:     usage.GenerateFromContext(ctx),
 		requestID:    internallogging.GetRequestID(ctx),
 	}
@@ -400,6 +404,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		AuthType:            r.authType,
 		ReasoningEffort:     r.reasoning,
 		ServiceTier:         r.serviceTier,
+		Tier:                r.tier,
+		RouterID:            r.routerID,
 		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
 		Generate:            usage.GenerateFlag(r.generate),
 		RequestedAt:         r.requestedAt,

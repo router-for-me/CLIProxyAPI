@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -295,4 +296,82 @@ func TestUsageFlusherStartTwice(t *testing.T) {
 		t.Fatal("expected error on second Start; got nil")
 	}
 	t.Cleanup(flusher.Stop)
+}
+
+// TestUsageFlusherPersistsAutoRouterTier verifies that the Auto Router
+// complexity tier and router id carried on a coreusage.Record survive the
+// flusher -> usage_events round trip. Skips when no Postgres is available.
+func TestUsageFlusherPersistsAutoRouterTier(t *testing.T) {
+	store := newTestPostgresStore(t, "flusher_router_tier")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+	apiKeys := NewAPIKeyStore(store)
+	flusher := NewUsageFlusher(us, apiKeys, nil, FlusherConfig{QueueCap: 10, FlushInterval: time.Hour, FlushBatchSize: 5})
+	if err := flusher.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(flusher.Stop)
+
+	flusher.HandleUsage(ctx, coreusage.Record{
+		Provider: "test", Model: "m", Alias: "m",
+		AuthType: "api_key", Source: "test",
+		Tier: "complex", RouterID: "router:smart",
+		RequestedAt: time.Now().UTC(),
+		Detail: coreusage.Detail{
+			InputTokens: 100, OutputTokens: 100, TotalTokens: 200,
+		},
+	})
+	flusher.Stop()
+
+	var tier, routerID string
+	err := us.db.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT tier, router_id FROM %s ORDER BY id DESC LIMIT 1`, us.eventsTable,
+	)).Scan(&tier, &routerID)
+	if err != nil {
+		t.Fatalf("query persisted tier: %v", err)
+	}
+	if tier != "complex" {
+		t.Errorf("tier = %q; want complex", tier)
+	}
+	if routerID != "router:smart" {
+		t.Errorf("router_id = %q; want router:smart", routerID)
+	}
+}
+
+// TestUsageFlusherPersistsEmptyAutoRouterTier verifies that a record without
+// an Auto Router decision persists empty tier/router_id (not an error).
+func TestUsageFlusherPersistsEmptyAutoRouterTier(t *testing.T) {
+	store := newTestPostgresStore(t, "flusher_router_tier_empty")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+	apiKeys := NewAPIKeyStore(store)
+	flusher := NewUsageFlusher(us, apiKeys, nil, FlusherConfig{QueueCap: 10, FlushInterval: time.Hour, FlushBatchSize: 5})
+	if err := flusher.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(flusher.Stop)
+
+	flusher.HandleUsage(ctx, coreusage.Record{
+		Provider: "test", Model: "m", Alias: "m",
+		AuthType: "api_key", Source: "test",
+		RequestedAt: time.Now().UTC(),
+		Detail: coreusage.Detail{
+			InputTokens: 100, OutputTokens: 100, TotalTokens: 200,
+		},
+	})
+	flusher.Stop()
+
+	var got struct {
+		Tier     string
+		RouterID string
+	}
+	err := us.db.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT COALESCE(tier, ''), COALESCE(router_id, '') FROM %s ORDER BY id DESC LIMIT 1`, us.eventsTable,
+	)).Scan(&got.Tier, &got.RouterID)
+	if err != nil {
+		t.Fatalf("query persisted tier: %v", err)
+	}
+	if got.Tier != "" || got.RouterID != "" {
+		t.Errorf("tier/router_id = (%q, %q); want both empty for non-routed request", got.Tier, got.RouterID)
+	}
 }

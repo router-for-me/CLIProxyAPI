@@ -24,23 +24,29 @@ const (
 // api_key_id and computed cost_usd that the hot path does not know at publish
 // time.
 type UsageEvent struct {
-	ID                  int64   `json:"id,omitempty"`
-	RequestID           string  `json:"request_id,omitempty"`
-	APIKeyID            string  `json:"api_key_id,omitempty"`
-	APIKeyPrincipal     string  `json:"api_key_principal,omitempty"`
-	UserID              string  `json:"user_id,omitempty"`
-	Provider            string  `json:"provider"`
-	ExecutorType        string  `json:"executor_type,omitempty"`
-	Model               string  `json:"model"`
-	Alias               string  `json:"alias,omitempty"`
-	Endpoint            string  `json:"endpoint,omitempty"`
-	ClientIP            string  `json:"client_ip,omitempty"`
-	ForwardedFor        string  `json:"forwarded_for,omitempty"`
-	AuthType            string  `json:"auth_type,omitempty"`
-	Source              string  `json:"source,omitempty"`
-	ReasoningEffort     string  `json:"reasoning_effort,omitempty"`
-	ServiceTier         string  `json:"service_tier,omitempty"`
-	ResponseServiceTier string  `json:"response_service_tier,omitempty"`
+	ID                  int64  `json:"id,omitempty"`
+	RequestID           string `json:"request_id,omitempty"`
+	APIKeyID            string `json:"api_key_id,omitempty"`
+	APIKeyPrincipal     string `json:"api_key_principal,omitempty"`
+	UserID              string `json:"user_id,omitempty"`
+	Provider            string `json:"provider"`
+	ExecutorType        string `json:"executor_type,omitempty"`
+	Model               string `json:"model"`
+	Alias               string `json:"alias,omitempty"`
+	Endpoint            string `json:"endpoint,omitempty"`
+	ClientIP            string `json:"client_ip,omitempty"`
+	ForwardedFor        string `json:"forwarded_for,omitempty"`
+	AuthType            string `json:"auth_type,omitempty"`
+	Source              string `json:"source,omitempty"`
+	ReasoningEffort     string `json:"reasoning_effort,omitempty"`
+	ServiceTier         string `json:"service_tier,omitempty"`
+	ResponseServiceTier string `json:"response_service_tier,omitempty"`
+	// Tier stores the Auto Router complexity tier (e.g. simple/medium/complex/
+	// reasoning) chosen for the request. Empty for non-routed requests.
+	Tier string `json:"tier,omitempty"`
+	// RouterID stores the Auto Router id (e.g. "router:smart") that owned the
+	// tier decision. Empty for non-routed requests.
+	RouterID            string  `json:"router_id,omitempty"`
 	InputTokens         int64   `json:"input_tokens"`
 	OutputTokens        int64   `json:"output_tokens"`
 	ReasoningTokens     int64   `json:"reasoning_tokens"`
@@ -211,7 +217,7 @@ func (s *UsageStore) PricingTable() string {
 const usageEventColumnList = `
 	request_id, api_key_id, api_key_principal, user_id, provider, executor_type, model,
 	alias, endpoint, client_ip, forwarded_for, auth_type, source, reasoning_effort, service_tier,
-	response_service_tier, input_tokens, output_tokens, reasoning_tokens,
+	response_service_tier, tier, router_id, input_tokens, output_tokens, reasoning_tokens,
 	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, discount_pct, original_cost_usd, latency_ms,
 	ttft_ms, failed, fail_status_code, generate, requested_at
 `
@@ -236,7 +242,7 @@ func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (%s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-			$26, $27, $28, $29, $30, $31)
+			$26, $27, $28, $29, $30, $31, $32, $33)
 	`, s.eventsTable, usageEventColumnList),
 		e.RequestID, nullableString(e.APIKeyID), nullableString(principal),
 		nullableString(e.UserID),
@@ -244,6 +250,7 @@ func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 		nullableString(e.ClientIP), nullableString(e.ForwardedFor),
 		e.AuthType,
 		e.Source, e.ReasoningEffort, e.ServiceTier, e.ResponseServiceTier,
+		nullableString(e.Tier), nullableString(e.RouterID),
 		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens,
 		e.CacheCreationTokens, e.TotalTokens, e.CostUSD, e.DiscountPct, e.OriginalCostUSD, e.LatencyMs, e.TTFTMs,
 		e.Failed, e.FailStatusCode, e.Generate, e.RequestedAt,
@@ -270,18 +277,18 @@ func (s *UsageStore) BatchInsertEvents(ctx context.Context, events []UsageEvent)
 	b.WriteString(" (")
 	b.WriteString(usageEventColumnList)
 	b.WriteString(") VALUES ")
-	args := make([]any, 0, len(events)*31)
+	args := make([]any, 0, len(events)*33)
 	for i, ev := range events {
 		if i > 0 {
 			b.WriteByte(',')
 		}
 		b.WriteByte('(')
-		for j := 1; j <= 31; j++ {
+		for j := 1; j <= 33; j++ {
 			if j > 1 {
 				b.WriteByte(',')
 			}
 			b.WriteByte('$')
-			b.WriteString(itoa(i*31 + j))
+			b.WriteString(itoa(i*33 + j))
 		}
 		b.WriteByte(')')
 		if ev.RequestedAt.IsZero() {
@@ -300,6 +307,7 @@ func (s *UsageStore) BatchInsertEvents(ctx context.Context, events []UsageEvent)
 			nullableString(ev.ClientIP), nullableString(ev.ForwardedFor),
 			ev.AuthType,
 			ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
+			nullableString(ev.Tier), nullableString(ev.RouterID),
 			ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
 			ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
 			ev.Failed, ev.FailStatusCode, ev.Generate, ev.RequestedAt)
@@ -340,18 +348,18 @@ func (s *UsageStore) ImportLiteLLMSpendLogs(ctx context.Context, events []UsageE
 		b.WriteString(" (")
 		b.WriteString(usageEventColumnList)
 		b.WriteString(") VALUES ")
-		args := make([]any, 0, len(chunk)*31)
+		args := make([]any, 0, len(chunk)*33)
 		for i, ev := range chunk {
 			if i > 0 {
 				b.WriteByte(',')
 			}
 			b.WriteByte('(')
-			for j := 1; j <= 31; j++ {
+			for j := 1; j <= 33; j++ {
 				if j > 1 {
 					b.WriteByte(',')
 				}
 				b.WriteByte('$')
-				b.WriteString(itoa(i*31 + j))
+				b.WriteString(itoa(i*33 + j))
 			}
 			b.WriteByte(')')
 			if ev.RequestedAt.IsZero() {
@@ -368,6 +376,7 @@ func (s *UsageStore) ImportLiteLLMSpendLogs(ctx context.Context, events []UsageE
 				nullableString(ev.ClientIP), nullableString(ev.ForwardedFor),
 				ev.AuthType,
 				ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
+				nullableString(ev.Tier), nullableString(ev.RouterID),
 				ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
 				ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
 				ev.Failed, ev.FailStatusCode, ev.Generate, ev.RequestedAt)

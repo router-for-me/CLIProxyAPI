@@ -618,6 +618,31 @@ func TestUsageReporterBuildRecordIncludesServiceTier(t *testing.T) {
 	}
 }
 
+func TestUsageReporterBuildRecordIncludesAutoRouterTier(t *testing.T) {
+	ctx := usage.WithRouterTier(context.Background(), "complex", "router:smart")
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.Tier != "complex" {
+		t.Fatalf("tier = %q, want %q", record.Tier, "complex")
+	}
+	if record.RouterID != "router:smart" {
+		t.Fatalf("router id = %q, want %q", record.RouterID, "router:smart")
+	}
+}
+
+func TestUsageReporterBuildRecordDefaultsAutoRouterTierEmpty(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.Tier != "" {
+		t.Fatalf("tier = %q, want empty for non-routed request", record.Tier)
+	}
+	if record.RouterID != "" {
+		t.Fatalf("router id = %q, want empty for non-routed request", record.RouterID)
+	}
+}
+
 func TestUsageReporterBuildRecordDefaultsGenerateTrue(t *testing.T) {
 	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
 

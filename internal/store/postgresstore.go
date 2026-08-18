@@ -833,6 +833,8 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			reasoning_effort        TEXT,
 			service_tier            TEXT,
 			response_service_tier   TEXT,
+			tier                    TEXT,
+			router_id               TEXT,
 			input_tokens            BIGINT NOT NULL DEFAULT 0,
 			output_tokens           BIGINT NOT NULL DEFAULT 0,
 			reasoning_tokens        BIGINT NOT NULL DEFAULT 0,
@@ -932,6 +934,20 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_usage_events_user_id ON %s(user_id, requested_at) WHERE user_id IS NOT NULL`, usageEventsTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: create usage_events user_id index: %w", err)
+	}
+	// Backfill the tier and router_id columns on usage_events. These store the
+	// Auto Router decision (complexity tier + owning router id) and are empty
+	// for requests not routed by the Auto Router. Idempotent so existing
+	// deployments pick them up without a full rebuild.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS tier TEXT`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_events add tier: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS router_id TEXT`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_events add router_id: %w", err)
 	}
 	// Backfill the discount_pct column on usage_events. Stamped by the usage
 	// flusher with the resolved model-group discount percentage (0-100; 0/NULL

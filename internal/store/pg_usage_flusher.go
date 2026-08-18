@@ -346,6 +346,8 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 		ReasoningEffort:     record.ReasoningEffort,
 		ServiceTier:         record.ServiceTier,
 		ResponseServiceTier: record.ResponseServiceTier,
+		Tier:                record.Tier,
+		RouterID:            record.RouterID,
 		InputTokens:         record.Detail.InputTokens,
 		OutputTokens:        record.Detail.OutputTokens,
 		ReasoningTokens:     record.Detail.ReasoningTokens,
