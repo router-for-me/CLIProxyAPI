@@ -384,9 +384,8 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 	}
 
 	ctxToken := ctx
-	httpClient := &http.Client{
+httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
 	}
 	ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
 
@@ -1056,7 +1055,7 @@ func (h *Handler) GetCopilotQuota(c *gin.Context) {
 		return
 	}
 
-	token, tokenErr := h.resolveTokenForAuth(c.Request.Context(), auth)
+	token, tokenErr := h.resolveTokenForAuth(c.Request.Context(), auth, "")
 	if tokenErr != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to refresh copilot token"})
 		return
@@ -1079,7 +1078,6 @@ func (h *Handler) GetCopilotQuota(c *gin.Context) {
 
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
 	}
 
 	resp, errDo := httpClient.Do(req)
@@ -1166,7 +1164,7 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 	}
 
 	// Get the GitHub token to call the copilot_internal/user endpoint
-	token, tokenErr := h.resolveTokenForAuth(ctx, auth)
+	token, tokenErr := h.resolveTokenForAuth(ctx, auth, "")
 	if tokenErr != nil {
 		log.WithError(tokenErr).Debug("enrichCopilotTokenResponse: failed to resolve token")
 		return response
@@ -1196,7 +1194,6 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
 	}
 
 	quotaResp, errDo := httpClient.Do(req)
