@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode"
 
+	claudeinput "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/input"
 	"github.com/tidwall/gjson"
 )
 
@@ -18,13 +19,11 @@ type claudeCodexValidationState struct {
 // ValidateClaudeRequestForCodex rejects request features that the Codex
 // translation would otherwise silently discard.
 func ValidateClaudeRequestForCodex(inputRawJSON []byte) error {
-	if !gjson.ValidBytes(inputRawJSON) {
-		return fmt.Errorf("request must be valid JSON")
+	request := claudeinput.Parse("", inputRawJSON)
+	if err := request.Validate(); err != nil {
+		return err
 	}
-	root := gjson.ParseBytes(inputRawJSON)
-	if !root.IsObject() {
-		return fmt.Errorf("request must be a JSON object")
-	}
+	root := request.Root()
 	if err := validateClaudeCodexControls(root); err != nil {
 		return err
 	}

@@ -11,6 +11,7 @@ import (
 	"context"
 	"strings"
 
+	claudeoutput "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/output"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
@@ -118,13 +119,13 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		output = append(output, codexStreamErrorToClaudeError(rootResult)...)
 		params.Terminal = true
 	case "keepalive":
-		output = translatorcommon.AppendSSEEventBytes(output, "ping", []byte(`{"type":"ping"}`), 2)
+		output = claudeoutput.AppendEvent(output, "ping", []byte(`{"type":"ping"}`), 2)
 	case "response.created":
 		template = []byte(`{"type":"message_start","message":{"id":"","type":"message","role":"assistant","model":"claude-opus-4-1-20250805","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0},"content":[],"stop_reason":null}}`)
 		template, _ = sjson.SetBytes(template, "message.model", rootResult.Get("response.model").String())
 		template, _ = sjson.SetBytes(template, "message.id", rootResult.Get("response.id").String())
 
-		output = translatorcommon.AppendSSEEventBytes(output, "message_start", template, 2)
+		output = claudeoutput.AppendEvent(output, "message_start", template, 2)
 	case "response.reasoning_summary_part.added":
 		output = append(output, stopCodexTextBlock(params)...)
 		// Codex splits a single reasoning item into several summary parts, but only
@@ -158,7 +159,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
 		template, _ = sjson.SetBytes(template, "delta.text", rootResult.Get("delta").String())
 
-		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
+		output = claudeoutput.AppendEvent(output, "content_block_delta", template, 2)
 	case "response.content_part.done":
 		if rootResult.Get("part.type").String() == "output_text" {
 			output = append(output, stopCodexTextBlock(params)...)
@@ -190,8 +191,8 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			template, _ = sjson.SetRawBytes(template, "context_management.applied_edits", []byte(`[]`))
 		}
 
-		output = translatorcommon.AppendSSEEventBytes(output, "message_delta", template, 2)
-		output = translatorcommon.AppendSSEEventBytes(output, "message_stop", []byte(`{"type":"message_stop"}`), 2)
+		output = claudeoutput.AppendEvent(output, "message_delta", template, 2)
+		output = claudeoutput.AppendEvent(output, "message_stop", []byte(`{"type":"message_stop"}`), 2)
 		params.Terminal = true
 	case "response.output_item.added":
 		itemResult := rootResult.Get("item")
@@ -257,7 +258,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			template = []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`)
 			template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
 			template, _ = sjson.SetBytes(template, "delta.text", text)
-			output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
+			output = claudeoutput.AppendEvent(output, "content_block_delta", template, 2)
 
 			output = append(output, stopCodexTextBlock(params)...)
 			params.HasTextDelta = true
@@ -341,7 +342,7 @@ func appendDeferredCodexStreamEvents(output []byte, originalRequestRawJSON []byt
 }
 
 func codexStreamErrorToClaudeError(rootResult gjson.Result) []byte {
-	return translatorcommon.AppendSSEEventBytes(nil, "error", codexErrorToClaudeError(rootResult), 2)
+	return claudeoutput.AppendEvent(nil, "error", codexErrorToClaudeError(rootResult), 2)
 }
 
 func codexErrorToClaudeError(rootResult gjson.Result) []byte {
@@ -382,7 +383,7 @@ func codexErrorToClaudeError(rootResult gjson.Result) []byte {
 func codexProtocolError(message string) []byte {
 	out := []byte(`{"type":"error","error":{"type":"api_error","message":""}}`)
 	out, _ = sjson.SetBytes(out, "error.message", message)
-	return translatorcommon.AppendSSEEventBytes(nil, "error", out, 2)
+	return claudeoutput.AppendEvent(nil, "error", out, 2)
 }
 
 // ConvertCodexResponseToClaudeNonStream converts a non-streaming Codex response to a non-streaming Claude Code response.
@@ -703,20 +704,20 @@ func appendCodexFunctionCallStart(output []byte, originalRequestRawJSON []byte, 
 	template, _ = sjson.SetBytes(template, "index", blockIndex)
 	template, _ = sjson.SetBytes(template, "content_block.id", shortenCodexCallIDIfNeeded(util.SanitizeClaudeToolID(callID)))
 	template, _ = sjson.SetBytes(template, "content_block.name", resolveCodexClaudeToolUseName(originalRequestRawJSON, name))
-	return translatorcommon.AppendSSEEventBytes(output, "content_block_start", template, 2)
+	return claudeoutput.AppendEvent(output, "content_block_start", template, 2)
 }
 
 func appendCodexFunctionCallArgumentDelta(output []byte, partialJSON string, blockIndex int) []byte {
 	template := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
 	template, _ = sjson.SetBytes(template, "index", blockIndex)
 	template, _ = sjson.SetBytes(template, "delta.partial_json", partialJSON)
-	return translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
+	return claudeoutput.AppendEvent(output, "content_block_delta", template, 2)
 }
 
 func appendCodexFunctionCallStop(output []byte, blockIndex int) []byte {
 	template := []byte(`{"type":"content_block_stop","index":0}`)
 	template, _ = sjson.SetBytes(template, "index", blockIndex)
-	return translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
+	return claudeoutput.AppendEvent(output, "content_block_stop", template, 2)
 }
 
 func appendCodexFunctionCallBufferedArguments(output []byte, params *ConvertCodexResponseToClaudeParams, call *codexFunctionCallStream) []byte {
@@ -926,7 +927,7 @@ func startCodexTextBlock(params *ConvertCodexResponseToClaudeParams) []byte {
 	template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
 	params.TextBlockOpen = true
 
-	return translatorcommon.AppendSSEEventBytes(nil, "content_block_start", template, 2)
+	return claudeoutput.AppendEvent(nil, "content_block_start", template, 2)
 }
 
 func stopCodexTextBlock(params *ConvertCodexResponseToClaudeParams) []byte {
@@ -939,7 +940,7 @@ func stopCodexTextBlock(params *ConvertCodexResponseToClaudeParams) []byte {
 	params.TextBlockOpen = false
 	params.BlockIndex++
 
-	return translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", template, 2)
+	return claudeoutput.AppendEvent(nil, "content_block_stop", template, 2)
 }
 
 func startCodexThinkingBlock(params *ConvertCodexResponseToClaudeParams) []byte {
@@ -951,7 +952,7 @@ func startCodexThinkingBlock(params *ConvertCodexResponseToClaudeParams) []byte 
 	template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
 	params.ThinkingBlockOpen = true
 
-	return translatorcommon.AppendSSEEventBytes(nil, "content_block_start", template, 2)
+	return claudeoutput.AppendEvent(nil, "content_block_start", template, 2)
 }
 
 // appendCodexThinkingDelta emits a thinking_delta for the currently open thinking block.
@@ -964,7 +965,7 @@ func appendCodexThinkingDelta(params *ConvertCodexResponseToClaudeParams, text s
 	template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
 	template, _ = sjson.SetBytes(template, "delta.thinking", text)
 
-	return translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", template, 2)
+	return claudeoutput.AppendEvent(nil, "content_block_delta", template, 2)
 }
 
 func finalizeCodexSignatureOnlyThinkingBlock(params *ConvertCodexResponseToClaudeParams) []byte {
@@ -987,12 +988,12 @@ func finalizeCodexThinkingBlock(params *ConvertCodexResponseToClaudeParams) []by
 		signatureDelta := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":""}}`)
 		signatureDelta, _ = sjson.SetBytes(signatureDelta, "index", params.BlockIndex)
 		signatureDelta, _ = sjson.SetBytes(signatureDelta, "delta.signature", params.ThinkingSignature)
-		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", signatureDelta, 2)
+		output = claudeoutput.AppendEvent(output, "content_block_delta", signatureDelta, 2)
 	}
 
 	contentBlockStop := []byte(`{"type":"content_block_stop","index":0}`)
 	contentBlockStop, _ = sjson.SetBytes(contentBlockStop, "index", params.BlockIndex)
-	output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", contentBlockStop, 2)
+	output = claudeoutput.AppendEvent(output, "content_block_stop", contentBlockStop, 2)
 
 	params.BlockIndex++
 	params.ThinkingBlockOpen = false
