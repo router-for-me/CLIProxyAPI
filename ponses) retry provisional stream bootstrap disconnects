@@ -1,0 +1,270 @@
+[1mdiff --git a/sdk/api/handlers/handlers_stream.go b/sdk/api/handlers/handlers_stream.go[m
+[1mindex 9cceec54..e6b9e694 100644[m
+[1m--- a/sdk/api/handlers/handlers_stream.go[m
+[1m+++ b/sdk/api/handlers/handlers_stream.go[m
+[36m@@ -13,6 +13,14 @@[m [mimport ([m
+ 	"golang.org/x/net/context"[m
+ )[m
+ [m
+[32m+[m[32mconst ([m
+[32m+[m	[32m// A Responses stream can emit provisional lifecycle events before any user-visible[m
+[32m+[m	[32m// output. Keep a bounded private prefix so transient upstream disconnects during[m
+[32m+[m	[32m// that bootstrap window can be retried without leaking stale response IDs.[m
+[32m+[m	[32mmaxResponsesBootstrapPrefixChunks = 32[m
+[32m+[m	[32mmaxResponsesBootstrapPrefixBytes  = 64 << 10[m
+[32m+[m[32m)[m
+[32m+[m
+ // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.[m
+ // This path is the only supported execution route.[m
+ // The returned http.Header carries upstream response headers captured before streaming begins.[m
+[36m@@ -449,7 +457,8 @@[m [mfunc (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context[m
+ 		return payload, true, nil[m
+ 	}[m
+ [m
+[31m-	var bootstrapPayload []byte[m
+[32m+[m	[32mvar bootstrapPayloads [][]byte[m
+[32m+[m	[32mbootstrapPayloadBytes := 0[m
+ 	bootstrapChunkIndex := 0[m
+ 	var bootstrapHistoryChunks [][]byte[m
+ 	var bootstrapStreamErr error[m
+[36m@@ -471,6 +480,9 @@[m [mfunc (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context[m
+ 			if !ok {[m
+ 				streamClosedBeforeRead = true[m
+ 				applyStreamHeaderInit()[m
+[32m+[m				[32mif len(bootstrapPayloads) > 0 || responseProtocol == "openai-response" {[m
+[32m+[m					[32mbootstrapStreamErr = fmt.Errorf("upstream stream closed before terminal event")[m
+[32m+[m				[32m}[m
+ 				return[m
+ 			}[m
+ 			if chunk.Err != nil {[m
+[36m@@ -488,8 +500,15 @@[m [mfunc (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context[m
+ 			if !deliverable {[m
+ 				continue[m
+ 			}[m
+[31m-			bootstrapPayload = payload[m
+[31m-			return[m
+[32m+[m			[32mbootstrapPayloads = append(bootstrapPayloads, payload)[m
+[32m+[m			[32mbootstrapPayloadBytes += len(payload)[m
+[32m+[m			[32mif streamInterceptorsActive {[m
+[32m+[m				[32mbootstrapHistoryChunks = appendStreamInterceptorHistory(bootstrapHistoryChunks, payload)[m
+[32m+[m			[32m}[m
+[32m+[m			[32mif streamBootstrapPayloadCommitsResponse(responseProtocol, payload) ||[m
+[32m+[m				[32mstreamBootstrapPrefixBufferFull(responseProtocol, len(bootstrapPayloads), bootstrapPayloadBytes) {[m
+[32m+[m				[32mreturn[m
+[32m+[m			[32m}[m
+ 		}[m
+ 	}[m
+ [m
+[36m@@ -540,7 +559,8 @@[m [mfunc (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context[m
+ 		streamHeaderInitialized = false[m
+ 		streamClosedBeforeRead = false[m
+ 		bootstrapStreamErr = nil[m
+[31m-		bootstrapPayload = nil[m
+[32m+[m		[32mbootstrapPayloads = nil[m
+[32m+[m		[32mbootstrapPayloadBytes = 0[m
+ 		bootstrapChunkIndex = 0[m
+ 		bootstrapHistoryChunks = nil[m
+ 		if responseSSEValidator != nil {[m
+[36m@@ -622,7 +642,7 @@[m [mfunc (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context[m
+ [m
+ 		chunkIndex := bootstrapChunkIndex[m
+ 		historyChunks := bootstrapHistoryChunks[m
+[31m-		if bootstrapPayload != nil {[m
+[32m+[m		[32mfor _, bootstrapPayload := range bootstrapPayloads {[m
+ 			if okSendData := sendData(bootstrapPayload); !okSendData {[m
+ 				completionOutcome = pluginapi.RequestCompletionCanceled[m
+ 				completionStatus = 0[m
+[36m@@ -631,9 +651,6 @@[m [mfunc (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context[m
+ 				}[m
+ 				return[m
+ 			}[m
+[31m-			if streamInterceptorsActive {[m
+[31m-				historyChunks = appendStreamInterceptorHistory(historyChunks, bootstrapPayload)[m
+[31m-			}[m
+ 		}[m
+ 		for {[m
+ 			chunk, ok, canceled := nextStreamChunk(ctx, nil, &streamClosedBeforeRead, chunks)[m
+[36m@@ -703,6 +720,54 @@[m [mfunc (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context[m
+ 	return dataChan, upstreamHeaders, errChan[m
+ }[m
+ [m
+[32m+[m
+[32m+[m[32mfunc streamBootstrapPrefixBufferFull(responseProtocol string, chunks, bytes int) bool {[m
+[32m+[m	[32mreturn responseProtocol == "openai-response" &&[m
+[32m+[m		[32m(chunks >= maxResponsesBootstrapPrefixChunks || bytes >= maxResponsesBootstrapPrefixBytes)[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mfunc streamBootstrapPayloadCommitsResponse(responseProtocol string, payload []byte) bool {[m
+[32m+[m	[32mif responseProtocol != "openai-response" {[m
+[32m+[m		[32mreturn true[m
+[32m+[m	[32m}[m
+[32m+[m	[32mtrimmed := bytes.TrimSpace(payload)[m
+[32m+[m	[32mif len(trimmed) == 0 {[m
+[32m+[m		[32mreturn false[m
+[32m+[m	[32m}[m
+[32m+[m	[32mif json.Valid(trimmed) {[m
+[32m+[m		[32mreturn openAIResponsesPayloadCommitsResponse(trimmed)[m
+[32m+[m	[32m}[m
+[32m+[m	[32mfor _, line := range bytes.Split(payload, []byte("\n")) {[m
+[32m+[m		[32mline = bytes.TrimSpace(line)[m
+[32m+[m		[32mif !bytes.HasPrefix(line, []byte("data:")) {[m
+[32m+[m			[32mcontinue[m
+[32m+[m		[32m}[m
+[32m+[m		[32mdata := bytes.TrimSpace(line[5:])[m
+[32m+[m		[32mif len(data) == 0 {[m
+[32m+[m			[32mcontinue[m
+[32m+[m		[32m}[m
+[32m+[m		[32mif bytes.Equal(data, []byte("[DONE]")) || openAIResponsesPayloadCommitsResponse(data) {[m
+[32m+[m			[32mreturn true[m
+[32m+[m		[32m}[m
+[32m+[m	[32m}[m
+[32m+[m	[32mreturn false[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mfunc openAIResponsesPayloadCommitsResponse(payload []byte) bool {[m
+[32m+[m	[32mvar event struct {[m
+[32m+[m		[32mType string `json:"type"`[m
+[32m+[m	[32m}[m
+[32m+[m	[32mif err := json.Unmarshal(payload, &event); err != nil {[m
+[32m+[m		[32mreturn true[m
+[32m+[m	[32m}[m
+[32m+[m	[32mswitch event.Type {[m
+[32m+[m	[32mcase "response.queued", "response.created", "response.in_progress":[m
+[32m+[m		[32mreturn false[m
+[32m+[m	[32mdefault:[m
+[32m+[m		[32mreturn true[m
+[32m+[m	[32m}[m
+[32m+[m[32m}[m
+[32m+[m
+ type sseJSONValidationState struct {[m
+ 	pending    []byte[m
+ 	pendingErr error[m
+[1mdiff --git a/sdk/api/handlers/handlers_stream_bootstrap_test.go b/sdk/api/handlers/handlers_stream_bootstrap_test.go[m
+[1mindex f10d7474..8dd72eab 100644[m
+[1m--- a/sdk/api/handlers/handlers_stream_bootstrap_test.go[m
+[1m+++ b/sdk/api/handlers/handlers_stream_bootstrap_test.go[m
+[36m@@ -584,6 +584,124 @@[m [mfunc TestExecuteStreamWithAuthManager_ResetsResponsesValidatorOnBootstrapRetry(t[m
+ 	}[m
+ }[m
+ [m
+[32m+[m[32mfunc TestStreamBootstrapPayloadCommitsResponse_OpenAIResponsesLifecycle(t *testing.T) {[m
+[32m+[m	[32mtests := []struct {[m
+[32m+[m		[32mname    string[m
+[32m+[m		[32mpayload string[m
+[32m+[m		[32mwant    bool[m
+[32m+[m	[32m}{[m
+[32m+[m		[32m{name: "event prefix only", payload: "event: response.created", want: false},[m
+[32m+[m		[32m{name: "queued raw JSON", payload: `{"type":"response.queued"}`, want: false},[m
+[32m+[m		[32m{name: "created SSE data", payload: `data: {"type":"response.created"}`, want: false},[m
+[32m+[m		[32m{name: "in progress SSE data", payload: `data: {"type":"response.in_progress"}`, want: false},[m
+[32m+[m		[32m{name: "output delta", payload: `data: {"type":"response.output_text.delta","delta":"hello"}`, want: true},[m
+[32m+[m		[32m{name: "completed", payload: `data: {"type":"response.completed"}`, want: true},[m
+[32m+[m		[32m{name: "failed", payload: `data: {"type":"response.failed"}`, want: true},[m
+[32m+[m		[32m{name: "done marker", payload: "data: [DONE]", want: true},[m
+[32m+[m		[32m{name: "unknown event", payload: `data: {"type":"response.future_event"}`, want: true},[m
+[32m+[m	[32m}[m
+[32m+[m	[32mfor _, test := range tests {[m
+[32m+[m		[32mt.Run(test.name, func(t *testing.T) {[m
+[32m+[m			[32mif got := streamBootstrapPayloadCommitsResponse("openai-response", []byte(test.payload)); got != test.want {[m
+[32m+[m				[32mt.Fatalf("streamBootstrapPayloadCommitsResponse() = %t, want %t", got, test.want)[m
+[32m+[m			[32m}[m
+[32m+[m		[32m})[m
+[32m+[m	[32m}[m
+[32m+[m	[32mif !streamBootstrapPayloadCommitsResponse("openai", []byte("event: response.created")) {[m
+[32m+[m		[32mt.Fatal("non-Responses protocols must retain first-payload commitment")[m
+[32m+[m	[32m}[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mfunc TestExecuteStreamWithAuthManager_RetriesAfterOpenAIResponsesProvisionalLifecycleFrame(t *testing.T) {[m
+[32m+[m	[32mexecutor := &bootstrapStreamExecutor{stream: func(_ context.Context, call int) (*coreexecutor.StreamResult, error) {[m
+[32m+[m		[32mchunks := make(chan coreexecutor.StreamChunk, 4)[m
+[32m+[m		[32mchunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.created")}[m
+[32m+[m		[32mif call == 1 {[m
+[32m+[m			[32mchunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp-1","status":"in_progress"}}`)}[m
+[32m+[m			[32mchunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{[m
+[32m+[m				[32mCode:       "upstream_closed",[m
+[32m+[m				[32mMessage:    "stream closed before response.completed",[m
+[32m+[m				[32mHTTPStatus: http.StatusRequestTimeout,[m
+[32m+[m			[32m}}[m
+[32m+[m		[32m} else {[m
+[32m+[m			[32mchunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp-2","status":"in_progress"}}`)}[m
+[32m+[m			[32mchunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed","response":{"id":"resp-2","output":[]}}`)}[m
+[32m+[m		[32m}[m
+[32m+[m		[32mclose(chunks)[m
+[32m+[m		[32mreturn &coreexecutor.StreamResult{Chunks: chunks}, nil[m
+[32m+[m	[32m}}[m
+[32m+[m	[32mhandler, _ := registerBootstrapExecutor(t, executor)[m
+[32m+[m
+[32m+[m	[32mdataChan, _, errChan := handler.ExecuteStreamWithAuthManager([m
+[32m+[m		[32mcontext.Background(),[m
+[32m+[m		[32m"openai-response",[m
+[32m+[m		[32m"bootstrap-model",[m
+[32m+[m		[32m[]byte(`{"model":"bootstrap-model","input":"hello"}`),[m
+[32m+[m		[32m"",[m
+[32m+[m	[32m)[m
+[32m+[m
+[32m+[m	[32mvar got []string[m
+[32m+[m	[32mfor chunk := range dataChan {[m
+[32m+[m		[32mgot = append(got, string(chunk))[m
+[32m+[m	[32m}[m
+[32m+[m	[32mfor msg := range errChan {[m
+[32m+[m		[32mif msg != nil {[m
+[32m+[m			[32mt.Fatalf("unexpected stream error: %+v", msg)[m
+[32m+[m		[32m}[m
+[32m+[m	[32m}[m
+[32m+[m	[32mif executor.Calls() != 2 {[m
+[32m+[m		[32mt.Fatalf("stream attempts = %d, want retry after provisional lifecycle failure", executor.Calls())[m
+[32m+[m	[32m}[m
+[32m+[m	[32mwant := []string{[m
+[32m+[m		[32m"event: response.created",[m
+[32m+[m		[32m`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp-2","status":"in_progress"}}`,[m
+[32m+[m		[32m`data: {"type":"response.completed","response":{"id":"resp-2","output":[]}}`,[m
+[32m+[m	[32m}[m
+[32m+[m	[32mif strings.Join(got, "\n") != strings.Join(want, "\n") {[m
+[32m+[m		[32mt.Fatalf("forwarded chunks = %#v, want only successful attempt %#v", got, want)[m
+[32m+[m	[32m}[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mfunc TestExecuteStreamWithAuthManager_RetriesAfterCleanCloseDuringResponsesProvisionalLifecycle(t *testing.T) {[m
+[32m+[m	[32mexecutor := &bootstrapStreamExecutor{stream: func(_ context.Context, call int) (*coreexecutor.StreamResult, error) {[m
+[32m+[m		[32mchunks := make(chan coreexecutor.StreamChunk, 3)[m
+[32m+[m		[32mif call == 1 {[m
+[32m+[m			[32mchunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.created")}[m
+[32m+[m			[32mchunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`)}[m
+[32m+[m		[32m} else {[m
+[32m+[m			[32mchunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.completed")}[m
+[32m+[m			[32mchunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed","response":{"id":"resp-2","output":[]}}`)}[m
+[32m+[m		[32m}[m
+[32m+[m		[32mclose(chunks)[m
+[32m+[m		[32mreturn &coreexecutor.StreamResult{Chunks: chunks}, nil[m
+[32m+[m	[32m}}[m
+[32m+[m	[32mhandler, _ := registerBootstrapExecutor(t, executor)[m
+[32m+[m
+[32m+[m	[32mdataChan, _, errChan := handler.ExecuteStreamWithAuthManager([m
+[32m+[m		[32mcontext.Background(),[m
+[32m+[m		[32m"openai-response",[m
+[32m+[m		[32m"bootstrap-model",[m
+[32m+[m		[32m[]byte(`{"model":"bootstrap-model","input":"hello"}`),[m
+[32m+[m		[32m"",[m
+[32m+[m	[32m)[m
+[32m+[m
+[32m+[m	[32mvar got []string[m
+[32m+[m	[32mfor chunk := range dataChan {[m
+[32m+[m		[32mgot = append(got, string(chunk))[m
+[32m+[m	[32m}[m
+[32m+[m	[32mfor msg := range errChan {[m
+[32m+[m		[32mif msg != nil {[m
+[32m+[m			[32mt.Fatalf("unexpected stream error: %+v", msg)[m
+[32m+[m		[32m}[m
+[32m+[m	[32m}[m
+[32m+[m	[32mif executor.Calls() != 2 {[m
+[32m+[m		[32mt.Fatalf("stream attempts = %d, want retry after clean provisional close", executor.Calls())[m
+[32m+[m	[32m}[m
+[32m+[m	[32mif strings.Contains(strings.Join(got, "\n"), "resp-1") || !strings.Contains(strings.Join(got, "\n"), "response.completed") {[m
+[32m+[m		[32mt.Fatalf("forwarded chunks = %#v, want only successful retry terminal stream", got)[m
+[32m+[m	[32m}[m
+[32m+[m[32m}[m
+[32m+[m
+ func TestExecuteStreamWithAuthManager_CancelDuringSynchronousBootstrap(t *testing.T) {[m
+ 	started := make(chan struct{})[m
+ 	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, _ int) (*coreexecutor.StreamResult, error) {[m

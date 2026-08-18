@@ -13,6 +13,14 @@ import (
 	"golang.org/x/net/context"
 )
 
+const (
+	// A Responses stream can emit provisional lifecycle events before any user-visible
+	// output. Keep a bounded private prefix so transient upstream disconnects during
+	// that bootstrap window can be retried without leaking stale response IDs.
+	maxResponsesBootstrapPrefixChunks = 32
+	maxResponsesBootstrapPrefixBytes  = 64 << 10
+)
+
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
@@ -449,7 +457,8 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return payload, true, nil
 	}
 
-	var bootstrapPayload []byte
+	var bootstrapPayloads [][]byte
+	bootstrapPayloadBytes := 0
 	bootstrapChunkIndex := 0
 	var bootstrapHistoryChunks [][]byte
 	var bootstrapStreamErr error
@@ -471,6 +480,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			if !ok {
 				streamClosedBeforeRead = true
 				applyStreamHeaderInit()
+				if len(bootstrapPayloads) > 0 || responseProtocol == "openai-response" {
+					bootstrapStreamErr = fmt.Errorf("upstream stream closed before terminal event")
+				}
 				return
 			}
 			if chunk.Err != nil {
@@ -488,8 +500,15 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			if !deliverable {
 				continue
 			}
-			bootstrapPayload = payload
-			return
+			bootstrapPayloads = append(bootstrapPayloads, payload)
+			bootstrapPayloadBytes += len(payload)
+			if streamInterceptorsActive {
+				bootstrapHistoryChunks = appendStreamInterceptorHistory(bootstrapHistoryChunks, payload)
+			}
+			if streamBootstrapPayloadCommitsResponse(responseProtocol, payload) ||
+				streamBootstrapPrefixBufferFull(responseProtocol, len(bootstrapPayloads), bootstrapPayloadBytes) {
+				return
+			}
 		}
 	}
 
@@ -540,7 +559,8 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		streamHeaderInitialized = false
 		streamClosedBeforeRead = false
 		bootstrapStreamErr = nil
-		bootstrapPayload = nil
+		bootstrapPayloads = nil
+		bootstrapPayloadBytes = 0
 		bootstrapChunkIndex = 0
 		bootstrapHistoryChunks = nil
 		if responseSSEValidator != nil {
@@ -622,7 +642,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 
 		chunkIndex := bootstrapChunkIndex
 		historyChunks := bootstrapHistoryChunks
-		if bootstrapPayload != nil {
+		for _, bootstrapPayload := range bootstrapPayloads {
 			if okSendData := sendData(bootstrapPayload); !okSendData {
 				completionOutcome = pluginapi.RequestCompletionCanceled
 				completionStatus = 0
@@ -630,9 +650,6 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 					completionErr = ctx.Err()
 				}
 				return
-			}
-			if streamInterceptorsActive {
-				historyChunks = appendStreamInterceptorHistory(historyChunks, bootstrapPayload)
 			}
 		}
 		for {
@@ -701,6 +718,54 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 	}()
 	return dataChan, upstreamHeaders, errChan
+}
+
+
+func streamBootstrapPrefixBufferFull(responseProtocol string, chunks, bytes int) bool {
+	return responseProtocol == "openai-response" &&
+		(chunks >= maxResponsesBootstrapPrefixChunks || bytes >= maxResponsesBootstrapPrefixBytes)
+}
+
+func streamBootstrapPayloadCommitsResponse(responseProtocol string, payload []byte) bool {
+	if responseProtocol != "openai-response" {
+		return true
+	}
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 {
+		return false
+	}
+	if json.Valid(trimmed) {
+		return openAIResponsesPayloadCommitsResponse(trimmed)
+	}
+	for _, line := range bytes.Split(payload, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(line[5:])
+		if len(data) == 0 {
+			continue
+		}
+		if bytes.Equal(data, []byte("[DONE]")) || openAIResponsesPayloadCommitsResponse(data) {
+			return true
+		}
+	}
+	return false
+}
+
+func openAIResponsesPayloadCommitsResponse(payload []byte) bool {
+	var event struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return true
+	}
+	switch event.Type {
+	case "response.queued", "response.created", "response.in_progress":
+		return false
+	default:
+		return true
+	}
 }
 
 type sseJSONValidationState struct {
