@@ -20,6 +20,14 @@ import (
 )
 
 func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if fallback := e.codexFallbackCompactionExecutor(auth); fallback != nil && opts.Alt != "responses/compact" {
+		fallbackAuth := codexFallbackCompactionAuth(auth, fallback)
+		expanded, errExpand := fallback.expandFallbackCompactionCapsules(fallbackAuth, req.Payload)
+		if errExpand != nil {
+			return nil, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+		}
+		req.Payload = expanded
+	}
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
