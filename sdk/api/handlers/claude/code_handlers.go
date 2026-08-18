@@ -22,6 +22,7 @@ import (
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	claudeoutput "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/output"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -277,9 +278,10 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 					}
 					return
 				}
-				// Stream closed without data? Send DONE or just headers.
+				// A clean close before a semantic terminal event is a protocol error.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+				_, _ = c.Writer.Write(claudeIncompleteStreamError())
 				flusher.Flush()
 				cliCancel(nil)
 				return
@@ -296,19 +298,25 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 			}
 
 			// Continue streaming the rest
-			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
+			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, claudeStreamChunkTerminal(chunk))
 			return
 		}
 	}
 }
 
-func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, terminalSeen bool) {
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
 			if len(chunk) == 0 {
 				return
 			}
+			terminalSeen = terminalSeen || claudeStreamChunkTerminal(chunk)
 			_, _ = c.Writer.Write(chunk)
+		},
+		WriteDone: func() {
+			if !terminalSeen {
+				_, _ = c.Writer.Write(claudeIncompleteStreamError())
+			}
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			if errMsg == nil {
@@ -324,6 +332,14 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
 		},
 	})
+}
+
+func claudeStreamChunkTerminal(chunk []byte) bool {
+	return claudeoutput.HasTerminalEvent(chunk)
+}
+
+func claudeIncompleteStreamError() []byte {
+	return []byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Upstream stream ended before response.completed.\"}}\n\n")
 }
 
 type claudeErrorDetail struct {
