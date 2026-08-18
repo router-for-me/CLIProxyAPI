@@ -11,13 +11,14 @@ import (
 )
 
 func TestPatchXAIKeyUpdatesExecutionFields(t *testing.T) {
+	disableCooling := false
 	h := &Handler{
 		cfg: &config.Config{XAIKey: []config.XAIKey{{
 			APIKey:         "xai-key",
 			Priority:       1,
 			BaseURL:        "https://api.x.ai/v1",
 			Websockets:     true,
-			DisableCooling: false,
+			DisableCooling: &disableCooling,
 		}}},
 		configFilePath: writeTestConfigFile(t),
 	}
@@ -47,8 +48,8 @@ func TestPatchXAIKeyUpdatesExecutionFields(t *testing.T) {
 	if entry.Websockets {
 		t.Fatal("websockets = true, want false")
 	}
-	if !entry.DisableCooling {
-		t.Fatal("disable-cooling = false, want true")
+	if entry.DisableCooling == nil || !*entry.DisableCooling {
+		t.Fatalf("disable-cooling = %v, want true", entry.DisableCooling)
 	}
 	if entry.RequestRetry == nil || *entry.RequestRetry != 0 {
 		t.Fatalf("request-retry = %v, want 0", entry.RequestRetry)

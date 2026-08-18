@@ -207,6 +207,8 @@ func TestBuildConfigChangeDetails_CodexAlphaSearch(t *testing.T) {
 func TestBuildConfigChangeDetails_XAIKeys(t *testing.T) {
 	oldRetry := 1
 	newRetry := 0
+	oldDisableCooling := false
+	newDisableCooling := true
 	oldCfg := &config.Config{XAIKey: []config.XAIKey{{
 		APIKey:         "old-key",
 		Priority:       1,
@@ -214,7 +216,7 @@ func TestBuildConfigChangeDetails_XAIKeys(t *testing.T) {
 		BaseURL:        "https://old.example.com/v1",
 		ProxyURL:       "http://old-proxy",
 		Websockets:     false,
-		DisableCooling: false,
+		DisableCooling: &oldDisableCooling,
 		RequestRetry:   &oldRetry,
 		Headers:        map[string]string{"X-Test": "old"},
 		Models:         []config.XAIModel{{Name: "grok-old", Alias: "grok"}},
@@ -227,7 +229,7 @@ func TestBuildConfigChangeDetails_XAIKeys(t *testing.T) {
 		BaseURL:        "https://new.example.com/v1",
 		ProxyURL:       "http://new-proxy",
 		Websockets:     true,
-		DisableCooling: true,
+		DisableCooling: &newDisableCooling,
 		RequestRetry:   &newRetry,
 		Headers:        map[string]string{"X-Test": "new"},
 		Models:         []config.XAIModel{{Name: "grok-new", Alias: "grok"}},

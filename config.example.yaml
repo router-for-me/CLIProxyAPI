@@ -154,6 +154,7 @@ max-retry-credentials: 0
 max-retry-interval: 30
 
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
+# A credential/provider disable-cooling value, when present, overrides this global value.
 disable-cooling: false
 
 # When true, persist per-auth cooldown status as .cds files next to auth files.
@@ -296,7 +297,7 @@ nonstream-keepalive-interval: 0
 #   - api-key: "AIzaSy...01"
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
-#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400        # HTTP status code to match
@@ -335,7 +336,7 @@ nonstream-keepalive-interval: 0
 #   - api-key: "AIzaSy...03"
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "native" # optional: require calls like "native/gemini-3-pro-preview" to target this credential
-#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
@@ -362,7 +363,7 @@ nonstream-keepalive-interval: 0
 #   - api-key: "sk-atSM..."
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
-#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
@@ -401,7 +402,7 @@ nonstream-keepalive-interval: 0
 #   - api-key: "xai-..."
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "xai" # optional: require calls like "xai/grok-4.5" to target this credential
-#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
@@ -433,7 +434,7 @@ nonstream-keepalive-interval: 0
 #   - api-key: "sk-atSM..."
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
-#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
@@ -521,7 +522,7 @@ nonstream-keepalive-interval: 0
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
 #     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
-#     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
+#     disable-cooling: false # optional provider override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3 # optional: per-provider override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
@@ -568,6 +569,7 @@ nonstream-keepalive-interval: 0
 #   - api-key: "vk-123..."                        # x-goog-api-key header
 #     weight: 5                                    # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test"                              # optional: require calls like "test/vertex-pro" to target this credential
+#     disable-cooling: false                       # optional override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3                             # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
 #     base-url: "https://example.com/api"         # optional, e.g. https://zenmux.ai/api; falls back to Google Vertex when omitted
 #     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
