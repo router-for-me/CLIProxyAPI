@@ -444,6 +444,7 @@ const NAV_GROUPS = [
       { to: '/session-affinity', label: 'Session Affinity', icon: 'link' },
       { to: '/upstream-sync-log', label: 'Sync Log', icon: 'sync' },
       { to: '/model-health', label: 'Model Health', icon: 'pulse' },
+      { to: '/analysis/auto-routers', label: 'Auto Router', icon: 'route' },
     ],
   },
   {

@@ -17,6 +17,7 @@ import ModelGroupsPage from './pages/ModelGroupsPage.jsx';
 import ModelGroupDetailPage from './pages/ModelGroupDetailPage.jsx';
 import AutoRoutersPage from './pages/AutoRoutersPage.jsx';
 import AutoRouterPage from './pages/AutoRouterPage.jsx';
+import AutoRouterAnalysisPage from './pages/AutoRouterAnalysisPage.jsx';
 import ModelsCatalogPage from './pages/ModelsCatalogPage.jsx';
 import ErrorMessagesPage from './pages/ErrorMessagesPage.jsx';
 import SettingsPage from './pages/SettingsPage.jsx';
@@ -269,6 +270,7 @@ export default function App() {
   <Route path="/usage" element={<UsageStatsPage />} />
   <Route path="/recent-events" element={<RecentEventsPage />} />
   <Route path="/errors" element={<ErrorsPage />} />
+  <Route path="/analysis/auto-routers" element={<AutoRouterAnalysisPage />} />
             <Route path="/cooldown-providers" element={<CooldownProvidersPage />} />
             <Route path="/session-affinity" element={<SessionAffinityPage />} />
             <Route path="/alerts" element={<AlertsPage />} />

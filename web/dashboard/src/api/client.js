@@ -1954,6 +1954,22 @@ export async function deleteAutoRouter(id) {
   await fetchJSON(`/auto-routers/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
+// Per-router analysis stats for the Auto Router Analysis page.
+// params: { router_id (required), api_key_id?, from?, to? (RFC3339 UTC),
+//           top: 'tier' | 'model', limit? }.
+//   - top=tier (default) returns { tiers: [...] } — always the 4 canonical
+//     tiers (simple/medium/complex/reasoning), zero-valued when no requests.
+//   - top=model returns { models: [...] } ordered by cost_usd descending,
+//     each row carrying avg_cost_per_request.
+export async function getAutoRouterStats(params = {}) {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+  }
+  const suffix = qs.toString() ? `?${qs}` : '';
+  return fetchJSON(`/auto-routers/stats${suffix}`);
+}
+
 // ---------------------------------------------------------------------------
 // Backup / restore (export & import all data)
 // ---------------------------------------------------------------------------
