@@ -46,6 +46,14 @@ type Record struct {
 	RequestServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
+	// Tier stores the Auto Router complexity tier (simple/medium/complex/reasoning)
+	// that routed this request; empty for non-routed requests.
+	Tier string
+	// RouterID stores the Auto Router id (e.g. "router:smart") that owned the tier
+	// decision; empty for non-routed requests. Kept separate from Alias because the
+	// alias is the client-requested model string and is not a reliable aggregation
+	// key across renames.
+	RouterID string
 	// Generate reports whether the client requested actual generation.
 	// nil or true means generation is enabled; only an explicit false disables generation.
 	// Use GenerateFlag to set the value and GenerateEnabled to read it with the default.
@@ -104,6 +112,15 @@ type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
 type generateContextKey struct{}
+
+// routerTierContextValue carries the Auto Router tier decision stored in ctx.
+// It is a named struct (rather than a positional tuple) so the fields read
+// unambiguously in both setters and getters.
+type routerTierContextValue struct {
+	tier     string
+	routerID string
+}
+type routerTierContextKey struct{}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -195,6 +212,47 @@ func ServiceTierFromContext(ctx context.Context) string {
 	default:
 		return DefaultServiceTier
 	}
+}
+
+// WithRouterTier stores the Auto Router tier and router id that routed this request
+// for usage sinks. Both values are trimmed; if both are empty, ctx is returned
+// unchanged. A nil ctx is tolerated and replaced with context.Background().
+func WithRouterTier(ctx context.Context, tier, routerID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tier = strings.TrimSpace(tier)
+	routerID = strings.TrimSpace(routerID)
+	if tier == "" && routerID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, routerTierContextKey{}, routerTierContextValue{tier: tier, routerID: routerID})
+}
+
+// RouterTierFromContext returns the Auto Router tier stored in ctx.
+// Returns the empty string when ctx is nil or no value is present.
+func RouterTierFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(routerTierContextKey{})
+	if value, ok := raw.(routerTierContextValue); ok {
+		return value.tier
+	}
+	return ""
+}
+
+// RouterIDFromContext returns the Auto Router id stored in ctx.
+// Returns the empty string when ctx is nil or no value is present.
+func RouterIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(routerTierContextKey{})
+	if value, ok := raw.(routerTierContextValue); ok {
+		return value.routerID
+	}
+	return ""
 }
 
 // WithGenerate stores whether the client requested actual generation for usage sinks.

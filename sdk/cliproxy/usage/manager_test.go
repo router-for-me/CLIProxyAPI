@@ -50,3 +50,19 @@ func TestRecordOmittedGenerateIsEnabled(t *testing.T) {
 		t.Fatalf("GenerateEnabled(omitted) = false, want true")
 	}
 }
+
+func TestRouterTierFromContext(t *testing.T) {
+	ctx := WithRouterTier(context.Background(), "complex", "router:smart")
+	if got := RouterTierFromContext(ctx); got != "complex" {
+		t.Fatalf("RouterTierFromContext(ctx) = %q, want %q", got, "complex")
+	}
+	if got := RouterIDFromContext(ctx); got != "router:smart" {
+		t.Fatalf("RouterIDFromContext(ctx) = %q, want %q", got, "router:smart")
+	}
+	if got := RouterTierFromContext(nil); got != "" {
+		t.Fatalf("RouterTierFromContext(nil) = %q, want empty string", got)
+	}
+	if got := RouterIDFromContext(nil); got != "" {
+		t.Fatalf("RouterIDFromContext(nil) = %q, want empty string", got)
+	}
+}
