@@ -27,4 +27,10 @@ const (
 
 	// Interactions represents the Google Interactions API format identifier.
 	Interactions = "interactions"
+
+	// ZAI represents the z.ai GLM provider identifier.
+	ZAI = "zai"
+
+	// OpenCode represents the OpenCode/Zen provider identifier.
+	OpenCode = "opencode"
 )

@@ -1,9 +1,11 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,7 +16,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
-	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	zaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/zai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
