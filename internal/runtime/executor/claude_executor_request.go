@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -613,6 +614,26 @@ func claudeCredentialUsesOAuth(auth *cliproxyauth.Auth, apiKey string) bool {
 	return isClaudeOAuthToken(apiKey) || !hasAPIKeyAttr
 }
 
+func copyClaudeCallerFingerprintHeaders(dst, src http.Header) {
+	if dst == nil || src == nil {
+		return
+	}
+	for name, values := range src {
+		lowerName := strings.ToLower(strings.TrimSpace(name))
+		if lowerName != "accept" && lowerName != "accept-encoding" && lowerName != "user-agent" &&
+			lowerName != "x-app" && lowerName != "x-client-request-id" &&
+			!strings.HasPrefix(lowerName, "anthropic-") &&
+			!strings.HasPrefix(lowerName, "x-stainless-") &&
+			!strings.HasPrefix(lowerName, "x-claude-code-") {
+			continue
+		}
+		dst.Del(name)
+		for _, value := range values {
+			dst.Add(name, value)
+		}
+	}
+}
+
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, body []byte, cfg *config.Config, incomingHeaders http.Header, confirmedClaudeCode bool, sessionIDs ...string) error {
 	return applyClaudeHeadersWithNativeProfile(
 		r,
@@ -657,8 +678,20 @@ func applyClaudeHeadersWithNativeProfile(
 		hd = cfg.ClaudeHeaderDefaults
 	}
 
-	oauthToken := claudeCredentialUsesOAuth(auth, apiKey)
-	useAPIKey := !oauthToken
+	// Authentication and wire fingerprint are separate authorities. File-backed
+	// delegated providers still use Bearer auth, but only real Claude OAuth and
+	// explicit fingerprint-profile opt-ins receive the CLI wire profile.
+	credentialUsesBearer := claudeCredentialUsesOAuth(auth, apiKey)
+	useAPIKey := !credentialUsesBearer
+	origin := ""
+	if r.URL != nil {
+		origin = r.URL.String()
+	}
+	fp := resolveClaudeFingerprintPolicyForOrigin(cfg, auth, apiKey, origin)
+	wirePolicy, _ := resolveClaudeWirePolicy(cfg, auth, apiKey, confirmedClaudeCode, origin)
+	applyCLIFingerprint := fp.ProfileClaudeCodeCLI || wirePolicy.Cloak
+	preserveCallerFingerprint := !applyCLIFingerprint && !confirmedClaudeCode
+	useOAuthBetas := fp.UseOAuthBetas
 	isAnthropicBase := isAnthropicUpstreamURL(r.URL)
 	if isAnthropicBase && useAPIKey {
 		r.Header.Del("Authorization")
@@ -685,15 +718,18 @@ func applyClaudeHeadersWithNativeProfile(
 
 	incomingBetas := strings.TrimSpace(strings.Join(incomingHeaders.Values("Anthropic-Beta"), ","))
 	countTokens := r.URL != nil && strings.HasSuffix(r.URL.Path, "/count_tokens")
-	baseBetas := claudeCodeCLIBetas(body, claudeRequestedBetas(incomingBetas, extraBetas), oauthToken)
-	if countTokens {
-		baseBetas = claudeCountTokensBetasForCredential(oauthToken)
+	baseBetas := incomingBetas
+	if !preserveCallerFingerprint {
+		baseBetas = claudeCodeCLIBetas(body, claudeRequestedBetas(incomingBetas, extraBetas), useOAuthBetas)
+		if countTokens {
+			baseBetas = claudeCountTokensBetasForCredential(useOAuthBetas)
+		}
 	}
 	if confirmedClaudeCode && incomingBetas != "" {
 		baseBetas = incomingBetas
 		// Measured Haiku helper requests already carry the exact credential
 		// beta profile and intentionally omit extended-cache-ttl.
-		if oauthToken && !helperProfile {
+		if useOAuthBetas && !helperProfile {
 			if countTokens {
 				baseBetas = withClaudeCountTokensOAuthBeta(baseBetas)
 			} else {
@@ -712,31 +748,93 @@ func applyClaudeHeadersWithNativeProfile(
 		if beta == "" || existingSet[beta] {
 			return
 		}
-		baseBetas += "," + beta
+		if strings.TrimSpace(baseBetas) == "" {
+			baseBetas = beta
+		} else {
+			baseBetas += "," + beta
+		}
 		existingSet[beta] = true
 	}
-	// On direct Anthropic an unconfirmed caller's own betas are dropped: appending
-	// them to the official baseline produces a combination real Claude Code never
-	// sends, which defeats the identity the rest of this path reconstructs. Other
-	// Anthropic-compatible upstreams (Kimi, custom gateways) run no such check, so
-	// caller betas stay functional there. This matches the CCH signing gate, which
-	// is likewise limited to api.anthropic.com.
-	if !confirmedClaudeCode && incomingBetas != "" && !isAnthropicBase {
-		for _, beta := range strings.Split(incomingBetas, ",") {
-			appendBeta(beta)
+	if preserveCallerFingerprint {
+		// Caller-owned mode preserves both header and body-lifted betas verbatim.
+		// The explicit speed=fast request still needs its protocol beta.
+		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, "speed").String()), "fast") {
+			appendBeta(claudeFastModeBeta)
 		}
-	}
-	// Betas lifted out of the body follow the same policy as header-supplied ones.
-	// Known betas already reached the assembled baseline through the requested map,
-	// which places them at their captured positions; anything left over is unknown
-	// to Claude Code and Anthropic rejects it outright. Forwarding those verbatim
-	// here was letting the body bypass the gate the header path enforces.
-	if !isAnthropicBase {
 		for _, beta := range extraBetas {
 			appendBeta(beta)
 		}
+	} else {
+		// On direct Anthropic an unconfirmed CLI-profile caller's own betas are
+		// dropped: appending them to the measured baseline produces a shape real
+		// Claude Code never sends. Custom gateways keep caller extensions.
+		if !confirmedClaudeCode && incomingBetas != "" && !isAnthropicBase {
+			for _, beta := range strings.Split(incomingBetas, ",") {
+				appendBeta(beta)
+			}
+		}
+		if !isAnthropicBase {
+			for _, beta := range extraBetas {
+				appendBeta(beta)
+			}
+		}
 	}
-	r.Header.Set("Anthropic-Beta", baseBetas)
+	applyBetaHeader := func() {
+		if strings.TrimSpace(baseBetas) == "" {
+			r.Header.Del("Anthropic-Beta")
+			return
+		}
+		r.Header.Set("Anthropic-Beta", baseBetas)
+	}
+	applyBetaHeader()
+
+	if preserveCallerFingerprint {
+		defaultAccept := "application/json"
+		defaultAcceptEncoding := "gzip, deflate, br, zstd"
+		if stream && !isAnthropicBase {
+			defaultAccept = "text/event-stream"
+			defaultAcceptEncoding = "identity"
+		}
+		copyClaudeCallerFingerprintHeaders(r.Header, incomingHeaders)
+		misc.EnsureHeader(r.Header, incomingHeaders, "Anthropic-Version", "2023-06-01")
+		misc.EnsureHeader(r.Header, incomingHeaders, "Accept", defaultAccept)
+		misc.EnsureHeader(r.Header, incomingHeaders, "Accept-Encoding", defaultAcceptEncoding)
+		// Caller-owned mode forwards the caller's own User-Agent, but a caller that
+		// sent none must not fall through to Go's transport default
+		// ("Go-http-client/1.1"), which upstreams read as a bot signature. Identify
+		// as CPA instead: honest about the hop, and not a fabricated client.
+		misc.EnsureHeader(r.Header, incomingHeaders, "User-Agent", "CLIProxyAPI/"+buildinfo.Version)
+		applyBetaHeader()
+		var attrs map[string]string
+		if auth != nil {
+			attrs = auth.Attributes
+		}
+		util.ApplyCustomHeadersFromAttrs(r, attrs)
+		// Scope the custom-header escape hatch exactly like the CLI path below, which
+		// claws overrides back on api.anthropic.com (an operator Anthropic-Beta reaches
+		// a first-party API that rejects unknown values) and on any streaming request
+		// (an Accept override silently disables event negotiation), while letting a
+		// non-streaming third-party gateway keep them. Restoring here means restoring
+		// the caller's own choice, not CPA's default: this mode is caller-owned.
+		restoreCallerTransport := func() {
+			resetHeader := func(name, fallback string) {
+				if value := strings.TrimSpace(incomingHeaders.Get(name)); value != "" {
+					r.Header.Set(name, value)
+					return
+				}
+				r.Header.Set(name, fallback)
+			}
+			resetHeader("Accept", defaultAccept)
+			resetHeader("Accept-Encoding", defaultAcceptEncoding)
+		}
+		if isAnthropicBase {
+			applyBetaHeader()
+			restoreCallerTransport()
+		} else if stream {
+			restoreCallerTransport()
+		}
+		return nil
+	}
 
 	identityHeader := func(name, fallback string) {
 		if confirmedClaudeCode {

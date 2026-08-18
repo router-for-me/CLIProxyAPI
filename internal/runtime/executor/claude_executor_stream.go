@@ -30,13 +30,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		baseURL = "https://api.anthropic.com"
 	}
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
-	oauthToken := isClaudeOAuthToken(apiKey)
+	fp := resolveClaudeFingerprintPolicyForOrigin(e.cfg, auth, apiKey, url)
 	defer func() {
-		if cancelErr := newClaudeOAuthCancellationError(ctx, oauthToken, err); cancelErr != nil {
+		if cancelErr := newClaudeOAuthCancellationError(ctx, fp.OAuthCancellation, err); cancelErr != nil {
 			err = cancelErr
 		}
 	}()
-	cchSigning := claudeCCHSigningEnabled(apiKey, claudeCCHUpstreamAnthropic, url)
+	cchSigning := claudeCCHSigningEnabled(apiKey, claudeCCHUpstreamAnthropic, fp.ProfileClaudeCodeCLI)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -60,7 +60,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	incomingHeaders, claudeCodeDetection := detectIncomingClaudeCodeRequest(ctx, opts.Headers, originalPayload, false, e.cfg)
 	confirmedClaudeCode := claudeCodeDetection.Confirmed
 	claudeSessionID := ""
-	if oauthToken {
+	if fp.ProfileClaudeCodeCLI {
 		claudeSessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, originalPayload, req.Payload, confirmedClaudeCode, opts.Metadata, req.Metadata)
 	}
 	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true, helps.APIKeyModelIsCompat(req))
@@ -101,7 +101,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	if contextManagementState.eligible {
 		body, contextManagementState.automaticallyInjected = injectClaudeCodeContextManagement(body)
-		if oauthToken {
+		if fp.InjectDiagnostics {
 			body, diagnosticsState = injectClaudeDiagnostics(body, auth, claudeSessionID)
 		}
 	}
@@ -141,7 +141,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// opt-in to 5m, so a cloaked caller's bare {"type":"ephemeral"} is upgraded too.
 	// Only a ttl the caller wrote out explicitly survives, because
 	// upgradeClaudeCacheControlTTL skips any block that already has one.
-	if cpaOwnsCacheControl && claudeCredentialUsesOAuth(auth, apiKey) {
+	// claude-code-cli fingerprint profiles emit extended-cache-ttl and must use the same 1h pool.
+	if cpaOwnsCacheControl && fp.ProfileClaudeCodeCLI {
 		body = upgradeClaudeCacheControlTTL(body, claudeCacheControlTTL1h)
 	}
 
@@ -154,13 +155,26 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	bodyForTranslation := body
 	bodyForUpstream := body
 	var oauthToolNamesReverseMap map[string]string
-	if oauthToken && cloaked {
+	if fp.MCPAlias && cloaked {
 		mcpAliases := resolveClaudeMCPAliasOptions(ctx)
 		bodyForUpstream, oauthToolNamesReverseMap = prepareClaudeOAuthToolNamesForUpstream(bodyForUpstream, mcpAliases)
 	}
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel, helps.APIKeyModelIsCompat(req))
-	if oauthToken {
-		bodyForUpstream, _, err = helps.ApplyClaudeCredentialMetadata(bodyForUpstream, auth, claudeSessionID)
+	if fp.ApplyCLIIdentity {
+		// ApplyCLIIdentity and ProfileClaudeCodeCLI are the same predicate, so
+		// claudeSessionID was already resolved above by ClaudeAgentSessionUUIDForRequest,
+		// which always returns a UUID. Do not add a second session source here: a
+		// per-apiKey cached ID would silently break agent-conversation continuity.
+		identitySeed := apiKey
+		if isKimiMessagesUpstream(auth, url) {
+			identitySeed = helps.ClaudeCLIAuthIdentitySeed(auth)
+		}
+		var identityAuth *cliproxyauth.Auth
+		identityAuth, err = helps.PrepareClaudeCLIFingerprintAuth(auth, identitySeed, fp.SynthesizeIdentity)
+		if err != nil {
+			return nil, fmt.Errorf("ensure Claude CLI fingerprint identity: %w", err)
+		}
+		bodyForUpstream, _, err = helps.ApplyClaudeCredentialMetadata(bodyForUpstream, identityAuth, claudeSessionID)
 		if err != nil {
 			return nil, fmt.Errorf("apply Claude credential metadata: %w", err)
 		}
@@ -175,6 +189,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return nil, fmt.Errorf("finalize Claude CCH: %w", err)
 		}
 	}
+	bodyForUpstream = stripDefaultKimiClaudeCodeAttribution(auth, url, fp.ProfileClaudeCodeCLI, bodyForUpstream)
 	// Runs on the finished body: payload rules can rewrite model and messages
 	// long after translation, so an earlier check would not describe the request
 	// that is about to be sent.
@@ -272,7 +287,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}()
 		emitCancellation := func(cause error) bool {
-			cancelErr := newClaudeOAuthCancellationError(ctx, oauthToken, cause)
+			cancelErr := newClaudeOAuthCancellationError(ctx, fp.OAuthCancellation, cause)
 			if cancelErr == nil {
 				return false
 			}

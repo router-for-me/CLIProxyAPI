@@ -77,18 +77,16 @@ func TestApplyClaudeHeaders_ConfirmedAPIKeyClientKeepsPurePassthrough(t *testing
 	}
 }
 
-// Betas lifted out of the body must obey the same policy as header-supplied ones.
-// Anthropic rejects an unknown beta outright, so letting the body bypass the gate
-// turned a caller-controlled field into a guaranteed 400.
-func TestApplyClaudeHeaders_UnknownBodyBetaDroppedOnAnthropic(t *testing.T) {
+// Default API-key mode preserves body-lifted betas just like header betas.
+func TestApplyClaudeHeaders_UnknownBodyBetaPreservedOnAnthropic(t *testing.T) {
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-body-beta"}}
 	req := newClaudeHeaderTestRequest(t, nil)
 	if err := applyClaudeHeaders(req, auth, "key-body-beta", false, []string{"unknown-body-probe-2099-01-01"},
 		[]byte(`{"model":"claude-opus-5"}`), nil, nil, false); err != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", err)
 	}
-	if got := req.Header.Get("Anthropic-Beta"); strings.Contains(got, "unknown-body-probe-2099-01-01") {
-		t.Fatalf("Anthropic-Beta = %q, want the unknown body beta dropped", got)
+	if got := req.Header.Get("Anthropic-Beta"); got != "unknown-body-probe-2099-01-01" {
+		t.Fatalf("Anthropic-Beta = %q, want the caller body beta preserved", got)
 	}
 }
 
@@ -99,10 +97,8 @@ func TestApplyClaudeHeaders_KnownBodyBetaStillPlacedOnAnthropic(t *testing.T) {
 		[]byte(`{"model":"claude-opus-5"}`), nil, nil, false); err != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", err)
 	}
-	got := req.Header.Get("Anthropic-Beta")
-	parts := strings.Split(got, ",")
-	if len(parts) < 2 || parts[1] != claudeContext1MBeta {
-		t.Fatalf("Anthropic-Beta = %q, want %s honored at its captured position", got, claudeContext1MBeta)
+	if got := req.Header.Get("Anthropic-Beta"); got != claudeContext1MBeta {
+		t.Fatalf("Anthropic-Beta = %q, want caller body beta %s", got, claudeContext1MBeta)
 	}
 }
 

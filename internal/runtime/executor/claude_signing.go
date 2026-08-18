@@ -145,30 +145,30 @@ func prependClaudeBillingSystemBlock(body []byte, billingText string) ([]byte, e
 	return updated, nil
 }
 
-// claudeCCHSigningEnabled applies CPA's CCH policy. Every Claude OAuth
-// request is signed, while non-OAuth requests require a supported upstream.
-func claudeCCHSigningEnabled(apiKey string, kind claudeCCHUpstreamKind, endpoint string) bool {
-	if isClaudeOAuthToken(apiKey) {
-		return true
-	}
-	if kind == claudeCCHUpstreamVertex {
-		return true
-	}
-	if kind != claudeCCHUpstreamAnthropic {
-		return false
-	}
-
+func isKimiAPIEndpoint(endpoint string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil || parsed.User != nil || !strings.EqualFold(parsed.Scheme, "https") {
+	if err != nil {
 		return false
 	}
-	if !strings.EqualFold(parsed.Hostname(), "api.anthropic.com") {
-		return false
+	return strings.EqualFold(parsed.Hostname(), "api.kimi.com")
+}
+
+func isKimiMessagesUpstream(auth *cliproxyauth.Auth, endpoint string) bool {
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "kimi") {
+		return true
 	}
-	if port := parsed.Port(); port != "" && port != "443" {
-		return false
+	return isKimiAPIEndpoint(endpoint)
+}
+
+// claudeCCHSigningEnabled applies CPA's CCH policy. Real Claude OAuth tokens
+// and explicit claude-code-cli fingerprint profiles sign. Default API-key and
+// delegated-provider requests preserve the caller body instead. Vertex keeps
+// its existing provider-native signing behavior.
+func claudeCCHSigningEnabled(apiKey string, kind claudeCCHUpstreamKind, cliFingerprint bool) bool {
+	if isClaudeOAuthToken(apiKey) || cliFingerprint {
+		return true
 	}
-	return strings.Contains(parsed.EscapedPath(), "/v1/messages")
+	return kind == claudeCCHUpstreamVertex
 }
 
 // signAnthropicMessagesBody reproduces Claude Code 2.1.220's final-body CCH.

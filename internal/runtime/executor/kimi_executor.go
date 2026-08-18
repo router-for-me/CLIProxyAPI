@@ -50,6 +50,13 @@ func NewKimiExecutor(cfg *config.Config) *KimiExecutor {
 // Identifier returns the executor identifier.
 func (e *KimiExecutor) Identifier() string { return "kimi" }
 
+func stripDefaultKimiClaudeCodeAttribution(auth *cliproxyauth.Auth, endpoint string, cliFingerprint bool, body []byte) []byte {
+	if cliFingerprint || !isKimiMessagesUpstream(auth, endpoint) {
+		return body
+	}
+	return util.StripClaudeCodeAttributionSystem(body)
+}
+
 // RequestToFormat reports the upstream request format used after auth selection.
 func (e *KimiExecutor) RequestToFormat(_ cliproxyexecutor.Request, opts cliproxyexecutor.Options) sdktranslator.Format {
 	if opts.SourceFormat == sdktranslator.FormatClaude {

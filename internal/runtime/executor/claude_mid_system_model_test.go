@@ -89,7 +89,7 @@ func httptest_NewRequest() *http.Request {
 
 func midSystemAuth() *cliproxyauth.Auth {
 	// No base_url, so the executor keeps Anthropic's first-party origin.
-	return &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
+	return &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123", "cloak_mode": "always"}}
 }
 
 func midSystemConfig() *config.Config {

@@ -930,9 +930,10 @@ func withEphemeralCacheControl(rawBlock string) string {
 }
 
 type claudeWirePolicy struct {
-	OAuth               bool
-	ConfirmedClaudeCode bool
-	Cloak               bool
+	OAuth                bool // real OAuth token runtime identity
+	ProfileClaudeCodeCLI bool // request fingerprint looks like Claude Code CLI
+	ConfirmedClaudeCode  bool
+	Cloak                bool
 }
 
 type claudeCloakSettings struct {
@@ -941,7 +942,7 @@ type claudeCloakSettings struct {
 	cacheUserID    bool
 }
 
-func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey string, confirmedClaudeCode bool) (claudeWirePolicy, claudeCloakSettings) {
+func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey string, confirmedClaudeCode bool, origin string) (claudeWirePolicy, claudeCloakSettings) {
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
 	attrMode, attrStrict, attrWords, attrCache := getCloakConfigFromAuth(auth)
 
@@ -972,10 +973,16 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 		}
 	}
 
+	if strings.TrimSpace(origin) == "" {
+		origin = fingerprintOriginFromAuth(auth)
+	}
+	fp := resolveClaudeFingerprintPolicyForOrigin(cfg, auth, apiKey, origin)
+	cloakConfigured := cloakCfg != nil || attrMode != "" || attrStrict || len(attrWords) > 0 || attrCache
 	policy := claudeWirePolicy{
-		OAuth:               isClaudeOAuthToken(apiKey),
-		ConfirmedClaudeCode: confirmedClaudeCode,
-		Cloak:               !confirmedClaudeCode,
+		OAuth:                fp.AuthIsOAuthToken,
+		ProfileClaudeCodeCLI: fp.ProfileClaudeCodeCLI,
+		ConfirmedClaudeCode:  confirmedClaudeCode,
+		Cloak:                (fp.ProfileClaudeCodeCLI || cloakConfigured) && !confirmedClaudeCode,
 	}
 	if confirmedClaudeCode {
 		// Native Claude Code is always a passthrough client. An operator-level
@@ -989,6 +996,10 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 		policy.Cloak = true
 	case "never":
 		policy.Cloak = false
+	default:
+		// Auto applies the CLI cloak only to real Claude OAuth credentials,
+		// explicit fingerprint-profile opt-ins, or credentials with explicit cloak
+		// settings. Other API keys and delegated providers keep the caller shape.
 	}
 	return policy, settings
 }
@@ -1004,7 +1015,7 @@ func applyCloaking(
 	confirmedClaudeCode bool,
 	cchSigning bool,
 ) ([]byte, bool, error) {
-	policy, settings := resolveClaudeWirePolicy(cfg, auth, apiKey, confirmedClaudeCode)
+	policy, settings := resolveClaudeWirePolicy(cfg, auth, apiKey, confirmedClaudeCode, "")
 	if !policy.Cloak {
 		return payload, false, nil
 	}
@@ -1020,9 +1031,10 @@ func applyCloaking(
 	workload := getWorkloadFromContext(ctx)
 	payload = checkSystemInstructionsWithSigningModeAt(payload, settings.strictMode, cchSigning, billingVersion, "cli", workload, claudeCodeCurrentTime(cfg, auth))
 
-	// OAuth metadata is rewritten after credential selection and all remaining
-	// body mutations. Non-OAuth cloaking keeps the legacy generated identity.
-	if !policy.OAuth {
+	// Claude-Code-CLI fingerprint identity (real OAuth or fingerprint-profile=claude-code-cli)
+	// is applied later through the shared ApplyClaudeCredentialMetadata path.
+	// Other non-OAuth cloaking keeps the legacy per-request fake user_id.
+	if !policy.ProfileClaudeCodeCLI {
 		var errFakeUserID error
 		payload, errFakeUserID = injectFakeUserID(ctx, payload, apiKey, settings.cacheUserID)
 		if errFakeUserID != nil {
