@@ -262,7 +262,9 @@ codex:
 
 # Antigravity provider behavior.
 # antigravity:
-#   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions
+#   # Additional words to obfuscate with zero-width characters in system instructions.
+#   # Known Antigravity fingerprints, such as "Claude Agent SDK", are protected automatically.
+#   sensitive-words:
 #     - "API"
 #     - "proxy"
 

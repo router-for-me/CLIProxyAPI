@@ -139,7 +139,8 @@ type XAIConfig struct {
 
 // AntigravityConfig configures provider-wide Antigravity request behavior.
 type AntigravityConfig struct {
-	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.
+	// SensitiveWords is an additional list of words to obfuscate with zero-width characters in system instructions.
+	// Built-in Antigravity fingerprints are always obfuscated.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
 }
 
