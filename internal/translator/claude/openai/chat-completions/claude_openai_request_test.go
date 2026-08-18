@@ -729,3 +729,42 @@ func TestConvertOpenAIRequestToClaude_DeduplicatesToolResults(t *testing.T) {
 		t.Fatalf("msg4Blocks[1].content = %q, want 'empty id output'", got)
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_MaxTokensAndMaxCompletionTokens(t *testing.T) {
+	tests := []struct {
+		name      string
+		rawJSON   string
+		wantLimit int64
+	}{
+		{
+			name:      "only max_completion_tokens",
+			rawJSON:   `{"messages":[{"role":"user","content":"hi"}],"max_completion_tokens":128000}`,
+			wantLimit: 128000,
+		},
+		{
+			name:      "only max_tokens",
+			rawJSON:   `{"messages":[{"role":"user","content":"hi"}],"max_tokens":4096}`,
+			wantLimit: 4096,
+		},
+		{
+			name:      "both present prefers max_tokens",
+			rawJSON:   `{"messages":[{"role":"user","content":"hi"}],"max_tokens":4096,"max_completion_tokens":128000}`,
+			wantLimit: 4096,
+		},
+		{
+			name:      "neither present uses default template limit",
+			rawJSON:   `{"messages":[{"role":"user","content":"hi"}]}`,
+			wantLimit: 32000,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := ConvertOpenAIRequestToClaude("claude-3-7-sonnet-20250219", []byte(tc.rawJSON), false)
+			got := gjson.GetBytes(out, "max_tokens").Int()
+			if got != tc.wantLimit {
+				t.Fatalf("max_tokens = %d, want %d. Output: %s", got, tc.wantLimit, string(out))
+			}
+		})
+	}
+}
