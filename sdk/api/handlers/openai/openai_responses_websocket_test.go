@@ -59,6 +59,10 @@ type homeResponsesWebsocketExecutor struct {
 	mu       sync.Mutex
 }
 
+func successfulResponsesWebsocketCompletion(responseID, messageID string) []byte {
+	return []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"object":"response","status":"completed","output":[{"type":"message","id":%q,"status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`, responseID, messageID))
+}
+
 func (*homeResponsesWebsocketExecutor) Identifier() string { return "codex" }
 
 func (*homeResponsesWebsocketExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
@@ -74,7 +78,7 @@ func (e *homeResponsesWebsocketExecutor) ExecuteStream(_ context.Context, _ *cor
 		lifecycle.Retain()
 	}
 	chunks := make(chan coreexecutor.StreamChunk, 1)
-	chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"home-response","output":[]}}`)}
+	chunks <- coreexecutor.StreamChunk{Payload: successfulResponsesWebsocketCompletion("home-response", "home-message")}
 	close(chunks)
 	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -730,7 +734,7 @@ func (e *websocketBootstrapFallbackExecutor) ExecuteStream(_ context.Context, au
 		return &coreexecutor.StreamResult{Chunks: chunks}, nil
 	}
 
-	chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-http","output":[{"type":"message","id":"out-http"}]}}`)}
+	chunks <- coreexecutor.StreamChunk{Payload: successfulResponsesWebsocketCompletion("resp-http", "out-http")}
 	close(chunks)
 	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -799,7 +803,7 @@ func (e *websocketDirectCaptureExecutor) ExecuteStream(ctx context.Context, auth
 		return &coreexecutor.StreamResult{Chunks: chunks}, nil
 	}
 	responseID := fmt.Sprintf("resp-%d", count)
-	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"output":[{"type":"message","id":"out-%d"}]}}`, responseID, count))}
+	chunks <- coreexecutor.StreamChunk{Payload: successfulResponsesWebsocketCompletion(responseID, fmt.Sprintf("out-%d", count))}
 	close(chunks)
 	if count >= 2 && e.done != nil {
 		e.doneOnce.Do(func() {
@@ -875,7 +879,7 @@ func (e *websocketCanonicalRollbackExecutor) ExecuteStream(_ context.Context, _ 
 		close(chunks)
 		return &coreexecutor.StreamResult{Chunks: chunks}, nil
 	}
-	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp-%d","output":[{"type":"message","id":"out-%d"}]}}`, call, call))}
+	chunks <- coreexecutor.StreamChunk{Payload: successfulResponsesWebsocketCompletion(fmt.Sprintf("resp-%d", call), fmt.Sprintf("out-%d", call))}
 	close(chunks)
 	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -995,7 +999,7 @@ func (e *websocketAuthCaptureExecutor) ExecuteStream(_ context.Context, auth *co
 	e.mu.Unlock()
 
 	chunks := make(chan coreexecutor.StreamChunk, 1)
-	chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-upstream","output":[{"type":"message","id":"out-1"}]}}`)}
+	chunks <- coreexecutor.StreamChunk{Payload: successfulResponsesWebsocketCompletion("resp-upstream", "out-1")}
 	close(chunks)
 	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -1054,7 +1058,7 @@ func (e *websocketPinnedFailoverExecutor) ExecuteStream(_ context.Context, auth 
 	}
 
 	chunks := make(chan coreexecutor.StreamChunk, 1)
-	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp-%s-%d","output":[{"type":"message","id":"out-%s-%d"}]}}`, authID, call, authID, call))}
+	chunks <- coreexecutor.StreamChunk{Payload: successfulResponsesWebsocketCompletion(fmt.Sprintf("resp-%s-%d", authID, call), fmt.Sprintf("out-%s-%d", authID, call))}
 	close(chunks)
 	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -1105,7 +1109,7 @@ func (e *websocketCaptureExecutor) ExecuteStream(_ context.Context, _ *coreauth.
 	e.streamCalls++
 	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
 	chunks := make(chan coreexecutor.StreamChunk, 1)
-	chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-upstream","output":[{"type":"message","id":"out-1"}]}}`)}
+	chunks <- coreexecutor.StreamChunk{Payload: successfulResponsesWebsocketCompletion("resp-upstream", "out-1")}
 	close(chunks)
 	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -1145,9 +1149,9 @@ func (e *websocketCompactionCaptureExecutor) ExecuteStream(_ context.Context, _ 
 	case 0:
 		payload = []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool"}]}}`)
 	case 1:
-		payload = []byte(`{"type":"response.completed","response":{"id":"resp-2","output":[{"type":"message","id":"assistant-1"}]}}`)
+		payload = successfulResponsesWebsocketCompletion("resp-2", "assistant-1")
 	default:
-		payload = []byte(`{"type":"response.completed","response":{"id":"resp-3","output":[{"type":"message","id":"assistant-2"}]}}`)
+		payload = successfulResponsesWebsocketCompletion("resp-3", "assistant-2")
 	}
 
 	chunks := make(chan coreexecutor.StreamChunk, 1)
@@ -5012,7 +5016,7 @@ func (e *websocketPinnedPrematureCloseExecutor) ExecuteStream(_ context.Context,
 	}
 
 	chunks := make(chan coreexecutor.StreamChunk, 1)
-	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp-%s-%d","output":[{"type":"message","id":"out-%s-%d"}]}}`, authID, call, authID, call))}
+	chunks <- coreexecutor.StreamChunk{Payload: successfulResponsesWebsocketCompletion(fmt.Sprintf("resp-%s-%d", authID, call), fmt.Sprintf("out-%s-%d", authID, call))}
 	close(chunks)
 	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }

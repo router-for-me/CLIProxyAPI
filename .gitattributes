@@ -1,0 +1,27 @@
+# Plus-only provider dirs — never merge from upstream (original CLIProxyAPI has no equivalent)
+internal/auth/codebuddy/** merge=ours
+internal/auth/copilot/** merge=ours
+internal/auth/cursor/** merge=ours
+internal/auth/gitlab/** merge=ours
+internal/auth/iflow/** merge=ours
+internal/auth/kilo/** merge=ours
+internal/auth/kiro/** merge=ours
+
+# Fork-maintenance files — always keep ours. Workflow ownership is explicit so
+# the sync job can restore exactly this allowlist after every upstream merge.
+.github/workflows/upstream-sync.yml merge=ours
+.github/workflows/sync-release-tag.yml merge=ours
+.github/workflows/release.yaml merge=ours
+.github/workflows/docker-image.yml merge=ours
+.github/workflows/pr-test-build.yml merge=ours
+.github/workflows/agents-md-guard.yml merge=ours
+.github/workflows/sync-validation-status.yml merge=ours
+.goreleaser.yml merge=ours
+.gitattributes merge=ours
+README-ccs-fork.md merge=ours
+
+# Image references diverge from upstream (Plus publishes official images to
+# kaitranntt/cli-proxy-api-plus with a GHCR mirror; upstream publishes to
+# eceasy/cli-proxy-api). Keep ours so upstream sync does not silently revert
+# the image path back to upstream's.
+docker-compose.yml merge=ours

@@ -124,4 +124,14 @@ type Service struct {
 	homePluginSyncKey            string
 	homePluginSyncFetch          func(context.Context, sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error)
 	homePluginDeleteTask         func(context.Context, *config.Config, home.PluginTask) homeplugins.SyncReport
+	kiroModelsCache              kiroModelsCache
+}
+
+// GetWatcher returns the active watcher for integrations that need to trigger
+// or observe runtime authentication refreshes.
+func (s *Service) GetWatcher() *WatcherWrapper {
+	if s == nil {
+		return nil
+	}
+	return s.watcher
 }

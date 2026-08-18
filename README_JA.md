@@ -118,16 +118,19 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 - OAuthログインによるOpenAI Codexサポート（GPTモデル）
 - OAuthログインによるClaude Codeサポート
 - OAuthログインによるGrok Buildサポート
+- OAuthログインによるQoderサポート
+- プロバイダールーティングによるAmp CLIおよびIDE拡張機能のサポート
 - ストリーミング、非ストリーミング、および対応環境でのWebSocketレスポンス
 - 関数呼び出し/ツールのサポート
 - マルチモーダル入力サポート（テキストと画像）
-- ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、Claude、Grok）
-- シンプルなCLI認証フロー（Gemini、OpenAI、Claude、Grok）
+- ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、Claude、Qwen、Grok、QoderおよびiFlow）
+- シンプルなCLI認証フロー（Gemini、OpenAI、Claude、Qwen、Grok、QoderおよびiFlow）
 - Generative Language APIキーのサポート
 - AI Studioビルドのマルチアカウント負荷分散
 - Claude Codeのマルチアカウント負荷分散
 - OpenAI Codexのマルチアカウント負荷分散
 - Grok Buildのマルチアカウント負荷分散
+- Qoderのマルチアカウント負荷分散
 - 設定によるOpenAI互換アップストリームプロバイダー（例：OpenRouter）
 - プロキシ埋め込み用の再利用可能なGo SDK（`docs/sdk-usage.md`を参照）
 
@@ -141,7 +144,9 @@ CLIProxyAPIガイド：[https://help.router-for.me/](https://help.router-for.me/
 
 ## 使用量統計
 
-v6.10.0以降、CLIProxyAPIおよび [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) プロジェクトには使用量統計機能がプリセットされなくなりました。使用量統計が必要な場合は、次のプロジェクトをご利用ください：
+v6.10.0以降、上流のCLIProxyAPIおよび [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) プロジェクトには使用量統計機能がプリセットされなくなりました。CLIProxyAPIPlusでは、使用量ロガーとメンテナンス版の [CPAMC dashboard fork](https://github.com/kaitranntt/Cli-Proxy-API-Management-Center) により、このワークフローを維持し、この管理パネルのリリースをデフォルトで使用します。
+
+外部の独立した使用量サービスが必要な場合は、次のプロジェクトをご利用ください：
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 

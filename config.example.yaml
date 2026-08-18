@@ -1,6 +1,6 @@
 # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
 # Use "127.0.0.1" or "localhost" to restrict access to local machine only.
-host: ""
+host: ''
 
 # Server port
 port: 8317
@@ -8,8 +8,8 @@ port: 8317
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false
-  cert: ""
-  key: ""
+  cert: ''
+  key: ''
 
 # Management API settings
 remote-management:
@@ -20,7 +20,7 @@ remote-management:
   # Management key. If a plaintext value is provided here, it will be hashed on startup.
   # All management requests (even from localhost) require this key.
   # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
-  secret-key: ""
+  secret-key: ''
 
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
@@ -30,16 +30,16 @@ remote-management:
   # disable-auto-update-panel: false
 
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
-  panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+  panel-github-repository: 'https://github.com/kaitranntt/Cli-Proxy-API-Management-Center'
 
 # Authentication directory (supports ~ for home directory)
-auth-dir: "~/.cli-proxy-api"
+auth-dir: '~/.cli-proxy-api'
 
 # API keys for authentication
 api-keys:
-  - "your-api-key-1"
-  - "your-api-key-2"
-  - "your-api-key-3"
+  - 'your-api-key-1'
+  - 'your-api-key-2'
+  - 'your-api-key-3'
 
 # Enable debug logging
 debug: false
@@ -47,7 +47,7 @@ debug: false
 # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
 pprof:
   enable: false
-  addr: "127.0.0.1:8316"
+  addr: '127.0.0.1:8316'
 
 # Credential concurrency is configured by Home in Home mode. The synthesized Home config is
 # authoritative and local values, including the values below, are ignored. Do not use local
@@ -110,6 +110,11 @@ plugins:
 
 # When true, disable high-overhead request logging and HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
+
+# Open OAuth URLs in incognito/private browser mode.
+# Useful when you want to login with a different account without logging out from your current session.
+# Default: false (but Kiro auth defaults to true for multi-account support)
+incognito-browser: true
 
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
@@ -660,7 +665,71 @@ opencode:
       alias: "zen-roundrobin"
       display-name: "OpenCode Zen Round Robin"
 
-# Remove or keep the openai-compatibility section as disabled by default
+# Kiro (AWS CodeWhisperer) configuration
+# Note: Kiro API currently only operates in us-east-1 region
+#kiro:
+#  - token-file: "~/.aws/sso/cache/kiro-auth-token.json" # path to Kiro token file
+#    agent-task-type: "" # optional: "vibe" or empty (API default)
+#    start-url: "https://your-company.awsapps.com/start" # optional: IDC start URL (preset for login)
+#    region: "us-east-1" # optional: OIDC region for IDC login and token refresh
+#  - access-token: "aoaAAAAA..." # or provide tokens directly
+#    refresh-token: "aorAAAAA..."
+#    profile-arn: "arn:aws:codewhisperer:us-east-1:..."
+#    proxy-url: "socks5://proxy.example.com:1080" # optional: proxy override
+
+# Kiro rate limiter configuration
+# Controls request throttling and backoff behavior for Kiro tokens.
+# All fields are optional; omitted fields fall back to defaults shown below.
+#kiro-rate-limit:
+#  enabled: true                # set to true to enable rate limiting (default: false)
+#  min-token-interval: "1s"     # minimum interval between requests per token (default: 1s)
+#  max-token-interval: "2s"     # maximum interval between requests per token (default: 2s)
+#  daily-max-requests: 500      # maximum requests per token per day (default: 500)
+#  jitter-percent: 0.3          # random jitter ratio applied to intervals (default: 0.3)
+#  backoff-base: "30s"          # base duration for exponential backoff on failure (default: 30s)
+#  backoff-max: "5m"            # maximum backoff duration cap (default: 5m)
+#  backoff-multiplier: 1.5      # exponential backoff multiplier (default: 1.5)
+#  suspend-cooldown: "1h"       # cooldown after suspension keywords detected (default: 1h)
+
+# Controls whether system prompts are wrapped with --- SYSTEM PROMPT --- markers
+# and injected into Kiro user messages. Kiro/Amazon Q API has no native system
+# field, so when enabled the proxy prepends the wrapped system prompt to the
+# user message. By default the proxy drops system prompts entirely.
+# Default: false.
+#kiro-system-prompt-inject-enable: true
+
+# Controls whether the heuristic truncation detector is applied to Kiro tool
+# use responses. When enabled, tool calls that appear truncated (invalid JSON,
+# missing required fields, suspiciously short content for write tools) are
+# silently skipped. The detector uses heuristic matching that can produce false
+# positives (e.g. code fence counting), so it is off by default.
+# Default: false.
+#kiro-truncation-detector-enable: true
+
+# Controls whether inline <thinking>...</thinking> tags in Kiro
+# assistantResponseEvent content are parsed into Claude thinking content
+# blocks. Kiro's official reasoning channel is reasoningContentEvent; the
+# tag-based path is unofficial and can false-positive when content literally
+# contains the tag string (code samples, discussion, XML fixtures), silently
+# truncating responses. Default: false.
+#kiro-extract-thinking-tag-enable: true
+
+# Kilocode (OAuth-based code assistant)
+# Note: Kilocode uses OAuth device flow authentication.
+# Use the CLI command: ./server --kilo-login
+# This will save credentials to the auth directory (default: ~/.cli-proxy-api/)
+# oauth-model-alias:
+#   kilo:
+#     - name: "minimax/minimax-m2.5:free"
+#       alias: "minimax-m2.5"
+#     - name: "z-ai/glm-5:free"
+#       alias: "glm-5"
+# oauth-excluded-models:
+#   kilo:
+#     - "kilo-claude-opus-4-6"  # exclude specific models (exact match)
+#     - "*:free"                # wildcard matching suffix (e.g. all free models)
+
+# OpenAI compatibility providers
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #     disabled: false # optional: set to true to disable this provider without removing it
@@ -739,10 +808,38 @@ opencode:
 #       - "imagen-3.0-generate-002"
 #       - "imagen-*"
 
+# Amp Integration
+# ampcode:
+#   # Configure upstream URL for Amp CLI OAuth and management features.
+#   upstream-url: "https://ampcode.com"
+#   # Optional: override the Amp upstream API key (otherwise uses env or file).
+#   upstream-api-key: ""
+#   # Map client API keys to separate Amp upstream API keys.
+#   upstream-api-keys:
+#     - upstream-api-key: "amp_key_for_team_a"
+#       api-keys:
+#         - "your-api-key-1"
+#         - "your-api-key-2"
+#     - upstream-api-key: "amp_key_for_team_b"
+#       api-keys:
+#         - "your-api-key-3"
+#   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only.
+#   restrict-management-to-localhost: false
+#   # Apply model mappings before checking local API keys.
+#   force-model-mappings: false
+#   # Route unavailable Amp models to models available in the local proxy.
+#   model-mappings:
+#     - from: "claude-opus-4-5-20251101"
+#       to: "gemini-claude-opus-4-5-thinking"
+#     - from: "claude-sonnet-4-5-20250929"
+#       to: "gemini-claude-sonnet-4-5-thinking"
+#     - from: "claude-haiku-4-5-20251001"
+#       to: "gemini-2.5-flash"
+
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai.
-# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai, qoder, iflow, kiro, github-copilot, and plugin providers.
+# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. For strict backend pinning, use
 # unique aliases/prefixes or avoid overlapping names.
@@ -763,6 +860,25 @@ opencode:
 #   ]
 # }
 # oauth-model-alias:
+#  antigravity:
+#    - name: "rev19-uic3-1p"
+#      alias: "gemini-2.5-computer-use-preview-10-2025"
+#    - name: "gemini-3-pro-image"
+#      alias: "gemini-3-pro-image-preview"
+#    - name: "gemini-3-pro-high"
+#      alias: "gemini-3-pro-preview"
+#    - name: "gemini-3-flash"
+#      alias: "gemini-3-flash-preview"
+#    - name: "claude-sonnet-4-5"
+#      alias: "gemini-claude-sonnet-4-5"
+#    - name: "claude-sonnet-4-5-thinking"
+#      alias: "gemini-claude-sonnet-4-5-thinking"
+#    - name: "claude-opus-4-5-thinking"
+#      alias: "gemini-claude-opus-4-5-thinking"
+#   gemini-cli:
+#     - name: "gemini-2.5-pro"          # original model name under this channel
+#       alias: "g2.5p"                  # client-visible alias
+#       fork: true                      # when true, keep original and also add the alias as an extra model (default: false)
 #   vertex:
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"
@@ -787,11 +903,17 @@ opencode:
 #   xai:
 #     - name: "grok-4.3"
 #       alias: "grok-latest"
+#   qoder:
+#     - name: "auto"
+#       alias: "qoder-auto"
+#     - name: "qmodel_latest"
+#       alias: "qlatest"
 #   sample-provider:                  # plugin provider keys are supported for OAuth plugins
 #     - name: "sample-model-latest"
 #       alias: "sample-latest"
 
 # OAuth provider excluded models
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot, qoder.
 # oauth-excluded-models:
 #   vertex:
 #     - "gemini-3-pro-preview"
@@ -807,6 +929,8 @@ opencode:
 #     - "kimi-k2-thinking"
 #   xai:
 #     - "grok-3-mini"
+#   qoder:
+#     - "auto"
 
 # Optional payload configuration
 # payload:

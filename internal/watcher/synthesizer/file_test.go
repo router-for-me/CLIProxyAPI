@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -198,6 +200,51 @@ func TestFileSynthesizer_Synthesize_IgnoresGeminiProviderFile(t *testing.T) {
 	}
 	if len(auths) != 0 {
 		t.Fatalf("expected Gemini auth file to be ignored, got %d auths", len(auths))
+	}
+}
+
+func TestSynthesizeAuthFileRejectsRawGeminiBeforePluginDispatch(t *testing.T) {
+	tempDir := t.TempDir()
+
+	for _, tt := range []struct {
+		name string
+		raw  []byte
+	}{
+		{
+			name: "single project",
+			raw:  []byte(`{"type":"gemini","project_id":"project-a"}`),
+		},
+		{
+			name: "multiple projects",
+			raw:  []byte(`{"type":"gemini","project_id":"project-a,project-b"}`),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			parserCalls := 0
+			ctx := &SynthesisContext{
+				Config:  &config.Config{},
+				AuthDir: tempDir,
+				Now:     time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC),
+				PluginAuthParser: multiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+					parserCalls++
+					return []*coreauth.Auth{
+						{ID: "gemini-cli.json", Provider: "gemini-cli"},
+						{ID: "gemini-cli-project-a.json", Provider: "gemini-cli"},
+					}, true, nil
+				}),
+			}
+
+			auths, errSynthesize := SynthesizeAuthFile(ctx, filepath.Join(tempDir, "gemini.json"), tt.raw)
+			if errSynthesize != nil {
+				t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+			}
+			if len(auths) != 0 {
+				t.Fatalf("SynthesizeAuthFile() len = %d, want no auths for raw Gemini input", len(auths))
+			}
+			if parserCalls != 0 {
+				t.Fatalf("plugin parser calls = %d, want 0 for raw Gemini input", parserCalls)
+			}
+		})
 	}
 }
 
@@ -825,5 +872,167 @@ func TestFileSynthesizer_Synthesize_NoteParsing(t *testing.T) {
 				t.Fatalf("expected note attribute to be absent, got %q", value)
 			}
 		})
+	}
+}
+func TestSynthesizeAuthFileExpandsTrustedGeminiCLIPluginAuth(t *testing.T) {
+	tempDir := t.TempDir()
+
+	authData := map[string]any{
+		"type":       "gemini-cli",
+		"email":      "multi@example.com",
+		"project_id": "project-a, project-b",
+		"priority":   5,
+		"note":       "production keys",
+	}
+	data, _ := json.Marshal(authData)
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+		PluginAuthParser: multiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+			return []*coreauth.Auth{{
+				ID:       "gemini-cli.json",
+				Provider: "gemini-cli",
+				Label:    "multi@example.com",
+			}}, true, nil
+		}),
+	}
+
+	auths, errSynthesize := SynthesizeAuthFile(ctx, filepath.Join(tempDir, "gemini-cli.json"), data)
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
+	if len(auths) != 3 {
+		t.Fatalf("expected 3 auths (1 primary + 2 virtuals), got %d", len(auths))
+	}
+
+	primary := auths[0]
+	if gotNote := primary.Attributes["note"]; gotNote != "production keys" {
+		t.Errorf("expected primary note %q, got %q", "production keys", gotNote)
+	}
+
+	// Verify virtuals inherit note
+	for i := 1; i < len(auths); i++ {
+		v := auths[i]
+		if gotNote := v.Attributes["note"]; gotNote != "production keys" {
+			t.Errorf("expected virtual %d note %q, got %q", i, "production keys", gotNote)
+		}
+		if gotPriority := v.Attributes["priority"]; gotPriority != "5" {
+			t.Errorf("expected virtual %d priority %q, got %q", i, "5", gotPriority)
+		}
+	}
+}
+
+// TestSynthesizeFileAuths_QoderPreservesModelConfigs verifies that hot-reloading
+// a qoder auth file does not drop the cached model_configs map written by
+// QoderTokenStorage.SaveTokenToFile. Without it, buildQoderModelConfig fails
+// with "model config cache is empty" until /algo/api/v2/model/list returns,
+// even when the disk copy already has the answer.
+func TestSynthesizeFileAuths_QoderPreservesModelConfigs(t *testing.T) {
+	tmpDir := t.TempDir()
+	authPath := filepath.Join(tmpDir, "qoder-test@example.com.json")
+
+	storage := &qoderauth.QoderTokenStorage{
+		Token:        "tok",
+		RefreshToken: "rtok",
+		UserID:       "u-123",
+		Name:         "Test",
+		Email:        "test@example.com",
+		ExpireTime:   1234567890,
+		Type:         "qoder",
+		MachineID:    "m-1",
+		ModelConfigs: map[string]json.RawMessage{
+			"dfmodel": json.RawMessage(`{"key":"dfmodel","format":"openai","is_vl":true,"max_input_tokens":131072}`),
+		},
+	}
+	if err := storage.SaveTokenToFile(authPath); err != nil {
+		t.Fatalf("SaveTokenToFile: %v", err)
+	}
+
+	data, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tmpDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+	auths, errSynthesize := SynthesizeAuthFile(ctx, authPath, data)
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+
+	a := auths[0]
+	if a.Provider != "qoder" {
+		t.Fatalf("expected provider qoder, got %q", a.Provider)
+	}
+	storedAny := a.Storage
+	stored, ok := storedAny.(*qoderauth.QoderTokenStorage)
+	if !ok {
+		t.Fatalf("expected *QoderTokenStorage, got %T", storedAny)
+	}
+	if stored.Email != "test@example.com" {
+		t.Errorf("expected email preserved, got %q", stored.Email)
+	}
+	raw, ok := stored.GetModelConfig("dfmodel")
+	if !ok {
+		t.Fatalf("expected cached model_configs entry to survive reload, keys=%v", stored.ModelConfigKeys())
+	}
+	if !strings.Contains(string(raw), `"is_vl":true`) {
+		t.Errorf("expected raw model_config to contain is_vl, got %s", string(raw))
+	}
+}
+
+// TestSynthesizeFileAuths_QoderHandlesMissingModelConfigs ensures that auth
+// files written by older builds (no model_configs key) still synthesize
+// without error — the cache simply starts empty and FetchQoderModels will
+// repopulate it.
+func TestSynthesizeFileAuths_QoderHandlesMissingModelConfigs(t *testing.T) {
+	tmpDir := t.TempDir()
+	authPath := filepath.Join(tmpDir, "qoder-old@example.com.json")
+	payload := map[string]any{
+		"type":          "qoder",
+		"email":         "old@example.com",
+		"token":         "tok",
+		"refresh_token": "rtok",
+		"user_id":       "u-1",
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(authPath, data, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tmpDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+	auths, errSynthesize := SynthesizeAuthFile(ctx, authPath, data)
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	stored, ok := auths[0].Storage.(*qoderauth.QoderTokenStorage)
+	if !ok {
+		t.Fatalf("expected *QoderTokenStorage, got %T", auths[0].Storage)
+	}
+	if stored.Email != "old@example.com" {
+		t.Errorf("expected email preserved, got %q", stored.Email)
+	}
+	if len(stored.ModelConfigKeys()) != 0 {
+		t.Errorf("expected empty cache, got %v", stored.ModelConfigKeys())
 	}
 }

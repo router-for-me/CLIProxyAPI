@@ -562,6 +562,11 @@ func (a *Auth) AccountInfo() (string, string) {
 			if v, ok := a.Metadata["email"].(string); ok {
 				email := strings.TrimSpace(v)
 				if email != "" {
+					if strings.EqualFold(a.Provider, "gemini-cli") {
+						if projectID, ok := a.Metadata["project_id"].(string); ok && strings.TrimSpace(projectID) != "" {
+							return "oauth", email + " (" + strings.TrimSpace(projectID) + ")"
+						}
+					}
 					return "oauth", email
 				}
 			}
@@ -573,6 +578,37 @@ func (a *Auth) AccountInfo() (string, string) {
 		}
 		return "api_key", ""
 	default:
+		if a.Metadata == nil {
+			return "", ""
+		}
+		if method, ok := a.Metadata["auth_method"].(string); ok {
+			switch strings.ToLower(strings.TrimSpace(method)) {
+			case "oauth":
+				for _, key := range []string{"email", "username", "name"} {
+					if value, okValue := a.Metadata[key].(string); okValue {
+						if trimmed := strings.TrimSpace(value); trimmed != "" {
+							return "oauth", trimmed
+						}
+					}
+				}
+			case "pat", "personal_access_token":
+				for _, key := range []string{"username", "email", "name", "token_preview"} {
+					if value, okValue := a.Metadata[key].(string); okValue {
+						if trimmed := strings.TrimSpace(value); trimmed != "" {
+							return "personal_access_token", trimmed
+						}
+					}
+				}
+				return "personal_access_token", ""
+			}
+		}
+		if strings.HasPrefix(strings.ToLower(a.Provider), "github") {
+			if username, ok := a.Metadata["username"].(string); ok {
+				if trimmed := strings.TrimSpace(username); trimmed != "" {
+					return "oauth", trimmed
+				}
+			}
+		}
 		return "", ""
 	}
 }

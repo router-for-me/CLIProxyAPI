@@ -106,8 +106,13 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 
 	applyAuthDisabledState(targetAuth, *req.Disabled)
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+	_, err := h.authManager.Update(ctx, targetAuth)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		return
+	}
+	if errHook := h.notifyAuthFilePersisted(ctx, targetAuth); errHook != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to refresh auth: %v", errHook)})
 		return
 	}
 
@@ -313,8 +318,13 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 
 	targetAuth.UpdatedAt = time.Now()
 
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+	updatedAuth, err := h.authManager.Update(ctx, targetAuth)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		return
+	}
+	if errHook := h.notifyAuthFilePersisted(ctx, updatedAuth); errHook != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to refresh auth: %v", errHook)})
 		return
 	}
 
@@ -459,6 +469,11 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	}
 	if _, ok := touchedRoots["disabled"]; ok {
 		syncAuthFileDisabledState(auth)
+	}
+	if _, ok := touchedRoots["excluded_models"]; ok {
+		syncAuthFileExcludedModelsAttribute(auth, touchedRoots)
+	} else if _, ok := touchedRoots["excluded-models"]; ok {
+		syncAuthFileExcludedModelsAttribute(auth, touchedRoots)
 	}
 }
 
@@ -756,4 +771,11 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 		}
 	}
 	return savedPath, nil
+}
+
+func (h *Handler) saveOAuthTokenRecord(ctx context.Context, state, provider string, record *coreauth.Auth) (string, error) {
+	if errBegin := beginOAuthSessionSave(state, provider); errBegin != nil {
+		return "", errBegin
+	}
+	return h.saveTokenRecord(ctx, record)
 }

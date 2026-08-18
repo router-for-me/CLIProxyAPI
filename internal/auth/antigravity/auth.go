@@ -125,7 +125,7 @@ func (o *AntigravityAuth) BuildAuthURL(state, redirectURI string) string {
 	}
 	params := url.Values{}
 	params.Set("access_type", "offline")
-	params.Set("client_id", ClientID)
+	params.Set("client_id", OAuthClientID())
 	params.Set("prompt", "consent")
 	params.Set("redirect_uri", redirectURI)
 	params.Set("response_type", "code")
@@ -138,8 +138,8 @@ func (o *AntigravityAuth) BuildAuthURL(state, redirectURI string) string {
 func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI string) (*TokenResponse, error) {
 	data := url.Values{}
 	data.Set("code", code)
-	data.Set("client_id", ClientID)
-	data.Set("client_secret", ClientSecret)
+	data.Set("client_id", OAuthClientID())
+	data.Set("client_secret", OAuthClientSecret())
 	data.Set("redirect_uri", redirectURI)
 	data.Set("grant_type", "authorization_code")
 

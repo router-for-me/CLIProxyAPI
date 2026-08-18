@@ -1,25 +1,54 @@
 name: pr-test-build
+run-name: >-
+  sync-validation ref=${{ inputs.ref || github.head_ref || github.ref_name }}
+  head_sha=${{ inputs.head_sha || github.event.pull_request.head.sha || github.sha }}
+  sync_pr=${{ inputs.sync_pr || github.event.pull_request.number || 'none' }}
+  upstream_sha=${{ inputs.upstream_sha || 'none' }}
 
 on:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Sync branch name for correlation
+        required: true
+        type: string
+      head_sha:
+        description: Exact sync PR head SHA to validate
+        required: true
+        type: string
+      sync_pr:
+        description: Sync PR number for correlation
+        required: true
+        type: string
+      upstream_sha:
+        description: Pinned upstream commit included by the sync PR
+        required: true
+        type: string
 
 permissions:
   contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  MODELS_REPOSITORY_REF: fb13a81071567e9d772e8abc5541a6558075e5f2
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ inputs.head_sha || github.event.pull_request.head.sha || github.sha }}
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
           cache: true
       - name: Refresh models catalog
         run: bash .github/scripts/refresh-model-catalogs.sh
       - name: Build
-        run: |
-          go build -o test-output ./cmd/server
-          rm -f test-output
+        run: go build ./cmd/server
+      - name: Test
+        run: go test ./...

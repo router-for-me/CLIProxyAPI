@@ -91,8 +91,11 @@ func TestFileRequestLogger_HomeEnabled_ForwardsWhenRequestLogEnabled(t *testing.
 	logger.SetHomeEnabled(true)
 
 	requestHeaders := map[string][]string{
-		"Content-Type":  {"application/json"},
-		"Authorization": {"Bearer secret"},
+		"Content-Type":   {"application/json"},
+		"Authorization":  {"Bearer secret"},
+		"Cookie":         {"session=secret"},
+		"X-Goog-Api-Key": {"goog-secret"},
+		"X-Custom-Token": {"custom-secret"},
 	}
 
 	errLog := logger.LogRequest(
@@ -139,8 +142,16 @@ func TestFileRequestLogger_HomeEnabled_ForwardsWhenRequestLogEnabled(t *testing.
 	if got.Headers == nil || got.Headers["Content-Type"][0] != "application/json" {
 		t.Fatalf("headers.content-type = %+v, want application/json", got.Headers["Content-Type"])
 	}
-	if got.Headers == nil || got.Headers["Authorization"][0] != "Bearer secret" {
-		t.Fatalf("headers.authorization = %+v, want Bearer secret", got.Headers["Authorization"])
+	if got.Headers == nil || got.Headers["Authorization"][0] != "[REDACTED]" {
+		t.Fatalf("headers.authorization = %+v, want redacted", got.Headers["Authorization"])
+	}
+	for _, key := range []string{"Cookie", "X-Goog-Api-Key", "X-Custom-Token"} {
+		if got.Headers[key][0] != "[REDACTED]" {
+			t.Fatalf("headers[%s] = %+v, want redacted", key, got.Headers[key])
+		}
+	}
+	if bytes.Contains(stub.pushed[0], []byte("Bearer secret")) || bytes.Contains(stub.pushed[0], []byte("session=secret")) {
+		t.Fatalf("home payload leaked sensitive header: %s", string(stub.pushed[0]))
 	}
 	if got.RequestID != "req-1" {
 		t.Fatalf("request_id = %q, want req-1", got.RequestID)
@@ -346,6 +357,55 @@ func TestFileRequestLogger_HomeEnabled_ForwardsStreamingRequestID(t *testing.T) 
 	}
 	if got.RequestLog == "" {
 		t.Fatalf("request_log empty, want non-empty")
+	}
+}
+
+func TestFileRequestLogger_HomeEnabled_RedactsStreamingHeaders(t *testing.T) {
+	original := currentHomeRequestLogClient
+	defer func() {
+		currentHomeRequestLogClient = original
+	}()
+
+	stub := &stubHomeRequestLogClient{heartbeatOK: true}
+	currentHomeRequestLogClient = func() homeRequestLogClient {
+		return stub
+	}
+
+	logger := NewFileRequestLogger(true, t.TempDir(), "", 0)
+	logger.SetHomeEnabled(true)
+
+	writer := newHomeStreamingLogWriter(
+		"/v1/chat/completions",
+		http.MethodPost,
+		map[string][]string{
+			"Authorization": {"Bearer stream-secret"},
+			"Content-Type":  {"application/json"},
+		},
+		[]byte(`{"stream":true}`),
+		"req-stream",
+	)
+	if errStatus := writer.WriteStatus(http.StatusOK, map[string][]string{"Content-Type": {"text/event-stream"}}); errStatus != nil {
+		t.Fatalf("WriteStatus error: %v", errStatus)
+	}
+	writer.WriteChunkAsync([]byte(`data: {"ok":true}`))
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatalf("Close error: %v", errClose)
+	}
+
+	if len(stub.pushed) != 1 {
+		t.Fatalf("home pushed records = %d, want 1", len(stub.pushed))
+	}
+	if bytes.Contains(stub.pushed[0], []byte("Bearer stream-secret")) {
+		t.Fatalf("home streaming payload leaked authorization header: %s", string(stub.pushed[0]))
+	}
+	var got struct {
+		Headers map[string][]string `json:"headers"`
+	}
+	if errUnmarshal := json.Unmarshal(stub.pushed[0], &got); errUnmarshal != nil {
+		t.Fatalf("unmarshal payload: %v", errUnmarshal)
+	}
+	if got.Headers["Authorization"][0] != "[REDACTED]" {
+		t.Fatalf("headers.authorization = %+v, want redacted", got.Headers["Authorization"])
 	}
 }
 

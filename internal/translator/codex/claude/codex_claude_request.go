@@ -403,6 +403,9 @@ func codexClaudeTargetAcceptsGrokSignature(modelName string) bool {
 	return strings.Contains(baseModel, "grok")
 }
 
+// normalizeCodexServiceTier maps a requested service_tier to the value Codex
+// accepts. "fast" and "priority" (case-insensitive, trimmed) both resolve to
+// "priority"; any other value yields an empty string so the field is omitted.
 func normalizeCodexServiceTier(result gjson.Result) string {
 	if !result.Exists() || result.Type != gjson.String {
 		return ""

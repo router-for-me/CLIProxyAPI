@@ -1,10 +1,12 @@
-# CLI Proxy API
+# CLIProxyAPI Plus
 
-English | [中文](README_CN.md) | [日本語](README_JA.md)
+English | [Chinese](README_CN.md)
 
 If you want to use CLIProxyAPI on your desktop, we recommend our [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) desktop client. It provides a graphical configuration UI, automatic updates, system tray integration, and one-click start/stop for the CLIProxyAPI service.
 
 CLIProxyAPI is a proxy server that provides OpenAI/Gemini/Claude/Codex/Grok compatible API interfaces for CLI.
+
+All third-party provider support is maintained by community contributors; CLIProxyAPI does not provide technical support. Please contact the corresponding community maintainer if you need assistance.
 
 You can access the following providers locally and with multiple CLI accounts through any OpenAI (including Responses), Gemini (including Interactions), or Claude-compatible client or SDK.
 
@@ -123,16 +125,19 @@ PackyCode provides special discounts for our software users: register using <a h
 - OpenAI Codex support (GPT models) via OAuth login
 - Claude Code support via OAuth login
 - Grok Build support via OAuth login
+- Qoder support via OAuth login
+- Amp CLI and IDE extensions support with provider routing
 - Streaming, non-streaming, and WebSocket responses where supported
 - Function calling/tools support
 - Multimodal input support (text and images)
-- Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Grok)
-- Simple CLI authentication flows (Gemini, OpenAI, Claude, Grok)
+- Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Grok, Qoder)
+- Simple CLI authentication flows (Gemini, OpenAI, Claude, Grok, Qoder)
 - Generative Language API Key support
 - AI Studio Build multi-account load balancing
 - Claude Code multi-account load balancing
 - OpenAI Codex multi-account load balancing
 - Grok Build multi-account load balancing
+- Qoder multi-account load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
@@ -140,13 +145,45 @@ PackyCode provides special discounts for our software users: register using <a h
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+### Run with Docker
+
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to Docker Hub and GitHub Container Registry on every release tag.
+
+```sh
+# Pull a specific version (recommended)
+docker pull kaitranntt/cli-proxy-api-plus:v6.9.45-0
+
+# Or pull the latest published release
+docker pull kaitranntt/cli-proxy-api-plus:latest
+```
+
+GHCR mirror:
+
+```sh
+docker pull ghcr.io/kaitranntt/cli-proxy-api-plus:latest
+```
+
+Or use the included `docker-compose.yml` (defaults to the Docker Hub image, builds from source if `CLI_PROXY_IMAGE` is overridden):
+
+```sh
+git clone https://github.com/kaitranntt/CLIProxyAPIPlus.git
+cd CLIProxyAPIPlus
+docker compose up -d
+```
+
+Available tags:
+- Docker Hub: [`kaitranntt/cli-proxy-api-plus`](https://hub.docker.com/r/kaitranntt/cli-proxy-api-plus)
+- GHCR: [`ghcr.io/kaitranntt/cli-proxy-api-plus`](https://github.com/kaitranntt/CLIProxyAPIPlus/pkgs/container/cli-proxy-api-plus)
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
 ## Usage Statistics
 
-Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:
+Since v6.10.0, upstream CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. CLIProxyAPIPlus preserves this workflow with its usage logger and the maintained [CPAMC dashboard fork](https://github.com/kaitranntt/Cli-Proxy-API-Management-Center), which is the default management panel release stream.
+
+If you need a separate external usage service, use:
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
@@ -166,7 +203,7 @@ Full CLIProxyAPI management center with request-level monitoring and cost estima
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+This project only accepts pull requests that relate to third-party provider support. Any pull requests unrelated to third-party provider support will be rejected.
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-feature`)

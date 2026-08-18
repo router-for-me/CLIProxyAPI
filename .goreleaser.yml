@@ -1,0 +1,72 @@
+version: 2
+
+builds:
+  # GoReleaser runs on Linux without cross C toolchains in this fork. Keep the
+  # portable non-Windows archives explicit: they compile without CGO, so dynamic
+  # library plugins are not available there. Docker images are CGO-enabled.
+  - id: "cli-proxy-api-plus-no-plugin"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    main: ./cmd/server/
+    binary: cli-proxy-api-plus
+    ldflags:
+      - -s -w -X 'main.Version={{.Version}}-plus' -X 'main.Commit={{.ShortCommit}}' -X 'main.BuildDate={{.Date}}'
+  # Windows plugin loading is implemented without CGO, so these archives keep
+  # the standard release name.
+  - id: "cli-proxy-api-plus-windows"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    main: ./cmd/server/
+    binary: cli-proxy-api-plus
+    ldflags:
+      - -s -w -X 'main.Version={{.Version}}-plus' -X 'main.Commit={{.ShortCommit}}' -X 'main.BuildDate={{.Date}}'
+archives:
+  - id: "cli-proxy-api-plus-no-plugin"
+    ids:
+      - cli-proxy-api-plus-no-plugin
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{- if eq .Arch "arm64" -}}aarch64{{- else -}}{{ .Arch }}{{- end -}}_no-plugin
+    files:
+      - LICENSE
+      - README.md
+      - README_CN.md
+      - config.example.yaml
+  - id: "cli-proxy-api-plus-windows"
+    ids:
+      - cli-proxy-api-plus-windows
+    formats:
+      - zip
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{- if eq .Arch "arm64" -}}aarch64{{- else -}}{{ .Arch }}{{- end -}}
+    files:
+      - LICENSE
+      - README.md
+      - README_CN.md
+      - config.example.yaml
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'

@@ -86,7 +86,7 @@ func TestKimiExecutorClaudeRequestPreservesInternalModelSemantics(t *testing.T) 
 		Metadata:   map[string]any{"access_token": "test-token"},
 	}
 	const model = "kimi-k2.5(max)"
-	payload := []byte(`{"model":"kimi-k2.5(max)","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`)
+	payload := []byte(`{"model":"kimi-k2.5(max)","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"tools":[{"name":"lookup","description":"lookup","input_schema":{"type":"object"}}]}`)
 	response, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
 		Model:   model,
 		Payload: payload,
@@ -102,6 +102,9 @@ func TestKimiExecutorClaudeRequestPreservesInternalModelSemantics(t *testing.T) 
 	}
 	if got := gjson.GetBytes(upstreamBody, "output_config.effort").String(); got != "high" {
 		t.Fatalf("upstream output_config.effort = %q, want high", got)
+	}
+	if gjson.GetBytes(upstreamBody, "tools.0.cache_control").Exists() {
+		t.Fatalf("Kimi upstream body contains Anthropic-only cache_control: %s", upstreamBody)
 	}
 	if got := gjson.GetBytes(response.Payload, "model").String(); got != model {
 		t.Fatalf("response model = %q, want %q", got, model)
@@ -192,7 +195,7 @@ func TestKimiExecutorCountTokensUsesCanonicalUpstreamModel(t *testing.T) {
 		Attributes: map[string]string{},
 		Metadata:   map[string]any{"access_token": "test-token"},
 	}
-	payload := []byte(`{"model":"kimi-k3[1m](high)","messages":[{"role":"user","content":"hello"}]}`)
+	payload := []byte(`{"model":"kimi-k3[1m](high)","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"lookup","description":"lookup","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}]}`)
 	_, err := executor.CountTokens(ctx, auth, cliproxyexecutor.Request{
 		Model:   "kimi-k3[1m](high)",
 		Payload: payload,
@@ -208,6 +211,9 @@ func TestKimiExecutorCountTokensUsesCanonicalUpstreamModel(t *testing.T) {
 	}
 	if got := gjson.GetBytes(upstreamBody, "model").String(); got != "k3" {
 		t.Fatalf("upstream model = %q, want k3", got)
+	}
+	if gjson.GetBytes(upstreamBody, "tools.0.cache_control").Exists() {
+		t.Fatalf("Kimi count_tokens upstream body contains Anthropic-only cache_control: %s", upstreamBody)
 	}
 }
 

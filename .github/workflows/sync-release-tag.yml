@@ -1,0 +1,165 @@
+name: Sync Fork Release Tag
+run-name: sync-fork-release ref=${{ github.ref_name }} commit=${{ github.sha }}
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '47 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: sync-release-tag
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "ccs-upstream-sync[bot]"
+          git config user.email "ccs-upstream-sync@users.noreply.github.com"
+
+      - name: Fetch upstream tags
+        run: |
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
+          git fetch upstream main --tags
+
+      - name: Create and bind the fork release tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck disable=SC1091
+          . ./.ccs-fork-upstream.env
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+
+          if ! printf '%s' "${UPSTREAM_TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid UPSTREAM_TAG in .ccs-fork-upstream.env" >&2
+            exit 1
+          fi
+          if ! printf '%s' "${UPSTREAM_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "Invalid UPSTREAM_COMMIT in .ccs-fork-upstream.env" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${UPSTREAM_COMMIT}" "${HEAD_COMMIT}"; then
+            echo "${UPSTREAM_COMMIT} is not contained in ${HEAD_COMMIT}; refusing to tag." >&2
+            exit 1
+          fi
+
+          dispatch_downstream() {
+            local tag="$1"
+            local commit="$2"
+            local release_run
+            local docker_run
+
+            gh workflow run release.yaml --repo "${GITHUB_REPOSITORY}" --ref main \
+              -f tag="${tag}" -f commit="${commit}"
+            gh workflow run docker-image.yml --repo "${GITHUB_REPOSITORY}" --ref main \
+              -f tag="${tag}" -f commit="${commit}"
+
+            release_run="$(resolve_downstream_run release.yaml "goreleaser tag=${tag} commit=${commit}")"
+            docker_run="$(resolve_downstream_run docker-image.yml "docker-image tag=${tag} commit=${commit}")"
+
+            echo "Release workflow run: ${release_run}"
+            echo "Docker workflow run: ${docker_run}"
+            {
+              echo "## Downstream release dispatch"
+              echo "- tag: \`${tag}\`"
+              echo "- commit: \`${commit}\`"
+              echo "- GoReleaser run: ${release_run}"
+              echo "- Docker run: ${docker_run}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          }
+
+          resolve_downstream_run() {
+            local workflow="$1"
+            local title="$2"
+            local run_id=""
+
+            for _ in $(seq 1 12); do
+              run_id="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow "${workflow}" \
+                --event workflow_dispatch --limit 20 --json databaseId,displayTitle \
+                | jq -r --arg title "${title}" \
+                  'first(.[] | select(.displayTitle == $title) | .databaseId) // empty')"
+              if [ -n "${run_id}" ]; then
+                printf '%s' "${run_id}"
+                return 0
+              fi
+              sleep 5
+            done
+
+            echo "Unable to identify ${workflow} run for ${title}" >&2
+            return 1
+          }
+
+          latest_fork_tag() {
+            git tag --merged HEAD --list "${UPSTREAM_TAG}-[0-9]*" --sort=-v:refname | head -1
+          }
+
+          next_fork_tag() {
+            local latest="$1"
+            local suffix="0"
+
+            if [ -n "${latest}" ]; then
+              suffix="${latest##*-}"
+              suffix="$((suffix + 1))"
+            fi
+
+            printf '%s-%s' "${UPSTREAM_TAG}" "${suffix}"
+          }
+
+          has_release_relevant_changes() {
+            local base_commit="$1"
+
+            git diff --name-only "${base_commit}..HEAD" \
+              | grep -Ev '^(\.github/|docs/|plans/|.*\.md$)' \
+              | grep -q .
+          }
+
+          LATEST_FORK_TAG="$(latest_fork_tag)"
+          if [ -n "${LATEST_FORK_TAG}" ]; then
+            LATEST_FORK_COMMIT="$(git rev-list -n 1 "${LATEST_FORK_TAG}")"
+
+            if [ "${LATEST_FORK_COMMIT}" = "${HEAD_COMMIT}" ]; then
+              if gh release view "${LATEST_FORK_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+                echo "${LATEST_FORK_TAG} release already exists; nothing to tag."
+                exit 0
+              fi
+
+              echo "${LATEST_FORK_TAG} tag exists but release is missing; dispatching exact tag and commit."
+              dispatch_downstream "${LATEST_FORK_TAG}" "${HEAD_COMMIT}"
+              exit 0
+            fi
+
+            if ! git merge-base --is-ancestor "${LATEST_FORK_COMMIT}" "${HEAD_COMMIT}"; then
+              echo "${LATEST_FORK_TAG} is not an ancestor of HEAD; refusing to guess release tag." >&2
+              exit 1
+            fi
+
+            if ! has_release_relevant_changes "${LATEST_FORK_COMMIT}"; then
+              echo "No release-relevant changes since ${LATEST_FORK_TAG}; nothing to tag."
+              exit 0
+            fi
+          fi
+
+          FORK_TAG="$(next_fork_tag "${LATEST_FORK_TAG}")"
+          echo "Creating ${FORK_TAG} for upstream ${UPSTREAM_TAG} at ${HEAD_COMMIT}."
+          git tag -a "${FORK_TAG}" -m "CLIProxyAPIPlus ${FORK_TAG} (upstream ${UPSTREAM_TAG} ${UPSTREAM_COMMIT})"
+          git push origin "refs/tags/${FORK_TAG}"
+          dispatch_downstream "${FORK_TAG}" "${HEAD_COMMIT}"

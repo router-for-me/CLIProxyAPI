@@ -7,10 +7,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	antigravityauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -114,9 +116,15 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 		ctx = context.Background()
 	}
 	refreshToken = strings.TrimSpace(refreshToken)
+	clientID := antigravityOAuthClientValue(auth, "client_id", antigravityClientIDEnv)
+	clientSecret := antigravityOAuthClientValue(auth, "client_secret", antigravityClientSecretEnv)
+	if clientID == "" || clientSecret == "" {
+		return auth, statusErr{code: http.StatusUnauthorized, msg: "missing Antigravity OAuth client credentials"}
+	}
 
-	result, errRefresh, _ := antigravityRefreshGroup.Do(refreshToken, func() (interface{}, error) {
-		return e.refreshTokenSingleFlight(context.WithoutCancel(ctx), auth, refreshToken)
+	refreshKey := clientID + "\x00" + refreshToken
+	result, errRefresh, _ := antigravityRefreshGroup.Do(refreshKey, func() (interface{}, error) {
+		return e.refreshTokenSingleFlight(context.WithoutCancel(ctx), auth, refreshToken, clientID, clientSecret)
 	})
 	if errRefresh != nil {
 		return auth, errRefresh
@@ -145,10 +153,29 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	return auth, nil
 }
 
-func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth *cliproxyauth.Auth, refreshToken string) (*antigravityTokenRefreshData, error) {
+func antigravityOAuthClientValue(auth *cliproxyauth.Auth, key string, envName string) string {
+	if auth != nil {
+		if value := metaStringValue(auth.Metadata, key); value != "" {
+			return value
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv(envName)); value != "" {
+		return value
+	}
+	switch envName {
+	case antigravityClientIDEnv:
+		return antigravityauth.DefaultClientID
+	case antigravityClientSecretEnv:
+		return antigravityauth.DefaultClientSecret
+	default:
+		return ""
+	}
+}
+
+func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth *cliproxyauth.Auth, refreshToken, clientID, clientSecret string) (*antigravityTokenRefreshData, error) {
 	form := url.Values{}
-	form.Set("client_id", antigravityClientID)
-	form.Set("client_secret", antigravityClientSecret)
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 

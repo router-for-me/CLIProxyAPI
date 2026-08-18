@@ -571,7 +571,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		updated.Runtime = auth.Runtime
 	}
 	updated.LastRefreshedAt = now
-	updated.NextRefreshAfter = time.Time{}
+	// Preserve a provider-specific refresh schedule when the authenticator sets one.
 	updated.LastError = nil
 	updated.StatusMessage = ""
 	updated.Unavailable = false

@@ -45,7 +45,7 @@ func cloneRuntimeValue(v reflect.Value) reflect.Value {
 		for i := 0; i < v.NumField(); i++ {
 			dst := out.Field(i)
 			if !dst.CanSet() {
-				return v
+				continue
 			}
 			dst.Set(cloneRuntimeValue(v.Field(i)))
 		}

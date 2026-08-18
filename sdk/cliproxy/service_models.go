@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
@@ -46,14 +47,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	if compatDetected {
 		provider = "openai-compatibility"
 	}
-	excluded := s.oauthExcludedModels(provider, authKind)
-	// The synthesizer pre-merges per-account and global exclusions into the "excluded_models" attribute.
-	// If this attribute is present, it represents the complete list of exclusions and overrides the global config.
-	if a.Attributes != nil {
-		if val, ok := a.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
-			excluded = strings.Split(val, ",")
-		}
-	}
+	excluded := s.effectiveAuthExcludedModels(a, provider, authKind, nil)
 	if s.tryRegisterPluginModelsForAuth(ctx, a, provider, authKind, excluded) {
 		return
 	}
@@ -73,6 +67,8 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case constant.GeminiCLI:
+		models = applyExcludedModels(registry.GetGeminiCLIModels(), excluded)
 	case constant.GeminiInteractions:
 		models = registry.GetGeminiModels()
 		if entry := s.resolveConfigInteractionsKey(a); entry != nil {
@@ -144,6 +140,20 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case "kimi":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
+	case "cursor":
+		models = applyExcludedModels(executor.FetchCursorModels(ctx, a, s.cfg), excluded)
+	case "github-copilot":
+		models = applyExcludedModels(executor.FetchGitHubCopilotModels(ctx, a, s.cfg), excluded)
+	case "kiro":
+		models = applyExcludedModels(s.fetchKiroModelsContext(ctx, a), excluded)
+	case "kilo":
+		models = applyExcludedModels(executor.FetchKiloModels(ctx, a, s.cfg), excluded)
+	case "gitlab":
+		models = applyExcludedModels(executor.GitLabModelsFromAuth(a), excluded)
+	case "codebuddy":
+		models = applyExcludedModels(registry.GetCodeBuddyModels(), excluded)
+	case "qoder":
+		models = applyExcludedModels(executor.FetchQoderModels(ctx, a, s.cfg), excluded)
 	case "xai":
 		models = registry.GetXAIModels()
 		if entry := s.resolveConfigXAIKey(a); entry != nil {
@@ -536,6 +546,47 @@ func (s *Service) oauthExcludedModels(provider, authKind string) []string {
 		return nil
 	}
 	return cfg.OAuthExcludedModels[providerKey]
+}
+
+func (s *Service) effectiveAuthExcludedModels(auth *coreauth.Auth, provider, authKind string, fallback []string) []string {
+	return mergeExcludedModels(
+		fallback,
+		s.oauthExcludedModels(provider, authKind),
+		excludedModelsFromAuthAttributes(auth),
+	)
+}
+
+func excludedModelsFromAuthAttributes(auth *coreauth.Auth) []string {
+	if auth == nil || auth.Attributes == nil {
+		return nil
+	}
+	value := strings.TrimSpace(auth.Attributes["excluded_models"])
+	if value == "" {
+		return nil
+	}
+	return strings.Split(value, ",")
+}
+
+func mergeExcludedModels(lists ...[]string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, list := range lists {
+		for _, item := range list {
+			trimmed := strings.ToLower(strings.TrimSpace(item))
+			if trimmed == "" {
+				continue
+			}
+			if _, exists := seen[trimmed]; exists {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {

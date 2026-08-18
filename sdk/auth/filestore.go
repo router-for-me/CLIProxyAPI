@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -326,6 +327,15 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 	if disabled {
 		status = cliproxyauth.StatusDisabled
 	}
+
+	// Calculate NextRefreshAfter from expires_at (20 minutes before expiry)
+	var nextRefreshAfter time.Time
+	if expiresAtStr, ok := metadata["expires_at"].(string); ok && expiresAtStr != "" {
+		if expiresAt, err := time.Parse(time.RFC3339, expiresAtStr); err == nil {
+			nextRefreshAfter = expiresAt.Add(-20 * time.Minute)
+		}
+	}
+
 	auth := &cliproxyauth.Auth{
 		ID:       id,
 		Provider: provider,
@@ -342,10 +352,21 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 		CreatedAt:        info.ModTime(),
 		UpdatedAt:        info.ModTime(),
 		LastRefreshedAt:  time.Time{},
-		NextRefreshAfter: time.Time{},
+		NextRefreshAfter: nextRefreshAfter,
 	}
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
+	}
+	if provider == "qoder" {
+		var storage qoderauth.QoderTokenStorage
+		if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
+			if errUnmarshal := json.Unmarshal(raw, &storage); errUnmarshal == nil {
+				if strings.TrimSpace(storage.Type) == "" {
+					storage.Type = "qoder"
+				}
+				auth.Storage = &storage
+			}
+		}
 	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return []*cliproxyauth.Auth{auth}, nil

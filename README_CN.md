@@ -1,10 +1,10 @@
-# CLI Proxy API
+# CLIProxyAPI Plus
 
-[English](README.md) | 中文 | [日本語](README_JA.md)
+[English](README.md) | 中文
 
 如果您想在您的桌面使用 CLIProxyAPI，我们推荐您使用我们的 [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) 桌面客户端，该客户端提供了图形化的配置界面、自动更新、系统托盘集成、一键启动/关闭 CLIProxyAPI 服务等功能。
 
-CLIProxyAPI 是一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API 接口的代理服务器。
+CLIProxyAPIPlus 是一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API 接口的代理服务器。
 
 您可以通过任何与 OpenAI（包括 Responses）、Gemini（包括 Interactions）或 Claude 兼容的客户端或 SDK，以本地方式或多 CLI 账户访问以下提供商。
 
@@ -119,16 +119,18 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 - 新增 OpenAI Codex（GPT 系列）支持（OAuth 登录）
 - 新增 Claude Code 支持（OAuth 登录）
 - 新增 Grok Build 支持（OAuth 登录）
+- 新增 Qoder 支持（OAuth 登录）
 - 支持流式、非流式响应，以及受支持场景下的 WebSocket 响应
 - 函数调用/工具支持
 - 多模态输入（文本、图片）
-- 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude、Grok）
-- 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude、Grok）
+- 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude、Qwen、Grok、Qoder 与 iFlow）
+- 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude、Qwen、Grok、Qoder 与 iFlow）
 - 支持 Gemini AIStudio API 密钥
 - 支持 AI Studio Build 多账户轮询
 - 支持 Claude Code 多账户轮询
 - 支持 OpenAI Codex 多账户轮询
 - 支持 Grok Build 多账户轮询
+- 支持 Qoder 多账户轮询
 - 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
 
@@ -136,13 +138,45 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+### 使用 Docker 运行
+
+每个发布标签都会发布多架构镜像（`linux/amd64`、`linux/arm64`）到 Docker Hub 和 GitHub Container Registry。
+
+```sh
+# 拉取指定版本（推荐）
+docker pull kaitranntt/cli-proxy-api-plus:v6.9.45-0
+
+# 或拉取最新发布版本
+docker pull kaitranntt/cli-proxy-api-plus:latest
+```
+
+GHCR 镜像：
+
+```sh
+docker pull ghcr.io/kaitranntt/cli-proxy-api-plus:latest
+```
+
+也可以使用仓库内置的 `docker-compose.yml`（默认使用 Docker Hub 镜像；如需覆盖，可设置 `CLI_PROXY_IMAGE`）：
+
+```sh
+git clone https://github.com/kaitranntt/CLIProxyAPIPlus.git
+cd CLIProxyAPIPlus
+docker compose up -d
+```
+
+可用标签：
+- Docker Hub: [`kaitranntt/cli-proxy-api-plus`](https://hub.docker.com/r/kaitranntt/cli-proxy-api-plus)
+- GHCR: [`ghcr.io/kaitranntt/cli-proxy-api-plus`](https://github.com/kaitranntt/CLIProxyAPIPlus/pkgs/container/cli-proxy-api-plus)
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)
 
 ## 使用量统计
 
-自v6.10.0版本以后，CLIProxyAPI及 [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) 项目不再预置数据统计功能，如果有数据统计需求的请使用以下项目：
+自 v6.10.0 版本以后，上游 CLIProxyAPI 及 [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) 项目不再预置数据统计功能。CLIProxyAPIPlus 会通过自身的使用量日志和维护版 [CPAMC dashboard fork](https://github.com/kaitranntt/Cli-Proxy-API-Management-Center) 保留该工作流，并默认使用这个管理面板发布源。
+
+如果需要独立的外部使用量服务，请使用以下项目：
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
@@ -162,7 +196,7 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 ## 贡献
 
-欢迎贡献！请随时提交 Pull Request。
+该项目仅接受第三方供应商支持的 Pull Request。任何非第三方供应商支持的 Pull Request 都将被拒绝。
 
 1. Fork 仓库
 2. 创建您的功能分支（`git checkout -b feature/amazing-feature`）
@@ -297,11 +331,3 @@ OmniRoute 是一个面向多供应商大语言模型的 AI 网关：它提供兼
 ## 许可证
 
 此项目根据 MIT 许可证授权 - 有关详细信息，请参阅 [LICENSE](LICENSE) 文件。
-
-## 写给所有中国网友的
-
-QQ 群：188637136（满）、1081218164
-
-或
-
-Telegram 群：https://t.me/CLIProxyAPI

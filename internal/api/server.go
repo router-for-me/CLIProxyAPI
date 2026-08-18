@@ -20,6 +20,9 @@ import (
 	"github.com/gin-gonic/gin"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/modules"
+	ampmodule "github.com/router-for-me/CLIProxyAPI/v7/internal/api/modules/amp"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -81,6 +84,9 @@ type Server struct {
 
 	// management handler
 	mgmt *managementHandlers.Handler
+
+	// ampModule owns fork-maintained Amp routing and configuration reload behavior.
+	ampModule *ampmodule.AmpModule
 
 	// pluginHost owns dynamic plugin Management API route dispatch.
 	pluginHost *pluginhost.Host
@@ -224,6 +230,19 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Setup routes
 	s.setupRoutes()
+
+	s.ampModule = ampmodule.NewLegacy(accessManager, AuthMiddleware(accessManager))
+	moduleContext := modules.Context{
+		Engine:         engine,
+		BaseHandler:    s.handlers,
+		Config:         cfg,
+		AuthMiddleware: AuthMiddleware(accessManager),
+	}
+	if errRegisterModule := modules.RegisterModule(moduleContext, s.ampModule); errRegisterModule != nil {
+		log.Errorf("failed to register Amp module: %v", errRegisterModule)
+	}
+
+	kiro.NewOAuthWebHandler(cfg).RegisterRoutes(engine)
 
 	// Apply additional router configurators from options
 	if optionState.routerConfigurator != nil {

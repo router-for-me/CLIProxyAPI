@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -49,6 +51,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.homeMu.Unlock()
 	}()
 
+	s.applyUsageStatisticsConfig(s.cfg)
 	usage.StartDefault(ctx)
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
 	if homeEnabled {
@@ -71,6 +74,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.applyRetryConfig(s.cfg)
+	applyKiroRuntimeConfig(s.cfg)
 	s.configureCooldownStateStore(s.cfg)
 
 	s.registerPluginAuthParser()
@@ -213,6 +217,23 @@ func (s *Service) Run(ctx context.Context) error {
 	case errServer := <-s.serverErr:
 		return errServer
 	}
+}
+
+func applyKiroRuntimeConfig(cfg *config.Config) {
+	kiroauth.InitRateLimiterConfig(cfg)
+	kiroauth.InitSystemPromptInjectConfig(cfg)
+	kiroauth.InitTruncationDetectorConfig(cfg)
+	kiroauth.InitExtractThinkingTagConfig(cfg)
+}
+
+func (s *Service) applyUsageStatisticsConfig(cfg *config.Config) {
+	if cfg == nil {
+		internalusage.SetStatisticsEnabled(false)
+		redisqueue.SetUsageStatisticsEnabled(false)
+		return
+	}
+	internalusage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
 }
 
 // Shutdown gracefully stops background workers and the HTTP server.

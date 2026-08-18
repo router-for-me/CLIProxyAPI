@@ -3,6 +3,28 @@
 // such as AI service clients, API handlers, and data models.
 package interfaces
 
+import "time"
+
+// GCPProject represents a Google Cloud project list response.
+type GCPProject struct {
+	Projects []GCPProjectProjects `json:"projects"`
+}
+
+// GCPProjectLabels contains the labels associated with a Google Cloud project.
+type GCPProjectLabels struct {
+	GenerativeLanguage string `json:"generative-language"`
+}
+
+// GCPProjectProjects contains the fields used by Gemini CLI project selection.
+type GCPProjectProjects struct {
+	ProjectNumber string           `json:"projectNumber"`
+	ProjectID     string           `json:"projectId"`
+	Lifecycle     string           `json:"lifecycleState"`
+	Name          string           `json:"name"`
+	Labels        GCPProjectLabels `json:"labels"`
+	CreateTime    time.Time        `json:"createTime"`
+}
+
 // Content represents a single message in a conversation, with a role and parts.
 // This structure models a message exchange between a user and an AI model.
 type Content struct {
