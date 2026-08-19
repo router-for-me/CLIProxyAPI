@@ -2327,7 +2327,7 @@ func TestManagerSetSelectorConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
-=======
+
 // recordingFallbackSelector wraps a Selector and records the auth IDs passed to
 // each Pick call, so tests can assert the fallback only receives available auths.
 type recordingFallbackSelector struct {
