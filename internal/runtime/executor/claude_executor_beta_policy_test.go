@@ -48,7 +48,7 @@ func TestApplyClaudeHeaders_ConfirmedClientKeepsOAuthCredentialBetas(t *testing.
 	if parts[len(parts)-1] != claudeExtendedCacheTTLBeta {
 		t.Fatalf("Anthropic-Beta = %q, want OAuth cache trailer %s", got, claudeExtendedCacheTTLBeta)
 	}
-	if strings.Contains(got, "advisor-tool-2026-03-01") {
+	if strings.Contains(got, claudeAdvisorToolBeta) {
 		t.Fatalf("Anthropic-Beta = %q, contains stale OAuth tool beta", got)
 	}
 	if strings.Contains(got, claudeCacheDiagnosisBeta) {
@@ -99,6 +99,46 @@ func TestApplyClaudeHeaders_KnownBodyBetaStillPlacedOnAnthropic(t *testing.T) {
 	}
 	if got := req.Header.Get("Anthropic-Beta"); got != claudeContext1MBeta {
 		t.Fatalf("Anthropic-Beta = %q, want caller body beta %s", got, claudeContext1MBeta)
+	}
+}
+
+func TestApplyClaudeHeaders_AdvisorBetaFollowsCallerRequest(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-advisor-beta"}}
+	body := []byte(`{"model":"claude-opus-5","tools":[{"type":"advisor_20260301","name":"advisor"}]}`)
+
+	for _, tc := range []struct {
+		name     string
+		incoming http.Header
+		want     bool
+	}{
+		{
+			name: "requested",
+			incoming: http.Header{
+				"Anthropic-Beta": []string{claudeCodeBeta + "," + claudeAdvisorToolBeta + "," + claudeEffortBeta},
+			},
+			want: true,
+		},
+		{name: "not requested", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := newClaudeHeaderTestRequest(t, nil)
+			if err := applyClaudeHeaders(req, auth, "key-advisor-beta", false, nil,
+				body, nil, tc.incoming, false); err != nil {
+				t.Fatalf("applyClaudeHeaders() error = %v", err)
+			}
+
+			got := req.Header.Get("Anthropic-Beta")
+			advisorIndex := strings.Index(got, claudeAdvisorToolBeta)
+			if (advisorIndex >= 0) != tc.want {
+				t.Fatalf("Anthropic-Beta = %q, advisor beta present = %v, want %v", got, advisorIndex >= 0, tc.want)
+			}
+			if tc.want {
+				effortIndex := strings.Index(got, claudeEffortBeta)
+				if effortIndex < 0 || advisorIndex > effortIndex {
+					t.Fatalf("Anthropic-Beta = %q, want advisor beta before effort beta", got)
+				}
+			}
+		})
 	}
 }
 
