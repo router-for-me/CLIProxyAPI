@@ -28,8 +28,6 @@ type UsageReporter struct {
 	alias           string
 	authID          string
 	authIndex       string
-	authMu          sync.RWMutex
-	accessTokenHash string
 	authType        string
 	apiKey          string
 	source          string
@@ -37,11 +35,15 @@ type UsageReporter struct {
 	serviceTier     string
 	generate        bool
 	requestedAt     time.Time
+	quotaHeadersMu  sync.RWMutex
+	quotaHeaders    http.Header
 	ttftMu          sync.RWMutex
 	ttft            time.Duration
 	ttftStart       time.Time
 	ttftSet         bool
 	once            sync.Once
+	authMu          sync.RWMutex
+	accessTokenHash string
 }
 
 type usageExecutor interface {
@@ -266,8 +268,48 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 }
 
 func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) {
-	record.ResponseHeaders = internallogging.GetResponseHeaders(ctx)
+	record.ResponseHeaders = r.responseHeaders(ctx)
 	usage.PublishRecord(ctx, record)
+}
+
+// ObserveQuotaHeaders merges provider quota metadata that arrived outside the
+// HTTP response header block, such as Codex websocket rate-limit events.
+func (r *UsageReporter) ObserveQuotaHeaders(headers http.Header) {
+	if r == nil || len(headers) == 0 {
+		return
+	}
+	r.quotaHeadersMu.Lock()
+	if r.quotaHeaders == nil {
+		r.quotaHeaders = make(http.Header, len(headers))
+	}
+	for key, values := range headers {
+		canonicalKey := http.CanonicalHeaderKey(strings.TrimSpace(key))
+		if canonicalKey == "" {
+			continue
+		}
+		r.quotaHeaders[canonicalKey] = append([]string(nil), values...)
+	}
+	r.quotaHeadersMu.Unlock()
+}
+
+func (r *UsageReporter) responseHeaders(ctx context.Context) http.Header {
+	headers := internallogging.GetResponseHeaders(ctx)
+	if r == nil {
+		return headers
+	}
+	r.quotaHeadersMu.RLock()
+	if len(r.quotaHeaders) == 0 {
+		r.quotaHeadersMu.RUnlock()
+		return headers
+	}
+	if headers == nil {
+		headers = make(http.Header, len(r.quotaHeaders))
+	}
+	for key, values := range r.quotaHeaders {
+		headers[key] = append([]string(nil), values...)
+	}
+	r.quotaHeadersMu.RUnlock()
+	return headers
 }
 
 func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures ...usage.Failure) usage.Record {

@@ -1807,8 +1807,6 @@ func isRequestInvalidError(err error) bool {
 	}
 	var authErr *Error
 	if errors.As(err, &authErr) && authErr != nil && authErr.Message != "" {
-		// When authErr.Code is non-empty, Error() formats as "Code: Message" which
-		// breaks JSON parsing in clienterror. Re-evaluate against the raw Message body.
 		if clienterror.IsRequestFault(status, errors.New(authErr.Message)) {
 			return true
 		}

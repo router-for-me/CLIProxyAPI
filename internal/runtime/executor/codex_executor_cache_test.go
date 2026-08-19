@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -49,11 +50,11 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	if gotConversation := httpReq.Header.Get("Conversation_id"); gotConversation != "" {
 		t.Fatalf("Conversation_id = %q, want empty", gotConversation)
 	}
-	if gotSession := httpReq.Header["Session-Id"]; len(gotSession) != 1 || gotSession[0] != expectedKey {
-		t.Fatalf("Session-Id = %#v, want [%q]", gotSession, expectedKey)
+	if gotSession := httpReq.Header["Session_id"]; len(gotSession) != 1 || gotSession[0] != expectedKey {
+		t.Fatalf("Session_id = %#v, want [%q]", gotSession, expectedKey)
 	}
-	if gotLegacySession := httpReq.Header.Get("Session_id"); gotLegacySession != "" {
-		t.Fatalf("Session_id = %q, want empty", gotLegacySession)
+	if gotCanonicalSession := httpReq.Header.Get("Session-Id"); gotCanonicalSession != "" {
+		t.Fatalf("Session-Id = %q, want empty", gotCanonicalSession)
 	}
 
 	httpReq2, _, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai"), url, nil, req, req.Payload, rawJSON)
@@ -88,8 +89,8 @@ func TestCodexExecutorCacheHelper_UsesDerivedSessionUUID(t *testing.T) {
 	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != expectedKey {
 		t.Fatalf("prompt_cache_key = %q, want %q", got, expectedKey)
 	}
-	if got := httpReq.Header.Get("Session-Id"); got != expectedKey {
-		t.Fatalf("Session-Id = %q, want %q", got, expectedKey)
+	if got := httpReq.Header.Get("Session_id"); got != expectedKey {
+		t.Fatalf("Session_id = %q, want %q", got, expectedKey)
 	}
 	if _, errParse := uuid.Parse(expectedKey); errParse != nil {
 		t.Fatalf("derived prompt cache key %q is not a UUID: %v", expectedKey, errParse)
@@ -143,11 +144,11 @@ func TestCodexExecutorCacheHelper_ClaudeUsesClaudeCodeSessionID(t *testing.T) {
 	if secondKey != firstKey {
 		t.Fatalf("same Claude Code session_id produced different prompt_cache_key: first=%q second=%q", firstKey, secondKey)
 	}
-	if gotSession := firstHTTPReq.Header["Session-Id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
-		t.Fatalf("first Session-Id = %#v, want [%q]", gotSession, firstKey)
+	if gotSession := firstHTTPReq.Header["Session_id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
+		t.Fatalf("first Session_id = %#v, want [%q]", gotSession, firstKey)
 	}
-	if gotSession := secondHTTPReq.Header["Session-Id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
-		t.Fatalf("second Session-Id = %#v, want [%q]", gotSession, firstKey)
+	if gotSession := secondHTTPReq.Header["Session_id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
+		t.Fatalf("second Session_id = %#v, want [%q]", gotSession, firstKey)
 	}
 }
 
@@ -170,11 +171,11 @@ func TestCodexExecutorCacheHelper_ClaudeRejectsBareUserID(t *testing.T) {
 	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "" {
 		t.Fatalf("bare metadata.user_id must not create prompt_cache_key, got %q; body=%s", got, string(body))
 	}
-	if got := httpReq.Header["Session-Id"]; len(got) != 0 {
-		t.Fatalf("bare metadata.user_id must not create Session-Id, got %#v", got)
+	if got := httpReq.Header["Session_id"]; len(got) != 0 {
+		t.Fatalf("bare metadata.user_id must not create Session_id, got %#v", got)
 	}
-	if got := httpReq.Header.Get("Session_id"); got != "" {
-		t.Fatalf("bare metadata.user_id must not create Session_id, got %q", got)
+	if got := httpReq.Header.Get("Session-Id"); got != "" {
+		t.Fatalf("bare metadata.user_id must not create Session-Id, got %q", got)
 	}
 }
 
@@ -227,16 +228,16 @@ func TestCodexExecutorCacheHelper_IdentityConfuseRemapsBodyAndHeaders(t *testing
 	if gotWindowID := gjson.GetBytes(body, "client_metadata.x-codex-window-id").String(); gotWindowID != expectedPromptCacheKey+":0" {
 		t.Fatalf("client_metadata.x-codex-window-id = %q, want %q", gotWindowID, expectedPromptCacheKey+":0")
 	}
-	if gotHeader := httpReq.Header["Session-Id"]; len(gotHeader) != 1 || gotHeader[0] != expectedPromptCacheKey {
-		t.Fatalf("Session-Id = %#v, want [%q]", gotHeader, expectedPromptCacheKey)
+	if gotHeader := httpReq.Header["Session_id"]; len(gotHeader) != 1 || gotHeader[0] != expectedPromptCacheKey {
+		t.Fatalf("Session_id = %#v, want [%q]", gotHeader, expectedPromptCacheKey)
 	}
 	for _, headerName := range []string{"X-Client-Request-Id", "Thread-Id"} {
 		if gotHeader := httpReq.Header.Get(headerName); gotHeader != expectedPromptCacheKey {
 			t.Fatalf("%s = %q, want %q", headerName, gotHeader, expectedPromptCacheKey)
 		}
 	}
-	if gotLegacySession := httpReq.Header.Get("Session_id"); gotLegacySession != "" {
-		t.Fatalf("Session_id = %q, want empty", gotLegacySession)
+	if gotCanonicalSession := httpReq.Header.Get("Session-Id"); gotCanonicalSession != "" {
+		t.Fatalf("Session-Id = %q, want empty", gotCanonicalSession)
 	}
 	if gotWindow := httpReq.Header.Get("X-Codex-Window-Id"); gotWindow != expectedPromptCacheKey+":0" {
 		t.Fatalf("X-Codex-Window-Id = %q, want %q", gotWindow, expectedPromptCacheKey+":0")
@@ -390,5 +391,181 @@ func TestCodexExecutorCacheHelper_ClaudeAgentScopeUsesResolvedModelAcrossHTTPAnd
 	}
 	if websocketKey := gjson.GetBytes(websocketBody, "prompt_cache_key").String(); websocketKey != childKey {
 		t.Fatalf("HTTP/WebSocket prompt keys differ: http=%q websocket=%q", childKey, websocketKey)
+	}
+}
+
+func newCodexCacheHelperContext(apiKey string, headers map[string]string) context.Context {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	if apiKey != "" {
+		ginCtx.Set("userApiKey", apiKey)
+	}
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	for name, value := range headers {
+		ginCtx.Request.Header.Set(name, value)
+	}
+	return context.WithValue(context.Background(), "gin", ginCtx)
+}
+
+func TestCodexExecutorCacheHelper_OpenAIResponses_UsesSessionHeaderWhenPayloadKeyMissing(t *testing.T) {
+	ctx := newCodexCacheHelperContext("", map[string]string{"X-Session-ID": "cpa:session-123"})
+	executor := &CodexExecutor{}
+	rawJSON := []byte(`{"model":"gpt-5.5","stream":true}`)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":[]}`),
+	}
+	url := "https://example.com/responses"
+
+	httpReq, _, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), url, nil, req, req.Payload, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+
+	body, errRead := io.ReadAll(httpReq.Body)
+	if errRead != nil {
+		t.Fatalf("read request body: %v", errRead)
+	}
+	if gotKey := gjson.GetBytes(body, "prompt_cache_key").String(); gotKey != "cpa:session-123" {
+		t.Fatalf("prompt_cache_key = %q, want %q", gotKey, "cpa:session-123")
+	}
+	if gotSession := httpReq.Header.Get("Session_id"); gotSession != "cpa:session-123" {
+		t.Fatalf("Session_id = %q, want %q", gotSession, "cpa:session-123")
+	}
+}
+
+func TestCodexExecutorCacheHelper_OpenAIChatCompletions_PrefersPayloadPromptCacheKey(t *testing.T) {
+	ctx := newCodexCacheHelperContext("test-api-key", map[string]string{"X-Session-ID": "cpa:header"})
+	executor := &CodexExecutor{}
+	rawJSON := []byte(`{"model":"gpt-5.5","stream":true}`)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","messages":[],"prompt_cache_key":"cpa:body"}`),
+	}
+	url := "https://example.com/responses"
+
+	httpReq, _, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai"), url, nil, req, req.Payload, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+
+	body, errRead := io.ReadAll(httpReq.Body)
+	if errRead != nil {
+		t.Fatalf("read request body: %v", errRead)
+	}
+	if gotKey := gjson.GetBytes(body, "prompt_cache_key").String(); gotKey != "cpa:body" {
+		t.Fatalf("prompt_cache_key = %q, want %q", gotKey, "cpa:body")
+	}
+	if gotSession := httpReq.Header.Get("Session_id"); gotSession != "cpa:body" {
+		t.Fatalf("Session_id = %q, want %q", gotSession, "cpa:body")
+	}
+}
+
+func TestCodexExecutorCacheHelper_OpenAIChatCompletions_UsesSessionHeaderBeforeAPIKeyFallback(t *testing.T) {
+	ctx := newCodexCacheHelperContext("test-api-key", map[string]string{"X-Session-ID": "cpa:header"})
+	executor := &CodexExecutor{}
+	rawJSON := []byte(`{"model":"gpt-5.5","stream":true}`)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","messages":[]}`),
+	}
+	url := "https://example.com/responses"
+
+	httpReq, _, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai"), url, nil, req, req.Payload, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+
+	body, errRead := io.ReadAll(httpReq.Body)
+	if errRead != nil {
+		t.Fatalf("read request body: %v", errRead)
+	}
+	if gotKey := gjson.GetBytes(body, "prompt_cache_key").String(); gotKey != "cpa:header" {
+		t.Fatalf("prompt_cache_key = %q, want %q", gotKey, "cpa:header")
+	}
+	if gotSession := httpReq.Header.Get("Session_id"); gotSession != "cpa:header" {
+		t.Fatalf("Session_id = %q, want %q", gotSession, "cpa:header")
+	}
+}
+
+func TestCodexExecutorCacheHelper_OpenAIResponses_NormalizesDeveloperCurrentTimeForPromptCache(t *testing.T) {
+	ctx := newCodexCacheHelperContext("", nil)
+	executor := &CodexExecutor{}
+	rawJSON := []byte(`{"model":"gpt-5.5","stream":true,"prompt_cache_key":"cpa:session","input":[{"role":"developer","content":"You are powered by the model named gpt-5.5. The exact model ID is openai/gpt-5.5\nHere is some useful information about the environment you are running in:\n<env>\n  Working directory: /repo\n  Workspace root folder: /repo\n  Is directory a git repo: yes\n  Platform: linux\n  Today's date: Fri Apr 24 2026\n  Current time: 2026-04-24T05:55:01.054Z\n</env>"},{"role":"user","content":"hello"}]}`)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","prompt_cache_key":"cpa:session","input":[]}`),
+	}
+	url := "https://example.com/responses"
+
+	httpReq, _, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), url, nil, req, req.Payload, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+
+	body, errRead := io.ReadAll(httpReq.Body)
+	if errRead != nil {
+		t.Fatalf("read request body: %v", errRead)
+	}
+	content := gjson.GetBytes(body, "input.0.content").String()
+	if strings.Contains(content, "2026-04-24T05:55:01.054Z") {
+		t.Fatalf("developer current time was not normalized: %q", content)
+	}
+	if !strings.Contains(content, "Current time: 2026-04-24T00:00:00.000Z") {
+		t.Fatalf("developer current time = %q, want normalized day timestamp", content)
+	}
+}
+
+func TestCodexExecutorCacheHelper_OpenAIResponses_DoesNotNormalizeUserAuthoredDeveloperCurrentTime(t *testing.T) {
+	ctx := newCodexCacheHelperContext("", nil)
+	executor := &CodexExecutor{}
+	rawJSON := []byte(`{"model":"gpt-5.5","stream":true,"prompt_cache_key":"cpa:session","input":[{"role":"developer","content":"Use this exact timestamp for the audit window.\nCurrent time: 2026-04-24T05:55:01.054Z\nDo not change it."},{"role":"user","content":"hello"}]}`)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","prompt_cache_key":"cpa:session","input":[]}`),
+	}
+	url := "https://example.com/responses"
+
+	httpReq, _, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), url, nil, req, req.Payload, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+
+	body, errRead := io.ReadAll(httpReq.Body)
+	if errRead != nil {
+		t.Fatalf("read request body: %v", errRead)
+	}
+	content := gjson.GetBytes(body, "input.0.content").String()
+	if !strings.Contains(content, "Current time: 2026-04-24T05:55:01.054Z") {
+		t.Fatalf("developer current time was unexpectedly normalized: %q", content)
+	}
+}
+
+func TestCodexExecutorCacheHelper_OpenAIResponses_DoesNotNormalizeStructuredDeveloperContent(t *testing.T) {
+	ctx := newCodexCacheHelperContext("", nil)
+	executor := &CodexExecutor{}
+	rawJSON := []byte(`{"model":"gpt-5.5","stream":true,"prompt_cache_key":"cpa:session","input":[{"role":"developer","content":[{"type":"input_text","text":"prefix\n  Current time: 2026-04-24T05:55:01.054Z\nsuffix"}]},{"role":"user","content":"hello"}]}`)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","prompt_cache_key":"cpa:session","input":[]}`),
+	}
+	url := "https://example.com/responses"
+
+	httpReq, _, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), url, nil, req, req.Payload, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+
+	body, errRead := io.ReadAll(httpReq.Body)
+	if errRead != nil {
+		t.Fatalf("read request body: %v", errRead)
+	}
+	content := gjson.GetBytes(body, "input.0.content")
+	if !content.IsArray() {
+		t.Fatalf("developer content type changed: %s", string(body))
+	}
+	if gotText := content.Get("0.text").String(); !strings.Contains(gotText, "2026-04-24T05:55:01.054Z") {
+		t.Fatalf("structured developer content was unexpectedly normalized: %q", gotText)
 	}
 }
