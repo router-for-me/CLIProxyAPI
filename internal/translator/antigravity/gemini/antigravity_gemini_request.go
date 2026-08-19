@@ -639,6 +639,35 @@ type FunctionCallGroup struct {
 	CallNames       []string // ordered function call names for backfilling empty response names
 }
 
+func normalizeAntigravityInlineDataPart(part gjson.Result) ([]byte, bool) {
+	var inline gjson.Result
+	if rawInline := part.Get("inlineData"); rawInline.Exists() {
+		inline = rawInline
+	} else if rawInline := part.Get("inline_data"); rawInline.Exists() {
+		inline = rawInline
+	} else {
+		return nil, false
+	}
+
+	data := inline.Get("data").String()
+	if data == "" {
+		return nil, false
+	}
+
+	mimeType := inline.Get("mimeType").String()
+	if mimeType == "" {
+		mimeType = inline.Get("mime_type").String()
+	}
+	if mimeType == "" {
+		mimeType = "image/png"
+	}
+
+	out := []byte(`{"inlineData":{"mimeType":"","data":""}}`)
+	out, _ = sjson.SetBytes(out, "inlineData.mimeType", mimeType)
+	out, _ = sjson.SetBytes(out, "inlineData.data", data)
+	return out, true
+}
+
 // parseFunctionResponseRaw attempts to normalize a function response part into a JSON object string.
 // Falls back to a minimal "functionResponse" object when parsing fails.
 // fallbackName is used when the response's own name is empty.
@@ -751,15 +780,27 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 
 		// Check if this content has function responses
 		var responsePartsInThisContent []gjson.Result
+		var imagePartsInThisContent [][]byte
 		parts.ForEach(func(_, part gjson.Result) bool {
 			if part.Get("functionResponse").Exists() {
 				responsePartsInThisContent = append(responsePartsInThisContent, part)
+			} else if imagePart, ok := normalizeAntigravityInlineDataPart(part); ok {
+				imagePartsInThisContent = append(imagePartsInThisContent, imagePart)
 			}
 			return true
 		})
 
 		// If this content has function responses, collect them
 		if len(responsePartsInThisContent) > 0 {
+			if len(imagePartsInThisContent) > 0 {
+				lastIdx := len(responsePartsInThisContent) - 1
+				target := []byte(responsePartsInThisContent[lastIdx].Raw)
+				for _, img := range imagePartsInThisContent {
+					target, _ = sjson.SetRawBytes(target, "functionResponse.parts.-1", img)
+				}
+				responsePartsInThisContent[lastIdx] = gjson.ParseBytes(target)
+			}
+
 			collectedResponses = append(collectedResponses, responsePartsInThisContent...)
 
 			// Check if pending groups can be satisfied (FIFO: oldest group first)

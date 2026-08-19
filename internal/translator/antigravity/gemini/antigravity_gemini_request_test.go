@@ -954,3 +954,64 @@ func TestSanitizeAntigravityClaudeGeminiRequestSignatures_LargeNumberDoesNotHalt
 		t.Fatalf("expected hidden thoughtSignature to be stripped despite large number, got %s", fcSig.Raw)
 	}
 }
+
+func TestFixCLIToolResponse_PreservesSiblingInlineDataInFunctionResponse(t *testing.T) {
+	input := `{
+		"model": "gemini-3.7-flash-high",
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [{"text": "read file"}]
+				},
+				{
+					"role": "model",
+					"parts": [
+						{"functionCall": {"name": "read", "args": {}, "id": "call_1"}, "thoughtSignature": "skip_thought_signature_validator"}
+					]
+				},
+				{
+					"role": "user",
+					"parts": [
+						{"functionResponse": {"name": "read", "response": {"result": "Read image file [image/png]"}, "id": "call_1"}},
+						{"inline_data": {"mime_type": "image/png", "data": "QUJD"}}
+					]
+				}
+			]
+		}
+	}`
+
+	result, err := fixCLIToolResponse([]byte(input))
+	if err != nil {
+		t.Fatalf("fixCLIToolResponse failed: %v", err)
+	}
+
+	contents := gjson.GetBytes(result, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 contents, got %d. Output: %s", len(contents), result)
+	}
+
+	funcContent := contents[2]
+	if funcContent.Get("role").String() != "function" {
+		t.Fatalf("expected role function, got %q. Output: %s", funcContent.Get("role").String(), result)
+	}
+
+	funcResp := funcContent.Get("parts.0.functionResponse")
+	if !funcResp.Exists() {
+		t.Fatalf("functionResponse should exist. Output: %s", result)
+	}
+	if got := funcResp.Get("id").String(); got != "call_1" {
+		t.Errorf("expected id call_1, got %q", got)
+	}
+
+	inlineData := funcResp.Get("parts.0.inlineData")
+	if !inlineData.Exists() {
+		t.Fatalf("functionResponse.parts.0.inlineData should exist. Output: %s", result)
+	}
+	if got := inlineData.Get("mimeType").String(); got != "image/png" {
+		t.Errorf("expected mimeType image/png, got %q", got)
+	}
+	if got := inlineData.Get("data").String(); got != "QUJD" {
+		t.Errorf("expected data QUJD, got %q", got)
+	}
+}
