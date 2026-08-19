@@ -830,7 +830,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								if result.RetryAfter != nil {
 									next = now.Add(*result.RetryAfter)
 								} else {
+									reused := state.Quota.NextRecoverAt.After(now)
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
+									if !reused {
+										next = applyProviderQuotaFloor(auth.Provider, next, now)
+									}
 								}
 								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
 									next = state.Quota.NextRecoverAt
@@ -1096,6 +1100,8 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	return target
 }
 
+// resetModelState fully clears a model state, including quota. Callers that are
+// reacting to a genuine success or an explicit operator reset want this.
 func resetModelState(state *ModelState, now time.Time) {
 	if state == nil {
 		return
@@ -1106,6 +1112,40 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.NextRetryAfter = time.Time{}
 	state.LastError = nil
 	state.Quota = QuotaState{}
+	state.UpdatedAt = now
+}
+
+// resetModelStateKeepingQuota clears transient error state while leaving quota
+// accounting intact.
+//
+// Registry reconciliation runs on every token refresh. Clearing quota there is
+// wrong twice over: it returns a still-exhausted credential to rotation the
+// moment its token refreshes, and it resets the backoff exponent, so the ladder
+// restarts at one second and never escalates however long the upstream quota
+// stays exhausted. Only a success or an operator reset should clear quota.
+func resetModelStateKeepingQuota(state *ModelState, now time.Time) {
+	if state == nil {
+		return
+	}
+	prev := state.Quota
+	if prev.Exceeded && prev.NextRecoverAt.After(now) {
+		// Cooldown is still open: keep the credential parked until it expires.
+		state.LastError = nil
+		state.NextRetryAfter = prev.NextRecoverAt
+		state.Unavailable = true
+		state.Status = StatusError
+		state.StatusMessage = prev.Reason
+		state.UpdatedAt = now
+		return
+	}
+	state.Unavailable = false
+	state.Status = StatusActive
+	state.StatusMessage = ""
+	state.NextRetryAfter = time.Time{}
+	state.LastError = nil
+	// Window has expired, so the credential is retryable again, but carry the
+	// exponent forward so a repeat failure escalates instead of restarting at zero.
+	state.Quota = QuotaState{BackoffLevel: prev.BackoffLevel}
 	state.UpdatedAt = now
 }
 
@@ -2002,6 +2042,39 @@ func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) 
 		return withCooldownJitter(quotaBackoffMax), prevLevel
 	}
 	return withCooldownJitter(cooldown), prevLevel + 1
+}
+
+// anthropicQuotaFloor is the minimum cooldown applied to a Claude 429 that
+// carries no upstream reset hint.
+//
+// Anthropic returns no Retry-After and no anthropic-ratelimit-unified-* headers
+// on these responses; the body message is the literal string "Error". The quota
+// window is measured in hours, so an exponential ladder starting at one second
+// spends hundreds of requests re-confirming exhaustion it already knows about.
+// Absent any signal, waiting too long costs one idle credential while retrying
+// too soon costs the whole pool.
+var anthropicQuotaFloor = 15 * time.Minute
+
+// SetAnthropicQuotaFloor overrides the Claude quota floor. A non-positive value
+// disables the floor and restores plain exponential backoff.
+func SetAnthropicQuotaFloor(d time.Duration) {
+	anthropicQuotaFloor = d
+}
+
+// applyProviderQuotaFloor raises a computed cooldown to the provider minimum when
+// the upstream response gave no reset hint. Providers that do report a reset are
+// handled earlier via RetryAfter and never reach this path.
+func applyProviderQuotaFloor(provider string, next, now time.Time) time.Time {
+	if anthropicQuotaFloor <= 0 || next.IsZero() {
+		return next
+	}
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude", "anthropic":
+		if floor := now.Add(withCooldownJitter(anthropicQuotaFloor)); floor.After(next) {
+			return floor
+		}
+	}
+	return next
 }
 
 // withCooldownJitter spreads recovery across credentials that hit the same quota

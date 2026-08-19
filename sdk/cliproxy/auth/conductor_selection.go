@@ -208,7 +208,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 			if modelStateIsClean(state) {
 				continue
 			}
-			resetModelState(state, now)
+			resetModelStateKeepingQuota(state, now)
 			changed = true
 		}
 		if len(auth.ModelStates) == 0 {
