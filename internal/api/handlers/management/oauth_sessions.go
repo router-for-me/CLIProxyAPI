@@ -12,10 +12,8 @@ import (
 )
 
 const (
-	// oauthSessionTTL must cover device-code flows (xAI ~30m, Kimi ~15m).
-	oauthSessionTTL          = 30 * time.Minute
-	oauthCompletedSessionTTL = time.Minute
-	maxOAuthStateLength      = 128
+	oauthSessionTTL     = 10 * time.Minute
+	maxOAuthStateLength = 128
 )
 
 const (
@@ -27,7 +25,6 @@ var (
 	errInvalidOAuthState      = errors.New("invalid oauth state")
 	errUnsupportedOAuthFlow   = errors.New("unsupported oauth provider")
 	errOAuthSessionNotPending = errors.New("oauth session is not pending")
-	errOAuthSessionSaving     = errors.New("oauth session credential save is already in progress")
 	errOAuthSessionExists     = errors.New("oauth session already exists")
 )
 
@@ -36,31 +33,23 @@ type oauthSession struct {
 	Status    string
 	Source    string
 	Metadata  map[string]any
-	Saving    bool
-	Completed bool
 	CreatedAt time.Time
 	ExpiresAt time.Time
 }
 
 type oauthSessionStore struct {
-	mu           sync.RWMutex
-	ttl          time.Duration
-	completedTTL time.Duration
-	sessions     map[string]oauthSession
+	mu       sync.RWMutex
+	ttl      time.Duration
+	sessions map[string]oauthSession
 }
 
 func newOAuthSessionStore(ttl time.Duration) *oauthSessionStore {
 	if ttl <= 0 {
 		ttl = oauthSessionTTL
 	}
-	completedTTL := oauthCompletedSessionTTL
-	if ttl < completedTTL {
-		completedTTL = ttl
-	}
 	return &oauthSessionStore{
-		ttl:          ttl,
-		completedTTL: completedTTL,
-		sessions:     make(map[string]oauthSession),
+		ttl:      ttl,
+		sessions: make(map[string]oauthSession),
 	}
 }
 
@@ -138,7 +127,7 @@ func (s *oauthSessionStore) SetError(state, message string) {
 
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed {
+	if !ok {
 		return
 	}
 	session.Status = message
@@ -157,15 +146,7 @@ func (s *oauthSessionStore) Complete(state string) {
 	defer s.mu.Unlock()
 
 	s.purgeExpiredLocked(now)
-	session, ok := s.sessions[state]
-	if !ok || session.Completed {
-		return
-	}
-	session.Status = ""
-	session.Metadata = nil
-	session.Completed = true
-	session.ExpiresAt = now.Add(s.completedTTL)
-	s.sessions[state] = session
+	delete(s.sessions, state)
 }
 
 func (s *oauthSessionStore) CompleteProvider(provider string, source string) int {
@@ -182,12 +163,8 @@ func (s *oauthSessionStore) CompleteProvider(provider string, source string) int
 	s.purgeExpiredLocked(now)
 	removed := 0
 	for state, session := range s.sessions {
-		if !session.Completed && strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
-			session.Status = ""
-			session.Metadata = nil
-			session.Completed = true
-			session.ExpiresAt = now.Add(s.completedTTL)
-			s.sessions[state] = session
+		if strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
+			delete(s.sessions, state)
 			removed++
 		}
 	}
@@ -220,96 +197,16 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	if !ok {
 		return false
 	}
-	if session.Completed || session.Saving {
+	if session.Status != "" {
 		return false
 	}
-	if !isOAuthSessionPendingStatus(session) {
+	if session.Source == oauthSessionSourcePlugin {
 		return false
 	}
 	if provider == "" {
 		return true
 	}
 	return strings.EqualFold(session.Provider, provider)
-}
-
-func isOAuthSessionPendingStatus(session oauthSession) bool {
-	if session.Status == "" {
-		return true
-	}
-	if !strings.EqualFold(session.Provider, "kiro") {
-		return false
-	}
-	return strings.HasPrefix(session.Status, "device_code|") || strings.HasPrefix(session.Status, "auth_url|")
-}
-
-// BeginSave atomically claims a pending OAuth session for credential
-// persistence. Once claimed, cancellation must report false because saving has
-// already won the race.
-func (s *oauthSessionStore) BeginSave(state, provider string) error {
-	state = strings.TrimSpace(state)
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	if state == "" || provider == "" {
-		return errOAuthSessionNotPending
-	}
-	now := time.Now()
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.purgeExpiredLocked(now)
-	session, ok := s.sessions[state]
-	if !ok || session.Completed || !isOAuthSessionPendingStatus(session) {
-		return errOAuthSessionNotPending
-	}
-	if session.Saving {
-		return errOAuthSessionSaving
-	}
-	if !strings.EqualFold(session.Provider, provider) {
-		return errOAuthSessionNotPending
-	}
-	session.Saving = true
-	s.sessions[state] = session
-	return nil
-}
-
-func (s *oauthSessionStore) IsSaving(state, provider string) bool {
-	state = strings.TrimSpace(state)
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	if state == "" {
-		return false
-	}
-	now := time.Now()
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.purgeExpiredLocked(now)
-	session, ok := s.sessions[state]
-	if !ok || session.Completed || !session.Saving {
-		return false
-	}
-	return provider == "" || strings.EqualFold(session.Provider, provider)
-}
-
-// Cancel removes a pending OAuth session so background waiters exit without saving credentials.
-// Returns true when a pending session was cancelled.
-func (s *oauthSessionStore) Cancel(state string) bool {
-	state = strings.TrimSpace(state)
-	if state == "" {
-		return false
-	}
-	now := time.Now()
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.purgeExpiredLocked(now)
-	session, ok := s.sessions[state]
-	if !ok || session.Completed || session.Saving || !isOAuthSessionPendingStatus(session) {
-		return false
-	}
-	delete(s.sessions, state)
-	return true
 }
 
 func cloneOAuthSessionMetadata(in map[string]any) map[string]any {
@@ -345,38 +242,22 @@ func CompletePluginOAuthSessionsByProvider(provider string) int {
 
 func GetOAuthSession(state string) (provider string, status string, ok bool) {
 	session, ok := oauthSessions.Get(state)
-	if !ok || session.Completed {
+	if !ok {
 		return "", "", false
 	}
 	return session.Provider, session.Status, true
 }
 
-func GetOAuthSessionDetails(state string) (provider string, status string, isPlugin bool, metadata map[string]any, completed bool, ok bool) {
+func GetOAuthSessionDetails(state string) (provider string, status string, isPlugin bool, metadata map[string]any, ok bool) {
 	session, ok := oauthSessions.Get(state)
 	if !ok {
-		return "", "", false, nil, false, false
+		return "", "", false, nil, false
 	}
-	return session.Provider, session.Status, session.Source == oauthSessionSourcePlugin, cloneOAuthSessionMetadata(session.Metadata), session.Completed, true
+	return session.Provider, session.Status, session.Source == oauthSessionSourcePlugin, cloneOAuthSessionMetadata(session.Metadata), true
 }
 
 func IsOAuthSessionPending(state, provider string) bool {
 	return oauthSessions.IsPending(state, provider)
-}
-
-func IsOAuthSessionSaving(state, provider string) bool {
-	return oauthSessions.IsSaving(state, provider)
-}
-
-// beginOAuthSessionSave atomically prevents cancellation from claiming success
-// once credential persistence has started.
-func beginOAuthSessionSave(state, provider string) error {
-	return oauthSessions.BeginSave(state, provider)
-}
-
-// CancelOAuthSession cancels a pending OAuth session by state.
-// Background callback and device-code waiters observe IsOAuthSessionPending as false and exit without saving credentials.
-func CancelOAuthSession(state string) bool {
-	return oauthSessions.Cancel(state)
 }
 
 func oauthSessionErrorWithCause(message string, cause error) string {
@@ -427,57 +308,15 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 		return "anthropic", nil
 	case "codex", "openai":
 		return "codex", nil
-	case "gitlab":
-		return "gitlab", nil
-	case "gemini", "google":
-		return "gemini", nil
 	case "antigravity", "anti-gravity":
 		return "antigravity", nil
 	case "xai", "x-ai", "x.ai", "grok":
 		return "xai", nil
-	case "z.ai", "zai":
+	case "zai", "bigmodel", "glm", "zhipu":
 		return "zai", nil
-	case "kiro":
-		return "kiro", nil
-	case "github":
-		return "github", nil
-	case "iflow":
-		return "iflow", nil
 	default:
 		return "", errUnsupportedOAuthFlow
 	}
-}
-
-func NormalizeOAuthCallbackProvider(provider string) (string, error) {
-	if normalized, errNormalize := NormalizeOAuthProvider(provider); errNormalize == nil {
-		return normalized, nil
-	}
-	return NormalizePluginOAuthCallbackProvider(provider)
-}
-
-func NormalizePluginOAuthCallbackProvider(provider string) (string, error) {
-	trimmed := strings.ToLower(strings.TrimSpace(provider))
-	if trimmed == "" {
-		return "", errUnsupportedOAuthFlow
-	}
-	for _, r := range trimmed {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= '0' && r <= '9':
-		case r == '-':
-		default:
-			return "", errUnsupportedOAuthFlow
-		}
-	}
-	return trimmed, nil
-}
-
-func normalizeOAuthCallbackProviderForPendingSession(provider, state string) (string, error) {
-	session, ok := oauthSessions.Get(state)
-	if ok && session.Source == oauthSessionSourcePlugin {
-		return NormalizePluginOAuthCallbackProvider(provider)
-	}
-	return NormalizeOAuthCallbackProvider(provider)
 }
 
 type oauthCallbackFilePayload struct {
@@ -487,20 +326,12 @@ type oauthCallbackFilePayload struct {
 }
 
 func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string) (string, error) {
-	canonicalProvider, err := NormalizeOAuthCallbackProvider(provider)
-	if err != nil {
-		return "", err
-	}
-	return writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
-}
-
-func writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage string) (string, error) {
 	if strings.TrimSpace(authDir) == "" {
 		return "", fmt.Errorf("auth dir is empty")
 	}
-	canonicalProvider = strings.TrimSpace(canonicalProvider)
-	if canonicalProvider == "" {
-		return "", errUnsupportedOAuthFlow
+	canonicalProvider, err := NormalizeOAuthProvider(provider)
+	if err != nil {
+		return "", err
 	}
 	if err := ValidateOAuthState(state); err != nil {
 		return "", err
@@ -527,12 +358,12 @@ func writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessag
 }
 
 func WriteOAuthCallbackFileForPendingSession(authDir, provider, state, code, errorMessage string) (string, error) {
-	canonicalProvider, err := normalizeOAuthCallbackProviderForPendingSession(provider, state)
+	canonicalProvider, err := NormalizeOAuthProvider(provider)
 	if err != nil {
 		return "", err
 	}
 	if !IsOAuthSessionPending(state, canonicalProvider) {
 		return "", errOAuthSessionNotPending
 	}
-	return writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
+	return WriteOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
 }

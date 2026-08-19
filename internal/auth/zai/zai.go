@@ -253,7 +253,7 @@ func (a *ZAIAuth) poll(ctx context.Context, init *InitResponse) (*ReadyResult, b
 	data, err := a.doEnvelope(req)
 	if err != nil {
 		// Network / HTTP / envelope errors are transient: let the caller retry.
-		return nil, false, true, err
+		return nil, false, false, err
 	}
 
 	var poll struct {

@@ -169,7 +169,7 @@ func (a *ZAIAuth) mintBizAPIKey(ctx context.Context, host, authorization string,
 			APIKey string `json:"apiKey"`
 		}
 		if err = json.Unmarshal(createData, &created); err != nil {
-			return "", fmt.Errorf("zai: parse created api key: %w", errCreate)
+			return "", fmt.Errorf("zai: parse created api key: %w", err)
 		}
 		apiKey = strings.TrimSpace(created.APIKey)
 	}

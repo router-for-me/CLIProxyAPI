@@ -19,7 +19,7 @@ import (
 // TokenStorage stores Z.AI / ZCode coding-plan credentials on disk.
 //
 // The OAuth flow mints a long-lived coding-plan token (AccessToken) that is sent
-// as the x-api-key credential to the Anthropic-compatible endpoint (BaseURL). The flow does
+// as a Bearer token to the Anthropic-compatible endpoint (BaseURL). The flow does
 // not return a refresh token; when the token is rejected the user logs in again.
 type TokenStorage struct {
 	// Type indicates the authentication provider type, always "zai" for this storage.
