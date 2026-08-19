@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"sort"
 	"strings"
@@ -2139,7 +2140,21 @@ func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) 
 		cooldown = quotaBackoffBase
 	}
 	if cooldown >= quotaBackoffMax {
-		return quotaBackoffMax, prevLevel
+		return withCooldownJitter(quotaBackoffMax), prevLevel
 	}
-	return cooldown, prevLevel + 1
+	return withCooldownJitter(cooldown), prevLevel + 1
+}
+
+// withCooldownJitter spreads recovery across credentials that hit the same quota
+// ceiling at the same moment. Without it every credential in the pool recovers in
+// lockstep, retries together, and re-trips the upstream limit.
+func withCooldownJitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	delta := int64(d) / 5 // +/-20%
+	if delta <= 0 {
+		return d
+	}
+	return time.Duration(int64(d) - delta + rand.Int63n(2*delta+1))
 }
