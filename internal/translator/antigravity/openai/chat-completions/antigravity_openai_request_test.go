@@ -421,3 +421,37 @@ func assertNoResponseSchemaAliases(t *testing.T, out []byte) {
 		}
 	}
 }
+
+func TestConvertOpenAIRequestToAntigravityTranslatesVideoURL(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3.7-flash-high",
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "Name the colours in order"},
+				{"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAAIGZ0eXBtcDQy"}}
+			]
+		}]
+	}`)
+
+	out := ConvertOpenAIRequestToAntigravity("gemini-3.7-flash-high", inputJSON, false)
+	parts := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("parts length = %d, want 2. Output: %s", len(parts), out)
+	}
+
+	if got := parts[0].Get("text").String(); got != "Name the colours in order" {
+		t.Fatalf("parts[0].text = %q, want 'Name the colours in order'", got)
+	}
+
+	inlineData := parts[1].Get("inlineData")
+	if !inlineData.Exists() {
+		t.Fatalf("parts[1].inlineData missing. Output: %s", out)
+	}
+	if got := inlineData.Get("mimeType").String(); got != "video/mp4" {
+		t.Fatalf("inlineData.mimeType = %q, want video/mp4. Output: %s", got, out)
+	}
+	if got := inlineData.Get("data").String(); got != "AAAAIGZ0eXBtcDQy" {
+		t.Fatalf("inlineData.data = %q, want AAAAIGZ0eXBtcDQy. Output: %s", got, out)
+	}
+}

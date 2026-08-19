@@ -166,6 +166,9 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if ck.RebuildMidSystemMessage {
 			attrs["rebuild_mid_system_message"] = "true"
 		}
+		if profile := strings.ToLower(strings.TrimSpace(ck.FingerprintProfile)); profile != "" {
+			attrs["fingerprint_profile"] = profile
+		}
 		if hash := diff.ComputeClaudeModelsHash(ck.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}

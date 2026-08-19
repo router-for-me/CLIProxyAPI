@@ -10,6 +10,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -125,7 +126,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 		baseURL = "https://api.anthropic.com"
 	}
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
-	oauthToken := isClaudeOAuthToken(apiKey)
+	fp := resolveClaudeFingerprintPolicy(e.cfg, auth, apiKey)
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -137,7 +138,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	incomingHeaders, claudeCodeDetection := detectIncomingClaudeCodeRequest(ctx, opts.Headers, originalPayload, true, e.cfg)
 	confirmedClaudeCode := claudeCodeDetection.Confirmed
 	claudeSessionID := ""
-	if oauthToken {
+	if fp.ProfileClaudeCodeCLI {
 		claudeSessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, originalPayload, req.Payload, confirmedClaudeCode, opts.Metadata, req.Metadata)
 	}
 	// Use streaming translation to preserve function calling, except for claude.
@@ -154,38 +155,22 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	}
 
 	directAnthropic := isAnthropicUpstreamBase(baseURL)
-	var cloaked bool
-	if directAnthropic {
-		// Claude Code's count_tokens carries only model, messages and tools, so the
-		// full Messages cloaking must not run here. Apply the parts that still have
-		// to hold: relocate the caller's system prompt into messages so its tokens
-		// stay counted, and obfuscate sensitive words exactly like the Messages path.
-		policy, settings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
-		cloaked = policy.Cloak
-		if cloaked {
-			if !settings.strictMode {
-				if errSystem := validateClaudeCallerSystemBlocks(gjson.GetBytes(body, "system")); errSystem != nil {
-					return cliproxyexecutor.Response{}, errSystem
-				}
-			}
-			body = relocateClaudeSystemPromptForCountTokens(body, settings.strictMode)
-			if len(settings.sensitiveWords) > 0 {
-				body = helps.ObfuscateSensitiveWords(body, helps.BuildSensitiveWordMatcher(settings.sensitiveWords))
+	// Claude Code's count_tokens carries only model, messages and tools, so the
+	// full Messages cloaking must not run here for any origin. Apply the parts
+	// that still have to hold: relocate the caller's system prompt into messages
+	// so its tokens stay counted, and obfuscate sensitive words exactly like the
+	// Messages path. Kimi opt-in uses the same contract.
+	policy, settings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
+	cloaked := policy.Cloak
+	if cloaked {
+		if !settings.strictMode {
+			if errSystem := validateClaudeCallerSystemBlocks(gjson.GetBytes(body, "system")); errSystem != nil {
+				return cliproxyexecutor.Response{}, errSystem
 			}
 		}
-	} else {
-		var errCloaking error
-		body, cloaked, errCloaking = applyCloaking(
-			ctx,
-			e.cfg,
-			auth,
-			body,
-			apiKey,
-			confirmedClaudeCode,
-			false,
-		)
-		if errCloaking != nil {
-			return cliproxyexecutor.Response{}, errCloaking
+		body = relocateClaudeSystemPromptForCountTokens(body, settings.strictMode)
+		if len(settings.sensitiveWords) > 0 {
+			body = helps.ObfuscateSensitiveWords(body, helps.BuildSensitiveWordMatcher(settings.sensitiveWords))
 		}
 	}
 
@@ -198,18 +183,33 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	extraBetas, body = extractAndRemoveBetas(body)
 	// Claude Code 2.1.220's beta.messages.countTokens() always appends this beta.
 	extraBetas = append(extraBetas, claudeTokenCountingBeta)
-	if oauthToken && cloaked {
+	if fp.MCPAlias && cloaked {
 		mcpAliases := resolveClaudeMCPAliasOptions(ctx)
 		body, _ = prepareClaudeOAuthToolNamesForUpstream(body, mcpAliases)
 	}
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel, helps.APIKeyModelIsCompat(req))
-	// Claude Code never sends metadata on count_tokens, and Anthropic rejects the
-	// field outright there ("metadata: Extra inputs are not permitted"). The
-	// Messages path still carries the credential identity; this endpoint must not.
-	if directAnthropic {
+	// Two different reasons converge on the same deletions, and they must stay
+	// separable.
+	//
+	// api.anthropic.com rejects these fields on count_tokens outright ("metadata:
+	// Extra inputs are not permitted"), so they have to go for every credential
+	// that lands there, opted in or not. That is upstream compatibility, not
+	// fingerprinting.
+	//
+	// Elsewhere (Kimi, delegated Anthropic Messages providers) the caller owns its
+	// body by default: a caller that deliberately sends context_management expects
+	// the token count to reflect it, so CPA must not silently rewrite the request.
+	// Only an explicit claude-code-cli profile aligns the shape, and then it aligns
+	// to the measured one: Claude Code 2.1.220 count_tokens carries exactly model,
+	// messages and tools, never a system block.
+	alignCLICountTokensShape := fp.ProfileClaudeCodeCLI
+	if directAnthropic || alignCLICountTokensShape {
 		body, _ = sjson.DeleteBytes(body, "metadata")
 		body, _ = sjson.DeleteBytes(body, "context_management")
 		body, _ = sjson.DeleteBytes(body, "diagnostics")
+	}
+	if alignCLICountTokensShape {
+		body = util.StripClaudeCodeAttributionSystem(body)
 	}
 	// Runs on the finished body: payload rules can rewrite model and messages
 	// long after translation, so an earlier check would not describe the request

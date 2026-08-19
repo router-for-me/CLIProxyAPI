@@ -10,6 +10,7 @@ import (
 
 	xxHash64 "github.com/pierrec/xxHash/xxHash64"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -145,30 +146,69 @@ func prependClaudeBillingSystemBlock(body []byte, billingText string) ([]byte, e
 	return updated, nil
 }
 
-// claudeCCHSigningEnabled applies CPA's CCH policy. Every Claude OAuth
-// request is signed, while non-OAuth requests require a supported upstream.
-func claudeCCHSigningEnabled(apiKey string, kind claudeCCHUpstreamKind, endpoint string) bool {
+func isKimiAPIEndpoint(endpoint string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Hostname(), "api.kimi.com")
+}
+
+func isKimiMessagesUpstream(auth *cliproxyauth.Auth, endpoint string) bool {
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "kimi") {
+		return true
+	}
+	return isKimiAPIEndpoint(endpoint)
+}
+
+// stripDefaultKimiClaudeCodeAttribution removes the Claude Code billing/CCH
+// attribution block from a Kimi Messages body when the caller did not opt into
+// the full CLI profile. Kimi treats the block as prompt text, so forwarding it
+// unchanged would leak CPA's attribution into the model's context. Other system
+// content is preserved.
+func stripDefaultKimiClaudeCodeAttribution(auth *cliproxyauth.Auth, endpoint string, cliFingerprint bool, body []byte) []byte {
+	if cliFingerprint || !isKimiMessagesUpstream(auth, endpoint) {
+		return body
+	}
+	return util.StripClaudeCodeAttributionSystem(body)
+}
+
+// claudeCCHSigningEnabled applies CPA's CCH policy.
+//
+// Native gate, identical in Claude Code 2.1.220 through 2.1.234:
+//
+//	s = (provider === "firstParty" && isFirstPartyBaseURL()) || provider === "vertex"
+//	      ? " cch=00000;" : ""
+//
+// where isFirstPartyBaseURL() is true when ANTHROPIC_BASE_URL is unset or its
+// host is api.anthropic.com. Every other backend (bedrock, foundry, mantle,
+// anthropicAws, anthropicGoogleCloud, gateway, any custom base URL) sends the
+// billing header without cch.
+//
+// CPA maps that onto two authorities:
+//
+//   - A real Claude OAuth credential always signs, on every upstream. CPA is the
+//     hop that restores the first-party shape: a downstream Claude Code pointed at
+//     CPA sees a non-first-party base URL and therefore omits cch itself, so the
+//     value has to be regenerated here rather than inherited.
+//   - An API key or delegated provider signs only when it explicitly opted into
+//     the claude-code-cli profile AND the upstream is one the native gate accepts.
+//     On any other gateway the billing header still goes out, but without cch, so
+//     a per-request hash cannot bust that gateway's prompt cache.
+//
+// origin is the concrete upstream URL of the request being built. CPA additionally
+// requires https and the default port, which native does not check.
+func claudeCCHSigningEnabled(apiKey string, kind claudeCCHUpstreamKind, cliFingerprint bool, origin string) bool {
 	if isClaudeOAuthToken(apiKey) {
 		return true
 	}
 	if kind == claudeCCHUpstreamVertex {
 		return true
 	}
-	if kind != claudeCCHUpstreamAnthropic {
+	if !cliFingerprint {
 		return false
 	}
-
-	parsed, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil || parsed.User != nil || !strings.EqualFold(parsed.Scheme, "https") {
-		return false
-	}
-	if !strings.EqualFold(parsed.Hostname(), "api.anthropic.com") {
-		return false
-	}
-	if port := parsed.Port(); port != "" && port != "443" {
-		return false
-	}
-	return strings.Contains(parsed.EscapedPath(), "/v1/messages")
+	return kind == claudeCCHUpstreamAnthropic && isAnthropicUpstreamBase(origin)
 }
 
 // signAnthropicMessagesBody reproduces Claude Code 2.1.220's final-body CCH.

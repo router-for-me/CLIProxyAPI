@@ -344,6 +344,11 @@ func mergeResponsesWebsocketInput(lastRequest []byte, lastResponseOutput []byte,
 	trimmedResponse := bytes.TrimSpace(lastResponseOutput)
 	if len(trimmedResponse) > 0 && trimmedResponse[0] == '[' && json.Valid(trimmedResponse) {
 		responseInput := util.ParseGJSONBytesNoCopy(trimmedResponse)
+		if inputContainsFullTranscript(responseInput) {
+			items = slices.DeleteFunc(items, func(item responsesWebsocketMergeInputItem) bool {
+				return item.itemType == "compaction_trigger"
+			})
+		}
 		var errResponse error
 		items, errResponse = appendResponsesWebsocketMergeInputResult(items, responseInput)
 		if errResponse != nil {

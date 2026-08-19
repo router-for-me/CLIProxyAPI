@@ -60,11 +60,7 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				return true
 			})
 			if len(stops) > 0 {
-				if len(stops) == 1 {
-					out, _ = sjson.SetBytes(out, "stop", stops[0])
-				} else {
-					out, _ = sjson.SetBytes(out, "stop", stops)
-				}
+				out, _ = sjson.SetBytes(out, "stop", stops)
 			}
 		}
 	}
