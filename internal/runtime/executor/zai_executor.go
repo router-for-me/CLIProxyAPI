@@ -2,158 +2,119 @@ package executor
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"strings"
 
+	zaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/zai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
-// zaiDataTag is a tag used for identifying zai data in SSE responses.
-var zaiDataTag = []byte("data:")
-
-// zaiEventTag is a tag used for identifying zai events in SSE responses.
-var zaiEventTag = []byte("event:")
-
-// ZAIExecutor is a stateless executor for z.ai GLM's Anthropic-compatible API.
+// ZAIExecutor is a stateless executor for Z.AI / ZCode (GLM) coding plans.
+//
+// The coding-plan endpoint speaks the Anthropic Messages protocol, so this
+// executor reuses ClaudeExecutor verbatim: it only points the base URL at the
+// Z.AI endpoint and lets ClaudeExecutor handle request/response translation from
+// any source format (openai, gemini, claude). The minted token is read from
+// auth metadata by claudeCreds and sent as an Authorization: Bearer header
+// (the host is not api.anthropic.com, so the x-api-key path is never taken).
 type ZAIExecutor struct {
+	ClaudeExecutor
 	cfg *config.Config
 }
 
-// NewZAIExecutor creates a new zAI executor.
+// NewZAIExecutor creates a new Z.AI executor. Both the embedded ClaudeExecutor
+// and the outer struct receive cfg so delegated calls have full configuration.
 func NewZAIExecutor(cfg *config.Config) *ZAIExecutor {
-	return &ZAIExecutor{cfg: cfg}
+	return &ZAIExecutor{ClaudeExecutor: ClaudeExecutor{cfg: cfg, providerKey: "zai"}, cfg: cfg}
 }
 
-// Identifier returns the provider identifier.
-func (e *ZAIExecutor) Identifier() string {
-	return "zai"
-}
+// Identifier returns the executor identifier used to route auths with type "zai".
+func (e *ZAIExecutor) Identifier() string { return "zai" }
 
-// PrepareRequest injects z.ai credentials into the outgoing HTTP request.
-func (e *ZAIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
-	if req == nil {
+// cloneAuthWithBaseURL returns a shallow copy of auth with a deep-copied
+// Attributes map carrying the Z.AI coding-plan base URL.
+//
+// The Auth object is shared across concurrent requests and its Attributes map is
+// documented as immutable configuration, so it must never be mutated in place:
+// an in-place write races with concurrent readers and triggers a fatal
+// "concurrent map read and map write" panic. A base URL already present on the
+// auth (or in metadata) takes precedence so deployments can override the endpoint.
+func (e *ZAIExecutor) cloneAuthWithBaseURL(auth *cliproxyauth.Auth) *cliproxyauth.Auth {
+	if auth == nil {
 		return nil
 	}
-	token, ok := zaiCreds(auth)
-	if !ok {
-		return nil
+	cloned := *auth
+	cloned.Attributes = make(map[string]string, len(auth.Attributes)+2)
+	for k, v := range auth.Attributes {
+		cloned.Attributes[k] = v
 	}
-	if strings.TrimSpace(token) != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+
+	// Point at the Z.AI coding-plan endpoint unless an override is already set.
+	if strings.TrimSpace(cloned.Attributes["base_url"]) == "" {
+		base := zaiauth.ZAIAPIBaseURL
+		if auth.Metadata != nil {
+			if v, ok := auth.Metadata["base_url"].(string); ok && strings.TrimSpace(v) != "" {
+				base = strings.TrimSpace(v)
+			}
+		}
+		cloned.Attributes["base_url"] = base
 	}
-	return nil
+
+	// The coding-plan endpoint authenticates the token via the x-api-key header
+	// (like the official ZCode client) and answers Authorization: Bearer requests
+	// with a bot/captcha challenge (HTTP 403, {"code":3007,"msg":"captcha verify
+	// failed"}). Force x-api-key so ClaudeExecutor sends the token as expected.
+	if strings.TrimSpace(cloned.Attributes["anthropic_auth_scheme"]) == "" {
+		cloned.Attributes["anthropic_auth_scheme"] = "x-api-key"
+	}
+
+	// Z.AI / BigModel are not Anthropic, so Claude "cloak mode" (Claude Code
+	// system-prompt injection, fake user IDs, sensitive-word obfuscation) must not
+	// run: it would silently rewrite GLM prompts. ClaudeExecutor defaults to "auto"
+	// and cloaks requests from non-Claude clients, so force it off here unless an
+	// operator explicitly configured a mode on the credential.
+	if strings.TrimSpace(cloned.Attributes["cloak_mode"]) == "" {
+		cloned.Attributes["cloak_mode"] = "never"
+	}
+
+	return &cloned
 }
 
-// HttpRequest injects z.ai credentials into the request and executes it.
-func (e *ZAIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
-	if req == nil {
-		return nil, fmt.Errorf("zai executor: request is nil")
-	}
-	if ctx == nil {
-		ctx = req.Context()
-	}
-	httpReq := req.WithContext(ctx)
-	if errPrepare := e.PrepareRequest(httpReq, auth); errPrepare != nil {
-		return nil, errPrepare
-	}
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	return httpClient.Do(httpReq)
-}
-
-// Execute handles non-streaming execution for z.ai.
-// It prepares the request with credentials and executes the HTTP request via HttpRequest.
+// Execute performs a non-streaming request against the Z.AI coding-plan endpoint.
 func (e *ZAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	httpResp, err := e.HttpRequest(ctx, auth, &http.Request{
-		Header: http.Header{},
-		Body:   http.NoBody,
-	})
-	if err != nil {
-		return cliproxyexecutor.Response{}, err
-	}
-	// Read the response body
-	body := make([]byte, 0, 4096)
-	if httpResp.Body != nil {
-		_, err := httpResp.Body.Read(body)
-		httpResp.Body.Close()
-		if err != nil {
-			return cliproxyexecutor.Response{}, fmt.Errorf("zai executor: read response error: %w", err)
-		}
-	}
-	return cliproxyexecutor.Response{Payload: body}, nil
+	return e.ClaudeExecutor.Execute(ctx, e.cloneAuthWithBaseURL(auth), req, opts)
 }
 
-// ExecuteStream handles streaming execution for z.ai.
-// It returns a StreamResult containing upstream headers and a channel of provider chunks.
+// ExecuteStream performs a streaming request against the Z.AI coding-plan endpoint.
 func (e *ZAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-	httpResp, err := e.HttpRequest(ctx, auth, &http.Request{
-		Header: http.Header{},
-		Body:   http.NoBody,
-	})
-	if err != nil {
-		return nil, err
-	}
-	// Create a channel to stream chunks
-	ch := make(chan cliproxyexecutor.StreamChunk, 100)
-	// Start a goroutine to read and chunk the response
-	go func() {
-		defer close(ch)
-		// Read the response body in chunks
-		reader := httpResp.Body
-		buf := make([]byte, 4096)
-		for {
-			n, readErr := reader.Read(buf)
-			if n > 0 {
-				ch <- cliproxyexecutor.StreamChunk{Payload: buf[:n]}
-			}
-			if readErr != nil {
-				break
-			}
-		}
-	}()
-	return &cliproxyexecutor.StreamResult{
-		Headers: httpResp.Header,
-		Chunks:  ch,
-	}, nil
+	return e.ClaudeExecutor.ExecuteStream(ctx, e.cloneAuthWithBaseURL(auth), req, opts)
 }
 
-// zaiCreds extracts the z.ai token from auth.
-// The z.ai provider uses a Bearer token authentication scheme.
-// The token is stored in the auth Metadata field.
-func zaiCreds(auth *cliproxyauth.Auth) (string, bool) {
-	if auth == nil || auth.Metadata == nil {
-		return "", false
-	}
-	// Token can be stored as "api_key" or "access_token" in Metadata
-	if v, ok := auth.Metadata["api_key"]; ok {
-		if token, ok := v.(string); ok && strings.TrimSpace(token) != "" {
-			return token, true
-		}
-	}
-	if v, ok := auth.Metadata["access_token"]; ok {
-		if token, ok := v.(string); ok && strings.TrimSpace(token) != "" {
-			return token, true
-		}
-	}
-	return "", false
-}
-
-// CountTokens returns the number of tokens in the given request.
-// For z.ai, this approximates based on the request payload length.
+// CountTokens proxies token counting to the Z.AI coding-plan endpoint.
 func (e *ZAIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	payload := []byte("{}")
-	if len(req.Payload) > 0 {
-		payload = req.Payload
-	}
-	count := int64(len(payload))
-	return cliproxyexecutor.Response{Payload: []byte(fmt.Sprintf(`{"input_tokens":%d,"output_tokens":0,"total_tokens":%d}`, count, count))}, nil
+	return e.ClaudeExecutor.CountTokens(ctx, e.cloneAuthWithBaseURL(auth), req, opts)
 }
 
-// Refresh attempts to refresh provider credentials and returns the updated auth state.
-func (e *ZAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	// z.ai uses static API keys, no refresh needed
+// PrepareRequest injects Z.AI credentials into a raw HTTP request. It overrides
+// the method promoted from the embedded ClaudeExecutor so requests built through
+// the public Manager helpers (PrepareHttpRequest / NewHttpRequest / HttpRequest)
+// also pass through cloneAuthWithBaseURL - applying the Z.AI base URL, the
+// x-api-key scheme and the no-cloak override instead of Claude's default Bearer
+// behavior against api.anthropic.com.
+func (e *ZAIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
+	return e.ClaudeExecutor.PrepareRequest(req, e.cloneAuthWithBaseURL(auth))
+}
+
+// HttpRequest injects Z.AI credentials and executes the request. It overrides the
+// promoted ClaudeExecutor method for the same reason as PrepareRequest.
+func (e *ZAIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
+	return e.ClaudeExecutor.HttpRequest(ctx, e.cloneAuthWithBaseURL(auth), req)
+}
+
+// Refresh is a no-op: the Z.AI coding-plan token is long-lived and the OAuth
+// flow does not return a refresh token. Re-login is required if it is revoked.
+func (e *ZAIExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	return auth, nil
 }
