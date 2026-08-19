@@ -265,3 +265,57 @@ func TestConvertOpenAIResponsesRequestToAntigravity_GeminiReasoningUsesNativeTho
 		t.Fatalf("parts[0].thoughtSignature = %q, want preserved Gemini signature. Output: %s", got, out)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToAntigravity_PreservesToolResultImage(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.7-flash-high",
+		"input": [
+			{
+				"role": "user",
+				"content": [{"type": "input_text", "text": "请帮我读取分析这张图片"}]
+			},
+			{
+				"type": "function_call",
+				"id": "fc_read",
+				"call_id": "call_read_1",
+				"name": "read",
+				"arguments": "{\"path\":\"/path/to/image.png\"}"
+			},
+			{
+				"type": "function_call_output",
+				"call_id": "call_read_1",
+				"output": [
+					{"type": "input_text", "text": "Read image file [image/png]"},
+					{"type": "input_image", "detail": "auto", "image_url": "data:image/png;base64,QUJD"}
+				]
+			}
+		]
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3.7-flash-high", []byte(inputJSON), false)
+	contents := gjson.GetBytes(out, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 contents, got %d. Output: %s", len(contents), out)
+	}
+
+	funcContent := contents[2]
+	if r := funcContent.Get("role").String(); r != "function" && r != "user" {
+		t.Fatalf("expected role function or user, got %q. Output: %s", r, out)
+	}
+
+	funcResp := funcContent.Get("parts.0.functionResponse")
+	if !funcResp.Exists() {
+		t.Fatalf("functionResponse should exist. Output: %s", out)
+	}
+
+	inlineData := funcResp.Get("parts.0.inlineData")
+	if !inlineData.Exists() {
+		t.Fatalf("expected functionResponse.parts.0.inlineData to exist, got: %s", out)
+	}
+	if got := inlineData.Get("mimeType").String(); got != "image/png" {
+		t.Errorf("expected mimeType image/png, got %q", got)
+	}
+	if got := inlineData.Get("data").String(); got != "QUJD" {
+		t.Errorf("expected data QUJD, got %q", got)
+	}
+}
