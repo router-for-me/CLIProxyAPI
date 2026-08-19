@@ -91,7 +91,7 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			out[channel] = nil
 			continue
 		}
-		seenAlias := make(map[string]struct{}, len(aliases))
+		seenEntry := make(map[string]struct{}, len(aliases))
 		clean := make([]OAuthModelAlias, 0, len(aliases))
 		for _, entry := range aliases {
 			name := strings.TrimSpace(entry.Name)
@@ -102,11 +102,14 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			if strings.EqualFold(name, alias) {
 				continue
 			}
-			aliasKey := strings.ToLower(alias)
-			if _, ok := seenAlias[aliasKey]; ok {
+			// Ordered pools allow the same alias to map to multiple upstream
+			// models for sequential failover; only fully identical entries
+			// (same name+alias pair) are duplicates.
+			entryKey := strings.ToLower(name) + "\x00" + strings.ToLower(alias)
+			if _, ok := seenEntry[entryKey]; ok {
 				continue
 			}
-			seenAlias[aliasKey] = struct{}{}
+			seenEntry[entryKey] = struct{}{}
 			clean = append(clean, OAuthModelAlias{
 				Name:         name,
 				Alias:        alias,
