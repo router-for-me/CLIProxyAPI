@@ -1,6 +1,9 @@
 package helps
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
@@ -9,6 +12,36 @@ func resetUserIDCache() {
 	userIDCacheMu.Lock()
 	userIDCache = make(map[string]userIDCacheEntry)
 	userIDCacheMu.Unlock()
+}
+
+func TestGenerateFakeUserIDUsesClaudeCode220JSONShape(t *testing.T) {
+	userID := GenerateFakeUserID()
+	if !IsValidUserID(userID) {
+		t.Fatalf("user ID %q is not valid", userID)
+	}
+	var value claudeMetadataUserID
+	if errUnmarshal := json.Unmarshal([]byte(userID), &value); errUnmarshal != nil {
+		t.Fatalf("unmarshal user ID: %v", errUnmarshal)
+	}
+	if value.AccountUUID != "" {
+		t.Fatalf("account_uuid = %q, want empty", value.AccountUUID)
+	}
+}
+
+func TestCachedUserIDUsesCachedClaudeSessionID(t *testing.T) {
+	resetUserIDCache()
+	resetSessionIDCache()
+
+	const key = "api-key-shared-session"
+	sessionID := CachedSessionID(key)
+	userID := CachedUserID(key)
+	var value claudeMetadataUserID
+	if errUnmarshal := json.Unmarshal([]byte(userID), &value); errUnmarshal != nil {
+		t.Fatalf("unmarshal user ID: %v", errUnmarshal)
+	}
+	if value.SessionID != sessionID {
+		t.Fatalf("metadata session_id = %q, header session ID = %q", value.SessionID, sessionID)
+	}
 }
 
 func TestCachedUserID_ReusesWithinTTL(t *testing.T) {
@@ -82,5 +115,82 @@ func TestCachedUserID_RenewsTTLOnHit(t *testing.T) {
 
 	if entry.expire.Sub(soon) < 30*time.Minute {
 		t.Fatalf("expected TTL to renew, got %v remaining", entry.expire.Sub(soon))
+	}
+}
+
+func TestCachedUserIDRequiredHomeReusesKVAcrossLocalCacheReset(t *testing.T) {
+	resetUserIDCache()
+	client := newFakeClaudeIDKVClient()
+	useFakeClaudeIDKVClient(t, client, true, nil)
+
+	first, errFirst := CachedUserIDRequired(context.Background(), "api-key-1")
+	if errFirst != nil {
+		t.Fatalf("CachedUserIDRequired() first error = %v", errFirst)
+	}
+	resetUserIDCache()
+	second, errSecond := CachedUserIDRequired(context.Background(), "api-key-1")
+	if errSecond != nil {
+		t.Fatalf("CachedUserIDRequired() second error = %v", errSecond)
+	}
+	if first != second {
+		t.Fatalf("user id = %q then %q, want same Home KV value", first, second)
+	}
+	if !IsValidUserID(first) {
+		t.Fatalf("user id %q is not valid", first)
+	}
+	if client.setCount != 2 {
+		t.Fatalf("KVSetNX count = %d, want 2 (session and user ID)", client.setCount)
+	}
+	if client.expireCount != 1 || client.lastExpireTTL != userIDTTL {
+		t.Fatalf("KVExpire count/ttl = %d/%v, want 1/%v", client.expireCount, client.lastExpireTTL, userIDTTL)
+	}
+	if client.lastSetTTL != userIDTTL {
+		t.Fatalf("KVSetNX ttl = %v, want %v", client.lastSetTTL, userIDTTL)
+	}
+}
+
+func TestCachedUserIDRequiredEmptyAPIKeyDoesNotUseHomeKV(t *testing.T) {
+	client := newFakeClaudeIDKVClient()
+	useFakeClaudeIDKVClient(t, client, true, nil)
+
+	value, errValue := CachedUserIDRequired(context.Background(), "")
+	if errValue != nil {
+		t.Fatalf("CachedUserIDRequired(empty) error = %v", errValue)
+	}
+	if !IsValidUserID(value) {
+		t.Fatalf("user id %q is not valid", value)
+	}
+	if client.getCount != 0 || client.setCount != 0 || client.expireCount != 0 {
+		t.Fatalf("KV calls = get %d set %d expire %d, want all zero", client.getCount, client.setCount, client.expireCount)
+	}
+}
+
+func TestCachedUserIDRequiredHomeKVFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		client *fakeClaudeIDKVClient
+	}{
+		{name: "get", client: &fakeClaudeIDKVClient{values: make(map[string][]byte), getErr: errors.New("get failed")}},
+		{name: "set", client: &fakeClaudeIDKVClient{values: make(map[string][]byte), setErr: errors.New("set failed")}},
+		{name: "expire", client: &fakeClaudeIDKVClient{values: map[string][]byte{
+			claudeUserIDKVKey("api-key-1"): []byte(GenerateFakeUserID()),
+		}, expireErr: errors.New("expire failed")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useFakeClaudeIDKVClient(t, tc.client, true, nil)
+			if _, errValue := CachedUserIDRequired(context.Background(), "api-key-1"); errValue == nil {
+				t.Fatalf("CachedUserIDRequired() error = nil, want error")
+			}
+		})
+	}
+}
+
+func TestCachedUserIDRequiredHomeRequiresReadAfterSet(t *testing.T) {
+	client := newFakeClaudeIDKVClient()
+	client.setNoPersist = true
+	useFakeClaudeIDKVClient(t, client, true, nil)
+
+	if _, errValue := CachedUserIDRequired(context.Background(), "api-key-1"); errValue == nil {
+		t.Fatalf("CachedUserIDRequired() error = nil, want missing-after-set error")
 	}
 }

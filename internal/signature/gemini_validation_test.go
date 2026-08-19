@@ -2,6 +2,10 @@ package signature
 
 import (
 	"encoding/base64"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -100,24 +104,57 @@ func TestInspectGeminiThoughtSignature_AcceptsCapturedGemini31FlashLiteEnvelope(
 	}
 }
 
-func TestInspectGeminiThoughtSignature_AcceptsGemini25Field1Envelope(t *testing.T) {
-	sig := testGemini25ThoughtSignature([]byte{0x01, 0x8f}, []byte{0x01, 0x90, 0x91})
+func TestInspectGeminiThoughtSignature_AcceptsGemini3WrappedUUIDEnvelope(t *testing.T) {
+	const providerUUID = "e24830a7-5cd6-42fe-998b-ee539e72b9c3"
+	sig := testGemini3ThoughtSignature([]byte(providerUUID))
 
 	info, err := InspectGeminiThoughtSignature(sig, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true})
 	if err != nil {
-		t.Fatalf("Gemini 2.5 field-1 envelope should be known: %v", err)
+		t.Fatalf("Gemini 3 wrapped UUID envelope should be known: %v", err)
 	}
-	if info.Envelope != GeminiThoughtSignatureEnvelopeProtobufField1 {
-		t.Fatalf("Envelope = %q, want %q", info.Envelope, GeminiThoughtSignatureEnvelopeProtobufField1)
+	if info.Envelope != GeminiThoughtSignatureEnvelopeProtobufField2 {
+		t.Fatalf("Envelope = %q, want %q", info.Envelope, GeminiThoughtSignatureEnvelopeProtobufField2)
 	}
-	if info.HasObservedMarker {
-		t.Fatal("Gemini 2.5 field-1 envelope should not be marked as 0x12")
+	if info.RecordCount != 1 {
+		t.Fatalf("RecordCount = %d, want 1", info.RecordCount)
 	}
-	if info.RecordCount != 2 {
-		t.Fatalf("RecordCount = %d, want 2", info.RecordCount)
+	if info.OpaquePayloadLen != len(providerUUID) {
+		t.Fatalf("OpaquePayloadLen = %d, want %d", info.OpaquePayloadLen, len(providerUUID))
 	}
-	if info.OpaquePayloadLen != 5 {
-		t.Fatalf("OpaquePayloadLen = %d, want 5", info.OpaquePayloadLen)
+	if provider := DetectSignatureProviderForBlock(sig, SignatureBlockKindGeminiFunctionCall); provider != SignatureProviderGemini {
+		t.Fatalf("provider = %q, want %q", provider, SignatureProviderGemini)
+	}
+}
+
+// TestInspectGeminiThoughtSignature_RejectsGemini25Field1Envelope pins the removal
+// of the repeated field-1 envelope. Gemini 2.5 is out of scope, so its signatures
+// are no longer a known envelope; they degrade to the bypass sentinel on Gemini
+// model parts instead of being replayed verbatim.
+func TestInspectGeminiThoughtSignature_RejectsGemini25Field1Envelope(t *testing.T) {
+	sig := testGemini25ThoughtSignature([]byte{0x01, 0x8f}, []byte{0x01, 0x90, 0x91})
+
+	if _, err := InspectGeminiThoughtSignature(sig, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true}); err == nil {
+		t.Fatal("Gemini 2.5 field-1 envelope should no longer be a known envelope")
+	}
+
+	info, err := InspectGeminiThoughtSignature(sig)
+	if err != nil {
+		t.Fatalf("inspection without RequireKnownEnvelope should still succeed: %v", err)
+	}
+	if info.Envelope != GeminiThoughtSignatureEnvelopeUnknown {
+		t.Fatalf("Envelope = %q, want %q", info.Envelope, GeminiThoughtSignatureEnvelopeUnknown)
+	}
+	if info.KnownEnvelope {
+		t.Fatal("KnownEnvelope should be false for the retired field-1 envelope")
+	}
+
+	// Gemini model parts still recover through the documented sentinel.
+	decision := DecideSignatureCompatibility(SignatureProviderGemini, sig, SignatureBlockKindGeminiModelPart)
+	if decision.Action != SignatureActionReplaceWithGeminiBypass {
+		t.Fatalf("action = %q, want %q", decision.Action, SignatureActionReplaceWithGeminiBypass)
+	}
+	if decision.ReplacementSignature != GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("replacement = %q, want %q", decision.ReplacementSignature, GeminiSkipThoughtSignatureValidator)
 	}
 }
 
@@ -187,7 +224,7 @@ func TestInspectGeminiThoughtSignature_RejectsInvalidBase64(t *testing.T) {
 	}
 }
 
-func TestValidateGeminiThoughtSignatures_FunctionCallRequiresSignature(t *testing.T) {
+func TestValidateGeminiThoughtSignatures_FirstFunctionCallRequiresSignature(t *testing.T) {
 	input := []byte(`{
 		"contents": [{
 			"role": "model",
@@ -199,9 +236,66 @@ func TestValidateGeminiThoughtSignatures_FunctionCallRequiresSignature(t *testin
 
 	err := ValidateGeminiThoughtSignatures(input)
 	if err == nil {
-		t.Fatal("missing functionCall thoughtSignature should fail")
+		t.Fatal("missing first functionCall thoughtSignature should fail")
 	}
-	if !strings.Contains(err.Error(), "missing thoughtSignature on functionCall") {
+	if !strings.Contains(err.Error(), "missing thoughtSignature on first functionCall") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateGeminiThoughtSignatures_AllowsUnsignedParallelSibling(t *testing.T) {
+	input := []byte(`{
+		"contents": [{
+			"role": "model",
+			"parts": [
+				{
+					"functionCall": {"id": "call-1", "name": "read_file", "args": {}},
+					"thoughtSignature": "skip_thought_signature_validator"
+				},
+				{"functionCall": {"id": "call-2", "name": "read_file", "args": {}}}
+			]
+		}]
+	}`)
+
+	if err := ValidateGeminiThoughtSignatures(input, GeminiThoughtSignatureValidationOptions{AllowBypassSentinel: true}); err != nil {
+		t.Fatalf("unsigned parallel sibling should be valid: %v", err)
+	}
+}
+
+func TestValidateGeminiThoughtSignatures_RejectsSentinelOutsideFirstFunctionCall(t *testing.T) {
+	tests := []struct {
+		name  string
+		parts string
+	}{
+		{
+			name: "parallel sibling",
+			parts: `[
+				{"functionCall":{"name":"first","args":{}},"thoughtSignature":"skip_thought_signature_validator"},
+				{"functionCall":{"name":"second","args":{}},"thoughtSignature":"skip_thought_signature_validator"}
+			]`,
+		},
+		{
+			name:  "thought part",
+			parts: `[{"text":"hidden","thought":true,"thoughtSignature":"skip_thought_signature_validator"}]`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{"contents":[{"role":"model","parts":` + tt.parts + `}]}`)
+			err := ValidateGeminiThoughtSignatures(input, GeminiThoughtSignatureValidationOptions{AllowBypassSentinel: true})
+			if err == nil || !strings.Contains(err.Error(), "allowed only on the first model functionCall") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateGeminiThoughtSignatures_RejectsNonCanonicalNestedSignature(t *testing.T) {
+	signature := testGemini3ThoughtSignature([]byte{0x01, 0x0c, 0x39})
+	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"first","args":{},"thoughtSignature":"` + signature + `"}}]}]}`)
+
+	err := ValidateGeminiThoughtSignatures(input)
+	if err == nil || !strings.Contains(err.Error(), "canonical top-level field") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -268,6 +362,26 @@ func TestValidateGeminiFunctionCallPairing_ValidParallelGroup(t *testing.T) {
 
 	if err := ValidateGeminiFunctionCallPairing(input); err != nil {
 		t.Fatalf("valid pairing failed: %v", err)
+	}
+}
+
+func TestValidateGeminiFunctionCallPairing_RejectsUserBoundaryBeforeResponse(t *testing.T) {
+	payload := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run","args":{}}}]},{"role":"user","parts":[{"text":"boundary"}]},{"role":"model","parts":[{"functionResponse":{"id":"call-1","name":"run","response":{"result":"ok"}}}]}]}`)
+	if err := ValidateGeminiFunctionCallPairing(payload); err == nil {
+		t.Fatal("user boundary before function response was accepted")
+	}
+}
+
+func TestValidateGeminiFunctionCallPairing_RejectsEmptyContentBoundaryBeforeResponse(t *testing.T) {
+	for _, boundary := range []string{
+		`{"role":"user","parts":[]}`,
+		`{"role":"user"}`,
+		`{"role":"user","parts":null}`,
+	} {
+		payload := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run","args":{}}}]},` + boundary + `,{"role":"model","parts":[{"functionResponse":{"id":"call-1","name":"run","response":{"result":"ok"}}}]}]}`)
+		if err := ValidateGeminiFunctionCallPairing(payload); err == nil {
+			t.Fatalf("content boundary %s before function response was accepted", boundary)
+		}
 	}
 }
 
@@ -390,4 +504,41 @@ func TestValidateGeminiFunctionCallPairing_RejectsSameContentInterleaving(t *tes
 	if !strings.Contains(err.Error(), "must not be interleaved") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+func TestIsValidGeminiThoughtSignature_AgyNativeSamples(t *testing.T) {
+	samplesPath, ok := agyGeminiThoughtSignatureSamplesPath()
+	if !ok {
+		t.Skip("agy gemini corpus missing; run docs/native-prompt-capture/scripts/harvest_agy_gemini_signatures.py")
+	}
+	raw, err := os.ReadFile(samplesPath)
+	if err != nil {
+		t.Fatalf("read samples: %v", err)
+	}
+	var samples []string
+	if err := json.Unmarshal(raw, &samples); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(samples) < 10 {
+		t.Fatalf("expected >=10 agy gemini thoughtSignature samples, got %d", len(samples))
+	}
+	opts := GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: false} // agy native mix includes envelopes CPA may still transport-reject separately
+	for i, sig := range samples {
+		if !IsValidGeminiThoughtSignature(sig, opts) {
+			t.Fatalf("sample %d invalid (len=%d prefix=%q)", i, len(sig), sig[:12])
+		}
+	}
+}
+
+func agyGeminiThoughtSignatureSamplesPath() (string, bool) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		return "", false
+	}
+	repo := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	path := filepath.Join(repo, "docs", "native-prompt-capture", "corpus", "agy-gemini-thought-signatures", "samples.json")
+	if _, err := os.Stat(path); err != nil {
+		return path, false
+	}
+	return path, true
 }

@@ -3,44 +3,26 @@
 // such as AI service clients, API handlers, and data models.
 package interfaces
 
-import (
-	"time"
-)
+import "time"
 
-// GCPProject represents the response structure for a Google Cloud project list request.
-// This structure is used when fetching available projects for a Google Cloud account.
+// GCPProject represents a Google Cloud project list response.
 type GCPProject struct {
-	// Projects is a list of Google Cloud projects accessible by the user.
 	Projects []GCPProjectProjects `json:"projects"`
 }
 
-// GCPProjectLabels defines the labels associated with a GCP project.
-// These labels can contain metadata about the project's purpose or configuration.
+// GCPProjectLabels contains the labels associated with a Google Cloud project.
 type GCPProjectLabels struct {
-	// GenerativeLanguage indicates if the project has generative language APIs enabled.
 	GenerativeLanguage string `json:"generative-language"`
 }
 
-// GCPProjectProjects contains details about a single Google Cloud project.
-// This includes identifying information, metadata, and configuration details.
+// GCPProjectProjects contains the fields used by Gemini CLI project selection.
 type GCPProjectProjects struct {
-	// ProjectNumber is the unique numeric identifier for the project.
-	ProjectNumber string `json:"projectNumber"`
-
-	// ProjectID is the unique string identifier for the project.
-	ProjectID string `json:"projectId"`
-
-	// LifecycleState indicates the current state of the project (e.g., "ACTIVE").
-	LifecycleState string `json:"lifecycleState"`
-
-	// Name is the human-readable name of the project.
-	Name string `json:"name"`
-
-	// Labels contains metadata labels associated with the project.
-	Labels GCPProjectLabels `json:"labels"`
-
-	// CreateTime is the timestamp when the project was created.
-	CreateTime time.Time `json:"createTime"`
+	ProjectNumber string           `json:"projectNumber"`
+	ProjectID     string           `json:"projectId"`
+	Lifecycle     string           `json:"lifecycleState"`
+	Name          string           `json:"name"`
+	Labels        GCPProjectLabels `json:"labels"`
+	CreateTime    time.Time        `json:"createTime"`
 }
 
 // Content represents a single message in a conversation, with a role and parts.

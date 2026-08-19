@@ -48,6 +48,65 @@
 // Vertex, Bedrock) and legacy ch=11 signatures. Both single-layer (E) and
 // double-layer (R) encodings are supported. Historical cache-mode modelGroup#
 // prefixes are stripped.
+//
+// # CAIS envelope (newest Claude Code models)
+//
+// Newer Claude Code models wrap the channel block in a CAIS envelope whose
+// decoded payload starts with 0x08 (top-level field 1 varint) instead of 0x12,
+// so the base64 string starts with 'C' instead of 'E'/'R'. The envelope version
+// varint in top-level field 1 is the ONLY structural difference from the layout
+// above; everything below it is unchanged.
+//
+// The channel block itself belongs to a newer schema generation that is shared
+// by both envelopes: channel_id 16, no infra field 2, plus a block kind (field
+// 8) and a context id (field 11). Observed traffic confirms this schema
+// appears under the classic 0x12 envelope too (opus-4-6/4-7/4-8, sonnet-5) and
+// under the CAIS envelope (opus-5, fable-5), so envelope form and channel schema
+// generation vary independently and must not be inferred from each other:
+//
+//	Top-level protobuf
+//	|- Field 1 (varint): envelope version [required marker, observed as 2]
+//	|- Field 2 (bytes): container [required]
+//	|  `- Field 1 (bytes): channel block [required]
+//	|     |- Field 1  (varint): channel_id [required, observed as 16]
+//	|     |- Field 3  (varint): version [optional, observed as 2]
+//	|     |- Field 5  (bytes):  ECDSA signature [required, observed as 64B]
+//	|     |- Field 6  (bytes):  model_text [required, "claude-" prefixed]
+//	|     |- Field 7  (varint): unknown [optional, observed as 1]
+//	|     |- Field 8  (bytes):  block kind [optional, observed as "thinking"]
+//	|     `- Field 11 (bytes):  context id [optional, canonical UUID]
+//	`- Field 3 (varint): trailer [optional, observed as 1]
+//
+// CAIS validation is structural rather than an exact replay of the observed
+// bytes. The payload is an opaque upstream-issued blob and rejecting it drops
+// the whole thinking block, so only the fields that actually identify the format
+// are required: the 0x08 marker, the nested container/channel block, the
+// signature bytes, and the "claude-" model text. Observed-but-incidental values
+// such as channel_id 16 or the "thinking" block kind are recorded for debugging
+// and checked only for wire type, so an upstream field bump cannot silently
+// erase conversation history.
+//
+// # Which provider emits which envelope
+//
+// Three providers serve Claude models, and the envelope depends on the model
+// generation rather than on the provider:
+//
+//   - Claude Code OAuth subscription (Claude Code Max): opus-4-5, sonnet-4-6 and
+//     every later model up to opus-5 and fable-5. Emits the CAIS envelope for
+//     the newest models (opus-5, fable-5) and the single-layer E envelope for the
+//     opus-4-6/4-7/4-8 and sonnet-5 generation — but both carry the same
+//     channel_id 16 channel schema, so only the envelope differs.
+//   - Claude Messages API: the full Claude model range, same envelopes as the
+//     Claude Code OAuth subscription.
+//   - Antigravity: only opus-4-6-think and sonnet-4-6, and always the
+//     double-layer R form on Google infrastructure (infra_google). Antigravity
+//     never issues a CAIS envelope or a single-layer E signature, and its replay
+//     path requires R form, so CompatibleAntigravityClaudeThinkingSignature
+//     rejects CAIS signatures.
+//
+// A single conversation therefore mixes envelopes whenever a user switches model
+// generations or providers, and every form must stay replayable toward the
+// provider that issued it.
 package signature
 
 import (
@@ -515,4 +574,228 @@ func decodeClaudeBytesField(raw []byte, label string) ([]byte, error) {
 		return nil, fmt.Errorf("invalid Claude signature: failed to decode %s: %w", label, protowire.ParseError(n))
 	}
 	return value, nil
+}
+
+// claudeCAISSignatureMarker is the decoded first byte identifying the CAIS
+// envelope (protobuf tag for top-level field 1, varint).
+const claudeCAISSignatureMarker = 0x08
+
+// claudeCAISModelTextPrefix is the model_text prefix that distinguishes a CAIS
+// channel block from an arbitrary protobuf payload.
+const claudeCAISModelTextPrefix = "claude-"
+
+// ClaudeCAISSignatureInfo describes the locally inspected structure of a Claude
+// CAIS thinking signature.
+type ClaudeCAISSignatureInfo struct {
+	FirstByte       byte
+	EnvelopeVersion uint64
+	ChannelID       uint64
+	ModelText       string
+	BlockKind       string
+	ContextID       string
+
+	SignatureLen int
+}
+
+// IsValidClaudeCAISSignature returns whether rawSignature is a valid Claude CAIS
+// thinking signature.
+func IsValidClaudeCAISSignature(rawSignature string) bool {
+	_, err := InspectClaudeCAISSignature(rawSignature)
+	return err == nil
+}
+
+// InspectClaudeCAISSignature decodes and validates a Claude CAIS thinking
+// signature. See the CAIS envelope section in this file's package comment for
+// the layout and for why validation is structural rather than exact.
+func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, error) {
+	sig := stripClaudeSignaturePrefix(rawSignature)
+	if sig == "" {
+		return nil, fmt.Errorf("empty signature")
+	}
+	if len(sig) > MaxClaudeThinkingSignatureLen {
+		return nil, fmt.Errorf("signature exceeds maximum length (%d bytes)", MaxClaudeThinkingSignatureLen)
+	}
+	// A payload whose first byte is 0x08 always base64-encodes to a string
+	// starting with 'C' (0x08>>2 == 2). Checking that first keeps this validator
+	// cheap on the hot paths that probe every signature, since classic Claude
+	// (E/R) and Gemini envelopes are rejected without a base64 decode.
+	if sig[0] != 'C' {
+		return nil, fmt.Errorf("invalid Claude CAIS signature: expected 'C' prefix, got %q", string(sig[0]))
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(sig)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Claude CAIS signature: base64 decode failed: %w", err)
+	}
+	if len(decoded) == 0 {
+		return nil, fmt.Errorf("invalid Claude CAIS signature: empty after decode")
+	}
+	if decoded[0] != claudeCAISSignatureMarker {
+		return nil, fmt.Errorf("invalid Claude CAIS signature: expected first byte 0x%02x, got 0x%02x", claudeCAISSignatureMarker, decoded[0])
+	}
+
+	info := &ClaudeCAISSignatureInfo{FirstByte: decoded[0]}
+
+	var container []byte
+	err = walkClaudeProtobufFields(decoded, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+		switch num {
+		case 1:
+			value, errField := decodeClaudeCAISVarint(raw, typ, "CAIS top-level field 1 envelope version")
+			if errField != nil {
+				return errField
+			}
+			info.EnvelopeVersion = value
+		case 2:
+			value, errField := decodeClaudeCAISBytes(raw, typ, "CAIS top-level field 2 container")
+			if errField != nil {
+				return errField
+			}
+			container = value
+		case 3:
+			if _, errField := decodeClaudeCAISVarint(raw, typ, "CAIS top-level field 3 trailer"); errField != nil {
+				return errField
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if container == nil {
+		return nil, fmt.Errorf("invalid Claude CAIS signature: missing top-level field 2 container")
+	}
+
+	var channelBlock []byte
+	err = walkClaudeProtobufFields(container, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+		if num != 1 {
+			return nil
+		}
+		value, errField := decodeClaudeCAISBytes(raw, typ, "CAIS container field 1 channel block")
+		if errField != nil {
+			return errField
+		}
+		channelBlock = value
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if channelBlock == nil {
+		return nil, fmt.Errorf("invalid Claude CAIS signature: missing container field 1 channel block")
+	}
+
+	var haveChannelID, haveSignatureBytes, haveModelText bool
+	err = walkClaudeProtobufFields(channelBlock, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+		switch num {
+		case 1:
+			value, errField := decodeClaudeCAISVarint(raw, typ, "CAIS channel field 1 channel_id")
+			if errField != nil {
+				return errField
+			}
+			info.ChannelID = value
+			haveChannelID = true
+		case 3:
+			if _, errField := decodeClaudeCAISVarint(raw, typ, "CAIS channel field 3 version"); errField != nil {
+				return errField
+			}
+		case 5:
+			value, errField := decodeClaudeCAISBytes(raw, typ, "CAIS channel field 5 signature bytes")
+			if errField != nil {
+				return errField
+			}
+			if len(value) == 0 {
+				return fmt.Errorf("invalid Claude CAIS signature: channel field 5 signature bytes must not be empty")
+			}
+			info.SignatureLen = len(value)
+			haveSignatureBytes = true
+		case 6:
+			value, errField := decodeClaudeCAISUTF8(raw, typ, "CAIS channel field 6 model_text")
+			if errField != nil {
+				return errField
+			}
+			if !strings.HasPrefix(value, claudeCAISModelTextPrefix) {
+				return fmt.Errorf("invalid Claude CAIS signature: channel field 6 model_text must start with %q, got %q", claudeCAISModelTextPrefix, value)
+			}
+			info.ModelText = value
+			haveModelText = true
+		case 7:
+			if _, errField := decodeClaudeCAISVarint(raw, typ, "CAIS channel field 7"); errField != nil {
+				return errField
+			}
+		case 8:
+			value, errField := decodeClaudeCAISUTF8(raw, typ, "CAIS channel field 8 block kind")
+			if errField != nil {
+				return errField
+			}
+			info.BlockKind = value
+		case 11:
+			value, errField := decodeClaudeCAISUTF8(raw, typ, "CAIS channel field 11 context id")
+			if errField != nil {
+				return errField
+			}
+			if !isCanonicalUUID(value) {
+				return fmt.Errorf("invalid Claude CAIS signature: channel field 11 context id must be a canonical UUID, got %q", value)
+			}
+			info.ContextID = value
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case !haveChannelID:
+		return nil, fmt.Errorf("invalid Claude CAIS signature: missing channel field 1 channel_id")
+	case !haveSignatureBytes:
+		return nil, fmt.Errorf("invalid Claude CAIS signature: missing channel field 5 signature bytes")
+	case !haveModelText:
+		return nil, fmt.Errorf("invalid Claude CAIS signature: missing channel field 6 model_text")
+	}
+
+	return info, nil
+}
+
+func decodeClaudeCAISVarint(raw []byte, typ protowire.Type, label string) (uint64, error) {
+	if typ != protowire.VarintType {
+		return 0, fmt.Errorf("invalid Claude CAIS signature: %s must be varint", label)
+	}
+	return decodeClaudeVarintField(raw, label)
+}
+
+func decodeClaudeCAISBytes(raw []byte, typ protowire.Type, label string) ([]byte, error) {
+	if typ != protowire.BytesType {
+		return nil, fmt.Errorf("invalid Claude CAIS signature: %s must be bytes", label)
+	}
+	return decodeClaudeBytesField(raw, label)
+}
+
+func decodeClaudeCAISUTF8(raw []byte, typ protowire.Type, label string) (string, error) {
+	value, err := decodeClaudeCAISBytes(raw, typ, label)
+	if err != nil {
+		return "", err
+	}
+	if !utf8.Valid(value) {
+		return "", fmt.Errorf("invalid Claude CAIS signature: %s must be valid UTF-8", label)
+	}
+	return string(value), nil
+}
+
+func isCanonicalUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if b != '-' {
+				return false
+			}
+		default:
+			if !((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }

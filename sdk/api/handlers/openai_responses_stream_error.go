@@ -14,6 +14,17 @@ type openAIResponsesStreamErrorChunk struct {
 	SequenceNumber int    `json:"sequence_number"`
 }
 
+type openAIResponsesStreamFailedChunk struct {
+	Type           string                              `json:"type"`
+	SequenceNumber int                                 `json:"sequence_number"`
+	Response       openAIResponsesStreamFailedResponse `json:"response"`
+}
+
+type openAIResponsesStreamFailedResponse struct {
+	Status string         `json:"status"`
+	Error  map[string]any `json:"error"`
+}
+
 func openAIResponsesStreamErrorCode(status int) string {
 	switch status {
 	case http.StatusUnauthorized:
@@ -116,4 +127,64 @@ func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNu
 		return data
 	}
 	return []byte(`{"type":"error","code":"internal_server_error","message":"internal error","sequence_number":0}`)
+}
+
+func openAIResponsesStreamFailedErrorDetail(status int, errText, code, message string) map[string]any {
+	var payload map[string]any
+	if errUnmarshal := json.Unmarshal([]byte(strings.TrimSpace(errText)), &payload); errUnmarshal == nil {
+		if errorDetail, ok := payload["error"].(map[string]any); ok {
+			return errorDetail
+		}
+		if response, ok := payload["response"].(map[string]any); ok {
+			if errorDetail, ok := response["error"].(map[string]any); ok {
+				return errorDetail
+			}
+		}
+	}
+
+	errorType := "invalid_request_error"
+	if status >= http.StatusInternalServerError {
+		errorType = "server_error"
+	}
+	return map[string]any{
+		"type":    errorType,
+		"code":    code,
+		"message": message,
+	}
+}
+
+// BuildOpenAIResponsesStreamFailedChunk builds the terminal Responses event used by official Codex clients.
+// It is intentionally separate from BuildOpenAIResponsesStreamErrorChunk so existing clients keep the legacy shape.
+func BuildOpenAIResponsesStreamFailedChunk(status int, errText string, sequenceNumber int) []byte {
+	if status <= 0 {
+		status = http.StatusInternalServerError
+	}
+	if sequenceNumber < 0 {
+		sequenceNumber = 0
+	}
+
+	legacyChunk := BuildOpenAIResponsesStreamErrorChunk(status, errText, sequenceNumber)
+	var legacyPayload openAIResponsesStreamErrorChunk
+	if errUnmarshal := json.Unmarshal(legacyChunk, &legacyPayload); errUnmarshal != nil {
+		legacyPayload.Code = openAIResponsesStreamErrorCode(status)
+		legacyPayload.Message = http.StatusText(status)
+		legacyPayload.SequenceNumber = sequenceNumber
+	}
+	if sequenceNumber == 0 && legacyPayload.SequenceNumber > 0 {
+		sequenceNumber = legacyPayload.SequenceNumber
+	}
+
+	data, errMarshal := json.Marshal(openAIResponsesStreamFailedChunk{
+		Type:           "response.failed",
+		SequenceNumber: sequenceNumber,
+		Response: openAIResponsesStreamFailedResponse{
+			Status: "failed",
+			Error:  openAIResponsesStreamFailedErrorDetail(status, errText, legacyPayload.Code, legacyPayload.Message),
+		},
+	})
+	if errMarshal == nil {
+		return data
+	}
+
+	return []byte(`{"type":"response.failed","sequence_number":0,"response":{"status":"failed","error":{"type":"server_error","code":"internal_server_error","message":"internal error"}}}`)
 }

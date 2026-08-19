@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
@@ -43,7 +44,7 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 			wantTexts:        []string{"Be helpful"},
 		},
 		{
-			name: "System role in messages",
+			name: "Message system role does not become developer",
 			inputJSON: `{
 				"model": "claude-3-opus",
 				"messages": [
@@ -51,8 +52,7 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 					{"role": "user", "content": "hello"}
 				]
 			}`,
-			wantHasDeveloper: true,
-			wantTexts:        []string{"Follow the project instructions"},
+			wantHasDeveloper: false,
 		},
 		{
 			name: "Array system field with filtered billing header",
@@ -102,6 +102,41 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToCodex_MessageSystemRoleWrapsAsUserReminder(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"system": [{"type": "text", "text": "Top-level rules"}],
+		"messages": [
+			{"role": "user", "content": "hello"},
+			{"role": "system", "content": "Follow the project instructions"},
+			{"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+			{"role": "system", "content": [{"type": "text", "text": "Use the current repo"}]}
+		]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	inputs := gjson.GetBytes(result, "input").Array()
+	if len(inputs) != 5 {
+		t.Fatalf("got %d input items, want 5: %s", len(inputs), gjson.GetBytes(result, "input").Raw)
+	}
+
+	if got := inputs[0].Get("role").String(); got != "developer" {
+		t.Fatalf("top-level system role = %q, want developer", got)
+	}
+	if got := inputs[2].Get("role").String(); got != "user" {
+		t.Fatalf("message-level system role = %q, want user", got)
+	}
+	if got := inputs[2].Get("content.0.text").String(); got != "<system-reminder>\nFollow the project instructions\n</system-reminder>" {
+		t.Fatalf("unexpected first reminder text: %q", got)
+	}
+	if got := inputs[4].Get("role").String(); got != "user" {
+		t.Fatalf("array message-level system role = %q, want user", got)
+	}
+	if got := inputs[4].Get("content.0.text").String(); got != "<system-reminder>\nUse the current repo\n</system-reminder>" {
+		t.Fatalf("unexpected second reminder text: %q", got)
+	}
+}
+
 func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 	tests := []struct {
 		name                  string
@@ -143,6 +178,85 @@ func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 
 			if got := resultJSON.Get("parallel_tool_calls").Bool(); got != tt.wantParallelToolCalls {
 				t.Fatalf("parallel_tool_calls = %v, want %v. Output: %s", got, tt.wantParallelToolCalls, string(result))
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
+	tests := []struct {
+		name            string
+		serviceTierJSON string
+		speedJSON       string
+		want            string
+		wantExists      bool
+	}{
+		{
+			name:            "Priority passes through",
+			serviceTierJSON: `"priority"`,
+			want:            "priority",
+			wantExists:      true,
+		},
+		{
+			name:            "Fast tier normalizes to priority",
+			serviceTierJSON: `"fast"`,
+			want:            "priority",
+			wantExists:      true,
+		},
+		{
+			name:            "Unsupported tier is omitted",
+			serviceTierJSON: `"default"`,
+		},
+		{
+			name:            "Non-string tier is omitted",
+			serviceTierJSON: `true`,
+		},
+		{
+			name:       "Fast speed maps to priority",
+			speedJSON:  `"fast"`,
+			want:       "priority",
+			wantExists: true,
+		},
+		{
+			name:      "Standard speed is omitted",
+			speedJSON: `"standard"`,
+		},
+		{
+			name:      "Non-string speed is omitted",
+			speedJSON: `true`,
+		},
+		{
+			name:            "Fast speed overrides unsupported Anthropic tier",
+			serviceTierJSON: `"auto"`,
+			speedJSON:       `"fast"`,
+			want:            "priority",
+			wantExists:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := []byte(`{
+				"model": "gpt-5.4",
+				"messages": [{"role": "user", "content": "Reply with OK"}]
+			}`)
+			if tt.serviceTierJSON != "" {
+				inputJSON, _ = sjson.SetRawBytes(inputJSON, "service_tier", []byte(tt.serviceTierJSON))
+			}
+			if tt.speedJSON != "" {
+				inputJSON, _ = sjson.SetRawBytes(inputJSON, "speed", []byte(tt.speedJSON))
+			}
+
+			result := ConvertClaudeRequestToCodex("gpt-5.4", inputJSON, false)
+			serviceTierResult := gjson.GetBytes(result, "service_tier")
+			if serviceTierResult.Exists() != tt.wantExists {
+				t.Fatalf("service_tier exists = %v, want %v. Output: %s", serviceTierResult.Exists(), tt.wantExists, string(result))
+			}
+			if !tt.wantExists {
+				return
+			}
+			if got := serviceTierResult.String(); got != tt.want {
+				t.Fatalf("service_tier = %q, want %q. Output: %s", got, tt.want, string(result))
 			}
 		})
 	}
@@ -391,6 +505,130 @@ func TestConvertClaudeRequestToCodex_AssistantThinkingSignatureToReasoningItem(t
 	}
 	if strings.Contains(string(result), "visible summary must not be replayed") {
 		t.Fatalf("thinking text should not be replayed into Codex input. Output: %s", string(result))
+	}
+}
+
+func TestConvertClaudeRequestToCodex_PreservesBase64PDFDocumentContent(t *testing.T) {
+	inputJSON := `{
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "before"},
+				{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}},
+				{"type": "text", "text": "after"}
+			]
+		}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("gpt-5.6-sol", []byte(inputJSON), false)
+	content := gjson.GetBytes(result, "input.0.content").Array()
+	if len(content) != 3 {
+		t.Fatalf("got %d content items, want 3. Output: %s", len(content), result)
+	}
+
+	wantTypes := []string{"input_text", "input_file", "input_text"}
+	for i, wantType := range wantTypes {
+		if got := content[i].Get("type").String(); got != wantType {
+			t.Fatalf("content[%d].type = %q, want %q. Output: %s", i, got, wantType, result)
+		}
+	}
+	if got := content[0].Get("text").String(); got != "before" {
+		t.Fatalf("content[0].text = %q, want %q", got, "before")
+	}
+	if got := content[1].Get("file_data").String(); got != "data:application/pdf;base64,JVBERi0xLjQK" {
+		t.Fatalf("content[1].file_data = %q, want PDF data URL", got)
+	}
+	if got := content[1].Get("filename").String(); got != "document.pdf" {
+		t.Fatalf("content[1].filename = %q, want %q", got, "document.pdf")
+	}
+	if got := content[2].Get("text").String(); got != "after" {
+		t.Fatalf("content[2].text = %q, want %q", got, "after")
+	}
+}
+
+func TestConvertClaudeRequestToCodex_PreservesContentOrderAcrossToolAndReasoningItems(t *testing.T) {
+	signature := validCodexReasoningSignature()
+	inputJSON := `{
+		"system": "system rules",
+		"messages": [
+			{"role":"assistant","content":[
+				{"type":"text","text":"before reasoning"},
+				{"type":"thinking","signature":"` + signature + `"},
+				{"type":"text","text":"before tool"},
+				{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"query":"test"}},
+				{"type":"text","text":"after tool"}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"toolu_1","content":[
+					{"type":"text","text":"tool output"},
+					{"type":"image","source":{"media_type":"image/png","data":"aW1hZ2U="}}
+				]},
+				{"type":"text","text":"continue"}
+			]}
+		],
+		"tools": [{"name":"lookup","input_schema":{"type":"object"}}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("gpt-5.4", []byte(inputJSON), false)
+	inputs := gjson.GetBytes(result, "input").Array()
+	if len(inputs) != 8 {
+		t.Fatalf("got %d input items, want 8. Output: %s", len(inputs), result)
+	}
+
+	wantTypes := []string{"message", "message", "reasoning", "message", "function_call", "message", "function_call_output", "message"}
+	for i := 0; i < len(wantTypes); i++ {
+		if got := inputs[i].Get("type").String(); got != wantTypes[i] {
+			t.Fatalf("input[%d].type = %q, want %q. Output: %s", i, got, wantTypes[i], result)
+		}
+	}
+
+	if got := inputs[1].Get("content.0.text").String(); got != "before reasoning" {
+		t.Fatalf("input[1] text = %q, want before reasoning", got)
+	}
+	if got := inputs[3].Get("content.0.text").String(); got != "before tool" {
+		t.Fatalf("input[3] text = %q, want before tool", got)
+	}
+	if got := inputs[5].Get("content.0.text").String(); got != "after tool" {
+		t.Fatalf("input[5] text = %q, want after tool", got)
+	}
+	if got := inputs[6].Get("output.0.type").String(); got != "input_text" {
+		t.Fatalf("tool result output.0.type = %q, want input_text", got)
+	}
+	if got := inputs[6].Get("output.1.image_url").String(); got != "data:image/png;base64,aW1hZ2U=" {
+		t.Fatalf("tool result image_url = %q, want data URL", got)
+	}
+	if got := inputs[7].Get("content.0.text").String(); got != "continue" {
+		t.Fatalf("input[7] text = %q, want continue", got)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_AssistantGrokSignatureToReasoningItem(t *testing.T) {
+	signature := "HmlYdr2aCAqCYP/m9mr8PS6KOsdMs72FGDigmydR+Jsmuv8KX97yWPlbOwmXJgWn0CbHaCacdQD3+n5EvpgLfPNmafS3kdICBjRuDf4bzHy7uBiUhNVhqPtp/ee1y9q4imPE4LYgD1VZ4J+bp9mTeqA1+nC9Oue58CiNEMV9SVaGenCD+aBnVuSTzQhD32Y+68i6HLJW0Dx6ifaRfb8hxYtA/sPM+/FTvAMW11nRho5a2BBSkpnzfqqAz/e/vGJ77/bygpXM823QA9wL9i0X"
+	payload := []byte(`{"model":"grok-4.5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":""},{"type":"text","text":"answer"}]},{"role":"user","content":"next"}]}`)
+	payload, _ = sjson.SetBytes(payload, "messages.0.content.0.signature", signature)
+
+	out := ConvertClaudeRequestToCodex("grok-4.5", payload, false)
+	reasoning := gjson.GetBytes(out, "input.0")
+	if reasoning.Get("type").String() != "reasoning" {
+		t.Fatalf("input.0 type = %q, want reasoning; output=%s", reasoning.Get("type").String(), out)
+	}
+	if got := reasoning.Get("encrypted_content").String(); got != signature {
+		t.Fatalf("encrypted_content = %q, want Grok signature", got)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_IgnoresGrokSignatureForNonGrokTargets(t *testing.T) {
+	signature := "HmlYdr2aCAqCYP/m9mr8PS6KOsdMs72FGDigmydR+Jsmuv8KX97yWPlbOwmXJgWn0CbHaCacdQD3+n5EvpgLfPNmafS3kdICBjRuDf4bzHy7uBiUhNVhqPtp/ee1y9q4imPE4LYgD1VZ4J+bp9mTeqA1+nC9Oue58CiNEMV9SVaGenCD+aBnVuSTzQhD32Y+68i6HLJW0Dx6ifaRfb8hxYtA/sPM+/FTvAMW11nRho5a2BBSkpnzfqqAz/e/vGJ77/bygpXM823QA9wL9i0X"
+	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":""},{"type":"text","text":"answer"}]},{"role":"user","content":"next"}]}`)
+	payload, _ = sjson.SetBytes(payload, "messages.0.content.0.signature", signature)
+
+	for _, modelName := range []string{"gpt-5.4", "claude-sonnet-4-6"} {
+		t.Run(modelName, func(t *testing.T) {
+			out := ConvertClaudeRequestToCodex(modelName, payload, false)
+			if got := countRequestInputItemsByType(out, "reasoning"); got != 0 {
+				t.Fatalf("got %d reasoning items for non-Grok target, want 0; output=%s", got, out)
+			}
+		})
 	}
 }
 

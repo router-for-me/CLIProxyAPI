@@ -36,14 +36,14 @@ func MergeMetadata(source any, metadata map[string]any) (map[string]any, error) 
 		for k, v := range srcMap {
 			data[k] = v
 		}
-	} else {
+	} else if source != nil {
 		// Slow path: marshal to JSON and back to map to respect JSON tags
-		temp, err := json.Marshal(source)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal source: %w", err)
+		temp, errMarshal := json.Marshal(source)
+		if errMarshal != nil {
+			return nil, fmt.Errorf("failed to marshal source: %w", errMarshal)
 		}
-		if err := json.Unmarshal(temp, &data); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal to map: %w", err)
+		if errUnmarshal := json.Unmarshal(temp, &data); errUnmarshal != nil {
+			return nil, fmt.Errorf("failed to unmarshal to map: %w", errUnmarshal)
 		}
 	}
 

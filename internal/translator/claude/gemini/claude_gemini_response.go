@@ -6,7 +6,6 @@
 package gemini
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"strings"
@@ -37,6 +36,7 @@ type ConvertAnthropicResponseToGeminiParams struct {
 	// Keyed by content_block index from Claude SSE events
 	ToolUseNames map[int]string           // function/tool name per block index
 	ToolUseArgs  map[int]*strings.Builder // accumulates partial_json across deltas
+	ToolUseIDs   map[int]string           // tool use ID per block index
 }
 
 // ConvertClaudeResponseToGemini converts Claude Code streaming response format to Gemini format.
@@ -110,6 +110,12 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 				if name := cb.Get("name"); name.Exists() {
 					(*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseNames[idx] = name.String()
 				}
+				if toolID := cb.Get("id").String(); toolID != "" {
+					if (*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseIDs == nil {
+						(*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseIDs = map[int]string{}
+					}
+					(*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseIDs[idx] = toolID
+				}
 			}
 		}
 		return [][]byte{}
@@ -169,6 +175,10 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 				argsTrim = strings.TrimSpace(b.String())
 			}
 		}
+		toolID := ""
+		if (*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseIDs != nil {
+			toolID = (*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseIDs[idx]
+		}
 		if name != "" || argsTrim != "" {
 			functionCall := []byte(`{"functionCall":{"name":"","args":{}}}`)
 			if name != "" {
@@ -176,6 +186,9 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 			}
 			if argsTrim != "" {
 				functionCall, _ = sjson.SetRawBytes(functionCall, "functionCall.args", []byte(argsTrim))
+			}
+			if toolID != "" {
+				functionCall, _ = sjson.SetBytes(functionCall, "functionCall.id", toolID)
 			}
 			template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", functionCall)
 			template, _ = sjson.SetBytes(template, "candidates.0.finishReason", "STOP")
@@ -186,6 +199,9 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 			}
 			if (*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseNames != nil {
 				delete((*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseNames, idx)
+			}
+			if (*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseIDs != nil {
+				delete((*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseIDs, idx)
 			}
 			return [][]byte{template}
 		}
@@ -284,13 +300,18 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 	template, _ = sjson.SetBytes(template, "modelVersion", modelName)
 
 	streamingEvents := make([][]byte, 0)
-
-	scanner := bufio.NewScanner(bytes.NewReader(rawJSON))
-	buffer := make([]byte, 52_428_800) // 50MB
-	scanner.Buffer(buffer, 52_428_800)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		// log.Debug(string(line))
+	remaining := rawJSON
+	for len(remaining) > 0 {
+		var line []byte
+		idx := bytes.IndexByte(remaining, '\n')
+		if idx >= 0 {
+			line = remaining[:idx]
+			remaining = remaining[idx+1:]
+		} else {
+			line = remaining
+			remaining = nil
+		}
+		line = bytes.TrimRight(line, "\r")
 		if bytes.HasPrefix(line, dataTag) {
 			jsonData := bytes.TrimSpace(line[5:])
 			streamingEvents = append(streamingEvents, jsonData)
@@ -308,6 +329,7 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 		IsStreaming:       false,
 		ToolUseNames:      nil,
 		ToolUseArgs:       nil,
+		ToolUseIDs:        nil,
 	}
 
 	// Process each streaming event and collect parts
@@ -347,6 +369,12 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 					}
 					if name := cb.Get("name"); name.Exists() {
 						newParam.ToolUseNames[idx] = name.String()
+					}
+					if toolID := cb.Get("id").String(); toolID != "" {
+						if newParam.ToolUseIDs == nil {
+							newParam.ToolUseIDs = map[int]string{}
+						}
+						newParam.ToolUseIDs[idx] = toolID
 					}
 				}
 			}
@@ -401,6 +429,10 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 					argsTrim = strings.TrimSpace(b.String())
 				}
 			}
+			toolID := ""
+			if newParam.ToolUseIDs != nil {
+				toolID = newParam.ToolUseIDs[idx]
+			}
 			if name != "" || argsTrim != "" {
 				functionCallJSON := []byte(`{"functionCall":{"name":"","args":{}}}`)
 				if name != "" {
@@ -409,6 +441,9 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 				if argsTrim != "" {
 					functionCallJSON, _ = sjson.SetRawBytes(functionCallJSON, "functionCall.args", []byte(argsTrim))
 				}
+				if toolID != "" {
+					functionCallJSON, _ = sjson.SetBytes(functionCallJSON, "functionCall.id", toolID)
+				}
 				allParts = append(allParts, functionCallJSON)
 				// cleanup used state for this index
 				if newParam.ToolUseArgs != nil {
@@ -416,6 +451,9 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 				}
 				if newParam.ToolUseNames != nil {
 					delete(newParam.ToolUseNames, idx)
+				}
+				if newParam.ToolUseIDs != nil {
+					delete(newParam.ToolUseIDs, idx)
 				}
 			}
 
@@ -470,11 +508,7 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 
 	// Set the consolidated parts array
 	if len(consolidatedParts) > 0 {
-		partsJSON := []byte(`[]`)
-		for _, partJSON := range consolidatedParts {
-			partsJSON, _ = sjson.SetRawBytes(partsJSON, "-1", partJSON)
-		}
-		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts", partsJSON)
+		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts", translatorcommon.JoinRawArray(consolidatedParts))
 	}
 
 	// Set usage metadata

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	log "github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
@@ -133,6 +134,191 @@ func TestConvertClaudeRequestToAntigravity_StripsClaudeCodeAttribution(t *testin
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_ConvertsMessageSystemRoleToUserContent(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3.5-flash",
+		"system": [{"type": "text", "text": "Top-level rules"}],
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+			{"role": "system", "content": "String mid-conversation rule"},
+			{"role": "system", "content": [{"type": "text", "text": "Array mid-conversation rule"}]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3-flash-agent", inputJSON, false)
+	outputStr := string(output)
+
+	if systemContent := gjson.Get(outputStr, `request.contents.#(role=="system")`); systemContent.Exists() {
+		t.Fatalf("system role should not be emitted in request.contents: %s", systemContent.Raw)
+	}
+
+	contents := gjson.Get(outputStr, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("Expected the user and message-level system turns in request.contents, got %d: %s", len(contents), gjson.Get(outputStr, "request.contents").Raw)
+	}
+	if got := contents[0].Get("role").String(); got != "user" {
+		t.Fatalf("Expected first content role user, got %q", got)
+	}
+	if got := contents[1].Get("role").String(); got != "user" {
+		t.Fatalf("Expected message-level system content to be downgraded to user role, got %q", got)
+	}
+	if got := contents[1].Get("parts.0.text").String(); got != "<system-reminder>\nString mid-conversation rule\n</system-reminder>" {
+		t.Fatalf("Unexpected string message-level system content text: %q", got)
+	}
+	if got := contents[2].Get("role").String(); got != "user" {
+		t.Fatalf("Expected array message-level system content to be downgraded to user role, got %q", got)
+	}
+	if got := contents[2].Get("parts.0.text").String(); got != "<system-reminder>\nArray mid-conversation rule\n</system-reminder>" {
+		t.Fatalf("Unexpected array message-level system content text: %q", got)
+	}
+
+	parts := gjson.Get(outputStr, "request.systemInstruction.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("Expected only top-level system parts, got %d: %s", len(parts), gjson.Get(outputStr, "request.systemInstruction.parts").Raw)
+	}
+	if got := parts[0].Get("text").String(); got != "Top-level rules" {
+		t.Fatalf("Unexpected first system part: %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_MapsTypedWebSearchToIndependentSearchRequest(t *testing.T) {
+	registry.GetGlobalRegistry().RegisterClient("test-antigravity-claude-websearch", "antigravity", []*registry.ModelInfo{
+		{ID: "gemini-3.1-flash-lite", SupportsWebSearch: true},
+	})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient("test-antigravity-claude-websearch") })
+
+	inputJSON := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"messages": [{"role": "user", "content": "北京天气 2026-06-12"}],
+		"tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8, "allowed_domains": ["www.baidu.com", "weather.com.cn"]}]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3.1-flash-lite", inputJSON, true)
+	if got := gjson.GetBytes(output, "requestType").String(); got != "web_search" {
+		t.Fatalf("requestType = %q, want web_search: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.contents.0.parts.0.text").String(); got != "北京天气 2026-06-12" {
+		t.Fatalf("search query = %q, want original user query: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.systemInstruction.parts.0.text").String(); got != antigravityWebSearchSystemInstruction {
+		t.Fatalf("unexpected search system instruction: %q", got)
+	}
+	if got := gjson.GetBytes(output, "request.tools.0.googleSearch.enhancedContent.imageSearch.maxResultCount").Int(); got != 8 {
+		t.Fatalf("image search maxResultCount = %d, want 8: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.tools.0.googleSearch.includedDomains.0").String(); got != "www.baidu.com" {
+		t.Fatalf("includedDomains.0 = %q, want www.baidu.com: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.tools.0.googleSearch.includedDomains.1").String(); got != "weather.com.cn" {
+		t.Fatalf("includedDomains.1 = %q, want weather.com.cn: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.generationConfig.candidateCount").Int(); got != 1 {
+		t.Fatalf("candidateCount = %d, want 1: %s", got, output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_UsesDefaultWebSearchMaxResultCountWithoutMaxUses(t *testing.T) {
+	registry.GetGlobalRegistry().RegisterClient("test-antigravity-claude-websearch-default-max", "antigravity", []*registry.ModelInfo{
+		{ID: "gemini-3.1-flash-lite", SupportsWebSearch: true},
+	})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient("test-antigravity-claude-websearch-default-max") })
+
+	inputJSON := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"messages": [{"role": "user", "content": "北京天气 2026-06-12"}],
+		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3.1-flash-lite", inputJSON, true)
+	if got := gjson.GetBytes(output, "request.tools.0.googleSearch.enhancedContent.imageSearch.maxResultCount").Int(); got != 5 {
+		t.Fatalf("image search maxResultCount = %d, want default 5: %s", got, output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_DoesNotMapTypedWebSearchWhenMixedWithCustomTools(t *testing.T) {
+	registry.GetGlobalRegistry().RegisterClient("test-antigravity-claude-websearch-mixed", "antigravity", []*registry.ModelInfo{
+		{ID: "gemini-3.1-flash-lite", SupportsWebSearch: true},
+	})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient("test-antigravity-claude-websearch-mixed") })
+
+	inputJSON := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"messages": [{"role": "user", "content": "Search current weather"}],
+		"tools": [
+			{"type": "web_search_20250305", "name": "web_search", "max_uses": 8},
+			{"name": "lookup", "description": "Lookup local data", "input_schema": {"type": "object", "properties": {}}}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3.1-flash-lite", inputJSON, true)
+	if got := gjson.GetBytes(output, "requestType").String(); got == "web_search" {
+		t.Fatalf("mixed tools should not become independent web_search request: %s", output)
+	}
+	if got := gjson.GetBytes(output, "request.tools.#(googleSearch)").Raw; got != "" {
+		t.Fatalf("mixed tools should not inject native googleSearch into chat request: %s", output)
+	}
+	if got := gjson.GetBytes(output, `request.tools.#.functionDeclarations.#(name=="lookup")`).Raw; got == "" {
+		t.Fatalf("custom tool declaration should be preserved: %s", output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_DoesNotMapTypedWebSearchForUnsupportedRouteModel(t *testing.T) {
+	registry.GetGlobalRegistry().RegisterClient("test-antigravity-claude-websearch-route", "antigravity", []*registry.ModelInfo{
+		{ID: "gemini-3.5-flash"},
+		{ID: "gemini-3.1-flash-lite", SupportsWebSearch: true},
+	})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient("test-antigravity-claude-websearch-route") })
+
+	inputJSON := []byte(`{
+		"model": "gemini-3.5-flash",
+		"messages": [{"role": "user", "content": "Perform a web search"}],
+		"tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3.5-flash", inputJSON, true)
+	if got := gjson.GetBytes(output, "model").String(); got != "gemini-3.5-flash" {
+		t.Fatalf("web search request model = %q, want original route model: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.tools.#(googleSearch)").Raw; got != "" {
+		t.Fatalf("typed web_search should not become native googleSearch for unsupported route model: %s", output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_DoesNotMapTypedWebSearchForFlashAgentWithoutCapability(t *testing.T) {
+	registry.GetGlobalRegistry().RegisterClient("test-antigravity-claude-websearch-flash-agent", "antigravity", []*registry.ModelInfo{
+		{ID: "gemini-3-flash-agent"},
+		{ID: "gemini-3.1-flash-lite", SupportsWebSearch: true},
+	})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient("test-antigravity-claude-websearch-flash-agent") })
+
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-agent",
+		"messages": [{"role": "user", "content": "Perform a web search"}],
+		"tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3-flash-agent", inputJSON, true)
+	if got := gjson.GetBytes(output, "model").String(); got != "gemini-3-flash-agent" {
+		t.Fatalf("web search request model = %q, want original route model: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.tools.#(googleSearch)").Raw; got != "" {
+		t.Fatalf("typed web_search should not become native googleSearch for flash-agent without capability: %s", output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_DoesNotMapTypedWebSearchForOtherModels(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"messages": [{"role": "user", "content": "Search current weather"}],
+		"tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", inputJSON, true)
+	if got := gjson.GetBytes(output, "request.tools.#(googleSearch)").Raw; got != "" {
+		t.Fatalf("model without Antigravity web search capability should not get native googleSearch: %s", output)
+	}
+}
+
 func testNonAnthropicRawSignature(t *testing.T) string {
 	t.Helper()
 
@@ -170,6 +356,391 @@ func testGeminiEPrefixSignature(t *testing.T) string {
 		t.Fatalf("test signature should start with E, got %q", signature[:1])
 	}
 	return signature
+}
+
+func TestConvertClaudeRequestToAntigravity_ReattachesDetachedGeminiSignature(t *testing.T) {
+	geminiSig := testGeminiEPrefixSignature(t)
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"assistant","content":[
+			{"type":"text","text":"visible answer"},
+			{"type":"thinking","thinking":"","signature":"` + geminiSig + `"}
+		]}]
+	}`)
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("parts = %d, want one native text part; output=%s", len(parts), output)
+	}
+	if got := parts[0].Get("text").String(); got != "visible answer" {
+		t.Fatalf("text = %q; output=%s", got, output)
+	}
+	if got := parts[0].Get("thoughtSignature").String(); got != geminiSig {
+		t.Fatalf("signature = %q, want detached Gemini signature; output=%s", got, output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ReattachesLeadingDetachedGeminiSignature(t *testing.T) {
+	geminiSig := testGeminiEPrefixSignature(t)
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"assistant","content":[
+			{"type":"thinking","thinking":"","signature":"` + geminiSig + `"},
+			{"type":"text","text":"visible answer"}
+		]}]
+	}`)
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	if got := gjson.GetBytes(output, "request.contents.0.parts.0.thoughtSignature").String(); got != geminiSig {
+		t.Fatalf("leading detached signature = %q, want %q; output=%s", got, geminiSig, output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_DropsLegacyRawCarrierFromUserMessage(t *testing.T) {
+	geminiSig := testGeminiEPrefixSignature(t)
+	inputJSON := []byte(`{"model":"gemini-3.6-flash-high","messages":[{"role":"user","content":[{"type":"thinking","thinking":"","signature":"` + geminiSig + `"},{"type":"text","text":"user text"}]}]}`)
+	filtered := StripInvalidGeminiSignatureThinkingBlocks(inputJSON)
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", filtered, true)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 1 || parts[0].Get("text").String() != "user text" || parts[0].Get("thoughtSignature").Exists() {
+		t.Fatalf("user legacy carrier reached Gemini after filtering: %s", output)
+	}
+
+	directOutput := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	directParts := gjson.GetBytes(directOutput, "request.contents.0.parts").Array()
+	if len(directParts) != 1 || directParts[0].Get("text").String() != "user text" || directParts[0].Get("thoughtSignature").Exists() {
+		t.Fatalf("user legacy carrier reached Gemini without prefilter: %s", directOutput)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_DistributesConsecutiveTrailingGeminiCarriers(t *testing.T) {
+	sig1 := testGeminiEPrefixSignature(t)
+	sig2 := differentClaudeGeminiSignature(t)
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"assistant","content":[
+			{"type":"text","text":"first"},
+			{"type":"text","text":"second"},
+			{"type":"thinking","thinking":"","signature":"` + sig1 + `"},
+			{"type":"thinking","thinking":"","signature":"` + sig2 + `"}
+		]}]
+	}`)
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 3 {
+		t.Fatalf("parts = %d, want two text parts + detached carrier; output=%s", len(parts), output)
+	}
+	if got := parts[1].Get("thoughtSignature").String(); got != sig1 {
+		t.Fatalf("latest semantic text signature = %q, want %q; output=%s", got, sig1, output)
+	}
+	if got := parts[2].Get("thoughtSignature").String(); got != sig2 || !parts[2].Get("text").Exists() || parts[2].Get("text").String() != "" {
+		t.Fatalf("second carrier malformed: %s; output=%s", parts[2].Raw, output)
+	}
+	if got := parts[0].Get("thoughtSignature").String(); got != "" {
+		t.Fatalf("second carrier must not search past the nearest semantic part, got %q; output=%s", got, output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_PreservesConsecutiveLeadingGeminiCarriers(t *testing.T) {
+	sig1 := testGeminiEPrefixSignature(t)
+	sig2 := differentClaudeGeminiSignature(t)
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"assistant","content":[
+			{"type":"thinking","thinking":"","signature":"` + sig1 + `"},
+			{"type":"thinking","thinking":"","signature":"` + sig2 + `"},
+			{"type":"tool_use","id":"tool-1","name":"run_command","input":{"command":"true"}}
+		]}]
+	}`)
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want carrier + signed tool; output=%s", len(parts), output)
+	}
+	if parts[0].Get("thoughtSignature").String() != sig1 || !parts[0].Get("text").Exists() || parts[0].Get("text").String() != "" {
+		t.Fatalf("leading carrier malformed: %s; output=%s", parts[0].Raw, output)
+	}
+	if !parts[1].Get("functionCall").Exists() || parts[1].Get("thoughtSignature").String() != sig2 {
+		t.Fatalf("signed tool malformed: %s; output=%s", parts[1].Raw, output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_DirectToolSignatureWinsOverLeadingCarrier(t *testing.T) {
+	prefixSig := testGeminiEPrefixSignature(t)
+	directSig := differentClaudeGeminiSignature(t)
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"assistant","content":[
+			{"type":"thinking","thinking":"","signature":"` + prefixSig + `"},
+			{"type":"tool_use","id":"tool-1","name":"run_command","input":{"command":"true"},"signature":"` + directSig + `"}
+		]}]
+	}`)
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want carrier + directly signed tool; output=%s", len(parts), output)
+	}
+	if parts[0].Get("thoughtSignature").String() != prefixSig || !parts[0].Get("text").Exists() || parts[0].Get("text").String() != "" {
+		t.Fatalf("prefix carrier malformed: %s; output=%s", parts[0].Raw, output)
+	}
+	if !parts[1].Get("functionCall").Exists() || parts[1].Get("thoughtSignature").String() != directSig {
+		t.Fatalf("direct tool signature was overwritten: %s; output=%s", parts[1].Raw, output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_PreservesCarrierBetweenDirectlySignedParallelTools(t *testing.T) {
+	sig1 := testGeminiEPrefixSignature(t)
+	sig2 := differentClaudeGeminiSignature(t)
+	rawSig3, errDecode := base64.StdEncoding.DecodeString(sig1)
+	if errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	rawSig3[len(rawSig3)-1] ^= 2
+	sig3 := base64.StdEncoding.EncodeToString(rawSig3)
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"assistant","content":[
+			{"type":"tool_use","id":"tool-1","name":"run_command","input":{"command":"one"},"signature":"` + sig1 + `"},
+			{"type":"thinking","thinking":"","signature":"` + sig2 + `"},
+			{"type":"tool_use","id":"tool-2","name":"run_command","input":{"command":"two"},"signature":"` + sig3 + `"}
+		]}]
+	}`)
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 3 {
+		t.Fatalf("parts = %d, want tool + carrier + tool; output=%s", len(parts), output)
+	}
+	if parts[0].Get("functionCall.id").String() != "tool-1" || parts[0].Get("thoughtSignature").String() != sig1 {
+		t.Fatalf("first tool malformed: %s; output=%s", parts[0].Raw, output)
+	}
+	if parts[1].Get("thoughtSignature").String() != sig2 || !parts[1].Get("text").Exists() || parts[1].Get("text").String() != "" {
+		t.Fatalf("middle carrier malformed: %s; output=%s", parts[1].Raw, output)
+	}
+	if parts[2].Get("functionCall.id").String() != "tool-2" || parts[2].Get("thoughtSignature").String() != sig3 {
+		t.Fatalf("second tool malformed: %s; output=%s", parts[2].Raw, output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_PreservesCarrierOnlyAssistantMessage(t *testing.T) {
+	sig1 := testGeminiEPrefixSignature(t)
+	sig2 := differentClaudeGeminiSignature(t)
+	for _, tc := range []struct {
+		name       string
+		content    string
+		signatures []string
+	}{
+		{name: "single", content: `[{"type":"thinking","thinking":"","signature":"` + sig1 + `"}]`, signatures: []string{sig1}},
+		{name: "multiple", content: `[{"type":"thinking","thinking":"","signature":"` + sig1 + `"},{"type":"thinking","thinking":"","signature":"` + sig2 + `"}]`, signatures: []string{sig1, sig2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inputJSON := []byte(`{"model":"gemini-3.6-flash-high","messages":[{"role":"assistant","content":` + tc.content + `}]}`)
+			output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+			parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+			if len(parts) != len(tc.signatures) {
+				t.Fatalf("parts = %d, want %d carriers; output=%s", len(parts), len(tc.signatures), output)
+			}
+			for i, signature := range tc.signatures {
+				if parts[i].Get("thoughtSignature").String() != signature || !parts[i].Get("text").Exists() || parts[i].Get("text").String() != "" {
+					t.Fatalf("carrier %d malformed: %s; output=%s", i, parts[i].Raw, output)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_PreservesConsecutiveLeadingGeminiCarriersBeforeText(t *testing.T) {
+	sig1 := testGeminiEPrefixSignature(t)
+	sig2 := differentClaudeGeminiSignature(t)
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"assistant","content":[
+			{"type":"thinking","thinking":"","signature":"` + sig1 + `"},
+			{"type":"thinking","thinking":"","signature":"` + sig2 + `"},
+			{"type":"text","text":"visible"}
+		]}]
+	}`)
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want carrier + signed text; output=%s", len(parts), output)
+	}
+	if parts[0].Get("thoughtSignature").String() != sig1 || !parts[0].Get("text").Exists() || parts[0].Get("text").String() != "" {
+		t.Fatalf("leading carrier order malformed: %s; output=%s", parts[0].Raw, output)
+	}
+	if parts[1].Get("text").String() != "visible" || parts[1].Get("thoughtSignature").String() != sig2 {
+		t.Fatalf("signed text malformed: %s; output=%s", parts[1].Raw, output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_PreservesTrailingCarrierAfterSignedTool(t *testing.T) {
+	sig1 := testGeminiEPrefixSignature(t)
+	sig2 := differentClaudeGeminiSignature(t)
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"assistant","content":[
+			{"type":"thinking","thinking":"","signature":"` + sig1 + `"},
+			{"type":"tool_use","id":"tool-1","name":"run_command","input":{"command":"true"}},
+			{"type":"thinking","thinking":"","signature":"` + sig2 + `"}
+		]}]
+	}`)
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want signed tool + trailing carrier; output=%s", len(parts), output)
+	}
+	if !parts[0].Get("functionCall").Exists() || parts[0].Get("thoughtSignature").String() != sig1 {
+		t.Fatalf("signed tool was reordered: %s; output=%s", parts[0].Raw, output)
+	}
+	if parts[1].Get("thoughtSignature").String() != sig2 || !parts[1].Get("text").Exists() || parts[1].Get("text").String() != "" {
+		t.Fatalf("trailing carrier malformed: %s; output=%s", parts[1].Raw, output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_DetachedToolCarrierTargetsFollowingTool(t *testing.T) {
+	geminiSig := testGeminiEPrefixSignature(t)
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"assistant","content":[
+			{"type":"text","text":"preface"},
+			{"type":"thinking","thinking":"","signature":"` + geminiSig + `"},
+			{"type":"tool_use","id":"claude-id","name":"run_command","input":{"command":"true"}}
+		]}]
+	}`)
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	if got := gjson.GetBytes(output, "request.contents.0.parts.0.thoughtSignature").String(); got != "" {
+		t.Fatalf("detached tool signature attached backward to text: %q; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.contents.0.parts.1.thoughtSignature").String(); got != geminiSig {
+		t.Fatalf("tool signature = %q, want %q; output=%s", got, geminiSig, output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_GeminiThinkingSignatureTargetsFollowingText(t *testing.T) {
+	geminiSig := testGeminiEPrefixSignature(t)
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"assistant","content":[
+			{"type":"thinking","thinking":"hidden thought","signature":"` + geminiSig + `"},
+			{"type":"text","text":"visible answer"}
+		]}]
+	}`)
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	if got := gjson.GetBytes(output, "request.contents.0.parts.0.thoughtSignature").String(); got != "" {
+		t.Fatalf("Gemini signature remained on thought part: %q; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.contents.0.parts.1.thoughtSignature").String(); got != geminiSig {
+		t.Fatalf("visible signature = %q, want %q; output=%s", got, geminiSig, output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_LeadingCarrierDoesNotCrossSignedThinking(t *testing.T) {
+	signature1 := testGeminiEPrefixSignature(t)
+	signature2 := differentClaudeGeminiSignature(t)
+	leading := encodeGeminiClaudeCarrierSignature(signature1, geminiClaudeCarrierNext, geminiClaudeCarrierAny)
+	signedThought := encodeGeminiClaudeCarrierSignature(signature2, geminiClaudeCarrierStandalone, geminiClaudeCarrierText)
+	inputJSON := []byte(`{"model":"gemini-3.6-flash-high","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"` + leading + `"},{"type":"thinking","thinking":"reason","signature":"` + signedThought + `"},{"type":"text","text":"answer"}]}]}`)
+	inputJSON = StripInvalidGeminiSignatureThinkingBlocks(inputJSON)
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 3 || parts[0].Get("text").String() != "reason" || !parts[0].Get("thought").Bool() || parts[0].Get("thoughtSignature").String() != signature2 || !parts[1].Get("text").Exists() || parts[1].Get("text").String() != "" || parts[1].Get("thoughtSignature").String() != signature1 || parts[2].Get("text").String() != "answer" || parts[2].Get("thoughtSignature").String() != "" {
+		t.Fatalf("leading carrier crossed signed thinking: %s", output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_DropsMismatchedMarkedNonEmptyCarrier(t *testing.T) {
+	geminiSig := testGeminiEPrefixSignature(t)
+	for _, content := range []string{
+		`[{"type":"thinking","thinking":"hidden","signature":"` + encodeGeminiClaudeCarrierSignature(geminiSig, geminiClaudeCarrierNext, geminiClaudeCarrierFunction) + `"},{"type":"text","text":"visible"}]`,
+		`[{"type":"thinking","thinking":"hidden","signature":"` + encodeGeminiClaudeCarrierSignature(geminiSig, geminiClaudeCarrierStandalone, geminiClaudeCarrierFunction) + `"}]`,
+	} {
+		inputJSON := []byte(`{"model":"gemini-3.6-flash-high","messages":[{"role":"assistant","content":` + content + `}]}`)
+		output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+		if strings.Contains(string(output), geminiSig) || strings.Contains(string(output), geminiClaudeCarrierPrefix) {
+			t.Fatalf("mismatched marked carrier reached Gemini wire: %s", output)
+		}
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_GeminiThinkingSignatureTargetsFollowingTool(t *testing.T) {
+	geminiSig := testGeminiEPrefixSignature(t)
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"assistant","content":[
+			{"type":"thinking","thinking":"hidden thought","signature":"` + geminiSig + `"},
+			{"type":"tool_use","id":"claude-id","name":"run_command","input":{"command":"true"}}
+		]}]
+	}`)
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 2 || !parts[0].Get("thought").Bool() {
+		t.Fatalf("thought/tool parts malformed: %s", output)
+	}
+	if got := parts[0].Get("thoughtSignature").String(); got != "" {
+		t.Fatalf("signature remained on thought part: %q; output=%s", got, output)
+	}
+	if got := parts[1].Get("thoughtSignature").String(); got != geminiSig {
+		t.Fatalf("tool signature = %q, want %q; output=%s", got, geminiSig, output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_PreservesGeminiToolSignature(t *testing.T) {
+	geminiSig := testGeminiEPrefixSignature(t)
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"assistant","content":[
+			{"type":"thinking","thinking":"","signature":"` + geminiSig + `"},
+			{"type":"tool_use","id":"claude-id","name":"run_command","input":{"command":"true"}
+		]}]
+	}`)
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	if got := gjson.GetBytes(output, "request.contents.0.parts.0.thoughtSignature").String(); got != geminiSig {
+		t.Fatalf("tool signature = %q, want %q; output=%s", got, geminiSig, output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_NativeParallelToolLeavesUnsignedSibling(t *testing.T) {
+	geminiSig := testGeminiEPrefixSignature(t)
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"assistant","content":[
+			{"type":"thinking","thinking":"","signature":"` + geminiSig + `"},
+			{"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"/tmp/a"}},
+			{"type":"tool_use","id":"call-2","name":"Read","input":{"file_path":"/tmp/b"}}
+		]}]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want 2 function calls; output=%s", len(parts), output)
+	}
+	if got := parts[0].Get("thoughtSignature").String(); got != geminiSig {
+		t.Fatalf("first call signature = %q, want native signature; output=%s", got, output)
+	}
+	if signature := parts[1].Get("thoughtSignature"); signature.Exists() {
+		t.Fatalf("native unsigned sibling should remain unsigned; output=%s", output)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_SyntheticParallelToolOnlyFirstGetsSentinel(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"assistant","content":[
+			{"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"/tmp/a"}},
+			{"type":"tool_use","id":"call-2","name":"Read","input":{"file_path":"/tmp/b"}}
+		]}]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", inputJSON, true)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want 2 function calls; output=%s", len(parts), output)
+	}
+	if got := parts[0].Get("thoughtSignature").String(); got != "skip_thought_signature_validator" {
+		t.Fatalf("first synthetic call signature = %q, want sentinel; output=%s", got, output)
+	}
+	if signature := parts[1].Get("thoughtSignature"); signature.Exists() {
+		t.Fatalf("second synthetic sibling should remain unsigned; output=%s", output)
+	}
 }
 
 func TestConvertClaudeRequestToAntigravity_BasicStructure(t *testing.T) {
@@ -1005,6 +1576,64 @@ func TestConvertClaudeRequestToAntigravity_ToolDeclarations(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_DeduplicatesAndDisambiguatesTools(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"` + second + `","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ok"}]}
+		],
+		"tools":[
+			{"name":"lookup","input_schema":{"type":"object"}},
+			{"name":"lookup","description":"duplicate","input_schema":{"type":"object"}},
+			{"name":"` + first + `","input_schema":{"type":"object"}},
+			{"name":"` + second + `","input_schema":{"type":"object"}}
+		],
+		"tool_choice":{"type":"tool","name":"` + second + `"}
+	}`)
+
+	out := ConvertClaudeRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	declarations := gjson.GetBytes(out, "request.tools.0.functionDeclarations").Array()
+	if len(declarations) != 3 {
+		t.Fatalf("declaration count = %d, want 3. Output: %s", len(declarations), out)
+	}
+	firstMapped := declarations[1].Get("name").String()
+	secondMapped := declarations[2].Get("name").String()
+	if firstMapped == secondMapped || len(secondMapped) > 64 {
+		t.Fatalf("collision names = %q and %q, want distinct names <= 64 chars", firstMapped, secondMapped)
+	}
+	if got := gjson.GetBytes(out, "request.contents.0.parts.0.functionCall.name").String(); got != secondMapped {
+		t.Fatalf("functionCall.name = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+	if got := gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse.name").String(); got != secondMapped {
+		t.Fatalf("functionResponse.name = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+	if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames.0").String(); got != secondMapped {
+		t.Fatalf("allowedFunctionNames.0 = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_MapsToolResultNameOnce(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read/file","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ok"}]}
+		],
+		"tools":[
+			{"name":"read/file","input_schema":{"type":"object"}},
+			{"name":"read_file","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	out := ConvertClaudeRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	callName := gjson.GetBytes(out, "request.contents.0.parts.0.functionCall.name").String()
+	responseName := gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse.name").String()
+	if callName == "" || responseName != callName {
+		t.Fatalf("function names call=%q response=%q, want the same non-empty mapping. Output: %s", callName, responseName, out)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_ToolChoice_SpecificTool(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gemini-3-flash-preview",
@@ -1081,6 +1710,58 @@ func TestConvertClaudeRequestToAntigravity_ToolUse(t *testing.T) {
 	}
 	if parts[0].Get("thoughtSignature").Exists() {
 		t.Errorf("Expected no thoughtSignature without valid Claude thinking signature, got '%s'", parts[0].Get("thoughtSignature").String())
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ToolUsePreservesPresentNonObjectInput(t *testing.T) {
+	tests := []struct {
+		name             string
+		inputJSON        string
+		wantArgs         string
+		wantFunctionCall bool
+	}{
+		{name: "plain string", inputJSON: `"plain"`, wantArgs: `"plain"`, wantFunctionCall: true},
+		{name: "array", inputJSON: `[1,"two"]`, wantArgs: `[1,"two"]`, wantFunctionCall: true},
+		{name: "number", inputJSON: `42`, wantArgs: `42`, wantFunctionCall: true},
+		{name: "boolean", inputJSON: `true`, wantArgs: `true`, wantFunctionCall: true},
+		{name: "null", inputJSON: `null`, wantArgs: `{}`, wantFunctionCall: true},
+		{name: "missing", wantFunctionCall: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inputField := ""
+			if tc.inputJSON != "" {
+				inputField = fmt.Sprintf(`,"input":%s`, tc.inputJSON)
+			}
+			inputJSON := []byte(fmt.Sprintf(`{
+				"model": "claude-sonnet-4-5",
+				"messages": [{
+					"role": "assistant",
+					"content": [{
+						"type": "tool_use",
+						"id": "call_123",
+						"name": "run"%s
+					}]
+				}]
+			}`, inputField))
+
+			output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+			part := gjson.GetBytes(output, "request.contents.0.parts.0")
+			functionCall := part.Get("functionCall")
+			if tc.wantFunctionCall {
+				if !functionCall.Exists() {
+					t.Fatalf("functionCall should exist, output: %s", output)
+				}
+				if got := functionCall.Get("args").Raw; got != tc.wantArgs {
+					t.Fatalf("functionCall.args = %q, want %q; output: %s", got, tc.wantArgs, output)
+				}
+				return
+			}
+			if functionCall.Exists() {
+				t.Fatalf("missing input should not create functionCall, output: %s", output)
+			}
+		})
 	}
 }
 
@@ -1609,8 +2290,8 @@ func TestConvertClaudeRequestToAntigravity_ThinkingConfig(t *testing.T) {
 		if thinkingConfig.Get("thinkingBudget").Int() != 8000 {
 			t.Errorf("Expected thinkingBudget 8000, got %d", thinkingConfig.Get("thinkingBudget").Int())
 		}
-		if !thinkingConfig.Get("includeThoughts").Bool() {
-			t.Error("includeThoughts should be true")
+		if thinkingConfig.Get("includeThoughts").Exists() {
+			t.Error("includeThoughts should be absent without explicit Claude display intent")
 		}
 	} else {
 		t.Log("thinkingConfig not present - model may not be registered in test registry")
@@ -2452,7 +3133,7 @@ func TestConvertClaudeRequestToAntigravity_BypassMode_DropsWrappedRedactedThinki
 		cache.ClearSignatureCache("")
 	})
 
-	validSignature := testAnthropicNativeSignature(t)
+	_, validSignature := testAntigravityClaudeSignature(t)
 
 	inputJSON := []byte(`{
 		"model": "claude-sonnet-4-6",
@@ -2485,6 +3166,40 @@ func TestConvertClaudeRequestToAntigravity_BypassMode_DropsWrappedRedactedThinki
 	}
 	if assistantParts[0].Get("text").String() != "Answer" {
 		t.Fatalf("Expected text part preserved, got: %s", assistantParts[0].Raw)
+	}
+	if assistantParts[0].Get("thoughtSignature").Exists() {
+		t.Fatalf("Wrapped redacted Claude signature must not move to text: %s", assistantParts[0].Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_BypassMode_DropsWrappedRedactedThinkingBeforeTool(t *testing.T) {
+	cache.ClearSignatureCache("")
+	previous := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(false)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previous)
+		cache.ClearSignatureCache("")
+	})
+
+	_, validSignature := testAntigravityClaudeSignature(t)
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"messages": [{
+			"role": "assistant",
+			"content": [
+				{"type": "thinking", "thinking": "", "signature": "` + validSignature + `"},
+				{"type": "tool_use", "id": "tool-1", "name": "run", "input": {"command": "true"}}
+			]
+		}]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", inputJSON, false)
+	toolPart := gjson.GetBytes(output, "request.contents.0.parts.0")
+	if !toolPart.Get("functionCall").Exists() {
+		t.Fatalf("Expected tool part preserved: %s", output)
+	}
+	if toolPart.Get("thoughtSignature").Exists() {
+		t.Fatalf("Wrapped redacted Claude signature must not move to tool: %s", toolPart.Raw)
 	}
 }
 
@@ -2648,5 +3363,61 @@ func TestConvertClaudeRequestToAntigravity_ToolAndThinking_NoExistingSystem(t *t
 	}
 	if !found {
 		t.Errorf("Interleaved thinking hint should be in created systemInstruction, got: %v", sysInstruction.Raw)
+	}
+}
+
+// TestConvertClaudeRequestToAntigravityStripsPropertyNames covers the reported ingress route: a
+// Claude Messages request carrying MCP-style tool schemas. The private Gemini backend rejects the
+// standard JSON Schema keyword "propertyNames" with an unknown-field 400 before inference, so it
+// must not survive translation. Both reported nestings are exercised, including the one where the
+// keyword sits inside a property that is itself named "properties".
+func TestConvertClaudeRequestToAntigravityStripsPropertyNames(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [
+			{
+				"name": "notion-create-pages",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"records": {
+							"type": "array",
+							"items": {
+								"type": "object",
+								"properties": {"name": {"type": "string"}},
+								"propertyNames": {"type": "string"}
+							}
+						}
+					}
+				}
+			},
+			{
+				"name": "notion-update-page",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"properties": {"type": "object", "propertyNames": {"type": "string"}}
+					}
+				}
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+
+	decls := gjson.GetBytes(output, "request.tools.0.functionDeclarations")
+	if !decls.IsArray() || len(decls.Array()) != 2 {
+		t.Fatalf("expected two function declarations, got: %s", decls.Raw)
+	}
+	if strings.Contains(decls.Raw, `"propertyNames"`) {
+		t.Errorf("propertyNames survived translation: %s", decls.Raw)
+	}
+	// The declarations must still be usable, not emptied out by the cleaning.
+	if !decls.Get("0.parametersJsonSchema.properties.records.items.properties.name").Exists() {
+		t.Errorf("array item property was lost: %s", decls.Get("0").Raw)
+	}
+	if !decls.Get("1.parametersJsonSchema.properties.properties").Exists() {
+		t.Errorf("property named properties was lost: %s", decls.Get("1").Raw)
 	}
 }

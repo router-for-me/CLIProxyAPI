@@ -12,6 +12,20 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const openAICompatibleProviderPrefix = "openai-compatible-"
+
+// OpenAICompatibleProviderKey returns the internal provider key for an OpenAI-compatible provider.
+func OpenAICompatibleProviderKey(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || name == "openai-compatibility" || strings.HasPrefix(name, openAICompatibleProviderPrefix) {
+		if name == "" {
+			return "openai-compatibility"
+		}
+		return name
+	}
+	return openAICompatibleProviderPrefix + name
+}
+
 // GetProviderName determines all AI service providers capable of serving a registered model.
 // It first queries the global model registry to retrieve the providers backing the supplied model name.
 // When the model has not been registered yet, it falls back to legacy string heuristics to infer
@@ -54,6 +68,12 @@ func GetProviderName(modelName string) []string {
 
 	if len(providers) > 0 {
 		return providers
+	}
+
+	// Fallback: if cursor provider has registered models, route unknown models to it.
+	// Cursor acts as a universal proxy supporting multiple model families (Claude, GPT, Gemini, etc.).
+	if models := registry.GetGlobalRegistry().GetAvailableModelsByProvider("cursor"); len(models) > 0 {
+		return []string{"cursor"}
 	}
 
 	return providers
@@ -196,6 +216,7 @@ func MaskAuthorizationHeader(value string) string {
 //
 // Behavior by header key (case-insensitive):
 //   - "Authorization": Preserve the auth type prefix (e.g., "Bearer ") and mask only the credential part.
+//   - "Cookie", "Set-Cookie", and "Proxy-Authorization": Mask the entire value.
 //   - Headers containing "api-key": Mask the entire value using HideAPIKey.
 //   - Others: Return the original value unchanged.
 //
@@ -208,6 +229,10 @@ func MaskAuthorizationHeader(value string) string {
 func MaskSensitiveHeaderValue(key, value string) string {
 	lowerKey := strings.ToLower(strings.TrimSpace(key))
 	switch {
+	case lowerKey == "cookie",
+		lowerKey == "set-cookie",
+		lowerKey == "proxy-authorization":
+		return HideAPIKey(value)
 	case strings.Contains(lowerKey, "authorization"):
 		return MaskAuthorizationHeader(value)
 	case strings.Contains(lowerKey, "api-key"),

@@ -65,8 +65,14 @@ func TestCodexExecutorDropsInvalidReasoningEncryptedContentFromFinalRequest(t *t
 	if gjson.GetBytes(gotBody, "input.0.encrypted_content").Exists() {
 		t.Fatalf("invalid reasoning encrypted_content exists, want removed; body=%s", string(gotBody))
 	}
+	if gjson.GetBytes(gotBody, "input.0.id").Exists() {
+		t.Fatalf("invalid reasoning id should be stripped under store=false default; body=%s", string(gotBody))
+	}
 	if gjson.GetBytes(gotBody, "input.1.encrypted_content").Exists() {
 		t.Fatalf("non-string reasoning encrypted_content exists, want removed; body=%s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "input.1.id").Exists() {
+		t.Fatalf("non-string reasoning id should be stripped under store=false default; body=%s", string(gotBody))
 	}
 	if got := gjson.GetBytes(gotBody, "input.2.encrypted_content").String(); got != validEncryptedContent {
 		t.Fatalf("valid reasoning encrypted_content = %q, want preserved", got)

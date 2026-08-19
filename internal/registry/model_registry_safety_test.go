@@ -135,6 +135,27 @@ func TestGetAvailableModelsReturnsClonedSupportedParameters(t *testing.T) {
 	}
 }
 
+func TestGetAvailableModelsIncludesMaxContextLengthOverride(t *testing.T) {
+	r := newTestModelRegistry()
+	const want = 1048576
+	r.RegisterClient("client-1", "openai", []*ModelInfo{{
+		ID:               "deepseek-v4-flash",
+		ContextLength:    want,
+		MaxContextLength: want,
+	}})
+
+	models := r.GetAvailableModels("openai")
+	if len(models) != 1 {
+		t.Fatalf("models length = %d, want 1", len(models))
+	}
+	if got := models[0]["context_length"]; got != want {
+		t.Fatalf("context_length = %#v, want %d", got, want)
+	}
+	if got := models[0]["max_context_length"]; got != want {
+		t.Fatalf("max_context_length = %#v, want %d", got, want)
+	}
+}
+
 func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 	first := LookupModelInfo("claude-sonnet-4-6")
 	if first == nil || first.Thinking == nil || len(first.Thinking.Levels) == 0 {
@@ -145,5 +166,33 @@ func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 	second := LookupModelInfo("claude-sonnet-4-6")
 	if second == nil || second.Thinking == nil || len(second.Thinking.Levels) == 0 || second.Thinking.Levels[0] == "mutated" {
 		t.Fatalf("expected static lookup clone, got %+v", second)
+	}
+}
+
+func TestLookupModelInfoIncludesClaudeSonnet5(t *testing.T) {
+	model := LookupModelInfo("claude-sonnet-5")
+	if model == nil {
+		t.Fatal("expected Claude Sonnet 5 static model")
+	}
+	if model.Type != "claude" {
+		t.Fatalf("Claude Sonnet 5 type = %q, want claude", model.Type)
+	}
+	if model.ContextLength != 1000000 {
+		t.Fatalf("Claude Sonnet 5 context length = %d, want 1000000", model.ContextLength)
+	}
+	if model.MaxCompletionTokens != 128000 {
+		t.Fatalf("Claude Sonnet 5 max completion tokens = %d, want 128000", model.MaxCompletionTokens)
+	}
+	if model.Thinking == nil || !model.Thinking.ZeroAllowed || !model.Thinking.DynamicAllowed || model.Thinking.Min != 0 || model.Thinking.Max != 0 {
+		t.Fatalf("expected Claude Sonnet 5 dynamic level-only thinking with zero allowed, got %+v", model.Thinking)
+	}
+	expectedLevels := []string{"low", "medium", "high", "xhigh", "max"}
+	if len(model.Thinking.Levels) != len(expectedLevels) {
+		t.Fatalf("Claude Sonnet 5 thinking levels = %+v, want %+v", model.Thinking.Levels, expectedLevels)
+	}
+	for i, level := range expectedLevels {
+		if model.Thinking.Levels[i] != level {
+			t.Fatalf("Claude Sonnet 5 thinking levels = %+v, want %+v", model.Thinking.Levels, expectedLevels)
+		}
 	}
 }

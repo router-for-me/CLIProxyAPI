@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
@@ -28,9 +30,14 @@ import (
 
 // OAuth configuration constants for Gemini
 const (
-	ClientID            = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-	ClientSecret        = "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"
+	ClientIDEnv         = "CLIPROXY_GEMINI_OAUTH_CLIENT_ID"
+	ClientSecretEnv     = "CLIPROXY_GEMINI_OAUTH_CLIENT_SECRET"
 	DefaultCallbackPort = 8085
+)
+
+var (
+	ClientID     = strings.TrimSpace(os.Getenv(ClientIDEnv))
+	ClientSecret = strings.TrimSpace(os.Getenv(ClientSecretEnv))
 )
 
 // OAuth scopes for Gemini authentication
@@ -216,7 +223,7 @@ func (g *GeminiAuth) getTokenFromWeb(ctx context.Context, config *oauth2.Config,
 
 	// Create a new HTTP server with its own multiplexer.
 	mux := http.NewServeMux()
-	server := &http.Server{Addr: fmt.Sprintf(":%d", callbackPort), Handler: mux}
+	server := &http.Server{Addr: fmt.Sprintf("localhost:%d", callbackPort), Handler: mux}
 	config.RedirectURL = callbackURL
 
 	mux.HandleFunc("/oauth2callback", func(w http.ResponseWriter, r *http.Request) {

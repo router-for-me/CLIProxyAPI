@@ -172,7 +172,7 @@ waitForCallback:
 		return nil, fmt.Errorf("antigravity: empty email returned from user info")
 	}
 
-	// Fetch project ID via loadCodeAssist (same approach as Gemini CLI)
+	// Fetch project ID via loadCodeAssist.
 	projectID := ""
 	if accessToken != "" {
 		fetchedProjectID, errProject := authSvc.FetchProjectID(ctx, accessToken)
@@ -232,7 +232,7 @@ func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbac
 	if port <= 0 {
 		port = antigravity.CallbackPort
 	}
-	addr := fmt.Sprintf(":%d", port)
+	addr := fmt.Sprintf("localhost:%d", port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, 0, nil, err

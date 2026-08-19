@@ -84,12 +84,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 					template, _ = sjson.SetBytes(template, "model", model.String())
 				}
 
-				template, _ = sjson.SetBytes(template, "usageMetadata.promptTokenCount", usage.Get("prompt_tokens").Int())
-				template, _ = sjson.SetBytes(template, "usageMetadata.candidatesTokenCount", usage.Get("completion_tokens").Int())
-				template, _ = sjson.SetBytes(template, "usageMetadata.totalTokenCount", usage.Get("total_tokens").Int())
-				if reasoningTokens := reasoningTokensFromUsage(usage); reasoningTokens > 0 {
-					template, _ = sjson.SetBytes(template, "usageMetadata.thoughtsTokenCount", reasoningTokens)
-				}
+				template = setGeminiUsageMetadataFromOpenAIUsage(template, usage)
 				return [][]byte{template}
 			}
 			return [][]byte{}
@@ -214,8 +209,12 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 				if len((*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator) > 0 {
 					partIndex := 0
 					for _, accumulator := range (*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator {
+						idPath := fmt.Sprintf("candidates.0.content.parts.%d.functionCall.id", partIndex)
 						namePath := fmt.Sprintf("candidates.0.content.parts.%d.functionCall.name", partIndex)
 						argsPath := fmt.Sprintf("candidates.0.content.parts.%d.functionCall.args", partIndex)
+						if accumulator.ID != "" {
+							template, _ = sjson.SetBytes(template, idPath, accumulator.ID)
+						}
 						template, _ = sjson.SetBytes(template, namePath, accumulator.Name)
 						template, _ = sjson.SetRawBytes(template, argsPath, []byte(parseArgsToObjectRaw(accumulator.Arguments.String())))
 						partIndex++
@@ -231,12 +230,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 
 			// Handle usage information
 			if usage := root.Get("usage"); usage.Exists() {
-				template, _ = sjson.SetBytes(template, "usageMetadata.promptTokenCount", usage.Get("prompt_tokens").Int())
-				template, _ = sjson.SetBytes(template, "usageMetadata.candidatesTokenCount", usage.Get("completion_tokens").Int())
-				template, _ = sjson.SetBytes(template, "usageMetadata.totalTokenCount", usage.Get("total_tokens").Int())
-				if reasoningTokens := reasoningTokensFromUsage(usage); reasoningTokens > 0 {
-					template, _ = sjson.SetBytes(template, "usageMetadata.thoughtsTokenCount", reasoningTokens)
-				}
+				template = setGeminiUsageMetadataFromOpenAIUsage(template, usage)
 				results = append(results, template)
 				return true
 			}
@@ -544,6 +538,8 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 		out, _ = sjson.SetBytes(out, "model", model.String())
 	}
 
+	var allParts [][]byte
+
 	// Process choices
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() {
 		choices.ForEach(func(choiceIndex, choice gjson.Result) bool {
@@ -558,6 +554,12 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 			}
 
 			partIndex := 0
+			ensurePart := func(idx int) []byte {
+				for len(allParts) <= idx {
+					allParts = append(allParts, []byte(`{}`))
+				}
+				return allParts[idx]
+			}
 
 			// Handle reasoning content before visible text
 			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
@@ -565,15 +567,19 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 					if reasoningText == "" {
 						continue
 					}
-					out, _ = sjson.SetBytes(out, fmt.Sprintf("candidates.0.content.parts.%d.thought", partIndex), true)
-					out, _ = sjson.SetBytes(out, fmt.Sprintf("candidates.0.content.parts.%d.text", partIndex), reasoningText)
+					part := ensurePart(partIndex)
+					part, _ = sjson.SetBytes(part, "thought", true)
+					part, _ = sjson.SetBytes(part, "text", reasoningText)
+					allParts[partIndex] = part
 					partIndex++
 				}
 			}
 
 			// Handle content first
 			if content := message.Get("content"); content.Exists() && content.String() != "" {
-				out, _ = sjson.SetBytes(out, fmt.Sprintf("candidates.0.content.parts.%d.text", partIndex), content.String())
+				part := ensurePart(partIndex)
+				part, _ = sjson.SetBytes(part, "text", content.String())
+				allParts[partIndex] = part
 				partIndex++
 			}
 
@@ -584,11 +590,15 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 						function := toolCall.Get("function")
 						functionName := function.Get("name").String()
 						functionArgs := function.Get("arguments").String()
+						functionID := toolCall.Get("id").String()
 
-						namePath := fmt.Sprintf("candidates.0.content.parts.%d.functionCall.name", partIndex)
-						argsPath := fmt.Sprintf("candidates.0.content.parts.%d.functionCall.args", partIndex)
-						out, _ = sjson.SetBytes(out, namePath, functionName)
-						out, _ = sjson.SetRawBytes(out, argsPath, []byte(parseArgsToObjectRaw(functionArgs)))
+						part := ensurePart(partIndex)
+						if functionID != "" {
+							part, _ = sjson.SetBytes(part, "functionCall.id", functionID)
+						}
+						part, _ = sjson.SetBytes(part, "functionCall.name", functionName)
+						part, _ = sjson.SetRawBytes(part, "functionCall.args", []byte(parseArgsToObjectRaw(functionArgs)))
+						allParts[partIndex] = part
 						partIndex++
 					}
 					return true
@@ -606,16 +616,15 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 
 			return true
 		})
+
+		if len(allParts) > 0 {
+			out, _ = sjson.SetRawBytes(out, "candidates.0.content.parts", translatorcommon.JoinRawArray(allParts))
+		}
 	}
 
 	// Handle usage information
 	if usage := root.Get("usage"); usage.Exists() {
-		out, _ = sjson.SetBytes(out, "usageMetadata.promptTokenCount", usage.Get("prompt_tokens").Int())
-		out, _ = sjson.SetBytes(out, "usageMetadata.candidatesTokenCount", usage.Get("completion_tokens").Int())
-		out, _ = sjson.SetBytes(out, "usageMetadata.totalTokenCount", usage.Get("total_tokens").Int())
-		if reasoningTokens := reasoningTokensFromUsage(usage); reasoningTokens > 0 {
-			out, _ = sjson.SetBytes(out, "usageMetadata.thoughtsTokenCount", reasoningTokens)
-		}
+		out = setGeminiUsageMetadataFromOpenAIUsage(out, usage)
 	}
 
 	return out
@@ -631,6 +640,51 @@ func reasoningTokensFromUsage(usage gjson.Result) int64 {
 			return v.Int()
 		}
 		if v := usage.Get("output_tokens_details.reasoning_tokens"); v.Exists() {
+			return v.Int()
+		}
+	}
+	return 0
+}
+
+func setGeminiUsageMetadataFromOpenAIUsage(out []byte, usage gjson.Result) []byte {
+	promptTokens, hasPromptTokens := tokenCountFromUsage(usage, "prompt_tokens", "input_tokens")
+	completionTokens, hasCompletionTokens := tokenCountFromUsage(usage, "completion_tokens", "output_tokens")
+	totalTokens, hasTotalTokens := tokenCountFromUsage(usage, "total_tokens")
+	if hasPromptTokens {
+		out, _ = sjson.SetBytes(out, "usageMetadata.promptTokenCount", promptTokens)
+	}
+	if hasCompletionTokens {
+		out, _ = sjson.SetBytes(out, "usageMetadata.candidatesTokenCount", completionTokens)
+	}
+	if hasTotalTokens {
+		out, _ = sjson.SetBytes(out, "usageMetadata.totalTokenCount", totalTokens)
+	} else if hasPromptTokens || hasCompletionTokens {
+		out, _ = sjson.SetBytes(out, "usageMetadata.totalTokenCount", promptTokens+completionTokens)
+	}
+	if reasoningTokens := reasoningTokensFromUsage(usage); reasoningTokens > 0 {
+		out, _ = sjson.SetBytes(out, "usageMetadata.thoughtsTokenCount", reasoningTokens)
+	}
+	if cachedTokens := cachedTokensFromUsage(usage); cachedTokens > 0 {
+		out, _ = sjson.SetBytes(out, "usageMetadata.cachedContentTokenCount", cachedTokens)
+	}
+	return out
+}
+
+func tokenCountFromUsage(usage gjson.Result, paths ...string) (int64, bool) {
+	for _, path := range paths {
+		if v := usage.Get(path); v.Exists() {
+			return v.Int(), true
+		}
+	}
+	return 0, false
+}
+
+func cachedTokensFromUsage(usage gjson.Result) int64 {
+	if usage.Exists() {
+		if v := usage.Get("prompt_tokens_details.cached_tokens"); v.Exists() {
+			return v.Int()
+		}
+		if v := usage.Get("input_tokens_details.cached_tokens"); v.Exists() {
 			return v.Int()
 		}
 	}

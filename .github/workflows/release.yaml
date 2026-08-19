@@ -1,39 +1,80 @@
 name: goreleaser
+run-name: >-
+  goreleaser tag=${{ inputs.tag || github.ref_name }}
+  commit=${{ inputs.commit || github.sha }}
 
 on:
   push:
     # run only against tags
     tags:
       - '*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing fork tag to release, for example v6.9.36-0
+        required: false
+        type: string
+      commit:
+        description: Exact commit the supplied fork tag must resolve to
+        required: false
+        type: string
 
 permissions:
   contents: write
+
+concurrency:
+  group: goreleaser-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
-      - name: Refresh models catalog
-        run: |
-          git fetch --depth 1 https://github.com/router-for-me/models.git main
-          git show FETCH_HEAD:models.json > internal/registry/models/models.json
+          ref: ${{ inputs.tag || github.ref }}
       - run: git fetch --force --tags
-      - uses: actions/setup-go@v4
+      - name: Verify requested release commit
+        if: inputs.commit != ''
+        env:
+          EXPECTED_COMMIT: ${{ inputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "${EXPECTED_COMMIT}"
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version: '>=1.26.0'
           cache: true
       - name: Generate Build Metadata
         run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
-      - uses: goreleaser/goreleaser-action@v4
+          VERSION="${{ inputs.tag }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+
+          {
+            echo "VERSION=${VERSION}"
+            echo "COMMIT=$(git rev-parse --short HEAD)"
+            echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_ENV"
+      - name: Check existing release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "[i] ${VERSION} release already exists; skipping GoReleaser."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: goreleaser/goreleaser-action@5fdedb94abba051217030cc86d4523cf3f02243d
+        if: steps.release.outputs.exists != 'true'
         with:
           distribution: goreleaser
-          version: latest
+          version: v2.17.0
           args: release --clean --skip=validate
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

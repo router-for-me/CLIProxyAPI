@@ -40,7 +40,7 @@ func TestConvertGeminiRequestToAntigravity_ReplacesClientSignatureOnFunctionCall
 	}
 }
 
-func TestConvertGeminiRequestToAntigravity_ReplacesClientSignatureOnTextPart(t *testing.T) {
+func TestConvertGeminiRequestToAntigravity_DropsIncompatibleClientSignatureOnTextPart(t *testing.T) {
 	validSignature := "abc123validSignature1234567890123456789012345678901234567890"
 	inputJSON := []byte(fmt.Sprintf(`{
 		"model": "gemini-3-pro-preview",
@@ -55,16 +55,12 @@ func TestConvertGeminiRequestToAntigravity_ReplacesClientSignatureOnTextPart(t *
 	}`, validSignature))
 
 	output := ConvertGeminiRequestToAntigravity("gemini-3-pro-preview", inputJSON, false)
-	outputStr := string(output)
-
-	sig := gjson.Get(outputStr, "request.contents.0.parts.0.thoughtSignature").String()
-	expectedSig := "skip_thought_signature_validator"
-	if sig != expectedSig {
-		t.Errorf("Expected thoughtSignature '%s', got '%s'", expectedSig, sig)
+	if signature := gjson.GetBytes(output, "request.contents.0.parts.0.thoughtSignature"); signature.Exists() {
+		t.Fatalf("incompatible text signature should be dropped, got %s", signature.Raw)
 	}
 }
 
-func TestConvertGeminiRequestToAntigravity_AddsSkipSentinelToStringThoughtPart(t *testing.T) {
+func TestConvertGeminiRequestToAntigravity_LeavesUnsignedThoughtPartUnsigned(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gemini-3-pro-preview",
 		"contents": [
@@ -78,12 +74,8 @@ func TestConvertGeminiRequestToAntigravity_AddsSkipSentinelToStringThoughtPart(t
 	}`)
 
 	output := ConvertGeminiRequestToAntigravity("gemini-3-pro-preview", inputJSON, false)
-	outputStr := string(output)
-
-	sig := gjson.Get(outputStr, "request.contents.0.parts.0.thoughtSignature").String()
-	expectedSig := "skip_thought_signature_validator"
-	if sig != expectedSig {
-		t.Errorf("Expected thoughtSignature '%s', got '%s'", expectedSig, sig)
+	if signature := gjson.GetBytes(output, "request.contents.0.parts.0.thoughtSignature"); signature.Exists() {
+		t.Fatalf("unsigned thought should remain unsigned, got %s", signature.Raw)
 	}
 }
 
@@ -277,8 +269,7 @@ func testAntigravityGeminiClaudeSignature(t *testing.T) string {
 	return base64.StdEncoding.EncodeToString(payload)
 }
 
-func TestConvertGeminiRequestToAntigravity_ParallelFunctionCalls(t *testing.T) {
-	// Multiple functionCalls should all get skip_thought_signature_validator
+func TestConvertGeminiRequestToAntigravity_ParallelFunctionCallsOnlyFirstGetsSentinel(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gemini-3-pro-preview",
 		"contents": [
@@ -293,19 +284,15 @@ func TestConvertGeminiRequestToAntigravity_ParallelFunctionCalls(t *testing.T) {
 	}`)
 
 	output := ConvertGeminiRequestToAntigravity("gemini-3-pro-preview", inputJSON, false)
-	outputStr := string(output)
-
-	parts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
 	if len(parts) != 2 {
 		t.Fatalf("Expected 2 parts, got %d", len(parts))
 	}
-
-	expectedSig := "skip_thought_signature_validator"
-	for i, part := range parts {
-		sig := part.Get("thoughtSignature").String()
-		if sig != expectedSig {
-			t.Errorf("Part %d: Expected '%s', got '%s'", i, expectedSig, sig)
-		}
+	if got := parts[0].Get("thoughtSignature").String(); got != signature.GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("first call signature = %q, want sentinel", got)
+	}
+	if parts[1].Get("thoughtSignature").Exists() {
+		t.Fatalf("second parallel call should remain unsigned: %s", parts[1].Raw)
 	}
 }
 
@@ -345,13 +332,13 @@ func TestFixCLIToolResponse_PreservesFunctionResponseParts(t *testing.T) {
 		}
 	}`
 
-	result, err := fixCLIToolResponse(input)
+	result, err := fixCLIToolResponse([]byte(input))
 	if err != nil {
 		t.Fatalf("fixCLIToolResponse failed: %v", err)
 	}
 
 	// Find the function response content (role=function)
-	contents := gjson.Get(result, "request.contents").Array()
+	contents := gjson.GetBytes(result, "request.contents").Array()
 	var funcContent gjson.Result
 	for _, c := range contents {
 		if c.Get("role").String() == "function" {
@@ -388,8 +375,7 @@ func TestFixCLIToolResponse_PreservesFunctionResponseParts(t *testing.T) {
 }
 
 func TestFixCLIToolResponse_BackfillsEmptyFunctionResponseName(t *testing.T) {
-	// When the Amp client sends functionResponse with an empty name,
-	// fixCLIToolResponse should backfill it from the corresponding functionCall.
+	// Empty functionResponse names are backfilled from the corresponding functionCall.
 	input := `{
 		"model": "gemini-3-pro-preview",
 		"request": {
@@ -410,12 +396,12 @@ func TestFixCLIToolResponse_BackfillsEmptyFunctionResponseName(t *testing.T) {
 		}
 	}`
 
-	result, err := fixCLIToolResponse(input)
+	result, err := fixCLIToolResponse([]byte(input))
 	if err != nil {
 		t.Fatalf("fixCLIToolResponse failed: %v", err)
 	}
 
-	contents := gjson.Get(result, "request.contents").Array()
+	contents := gjson.GetBytes(result, "request.contents").Array()
 	var funcContent gjson.Result
 	for _, c := range contents {
 		if c.Get("role").String() == "function" {
@@ -457,12 +443,12 @@ func TestFixCLIToolResponse_BackfillsMultipleEmptyNames(t *testing.T) {
 		}
 	}`
 
-	result, err := fixCLIToolResponse(input)
+	result, err := fixCLIToolResponse([]byte(input))
 	if err != nil {
 		t.Fatalf("fixCLIToolResponse failed: %v", err)
 	}
 
-	contents := gjson.Get(result, "request.contents").Array()
+	contents := gjson.GetBytes(result, "request.contents").Array()
 	var funcContent gjson.Result
 	for _, c := range contents {
 		if c.Get("role").String() == "function" {
@@ -511,12 +497,12 @@ func TestFixCLIToolResponse_PreservesExistingName(t *testing.T) {
 		}
 	}`
 
-	result, err := fixCLIToolResponse(input)
+	result, err := fixCLIToolResponse([]byte(input))
 	if err != nil {
 		t.Fatalf("fixCLIToolResponse failed: %v", err)
 	}
 
-	contents := gjson.Get(result, "request.contents").Array()
+	contents := gjson.GetBytes(result, "request.contents").Array()
 	var funcContent gjson.Result
 	for _, c := range contents {
 		if c.Get("role").String() == "function" {
@@ -557,12 +543,12 @@ func TestFixCLIToolResponse_MoreResponsesThanCalls(t *testing.T) {
 		}
 	}`
 
-	result, err := fixCLIToolResponse(input)
+	result, err := fixCLIToolResponse([]byte(input))
 	if err != nil {
 		t.Fatalf("fixCLIToolResponse failed: %v", err)
 	}
 
-	contents := gjson.Get(result, "request.contents").Array()
+	contents := gjson.GetBytes(result, "request.contents").Array()
 	var funcContent gjson.Result
 	for _, c := range contents {
 		if c.Get("role").String() == "function" {
@@ -615,12 +601,12 @@ func TestFixCLIToolResponse_MultipleGroupsFIFO(t *testing.T) {
 		}
 	}`
 
-	result, err := fixCLIToolResponse(input)
+	result, err := fixCLIToolResponse([]byte(input))
 	if err != nil {
 		t.Fatalf("fixCLIToolResponse failed: %v", err)
 	}
 
-	contents := gjson.Get(result, "request.contents").Array()
+	contents := gjson.GetBytes(result, "request.contents").Array()
 	var funcContents []gjson.Result
 	for _, c := range contents {
 		if c.Get("role").String() == "function" {
@@ -638,5 +624,333 @@ func TestFixCLIToolResponse_MultipleGroupsFIFO(t *testing.T) {
 	}
 	if name1 != "Grep" {
 		t.Errorf("Expected second group name 'Grep', got '%s'", name1)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravityDeduplicatesRequestWideAndDisambiguatesTools(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	inputJSON := []byte(`{
+		"contents":[
+			{"role":"model","parts":[{"functionCall":{"name":"` + second + `","args":{}}}]},
+			{"role":"user","parts":[{"functionResponse":{"name":"` + second + `","response":{}}}]}
+		],
+		"tools":[
+			{"functionDeclarations":[
+				{"name":"lookup","parameters":{"type":"object"}},
+				{"name":"` + first + `","parameters":{"type":"object"}}
+			]},
+			{"function_declarations":[
+				{"name":"lookup","parameters":{"type":"object"}},
+				{"name":"` + second + `","parameters":{"type":"object"}}
+			]},
+			{"functionDeclarations":[{"name":"lookup","parameters":{"type":"object"}}]}
+		],
+		"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["` + second + `"]}}
+	}`)
+
+	out := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if got := len(gjson.GetBytes(out, "request.tools").Array()); got != 2 {
+		t.Fatalf("tool count = %d, want 2 after removing the empty duplicate node. Output: %s", got, out)
+	}
+	camel := gjson.GetBytes(out, "request.tools.0.functionDeclarations").Array()
+	snake := gjson.GetBytes(out, "request.tools.1.function_declarations").Array()
+	if len(camel)+len(snake) != 3 {
+		t.Fatalf("declaration count = %d, want 3. Output: %s", len(camel)+len(snake), out)
+	}
+	if len(camel) != 2 || len(snake) != 1 {
+		t.Fatalf("declaration distribution = %d/%d, want 2/1. Output: %s", len(camel), len(snake), out)
+	}
+	firstMapped := camel[1].Get("name").String()
+	secondMapped := snake[0].Get("name").String()
+	if firstMapped == secondMapped || len(secondMapped) > 64 {
+		t.Fatalf("collision names = %q and %q, want distinct names <= 64 chars", firstMapped, secondMapped)
+	}
+	if !camel[0].Get("parametersJsonSchema").Exists() || !snake[0].Get("parametersJsonSchema").Exists() {
+		t.Fatalf("parameters were not normalized. Output: %s", out)
+	}
+	if got := gjson.GetBytes(out, "request.contents.0.parts.0.functionCall.name").String(); got != secondMapped {
+		t.Fatalf("functionCall.name = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+	if got := gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse.name").String(); got != secondMapped {
+		t.Fatalf("functionResponse.name = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+	if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames.0").String(); got != secondMapped {
+		t.Fatalf("allowedFunctionNames.0 = %q, want %q. Output: %s", got, secondMapped, out)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravityMapsSnakeCaseFunctionReferences(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents":[
+			{"role":"model","parts":[{"function_call":{"name":"read_file","args":{}}}]},
+			{"role":"user","parts":[{"function_response":{"name":"read_file","response":{}}}]}
+		],
+		"tools":[{"function_declarations":[{"name":"read/file"},{"name":"read_file"}]}],
+		"tool_config":{"function_calling_config":{"allowed_function_names":["read_file"]}}
+	}`)
+
+	out := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	mapped := gjson.GetBytes(out, "request.tools.0.function_declarations.1.name").String()
+	if mapped == "" {
+		t.Fatalf("mapped declaration name is empty. Output: %s", out)
+	}
+	for _, path := range []string{
+		"request.contents.0.parts.0.function_call.name",
+		"request.contents.1.parts.0.function_response.name",
+		"request.tool_config.function_calling_config.allowed_function_names.0",
+	} {
+		if got := gjson.GetBytes(out, path).String(); got != mapped {
+			t.Fatalf("%s = %q, want %q. Output: %s", path, got, mapped, out)
+		}
+	}
+}
+
+func TestSanitizeAntigravityClaudeGeminiRequestSignatures_PreservesNumberPrecision(t *testing.T) {
+	inputJSON := []byte(`{
+		"project": "",
+		"model": "claude-sonnet-4-6",
+		"request": {
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{
+							"text": "thinking",
+							"thought": true,
+							"thoughtSignature": "invalid"
+						},
+						{
+							"functionCall": {
+								"name": "calc",
+								"args": {
+									"n": 12345678901234567890,
+									"big": 9007199254740993
+								}
+							}
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-sonnet-4-6", inputJSON)
+	outputStr := string(output)
+
+	bigVal := gjson.Get(outputStr, "request.contents.0.parts.0.functionCall.args.big").Raw
+	nVal := gjson.Get(outputStr, "request.contents.0.parts.0.functionCall.args.n").Raw
+
+	if bigVal != "9007199254740993" {
+		t.Errorf("Precision lost for big: got %s, want 9007199254740993", bigVal)
+	}
+	if nVal != "12345678901234567890" {
+		t.Errorf("Precision lost for n: got %s, want 12345678901234567890", nVal)
+	}
+}
+
+func TestSanitizeAntigravityClaudeGeminiRequestSignatures_StripsFunctionCallSignatureForClaudeModel(t *testing.T) {
+	inputJSON := []byte(`{
+		"project": "",
+		"model": "claude-sonnet-4-6",
+		"request": {
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{
+							"functionCall": {
+								"name": "calc",
+								"args": {}
+							},
+							"thoughtSignature": "skip_thought_signature_validator"
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-sonnet-4-6", inputJSON)
+	outputStr := string(output)
+
+	sig := gjson.Get(outputStr, "request.contents.0.parts.0.thoughtSignature")
+	if sig.Exists() {
+		t.Fatalf("expected functionCall thoughtSignature to be stripped for Claude target model, got %s", sig.Raw)
+	}
+}
+
+func TestSanitizeAntigravityClaudeGeminiRequestSignatures_StrictTypeChecks(t *testing.T) {
+	// Non-boolean thought (e.g. "true" as string) and non-string text (e.g. 123) should not be treated as valid thinking block
+	inputJSON := []byte(`{
+		"project": "",
+		"model": "claude-sonnet-4-6",
+		"request": {
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{
+							"text": "reasoning",
+							"thought": "true",
+							"thoughtSignature": "valid_signature_1234567890123456789012345678901234567890"
+						},
+						{
+							"text": 123,
+							"thought": true,
+							"thoughtSignature": "valid_signature_1234567890123456789012345678901234567890"
+						},
+						{
+							"text": "valid answer"
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-sonnet-4-6", inputJSON)
+	outputStr := string(output)
+
+	parts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	for i, part := range parts {
+		if sig := part.Get("thoughtSignature"); sig.Exists() {
+			t.Fatalf("part %d should not retain thoughtSignature, got %s", i, sig.Raw)
+		}
+	}
+}
+
+func TestSanitizeAntigravityClaudeGeminiRequestSignatures_StripsDuplicateSignatureKeys(t *testing.T) {
+	inputJSON := []byte(`{
+		"project": "",
+		"model": "claude-sonnet-4-6",
+		"request": {
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{
+							"functionCall": {
+								"name": "calc",
+								"args": {}
+							},
+							"thoughtSignature": "first_signature",
+							"thoughtSignature": "second_signature"
+						},
+						{
+							"functionCall": {"name": "first"},
+							"functionCall": {
+								"name": "second",
+								"thoughtSignature": "secret"
+							}
+						},
+						{
+							"functionCall": {
+								"name": "first",
+								"thoughtSignature": "secret"
+							},
+							"functionCall": {"name": "second"}
+						},
+						{
+							"thoughtSignature": null,
+							"thoughtSignature": "second_sig",
+							"text": "regular answer"
+						},
+						{
+							"thoughtSignature": "secret",
+							"thoughtSignature": null,
+							"text": "regular answer 2"
+						},
+						{
+							"thoughtSignature": {"nested": "obj"},
+							"text": "object sig"
+						},
+						{
+							"thoughtSignature": [1, 2, 3],
+							"text": "array sig"
+						},
+						{
+							"functionCall": {"thought\u0053ignature": "secret"},
+							"functionCall": {"name": "safe"}
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-sonnet-4-6", inputJSON)
+	outputStr := string(output)
+
+	for i := 0; i < 8; i++ {
+		sig := gjson.Get(outputStr, fmt.Sprintf("request.contents.0.parts.%d.thoughtSignature", i))
+		if sig.Exists() {
+			t.Fatalf("part %d: expected all duplicate thoughtSignature fields to be stripped, got %s", i, sig.Raw)
+		}
+		fcSig := gjson.Get(outputStr, fmt.Sprintf("request.contents.0.parts.%d.functionCall.thoughtSignature", i))
+		if fcSig.Exists() {
+			t.Fatalf("part %d: expected functionCall thoughtSignature to be stripped, got %s", i, fcSig.Raw)
+		}
+	}
+}
+
+func TestSanitizeAntigravityClaudeGeminiRequestSignatures_StringValueNotTreatedAsKey(t *testing.T) {
+	// A part where "thoughtSignature" is a tool name (string value), not a key, should not trigger signature sanitization
+	inputJSON := []byte(`{
+		"project": "",
+		"model": "claude-sonnet-4-6",
+		"request": {
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{
+							"functionCall": {
+								"name": "thoughtSignature",
+								"args": {
+									"query": "thought_signature"
+								}
+							}
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-sonnet-4-6", inputJSON)
+	// Output should preserve the exact input string because no signature keys exist
+	if string(output) != string(inputJSON) {
+		t.Fatalf("expected unchanged output for non-key values, got %s", string(output))
+	}
+}
+
+func TestSanitizeAntigravityClaudeGeminiRequestSignatures_LargeNumberDoesNotHaltKeyScan(t *testing.T) {
+	// A part with numbers outside float64 range should not break token scanning
+	inputJSON := []byte(`{
+		"project": "",
+		"model": "claude-sonnet-4-6",
+		"request": {
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{
+							"functionCall": {"args": {"n": 1e10000}},
+							"functionCall": {"thoughtSignature": "secret"},
+							"functionCall": {"name": "safe"}
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-sonnet-4-6", inputJSON)
+	outputStr := string(output)
+
+	fcSig := gjson.Get(outputStr, "request.contents.0.parts.0.functionCall.thoughtSignature")
+	if fcSig.Exists() {
+		t.Fatalf("expected hidden thoughtSignature to be stripped despite large number, got %s", fcSig.Raw)
 	}
 }

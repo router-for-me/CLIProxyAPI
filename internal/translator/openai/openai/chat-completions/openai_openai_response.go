@@ -14,16 +14,25 @@ import (
 // Parameters:
 //   - ctx: The context for the request, used for cancellation and timeout handling
 //   - modelName: The name of the model being used for the response (unused in current implementation)
-//   - rawJSON: The raw JSON response from the Gemini CLI API
+//   - rawJSON: The raw JSON response from the OpenAI API
 //   - param: A pointer to a parameter object for maintaining state between calls
 //
 // Returns:
 //   - [][]byte: A slice of JSON payload chunks in OpenAI format.
 func ConvertOpenAIResponseToOpenAI(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+	if param != nil {
+		if done, ok := (*param).(bool); ok && done {
+			// Drop any chunks that arrive after the terminal [DONE] marker.
+			return [][]byte{}
+		}
+	}
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
+		if param != nil {
+			*param = true
+		}
 		return [][]byte{}
 	}
 	return [][]byte{rawJSON}
@@ -34,7 +43,7 @@ func ConvertOpenAIResponseToOpenAI(_ context.Context, _ string, originalRequestR
 // Parameters:
 //   - ctx: The context for the request, used for cancellation and timeout handling
 //   - modelName: The name of the model being used for the response
-//   - rawJSON: The raw JSON response from the Gemini CLI API
+//   - rawJSON: The raw JSON response from the OpenAI API
 //   - param: A pointer to a parameter object for the conversion
 //
 // Returns:

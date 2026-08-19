@@ -65,6 +65,7 @@ func ConfigFromJWT(ctx context.Context, rawJWT string) (config.HomeConfig, error
 	}
 	return config.HomeConfig{
 		Enabled: true,
+		NodeID:  strings.TrimSpace(claims.CertificateID),
 		Host:    strings.TrimSpace(claims.IP),
 		Port:    claims.Port,
 		TLS: config.HomeTLSConfig{

@@ -1,9 +1,9 @@
 package helps
 
 import (
-	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -15,29 +15,72 @@ func StripVertexOpenAIResponsesToolCallIDs(payload []byte, sourceFormat string) 
 		return payload
 	}
 
-	contents := gjson.GetBytes(payload, "contents")
-	if !contents.IsArray() {
+	contents := util.GetGJSONBytesNoCopy(payload, "contents")
+	if !contents.IsArray() || !vertexContentsHaveToolCallIDs(contents) {
 		return payload
 	}
 
-	out := payload
-	for contentIndex, content := range contents.Array() {
+	contentsChanged := false
+	contentItems := make([][]byte, 0, int(contents.Get("#").Int()))
+	contents.ForEach(func(_, content gjson.Result) bool {
 		parts := content.Get("parts")
 		if !parts.IsArray() {
-			continue
+			contentItems = append(contentItems, []byte(content.Raw))
+			return true
 		}
-		for partIndex, part := range parts.Array() {
-			if part.Get("functionCall.id").Exists() {
-				if updated, errDelete := sjson.DeleteBytes(out, fmt.Sprintf("contents.%d.parts.%d.functionCall.id", contentIndex, partIndex)); errDelete == nil {
-					out = updated
+
+		partsChanged := false
+		partItems := make([][]byte, 0, int(parts.Get("#").Int()))
+		parts.ForEach(func(_, part gjson.Result) bool {
+			partJSON := []byte(part.Raw)
+			for _, path := range []string{"functionCall.id", "functionResponse.id"} {
+				if !part.Get(path).Exists() {
+					continue
+				}
+				updated, errDelete := sjson.DeleteBytes(partJSON, path)
+				if errDelete == nil {
+					partJSON = updated
+					partsChanged = true
 				}
 			}
-			if part.Get("functionResponse.id").Exists() {
-				if updated, errDelete := sjson.DeleteBytes(out, fmt.Sprintf("contents.%d.parts.%d.functionResponse.id", contentIndex, partIndex)); errDelete == nil {
-					out = updated
-				}
+			partItems = append(partItems, partJSON)
+			return true
+		})
+
+		contentJSON := []byte(content.Raw)
+		if partsChanged {
+			updated, errSet := sjson.SetRawBytes(contentJSON, "parts", JoinRawJSONArray(partItems))
+			if errSet == nil {
+				contentJSON = updated
+				contentsChanged = true
 			}
 		}
+		contentItems = append(contentItems, contentJSON)
+		return true
+	})
+	if !contentsChanged {
+		return payload
 	}
-	return out
+
+	updated, errSet := sjson.SetRawBytes(payload, "contents", JoinRawJSONArray(contentItems))
+	if errSet != nil {
+		return payload
+	}
+	return updated
+}
+
+func vertexContentsHaveToolCallIDs(contents gjson.Result) bool {
+	hasIDs := false
+	contents.ForEach(func(_, content gjson.Result) bool {
+		parts := content.Get("parts")
+		if !parts.IsArray() {
+			return true
+		}
+		parts.ForEach(func(_, part gjson.Result) bool {
+			hasIDs = part.Get("functionCall.id").Exists() || part.Get("functionResponse.id").Exists()
+			return !hasIDs
+		})
+		return !hasIDs
+	})
+	return hasIDs
 }

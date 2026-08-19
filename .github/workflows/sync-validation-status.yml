@@ -1,0 +1,290 @@
+name: Sync Validation Status
+
+on:
+  workflow_run:
+    workflows: [pr-test-build]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: read
+
+# queue: max. Serialize tracker mutations with Upstream Sync, then re-read
+# state and enforce generation monotonicity because queue order is arbitrary.
+concurrency:
+  group: upstream-sync-tracker-mutations
+  queue: max
+
+jobs:
+  reconcile-sync-validation:
+    # Only the trusted upstream-sync workflow dispatches the correlated check.
+    # workflow_run has write permissions, so this job never checks out or runs PR code.
+    if: github.event.workflow_run.event == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reconcile trackers from correlated run metadata
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_NAME: ${{ github.event.workflow_run.display_title }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          case "${RUN_NAME}" in
+            sync-validation\ *) ;;
+            *)
+              echo "Uncorrelated workflow_dispatch run; no tracker mutation."
+              exit 0
+              ;;
+          esac
+
+          HEAD_SHA="$(printf '%s\n' "${RUN_NAME}" | sed -n 's/.*head_sha=\([^ ]*\).*/\1/p')"
+          PR_NUMBER="$(printf '%s\n' "${RUN_NAME}" | sed -n 's/.*sync_pr=\([^ ]*\).*/\1/p')"
+          UPSTREAM_SHA="$(printf '%s\n' "${RUN_NAME}" | sed -n 's/.*upstream_sha=\([^ ]*\).*/\1/p')"
+          if ! printf '%s' "${HEAD_SHA}" | grep -Eq '^[0-9a-f]{40}$' || \
+             ! printf '%s' "${PR_NUMBER}" | grep -Eq '^[0-9]+$' || \
+             ! printf '%s' "${UPSTREAM_SHA}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "Run metadata does not contain a complete sync correlation; no tracker mutation." >&2
+            exit 1
+          fi
+
+          PR_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"
+          ACTUAL_HEAD="$(jq -r '.head.sha' <<< "${PR_JSON}")"
+          PR_BODY="$(jq -r '.body // ""' <<< "${PR_JSON}")"
+          BRANCH="$(jq -r '.head.ref' <<< "${PR_JSON}")"
+          BASE_BRANCH="$(jq -r '.base.ref' <<< "${PR_JSON}")"
+          HEAD_REPOSITORY="$(jq -r '.head.repo.full_name // ""' <<< "${PR_JSON}")"
+          if [ "${ACTUAL_HEAD}" != "${HEAD_SHA}" ]; then
+            echo "PR head no longer matches the validated run; no tracker mutation." >&2
+            exit 1
+          fi
+          if [ "${BASE_BRANCH}" != "main" ] || [ "${HEAD_REPOSITORY}" != "${GITHUB_REPOSITORY}" ]; then
+            echo "Validation metadata does not identify a same-repository main-targeting PR." >&2
+            exit 1
+          fi
+
+          CORRELATION="$(jq -Rn --arg body "${PR_BODY}" \
+            '$body | capture("<!-- ccs-upstream-sync:tag=(?<tag>v[0-9]+\\.[0-9]+\\.[0-9]+);sha=(?<sha>[0-9a-f]{40}) -->")? | if . == null then "" else "\\(.tag) \\(.sha)" end')"
+          if [ -z "${CORRELATION}" ]; then
+            echo "PR lacks a valid upstream correlation marker; no tracker mutation." >&2
+            exit 1
+          fi
+          TAG="${CORRELATION%% *}"
+          MARKER_SHA="${CORRELATION##* }"
+          MARKER="<!-- ccs-upstream-sync:tag=${TAG};sha=${MARKER_SHA} -->"
+          if [ "${MARKER_SHA}" != "${UPSTREAM_SHA}" ]; then
+            echo "PR lacks the exact upstream marker for this validation run; no tracker mutation." >&2
+            exit 1
+          fi
+
+          EXPECTED_BRANCH="upstream-sync/${TAG}-${UPSTREAM_SHA}"
+          case "${BRANCH}" in
+            "${EXPECTED_BRANCH}"|"${EXPECTED_BRANCH}"-[0-9]*) ;;
+            *)
+              echo "PR branch does not match the validated upstream generation." >&2
+              exit 1
+              ;;
+          esac
+
+          TRACKING_ISSUE_MARKER='<!-- ccs-upstream-sync-blocker -->'
+          TRACKING_ISSUE_AUTHOR='app/github-actions'
+          ISSUES_JSON="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 \
+            --json number,title,body,createdAt,url,author)"
+          ISSUE_NUMBER="$(jq -r --arg owner "${TRACKING_ISSUE_MARKER}" --arg trusted "${TRACKING_ISSUE_AUTHOR}" \
+            '[.[] | select(.author.login == $trusted and ((.body // "") | contains($owner))) | . + {generation: (try ((.body // "") | capture("ccs-upstream-sync-current:tag=v(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+);sha=(?<sha>[0-9a-f]{40})")) catch {major:"-1",minor:"-1",patch:"-1",sha:""})}] | sort_by((.generation.major | tonumber), (.generation.minor | tonumber), (.generation.patch | tonumber), .createdAt) | last.number // empty' \
+            <<< "${ISSUES_JSON}")"
+          if [ -z "${ISSUE_NUMBER}" ]; then
+            LEGACY_TITLE="upstream-sync blocked: ${TAG} (${UPSTREAM_SHA})"
+            ISSUE_NUMBER="$(jq -r --arg title "${LEGACY_TITLE}" --arg marker "${MARKER}" --arg trusted "${TRACKING_ISSUE_AUTHOR}" \
+              '[.[] | select(.author.login == $trusted and .title == $title and ((.body // "") | contains($marker)))] | .[0].number // empty' \
+              <<< "${ISSUES_JSON}")"
+          fi
+
+          ISSUE_BODY=""
+          ISSUE_TITLE=""
+          CURRENT_GENERATION=""
+          if [ -n "${ISSUE_NUMBER}" ]; then
+            LIVE_ISSUE="$(gh issue view "${ISSUE_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+              --json author,title,body,state)"
+            ISSUE_AUTHOR="$(jq -r '.author.login // ""' <<< "${LIVE_ISSUE}")"
+            ISSUE_TITLE="$(jq -r '.title // ""' <<< "${LIVE_ISSUE}")"
+            ISSUE_BODY="$(jq -r '.body // ""' <<< "${LIVE_ISSUE}")"
+            ISSUE_STATE="$(jq -r '.state // ""' <<< "${LIVE_ISSUE}")"
+            if [ "${ISSUE_AUTHOR}" != "${TRACKING_ISSUE_AUTHOR}" ] || [ "${ISSUE_STATE}" != "OPEN" ]; then
+              echo "Tracker ownership or state changed before reconciliation; refusing mutation." >&2
+              exit 1
+            fi
+            if [[ "${ISSUE_BODY}" != *"${TRACKING_ISSUE_MARKER}"* ]] && \
+               { [ "${ISSUE_TITLE}" != "${LEGACY_TITLE}" ] || [[ "${ISSUE_BODY}" != *"${MARKER}"* ]]; }; then
+              echo "Tracker identity changed before reconciliation; refusing mutation." >&2
+              exit 1
+            fi
+            CURRENT_GENERATION="$(sed -nE 's/^<!-- ccs-upstream-sync-current:tag=(v[0-9]+\.[0-9]+\.[0-9]+);sha=([0-9a-f]{40}) -->$/\1 \2/p' \
+              <<< "${ISSUE_BODY}")"
+            if [ -z "${CURRENT_GENERATION}" ] && [[ "${ISSUE_BODY}" == *"${MARKER}"* ]]; then
+              CURRENT_GENERATION="${TAG} ${UPSTREAM_SHA}"
+            fi
+          fi
+
+          if [ "${CONCLUSION}" = "success" ]; then
+            if [ -z "${ISSUE_NUMBER}" ]; then
+              echo "No automation-owned tracker exists for this successful validation."
+              exit 0
+            fi
+            if [ "${CURRENT_GENERATION}" != "${TAG} ${UPSTREAM_SHA}" ]; then
+              echo "Stale successful validation cannot close the current tracker generation."
+              exit 0
+            fi
+            gh issue close "${ISSUE_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+              --comment "Exact-head validation succeeded for the currently tracked upstream ${TAG} (${UPSTREAM_SHA}) on PR #${PR_NUMBER}.
+
+          ${MARKER}
+
+          Validation run: ${RUN_URL}"
+            exit 0
+          fi
+
+          COMPARE_STATUS="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${UPSTREAM_SHA}...main" --jq '.status')"
+          if [ "${COMPARE_STATUS}" = "ahead" ] || [ "${COMPARE_STATUS}" = "identical" ]; then
+            echo "Failed validation target is already contained in main; stale event cannot reopen a tracker."
+            exit 0
+          fi
+
+          if [ -n "${CURRENT_GENERATION}" ]; then
+            CURRENT_TAG="${CURRENT_GENERATION%% *}"
+            CURRENT_SHA="${CURRENT_GENERATION##* }"
+            if [ "${CURRENT_TAG}" = "${TAG}" ] && [ "${CURRENT_SHA}" != "${UPSTREAM_SHA}" ]; then
+              echo "Tracked tag ${CURRENT_TAG} has a different SHA; refusing retag mutation." >&2
+              exit 1
+            fi
+            NEWEST_TAG="$(printf '%s\n%s\n' "${CURRENT_TAG}" "${TAG}" | sort -V | tail -n 1)"
+            if [ "${NEWEST_TAG}" != "${TAG}" ]; then
+              echo "Stale validation for ${TAG}; tracker already targets ${CURRENT_TAG}."
+              exit 0
+            fi
+          fi
+
+          LABEL_EXISTS="$(gh label list --repo "${GITHUB_REPOSITORY}" --limit 100 --json name \
+            --jq '.[] | select(.name == "upstream-sync-blocked") | .name')"
+          if [ -z "${LABEL_EXISTS}" ]; then
+            if ! gh label create upstream-sync-blocked --repo "${GITHUB_REPOSITORY}" --color B60205 \
+              --description "Pinned upstream sync needs maintainer attention."; then
+              gh label list --repo "${GITHUB_REPOSITORY}" --limit 100 --json name \
+                --jq '.[] | select(.name == "upstream-sync-blocked") | .name' | grep -Fqx upstream-sync-blocked
+            fi
+          fi
+
+          STATUS="- upstream tag: \`${TAG}\`
+          - upstream commit: \`${UPSTREAM_SHA}\`
+          - status: read-only validation ${CONCLUSION}
+          - sync PR: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${PR_NUMBER}
+          - pushed branch: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/tree/${BRANCH}
+          - validation run: ${RUN_URL}"
+
+          if [ -n "${ISSUE_NUMBER}" ]; then
+            EDIT_ISSUE="$(gh issue view "${ISSUE_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+              --json author,title,body,state)"
+            EDIT_AUTHOR="$(jq -r '.author.login // ""' <<< "${EDIT_ISSUE}")"
+            EDIT_TITLE="$(jq -r '.title // ""' <<< "${EDIT_ISSUE}")"
+            EDIT_BODY="$(jq -r '.body // ""' <<< "${EDIT_ISSUE}")"
+            EDIT_STATE="$(jq -r '.state // ""' <<< "${EDIT_ISSUE}")"
+            if [ "${EDIT_AUTHOR}" != "${TRACKING_ISSUE_AUTHOR}" ] || [ "${EDIT_STATE}" != "OPEN" ] || \
+               { [[ "${EDIT_BODY}" != *"${TRACKING_ISSUE_MARKER}"* ]] && \
+                 { [ "${EDIT_TITLE}" != "${LEGACY_TITLE}" ] || [[ "${EDIT_BODY}" != *"${MARKER}"* ]]; }; }; then
+              echo "Tracker identity changed before edit; refusing mutation." >&2
+              exit 1
+            fi
+            EDIT_GENERATION="$(sed -nE 's/^<!-- ccs-upstream-sync-current:tag=(v[0-9]+\.[0-9]+\.[0-9]+);sha=([0-9a-f]{40}) -->$/\1 \2/p' \
+              <<< "${EDIT_BODY}")"
+            if [ -z "${EDIT_GENERATION}" ] && [[ "${EDIT_BODY}" == *"${MARKER}"* ]]; then
+              EDIT_GENERATION="${TAG} ${UPSTREAM_SHA}"
+            fi
+            if [ -n "${EDIT_GENERATION}" ]; then
+              EDIT_TAG="${EDIT_GENERATION%% *}"
+              EDIT_SHA="${EDIT_GENERATION##* }"
+              if [ "${EDIT_TAG}" = "${TAG}" ] && [ "${EDIT_SHA}" != "${UPSTREAM_SHA}" ]; then
+                echo "Tracked tag ${EDIT_TAG} was retagged before edit; refusing mutation." >&2
+                exit 1
+              fi
+              EDIT_NEWEST="$(printf '%s\n%s\n' "${EDIT_TAG}" "${TAG}" | sort -V | tail -n 1)"
+              if [ "${EDIT_NEWEST}" != "${TAG}" ]; then
+                echo "Tracker advanced to ${EDIT_TAG} before edit; stale validation ignored."
+                exit 0
+              fi
+            fi
+            TRACKER_BODY="${TRACKING_ISSUE_MARKER}
+          <!-- ccs-upstream-sync-current:tag=${TAG};sha=${UPSTREAM_SHA} -->
+
+          Automation-owned singleton for the current blocked upstream-sync generation. Status history is recorded in comments."
+            gh issue edit "${ISSUE_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+              --title "upstream-sync blocked: ${TAG} (${UPSTREAM_SHA})" \
+              --body "${TRACKER_BODY}" --add-label upstream-sync-blocked
+            gh issue comment "${ISSUE_NUMBER}" --repo "${GITHUB_REPOSITORY}" --body "${MARKER}
+
+          ${STATUS}"
+          else
+            ISSUE_URL="$(gh issue create --repo "${GITHUB_REPOSITORY}" \
+              --title "upstream-sync blocked: ${TAG} (${UPSTREAM_SHA})" \
+              --label upstream-sync-blocked --assignee kaitranntt \
+              --body "${TRACKING_ISSUE_MARKER}
+
+          <!-- ccs-upstream-sync-current:tag=${TAG};sha=${UPSTREAM_SHA} -->
+
+          ${MARKER}
+
+          ${STATUS}")"
+            ISSUE_NUMBER="${ISSUE_URL##*/}"
+          fi
+
+          # Re-read after mutation so concurrent creates converge on the highest
+          # stored generation rather than depending on workflow scheduling.
+          ISSUES_JSON="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 \
+            --json number,title,body,createdAt,url,author)"
+          ISSUE_NUMBER="$(jq -r --arg owner "${TRACKING_ISSUE_MARKER}" --arg trusted "${TRACKING_ISSUE_AUTHOR}" \
+            '[.[] | select(.author.login == $trusted and ((.body // "") | contains($owner))) | . + {generation: (try ((.body // "") | capture("ccs-upstream-sync-current:tag=v(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+);sha=(?<sha>[0-9a-f]{40})")) catch {major:"-1",minor:"-1",patch:"-1",sha:""})}] | sort_by((.generation.major | tonumber), (.generation.minor | tonumber), (.generation.patch | tonumber), .createdAt) | last.number // empty' \
+            <<< "${ISSUES_JSON}")"
+          CANONICAL_LIVE="$(gh issue view "${ISSUE_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+            --json author,body,state)"
+          CANONICAL_AUTHOR="$(jq -r '.author.login // ""' <<< "${CANONICAL_LIVE}")"
+          CANONICAL_BODY="$(jq -r '.body // ""' <<< "${CANONICAL_LIVE}")"
+          CANONICAL_STATE="$(jq -r '.state // ""' <<< "${CANONICAL_LIVE}")"
+          CANONICAL_GENERATION="$(sed -nE 's/^<!-- ccs-upstream-sync-current:tag=(v[0-9]+\.[0-9]+\.[0-9]+);sha=([0-9a-f]{40}) -->$/\1 \2/p' \
+            <<< "${CANONICAL_BODY}")"
+          if [ "${CANONICAL_AUTHOR}" != "${TRACKING_ISSUE_AUTHOR}" ] || \
+             [ "${CANONICAL_STATE}" != "OPEN" ] || \
+             [[ "${CANONICAL_BODY}" != *"${TRACKING_ISSUE_MARKER}"* ]] || \
+             [ "${CANONICAL_GENERATION}" != "${TAG} ${UPSTREAM_SHA}" ]; then
+            echo "Canonical tracker advanced or changed before duplicate reconciliation; skipping stale closes."
+            exit 0
+          fi
+          DUPLICATE_NUMBERS="$(jq -r --arg owner "${TRACKING_ISSUE_MARKER}" --arg trusted "${TRACKING_ISSUE_AUTHOR}" --argjson canonical "${ISSUE_NUMBER}" \
+            '.[] | select(.number != $canonical and .author.login == $trusted and ((.body // "") | contains($owner))) | .number' \
+            <<< "${ISSUES_JSON}")"
+          while IFS= read -r DUPLICATE_NUMBER; do
+            [ -n "${DUPLICATE_NUMBER}" ] || continue
+            DUPLICATE_LIVE="$(gh issue view "${DUPLICATE_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+              --json author,body,state)"
+            DUPLICATE_AUTHOR="$(jq -r '.author.login // ""' <<< "${DUPLICATE_LIVE}")"
+            DUPLICATE_BODY="$(jq -r '.body // ""' <<< "${DUPLICATE_LIVE}")"
+            DUPLICATE_STATE="$(jq -r '.state // ""' <<< "${DUPLICATE_LIVE}")"
+            DUPLICATE_GENERATION="$(sed -nE 's/^<!-- ccs-upstream-sync-current:tag=(v[0-9]+\.[0-9]+\.[0-9]+);sha=([0-9a-f]{40}) -->$/\1 \2/p' \
+              <<< "${DUPLICATE_BODY}")"
+            DUPLICATE_TAG="${DUPLICATE_GENERATION%% *}"
+            DUPLICATE_SHA="${DUPLICATE_GENERATION##* }"
+            DUPLICATE_NEWEST="$(printf '%s\n%s\n' "${DUPLICATE_TAG}" "${TAG}" | sort -V | tail -n 1)"
+            if [ "${DUPLICATE_AUTHOR}" != "${TRACKING_ISSUE_AUTHOR}" ] || \
+               [ "${DUPLICATE_STATE}" != "OPEN" ] || \
+               [[ "${DUPLICATE_BODY}" != *"${TRACKING_ISSUE_MARKER}"* ]] || \
+               [ -z "${DUPLICATE_GENERATION}" ] || \
+               { [ "${DUPLICATE_TAG}" = "${TAG}" ] && [ "${DUPLICATE_SHA}" != "${UPSTREAM_SHA}" ]; } || \
+               [ "${DUPLICATE_NEWEST}" != "${TAG}" ]; then
+              echo "Duplicate #${DUPLICATE_NUMBER} changed or is newer; refusing close." >&2
+              continue
+            fi
+            gh issue close "${DUPLICATE_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+              --comment "Consolidated this automation-owned duplicate into singleton tracker #${ISSUE_NUMBER}. Latest failed validation target: ${TAG} (${UPSTREAM_SHA}).
+
+          ${MARKER}"
+          done <<< "${DUPLICATE_NUMBERS}"

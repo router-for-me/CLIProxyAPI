@@ -4,7 +4,6 @@
 package cmd
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -543,21 +542,6 @@ func resolveProjectSelections(selection string, projects []interfaces.GCPProject
 		selections = append(selections, id)
 	}
 	return selections, nil
-}
-
-func defaultProjectPrompt() func(string) (string, error) {
-	reader := bufio.NewReader(os.Stdin)
-	return func(prompt string) (string, error) {
-		fmt.Print(prompt)
-		line, errRead := reader.ReadString('\n')
-		if errRead != nil {
-			if errors.Is(errRead, io.EOF) {
-				return strings.TrimSpace(line), nil
-			}
-			return "", errRead
-		}
-		return strings.TrimSpace(line), nil
-	}
 }
 
 func showProjectSelectionHelp(email string, projects []interfaces.GCPProjectProjects) {

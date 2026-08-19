@@ -1,20 +1,22 @@
-// Package gemini provides request translation functionality for Gemini to Gemini CLI API compatibility.
-// It handles parsing and transforming Gemini API requests into Gemini CLI API format,
+// Package gemini provides request translation functionality for Gemini to Antigravity API compatibility.
+// It handles parsing and transforming Gemini API requests into Antigravity API format,
 // extracting model information, system instructions, message contents, and tool declarations.
 // The package performs JSON data transformation to ensure compatibility
-// between Gemini API format and Gemini CLI API's expected format.
+// between Gemini API format and Antigravity API's expected format.
 package gemini
 
 import (
 	"bytes"
 	"context"
+	"fmt"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-// ConvertAntigravityResponseToGemini parses and transforms a Gemini CLI API request into Gemini API format.
+// ConvertAntigravityResponseToGemini parses and transforms a Antigravity API request into Gemini API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Gemini API.
 // The function performs the following transformations:
@@ -25,7 +27,7 @@ import (
 // Parameters:
 //   - ctx: The context for the request, used for cancellation and timeout handling
 //   - modelName: The name of the model to use for the request (unused in current implementation)
-//   - rawJSON: The raw JSON request data from the Gemini CLI API
+//   - rawJSON: The raw JSON request data from the Antigravity API
 //   - param: A pointer to a parameter object for the conversion (unused in current implementation)
 //
 // Returns:
@@ -42,6 +44,7 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, originalR
 			if responseResult.Exists() {
 				chunk = []byte(responseResult.Raw)
 				chunk = restoreUsageMetadata(chunk)
+				chunk = restoreGeminiFunctionNames(chunk, originalRequestRawJSON)
 			}
 		} else {
 			chunkTemplate := []byte("[]")
@@ -62,14 +65,14 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, originalR
 	return [][]byte{}
 }
 
-// ConvertAntigravityResponseToGeminiNonStream converts a non-streaming Gemini CLI request to a non-streaming Gemini response.
-// This function processes the complete Gemini CLI request and transforms it into a single Gemini-compatible
+// ConvertAntigravityResponseToGeminiNonStream converts a non-streaming Antigravity request to a non-streaming Gemini response.
+// This function processes the complete Antigravity request and transforms it into a single Gemini-compatible
 // JSON response. It extracts the response data from the request and returns it in the expected format.
 //
 // Parameters:
 //   - ctx: The context for the request, used for cancellation and timeout handling
 //   - modelName: The name of the model being used for the response (unused in current implementation)
-//   - rawJSON: The raw JSON request data from the Gemini CLI API
+//   - rawJSON: The raw JSON request data from the Antigravity API
 //   - param: A pointer to a parameter object for the conversion (unused in current implementation)
 //
 // Returns:
@@ -78,9 +81,35 @@ func ConvertAntigravityResponseToGeminiNonStream(_ context.Context, _ string, or
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
 		chunk := restoreUsageMetadata([]byte(responseResult.Raw))
+		return restoreGeminiFunctionNames(chunk, originalRequestRawJSON)
+	}
+	return restoreGeminiFunctionNames(rawJSON, originalRequestRawJSON)
+}
+
+func restoreGeminiFunctionNames(chunk, originalRequestRawJSON []byte) []byte {
+	nameMap := util.DisambiguatedToolNameMap(originalRequestRawJSON)
+	if len(nameMap) == 0 {
 		return chunk
 	}
-	return rawJSON
+	candidates := gjson.GetBytes(chunk, "candidates")
+	for candidateIndex, candidate := range candidates.Array() {
+		for partIndex, part := range candidate.Get("content.parts").Array() {
+			for _, field := range []string{"functionCall", "functionResponse", "function_call", "function_response"} {
+				nameResult := part.Get(field + ".name")
+				name := nameResult.String()
+				if name == "" {
+					continue
+				}
+				restoredName := util.RestoreSanitizedToolName(nameMap, name)
+				if nameResult.Type == gjson.String && restoredName == name {
+					continue
+				}
+				path := fmt.Sprintf("candidates.%d.content.parts.%d.%s.name", candidateIndex, partIndex, field)
+				chunk, _ = sjson.SetBytes(chunk, path, restoredName)
+			}
+		}
+	}
+	return chunk
 }
 
 func GeminiTokenCount(ctx context.Context, count int64) []byte {

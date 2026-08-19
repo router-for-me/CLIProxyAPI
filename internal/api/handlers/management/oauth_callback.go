@@ -25,14 +25,26 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 	}
 
 	var req oauthCallbackRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if errBindJSON := c.ShouldBindJSON(&req); errBindJSON != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
 		return
 	}
+	h.handleOAuthCallback(c, req)
+}
 
-	canonicalProvider, err := NormalizeOAuthProvider(req.Provider)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "unsupported provider"})
+func (h *Handler) GetOAuthCallback(c *gin.Context) {
+	req := oauthCallbackRequest{
+		Provider: strings.TrimSpace(c.Query("provider")),
+		Code:     strings.TrimSpace(c.Query("code")),
+		State:    strings.TrimSpace(c.Query("state")),
+		Error:    firstNonEmpty(c.Query("error"), c.Query("error_description")),
+	}
+	h.handleOAuthCallback(c, req)
+}
+
+func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) {
+	if h == nil || h.cfg == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "handler not initialized"})
 		return
 	}
 
@@ -51,7 +63,12 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 			state = strings.TrimSpace(q.Get("state"))
 		}
 		if code == "" {
-			code = strings.TrimSpace(q.Get("code"))
+			// BigModel returns the authorization code as "authCode".
+			code = strings.TrimSpace(q.Get("authCode"))
+		}
+		if code == "" {
+			// BigModel returns the authorization code as "authCode".
+			code = strings.TrimSpace(q.Get("authCode"))
 		}
 		if errMsg == "" {
 			errMsg = strings.TrimSpace(q.Get("error"))
@@ -74,9 +91,28 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		return
 	}
 
-	sessionProvider, sessionStatus, ok := GetOAuthSession(state)
+	sessionProvider, sessionStatus, isPlugin, _, completed, ok := GetOAuthSessionDetails(state)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"status": "error", "error": "unknown or expired state"})
+		return
+	}
+	if completed {
+		c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is already completed"})
+		return
+	}
+	provider := strings.TrimSpace(req.Provider)
+	if provider == "" {
+		provider = sessionProvider
+	}
+	var canonicalProvider string
+	var errNormalize error
+	if isPlugin {
+		canonicalProvider, errNormalize = NormalizePluginOAuthCallbackProvider(provider)
+	} else {
+		canonicalProvider, errNormalize = NormalizeOAuthCallbackProvider(provider)
+	}
+	if errNormalize != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "unsupported provider"})
 		return
 	}
 	if sessionStatus != "" {
@@ -104,4 +140,14 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }

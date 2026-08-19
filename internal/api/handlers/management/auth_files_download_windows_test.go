@@ -16,7 +16,6 @@ import (
 
 func TestDownloadAuthFile_PreventsWindowsSlashTraversal(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	gin.SetMode(gin.TestMode)
 
 	tempDir := t.TempDir()
 	authDir := filepath.Join(tempDir, "auth")

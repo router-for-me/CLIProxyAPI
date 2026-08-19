@@ -29,4 +29,36 @@ codex-header-defaults:
 	if got := cfg.CodexHeaderDefaults.BetaFeatures; got != "feature-a,feature-b" {
 		t.Fatalf("BetaFeatures = %q, want %q", got, "feature-a,feature-b")
 	}
+	if cfg.Codex.DisableCodexCloaking {
+		t.Fatal("DisableCodexCloaking = true, want default false")
+	}
+}
+
+func TestLoadConfigOptional_CodexIdentityConfuse(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := []byte(`
+codex:
+  identity-confuse: true
+  disable-codex-cloaking: true
+  optimize-multi-agent-v2: true
+`)
+	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := LoadConfigOptional(configPath, false)
+	if err != nil {
+		t.Fatalf("LoadConfigOptional() error = %v", err)
+	}
+
+	if !cfg.Codex.IdentityConfuse {
+		t.Fatalf("IdentityConfuse = false, want true")
+	}
+	if !cfg.Codex.DisableCodexCloaking {
+		t.Fatal("DisableCodexCloaking = false, want true")
+	}
+	if !cfg.Codex.OptimizeMultiAgentV2 {
+		t.Fatalf("OptimizeMultiAgentV2 = false, want true")
+	}
 }

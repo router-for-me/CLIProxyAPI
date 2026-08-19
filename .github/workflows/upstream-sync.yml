@@ -1,0 +1,624 @@
+name: Upstream Sync
+run-name: upstream-sync ref=${{ github.ref_name }} run=${{ github.run_number }}
+
+# This workflow only prepares a main-targeting PR. It never fast-forwards main,
+# never runs imported Go code, and never applies a blanket conflict policy.
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Pinned upstream tag (must be paired with upstream_commit)
+        required: false
+        type: string
+      upstream_commit:
+        description: Pinned upstream commit (must be paired with upstream_tag)
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+  pull-requests: write
+
+# queue: max. Serialize tracker mutations with Sync Validation Status, then
+# re-read state and enforce generation monotonicity because queue order is arbitrary.
+concurrency:
+  group: upstream-sync-tracker-mutations
+  queue: max
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  TRACKING_ISSUE_LABEL: upstream-sync-blocked
+  TRACKING_ISSUE_MARKER: '<!-- ccs-upstream-sync-blocker -->'
+  TRACKING_ISSUE_AUTHOR: app/github-actions
+  PR_LABEL: upstream-sync
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git and the explicit ours driver
+        run: |
+          set -euo pipefail
+          git config user.name "ccs-upstream-sync[bot]"
+          git config user.email "ccs-upstream-sync@users.noreply.github.com"
+          git config merge.ours.driver true
+
+      - name: Resolve the upstream target
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.upstream_tag }}
+          INPUT_COMMIT: ${{ inputs.upstream_commit }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . ./.ccs-fork-upstream.env
+
+          if { [ -n "${INPUT_TAG}" ] && [ -z "${INPUT_COMMIT}" ]; } || { [ -z "${INPUT_TAG}" ] && [ -n "${INPUT_COMMIT}" ]; }; then
+            echo "upstream_tag and upstream_commit must be supplied together" >&2
+            exit 1
+          fi
+
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
+          if [ "${EVENT_NAME}" = "schedule" ]; then
+            TARGET_TAG="$(
+              git ls-remote --tags --refs upstream 'v*' \
+                | awk '{sub("^refs/tags/", "", $2); print $2}' \
+                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+                | sort -V \
+                | tail -n 1
+            )"
+            EXPECTED_COMMIT=""
+            if [ -z "${TARGET_TAG}" ]; then
+              echo "No stable upstream tag was found" >&2
+              exit 1
+            fi
+            echo "Scheduled run selected latest stable upstream tag ${TARGET_TAG}."
+          else
+            TARGET_TAG="${INPUT_TAG:-${UPSTREAM_TAG}}"
+            EXPECTED_COMMIT="${INPUT_COMMIT:-${UPSTREAM_COMMIT}}"
+          fi
+
+          if ! printf '%s' "${TARGET_TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid upstream tag: ${TARGET_TAG}" >&2
+            exit 1
+          fi
+          if [ -n "${EXPECTED_COMMIT}" ] && ! printf '%s' "${EXPECTED_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "Invalid pinned upstream commit: ${EXPECTED_COMMIT}" >&2
+            exit 1
+          fi
+
+          git fetch --no-tags upstream "refs/tags/${TARGET_TAG}:refs/upstream-tags/${TARGET_TAG}"
+          TARGET_COMMIT="$(git rev-parse "refs/upstream-tags/${TARGET_TAG}^{commit}")"
+          if [ -n "${EXPECTED_COMMIT}" ] && [ "${TARGET_COMMIT}" != "${EXPECTED_COMMIT}" ]; then
+            echo "${TARGET_TAG} resolved to ${TARGET_COMMIT}, not ${EXPECTED_COMMIT}" >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=${TARGET_TAG}"
+            echo "sha=${TARGET_COMMIT}"
+            echo "marker=<!-- ccs-upstream-sync:tag=${TARGET_TAG};sha=${TARGET_COMMIT} -->"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Check whether the pinned target is already merged
+        id: check
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor "${{ steps.target.outputs.sha }}" HEAD; then
+            echo "has_changes=false" >> "${GITHUB_OUTPUT}"
+            echo "Pinned upstream target is already contained in main."
+          else
+            echo "has_changes=true" >> "${GITHUB_OUTPUT}"
+            echo "Pinned upstream target requires a reconciliation PR."
+          fi
+
+      - name: Close the automation-owned tracker only when its target is in main
+        if: steps.check.outputs.has_changes == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MARKER: ${{ steps.target.outputs.marker }}
+          TARGET_TAG: ${{ steps.target.outputs.tag }}
+          TARGET_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          ISSUES_JSON="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 \
+            --json number,title,body,createdAt,author)"
+          ISSUE_NUMBER="$(jq -r --arg owner "${TRACKING_ISSUE_MARKER}" --arg trusted "${TRACKING_ISSUE_AUTHOR}" \
+            '[.[] | select(.author.login == $trusted and ((.body // "") | contains($owner))) | . + {generation: (try ((.body // "") | capture("ccs-upstream-sync-current:tag=v(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+);sha=(?<sha>[0-9a-f]{40})")) catch {major:"-1",minor:"-1",patch:"-1",sha:""})}] | sort_by((.generation.major | tonumber), (.generation.minor | tonumber), (.generation.patch | tonumber), .createdAt) | last.number // empty' \
+            <<< "${ISSUES_JSON}")"
+
+          # One-time migration is intentionally exact: both the historical title and
+          # per-target marker must match the target this run already proved is in main.
+          if [ -z "${ISSUE_NUMBER}" ]; then
+            LEGACY_TITLE="upstream-sync blocked: ${TARGET_TAG} (${TARGET_SHA})"
+            ISSUE_NUMBER="$(jq -r --arg title "${LEGACY_TITLE}" --arg marker "${MARKER}" --arg trusted "${TRACKING_ISSUE_AUTHOR}" \
+              '[.[] | select(.author.login == $trusted and .title == $title and ((.body // "") | contains($marker)))] | .[0].number // empty' \
+              <<< "${ISSUES_JSON}")"
+          fi
+          if [ -z "${ISSUE_NUMBER}" ]; then
+            echo "No automation-owned tracker exists."
+            exit 0
+          fi
+
+          LIVE_ISSUE="$(gh issue view "${ISSUE_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+            --json author,title,body,state)"
+          ISSUE_AUTHOR="$(jq -r '.author.login // ""' <<< "${LIVE_ISSUE}")"
+          ISSUE_TITLE="$(jq -r '.title // ""' <<< "${LIVE_ISSUE}")"
+          ISSUE_BODY="$(jq -r '.body // ""' <<< "${LIVE_ISSUE}")"
+          ISSUE_STATE="$(jq -r '.state // ""' <<< "${LIVE_ISSUE}")"
+          if [ "${ISSUE_AUTHOR}" != "${TRACKING_ISSUE_AUTHOR}" ] || [ "${ISSUE_STATE}" != "OPEN" ]; then
+            echo "Tracker ownership or state changed before close; refusing mutation." >&2
+            exit 1
+          fi
+          CURRENT_GENERATION="$(sed -nE 's/^<!-- ccs-upstream-sync-current:tag=(v[0-9]+\.[0-9]+\.[0-9]+);sha=([0-9a-f]{40}) -->$/\1 \2/p' \
+            <<< "${ISSUE_BODY}")"
+          if [[ "${ISSUE_BODY}" != *"${TRACKING_ISSUE_MARKER}"* ]]; then
+            if [ "${ISSUE_TITLE}" != "upstream-sync blocked: ${TARGET_TAG} (${TARGET_SHA})" ] || \
+               [[ "${ISSUE_BODY}" != *"${MARKER}"* ]]; then
+              echo "Legacy tracker identity changed before close; refusing mutation." >&2
+              exit 1
+            fi
+            CURRENT_GENERATION="${TARGET_TAG} ${TARGET_SHA}"
+          fi
+          CURRENT_TAG="${CURRENT_GENERATION%% *}"
+          TRACKED_SHA="${CURRENT_GENERATION##* }"
+          if [ -z "${CURRENT_GENERATION}" ] || \
+             { [ "${CURRENT_TAG}" = "${TARGET_TAG}" ] && [ "${TRACKED_SHA}" != "${TARGET_SHA}" ]; }; then
+            echo "Tracker generation is missing or retagged; refusing close." >&2
+            exit 1
+          fi
+          NEWEST_TAG="$(printf '%s\n%s\n' "${CURRENT_TAG}" "${TARGET_TAG}" | sort -V | tail -n 1)"
+          if [ "${NEWEST_TAG}" != "${TARGET_TAG}" ]; then
+            echo "Stale no-op generation cannot close newer tracker ${CURRENT_TAG}."
+            exit 0
+          fi
+          if ! git cat-file -e "${TRACKED_SHA}^{commit}" 2>/dev/null || \
+             ! git merge-base --is-ancestor "${TRACKED_SHA}" HEAD; then
+            echo "Tracker target is not proven contained in main; stale no-op run cannot close it."
+            exit 0
+          fi
+
+          gh issue close "${ISSUE_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+            --comment "Tracked upstream commit ${TRACKED_SHA} is contained in main; closing this automation-owned tracker only.
+
+          ${TRACKING_ISSUE_MARKER}"
+
+      - name: Preserve an unchanged open sync PR for this target
+        if: steps.check.outputs.has_changes == 'true'
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MARKER: ${{ steps.target.outputs.marker }}
+        run: |
+          set -euo pipefail
+          BRANCH="upstream-sync/${{ steps.target.outputs.tag }}-${{ steps.target.outputs.sha }}"
+          PR_NUMBER="$(gh pr list --repo "${GITHUB_REPOSITORY}" --state open --head "${BRANCH}" \
+            --json number --jq '.[0].number // empty')"
+          if [ -z "${PR_NUMBER}" ]; then
+            {
+              echo "reused=false"
+              echo "branch=${BRANCH}"
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          PR_BODY="$(gh pr view "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --json body --jq .body)"
+          if ! printf '%s\n' "${PR_BODY}" | grep -Fqx "${MARKER}"; then
+            echo "Existing sync PR #${PR_NUMBER} has a different correlation marker; refusing to mutate it." >&2
+            exit 1
+          fi
+
+          {
+            echo "reused=true"
+            echo "pr=${PR_NUMBER}"
+            echo "branch=${BRANCH}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Reusing unchanged sync PR #${PR_NUMBER}; no branch deletion or replacement."
+
+      - name: Select a new sync branch
+        if: steps.check.outputs.has_changes == 'true' && steps.existing.outputs.reused != 'true'
+        id: branch
+        run: |
+          set -euo pipefail
+          BRANCH="${{ steps.existing.outputs.branch }}"
+          if git ls-remote --exit-code --heads origin "refs/heads/${BRANCH}" >/dev/null; then
+            BRANCH="${BRANCH}-${GITHUB_RUN_ID}"
+          fi
+          echo "name=${BRANCH}" >> "${GITHUB_OUTPUT}"
+          git checkout -b "${BRANCH}" origin/main
+
+      - name: Snapshot fork workflow ownership before merge
+        if: steps.check.outputs.has_changes == 'true' && steps.existing.outputs.reused != 'true'
+        id: snapshot
+        run: |
+          set -euo pipefail
+          PREMERGE_SHA="$(git rev-parse HEAD)"
+          MANIFEST="${RUNNER_TEMP}/pre-merge-workflow-manifest.txt"
+          git ls-tree -r --name-only "${PREMERGE_SHA}" -- .github/workflows > "${MANIFEST}"
+          {
+            echo "premerge_sha=${PREMERGE_SHA}"
+            echo "manifest=${MANIFEST}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Merge pinned upstream without automatic resolution
+        if: steps.check.outputs.has_changes == 'true' && steps.existing.outputs.reused != 'true'
+        id: merge
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          set +e
+          git merge --no-commit --no-ff "${{ steps.target.outputs.sha }}"
+          MERGE_EXIT=$?
+          set -e
+          CONFLICT_PATHS="$(git ls-files -u | awk '{print $4}' | sort -u)"
+          if [ "${MERGE_EXIT}" -ne 0 ] || [ -n "${CONFLICT_PATHS}" ]; then
+            if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+              git merge --abort
+            fi
+            {
+              echo "merged=false"
+              echo "conflicts<<EOF"
+              echo "${CONFLICT_PATHS}"
+              echo "EOF"
+            } >> "${GITHUB_OUTPUT}"
+            echo "Merge requires explicit maintainer resolution:" >&2
+            printf '%s\n' "${CONFLICT_PATHS}" >&2
+            exit 1
+          fi
+          echo "merged=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore only the fork workflow allowlist
+        if: steps.merge.outputs.merged == 'true'
+        id: restore
+        run: |
+          set -euo pipefail
+          PREMERGE_SHA="${{ steps.snapshot.outputs.premerge_sha }}"
+          MANIFEST="${{ steps.snapshot.outputs.manifest }}"
+          ALLOWLIST="
+          .github/workflows/upstream-sync.yml
+          .github/workflows/sync-release-tag.yml
+          .github/workflows/release.yaml
+          .github/workflows/docker-image.yml
+          .github/workflows/pr-test-build.yml
+          .github/workflows/agents-md-guard.yml
+          .github/workflows/sync-validation-status.yml
+          "
+
+          for path in ${ALLOWLIST}; do
+            if ! grep -Fqx "${path}" "${MANIFEST}"; then
+              echo "Fork workflow allowlist path missing from pre-merge manifest: ${path}" >&2
+              exit 1
+            fi
+            git checkout "${PREMERGE_SHA}" -- "${path}"
+          done
+
+          for path in $(git ls-files .github/workflows); do
+            case "${path}" in
+              .github/workflows/upstream-sync.yml|\
+              .github/workflows/sync-release-tag.yml|\
+              .github/workflows/release.yaml|\
+              .github/workflows/docker-image.yml|\
+              .github/workflows/pr-test-build.yml|\
+              .github/workflows/agents-md-guard.yml|\
+              .github/workflows/sync-validation-status.yml)
+                ;;
+              *)
+                git rm -f "${path}"
+                ;;
+            esac
+          done
+          git add .github/workflows
+
+      - name: Record the exact pinned upstream target
+        if: steps.merge.outputs.merged == 'true'
+        id: record
+        run: |
+          set -euo pipefail
+          {
+            echo "UPSTREAM_TAG=${{ steps.target.outputs.tag }}"
+            echo "UPSTREAM_COMMIT=${{ steps.target.outputs.sha }}"
+          } > .ccs-fork-upstream.env
+          git add .ccs-fork-upstream.env
+
+      - name: Commit the reconciled merge
+        if: steps.merge.outputs.merged == 'true'
+        id: commit
+        run: |
+          set -euo pipefail
+          git add -A
+          git commit --no-edit
+          echo "head_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Push the sync branch
+        if: steps.commit.outputs.head_sha != ''
+        id: push
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          BRANCH="${{ steps.branch.outputs.name }}"
+          set +e
+          git push origin "${BRANCH}"
+          PUSH_EXIT=$?
+          set -e
+          if [ "${PUSH_EXIT}" -ne 0 ]; then
+            echo "pushed=false" >> "${GITHUB_OUTPUT}"
+            exit "${PUSH_EXIT}"
+          fi
+          echo "pushed=true" >> "${GITHUB_OUTPUT}"
+          echo "branch_url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/tree/${BRANCH}" >> "${GITHUB_OUTPUT}"
+
+      - name: Open the main-targeting sync PR
+        if: steps.push.outputs.pushed == 'true'
+        id: pr
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MARKER: ${{ steps.target.outputs.marker }}
+        run: |
+          set -euo pipefail
+          BRANCH="${{ steps.branch.outputs.name }}"
+          TITLE="chore(upstream-sync): merge ${{ steps.target.outputs.tag }} (${{ steps.target.outputs.sha }})"
+          BODY="$(cat <<EOF
+          ## Pinned upstream reconciliation
+
+          - upstream tag: \`${{ steps.target.outputs.tag }}\`
+          - upstream commit: \`${{ steps.target.outputs.sha }}\`
+          - validation: explicitly dispatched read-only full build/test workflow for this exact head
+
+          ${MARKER}
+          EOF
+          )"
+          PR_NUMBER="$(gh pr list --repo "${GITHUB_REPOSITORY}" --state open --head "${BRANCH}" \
+            --json number --jq '.[0].number // empty')"
+          if [ -z "${PR_NUMBER}" ]; then
+            set +e
+            PR_URL="$(gh pr create --repo "${GITHUB_REPOSITORY}" --base main --head "${BRANCH}" --title "${TITLE}" --body "${BODY}")"
+            PR_EXIT=$?
+            set -e
+            if [ "${PR_EXIT}" -ne 0 ]; then
+              echo "opened=false" >> "${GITHUB_OUTPUT}"
+              exit "${PR_EXIT}"
+            fi
+            PR_NUMBER="${PR_URL##*/}"
+          fi
+          echo "opened=true" >> "${GITHUB_OUTPUT}"
+          echo "number=${PR_NUMBER}" >> "${GITHUB_OUTPUT}"
+
+      - name: Dispatch exact-head read-only validation
+        if: steps.pr.outputs.opened == 'true'
+        id: validation
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          set +e
+          gh workflow run pr-test-build.yml --repo "${GITHUB_REPOSITORY}" --ref main \
+            -f ref="${{ steps.branch.outputs.name }}" \
+            -f head_sha="${{ steps.commit.outputs.head_sha }}" \
+            -f sync_pr="${{ steps.pr.outputs.number }}" \
+            -f upstream_sha="${{ steps.target.outputs.sha }}"
+          DISPATCH_EXIT=$?
+          set -e
+          if [ "${DISPATCH_EXIT}" -ne 0 ]; then
+            echo "dispatched=false" >> "${GITHUB_OUTPUT}"
+            exit "${DISPATCH_EXIT}"
+          fi
+          echo "dispatched=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Create or update the singleton blocked-sync tracker
+        if: >-
+          always() && steps.target.outcome == 'success' &&
+          steps.existing.outputs.reused != 'true' &&
+          (steps.check.outcome != 'success' ||
+           (steps.check.outputs.has_changes == 'true' &&
+            (steps.existing.outcome != 'success' ||
+             steps.branch.outcome != 'success' ||
+             steps.snapshot.outcome != 'success' ||
+             steps.merge.outputs.merged != 'true' ||
+             steps.restore.outcome != 'success' ||
+             steps.record.outcome != 'success' ||
+             steps.commit.outcome != 'success' ||
+             steps.push.outputs.pushed != 'true' ||
+             steps.pr.outputs.opened != 'true' ||
+             steps.validation.outputs.dispatched != 'true')))
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MARKER: ${{ steps.target.outputs.marker }}
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+          TARGET_TAG: ${{ steps.target.outputs.tag }}
+          TARGET_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          STATUS=""
+          if [ "${{ steps.check.outcome }}" != "success" ]; then
+            STATUS="main containment check failed"
+          elif [ "${{ steps.existing.outcome }}" != "success" ]; then
+            STATUS="existing sync PR inspection failed"
+          elif [ "${{ steps.branch.outcome }}" != "success" ]; then
+            STATUS="sync branch preparation failed"
+          elif [ "${{ steps.snapshot.outcome }}" != "success" ]; then
+            STATUS="fork workflow ownership snapshot failed"
+          elif [ "${{ steps.merge.outputs.merged }}" != "true" ]; then
+            STATUS="merge requires maintainer resolution"
+          elif [ "${{ steps.restore.outcome }}" != "success" ]; then
+            STATUS="fork workflow allowlist restoration failed"
+          elif [ "${{ steps.record.outcome }}" != "success" ]; then
+            STATUS="upstream target recording failed"
+          elif [ "${{ steps.commit.outcome }}" != "success" ]; then
+            STATUS="reconciled merge commit failed"
+          elif [ "${{ steps.push.outputs.pushed }}" != "true" ]; then
+            STATUS="sync branch push failed"
+          elif [ "${{ steps.pr.outputs.opened }}" != "true" ]; then
+            STATUS="main-targeting sync PR creation failed"
+          elif [ "${{ steps.validation.outputs.dispatched }}" != "true" ]; then
+            STATUS="exact-head read-only validation dispatch failed"
+          else
+            STATUS="sync preparation failed before a PR validation could complete"
+          fi
+
+          LABEL_EXISTS="$(gh label list --repo "${GITHUB_REPOSITORY}" --limit 100 --json name \
+            --jq '.[] | select(.name == "upstream-sync-blocked") | .name')"
+          if [ -z "${LABEL_EXISTS}" ]; then
+            if ! gh label create "${TRACKING_ISSUE_LABEL}" --repo "${GITHUB_REPOSITORY}" --color B60205 \
+              --description "Pinned upstream sync needs maintainer attention."; then
+              gh label list --repo "${GITHUB_REPOSITORY}" --limit 100 --json name \
+                --jq '.[] | select(.name == "upstream-sync-blocked") | .name' | grep -Fqx "${TRACKING_ISSUE_LABEL}"
+            fi
+          fi
+
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          BRANCH_URL="${{ steps.push.outputs.branch_url }}"
+          DETAILS="- upstream tag: \`${{ steps.target.outputs.tag }}\`
+          - upstream commit: \`${{ steps.target.outputs.sha }}\`
+          - status: ${STATUS}
+          - preparation run: ${RUN_URL}"
+          if [ -n "${CONFLICTS}" ]; then
+            DETAILS="${DETAILS}
+          - conflict paths:
+
+          \`\`\`
+          ${CONFLICTS}
+          \`\`\`"
+          fi
+          if [ -n "${BRANCH_URL}" ]; then
+            DETAILS="${DETAILS}
+          - pushed branch: ${BRANCH_URL}"
+          fi
+
+          ISSUES_JSON="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 \
+            --json number,title,body,createdAt,url,author)"
+          ISSUE_NUMBER="$(jq -r --arg marker "${TRACKING_ISSUE_MARKER}" --arg trusted "${TRACKING_ISSUE_AUTHOR}" \
+            '[.[] | select(.author.login == $trusted and ((.body // "") | contains($marker))) | . + {generation: (try ((.body // "") | capture("ccs-upstream-sync-current:tag=v(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+);sha=(?<sha>[0-9a-f]{40})")) catch {major:"-1",minor:"-1",patch:"-1",sha:""})}] | sort_by((.generation.major | tonumber), (.generation.minor | tonumber), (.generation.patch | tonumber), .createdAt) | last.number // empty' \
+            <<< "${ISSUES_JSON}")"
+
+          # Migrate only the old per-target tracker whose exact title and body
+          # marker both match this generation. A label alone is never identity.
+          if [ -z "${ISSUE_NUMBER}" ]; then
+            LEGACY_TITLE="upstream-sync blocked: ${TARGET_TAG} (${TARGET_SHA})"
+            ISSUE_NUMBER="$(jq -r --arg title "${LEGACY_TITLE}" --arg marker "${MARKER}" --arg trusted "${TRACKING_ISSUE_AUTHOR}" \
+              '[.[] | select(.author.login == $trusted and .title == $title and ((.body // "") | contains($marker)))] | .[0].number // empty' \
+              <<< "${ISSUES_JSON}")"
+          fi
+
+          if [ -n "${ISSUE_NUMBER}" ]; then
+            LIVE_ISSUE="$(gh issue view "${ISSUE_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+              --json author,title,body,state)"
+            ISSUE_AUTHOR="$(jq -r '.author.login // ""' <<< "${LIVE_ISSUE}")"
+            ISSUE_TITLE="$(jq -r '.title // ""' <<< "${LIVE_ISSUE}")"
+            ISSUE_BODY="$(jq -r '.body // ""' <<< "${LIVE_ISSUE}")"
+            ISSUE_STATE="$(jq -r '.state // ""' <<< "${LIVE_ISSUE}")"
+            if [ "${ISSUE_AUTHOR}" != "${TRACKING_ISSUE_AUTHOR}" ] || [ "${ISSUE_STATE}" != "OPEN" ]; then
+              echo "Tracker ownership or state changed before edit; refusing mutation." >&2
+              exit 1
+            fi
+            if [[ "${ISSUE_BODY}" != *"${TRACKING_ISSUE_MARKER}"* ]] && \
+               { [ "${ISSUE_TITLE}" != "${LEGACY_TITLE}" ] || [[ "${ISSUE_BODY}" != *"${MARKER}"* ]]; }; then
+              echo "Tracker identity changed before edit; refusing mutation." >&2
+              exit 1
+            fi
+            CURRENT_GENERATION="$(sed -nE 's/^<!-- ccs-upstream-sync-current:tag=(v[0-9]+\.[0-9]+\.[0-9]+);sha=([0-9a-f]{40}) -->$/\1 \2/p' \
+              <<< "${ISSUE_BODY}")"
+            if [ -z "${CURRENT_GENERATION}" ] && [[ "${ISSUE_BODY}" == *"${MARKER}"* ]]; then
+              CURRENT_GENERATION="${TARGET_TAG} ${TARGET_SHA}"
+            fi
+            if [ -n "${CURRENT_GENERATION}" ]; then
+              CURRENT_TAG="${CURRENT_GENERATION%% *}"
+              CURRENT_SHA="${CURRENT_GENERATION##* }"
+              if [ "${CURRENT_TAG}" = "${TARGET_TAG}" ] && [ "${CURRENT_SHA}" != "${TARGET_SHA}" ]; then
+                echo "Tracked tag ${CURRENT_TAG} has a different SHA; refusing retag mutation." >&2
+                exit 1
+              fi
+              NEWEST_TAG="$(printf '%s\n%s\n' "${CURRENT_TAG}" "${TARGET_TAG}" | sort -V | tail -n 1)"
+              if [ "${NEWEST_TAG}" != "${TARGET_TAG}" ]; then
+                echo "Stale preparation for ${TARGET_TAG}; tracker already targets ${CURRENT_TAG}."
+                exit 0
+              fi
+            fi
+            TRACKER_BODY="${TRACKING_ISSUE_MARKER}
+          <!-- ccs-upstream-sync-current:tag=${TARGET_TAG};sha=${TARGET_SHA} -->
+
+          Automation-owned singleton for the current blocked upstream-sync generation. Status history is recorded in comments."
+            gh issue edit "${ISSUE_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+              --title "upstream-sync blocked: ${TARGET_TAG} (${TARGET_SHA})" \
+              --body "${TRACKER_BODY}" --add-label "${TRACKING_ISSUE_LABEL}"
+            gh issue comment "${ISSUE_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+              --body "${MARKER}
+
+          ${DETAILS}"
+          else
+            ISSUE_URL="$(gh issue create --repo "${GITHUB_REPOSITORY}" \
+              --title "upstream-sync blocked: ${TARGET_TAG} (${TARGET_SHA})" \
+              --label "${TRACKING_ISSUE_LABEL}" --assignee kaitranntt \
+              --body "${TRACKING_ISSUE_MARKER}
+
+          <!-- ccs-upstream-sync-current:tag=${TARGET_TAG};sha=${TARGET_SHA} -->
+
+          ${MARKER}
+
+          ${DETAILS}")"
+            ISSUE_NUMBER="${ISSUE_URL##*/}"
+          fi
+
+          # Re-read after mutation so concurrent creates converge without relying on
+          # workflow concurrency for causal ordering. Highest stored generation wins.
+          ISSUES_JSON="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 1000 \
+            --json number,title,body,createdAt,url,author)"
+          ISSUE_NUMBER="$(jq -r --arg owner "${TRACKING_ISSUE_MARKER}" --arg trusted "${TRACKING_ISSUE_AUTHOR}" \
+            '[.[] | select(.author.login == $trusted and ((.body // "") | contains($owner))) | . + {generation: (try ((.body // "") | capture("ccs-upstream-sync-current:tag=v(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+);sha=(?<sha>[0-9a-f]{40})")) catch {major:"-1",minor:"-1",patch:"-1",sha:""})}] | sort_by((.generation.major | tonumber), (.generation.minor | tonumber), (.generation.patch | tonumber), .createdAt) | last.number // empty' \
+            <<< "${ISSUES_JSON}")"
+          CANONICAL_LIVE="$(gh issue view "${ISSUE_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+            --json author,body,state)"
+          CANONICAL_AUTHOR="$(jq -r '.author.login // ""' <<< "${CANONICAL_LIVE}")"
+          CANONICAL_BODY="$(jq -r '.body // ""' <<< "${CANONICAL_LIVE}")"
+          CANONICAL_STATE="$(jq -r '.state // ""' <<< "${CANONICAL_LIVE}")"
+          CANONICAL_GENERATION="$(sed -nE 's/^<!-- ccs-upstream-sync-current:tag=(v[0-9]+\.[0-9]+\.[0-9]+);sha=([0-9a-f]{40}) -->$/\1 \2/p' \
+            <<< "${CANONICAL_BODY}")"
+          if [ "${CANONICAL_AUTHOR}" != "${TRACKING_ISSUE_AUTHOR}" ] || \
+             [ "${CANONICAL_STATE}" != "OPEN" ] || \
+             [[ "${CANONICAL_BODY}" != *"${TRACKING_ISSUE_MARKER}"* ]] || \
+             [ "${CANONICAL_GENERATION}" != "${TARGET_TAG} ${TARGET_SHA}" ]; then
+            echo "Canonical tracker advanced or changed before duplicate reconciliation; skipping stale closes."
+            exit 0
+          fi
+          DUPLICATE_NUMBERS="$(jq -r --arg owner "${TRACKING_ISSUE_MARKER}" --arg trusted "${TRACKING_ISSUE_AUTHOR}" --argjson canonical "${ISSUE_NUMBER}" \
+            '.[] | select(.number != $canonical and .author.login == $trusted and ((.body // "") | contains($owner))) | .number' \
+            <<< "${ISSUES_JSON}")"
+          while IFS= read -r DUPLICATE_NUMBER; do
+            [ -n "${DUPLICATE_NUMBER}" ] || continue
+            DUPLICATE_LIVE="$(gh issue view "${DUPLICATE_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+              --json author,body,state)"
+            DUPLICATE_AUTHOR="$(jq -r '.author.login // ""' <<< "${DUPLICATE_LIVE}")"
+            DUPLICATE_BODY="$(jq -r '.body // ""' <<< "${DUPLICATE_LIVE}")"
+            DUPLICATE_STATE="$(jq -r '.state // ""' <<< "${DUPLICATE_LIVE}")"
+            DUPLICATE_GENERATION="$(sed -nE 's/^<!-- ccs-upstream-sync-current:tag=(v[0-9]+\.[0-9]+\.[0-9]+);sha=([0-9a-f]{40}) -->$/\1 \2/p' \
+              <<< "${DUPLICATE_BODY}")"
+            DUPLICATE_TAG="${DUPLICATE_GENERATION%% *}"
+            DUPLICATE_SHA="${DUPLICATE_GENERATION##* }"
+            DUPLICATE_NEWEST="$(printf '%s\n%s\n' "${DUPLICATE_TAG}" "${TARGET_TAG}" | sort -V | tail -n 1)"
+            if [ "${DUPLICATE_AUTHOR}" != "${TRACKING_ISSUE_AUTHOR}" ] || \
+               [ "${DUPLICATE_STATE}" != "OPEN" ] || \
+               [[ "${DUPLICATE_BODY}" != *"${TRACKING_ISSUE_MARKER}"* ]] || \
+               [ -z "${DUPLICATE_GENERATION}" ] || \
+               { [ "${DUPLICATE_TAG}" = "${TARGET_TAG}" ] && [ "${DUPLICATE_SHA}" != "${TARGET_SHA}" ]; } || \
+               [ "${DUPLICATE_NEWEST}" != "${TARGET_TAG}" ]; then
+              echo "Duplicate #${DUPLICATE_NUMBER} changed or is newer; refusing close." >&2
+              continue
+            fi
+            gh issue close "${DUPLICATE_NUMBER}" --repo "${GITHUB_REPOSITORY}" \
+              --comment "Consolidated this automation-owned duplicate into singleton tracker #${ISSUE_NUMBER}. Latest blocked target: ${TARGET_TAG} (${TARGET_SHA}).
+
+          ${MARKER}"
+          done <<< "${DUPLICATE_NUMBERS}"

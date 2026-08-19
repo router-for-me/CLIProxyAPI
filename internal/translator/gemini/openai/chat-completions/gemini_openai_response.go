@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -23,8 +24,10 @@ import (
 type convertGeminiResponseToOpenAIChatParams struct {
 	UnixTimestamp int64
 	// FunctionIndex tracks tool call indices per candidate index to support multiple candidates.
-	FunctionIndex    map[int]int
-	SanitizedNameMap map[string]string
+	FunctionIndex        map[int]int
+	SawToolCall          map[int]bool
+	UpstreamFinishReason map[int]string
+	SanitizedNameMap     map[string]string
 }
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
@@ -48,9 +51,11 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	// Initialize parameters if nil.
 	if *param == nil {
 		*param = &convertGeminiResponseToOpenAIChatParams{
-			UnixTimestamp:    0,
-			FunctionIndex:    make(map[int]int),
-			SanitizedNameMap: util.SanitizedToolNameMap(originalRequestRawJSON),
+			UnixTimestamp:        0,
+			FunctionIndex:        make(map[int]int),
+			SawToolCall:          make(map[int]bool),
+			UpstreamFinishReason: make(map[int]string),
+			SanitizedNameMap:     util.SanitizedToolNameMap(originalRequestRawJSON),
 		}
 	}
 
@@ -58,6 +63,12 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	p := (*param).(*convertGeminiResponseToOpenAIChatParams)
 	if p.FunctionIndex == nil {
 		p.FunctionIndex = make(map[int]int)
+	}
+	if p.SawToolCall == nil {
+		p.SawToolCall = make(map[int]bool)
+	}
+	if p.UpstreamFinishReason == nil {
+		p.UpstreamFinishReason = make(map[int]string)
 	}
 	if p.SanitizedNameMap == nil {
 		p.SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
@@ -100,9 +111,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	// Usage is applied to the base template so it appears in the chunks.
 	if usageResult := gjson.GetBytes(rawJSON, "usageMetadata"); usageResult.Exists() {
 		cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
-		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
-			baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.completion_tokens", candidatesTokenCountResult.Int())
-		}
+		baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.completion_tokens", usageResult.Get("candidatesTokenCount").Int())
 		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
 			baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.total_tokens", totalTokenCountResult.Int())
 		}
@@ -135,19 +144,19 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			candidateIndex := int(candidate.Get("index").Int())
 			template, _ = sjson.SetBytes(template, "choices.0.index", candidateIndex)
 
-			finishReason := ""
-			if stopReasonResult := gjson.GetBytes(rawJSON, "stop_reason"); stopReasonResult.Exists() {
-				finishReason = stopReasonResult.String()
+			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Exists() {
+				p.UpstreamFinishReason[candidateIndex] = strings.ToUpper(finishReasonResult.String())
 			}
-			if finishReason == "" {
-				if finishReasonResult := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finishReasonResult.Exists() {
-					finishReason = finishReasonResult.String()
-				}
-			}
-			finishReason = strings.ToLower(finishReason)
 
 			partsResult := candidate.Get("content.parts")
-			hasFunctionCall := false
+			assistantRoleSet := false
+			setAssistantRole := func() {
+				if assistantRoleSet {
+					return
+				}
+				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+				assistantRoleSet = true
+			}
 
 			if partsResult.IsArray() {
 				partResults := partsResult.Array()
@@ -174,16 +183,16 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 
 					if partTextResult.Exists() {
 						text := partTextResult.String()
+						setAssistantRole()
 						// Handle text content, distinguishing between regular content and reasoning/thoughts.
 						if partResult.Get("thought").Bool() {
 							template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", text)
 						} else {
 							template, _ = sjson.SetBytes(template, "choices.0.delta.content", text)
 						}
-						template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 					} else if functionCallResult.Exists() {
 						// Handle function call content.
-						hasFunctionCall = true
+						p.SawToolCall[candidateIndex] = true
 						toolCallsResult := gjson.GetBytes(template, "choices.0.delta.tool_calls")
 
 						// Retrieve the function index for this specific candidate.
@@ -204,7 +213,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 						if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
 							functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.arguments", fcArgsResult.Raw)
 						}
-						template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+						setAssistantRole()
 						template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls.-1", functionCallTemplate)
 					} else if inlineDataResult.Exists() {
 						data := inlineDataResult.Get("data").String()
@@ -227,21 +236,28 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 						imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 						imagePayload, _ = sjson.SetBytes(imagePayload, "index", imageIndex)
 						imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
-						template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+						setAssistantRole()
 						template, _ = sjson.SetRawBytes(template, "choices.0.delta.images.-1", imagePayload)
 					}
 				}
 			}
 
-			if hasFunctionCall {
-				template, _ = sjson.SetBytes(template, "choices.0.finish_reason", "tool_calls")
-				template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", "tool_calls")
-			} else if finishReason != "" {
-				// Only pass through specific finish reasons
-				if finishReason == "max_tokens" || finishReason == "stop" {
-					template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
-					template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", finishReason)
+			upstreamFinishReason := p.UpstreamFinishReason[candidateIndex]
+			sawToolCall := p.SawToolCall[candidateIndex]
+			usageExists := gjson.GetBytes(rawJSON, "usageMetadata").Exists()
+			isFinalChunk := upstreamFinishReason != "" && usageExists
+
+			if isFinalChunk {
+				var finishReason string
+				if sawToolCall {
+					finishReason = "tool_calls"
+				} else if upstreamFinishReason == "MAX_TOKENS" {
+					finishReason = "max_tokens"
+				} else {
+					finishReason = "stop"
 				}
+				template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
+				template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", strings.ToLower(upstreamFinishReason))
 			}
 
 			responseStrings = append(responseStrings, template)
@@ -295,9 +311,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 	}
 
 	if usageResult := gjson.GetBytes(rawJSON, "usageMetadata"); usageResult.Exists() {
-		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
-			template, _ = sjson.SetBytes(template, "usage.completion_tokens", candidatesTokenCountResult.Int())
-		}
+		template, _ = sjson.SetBytes(template, "usage.completion_tokens", usageResult.Get("candidatesTokenCount").Int())
 		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
 			template, _ = sjson.SetBytes(template, "usage.total_tokens", totalTokenCountResult.Int())
 		}
@@ -321,6 +335,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 	// Process the main content part of the response for all candidates.
 	candidates := gjson.GetBytes(rawJSON, "candidates")
 	if candidates.IsArray() {
+		var choicesList [][]byte
 		candidates.ForEach(func(_, candidate gjson.Result) bool {
 			// Construct a single Choice object.
 			choiceTemplate := []byte(`{"index":0,"message":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}`)
@@ -338,6 +353,13 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 			hasFunctionCall := false
 			if partsResult.IsArray() {
 				partsResults := partsResult.Array()
+				var toolCalls [][]byte
+				var images [][]byte
+				var textContent strings.Builder
+				var reasoningContent strings.Builder
+				hasTextContent := false
+				hasReasoningContent := false
+
 				for i := 0; i < len(partsResults); i++ {
 					partResult := partsResults[i]
 					partTextResult := partResult.Get("text")
@@ -350,20 +372,15 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 					if partTextResult.Exists() {
 						// Append text content, distinguishing between regular content and reasoning.
 						if partResult.Get("thought").Bool() {
-							oldVal := gjson.GetBytes(choiceTemplate, "message.reasoning_content").String()
-							choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.reasoning_content", oldVal+partTextResult.String())
+							hasReasoningContent = true
+							reasoningContent.WriteString(partTextResult.String())
 						} else {
-							oldVal := gjson.GetBytes(choiceTemplate, "message.content").String()
-							choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.content", oldVal+partTextResult.String())
+							hasTextContent = true
+							textContent.WriteString(partTextResult.String())
 						}
-						choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.role", "assistant")
 					} else if functionCallResult.Exists() {
 						// Append function call content to the tool_calls array.
 						hasFunctionCall = true
-						toolCallsResult := gjson.GetBytes(choiceTemplate, "message.tool_calls")
-						if !toolCallsResult.Exists() || !toolCallsResult.IsArray() {
-							choiceTemplate, _ = sjson.SetRawBytes(choiceTemplate, "message.tool_calls", []byte(`[]`))
-						}
 						functionCallItemTemplate := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 						fcName := util.RestoreSanitizedToolName(sanitizedNameMap, functionCallResult.Get("name").String())
 						functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
@@ -371,8 +388,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 						if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
 							functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.arguments", fcArgsResult.Raw)
 						}
-						choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.role", "assistant")
-						choiceTemplate, _ = sjson.SetRawBytes(choiceTemplate, "message.tool_calls.-1", functionCallItemTemplate)
+						toolCalls = append(toolCalls, functionCallItemTemplate)
 					} else if inlineDataResult.Exists() {
 						data := inlineDataResult.Get("data").String()
 						if data != "" {
@@ -384,18 +400,29 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 								mimeType = "image/png"
 							}
 							imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
-							imagesResult := gjson.GetBytes(choiceTemplate, "message.images")
-							if !imagesResult.Exists() || !imagesResult.IsArray() {
-								choiceTemplate, _ = sjson.SetRawBytes(choiceTemplate, "message.images", []byte(`[]`))
-							}
-							imageIndex := len(gjson.GetBytes(choiceTemplate, "message.images").Array())
 							imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
-							imagePayload, _ = sjson.SetBytes(imagePayload, "index", imageIndex)
+							imagePayload, _ = sjson.SetBytes(imagePayload, "index", len(images))
 							imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
-							choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.role", "assistant")
-							choiceTemplate, _ = sjson.SetRawBytes(choiceTemplate, "message.images.-1", imagePayload)
+							images = append(images, imagePayload)
 						}
 					}
+				}
+
+				if hasTextContent {
+					if !hasReasoningContent && len(partsResults) == 1 && len(toolCalls) == 0 && len(images) == 0 {
+						choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.content", partsResults[0].Get("text").String())
+					} else {
+						choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.content", textContent.String())
+					}
+				}
+				if hasReasoningContent {
+					choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.reasoning_content", reasoningContent.String())
+				}
+				if len(toolCalls) > 0 {
+					choiceTemplate, _ = sjson.SetRawBytes(choiceTemplate, "message.tool_calls", translatorcommon.JoinRawArray(toolCalls))
+				}
+				if len(images) > 0 {
+					choiceTemplate, _ = sjson.SetRawBytes(choiceTemplate, "message.images", translatorcommon.JoinRawArray(images))
 				}
 			}
 
@@ -405,9 +432,12 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 			}
 
 			// Append the constructed choice to the main choices array.
-			template, _ = sjson.SetRawBytes(template, "choices.-1", choiceTemplate)
+			choicesList = append(choicesList, choiceTemplate)
 			return true
 		})
+		if len(choicesList) > 0 {
+			template = translatorcommon.SetRawArrayItems(template, "choices", choicesList)
+		}
 	}
 
 	return template

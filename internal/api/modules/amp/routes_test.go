@@ -86,6 +86,77 @@ func TestRegisterManagementRoutes(t *testing.T) {
 	}
 }
 
+func TestRegisterManagementRoutes_RootRoutesRequireAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+
+	m := &AmpModule{restrictToLocalhost: false}
+	mockProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("proxied"))
+	}))
+	defer mockProxy.Close()
+
+	proxy, errProxy := createReverseProxy(mockProxy.URL, NewStaticSecretSource(""))
+	if errProxy != nil {
+		t.Fatalf("create proxy: %v", errProxy)
+	}
+	m.setProxy(proxy)
+
+	authCalls := 0
+	authMiddleware := func(c *gin.Context) {
+		authCalls++
+		if c.GetHeader("Authorization") != "Bearer test-key" {
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		c.Next()
+	}
+
+	m.registerManagementRoutes(r, &handlers.BaseAPIHandler{}, authMiddleware)
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	for _, path := range []string{"/threads", "/settings", "/docs", "/auth/cli-login"} {
+		t.Run(path, func(t *testing.T) {
+			authCalls = 0
+			unauthReq, errReq := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+			if errReq != nil {
+				t.Fatalf("build unauth request: %v", errReq)
+			}
+			unauthResp, errDo := http.DefaultClient.Do(unauthReq)
+			if errDo != nil {
+				t.Fatalf("unauth request failed: %v", errDo)
+			}
+			defer unauthResp.Body.Close()
+			if unauthResp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("unauth status = %d, want %d", unauthResp.StatusCode, http.StatusUnauthorized)
+			}
+			if authCalls != 1 {
+				t.Fatalf("auth calls for unauth = %d, want 1", authCalls)
+			}
+
+			authCalls = 0
+			authReq, errReq := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+			if errReq != nil {
+				t.Fatalf("build auth request: %v", errReq)
+			}
+			authReq.Header.Set("Authorization", "Bearer test-key")
+			authResp, errDo := http.DefaultClient.Do(authReq)
+			if errDo != nil {
+				t.Fatalf("auth request failed: %v", errDo)
+			}
+			defer authResp.Body.Close()
+			if authResp.StatusCode != http.StatusOK {
+				t.Fatalf("auth status = %d, want %d", authResp.StatusCode, http.StatusOK)
+			}
+			if authCalls != 1 {
+				t.Fatalf("auth calls for auth = %d, want 1", authCalls)
+			}
+		})
+	}
+}
+
 func TestRegisterProviderAliases_AllProvidersRegistered(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

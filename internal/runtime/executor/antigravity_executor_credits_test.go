@@ -2,6 +2,9 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,16 +14,133 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
+// resetAntigravityCreditsRetryState clears the package-level credits state
+// between tests. It empties each map in place instead of assigning a fresh
+// sync.Map, because credits hint refreshes run on background goroutines that
+// may still be writing these maps when a test's cleanup runs. Replacing the
+// variable is an unsynchronized write and races with them; Clear is not.
 func resetAntigravityCreditsRetryState() {
-	antigravityCreditsFailureByAuth = sync.Map{}
-	antigravityShortCooldownByAuth = sync.Map{}
-	antigravityCreditsBalanceByAuth = sync.Map{}
-	antigravityCreditsHintRefreshByID = sync.Map{}
+	antigravityCreditsFailureByAuth.Clear()
+	antigravityShortCooldownByAuth.Clear()
+	antigravityCreditsBalanceByAuth.Clear()
+	antigravityCreditsHintRefreshByID.Clear()
+}
+
+type closeSignalReadCloser struct {
+	io.ReadCloser
+	closed chan<- struct{}
+}
+
+func (c *closeSignalReadCloser) Close() error {
+	errClose := c.ReadCloser.Close()
+	close(c.closed)
+	return errClose
+}
+
+type fakeAntigravityKVClient struct {
+	values       map[string][]byte
+	getErr       error
+	setErr       error
+	setNXErr     error
+	delErr       error
+	setNXResult  bool
+	getCount     int
+	setCount     int
+	setNXCount   int
+	delCount     int
+	lastSetTTL   time.Duration
+	lastSetNXTTL time.Duration
+	lastSetNXKey string
+	lastSetKey   string
+}
+
+func newFakeAntigravityKVClient() *fakeAntigravityKVClient {
+	return &fakeAntigravityKVClient{
+		values:      make(map[string][]byte),
+		setNXResult: true,
+	}
+}
+
+func (c *fakeAntigravityKVClient) KVGet(_ context.Context, key string) ([]byte, bool, error) {
+	c.getCount++
+	if c.getErr != nil {
+		return nil, false, c.getErr
+	}
+	value, ok := c.values[key]
+	if !ok {
+		return nil, false, nil
+	}
+	return append([]byte(nil), value...), true, nil
+}
+
+func (c *fakeAntigravityKVClient) KVSet(_ context.Context, key string, value []byte, opts homekv.KVSetOptions) (bool, error) {
+	c.setCount++
+	c.lastSetKey = key
+	c.lastSetTTL = opts.EX
+	if c.setErr != nil {
+		return false, c.setErr
+	}
+	c.values[key] = append([]byte(nil), value...)
+	return true, nil
+}
+
+func (c *fakeAntigravityKVClient) KVSetNX(_ context.Context, key string, value []byte, ttl time.Duration) (bool, error) {
+	c.setNXCount++
+	c.lastSetNXKey = key
+	c.lastSetNXTTL = ttl
+	if c.setNXErr != nil {
+		return false, c.setNXErr
+	}
+	if _, ok := c.values[key]; ok {
+		return false, nil
+	}
+	if c.setNXResult {
+		c.values[key] = append([]byte(nil), value...)
+		return true, nil
+	}
+	return false, nil
+}
+
+func (c *fakeAntigravityKVClient) KVDel(_ context.Context, keys ...string) (int64, error) {
+	c.delCount++
+	if c.delErr != nil {
+		return 0, c.delErr
+	}
+	var deleted int64
+	for _, key := range keys {
+		if _, ok := c.values[key]; ok {
+			delete(c.values, key)
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
+func useFakeAntigravityKVClient(t *testing.T, client *fakeAntigravityKVClient, homeMode bool, errClient error) {
+	t.Helper()
+	previous := currentAntigravityKVClient
+	currentAntigravityKVClient = func() (antigravityKVClient, bool, error) {
+		return client, homeMode, errClient
+	}
+	t.Cleanup(func() {
+		currentAntigravityKVClient = previous
+	})
+}
+
+func mustAntigravityJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	raw, errMarshal := json.Marshal(value)
+	if errMarshal != nil {
+		t.Fatalf("marshal value: %v", errMarshal)
+	}
+	return raw
 }
 
 func TestClassifyAntigravity429(t *testing.T) {
@@ -145,16 +265,16 @@ func TestInjectEnabledCreditTypes(t *testing.T) {
 
 func TestParseRetryDelay_HumanReadableDuration(t *testing.T) {
 	body := []byte(`{"error":{"message":"You have exhausted your capacity on this model. Your quota will reset after 1h43m56s."}}`)
-	retryAfter, err := parseRetryDelay(body)
+	retryAfter, err := helps.ParseRetryDelay(body)
 	if err != nil {
-		t.Fatalf("parseRetryDelay() error = %v", err)
+		t.Fatalf("helps.ParseRetryDelay() error = %v", err)
 	}
 	if retryAfter == nil {
-		t.Fatal("parseRetryDelay() returned nil")
+		t.Fatal("helps.ParseRetryDelay() returned nil")
 	}
 	want := time.Hour + 43*time.Minute + 56*time.Second
 	if *retryAfter != want {
-		t.Fatalf("parseRetryDelay() = %v, want %v", *retryAfter, want)
+		t.Fatalf("helps.ParseRetryDelay() = %v, want %v", *retryAfter, want)
 	}
 }
 
@@ -235,7 +355,7 @@ func TestAntigravityExecute_CreditsInjectedWhenConductorRequests(t *testing.T) {
 		QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
 	})
 	auth := &cliproxyauth.Auth{
-		ID: "auth-credits-conductor",
+		ID: fmt.Sprintf("auth-credits-conductor-%d", time.Now().UnixNano()),
 		Attributes: map[string]string{
 			"base_url": server.URL,
 		},
@@ -258,6 +378,16 @@ func TestAntigravityExecute_CreditsInjectedWhenConductorRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
+	stateValue, ok := antigravityCreditsHintRefreshByID.Load(auth.ID)
+	if !ok {
+		t.Fatal("expected credits refresh state")
+	}
+	state, ok := stateValue.(*antigravityCreditsHintRefreshState)
+	if !ok || state == nil {
+		t.Fatal("credits refresh state has unexpected type")
+	}
+	state.mu.Lock()
+	state.mu.Unlock()
 	if len(resp.Payload) == 0 {
 		t.Fatal("Execute() returned empty payload")
 	}
@@ -379,6 +509,134 @@ func TestAntigravityAuthHasCredits(t *testing.T) {
 	})
 }
 
+func TestAntigravityAuthHasCreditsRequiredHomeBalanceUsesKV(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+	const authID = "home-balance-auth"
+	client := newFakeAntigravityKVClient()
+	client.values[antigravityCreditsBalanceKey(authID)] = mustAntigravityJSON(t, antigravityCreditsBalance{
+		CreditAmount:    10,
+		MinCreditAmount: 50,
+		Known:           true,
+	})
+	useFakeAntigravityKVClient(t, client, true, nil)
+	antigravityCreditsBalanceByAuth.Store(authID, antigravityCreditsBalance{
+		CreditAmount:    25000,
+		MinCreditAmount: 50,
+		Known:           true,
+	})
+
+	ok, errCredits := antigravityAuthHasCreditsRequired(context.Background(), &cliproxyauth.Auth{ID: authID})
+	if errCredits != nil {
+		t.Fatalf("antigravityAuthHasCreditsRequired() error = %v", errCredits)
+	}
+	if ok {
+		t.Fatalf("antigravityAuthHasCreditsRequired() = true, want Home KV balance to win over local cache")
+	}
+	if client.getCount != 1 {
+		t.Fatalf("KVGet count = %d, want 1", client.getCount)
+	}
+}
+
+func TestStoreAntigravityCreditsBalanceBestEffortHomeKV(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+	const authID = "home-balance-write-auth"
+	client := newFakeAntigravityKVClient()
+	useFakeAntigravityKVClient(t, client, true, nil)
+
+	storeAntigravityCreditsBalanceBestEffort(authID, antigravityCreditsBalance{
+		CreditAmount:    25000,
+		MinCreditAmount: 50,
+		Known:           true,
+	})
+
+	if client.setCount != 1 || client.lastSetKey != antigravityCreditsBalanceKey(authID) || client.lastSetTTL != 30*time.Minute {
+		t.Fatalf("KVSet count/key/ttl = %d/%s/%v, want 1/%s/30m", client.setCount, client.lastSetKey, client.lastSetTTL, antigravityCreditsBalanceKey(authID))
+	}
+	if _, ok := antigravityCreditsBalanceByAuth.Load(authID); ok {
+		t.Fatalf("local balance cache was populated in Home mode")
+	}
+}
+
+func TestAntigravityShortCooldownRequiredHomeKV(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+	client := newFakeAntigravityKVClient()
+	useFakeAntigravityKVClient(t, client, true, nil)
+	auth := &cliproxyauth.Auth{ID: "home-cooldown-auth"}
+	now := time.Now()
+	duration := 30 * time.Second
+
+	if errMark := markAntigravityShortCooldownRequired(context.Background(), auth, "claude-sonnet-4-5", now, duration); errMark != nil {
+		t.Fatalf("markAntigravityShortCooldownRequired() error = %v", errMark)
+	}
+	if client.setCount != 1 || client.lastSetTTL != duration+5*time.Second {
+		t.Fatalf("KVSet count/ttl = %d/%v, want 1/%v", client.setCount, client.lastSetTTL, duration+5*time.Second)
+	}
+	antigravityShortCooldownByAuth = sync.Map{}
+	inCooldown, remaining, errRead := antigravityIsInShortCooldownRequired(context.Background(), auth, "claude-sonnet-4-5", now.Add(5*time.Second))
+	if errRead != nil {
+		t.Fatalf("antigravityIsInShortCooldownRequired() error = %v", errRead)
+	}
+	if !inCooldown || remaining <= 0 {
+		t.Fatalf("cooldown = %v remaining %v, want active Home KV cooldown", inCooldown, remaining)
+	}
+}
+
+func TestAntigravityShortCooldownRequiredHomeKVFailures(t *testing.T) {
+	auth := &cliproxyauth.Auth{ID: "home-cooldown-failure-auth"}
+	for _, tc := range []struct {
+		name   string
+		client *fakeAntigravityKVClient
+		write  bool
+	}{
+		{name: "read", client: &fakeAntigravityKVClient{values: make(map[string][]byte), getErr: errors.New("get failed")}},
+		{name: "write", client: &fakeAntigravityKVClient{values: make(map[string][]byte), setErr: errors.New("set failed")}, write: true},
+		{name: "delete-expired", client: &fakeAntigravityKVClient{
+			values: map[string][]byte{
+				antigravityShortCooldownKVKey(auth, "claude-sonnet-4-5"): []byte("1"),
+			},
+			delErr: errors.New("delete failed"),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useFakeAntigravityKVClient(t, tc.client, true, nil)
+			if tc.write {
+				if errMark := markAntigravityShortCooldownRequired(context.Background(), auth, "claude-sonnet-4-5", time.Now(), time.Second); errMark == nil {
+					t.Fatalf("markAntigravityShortCooldownRequired() error = nil, want error")
+				}
+				return
+			}
+			if _, _, errRead := antigravityIsInShortCooldownRequired(context.Background(), auth, "claude-sonnet-4-5", time.Now()); errRead == nil {
+				t.Fatalf("antigravityIsInShortCooldownRequired() error = nil, want error")
+			}
+		})
+	}
+}
+
+func TestMaybeRefreshAntigravityCreditsHintHomeRefreshThrottleUsesSetNX(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+	client := newFakeAntigravityKVClient()
+	client.setNXResult = false
+	useFakeAntigravityKVClient(t, client, true, nil)
+	exec := NewAntigravityExecutor(&config.Config{
+		QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+	})
+	auth := &cliproxyauth.Auth{ID: "home-refresh-throttle-auth"}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		t.Fatalf("refresh request should not run when Home KV throttle lock is not acquired")
+		return nil, nil
+	}))
+
+	exec.maybeRefreshAntigravityCreditsHint(ctx, auth, "access-token")
+
+	if client.setNXCount != 1 || client.lastSetNXKey != antigravityCreditsRefreshLockKey(auth.ID) || client.lastSetNXTTL != antigravityCreditsHintRefreshInterval {
+		t.Fatalf("KVSetNX count/key/ttl = %d/%s/%v, want 1/%s/%v", client.setNXCount, client.lastSetNXKey, client.lastSetNXTTL, antigravityCreditsRefreshLockKey(auth.ID), antigravityCreditsHintRefreshInterval)
+	}
+}
+
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -393,20 +651,24 @@ func TestEnsureAccessToken_WarmTokenLoadsCreditsHint(t *testing.T) {
 		QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
 	})
 	auth := &cliproxyauth.Auth{
-		ID: "auth-warm-token-credits",
+		ID: fmt.Sprintf("auth-warm-token-credits-%d", time.Now().UnixNano()),
 		Metadata: map[string]any{
 			"access_token": "token",
 			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
 		},
 	}
+	refreshDone := make(chan struct{})
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected request url %s", req.URL.String())
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"25000","minimumCreditAmountForUsage":"50"}]}}`)),
+			Body: &closeSignalReadCloser{
+				ReadCloser: io.NopCloser(strings.NewReader(`{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"25000","minimumCreditAmountForUsage":"50"}]}}`)),
+				closed:     refreshDone,
+			},
 		}, nil
 	}))
 
@@ -420,9 +682,10 @@ func TestEnsureAccessToken_WarmTokenLoadsCreditsHint(t *testing.T) {
 	if updatedAuth != nil {
 		t.Fatalf("ensureAccessToken() updatedAuth = %v, want nil", updatedAuth)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && !cliproxyauth.HasKnownAntigravityCreditsHint(auth.ID) {
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-refreshDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for background credits refresh")
 	}
 	if !cliproxyauth.HasKnownAntigravityCreditsHint(auth.ID) {
 		t.Fatal("expected credits hint to be populated for warm token auth")
@@ -444,14 +707,14 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 	t.Cleanup(resetAntigravityCreditsRetryState)
 
 	exec := NewAntigravityExecutor(&config.Config{})
-	const configuredUserAgent = "antigravity/1.23.2 windows/amd64 google-api-nodejs-client/10.3.0"
-	const loadCodeAssistUserAgent = "antigravity/1.23.2 windows/amd64"
+	const configuredUserAgent = "antigravity/hub/1.23.2 windows/amd64 google-api-nodejs-client/10.3.0"
+	const loadCodeAssistUserAgent = "antigravity/hub/1.23.2 windows/amd64"
 	auth := &cliproxyauth.Auth{
 		ID:         "auth-load-code-assist-ua",
 		Attributes: map[string]string{"user_agent": configuredUserAgent},
 	}
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected request url %s", req.URL.String())
 		}
 		if got := req.Header.Get("User-Agent"); got != loadCodeAssistUserAgent {
