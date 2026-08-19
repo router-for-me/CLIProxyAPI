@@ -182,6 +182,13 @@ type emptyCompletionAccum struct {
 	completionTokens int
 	sawUsage         bool
 	blocked          bool
+	// responseAPI reports the stream carried the OpenAI Responses-API shape.
+	// Its terminal event (response.completed) is also the downstream client's
+	// terminal event, and real completions always carry usage there: without
+	// usage we cannot prove the completion is empty unless the response object
+	// carried an explicit output field.
+	responseAPI      bool
+	sawResponseOutput bool
 }
 
 func (a *emptyCompletionAccum) evalJSON(data []byte) bool {
@@ -344,6 +351,7 @@ func (a *emptyCompletionAccum) evalOpenAIResponse(data []byte) bool {
 		return false
 	}
 	a.recognized = true
+	a.responseAPI = true
 
 	var chunk openAIResponseChunk
 	if err := json.Unmarshal(data, &chunk); err != nil {
@@ -388,6 +396,9 @@ func (a *emptyCompletionAccum) evalOpenAIResponse(data []byte) bool {
 	a.evalOpenAIResponseRawOutput(chunk.Item)
 	if chunk.Response != nil {
 		a.evalOpenAIResponseRawOutput(chunk.Response.Output)
+		if chunk.Response.Output != nil {
+			a.sawResponseOutput = true
+		}
 	}
 
 	return true
@@ -605,6 +616,9 @@ func (a *emptyCompletionAccum) empty() bool {
 		return false
 	}
 	if a.sawUsage && a.completionTokens > 0 {
+		return false
+	}
+	if a.responseAPI && !a.sawUsage && !a.sawResponseOutput {
 		return false
 	}
 	return true
