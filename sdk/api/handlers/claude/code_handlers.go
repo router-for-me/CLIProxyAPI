@@ -154,7 +154,8 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
-	c.JSON(http.StatusOK, claudemodels.BuildResponse(h.Models()))
+	disableCloaking := h.Cfg != nil && h.Cfg.ClaudeCode.DisableCloakingModelList
+	c.JSON(http.StatusOK, claudemodels.BuildResponse(h.Models(), disableCloaking))
 }
 
 // handleNonStreamingResponse handles non-streaming content generation requests for Claude models.
@@ -265,7 +266,7 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				if errMsg, okPendingErr := pendingClaudeStreamError(errChan); okPendingErr {
+				if errMsg, hasPendingError := handlers.PendingStreamError(errChan); hasPendingError {
 					h.WriteErrorResponse(c, errMsg)
 					if errMsg != nil {
 						cliCancel(errMsg.Error)
@@ -296,21 +297,6 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
 			return
 		}
-	}
-}
-
-func pendingClaudeStreamError(errs <-chan *interfaces.ErrorMessage) (*interfaces.ErrorMessage, bool) {
-	if errs == nil {
-		return nil, false
-	}
-	select {
-	case errMsg, ok := <-errs:
-		if !ok {
-			return nil, false
-		}
-		return errMsg, true
-	default:
-		return nil, false
 	}
 }
 
@@ -376,6 +362,25 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 	status := http.StatusInternalServerError
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode
+	}
+	if msg != nil && msg.DirectResponse {
+		for key, values := range handlers.FilterUpstreamHeaders(msg.Headers) {
+			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) {
+				continue
+			}
+			c.Writer.Header().Del(key)
+			for _, value := range values {
+				c.Writer.Header().Add(key, value)
+			}
+		}
+		body := bytes.Clone(msg.Body)
+		appendClaudeAPIResponse(c, body)
+		if !c.Writer.Written() && c.Writer.Header().Get("Content-Type") == "" {
+			c.Writer.Header().Set("Content-Type", "application/json")
+		}
+		c.Status(status)
+		_, _ = c.Writer.Write(body)
+		return
 	}
 	if msg != nil && msg.Addon != nil && handlers.PassthroughHeadersEnabled(h.Cfg) {
 		for key, values := range msg.Addon {

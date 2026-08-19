@@ -22,6 +22,7 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewXAIAuthenticator(),
+		sdkAuth.NewGitLabAuthenticator(),
 	)
 }
 
@@ -383,6 +384,9 @@ func (s *Service) configureCooldownStateStoreContext(ctx context.Context, cfg *c
 func (s *Service) resolveCooldownStateStore(cfg *config.Config) coreauth.CooldownStateStore {
 	if cfg == nil || !cfg.SaveCooldownStatus || cfg.Home.Enabled {
 		return nil
+	}
+	if s != nil && s.cooldownStateStore != nil {
+		return s.cooldownStateStore
 	}
 	authDir, errResolve := resolveCooldownStateAuthDir(cfg)
 	if errResolve != nil {

@@ -70,6 +70,12 @@ func GetProviderName(modelName string) []string {
 		return providers
 	}
 
+	// Fallback: if cursor provider has registered models, route unknown models to it.
+	// Cursor acts as a universal proxy supporting multiple model families (Claude, GPT, Gemini, etc.).
+	if models := registry.GetGlobalRegistry().GetAvailableModelsByProvider("cursor"); len(models) > 0 {
+		return []string{"cursor"}
+	}
+
 	return providers
 }
 
@@ -210,6 +216,7 @@ func MaskAuthorizationHeader(value string) string {
 //
 // Behavior by header key (case-insensitive):
 //   - "Authorization": Preserve the auth type prefix (e.g., "Bearer ") and mask only the credential part.
+//   - "Cookie", "Set-Cookie", and "Proxy-Authorization": Mask the entire value.
 //   - Headers containing "api-key": Mask the entire value using HideAPIKey.
 //   - Others: Return the original value unchanged.
 //
@@ -222,6 +229,10 @@ func MaskAuthorizationHeader(value string) string {
 func MaskSensitiveHeaderValue(key, value string) string {
 	lowerKey := strings.ToLower(strings.TrimSpace(key))
 	switch {
+	case lowerKey == "cookie",
+		lowerKey == "set-cookie",
+		lowerKey == "proxy-authorization":
+		return HideAPIKey(value)
 	case strings.Contains(lowerKey, "authorization"):
 		return MaskAuthorizationHeader(value)
 	case strings.Contains(lowerKey, "api-key"),

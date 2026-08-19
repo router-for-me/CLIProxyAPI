@@ -29,7 +29,17 @@ const geminiClaudeThoughtSignature = "skip_thought_signature_validator"
 //
 // Returns:
 //   - []byte: The transformed request in Gemini format.
-func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool) []byte {
+func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, stream bool) []byte {
+	return convertClaudeRequestToGemini(modelName, inputRawJSON, stream, false)
+}
+
+// ConvertClaudeRequestToGeminiWithCompat preserves assistant thinking blocks
+// with empty signatures for configured compatibility endpoints.
+func ConvertClaudeRequestToGeminiWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
+	return convertClaudeRequestToGemini(modelName, inputRawJSON, stream, true)
+}
+
+func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool, preserveEmptyThinkingBlocks bool) []byte {
 	rawJSON := inputRawJSON
 	// Build output Gemini request JSON
 	out := []byte(`{"contents":[]}`)
@@ -55,10 +65,14 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		if len(systemParts) > 0 {
 			systemInstruction := []byte(`{"role":"user","parts":[]}`)
 			systemInstruction, _ = sjson.SetRawBytes(systemInstruction, "parts", translatorcommon.JoinRawArray(systemParts))
-			out, _ = sjson.SetRawBytes(out, "system_instruction", systemInstruction)
+			out, _ = sjson.SetRawBytes(out, "systemInstruction", systemInstruction)
 		}
 	} else if systemResult.Type == gjson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
-		out, _ = sjson.SetBytes(out, "system_instruction.parts.-1.text", systemResult.String())
+		part := []byte(`{"text":""}`)
+		part, _ = sjson.SetBytes(part, "text", systemResult.String())
+		systemInstruction := []byte(`{"parts":[]}`)
+		systemInstruction = translatorcommon.SetRawArrayItems(systemInstruction, "parts", [][]byte{part})
+		out, _ = sjson.SetRawBytes(out, "systemInstruction", systemInstruction)
 	}
 
 	// contents
@@ -97,6 +111,15 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						}
 						part := []byte(`{"text":""}`)
 						part, _ = sjson.SetBytes(part, "text", text)
+						partItems = append(partItems, part)
+
+					case "thinking":
+						if !preserveEmptyThinkingBlocks {
+							return true
+						}
+						part := []byte(`{"text":"","thought":true,"thoughtSignature":""}`)
+						part, _ = sjson.SetBytes(part, "text", contentResult.Get("thinking").String())
+						part, _ = sjson.SetBytes(part, "thoughtSignature", contentResult.Get("signature").String())
 						partItems = append(partItems, part)
 
 					case "tool_use":
@@ -266,7 +289,6 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
 				budget := int(b.Int())
 				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", budget)
-				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.includeThoughts", true)
 			}
 		case "adaptive", "auto":
 			// For adaptive thinking:
@@ -290,7 +312,6 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", "high")
 				}
 			}
-			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.includeThoughts", true)
 		}
 	}
 	if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() && v.Type == gjson.Number {

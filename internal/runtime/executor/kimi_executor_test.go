@@ -28,6 +28,41 @@ func TestNewKimiExecutorInitializesDelegatedClaudeConfig(t *testing.T) {
 	}
 }
 
+func TestKimiExecutorRequestToFormatMatchesWireProtocol(t *testing.T) {
+	type requestToFormatReporter interface {
+		RequestToFormat(cliproxyexecutor.Request, cliproxyexecutor.Options) sdktranslator.Format
+	}
+
+	executor := NewKimiExecutor(&config.Config{})
+	reporter, ok := any(executor).(requestToFormatReporter)
+	if !ok {
+		t.Fatal("Kimi executor does not report its upstream request format")
+	}
+
+	tests := []struct {
+		name   string
+		stream bool
+		source sdktranslator.Format
+		want   sdktranslator.Format
+	}{
+		{name: "Claude non-streaming", source: sdktranslator.FormatClaude, want: sdktranslator.FormatClaude},
+		{name: "Claude streaming", stream: true, source: sdktranslator.FormatClaude, want: sdktranslator.FormatClaude},
+		{name: "OpenAI non-streaming", source: sdktranslator.FormatOpenAI, want: sdktranslator.FormatOpenAI},
+		{name: "OpenAI streaming", stream: true, source: sdktranslator.FormatOpenAI, want: sdktranslator.FormatOpenAI},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := reporter.RequestToFormat(cliproxyexecutor.Request{}, cliproxyexecutor.Options{
+				SourceFormat: tt.source,
+				Stream:       tt.stream,
+			})
+			if got != tt.want {
+				t.Fatalf("RequestToFormat() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestKimiExecutorClaudeRequestPreservesInternalModelSemantics(t *testing.T) {
 	var upstreamBody []byte
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -51,7 +86,7 @@ func TestKimiExecutorClaudeRequestPreservesInternalModelSemantics(t *testing.T) 
 		Metadata:   map[string]any{"access_token": "test-token"},
 	}
 	const model = "kimi-k2.5(max)"
-	payload := []byte(`{"model":"kimi-k2.5(max)","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`)
+	payload := []byte(`{"model":"kimi-k2.5(max)","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"tools":[{"name":"lookup","description":"lookup","input_schema":{"type":"object"}}]}`)
 	response, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
 		Model:   model,
 		Payload: payload,
@@ -68,8 +103,73 @@ func TestKimiExecutorClaudeRequestPreservesInternalModelSemantics(t *testing.T) 
 	if got := gjson.GetBytes(upstreamBody, "output_config.effort").String(); got != "high" {
 		t.Fatalf("upstream output_config.effort = %q, want high", got)
 	}
+	if gjson.GetBytes(upstreamBody, "tools.0.cache_control").Exists() {
+		t.Fatalf("Kimi upstream body contains Anthropic-only cache_control: %s", upstreamBody)
+	}
 	if got := gjson.GetBytes(response.Payload, "model").String(); got != model {
 		t.Fatalf("response model = %q, want %q", got, model)
+	}
+}
+
+func TestKimiExecutorPreservesAssistantContentAndToolCallsFromResponsesHistory(t *testing.T) {
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"chatcmpl_test","object":"chat.completion","created":1,"model":"k3","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+			)),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+	payload := []byte(`{
+		"model":"kimi-k3",
+		"input":[
+			{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"inspect the next step"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Step 3 completed; continue to step 4."}]},
+			{"type":"function_call","call_id":"call_4","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
+			{"type":"function_call_output","call_id":"call_4","output":"ok"}
+		]
+	}`)
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: payload,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	messages := gjson.GetBytes(upstreamBody, "messages").Array()
+	if got := len(messages); got != 2 {
+		t.Fatalf("upstream messages count = %d, want 2; body=%s", got, upstreamBody)
+	}
+	assistant := messages[0]
+	if got := assistant.Get("content.0.text").String(); got != "Step 3 completed; continue to step 4." {
+		t.Fatalf("assistant content = %q, want preserved text; body=%s", got, upstreamBody)
+	}
+	if got := assistant.Get("reasoning_content").String(); got != "inspect the next step" {
+		t.Fatalf("assistant reasoning_content = %q, want inspect the next step; body=%s", got, upstreamBody)
+	}
+	if got := assistant.Get("tool_calls.0.id").String(); got != "call_4" {
+		t.Fatalf("assistant tool call ID = %q, want call_4; body=%s", got, upstreamBody)
+	}
+	if got := messages[1].Get("tool_call_id").String(); got != "call_4" {
+		t.Fatalf("tool output call ID = %q, want call_4; body=%s", got, upstreamBody)
 	}
 }
 
@@ -95,7 +195,7 @@ func TestKimiExecutorCountTokensUsesCanonicalUpstreamModel(t *testing.T) {
 		Attributes: map[string]string{},
 		Metadata:   map[string]any{"access_token": "test-token"},
 	}
-	payload := []byte(`{"model":"kimi-k3[1m](high)","messages":[{"role":"user","content":"hello"}]}`)
+	payload := []byte(`{"model":"kimi-k3[1m](high)","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"lookup","description":"lookup","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}]}`)
 	_, err := executor.CountTokens(ctx, auth, cliproxyexecutor.Request{
 		Model:   "kimi-k3[1m](high)",
 		Payload: payload,
@@ -111,6 +211,34 @@ func TestKimiExecutorCountTokensUsesCanonicalUpstreamModel(t *testing.T) {
 	}
 	if got := gjson.GetBytes(upstreamBody, "model").String(); got != "k3" {
 		t.Fatalf("upstream model = %q, want k3", got)
+	}
+	if gjson.GetBytes(upstreamBody, "tools.0.cache_control").Exists() {
+		t.Fatalf("Kimi count_tokens upstream body contains Anthropic-only cache_control: %s", upstreamBody)
+	}
+}
+
+func TestKimiExecutorCountTokensInvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     http.Header{"Content-Encoding": []string{"gzip"}},
+			Body:       io.NopCloser(strings.NewReader("not-a-valid-gzip-stream")),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+	payload := []byte(`{"model":"kimi-k3","messages":[{"role":"user","content":"hello"}]}`)
+	_, err := executor.CountTokens(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	assertStatusErr(t, err, http.StatusBadRequest)
+	if !strings.Contains(err.Error(), "failed to decode error response body") {
+		t.Fatalf("CountTokens() error = %q, want decode failure", err)
 	}
 }
 
@@ -176,10 +304,8 @@ func TestKimiExecutorClaudeStreamForwardsAnthropicBetaAndLogsUpstream(t *testing
 		t.Fatalf("upstream URL = %q, want Kimi messages endpoint", got)
 	}
 	upstreamBetas := upstreamRequest.Header.Get("Anthropic-Beta")
-	for _, beta := range []string{"client-beta-one", "client-beta-two", "oauth-2025-04-20", "interleaved-thinking-2025-05-14"} {
-		if !strings.Contains(upstreamBetas, beta) {
-			t.Fatalf("Anthropic-Beta = %q, want %q", upstreamBetas, beta)
-		}
+	if upstreamBetas != "client-beta-one,client-beta-two" {
+		t.Fatalf("Anthropic-Beta = %q, want caller beta values only", upstreamBetas)
 	}
 
 	rawAPIRequest, existsRequest := ginCtx.Get("API_REQUEST")
@@ -337,6 +463,63 @@ func TestNormalizeKimiToolMessageLinks_InsertsFallbackReasoningWhenMissing(t *te
 	}
 	if reasoning.String() != "[reasoning unavailable]" {
 		t.Fatalf("messages.0.reasoning_content = %q, want %q", reasoning.String(), "[reasoning unavailable]")
+	}
+}
+
+func TestNormalizeKimiToolMessageLinks_DoesNotReuseUnavailableReasoning(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","reasoning_content":"[reasoning unavailable]"},
+			{"role":"assistant","content":"current summary","tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_directory","arguments":"{}"}}]}
+		]
+	}`)
+
+	out, err := normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
+	}
+
+	got := gjson.GetBytes(out, "messages.1.reasoning_content").String()
+	if got != "current summary" {
+		t.Fatalf("messages.1.reasoning_content = %q, want %q", got, "current summary")
+	}
+}
+
+func TestNormalizeKimiToolMessageLinks_UnavailableReasoningDoesNotOverridePreviousReasoning(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","reasoning_content":"real reasoning"},
+			{"role":"assistant","reasoning_content":"[reasoning unavailable]"},
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_directory","arguments":"{}"}}]}
+		]
+	}`)
+
+	out, err := normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
+	}
+
+	got := gjson.GetBytes(out, "messages.2.reasoning_content").String()
+	if got != "real reasoning" {
+		t.Fatalf("messages.2.reasoning_content = %q, want %q", got, "real reasoning")
+	}
+}
+
+func TestNormalizeKimiToolMessageLinks_ReplacesUnavailableReasoningContent(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":"assistant summary","tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_directory","arguments":"{}"}}],"reasoning_content":"[reasoning unavailable]"}
+		]
+	}`)
+
+	out, err := normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
+	}
+
+	got := gjson.GetBytes(out, "messages.0.reasoning_content").String()
+	if got != "assistant summary" {
+		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "assistant summary")
 	}
 }
 
@@ -503,6 +686,20 @@ func TestNormalizeKimiUpstreamModel(t *testing.T) {
 		{"kimi-k3[1m](1024)", "k3(1024)"},
 		{"kimi-k2.6(high)", "k2.6(high)"},
 		{"kimi-k2.6[1m](high)", "k2.6(high)"},
+		{"kimi-k2.7-code", "kimi-for-coding"},
+		{"kimi-k2.7-code-highspeed", "kimi-for-coding-highspeed"},
+		{"Kimi-K2.7-Code", "kimi-for-coding"},
+		{"kimi-k2.7-code-highspeed(high)", "kimi-for-coding-highspeed(high)"},
+		{"kimi-k2.7-code[1m](high)", "kimi-for-coding(high)"},
+		{"k2.7-code", "kimi-for-coding"},
+		{"k2.7-code-highspeed", "kimi-for-coding-highspeed"},
+		{"kimi-for-coding", "kimi-for-coding"},
+		{"kimi-for-coding-highspeed", "kimi-for-coding-highspeed"},
+		{"Kimi-For-Coding", "kimi-for-coding"},
+		{"kimi-for-coding-highspeed(high)", "kimi-for-coding-highspeed(high)"},
+		{"kimi-for-coding[1m]", "kimi-for-coding"},
+		{"for-coding", "kimi-for-coding"},
+		{"for-coding-highspeed", "kimi-for-coding-highspeed"},
 	}
 
 	for _, c := range cases {

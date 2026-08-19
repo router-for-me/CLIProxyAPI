@@ -167,12 +167,8 @@ func (h *Host) callHostHTTPDoStream(ctx context.Context, request []byte) ([]byte
 		cancel()
 		return nil, errDo
 	}
-	streamID := ""
-	if h != nil && h.httpStreams != nil {
-		streamID = h.httpStreams.open(resp.Chunks, cancel)
-	}
+	streamID := h.openHTTPStreamWithCancel(resp.Chunks, cancel)
 	if streamID == "" {
-		cancel()
 		return nil, fmt.Errorf("host http stream bridge is unavailable")
 	}
 	return marshalRPCResult(rpcHostHTTPStreamResponse{
@@ -180,6 +176,18 @@ func (h *Host) callHostHTTPDoStream(ctx context.Context, request []byte) ([]byte
 		Headers:    httpHeader(resp.Headers),
 		StreamID:   streamID,
 	})
+}
+
+// openHTTPStreamWithCancel registers the HTTP stream chunk channel and hands
+// the cancel function over to the stream registry, which owns calling it when
+// the stream is closed. When the registry is unavailable the cancel is
+// consumed here so no context is leaked.
+func (h *Host) openHTTPStreamWithCancel(chunks <-chan pluginapi.HTTPStreamChunk, cancel context.CancelFunc) string {
+	if h == nil || h.httpStreams == nil {
+		cancel()
+		return ""
+	}
+	return h.httpStreams.open(chunks, cancel)
 }
 
 func (h *Host) callHostHTTPStreamRead(ctx context.Context, request []byte) ([]byte, error) {

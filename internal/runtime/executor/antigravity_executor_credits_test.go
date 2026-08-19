@@ -21,11 +21,16 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
+// resetAntigravityCreditsRetryState clears the package-level credits state
+// between tests. It empties each map in place instead of assigning a fresh
+// sync.Map, because credits hint refreshes run on background goroutines that
+// may still be writing these maps when a test's cleanup runs. Replacing the
+// variable is an unsynchronized write and races with them; Clear is not.
 func resetAntigravityCreditsRetryState() {
-	antigravityCreditsFailureByAuth = sync.Map{}
-	antigravityShortCooldownByAuth = sync.Map{}
-	antigravityCreditsBalanceByAuth = sync.Map{}
-	antigravityCreditsHintRefreshByID = sync.Map{}
+	antigravityCreditsFailureByAuth.Clear()
+	antigravityShortCooldownByAuth.Clear()
+	antigravityCreditsBalanceByAuth.Clear()
+	antigravityCreditsHintRefreshByID.Clear()
 }
 
 type closeSignalReadCloser struct {
@@ -654,7 +659,7 @@ func TestEnsureAccessToken_WarmTokenLoadsCreditsHint(t *testing.T) {
 	}
 	refreshDone := make(chan struct{})
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected request url %s", req.URL.String())
 		}
 		return &http.Response{
@@ -709,7 +714,7 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 		Attributes: map[string]string{"user_agent": configuredUserAgent},
 	}
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected request url %s", req.URL.String())
 		}
 		if got := req.Header.Get("User-Agent"); got != loadCodeAssistUserAgent {

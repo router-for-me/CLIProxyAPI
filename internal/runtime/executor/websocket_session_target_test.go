@@ -29,6 +29,8 @@ type rejectSecondBindLifecycle struct {
 	binds atomic.Int32
 }
 
+const websocketSessionTargetCompletion = `{"type":"response.completed","response":{"id":"response-1","object":"response","status":"completed","output":[{"type":"message","id":"message-1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
+
 func (l *rejectSecondBindLifecycle) Bind(func() error) error {
 	if l.binds.Add(1) > 1 {
 		return fmt.Errorf("retry lifecycle bind rejected")
@@ -231,6 +233,7 @@ func TestWebsocketRetryBindFailureClearsActiveSessionState(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 			var connections atomic.Int32
+			releaseSuccessfulConnection := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				conn, errUpgrade := upgrader.Upgrade(w, r, nil)
 				if errUpgrade != nil {
@@ -249,12 +252,18 @@ func TestWebsocketRetryBindFailureClearsActiveSessionState(t *testing.T) {
 				if _, _, errRead := conn.ReadMessage(); errRead != nil {
 					return
 				}
-				completed := []byte(`{"type":"response.completed","response":{"id":"response-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+				completed := []byte(websocketSessionTargetCompletion)
 				if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 					t.Errorf("write websocket completion: %v", errWrite)
 				}
+				select {
+				case <-releaseSuccessfulConnection:
+				case <-time.After(5 * time.Second):
+					t.Error("timed out waiting to release successful websocket connection")
+				}
 			}))
 			defer server.Close()
+			defer close(releaseSuccessfulConnection)
 
 			lifecycle := &rejectSecondBindLifecycle{}
 			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, ResponseFormat: sdktranslator.FormatOpenAIResponse, ExecutionLifecycle: lifecycle, Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "retry-bind"}}
@@ -764,7 +773,7 @@ func TestAuditAccountedCodexXAIReconnectReuseAndTargetChange(t *testing.T) {
 					if _, _, errRead := conn.ReadMessage(); errRead != nil {
 						return
 					}
-					completed := []byte(`{"type":"response.completed","response":{"id":"response-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+					completed := []byte(websocketSessionTargetCompletion)
 					if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 						return
 					}
@@ -961,7 +970,7 @@ func TestAuditHomeCodex426WebsocketToHTTPFreshSelection(t *testing.T) {
 		}
 		httpFallbackCalls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n"))
+		_, _ = w.Write([]byte("data: " + websocketSessionTargetCompletion + "\n\n"))
 	}))
 	defer httpFallback.Close()
 

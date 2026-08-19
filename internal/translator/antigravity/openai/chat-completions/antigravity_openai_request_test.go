@@ -191,17 +191,27 @@ func TestConvertOpenAIRequestToAntigravitySkipsEmptyAssistantMessages(t *testing
 
 func TestConvertOpenAIRequestToAntigravityThinkingAliases(t *testing.T) {
 	tests := []struct {
-		name string
-		body string
-		want bool
+		name       string
+		body       string
+		wantExists bool
+		want       bool
 	}{
 		{
-			name: "Default Gemini include thoughts",
+			name: "Missing summary intent leaves include thoughts absent",
 			body: `{
 				"model":"gemini-3.1-pro-low",
 				"messages":[{"role":"user","content":"hi"}]
 			}`,
-			want: true,
+		},
+		{
+			name: "Reasoning effort enables thoughts",
+			body: `{
+				"model":"gemini-3.1-pro-low",
+				"messages":[{"role":"user","content":"hi"}],
+				"reasoning_effort":"high"
+			}`,
+			wantExists: true,
+			want:       true,
 		},
 		{
 			name: "GenerationConfig snake include thoughts",
@@ -210,7 +220,16 @@ func TestConvertOpenAIRequestToAntigravityThinkingAliases(t *testing.T) {
 				"messages":[{"role":"user","content":"hi"}],
 				"generationConfig":{"thinkingConfig":{"include_thoughts":true}}
 			}`,
-			want: true,
+			wantExists: true,
+			want:       true,
+		},
+		{
+			name: "String include thoughts is ignored",
+			body: `{
+				"model":"gemini-3.1-pro-low",
+				"messages":[{"role":"user","content":"hi"}],
+				"generationConfig":{"thinkingConfig":{"includeThoughts":"true"}}
+			}`,
 		},
 		{
 			name: "Top-level thinking include thoughts",
@@ -219,7 +238,8 @@ func TestConvertOpenAIRequestToAntigravityThinkingAliases(t *testing.T) {
 				"messages":[{"role":"user","content":"hi"}],
 				"thinking":{"include_thoughts":true}
 			}`,
-			want: true,
+			wantExists: true,
+			want:       true,
 		},
 		{
 			name: "Reasoning exclude false includes thoughts",
@@ -228,7 +248,8 @@ func TestConvertOpenAIRequestToAntigravityThinkingAliases(t *testing.T) {
 				"messages":[{"role":"user","content":"hi"}],
 				"reasoning":{"exclude":false}
 			}`,
-			want: true,
+			wantExists: true,
+			want:       true,
 		},
 		{
 			name: "Reasoning exclude true hides thoughts",
@@ -237,7 +258,19 @@ func TestConvertOpenAIRequestToAntigravityThinkingAliases(t *testing.T) {
 				"messages":[{"role":"user","content":"hi"}],
 				"reasoning":{"exclude":true}
 			}`,
-			want: false,
+			wantExists: true,
+			want:       false,
+		},
+		{
+			name: "Google extension disables thoughts",
+			body: `{
+				"model":"gemini-3.1-pro-low",
+				"messages":[{"role":"user","content":"hi"}],
+				"reasoning_effort":"high",
+				"extra_body":{"google":{"thinking_config":{"include_thoughts":false}}}
+			}`,
+			wantExists: true,
+			want:       false,
 		},
 	}
 
@@ -245,11 +278,13 @@ func TestConvertOpenAIRequestToAntigravityThinkingAliases(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := ConvertOpenAIRequestToAntigravity("gemini-3.1-pro-low", []byte(tt.body), false)
 			includeThoughts := gjson.GetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts")
-			if !includeThoughts.Exists() {
-				t.Fatalf("includeThoughts missing. Output: %s", result)
+			if includeThoughts.Exists() != tt.wantExists {
+				t.Fatalf("includeThoughts exists = %v, want %v. Output: %s", includeThoughts.Exists(), tt.wantExists, result)
 			}
-			if got := includeThoughts.Bool(); got != tt.want {
-				t.Fatalf("includeThoughts = %v, want %v. Output: %s", got, tt.want, result)
+			if tt.wantExists {
+				if got := includeThoughts.Bool(); got != tt.want {
+					t.Fatalf("includeThoughts = %v, want %v. Output: %s", got, tt.want, result)
+				}
 			}
 			if snake := gjson.GetBytes(result, "request.generationConfig.thinkingConfig.include_thoughts"); snake.Exists() {
 				t.Fatalf("include_thoughts should be normalized away. Output: %s", result)
@@ -312,5 +347,111 @@ func TestConvertOpenAIRequestToAntigravityMapsToolChoiceModes(t *testing.T) {
 				t.Fatalf("tool choice mode = %q, want %q. Output: %s", got, tt.mode, out)
 			}
 		})
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravityMapsResponseFormatJSONObject(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"user","content":"hi"}],
+		"generationConfig":{
+			"responseSchema":{"type":"string","description":"stale"},
+			"responseJsonSchema":{"type":"string"},
+			"response_schema":{"type":"string"},
+			"response_json_schema":{"type":"string"}
+		},
+		"response_format":{"type":"json_object"}
+	}`)
+
+	out := ConvertOpenAIRequestToAntigravity("gemini-3.6-flash-high", inputJSON, false)
+	if got := gjson.GetBytes(out, "request.generationConfig.responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json. Output: %s", got, out)
+	}
+	if gjson.GetBytes(out, "request.generationConfig.responseSchema").Exists() {
+		t.Fatalf("responseSchema should not be set for json_object. Output: %s", out)
+	}
+	assertNoResponseSchemaAliases(t, out)
+}
+
+func TestConvertOpenAIRequestToAntigravityMapsResponseFormatJSONSchema(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"gemini-3.6-flash-high",
+		"messages":[{"role":"user","content":"hi"}],
+		"generationConfig":{
+			"responseSchema":{"type":"string","description":"stale"},
+			"responseJsonSchema":{"type":"string"},
+			"response_schema":{"type":"string"},
+			"response_json_schema":{"type":"string"}
+		},
+		"response_format":{
+			"type":"json_schema",
+			"json_schema":{
+				"name":"verdict",
+				"schema":{
+					"type":"object",
+					"properties":{"score":{"type":"integer"}},
+					"required":["score"]
+				}
+			}
+		}
+	}`)
+
+	out := ConvertOpenAIRequestToAntigravity("gemini-3.6-flash-high", inputJSON, false)
+	if got := gjson.GetBytes(out, "request.generationConfig.responseMimeType").String(); got != "application/json" {
+		t.Fatalf("responseMimeType = %q, want application/json. Output: %s", got, out)
+	}
+	schema := gjson.GetBytes(out, "request.generationConfig.responseSchema")
+	if !schema.Exists() {
+		t.Fatalf("responseSchema missing. Output: %s", out)
+	}
+	if got := schema.Get("properties.score.type").String(); got != "integer" {
+		t.Fatalf("responseSchema.properties.score.type = %q, want integer. Output: %s", got, out)
+	}
+	if schema.Get("description").Exists() {
+		t.Fatalf("stale responseSchema survived. Output: %s", out)
+	}
+	assertNoResponseSchemaAliases(t, out)
+}
+
+func assertNoResponseSchemaAliases(t *testing.T, out []byte) {
+	t.Helper()
+	for _, schemaKey := range []string{"responseJsonSchema", "response_schema", "response_json_schema"} {
+		if gjson.GetBytes(out, "request.generationConfig."+schemaKey).Exists() {
+			t.Errorf("stale %s survived response_format mapping. Output: %s", schemaKey, out)
+		}
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravityTranslatesVideoURL(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3.7-flash-high",
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "Name the colours in order"},
+				{"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAAIGZ0eXBtcDQy"}}
+			]
+		}]
+	}`)
+
+	out := ConvertOpenAIRequestToAntigravity("gemini-3.7-flash-high", inputJSON, false)
+	parts := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("parts length = %d, want 2. Output: %s", len(parts), out)
+	}
+
+	if got := parts[0].Get("text").String(); got != "Name the colours in order" {
+		t.Fatalf("parts[0].text = %q, want 'Name the colours in order'", got)
+	}
+
+	inlineData := parts[1].Get("inlineData")
+	if !inlineData.Exists() {
+		t.Fatalf("parts[1].inlineData missing. Output: %s", out)
+	}
+	if got := inlineData.Get("mimeType").String(); got != "video/mp4" {
+		t.Fatalf("inlineData.mimeType = %q, want video/mp4. Output: %s", got, out)
+	}
+	if got := inlineData.Get("data").String(); got != "AAAAIGZ0eXBtcDQy" {
+		t.Fatalf("inlineData.data = %q, want AAAAIGZ0eXBtcDQy. Output: %s", got, out)
 	}
 }

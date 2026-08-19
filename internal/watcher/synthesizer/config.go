@@ -5,11 +5,13 @@ import (
 	"strconv"
 	"strings"
 
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 // ConfigSynthesizer generates Auth entries from configuration API keys.
@@ -21,11 +23,25 @@ func NewConfigSynthesizer() *ConfigSynthesizer {
 	return &ConfigSynthesizer{}
 }
 
+func addWeightToAttrs(weight *int, attrs map[string]string) {
+	if weight == nil {
+		return
+	}
+	normalized := *weight
+	if normalized <= 0 {
+		normalized = 0
+	}
+	attrs[coreauth.AttributeWeight] = strconv.Itoa(normalized)
+}
+
 // Synthesize generates Auth entries from config API keys.
 func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
 	out := make([]*coreauth.Auth, 0, 32)
 	if ctx == nil || ctx.Config == nil {
 		return out, nil
+	}
+	if errValidate := ctx.Config.ValidateCredentialWeights(); errValidate != nil {
+		return nil, fmt.Errorf("synthesize config API key auths: %w", errValidate)
 	}
 
 	// Gemini API Keys
@@ -36,6 +52,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeClaudeKeys(ctx)...)
 	// Codex API Keys
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
+	// Kiro (AWS CodeWhisperer)
+	out = append(out, s.synthesizeKiroKeys(ctx)...)
 	// xAI API Keys
 	out = append(out, s.synthesizeXAIKeys(ctx)...)
 	// OpenAI-compat
@@ -73,16 +91,20 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 		proxyURL := strings.TrimSpace(entry.ProxyURL)
 		id, token := idGen.Next(idKind, key, base)
 		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:%s[%s]", sourceName, token),
-			"api_key": key,
+			"source":       fmt.Sprintf("config:%s[%s]", sourceName, token),
+			"api_key":      key,
+			"config_index": strconv.Itoa(i),
 		}
 		metadata := map[string]any{}
-		if entry.DisableCooling {
-			metadata["disable_cooling"] = true
+		if entry.DisableCooling != nil {
+			metadata["disable_cooling"] = *entry.DisableCooling
 		}
+		addRequestRetryToMetadata(entry.RequestRetry, metadata)
+		addRequestScopedErrorsToMetadata(entry.RequestScopedErrors, metadata)
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
 		}
+		addWeightToAttrs(entry.Weight, attrs)
 		if base != "" {
 			attrs["base_url"] = base
 		}
@@ -128,21 +150,28 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		base := strings.TrimSpace(ck.BaseURL)
 		id, token := idGen.Next("claude:apikey", key, base)
 		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:claude[%s]", token),
-			"api_key": key,
+			"source":       fmt.Sprintf("config:claude[%s]", token),
+			"api_key":      key,
+			"config_index": strconv.Itoa(i),
 		}
 		metadata := map[string]any{}
-		if ck.DisableCooling {
-			metadata["disable_cooling"] = true
+		if ck.DisableCooling != nil {
+			metadata["disable_cooling"] = *ck.DisableCooling
 		}
+		addRequestRetryToMetadata(ck.RequestRetry, metadata)
+		addRequestScopedErrorsToMetadata(ck.RequestScopedErrors, metadata)
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
 		}
+		addWeightToAttrs(ck.Weight, attrs)
 		if base != "" {
 			attrs["base_url"] = base
 		}
 		if ck.RebuildMidSystemMessage {
 			attrs["rebuild_mid_system_message"] = "true"
+		}
+		if profile := strings.ToLower(strings.TrimSpace(ck.FingerprintProfile)); profile != "" {
+			attrs["fingerprint_profile"] = profile
 		}
 		if hash := diff.ComputeClaudeModelsHash(ck.Models); hash != "" {
 			attrs["models_hash"] = hash
@@ -196,21 +225,28 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 		baseURL := strings.TrimSpace(entry.BaseURL)
 		id, token := idGen.Next(provider+":apikey", key, baseURL)
 		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:%s[%s]", provider, token),
-			"api_key": key,
+			"source":       fmt.Sprintf("config:%s[%s]", provider, token),
+			"api_key":      key,
+			"config_index": strconv.Itoa(i),
 		}
 		metadata := map[string]any{}
-		if entry.DisableCooling {
-			metadata["disable_cooling"] = true
+		if entry.DisableCooling != nil {
+			metadata["disable_cooling"] = *entry.DisableCooling
 		}
+		addRequestRetryToMetadata(entry.RequestRetry, metadata)
+		addRequestScopedErrorsToMetadata(entry.RequestScopedErrors, metadata)
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
 		}
+		addWeightToAttrs(entry.Weight, attrs)
 		if baseURL != "" {
 			attrs["base_url"] = baseURL
 		}
 		if entry.Websockets {
 			attrs["websockets"] = "true"
+		}
+		if provider == "codex" && entry.AlphaSearch {
+			attrs[coreauth.AttributeCodexAlphaSearch] = "true"
 		}
 		if hash := diff.ComputeCodexModelsHash(entry.Models); hash != "" {
 			attrs["models_hash"] = hash
@@ -271,14 +307,18 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"base_url":     base,
 				"compat_name":  compat.Name,
 				"provider_key": internalProviderKey,
+				"config_index": strconv.Itoa(i),
 			}
 			metadata := map[string]any{}
-			if disableCooling {
-				metadata["disable_cooling"] = true
+			if disableCooling != nil {
+				metadata["disable_cooling"] = *disableCooling
 			}
+			addRequestRetryToMetadata(compat.RequestRetry, metadata)
+			addRequestScopedErrorsToMetadata(compat.RequestScopedErrors, metadata)
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
+			addWeightToAttrs(entry.Weight, attrs)
 			if key != "" {
 				attrs["api_key"] = key
 			}
@@ -313,11 +353,14 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"base_url":     base,
 				"compat_name":  compat.Name,
 				"provider_key": internalProviderKey,
+				"config_index": strconv.Itoa(i),
 			}
 			metadata := map[string]any{}
-			if disableCooling {
-				metadata["disable_cooling"] = true
+			if disableCooling != nil {
+				metadata["disable_cooling"] = *disableCooling
 			}
+			addRequestRetryToMetadata(compat.RequestRetry, metadata)
+			addRequestScopedErrorsToMetadata(compat.RequestScopedErrors, metadata)
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
@@ -366,10 +409,12 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			"source":       fmt.Sprintf("config:vertex-apikey[%s]", token),
 			"base_url":     base,
 			"provider_key": providerName,
+			"config_index": strconv.Itoa(i),
 		}
 		if compat.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(compat.Priority)
 		}
+		addWeightToAttrs(compat.Weight, attrs)
 		if key != "" {
 			attrs["api_key"] = key
 		}
@@ -377,6 +422,11 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(compat.Headers, attrs)
+		metadata := map[string]any{}
+		if compat.DisableCooling != nil {
+			metadata["disable_cooling"] = *compat.DisableCooling
+		}
+		addRequestRetryToMetadata(compat.RequestRetry, metadata)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   providerName,
@@ -385,10 +435,107 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
 			Attributes: attrs,
+			Metadata:   metadata,
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, compat.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeKiroKeys creates Auth entries for Kiro (AWS CodeWhisperer) tokens.
+func (s *ConfigSynthesizer) synthesizeKiroKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	if len(cfg.KiroKey) == 0 {
+		return nil
+	}
+
+	out := make([]*coreauth.Auth, 0, len(cfg.KiroKey))
+	kAuth := kiroauth.NewKiroAuth(cfg)
+
+	for i := range cfg.KiroKey {
+		kk := cfg.KiroKey[i]
+		var accessToken, profileArn, refreshToken string
+
+		// Try to load from token file first
+		if kk.TokenFile != "" && kAuth != nil {
+			tokenData, err := kAuth.LoadTokenFromFile(kk.TokenFile)
+			if err != nil {
+				log.Warnf("failed to load kiro token file %s: %v", kk.TokenFile, err)
+			} else {
+				accessToken = tokenData.AccessToken
+				profileArn = tokenData.ProfileArn
+				refreshToken = tokenData.RefreshToken
+			}
+		}
+
+		// Override with direct config values if provided
+		if kk.AccessToken != "" {
+			accessToken = kk.AccessToken
+		}
+		if kk.ProfileArn != "" {
+			profileArn = kk.ProfileArn
+		}
+		if kk.RefreshToken != "" {
+			refreshToken = kk.RefreshToken
+		}
+
+		if accessToken == "" {
+			log.Warnf("kiro config[%d] missing access_token, skipping", i)
+			continue
+		}
+
+		// profileArn is optional for AWS Builder ID users
+		id, token := idGen.Next("kiro:token", accessToken, profileArn)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:kiro[%s]", token),
+			"access_token": accessToken,
+		}
+		if profileArn != "" {
+			attrs["profile_arn"] = profileArn
+		}
+		if kk.Region != "" {
+			attrs["region"] = kk.Region
+		}
+		if kk.AgentTaskType != "" {
+			attrs["agent_task_type"] = kk.AgentTaskType
+		}
+		if kk.PreferredEndpoint != "" {
+			attrs["preferred_endpoint"] = kk.PreferredEndpoint
+		} else if cfg.KiroPreferredEndpoint != "" {
+			// Apply global default if not overridden by specific key
+			attrs["preferred_endpoint"] = cfg.KiroPreferredEndpoint
+		}
+		if refreshToken != "" {
+			attrs["refresh_token"] = refreshToken
+		}
+		proxyURL := strings.TrimSpace(kk.ProxyURL)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "kiro",
+			Label:      "kiro-token",
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+
+		if refreshToken != "" {
+			if a.Metadata == nil {
+				a.Metadata = make(map[string]any)
+			}
+			a.Metadata["refresh_token"] = refreshToken
+		}
+
 		out = append(out, a)
 	}
 	return out

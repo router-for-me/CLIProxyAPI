@@ -32,6 +32,7 @@ func startCodexCacheCleanup() {
 	go func() {
 		ticker := time.NewTicker(codexCacheCleanupInterval)
 		defer ticker.Stop()
+
 		for range ticker.C {
 			purgeExpiredCodexCache()
 		}
@@ -41,8 +42,10 @@ func startCodexCacheCleanup() {
 // purgeExpiredCodexCache removes entries that have expired.
 func purgeExpiredCodexCache() {
 	now := time.Now()
+
 	codexCacheMu.Lock()
 	defer codexCacheMu.Unlock()
+
 	for key, cache := range codexCacheMap {
 		if cache.Expire.Before(now) {
 			delete(codexCacheMap, key)
@@ -125,4 +128,11 @@ func SetCodexCacheBestEffort(ctx context.Context, key string, cache CodexCache) 
 // CodexPromptCacheKey builds the Home KV key for a model/user prompt cache.
 func CodexPromptCacheKey(modelName string, userScope string) string {
 	return "cpa:codex:prompt-cache:" + homekv.HashKeyPart(modelName) + ":" + homekv.HashKeyPart(userScope)
+}
+
+// deleteCodexCache deletes a cache entry.
+func deleteCodexCache(key string) {
+	codexCacheMu.Lock()
+	delete(codexCacheMap, key)
+	codexCacheMu.Unlock()
 }

@@ -67,13 +67,13 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := bytes.Clone(originalPayloadSource)
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
+	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, stream, helps.APIKeyModelIsCompat(req))
 	originalTranslated = preserveXAIResponsesOutputControls(originalTranslated, originalPayload, from)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), stream)
+	body := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, bytes.Clone(req.Payload), stream, helps.APIKeyModelIsCompat(req))
 	body = preserveXAIResponsesOutputControls(body, req.Payload, from)
 
 	var err error
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), e.Identifier(), e.Identifier())
+	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), e.Identifier(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
@@ -94,13 +94,15 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	clientDeclaredTools := collectXAIClientDeclaredToolKeys(body)
 	body = normalizeXAITools(body)
 	body = promoteXAIAdditionalTools(body)
-	// Drop choices that point at tools removed by normalizeXAITools before we
-	// inject native x_search, so a surviving allowed_tools / forced choice is not
-	// left pointing at a deleted tool once only x_search remains.
+	// Drop choices that point at tools removed by normalizeXAITools before any
+	// configured x_search injection, so no surviving choice references a deleted tool.
 	body = normalizeXAINamespaceToolChoice(body)
+	body = normalizeXAIForcedWebSearchToolChoice(body)
 	body = pruneXAIOrphanedToolChoice(body)
 	body = normalizeXAIToolChoiceForTools(body)
-	body = ensureXAINativeXSearchTool(body)
+	if e.cfg != nil && e.cfg.XAI.InjectXSearch {
+		body = ensureXAINativeXSearchTool(body)
+	}
 	var replayScope xaiReasoningReplayScope
 	body, replayScope, err = applyXAIReasoningReplayCacheRequired(ctx, from, req, opts, body)
 	if err != nil {
@@ -274,9 +276,9 @@ func logXAIResolvedBaseURL(ctx context.Context, baseURL string) {
 	helps.LogWithRequestID(ctx).Infof("xai: using base_url=%s source=%s", baseURL, xaiBaseURLSource(baseURL))
 }
 
-func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {
+func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string, clientHeaders ...http.Header) {
 	applyXAIDefaultHeaders(r, token, stream, sessionID)
-	applyXAICustomHeaders(r, auth)
+	applyXAICustomHeaders(r, auth, clientHeaders...)
 }
 
 func applyXAIDefaultHeaders(r *http.Request, token string, stream bool, sessionID string) {
@@ -295,12 +297,12 @@ func applyXAIDefaultHeaders(r *http.Request, token string, stream bool, sessionI
 	}
 }
 
-func applyXAICustomHeaders(r *http.Request, auth *cliproxyauth.Auth) {
+func applyXAICustomHeaders(r *http.Request, auth *cliproxyauth.Auth, clientHeaders ...http.Header) {
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	util.ApplyCustomHeadersFromAttrs(r, attrs, clientHeaders...)
 }
 
 // applyXAIChatHeaders applies standard xAI headers for non-image/video chat
@@ -308,9 +310,9 @@ func applyXAICustomHeaders(r *http.Request, auth *cliproxyauth.Auth) {
 // applyXAIHeaders behavior. CLI chat-proxy identity headers are only attached
 // when using_api is false and the resolved chat base URL is the official CLI
 // chat-proxy endpoint.
-func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {
+func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string, clientHeaders ...http.Header) {
 	if xaiUsingAPI(auth) {
-		applyXAIHeaders(r, auth, token, stream, sessionID)
+		applyXAIHeaders(r, auth, token, stream, sessionID, clientHeaders...)
 		return
 	}
 	applyXAIDefaultHeaders(r, token, stream, sessionID)
@@ -318,8 +320,10 @@ func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string,
 		r.Header.Set(xaiTokenAuthHeader, xaiTokenAuthValue)
 		r.Header.Set(xaiClientVersionHeader, xaiClientVersionValue)
 		r.Header.Set("User-Agent", "xai-grok-workspace/"+xaiClientVersionValue)
+		r.Header.Set(xaiClientIdentifierHeader, xaiClientIdentifierValue)
+		r.Header.Set(xaiAuthenticateResponseHeader, xaiAuthenticateResponseValue)
 	}
-	applyXAICustomHeaders(r, auth)
+	applyXAICustomHeaders(r, auth, clientHeaders...)
 }
 
 func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (string, error) {
@@ -542,9 +546,9 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 // ensureXAINativeXSearchTool appends {"type":"x_search"} when the final tools
 // list does not already include native X Search. When tool_choice restricts the
 // model to allowed_tools, x_search is also added there (without duplicates) so
-// Grok can select the injected tool. HTTP and websocket executors both prepare
-// payloads through prepareResponsesRequestTo, so this runs once before the body
-// is submitted upstream.
+// Grok can select the injected tool. When injection is enabled, HTTP and websocket
+// executors both prepare payloads through prepareResponsesRequestTo, so this runs
+// once before the body is submitted upstream.
 func ensureXAINativeXSearchTool(body []byte) []byte {
 	if !gjson.ValidBytes(body) {
 		return body
@@ -579,6 +583,26 @@ func ensureXAINativeXSearchAllowedTools(body []byte) []byte {
 	}
 	body, _ = sjson.SetRawBytes(body, "tool_choice.tools.-1", xaiXSearchToolJSON)
 	return body
+}
+
+// normalizeXAIForcedWebSearchToolChoice rewrites Codex's hosted-tool choice
+// into the allowed_tools form accepted by xAI's ModelToolChoice schema.
+func normalizeXAIForcedWebSearchToolChoice(body []byte) []byte {
+	choice := gjson.GetBytes(body, "tool_choice")
+	if !choice.IsObject() || strings.TrimSpace(choice.Get("type").String()) != xaiWebSearchToolType {
+		return body
+	}
+
+	allowedChoice := []byte(`{"type":"allowed_tools","mode":"required","tools":[]}`)
+	allowedChoice, errSetAllowed := sjson.SetRawBytes(allowedChoice, "tools.-1", []byte(choice.Raw))
+	if errSetAllowed != nil {
+		return body
+	}
+	updated, errSetChoice := sjson.SetRawBytes(body, "tool_choice", allowedChoice)
+	if errSetChoice != nil {
+		return body
+	}
+	return updated
 }
 
 // pruneXAIOrphanedToolChoice removes tool_choice entries that no longer match

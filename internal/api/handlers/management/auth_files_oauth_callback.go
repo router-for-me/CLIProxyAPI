@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -49,7 +50,7 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 		stopForwarderInstance(port, prev)
 	}
 
-	addr := fmt.Sprintf("0.0.0.0:%d", port)
+	addr := fmt.Sprintf("%s:%d", callbackForwarderListenHost(), port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
@@ -95,6 +96,33 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 	log.Infof("callback forwarder for %s listening on %s", provider, addr)
 
 	return forwarder, nil
+}
+
+func callbackForwarderListenHost() string {
+	return callbackForwarderListenHostForRuntime(runningInContainer())
+}
+
+func callbackForwarderListenHostForRuntime(inContainer bool) string {
+	if inContainer || isTruthyEnv(os.Getenv("CLIPROXY_CALLBACK_FORWARDER_BIND_ALL")) {
+		return "0.0.0.0"
+	}
+	return "127.0.0.1"
+}
+
+func runningInContainer() bool {
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("DEPLOY")), "docker")
+}
+
+func isTruthyEnv(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func stopCallbackForwarderInstance(port int, forwarder *callbackForwarder) {

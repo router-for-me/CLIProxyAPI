@@ -51,10 +51,15 @@ type ModelInfo struct {
 	SupportedGenerationMethods []string `json:"supportedGenerationMethods,omitempty"`
 	// ContextLength is the context window size
 	ContextLength int `json:"context_length,omitempty"`
+	// MaxContextLength is an explicit per-model context window override from configuration.
+	// It is carried internally for Codex client model catalog generation.
+	MaxContextLength int `json:"-"`
 	// MaxCompletionTokens is the maximum completion tokens
 	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
 	// SupportedParameters lists supported parameters
 	SupportedParameters []string `json:"supported_parameters,omitempty"`
+	// SupportedEndpoints lists supported API endpoints (e.g., "/chat/completions", "/responses").
+	SupportedEndpoints []string `json:"supported_endpoints,omitempty"`
 	// SupportedInputModalities lists supported input modalities (e.g., TEXT, IMAGE, VIDEO, AUDIO)
 	SupportedInputModalities []string `json:"supportedInputModalities,omitempty"`
 	// SupportedOutputModalities lists supported output modalities (e.g., TEXT, IMAGE)
@@ -74,6 +79,10 @@ type ModelInfo struct {
 	// array (e.g., openai-compatibility.*.models[], *-api-key.models[]).
 	// UserDefined models have thinking configuration passed through without validation.
 	UserDefined bool `json:"-"`
+
+	// IsCompat enables compatibility handling for this configured API-key model.
+	// It is internal metadata and is not exposed in model listings.
+	IsCompat bool `json:"-"`
 }
 
 // ModelConfig holds optional runtime overrides for a model definition.
@@ -144,6 +153,8 @@ type ModelRegistry struct {
 	mutex *sync.RWMutex
 	// availableModelsCache stores per-handler snapshots for GetAvailableModels.
 	availableModelsCache map[string]availableModelsCacheEntry
+	// generation tracks changes to model registrations and availability.
+	generation uint64
 	// hook is an optional callback sink for model registration changes
 	hook ModelRegistryHook
 }
@@ -173,10 +184,18 @@ func (r *ModelRegistry) ensureAvailableModelsCacheLocked() {
 }
 
 func (r *ModelRegistry) invalidateAvailableModelsCacheLocked() {
+	r.generation++
 	if len(r.availableModelsCache) == 0 {
 		return
 	}
 	clear(r.availableModelsCache)
+}
+
+// GetGeneration returns the current generation counter of model registrations.
+func (r *ModelRegistry) GetGeneration() uint64 {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	return r.generation
 }
 
 // LookupModelInfo searches dynamic registry (provider-specific > global) then static definitions.
@@ -835,49 +854,84 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 	return models
 }
 
+func modelRegistrationAvailability(registration *ModelRegistration, now time.Time) (bool, time.Time) {
+	if registration == nil {
+		return false, time.Time{}
+	}
+
+	availableClients := registration.Count
+	expiredClients := 0
+	var expiresAt time.Time
+	for _, quotaTime := range registration.QuotaExceededClients {
+		if quotaTime == nil {
+			continue
+		}
+		recoveryAt := quotaTime.Add(modelQuotaExceededWindow)
+		if now.Before(recoveryAt) {
+			expiredClients++
+			if expiresAt.IsZero() || recoveryAt.Before(expiresAt) {
+				expiresAt = recoveryAt
+			}
+		}
+	}
+
+	cooldownSuspended := 0
+	otherSuspended := 0
+	if registration.SuspendedClients != nil {
+		for _, reason := range registration.SuspendedClients {
+			if strings.EqualFold(reason, "quota") {
+				cooldownSuspended++
+				continue
+			}
+			otherSuspended++
+		}
+	}
+
+	effectiveClients := availableClients - expiredClients - otherSuspended
+	if effectiveClients < 0 {
+		effectiveClients = 0
+	}
+
+	available := effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0)
+	return available, expiresAt
+}
+
+// GetAvailableModelInfos returns cloned metadata for all currently available models.
+func (r *ModelRegistry) GetAvailableModelInfos() []*ModelInfo {
+	now := time.Now()
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	result := make([]*ModelInfo, 0, len(r.models))
+	for _, registration := range r.models {
+		available, _ := modelRegistrationAvailability(registration, now)
+		if !available || registration == nil || registration.Info == nil {
+			continue
+		}
+		result = append(result, cloneModelInfo(registration.Info))
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return strings.TrimSpace(result[i].ID) < strings.TrimSpace(result[j].ID)
+	})
+	return result
+}
+
 func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.Time) ([]map[string]any, time.Time) {
 	models := make([]map[string]any, 0, len(r.models))
 	var expiresAt time.Time
 
 	for _, registration := range r.models {
-		availableClients := registration.Count
-
-		expiredClients := 0
-		for _, quotaTime := range registration.QuotaExceededClients {
-			if quotaTime == nil {
-				continue
-			}
-			recoveryAt := quotaTime.Add(modelQuotaExceededWindow)
-			if now.Before(recoveryAt) {
-				expiredClients++
-				if expiresAt.IsZero() || recoveryAt.Before(expiresAt) {
-					expiresAt = recoveryAt
-				}
-			}
+		available, registrationExpiresAt := modelRegistrationAvailability(registration, now)
+		if !registrationExpiresAt.IsZero() && (expiresAt.IsZero() || registrationExpiresAt.Before(expiresAt)) {
+			expiresAt = registrationExpiresAt
+		}
+		if !available || registration == nil {
+			continue
 		}
 
-		cooldownSuspended := 0
-		otherSuspended := 0
-		if registration.SuspendedClients != nil {
-			for _, reason := range registration.SuspendedClients {
-				if strings.EqualFold(reason, "quota") {
-					cooldownSuspended++
-					continue
-				}
-				otherSuspended++
-			}
-		}
-
-		effectiveClients := availableClients - expiredClients - otherSuspended
-		if effectiveClients < 0 {
-			effectiveClients = 0
-		}
-
-		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
-			model := r.convertModelToMap(registration.Info, handlerType)
-			if model != nil {
-				models = append(models, model)
-			}
+		model := r.convertModelToMap(registration.Info, handlerType)
+		if model != nil {
+			models = append(models, model)
 		}
 	}
 
@@ -1187,15 +1241,22 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if model.ContextLength > 0 {
 			result["context_length"] = model.ContextLength
 		}
+		if model.MaxContextLength > 0 {
+			result["max_context_length"] = model.MaxContextLength
+		}
 		if model.MaxCompletionTokens > 0 {
 			result["max_completion_tokens"] = model.MaxCompletionTokens
 		}
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)
 		}
+		if len(model.SupportedEndpoints) > 0 {
+			result["supported_endpoints"] = model.SupportedEndpoints
+		}
 		return result
 
-	case "claude":
+	case "claude", "kiro", "antigravity":
+		// Claude, Kiro, and Antigravity all use Claude-compatible format for Claude Code client
 		result := map[string]any{
 			"id":       model.ID,
 			"object":   "model",
@@ -1209,6 +1270,29 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 			result["display_name"] = model.DisplayName
 		} else {
 			result["display_name"] = model.ID
+		}
+		// Add thinking support for Claude Code client
+		// Claude Code checks for "thinking" field (simple boolean) to enable tab toggle
+		// Also add "extended_thinking" for detailed budget info
+		if model.Thinking != nil {
+			result["thinking"] = true
+			result["extended_thinking"] = map[string]any{
+				"supported":       true,
+				"min":             model.Thinking.Min,
+				"max":             model.Thinking.Max,
+				"zero_allowed":    model.Thinking.ZeroAllowed,
+				"dynamic_allowed": model.Thinking.DynamicAllowed,
+			}
+		}
+		// Include context limits so Claude Code can manage conversation
+		// context correctly, especially for Copilot-proxied models whose
+		// real prompt limit (128K-168K) is much lower than the 1M window
+		// that Claude Code may assume for Opus 4.6 with 1M context enabled.
+		if model.ContextLength > 0 {
+			result["context_length"] = model.ContextLength
+		}
+		if model.MaxCompletionTokens > 0 {
+			result["max_completion_tokens"] = model.MaxCompletionTokens
 		}
 		maxInput := model.ContextLength
 		if maxInput <= 0 {

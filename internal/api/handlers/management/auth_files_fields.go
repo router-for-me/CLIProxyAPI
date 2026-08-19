@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -105,8 +106,13 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 
 	applyAuthDisabledState(targetAuth, *req.Disabled)
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+	_, err := h.authManager.Update(ctx, targetAuth)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		return
+	}
+	if errHook := h.notifyAuthFilePersisted(ctx, targetAuth); errHook != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to refresh auth: %v", errHook)})
 		return
 	}
 
@@ -272,7 +278,25 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			targetAuth.Metadata = make(map[string]any)
 		}
 
-		if fieldPath == "headers" {
+		if fieldPath == coreauth.AttributeWeight {
+			if value == nil {
+				delete(targetAuth.Metadata, coreauth.AttributeWeight)
+			} else {
+				if _, okNumber := value.(json.Number); !okNumber {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "weight must be an integer"})
+					return
+				}
+				weight, errWeight := credentialweight.ParseValue(value)
+				if errWeight != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": errWeight.Error()})
+					return
+				}
+				targetAuth.Metadata[coreauth.AttributeWeight] = weight
+			}
+		} else if rootAuthFileField(fieldPath) == coreauth.AttributeWeight {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "weight does not support nested fields"})
+			return
+		} else if fieldPath == "headers" {
 			applyAuthFileHeadersPatch(targetAuth, value)
 		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": errSet.Error()})
@@ -294,8 +318,13 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 
 	targetAuth.UpdatedAt = time.Now()
 
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+	updatedAuth, err := h.authManager.Update(ctx, targetAuth)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		return
+	}
+	if errHook := h.notifyAuthFilePersisted(ctx, updatedAuth); errHook != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to refresh auth: %v", errHook)})
 		return
 	}
 
@@ -429,6 +458,9 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	if _, ok := touchedRoots["priority"]; ok {
 		syncAuthFilePriorityAttribute(auth)
 	}
+	if _, ok := touchedRoots[coreauth.AttributeWeight]; ok {
+		syncAuthFileWeightAttribute(auth)
+	}
 	if _, ok := touchedRoots["note"]; ok {
 		syncAuthFileNoteAttribute(auth)
 	}
@@ -437,6 +469,11 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	}
 	if _, ok := touchedRoots["disabled"]; ok {
 		syncAuthFileDisabledState(auth)
+	}
+	if _, ok := touchedRoots["excluded_models"]; ok {
+		syncAuthFileExcludedModelsAttribute(auth, touchedRoots)
+	} else if _, ok := touchedRoots["excluded-models"]; ok {
+		syncAuthFileExcludedModelsAttribute(auth, touchedRoots)
 	}
 }
 
@@ -474,6 +511,21 @@ func syncAuthFilePriorityAttribute(auth *coreauth.Auth) {
 		return
 	}
 	auth.Attributes["priority"] = strconv.Itoa(priority)
+}
+
+func syncAuthFileWeightAttribute(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	weight, errWeight := credentialweight.ParseValue(auth.Metadata[coreauth.AttributeWeight])
+	if errWeight != nil {
+		delete(auth.Attributes, coreauth.AttributeWeight)
+		return
+	}
+	auth.Attributes[coreauth.AttributeWeight] = strconv.FormatInt(weight, 10)
 }
 
 func authFileIntValue(value any) (int, bool) {
@@ -658,10 +710,48 @@ func (h *Handler) tokenStoreWithBaseDir() coreauth.Store {
 	return store
 }
 
+func (h *Handler) mergeExistingAuthFileMetadata(record *coreauth.Auth) {
+	if h == nil || record == nil {
+		return
+	}
+	var existingMap map[string]any
+
+	if h.cfg != nil && strings.TrimSpace(h.cfg.AuthDir) != "" {
+		targetFile := record.FileName
+		if targetFile == "" {
+			targetFile = record.ID
+		}
+		if targetFile != "" {
+			fullPath := filepath.Join(h.cfg.AuthDir, targetFile)
+			if raw, errRead := os.ReadFile(fullPath); errRead == nil && len(raw) > 0 {
+				_ = json.Unmarshal(raw, &existingMap)
+			}
+		}
+	}
+
+	if existingMap == nil && h.authManager != nil {
+		if existing, ok := h.authManager.GetByID(record.ID); ok && existing != nil && existing.Metadata != nil {
+			existingMap = existing.Metadata
+		} else {
+			for _, auth := range h.authManager.List() {
+				if auth != nil && auth.FileName == record.FileName && auth.Metadata != nil {
+					existingMap = auth.Metadata
+					break
+				}
+			}
+		}
+	}
+
+	if len(existingMap) > 0 {
+		coreauth.MergeExistingAuthMetadata(record, existingMap)
+	}
+}
+
 func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (string, error) {
 	if record == nil {
 		return "", fmt.Errorf("token record is nil")
 	}
+	h.mergeExistingAuthFileMetadata(record)
 	store := h.tokenStoreWithBaseDir()
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")
@@ -681,4 +771,11 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 		}
 	}
 	return savedPath, nil
+}
+
+func (h *Handler) saveOAuthTokenRecord(ctx context.Context, state, provider string, record *coreauth.Auth) (string, error) {
+	if errBegin := beginOAuthSessionSave(state, provider); errBegin != nil {
+		return "", errBegin
+	}
+	return h.saveTokenRecord(ctx, record)
 }

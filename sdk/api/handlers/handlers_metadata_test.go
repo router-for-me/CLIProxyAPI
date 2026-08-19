@@ -9,8 +9,34 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"golang.org/x/net/context"
 )
+
+func TestGetContextWithCancelCapturesClientRequestMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ginCtx.Request.RemoteAddr = "192.0.2.10:43123"
+	ginCtx.Request.Header.Add("X-Forwarded-For", "203.0.113.5")
+	ginCtx.Request.Header.Add("X-Forwarded-For", "198.51.100.8")
+	ginCtx.Request.Header.Set("User-Agent", "test-client/1.0")
+
+	handler := &BaseAPIHandler{Cfg: &config.SDKConfig{}}
+	ctx, cancel := handler.GetContextWithCancel(nil, ginCtx, context.Background())
+	defer cancel()
+
+	metadata := logging.GetClientRequestMetadata(ctx)
+	if metadata.ClientIP != "192.0.2.10" {
+		t.Fatalf("ClientIP = %q, want direct peer IP", metadata.ClientIP)
+	}
+	if metadata.XForwardedFor != "203.0.113.5, 198.51.100.8" {
+		t.Fatalf("XForwardedFor = %q", metadata.XForwardedFor)
+	}
+	if metadata.UserAgent != "test-client/1.0" {
+		t.Fatalf("UserAgent = %q", metadata.UserAgent)
+	}
+}
 
 func TestRequestExecutionMetadataIncludesExecutionSessionWithoutIdempotencyKey(t *testing.T) {
 	ctx := WithExecutionSessionID(context.Background(), "session-1")

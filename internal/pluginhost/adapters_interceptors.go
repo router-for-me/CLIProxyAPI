@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
@@ -113,9 +114,52 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 			if len(resp.Body) > 0 {
 				current.Body = bytes.Clone(resp.Body)
 			}
+			if resp.Terminate {
+				current.Terminate = true
+				current.StatusCode = resp.StatusCode
+				current.ResponseHeaders = cloneHeader(resp.ResponseHeaders)
+				current.ResponseBody = bytes.Clone(resp.ResponseBody)
+				break
+			}
 		}
 	}
 	return current
+}
+
+// CompleteRequest schedules terminal notifications without blocking response delivery.
+func (h *Host) CompleteRequest(ctx context.Context, completion pluginapi.RequestCompletion) {
+	h.CompleteRequestExcept(ctx, completion, "")
+}
+
+// CompleteRequestExcept notifies lifecycle plugins except the plugin that initiated a nested host execution.
+func (h *Host) CompleteRequestExcept(ctx context.Context, completion pluginapi.RequestCompletion, skipPluginID string) {
+	if h == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	} else {
+		ctx = context.WithoutCancel(ctx)
+	}
+	skipPluginID = strings.TrimSpace(skipPluginID)
+	for _, record := range h.activeRecords() {
+		plugin := record.plugin.Capabilities.RequestLifecyclePlugin
+		if h.isPluginFused(record.id) || plugin == nil || record.id == skipPluginID || !h.recordCurrent(record) {
+			continue
+		}
+		next := completion
+		next.Metadata = cloneInterceptorMetadata(completion.Metadata)
+		go func(record capabilityRecord, plugin pluginapi.RequestLifecyclePlugin, completion pluginapi.RequestCompletion) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					h.fusePlugin(record.id, "RequestLifecyclePlugin.HandleRequestComplete", recovered)
+				}
+			}()
+			if errComplete := plugin.HandleRequestComplete(ctx, completion); errComplete != nil {
+				log.Warnf("pluginhost: request lifecycle plugin %s failed: %v", record.id, errComplete)
+			}
+		}(record, plugin, next)
+	}
 }
 
 func (h *Host) InterceptResponse(ctx context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
@@ -168,8 +212,15 @@ func (h *Host) InterceptStreamChunkExcept(ctx context.Context, req pluginapi.Str
 		nextReq := req
 		nextReq.RequestHeaders = cloneHeader(req.RequestHeaders)
 		nextReq.ResponseHeaders = cloneHeader(current.Headers)
-		nextReq.OriginalRequest = bytes.Clone(req.OriginalRequest)
-		nextReq.RequestBody = bytes.Clone(req.RequestBody)
+		// Schema v3+ omits request bodies on payload chunks to avoid re-sending multi-MB
+		// prompts across cgo/JSON for every frame. Legacy plugins still receive them.
+		if req.ChunkIndex != pluginapi.StreamChunkHeaderInitIndex && streamChunkOmitsRequestBodies(record.plugin.SchemaVersion) {
+			nextReq.OriginalRequest = nil
+			nextReq.RequestBody = nil
+		} else {
+			nextReq.OriginalRequest = bytes.Clone(req.OriginalRequest)
+			nextReq.RequestBody = bytes.Clone(req.RequestBody)
+		}
 		nextReq.Body = bytes.Clone(current.Body)
 		nextReq.HistoryChunks = cloneByteSlices(req.HistoryChunks)
 		nextReq.Metadata = cloneInterceptorMetadata(req.Metadata)
@@ -199,6 +250,28 @@ func (h *Host) HasStreamInterceptors() bool {
 		}
 	}
 	return false
+}
+
+// StreamChunkPayloadIncludesRequestBody reports whether any active stream chunk
+// interceptor still requires OriginalRequest/RequestBody on payload chunks
+// (schema_version < SchemaVersionStreamChunkOmitRequestBody).
+func (h *Host) StreamChunkPayloadIncludesRequestBody() bool {
+	if h == nil {
+		return false
+	}
+	for _, record := range h.activeRecords() {
+		if h.isPluginFused(record.id) || record.plugin.Capabilities.StreamChunkInterceptor == nil {
+			continue
+		}
+		if !streamChunkOmitsRequestBodies(record.plugin.SchemaVersion) {
+			return true
+		}
+	}
+	return false
+}
+
+func streamChunkOmitsRequestBodies(schemaVersion uint32) bool {
+	return schemaVersion >= pluginabi.SchemaVersionStreamChunkOmitRequestBody
 }
 
 func (h *Host) HasRequestInterceptors() bool {

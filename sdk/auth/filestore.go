@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -77,6 +78,9 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	if auth == nil {
 		return "", fmt.Errorf("auth filestore: auth is nil")
 	}
+	if errWeight := cliproxyauth.ValidateAuthWeight(auth); errWeight != nil {
+		return "", fmt.Errorf("auth filestore: %w", errWeight)
+	}
 
 	path, err := s.resolveAuthPath(auth)
 	if err != nil {
@@ -124,7 +128,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		}
 		if existing, errRead := os.ReadFile(path); errRead == nil {
 			if jsonEqual(existing, raw) {
-				return path, nil
+				break
 			}
 			file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
 			if errOpen != nil {
@@ -137,7 +141,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			if errClose := file.Close(); errClose != nil {
 				return "", fmt.Errorf("auth filestore: close existing failed: %w", errClose)
 			}
-			return path, nil
+			break
 		} else if !os.IsNotExist(errRead) {
 			return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
 		}
@@ -233,6 +237,9 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 	if err = json.Unmarshal(data, &metadata); err != nil {
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
 	}
+	if errWeight := cliproxyauth.ValidateAuthWeight(&cliproxyauth.Auth{Metadata: metadata}); errWeight != nil {
+		return nil, errWeight
+	}
 	provider, _ := metadata["type"].(string)
 	provider = strings.TrimSpace(provider)
 	if strings.EqualFold(provider, "gemini") {
@@ -278,6 +285,9 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 					}
 					auth.Metadata["disabled"] = true
 				}
+				if errWeight := cliproxyauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
+					return nil, errWeight
+				}
 				cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 			}
 			return auths, nil
@@ -317,6 +327,15 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 	if disabled {
 		status = cliproxyauth.StatusDisabled
 	}
+
+	// Calculate NextRefreshAfter from expires_at (20 minutes before expiry)
+	var nextRefreshAfter time.Time
+	if expiresAtStr, ok := metadata["expires_at"].(string); ok && expiresAtStr != "" {
+		if expiresAt, err := time.Parse(time.RFC3339, expiresAtStr); err == nil {
+			nextRefreshAfter = expiresAt.Add(-20 * time.Minute)
+		}
+	}
+
 	auth := &cliproxyauth.Auth{
 		ID:       id,
 		Provider: provider,
@@ -333,10 +352,21 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 		CreatedAt:        info.ModTime(),
 		UpdatedAt:        info.ModTime(),
 		LastRefreshedAt:  time.Time{},
-		NextRefreshAfter: time.Time{},
+		NextRefreshAfter: nextRefreshAfter,
 	}
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
+	}
+	if provider == "qoder" {
+		var storage qoderauth.QoderTokenStorage
+		if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
+			if errUnmarshal := json.Unmarshal(raw, &storage); errUnmarshal == nil {
+				if strings.TrimSpace(storage.Type) == "" {
+					storage.Type = "qoder"
+				}
+				auth.Storage = &storage
+			}
+		}
 	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return []*cliproxyauth.Auth{auth}, nil
@@ -371,6 +401,9 @@ func compactPluginAuths(auths []*cliproxyauth.Auth) []*cliproxyauth.Auth {
 	out := auths[:0]
 	for _, auth := range auths {
 		if auth == nil {
+			continue
+		}
+		if errWeight := cliproxyauth.ValidateAuthWeight(auth); errWeight != nil {
 			continue
 		}
 		out = append(out, auth)

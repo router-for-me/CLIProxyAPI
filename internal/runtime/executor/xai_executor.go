@@ -47,14 +47,17 @@ const (
 	xaiTokenAuthValue           = "xai-grok-cli"
 	xaiClientVersionHeader      = "x-grok-client-version"
 	// Keep in sync with the current Grok CLI client version that chat-proxy expects.
-	xaiClientVersionValue = "0.2.93"
+	xaiClientVersionValue         = "0.2.120"
+	xaiClientIdentifierHeader     = "x-grok-client-identifier"
+	xaiClientIdentifierValue      = "grok-shell"
+	xaiAuthenticateResponseHeader = "x-authenticateresponse"
+	xaiAuthenticateResponseValue  = "authenticate-response"
 	// xaiUsingAPIAttr enables the official API path for non-media HTTP chat.
 	xaiUsingAPIAttr = "using_api"
 )
 
-// Always inject native x_search when the client did not declare it so Grok can
-// run X Search server-side. Internal subtool traces are still filtered downstream
-// when this native tool is present (see filterInternalXSearch).
+// xaiXSearchToolJSON is the native X Search tool injected when enabled by config.
+// Internal subtool traces are still filtered downstream when this tool is present.
 var xaiXSearchToolJSON = []byte(`{"type":"x_search"}`)
 
 // XAIExecutor is a stateless executor for xAI Grok's Responses API.

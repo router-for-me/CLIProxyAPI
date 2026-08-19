@@ -269,7 +269,17 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	if err != nil {
 		return err
 	}
-	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
+	persistData := data
+	if metadata := metadataFromAuthFileBytes(data); metadata != nil {
+		if normalized, ok := normalizeKiroIDETokenMetadata(metadata); ok {
+			normalizedData, errMarshal := json.MarshalIndent(normalized, "", "  ")
+			if errMarshal != nil {
+				return fmt.Errorf("failed to encode normalized auth file: %w", errMarshal)
+			}
+			persistData = append(normalizedData, '\n')
+		}
+	}
+	if errWrite := os.WriteFile(dst, persistData, 0o600); errWrite != nil {
 		return fmt.Errorf("failed to write file: %w", errWrite)
 	}
 	if err := h.upsertAuthRecord(ctx, auth); err != nil {
@@ -476,6 +486,9 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	if err := json.Unmarshal(data, &metadata); err != nil {
 		return nil, fmt.Errorf("invalid auth file: %w", err)
 	}
+	if normalized, ok := normalizeKiroIDETokenMetadata(metadata); ok {
+		metadata = normalized
+	}
 	provider, _ := metadata["type"].(string)
 	if provider == "" {
 		provider = "unknown"
@@ -498,7 +511,11 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 			Now:         time.Now(),
 			IDGenerator: synthesizer.NewStableIDGenerator(),
 		}
-		if generated := synthesizer.SynthesizeAuthFile(sctx, path, data); len(generated) > 0 && generated[0] != nil {
+		generated, errSynthesize := synthesizer.SynthesizeAuthFile(sctx, path, data)
+		if errSynthesize != nil {
+			return nil, fmt.Errorf("invalid auth file: %w", errSynthesize)
+		}
+		if len(generated) > 0 && generated[0] != nil {
 			auth = generated[0].Clone()
 		}
 	}

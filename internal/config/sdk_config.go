@@ -29,6 +29,9 @@ type SDKConfig struct {
 	// default base model ("gpt-5.4-mini") is used.
 	GPTImage2BaseModel string `yaml:"gpt-image-2-base-model,omitempty" json:"gpt-image-2-base-model,omitempty"`
 
+	// EnableGeminiCLIEndpoint controls whether Gemini CLI internal endpoints are enabled.
+	EnableGeminiCLIEndpoint bool `yaml:"enable-gemini-cli-endpoint" json:"enable-gemini-cli-endpoint"`
+
 	// VideoResultAuthCacheTTL controls how long video IDs stay pinned to the credential
 	// that created them. Accepts duration strings like "30m" or "3h".
 	// Empty or invalid values use the default 3h.
@@ -45,6 +48,9 @@ type SDKConfig struct {
 	// CodexOptimizeMultiAgentV2 mirrors the provider-wide runtime setting for API handlers.
 	CodexOptimizeMultiAgentV2 bool `yaml:"-" json:"-"`
 
+	// ClaudeCode configures Claude Code compatibility behavior.
+	ClaudeCode ClaudeCodeConfig `yaml:"claude-code" json:"claude-code"`
+
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
@@ -58,6 +64,12 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// ClaudeCodeConfig configures Claude Code compatibility behavior.
+type ClaudeCodeConfig struct {
+	// DisableCloakingModelList disables model ID cloaking in Anthropic model list responses.
+	DisableCloakingModelList bool `yaml:"disable-cloaking-model-list" json:"disable-cloaking-model-list"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.

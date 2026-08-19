@@ -31,6 +31,36 @@ func parseClaudeResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Res
 	return event, gjson.Parse(data)
 }
 
+func TestConvertClaudeResponseToOpenAIResponses_CreatedIncludesOriginalRequestModel(t *testing.T) {
+	request := []byte(`{"model":"original-claude-model"}`)
+	translatedRequest := []byte(`{"model":"translated-claude-model"}`)
+	chunk := []byte(`data: {"type":"message_start","message":{"id":"msg_123"}}`)
+
+	var param any
+	outputs := ConvertClaudeResponseToOpenAIResponses(context.Background(), "fallback-model", request, translatedRequest, chunk, &param)
+	if len(outputs) < 2 {
+		t.Fatalf("expected response.created and response.in_progress outputs, got %d", len(outputs))
+	}
+
+	var createdModels string
+	var inProgressModels string
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		switch event {
+		case "response.created":
+			createdModels = data.Get("response.model").String()
+		case "response.in_progress":
+			inProgressModels = data.Get("response.model").String()
+		}
+	}
+	if createdModels != "original-claude-model" {
+		t.Fatalf("response.created models = %q, want original-claude-model", createdModels)
+	}
+	if inProgressModels != "original-claude-model" {
+		t.Fatalf("response.in_progress models = %q, want original-claude-model", inProgressModels)
+	}
+}
+
 func translateClaudeResponsesStreamThroughRegistry(chunks [][]byte) [][]byte {
 	var param any
 	var outputs [][]byte
@@ -86,6 +116,72 @@ func TestConvertClaudeResponseToOpenAIResponses_ThinkingIncludesSignature(t *tes
 	}
 	if got := completed.Get("response.output.0.summary.0.text").String(); got != "internal reasoning" {
 		t.Fatalf("completed reasoning summary text = %q", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_RedactedThinkingBecomesMarkedReasoningItem(t *testing.T) {
+	const data = "EroBCkYIBRgCKkA"
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"` + data + `"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"done"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &param)...)
+	}
+
+	want := ClaudeResponsesRedactedThinkingPrefix + data
+	var reasoningDone, completed gjson.Result
+	for _, output := range outputs {
+		event, parsed := parseClaudeResponsesSSEEvent(t, output)
+		switch event {
+		case "response.output_item.done":
+			if parsed.Get("item.type").String() == "reasoning" {
+				reasoningDone = parsed
+			}
+		case "response.completed":
+			completed = parsed
+		}
+	}
+
+	if !reasoningDone.Exists() {
+		t.Fatal("expected reasoning output_item.done event for redacted_thinking")
+	}
+	if got := reasoningDone.Get("item.encrypted_content").String(); got != want {
+		t.Fatalf("reasoning encrypted_content = %q, want %q", got, want)
+	}
+	if got := completed.Get("response.output.0.encrypted_content").String(); got != want {
+		t.Fatalf("completed reasoning encrypted_content = %q, want %q", got, want)
+	}
+	if got := completed.Get("response.output.1.type").String(); got != "message" {
+		t.Fatalf("completed output[1].type = %q, want message", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponsesNonStream_RedactedThinkingBecomesMarkedReasoningItem(t *testing.T) {
+	const data = "EroBCkYIBRgCKkA"
+	raw := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"` + data + `"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n")
+
+	out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, []byte(raw), nil)
+	parsed := gjson.ParseBytes(out)
+	if got := parsed.Get("output.0.type").String(); got != "reasoning" {
+		t.Fatalf("output.0.type = %q, want reasoning; body=%s", got, out)
+	}
+	want := ClaudeResponsesRedactedThinkingPrefix + data
+	if got := parsed.Get("output.0.encrypted_content").String(); got != want {
+		t.Fatalf("output.0.encrypted_content = %q, want %q", got, want)
 	}
 }
 
@@ -704,6 +800,59 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_ThinkingIncludesSignatu
 	}
 }
 
+func TestConvertClaudeResponseToOpenAIResponsesNonStream_PreservesContentBlockOrder(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_nonstream_order","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}`,
+		`data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"call_order","name":"exec_command","input":{}}}`,
+		`data: {"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"plan"}}`,
+		`data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"pwd\"}"}}`,
+		`data: {"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"done"}}`,
+		`data: {"type":"content_block_stop","index":1}`,
+		`data: {"type":"content_block_stop","index":2}`,
+		`data: {"type":"content_block_stop","index":3}`,
+		`data: {"type":"content_block_start","index":4,"content_block":{"type":"thinking","thinking":""}}`,
+		`data: {"type":"content_block_delta","index":4,"delta":{"type":"thinking_delta","thinking":"more"}}`,
+		`data: {"type":"content_block_stop","index":4}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n"))
+
+	root := gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, raw, nil))
+	wantTypes := []string{"message", "reasoning", "function_call", "message", "reasoning"}
+	if got := root.Get("output.#").Int(); got != int64(len(wantTypes)) {
+		t.Fatalf("non-stream output count = %d, want %d", got, len(wantTypes))
+	}
+	for index, wantType := range wantTypes {
+		if got := root.Get(fmt.Sprintf("output.%d.type", index)).String(); got != wantType {
+			t.Fatalf("non-stream output.%d.type = %q, want %q", index, got, wantType)
+		}
+	}
+	if got := root.Get("output.0.content.0.text").String(); got != "" {
+		t.Fatalf("empty text block content = %q, want empty string", got)
+	}
+	if got := root.Get("output.1.summary.0.text").String(); got != "plan" {
+		t.Fatalf("first reasoning text = %q, want %q", got, "plan")
+	}
+	if got := root.Get("output.2.call_id").String(); got != "call_order" {
+		t.Fatalf("function call id = %q, want %q", got, "call_order")
+	}
+	if got := root.Get("output.2.arguments").String(); got != `{"cmd":"pwd"}` {
+		t.Fatalf("function call arguments = %q, want %q", got, `{"cmd":"pwd"}`)
+	}
+	if got := root.Get("output.3.content.0.text").String(); got != "done" {
+		t.Fatalf("second message text = %q, want %q", got, "done")
+	}
+	if got := root.Get("output.4.summary.0.text").String(); got != "more" {
+		t.Fatalf("second reasoning text = %q, want %q", got, "more")
+	}
+	if got := root.Get("usage.output_tokens_details.reasoning_tokens").Int(); got != 2 {
+		t.Fatalf("reasoning tokens = %d, want 2", got)
+	}
+}
+
 func TestConvertClaudeResponseToOpenAIResponsesNonStream_ReportsCacheTokens(t *testing.T) {
 	raw := []byte(strings.Join([]string{
 		`data: {"type":"message_start","message":{"id":"msg_nonstream","usage":{"input_tokens":13,"output_tokens":1,"cache_read_input_tokens":22000,"cache_creation_input_tokens":31}}}`,
@@ -725,6 +874,215 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_ReportsCacheTokens(t *t
 	}
 	if got := root.Get("usage.total_tokens").Int(); got != 22048 {
 		t.Fatalf("non-stream usage total_tokens = %d, want %d", got, 22048)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_RestoresAdditionalNamespaceCustomToolCall(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"gpt-test",
+		"input":[{"type":"additional_tools","role":"developer","tools":[
+			{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec"}]}
+		]}]
+	}`)
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_custom","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_custom","name":"functions__exec","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"input\":\"pwd\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var added, inputDone, done, completed gjson.Result
+	functionEvents := 0
+	for _, chunk := range chunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", originalRequest, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			switch event {
+			case "response.output_item.added":
+				if data.Get("item.type").String() == "custom_tool_call" {
+					added = data
+				}
+			case "response.custom_tool_call_input.done":
+				inputDone = data
+			case "response.output_item.done":
+				if data.Get("item.type").String() == "custom_tool_call" {
+					done = data
+				}
+			case "response.function_call_arguments.delta", "response.function_call_arguments.done":
+				functionEvents++
+			case "response.completed":
+				completed = data
+			}
+		}
+	}
+
+	if !added.Exists() || !inputDone.Exists() || !done.Exists() || !completed.Exists() {
+		t.Fatalf("missing custom tool lifecycle events: added=%v input_done=%v done=%v completed=%v", added.Exists(), inputDone.Exists(), done.Exists(), completed.Exists())
+	}
+	if functionEvents != 0 {
+		t.Fatalf("function call events = %d, want 0", functionEvents)
+	}
+	for _, test := range []struct {
+		label string
+		item  gjson.Result
+	}{
+		{label: "added", item: added.Get("item")},
+		{label: "done", item: done.Get("item")},
+		{label: "completed", item: completed.Get("response.output.0")},
+	} {
+		if got := test.item.Get("name").String(); got != "exec" {
+			t.Fatalf("%s name = %q, want exec", test.label, got)
+		}
+		if got := test.item.Get("namespace").String(); got != "functions" {
+			t.Fatalf("%s namespace = %q, want functions", test.label, got)
+		}
+	}
+	if got := inputDone.Get("input").String(); got != "pwd" {
+		t.Fatalf("custom input.done input = %q, want pwd", got)
+	}
+	if got := done.Get("item.input").String(); got != "pwd" {
+		t.Fatalf("done input = %q, want pwd", got)
+	}
+	if got := completed.Get("response.output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("completed output type = %q, want custom_tool_call", got)
+	}
+	if got := completed.Get("response.output.0.input").String(); got != "pwd" {
+		t.Fatalf("completed input = %q, want pwd", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_DirectCustomWinsNamespaceCollision(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"gpt-test",
+		"tools":[
+			{"type":"namespace","name":"n","tools":[{"type":"function","name":"x"}]},
+			{"type":"custom","name":"n__x"}
+		]
+	}`)
+	streamChunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_collision","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_collision","name":"n__x","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"input\":\"pwd\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var streamCompleted gjson.Result
+	for _, chunk := range streamChunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", originalRequest, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			if event == "response.completed" {
+				streamCompleted = data
+			}
+		}
+	}
+	if got := streamCompleted.Get("response.output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("stream output type = %q, want custom_tool_call", got)
+	}
+	if got := streamCompleted.Get("response.output.0.input").String(); got != "pwd" {
+		t.Fatalf("stream output input = %q, want pwd", got)
+	}
+	item := streamCompleted.Get("response.output.0")
+	if got := item.Get("name").String(); got != "n__x" {
+		t.Fatalf("name = %q, want n__x", got)
+	}
+	if item.Get("namespace").Exists() {
+		t.Fatalf("unexpected namespace: %s", item.Get("namespace").Raw)
+	}
+
+	nonStreamRaw := []byte(strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_collision_nonstream","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_collision_nonstream","name":"n__x","input":{}}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"input\":\"pwd\"}"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n"))
+	nonStream := gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", originalRequest, nil, nonStreamRaw, nil))
+	if got := nonStream.Get("output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("non-stream output type = %q, want custom_tool_call", got)
+	}
+	if got := nonStream.Get("output.0.input").String(); got != "pwd" {
+		t.Fatalf("non-stream output input = %q, want pwd", got)
+	}
+	item = nonStream.Get("output.0")
+	if got := item.Get("name").String(); got != "n__x" {
+		t.Fatalf("name = %q, want n__x", got)
+	}
+	if item.Get("namespace").Exists() {
+		t.Fatalf("unexpected namespace: %s", item.Get("namespace").Raw)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponsesNonStream_RestoresAdditionalNamespaceCustomToolCall(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"gpt-test",
+		"input":[{"type":"additional_tools","role":"developer","tools":[
+			{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec"}]}
+		]}]
+	}`)
+	raw := []byte(strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_custom_nonstream","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_custom_nonstream","name":"functions__exec","input":{}}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"input\":\"pwd\"}"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n"))
+
+	root := gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", originalRequest, nil, raw, nil))
+	if got := root.Get("output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("non-stream output type = %q, want custom_tool_call; output=%s", got, root.Raw)
+	}
+	if got := root.Get("output.0.input").String(); got != "pwd" {
+		t.Fatalf("non-stream input = %q, want pwd", got)
+	}
+	if got := root.Get("output.0.call_id").String(); got != "call_custom_nonstream" {
+		t.Fatalf("non-stream call_id = %q, want call_custom_nonstream", got)
+	}
+	if got := root.Get("output.0.name").String(); got != "exec" {
+		t.Fatalf("non-stream name = %q, want exec; output=%s", got, root.Raw)
+	}
+	if got := root.Get("output.0.namespace").String(); got != "functions" {
+		t.Fatalf("non-stream namespace = %q, want functions; output=%s", got, root.Raw)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_CustomToolEmptyInputMatchesNonStream(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"gpt-test",
+		"tools":[{"type":"custom","name":"exec"}]
+	}`)
+	streamChunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_custom_empty","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_custom_empty","name":"exec","input":{}}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var streamCompleted gjson.Result
+	for _, chunk := range streamChunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", originalRequest, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			if event == "response.completed" {
+				streamCompleted = data
+			}
+		}
+	}
+	if got := streamCompleted.Get("response.output.0.input").String(); got != "" {
+		t.Fatalf("stream empty custom input = %q, want empty string", got)
+	}
+
+	raw := []byte(strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_custom_empty_nonstream","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_custom_empty","name":"exec","input":{}}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n"))
+	nonStream := gjson.ParseBytes(ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", originalRequest, nil, raw, nil))
+	if got := nonStream.Get("output.0.input").String(); got != "" {
+		t.Fatalf("non-stream empty custom input = %q, want empty string", got)
 	}
 }
 

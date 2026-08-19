@@ -88,6 +88,49 @@ func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
 	}
 }
 
+func TestIsOneShotCommandMode(t *testing.T) {
+	tests := []struct {
+		name string
+		opts commandModeOptions
+		want bool
+	}{
+		{name: "none", want: false},
+		{name: "vertex import", opts: commandModeOptions{vertexImport: "/tmp/key.json"}, want: true},
+		{name: "plugin command line", opts: commandModeOptions{pluginCommandLine: true}, want: true},
+		{name: "gemini login", opts: commandModeOptions{login: true}, want: true},
+		{name: "antigravity login", opts: commandModeOptions{antigravityLogin: true}, want: true},
+		{name: "github copilot login", opts: commandModeOptions{githubCopilotLogin: true}, want: true},
+		{name: "codebuddy login", opts: commandModeOptions{codeBuddyLogin: true}, want: true},
+		{name: "codex oauth login", opts: commandModeOptions{codexLogin: true}, want: true},
+		{name: "codex device login", opts: commandModeOptions{codexDeviceLogin: true}, want: true},
+		{name: "claude login", opts: commandModeOptions{claudeLogin: true}, want: true},
+		{name: "kilo login", opts: commandModeOptions{kiloLogin: true}, want: true},
+		{name: "iflow oauth login", opts: commandModeOptions{iflowLogin: true}, want: true},
+		{name: "iflow cookie login", opts: commandModeOptions{iflowCookie: true}, want: true},
+		{name: "gitlab oauth login", opts: commandModeOptions{gitlabLogin: true}, want: true},
+		{name: "gitlab token login", opts: commandModeOptions{gitlabTokenLogin: true}, want: true},
+		{name: "kimi login", opts: commandModeOptions{kimiLogin: true}, want: true},
+		{name: "cursor login", opts: commandModeOptions{cursorLogin: true}, want: true},
+		{name: "kiro google login", opts: commandModeOptions{kiroLogin: true}, want: true},
+		{name: "kiro google alias login", opts: commandModeOptions{kiroGoogleLogin: true}, want: true},
+		{name: "kiro aws device login", opts: commandModeOptions{kiroAWSLogin: true}, want: true},
+		{name: "kiro aws authcode login", opts: commandModeOptions{kiroAWSAuthCode: true}, want: true},
+		{name: "kiro import", opts: commandModeOptions{kiroImport: true}, want: true},
+		{name: "kiro idc login", opts: commandModeOptions{kiroIDCLogin: true}, want: true},
+		{name: "xai login", opts: commandModeOptions{xaiLogin: true}, want: true},
+		{name: "qoder login", opts: commandModeOptions{qoderLogin: true}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isOneShotCommandMode(tt.opts)
+			if got != tt.want {
+				t.Fatalf("isOneShotCommandMode() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestModelCatalogUpdaterPlan(t *testing.T) {
 	tests := []struct {
 		name            string

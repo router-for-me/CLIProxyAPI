@@ -54,19 +54,41 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	cfg.ClaudeHeaderDefaults.OS = strings.TrimSpace(cfg.ClaudeHeaderDefaults.OS)
 	cfg.ClaudeHeaderDefaults.Arch = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Arch)
 	cfg.ClaudeHeaderDefaults.Timeout = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timeout)
+	cfg.ClaudeHeaderDefaults.Timezone = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timezone)
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.
 // It trims whitespace, normalizes channel keys to lower-case, drops empty entries,
 // allows multiple aliases per upstream name, and ensures aliases are unique within each channel.
 func (cfg *Config) SanitizeOAuthModelAlias() {
-	if cfg == nil || len(cfg.OAuthModelAlias) == 0 {
+	if cfg == nil {
 		return
+	}
+	if cfg.OAuthModelAlias == nil {
+		cfg.OAuthModelAlias = make(map[string][]OAuthModelAlias)
+	}
+	hasChannel := func(channel string) bool {
+		for key := range cfg.OAuthModelAlias {
+			if strings.EqualFold(strings.TrimSpace(key), channel) {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasChannel("kiro") {
+		cfg.OAuthModelAlias["kiro"] = defaultKiroAliases()
+	}
+	if !hasChannel("github-copilot") {
+		cfg.OAuthModelAlias["github-copilot"] = defaultGitHubCopilotAliases()
 	}
 	out := make(map[string][]OAuthModelAlias, len(cfg.OAuthModelAlias))
 	for rawChannel, aliases := range cfg.OAuthModelAlias {
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
-		if channel == "" || len(aliases) == 0 {
+		if channel == "" {
+			continue
+		}
+		if len(aliases) == 0 {
+			out[channel] = nil
 			continue
 		}
 		seenAlias := make(map[string]struct{}, len(aliases))
@@ -139,6 +161,9 @@ func (cfg *Config) SanitizeXAIKeys() {
 		return
 	}
 	cfg.XAIKey = sanitizeCodexKeyEntries(cfg.XAIKey)
+	for i := range cfg.XAIKey {
+		cfg.XAIKey[i].AlphaSearch = false
+	}
 }
 
 func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
@@ -170,6 +195,14 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		// Only a recognized value is rewritten. An unrecognized one is preserved as
+		// written so sanitizing a config file never destroys operator input; the
+		// request path falls back to the default profile and reports it once.
+		if normalized, ok := NormalizeClaudeFingerprintProfile(entry.FingerprintProfile); ok {
+			entry.FingerprintProfile = normalized
+		} else {
+			entry.FingerprintProfile = strings.TrimSpace(entry.FingerprintProfile)
+		}
 	}
 }
 
@@ -204,6 +237,25 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		return
 	}
 	cfg.GeminiKey = sanitizeGeminiKeyEntries(cfg.GeminiKey)
+}
+
+// SanitizeKiroKeys normalizes Kiro credential fields.
+func (cfg *Config) SanitizeKiroKeys() {
+	if cfg == nil {
+		return
+	}
+	for i := range cfg.KiroKey {
+		entry := &cfg.KiroKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.AccessToken = strings.TrimSpace(entry.AccessToken)
+		entry.RefreshToken = strings.TrimSpace(entry.RefreshToken)
+		entry.ProfileArn = strings.TrimSpace(entry.ProfileArn)
+		entry.Region = strings.TrimSpace(entry.Region)
+		entry.StartURL = strings.TrimSpace(entry.StartURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.AgentTaskType = strings.TrimSpace(entry.AgentTaskType)
+		entry.PreferredEndpoint = strings.TrimSpace(entry.PreferredEndpoint)
+	}
 }
 
 // SanitizeInteractionsKeys deduplicates and normalizes native Interactions credentials.

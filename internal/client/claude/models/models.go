@@ -9,11 +9,11 @@ import (
 const claudeDDModelPrefix = "claude-fable-5-dd-"
 
 // BuildResponse builds an Anthropic model response from available models.
-func BuildResponse(availableModels []map[string]any) map[string]any {
+func BuildResponse(availableModels []map[string]any, disableCloaking bool) map[string]any {
 	models := make([]map[string]any, len(availableModels))
 	for i, model := range availableModels {
 		models[i] = cloneModel(model)
-		if id, ok := models[i]["id"].(string); ok {
+		if id, ok := models[i]["id"].(string); ok && !disableCloaking {
 			models[i]["id"] = EnsureClaudeModelIDPrefix(id)
 		}
 	}

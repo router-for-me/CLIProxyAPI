@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 )
@@ -514,8 +517,9 @@ func (e *lifecycleRetryExecutor) ExecuteStream(ctx context.Context, _ *Auth, _ c
 		e.firstCtx = ctx
 		return nil, &Error{HTTPStatus: http.StatusUpgradeRequired, Message: "websocket upgrade required"}
 	}
-	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
-	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed"}`)}
+	chunks := make(chan cliproxyexecutor.StreamChunk, 2)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"type":"response.output_text.delta","delta":"ok"}`)}
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"status":"completed"}}`)}
 	close(chunks)
 	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -590,8 +594,9 @@ func (e *retryingHomeStreamExecutor) ExecuteStream(context.Context, *Auth, clipr
 	if e.calls.Add(1) == 1 {
 		return nil, &Error{HTTPStatus: http.StatusUnauthorized, Message: "expired"}
 	}
-	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
-	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\"}\n\n")}
+	chunks := make(chan cliproxyexecutor.StreamChunk, 2)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")}
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")}
 	close(chunks)
 	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -621,6 +626,123 @@ func TestHomeStreamRetryUsesFreshSelection(t *testing.T) {
 	}
 	if got := dispatcher.calls.Load(); got != 2 {
 		t.Fatalf("Home RPOP calls = %d, want 2 for retrying stream invocations", got)
+	}
+}
+
+type alwaysEmptyHomeStreamExecutor struct {
+	calls atomic.Int32
+}
+
+func (*alwaysEmptyHomeStreamExecutor) Identifier() string { return "home-execution" }
+func (*alwaysEmptyHomeStreamExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (e *alwaysEmptyHomeStreamExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.calls.Add(1)
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\n")}
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+}
+func (*alwaysEmptyHomeStreamExecutor) Refresh(context.Context, *Auth) (*Auth, error) {
+	return nil, nil
+}
+func (*alwaysEmptyHomeStreamExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (*alwaysEmptyHomeStreamExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestHomeStreamRepeatedEmptyCompletionStopsAtRepeatedAuth(t *testing.T) {
+	dispatcher := &retainingHomeExecutionDispatcher{}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+	executor := &alwaysEmptyHomeStreamExecutor{}
+	manager.RegisterExecutor(executor)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, errExecute := manager.ExecuteStream(ctx, []string{"home-execution"}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{Stream: true})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	var terminalErr error
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			terminalErr = chunk.Err
+		}
+	}
+	if !isEmptyCompletionError(terminalErr) {
+		t.Fatalf("terminal error = %v, want empty_completion", terminalErr)
+	}
+	if got := executor.calls.Load(); got != 1 {
+		t.Fatalf("executor calls = %d, want 1 before repeated auth is rejected", got)
+	}
+	if got := dispatcher.calls.Load(); got != 2 {
+		t.Fatalf("Home RPOP calls = %d, want 2 to detect the repeated auth", got)
+	}
+}
+
+type alternatingEmptyHomeDispatcher struct {
+	calls atomic.Int32
+}
+
+func (*alternatingEmptyHomeDispatcher) HeartbeatOK() bool { return true }
+func (d *alternatingEmptyHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+	call := d.calls.Add(1)
+	authID := "home-auth-a"
+	if call == 2 {
+		authID = "home-auth-b"
+	}
+	return json.Marshal(homeAuthDispatchResponse{Auth: Auth{ID: authID, Provider: "home-execution", Status: StatusActive}})
+}
+func (*alternatingEmptyHomeDispatcher) AbortAmbiguousDispatch() {}
+
+type alternatingEmptyHomeExecutor struct {
+	calls atomic.Int32
+}
+
+func (*alternatingEmptyHomeExecutor) Identifier() string { return "home-execution" }
+func (*alternatingEmptyHomeExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (e *alternatingEmptyHomeExecutor) ExecuteStream(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.calls.Add(1)
+	if auth.ID == "home-auth-b" {
+		return nil, &Error{Code: "transient", Message: "transient stream failure", Retryable: true}
+	}
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n")}
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+}
+func (*alternatingEmptyHomeExecutor) Refresh(context.Context, *Auth) (*Auth, error) { return nil, nil }
+func (*alternatingEmptyHomeExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (*alternatingEmptyHomeExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestHomeStreamDoesNotRevisitEmptyAuthAfterAnotherFailure(t *testing.T) {
+	dispatcher := &alternatingEmptyHomeDispatcher{}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+	executor := &alternatingEmptyHomeExecutor{}
+	manager.RegisterExecutor(executor)
+
+	_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-execution"}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{Stream: true}, 0)
+	if errExecute == nil || !strings.Contains(errExecute.Error(), "transient stream failure") {
+		t.Fatalf("executeStreamMixedOnce() error = %v, want last transient failure", errExecute)
+	}
+	if got := executor.calls.Load(); got != 2 {
+		t.Fatalf("executor calls = %d, want one call per distinct auth", got)
+	}
+	if got := dispatcher.calls.Load(); got != 3 {
+		t.Fatalf("Home RPOP calls = %d, want third dispatch rejected before execution", got)
 	}
 }
 
@@ -1201,5 +1323,264 @@ func TestHomeStreamWithoutSourceEndsSelection(t *testing.T) {
 	defer cancelDrain()
 	if errDrain := registry.Drain(drainCtx); errDrain != nil {
 		t.Fatalf("Drain() error = %v", errDrain)
+	}
+}
+
+// homeRequestMetadataSnapshot captures the client request metadata a context carries.
+type homeRequestMetadataSnapshot struct {
+	requestedModel  string
+	reasoningEffort string
+	serviceTier     string
+	generate        bool
+}
+
+func homeRequestMetadataFromContext(ctx context.Context) homeRequestMetadataSnapshot {
+	return homeRequestMetadataSnapshot{
+		requestedModel:  coreusage.RequestedModelAliasFromContext(ctx),
+		reasoningEffort: coreusage.ReasoningEffortFromContext(ctx),
+		serviceTier:     coreusage.ServiceTierFromContext(ctx),
+		generate:        coreusage.GenerateFromContext(ctx),
+	}
+}
+
+// homeRequestMetadataExecutor records the metadata visible at auth preparation and execution.
+type homeRequestMetadataExecutor struct {
+	mu              sync.Mutex
+	prepareMetadata homeRequestMetadataSnapshot
+	executeMetadata homeRequestMetadataSnapshot
+	// prepareErrOnce fails only the first preparation so Home redispatch still terminates.
+	prepareErrOnce error
+	executeErr     error
+}
+
+func (*homeRequestMetadataExecutor) Identifier() string { return "home-execution" }
+
+func (*homeRequestMetadataExecutor) ShouldPrepareRequestAuth(*Auth) bool { return true }
+
+func (e *homeRequestMetadataExecutor) PrepareRequestAuth(ctx context.Context, auth *Auth) (*Auth, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.prepareMetadata = homeRequestMetadataFromContext(ctx)
+	if e.prepareErrOnce != nil {
+		errPrepare := e.prepareErrOnce
+		e.prepareErrOnce = nil
+		return nil, errPrepare
+	}
+	return auth, nil
+}
+
+func (e *homeRequestMetadataExecutor) recordExecution(ctx context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.executeMetadata = homeRequestMetadataFromContext(ctx)
+	return e.executeErr
+}
+
+func (e *homeRequestMetadataExecutor) snapshots() (homeRequestMetadataSnapshot, homeRequestMetadataSnapshot) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.prepareMetadata, e.executeMetadata
+}
+
+func (e *homeRequestMetadataExecutor) Execute(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if errExecute := e.recordExecution(ctx); errExecute != nil {
+		return cliproxyexecutor.Response{}, errExecute
+	}
+	return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
+}
+
+func (e *homeRequestMetadataExecutor) ExecuteStream(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if errExecute := e.recordExecution(ctx); errExecute != nil {
+		return nil, errExecute
+	}
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("ok")}
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (*homeRequestMetadataExecutor) Refresh(context.Context, *Auth) (*Auth, error) {
+	return nil, nil
+}
+
+func (e *homeRequestMetadataExecutor) CountTokens(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if errExecute := e.recordExecution(ctx); errExecute != nil {
+		return cliproxyexecutor.Response{}, errExecute
+	}
+	return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
+}
+
+func (*homeRequestMetadataExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+// homeRequestMetadataHook buffers every Home result so a synchronous OnResult never blocks execution.
+type homeRequestMetadataHook struct {
+	results chan homeRequestMetadataSnapshot
+}
+
+func newHomeRequestMetadataHook() *homeRequestMetadataHook {
+	return &homeRequestMetadataHook{results: make(chan homeRequestMetadataSnapshot, 8)}
+}
+
+func (*homeRequestMetadataHook) OnAuthRegistered(context.Context, *Auth) {}
+func (*homeRequestMetadataHook) OnAuthUpdated(context.Context, *Auth)    {}
+func (h *homeRequestMetadataHook) OnResult(ctx context.Context, _ Result) {
+	select {
+	case h.results <- homeRequestMetadataFromContext(ctx):
+	default:
+	}
+}
+
+func (h *homeRequestMetadataHook) awaitResult(t *testing.T) homeRequestMetadataSnapshot {
+	t.Helper()
+	select {
+	case snapshot := <-h.results:
+		return snapshot
+	case <-time.After(time.Second):
+		t.Fatal("Home result hook did not run")
+		return homeRequestMetadataSnapshot{}
+	}
+}
+
+func assertHomeRequestMetadata(t *testing.T, got homeRequestMetadataSnapshot, serviceTier string) {
+	t.Helper()
+	want := homeRequestMetadataSnapshot{
+		requestedModel:  "client-model",
+		reasoningEffort: "high",
+		serviceTier:     serviceTier,
+		generate:        false,
+	}
+	if got != want {
+		t.Fatalf("request metadata = %#v, want %#v", got, want)
+	}
+}
+
+func newHomeRequestMetadataManager(t *testing.T, executor *homeRequestMetadataExecutor, hook Hook) *Manager {
+	t.Helper()
+	manager := NewManager(nil, nil, hook)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.PublishHomeDispatch(homeExecutionDispatcher{}, executionregistry.New(), 1)
+	manager.RegisterExecutor(executor)
+	return manager
+}
+
+// homeRequestMetadataOptions mirrors handler-populated metadata. Handlers already derive the
+// OpenAI "auto" default for an omitted tier (see sdk/api/handlers metadata tests); this layer
+// only has to carry whatever the handler resolved.
+func homeRequestMetadataOptions(serviceTier string) cliproxyexecutor.Options {
+	return cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.RequestedModelMetadataKey:  "client-model",
+		cliproxyexecutor.ReasoningEffortMetadataKey: "high",
+		cliproxyexecutor.ServiceTierMetadataKey:     serviceTier,
+		cliproxyexecutor.GenerateMetadataKey:        false,
+	}}
+}
+
+type homeRequestMetadataPath struct {
+	name string
+	run  func(*Manager, cliproxyexecutor.Options) error
+}
+
+func homeExecuteMetadataPath() homeRequestMetadataPath {
+	return homeRequestMetadataPath{
+		name: "execute",
+		run: func(manager *Manager, opts cliproxyexecutor.Options) error {
+			_, errExecute := manager.Execute(context.Background(), []string{"home-execution"}, cliproxyexecutor.Request{Model: "route-model"}, opts)
+			return errExecute
+		},
+	}
+}
+
+func homeCountMetadataPath() homeRequestMetadataPath {
+	return homeRequestMetadataPath{
+		name: "count_tokens",
+		run: func(manager *Manager, opts cliproxyexecutor.Options) error {
+			_, errCount := manager.ExecuteCount(context.Background(), []string{"home-execution"}, cliproxyexecutor.Request{Model: "route-model"}, opts)
+			return errCount
+		},
+	}
+}
+
+func homeStreamMetadataPath() homeRequestMetadataPath {
+	return homeRequestMetadataPath{
+		name: "stream",
+		run: func(manager *Manager, opts cliproxyexecutor.Options) error {
+			opts.Stream = true
+			result, errStream := manager.ExecuteStream(context.Background(), []string{"home-execution"}, cliproxyexecutor.Request{Model: "route-model"}, opts)
+			if errStream != nil {
+				return errStream
+			}
+			for range result.Chunks {
+			}
+			return nil
+		},
+	}
+}
+
+// TestHomeExecutionPropagatesRequestMetadata covers the Home regression from issue #4791: the
+// executor context must carry the client request metadata at auth preparation, at execution, and
+// in the Home result usage record.
+func TestHomeExecutionPropagatesRequestMetadata(t *testing.T) {
+	paths := []homeRequestMetadataPath{homeExecuteMetadataPath(), homeCountMetadataPath(), homeStreamMetadataPath()}
+
+	for _, path := range paths {
+		for _, serviceTier := range []string{"priority", coreusage.AutoServiceTier} {
+			t.Run(path.name+"/"+serviceTier, func(t *testing.T) {
+				executor := &homeRequestMetadataExecutor{}
+				hook := newHomeRequestMetadataHook()
+				manager := newHomeRequestMetadataManager(t, executor, hook)
+
+				if errRun := path.run(manager, homeRequestMetadataOptions(serviceTier)); errRun != nil {
+					t.Fatalf("execution error = %v", errRun)
+				}
+				prepareMetadata, executeMetadata := executor.snapshots()
+				assertHomeRequestMetadata(t, prepareMetadata, serviceTier)
+				assertHomeRequestMetadata(t, executeMetadata, serviceTier)
+				assertHomeRequestMetadata(t, hook.awaitResult(t), serviceTier)
+			})
+		}
+	}
+}
+
+// TestHomeExecutionFailureResultPreservesRequestMetadata keeps the requested tier authoritative in
+// the failure usage record instead of falling back to the upstream or default tier.
+func TestHomeExecutionFailureResultPreservesRequestMetadata(t *testing.T) {
+	paths := []homeRequestMetadataPath{homeExecuteMetadataPath(), homeCountMetadataPath()}
+
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			executor := &homeRequestMetadataExecutor{
+				executeErr: &Error{HTTPStatus: http.StatusBadRequest, Message: "invalid request"},
+			}
+			hook := newHomeRequestMetadataHook()
+			manager := newHomeRequestMetadataManager(t, executor, hook)
+
+			if errRun := path.run(manager, homeRequestMetadataOptions("priority")); errRun == nil {
+				t.Fatal("execution error = nil, want invalid request")
+			}
+			assertHomeRequestMetadata(t, hook.awaitResult(t), "priority")
+		})
+	}
+}
+
+// TestHomePrepareFailureResultPreservesRequestMetadata covers the prepare_failed Home result paths,
+// which report usage before any executor call happens.
+func TestHomePrepareFailureResultPreservesRequestMetadata(t *testing.T) {
+	paths := []homeRequestMetadataPath{homeExecuteMetadataPath(), homeCountMetadataPath(), homeStreamMetadataPath()}
+
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			executor := &homeRequestMetadataExecutor{
+				prepareErrOnce: &Error{Code: "prepare_failed", Message: "prepare failed"},
+			}
+			hook := newHomeRequestMetadataHook()
+			manager := newHomeRequestMetadataManager(t, executor, hook)
+
+			_ = path.run(manager, homeRequestMetadataOptions("priority"))
+			prepareMetadata, _ := executor.snapshots()
+			assertHomeRequestMetadata(t, prepareMetadata, "priority")
+			assertHomeRequestMetadata(t, hook.awaitResult(t), "priority")
+		})
 	}
 }

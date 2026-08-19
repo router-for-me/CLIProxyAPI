@@ -23,7 +23,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		return e.executeCompact(ctx, auth, req, opts)
 	}
 	if endpointPath := xaiImageEndpointPath(opts); endpointPath != "" {
-		return e.executeImages(ctx, auth, req, endpointPath)
+		return e.executeImages(ctx, auth, req, opts, endpointPath)
 	}
 	if xaiIsVideoRequest(opts) {
 		return e.executeVideos(ctx, auth, req, opts)
@@ -47,7 +47,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	if err != nil {
 		return resp, err
 	}
-	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID)
+	applyXAIChatHeaders(httpReq, auth, token, true, prepared.sessionID, opts.Headers)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -106,6 +106,9 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
+			if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
+				out = helps.EnsureResponsesUsageDetails(out)
+			}
 			return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 		}
 	}
@@ -121,6 +124,9 @@ func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Aut
 
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, data, &param)
+	if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
+		out = helps.EnsureResponsesUsageDetails(out)
+	}
 	return cliproxyexecutor.Response{Payload: out, Headers: headers}, nil
 }
 
@@ -153,7 +159,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	}
 	// Official API / custom compact endpoints use standard API headers, not CLI
 	// chat-proxy identity headers (which applyXAIChatHeaders may still attach for OAuth chat).
-	applyXAIHeaders(httpReq, auth, token, false, prepared.sessionID)
+	applyXAIHeaders(httpReq, auth, token, false, prepared.sessionID, opts.Headers)
 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -272,6 +278,20 @@ func xaiBuildCompactionTriggerStreamChunks(prepared *xaiPreparedRequest, compact
 	createdResponse := xaiBuildCompactionBaseResponse(prepared, compactData, responseID, createdAt, "in_progress")
 	inProgressResponse := xaiBuildCompactionBaseResponse(prepared, compactData, responseID, createdAt, "in_progress")
 	completedResponse := xaiBuildCompactionBaseResponse(prepared, compactData, responseID, createdAt, "completed")
+	requestModelName := ""
+	if prepared != nil {
+		requestModelName = gjson.GetBytes(prepared.originalPayload, "model").String()
+		if requestModelName == "" {
+			requestModelName = prepared.baseModel
+		}
+	}
+	if requestModelName == "" {
+		requestModelName = gjson.GetBytes(compactData, "model").String()
+	}
+	if requestModelName != "" {
+		createdResponse, _ = sjson.SetBytes(createdResponse, "model", requestModelName)
+		inProgressResponse, _ = sjson.SetBytes(inProgressResponse, "model", requestModelName)
+	}
 	completedResponse, _ = sjson.SetBytes(completedResponse, "completed_at", completedAt)
 	completedResponse, _ = sjson.SetRawBytes(completedResponse, "output", output)
 	if usage := gjson.GetBytes(compactData, "usage"); usage.Exists() {
@@ -289,6 +309,7 @@ func xaiBuildCompactionTriggerStreamChunks(prepared *xaiPreparedRequest, compact
 	donePayload, _ = sjson.SetRawBytes(donePayload, "item", item)
 	completedPayload := []byte(`{"type":"response.completed","sequence_number":5}`)
 	completedPayload, _ = sjson.SetRawBytes(completedPayload, "response", completedResponse)
+	completedPayload = helps.EnsureResponsesUsageDetails(completedPayload)
 
 	return [][]byte{
 		xaiBuildSSEFrame("response.created", createdPayload),

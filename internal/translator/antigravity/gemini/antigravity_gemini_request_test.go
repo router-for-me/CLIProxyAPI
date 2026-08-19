@@ -332,13 +332,13 @@ func TestFixCLIToolResponse_PreservesFunctionResponseParts(t *testing.T) {
 		}
 	}`
 
-	result, err := fixCLIToolResponse(input)
+	result, err := fixCLIToolResponse([]byte(input))
 	if err != nil {
 		t.Fatalf("fixCLIToolResponse failed: %v", err)
 	}
 
 	// Find the function response content (role=function)
-	contents := gjson.Get(result, "request.contents").Array()
+	contents := gjson.GetBytes(result, "request.contents").Array()
 	var funcContent gjson.Result
 	for _, c := range contents {
 		if c.Get("role").String() == "function" {
@@ -396,12 +396,12 @@ func TestFixCLIToolResponse_BackfillsEmptyFunctionResponseName(t *testing.T) {
 		}
 	}`
 
-	result, err := fixCLIToolResponse(input)
+	result, err := fixCLIToolResponse([]byte(input))
 	if err != nil {
 		t.Fatalf("fixCLIToolResponse failed: %v", err)
 	}
 
-	contents := gjson.Get(result, "request.contents").Array()
+	contents := gjson.GetBytes(result, "request.contents").Array()
 	var funcContent gjson.Result
 	for _, c := range contents {
 		if c.Get("role").String() == "function" {
@@ -443,12 +443,12 @@ func TestFixCLIToolResponse_BackfillsMultipleEmptyNames(t *testing.T) {
 		}
 	}`
 
-	result, err := fixCLIToolResponse(input)
+	result, err := fixCLIToolResponse([]byte(input))
 	if err != nil {
 		t.Fatalf("fixCLIToolResponse failed: %v", err)
 	}
 
-	contents := gjson.Get(result, "request.contents").Array()
+	contents := gjson.GetBytes(result, "request.contents").Array()
 	var funcContent gjson.Result
 	for _, c := range contents {
 		if c.Get("role").String() == "function" {
@@ -497,12 +497,12 @@ func TestFixCLIToolResponse_PreservesExistingName(t *testing.T) {
 		}
 	}`
 
-	result, err := fixCLIToolResponse(input)
+	result, err := fixCLIToolResponse([]byte(input))
 	if err != nil {
 		t.Fatalf("fixCLIToolResponse failed: %v", err)
 	}
 
-	contents := gjson.Get(result, "request.contents").Array()
+	contents := gjson.GetBytes(result, "request.contents").Array()
 	var funcContent gjson.Result
 	for _, c := range contents {
 		if c.Get("role").String() == "function" {
@@ -543,12 +543,12 @@ func TestFixCLIToolResponse_MoreResponsesThanCalls(t *testing.T) {
 		}
 	}`
 
-	result, err := fixCLIToolResponse(input)
+	result, err := fixCLIToolResponse([]byte(input))
 	if err != nil {
 		t.Fatalf("fixCLIToolResponse failed: %v", err)
 	}
 
-	contents := gjson.Get(result, "request.contents").Array()
+	contents := gjson.GetBytes(result, "request.contents").Array()
 	var funcContent gjson.Result
 	for _, c := range contents {
 		if c.Get("role").String() == "function" {
@@ -601,12 +601,12 @@ func TestFixCLIToolResponse_MultipleGroupsFIFO(t *testing.T) {
 		}
 	}`
 
-	result, err := fixCLIToolResponse(input)
+	result, err := fixCLIToolResponse([]byte(input))
 	if err != nil {
 		t.Fatalf("fixCLIToolResponse failed: %v", err)
 	}
 
-	contents := gjson.Get(result, "request.contents").Array()
+	contents := gjson.GetBytes(result, "request.contents").Array()
 	var funcContents []gjson.Result
 	for _, c := range contents {
 		if c.Get("role").String() == "function" {
@@ -777,5 +777,180 @@ func TestSanitizeAntigravityClaudeGeminiRequestSignatures_StripsFunctionCallSign
 	sig := gjson.Get(outputStr, "request.contents.0.parts.0.thoughtSignature")
 	if sig.Exists() {
 		t.Fatalf("expected functionCall thoughtSignature to be stripped for Claude target model, got %s", sig.Raw)
+	}
+}
+
+func TestSanitizeAntigravityClaudeGeminiRequestSignatures_StrictTypeChecks(t *testing.T) {
+	// Non-boolean thought (e.g. "true" as string) and non-string text (e.g. 123) should not be treated as valid thinking block
+	inputJSON := []byte(`{
+		"project": "",
+		"model": "claude-sonnet-4-6",
+		"request": {
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{
+							"text": "reasoning",
+							"thought": "true",
+							"thoughtSignature": "valid_signature_1234567890123456789012345678901234567890"
+						},
+						{
+							"text": 123,
+							"thought": true,
+							"thoughtSignature": "valid_signature_1234567890123456789012345678901234567890"
+						},
+						{
+							"text": "valid answer"
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-sonnet-4-6", inputJSON)
+	outputStr := string(output)
+
+	parts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	for i, part := range parts {
+		if sig := part.Get("thoughtSignature"); sig.Exists() {
+			t.Fatalf("part %d should not retain thoughtSignature, got %s", i, sig.Raw)
+		}
+	}
+}
+
+func TestSanitizeAntigravityClaudeGeminiRequestSignatures_StripsDuplicateSignatureKeys(t *testing.T) {
+	inputJSON := []byte(`{
+		"project": "",
+		"model": "claude-sonnet-4-6",
+		"request": {
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{
+							"functionCall": {
+								"name": "calc",
+								"args": {}
+							},
+							"thoughtSignature": "first_signature",
+							"thoughtSignature": "second_signature"
+						},
+						{
+							"functionCall": {"name": "first"},
+							"functionCall": {
+								"name": "second",
+								"thoughtSignature": "secret"
+							}
+						},
+						{
+							"functionCall": {
+								"name": "first",
+								"thoughtSignature": "secret"
+							},
+							"functionCall": {"name": "second"}
+						},
+						{
+							"thoughtSignature": null,
+							"thoughtSignature": "second_sig",
+							"text": "regular answer"
+						},
+						{
+							"thoughtSignature": "secret",
+							"thoughtSignature": null,
+							"text": "regular answer 2"
+						},
+						{
+							"thoughtSignature": {"nested": "obj"},
+							"text": "object sig"
+						},
+						{
+							"thoughtSignature": [1, 2, 3],
+							"text": "array sig"
+						},
+						{
+							"functionCall": {"thought\u0053ignature": "secret"},
+							"functionCall": {"name": "safe"}
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-sonnet-4-6", inputJSON)
+	outputStr := string(output)
+
+	for i := 0; i < 8; i++ {
+		sig := gjson.Get(outputStr, fmt.Sprintf("request.contents.0.parts.%d.thoughtSignature", i))
+		if sig.Exists() {
+			t.Fatalf("part %d: expected all duplicate thoughtSignature fields to be stripped, got %s", i, sig.Raw)
+		}
+		fcSig := gjson.Get(outputStr, fmt.Sprintf("request.contents.0.parts.%d.functionCall.thoughtSignature", i))
+		if fcSig.Exists() {
+			t.Fatalf("part %d: expected functionCall thoughtSignature to be stripped, got %s", i, fcSig.Raw)
+		}
+	}
+}
+
+func TestSanitizeAntigravityClaudeGeminiRequestSignatures_StringValueNotTreatedAsKey(t *testing.T) {
+	// A part where "thoughtSignature" is a tool name (string value), not a key, should not trigger signature sanitization
+	inputJSON := []byte(`{
+		"project": "",
+		"model": "claude-sonnet-4-6",
+		"request": {
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{
+							"functionCall": {
+								"name": "thoughtSignature",
+								"args": {
+									"query": "thought_signature"
+								}
+							}
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-sonnet-4-6", inputJSON)
+	// Output should preserve the exact input string because no signature keys exist
+	if string(output) != string(inputJSON) {
+		t.Fatalf("expected unchanged output for non-key values, got %s", string(output))
+	}
+}
+
+func TestSanitizeAntigravityClaudeGeminiRequestSignatures_LargeNumberDoesNotHaltKeyScan(t *testing.T) {
+	// A part with numbers outside float64 range should not break token scanning
+	inputJSON := []byte(`{
+		"project": "",
+		"model": "claude-sonnet-4-6",
+		"request": {
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{
+							"functionCall": {"args": {"n": 1e10000}},
+							"functionCall": {"thoughtSignature": "secret"},
+							"functionCall": {"name": "safe"}
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	output := SanitizeAntigravityClaudeGeminiRequestSignatures("claude-sonnet-4-6", inputJSON)
+	outputStr := string(output)
+
+	fcSig := gjson.Get(outputStr, "request.contents.0.parts.0.functionCall.thoughtSignature")
+	if fcSig.Exists() {
+		t.Fatalf("expected hidden thoughtSignature to be stripped despite large number, got %s", fcSig.Raw)
 	}
 }

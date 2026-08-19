@@ -8,21 +8,23 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"golang.org/x/net/context"
 )
 
 func statusFromError(err error) int {
-	if err == nil {
-		return 0
+	return clienterror.HTTPStatusFromError(err)
+}
+
+func isAuthSelectionUnavailable(err error) bool {
+	var authErr *coreauth.Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
 	}
-	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-		if code := se.StatusCode(); code > 0 {
-			return code
-		}
-	}
-	return 0
+	code := strings.TrimSpace(authErr.Code)
+	return code == "auth_not_found" || code == "auth_unavailable"
 }
 
 func enrichAuthSelectionError(err error, providers []string, model string) error {
@@ -79,6 +81,10 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode
 	}
+	if msg != nil && msg.DirectResponse {
+		writeDirectErrorResponse(c, status, msg)
+		return
+	}
 	if msg != nil && msg.Error != nil {
 		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
 			c.Writer.Header().Add("Retry-After", value)
@@ -122,6 +128,25 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	}
 
 	if !c.Writer.Written() {
+		c.Writer.Header().Set("Content-Type", "application/json")
+	}
+	c.Status(status)
+	_, _ = c.Writer.Write(body)
+}
+
+func writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorMessage) {
+	for key, values := range FilterUpstreamHeaders(msg.Headers) {
+		if len(values) == 0 || IsCPAReservedResponseHeader(key) {
+			continue
+		}
+		c.Writer.Header().Del(key)
+		for _, value := range values {
+			c.Writer.Header().Add(key, value)
+		}
+	}
+	body := bytes.Clone(msg.Body)
+	appendAPIResponse(c, body)
+	if !c.Writer.Written() && c.Writer.Header().Get("Content-Type") == "" {
 		c.Writer.Header().Set("Content-Type", "application/json")
 	}
 	c.Status(status)

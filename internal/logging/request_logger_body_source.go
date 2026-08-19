@@ -166,8 +166,10 @@ func (s *FileBodySource) Paths() []string {
 	return out
 }
 
-// WriteTo merges all ordered parts into w.
-func (s *FileBodySource) WriteTo(w io.Writer) error {
+// WriteMergedTo merges all ordered parts into w. It is deliberately not named
+// WriteTo so it does not collide with io.WriterTo, whose signature requires
+// returning the number of bytes written.
+func (s *FileBodySource) WriteMergedTo(w io.Writer) error {
 	if s == nil || w == nil {
 		return nil
 	}
@@ -207,7 +209,7 @@ func (s *FileBodySource) WriteTo(w io.Writer) error {
 // Bytes merges all ordered parts into memory.
 func (s *FileBodySource) Bytes() ([]byte, error) {
 	var buf bytes.Buffer
-	if errWrite := s.WriteTo(&buf); errWrite != nil {
+	if errWrite := s.WriteMergedTo(&buf); errWrite != nil {
 		return nil, errWrite
 	}
 	return buf.Bytes(), nil
