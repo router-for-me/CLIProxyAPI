@@ -211,6 +211,8 @@ func baselineExecutorAuths() []*coreauth.Auth {
 		"xai",
 		"zai",
 		"opencode",
+		constant.OpenCodeGo,
+		constant.Poolside,
 		"openai-compatibility",
 	}
 	auths := make([]*coreauth.Auth, 0, len(providers))
@@ -324,7 +326,11 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	case "zai":
 		s.coreManager.RegisterExecutor(executor.NewZAIExecutor(cfg))
 	case "opencode":
-		s.coreManager.RegisterExecutor(executor.NewOpenCodeExecutor(cfg))
+		s.coreManager.RegisterExecutor(executor.NewOpenCodeExecutor(constant.OpenCode))
+	case constant.OpenCodeGo:
+		s.coreManager.RegisterExecutor(executor.NewOpenCodeExecutor(constant.OpenCodeGo))
+	case constant.Poolside:
+		s.coreManager.RegisterExecutor(executor.NewPoolsideExecutor(cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {

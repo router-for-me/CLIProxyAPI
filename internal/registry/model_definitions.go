@@ -33,6 +33,9 @@ type staticModelsJSON struct {
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
 	ZAI         []*ModelInfo `json:"zai"`
+	OpenCode    []*ModelInfo `json:"opencode"`
+	OpenCodeGo  []*ModelInfo `json:"opencode-go"`
+	Poolside    []*ModelInfo `json:"poolside"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -341,6 +344,12 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAmazonQModels()
 	case "antigravity":
 		return GetAntigravityModels()
+	case "opencode":
+		return GetOpenCodeModels("zen")
+	case "opencode-go":
+		return GetOpenCodeModels("go")
+	case "poolside":
+		return GetPoolsideModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
 	case "qoder":
@@ -384,6 +393,9 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.XAI,
 		data.Qoder,
 		data.ZAI,
+		data.OpenCode,
+		data.OpenCodeGo,
+		data.Poolside,
 	}
 	for _, models := range allModels {
 		for _, m := range models {
@@ -910,4 +922,16 @@ func GetQoderModels() []*ModelInfo {
 // GetZAIModels returns the Z.AI / ZCode (GLM) coding-plan model definitions.
 func GetZAIModels() []*ModelInfo {
 	return cloneModelInfos(getModels().ZAI)
+}
+
+// GetOpenCodeModels returns the OpenCode model definitions for the given gateway
+// ("zen" or "go"). Models are generated from the embedded opencode_routes.json
+// route table.
+func GetOpenCodeModels(gateway string) []*ModelInfo {
+	return cloneModelInfos(getModels().OpenCode)
+}
+
+// GetPoolsideModels returns the Poolside model definitions.
+func GetPoolsideModels() []*ModelInfo {
+	return cloneModelInfos(getModels().Poolside)
 }

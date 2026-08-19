@@ -42,4 +42,10 @@ const (
 
 	// OpenCode represents the OpenCode/Zen provider identifier.
 	OpenCode = "opencode"
+
+	// OpenCodeGo represents the OpenCode Go provider identifier.
+	OpenCodeGo = "opencode-go"
+
+	// Poolside represents the Poolside provider identifier.
+	Poolside = "poolside"
 )

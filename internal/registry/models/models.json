@@ -4201,5 +4201,213 @@
         "IMAGE"
       ]
     }
+  ],
+  "opencode": [
+    {
+      "id": "gpt-5.6-luna",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "GPT-5.6 Luna (Zen)",
+      "description": "OpenCode Zen gateway — GPT-5.6 Luna via OpenAI Responses API",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "grok-4.5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Grok 4.5 (Zen)",
+      "description": "OpenCode Zen gateway — Grok 4.5 via OpenAI Responses API",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "claude-opus-5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Claude Opus 5 (Zen)",
+      "description": "OpenCode Zen gateway — Claude Opus 5 via Anthropic Messages",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      },
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "DeepSeek V4 Pro (Zen)",
+      "description": "OpenCode Zen gateway — DeepSeek V4 Pro via OpenAI-compatible chat",
+      "context_length": 272000,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    }
+  ],
+  "opencode-go": [
+    {
+      "id": "gpt-5.6-luna",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "GPT-5.6 Luna (Go)",
+      "description": "OpenCode Go gateway — GPT-5.6 Luna via OpenAI Responses API",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "grok-4.5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Grok 4.5 (Go)",
+      "description": "OpenCode Go gateway — Grok 4.5 via OpenAI Responses API",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "claude-opus-5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Claude Opus 5 (Go)",
+      "description": "OpenCode Go gateway — Claude Opus 5 via Anthropic Messages",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      },
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "DeepSeek V4 Pro (Go)",
+      "description": "OpenCode Go gateway — DeepSeek V4 Pro via OpenAI-compatible chat",
+      "context_length": 128000,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    }
+  ],
+  "poolside": [
+    {
+      "id": "claude-opus-4-8",
+      "object": "model",
+      "owned_by": "poolside",
+      "type": "poolside",
+      "display_name": "Claude Opus 4.8 (Poolside)",
+      "description": "Poolside AI gateway — Claude Opus 4.8 via Anthropic Messages",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      },
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "object": "model",
+      "owned_by": "poolside",
+      "type": "poolside",
+      "display_name": "Claude Sonnet 4.6 (Poolside)",
+      "description": "Poolside AI gateway — Claude Sonnet 4.6 via Anthropic Messages",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "poolside/laguna-s-2.1",
+      "object": "model",
+      "created": 1771372800,
+      "owned_by": "poolside",
+      "type": "poolside",
+      "display_name": "Laguna S 2.1 (Poolside)",
+      "description": "Poolside AI gateway — fallback model proxying to Claude Sonnet 4.6 via Anthropic Messages",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    }
   ]
 }

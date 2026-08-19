@@ -1,0 +1,20 @@
+{
+  "hooks": {
+    "postToolUse": [
+      {
+        "command": "bd cursor-hook postToolUse"
+      }
+    ],
+    "preCompact": [
+      {
+        "command": "bd cursor-hook preCompact"
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": "bd cursor-hook sessionStart"
+      }
+    ]
+  },
+  "version": 1
+}
