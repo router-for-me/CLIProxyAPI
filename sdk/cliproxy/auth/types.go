@@ -178,7 +178,8 @@ type QuotaState struct {
 	// NextRecoverAt is when the credential may become available again.
 	NextRecoverAt time.Time `json:"next_recover_at"`
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
-	BackoffLevel int `json:"backoff_level,omitempty"`
+	BackoffLevel    int       `json:"backoff_level,omitempty"`
+	FirstExceededAt time.Time `json:"first_exceeded_at,omitempty"`
 	// ObservedAt is the time the current Signals snapshot was observed.
 	ObservedAt time.Time `json:"observed_at,omitempty"`
 	// Signals stores bounded, provider-specific quota watermark values observed
