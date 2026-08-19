@@ -31,6 +31,7 @@ type staticModelsJSON struct {
 	Qoder       []*ModelInfo `json:"qoder"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
+	Devin       []*ModelInfo `json:"devin"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -887,4 +888,9 @@ func GetAmazonQModels() []*ModelInfo {
 // GetQoderModels returns the Qoder model definitions.
 func GetQoderModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Qoder)
+}
+
+// GetDevinModels returns the standard Devin model definitions.
+func GetDevinModels() []*ModelInfo {
+	return cloneModelInfos(getModels().Devin)
 }
