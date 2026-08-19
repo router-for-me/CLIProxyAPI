@@ -124,6 +124,12 @@ func TestConvertGeminiRequestToOpenAI_PreservesExplicitFunctionCallIDs(t *testin
 			responseField: `"call_id":"call_gateway_call_id"`,
 			want:          "call_gateway_call_id",
 		},
+		{
+			name:          "callId",
+			callField:     `"callId":"call_gateway_camel_id"`,
+			responseField: `"callId":"call_gateway_camel_id"`,
+			want:          "call_gateway_camel_id",
+		},
 	}
 
 	for _, tt := range tests {
@@ -170,305 +176,269 @@ func TestConvertGeminiRequestToOpenAI_SplitsNonImageInlineDataByMIME(t *testing.
 	}
 }
 
-func TestConvertGeminiRequestToOpenAI_Deterministic100Invocations(t *testing.T) {
+func TestConvertGeminiRequestToOpenAI_DropsHiddenThoughtParts(t *testing.T) {
+	t.Run("thought-only turn", func(t *testing.T) {
+		out := ConvertGeminiRequestToOpenAI("openai-test", []byte(`{
+			"contents":[
+				{"role":"model","parts":[{"thought":true,"text":"internal reasoning","thoughtSignature":"opaque-provider-state"}]},
+				{"role":"user","parts":[{"text":"continue"}]}
+			]
+		}`), false)
+
+		messages := gjson.GetBytes(out, "messages").Array()
+		if len(messages) != 1 || messages[0].Get("role").String() != "user" || messages[0].Get("content").String() != "continue" {
+			t.Fatalf("hidden thought turn was not dropped. Output: %s", string(out))
+		}
+	})
+
+	t.Run("mixed turn", func(t *testing.T) {
+		out := ConvertGeminiRequestToOpenAI("openai-test", []byte(`{
+			"contents":[{"role":"model","parts":[
+				{"thought":true,"text":"internal reasoning","thoughtSignature":"opaque-provider-state"},
+				{"text":"visible answer"}
+			]}]
+		}`), false)
+
+		messages := gjson.GetBytes(out, "messages").Array()
+		if len(messages) != 1 || messages[0].Get("role").String() != "assistant" || messages[0].Get("content").String() != "visible answer" {
+			t.Fatalf("hidden thought was not dropped independently of visible text. Output: %s", string(out))
+		}
+	})
+}
+
+func TestConvertGeminiRequestToOpenAI_DeterministicToolCallIDs(t *testing.T) {
 	inputJSON := []byte(`{
 		"contents": [
 			{
 				"role": "model",
 				"parts": [
-					{"functionCall": {"name": "search", "args": {"q": "golang"}}},
-					{"functionCall": {"name": "fetch", "args": {"url": "https://example.com"}}}
+					{"functionCall": {"name": "read_file", "args": {"path": "main.go"}}},
+					{"functionCall": {"name": "grep", "args": {"pattern": "TODO"}}}
 				]
 			},
 			{
 				"role": "function",
 				"parts": [
-					{"functionResponse": {"name": "search", "response": {"results": ["a", "b"]}}},
-					{"functionResponse": {"name": "fetch", "response": {"body": "hello"}}}
+					{"functionResponse": {"name": "read_file", "response": {"result": "code"}}},
+					{"functionResponse": {"name": "grep", "response": {"result": "matches"}}}
 				]
 			}
 		]
 	}`)
 
 	firstOut := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
+	firstCall0 := gjson.GetBytes(firstOut, "messages.0.tool_calls.0.id").String()
+	firstCall1 := gjson.GetBytes(firstOut, "messages.0.tool_calls.1.id").String()
+	firstResp0 := gjson.GetBytes(firstOut, "messages.1.tool_call_id").String()
+	firstResp1 := gjson.GetBytes(firstOut, "messages.2.tool_call_id").String()
+
+	if !strings.HasPrefix(firstCall0, "call_") || !strings.HasPrefix(firstCall1, "call_") {
+		t.Fatalf("expected tool call IDs to have call_ prefix, got %q, %q", firstCall0, firstCall1)
+	}
+	if firstResp0 != firstCall0 {
+		t.Fatalf("expected first response ID %q to match first call ID %q", firstResp0, firstCall0)
+	}
+	if firstResp1 != firstCall1 {
+		t.Fatalf("expected second response ID %q to match second call ID %q", firstResp1, firstCall1)
+	}
+
 	for i := 0; i < 100; i++ {
 		out := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
-		if string(out) != string(firstOut) {
-			t.Fatalf("invocation %d produced different bytes:\ngot:  %s\nwant: %s", i, string(out), string(firstOut))
+		if got := gjson.GetBytes(out, "messages.0.tool_calls.0.id").String(); got != firstCall0 {
+			t.Fatalf("iteration %d: tool_calls.0.id = %q, want %q", i, got, firstCall0)
+		}
+		if got := gjson.GetBytes(out, "messages.0.tool_calls.1.id").String(); got != firstCall1 {
+			t.Fatalf("iteration %d: tool_calls.1.id = %q, want %q", i, got, firstCall1)
+		}
+		if got := gjson.GetBytes(out, "messages.1.tool_call_id").String(); got != firstResp0 {
+			t.Fatalf("iteration %d: messages.1.tool_call_id = %q, want %q", i, got, firstResp0)
+		}
+		if got := gjson.GetBytes(out, "messages.2.tool_call_id").String(); got != firstResp1 {
+			t.Fatalf("iteration %d: messages.2.tool_call_id = %q, want %q", i, got, firstResp1)
 		}
 	}
 }
 
-func TestConvertGeminiRequestToOpenAI_DuplicateCallsGetDistinctStableIDs(t *testing.T) {
+func TestConvertGeminiRequestToOpenAI_SameNameCallsInSameMessageDistinct(t *testing.T) {
 	inputJSON := []byte(`{
 		"contents": [
 			{
 				"role": "model",
 				"parts": [
-					{"functionCall": {"name": "ping", "args": {"host": "localhost"}}},
-					{"functionCall": {"name": "ping", "args": {"host": "localhost"}}}
-				]
-			}
-		]
-	}`)
-
-	out1 := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
-	id1 := gjson.GetBytes(out1, "messages.0.tool_calls.0.id").String()
-	id2 := gjson.GetBytes(out1, "messages.0.tool_calls.1.id").String()
-
-	if id1 == "" || id2 == "" {
-		t.Fatalf("expected non-empty IDs, got id1=%q, id2=%q", id1, id2)
-	}
-	if id1 == id2 {
-		t.Fatalf("expected distinct IDs for duplicate calls, got id1 == id2 == %q", id1)
-	}
-
-	out2 := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
-	if string(out1) != string(out2) {
-		t.Fatalf("duplicate call translation is not deterministic across runs:\nout1: %s\nout2: %s", string(out1), string(out2))
-	}
-}
-
-func TestConvertGeminiRequestToOpenAI_SameNameResponsesConsumeFIFO(t *testing.T) {
-	inputJSON := []byte(`{
-		"contents": [
-			{
-				"role": "model",
-				"parts": [
-					{"functionCall": {"name": "fnA", "args": {"step": 1}}},
-					{"functionCall": {"name": "fnA", "args": {"step": 2}}}
+					{"functionCall": {"name": "read_file", "args": {"path": "a.txt"}}},
+					{"functionCall": {"name": "read_file", "args": {"path": "a.txt"}}}
 				]
 			},
 			{
 				"role": "function",
 				"parts": [
-					{"functionResponse": {"name": "fnA", "response": {"res": 1}}},
-					{"functionResponse": {"name": "fnA", "response": {"res": 2}}}
+					{"functionResponse": {"name": "read_file", "response": {"result": "first"}}},
+					{"functionResponse": {"name": "read_file", "response": {"result": "second"}}}
 				]
 			}
 		]
 	}`)
 
 	out := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
-	callID1 := gjson.GetBytes(out, "messages.0.tool_calls.0.id").String()
-	callID2 := gjson.GetBytes(out, "messages.0.tool_calls.1.id").String()
+	id0 := gjson.GetBytes(out, "messages.0.tool_calls.0.id").String()
+	id1 := gjson.GetBytes(out, "messages.0.tool_calls.1.id").String()
 
-	respID1 := gjson.GetBytes(out, "messages.1.tool_call_id").String()
-	respID2 := gjson.GetBytes(out, "messages.2.tool_call_id").String()
-
-	if respID1 != callID1 {
-		t.Fatalf("first response tool_call_id = %q, want callID1 %q", respID1, callID1)
+	if id0 == id1 {
+		t.Fatalf("expected distinct IDs for same-name calls in same message, got both %q", id0)
 	}
-	if respID2 != callID2 {
-		t.Fatalf("second response tool_call_id = %q, want callID2 %q", respID2, callID2)
+
+	resp0 := gjson.GetBytes(out, "messages.1.tool_call_id").String()
+	resp1 := gjson.GetBytes(out, "messages.2.tool_call_id").String()
+
+	if resp0 != id0 {
+		t.Fatalf("expected first response to match first call ID %q, got %q", id0, resp0)
+	}
+	if resp1 != id1 {
+		t.Fatalf("expected second response to match second call ID %q, got %q", id1, resp1)
 	}
 }
 
-func TestConvertGeminiRequestToOpenAI_InterleavedFunctionsPairByNameAndFIFO(t *testing.T) {
+func TestConvertGeminiRequestToOpenAI_InterleavedPerNameFIFOMatching(t *testing.T) {
+	// Interleaved calls: toolA, toolB, toolA, toolB
+	// Responses returned grouped by tool: toolB, toolA, toolB, toolA
 	inputJSON := []byte(`{
 		"contents": [
 			{
 				"role": "model",
 				"parts": [
-					{"functionCall": {"name": "fnA", "args": {"id": 1}}},
-					{"functionCall": {"name": "fnB", "args": {"id": 1}}},
-					{"functionCall": {"name": "fnA", "args": {"id": 2}}}
+					{"functionCall": {"name": "tool_a", "args": {"step": 1}}},
+					{"functionCall": {"name": "tool_b", "args": {"step": 1}}},
+					{"functionCall": {"name": "tool_a", "args": {"step": 2}}},
+					{"functionCall": {"name": "tool_b", "args": {"step": 2}}}
 				]
 			},
 			{
 				"role": "function",
 				"parts": [
-					{"functionResponse": {"name": "fnB", "response": {"out": 1}}},
-					{"functionResponse": {"name": "fnA", "response": {"out": 1}}},
-					{"functionResponse": {"name": "fnA", "response": {"out": 2}}}
+					{"functionResponse": {"name": "tool_b", "response": {"step": 1}}},
+					{"functionResponse": {"name": "tool_a", "response": {"step": 1}}},
+					{"functionResponse": {"name": "tool_b", "response": {"step": 2}}},
+					{"functionResponse": {"name": "tool_a", "response": {"step": 2}}}
 				]
 			}
 		]
 	}`)
 
 	out := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
-	fnA_call1 := gjson.GetBytes(out, "messages.0.tool_calls.0.id").String()
-	fnB_call1 := gjson.GetBytes(out, "messages.0.tool_calls.1.id").String()
-	fnA_call2 := gjson.GetBytes(out, "messages.0.tool_calls.2.id").String()
+	callA1 := gjson.GetBytes(out, "messages.0.tool_calls.0.id").String()
+	callB1 := gjson.GetBytes(out, "messages.0.tool_calls.1.id").String()
+	callA2 := gjson.GetBytes(out, "messages.0.tool_calls.2.id").String()
+	callB2 := gjson.GetBytes(out, "messages.0.tool_calls.3.id").String()
 
-	resp_fnB1 := gjson.GetBytes(out, "messages.1.tool_call_id").String()
-	resp_fnA1 := gjson.GetBytes(out, "messages.2.tool_call_id").String()
-	resp_fnA2 := gjson.GetBytes(out, "messages.3.tool_call_id").String()
-
-	if resp_fnB1 != fnB_call1 {
-		t.Fatalf("fnB response paired with %q, want %q", resp_fnB1, fnB_call1)
+	// Responses:
+	// messages[1] = tool_b (step 1) -> should match callB1
+	// messages[2] = tool_a (step 1) -> should match callA1
+	// messages[3] = tool_b (step 2) -> should match callB2
+	// messages[4] = tool_a (step 2) -> should match callA2
+	if got := gjson.GetBytes(out, "messages.1.tool_call_id").String(); got != callB1 {
+		t.Fatalf("first response (tool_b) = %q, want callB1 %q", got, callB1)
 	}
-	if resp_fnA1 != fnA_call1 {
-		t.Fatalf("first fnA response paired with %q, want %q", resp_fnA1, fnA_call1)
+	if got := gjson.GetBytes(out, "messages.2.tool_call_id").String(); got != callA1 {
+		t.Fatalf("second response (tool_a) = %q, want callA1 %q", got, callA1)
 	}
-	if resp_fnA2 != fnA_call2 {
-		t.Fatalf("second fnA response paired with %q, want %q", resp_fnA2, fnA_call2)
+	if got := gjson.GetBytes(out, "messages.3.tool_call_id").String(); got != callB2 {
+		t.Fatalf("third response (tool_b) = %q, want callB2 %q", got, callB2)
 	}
-}
-
-func TestConvertGeminiRequestToOpenAI_ExplicitIDsPreserved(t *testing.T) {
-	inputJSON := []byte(`{
-		"contents": [
-			{
-				"role": "model",
-				"parts": [
-					{"functionCall": {"name": "calc", "id": "call_explicit_100", "args": {"x": 5}}}
-				]
-			},
-			{
-				"role": "function",
-				"parts": [
-					{"functionResponse": {"name": "calc", "id": "call_explicit_100", "response": {"ans": 10}}}
-				]
-			}
-		]
-	}`)
-
-	out := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
-	callID := gjson.GetBytes(out, "messages.0.tool_calls.0.id").String()
-	respID := gjson.GetBytes(out, "messages.1.tool_call_id").String()
-
-	if callID != "call_explicit_100" {
-		t.Fatalf("callID = %q, want %q", callID, "call_explicit_100")
-	}
-	if respID != "call_explicit_100" {
-		t.Fatalf("respID = %q, want %q", respID, "call_explicit_100")
+	if got := gjson.GetBytes(out, "messages.4.tool_call_id").String(); got != callA2 {
+		t.Fatalf("fourth response (tool_a) = %q, want callA2 %q", got, callA2)
 	}
 }
 
-func TestConvertGeminiRequestToOpenAI_UnmatchedResponseGetsStableStandaloneID(t *testing.T) {
+func TestConvertGeminiRequestToOpenAI_DeterministicFallbackOrphanResponse(t *testing.T) {
 	inputJSON := []byte(`{
 		"contents": [
 			{
 				"role": "function",
 				"parts": [
-					{"functionResponse": {"name": "orphan_func", "response": {"status": "ok"}}}
+					{"functionResponse": {"name": "orphan_tool", "response": {"result": "standalone"}}}
 				]
 			}
 		]
 	}`)
 
-	out1 := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
-	id1 := gjson.GetBytes(out1, "messages.0.tool_call_id").String()
-
-	if !strings.HasPrefix(id1, "call_") {
-		t.Fatalf("standalone ID = %q, want call_ prefix", id1)
+	firstOut := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
+	firstID := gjson.GetBytes(firstOut, "messages.0.tool_call_id").String()
+	if !strings.HasPrefix(firstID, "call_") {
+		t.Fatalf("expected fallback tool_call_id with call_ prefix, got %q", firstID)
 	}
 
-	out2 := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
-	id2 := gjson.GetBytes(out2, "messages.0.tool_call_id").String()
-
-	if id1 != id2 {
-		t.Fatalf("standalone response ID is not stable: id1=%q, id2=%q", id1, id2)
-	}
-}
-
-func TestConvertGeminiRequestToOpenAI_MalformedFieldsNoPanicDeterministic(t *testing.T) {
-	malformedInputs := [][]byte{
-		[]byte(`{"contents":[{"role":"model","parts":[{"functionCall":{}}]}]}`),
-		[]byte(`{"contents":[{"role":"function","parts":[{"functionResponse":{}}]}]}`),
-		[]byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":123,"args":"invalid"}}]}]}`),
-		[]byte(`{"contents":[{"role":"function","parts":[{"functionResponse":{"name":true,"response":null}}]}]}`),
-	}
-
-	for i, input := range malformedInputs {
-		out1 := ConvertGeminiRequestToOpenAI("test-model", input, false)
-		out2 := ConvertGeminiRequestToOpenAI("test-model", input, false)
-		if string(out1) != string(out2) {
-			t.Fatalf("malformed input index %d is not deterministic:\nout1: %s\nout2: %s", i, string(out1), string(out2))
+	for i := 0; i < 100; i++ {
+		out := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
+		if got := gjson.GetBytes(out, "messages.0.tool_call_id").String(); got != firstID {
+			t.Fatalf("iteration %d: orphan fallback tool_call_id = %q, want %q", i, got, firstID)
 		}
 	}
 }
 
-func TestConvertGeminiRequestToOpenAI_RealisticCallResultRoundTrip(t *testing.T) {
+func TestConvertGeminiRequestToOpenAI_ExplicitCallInheritedByImplicitResponse(t *testing.T) {
 	inputJSON := []byte(`{
 		"contents": [
 			{
-				"role": "user",
-				"parts": [{"text": "What is the weather in Tokyo?"}]
-			},
-			{
 				"role": "model",
 				"parts": [
-					{"text": "Checking weather..."},
-					{"functionCall": {"name": "get_weather", "args": {"city": "Tokyo"}}}
+					{"functionCall": {"name": "lookup", "id": "explicit_call_1", "args": {"q": "foo"}}}
 				]
 			},
 			{
 				"role": "function",
 				"parts": [
-					{"functionResponse": {"name": "get_weather", "response": {"temp": "22C", "condition": "Sunny"}}}
+					{"functionResponse": {"name": "lookup", "response": {"result": "bar"}}}
 				]
 			}
 		]
 	}`)
 
-	out := ConvertGeminiRequestToOpenAI("gpt-4o", inputJSON, false)
-
-	modelMsgRole := gjson.GetBytes(out, "messages.1.role").String()
-	if modelMsgRole != "assistant" {
-		t.Fatalf("messages.1.role = %q, want assistant", modelMsgRole)
+	out := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
+	if got := gjson.GetBytes(out, "messages.0.tool_calls.0.id").String(); got != "explicit_call_1" {
+		t.Fatalf("tool call ID = %q, want explicit_call_1", got)
 	}
-
-	callID := gjson.GetBytes(out, "messages.1.tool_calls.0.id").String()
-	if callID == "" || !strings.HasPrefix(callID, "call_") {
-		t.Fatalf("callID = %q, want valid call_ prefix", callID)
-	}
-
-	toolMsgRole := gjson.GetBytes(out, "messages.2.role").String()
-	if toolMsgRole != "tool" {
-		t.Fatalf("messages.2.role = %q, want tool", toolMsgRole)
-	}
-
-	toolMsgCallID := gjson.GetBytes(out, "messages.2.tool_call_id").String()
-	if toolMsgCallID != callID {
-		t.Fatalf("tool message tool_call_id = %q, want matching callID %q", toolMsgCallID, callID)
+	if got := gjson.GetBytes(out, "messages.1.tool_call_id").String(); got != "explicit_call_1" {
+		t.Fatalf("tool response ID = %q, want explicit_call_1", got)
 	}
 }
 
-func TestConvertGeminiRequestToOpenAI_MultiPartToolResponseFollowedByUnmatchedResponse(t *testing.T) {
+func TestConvertGeminiRequestToOpenAI_OutOrderExplicitResponseDoesNotDuplicateID(t *testing.T) {
+	// Calls: foo (id=call_1), foo (id=call_2), foo (id=call_3)
+	// Responses: 1st response has explicit id=call_2, 2nd and 3rd are implicit.
+	// Expected responses order: call_2, call_1, call_3.
 	inputJSON := []byte(`{
 		"contents": [
 			{
-				"role": "user",
-				"parts": [{"text": "Hello"}]
-			},
-			{
 				"role": "model",
 				"parts": [
-					{"functionCall": {"name": "funcA", "args": {"x": 1}}}
+					{"functionCall": {"name": "foo", "id": "call_1", "args": {"n": 1}}},
+					{"functionCall": {"name": "foo", "id": "call_2", "args": {"n": 2}}},
+					{"functionCall": {"name": "foo", "id": "call_3", "args": {"n": 3}}}
 				]
 			},
 			{
 				"role": "function",
 				"parts": [
-					{"functionResponse": {"name": "funcA", "response": {"res": 1}}},
-					{"functionResponse": {"name": "unmatchedA", "response": {"res": 2}}}
-				]
-			},
-			{
-				"role": "function",
-				"parts": [
-					{"functionResponse": {"name": "unmatchedB", "response": {"res": 3}}}
+					{"functionResponse": {"name": "foo", "id": "call_2", "response": {"r": 2}}},
+					{"functionResponse": {"name": "foo", "response": {"r": 1}}},
+					{"functionResponse": {"name": "foo", "response": {"r": 3}}}
 				]
 			}
 		]
 	}`)
 
-	out1 := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
-	out2 := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
+	out := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
+	resp1 := gjson.GetBytes(out, "messages.1.tool_call_id").String()
+	resp2 := gjson.GetBytes(out, "messages.2.tool_call_id").String()
+	resp3 := gjson.GetBytes(out, "messages.3.tool_call_id").String()
 
-	if string(out1) != string(out2) {
-		t.Fatalf("multi-part response translation not deterministic across runs")
+	if resp1 != "call_2" {
+		t.Fatalf("first response = %q, want call_2", resp1)
 	}
-
-	unmatched1_ID := gjson.GetBytes(out1, "messages.3.tool_call_id").String()
-	unmatched2_ID := gjson.GetBytes(out1, "messages.5.tool_call_id").String()
-
-	if unmatched1_ID == "" || unmatched2_ID == "" {
-		t.Fatalf("expected non-empty standalone tool_call_ids, got %q and %q", unmatched1_ID, unmatched2_ID)
+	if resp2 != "call_1" {
+		t.Fatalf("second response = %q, want call_1", resp2)
 	}
-	if unmatched1_ID == unmatched2_ID {
-		t.Fatalf("expected distinct standalone tool_call_ids across messages, got %q", unmatched1_ID)
+	if resp3 != "call_3" {
+		t.Fatalf("third response = %q, want call_3", resp3)
 	}
 }

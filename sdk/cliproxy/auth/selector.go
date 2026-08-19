@@ -592,7 +592,6 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 			if matched {
 				return blocked, blockedReason, nextRetry
 			}
-			// Auth-level availability can aggregate failures from other models.
 			return false, blockReasonNone, time.Time{}
 		}
 		return availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
@@ -706,10 +705,11 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return nil, err
 	}
 
-	cacheKey := provider + "::" + primaryID + "::" + model
+	modelKey := canonicalModelKey(model)
+	cacheKey := provider + "::" + primaryID + "::" + modelKey
 	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey = provider + "::" + fallbackID + "::" + model
+		fallbackKey = provider + "::" + fallbackID + "::" + modelKey
 	}
 	available = s.excludeSessionQuarantine(cacheKey, fallbackKey, available)
 	fallbackAuths := highestPriorityAuths(available)
@@ -903,10 +903,12 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		ns = raw
 	}
 	// Use the affinity model namespace (the normalized Pick-time model) when present;
-	// fall back to the rewritten result model for metadata-absent callers.
-	nsModel := res.Model
+	// fall back to the rewritten result model for metadata-absent callers. Both are
+	// canonicalized the same way Pick builds its cache key, so thinking-suffix
+	// variants of the same model release the same binding they selected.
+	nsModel := canonicalModelKey(res.Model)
 	if raw, ok := res.Options.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey].(string); ok && raw != "" {
-		nsModel = raw
+		nsModel = canonicalModelKey(raw)
 	}
 
 	cacheKey := ns + "::" + primaryID + "::" + nsModel
@@ -918,7 +920,9 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	if res.Success {
 		if fallbackKey != "" {
 			s.cache.SetAliases(res.AuthID, cacheKey, fallbackKey)
-		} else {
+		} else if current, ok := s.cache.Get(cacheKey); !ok || current == res.AuthID {
+			// Create or refresh in place; a delayed success from a stale auth
+			// must not steal back a binding that already rebound to another.
 			s.cache.Set(cacheKey, res.AuthID)
 		}
 		return

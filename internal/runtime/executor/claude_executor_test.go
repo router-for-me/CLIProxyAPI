@@ -109,7 +109,7 @@ func TestApplyClaudeHeaders_FastModeBetaIsConditional(t *testing.T) {
 		},
 	}
 
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-fast-mode-beta"}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-fast-mode-beta", "cloak_mode": "always"}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			extraBetas, body := extractAndRemoveBetas([]byte(tt.body))
@@ -194,6 +194,7 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 		ID: "auth-baseline",
 		Attributes: map[string]string{
 			"api_key":                            "key-baseline",
+			"cloak_mode":                         "always",
 			"header:User-Agent":                  "evil-client/9.9",
 			"header:X-Stainless-Os":              "Linux",
 			"header:X-Stainless-Arch":            "x64",
@@ -234,7 +235,8 @@ func TestApplyClaudeHeaders_RejectsUnmeasuredClaudeCLIFingerprints(t *testing.T)
 	auth := &cliproxyauth.Auth{
 		ID: "auth-upgrade",
 		Attributes: map[string]string{
-			"api_key": "key-upgrade",
+			"api_key":    "key-upgrade",
+			"cloak_mode": "always",
 		},
 	}
 
@@ -348,7 +350,8 @@ func TestApplyClaudeHeaders_UpgradesCachedSoftwareFingerprintWhenBaselineAdvance
 	auth := &cliproxyauth.Auth{
 		ID: "auth-baseline-reload",
 		Attributes: map[string]string{
-			"api_key": "key-baseline-reload",
+			"api_key":    "key-baseline-reload",
+			"cloak_mode": "always",
 		},
 	}
 
@@ -390,7 +393,8 @@ func TestApplyClaudeHeaders_LearnsOfficialFingerprintAfterCustomBaselineFallback
 	auth := &cliproxyauth.Auth{
 		ID: "auth-custom-baseline-learning",
 		Attributes: map[string]string{
-			"api_key": "key-custom-baseline-learning",
+			"api_key":    "key-custom-baseline-learning",
+			"cloak_mode": "always",
 		},
 	}
 
@@ -548,7 +552,8 @@ func TestApplyClaudeHeaders_ThirdPartyBaselineThenOfficialUpgradeKeepsPinnedPlat
 	auth := &cliproxyauth.Auth{
 		ID: "auth-third-party-then-official",
 		Attributes: map[string]string{
-			"api_key": "key-third-party-then-official",
+			"api_key":    "key-third-party-then-official",
+			"cloak_mode": "always",
 		},
 	}
 
@@ -590,7 +595,8 @@ func TestApplyClaudeHeaders_DisableDeviceProfileStabilization(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		ID: "auth-disable-stability",
 		Attributes: map[string]string{
-			"api_key": "key-disable-stability",
+			"api_key":    "key-disable-stability",
+			"cloak_mode": "always",
 		},
 	}
 
@@ -674,7 +680,8 @@ func TestApplyClaudeHeaders_LegacyThirdPartyUsesStableConfiguredOSArch(t *testin
 	auth := &cliproxyauth.Auth{
 		ID: "auth-legacy-runtime-os-arch",
 		Attributes: map[string]string{
-			"api_key": "key-legacy-runtime-os-arch",
+			"api_key":    "key-legacy-runtime-os-arch",
+			"cloak_mode": "always",
 		},
 	}
 
@@ -701,7 +708,8 @@ func TestApplyClaudeHeaders_UnsetStabilizationUsesStableConfiguredOSArch(t *test
 	auth := &cliproxyauth.Auth{
 		ID: "auth-unset-runtime-os-arch",
 		Attributes: map[string]string{
-			"api_key": "key-unset-runtime-os-arch",
+			"api_key":    "key-unset-runtime-os-arch",
+			"cloak_mode": "always",
 		},
 	}
 
@@ -746,8 +754,9 @@ func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode220CLIFingerprint(t *testi
 
 	executor := NewClaudeExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":  "key-sdk-fingerprint",
-		"base_url": server.URL,
+		"api_key":    "key-sdk-fingerprint",
+		"base_url":   server.URL,
+		"cloak_mode": "always",
 	}}
 	payload := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":[{"type":"text","text":"x"}]}]}`)
 
@@ -780,15 +789,21 @@ func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode220CLIFingerprint(t *testi
 	if got := system[1].Get("cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("system[1].cache_control.type = %q, want ephemeral", got)
 	}
+	// This credential is an API key, and native only selects the 1h cache pool for
+	// OAuth. The body ttl therefore has to stay absent, matching the fact that
+	// claudeCodeCLIBetas does not emit extended-cache-ttl-2025-04-11 here either.
 	if system[1].Get("cache_control.ttl").Exists() {
-		t.Fatalf("system[1] unexpectedly has cache_control.ttl: %s", system[1].Raw)
+		t.Fatalf("API-key request must not carry a 1h body ttl: %s", system[1].Raw)
+	}
+	if betas := seenHeaders.Get("Anthropic-Beta"); strings.Contains(betas, claudeExtendedCacheTTLBeta) {
+		t.Fatalf("API-key request must not declare extended-cache-ttl: %s", betas)
 	}
 	content := gjson.GetBytes(seenBody, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "x")
+	assertEphemeralUserTextBlock(t, content[1], "x", "")
 
 	userID := gjson.GetBytes(seenBody, "metadata.user_id").String()
 	if !helps.IsValidUserID(userID) {
@@ -853,6 +868,77 @@ func TestClaudeExecutor_ConfirmedClaudeCodeRequestPreservesInteractiveIdentity(t
 	}
 	if got := seenHeaders.Get("Anthropic-Beta"); got != incoming.Get("Anthropic-Beta") {
 		t.Fatalf("Anthropic-Beta = %q, want preserved %q", got, incoming.Get("Anthropic-Beta"))
+	}
+}
+
+func TestClaudeExecutor_ConfirmedClaudeCodeWithoutCacheControlPreservesContent(t *testing.T) {
+	tests := []struct {
+		name   string
+		stream bool
+	}{
+		{name: "non-stream"},
+		{name: "stream", stream: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var seenBody []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seenBody, _ = io.ReadAll(r.Body)
+				if tt.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write([]byte("event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-opus-4-6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+			}))
+			defer server.Close()
+
+			const sessionID = "11111111-2222-4333-8444-555555555555"
+			const userID = `{"device_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","account_uuid":"","session_id":"11111111-2222-4333-8444-555555555555"}`
+			payload := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"x"}],"metadata":{"user_id":` + fmt.Sprintf("%q", userID) + `}}`)
+			incoming := http.Header{
+				"User-Agent":               {"claude-cli/2.1.220 (external, cli)"},
+				"X-App":                    {"cli"},
+				"Anthropic-Beta":           {"claude-code-20250219"},
+				"X-Claude-Code-Session-Id": {sessionID},
+			}
+			executor := NewClaudeExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"api_key":  "key-confirmed-markerless",
+				"base_url": server.URL,
+			}}
+			req := cliproxyexecutor.Request{Model: "claude-opus-4-6", Payload: payload}
+			opts := cliproxyexecutor.Options{
+				Stream:          tt.stream,
+				SourceFormat:    sdktranslator.FormatClaude,
+				OriginalRequest: payload,
+				Headers:         incoming,
+			}
+
+			if tt.stream {
+				result, errStream := executor.ExecuteStream(context.Background(), auth, req, opts)
+				if errStream != nil {
+					t.Fatalf("ExecuteStream() error = %v", errStream)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream chunk error = %v", chunk.Err)
+					}
+				}
+			} else if _, errExecute := executor.Execute(context.Background(), auth, req, opts); errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+
+			content := gjson.GetBytes(seenBody, "messages.0.content")
+			if content.Type != gjson.String || content.String() != "x" {
+				t.Fatalf("messages.0.content = %s, want native string content preserved; body=%s", content.Raw, seenBody)
+			}
+			if gjson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
+				t.Fatalf("confirmed markerless native request received synthetic cache_control: %s", seenBody)
+			}
+		})
 	}
 }
 
@@ -944,8 +1030,9 @@ func TestClaudeExecutor_CopiedVSCodeAgentSDKHeadersWithoutMetadataAreCloaked(t *
 	payload := []byte(`{"model":"claude-opus-5","system":"spoofed-system","messages":[{"role":"user","content":"x"}]}`)
 	executor := NewClaudeExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":  "key-spoofed-client",
-		"base_url": server.URL,
+		"api_key":    "key-spoofed-client",
+		"base_url":   server.URL,
+		"cloak_mode": "always",
 	}}
 	_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "claude-opus-5",
@@ -974,8 +1061,8 @@ func TestClaudeExecutor_CopiedVSCodeAgentSDKHeadersWithoutMetadataAreCloaked(t *
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "x")
-	assertClaudeMidConversationSystemMessage(t, seenBody, 1, "spoofed-system")
+	assertEphemeralUserTextBlock(t, content[1], "x", "")
+	assertClaudeMidConversationSystemMessage(t, seenBody, 1, "spoofed-system", "")
 }
 
 func TestClaudeExecutor_AgentSDKEntrypointWithStrongSignalsUsesCLICloak(t *testing.T) {
@@ -992,8 +1079,9 @@ func TestClaudeExecutor_AgentSDKEntrypointWithStrongSignalsUsesCLICloak(t *testi
 	payload := []byte(`{"model":"claude-opus-4-6","system":"agent-sdk-system","messages":[{"role":"user","content":"x"}],"metadata":{"user_id":"agent-sdk-user"}}`)
 	executor := NewClaudeExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":  "key-agent-sdk-client",
-		"base_url": server.URL,
+		"api_key":    "key-agent-sdk-client",
+		"base_url":   server.URL,
+		"cloak_mode": "always",
 	}}
 	_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "claude-opus-4-6",
@@ -2117,7 +2205,7 @@ func TestClaudeExecutor_LegacySystemReminderAcrossMessagesAndStream(t *testing.T
 		if len(body) == 0 {
 			t.Fatalf("missing %s upstream capture", kind)
 		}
-		assertClaudeLegacySystemReminderLayout(t, body, "legacy-system-prompt", wantUser)
+		assertClaudeLegacySystemReminderLayout(t, body, "legacy-system-prompt", wantUser, "1h")
 		if _, ok := claudeBillingCCHDigitsOffset(body); !ok {
 			t.Fatalf("%s body is missing final CCH", kind)
 		}
@@ -2600,7 +2688,7 @@ func TestClaudeExecutor_ReusesUserIDAcrossModelsWhenCacheEnabled(t *testing.T) {
 	t.Logf("✓ End-to-end test passed: Same user_id (%s) was used for both models", userIDs[0])
 }
 
-func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
+func TestClaudeExecutor_DefaultDoesNotInjectUserID(t *testing.T) {
 	var userIDs []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -2632,14 +2720,8 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 	if len(userIDs) != 2 {
 		t.Fatalf("expected 2 requests, got %d", len(userIDs))
 	}
-	if userIDs[0] == "" || userIDs[1] == "" {
-		t.Fatal("expected user_id to be populated")
-	}
-	if userIDs[0] == userIDs[1] {
-		t.Fatalf("expected user_id to change when caching is not enabled, got identical values %q", userIDs[0])
-	}
-	if !helps.IsValidUserID(userIDs[0]) || !helps.IsValidUserID(userIDs[1]) {
-		t.Fatalf("user_ids should be valid, got %q and %q", userIDs[0], userIDs[1])
+	if userIDs[0] != "" || userIDs[1] != "" {
+		t.Fatalf("default API-key requests must preserve caller metadata without injecting user_id, got %q and %q", userIDs[0], userIDs[1])
 	}
 }
 
@@ -3609,7 +3691,10 @@ func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity
 	}
 }
 
-func assertClaudeMidConversationSystemMessage(t *testing.T, body []byte, messageIndex int, wantText string) {
+// assertClaudeMidConversationSystemMessage checks a forwarded caller system prompt.
+// wantTTL is "" for the native default marker and "1h" once
+// upgradeClaudeCacheControlTTL has run, which only happens for OAuth credentials.
+func assertClaudeMidConversationSystemMessage(t *testing.T, body []byte, messageIndex int, wantText, wantTTL string) {
 	t.Helper()
 	messagePath := fmt.Sprintf("messages.%d", messageIndex)
 	if got := gjson.GetBytes(body, messagePath+".role").String(); got != "system" {
@@ -3625,12 +3710,12 @@ func assertClaudeMidConversationSystemMessage(t *testing.T, body []byte, message
 	if got := content[0].Get("cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("%s.content.0.cache_control.type = %q, want ephemeral", messagePath, got)
 	}
-	if content[0].Get("cache_control.ttl").Exists() {
-		t.Fatalf("%s.content.0 unexpectedly has cache_control.ttl", messagePath)
+	if got := content[0].Get("cache_control.ttl").String(); got != wantTTL {
+		t.Fatalf("%s.content.0.cache_control.ttl = %q, want %q: %s", messagePath, got, wantTTL, content[0].Raw)
 	}
 }
 
-func assertClaudeLegacySystemReminderLayout(t *testing.T, body []byte, wantSystem, wantUser string) {
+func assertClaudeLegacySystemReminderLayout(t *testing.T, body []byte, wantSystem, wantUser, wantTTL string) {
 	t.Helper()
 	if got := gjson.GetBytes(body, "system.#").Int(); got != 2 {
 		t.Fatalf("top-level system block count = %d, want billing and identity only", got)
@@ -3649,7 +3734,7 @@ func assertClaudeLegacySystemReminderLayout(t *testing.T, body []byte, wantSyste
 	if content[1].Get("cache_control").Exists() {
 		t.Fatalf("caller reminder unexpectedly has cache_control: %s", content[1].Raw)
 	}
-	assertEphemeralUserTextBlock(t, content[2], wantUser)
+	assertEphemeralUserTextBlock(t, content[2], wantUser, wantTTL)
 }
 
 func assertClaudeCodeCurrentDateBlock(t *testing.T, block gjson.Result) {
@@ -3670,7 +3755,10 @@ func assertClaudeCodeCurrentDateBlockAt(t *testing.T, block gjson.Result, now ti
 	}
 }
 
-func assertEphemeralUserTextBlock(t *testing.T, block gjson.Result, wantText string) {
+// assertEphemeralUserTextBlock checks the cloaked first-user block. wantTTL is ""
+// for the native default marker and "1h" once upgradeClaudeCacheControlTTL has run,
+// which only happens for OAuth credentials.
+func assertEphemeralUserTextBlock(t *testing.T, block gjson.Result, wantText, wantTTL string) {
 	t.Helper()
 	if got := block.Get("type").String(); got != "text" {
 		t.Fatalf("user block type = %q, want text", got)
@@ -3681,8 +3769,8 @@ func assertEphemeralUserTextBlock(t *testing.T, block gjson.Result, wantText str
 	if got := block.Get("cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("user block cache_control.type = %q, want ephemeral", got)
 	}
-	if block.Get("cache_control.ttl").Exists() {
-		t.Fatalf("user block must not contain cache_control.ttl: %s", block.Raw)
+	if got := block.Get("cache_control.ttl").String(); got != wantTTL {
+		t.Fatalf("user block cache_control.ttl = %q, want %q: %s", got, wantTTL, block.Raw)
 	}
 }
 
@@ -3756,7 +3844,7 @@ func TestInjectClaudeCodeCurrentDateIsIdempotentAndAlignsFirstUserCache(t *testi
 	if content[0].Get("cache_control").Exists() {
 		t.Fatalf("currentDate block must not contain cache_control: %s", content[0].Raw)
 	}
-	assertEphemeralUserTextBlock(t, content[1], "hello")
+	assertEphemeralUserTextBlock(t, content[1], "hello", "")
 }
 
 func TestInjectClaudeCodeCurrentDateMovesExistingCopyToFirstBlock(t *testing.T) {
@@ -3771,7 +3859,7 @@ func TestInjectClaudeCodeCurrentDateMovesExistingCopyToFirstBlock(t *testing.T) 
 		t.Fatalf("content has %d blocks, want one currentDate and user text: %s", len(content), out)
 	}
 	assertClaudeCodeCurrentDateBlockAt(t, content[0], fixed)
-	assertEphemeralUserTextBlock(t, content[1], "hello")
+	assertEphemeralUserTextBlock(t, content[1], "hello", "")
 }
 
 func TestInjectClaudeCodeCurrentDatePrecedesExistingReminder(t *testing.T) {
@@ -3790,7 +3878,61 @@ func TestInjectClaudeCodeCurrentDatePrecedesExistingReminder(t *testing.T) {
 	if got := content[1].Get("text").String(); got != reminder {
 		t.Fatalf("content[1].text = %q, want standalone reminder", got)
 	}
-	assertEphemeralUserTextBlock(t, content[2], "continue")
+	assertEphemeralUserTextBlock(t, content[2], "continue", "")
+}
+
+func TestInjectClaudeCodeCurrentDateFollowsLeadingToolResults(t *testing.T) {
+	fixed := time.Date(2026, time.August, 1, 9, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))
+	payload := []byte(`{"messages":[` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]},` +
+		`{"role":"user","content":[` +
+		`{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"},` +
+		`{"type":"text","text":"continue"}]}]}`)
+
+	first := injectClaudeCodeCurrentDate(payload, fixed)
+	second := injectClaudeCodeCurrentDate(first, fixed)
+	if !bytes.Equal(first, second) {
+		t.Fatalf("currentDate injection is not idempotent:\nfirst:  %s\nsecond: %s", first, second)
+	}
+
+	content := gjson.GetBytes(first, "messages.1.content").Array()
+	if len(content) != 3 {
+		t.Fatalf("content has %d blocks, want tool_result, currentDate, and user text: %s", len(content), first)
+	}
+	if got := content[0].Get("type").String(); got != "tool_result" {
+		t.Fatalf("content[0].type = %q, want tool_result to stay first: %s", got, first)
+	}
+	if got := content[0].Get("tool_use_id").String(); got != "toolu_1" {
+		t.Fatalf("content[0].tool_use_id = %q, want toolu_1", got)
+	}
+	assertClaudeCodeCurrentDateBlockAt(t, content[1], fixed)
+	assertEphemeralUserTextBlock(t, content[2], "continue", "")
+}
+
+func TestInjectClaudeCodeCurrentDateFollowsAllLeadingToolResults(t *testing.T) {
+	fixed := time.Date(2026, time.August, 1, 9, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))
+	payload := []byte(`{"messages":[` +
+		`{"role":"assistant","content":[` +
+		`{"type":"tool_use","id":"toolu_1","name":"Read","input":{}},` +
+		`{"type":"tool_use","id":"toolu_2","name":"Read","input":{}}]},` +
+		`{"role":"user","content":[` +
+		`{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"},` +
+		`{"type":"tool_result","tool_use_id":"toolu_2","content":"ok"}]}]}`)
+
+	out := injectClaudeCodeCurrentDate(payload, fixed)
+	content := gjson.GetBytes(out, "messages.1.content").Array()
+	if len(content) != 3 {
+		t.Fatalf("content has %d blocks, want two tool_results and currentDate: %s", len(content), out)
+	}
+	for idx, wantID := range []string{"toolu_1", "toolu_2"} {
+		if got := content[idx].Get("type").String(); got != "tool_result" {
+			t.Fatalf("content[%d].type = %q, want tool_result: %s", idx, got, out)
+		}
+		if got := content[idx].Get("tool_use_id").String(); got != wantID {
+			t.Fatalf("content[%d].tool_use_id = %q, want %q", idx, got, wantID)
+		}
+	}
+	assertClaudeCodeCurrentDateBlockAt(t, content[2], fixed)
 }
 
 // Test case 1: String system prompt becomes an authoritative mid-conversation
@@ -3818,15 +3960,15 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 		t.Fatalf("blocks[1] cache_control.type = %q, want ephemeral", got)
 	}
 	if blocks[1].Get("cache_control.ttl").Exists() {
-		t.Fatalf("blocks[1] should not set cache_control.ttl: %s", blocks[1].Raw)
+		t.Fatalf("blocks[1] cache_control must not carry a default ttl: %s", blocks[1].Raw)
 	}
 	content := gjson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text: %s", len(content), out)
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "You are a helpful assistant.")
+	assertEphemeralUserTextBlock(t, content[1], "hi", "")
+	assertClaudeMidConversationSystemMessage(t, out, 1, "You are a helpful assistant.", "")
 }
 
 func TestClaudeUsesLegacySystemReminder(t *testing.T) {
@@ -3864,8 +4006,8 @@ func TestCheckSystemInstructionsWithMode_FutureModelDefaultsToMidSystem(t *testi
 		t.Fatalf("user content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "future instructions")
+	assertEphemeralUserTextBlock(t, content[1], "hi", "")
+	assertClaudeMidConversationSystemMessage(t, out, 1, "future instructions", "")
 }
 
 func TestCheckSystemInstructionsWithMode_LegacyModelUsesSystemReminder(t *testing.T) {
@@ -3889,7 +4031,7 @@ func TestCheckSystemInstructionsWithMode_LegacyModelUsesSystemReminder(t *testin
 	if content[1].Get("cache_control").Exists() {
 		t.Fatalf("caller system reminder unexpectedly has cache_control: %s", content[1].Raw)
 	}
-	assertEphemeralUserTextBlock(t, content[2], "hi")
+	assertEphemeralUserTextBlock(t, content[2], "hi", "")
 }
 
 func TestCheckSystemInstructionsWithMode_LegacyModelKeepsSystemBlocksSeparate(t *testing.T) {
@@ -3913,7 +4055,7 @@ func TestCheckSystemInstructionsWithMode_LegacyModelKeepsSystemBlocksSeparate(t 
 			t.Fatalf("content[%d] caller reminder unexpectedly has cache_control: %s", idx+1, block.Raw)
 		}
 	}
-	assertEphemeralUserTextBlock(t, content[3], "hi")
+	assertEphemeralUserTextBlock(t, content[3], "hi", "")
 }
 
 // Test case 2: Strict mode keeps only the injected Claude Code system blocks.
@@ -3931,7 +4073,7 @@ func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
 		t.Fatalf("strict mode content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi")
+	assertEphemeralUserTextBlock(t, content[1], "hi", "")
 }
 
 // Test case 3: Empty string system prompt adds only currentDate before user text.
@@ -3949,7 +4091,7 @@ func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) 
 		t.Fatalf("empty system content has %d blocks, want 2", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi")
+	assertEphemeralUserTextBlock(t, content[1], "hi", "")
 }
 
 // Test case 4: Array system prompt becomes one mid-conversation system message.
@@ -3967,8 +4109,8 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "Be concise.")
+	assertEphemeralUserTextBlock(t, content[1], "hi", "")
+	assertClaudeMidConversationSystemMessage(t, out, 1, "Be concise.", "")
 }
 
 func TestCheckSystemInstructionsWithMode_ArraySystemKeepsBlocksAsSeparateMessages(t *testing.T) {
@@ -3986,9 +4128,9 @@ func TestCheckSystemInstructionsWithMode_ArraySystemKeepsBlocksAsSeparateMessage
 		t.Fatalf("user content has %d blocks, want currentDate and user text: %s", len(content), out)
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi")
-	assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance")
-	assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance")
+	assertEphemeralUserTextBlock(t, content[1], "hi", "")
+	assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance", "")
+	assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance", "")
 }
 
 func TestRelocateClaudeSystemPromptForCountTokensKeepsBlocksSeparate(t *testing.T) {
@@ -4031,8 +4173,8 @@ func TestRelocateClaudeSystemPromptForCountTokensKeepsBlocksSeparate(t *testing.
 			if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
 				t.Fatalf("message count = %d, want user and two system messages: %s", got, out)
 			}
-			assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance")
-			assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance")
+			assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance", "")
+			assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance", "")
 		})
 	}
 }
@@ -4052,8 +4194,8 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 		t.Fatalf("messages[0].content has %d blocks, want 2", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hi")
-	assertClaudeMidConversationSystemMessage(t, out, 1, wantSystem)
+	assertEphemeralUserTextBlock(t, content[1], "hi", "")
+	assertClaudeMidConversationSystemMessage(t, out, 1, wantSystem, "")
 }
 
 func TestCheckSystemInstructionsWithSigningMode_LongPromptIsExactAndIdempotent(t *testing.T) {
@@ -4087,8 +4229,8 @@ func TestCheckSystemInstructionsWithSigningMode_LongPromptIsExactAndIdempotent(t
 		t.Fatalf("user content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "hello")
-	assertClaudeMidConversationSystemMessage(t, first, 1, wantSystem)
+	assertEphemeralUserTextBlock(t, content[1], "hello", "")
+	assertClaudeMidConversationSystemMessage(t, first, 1, wantSystem, "")
 	if strings.Contains(content[0].Get("text").String(), "PI_SYSTEM_BEGIN") || strings.Contains(content[1].Get("text").String(), "PI_SYSTEM_BEGIN") {
 		t.Fatal("caller system prompt leaked into the user content blocks")
 	}
@@ -4109,7 +4251,7 @@ func TestCheckSystemInstructionsWithSigningMode_LongPromptIsExactAndIdempotent(t
 	}
 }
 
-func TestClaudeExecutor_CustomBaseURLOmitsCCHByDefault(t *testing.T) {
+func TestClaudeExecutor_CustomBaseURLPreservesBodyByDefault(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -4137,12 +4279,8 @@ func TestClaudeExecutor_CustomBaseURLOmitsCCHByDefault(t *testing.T) {
 		t.Fatal("expected request body to be captured")
 	}
 
-	billingHeader := gjson.GetBytes(seenBody, "system.0.text").String()
-	if !strings.HasPrefix(billingHeader, "x-anthropic-billing-header:") {
-		t.Fatalf("system.0.text = %q, want billing header", billingHeader)
-	}
-	if strings.Contains(billingHeader, "cch=") {
-		t.Fatalf("custom BaseURL must not include CCH, got %q", billingHeader)
+	if strings.Contains(string(seenBody), "x-anthropic-billing-header:") || strings.Contains(string(seenBody), "cch=") {
+		t.Fatalf("default custom BaseURL request must not inject billing/CCH: %s", seenBody)
 	}
 }
 
@@ -4180,13 +4318,11 @@ func TestClaudeExecutor_CustomBaseURLAPIKeyDoesNotEnableCCHSigning(t *testing.T)
 	if len(seenBody) == 0 {
 		t.Fatal("expected request body to be captured")
 	}
-	if got := gjson.GetBytes(seenBody, "messages.0.content.1.text").String(); got != messageText {
+	if got := gjson.GetBytes(seenBody, "messages.0.content.0.text").String(); got != messageText {
 		t.Fatalf("message text = %q, want %q", got, messageText)
 	}
-	assertClaudeCodeCurrentDateBlock(t, gjson.GetBytes(seenBody, "messages.0.content.0"))
-
-	if billing := gjson.GetBytes(seenBody, "system.0.text").String(); strings.Contains(billing, "cch=") {
-		t.Fatalf("custom BaseURL billing header must not contain CCH: %q", billing)
+	if strings.Contains(string(seenBody), "x-anthropic-billing-header:") {
+		t.Fatalf("default custom BaseURL request must not inject a billing header: %s", seenBody)
 	}
 }
 
@@ -4500,23 +4636,30 @@ func TestApplyCloaking_EmptyCredentialModeRespectsDefaultAndGlobalPrecedence(t *
 	tests := []struct {
 		name        string
 		cfg         *config.Config
+		auth        *cliproxyauth.Auth
 		wantCloaked bool
 	}{
 		{
-			name:        "default auto mode applies cloaking",
+			name:        "default mode preserves the caller without cloaking (v7.2.136 upstream sync)",
 			cfg:         &config.Config{},
-			wantCloaked: true,
+			wantCloaked: false,
 		},
 		{
 			name:        "global disable mode overrides an empty credential mode",
 			cfg:         &config.Config{DisableClaudeCloakMode: true},
 			wantCloaked: false,
 		},
+		{
+			name:        "credential auto mode still applies cloaking",
+			cfg:         &config.Config{},
+			auth:        &cliproxyauth.Auth{Attributes: map[string]string{"cloak_mode": "auto"}},
+			wantCloaked: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, gotCloaked, errCloaking := applyCloaking(context.Background(), tt.cfg, &cliproxyauth.Auth{}, payload, "test-key", false, false)
+			got, gotCloaked, errCloaking := applyCloaking(context.Background(), tt.cfg, tt.auth, payload, "test-key", false, false)
 			if errCloaking != nil {
 				t.Fatalf("applyCloaking() error = %v", errCloaking)
 			}
@@ -4532,7 +4675,7 @@ func TestApplyCloaking_EmptyCredentialModeRespectsDefaultAndGlobalPrecedence(t *
 
 func TestNormalizeClaudeSamplingForUpstream_RemovesTemperature(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`)
-	out := normalizeClaudeSamplingForUpstream(payload)
+	out := normalizeClaudeSamplingForUpstream(payload, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -4541,7 +4684,7 @@ func TestNormalizeClaudeSamplingForUpstream_RemovesTemperature(t *testing.T) {
 
 func TestNormalizeClaudeSamplingForUpstream_RemovesTemperatureWithThinkingEnabled(t *testing.T) {
 	payload := []byte(`{"temperature":0.2,"thinking":{"type":"enabled","budget_tokens":2048}}`)
-	out := normalizeClaudeSamplingForUpstream(payload)
+	out := normalizeClaudeSamplingForUpstream(payload, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -4550,7 +4693,7 @@ func TestNormalizeClaudeSamplingForUpstream_RemovesTemperatureWithThinkingEnable
 
 func TestNormalizeClaudeSamplingForUpstream_RemovesTopPAndTopKForThinking(t *testing.T) {
 	payload := []byte(`{"temperature":0.2,"top_p":0.9,"top_k":40,"thinking":{"type":"adaptive"}}`)
-	out := normalizeClaudeSamplingForUpstream(payload)
+	out := normalizeClaudeSamplingForUpstream(payload, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -4565,7 +4708,7 @@ func TestNormalizeClaudeSamplingForUpstream_RemovesTopPAndTopKForThinking(t *tes
 
 func TestNormalizeClaudeSamplingForUpstream_NoThinkingRemovesTemperatureAndTopP(t *testing.T) {
 	payload := []byte(`{"temperature":0,"top_p":0.9,"top_k":40,"messages":[{"role":"user","content":"hi"}]}`)
-	out := normalizeClaudeSamplingForUpstream(payload)
+	out := normalizeClaudeSamplingForUpstream(payload, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -4581,13 +4724,109 @@ func TestNormalizeClaudeSamplingForUpstream_NoThinkingRemovesTemperatureAndTopP(
 func TestNormalizeClaudeSamplingForUpstream_AfterForcedToolChoiceRemovesTemperature(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"tool_choice":{"type":"any"}}`)
 	out := disableThinkingIfToolChoiceForced(payload)
-	out = normalizeClaudeSamplingForUpstream(out)
+	out = normalizeClaudeSamplingForUpstream(out, false)
 
 	if gjson.GetBytes(out, "thinking").Exists() {
 		t.Fatalf("thinking should be removed when tool_choice forces tool use")
 	}
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
+	}
+}
+
+// The measured structured Haiku helper sends "temperature":1, and
+// claudeCodeHelperShapeStructured keys on exactly that value. Stripping it would
+// make CPA emit a shape no native client produces, so a confirmed native caller
+// must keep it.
+func TestNormalizeClaudeSamplingForUpstreamNativeKeepsMeasuredHelperTemperature(t *testing.T) {
+	// Top-level key order and values mirror the measured structured helper.
+	payload := []byte(`{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":[{"type":"text","text":"helper probe"}]}],"system":[{"type":"text","text":"Return a short title."}],"tools":[],"metadata":{"user_id":"u"},"max_tokens":32000,"thinking":{"type":"disabled"},"temperature":1,"output_config":{"format":{"type":"json_schema"}},"stream":true}`)
+	if got := gjson.GetBytes(payload, "temperature"); !got.Exists() || got.Num != 1 {
+		t.Fatalf("measured helper fixture should carry temperature=1, got %q", got.Raw)
+	}
+
+	out := normalizeClaudeSamplingForUpstream(payload, true)
+
+	if got := gjson.GetBytes(out, "temperature"); !got.Exists() || got.Num != 1 {
+		t.Fatalf("confirmed native must preserve the measured temperature, got %q", got.Raw)
+	}
+}
+
+// Anthropic's real constraints, verified against the live API: with thinking
+// active temperature must be 1, top_p must be >= 0.95 and top_k must be unset;
+// otherwise temperature and top_p cannot both be specified. Preserving the
+// native wire must never forward a combination that would 400.
+func TestNormalizeClaudeSamplingForUpstreamNativeDropsOnlyRejectedCombinations(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		keep    map[string]float64
+		dropped []string
+	}{
+		{
+			name:    "thinking off keeps every accepted knob",
+			payload: `{"temperature":0.5,"top_k":40}`,
+			keep:    map[string]float64{"temperature": 0.5, "top_k": 40},
+		},
+		{
+			name:    "thinking off drops top_p when temperature is also set",
+			payload: `{"temperature":0.5,"top_p":0.9}`,
+			keep:    map[string]float64{"temperature": 0.5},
+			dropped: []string{"top_p"},
+		},
+		{
+			name:    "thinking off keeps a lone top_p",
+			payload: `{"top_p":0.9}`,
+			keep:    map[string]float64{"top_p": 0.9},
+		},
+		{
+			name:    "thinking disabled is not thinking",
+			payload: `{"temperature":1,"thinking":{"type":"disabled"}}`,
+			keep:    map[string]float64{"temperature": 1},
+		},
+		{
+			name:    "thinking enabled keeps temperature 1",
+			payload: `{"temperature":1,"thinking":{"type":"enabled","budget_tokens":1024}}`,
+			keep:    map[string]float64{"temperature": 1},
+		},
+		{
+			name:    "thinking enabled drops temperature that is not 1",
+			payload: `{"temperature":0.5,"thinking":{"type":"enabled","budget_tokens":1024}}`,
+			dropped: []string{"temperature"},
+		},
+		{
+			name:    "thinking enabled keeps top_p at or above 0.95",
+			payload: `{"top_p":0.99,"thinking":{"type":"enabled","budget_tokens":1024}}`,
+			keep:    map[string]float64{"top_p": 0.99},
+		},
+		{
+			name:    "thinking enabled drops top_p below 0.95",
+			payload: `{"top_p":0.9,"thinking":{"type":"enabled","budget_tokens":1024}}`,
+			dropped: []string{"top_p"},
+		},
+		{
+			name:    "thinking enabled always drops top_k",
+			payload: `{"top_k":40,"thinking":{"type":"enabled","budget_tokens":1024}}`,
+			dropped: []string{"top_k"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := normalizeClaudeSamplingForUpstream([]byte(tc.payload), true)
+
+			for field, want := range tc.keep {
+				got := gjson.GetBytes(out, field)
+				if !got.Exists() || got.Num != want {
+					t.Fatalf("%s = %q, want %v preserved", field, got.Raw, want)
+				}
+			}
+			for _, field := range tc.dropped {
+				if got := gjson.GetBytes(out, field); got.Exists() {
+					t.Fatalf("%s = %q, want dropped because Anthropic rejects it", field, got.Raw)
+				}
+			}
+		})
 	}
 }
 
@@ -5085,8 +5324,8 @@ func TestClaudeExecutor_ExecuteOAuthCustomToolMCPAliasRoundTrip(t *testing.T) {
 		t.Fatalf("Messages first user content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "search")
-	assertClaudeMidConversationSystemMessage(t, upstreamBody, 1, "messages-system-prompt")
+	assertEphemeralUserTextBlock(t, content[1], "search", "1h")
+	assertClaudeMidConversationSystemMessage(t, upstreamBody, 1, "messages-system-prompt", "1h")
 }
 
 func TestClaudeExecutor_ExecuteStreamOAuthCustomToolMCPAliasRoundTrip(t *testing.T) {
@@ -5162,8 +5401,8 @@ func TestClaudeExecutor_ExecuteStreamOAuthCustomToolMCPAliasRoundTrip(t *testing
 		t.Fatalf("streaming first user content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	assertEphemeralUserTextBlock(t, content[1], "fetch")
-	assertClaudeMidConversationSystemMessage(t, upstreamBody, 1, "stream-system-prompt")
+	assertEphemeralUserTextBlock(t, content[1], "fetch", "1h")
+	assertClaudeMidConversationSystemMessage(t, upstreamBody, 1, "stream-system-prompt", "1h")
 	assertClaudeCredentialIdentity(t, upstreamBody, upstreamHeaders, deviceIDs, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 	if !strings.Contains(downstream.String(), `"name":"fetch_url"`) {
 		t.Fatalf("downstream stream did not restore fetch_url: %s", downstream.String())
@@ -5219,7 +5458,7 @@ func TestInsertClaudeMidConversationSystemMessages_FollowsToolResultUserTurn(t *
 	if got := blocks.Get("0.tool_use_id").String(); got != "toolu_1" {
 		t.Fatalf("tool_use_id = %q, want toolu_1: %s", got, out)
 	}
-	assertClaudeMidConversationSystemMessage(t, out, 2, "guidance")
+	assertClaudeMidConversationSystemMessage(t, out, 2, "guidance", "")
 }
 
 func TestInsertClaudeMidConversationSystemMessages_PrecedesExistingAssistantTurn(t *testing.T) {
@@ -5240,7 +5479,7 @@ func TestInsertClaudeMidConversationSystemMessages_PrecedesExistingAssistantTurn
 			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
 		}
 	}
-	assertClaudeMidConversationSystemMessage(t, out, 1, "guidance")
+	assertClaudeMidConversationSystemMessage(t, out, 1, "guidance", "")
 }
 
 func TestInsertClaudeMidConversationSystemMessages_FollowsConsecutiveUserRun(t *testing.T) {
@@ -5261,7 +5500,7 @@ func TestInsertClaudeMidConversationSystemMessages_FollowsConsecutiveUserRun(t *
 			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
 		}
 	}
-	assertClaudeMidConversationSystemMessage(t, out, 2, "guidance")
+	assertClaudeMidConversationSystemMessage(t, out, 2, "guidance", "")
 }
 
 func TestInsertClaudeMidConversationSystemMessages_IsIdempotent(t *testing.T) {
@@ -5275,8 +5514,8 @@ func TestInsertClaudeMidConversationSystemMessages_IsIdempotent(t *testing.T) {
 	if got := gjson.GetBytes(first, "messages.#").Int(); got != 3 {
 		t.Fatalf("message count = %d, want user and two system messages: %s", got, first)
 	}
-	assertClaudeMidConversationSystemMessage(t, first, 1, texts[0])
-	assertClaudeMidConversationSystemMessage(t, first, 2, texts[1])
+	assertClaudeMidConversationSystemMessage(t, first, 1, texts[0], "")
+	assertClaudeMidConversationSystemMessage(t, first, 2, texts[1], "")
 }
 
 // TestClaudeCodeCLIBetas_MatchesObservedClientMatrix pins the Anthropic-Beta
@@ -5484,21 +5723,18 @@ func TestApplyClaudeHeaders_StreamTransportNegotiation(t *testing.T) {
 	}
 }
 
-func TestApplyClaudeHeaders_CallerBetasScopedByUpstream(t *testing.T) {
+func TestApplyClaudeHeaders_DefaultPreservesCallerBetas(t *testing.T) {
 	incoming := http.Header{"Anthropic-Beta": []string{"caller-only-beta"}}
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-caller-betas"}}
 	body := []byte(`{"model":"claude-opus-4-6"}`)
 
-	// Direct Anthropic must not echo a beta real Claude Code never sends.
+	// Default API-key mode preserves caller betas on direct Anthropic.
 	directReq := newClaudeHeaderTestRequest(t, incoming)
 	if errApply := applyClaudeHeaders(directReq, auth, "key-caller-betas", false, nil, body, nil, incoming, false); errApply != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", errApply)
 	}
-	if got := directReq.Header.Get("Anthropic-Beta"); strings.Contains(got, "caller-only-beta") {
-		t.Fatalf("Anthropic-Beta = %q, want caller beta dropped on api.anthropic.com", got)
-	}
-	if got, want := directReq.Header.Get("Anthropic-Beta"), claudeCodeCLIBetas(body, nil, false); got != want {
-		t.Fatalf("Anthropic-Beta = %q, want exactly the CLI baseline %q", got, want)
+	if got := directReq.Header.Get("Anthropic-Beta"); got != "caller-only-beta" {
+		t.Fatalf("Anthropic-Beta = %q, want caller beta on api.anthropic.com", got)
 	}
 
 	// Other Anthropic-compatible upstreams keep caller betas functional.
@@ -5521,7 +5757,6 @@ func TestInjectClaudeCodeContextManagement(t *testing.T) {
 		name    string
 		payload string
 	}{
-		{name: "omitted thinking", payload: `{"model":"claude-opus-4-6"}`},
 		{name: "enabled thinking", payload: `{"model":"claude-opus-5","thinking":{"type":"enabled"}}`},
 		{name: "adaptive thinking", payload: `{"model":"claude-opus-5","thinking":{"type":"adaptive"}}`},
 	} {
@@ -5545,16 +5780,76 @@ func TestInjectClaudeCodeContextManagement(t *testing.T) {
 		t.Fatalf("caller context_management was modified: %s", callerOwnedGot)
 	}
 
-	disabledThinking := []byte(`{"model":"claude-opus-5","thinking":{"type":"disabled"}}`)
-	disabledThinkingGot, automaticallyInjected := injectClaudeCodeContextManagement(disabledThinking)
-	if automaticallyInjected {
-		t.Error("disabled thinking context_management was reported as automatically injected")
+	// Anthropic rejects clear_thinking_20251015 unless thinking is enabled or
+	// adaptive, so an omitted thinking field is as ineligible as an explicit
+	// disabled one.
+	for _, test := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "disabled thinking", payload: `{"model":"claude-opus-5","thinking":{"type":"disabled"}}`},
+		{name: "omitted thinking", payload: `{"model":"claude-opus-4-6"}`},
+		{name: "unknown thinking", payload: `{"model":"claude-opus-5","thinking":{"type":"unexpected"}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ineligible := []byte(test.payload)
+			got, automaticallyInjected := injectClaudeCodeContextManagement(ineligible)
+			if automaticallyInjected {
+				t.Error("ineligible thinking context_management was reported as automatically injected")
+			}
+			if !bytes.Equal(got, ineligible) {
+				t.Errorf("ineligible payload was modified: %s", got)
+			}
+			if cm := gjson.GetBytes(got, "context_management"); cm.Exists() {
+				t.Errorf("context_management = %s, want absent", cm.Raw)
+			}
+		})
 	}
-	if !bytes.Equal(disabledThinkingGot, disabledThinking) {
-		t.Errorf("disabled thinking payload was modified: %s", disabledThinkingGot)
-	}
-	if got := gjson.GetBytes(disabledThinkingGot, "context_management"); got.Exists() {
-		t.Errorf("disabled thinking payload has context_management = %s, want absent", got.Raw)
+}
+
+// Anthropic rejects a request carrying the clear_thinking_20251015 strategy
+// without enabled/adaptive thinking:
+//
+//	`clear_thinking_20251015` strategy requires `thinking` to be enabled or adaptive
+//
+// This walks the real execute.go ordering, where disableThinkingIfToolChoiceForced
+// deletes the thinking field between injection and reconciliation.
+func TestClaudeCodeContextManagementNeverOutlivesEligibleThinking(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		payload string
+		wantCM  bool
+	}{
+		{
+			name:    "thinking omitted from the start",
+			payload: `{"model":"claude-opus-5","messages":[]}`,
+		},
+		{
+			name:    "forced tool_choice strips thinking after injection",
+			payload: `{"model":"claude-opus-5","thinking":{"type":"enabled","budget_tokens":1024},"tool_choice":{"type":"any"},"messages":[]}`,
+		},
+		{
+			name:    "thinking survives without forced tool_choice",
+			payload: `{"model":"claude-opus-5","thinking":{"type":"enabled","budget_tokens":1024},"messages":[]}`,
+			wantCM:  true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body, injected := injectClaudeCodeContextManagement([]byte(test.payload))
+			state := claudeCodeContextManagementState{eligible: true, automaticallyInjected: injected}
+			body = disableThinkingIfToolChoiceForced(body)
+			body = reconcileClaudeCodeContextManagement(body, state)
+
+			thinkingEligible := gjson.GetBytes(body, "thinking.type").String() == "enabled" ||
+				gjson.GetBytes(body, "thinking.type").String() == "adaptive"
+			cm := gjson.GetBytes(body, "context_management")
+			if cm.Exists() && !thinkingEligible {
+				t.Fatalf("context_management = %s survived ineligible thinking; Anthropic would reject this: %s", cm.Raw, body)
+			}
+			if cm.Exists() != test.wantCM {
+				t.Fatalf("context_management present = %v, want %v; body=%s", cm.Exists(), test.wantCM, body)
+			}
+		})
 	}
 }
 
@@ -5616,6 +5911,17 @@ func TestReconcileClaudeCodeContextManagement(t *testing.T) {
 			name:    "omitted thinking prevents addition",
 			payload: `{}`,
 			state:   claudeCodeContextManagementState{eligible: true},
+		},
+		{
+			name:    "removes automatic object when thinking was stripped entirely",
+			payload: `{"context_management":` + claudeCodeContextManagement + `}`,
+			state:   claudeCodeContextManagementState{eligible: true, automaticallyInjected: true},
+		},
+		{
+			name:    "keeps caller object when thinking was stripped entirely",
+			payload: `{"context_management":` + claudeCodeContextManagement + `}`,
+			state:   claudeCodeContextManagementState{eligible: true, callerOwned: true},
+			wantRaw: claudeCodeContextManagement,
 		},
 		{
 			name:    "unknown thinking prevents addition",
@@ -5776,7 +6082,11 @@ func TestClaudeExecutorPayloadOverrideDisabledThinking(t *testing.T) {
 	})
 
 	for _, stream := range []bool{false, true} {
-		name := "forced tool choice retains automatic context management execute"
+		// Anthropic rejects the automatic strategy once forced tool choice has
+		// stripped thinking:
+		//
+		//	`clear_thinking_20251015` strategy requires `thinking` to be enabled or adaptive
+		name := "forced tool choice drops automatic context management execute"
 		if stream {
 			name += " stream"
 		}
@@ -5786,8 +6096,8 @@ func TestClaudeExecutorPayloadOverrideDisabledThinking(t *testing.T) {
 			if got := gjson.GetBytes(upstreamBody, "thinking"); got.Exists() {
 				t.Fatalf("forced tool choice thinking = %s, want absent", got.Raw)
 			}
-			if got := gjson.GetBytes(upstreamBody, "context_management").Raw; got != claudeCodeContextManagement {
-				t.Fatalf("forced tool choice context_management = %s, want %s", got, claudeCodeContextManagement)
+			if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
+				t.Fatalf("forced tool choice context_management = %s, want absent because Anthropic rejects it without thinking", got.Raw)
 			}
 			if got := gjson.GetBytes(upstreamBody, "tool_choice.type").String(); got != "any" {
 				t.Fatalf("forced tool_choice.type = %q, want any", got)
@@ -5905,7 +6215,7 @@ func executeClaudeContextManagementRequest(t *testing.T, cfg *config.Config, pay
 	})
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 	executor := NewClaudeExecutor(cfg)
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-payload-rule"}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-payload-rule", "cloak_mode": "always"}}
 	request := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}
 	options := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
 
@@ -6003,7 +6313,7 @@ func TestValidateClaudeCallerSystemBlocksRejectsNonTextBlock(t *testing.T) {
 
 func TestApplyCloakingRejectsNonTextCallerSystemBlock(t *testing.T) {
 	cfg := &config.Config{}
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123", "cloak_mode": "always"}}
 	payload := []byte(`{"model":"claude-opus-5","system":[{"type":"text","text":"S1"},{"type":"input_image"}],"messages":[{"role":"user","content":[{"type":"text","text":"U1"}]}]}`)
 
 	out, cloaked, errCloaking := applyCloaking(context.Background(), cfg, auth, payload, "key-123", false, true)
@@ -6067,5 +6377,78 @@ func TestClaudeExecutor_CountTokensRejectsNonTextCallerSystemBlock(t *testing.T)
 	}
 	if upstreamCalled {
 		t.Fatal("countTokensUpstream() called upstream, want local rejection")
+	}
+}
+
+// The native gate selects the 1h cache pool only for OAuth credentials and pushes
+// extended-cache-ttl-2025-04-11 exactly when that selection produced a 1h body ttl.
+// Body ttl and the beta must therefore always travel together.
+func TestClaudeExecutor_CacheTTLIsPairedWithExtendedCacheTTLBeta(t *testing.T) {
+	tests := []struct {
+		name     string
+		apiKey   string
+		wantTTL  string
+		wantBeta bool
+	}{
+		{
+			name:     "oauth credential selects the 1h pool",
+			apiKey:   "sk-ant-oat-cache-ttl-pairing",
+			wantTTL:  "1h",
+			wantBeta: true,
+		},
+		{
+			name:     "api key credential keeps the default pool",
+			apiKey:   "key-cache-ttl-pairing",
+			wantTTL:  "",
+			wantBeta: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var seenBody []byte
+			var seenHeaders http.Header
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seenBody, _ = io.ReadAll(r.Body)
+				seenHeaders = r.Header.Clone()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-opus-4-6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+			}))
+			defer server.Close()
+
+			executor := NewClaudeExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				ID: "cache-ttl-pairing",
+				Attributes: map[string]string{
+					"api_key":    test.apiKey,
+					"base_url":   server.URL,
+					"cloak_mode": "always",
+				},
+				Metadata: claudeOAuthTestMetadata(),
+			}
+			_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "claude-opus-4-6",
+				Payload: []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":[{"type":"text","text":"x"}]}]}`),
+			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+			if errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+
+			gotTTL := gjson.GetBytes(seenBody, "system.1.cache_control.ttl").String()
+			if gotTTL != test.wantTTL {
+				t.Fatalf("system[1].cache_control.ttl = %q, want %q: %s", gotTTL, test.wantTTL, seenBody)
+			}
+			if got := gjson.GetBytes(seenBody, "system.1.cache_control.type").String(); got != "ephemeral" {
+				t.Fatalf("system[1].cache_control.type = %q, want ephemeral: %s", got, seenBody)
+			}
+			gotBeta := strings.Contains(seenHeaders.Get("Anthropic-Beta"), claudeExtendedCacheTTLBeta)
+			if gotBeta != test.wantBeta {
+				t.Fatalf("extended-cache-ttl declared = %v, want %v: %s", gotBeta, test.wantBeta, seenHeaders.Get("Anthropic-Beta"))
+			}
+			// The pairing invariant itself: a 1h body ttl without the beta, or the beta
+			// without a 1h body ttl, is a combination native never produces.
+			if (gotTTL == "1h") != gotBeta {
+				t.Fatalf("body ttl %q and extended-cache-ttl beta %v disagree", gotTTL, gotBeta)
+			}
+		})
 	}
 }

@@ -49,11 +49,11 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	if gotConversation := httpReq.Header.Get("Conversation_id"); gotConversation != "" {
 		t.Fatalf("Conversation_id = %q, want empty", gotConversation)
 	}
-	if gotSession := httpReq.Header["Session_id"]; len(gotSession) != 1 || gotSession[0] != expectedKey {
-		t.Fatalf("Session_id = %#v, want [%q]", gotSession, expectedKey)
+	if gotSession := httpReq.Header["Session-Id"]; len(gotSession) != 1 || gotSession[0] != expectedKey {
+		t.Fatalf("Session-Id = %#v, want [%q]", gotSession, expectedKey)
 	}
-	if gotCanonicalSession := httpReq.Header.Get("Session-Id"); gotCanonicalSession != "" {
-		t.Fatalf("Session-Id = %q, want empty", gotCanonicalSession)
+	if gotLegacySession := httpReq.Header.Get("Session_id"); gotLegacySession != "" {
+		t.Fatalf("Session_id = %q, want empty", gotLegacySession)
 	}
 
 	httpReq2, _, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai"), url, nil, req, req.Payload, rawJSON)
@@ -88,8 +88,8 @@ func TestCodexExecutorCacheHelper_UsesDerivedSessionUUID(t *testing.T) {
 	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != expectedKey {
 		t.Fatalf("prompt_cache_key = %q, want %q", got, expectedKey)
 	}
-	if got := httpReq.Header.Get("Session_id"); got != expectedKey {
-		t.Fatalf("Session_id = %q, want %q", got, expectedKey)
+	if got := httpReq.Header.Get("Session-Id"); got != expectedKey {
+		t.Fatalf("Session-Id = %q, want %q", got, expectedKey)
 	}
 	if _, errParse := uuid.Parse(expectedKey); errParse != nil {
 		t.Fatalf("derived prompt cache key %q is not a UUID: %v", expectedKey, errParse)
@@ -143,11 +143,11 @@ func TestCodexExecutorCacheHelper_ClaudeUsesClaudeCodeSessionID(t *testing.T) {
 	if secondKey != firstKey {
 		t.Fatalf("same Claude Code session_id produced different prompt_cache_key: first=%q second=%q", firstKey, secondKey)
 	}
-	if gotSession := firstHTTPReq.Header["Session_id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
-		t.Fatalf("first Session_id = %#v, want [%q]", gotSession, firstKey)
+	if gotSession := firstHTTPReq.Header["Session-Id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
+		t.Fatalf("first Session-Id = %#v, want [%q]", gotSession, firstKey)
 	}
-	if gotSession := secondHTTPReq.Header["Session_id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
-		t.Fatalf("second Session_id = %#v, want [%q]", gotSession, firstKey)
+	if gotSession := secondHTTPReq.Header["Session-Id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
+		t.Fatalf("second Session-Id = %#v, want [%q]", gotSession, firstKey)
 	}
 }
 
@@ -170,11 +170,11 @@ func TestCodexExecutorCacheHelper_ClaudeRejectsBareUserID(t *testing.T) {
 	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "" {
 		t.Fatalf("bare metadata.user_id must not create prompt_cache_key, got %q; body=%s", got, string(body))
 	}
-	if got := httpReq.Header["Session_id"]; len(got) != 0 {
-		t.Fatalf("bare metadata.user_id must not create Session_id, got %#v", got)
+	if got := httpReq.Header["Session-Id"]; len(got) != 0 {
+		t.Fatalf("bare metadata.user_id must not create Session-Id, got %#v", got)
 	}
-	if got := httpReq.Header.Get("Session-Id"); got != "" {
-		t.Fatalf("bare metadata.user_id must not create Session-Id, got %q", got)
+	if got := httpReq.Header.Get("Session_id"); got != "" {
+		t.Fatalf("bare metadata.user_id must not create Session_id, got %q", got)
 	}
 }
 
@@ -227,16 +227,16 @@ func TestCodexExecutorCacheHelper_IdentityConfuseRemapsBodyAndHeaders(t *testing
 	if gotWindowID := gjson.GetBytes(body, "client_metadata.x-codex-window-id").String(); gotWindowID != expectedPromptCacheKey+":0" {
 		t.Fatalf("client_metadata.x-codex-window-id = %q, want %q", gotWindowID, expectedPromptCacheKey+":0")
 	}
-	if gotHeader := httpReq.Header["Session_id"]; len(gotHeader) != 1 || gotHeader[0] != expectedPromptCacheKey {
-		t.Fatalf("Session_id = %#v, want [%q]", gotHeader, expectedPromptCacheKey)
+	if gotHeader := httpReq.Header["Session-Id"]; len(gotHeader) != 1 || gotHeader[0] != expectedPromptCacheKey {
+		t.Fatalf("Session-Id = %#v, want [%q]", gotHeader, expectedPromptCacheKey)
 	}
 	for _, headerName := range []string{"X-Client-Request-Id", "Thread-Id"} {
 		if gotHeader := httpReq.Header.Get(headerName); gotHeader != expectedPromptCacheKey {
 			t.Fatalf("%s = %q, want %q", headerName, gotHeader, expectedPromptCacheKey)
 		}
 	}
-	if gotCanonicalSession := httpReq.Header.Get("Session-Id"); gotCanonicalSession != "" {
-		t.Fatalf("Session-Id = %q, want empty", gotCanonicalSession)
+	if gotLegacySession := httpReq.Header.Get("Session_id"); gotLegacySession != "" {
+		t.Fatalf("Session_id = %q, want empty", gotLegacySession)
 	}
 	if gotWindow := httpReq.Header.Get("X-Codex-Window-Id"); gotWindow != expectedPromptCacheKey+":0" {
 		t.Fatalf("X-Codex-Window-Id = %q, want %q", gotWindow, expectedPromptCacheKey+":0")

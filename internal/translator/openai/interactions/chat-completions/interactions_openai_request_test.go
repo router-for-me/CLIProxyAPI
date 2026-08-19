@@ -119,3 +119,40 @@ func TestConvertInteractionsRequestToOpenAIWithToolMessagesDirect(t *testing.T) 
 		t.Fatalf("tool_call_id = %q, want call_1. Output: %s", got, string(out))
 	}
 }
+
+func TestConvertOpenAIRequestToInteractions_AntigravitySanitizesGenerationConfigAndSetsAgentConfig(t *testing.T) {
+	raw := []byte(`{
+		"model":"antigravity-preview-05-2026",
+		"messages":[{"role":"user","content":"search"}],
+		"max_tokens":1024,
+		"temperature":0.5,
+		"top_p":0.9,
+		"tools":[{"type":"function","function":{"name":"search","parameters":{"type":"object"}}}]
+	}`)
+	out := ConvertOpenAIRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	// generation_config should not contain temperature, top_p, max_output_tokens
+	for _, knob := range []string{"temperature", "top_p", "top_k", "stop_sequences", "max_output_tokens"} {
+		if gjson.GetBytes(out, "generation_config."+knob).Exists() {
+			t.Fatalf("generation_config.%s should be stripped for antigravity model. Output: %s", knob, string(out))
+		}
+	}
+	if got := gjson.GetBytes(out, "agent_config.max_total_tokens").Int(); got != 1024 {
+		t.Fatalf("agent_config.max_total_tokens = %d, want 1024. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToInteractions_PreservesEnvironmentIDAndPreviousInteractionID(t *testing.T) {
+	raw := []byte(`{
+		"model":"antigravity-preview-05-2026",
+		"messages":[{"role":"user","content":"continue"}],
+		"previous_response_id":"v1_prev123",
+		"environment_id":"env_456"
+	}`)
+	out := ConvertOpenAIRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	if got := gjson.GetBytes(out, "previous_interaction_id").String(); got != "v1_prev123" {
+		t.Fatalf("previous_interaction_id = %q, want v1_prev123. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "environment_id").String(); got != "env_456" {
+		t.Fatalf("environment_id = %q, want env_456. Output: %s", got, string(out))
+	}
+}

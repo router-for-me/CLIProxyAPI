@@ -133,7 +133,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		messageCapacity++
 	}
 	messageItems := translatorcommon.NewRawArrayItems(messageCapacity)
-	missingCallIDs := make(map[string][]string)
+	toolCallIDsByName := make(map[string][]string) // Track tool call IDs per function name for matching
 
 	// System instruction -> OpenAI system message
 	// Gemini may provide `systemInstruction` or `system_instruction`; support both keys.
@@ -147,6 +147,10 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 		if parts.Exists() && parts.IsArray() {
 			parts.ForEach(func(_, part gjson.Result) bool {
+				if translatorcommon.IsGeminiThoughtPart(part) {
+					return true
+				}
+
 				// Handle text parts
 				if text := part.Get("text"); text.Exists() {
 					contentPart := []byte(`{"type":"text","text":""}`)
@@ -190,10 +194,19 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			contentItems := make([][]byte, 0, 4)
 			onlyTextContent := true
 			toolCallItems := make([][]byte, 0, 2)
+			droppedThought := false
 
 			if parts.Exists() && parts.IsArray() {
 				partIdx := 0
 				parts.ForEach(func(_, part gjson.Result) bool {
+					currentPartIdx := partIdx
+					partIdx++
+
+					if translatorcommon.IsGeminiThoughtPart(part) {
+						droppedThought = true
+						return true
+					}
+
 					// Handle text parts
 					if text := part.Get("text"); text.Exists() {
 						formattedText := text.String()
@@ -216,20 +229,23 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					// Handle function calls (Gemini) -> tool calls (OpenAI)
 					if functionCall := part.Get("functionCall"); functionCall.Exists() {
 						funcName := functionCall.Get("name").String()
+						argsRaw := ""
+						if args := functionCall.Get("args"); args.Exists() {
+							argsRaw = args.Raw
+						}
 						toolCallID := explicitGeminiToolID(functionCall)
 						if toolCallID == "" {
-							argsRaw := functionCall.Get("args").Raw
-							toolCallID = deriveDeterministicToolID("call", msgIdx, partIdx, funcName, argsRaw)
-							missingCallIDs[funcName] = append(missingCallIDs[funcName], toolCallID)
+							toolCallID = deterministicToolCallID("call", msgIdx, currentPartIdx, funcName, argsRaw)
 						}
+						toolCallIDsByName[funcName] = append(toolCallIDsByName[funcName], toolCallID)
 
 						toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 						toolCall, _ = sjson.SetBytes(toolCall, "id", toolCallID)
 						toolCall, _ = sjson.SetBytes(toolCall, "function.name", funcName)
 
 						// Convert args to arguments JSON string
-						if args := functionCall.Get("args"); args.Exists() {
-							toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", args.Raw)
+						if argsRaw != "" {
+							toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", argsRaw)
 						} else {
 							toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", "{}")
 						}
@@ -239,29 +255,39 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 					// Handle function responses (Gemini) -> tool role messages (OpenAI)
 					if functionResponse := part.Get("functionResponse"); functionResponse.Exists() {
+						funcName := functionResponse.Get("name").String()
 						// Create tool message for function response
 						toolMsg := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
 
+						responseRaw := ""
 						// Convert response.content to JSON string
 						if response := functionResponse.Get("response"); response.Exists() {
 							if contentField := response.Get("content"); contentField.Exists() {
-								toolMsg, _ = sjson.SetBytes(toolMsg, "content", contentField.Raw)
+								responseRaw = contentField.Raw
+								toolMsg, _ = sjson.SetBytes(toolMsg, "content", responseRaw)
 							} else {
-								toolMsg, _ = sjson.SetBytes(toolMsg, "content", response.Raw)
+								responseRaw = response.Raw
+								toolMsg, _ = sjson.SetBytes(toolMsg, "content", responseRaw)
 							}
 						}
-
-						funcName := functionResponse.Get("name").String()
 						if toolCallID := explicitGeminiToolID(functionResponse); toolCallID != "" {
 							toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", toolCallID)
-						} else if queue := missingCallIDs[funcName]; len(queue) > 0 {
+							if queue := toolCallIDsByName[funcName]; len(queue) > 0 {
+								for i, id := range queue {
+									if id == toolCallID {
+										toolCallIDsByName[funcName] = append(queue[:i], queue[i+1:]...)
+										break
+									}
+								}
+							}
+						} else if queue := toolCallIDsByName[funcName]; len(queue) > 0 {
 							toolCallID := queue[0]
-							missingCallIDs[funcName] = queue[1:]
+							toolCallIDsByName[funcName] = queue[1:]
 							toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", toolCallID)
 						} else {
-							respRaw := functionResponse.Get("response").Raw
-							standaloneID := deriveDeterministicToolID("response", msgIdx, partIdx, funcName, respRaw)
-							toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", standaloneID)
+							// Generate a deterministic tool call ID fallback if none available
+							fallbackID := deterministicToolCallID("response", msgIdx, currentPartIdx, funcName, responseRaw)
+							toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", fallbackID)
 						}
 
 						messageItems = append(messageItems, toolMsg)
@@ -284,6 +310,11 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			// Set tool calls if any.
 			if len(toolCallItems) > 0 {
 				msg, _ = sjson.SetRawBytes(msg, "tool_calls", translatorcommon.JoinRawArray(toolCallItems))
+			}
+
+			if droppedThought && len(contentItems) == 0 && len(toolCallItems) == 0 {
+				msgIdx++
+				return true
 			}
 
 			messageItems = append(messageItems, msg)
@@ -347,11 +378,19 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	return out
 }
 
+func deterministicToolCallID(kind string, msgIdx, partIdx int, name, payload string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%d|%s|%s", kind, msgIdx, partIdx, name, payload)))
+	return "call_" + hex.EncodeToString(sum[:12])
+}
+
 func explicitGeminiToolID(node gjson.Result) string {
 	if id := strings.TrimSpace(node.Get("id").String()); id != "" {
 		return id
 	}
-	return strings.TrimSpace(node.Get("call_id").String())
+	if callID := strings.TrimSpace(node.Get("call_id").String()); callID != "" {
+		return callID
+	}
+	return strings.TrimSpace(node.Get("callId").String())
 }
 
 func openAIContentPartFromGeminiInlineData(part gjson.Result) ([]byte, bool) {

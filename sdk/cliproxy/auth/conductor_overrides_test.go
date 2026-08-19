@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -1510,6 +1511,186 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 	}
 }
 
+func TestManager_DeepSeekInsufficientBalanceRotatesCredentialAndRebindsSession(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(2, 30*time.Second, 0)
+	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	defer affinity.Stop()
+	m.SetSelector(affinity)
+
+	const provider = "openai-compatibility"
+	const model = "deepseek-v4-pro"
+
+	executor := &authFallbackExecutor{
+		id: provider,
+		executeErrors: map[string]error{
+			"aa-empty-balance": &Error{
+				HTTPStatus: http.StatusPaymentRequired,
+				Message:    `{"error":{"message":"Insufficient Balance","type":"unknown_error","param":null,"code":"invalid_request_error"}}`,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	depletedAuth := &Auth{ID: "aa-empty-balance", Provider: provider}
+	availableAuth := &Auth{ID: "bb-available-balance", Provider: provider}
+
+	reg := registry.GetGlobalRegistry()
+	models := []*registry.ModelInfo{{ID: model}}
+	reg.RegisterClient(depletedAuth.ID, provider, models)
+	reg.RegisterClient(availableAuth.ID, provider, models)
+	t.Cleanup(func() {
+		reg.UnregisterClient(depletedAuth.ID)
+		reg.UnregisterClient(availableAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), depletedAuth); errRegister != nil {
+		t.Fatalf("register depleted auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), availableAuth); errRegister != nil {
+		t.Fatalf("register available auth: %v", errRegister)
+	}
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.DerivedSessionIDMetadataKey: "deepseek-insufficient-balance",
+	}}
+	beforeExecute := time.Now()
+	resp, errExecute := m.Execute(
+		context.Background(),
+		[]string{provider},
+		cliproxyexecutor.Request{Model: model},
+		opts,
+	)
+	if errExecute != nil {
+		t.Fatalf("expected fallback to the next credential, got error: %v", errExecute)
+	}
+	if got := string(resp.Payload); got != availableAuth.ID {
+		t.Fatalf("served by %q, want %q", got, availableAuth.ID)
+	}
+
+	resp, errExecute = m.Execute(
+		context.Background(),
+		[]string{provider},
+		cliproxyexecutor.Request{Model: model},
+		opts,
+	)
+	if errExecute != nil {
+		t.Fatalf("expected rebound session to use the next credential, got error: %v", errExecute)
+	}
+	if got := string(resp.Payload); got != availableAuth.ID {
+		t.Fatalf("rebound session served by %q, want %q", got, availableAuth.ID)
+	}
+	wantCalls := []string{depletedAuth.ID, availableAuth.ID, availableAuth.ID}
+	if calls := executor.ExecuteCalls(); !slices.Equal(calls, wantCalls) {
+		t.Fatalf("credential calls = %v, want %v", calls, wantCalls)
+	}
+
+	updatedDepleted, ok := m.GetByID(depletedAuth.ID)
+	if !ok || updatedDepleted == nil {
+		t.Fatal("expected depleted auth to remain registered")
+	}
+	state := updatedDepleted.ModelStates[model]
+	if state == nil {
+		t.Fatal("expected the depleted credential to be cooled down for the model")
+	}
+	if !state.Unavailable {
+		t.Fatal("expected the depleted credential to be unavailable for the model")
+	}
+	if state.NextRetryAfter.Before(beforeExecute.Add(29 * time.Minute)) {
+		t.Fatalf("cooldown expires at %v, want approximately 30 minutes", state.NextRetryAfter)
+	}
+}
+
+func TestManager_DeepSeekCredentialFailuresRotateCredential(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    int
+		message   string
+		wantQuota bool
+	}{
+		{
+			name:    "authentication failure",
+			status:  http.StatusUnauthorized,
+			message: `{"error":{"code":"invalid_request_error","message":"Authentication Fails, Your api key: ****heck is invalid","param":null,"type":"authentication_error"}}`,
+		},
+		{
+			name:      "rate limit with generic request error code",
+			status:    http.StatusTooManyRequests,
+			message:   `{"error":{"code":"invalid_request_error","message":"Rate Limit Reached","param":null,"type":"unknown_error"}}`,
+			wantQuota: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			m.SetRetryConfig(2, 30*time.Second, 0)
+
+			const provider = "openai-compatibility"
+			const model = "deepseek-v4-pro"
+
+			executor := &authFallbackExecutor{
+				id: provider,
+				executeErrors: map[string]error{
+					"aa-failed-key": &Error{HTTPStatus: tc.status, Message: tc.message},
+				},
+			}
+			m.RegisterExecutor(executor)
+
+			failedAuth := &Auth{ID: "aa-failed-key", Provider: provider}
+			availableAuth := &Auth{ID: "bb-valid-key", Provider: provider}
+
+			reg := registry.GetGlobalRegistry()
+			models := []*registry.ModelInfo{{ID: model}}
+			reg.RegisterClient(failedAuth.ID, provider, models)
+			reg.RegisterClient(availableAuth.ID, provider, models)
+			t.Cleanup(func() {
+				reg.UnregisterClient(failedAuth.ID)
+				reg.UnregisterClient(availableAuth.ID)
+			})
+
+			if _, errRegister := m.Register(context.Background(), failedAuth); errRegister != nil {
+				t.Fatalf("register failed auth: %v", errRegister)
+			}
+			if _, errRegister := m.Register(context.Background(), availableAuth); errRegister != nil {
+				t.Fatalf("register available auth: %v", errRegister)
+			}
+
+			resp, errExecute := m.Execute(
+				context.Background(),
+				[]string{provider},
+				cliproxyexecutor.Request{Model: model},
+				cliproxyexecutor.Options{},
+			)
+			if errExecute != nil {
+				t.Fatalf("expected fallback to the next credential, got error: %v", errExecute)
+			}
+			if got := string(resp.Payload); got != availableAuth.ID {
+				t.Fatalf("served by %q, want %q", got, availableAuth.ID)
+			}
+			wantCalls := []string{failedAuth.ID, availableAuth.ID}
+			if calls := executor.ExecuteCalls(); !slices.Equal(calls, wantCalls) {
+				t.Fatalf("credential calls = %v, want %v", calls, wantCalls)
+			}
+
+			updatedFailed, ok := m.GetByID(failedAuth.ID)
+			if !ok || updatedFailed == nil {
+				t.Fatal("expected failed auth to remain registered")
+			}
+			state := updatedFailed.ModelStates[model]
+			if state == nil || !state.Unavailable || state.NextRetryAfter.IsZero() {
+				t.Fatalf("failed auth model state = %#v, want active cooldown", state)
+			}
+			if tc.wantQuota && (!state.Quota.Exceeded || state.Quota.Reason != "quota") {
+				t.Fatalf("failed auth quota state = %#v, want exceeded quota", state.Quota)
+			}
+		})
+	}
+}
+
 // TestManager_UnknownUpstreamErrorRotatesAndPenalizesModelOnly pins the upstream
 // 500 "status":"UNKNOWN" contract. It is an upstream internal failure, not a
 // request fault, so the request must fall through to the next credential. The
@@ -2374,5 +2555,157 @@ func TestManagerExecuteStream_InvalidAPIKeyStopsModelPoolRetries(t *testing.T) {
 	wantCalls := []string{badAuth.ID, goodAuth.ID}
 	if len(calls) != len(wantCalls) {
 		t.Fatalf("stream calls = %v, want %v", calls, wantCalls)
+	}
+}
+
+func TestManager_MarkResult_RequestFaultBodyDoesNotCooldownModelOrAuth(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-request-fault",
+		Provider: "deepseek",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "deepseek-chat"
+	// SDK consumer reports a 401 request-fault body directly without knowing the internal requestScopedErrorCode.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusUnauthorized,
+			Message:    `{"error":{"message":"Invalid request parameter","type":"invalid_request_error"}}`,
+		},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Unavailable {
+		t.Fatalf("expected request-scoped 401 to keep auth available, got unavailable=true")
+	}
+	if !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected request-scoped 401 to keep auth cooldown unset, got %v", updated.NextRetryAfter)
+	}
+	if state := updated.ModelStates[model]; state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
+		t.Fatalf("expected request-scoped 401 to avoid model cooldown state, got %#v", state)
+	}
+
+	// SDK consumer uses NewRequestScopedError or MarkRequestScoped explicitly.
+	explicitReqErr := NewRequestScopedError("explicit request fault", http.StatusUnauthorized)
+	if !explicitReqErr.IsRequestScoped() || explicitReqErr.Code != ErrorCodeRequestScoped {
+		t.Fatalf("NewRequestScopedError code = %q, want %q", explicitReqErr.Code, ErrorCodeRequestScoped)
+	}
+	customErr := (&Error{Message: "custom fault", HTTPStatus: http.StatusUnauthorized}).MarkRequestScoped()
+	if !customErr.IsRequestScoped() || customErr.Code != ErrorCodeRequestScoped {
+		t.Fatalf("MarkRequestScoped code = %q, want %q", customErr.Code, ErrorCodeRequestScoped)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    explicitReqErr,
+	})
+	updated, _ = m.GetByID(auth.ID)
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected explicit request-scoped error to keep auth available")
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    customErr,
+	})
+	updated, _ = m.GetByID(auth.ID)
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected MarkRequestScoped error to keep auth available")
+	}
+
+	// Custom non-empty Code with request-fault message payload.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			Code:       "custom_upstream_code",
+			HTTPStatus: http.StatusUnauthorized,
+			Message:    `{"error":{"message":"Invalid request parameter","type":"invalid_request_error"}}`,
+		},
+	})
+	updated, _ = m.GetByID(auth.ID)
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected custom code with request-fault message to keep auth available")
+	}
+
+	// Auth-level request-fault error (empty Model) must also avoid cooling auth.
+	authEmptyModel := &Auth{
+		ID:       "auth-empty-model",
+		Provider: "deepseek",
+	}
+	if _, errRegister := m.Register(context.Background(), authEmptyModel); errRegister != nil {
+		t.Fatalf("register authEmptyModel: %v", errRegister)
+	}
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authEmptyModel.ID,
+		Provider: authEmptyModel.Provider,
+		Model:    "",
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusUnauthorized,
+			Message:    `{"error":{"message":"Invalid request parameter","type":"invalid_request_error"}}`,
+		},
+	})
+	updatedEmptyModel, ok := m.GetByID(authEmptyModel.ID)
+	if !ok || updatedEmptyModel == nil {
+		t.Fatalf("expected authEmptyModel to be present")
+	}
+	if updatedEmptyModel.Unavailable || !updatedEmptyModel.NextRetryAfter.IsZero() {
+		t.Fatalf("expected auth-level request-fault 401 to keep auth available")
+	}
+
+	// Real authentication error must still trigger cooldown.
+	authFail := &Auth{
+		ID:       "auth-real-fail",
+		Provider: "deepseek",
+	}
+	if _, errRegister := m.Register(context.Background(), authFail); errRegister != nil {
+		t.Fatalf("register authFail: %v", errRegister)
+	}
+	m.MarkResult(context.Background(), Result{
+		AuthID:   authFail.ID,
+		Provider: authFail.Provider,
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusUnauthorized,
+			Message:    `{"error":{"message":"Authentication Fails, Your api key is invalid","type":"authentication_error"}}`,
+		},
+	})
+	updatedFail, ok := m.GetByID(authFail.ID)
+	if !ok || updatedFail == nil {
+		t.Fatalf("expected authFail to be present")
+	}
+	if !updatedFail.Unavailable {
+		t.Fatalf("expected real 401 authentication error to mark auth unavailable")
+	}
+	if updatedFail.NextRetryAfter.IsZero() {
+		t.Fatalf("expected real 401 authentication error to set auth cooldown NextRetryAfter")
+	}
+	if state := updatedFail.ModelStates[model]; state == nil || !state.Unavailable || state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected real 401 authentication error to set model cooldown state, got %#v", state)
 	}
 }

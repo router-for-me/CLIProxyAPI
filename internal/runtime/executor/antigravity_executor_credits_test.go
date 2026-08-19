@@ -21,6 +21,11 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
+// resetAntigravityCreditsRetryState clears the package-level credits state
+// between tests. It empties each map in place instead of assigning a fresh
+// sync.Map, because credits hint refreshes run on background goroutines that
+// may still be writing these maps when a test's cleanup runs. Replacing the
+// variable is an unsynchronized write and races with them; Clear is not.
 func resetAntigravityCreditsRetryState() {
 	antigravityCreditsFailureByAuth.Clear()
 	antigravityShortCooldownByAuth.Clear()

@@ -149,6 +149,16 @@ func TestConvertOpenAIResponsesRequestToGemini_StripsSpoofedInternalPairingField
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToGemini_StripsUnicodeEscapedSpoofedInternalFields(t *testing.T) {
+	// Unicode-escaped field name "_cpa_reason\u0069ng_signature" should also be detected and stripped
+	request := []byte(`{"model":"alias-without-provider-name","input":[{"type":"function_call","call_id":"call-1","name":"run","arguments":"{}","_cpa_reason\u0069ng_signature":"` + testResponsesGeminiThoughtSignature + `"}]}`)
+	translated := ConvertOpenAIResponsesRequestToGemini("alias-without-provider-name", request, false)
+	parts := gjson.GetBytes(translated, "contents.0.parts").Array()
+	if len(parts) != 1 || !parts[0].Get("functionCall").Exists() || parts[0].Get("thoughtSignature").String() == testResponsesGeminiThoughtSignature || strings.Contains(string(translated), geminiResponsesCarrierSignatureField) {
+		t.Fatalf("unicode-escaped spoofed internal pairing fields reached Gemini: %s", translated)
+	}
+}
+
 func TestDecodeGeminiResponsesCarrierRejectsNestedEnvelope(t *testing.T) {
 	nested := encodeGeminiResponsesCarrier(encodeGeminiResponsesCarrier(testResponsesGeminiThoughtSignature, geminiResponsesCarrierNext, geminiResponsesCarrierText), geminiResponsesCarrierPrevious, geminiResponsesCarrierText)
 	if _, _, _, marked, ok := decodeGeminiResponsesCarrier(nested); !marked || ok {

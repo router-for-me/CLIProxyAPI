@@ -179,6 +179,14 @@ type Options struct {
 	ExecutionLifecycle ExecutionLifecycle
 }
 
+// EnsureMetadata initializes and returns Metadata, ensuring it is non-nil.
+func (o *Options) EnsureMetadata() map[string]any {
+	if o.Metadata == nil {
+		o.Metadata = make(map[string]any)
+	}
+	return o.Metadata
+}
+
 // ResponseFormatOrSource returns the response target format for an execution.
 func ResponseFormatOrSource(opts Options) sdktranslator.Format {
 	if opts.ResponseFormat != "" {

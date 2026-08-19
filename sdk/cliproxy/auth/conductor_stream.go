@@ -324,7 +324,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			if chunk.Err != nil && !failed {
 				failed = true
 				rerr := resultErrorFromError(chunk.Err)
-				m.recordExecutionResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: opts}, auth, ephemeralResult)
+				action, okAction := matchRequestScopedErrorAction(auth, chunk.Err, m.runtimeConfigSnapshot())
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: opts}
+				applyRequestScopedActionToResult(action, okAction, &result)
+				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 			}
 			if !forward {
 				return false
@@ -501,12 +504,24 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			errStream = checkTTFTErr(errStream)
 			rerr := resultErrorFromError(errStream)
+			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: execOpts}
 			result.RetryAfter = retryAfterFromError(errStream)
 			if isCredentialScopedError(errStream) {
 				result.CredentialScope = true
 			}
+			applyRequestScopedActionToResult(action, okAction, &result)
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			if okAction {
+				if isRequestScopedStop(action, okAction) {
+					return nil, wrapRequestStopError(errStream)
+				}
+				lastErr = errStream
+				if result.CredentialScope {
+					return nil, errStream
+				}
+				continue
+			}
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
@@ -589,6 +604,26 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		if bootstrapErr != nil {
 			scope.release()
 			bootstrapErr = checkTTFTErr(bootstrapErr)
+			action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.runtimeConfigSnapshot())
+			if okAction {
+				rerr := resultErrorFromError(bootstrapErr)
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: execOpts}
+				result.RetryAfter = retryAfterFromError(bootstrapErr)
+				if isCredentialScopedError(bootstrapErr) {
+					result.CredentialScope = true
+				}
+				applyRequestScopedActionToResult(action, okAction, &result)
+				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				discardStreamChunks(streamResult.Chunks)
+				if isRequestScopedStop(action, okAction) {
+					return nil, wrapRequestStopError(bootstrapErr)
+				}
+				lastErr = bootstrapErr
+				if result.CredentialScope {
+					return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+				}
+				continue
+			}
 			if isRequestInvalidError(bootstrapErr) {
 				rerr := resultErrorFromError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: execOpts}
@@ -633,7 +668,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		// Determine emptiness by buffered payload bytes, not chunk count:
 		// zero-payload chunks are dropped downstream by wrapStreamResult, so a
 		// stream of only such chunks would surface as a successful empty
-		// completion without failover.
+		// completion without failover. A stream that carries events but no
+		// content is likewise treated as an empty completion and rotated.
 		if closed && (payloadBytes == 0 || isEmptyCompletion(buffered)) {
 			scope.release()
 			emptyErr := errEmptyCompletion

@@ -869,3 +869,52 @@ func TestConvertClaudeRequestToOpenAI_StripsClaudeCodeAttribution(t *testing.T) 
 		t.Fatalf("Unexpected system content: %q", got)
 	}
 }
+
+func TestConvertClaudeRequestToOpenAI_StopSequences(t *testing.T) {
+	tests := []struct {
+		name      string
+		inputJSON string
+		wantStop  []string
+	}{
+		{
+			name: "single stop sequence is emitted as array",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"stop_sequences": ["</block>"],
+				"messages": [{"role": "user", "content": "hi"}]
+			}`,
+			wantStop: []string{"</block>"},
+		},
+		{
+			name: "multiple stop sequences are emitted as array",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"stop_sequences": ["stop1", "stop2"],
+				"messages": [{"role": "user", "content": "hi"}]
+			}`,
+			wantStop: []string{"stop1", "stop2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output := ConvertClaudeRequestToOpenAI("gpt-4o", []byte(tt.inputJSON), false)
+			stopRes := gjson.GetBytes(output, "stop")
+			if !stopRes.Exists() {
+				t.Fatalf("expected 'stop' field in output, got: %s", string(output))
+			}
+			if !stopRes.IsArray() {
+				t.Fatalf("expected 'stop' field to be JSON array, got: %s", stopRes.Raw)
+			}
+			items := stopRes.Array()
+			if len(items) != len(tt.wantStop) {
+				t.Fatalf("expected %d stop items, got %d (%v)", len(tt.wantStop), len(items), stopRes.Raw)
+			}
+			for i, want := range tt.wantStop {
+				if items[i].String() != want {
+					t.Errorf("stop[%d] = %q, want %q", i, items[i].String(), want)
+				}
+			}
+		})
+	}
+}

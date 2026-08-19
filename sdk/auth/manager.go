@@ -2,7 +2,11 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -65,6 +69,21 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 	if cfg != nil {
 		if dirSetter, ok := m.store.(interface{ SetBaseDir(string) }); ok {
 			dirSetter.SetBaseDir(cfg.AuthDir)
+		}
+		if strings.TrimSpace(cfg.AuthDir) != "" {
+			targetFile := record.FileName
+			if targetFile == "" {
+				targetFile = record.ID
+			}
+			if targetFile != "" {
+				fullPath := filepath.Join(cfg.AuthDir, targetFile)
+				if raw, errRead := os.ReadFile(fullPath); errRead == nil && len(raw) > 0 {
+					var existingMap map[string]any
+					if errUnmarshal := json.Unmarshal(raw, &existingMap); errUnmarshal == nil && len(existingMap) > 0 {
+						coreauth.MergeExistingAuthMetadata(record, existingMap)
+					}
+				}
+			}
 		}
 	}
 

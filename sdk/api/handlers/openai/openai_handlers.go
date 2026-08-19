@@ -620,15 +620,16 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				// Stream closed without data. Surface a buffered pending error
-				// before committing SSE headers, so a failed upstream never
-				// looks like a successful empty stream.
-				if pErr, pending := pendingOpenAIStreamError(errChan); pending {
-					h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(pErr))
-					cliCancel(pErr.Error)
+				if errMsg, hasPendingError := handlers.PendingStreamError(errChan); hasPendingError {
+					h.WriteErrorResponse(c, errMsg)
+					if errMsg != nil {
+						cliCancel(errMsg.Error)
+					} else {
+						cliCancel(nil)
+					}
 					return
 				}
-				// Clean close. Send DONE or just headers.
+				// Stream closed without data? Send DONE or just headers.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 				_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
@@ -807,15 +808,15 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				// Stream closed without data. Surface a buffered pending error
-				// before committing SSE headers, so a failed upstream never
-				// looks like a successful empty stream.
-				if pErr, pending := pendingOpenAIStreamError(errChan); pending {
-					h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(pErr))
-					cliCancel(pErr.Error)
+				if errMsg, hasPendingError := handlers.PendingStreamError(errChan); hasPendingError {
+					h.WriteErrorResponse(c, errMsg)
+					if errMsg != nil {
+						cliCancel(errMsg.Error)
+					} else {
+						cliCancel(nil)
+					}
 					return
 				}
-				// Clean close. Send DONE or just headers.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 				_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")

@@ -170,3 +170,33 @@ func TestConvertGeminiRequestToClaude_SplitsNonImageInlineDataByMIME(t *testing.
 		t.Fatalf("non-image inlineData must not be converted to image. Output: %s", string(out))
 	}
 }
+
+func TestConvertGeminiRequestToClaude_DropsHiddenThoughtParts(t *testing.T) {
+	t.Run("thought-only turn", func(t *testing.T) {
+		out := ConvertGeminiRequestToClaude("claude-test", []byte(`{
+			"contents":[
+				{"role":"model","parts":[{"thought":true,"text":"internal reasoning","thoughtSignature":"opaque-provider-state"}]},
+				{"role":"user","parts":[{"text":"continue"}]}
+			]
+		}`), false)
+
+		messages := gjson.GetBytes(out, "messages").Array()
+		if len(messages) != 1 || messages[0].Get("role").String() != "user" || messages[0].Get("content.0.text").String() != "continue" {
+			t.Fatalf("hidden thought turn was not dropped. Output: %s", string(out))
+		}
+	})
+
+	t.Run("mixed turn", func(t *testing.T) {
+		out := ConvertGeminiRequestToClaude("claude-test", []byte(`{
+			"contents":[{"role":"model","parts":[
+				{"thought":true,"text":"internal reasoning","thoughtSignature":"opaque-provider-state"},
+				{"text":"visible answer"}
+			]}]
+		}`), false)
+
+		content := gjson.GetBytes(out, "messages.0.content").Array()
+		if len(content) != 1 || content[0].Get("type").String() != "text" || content[0].Get("text").String() != "visible answer" {
+			t.Fatalf("hidden thought was not dropped independently of visible text. Output: %s", string(out))
+		}
+	})
+}

@@ -201,6 +201,14 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 									partItems = append(partItems, part)
 								}
 							}
+						case "video_url":
+							videoURL := item.Get("video_url.url").String()
+							if len(videoURL) > 5 {
+								pieces := strings.SplitN(videoURL[5:], ";", 2)
+								if len(pieces) == 2 && len(pieces[1]) > 7 {
+									partItems = append(partItems, antigravityOpenAIInlineDataPart(pieces[0], pieces[1][7:], false))
+								}
+							}
 						case "file":
 							filename := item.Get("file.filename").String()
 							fileData := item.Get("file.file_data").String()
