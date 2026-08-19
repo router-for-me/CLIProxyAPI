@@ -263,6 +263,7 @@ func (b *Builder) Build() (*Service, error) {
 	if pluginHost != nil {
 		coreManager.SetPluginScheduler(pluginHost)
 	}
+	coreManager.SetVirtualModels(b.cfg.VirtualModels)
 
 	service := &Service{
 		cfg:                 b.cfg,
