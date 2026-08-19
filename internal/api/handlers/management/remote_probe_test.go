@@ -138,11 +138,22 @@ func TestRemoteProbeModels_ResolvesBaseURLFromConfig(t *testing.T) {
 	}
 }
 
-// TestRemoteProbeModels_NotFoundOnUnknownName verifies that an unknown
-// name yields 404 entry_not_found rather than silently probing with the
-// body's api_key.
-func TestRemoteProbeModels_NotFoundOnUnknownName(t *testing.T) {
+// TestRemoteProbeModels_UnknownNameFallsBackToBodyAPIKey verifies that an
+// unknown name does NOT 404: the caller may be probing a brand-new
+// provider that has not been saved to config yet (the dashboard's
+// add-mode form requires a provider name before the row exists), so the
+// server must fall back to body.base_url + body.api_key verbatim, exactly
+// as if `name` had been omitted.
+func TestRemoteProbeModels_UnknownNameFallsBackToBodyAPIKey(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	var gotAuth atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth.Store(r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"m1"}]}`))
+	}))
+	defer upstream.Close()
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{
 		OpenAICompatibility: []config.OpenAICompatibility{
@@ -150,30 +161,24 @@ func TestRemoteProbeModels_NotFoundOnUnknownName(t *testing.T) {
 				Name:    "Mimo CN",
 				BaseURL: "https://example.test/v1",
 				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
-					{APIKey: "real-per-entry-key"},
+					{APIKey: "should-not-be-used"},
 				},
 			},
 		},
 	}, nil)
 
 	rec := runRemoteProbe(t, h, map[string]any{
-		"name":    "Nonexistent",
-		"api_key": "some-token",
+		"name":     "Brand New Provider",
+		"base_url": upstream.URL,
+		"api_key":  "typed-form-key",
 	})
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected status %d, got %d with body %s", http.StatusNotFound, rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d (fallback to body key), got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
 	}
-	var body struct {
-		Error struct {
-			Type string `json:"type"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	if body.Error.Type != "entry_not_found" {
-		t.Fatalf("expected error.type=entry_not_found, got %q", body.Error.Type)
+	got, _ := gotAuth.Load().(string)
+	if got != "Bearer typed-form-key" {
+		t.Fatalf("expected body api_key to be used verbatim for unknown name, got %q", got)
 	}
 }
 

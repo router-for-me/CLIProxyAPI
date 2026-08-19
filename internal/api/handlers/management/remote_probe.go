@@ -44,8 +44,10 @@ import (
 // probing the upstream with the global proxy caller key (or any stale
 // value). The supplied base_url also falls back to the entry's
 // configured base URL when omitted. When `name` is empty or does not
-// resolve, the server behaves exactly as before (body.api_key and
-// body.base_url are used verbatim).
+// resolve to a config entry, the server behaves exactly as before
+// (body.api_key and body.base_url are used verbatim) — an unknown name
+// is legitimate when probing a brand-new provider that has not been
+// saved yet. The only 404 is when `name` matches a Disabled entry.
 //
 // Response: { "models": [ ... ] }
 func (h *Handler) RemoteProbeModels(c *gin.Context) {
@@ -69,20 +71,33 @@ func (h *Handler) RemoteProbeModels(c *gin.Context) {
 	// cfg.OpenAICompatibility instead of trusting the body's api_key.
 	// The body's api_key may be empty, stale, or belong to a different
 	// entry; the configured entry is the source of truth.
+	//
+	// Resolve is best-effort: a name that does not match any configured,
+	// non-disabled entry is NOT an error — the caller may be probing a
+	// brand-new provider that has not been saved to config yet (the
+	// dashboard's add-mode form requires a provider name before the row
+	// exists). In that case we fall back to the body's base_url + api_key
+	// verbatim, exactly as if `name` had been omitted. The only rejection
+	// is when the name matches a Disabled entry: that is an explicit
+	// operator choice to exclude the provider, so probing with its
+	// credential (or with the body's key against its base URL) must fail.
 	if body.Name != nil {
 		match := strings.TrimSpace(*body.Name)
 		if match != "" {
 			h.mu.Lock()
 			var resolved *config.OpenAICompatibility
+			matchedDisabled := false
 			for i := range h.cfg.OpenAICompatibility {
 				entry := &h.cfg.OpenAICompatibility[i]
-				if entry.Disabled {
+				if !strings.EqualFold(strings.TrimSpace(entry.Name), match) {
 					continue
 				}
-				if strings.EqualFold(strings.TrimSpace(entry.Name), match) {
-					resolved = entry
+				if entry.Disabled {
+					matchedDisabled = true
 					break
 				}
+				resolved = entry
+				break
 			}
 			var resolvedKey string
 			var resolvedBase string
@@ -94,23 +109,32 @@ func (h *Handler) RemoteProbeModels(c *gin.Context) {
 			}
 			h.mu.Unlock()
 
-			if resolved == nil {
+			if matchedDisabled {
 				c.JSON(http.StatusNotFound, gin.H{
 					"error": gin.H{
 						"type":    "entry_not_found",
-						"message": fmt.Sprintf("OpenAI-Compat entry %q not found in config", match),
+						"message": fmt.Sprintf("OpenAI-Compat entry %q is disabled in config", match),
 					},
 				})
 				return
 			}
-			log.WithFields(log.Fields{
-				"name":     strings.TrimSpace(resolved.Name),
-				"base_url": resolvedBase,
-				"has_key":  resolvedKey != "",
-			}).Debug("remote-probe resolved entry from config")
-			body.APIKey = resolvedKey
-			if strings.TrimSpace(body.BaseURL) == "" && resolvedBase != "" {
-				body.BaseURL = resolvedBase
+			if resolved == nil {
+				// Unknown name — the provider is likely brand-new and not yet
+				// in config. Fall back to body.base_url + body.api_key
+				// verbatim (documented "behave exactly as before" path).
+				log.WithFields(log.Fields{
+					"name": match,
+				}).Debug("remote-probe: name did not resolve to a config entry; using body base_url/api_key verbatim")
+			} else {
+				log.WithFields(log.Fields{
+					"name":     strings.TrimSpace(resolved.Name),
+					"base_url": resolvedBase,
+					"has_key":  resolvedKey != "",
+				}).Debug("remote-probe resolved entry from config")
+				body.APIKey = resolvedKey
+				if strings.TrimSpace(body.BaseURL) == "" && resolvedBase != "" {
+					body.BaseURL = resolvedBase
+				}
 			}
 		}
 	}

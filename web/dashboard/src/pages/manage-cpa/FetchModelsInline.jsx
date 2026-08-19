@@ -78,16 +78,19 @@ export default function FetchModelsInline({
   //   2. form has no base_url (only happens in Add mode without a
   //      typed base_url) -> fall back to the registry view IF an
   //      auth-file matches; otherwise show a friendly hint.
-  // The form's stored key uses `api_key_entries[*].api-key` (underscore +
-// kebab in the wire JSON). Read both shapes defensively since the wire
-// format can land as either depending on how the upstream Go struct is
-// serialized — kebab-case (`api-key-entries`) is the actual Go tag, but
-// some proxies have historically emitted snake_case. The form's own
-// `api_key` field (the typed-in scalar) is the canonical source for
-// New entries; for Edit, fall back to the first configured key.
-const formApiKey =
+  // The form's stored key comes in several shapes depending on the caller:
+  //   - The form's own `api_key` scalar (the typed-in secret) — canonical
+  //     for New entries.
+  //   - `api_key_entries[*].api_key` (underscore) — produced by the
+  //     UpstreamProvidersPage buildForm/buildPayload editor.
+  //   - `api_key_entries[*]['api-key']` (underscore container + kebab key)
+  //     and `['api-key-entries'][*]['api-key']` (full kebab) — shapes seen
+  //     from ProviderKeyEditModal / wire JSON where the Go tag is
+  //     `api-key-entries`.
+  // Read all shapes defensively; the first non-empty value wins.
+  const formApiKey =
     form?.api_key?.trim()
-    || (Array.isArray(form?.api_key_entries) && form.api_key_entries[0]?.['api-key']?.trim?.())
+    || (Array.isArray(form?.api_key_entries) && (form.api_key_entries[0]?.['api-key']?.trim?.() || form.api_key_entries[0]?.api_key?.trim?.()))
     || (Array.isArray(form?.['api-key-entries']) && form['api-key-entries'][0]?.['api-key']?.trim?.())
     || '';
   // The form's `name` (for OpenAI-Compat) lets the server resolve the
@@ -286,7 +289,7 @@ const formApiKey =
                 value={callerKey}
                 onChange={(e) => setCallerKey(e.target.value)}
                 placeholder={
-                  form?.api_key || form?.api_key_entries?.[0]?.['api-key']
+                  form?.api_key || form?.api_key_entries?.[0]?.['api-key'] || form?.api_key_entries?.[0]?.api_key
                     ? 'Use the form\'s API key'
                     : 'sk-… (some providers require auth)'
                 }
