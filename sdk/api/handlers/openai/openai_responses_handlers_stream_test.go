@@ -1,7 +1,8 @@
 package openai
 
 import (
-"bytes"
+	"bytes"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"

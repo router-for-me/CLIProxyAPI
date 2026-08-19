@@ -689,7 +689,8 @@ func applyClaudeHeadersWithNativeProfile(
 	preserveCallerFingerprint := !applyCLIFingerprint && !confirmedClaudeCode
 	useOAuthBetas := fp.UseOAuthBetas
 	isAnthropicBase := isAnthropicUpstreamURL(r.URL)
-	if isAnthropicBase && useAPIKey {
+	forceXAPIKey := auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["anthropic_auth_scheme"]), "x-api-key")
+	if forceXAPIKey || (isAnthropicBase && useAPIKey) {
 		r.Header.Del("Authorization")
 		r.Header.Set("x-api-key", apiKey)
 	} else {

@@ -27,8 +27,12 @@ type ZAIExecutor struct {
 // NewZAIExecutor creates a new Z.AI executor. Both the embedded ClaudeExecutor
 // and the outer struct receive cfg so delegated calls have full configuration.
 func NewZAIExecutor(cfg *config.Config) *ZAIExecutor {
-	return &ZAIExecutor{ClaudeExecutor: ClaudeExecutor{cfg: cfg, providerKey: "zai"}, cfg: cfg}
+	return &ZAIExecutor{ClaudeExecutor: ClaudeExecutor{cfg: cfg}, cfg: cfg}
 }
+
+// ProviderKey overrides the provider identity used for usage attribution so
+// requests routed through the Claude wire format are still attributed to zai.
+func (e *ZAIExecutor) ProviderKey() string { return "zai" }
 
 // Identifier returns the executor identifier used to route auths with type "zai".
 func (e *ZAIExecutor) Identifier() string { return "zai" }
