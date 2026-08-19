@@ -793,6 +793,42 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							suspendReason = "invalid_grant"
 							shouldSuspendModel = true
 						}
+					} else if isInvalidAPIKeyResultError(result.Error) {
+						if disableCooling {
+							state.NextRetryAfter = time.Time{}
+						} else {
+							next := now.Add(30 * time.Minute)
+							state.NextRetryAfter = next
+							state.Quota = QuotaState{
+								Exceeded:      true,
+								Reason:        "credential_quota",
+								NextRecoverAt: next,
+							}
+							for _, otherState := range auth.ModelStates {
+								if otherState != nil && otherState != state {
+									otherState.Unavailable = true
+									otherState.Status = StatusError
+									otherState.StatusMessage = "invalid_api_key"
+									otherState.NextRetryAfter = next
+									otherState.Quota = QuotaState{
+										Exceeded:      true,
+										Reason:        "credential_quota",
+										NextRecoverAt: next,
+									}
+								}
+							}
+							auth.Unavailable = true
+							auth.Status = StatusError
+							auth.StatusMessage = "invalid_api_key"
+							auth.Quota = QuotaState{
+								Exceeded:      true,
+								Reason:        "credential_quota",
+								NextRecoverAt: next,
+							}
+							auth.NextRetryAfter = next
+							suspendReason = "invalid_api_key"
+							shouldSuspendModel = true
+						}
 					} else {
 						switch statusCode {
 						case 401:
@@ -927,9 +963,25 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().SetModelQuotaExceeded(result.AuthID, modelKey)
 	}
 	if shouldResumeModel {
-		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, modelKey)
+		for _, m := range modelsForRegisteredAuth(result.AuthID) {
+			if registry.GetGlobalRegistry().GetClientModelSuspensionReason(result.AuthID, m) == "invalid_api_key" {
+				registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, m)
+			}
+		}
+		if modelKey != "" {
+			registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, modelKey)
+		}
 	} else if shouldSuspendModel {
-		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, modelKey, suspendReason)
+		if suspendReason == "invalid_api_key" {
+			for _, m := range modelsForRegisteredAuth(result.AuthID) {
+				registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, m, suspendReason)
+			}
+			if modelKey != "" {
+				registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, modelKey, suspendReason)
+			}
+		} else {
+			registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, modelKey, suspendReason)
+		}
 	}
 
 	m.hook.OnResult(ctx, result)
@@ -1452,7 +1504,7 @@ func isCredentialScopedError(err error) bool {
 		IsCredentialScoped() bool
 	}
 	var csp credentialScopedProvider
-	return errors.As(err, &csp) && csp != nil && csp.IsCredentialScoped()
+	return (errors.As(err, &csp) && csp != nil && csp.IsCredentialScoped()) || isInvalidAPIKeyError(err)
 }
 
 func statusCodeFromResult(err *Error) int {
@@ -1522,6 +1574,38 @@ func isInvalidGrantResultError(err *Error) bool {
 		return false
 	}
 	return isInvalidGrantErrorMessage(err.Code) || isInvalidGrantErrorMessage(err.Message)
+}
+
+// isInvalidAPIKeyErrorMessage matches upstream "invalid API key" rejections
+// that arrive as generic client errors instead of 401/403 — Google answers a
+// dead Gemini key with 400 INVALID_ARGUMENT and
+// "API key not valid. Please pass a valid API key.", so a request-fault
+// classification would wrongly stop credential rotation on a dead key.
+func isInvalidAPIKeyErrorMessage(message string) bool {
+	lowered := strings.ToLower(message)
+	return strings.Contains(lowered, "api key not valid") || strings.Contains(lowered, "api_key_invalid")
+}
+
+func isInvalidAPIKeyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if status != http.StatusBadRequest && status != http.StatusUnauthorized && status != http.StatusForbidden {
+		return false
+	}
+	return isInvalidAPIKeyErrorMessage(err.Error())
+}
+
+func isInvalidAPIKeyResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromResult(err)
+	if status != http.StatusBadRequest && status != http.StatusUnauthorized && status != http.StatusForbidden {
+		return false
+	}
+	return isInvalidAPIKeyErrorMessage(err.Code) || isInvalidAPIKeyErrorMessage(err.Message)
 }
 
 func isModelSupportResultError(err *Error) bool {
@@ -1798,6 +1882,9 @@ func isRequestInvalidError(err error) bool {
 	if isInvalidGrantError(err) {
 		return false
 	}
+	if isInvalidAPIKeyError(err) {
+		return false
+	}
 	if isModelSupportError(err) {
 		return false
 	}
@@ -1855,6 +1942,34 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.NextRetryAfter = time.Time{}
 		} else {
 			auth.NextRetryAfter = now.Add(30 * time.Minute)
+		}
+		return
+	}
+	if isInvalidAPIKeyResultError(resultErr) {
+		auth.StatusMessage = "invalid_api_key"
+		if disableCooling {
+			auth.NextRetryAfter = time.Time{}
+		} else {
+			next := now.Add(30 * time.Minute)
+			auth.NextRetryAfter = next
+			auth.Quota = QuotaState{
+				Exceeded:      true,
+				Reason:        "credential_quota",
+				NextRecoverAt: next,
+			}
+			for _, state := range auth.ModelStates {
+				if state != nil {
+					state.Unavailable = true
+					state.Status = StatusError
+					state.StatusMessage = "invalid_api_key"
+					state.NextRetryAfter = next
+					state.Quota = QuotaState{
+						Exceeded:      true,
+						Reason:        "credential_quota",
+						NextRecoverAt: next,
+					}
+				}
+			}
 		}
 		return
 	}

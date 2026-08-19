@@ -1645,6 +1645,10 @@ func TestScheduleConfigReloadDebounces(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+
+	if atomic.LoadInt32(&reloads) != 1 {
+		t.Fatalf("expected single debounced reload, got %d", reloads)
+	}
 	if got := atomic.LoadInt32(&reloads); got != 1 {
 		t.Fatalf("expected single debounced reload, got %d", got)
 	}

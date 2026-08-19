@@ -17,6 +17,12 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+func deriveDeterministicToolID(kind string, msgIdx, partIdx int, funcName, payload string) string {
+	seed := fmt.Sprintf("%s|%d|%d|%s|%s", kind, msgIdx, partIdx, funcName, payload)
+	hash := sha256.Sum256([]byte(seed))
+	return "call_" + hex.EncodeToString(hash[:])[:24]
+}
+
 // ConvertGeminiRequestToOpenAI parses and transforms a Gemini API request into OpenAI Chat Completions API format.
 // It extracts the model name, generation config, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the OpenAI API.
@@ -264,7 +270,6 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 								toolMsg, _ = sjson.SetBytes(toolMsg, "content", responseRaw)
 							}
 						}
-
 						if toolCallID := explicitGeminiToolID(functionResponse); toolCallID != "" {
 							toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", toolCallID)
 							if queue := toolCallIDsByName[funcName]; len(queue) > 0 {
@@ -288,6 +293,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						messageItems = append(messageItems, toolMsg)
 					}
 
+					partIdx++
 					return true
 				})
 			}

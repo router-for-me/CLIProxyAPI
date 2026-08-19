@@ -18,6 +18,15 @@ var inPlaceSJSONTokens = []string{"ReplaceInPlace", "Optimistic"}
 // from the same buffer can still be alive at that point.
 var inPlaceSJSONAllowlist = map[string]struct{}{}
 
+// skippedWalkDirs are directories the source walker never descends into. The
+// build and tool dirs are excluded because they hold cloned third-party or
+// generated Go sources (build output, caches, temporary GOPATH/module trees)
+// that must not be treated as product code governed by these invariants.
+var skippedWalkDirs = map[string]struct{}{
+	".git": {}, "vendor": {}, "node_modules": {}, "testdata": {},
+	".tmp_build": {}, ".go-cache": {}, ".go-tmp": {}, ".gocache": {},
+}
+
 // forEachSourceFile visits every non-test Go file in the repository.
 func forEachSourceFile(t *testing.T, root string, visit func(rel string, data []byte)) {
 	t.Helper()
@@ -26,8 +35,7 @@ func forEachSourceFile(t *testing.T, root string, visit func(rel string, data []
 			return err
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "vendor", "node_modules", "testdata":
+			if _, skip := skippedWalkDirs[d.Name()]; skip {
 				return filepath.SkipDir
 			}
 			return nil
@@ -48,6 +56,50 @@ func forEachSourceFile(t *testing.T, root string, visit func(rel string, data []
 	})
 	if err != nil {
 		t.Fatalf("walk repository: %v", err)
+	}
+}
+
+// TestForEachSourceFileSkipsBuildDirs pins the walker's directory exclusions
+// and its non-exclusion of arbitrary hidden dirs. Every listed build/tool dir
+// must be skipped even when it holds a poisoned *.go file, while a hidden
+// source dir with no special meaning must still be scanned.
+func TestForEachSourceFileSkipsBuildDirs(t *testing.T) {
+	root := t.TempDir()
+	poison := "-- FORBIDDEN: ReplaceInPlace --\n"
+	// Every dir the walker must skip, seeded with a poisoned Go file.
+	for name := range skippedWalkDirs {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "x.go"), []byte(poison), 0o644); err != nil {
+			t.Fatalf("write skip fixture: %v", err)
+		}
+	}
+	// A hidden dir with no special meaning must still be scanned.
+	hidden := filepath.Join(root, ".hidden-source")
+	if err := os.MkdirAll(hidden, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", hidden, err)
+	}
+	if err := os.WriteFile(filepath.Join(hidden, "x.go"), []byte("// .hidden-source scanned\n"), 0o644); err != nil {
+		t.Fatalf("write hidden fixture: %v", err)
+	}
+
+	var skipped, kept []string
+	forEachSourceFile(t, root, func(rel string, data []byte) {
+		if strings.Contains(string(data), "FORBIDDEN") {
+			skipped = append(skipped, rel)
+			return
+		}
+		if strings.Contains(string(data), ".hidden-source scanned") {
+			kept = append(kept, rel)
+		}
+	})
+	if len(skipped) != 0 {
+		t.Fatalf("blocked dirs were walked: %v", skipped)
+	}
+	if len(kept) != 1 {
+		t.Fatalf("expected hidden-source dir to be scanned once, got %v", kept)
 	}
 }
 
@@ -106,6 +158,7 @@ var reviewedInPlaceByteWrites = map[string]reviewedInPlaceByteWrite{
 	"internal/runtime/executor/claude_executor_request.go":  {2, "shifts []string headers to insert a part; no byte of any payload is rewritten"},
 	"internal/runtime/executor/helps/claude_mcp_alias.go":   {1, "copies an HMAC sum into a local fixed-size digest array"},
 	"internal/client/codex/live/tcp_proxy.go":               {1, "copies header and payload into a freshly allocated frame"},
+	"internal/runtime/executor/devin_protobuf.go":           {1, "copies a protobuf payload into a freshly allocated Connect frame"},
 	"internal/auth/cursor/proto/connect.go":                 {1, "copies a protobuf payload into a freshly allocated Connect frame"},
 	"internal/home/client.go":                               {1, "zeroes a secret buffer after json.Unmarshal has copied every value out"},
 	"internal/pluginstore/auth.go":                          {1, "zeroes a locally built credential buffer after base64 encoding copied it out"},

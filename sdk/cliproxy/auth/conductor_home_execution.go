@@ -9,7 +9,11 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func (m *Manager) executeHome(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, countTokens bool) (cliproxyexecutor.Response, error) {
+func (m *Manager) executeHome(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, countTokens bool, optionalTracker ...*routeAttemptTracker) (cliproxyexecutor.Response, error) {
+	var tracker *routeAttemptTracker
+	if len(optionalTracker) > 0 {
+		tracker = optionalTracker[0]
+	}
 	if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
 		defer unlockSession()
 	}
@@ -23,21 +27,21 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		selection, errSelection := m.pickHomeDispatchSelection(ctx, routeModel, withHomeAuthCount(opts, homeAuthCount))
 		if errSelection != nil {
 			if shouldReturnLastErrorOnPickFailure(true, lastErr, errSelection) {
-				return cliproxyexecutor.Response{}, lastErr
+				return cliproxyexecutor.Response{}, wrapRouteExhaustion(lastErr, tracker)
 			}
-			return cliproxyexecutor.Response{}, errSelection
+			return cliproxyexecutor.Response{}, wrapRouteExhaustion(errSelection, tracker)
 		}
 		auth := selection.CloneAuthForRoute(routeModel)
 		if auth == nil || selection.Executor == nil {
 			selection.End("missing_execution_target")
-			return cliproxyexecutor.Response{}, &Error{Code: "executor_not_found", Message: "executor not registered"}
+			return cliproxyexecutor.Response{}, wrapRouteExhaustion(&Error{Code: "executor_not_found", Message: "executor not registered"}, tracker)
 		}
 		if _, seen := tried[auth.ID]; seen {
 			selection.End("repeated_auth")
 			if lastErr != nil {
-				return cliproxyexecutor.Response{}, lastErr
+				return cliproxyexecutor.Response{}, wrapRouteExhaustion(lastErr, tracker)
 			}
-			return cliproxyexecutor.Response{}, repeatedHomeAuthError()
+			return cliproxyexecutor.Response{}, wrapRouteExhaustion(repeatedHomeAuthError(), tracker)
 		}
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, selection.Provider, routeModel)
@@ -72,6 +76,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 				return cliproxyexecutor.Response{}, errEnd
 			}
 			lastErr = &Error{Code: "auth_not_found", Message: "no execution models available"}
+			tracker.Record(auth, lastErr)
 			continue
 		}
 		preparedAuth, errPrepare := m.prepareHomeRequestAuth(execCtx, selection.Executor, selection)
@@ -81,6 +86,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "prepare_failed"); errEnd != nil {
 				return cliproxyexecutor.Response{}, errEnd
 			}
+			tracker.Record(auth, errPrepare)
 			lastErr = errPrepare
 			continue
 		}
@@ -165,7 +171,15 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 					}
 				}
 			}
-			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, Success: errExecute == nil}
+			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, Success: errExecute == nil, Options: execOpts}
+			if errExecute == nil && !countTokens && isEmptyCompletionPayload(response.Payload) {
+				result.Success = false
+				result.Error = errEmptyCompletion
+				m.reportHomeResult(execCtx, result, preparedAuth)
+				tracker.Record(preparedAuth, errEmptyCompletion)
+				lastErr = errEmptyCompletion
+				continue
+			}
 			if errExecute == nil {
 				m.reportHomeResult(execCtx, result, preparedAuth)
 				releaseAttempt()
@@ -201,6 +215,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 				selection.End("request_invalid")
 				return cliproxyexecutor.Response{}, errExecute
 			}
+			tracker.Record(preparedAuth, errExecute)
 			if result.CredentialScope {
 				break
 			}

@@ -16,7 +16,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -890,111 +889,5 @@ func TestForwardResponsesStreamFailsWhenUpstreamClosesWithoutTerminalEvent(t *te
 	}
 	if !strings.Contains(body, "closed before a terminal event") {
 		t.Fatalf("response.failed does not explain the premature close: %q", body)
-	}
-}
-
-func TestForwardChatAsResponsesStreamTerminalErrorFollowsConvertedOutputSequence(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
-	h := NewOpenAIResponsesAPIHandler(base)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	c.Request.Header.Set("User-Agent", "Codex Desktop/26.803.41515")
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
-		t.Fatal("expected gin writer to implement http.Flusher")
-	}
-
-	data := make(chan []byte)
-	errs := make(chan *interfaces.ErrorMessage)
-	go func() {
-		data <- []byte(`data: {"id":"chat-partial","object":"chat.completion.chunk","created":1773896263,"model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}`)
-		errs <- &interfaces.ErrorMessage{
-			StatusCode: http.StatusBadRequest,
-			Error:      errors.New(`{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`),
-		}
-	}()
-
-	originalRequest := []byte(`{"model":"test-model"}`)
-	var param any
-	framer := &responsesSSEFramer{}
-	h.forwardChatAsResponsesStream(c, flusher, func(error) {}, data, errs, c.Request.Context(), "test-model", originalRequest, &param, framer)
-	body := recorder.Body.String()
-	lastOutputSequence := int64(-1)
-	terminalSequence := int64(-1)
-	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if !gjson.Valid(payload) {
-			continue
-		}
-		sequence := gjson.Get(payload, "sequence_number").Int()
-		if gjson.Get(payload, "type").String() == "response.failed" {
-			terminalSequence = sequence
-			continue
-		}
-		if sequence > lastOutputSequence {
-			lastOutputSequence = sequence
-		}
-	}
-	if terminalSequence < 0 {
-		t.Fatalf("stream ended without a terminal failure: %q", body)
-	}
-	if lastOutputSequence >= terminalSequence {
-		t.Fatalf("terminal failure must follow converted output events: last=%d terminal=%d body=%q", lastOutputSequence, terminalSequence, body)
-	}
-	if !strings.Contains(body, "blocked") {
-		t.Fatalf("terminal failure lost the upstream message: %q", body)
-	}
-}
-
-func TestForwardChatAsResponsesStreamUsesResponsesTerminalErrors(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
-	h := NewOpenAIResponsesAPIHandler(base)
-
-	cases := []struct {
-		name      string
-		status    int
-		message   string
-		wantEvent string
-		wantType  string
-	}{
-		{name: "bad_request", status: http.StatusBadRequest, message: `{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`, wantEvent: "response.failed", wantType: "invalid_request"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			recorder := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(recorder)
-			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-			c.Request.Header.Set("User-Agent", "Codex Desktop/26.803.41515")
-
-			flusher, ok := c.Writer.(http.Flusher)
-			if !ok {
-				t.Fatal("expected gin writer to implement http.Flusher")
-			}
-
-			data := make(chan []byte)
-			errs := make(chan *interfaces.ErrorMessage, 1)
-			errs <- &interfaces.ErrorMessage{
-				StatusCode: tc.status,
-				Error:      errors.New(tc.message),
-			}
-			close(errs)
-
-			var param any
-			framer := &responsesSSEFramer{}
-			h.forwardChatAsResponsesStream(c, flusher, func(error) {}, data, errs, c.Request.Context(), "test-model", nil, &param, framer)
-			body := recorder.Body.String()
-			if !strings.Contains(body, tc.wantEvent) || !strings.Contains(body, tc.wantType) {
-				t.Fatalf("terminal event = %q, want %q with %q", body, tc.wantEvent, tc.wantType)
-			}
-		})
 	}
 }

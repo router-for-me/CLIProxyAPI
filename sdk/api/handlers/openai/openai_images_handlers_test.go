@@ -25,7 +25,6 @@ import (
 func performImagesEndpointRequest(t *testing.T, endpointPath string, contentType string, body io.Reader, handler gin.HandlerFunc) *httptest.ResponseRecorder {
 	t.Helper()
 
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.POST(endpointPath, handler)
 

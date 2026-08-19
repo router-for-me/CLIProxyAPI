@@ -43,6 +43,7 @@ func TestHomeCodexTerminalStreamFailureUsesFreshDispatchOnNextRequest(t *testing
 		}
 		if connections.Add(1) == 1 {
 			_ = conn.WriteJSON(map[string]any{"type": "response.created", "response": map[string]any{"id": "response-1"}})
+			_ = conn.WriteJSON(map[string]any{"type": "response.output_text.delta", "delta": "streaming"})
 			_ = conn.WriteJSON(map[string]any{"type": "error", "status": http.StatusBadGateway, "error": map[string]any{"message": "terminal failure"}})
 		} else {
 			writeCompletion := func() {

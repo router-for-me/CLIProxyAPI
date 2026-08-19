@@ -21,7 +21,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 )
 
 const defaultAPICallTimeout = 60 * time.Second
@@ -334,6 +333,7 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth, 
 	return tokenValueForAuth(auth), nil
 }
 
+<<<<<<<<< Temporary merge branch 1
 func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -385,7 +385,8 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 
 	ctxToken := ctx
 	httpClient := &http.Client{
-		Timeout: defaultAPICallTimeout,
+		Timeout:   defaultAPICallTimeout,
+		Transport: h.apiCallTransport(auth),
 	}
 	ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
 
@@ -403,6 +404,8 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 	return strings.TrimSpace(currentToken.AccessToken), nil
 }
 
+func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+=========
 func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1077,7 +1080,8 @@ func (h *Handler) GetCopilotQuota(c *gin.Context) {
 	req.Header.Set("Accept", "application/json")
 
 	httpClient := &http.Client{
-		Timeout: defaultAPICallTimeout,
+		Timeout:   defaultAPICallTimeout,
+		Transport: h.apiCallTransport(auth, ""),
 	}
 
 	resp, errDo := httpClient.Do(req)
@@ -1193,7 +1197,8 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 	req.Header.Set("Accept", "application/json")
 
 	httpClient := &http.Client{
-		Timeout: defaultAPICallTimeout,
+		Timeout:   defaultAPICallTimeout,
+		Transport: h.apiCallTransport(auth, ""),
 	}
 
 	quotaResp, errDo := httpClient.Do(req)

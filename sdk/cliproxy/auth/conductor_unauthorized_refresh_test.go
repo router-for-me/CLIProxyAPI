@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -13,13 +14,14 @@ import (
 type unauthorizedRefreshExecutor struct {
 	id string
 
-	mu            sync.Mutex
-	executeCalls  []string
-	streamCalls   []string
-	refreshCalls  int
-	tokenInvalid  map[string]struct{}
-	refreshFail   bool
-	refreshTokens map[string]string
+	mu                       sync.Mutex
+	executeCalls             []string
+	streamCalls              []string
+	refreshCalls             int
+	tokenInvalid             map[string]struct{}
+	refreshFail              bool
+	refreshTokens            map[string]string
+	streamUnauthorizedResult func(auth *Auth) *cliproxyexecutor.StreamResult
 }
 
 func (e *unauthorizedRefreshExecutor) Identifier() string { return e.id }
@@ -44,9 +46,14 @@ func (e *unauthorizedRefreshExecutor) ExecuteStream(_ context.Context, auth *Aut
 	e.streamCalls = append(e.streamCalls, auth.ID)
 	token := authAccessToken(auth)
 	_, invalid := e.tokenInvalid[token]
+	streamFn := e.streamUnauthorizedResult
 	e.mu.Unlock()
 	if invalid {
-		return nil, &Error{
+		var res *cliproxyexecutor.StreamResult
+		if streamFn != nil {
+			res = streamFn(auth)
+		}
+		return res, &Error{
 			HTTPStatus: http.StatusUnauthorized,
 			Message:    "Your authentication token has been invalidated. Please try signing in again.",
 		}
@@ -332,5 +339,50 @@ func TestManager_Execute_UnauthorizedRefreshThenRetryStillFailsFallsBackOnce(t *
 	}
 	if got := executor.ExecuteCalls(); len(got) != 3 || got[0] != primary.ID || got[1] != primary.ID || got[2] != backup.ID {
 		t.Fatalf("Execute calls = %v, want [primary, primary, backup]", got)
+	}
+}
+
+func TestManager_ExecuteStream_UnauthorizedDrainsPreRefreshStreamResult(t *testing.T) {
+	m, executor, primary, _, model := newUnauthorizedRefreshFixture(t, false)
+
+	producerDone := make(chan struct{})
+	executor.mu.Lock()
+	executor.streamUnauthorizedResult = func(auth *Auth) *cliproxyexecutor.StreamResult {
+		ch := make(chan cliproxyexecutor.StreamChunk)
+		go func() {
+			defer close(producerDone)
+			for i := 0; i < 3; i++ {
+				ch <- cliproxyexecutor.StreamChunk{Payload: []byte("chunk")}
+			}
+			close(ch)
+		}()
+		return &cliproxyexecutor.StreamResult{
+			Headers: http.Header{"X-Auth": {auth.ID}},
+			Chunks:  ch,
+		}
+	}
+	executor.mu.Unlock()
+
+	stream, errStream := m.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream error = %v, want success on refreshed primary", errStream)
+	}
+	if stream == nil || stream.Chunks == nil {
+		t.Fatalf("expected stream result")
+	}
+
+	select {
+	case <-producerDone:
+		// success: pre-refresh stream channel was drained
+	case <-time.After(1 * time.Second):
+		t.Fatal("pre-refresh stream chunk channel producer remained blocked, want drained")
+	}
+
+	chunk, ok := <-stream.Chunks
+	if !ok {
+		t.Fatalf("expected stream chunk from refreshed stream")
+	}
+	if got := string(chunk.Payload); got != primary.ID+":fresh-access-token" {
+		t.Fatalf("stream payload = %q, want refreshed primary response", got)
 	}
 }

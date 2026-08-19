@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -213,6 +214,124 @@ func TestIsRequestFault(t *testing.T) {
 		{name: "transport", status: http.StatusBadGateway, err: errors.New("unexpected EOF")},
 		{name: "invalid JSON body", status: http.StatusBadGateway, err: errors.New(`{"error":`)},
 		{name: "nil", status: 0},
+		{
+			// DeepSeek-style: 401 with authentication_error type plus the generic
+			// invalid_request_error code. Credential fault, not a request fault.
+			name:   "401 authentication_error body",
+			status: http.StatusUnauthorized,
+			err:    errors.New(`{"error":{"message":"Authentication Fails","type":"authentication_error","code":"invalid_request_error"}}`),
+		},
+		{
+			name:   "403 authentication_error body",
+			status: http.StatusForbidden,
+			err:    errors.New(`{"error":{"type":"authentication_error","message":"Invalid token."}}`),
+		},
+		{
+			name:   "401 invalid_api_key code",
+			status: http.StatusUnauthorized,
+			err:    errors.New(`{"error":{"message":"Invalid API key","type":"invalid_request_error","code":"invalid_api_key"}}`),
+		},
+		{
+			name:   "403 incorrect_api_key code",
+			status: http.StatusForbidden,
+			err:    errors.New(`{"error":{"code":"incorrect_api_key","message":"bad key"}}`),
+		},
+		{
+			name:   "401 gemini unauthenticated status",
+			status: http.StatusUnauthorized,
+			err:    errors.New(`{"error":{"code":16,"message":"Request had invalid authentication credentials.","status":"UNAUTHENTICATED"}}`),
+		},
+		{
+			// Authentication marker with an invalid-request-type body: the auth
+			// carve-out must win over the generic classifier.
+			name:   "401 auth marker beats generic invalid_request",
+			status: http.StatusUnauthorized,
+			err:    errors.New(`{"error":{"type":"invalid_request","code":"invalid_api_key"}}`),
+		},
+		{
+			// Same body on a non-auth status stays a request fault.
+			name:   "authentication marker only honored on 401/403",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request","code":"invalid_api_key"}}`),
+			want:   true,
+		},
+		{
+			// An auth-styled body behind a server status is not a request fault.
+			name:   "authentication_error body behind upstream error",
+			status: http.StatusInternalServerError,
+			err:    errors.New(`{"error":{"type":"authentication_error","message":"server glitch"}}`),
+		},
+		{
+			// Wrapped status code: the 401 is extracted via errors.As, and even a
+			// non-splittable (prefixed) body stays a non-request credential fault.
+			name: "wrapped 401 authentication_error",
+			err:  fmt.Errorf("upstream: %w", statusError{status: http.StatusUnauthorized, body: `{"error":{"type":"authentication_error"}}`}),
+		},
+		{
+			name: "wrapped 400 invalid request stays request fault",
+			err:  fmt.Errorf("upstream: %w", statusError{status: http.StatusBadRequest, body: "bad input"}),
+			want: true,
+		},
+		{
+			// statusCoder form: the error carries both the 401 and the structured
+			// auth body directly (injected status stays 0, so it is read off the
+			// error). This mirrors how the shared loop feeds a Result error.
+			name: "statusCoder auth body",
+			err:  statusError{status: http.StatusUnauthorized, body: `{"error":{"type":"authentication_error","code":"invalid_api_key"}}`},
+		},
+		{
+			// Negative: a statusCoder 400 with an auth-looking body is still a
+			// request fault once status wins over the body.
+			name: "statusCoder 400 auth body still request fault",
+			err:  statusError{status: http.StatusBadRequest, body: `{"error":{"type":"authentication_error"}}`},
+			want: true,
+		},
+		{
+			// Large but valid bodies are still classified safely.
+			name:   "large authentication_error body",
+			status: http.StatusForbidden,
+			err:    errors.New(`{"error":{"type":"authentication_error","message":"` + strings.Repeat("x", 1<<16) + `"}}`),
+		},
+		{
+			name:   "429 stays credential domain",
+			status: http.StatusTooManyRequests,
+			err:    errors.New(`{"error":{"type":"rate_limit_error","message":"slow down"}}`),
+		},
+		{
+			// CPA parity: a rate-limit status is authoritative even when the body
+			// carries a generic invalid_request_error code. Quota, not request.
+			name:   "429 with generic invalid_request_error code stays quota",
+			status: http.StatusTooManyRequests,
+			err:    errors.New(`{"error":{"code":"invalid_request_error","message":"Rate Limit Reached","param":null,"type":"unknown_error"}}`),
+		},
+		{
+			// CPA parity: a payment-required status is authoritative even when the
+			// body carries the generic invalid_request_error code. Quota/balance,
+			// not request.
+			name:   "402 with generic invalid_request_error code stays payment",
+			status: http.StatusPaymentRequired,
+			err:    errors.New(`{"error":{"message":"Insufficient Balance","type":"unknown_error","param":null,"code":"invalid_request_error"}}`),
+		},
+		{
+			// A 402 surface with the invalid_request_error type spelling is still
+			// payment-scoped, never a request fault.
+			name:   "402 with invalid_request_error type stays payment",
+			status: http.StatusPaymentRequired,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","code":"insufficient_balance","message":"low balance"}}`),
+		},
+		{
+			// statusCoder form: quota/payment status is read off the error and the
+			// precedence still wins over the generic body code.
+			name: "statusCoder 429 with generic code stays quota",
+			err:  statusError{status: http.StatusTooManyRequests, body: `{"error":{"code":"invalid_request_error","message":"quota"}}`},
+		},
+		{
+			// A 429 that is genuinely a 429 request-fault-looking body never flips
+			// to a request fault either, because the status stays authoritative.
+			name:   "429 status stays authoritative over auth-looking body",
+			status: http.StatusTooManyRequests,
+			err:    errors.New(`{"error":{"type":"authentication_error","code":"invalid_request_error"}}`),
+		},
 	}
 
 	for _, tc := range tests {

@@ -32,6 +32,7 @@ type staticModelsJSON struct {
 	Qoder       []*ModelInfo `json:"qoder"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
+	Devin       []*ModelInfo `json:"devin"`
 	ZAI         []*ModelInfo `json:"zai"`
 	OpenCode    []*ModelInfo `json:"opencode"`
 	OpenCodeGo  []*ModelInfo `json:"opencode-go"`
@@ -917,6 +918,11 @@ func GetAmazonQModels() []*ModelInfo {
 // GetQoderModels returns the Qoder model definitions.
 func GetQoderModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Qoder)
+}
+
+// GetDevinModels returns the standard Devin model definitions.
+func GetDevinModels() []*ModelInfo {
+	return cloneModelInfos(getModels().Devin)
 }
 
 // GetZAIModels returns the Z.AI / ZCode (GLM) coding-plan model definitions.

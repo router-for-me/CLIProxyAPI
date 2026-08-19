@@ -13,6 +13,10 @@ import (
 	"golang.org/x/net/http2/hpack"
 )
 
+// h2WindowWaitTimeout bounds how long a writer parks on a closed flow-control
+// window before erroring out instead of hanging the pipeline.
+const h2WindowWaitTimeout = 30 * time.Second
+
 const (
 	defaultInitialWindowSize = 65535 // HTTP/2 default
 	maxFramePayload          = 16384 // HTTP/2 default max frame size
@@ -171,10 +175,24 @@ func (s *H2Stream) Write(data []byte) error {
 			chunk = data[:maxFramePayload]
 		}
 
-		// Wait for flow control window
+		// Wait for flow control window, bounded: a server that never reopens
+		// the window would otherwise park this goroutine (and, via the read
+		// loop's backpressure, the whole pipeline) forever.
 		s.windowMu.Lock()
+		waitDeadline := time.Now().Add(h2WindowWaitTimeout)
 		for s.sendWindow <= 0 || s.connWindow <= 0 {
+			remaining := time.Until(waitDeadline)
+			if remaining <= 0 {
+				s.windowMu.Unlock()
+				return fmt.Errorf("h2stream: flow-control window did not reopen within %v", h2WindowWaitTimeout)
+			}
+			timer := time.NewTimer(remaining)
+			go func() {
+				<-timer.C
+				s.windowCond.Broadcast()
+			}()
 			s.windowCond.Wait()
+			timer.Stop()
 		}
 		// Limit chunk to available window
 		allowed := int(s.sendWindow)

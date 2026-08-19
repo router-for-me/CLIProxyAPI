@@ -11,6 +11,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +23,7 @@ import (
 	codexconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/openai/chat-completions"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -321,6 +325,7 @@ func (h *OpenAIAPIHandler) forwardResponsesAsChatStream(c *gin.Context, flusher 
 			if errMsg == nil {
 				return
 			}
+			errMsg = sanitizeOpenAIErrorMessage(errMsg)
 			status := http.StatusInternalServerError
 			if errMsg.StatusCode > 0 {
 				status = errMsg.StatusCode
@@ -528,7 +533,7 @@ func (h *OpenAIAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -544,7 +549,7 @@ func (h *OpenAIAPIHandler) handleNonStreamingResponseViaResponses(c *gin.Context
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, OpenaiResponse, modelName, rawJSON, h.GetAlt(c))
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -606,7 +611,7 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 				continue
 			}
 			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
+			h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
@@ -682,7 +687,7 @@ func (h *OpenAIAPIHandler) handleStreamingResponseViaResponses(c *gin.Context, r
 				errChan = nil
 				continue
 			}
-			h.WriteErrorResponse(c, errMsg)
+			h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
@@ -691,6 +696,15 @@ func (h *OpenAIAPIHandler) handleStreamingResponseViaResponses(c *gin.Context, r
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				// Stream closed without data. Surface a buffered pending error
+				// before committing SSE headers, so a failed upstream never
+				// looks like a successful empty stream.
+				if pErr, pending := pendingOpenAIStreamError(errChan); pending {
+					h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(pErr))
+					cliCancel(pErr.Error)
+					return
+				}
+				// Clean close. Send DONE or just headers.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 				_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
@@ -729,7 +743,7 @@ func (h *OpenAIAPIHandler) handleCompletionsNonStreamingResponse(c *gin.Context,
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, chatCompletionsJSON, "")
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -785,7 +799,7 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 				errChan = nil
 				continue
 			}
-			h.WriteErrorResponse(c, errMsg)
+			h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
@@ -867,6 +881,7 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 			if errMsg == nil {
 				return
 			}
+			errMsg = sanitizeOpenAIErrorMessage(errMsg)
 			status := http.StatusInternalServerError
 			if errMsg.StatusCode > 0 {
 				status = errMsg.StatusCode
@@ -882,4 +897,393 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 			_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
 		},
 	})
+}
+
+// pendingOpenAIStreamError returns an immediately available non-nil stream error
+// buffered on errChan. It mirrors pendingClaudeStreamError in the Claude handler:
+// the initial peek consumes a queued upstream failure before committing SSE
+// headers so a failed stream never looks like a successful empty stream.
+func pendingOpenAIStreamError(errs <-chan *interfaces.ErrorMessage) (*interfaces.ErrorMessage, bool) {
+	if errs == nil {
+		return nil, false
+	}
+	select {
+	case errMsg, ok := <-errs:
+		if !ok || errMsg == nil {
+			return nil, false
+		}
+		return errMsg, true
+	default:
+		return nil, false
+	}
+}
+
+// sanitizeOpenAIErrorMessage is the trust-boundary sanitizer for the OpenAI
+// pre-output sinks. It preserves a DirectResponse only when it is explicitly
+// trusted (local plugin/interceptor); every other error path sanitizes
+// strictly: forces a valid status, clears Body, forces DirectResponse=false,
+// and redacts credential material from the error text. It returns nil for a
+// nil input.
+func sanitizeOpenAIErrorMessage(errMsg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
+	if errMsg != nil && errMsg.DirectResponse && errMsg.TrustedDirectResponse {
+		return errMsg
+	}
+	return sanitizeOpenAIStrictErrorMessage(errMsg)
+}
+
+func sanitizeOpenAIStrictErrorMessage(errMsg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
+	if errMsg == nil {
+		return nil
+	}
+	status := errMsg.StatusCode
+	if status < http.StatusBadRequest || status > 599 {
+		status = http.StatusInternalServerError
+	}
+	safe := *errMsg
+	safe.StatusCode = status
+	safe.DirectResponse = false
+	safe.Body = nil
+	if errMsg.Error != nil {
+		safe.Error = &openAIStreamSanitizedError{
+			message:     openAIStreamErrorText(errMsg.Error.Error(), status),
+			safeHeaders: coreauth.SafeResponseHeaders(errMsg.Error),
+		}
+	}
+	return &safe
+}
+
+type openAIStreamSanitizedError struct {
+	message     string
+	safeHeaders http.Header
+}
+
+func (e *openAIStreamSanitizedError) Error() string { return e.message }
+
+func (e *openAIStreamSanitizedError) SafeResponseHeaders() http.Header {
+	if e == nil || e.safeHeaders == nil {
+		return nil
+	}
+	return e.safeHeaders.Clone()
+}
+
+// openAIStreamErrorText produces a client-safe error message. JSON error bodies
+// are preserved field-by-field with sanitization; free-form text is kept with
+// credential material redacted.
+func openAIStreamErrorText(text string, status int) string {
+	if t := strings.TrimSpace(text); t != "" && json.Valid([]byte(t)) {
+		return sanitizeOpenAIStreamJSON(t, status)
+	}
+	fallback := http.StatusText(status)
+	if strings.TrimSpace(text) == "" {
+		return fallback
+	}
+	return redactOpenAIStreamErrorText(strings.TrimSpace(text))
+}
+
+func sanitizeOpenAIStreamJSON(text string, status int) string {
+	root := gjson.Parse(text)
+	errorNode := root.Get("error")
+	if !errorNode.Exists() || !errorNode.IsObject() {
+		errorNode = root.Get("response.error")
+	}
+	if errorNode.Exists() && errorNode.IsObject() {
+		safe := []byte(`{"error":{}}`)
+		copied := false
+		for _, field := range []string{"type", "code", "message", "param"} {
+			value := errorNode.Get(field)
+			if !value.Exists() || value.Type == gjson.Null {
+				continue
+			}
+			limit := openAIStreamErrorFieldLimit
+			if field == "message" {
+				limit = openAIStreamErrorMessageLimit
+			}
+			safe, _ = sjson.SetBytes(safe, "error."+field, truncateOpenAIStreamErrorText(redactOpenAIStreamErrorText(value.String()), limit))
+			copied = true
+		}
+		if copied {
+			return string(safe)
+		}
+	}
+
+	safe := []byte(`{"type":"error"}`)
+	copied := false
+	for _, field := range []string{"code", "message", "param"} {
+		value := root.Get(field)
+		if !value.Exists() || value.Type == gjson.Null {
+			continue
+		}
+		limit := openAIStreamErrorFieldLimit
+		if field == "message" {
+			limit = openAIStreamErrorMessageLimit
+		}
+		safe, _ = sjson.SetBytes(safe, field, truncateOpenAIStreamErrorText(redactOpenAIStreamErrorText(value.String()), limit))
+		copied = true
+	}
+	if copied {
+		return string(safe)
+	}
+	return http.StatusText(status)
+}
+
+const (
+	openAIStreamErrorMessageLimit = 2048
+	openAIStreamErrorFieldLimit   = 256
+)
+
+var (
+	// openAIStreamKeyPattern matches a sensitive key name and its separator
+	// (= or :), preceded by a boundary and optional quote/escape syntax.
+	// Group 1 is the leading boundary/quote syntax, group 2 the key, group 3
+	// the trailing quote/space syntax plus separator.
+	openAIStreamKeyPattern = regexp.MustCompile(`(?i)((?:^|[^A-Za-z0-9_])(?:\\*["']?)?)(api[_-]?key|apikey|access[_-]?key[_-]?id|aws[_-]?access[_-]?key[_-]?id|api[_-]?key[_-]?id|access[_-]?token|authorization|token|secret|credential|aws[_-]?credential|refresh[_-]?token|client[_-]?secret|(?:[A-Za-z0-9]+(?:[_-][A-Za-z0-9]+)*)[_-](?:key|token|secret|credential|key[_-]?id)|(?-i:[A-Za-z0-9]*(?:[a-z0-9]|_[a-z0-9]|-[a-z0-9])(?:Key|Token|Secret|Credential|KeyId|Key_Id|Key-Id)))((?:\\*["']?)?\s*[=:])`)
+	// openAIStreamSpaceAPIKeyPattern matches the "api key:" spelling with a
+	// space between api and key, in header/assignment contexts.
+	openAIStreamSpaceAPIKeyPattern = regexp.MustCompile(`(?i)((?:^|[^A-Za-z0-9_]))(api[ _]key)(["']?\s*[=:])`)
+	// openAIStreamBareKeyDenyPattern marks key names that merely mention a
+	// credential kind without being a credential themselves.
+	openAIStreamBareKeyDenyPattern = regexp.MustCompile(`(?i)^(?:not|non|no|count|counter|key[_-]?count|token[_-]?count)(?:[_-]|$)`)
+	// openAIStreamAuthSchemePattern detects a Bearer/Basic scheme at the
+	// start of a credential value so the scheme can be preserved.
+	openAIStreamAuthSchemePattern = regexp.MustCompile(`(?i)^(Bearer|Basic)\s+`)
+	// openAIStreamAuthPattern redacts standalone Bearer/Basic credentials
+	// that appear outside key/value contexts.
+	openAIStreamAuthPattern = regexp.MustCompile(`(?i)(\b(?:Bearer|Basic)\s+)([-A-Za-z0-9._~+/=]+)`)
+)
+
+func truncateOpenAIStreamErrorText(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "…"
+}
+
+func redactOpenAIStreamErrorText(text string) string {
+	text = redactOpenAIStreamKeyValues(text)
+	return openAIStreamAuthPattern.ReplaceAllString(text, "${1}[REDACTED]")
+}
+
+// redactOpenAIStreamKeyValues locates sensitive key/value pairs and replaces
+// their credential with [REDACTED], preserving quote/escape syntax and, for
+// Bearer/Basic values, the scheme. Compound keys always redact; bare
+// token/secret/credential keys redact only in explicit JSON, assignment, or
+// line-start header contexts.
+func redactOpenAIStreamKeyValues(text string) string {
+	type keyMatch struct {
+		loc []int
+		key string
+	}
+	var matches []keyMatch
+	for _, loc := range openAIStreamKeyPattern.FindAllStringSubmatchIndex(text, -1) {
+		matches = append(matches, keyMatch{loc: loc, key: text[loc[4]:loc[5]]})
+	}
+	for _, loc := range openAIStreamSpaceAPIKeyPattern.FindAllStringSubmatchIndex(text, -1) {
+		matches = append(matches, keyMatch{loc: loc, key: "api key"})
+	}
+	if len(matches) == 0 {
+		return text
+	}
+	sort.Slice(matches, func(a, b int) bool { return matches[a].loc[0] < matches[b].loc[0] })
+	var b strings.Builder
+	b.Grow(len(text) + 16*len(matches))
+	last := 0
+	for _, m := range matches {
+		loc := m.loc
+		if loc[0] < last {
+			continue
+		}
+		key := strings.ToLower(m.key)
+		if openAIStreamBareKeyDenyPattern.MatchString(key) {
+			continue
+		}
+		if key == "token" || key == "secret" || key == "credential" {
+			if !openAIStreamBareKeyContextOK(text, loc) {
+				continue
+			}
+		}
+		sepEnd := loc[1]
+		valueEnd, redactStart, redactEnd := openAIStreamValueBounds(text, sepEnd, key == "authorization" || key == "api key")
+		b.WriteString(text[last:sepEnd])
+		b.WriteString(text[sepEnd:redactStart])
+		if redactEnd > redactStart {
+			b.WriteString("[REDACTED]")
+		}
+		b.WriteString(text[redactEnd:valueEnd])
+		last = valueEnd
+	}
+	b.WriteString(text[last:])
+	return b.String()
+}
+
+// openAIStreamBareKeyContextOK applies the deterministic context rule for bare
+// token/secret/credential keys: they redact only as explicit JSON fields, '='
+// assignments, or line-start headers.
+func openAIStreamBareKeyContextOK(text string, loc []int) bool {
+	if loc[4] == 0 || text[loc[4]-1] == '\n' {
+		return true
+	}
+	if b := text[loc[4]-1]; b == '"' || b == '\\' || b == '\'' {
+		return true
+	}
+	for i := loc[6]; i < loc[7]; i++ {
+		if text[i] == '=' {
+			return true
+		}
+	}
+	return false
+}
+
+// openAIStreamValueBounds returns the region [redactStart, redactEnd) to
+// replace with [REDACTED] for the value starting at start, and the full value
+// span [start, valueEnd) the redaction consumes. Quoted values keep their
+// opening/closing quote syntax; unquoted generic values stop at whitespace;
+// Bearer/Basic credentials span the space between scheme and token;
+// authorization/api key values consume the whole multi-part value.
+func openAIStreamValueBounds(text string, start int, isAuth bool) (valueEnd, redactStart, redactEnd int) {
+	n := len(text)
+	i := start
+	for i < n && (text[i] == ' ' || text[i] == '\t') {
+		i++
+	}
+	if i >= n {
+		return start, start, start
+	}
+	backslashes := 0
+	j := i
+	for j < n && text[j] == '\\' {
+		backslashes++
+		j++
+	}
+	if j < n && (text[j] == '"' || text[j] == '\'') {
+		quote := text[j]
+		openEnd := j + 1
+		closeStart, closeEnd := openAIStreamQuoteClose(text, openEnd, quote, backslashes)
+		if schemeEnd := openAIStreamAuthSchemeEnd(text, openEnd); schemeEnd >= 0 && schemeEnd <= closeStart {
+			return closeEnd, schemeEnd, closeStart
+		}
+		return closeEnd, openEnd, closeStart
+	}
+	end := i
+	for end < n {
+		c := text[end]
+		if c == '\\' {
+			if end+1 >= n {
+				end = n
+				break
+			}
+			end += 2
+			continue
+		}
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '}' || c == ')' || c == ']' || c == ',' || c == ';' || c == '\'' || c == '"' {
+			break
+		}
+		end++
+	}
+	if schemeEnd := openAIStreamAuthSchemeEnd(text, i); schemeEnd >= 0 {
+		credEnd := schemeEnd
+		for credEnd < n {
+			c := text[credEnd]
+			if c == '\\' {
+				if credEnd+1 >= n {
+					credEnd = n
+					break
+				}
+				credEnd += 2
+				continue
+			}
+			if c == '\n' || c == '\r' || c == '}' || c == ')' || c == ']' || c == ',' || c == ';' || c == '"' {
+				break
+			}
+			credEnd++
+		}
+		return credEnd, schemeEnd, credEnd
+	}
+	if isAuth {
+		authEnd := i
+		for authEnd < n {
+			c := text[authEnd]
+			if c == '\\' {
+				if authEnd+1 >= n {
+					authEnd = n
+					break
+				}
+				authEnd += 2
+				continue
+			}
+			if c == '\n' || c == '\r' || c == '}' || c == ')' || c == ']' {
+				break
+			}
+			authEnd++
+		}
+		return authEnd, i, authEnd
+	}
+	return end, i, end
+}
+
+// openAIStreamQuoteClose finds the closing quote syntax of a quoted value
+// starting after the opening quote at openEnd.
+func openAIStreamQuoteClose(text string, openEnd int, quote byte, openRun int) (closeSyntaxStart, closeEnd int) {
+	n := len(text)
+	if openRun == 0 {
+		k := openEnd
+		for k < n {
+			if text[k] == '\\' {
+				if k+1 >= n {
+					return n, n
+				}
+				k += 2
+				continue
+			}
+			if text[k] == quote {
+				return k, k + 1
+			}
+			k++
+		}
+		return n, n
+	}
+	k := openEnd
+	for k < n {
+		if text[k] == '\\' {
+			r := 0
+			j := k
+			for j < n && text[j] == '\\' {
+				r++
+				j++
+			}
+			if j < n && text[j] == quote {
+				if r == openRun {
+					return j - openRun, j + 1
+				}
+				if r > openRun {
+					k = j + 1
+					continue
+				}
+				return j - r, j + 1
+			}
+			k = j
+			continue
+		}
+		if text[k] == quote {
+			return k, k + 1
+		}
+		k++
+	}
+	return n, n
+}
+
+// openAIStreamAuthSchemeEnd reports the position just after a Bearer/Basic
+// scheme word plus following whitespace at start, or -1 when no such scheme is
+// present.
+func openAIStreamAuthSchemeEnd(text string, start int) int {
+	i := start
+	n := len(text)
+	for i < n && (text[i] == ' ' || text[i] == '\t') {
+		i++
+	}
+	m := openAIStreamAuthSchemePattern.FindStringSubmatchIndex(text[i:])
+	if m == nil {
+		return -1
+	}
+	return i + m[1]
 }

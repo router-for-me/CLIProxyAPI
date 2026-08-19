@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -918,3 +919,73 @@ func TestCursorOpenAIExecutorEmitsNoDoneChunk(t *testing.T) {
 
 // Alias keeps test processor signatures readable without weakening production types.
 type anyMCPTools = []cursorproto.McpToolDef
+
+// recordingCursorStream captures written request frames for assertions.
+type recordingCursorStream struct {
+	inner   *fakeCursorStream
+	capture *[]byte
+}
+
+func (s *recordingCursorStream) ID() string          { return s.inner.ID() }
+func (s *recordingCursorStream) Data() <-chan []byte { return s.inner.Data() }
+func (s *recordingCursorStream) Done() <-chan struct{} {
+	return s.inner.Done()
+}
+func (s *recordingCursorStream) Err() error { return s.inner.Err() }
+func (s *recordingCursorStream) Close()     { s.inner.Close() }
+func (s *recordingCursorStream) Write(p []byte) error {
+	*s.capture = append(*s.capture, p...)
+	return s.inner.Write(p)
+}
+
+// TestCursorExecuteNonStreamFlattensConversationTurns guards the fix for the
+// deterministic multi-message failure: Execute never attaches a checkpoint, and
+// Cursor's Run endpoint rejects structured turns on a checkpoint-less
+// conversation with "Connect error internal", so the wire request must carry a
+// flattened UserText transcript instead of Turns (#183).
+func TestCursorExecuteNonStreamFlattensConversationTurns(t *testing.T) {
+	var written []byte
+	e := NewCursorExecutor(nil)
+	e.openStream = func(string) (cursorStream, error) {
+		return &recordingCursorStream{inner: newFakeCursorStream(), capture: &written}, nil
+	}
+	e.processFrames = func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func(pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
+		onText("answer", false)
+		return nil
+	}
+
+	payload := []byte(`{"model":"cursor-test-model","messages":[` +
+		`{"role":"user","content":"hi"},` +
+		`{"role":"assistant","content":"Hello."},` +
+		`{"role":"user","content":"capital of France?"}]}`)
+	req := cliproxyexecutor.Request{Model: "cursor-test-model", Payload: payload}
+
+	if _, err := e.Execute(context.Background(), cursorTestAuth(), req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	_, wire, _, ok := cursorproto.ParseConnectFrame(written)
+	if !ok || len(wire) == 0 {
+		t.Fatalf("no connect frame captured (written=%d bytes)", len(written))
+	}
+
+	control := parseOpenAIRequest(payload)
+	flattenConversationIntoUserText(control)
+	if len(control.Turns) != 0 || control.UserText == "" {
+		t.Fatalf("control flatten produced turns=%d userText=%q", len(control.Turns), control.UserText)
+	}
+
+	// The wire request must carry the flattened transcript inside UserText and
+	// must not byte-match an encoding built from the structured turns.
+	transcript := control.UserText
+	if !strings.Contains(string(wire), transcript) {
+		t.Fatalf("wire request does not contain the flattened transcript %q", transcript)
+	}
+	plain := parseOpenAIRequest(payload)
+	apiKey := apiKeyFromContext(context.Background())
+	convID := deriveConversationId(apiKey, extractClaudeCodeSessionId(payload), plain.SystemPrompt)
+	withTurns := cursorproto.EncodeRunRequest(buildRunRequestParams(plain, convID, req.Model))
+	if bytes.Equal(wire, withTurns) {
+		t.Fatalf("wire matches the unflattened turns encoding; flatten fix not applied")
+	}
+}

@@ -8,18 +8,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// RequestScopedErrorRule configures custom classification and handling for upstream errors.
-type RequestScopedErrorRule struct {
-	// Status matches the HTTP status code of the upstream response (e.g. 400).
-	Status int `yaml:"status,omitempty" json:"status,omitempty"`
-	// Match matches substrings in the upstream error body.
-	Match []string `yaml:"match,omitempty" json:"match,omitempty"`
-	// MatchRegexr matches regular expressions in the upstream error body.
-	MatchRegexr []string `yaml:"match-regexr,omitempty" json:"match-regexr,omitempty"`
-	// Action specifies the handling behavior: "stop", "stop-and-cooldown", "continue", "continue-and-cooldown".
-	Action string `yaml:"action,omitempty" json:"action,omitempty"`
-}
-
+<<<<<<<<< Temporary merge branch 1
 // AmpModelMapping maps an Amp-requested model to an available proxy model.
 type AmpModelMapping struct {
 	From  string `yaml:"from" json:"from"`
@@ -79,6 +68,18 @@ type KiroRateLimitConfig struct {
 	BackoffMax        string  `yaml:"backoff-max,omitempty" json:"backoff-max,omitempty"`
 	BackoffMultiplier float64 `yaml:"backoff-multiplier,omitempty" json:"backoff-multiplier,omitempty"`
 	SuspendCooldown   string  `yaml:"suspend-cooldown,omitempty" json:"suspend-cooldown,omitempty"`
+}
+
+// RequestScopedErrorRule configures custom classification and handling for upstream errors.
+type RequestScopedErrorRule struct {
+	// Status matches the HTTP status code of the upstream response (e.g. 400).
+	Status int `yaml:"status,omitempty" json:"status,omitempty"`
+	// Match matches substrings in the upstream error body.
+	Match []string `yaml:"match,omitempty" json:"match,omitempty"`
+	// MatchRegexr matches regular expressions in the upstream error body.
+	MatchRegexr []string `yaml:"match-regexr,omitempty" json:"match-regexr,omitempty"`
+	// Action specifies the handling behavior: "stop", "stop-and-cooldown", "continue", "continue-and-cooldown".
+	Action string `yaml:"action,omitempty" json:"action,omitempty"`
 }
 
 // PluginsConfig holds dynamic plugin system settings.

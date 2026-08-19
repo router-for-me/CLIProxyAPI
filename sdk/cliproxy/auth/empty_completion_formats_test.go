@@ -1,7 +1,9 @@
-package auth
+package auth_test
 
 import (
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 // TestSupportedCompletionFormatsRecognized covers representative wire formats
@@ -20,10 +22,11 @@ import (
 //     candidates-shaped) — voice/media channel, not a text completion stream.
 func TestSupportedCompletionFormatsRecognized(t *testing.T) {
 	cases := []struct {
-		name      string
-		executors []string
-		nonEmpty  []byte
-		empty     []byte
+		name       string
+		executors  []string
+		nonEmpty   []byte
+		empty      []byte
+		neverEmpty bool
 	}{
 		{
 			// OpenAI chat-completions wire. Emitted by the OpenAI-compatible
@@ -36,10 +39,11 @@ func TestSupportedCompletionFormatsRecognized(t *testing.T) {
 		{
 			// OpenAI Responses-API wire (codex agent format). Emitted by the
 			// codex-family executors (requestToFormat is FormatCodex).
-			name:      "codex-responses",
-			executors: []string{"codex", "home_codex", "xai"},
-			nonEmpty:  []byte("data: {\"type\":\"response.output_text.delta\",\"item_id\":\"1\",\"output_index\":0,\"content_index\":0,\"delta\":\"hello\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":{\"output_tokens\":5}}}\n\ndata: [DONE]\n\n"),
-			empty:     []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n"),
+			name:       "codex-responses",
+			executors:  []string{"codex", "home_codex", "xai"},
+			nonEmpty:   []byte("data: {\"type\":\"response.output_text.delta\",\"item_id\":\"1\",\"output_index\":0,\"content_index\":0,\"delta\":\"hello\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":{\"output_tokens\":5}}}\n\ndata: [DONE]\n\n"),
+			empty:      []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n"),
+			neverEmpty: true,
 		},
 		{
 			// Anthropic Claude wire. Emitted by the Claude executor
@@ -71,13 +75,19 @@ func TestSupportedCompletionFormatsRecognized(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if !IsCompletionFormatRecognized(tc.nonEmpty) {
+			if !auth.IsCompletionFormatRecognized(tc.nonEmpty) {
 				t.Fatalf("non-empty chunk for executors %v was NOT recognized; a new executor emitting this format would silently bypass empty-completion detection", tc.executors)
 			}
-			if !IsEmptyCompletionPayload(tc.empty) {
+			if tc.neverEmpty {
+				// Responses-API terminal frames pass through by contract (existing
+				// repo tests define them as valid completions even with no output).
+				if auth.IsEmptyCompletionPayload(tc.empty) {
+					t.Fatalf("terminal variant for executors %v must pass through (never empty), but was judged empty", tc.executors)
+				}
+			} else if !auth.IsEmptyCompletionPayload(tc.empty) {
 				t.Fatalf("empty-terminal variant for executors %v was not judged empty", tc.executors)
 			}
-			if IsEmptyCompletionPayload(tc.nonEmpty) {
+			if auth.IsEmptyCompletionPayload(tc.nonEmpty) {
 				t.Fatalf("non-empty chunk for executors %v was wrongly judged empty", tc.executors)
 			}
 		})

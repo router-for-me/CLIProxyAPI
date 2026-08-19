@@ -795,6 +795,23 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	log.Debugf("Resumed client %s for model %s", clientID, modelID)
 }
 
+// GetClientModelSuspensionReason returns the reason a client model was suspended, or empty string if not suspended.
+func (r *ModelRegistry) GetClientModelSuspensionReason(clientID, modelID string) string {
+	clientID = strings.TrimSpace(clientID)
+	modelID = strings.TrimSpace(modelID)
+	if clientID == "" || modelID == "" {
+		return ""
+	}
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	registration, exists := r.models[modelID]
+	if !exists || registration == nil || registration.SuspendedClients == nil {
+		return ""
+	}
+	return registration.SuspendedClients[clientID]
+}
+
 // ClientSupportsModel reports whether the client registered support for modelID.
 func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	clientID = strings.TrimSpace(clientID)

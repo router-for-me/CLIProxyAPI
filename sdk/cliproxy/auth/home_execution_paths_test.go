@@ -640,7 +640,7 @@ func (*alwaysEmptyHomeStreamExecutor) Execute(context.Context, *Auth, cliproxyex
 func (e *alwaysEmptyHomeStreamExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	e.calls.Add(1)
 	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
-	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\n")}
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}\n\n")}
 	close(chunks)
 	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -714,7 +714,7 @@ func (e *alternatingEmptyHomeExecutor) ExecuteStream(_ context.Context, auth *Au
 		return nil, &Error{Code: "transient", Message: "transient stream failure", Retryable: true}
 	}
 	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
-	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n")}
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}\n\n")}
 	close(chunks)
 	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -734,7 +734,7 @@ func TestHomeStreamDoesNotRevisitEmptyAuthAfterAnotherFailure(t *testing.T) {
 	executor := &alternatingEmptyHomeExecutor{}
 	manager.RegisterExecutor(executor)
 
-	_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-execution"}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{Stream: true}, 0)
+	_, errExecute := manager.executeStreamMixedOnce(context.Background(), []string{"home-execution"}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{Stream: true}, 0, nil)
 	if errExecute == nil || !strings.Contains(errExecute.Error(), "transient stream failure") {
 		t.Fatalf("executeStreamMixedOnce() error = %v, want last transient failure", errExecute)
 	}

@@ -4636,37 +4636,30 @@ func TestApplyCloaking_EmptyCredentialModeRespectsDefaultAndGlobalPrecedence(t *
 	tests := []struct {
 		name        string
 		cfg         *config.Config
-		keyAuth     bool
+		auth        *cliproxyauth.Auth
 		wantCloaked bool
 	}{
 		{
-			name:        "default auto mode does not cloak an unconfigured credential",
+			name:        "default mode preserves the caller without cloaking (v7.2.136 upstream sync)",
 			cfg:         &config.Config{},
 			wantCloaked: false,
-		},
-		{
-			name: "default auto mode cloaks a configured claude-api-key credential",
-			cfg: &config.Config{ClaudeKey: []config.ClaudeKey{{
-				APIKey: "test-key",
-				Cloak:  &config.CloakConfig{Mode: "auto"},
-			}}},
-			keyAuth:     true,
-			wantCloaked: true,
 		},
 		{
 			name:        "global disable mode overrides an empty credential mode",
 			cfg:         &config.Config{DisableClaudeCloakMode: true},
 			wantCloaked: false,
 		},
+		{
+			name:        "credential auto mode still applies cloaking",
+			cfg:         &config.Config{},
+			auth:        &cliproxyauth.Auth{Attributes: map[string]string{"cloak_mode": "auto"}},
+			wantCloaked: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			auth := &cliproxyauth.Auth{}
-			if tt.keyAuth {
-				auth = &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key"}}
-			}
-			got, gotCloaked, errCloaking := applyCloaking(context.Background(), tt.cfg, auth, payload, "test-key", false, false)
+			got, gotCloaked, errCloaking := applyCloaking(context.Background(), tt.cfg, tt.auth, payload, "test-key", false, false)
 			if errCloaking != nil {
 				t.Fatalf("applyCloaking() error = %v", errCloaking)
 			}
