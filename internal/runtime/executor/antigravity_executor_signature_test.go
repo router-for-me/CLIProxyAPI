@@ -389,6 +389,71 @@ func TestAntigravityStreamPrependsLeadingUserForIssue4959ResponsesHistory(t *tes
 	assertIssue4959LeadingUserContents(t, gjson.GetBytes(<-captured, "request.contents").Array())
 }
 
+func TestAntigravityStreamPrependsLeadingUserAfterReplayInsertsFunctionCall(t *testing.T) {
+	cache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(cache.ClearAntigravityReasoningReplayCache)
+
+	const sessionID = "replay-insert-at-zero"
+	const nativeID = "call-1"
+	const nativeArgs = `{}`
+	clientID := util.GeminiClaudeToolUseID(nativeID, "run", nativeArgs)
+	item := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"call_id":"` + nativeID + `","name":"run","args":` + nativeArgs + `,"thoughtSignature":"replay-inserted-call-signature-123456"}`)
+	if !cache.CacheAntigravityReasoningReplayItems("gemini-3.6-flash-high", "responses:"+sessionID, [][]byte{item}) {
+		t.Fatal("failed to cache omitted function call")
+	}
+
+	captured := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+			return
+		}
+		captured <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}}\n\n"))
+	}))
+	defer server.Close()
+
+	payload := []byte(`{"model":"gemini-3.6-flash-high","session_id":"` + sessionID + `","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + clientID + `","content":"ok"}]}],"tools":[{"name":"run","input_schema":{"type":"object"}}]}`)
+	executor := NewAntigravityExecutor(&config.Config{RequestRetry: 1})
+	auth := testAntigravityAuth(server.URL)
+	auth.Metadata["project_id"] = "project-1"
+	result, errExecute := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-3.6-flash-high",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		ResponseFormat:  sdktranslator.FormatClaude,
+		Stream:          true,
+		OriginalRequest: payload,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	body := <-captured
+	contents := gjson.GetBytes(body, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents len = %d, want 3; body=%s", len(contents), body)
+	}
+	leadingText := contents[0].Get("parts.0.text")
+	if contents[0].Get("role").String() != "user" || !leadingText.Exists() || leadingText.String() != "" {
+		t.Fatalf("synthetic leading user missing after replay insert: %s", contents[0].Raw)
+	}
+	if contents[1].Get("role").String() != "model" || contents[1].Get("parts.0.functionCall.id").String() != "call-1" {
+		t.Fatalf("replayed functionCall is not immediately after the synthetic user: %s", contents[1].Raw)
+	}
+	if !contentHasNamedPart(contents[2], "functionResponse", "run") {
+		t.Fatalf("functionResponse missing or moved: %s", contents[2].Raw)
+	}
+}
+
 func TestAntigravityStreamDoesNotPrependLeadingUserForClaudeTarget(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -621,11 +686,15 @@ func TestAntigravityExecutorCountTokensReconstructsCompactedClaudeToolCall(t *te
 	if len(upstreamBody) == 0 {
 		t.Fatal("countTokens upstream body was not captured")
 	}
-	call := gjson.GetBytes(upstreamBody, "request.contents.0.parts.0")
+	leadingText := gjson.GetBytes(upstreamBody, "request.contents.0.parts.0.text")
+	if gjson.GetBytes(upstreamBody, "request.contents.0.role").String() != "user" || !leadingText.Exists() || leadingText.String() != "" {
+		t.Fatalf("synthetic leading user missing after replay insert: %s", upstreamBody)
+	}
+	call := gjson.GetBytes(upstreamBody, "request.contents.1.parts.0")
 	if call.Get("functionCall.id").String() != nativeID || call.Get("functionCall.name").String() != "Bash" || call.Get("thoughtSignature").String() != nativeSignature {
 		t.Fatalf("native function call provenance was not reconstructed: %s", upstreamBody)
 	}
-	response := gjson.GetBytes(upstreamBody, "request.contents.1.parts.0.functionResponse")
+	response := gjson.GetBytes(upstreamBody, "request.contents.2.parts.0.functionResponse")
 	if response.Get("id").String() != nativeID || response.Get("name").String() != "Bash" {
 		t.Fatalf("native function response provenance was not reconstructed: %s", upstreamBody)
 	}

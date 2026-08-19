@@ -56,15 +56,12 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{}, err
 	}
 	payload = e.obfuscateSensitiveWords(payload)
-	if !strings.Contains(strings.ToLower(baseModel), "claude") {
-		payload = helps.EnsureGeminiLeadingUserContent(payload, "request.contents")
-	}
 	payload = sanitizeAntigravityGeminiRequestSignatures(baseModel, payload)
 	preparedPayload, _, errReplay := prepareAntigravityGeminiReasoningReplayPayload(ctx, baseModel, req, opts, payload)
 	if errReplay != nil {
 		return cliproxyexecutor.Response{}, errReplay
 	}
-	payload = preparedPayload
+	payload = ensureAntigravityGeminiLeadingUserContent(baseModel, preparedPayload)
 
 	payload = helps.DeleteJSONField(payload, "project")
 	payload = helps.DeleteJSONField(payload, "model")

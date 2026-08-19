@@ -77,7 +77,6 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
 	translated = e.obfuscateSensitiveWords(translated)
-	translated = helps.EnsureGeminiLeadingUserContent(translated, "request.contents")
 	translated = sanitizeAntigravityGeminiRequestSignatures(baseModel, translated)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
@@ -111,6 +110,7 @@ attemptLoop:
 					return resp, err
 				}
 			}
+			requestPayload = ensureAntigravityGeminiLeadingUserContent(baseModel, requestPayload)
 
 			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
 			if errReq != nil {
@@ -304,9 +304,6 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
 	translated = e.obfuscateSensitiveWords(translated)
-	if !strings.Contains(strings.ToLower(baseModel), "claude") {
-		translated = helps.EnsureGeminiLeadingUserContent(translated, "request.contents")
-	}
 	translated = sanitizeAntigravityGeminiRequestSignatures(baseModel, translated)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
@@ -341,6 +338,7 @@ attemptLoop:
 					return resp, err
 				}
 			}
+			requestPayload = ensureAntigravityGeminiLeadingUserContent(baseModel, requestPayload)
 			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
 			if errReq != nil {
 				err = errReq
