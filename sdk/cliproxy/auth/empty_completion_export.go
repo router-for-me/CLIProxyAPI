@@ -1,9 +1,5 @@
 package auth
 
-import (
-	"bytes"
-)
-
 // IsEmptyCompletionPayload reports whether a payload (aggregated SSE chunks or
 // a single non-stream JSON response) represents a terminal but empty
 // completion. It is the exported form of the internal predicate used by the
@@ -21,24 +17,6 @@ func EmptyCompletionError() error {
 	return errEmptyCompletion
 }
 
-// IsCompletionFormatRecognized reports whether payload uses a wire format the
-// empty-completion detection understands (OpenAI chat, OpenAI Responses,
-// Anthropic Claude, or Gemini). It supports representative format-contract
-// tests without claiming registry-wide executor coverage.
-func IsCompletionFormatRecognized(payload []byte) bool {
-	trimmed := bytes.TrimSpace(payload)
-	if len(trimmed) == 0 {
-		return false
-	}
-	var acc emptyCompletionAccum
-	if bytes.Contains(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) {
-		acc.evalSSE(trimmed)
-	} else {
-		acc.evalJSON(trimmed)
-	}
-	return acc.recognized
-}
-
 // StreamBootstrapDetector incrementally classifies a stream prefix without
 // reparsing previously observed chunks. Its zero value is ready for use.
 type StreamBootstrapDetector struct {
@@ -53,4 +31,32 @@ func (d *StreamBootstrapDetector) Observe(payload []byte) bool {
 		return true
 	}
 	return d.state.observe(payload)
+}
+
+// HasMeaningfulOutput reports whether any client-visible meaningful output
+// (content, tool calls, blocked state, or non-scaffolding data) has been observed.
+func (d *StreamBootstrapDetector) HasMeaningfulOutput() bool {
+	if d == nil {
+		return false
+	}
+	return d.state.hasMeaningfulOutput()
+}
+
+// Finish flushes any trailing pending fragment at EOF and reports whether the
+// accumulated stream chunks represent a terminal empty completion.
+func (d *StreamBootstrapDetector) Finish() bool {
+	if d == nil {
+		return false
+	}
+	d.state.finish()
+	return d.state.isEmptyCompletion()
+}
+
+// IsTerminalEmpty reports whether the accumulated stream has reached a terminal
+// marker without any meaningful output.
+func (d *StreamBootstrapDetector) IsTerminalEmpty() bool {
+	if d == nil {
+		return false
+	}
+	return d.state.isTerminalEmpty()
 }

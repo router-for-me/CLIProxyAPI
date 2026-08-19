@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
@@ -247,6 +248,70 @@ func TestExecutionErrorMessageMapsContextStatuses(t *testing.T) {
 				t.Fatalf("Error = %v, want original %v", msg.Error, tc.err)
 			}
 		})
+	}
+}
+
+func TestExecutionErrorMessageMapsTerminatedTrustedProvenance(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		trusted bool
+	}{
+		{name: "trusted local termination", trusted: true},
+		{name: "untrusted upstream termination", trusted: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			terminated := &coreexecutor.RequestTerminatedError{
+				HTTPStatus: http.StatusTeapot,
+				Header:     http.Header{"X-Downstream": []string{"preserved"}},
+				Body:       []byte(`{"custom":"body"}`),
+				Trusted:    tc.trusted,
+			}
+			msg := executionErrorMessage(terminated)
+			if msg == nil {
+				t.Fatal("executionErrorMessage() returned nil")
+			}
+			if !msg.DirectResponse {
+				t.Fatal("DirectResponse must remain true for every RequestTerminatedError")
+			}
+			if msg.TrustedDirectResponse != tc.trusted {
+				t.Fatalf("TrustedDirectResponse = %t, want %t", msg.TrustedDirectResponse, tc.trusted)
+			}
+			if msg.Body == nil || string(msg.Body) != `{"custom":"body"}` {
+				t.Fatalf("Body = %q, want preserved body", msg.Body)
+			}
+			if got := msg.Headers.Get("X-Downstream"); got != "preserved" {
+				t.Fatalf("Headers = %v, want preserved headers", msg.Headers)
+			}
+		})
+	}
+}
+
+func TestDirectTerminationErrorMarksTrustedLocalResponse(t *testing.T) {
+	msg := directTerminationError(http.StatusTeapot, http.Header{"X-Local": []string{"yes"}}, []byte(`{"ok":true}`))
+	if msg == nil {
+		t.Fatal("directTerminationError() returned nil")
+	}
+	if !msg.DirectResponse {
+		t.Fatal("local direct termination must set DirectResponse=true")
+	}
+	if !msg.TrustedDirectResponse {
+		t.Fatal("local direct termination must set TrustedDirectResponse=true")
+	}
+	if msg.StatusCode != http.StatusTeapot {
+		t.Fatalf("StatusCode = %d, want %d", msg.StatusCode, http.StatusTeapot)
+	}
+}
+
+func TestNonTerminatedErrorKeepsZeroValueTrustedDirectResponse(t *testing.T) {
+	msg := executionErrorMessage(errors.New("upstream boom"))
+	if msg == nil {
+		t.Fatal("executionErrorMessage() returned nil")
+	}
+	if msg.DirectResponse {
+		t.Fatal("plain upstream error must not be a DirectResponse")
+	}
+	if msg.TrustedDirectResponse {
+		t.Fatal("plain upstream error must have TrustedDirectResponse=false")
 	}
 }
 

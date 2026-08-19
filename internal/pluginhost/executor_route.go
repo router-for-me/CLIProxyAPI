@@ -159,17 +159,28 @@ func wrapStreamEmptyCompletion(ctx context.Context, streamResult *coreexecutor.S
 			case chunk, ok = <-src:
 			}
 			if !ok {
-				if !forwarding && len(buffered) == 0 {
-					_ = forward(coreexecutor.StreamChunk{Err: &coreauth.Error{
-						Code:      "empty_stream",
-						Message:   "upstream stream closed before first payload",
-						Retryable: true,
-					}})
-					return
-				}
-				if !forwarding && coreauth.IsEmptyCompletionPayload(streamChunkPayload(buffered)) {
-					_ = forward(coreexecutor.StreamChunk{Err: coreauth.EmptyCompletionError()})
-					return
+				if !forwarding {
+					payloadBytes := 0
+					for _, c := range buffered {
+						payloadBytes += len(c.Payload)
+					}
+					if payloadBytes == 0 {
+						// Zero-payload chunks are dropped downstream; a stream of only
+						// such chunks is an empty stream, not a successful completion.
+						_ = forward(coreexecutor.StreamChunk{Err: &coreauth.Error{
+							Code:      "empty_stream",
+							Message:   "upstream stream closed before first payload",
+							Retryable: true,
+						}})
+						return
+					}
+					// Judge with the incremental detector state instead of re-parsing
+					// the concatenated payload: separately chunked SSE frames do not
+					// reassemble into valid input for the payload-level check.
+					if detector.Finish() {
+						_ = forward(coreexecutor.StreamChunk{Err: coreauth.EmptyCompletionError()})
+						return
+					}
 				}
 				_ = flush()
 				return
@@ -202,9 +213,24 @@ func wrapStreamEmptyCompletion(ctx context.Context, streamResult *coreexecutor.S
 					return
 				}
 			}
+			if detector.IsTerminalEmpty() {
+				discardStreamChunks(src)
+				_ = forward(coreexecutor.StreamChunk{Err: coreauth.EmptyCompletionError()})
+				return
+			}
 		}
 	}()
 	return &coreexecutor.StreamResult{Chunks: wrapped, Headers: streamResult.Headers}
+}
+
+func discardStreamChunks(ch <-chan coreexecutor.StreamChunk) {
+	if ch == nil {
+		return
+	}
+	go func() {
+		for range ch {
+		}
+	}()
 }
 
 func streamChunkPayload(chunks []coreexecutor.StreamChunk) []byte {

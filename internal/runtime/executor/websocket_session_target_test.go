@@ -199,6 +199,7 @@ func TestWebsocketRetryBindFailureClearsActiveSessionState(t *testing.T) {
 			run: func(t *testing.T, baseURL string) (func(cliproxyexecutor.Options) error, *codexWebsocketSession) {
 				executor := NewXAIWebsocketsExecutor(&config.Config{})
 				executor.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+				executor.idStore = &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
 				auth := &cliproxyauth.Auth{ID: "retry-bind-xai", Provider: "xai", Attributes: map[string]string{"base_url": baseURL, "websockets": "true"}, Metadata: map[string]any{"access_token": "test-token"}}
 				req := cliproxyexecutor.Request{Model: "grok-4", Payload: []byte(`{"model":"grok-4","input":[{"type":"message","role":"user","content":"hello"}]}`)}
 				primed := false
