@@ -25,8 +25,10 @@ services:
       # 配置文件:默认使用生产配置;在 .env 设置
       # CLI_PROXY_CONFIG_PATH=./config.yaml 可切回本地开发配置。
       - ${CLI_PROXY_CONFIG_PATH:-./config.prod.yaml}:/CLIProxyAPI/config.yaml
+      # 持久化数据(日志、冷却状态):容器 /var/data/cli-proxy-api。
       - ${CLI_PROXY_DATA_PATH:-./data}:/var/data/cli-proxy-api
-      # OAuth 凭证:同时可通过宿主机 ./data/auths 访问,
-      # 单独挂出来方便备份和查看。
-      - ./auths:/var/data/cli-proxy-api/auths
+      # Auth 凭证(OAuth/DS JSON):容器 WORKDIR=/CLIProxyAPI,所以
+      # ./auths 在容器内是 /CLIProxyAPI/auths,与本机 go run 路径一致。
+      # 服务器与本机直接复制 ./auths 目录即可迁移。
+      - ./auths:/CLIProxyAPI/auths
     restart: unless-stopped
