@@ -20,19 +20,22 @@ FROM debian:bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir /CLIProxyAPI
+RUN mkdir -p /CLIProxyAPI/logs /var/data/cli-proxy-api
 
 COPY --from=builder ./app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
 
 COPY config.example.yaml /CLIProxyAPI/config.example.yaml
-COPY config.render.yaml /CLIProxyAPI/config.yaml
+COPY config.example.yaml /CLIProxyAPI/config.yaml
 
 WORKDIR /CLIProxyAPI
 
 EXPOSE 8317
 
 ENV TZ=Asia/Shanghai
+ENV WRITABLE_PATH=/var/data/cli-proxy-api
 
 RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
+
+VOLUME ["/var/data/cli-proxy-api/logs"]
 
 CMD ["./CLIProxyAPI"]

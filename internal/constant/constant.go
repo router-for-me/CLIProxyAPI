@@ -27,4 +27,7 @@ const (
 
 	// Interactions represents the Google Interactions API format identifier.
 	Interactions = "interactions"
+
+	// DeepSeek represents the DeepSeek web chat provider identifier.
+	DeepSeek = "deepseek"
 )

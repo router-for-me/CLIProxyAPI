@@ -155,6 +155,17 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case "deepseek":
+		models = registry.GetDeepSeekModels()
+		if entry := s.resolveConfigDeepSeekKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildDeepSeekConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -494,6 +505,13 @@ func (s *Service) resolveConfigXAIKey(auth *coreauth.Auth) *config.XAIKey {
 	return resolveConfigCodexStyleKey(auth, s.cfg.XAIKey, false)
 }
 
+func (s *Service) resolveConfigDeepSeekKey(auth *coreauth.Auth) *config.DeepSeekKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return resolveConfigCodexStyleKey(auth, s.cfg.DeepSeekKey, false)
+}
+
 func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey, validateIndexCredentials bool) *config.CodexKey {
 	if auth == nil {
 		return nil
@@ -816,6 +834,13 @@ func buildXAIConfigModels(entry *config.XAIKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "xai", "xai")
+}
+
+func buildDeepSeekConfigModels(entry *config.DeepSeekKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "deepseek", "deepseek")
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {

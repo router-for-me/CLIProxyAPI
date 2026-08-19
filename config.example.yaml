@@ -440,6 +440,25 @@ nonstream-keepalive-interval: 0
 #       - "grok-4.1"             # exclude specific models (exact match)
 #       - "grok-3-*"             # wildcard matching prefix
 
+# DeepSeek web-client tokens
+# Uses the reverse-engineered DeepSeek web client (chat.deepseek.com) transport.
+# The api-key field carries the long-lived userToken extracted from the DeepSeek
+# web client cookies. DeepSeek does not use OAuth or refresh tokens.
+# deepseek-api-key:
+#   - api-key: "eyJhbGciOi..."   # DeepSeek userToken from browser cookies
+#     weight: 5                  # optional: weighted-round-robin share
+#     prefix: "ds"               # optional: require calls like "ds/deepseek-v4-flash"
+#     disable-cooling: false     # optional: per-auth cooldown override
+#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     models:
+#       - name: "deepseek-v4-flash"   # upstream model id
+#         alias: "ds-flash"           # client alias mapped to the upstream model
+#         display-name: "DeepSeek Flash"
+#         thinking:
+#           levels: ["low", "medium", "high"]
+#     excluded-models:
+#       - "deepseek-v4-vision"   # exclude specific models (exact match)
+
 # Claude API keys
 # claude-api-key:
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url

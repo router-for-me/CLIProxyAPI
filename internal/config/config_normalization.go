@@ -145,6 +145,27 @@ func (cfg *Config) SanitizeXAIKeys() {
 	}
 }
 
+// SanitizeDeepSeekKeys normalizes DeepSeek credential entries.
+// Unlike codex/xAI, DeepSeek does not use a BaseURL (the transport targets
+// chat.deepseek.com directly), so entries are not dropped when BaseURL is empty.
+func (cfg *Config) SanitizeDeepSeekKeys() {
+	if cfg == nil || len(cfg.DeepSeekKey) == 0 {
+		return
+	}
+	out := make([]CodexKey, 0, len(cfg.DeepSeekKey))
+	for i := range cfg.DeepSeekKey {
+		e := cfg.DeepSeekKey[i]
+		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.Headers = NormalizeHeaders(e.Headers)
+		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
+		e.APIKey = strings.TrimSpace(e.APIKey)
+		e.ProxyURL = strings.TrimSpace(e.ProxyURL)
+		out = append(out, e)
+	}
+	cfg.DeepSeekKey = out
+}
+
 func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 	if len(entries) == 0 {
 		return entries

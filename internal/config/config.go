@@ -115,6 +115,10 @@ type Config struct {
 	// XAIKey defines xAI API key configurations using the same structure as Codex API keys.
 	XAIKey []XAIKey `yaml:"xai-api-key" json:"xai-api-key"`
 
+	// DeepSeekKey defines DeepSeek web-client token configurations using the same
+	// structure as Codex API keys. The api-key field carries the userToken.
+	DeepSeekKey []DeepSeekKey `yaml:"deepseek-api-key" json:"deepseek-api-key"`
+
 	// XAI configures provider-wide xAI request behavior.
 	XAI XAIConfig `yaml:"xai" json:"xai"`
 

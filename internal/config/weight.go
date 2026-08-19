@@ -141,6 +141,11 @@ func (cfg *Config) ValidateCredentialWeights() error {
 			return fmt.Errorf("xai-api-key[%d].weight: %w", index, errValidate)
 		}
 	}
+	for index := range cfg.DeepSeekKey {
+		if errValidate := ValidateCredentialWeight(cfg.DeepSeekKey[index].Weight); errValidate != nil {
+			return fmt.Errorf("deepseek-api-key[%d].weight: %w", index, errValidate)
+		}
+	}
 	for providerIndex := range cfg.OpenAICompatibility {
 		for keyIndex := range cfg.OpenAICompatibility[providerIndex].APIKeyEntries {
 			weight := cfg.OpenAICompatibility[providerIndex].APIKeyEntries[keyIndex].Weight
