@@ -48,6 +48,21 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
+	if chain := m.orderedCandidateChainForRequest(normalized, req, opts); len(chain) > 1 {
+		resp, errOrdered := m.executeWithOrderedFailover(ctx, normalized, req, opts)
+		if errOrdered == nil {
+			return resp, nil
+		}
+		if isRequestTerminatedError(errOrdered) || isRequestStopError(errOrdered) {
+			return cliproxyexecutor.Response{}, unwrapRequestStopError(errOrdered)
+		}
+		if !m.orderedFailoverShouldFallThrough(errOrdered) {
+			return cliproxyexecutor.Response{}, unwrapRequestStopError(errOrdered)
+		}
+		// Fall through to the legacy loop so cooldown-driven retries over the
+		// whole ordered pool remain available.
+	}
+
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	for attempt := 0; ; attempt++ {
@@ -95,6 +110,19 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
+	if chain := m.orderedCandidateChainForRequest(normalized, req, opts); len(chain) > 1 {
+		resp, errOrdered := m.executeCountWithOrderedFailover(ctx, normalized, req, opts)
+		if errOrdered == nil {
+			return resp, nil
+		}
+		if isRequestTerminatedError(errOrdered) || isRequestStopError(errOrdered) {
+			return cliproxyexecutor.Response{}, unwrapRequestStopError(errOrdered)
+		}
+		if !m.orderedFailoverShouldFallThrough(errOrdered) {
+			return cliproxyexecutor.Response{}, unwrapRequestStopError(errOrdered)
+		}
+	}
+
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	for attempt := 0; ; attempt++ {
@@ -135,6 +163,19 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	}
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
+
+	if chain := m.orderedCandidateChainForRequest(normalized, req, opts); len(chain) > 1 {
+		result, errOrdered := m.executeStreamWithOrderedFailover(ctx, normalized, req, opts)
+		if errOrdered == nil {
+			return result, nil
+		}
+		if isRequestTerminatedError(errOrdered) || isRequestStopError(errOrdered) {
+			return nil, unwrapRequestStopError(errOrdered)
+		}
+		if !m.orderedFailoverShouldFallThrough(errOrdered) {
+			return nil, unwrapRequestStopError(errOrdered)
+		}
+	}
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)

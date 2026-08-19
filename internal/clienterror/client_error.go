@@ -144,7 +144,14 @@ func hasRequestFaultBody(err error) bool {
 	if err == nil {
 		return false
 	}
-	body := strings.TrimSpace(err.Error())
+	return HasRequestFaultBodyString(err.Error())
+}
+
+// HasRequestFaultBodyString reports whether a raw error body carries a
+// structured request-fault code or type. It classifies the body only, with no
+// status-based inference.
+func HasRequestFaultBodyString(raw string) bool {
+	body := strings.TrimSpace(raw)
 	if body == "" || !json.Valid([]byte(body)) {
 		return false
 	}

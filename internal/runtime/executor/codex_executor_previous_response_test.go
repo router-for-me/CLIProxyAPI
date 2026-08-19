@@ -79,7 +79,6 @@ func TestCodexExecutorExecuteStream_PreservesPreviousResponseID(t *testing.T) {
 }
 
 func TestCodexExecutorCacheHelper_OpenAIResponses_DropsPreviousResponseIDForAssistantRoleWithoutType(t *testing.T) {
-	ctx := newCodexCacheHelperContext("", nil)
 	executor := &CodexExecutor{}
 	rawJSON := []byte(`{"model":"gpt-5.5","stream":true,"prompt_cache_key":"cpa:session","previous_response_id":"resp-prev","input":[{"role":"developer","content":"instructions"},{"role":"user","content":"hello"},{"role":"assistant","content":"done"}]}`)
 	req := cliproxyexecutor.Request{
@@ -88,7 +87,7 @@ func TestCodexExecutorCacheHelper_OpenAIResponses_DropsPreviousResponseIDForAssi
 	}
 	url := "https://example.com/responses"
 
-	httpReq, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), url, req, rawJSON)
+	httpReq, _, _, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), url, nil, req, req.Payload, rawJSON)
 	if err != nil {
 		t.Fatalf("cacheHelper error: %v", err)
 	}
@@ -105,7 +104,6 @@ func TestCodexExecutorCacheHelper_OpenAIResponses_DropsPreviousResponseIDForAssi
 func TestCodexExecutorCacheHelper_OpenAIResponses_DropsPreviousResponseIDForCompactionTranscript(t *testing.T) {
 	for _, typ := range []string{"compaction", "compaction_summary"} {
 		t.Run(typ, func(t *testing.T) {
-			ctx := newCodexCacheHelperContext("", nil)
 			executor := &CodexExecutor{}
 			rawJSON := []byte(`{"model":"gpt-5.5","stream":true,"prompt_cache_key":"cpa:session","previous_response_id":"resp-prev","input":[{"type":"message","role":"user","content":"hello"},{"type":"` + typ + `","encrypted_content":"summary"}]}`)
 			req := cliproxyexecutor.Request{
@@ -114,7 +112,7 @@ func TestCodexExecutorCacheHelper_OpenAIResponses_DropsPreviousResponseIDForComp
 			}
 			url := "https://example.com/responses"
 
-			httpReq, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), url, req, rawJSON)
+			httpReq, _, _, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), url, nil, req, req.Payload, rawJSON)
 			if err != nil {
 				t.Fatalf("cacheHelper error: %v", err)
 			}
@@ -145,7 +143,6 @@ func TestCodexExecutorCacheHelper_OpenAIResponses_PreservesPreviousResponseIDFor
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := newCodexCacheHelperContext("", nil)
 			executor := &CodexExecutor{}
 			rawJSON := []byte(`{"model":"gpt-5.5","stream":true,"prompt_cache_key":"cpa:session","previous_response_id":"resp-prev","input":[` + tc.item + `,{"type":"message","id":"msg-1"}]}`)
 			req := cliproxyexecutor.Request{
@@ -154,7 +151,7 @@ func TestCodexExecutorCacheHelper_OpenAIResponses_PreservesPreviousResponseIDFor
 			}
 			url := "https://example.com/responses"
 
-			httpReq, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), url, req, rawJSON)
+			httpReq, _, _, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), url, nil, req, req.Payload, rawJSON)
 			if err != nil {
 				t.Fatalf("cacheHelper error: %v", err)
 			}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
@@ -28,11 +29,11 @@ func permanentOrderedStopError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if isRequestInvalidError(err) {
-		return true
-	}
 	var authErr *Error
 	if errors.As(err, &authErr) && authErr != nil && authErr.Code == "model_excluded" {
+		return true
+	}
+	if isInvalidGrantError(err) {
 		return true
 	}
 	status := statusCodeFromError(err)
@@ -48,12 +49,46 @@ func permanentOrderedStopError(err error) bool {
 		// does not exist at all on this provider), the error is permanent.
 		// We rely on isRequestInvalidError above to catch the shape variants.
 	}
-	if isInvalidGrantError(err) {
-		// Invalid grant is auth-level; stop the chain rather than burning the
-		// next candidate on an auth refresh loop that already failed.
+	if status == http.StatusBadRequest && !isRequestShapeFaultError(err) {
+		// A generic 400 may be provider-specific payload rejection; the next
+		// candidate in the ordered chain may accept the same request shape.
+		// Only identified request-shape faults stop the chain.
+		return false
+	}
+	if isRequestInvalidError(err) {
 		return true
 	}
 	return false
+}
+
+// isRequestShapeFaultError reports whether err carries an identified
+// request-shape fault: either a prefixed plain-text translation/cloaking
+// failure or a structured upstream request-fault body. A bare status match
+// does not qualify — providers disagree on payload validation.
+func isRequestShapeFaultError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isRequestScopedError(err) {
+		return true
+	}
+	message := ""
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		message = authErr.Message
+	} else {
+		message = err.Error()
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return false
+	}
+	if strings.HasPrefix(message, "invalid_request_error:") {
+		return true
+	}
+	// Body-only classification: JSON request-fault codes/types qualify, plain
+	// text does not.
+	return clienterror.HasRequestFaultBodyString(message)
 }
 
 // retryablePreFirstByteError reports whether err is safe to retry by advancing
@@ -314,6 +349,22 @@ func annotateOrderedError(err error, chain []OrderedCandidate, idx int, reason s
 		chainIndex:  idx,
 		chainLength: len(chain),
 	}
+}
+
+// orderedFailoverShouldFallThrough reports whether a failed ordered chain
+// result should be retried by the legacy executeMixedOnce loop. Exhausted
+// chains (all candidates retried pre-first-byte) fall through so cooldown and
+// credential rotation over the full pool stay in effect. Permanent stops are
+// terminal for the request.
+func (m *Manager) orderedFailoverShouldFallThrough(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ordered *orderedFailoverError
+	if !errors.As(err, &ordered) || ordered == nil {
+		return false
+	}
+	return ordered.reason == "exhausted"
 }
 
 // orderedFailoverError wraps an upstream error with secret-safe structured

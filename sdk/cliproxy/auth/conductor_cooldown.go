@@ -1802,13 +1802,26 @@ func isRequestInvalidError(err error) bool {
 		return false
 	}
 	status := statusCodeFromError(err)
+	if status == http.StatusBadRequest {
+		var authErr *Error
+		if errors.As(err, &authErr) && authErr != nil && authErr.Message != "" {
+			// Cloaking/translation request-shape faults surface as prefixed
+			// plain-text messages; they are deterministic request faults.
+			if strings.HasPrefix(authErr.Message, "invalid_request_error:") {
+				return true
+			}
+			// Structured upstream bodies keep the standard request-fault
+			// classification so credential pools neither rotate nor cool down.
+			if clienterror.IsRequestFault(status, errors.New(authErr.Message)) {
+				return true
+			}
+		}
+	}
 	if clienterror.IsRequestFault(status, err) {
 		return true
 	}
 	var authErr *Error
 	if errors.As(err, &authErr) && authErr != nil && authErr.Message != "" {
-		// When authErr.Code is non-empty, Error() formats as "Code: Message" which
-		// breaks JSON parsing in clienterror. Re-evaluate against the raw Message body.
 		if clienterror.IsRequestFault(status, errors.New(authErr.Message)) {
 			return true
 		}
