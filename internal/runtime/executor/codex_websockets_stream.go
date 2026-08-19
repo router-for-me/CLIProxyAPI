@@ -343,7 +343,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			reporter.MarkFirstResponseByte()
 			payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
 			helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
-			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
+			payload = helps.RestoreCodexMultiAgentV2Response(payload, optimizeMultiAgentV2)
+			reporter.ObserveQuotaHeaders(helps.ParseCodexQuotaEventHeaders(payload))
 
 			if wsErr, ok := parseCodexWebsocketError(payload); ok {
 				terminateReason = "upstream_error"
