@@ -805,7 +805,7 @@ func applyClaudeHeadersWithNativeProfile(
 		if auth != nil {
 			attrs = auth.Attributes
 		}
-		util.ApplyCustomHeadersFromAttrs(r, attrs)
+		util.ApplyCustomHeadersFromAttrs(r, attrs, incomingHeaders)
 		// Scope the custom-header escape hatch exactly like the CLI path below, which
 		// claws overrides back on api.anthropic.com (an operator Anthropic-Beta reaches
 		// a first-party API that rejects unknown values) and on any streaming request
