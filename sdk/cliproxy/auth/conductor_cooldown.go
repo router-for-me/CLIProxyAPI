@@ -914,6 +914,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										if !otherState.NextRetryAfter.IsZero() && otherState.NextRetryAfter.After(otherRetryAfter) {
 											otherRetryAfter = otherState.NextRetryAfter
 										}
+										if capDeadline := now.Add(quotaBackoffMax); otherRetryAfter.After(capDeadline) {
+											otherRetryAfter = capDeadline
+											otherQuotaNext = capDeadline
+										}
 										otherState.NextRetryAfter = otherRetryAfter
 										applyCooldownFields(&otherState.Quota, QuotaState{
 											Exceeded:      true,
