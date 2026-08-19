@@ -22,26 +22,28 @@ import (
 )
 
 type UsageReporter struct {
-	provider       string
-	executorType   string
-	model          string
-	alias          string
-	authID         string
-	authIndex      string
-	authType       string
-	apiKey         string
-	source         string
-	reasoning      string
-	serviceTier    string
-	generate       bool
-	requestedAt    time.Time
-	quotaHeadersMu sync.RWMutex
-	quotaHeaders   http.Header
-	ttftMu         sync.RWMutex
-	ttft           time.Duration
-	ttftStart      time.Time
-	ttftSet        bool
-	once           sync.Once
+	provider         string
+	executorType     string
+	model            string
+	alias            string
+	authID           string
+	authIndex        string
+	authType         string
+	apiKey           string
+	source           string
+	reasoning        string
+	serviceTier      string
+	generate         bool
+	requestedAt      time.Time
+	quotaHeadersMu   sync.RWMutex
+	quotaHeaders     http.Header
+	ttftMu           sync.RWMutex
+	ttft             time.Duration
+	ttftStart        time.Time
+	ttftSet          bool
+	once             sync.Once
+	authMu           sync.RWMutex
+	accessTokenHash  string
 }
 
 type usageExecutor interface {
