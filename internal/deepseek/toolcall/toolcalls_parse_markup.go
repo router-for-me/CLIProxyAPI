@@ -220,9 +220,72 @@ func findXMLStartTagOutsideCDATA(text, tag string, from int) (start, bodyStart i
 			}
 			return i, end + 1, text[i+len(target) : end], true
 		}
+		// EPSE-style start tag: <|EPSE|tag ...>. Models sometimes mix EPSE
+		// and plain XML styles within the same tool_calls block, so accept
+		// both here. Only invoke/parameter are relevant for tool parsing.
+		if epseEnd, ok := matchEPSEStartTagAt(text, i, tag); ok {
+			end := findXMLTagEnd(text, epseEnd)
+			if end < 0 {
+				return -1, -1, "", false
+			}
+			return i, end + 1, text[epseEnd:end], true
+		}
 		i++
 	}
 	return -1, -1, "", false
+}
+
+// matchEPSEStartTagAt checks whether text at `start` begins with an EPSE-style
+// open tag for `tag`: <|EPSE|tag (case-insensitive on EPSE and tag). Fullwidth
+// variants of <, >, | are accepted via normalizedASCIIAt. Returns the position
+// after the tag name (where attributes/start scanning should continue) when it
+// matches.
+func matchEPSEStartTagAt(text string, start int, tag string) (afterName int, ok bool) {
+	pos := start
+	// Opening < (consume duplicates too, like scanToolMarkupTagAt).
+	ch, n := normalizedASCIIAt(text, pos)
+	if n == 0 || ch != '<' {
+		return 0, false
+	}
+	pos += n
+	for {
+		c, m := normalizedASCIIAt(text, pos)
+		if m > 0 && c == '<' {
+			pos += m
+			continue
+		}
+		break
+	}
+	// First pipe.
+	ch, n = normalizedASCIIAt(text, pos)
+	if n == 0 || ch != '|' {
+		return 0, false
+	}
+	pos += n
+	// "EPSE" (case-insensitive).
+	for _, expected := range []byte("EPSE") {
+		ch, n = normalizedASCIIAt(text, pos)
+		if n == 0 || asciiLower(ch) != asciiLower(expected) {
+			return 0, false
+		}
+		pos += n
+	}
+	// Second pipe.
+	ch, n = normalizedASCIIAt(text, pos)
+	if n == 0 || ch != '|' {
+		return 0, false
+	}
+	pos += n
+	// Tag name (case-insensitive).
+	lowerTag := strings.ToLower(tag)
+	for _, expected := range []byte(lowerTag) {
+		ch, n = normalizedASCIIAt(text, pos)
+		if n == 0 || asciiLower(ch) != asciiLower(expected) {
+			return 0, false
+		}
+		pos += n
+	}
+	return pos, true
 }
 
 func findMatchingXMLEndTagOutsideCDATA(text, tag string, from int) (closeStart, closeEnd int, ok bool) {
@@ -261,9 +324,90 @@ func findMatchingXMLEndTagOutsideCDATA(text, tag string, from int) (closeStart, 
 			i = end + 1
 			continue
 		}
+		// EPSE-style close tag: </|EPSE|tag>. Reduces depth.
+		if epseAfter, ok := matchEPSECloseTagAt(text, i, tag); ok {
+			end := findXMLTagEnd(text, epseAfter)
+			if end < 0 {
+				return -1, -1, false
+			}
+			depth--
+			if depth == 0 {
+				return i, end + 1, true
+			}
+			i = end + 1
+			continue
+		}
+		// EPSE-style open tag: <|EPSE|tag ...>. Increases depth (non-self-closing).
+		if epseAfter, ok := matchEPSEStartTagAt(text, i, tag); ok {
+			end := findXMLTagEnd(text, epseAfter)
+			if end < 0 {
+				return -1, -1, false
+			}
+			if !isSelfClosingXMLTag(text[:end]) {
+				depth++
+			}
+			i = end + 1
+			continue
+		}
 		i++
 	}
 	return -1, -1, false
+}
+
+// matchEPSECloseTagAt checks whether text at `start` begins with an EPSE-style
+// close tag for `tag`: </|EPSE|tag (case-insensitive on EPSE and tag). Returns
+// the position after the tag name when it matches.
+func matchEPSECloseTagAt(text string, start int, tag string) (afterName int, ok bool) {
+	pos := start
+	ch, n := normalizedASCIIAt(text, pos)
+	if n == 0 || ch != '<' {
+		return 0, false
+	}
+	pos += n
+	for {
+		c, m := normalizedASCIIAt(text, pos)
+		if m > 0 && c == '<' {
+			pos += m
+			continue
+		}
+		break
+	}
+	// Slash.
+	ch, n = normalizedASCIIAt(text, pos)
+	if n == 0 || ch != '/' {
+		return 0, false
+	}
+	pos += n
+	// First pipe.
+	ch, n = normalizedASCIIAt(text, pos)
+	if n == 0 || ch != '|' {
+		return 0, false
+	}
+	pos += n
+	// "EPSE" (case-insensitive).
+	for _, expected := range []byte("EPSE") {
+		ch, n = normalizedASCIIAt(text, pos)
+		if n == 0 || asciiLower(ch) != asciiLower(expected) {
+			return 0, false
+		}
+		pos += n
+	}
+	// Second pipe.
+	ch, n = normalizedASCIIAt(text, pos)
+	if n == 0 || ch != '|' {
+		return 0, false
+	}
+	pos += n
+	// Tag name (case-insensitive).
+	lowerTag := strings.ToLower(tag)
+	for _, expected := range []byte(lowerTag) {
+		ch, n = normalizedASCIIAt(text, pos)
+		if n == 0 || asciiLower(ch) != asciiLower(expected) {
+			return 0, false
+		}
+		pos += n
+	}
+	return pos, true
 }
 
 func skipXMLIgnoredSection(text string, i int) (next int, advanced bool, blocked bool) {

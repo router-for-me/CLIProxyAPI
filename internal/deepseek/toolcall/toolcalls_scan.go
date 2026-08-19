@@ -128,7 +128,7 @@ func FindMatchingToolMarkupClose(text string, open ToolMarkupTag) (ToolMarkupTag
 	for pos := open.End + 1; pos < len(text); {
 		tag, ok := FindToolMarkupTagOutsideIgnored(text, pos)
 		if !ok {
-			return ToolMarkupTag{}, false
+			break
 		}
 		if tag.Name != open.Name {
 			pos = tag.End + 1
@@ -144,7 +144,97 @@ func FindMatchingToolMarkupClose(text string, open ToolMarkupTag) (ToolMarkupTag
 		}
 		pos = tag.End + 1
 	}
+	// Fallback: when the opener is an EPSE-style tool_calls tag and no proper
+	// close was found, models sometimes truncate the close to </|EPSE> or
+	// </|EPSE|>. Recover by scanning for an anonymous EPSE close. Safe because
+	// |EPSE| is a strong tool-markup signal not found in ordinary prose, and
+	// anonymous closers are never valid for invoke/parameter (those need names
+	// to delimit parameters).
+	if open.Name == "tool_calls" && open.EPSELike {
+		if tag, ok := findAnonymousEPSECloseOutsideIgnored(text, open.End+1); ok {
+			return tag, true
+		}
+	}
 	return ToolMarkupTag{}, false
+}
+
+// findAnonymousEPSECloseOutsideIgnored scans text from `from` for an anonymous
+// EPSE-style closing tag (</|EPSE> or </|EPSE|>, with optional fullwidth
+// variants). Skips CDATA sections and markdown code spans to avoid false
+// positives.
+func findAnonymousEPSECloseOutsideIgnored(text string, from int) (ToolMarkupTag, bool) {
+	for i := maxInt(from, 0); i < len(text); {
+		next, advanced, blocked := skipXMLIgnoredSection(text, i)
+		if blocked {
+			return ToolMarkupTag{}, false
+		}
+		if advanced {
+			i = next
+			continue
+		}
+		if end, ok := markdownCodeSpanEnd(text, i); ok {
+			i = end
+			continue
+		}
+		if tag, ok := matchAnonymousEPSECloseAt(text, i); ok {
+			return tag, true
+		}
+		i++
+	}
+	return ToolMarkupTag{}, false
+}
+
+// matchAnonymousEPSECloseAt checks whether text at `start` is an anonymous
+// EPSE closing tag: </|EPSE> or </|EPSE|>. Fullwidth variants of <, >, |, /
+// are accepted via normalizedASCIIAt.
+func matchAnonymousEPSECloseAt(text string, start int) (ToolMarkupTag, bool) {
+	pos := start
+	ch, n := normalizedASCIIAt(text, pos)
+	if n == 0 || ch != '<' {
+		return ToolMarkupTag{}, false
+	}
+	pos += n
+	for {
+		c, m := normalizedASCIIAt(text, pos)
+		if m > 0 && c == '<' {
+			pos += m
+			continue
+		}
+		break
+	}
+	ch, n = normalizedASCIIAt(text, pos)
+	if n == 0 || ch != '/' {
+		return ToolMarkupTag{}, false
+	}
+	pos += n
+	ch, n = normalizedASCIIAt(text, pos)
+	if n == 0 || ch != '|' {
+		return ToolMarkupTag{}, false
+	}
+	pos += n
+	for _, expected := range []byte("EPSE") {
+		ch, n = normalizedASCIIAt(text, pos)
+		if n == 0 || asciiLower(ch) != asciiLower(expected) {
+			return ToolMarkupTag{}, false
+		}
+		pos += n
+	}
+	ch, n = normalizedASCIIAt(text, pos)
+	if n > 0 && ch == '|' {
+		pos += n
+	}
+	ch, n = normalizedASCIIAt(text, pos)
+	if n == 0 || ch != '>' {
+		return ToolMarkupTag{}, false
+	}
+	pos += n
+	return ToolMarkupTag{
+		Start:    start,
+		End:      pos - 1,
+		Name:     "tool_calls",
+		Closing:  true,
+		EPSELike: true,
+	}, true
 }
 
 func scanToolMarkupTagAt(text string, start int) (ToolMarkupTag, bool) {

@@ -123,7 +123,7 @@ func stringFromAny(v any) string {
 type deepSeekConfigReader struct{}
 
 func (deepSeekConfigReader) ModelAliases() map[string]string { return nil }
-func (deepSeekConfigReader) AutoRouteVisionEnabled() bool     { return false }
+func (deepSeekConfigReader) AutoRouteVisionEnabled() bool    { return false }
 
 // Execute handles non-streaming chat completion against the DeepSeek web client.
 func (e *DeepSeekExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -187,7 +187,21 @@ func (e *DeepSeekExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		return resp, statusErr{code: http.StatusOK, msg: collectResult.UpstreamError}
 	}
 
-	openAIResp := buildOpenAIChatCompletion(req.Model, collectResult.Text, collectResult.Thinking, stdReq.Thinking)
+	// When tools are declared, parse tool calls from the model output (text
+	// first, then thinking as a fallback). If calls are found, the response
+	// carries tool_calls and finish_reason="tool_calls" so agentic clients can
+	// execute the tools and continue the loop. Without this branch the EPSE
+	// markup would leak into `content` as plain text and break agent flows.
+	var toolCalls []toolcall.ParsedToolCall
+	if len(stdReq.ToolNames) > 0 {
+		toolCalls = toolcall.ParseAssistantToolCallsDetailed(
+			collectResult.Text, collectResult.ToolDetectionThinking, stdReq.ToolNames,
+		).Calls
+	}
+
+	openAIResp := buildOpenAIChatCompletionWithTools(
+		req.Model, collectResult.Text, collectResult.Thinking, stdReq.Thinking, toolCalls,
+	)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(openAIResp))
 
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, originalPayload, body, openAIResp, nil)
@@ -282,6 +296,12 @@ func (e *DeepSeekExecutor) streamDeepSeekSSE(
 	var toolSieve toolstream.State
 	toolNames := stdReq.ToolNames
 	bufferToolContent := len(toolNames) > 0
+	// toolCallsEmitted tracks whether any tool_calls delta was emitted during
+	// the stream. When true, the final chunk's finish_reason MUST be
+	// "tool_calls" — agentic clients (Codex, Claude Code, LangChain) only
+	// execute tools when finish_reason equals "tool_calls". Without this the
+	// agent loop breaks even though tool_calls deltas were sent.
+	var toolCallsEmitted bool
 
 	var firstChunkSent bool
 	var streamUsage helps.StreamUsageBuffer
@@ -309,6 +329,7 @@ func (e *DeepSeekExecutor) streamDeepSeekSSE(
 	emitToolCalls := func(events []toolstream.Event) {
 		for _, evt := range events {
 			if len(evt.ToolCalls) > 0 {
+				toolCallsEmitted = true
 				emitChunk(map[string]any{"tool_calls": formatToolCallsForOpenAI(evt.ToolCalls)})
 			}
 			if evt.Content != "" {
@@ -327,7 +348,11 @@ func (e *DeepSeekExecutor) streamDeepSeekSSE(
 				if bufferToolContent {
 					emitToolCalls(toolstream.Flush(&toolSieve, toolNames))
 				}
-				finishChunk := buildOpenAIStreamFinishChunk(completionID, created, model, "stop")
+				finishReason := "stop"
+				if toolCallsEmitted {
+					finishReason = "tool_calls"
+				}
+				finishChunk := buildOpenAIStreamFinishChunk(completionID, created, model, finishReason)
 				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, upstreamFormat, responseFormat, model, originalRequest, translatedRequest, finishChunk, nil, claudeInputTokens)
 				for i := range chunks {
 					select {
@@ -364,6 +389,8 @@ func (e *DeepSeekExecutor) streamDeepSeekSSE(
 				finishReason := "stop"
 				if line.ContentFilter {
 					finishReason = "content_filter"
+				} else if toolCallsEmitted {
+					finishReason = "tool_calls"
 				}
 				finishChunk := buildOpenAIStreamFinishChunk(completionID, created, model, finishReason)
 				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, upstreamFormat, responseFormat, model, originalRequest, translatedRequest, finishChunk, nil, claudeInputTokens)
@@ -517,6 +544,82 @@ func buildOpenAIChatCompletion(model, text, thinking string, thinkingEnabled boo
 	}
 	b, _ := json.Marshal(resp)
 	return b
+}
+
+// buildOpenAIChatCompletionWithTools constructs a non-streaming OpenAI chat
+// completion response. When toolCalls is non-empty, the assistant message
+// carries tool_calls and finish_reason is "tool_calls" so agentic clients can
+// execute the tools and continue the loop. When toolCalls is empty, behavior is
+// identical to buildOpenAIChatCompletion (plain content + finish_reason "stop").
+func buildOpenAIChatCompletionWithTools(model, text, thinking string, thinkingEnabled bool, toolCalls []toolcall.ParsedToolCall) []byte {
+	message := map[string]any{"role": "assistant"}
+	finishReason := "stop"
+
+	if len(toolCalls) > 0 {
+		cleaned := stripToolCallMarkup(text)
+		if strings.TrimSpace(cleaned) == "" {
+			message["content"] = nil
+		} else {
+			message["content"] = cleaned
+		}
+		message["tool_calls"] = formatToolCallsForOpenAI(toolCalls)
+		finishReason = "tool_calls"
+	} else {
+		message["content"] = text
+		if thinkingEnabled && strings.TrimSpace(thinking) != "" {
+			message["reasoning_content"] = thinking
+		}
+	}
+
+	resp := map[string]any{
+		"id":      "chatcmpl-" + uuid.NewString(),
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   model,
+		"choices": []map[string]any{
+			{
+				"index":         0,
+				"message":       message,
+				"finish_reason": finishReason,
+			},
+		},
+		"usage": map[string]any{
+			"prompt_tokens":     0,
+			"completion_tokens": 0,
+			"total_tokens":      0,
+		},
+	}
+	b, _ := json.Marshal(resp)
+	return b
+}
+
+// stripToolCallMarkup removes complete tool_calls wrapper blocks (EPSE or
+// canonical XML) from text so that tool-call markup does not leak into the
+// `content` field of an assistant message that already carries tool_calls.
+// Incomplete fragments are left untouched to avoid corrupting partial output.
+func stripToolCallMarkup(text string) string {
+	if text == "" {
+		return text
+	}
+	for {
+		tag, ok := toolcall.FindToolMarkupTagOutsideIgnored(text, 0)
+		if !ok {
+			break
+		}
+		if tag.Closing || tag.Name != "tool_calls" {
+			text = text[:tag.Start] + text[tag.End+1:]
+			continue
+		}
+		closeTag, ok := toolcall.FindMatchingToolMarkupClose(text, tag)
+		if !ok {
+			// No matching close tag; drop the opener and keep scanning so any
+			// following complete blocks are still stripped.
+			text = text[:tag.Start] + text[tag.End+1:]
+			continue
+		}
+		text = text[:tag.Start] + text[closeTag.End+1:]
+	}
+	return strings.TrimSpace(text)
 }
 
 // buildOpenAIStreamChunk constructs a streaming OpenAI chat completion chunk.

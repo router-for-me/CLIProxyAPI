@@ -388,9 +388,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if o.Websockets != n.Websockets {
 				changes = append(changes, fmt.Sprintf("deepseek[%d].websockets: %t -> %t", i, o.Websockets, n.Websockets))
 			}
-			if o.DisableCooling != n.DisableCooling {
-				changes = append(changes, fmt.Sprintf("deepseek[%d].disable-cooling: %t -> %t", i, o.DisableCooling, n.DisableCooling))
-			}
+			changes = appendOptionalBoolChange(changes, fmt.Sprintf("deepseek[%d].disable-cooling", i), o.DisableCooling, n.DisableCooling)
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("deepseek[%d].api-key: updated", i))
 			}

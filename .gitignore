@@ -4,6 +4,9 @@ cli-proxy-api
 
 # Configuration
 config.yaml
+config.prod.yaml
+config.*.yaml
+!config.example.yaml
 .env
 
 # Generated content
