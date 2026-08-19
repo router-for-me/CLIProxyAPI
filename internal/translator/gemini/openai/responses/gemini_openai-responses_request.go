@@ -290,11 +290,13 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		out, _ = sjson.SetRawBytes(out, "systemInstruction", geminiSystemInstruction(systemParts))
 	}
 
-	// Convert tools to Gemini functionDeclarations format
+	// Convert tools to Gemini functionDeclarations and native googleSearch tools.
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		var functionDeclarations [][]byte
+		hasWebSearch := false
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			if tool.Get("type").String() == "function" {
+			toolType := tool.Get("type").String()
+			if toolType == "function" {
 				funcDecl := []byte(`{"name":"","description":"","parametersJsonSchema":{}}`)
 
 				if name := tool.Get("name"); name.Exists() {
@@ -308,15 +310,23 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				}
 
 				functionDeclarations = append(functionDeclarations, funcDecl)
+			} else if isOpenAIResponsesWebSearchToolType(toolType) {
+				hasWebSearch = true
 			}
 			return true
 		})
 
-		// Only add tools if there are function declarations.
+		var geminiTools [][]byte
 		if len(functionDeclarations) > 0 {
-			geminiTools := []byte(`[{"functionDeclarations":[]}]`)
-			geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations", translatorcommon.JoinRawArray(functionDeclarations))
-			out, _ = sjson.SetRawBytes(out, "tools", geminiTools)
+			functionTool := []byte(`{"functionDeclarations":[]}`)
+			functionTool, _ = sjson.SetRawBytes(functionTool, "functionDeclarations", translatorcommon.JoinRawArray(functionDeclarations))
+			geminiTools = append(geminiTools, functionTool)
+		}
+		if hasWebSearch {
+			geminiTools = append(geminiTools, []byte(`{"googleSearch":{}}`))
+		}
+		if len(geminiTools) > 0 {
+			out = translatorcommon.SetRawArrayItems(out, "tools", geminiTools)
 		}
 	}
 
