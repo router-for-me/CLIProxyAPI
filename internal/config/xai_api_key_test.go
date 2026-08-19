@@ -2,10 +2,31 @@ package config
 
 import "testing"
 
+func TestParseConfigBytesXAIConfig(t *testing.T) {
+	defaultCfg, errDefault := ParseConfigBytes([]byte(`{}`))
+	if errDefault != nil {
+		t.Fatalf("ParseConfigBytes(default) error = %v", errDefault)
+	}
+	if defaultCfg.XAI.InjectXSearch {
+		t.Fatal("xai.inject-x-search = true by default, want false")
+	}
+
+	enabledCfg, errEnabled := ParseConfigBytes([]byte(`xai:
+  inject-x-search: true
+`))
+	if errEnabled != nil {
+		t.Fatalf("ParseConfigBytes(enabled) error = %v", errEnabled)
+	}
+	if !enabledCfg.XAI.InjectXSearch {
+		t.Fatal("xai.inject-x-search = false, want true")
+	}
+}
+
 func TestParseConfigBytesXAIAPIKeyMatchesCodexShape(t *testing.T) {
 	cfg, errParse := ParseConfigBytes([]byte(`xai-api-key:
   - api-key: " xai-key "
     priority: 3
+    weight: 5
     prefix: " team-xai "
     base-url: " https://api.x.ai/v1 "
     websockets: true
@@ -20,6 +41,7 @@ func TestParseConfigBytesXAIAPIKeyMatchesCodexShape(t *testing.T) {
     excluded-models:
       - " grok-3-* "
     disable-cooling: true
+    request-retry: 0
   - api-key: dropped
     base-url: " "
 `))
@@ -36,6 +58,9 @@ func TestParseConfigBytesXAIAPIKeyMatchesCodexShape(t *testing.T) {
 	if entry.Priority != 3 {
 		t.Fatalf("priority = %d, want 3", entry.Priority)
 	}
+	if entry.Weight == nil || *entry.Weight != 5 {
+		t.Fatalf("weight = %v, want 5", entry.Weight)
+	}
 	if entry.Prefix != "team-xai" {
 		t.Fatalf("prefix = %q, want team-xai", entry.Prefix)
 	}
@@ -48,8 +73,11 @@ func TestParseConfigBytesXAIAPIKeyMatchesCodexShape(t *testing.T) {
 	if entry.ProxyURL != " http://proxy.local " {
 		t.Fatalf("proxy-url = %q, want original Codex-compatible value", entry.ProxyURL)
 	}
-	if !entry.DisableCooling {
-		t.Fatal("disable-cooling = false, want true")
+	if entry.DisableCooling == nil || !*entry.DisableCooling {
+		t.Fatalf("disable-cooling = %v, want true", entry.DisableCooling)
+	}
+	if entry.RequestRetry == nil || *entry.RequestRetry != 0 {
+		t.Fatalf("request-retry = %v, want 0", entry.RequestRetry)
 	}
 	if entry.Headers["X-Custom"] != "value" {
 		t.Fatalf("X-Custom header = %q, want value", entry.Headers["X-Custom"])

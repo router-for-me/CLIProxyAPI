@@ -15,6 +15,7 @@ import (
 type interactionsToOpenAIChatStreamState struct {
 	ID              string
 	Model           string
+	EnvironmentID   string
 	Created         int64
 	Started         bool
 	Completed       bool
@@ -63,6 +64,7 @@ func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName
 	var textBuilder strings.Builder
 	var reasoningBuilder strings.Builder
 	sawToolCall := false
+	var toolCalls [][]byte
 	steps.ForEach(func(_, step gjson.Result) bool {
 		switch step.Get("type").String() {
 		case "model_output":
@@ -75,7 +77,7 @@ func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName
 			}
 		case "function_call":
 			sawToolCall = true
-			out, _ = sjson.SetRawBytes(out, "choices.0.message.tool_calls.-1", openAIChatToolCallFromInteractions(step, gjson.Result{}))
+			toolCalls = append(toolCalls, openAIChatToolCallFromInteractions(step, gjson.Result{}))
 		}
 		return true
 	})
@@ -85,9 +87,15 @@ func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName
 	if reasoningBuilder.Len() > 0 {
 		out, _ = sjson.SetBytes(out, "choices.0.message.reasoning_content", reasoningBuilder.String())
 	}
+	if len(toolCalls) > 0 {
+		out = translatorcommon.SetRawArrayItems(out, "choices.0.message.tool_calls", toolCalls)
+	}
 	if sawToolCall {
 		out, _ = sjson.SetBytes(out, "choices.0.message.content", nil)
 		out, _ = sjson.SetBytes(out, "choices.0.finish_reason", "tool_calls")
+	}
+	if envID := firstNonEmpty(interaction.Get("environment_id").String(), root.Get("environment_id").String(), interaction.Get("environment.id").String(), root.Get("environment.id").String(), root.Get("interaction.environment_id").String()); envID != "" {
+		out, _ = sjson.SetBytes(out, "environment_id", envID)
 	}
 	out = setOpenAIChatUsageFromInteractions(out, "usage", translatorcommon.InteractionsUsage(root))
 	return out
@@ -107,12 +115,19 @@ func convertInteractionsEventToOpenAIChat(modelName string, rawJSON []byte, st *
 		interaction := root.Get("interaction")
 		st.ID = firstNonEmpty(interaction.Get("id").String(), st.ID)
 		st.Model = firstNonEmpty(interaction.Get("model").String(), st.Model, modelName)
+		if envID := firstNonEmpty(interaction.Get("environment_id").String(), root.Get("environment_id").String(), interaction.Get("environment.id").String(), root.Get("environment.id").String()); envID != "" {
+			st.EnvironmentID = envID
+		}
 		return ensureOpenAIChatStarted(nil, st)
 	case "step.start":
 		return interactionsStepStartToOpenAIChat(modelName, root, st)
 	case "step.delta":
 		return interactionsStepDeltaToOpenAIChat(modelName, root, st)
 	case "interaction.completed", "finish":
+		interaction := root.Get("interaction")
+		if envID := firstNonEmpty(interaction.Get("environment_id").String(), root.Get("environment_id").String(), interaction.Get("environment.id").String(), root.Get("environment.id").String()); envID != "" {
+			st.EnvironmentID = envID
+		}
 		return appendOpenAIChatCompleted(nil, root, st)
 	case "done":
 		return nil
@@ -207,6 +222,9 @@ func openAIChatBaseChunk(st *interactionsToOpenAIChatStreamState) []byte {
 	chunk, _ = sjson.SetBytes(chunk, "id", firstNonEmpty(st.ID, fmt.Sprintf("chatcmpl_%d", time.Now().UnixNano())))
 	chunk, _ = sjson.SetBytes(chunk, "created", openAIChatCreated(st))
 	chunk, _ = sjson.SetBytes(chunk, "model", st.Model)
+	if st != nil && st.EnvironmentID != "" {
+		chunk, _ = sjson.SetBytes(chunk, "environment_id", st.EnvironmentID)
+	}
 	return chunk
 }
 

@@ -17,6 +17,7 @@ claude-header-defaults:
   os: "  MacOS  "
   arch: "  arm64  "
   timeout: "  900  "
+  timezone: "  Pacific/Honolulu  "
   stabilize-device-profile: false
 `)
 	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
@@ -45,6 +46,9 @@ claude-header-defaults:
 	}
 	if got := cfg.ClaudeHeaderDefaults.Timeout; got != "900" {
 		t.Fatalf("Timeout = %q, want %q", got, "900")
+	}
+	if got := cfg.ClaudeHeaderDefaults.Timezone; got != "Pacific/Honolulu" {
+		t.Fatalf("Timezone = %q, want %q", got, "Pacific/Honolulu")
 	}
 	if cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile == nil {
 		t.Fatal("StabilizeDeviceProfile = nil, want non-nil")

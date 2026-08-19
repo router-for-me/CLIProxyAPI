@@ -17,6 +17,11 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := internallogging.WithRequestID(context.Background(), "ctx-request-id")
 		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
+		ctx = internallogging.WithClientRequestMetadata(ctx, internallogging.ClientRequestMetadata{
+			ClientIP:      "192.0.2.10",
+			XForwardedFor: "203.0.113.5, 198.51.100.8",
+			UserAgent:     "test-client/1.0",
+		})
 		ctx = internallogging.WithResponseStatusHolder(ctx)
 		internallogging.SetResponseStatus(ctx, http.StatusOK)
 		responseHeaders := http.Header{}
@@ -31,6 +36,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			Alias:               "client-gpt",
 			APIKey:              "test-key",
 			AuthIndex:           "0",
+			AccessTokenSHA256:   "token-version-hash",
 			AuthType:            "apikey",
 			Source:              "user@example.com",
 			ReasoningEffort:     "medium",
@@ -55,12 +61,18 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireStringField(t, payload, "alias", "client-gpt")
 		requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
 		requireStringField(t, payload, "auth_type", "apikey")
+		requireStringField(t, payload, "access_token_sha256", "token-version-hash")
 		requireMissingField(t, payload, "user_api_key")
 		requireStringField(t, payload, "request_id", "ctx-request-id")
+		requireStringField(t, payload, "client_ip", "192.0.2.10")
+		requireStringField(t, payload, "x_forwarded_for", "203.0.113.5, 198.51.100.8")
+		requireStringField(t, payload, "user_agent", "test-client/1.0")
 		requireStringField(t, payload, "reasoning_effort", "medium")
 		requireStringField(t, payload, "service_tier", "auto")
 		requireMissingField(t, payload, "request_service_tier")
 		requireStringField(t, payload, "response_service_tier", "default")
+		requireIntField(t, payload, "accounting_version", coreusage.TokenAccountingSchemaVersion)
+		requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityComplete, 30)
 		requireTokensBoolField(t, payload, "cache_read_tokens_present", true)
 		requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
 		requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
@@ -68,6 +80,38 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireBoolField(t, payload, "generate", true)
 		requireFailField(t, payload, http.StatusOK, "")
 	})
+}
+
+func TestUsageQueuePluginNormalizesDirectSDKUsageByProvider(t *testing.T) {
+	tests := []struct {
+		provider  string
+		wantTotal int
+	}{
+		{provider: "openai", wantTotal: 130},
+		{provider: "gemini", wantTotal: 142},
+	}
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			withEnabledQueue(t, func() {
+				ctx := internallogging.WithResponseStatusHolder(context.Background())
+				internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+				(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+					Provider: tt.provider,
+					Model:    "direct-sdk-model",
+					Detail: coreusage.Detail{
+						InputTokens:     100,
+						OutputTokens:    30,
+						ReasoningTokens: 12,
+					},
+				})
+
+				payload := popSinglePayload(t)
+				requireIntField(t, requireTokensPayload(t, payload), "total_tokens", tt.wantTotal)
+				requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityComplete, int64(tt.wantTotal))
+			})
+		})
+	}
 }
 
 func TestUsageQueuePluginPayloadIncludesGenerateFalse(t *testing.T) {
@@ -110,7 +154,7 @@ func TestUsageQueuePluginPayloadDefaultsGenerateTrueWhenOmitted(t *testing.T) {
 	})
 }
 
-func TestUsageQueuePluginMarksCanonicalZeroCacheRead(t *testing.T) {
+func TestUsageQueuePluginPreservesLegacyCachedOnlyUsage(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := internallogging.WithResponseStatusHolder(context.Background())
 		internallogging.SetResponseStatus(ctx, http.StatusOK)
@@ -119,21 +163,16 @@ func TestUsageQueuePluginMarksCanonicalZeroCacheRead(t *testing.T) {
 			Provider: "openai",
 			Model:    "gpt-5.4",
 			Detail: coreusage.Detail{
-				CachedTokens:    13,
-				CacheReadTokens: 0,
+				CachedTokens: 13,
 			},
 		})
 
 		payload := popSinglePayload(t)
 		requireTokensBoolField(t, payload, "cache_read_tokens_present", true)
 		tokens := requireTokensPayload(t, payload)
-		var cacheReadTokens int64
-		if errUnmarshal := json.Unmarshal(tokens["cache_read_tokens"], &cacheReadTokens); errUnmarshal != nil {
-			t.Fatalf("unmarshal cache_read_tokens: %v", errUnmarshal)
-		}
-		if cacheReadTokens != 0 {
-			t.Fatalf("cache_read_tokens = %d, want 0", cacheReadTokens)
-		}
+		requireIntField(t, tokens, "cache_read_tokens", 13)
+		requireIntField(t, tokens, "total_tokens", 13)
+		requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityUnclassified, 13)
 	})
 }
 
@@ -394,6 +433,38 @@ func requireStringField(t *testing.T, payload map[string]json.RawMessage, key, w
 	}
 	if got != want {
 		t.Fatalf("%s = %q, want %q", key, got, want)
+	}
+}
+
+func requireIntField(t *testing.T, payload map[string]json.RawMessage, key string, want int) {
+	t.Helper()
+
+	raw, ok := payload[key]
+	if !ok {
+		t.Fatalf("payload missing %q", key)
+	}
+	var got int
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal %q: %v", key, err)
+	}
+	if got != want {
+		t.Fatalf("%s = %d, want %d", key, got, want)
+	}
+}
+
+func requireTokenBreakdown(t *testing.T, payload map[string]json.RawMessage, quality coreusage.TokenAccountingQuality, total int64) {
+	t.Helper()
+
+	raw, ok := payload["token_breakdown"]
+	if !ok {
+		t.Fatal("payload missing token_breakdown")
+	}
+	var breakdown coreusage.TokenBreakdown
+	if err := json.Unmarshal(raw, &breakdown); err != nil {
+		t.Fatalf("unmarshal token_breakdown: %v", err)
+	}
+	if !breakdown.Valid() || breakdown.Quality != quality || breakdown.TotalTokens != total {
+		t.Fatalf("token_breakdown = %+v, want quality=%s total=%d", breakdown, quality, total)
 	}
 }
 

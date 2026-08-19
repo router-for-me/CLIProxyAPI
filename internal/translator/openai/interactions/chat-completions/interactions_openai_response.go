@@ -58,20 +58,21 @@ func ConvertOpenAIResponseToInteractionsNonStream(ctx context.Context, modelName
 	out, _ = sjson.SetBytes(out, "id", firstNonEmpty(root.Get("id").String(), fmt.Sprintf("interaction_%d", time.Now().UnixNano())))
 	out, _ = sjson.SetBytes(out, "model", firstNonEmpty(modelName, root.Get("model").String()))
 	choices := root.Get("choices")
+	var steps [][]byte
 	choices.ForEach(func(_, choice gjson.Result) bool {
 		message := choice.Get("message")
 		if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
 			for _, text := range openAIReasoningTexts(reasoning) {
-				out, _ = sjson.SetRawBytes(out, "steps.-1", interactionsTextStep("thought", text))
+				steps = append(steps, interactionsTextStep("thought", text))
 			}
 		}
 		if content := message.Get("content"); content.Exists() && content.String() != "" {
-			out, _ = sjson.SetRawBytes(out, "steps.-1", interactionsTextStep("model_output", content.String()))
+			steps = append(steps, interactionsTextStep("model_output", content.String()))
 		}
 		if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
 				if step, ok := openAIToolCallToInteractionsStep(toolCall); ok {
-					out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+					steps = append(steps, step)
 				}
 				return true
 			})
@@ -81,6 +82,9 @@ func ConvertOpenAIResponseToInteractionsNonStream(ctx context.Context, modelName
 		}
 		return true
 	})
+	if len(steps) > 0 {
+		out = translatorcommon.SetRawArrayItems(out, "steps", steps)
+	}
 	out = setInteractionsUsageFromOpenAIChat(out, "usage", root.Get("usage"))
 	return out
 }
