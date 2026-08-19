@@ -866,6 +866,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										if otherState.Quota.Exceeded && otherState.Quota.NextRecoverAt.After(otherNext) {
 											otherNext = otherState.Quota.NextRecoverAt
 										}
+										// Cap credential-scoped cooldowns at the same maximum as per-model
+										// quota. Without this, stale multi-day cooldowns persist because the
+										// propagation keeps whichever NextRecoverAt is later, so the value
+										// can only grow — never shrink, even after the underlying quota
+										// window has reset.
+										if capDeadline := now.Add(quotaBackoffMax); otherNext.After(capDeadline) {
+											otherNext = capDeadline
+										}
 										otherState.NextRetryAfter = otherNext
 										otherState.Quota = QuotaState{
 											Exceeded:      true,
