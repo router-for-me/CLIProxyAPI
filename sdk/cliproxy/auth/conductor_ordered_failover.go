@@ -8,6 +8,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 )
 
 // Ordered failover implements ai-hub-ollw AC#2-#4: iterate an ordered candidate
@@ -174,7 +175,7 @@ func (m *Manager) executeWithOrderedFailover(ctx context.Context, providers []st
 			// verbatim; do not fabricate a fallback trace.
 			return resp, err
 		}
-		// Pre-first-byte retryable: advance to the next candidate.
+		logOrderedFailoverAdvance(ctx, chain, idx, err)
 		continue
 	}
 	if lastErr != nil {
@@ -210,6 +211,7 @@ func (m *Manager) executeCountWithOrderedFailover(ctx context.Context, providers
 		if !retryablePreFirstByteError(err) {
 			return resp, err
 		}
+		logOrderedFailoverAdvance(ctx, chain, idx, err)
 		continue
 	}
 	if lastErr != nil {
@@ -250,13 +252,32 @@ func (m *Manager) executeStreamWithOrderedFailover(ctx context.Context, provider
 		if !retryablePreFirstByteError(err) {
 			return nil, err
 		}
-		// Pre-first-byte retryable: advance to the next candidate.
+		logOrderedFailoverAdvance(ctx, chain, idx, err)
 		continue
 	}
 	if lastErr != nil {
 		return nil, annotateOrderedError(lastErr, chain, len(chain)-1, "exhausted")
 	}
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
+func logOrderedFailoverAdvance(ctx context.Context, chain []OrderedCandidate, idx int, err error) {
+	from := ""
+	to := ""
+	if idx >= 0 && idx < len(chain) {
+		from = chain[idx].UpstreamModel
+	}
+	if idx+1 < len(chain) {
+		to = chain[idx+1].UpstreamModel
+	}
+	logEntryWithRequestID(ctx).WithFields(log.Fields{
+		"from":        from,
+		"to":          to,
+		"reason":      "retryable",
+		"status":      statusCodeFromError(err),
+		"chain_index": idx,
+		"chain_len":   len(chain),
+	}).Debug("ordered failover advanced")
 }
 
 // orderedCandidateChainForRequest resolves the ordered candidate pool from the
