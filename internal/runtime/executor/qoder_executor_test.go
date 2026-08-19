@@ -474,7 +474,7 @@ func (p *captureQoderUsagePlugin) HandleUsage(_ context.Context, record usage.Re
 
 func waitForQoderUsageRecord(t *testing.T, records <-chan usage.Record, authID, model string) usage.Record {
 	t.Helper()
-	timeout := time.After(2 * time.Second)
+	timeout := time.After(5 * time.Second) // generous for CI scheduling jitter; correctness comes from matching the record, not the deadline
 	for {
 		select {
 		case record := <-records:
