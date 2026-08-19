@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -508,18 +509,12 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 
 		// Add tool calls if any
 		if len(toolCalls) > 0 {
-			template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls", []byte(`[]`))
-			for _, toolCall := range toolCalls {
-				template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls.-1", toolCall)
-			}
+			template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls", translatorcommon.JoinRawArray(toolCalls))
 		}
 
 		// Add images if any
 		if len(images) > 0 {
-			template, _ = sjson.SetRawBytes(template, "choices.0.message.images", []byte(`[]`))
-			for _, image := range images {
-				template, _ = sjson.SetRawBytes(template, "choices.0.message.images.-1", image)
-			}
+			template, _ = sjson.SetRawBytes(template, "choices.0.message.images", translatorcommon.JoinRawArray(images))
 		}
 	}
 
@@ -574,13 +569,19 @@ func registerToolCallState(p *ConvertCliToOpenAIParams, eventResult, itemResult 
 
 func findToolCallState(p *ConvertCliToOpenAIParams, eventResult, itemResult gjson.Result) *toolCallStreamState {
 	if itemID := eventResult.Get("item_id").String(); itemID != "" {
-		return p.toolCallStates["item:"+itemID]
+		if state := p.toolCallStates["item:"+itemID]; state != nil {
+			return state
+		}
 	}
 	if itemID := itemResult.Get("id").String(); itemID != "" {
-		return p.toolCallStates["item:"+itemID]
+		if state := p.toolCallStates["item:"+itemID]; state != nil {
+			return state
+		}
 	}
 	if outputIndex := eventResult.Get("output_index"); outputIndex.Exists() {
-		return p.toolCallStates["output:"+outputIndex.Raw]
+		if state := p.toolCallStates["output:"+outputIndex.Raw]; state != nil {
+			return state
+		}
 	}
 	return p.currentToolCall
 }

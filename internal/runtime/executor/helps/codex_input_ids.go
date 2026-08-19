@@ -18,6 +18,9 @@ const (
 	codexFunctionCallItemIDPrefix         = "fc"
 	codexCustomToolCallItemIDPrefix       = "ctc"
 	codexCustomToolCallOutputItemIDPrefix = "ctco"
+
+	codexInputItemIDOccupied  uint8 = 1 << 0
+	codexInputItemIDPreserved uint8 = 1 << 1
 )
 
 // SanitizeCodexInputItemIDs normalizes supported input item IDs for Codex, removes encrypted
@@ -30,7 +33,7 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 	}
 
 	items := input.Array()
-	occupied := make(map[string]struct{}, len(items))
+	idStates := make(map[string]uint8, len(items))
 	for _, item := range items {
 		if shouldDropCodexEncryptedReasoningItem(item) {
 			continue
@@ -39,13 +42,22 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 		if itemID.Type != gjson.String {
 			continue
 		}
-		id := normalizeCodexInputItemID(item, itemID.String())
+		originalID := itemID.String()
+		id := normalizeCodexInputItemID(item, originalID)
+		state := idStates[id]
+		if id == originalID {
+			state |= codexInputItemIDPreserved
+		}
 		if len([]rune(id)) <= codexInputItemIDLimit {
-			occupied[id] = struct{}{}
+			state |= codexInputItemIDOccupied
+		}
+		if state != 0 {
+			idStates[id] = state
 		}
 	}
 
-	mapped := make(map[string]string, len(items))
+	var mapped map[string]string
+	var collisionMapped map[string]string
 	rebuilt := make([]string, 0, len(items))
 	changed := false
 	for _, item := range items {
@@ -59,18 +71,39 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 		if itemID.Type == gjson.String {
 			originalID := itemID.String()
 			id := normalizeCodexInputItemID(item, originalID)
+			if id != originalID && idStates[id]&codexInputItemIDPreserved != 0 {
+				collisionID, ok := collisionMapped[id]
+				if !ok {
+					for attempt := 0; ; attempt++ {
+						collisionID = codexInputItemIDWithHashSuffix(id, attempt)
+						if idStates[collisionID]&codexInputItemIDOccupied != 0 {
+							continue
+						}
+						if collisionMapped == nil {
+							collisionMapped = make(map[string]string)
+						}
+						collisionMapped[id] = collisionID
+						idStates[collisionID] |= codexInputItemIDOccupied
+						break
+					}
+				}
+				id = collisionID
+			}
 			if len([]rune(id)) > codexInputItemIDLimit {
 				shortened, ok := mapped[id]
 				if !ok {
 					shortened = shortenCodexInputItemID(id)
 					for attempt := 1; ; attempt++ {
-						if _, exists := occupied[shortened]; !exists {
+						if idStates[shortened]&codexInputItemIDOccupied == 0 {
 							break
 						}
 						shortened = shortenCodexInputItemIDWithAttempt(id, attempt)
 					}
+					if mapped == nil {
+						mapped = make(map[string]string)
+					}
 					mapped[id] = shortened
-					occupied[shortened] = struct{}{}
+					idStates[shortened] |= codexInputItemIDOccupied
 				}
 				id = shortened
 			}
@@ -139,7 +172,14 @@ func shortenCodexInputItemIDWithAttempt(id string, attempt int) string {
 	if len(runes) <= codexInputItemIDLimit {
 		return id
 	}
+	return codexInputItemIDWithHashSuffixRunes(id, runes, attempt)
+}
 
+func codexInputItemIDWithHashSuffix(id string, attempt int) string {
+	return codexInputItemIDWithHashSuffixRunes(id, []rune(id), attempt)
+}
+
+func codexInputItemIDWithHashSuffixRunes(id string, runes []rune, attempt int) string {
 	hashInput := id
 	if attempt > 0 {
 		hashInput += "\x00" + strconv.Itoa(attempt)
@@ -147,5 +187,8 @@ func shortenCodexInputItemIDWithAttempt(id string, attempt int) string {
 	sum := sha256.Sum256([]byte(hashInput))
 	suffix := "_" + hex.EncodeToString(sum[:8])
 	prefixLength := codexInputItemIDLimit - len(suffix)
+	if len(runes) < prefixLength {
+		prefixLength = len(runes)
+	}
 	return string(runes[:prefixLength]) + suffix
 }

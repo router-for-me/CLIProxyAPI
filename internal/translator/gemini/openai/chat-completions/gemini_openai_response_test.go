@@ -62,3 +62,18 @@ func TestGeminiFinishReasonOnlyOnFinalChunk(t *testing.T) {
 		t.Fatalf("expected native_finish_reason stop, got %s", nfr3)
 	}
 }
+
+func TestConvertGeminiResponseToOpenAINonStream_EmptyTextProducesEmptyString(t *testing.T) {
+	response := []byte(`{"candidates":[{"content":{"parts":[{"text":""},{"text":"","thought":true}]},"finishReason":"STOP"}]}`)
+	result := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, response, nil)
+
+	content := gjson.GetBytes(result, "choices.0.message.content")
+	if !content.Exists() || content.String() != "" || content.Type == gjson.Null {
+		t.Fatalf("expected content to be empty string \"\", got %v (type %v)", content.Value(), content.Type)
+	}
+
+	reasoning := gjson.GetBytes(result, "choices.0.message.reasoning_content")
+	if !reasoning.Exists() || reasoning.String() != "" || reasoning.Type == gjson.Null {
+		t.Fatalf("expected reasoning_content to be empty string \"\", got %v (type %v)", reasoning.Value(), reasoning.Type)
+	}
+}

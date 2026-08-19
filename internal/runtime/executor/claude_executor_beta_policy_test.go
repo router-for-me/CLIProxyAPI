@@ -77,18 +77,16 @@ func TestApplyClaudeHeaders_ConfirmedAPIKeyClientKeepsPurePassthrough(t *testing
 	}
 }
 
-// Betas lifted out of the body must obey the same policy as header-supplied ones.
-// Anthropic rejects an unknown beta outright, so letting the body bypass the gate
-// turned a caller-controlled field into a guaranteed 400.
-func TestApplyClaudeHeaders_UnknownBodyBetaDroppedOnAnthropic(t *testing.T) {
+// Default API-key mode preserves body-lifted betas just like header betas.
+func TestApplyClaudeHeaders_UnknownBodyBetaPreservedOnAnthropic(t *testing.T) {
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-body-beta"}}
 	req := newClaudeHeaderTestRequest(t, nil)
 	if err := applyClaudeHeaders(req, auth, "key-body-beta", false, []string{"unknown-body-probe-2099-01-01"},
 		[]byte(`{"model":"claude-opus-5"}`), nil, nil, false); err != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", err)
 	}
-	if got := req.Header.Get("Anthropic-Beta"); strings.Contains(got, "unknown-body-probe-2099-01-01") {
-		t.Fatalf("Anthropic-Beta = %q, want the unknown body beta dropped", got)
+	if got := req.Header.Get("Anthropic-Beta"); got != "unknown-body-probe-2099-01-01" {
+		t.Fatalf("Anthropic-Beta = %q, want the caller body beta preserved", got)
 	}
 }
 
@@ -99,10 +97,8 @@ func TestApplyClaudeHeaders_KnownBodyBetaStillPlacedOnAnthropic(t *testing.T) {
 		[]byte(`{"model":"claude-opus-5"}`), nil, nil, false); err != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", err)
 	}
-	got := req.Header.Get("Anthropic-Beta")
-	parts := strings.Split(got, ",")
-	if len(parts) < 2 || parts[1] != claudeContext1MBeta {
-		t.Fatalf("Anthropic-Beta = %q, want %s honored at its captured position", got, claudeContext1MBeta)
+	if got := req.Header.Get("Anthropic-Beta"); got != claudeContext1MBeta {
+		t.Fatalf("Anthropic-Beta = %q, want caller body beta %s", got, claudeContext1MBeta)
 	}
 }
 
@@ -256,7 +252,7 @@ func TestClassifyClaudeUpstreamError_FastModeCreditsIsRequestScoped(t *testing.T
 		[]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Fast mode requires usage credits"}}`),
 	}
 	for _, body := range bodies {
-		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, body)
+		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, nil, body)
 
 		scoped, ok := err.(cliproxyexecutor.RequestScopedError)
 		if !ok || !scoped.IsRequestScoped() {
@@ -281,7 +277,7 @@ func TestClassifyClaudeUpstreamError_RealRateLimitStaysCredentialScoped(t *testi
 		[]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"This organization has exceeded its usage limit."}}`),
 	}
 	for _, body := range cases {
-		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, body)
+		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, nil, body)
 		if scoped, ok := err.(cliproxyexecutor.RequestScopedError); ok && scoped.IsRequestScoped() {
 			t.Fatalf("genuine rate limit was misclassified as request-scoped: %s", body)
 		}
@@ -292,7 +288,7 @@ func TestClassifyClaudeUpstreamError_OtherStatusesUnaffected(t *testing.T) {
 	body := []byte(`{"error":{"message":"Usage credits are required for fast mode."}}`)
 	// Only 429 carries the entitlement refusal; a 500 mentioning it is still a
 	// credential-scoped failure worth rotating away from.
-	err := classifyClaudeUpstreamError(http.StatusInternalServerError, body)
+	err := classifyClaudeUpstreamError(http.StatusInternalServerError, nil, body)
 	if scoped, ok := err.(cliproxyexecutor.RequestScopedError); ok && scoped.IsRequestScoped() {
 		t.Fatal("non-429 status was misclassified as request-scoped")
 	}

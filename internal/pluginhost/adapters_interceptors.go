@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
@@ -211,8 +212,15 @@ func (h *Host) InterceptStreamChunkExcept(ctx context.Context, req pluginapi.Str
 		nextReq := req
 		nextReq.RequestHeaders = cloneHeader(req.RequestHeaders)
 		nextReq.ResponseHeaders = cloneHeader(current.Headers)
-		nextReq.OriginalRequest = bytes.Clone(req.OriginalRequest)
-		nextReq.RequestBody = bytes.Clone(req.RequestBody)
+		// Schema v3+ omits request bodies on payload chunks to avoid re-sending multi-MB
+		// prompts across cgo/JSON for every frame. Legacy plugins still receive them.
+		if req.ChunkIndex != pluginapi.StreamChunkHeaderInitIndex && streamChunkOmitsRequestBodies(record.plugin.SchemaVersion) {
+			nextReq.OriginalRequest = nil
+			nextReq.RequestBody = nil
+		} else {
+			nextReq.OriginalRequest = bytes.Clone(req.OriginalRequest)
+			nextReq.RequestBody = bytes.Clone(req.RequestBody)
+		}
 		nextReq.Body = bytes.Clone(current.Body)
 		nextReq.HistoryChunks = cloneByteSlices(req.HistoryChunks)
 		nextReq.Metadata = cloneInterceptorMetadata(req.Metadata)
@@ -242,6 +250,28 @@ func (h *Host) HasStreamInterceptors() bool {
 		}
 	}
 	return false
+}
+
+// StreamChunkPayloadIncludesRequestBody reports whether any active stream chunk
+// interceptor still requires OriginalRequest/RequestBody on payload chunks
+// (schema_version < SchemaVersionStreamChunkOmitRequestBody).
+func (h *Host) StreamChunkPayloadIncludesRequestBody() bool {
+	if h == nil {
+		return false
+	}
+	for _, record := range h.activeRecords() {
+		if h.isPluginFused(record.id) || record.plugin.Capabilities.StreamChunkInterceptor == nil {
+			continue
+		}
+		if !streamChunkOmitsRequestBodies(record.plugin.SchemaVersion) {
+			return true
+		}
+	}
+	return false
+}
+
+func streamChunkOmitsRequestBodies(schemaVersion uint32) bool {
+	return schemaVersion >= pluginabi.SchemaVersionStreamChunkOmitRequestBody
 }
 
 func (h *Host) HasRequestInterceptors() bool {

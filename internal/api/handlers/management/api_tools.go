@@ -21,7 +21,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 )
 
 const defaultAPICallTimeout = 60 * time.Second
@@ -50,6 +49,7 @@ type apiCallRequest struct {
 	AuthIndexPascal *string           `json:"AuthIndex"`
 	Method          string            `json:"method"`
 	URL             string            `json:"url"`
+	ProxyURL        string            `json:"proxy_url"`
 	Header          map[string]string `json:"header"`
 	Data            string            `json:"data"`
 }
@@ -81,6 +81,8 @@ type apiCallResponse struct {
 //     If omitted or not found, credential-specific proxy/token substitution is skipped.
 //   - method (required): HTTP method, e.g. GET, POST, PUT, PATCH, DELETE.
 //   - url (required): Absolute URL including scheme and host, e.g. "https://api.example.com/v1/ping".
+//   - proxy_url (optional): Proxy used for this request. Supports HTTP, HTTPS, SOCKS5, SOCKS5H,
+//     and "direct"/"none" to explicitly bypass proxies. When set, credential and global proxies are ignored.
 //   - header (optional): Request headers map.
 //     Supports magic variable "$TOKEN$" which is replaced using the selected credential:
 //     1) metadata.access_token
@@ -91,9 +93,10 @@ type apiCallResponse struct {
 //   - data (optional): Raw request body as string (useful for POST/PUT/PATCH).
 //
 // Proxy selection (highest priority first):
-//  1. Selected credential proxy_url
-//  2. Global config proxy-url
-//  3. Direct connect (environment proxies are not used)
+//  1. Request proxy_url (when set, lower-priority proxy settings are ignored)
+//  2. Selected credential proxy_url
+//  3. Global config proxy-url
+//  4. Direct connect (environment proxies are not used)
 //
 // Response (returned with HTTP 200 when the APICall itself succeeds):
 //
@@ -157,6 +160,14 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	requestProxyURL := strings.TrimSpace(body.ProxyURL)
+	if requestProxyURL != "" {
+		if _, errParseProxy := proxyutil.Parse(requestProxyURL); errParseProxy != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid proxy_url"})
+			return
+		}
+	}
+
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
 
@@ -174,7 +185,7 @@ func (h *Handler) APICall(c *gin.Context) {
 			continue
 		}
 		if !tokenResolved {
-			token, tokenErr = h.resolveTokenForAuth(c.Request.Context(), auth)
+			token, tokenErr = h.resolveTokenForAuth(c.Request.Context(), auth, requestProxyURL)
 			tokenResolved = true
 		}
 		if auth != nil && token == "" {
@@ -228,7 +239,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	httpClient := &http.Client{
 		Timeout: defaultAPICallTimeout,
 	}
-	httpClient.Transport = h.apiCallTransport(auth)
+	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -309,90 +320,20 @@ func tokenValueForAuth(auth *coreauth.Auth) string {
 	return ""
 }
 
-func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) (string, error) {
+func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) (string, error) {
 	if auth == nil {
 		return "", nil
 	}
 
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
-		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth)
+		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth, requestProxyURL)
 		return token, errToken
 	}
 
 	return tokenValueForAuth(auth), nil
 }
 
-func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if auth == nil {
-		return "", nil
-	}
-
-	metadata, updater := geminiOAuthMetadata(auth)
-	if len(metadata) == 0 {
-		return "", fmt.Errorf("gemini oauth metadata missing")
-	}
-
-	base := make(map[string]any)
-	if tokenRaw, ok := metadata["token"].(map[string]any); ok && tokenRaw != nil {
-		base = cloneMap(tokenRaw)
-	}
-
-	var token oauth2.Token
-	if len(base) > 0 {
-		if raw, errMarshal := json.Marshal(base); errMarshal == nil {
-			_ = json.Unmarshal(raw, &token)
-		}
-	}
-
-	if token.AccessToken == "" {
-		token.AccessToken = stringValue(metadata, "access_token")
-	}
-	if token.RefreshToken == "" {
-		token.RefreshToken = stringValue(metadata, "refresh_token")
-	}
-	if token.TokenType == "" {
-		token.TokenType = stringValue(metadata, "token_type")
-	}
-	if token.Expiry.IsZero() {
-		if expiry := stringValue(metadata, "expiry"); expiry != "" {
-			if ts, errParseTime := time.Parse(time.RFC3339, expiry); errParseTime == nil {
-				token.Expiry = ts
-			}
-		}
-	}
-
-	conf := &oauth2.Config{
-		ClientID:     oauthClientValue(metadata, "client_id", geminiOAuthClientIDEnv),
-		ClientSecret: oauthClientValue(metadata, "client_secret", geminiOAuthSecretEnv),
-		Scopes:       geminiOAuthScopes,
-		Endpoint:     google.Endpoint,
-	}
-
-	ctxToken := ctx
-	httpClient := &http.Client{
-		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
-	}
-	ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
-
-	src := conf.TokenSource(ctxToken, &token)
-	currentToken, errToken := src.Token()
-	if errToken != nil {
-		return "", errToken
-	}
-
-	merged := buildOAuthTokenMap(base, currentToken)
-	fields := buildOAuthTokenFields(currentToken, merged)
-	if updater != nil {
-		updater(fields)
-	}
-	return strings.TrimSpace(currentToken.AccessToken), nil
-}
-
-func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -438,7 +379,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
+		Transport: h.apiCallTransport(auth, requestProxyURL),
 	}
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -713,7 +654,14 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 	return nil
 }
 
-func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
+func (h *Handler) apiCallTransport(auth *coreauth.Auth, requestProxyURL string) http.RoundTripper {
+	if proxyStr := strings.TrimSpace(requestProxyURL); proxyStr != "" {
+		if transport := buildProxyTransport(proxyStr); transport != nil {
+			return transport
+		}
+		return directAPICallTransport()
+	}
+
 	var proxyCandidates []string
 	if auth != nil {
 		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
@@ -737,6 +685,10 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 		}
 	}
 
+	return directAPICallTransport()
+}
+
+func directAPICallTransport() http.RoundTripper {
 	transport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok || transport == nil {
 		return &http.Transport{Proxy: nil}
@@ -1033,7 +985,7 @@ func (h *Handler) GetCopilotQuota(c *gin.Context) {
 		return
 	}
 
-	token, tokenErr := h.resolveTokenForAuth(c.Request.Context(), auth)
+	token, tokenErr := h.resolveTokenForAuth(c.Request.Context(), auth, "")
 	if tokenErr != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to refresh copilot token"})
 		return
@@ -1056,7 +1008,7 @@ func (h *Handler) GetCopilotQuota(c *gin.Context) {
 
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
+		Transport: h.apiCallTransport(auth, ""),
 	}
 
 	resp, errDo := httpClient.Do(req)
@@ -1143,7 +1095,7 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 	}
 
 	// Get the GitHub token to call the copilot_internal/user endpoint
-	token, tokenErr := h.resolveTokenForAuth(ctx, auth)
+	token, tokenErr := h.resolveTokenForAuth(ctx, auth, "")
 	if tokenErr != nil {
 		log.WithError(tokenErr).Debug("enrichCopilotTokenResponse: failed to resolve token")
 		return response
@@ -1173,7 +1125,7 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
+		Transport: h.apiCallTransport(auth, ""),
 	}
 
 	quotaResp, errDo := httpClient.Do(req)

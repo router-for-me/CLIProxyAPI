@@ -24,7 +24,7 @@ var quotaCooldownDisabled atomic.Bool
 
 var transientErrorCooldownSeconds atomic.Int64
 
-// SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
+// SetQuotaCooldownDisabled toggles auth/model cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
 }
@@ -40,12 +40,16 @@ func quotaCooldownDisabledForAuth(auth *Auth) bool {
 }
 
 func quotaCooldownDisabledForAuthWithConfig(auth *Auth, cfg *internalconfig.Config) bool {
+	// Home owns cooldown state, so downstream instances must not schedule local cooldowns.
+	if cfg != nil && cfg.Home.Enabled {
+		return true
+	}
 	if auth != nil {
 		if override, ok := auth.DisableCoolingOverride(); ok {
 			return override
 		}
-		if providerCoolingDisabledForAuth(auth, cfg) {
-			return true
+		if override, ok := providerCoolingOverrideForAuth(auth, cfg); ok {
+			return override
 		}
 	}
 	if cfg != nil && cfg.DisableCooling {
@@ -54,13 +58,13 @@ func quotaCooldownDisabledForAuthWithConfig(auth *Auth, cfg *internalconfig.Conf
 	return quotaCooldownDisabled.Load()
 }
 
-func providerCoolingDisabledForAuth(auth *Auth, cfg *internalconfig.Config) bool {
+func providerCoolingOverrideForAuth(auth *Auth, cfg *internalconfig.Config) (bool, bool) {
 	if auth == nil || cfg == nil {
-		return false
+		return false, false
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	if provider == "" {
-		return false
+		return false, false
 	}
 	providerKey := ""
 	compatName := ""
@@ -69,13 +73,16 @@ func providerCoolingDisabledForAuth(auth *Auth, cfg *internalconfig.Config) bool
 		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 	}
 	if providerKey == "" && compatName == "" && provider != "openai-compatibility" {
-		return false
+		return false, false
 	}
 	if providerKey == "" {
 		providerKey = provider
 	}
 	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, provider)
-	return entry != nil && entry.DisableCooling
+	if entry == nil || entry.DisableCooling == nil {
+		return false, false
+	}
+	return *entry.DisableCooling, true
 }
 
 func nextTransientErrorRetryAfter(now time.Time) time.Time {
@@ -724,7 +731,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 
 		if result.Success {
-			if modelKey != "" {
+			if auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+				// Retain active credential-scoped cooldown
+			} else if modelKey != "" {
 				state := ensureModelState(auth, modelKey)
 				resetModelState(state, now)
 				updateAggregatedAvailability(auth, now)
@@ -743,6 +752,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if modelKey != "" {
 				if !shouldSkipCredentialCooldown(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
+					if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
+						disableCooling = false
+					}
 					state := ensureModelState(auth, modelKey)
 					state.Unavailable = true
 					state.Status = StatusError
@@ -855,6 +867,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								} else {
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
 								}
+								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
+									next = state.Quota.NextRecoverAt
+								}
 							}
 							state.NextRetryAfter = next
 							state.Quota = QuotaState{
@@ -867,6 +882,34 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								suspendReason = "quota"
 								shouldSuspendModel = true
 								setModelQuota = true
+							}
+							if result.CredentialScope && !disableCooling {
+								for _, otherState := range auth.ModelStates {
+									if otherState != nil && otherState != state {
+										otherState.Unavailable = true
+										otherState.Status = StatusError
+										otherNext := next
+										if otherState.Quota.Exceeded && otherState.Quota.NextRecoverAt.After(otherNext) {
+											otherNext = otherState.Quota.NextRecoverAt
+										}
+										otherState.NextRetryAfter = otherNext
+										otherState.Quota = QuotaState{
+											Exceeded:      true,
+											Reason:        "credential_quota",
+											NextRecoverAt: otherNext,
+											BackoffLevel:  backoffLevel,
+										}
+									}
+								}
+								auth.Unavailable = true
+								auth.Quota.Exceeded = true
+								auth.Quota.Reason = "credential_quota"
+								authNext := next
+								if auth.Quota.NextRecoverAt.After(authNext) {
+									authNext = auth.Quota.NextRecoverAt
+								}
+								auth.Quota.NextRecoverAt = authNext
+								auth.NextRetryAfter = authNext
 							}
 						case 408, 500, 502, 503, 504:
 							state.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
@@ -881,12 +924,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state.Unavailable = false
 						state.Quota.Exceeded = false
 					}
+					if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown && state.NextRetryAfter.IsZero() {
+						state.NextRetryAfter = now.Add(transientErrorCooldown)
+						state.Unavailable = true
+					}
 					auth.Status = StatusError
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
 				}
 			} else {
 				disableCooling := m.cooldownDisabledForAuth(auth)
+				if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
+					disableCooling = false
+				}
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
 			}
 		}
@@ -1191,8 +1241,13 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	if quotaExceeded {
 		auth.Quota.Exceeded = true
 		auth.Quota.Reason = "quota"
+		if auth.Quota.NextRecoverAt.After(quotaRecover) {
+			quotaRecover = auth.Quota.NextRecoverAt
+		}
 		auth.Quota.NextRecoverAt = quotaRecover
 		auth.Quota.BackoffLevel = maxBackoffLevel
+	} else if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
+		// Retain active auth-level quota cooldown
 	} else {
 		auth.Quota.Exceeded = false
 		auth.Quota.Reason = ""
@@ -1320,6 +1375,9 @@ func resultErrorFromError(err error) *Error {
 // Connection lifecycle is intentionally separate from request_scoped so transport
 // drops do not also stop credential rotation via isRequestInvalidError.
 func shouldSkipCredentialCooldown(err *Error) bool {
+	if err != nil && err.Code == ErrorCodeForceCooldown {
+		return false
+	}
 	return isRequestScopedResultError(err) || isConnectionLifecycleResultError(err)
 }
 
@@ -1606,7 +1664,13 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 }
 
 func isRequestScopedResultError(err *Error) bool {
-	return err != nil && (err.IsRequestScoped() || isRequestScopedNotFoundResultError(err))
+	if err == nil {
+		return false
+	}
+	if err.IsRequestScoped() || isRequestScopedNotFoundResultError(err) {
+		return true
+	}
+	return isRequestInvalidError(err)
 }
 
 func isCountTokensEndpointNotFoundError(err error, requestedModel string) bool {
@@ -1824,7 +1888,19 @@ func isRequestInvalidError(err error) bool {
 	if isModelSupportError(err) {
 		return false
 	}
-	return clienterror.IsRequestFault(statusCodeFromError(err), err)
+	status := statusCodeFromError(err)
+	if clienterror.IsRequestFault(status, err) {
+		return true
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil && authErr.Message != "" {
+		// When authErr.Code is non-empty, Error() formats as "Code: Message" which
+		// breaks JSON parsing in clienterror. Re-evaluate against the raw Message body.
+		if clienterror.IsRequestFault(status, errors.New(authErr.Message)) {
+			return true
+		}
+	}
+	return false
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
@@ -1932,6 +2008,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			} else {
 				next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
 			}
+			if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
+				next = auth.Quota.NextRecoverAt
+			}
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
@@ -1945,6 +2024,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 		auth.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
 		auth.Unavailable = !auth.NextRetryAfter.IsZero()
+	}
+	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && auth.NextRetryAfter.IsZero() {
+		auth.NextRetryAfter = now.Add(transientErrorCooldown)
+		auth.Unavailable = true
 	}
 }
 

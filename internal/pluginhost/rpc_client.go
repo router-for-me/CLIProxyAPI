@@ -68,8 +68,14 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 		return pluginapi.Plugin{}, fmt.Errorf("plugin schema version %d is not supported", resp.SchemaVersion)
 	}
 	adapter := &rpcPluginAdapter{id: id, host: host, client: client}
+	schemaVersion := resp.SchemaVersion
+	if schemaVersion == 0 {
+		// Missing schema_version is treated as the original contract.
+		schemaVersion = 1
+	}
 	plugin := pluginapi.Plugin{
-		Metadata: resp.Metadata,
+		Metadata:      resp.Metadata,
+		SchemaVersion: schemaVersion,
 		Capabilities: pluginapi.Capabilities{
 			FrontendAuthProviderExclusive: resp.Capabilities.FrontendAuthProvider && resp.Capabilities.FrontendAuthProviderExclusive,
 			ExecutorModelScope:            resp.Capabilities.ExecutorModelScope,

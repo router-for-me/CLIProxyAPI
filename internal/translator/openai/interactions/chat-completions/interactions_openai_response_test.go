@@ -162,6 +162,26 @@ func TestConvertInteractionsResponseToOpenAINonStreamToolCall(t *testing.T) {
 	}
 }
 
+func TestConvertInteractionsResponseToOpenAINonStream_PreservesEnvironmentID(t *testing.T) {
+	raw := []byte(`{"id":"i1","model":"antigravity-preview-05-2026","environment_id":"env_chat123","steps":[{"type":"model_output","content":[{"type":"text","text":"hello"}]}],"usage":{"total_tokens":5}}`)
+	out := ConvertInteractionsResponseToOpenAINonStream(context.Background(), "antigravity-preview-05-2026", nil, nil, raw, nil)
+	if got := gjson.GetBytes(out, "environment_id").String(); got != "env_chat123" {
+		t.Fatalf("environment_id = %q, want env_chat123. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIStream_PreservesEnvironmentID(t *testing.T) {
+	var param any
+	chunk := []byte(`data: {"event_type":"interaction.created","interaction":{"id":"i1","model":"antigravity-preview-05-2026","environment_id":"env_chat_stream456"}}`)
+	out := ConvertInteractionsResponseToOpenAI(context.Background(), "antigravity-preview-05-2026", nil, nil, chunk, &param)
+	if len(out) == 0 {
+		t.Fatalf("no output chunks generated")
+	}
+	if got := gjson.GetBytes(out[0], "environment_id").String(); got != "env_chat_stream456" {
+		t.Fatalf("environment_id = %q, want env_chat_stream456. Chunk: %s", got, string(out[0]))
+	}
+}
+
 func findInteractionsEventPayload(events [][]byte, eventType string) []byte {
 	for _, event := range events {
 		payload := interactionsSSEPayload(event)

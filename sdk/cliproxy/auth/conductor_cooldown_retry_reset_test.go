@@ -250,7 +250,7 @@ func TestCooldownRetryPreservesConfigDisabledCoolingExclusions(t *testing.T) {
 			OpenAICompatibility: []internalconfig.OpenAICompatibility{
 				{
 					Name:           "custom-openai",
-					DisableCooling: true,
+					DisableCooling: &[]bool{true}[0],
 				},
 			},
 		})

@@ -110,7 +110,7 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadKeepsCacheForClientMalfor
 	payload := []byte(`{"sessionId":"client-malformed-history","request":{"contents":[{"role":"model","parts":[{"text":"answer"}]},{"role":"model","parts":[{"functionResponse":{"id":"orphan","name":"run","response":{"result":"bad"}}}]}]}}`)
 	kind, fingerprint := antigravityReplayPartFingerprint(gjson.Parse(`{"text":"answer"}`))
 	item := buildAntigravityThoughtSignatureItem(0, 0, "valid-cache-signature-123456789", kind, fingerprint)
-	item = antigravitySetReplayItemContextHash(item, payload, 0)
+	item = antigravityReplayItemContextHashForTest(item, payload, 0)
 	if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{item}) {
 		t.Fatal("cache write failed")
 	}
@@ -832,7 +832,7 @@ func TestPrepareAntigravityGeminiReasoningReplayReplacesIDLessFunctionCallBypass
 func TestAntigravityReasoningReplayContextFingerprintCanonicalizesJSON(t *testing.T) {
 	payload1 := []byte(`{"request":{"tools":[{"functionDeclarations":[{"name":"run","parameters":{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"number"}}}}]}],"contents":[{"role":"user","parts":[{"text":"turn"}]},{"role":"model","parts":[{"functionCall":{"name":"run","args":{"a":"x","b":2}}}]}]}}`)
 	payload2 := []byte(`{"request":{"tools":[{"functionDeclarations":[{"parameters":{"properties":{"b":{"type":"number"},"a":{"type":"string"}},"type":"object"},"name":"run"}]}],"contents":[{"parts":[{"text":"turn"}],"role":"user"},{"parts":[{"functionCall":{"args":{"b":2,"a":"x"},"name":"run"}}],"role":"model"}]}}`)
-	if got1, got2 := antigravityReplayContextFingerprint(payload1, 2), antigravityReplayContextFingerprint(payload2, 2); got1 == "" || got1 != got2 {
+	if got1, got2 := newAntigravityReplayRequestIndex(payload1).contextFingerprint(2), newAntigravityReplayRequestIndex(payload2).contextFingerprint(2); got1 == "" || got1 != got2 {
 		t.Fatalf("canonical context hashes differ: %q vs %q", got1, got2)
 	}
 	key1 := antigravityFunctionCallKey("run", `{"a":"x","b":2}`, "")
@@ -980,7 +980,7 @@ func TestAntigravityReasoningReplayPreservesRepeatedIDLessCallsAcrossSplitSSEPar
 func TestAntigravityReasoningReplayLegacyAmbiguousIDLessCallFailsClosed(t *testing.T) {
 	item := []byte(`{"type":"function_call_part","contentIndex":1,"partIndex":1,"name":"run_command","args":{"command":"same"},"thoughtSignature":"legacy-ambiguous-signature-123456"}`)
 	payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"run"}]},{"role":"model","parts":[{"functionCall":{"name":"run_command","args":{"command":"same"}}},{"functionCall":{"name":"run_command","args":{"command":"same"}}}]}]}}`)
-	out, changed := insertAntigravityReasoningReplayItems(payload, [][]byte{item})
+	out, changed := insertAntigravityReasoningReplayItemsWithSchemas(newAntigravityReplayRequestIndex(payload), payload, [][]byte{item}, nil)
 	if changed || strings.Contains(string(out), "legacy-ambiguous-signature") {
 		t.Fatalf("legacy ambiguous ID-less replay must fail closed: changed=%v body=%s", changed, out)
 	}
@@ -1047,7 +1047,7 @@ func TestPrepareAntigravityGeminiReasoningReplayKeepsTextSignatureOnContextDrift
 	kind, fingerprint := antigravityReplayPartFingerprint(gjson.Parse(`{"text":"same answer"}`))
 	item := buildAntigravityThoughtSignatureItem(1, 0, "fingerprinted-signature-123456", kind, fingerprint)
 	originalPayload := []byte(`{"sessionId":"rebuilt","request":{"contents":[{"role":"user","parts":[{"text":"old context"}]},{"role":"model","parts":[{"text":"same answer"}]},{"role":"user","parts":[{"text":"old next"}]}]}}`)
-	item = antigravitySetReplayItemContextHash(item, originalPayload, 1)
+	item = antigravityReplayItemContextHashForTest(item, originalPayload, 1)
 	internalcache.CacheAntigravityReasoningReplayItems("gemini-3.6-flash-high", "session:rebuilt", [][]byte{item})
 
 	payload := []byte(`{"sessionId":"rebuilt","request":{"contents":[{"role":"user","parts":[{"text":"new context"}]},{"role":"model","parts":[{"text":"same answer"}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
@@ -1265,13 +1265,6 @@ func TestAntigravityReplayToolCallKeysUsesNativeFunctionCallID(t *testing.T) {
 	keys2 := antigravityReplayToolCallKeysFromPart(fc2)
 	if keys[0] == keys2[0] {
 		t.Fatalf("parallel tool calls should not share replay key: %v vs %v", keys, keys2)
-	}
-}
-
-func TestAntigravityRequestHasMatchingFunctionResponseWhitespaceCallID(t *testing.T) {
-	item := gjson.Parse(`{"call_id":" "}`)
-	if !antigravityRequestHasMatchingFunctionResponse(nil, item) {
-		t.Fatal("whitespace-only call_id should be treated as empty => true")
 	}
 }
 

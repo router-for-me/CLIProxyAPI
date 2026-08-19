@@ -239,13 +239,13 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				// Stream closed without data. Surface a buffered pending error
-				// before committing SSE headers, so a failed upstream never
-				// looks like a successful empty stream (matches the OpenAI
-				// and Claude streaming paths).
-				if errMsg := pendingGeminiStreamError(errChan); errMsg != nil {
+				if errMsg, hasPendingError := handlers.PendingStreamError(errChan); hasPendingError {
 					h.WriteErrorResponse(c, errMsg)
-					cliCancel(errMsg.Error)
+					if errMsg != nil {
+						cliCancel(errMsg.Error)
+					} else {
+						cliCancel(nil)
+					}
 					return
 				}
 				// Closed without data

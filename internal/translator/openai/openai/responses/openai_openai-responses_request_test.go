@@ -190,6 +190,62 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_UnwrapsStringified
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_UnwrapsStringifiedCustomToolOutputImages(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"custom_tool_call","call_id":"call_image","name":"view_image","input":"{}"},
+			{"type":"custom_tool_call_output","call_id":"call_image","output":"[{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,AA==\",\"detail\":\"original\"}]"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, false)
+	content := gjson.GetBytes(out, "messages.1.content")
+	if !content.IsArray() {
+		t.Fatalf("expected custom tool content array, got %s; output=%s", content.Raw, out)
+	}
+	if got := content.Get("0.type").String(); got != "image_url" {
+		t.Fatalf("image type = %q, want image_url; output=%s", got, out)
+	}
+	if got := content.Get("0.image_url.url").String(); got != "data:image/png;base64,AA==" {
+		t.Fatalf("image URL = %q, want data URL; output=%s", got, out)
+	}
+	if got := content.Get("0.image_url.detail").String(); got != "high" {
+		t.Fatalf("image detail = %q, want high; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesCustomToolOutputFallbacks(t *testing.T) {
+	tests := []struct {
+		name     string
+		output   string
+		expected string
+	}{
+		{name: "plain text", output: `"plain output"`, expected: "plain output"},
+		{name: "text content array", output: `[{"type":"input_text","text":"done"}]`, expected: "done"},
+		{name: "invalid image array", output: `[{"type":"input_image","detail":"low"}]`, expected: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(fmt.Sprintf(`{
+				"input": [
+					{"type":"custom_tool_call","call_id":"call_output","name":"inspect","input":"{}"},
+					{"type":"custom_tool_call_output","call_id":"call_output","output":%s}
+				]
+			}`, tt.output))
+
+			out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, false)
+			content := gjson.GetBytes(out, "messages.1.content")
+			if content.Type != gjson.String {
+				t.Fatalf("expected custom tool content string, got %s; output=%s", content.Raw, out)
+			}
+			if got := content.String(); got != tt.expected {
+				t.Fatalf("custom tool content = %q, want %q; output=%s", got, tt.expected, out)
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ConvertsStructuredToolOutputImages(t *testing.T) {
 	raw := []byte(`{
 		"input": [

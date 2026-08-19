@@ -68,7 +68,11 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 			out, _ = sjson.SetRawBytes(out, "systemInstruction", systemInstruction)
 		}
 	} else if systemResult.Type == gjson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
-		out, _ = sjson.SetBytes(out, "systemInstruction.parts.-1.text", systemResult.String())
+		part := []byte(`{"text":""}`)
+		part, _ = sjson.SetBytes(part, "text", systemResult.String())
+		systemInstruction := []byte(`{"parts":[]}`)
+		systemInstruction = translatorcommon.SetRawArrayItems(systemInstruction, "parts", [][]byte{part})
+		out, _ = sjson.SetRawBytes(out, "systemInstruction", systemInstruction)
 	}
 
 	// contents
