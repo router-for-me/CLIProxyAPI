@@ -22,6 +22,7 @@ import (
 	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -38,6 +39,7 @@ const (
 	cursorAuthType          = "cursor"
 	cursorHeartbeatInterval = 5 * time.Second
 	cursorSessionTTL        = 5 * time.Minute
+	cursorFrameIdleTimeout  = 90 * time.Second
 	cursorCheckpointTTL     = 30 * time.Minute
 	cursorStreamFlushDelay  = 16 * time.Millisecond
 	cursorStreamMaxBatch    = 512
@@ -425,6 +427,10 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		payload = sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(payload), false)
 	}
 
+	usageReporter := helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
+	defer usageReporter.EnsurePublished(ctx)
+	defer usageReporter.TrackFailure(ctx, &err)
+
 	parsed := parseOpenAIRequest(payload)
 	sessionID := extractClaudeCodeSessionId(req.Payload)
 	conversationID := deriveConversationId(apiKeyFromContext(ctx), sessionID, parsed.SystemPrompt)
@@ -432,6 +438,14 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if openAICompatible && len(parsed.ToolResults) > 0 {
 		e.retireConversationState(conversationID)
 		log.Infof("cursor: using cold continuation for %d non-stream tool result(s)", len(parsed.ToolResults))
+		flattenConversationIntoUserText(parsed)
+	} else if len(parsed.Turns) > 0 {
+		// Mirror ExecuteStream's no-checkpoint branch: Cursor's Run endpoint
+		// rejects structured turns on a conversation without server-side state
+		// with "Connect error internal", but always accepts a flattened
+		// UserText transcript. Execute never attaches a checkpoint, so every
+		// multi-message non-streaming request must be flattened.
+		log.Debugf("cursor: non-stream request with %d turn(s), flattening into user text", len(parsed.Turns))
 		flattenConversationIntoUserText(parsed)
 	}
 	params := buildRunRequestParams(parsed, conversationID, req.Model)
@@ -519,6 +533,9 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		},
 	}
 	result, marshalErr := json.Marshal(body)
+	if marshalErr == nil {
+		usageReporter.Publish(ctx, helps.ParseOpenAIUsage(result))
+	}
 	if marshalErr != nil {
 		return resp, fmt.Errorf("cursor: encode non-stream response: %w", marshalErr)
 	}
@@ -538,6 +555,9 @@ func isOpenAICompatibleSourceFormat(format sdktranslator.Format) bool {
 // a parked MCP/H2 session; OpenAI-compatible tool results use a fresh request
 // rebuilt from the complete client transcript.
 func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	usageReporter := helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
+	defer usageReporter.EnsurePublished(ctx)
+	defer usageReporter.TrackFailure(ctx, &err)
 	log.Debugf("cursor ExecuteStream: model=%s sourceFormat=%s payloadLen=%d", req.Model, opts.SourceFormat, len(req.Payload))
 	defer func() {
 		if r := recover(); r != nil {
@@ -954,6 +974,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		fr := `"stop"`
 		openaiJSON := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":{},"finish_reason":%s}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
 			chatId, created, parsed.Model, fr, inputTok, outputTok, inputTok+outputTok)
+		usageReporter.Publish(ctx, helps.ParseOpenAIUsage([]byte(openaiJSON)))
 		sseLine := []byte("data: " + openaiJSON + "\n")
 		if needsTranslate {
 			translated := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, payload, sseLine, &streamParam)
@@ -1286,6 +1307,15 @@ func (u *cursorTokenUsage) get() (input, output int64) {
 	return u.inputTokensEst, u.outputTokens
 }
 
+// writeCursorReply sends an inline Connect reply. A failed reply strands the
+// server-side request and hangs the whole turn, so the error must surface.
+func writeCursorReply(stream cursorStream, payload []byte) error {
+	if err := stream.Write(cursorproto.FrameConnectMessage(payload, 0)); err != nil {
+		return fmt.Errorf("cursor: reply write failed: %w", err)
+	}
+	return nil
+}
+
 func processH2SessionFrames(
 	ctx context.Context,
 	stream cursorStream,
@@ -1300,12 +1330,20 @@ func processH2SessionFrames(
 	var buf bytes.Buffer
 	rejectReason := "Tool not available in this environment. Use the MCP tools provided instead."
 	log.Debugf("cursor: processH2SessionFrames started for streamID=%s, waiting for data...", stream.ID())
+	idleTimer := time.NewTimer(cursorFrameIdleTimeout)
+	defer idleTimer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			log.Debugf("cursor: processH2SessionFrames exiting: context done")
 			return ctx.Err()
+		case <-idleTimer.C:
+			// Heartbeats arrive every few seconds; a gap this long means a
+			// server request went unanswered (or the pipeline froze) and the
+			// turn would otherwise hang forever.
+			return fmt.Errorf("cursor: no frames for %v (stranded server request?)", cursorFrameIdleTimeout)
 		case data, ok := <-stream.Data():
+			idleTimer.Reset(cursorFrameIdleTimeout)
 			if !ok {
 				log.Debugf("cursor: processH2SessionFrames[%s]: exiting: stream data channel closed", stream.ID())
 				return stream.Err() // may be RST_STREAM, GOAWAY, or nil for clean close
@@ -1383,17 +1421,23 @@ func processH2SessionFrames(
 					blobKey := cursorproto.BlobIdHex(msg.BlobId)
 					data := blobStore[blobKey]
 					resp := cursorproto.EncodeKvGetBlobResult(msg.KvId, data)
-					stream.Write(cursorproto.FrameConnectMessage(resp, 0))
+					if errReply := writeCursorReply(stream, resp); errReply != nil {
+						return errReply
+					}
 
 				case cursorproto.ServerMsgKvSetBlob:
 					blobKey := cursorproto.BlobIdHex(msg.BlobId)
 					blobStore[blobKey] = append([]byte(nil), msg.BlobData...)
 					resp := cursorproto.EncodeKvSetBlobResult(msg.KvId)
-					stream.Write(cursorproto.FrameConnectMessage(resp, 0))
+					if errReply := writeCursorReply(stream, resp); errReply != nil {
+						return errReply
+					}
 
 				case cursorproto.ServerMsgExecRequestCtx:
 					resp := cursorproto.EncodeExecRequestContextResult(msg.ExecMsgId, msg.ExecId, mcpTools)
-					stream.Write(cursorproto.FrameConnectMessage(resp, 0))
+					if errReply := writeCursorReply(stream, resp); errReply != nil {
+						return errReply
+					}
 
 				case cursorproto.ServerMsgExecMcpArgs:
 					if onMcpExec != nil {
@@ -1420,11 +1464,15 @@ func processH2SessionFrames(
 						// Inline mode: wait for tool result while handling KV/heartbeat
 						log.Debugf("cursor: waiting for tool result on channel (inline mode)...")
 						var toolResults []toolResultInfo
+						waitIdle := time.NewTimer(cursorFrameIdleTimeout)
+						defer waitIdle.Stop()
 					waitLoop:
 						for {
 							select {
 							case <-ctx.Done():
 								return ctx.Err()
+							case <-waitIdle.C:
+								return fmt.Errorf("cursor: no frames for %v while waiting for tool result (stranded server request?)", cursorFrameIdleTimeout)
 							case results, ok := <-toolResultCh:
 								if !ok {
 									return nil
@@ -1435,6 +1483,7 @@ func processH2SessionFrames(
 								if !ok {
 									return stream.Err()
 								}
+								waitIdle.Reset(cursorFrameIdleTimeout)
 								buf.Write(waitData)
 								for {
 									cb := buf.Bytes()
@@ -1457,13 +1506,19 @@ func processH2SessionFrames(
 									case cursorproto.ServerMsgKvGetBlob:
 										blobKey := cursorproto.BlobIdHex(wmsg.BlobId)
 										d := blobStore[blobKey]
-										stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvGetBlobResult(wmsg.KvId, d), 0))
+										if errReply := writeCursorReply(stream, cursorproto.EncodeKvGetBlobResult(wmsg.KvId, d)); errReply != nil {
+											return errReply
+										}
 									case cursorproto.ServerMsgKvSetBlob:
 										blobKey := cursorproto.BlobIdHex(wmsg.BlobId)
 										blobStore[blobKey] = append([]byte(nil), wmsg.BlobData...)
-										stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvSetBlobResult(wmsg.KvId), 0))
+										if errReply := writeCursorReply(stream, cursorproto.EncodeKvSetBlobResult(wmsg.KvId)); errReply != nil {
+											return errReply
+										}
 									case cursorproto.ServerMsgExecRequestCtx:
-										stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecRequestContextResult(wmsg.ExecMsgId, wmsg.ExecId, mcpTools), 0))
+										if errReply := writeCursorReply(stream, cursorproto.EncodeExecRequestContextResult(wmsg.ExecMsgId, wmsg.ExecId, mcpTools)); errReply != nil {
+											return errReply
+										}
 									case cursorproto.ServerMsgCheckpoint:
 										if onCheckpoint != nil && len(wmsg.CheckpointData) > 0 {
 											onCheckpoint(wmsg.CheckpointData)
@@ -1480,7 +1535,9 @@ func processH2SessionFrames(
 							if tr.ToolCallId == pending.ToolCallId {
 								log.Debugf("cursor: sending inline MCP result for tool=%s", pending.ToolName)
 								resultBytes := cursorproto.EncodeExecMcpResult(pending.ExecMsgId, pending.ExecId, tr.Content, false)
-								stream.Write(cursorproto.FrameConnectMessage(resultBytes, 0))
+								if errReply := writeCursorReply(stream, resultBytes); errReply != nil {
+									return errReply
+								}
 								break
 							}
 						}
@@ -1488,25 +1545,45 @@ func processH2SessionFrames(
 					}
 
 				case cursorproto.ServerMsgExecReadArgs:
-					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecReadRejected(msg.ExecMsgId, msg.ExecId, msg.Path, rejectReason), 0))
+					if errReply := writeCursorReply(stream, cursorproto.EncodeExecReadRejected(msg.ExecMsgId, msg.ExecId, msg.Path, rejectReason)); errReply != nil {
+						return errReply
+					}
 				case cursorproto.ServerMsgExecWriteArgs:
-					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecWriteRejected(msg.ExecMsgId, msg.ExecId, msg.Path, rejectReason), 0))
+					if errReply := writeCursorReply(stream, cursorproto.EncodeExecWriteRejected(msg.ExecMsgId, msg.ExecId, msg.Path, rejectReason)); errReply != nil {
+						return errReply
+					}
 				case cursorproto.ServerMsgExecDeleteArgs:
-					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecDeleteRejected(msg.ExecMsgId, msg.ExecId, msg.Path, rejectReason), 0))
+					if errReply := writeCursorReply(stream, cursorproto.EncodeExecDeleteRejected(msg.ExecMsgId, msg.ExecId, msg.Path, rejectReason)); errReply != nil {
+						return errReply
+					}
 				case cursorproto.ServerMsgExecLsArgs:
-					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecLsRejected(msg.ExecMsgId, msg.ExecId, msg.Path, rejectReason), 0))
+					if errReply := writeCursorReply(stream, cursorproto.EncodeExecLsRejected(msg.ExecMsgId, msg.ExecId, msg.Path, rejectReason)); errReply != nil {
+						return errReply
+					}
 				case cursorproto.ServerMsgExecGrepArgs:
-					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecGrepError(msg.ExecMsgId, msg.ExecId, rejectReason), 0))
+					if errReply := writeCursorReply(stream, cursorproto.EncodeExecGrepError(msg.ExecMsgId, msg.ExecId, rejectReason)); errReply != nil {
+						return errReply
+					}
 				case cursorproto.ServerMsgExecShellArgs, cursorproto.ServerMsgExecShellStream:
-					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecShellRejected(msg.ExecMsgId, msg.ExecId, msg.Command, msg.WorkingDirectory, rejectReason), 0))
+					if errReply := writeCursorReply(stream, cursorproto.EncodeExecShellRejected(msg.ExecMsgId, msg.ExecId, msg.Command, msg.WorkingDirectory, rejectReason)); errReply != nil {
+						return errReply
+					}
 				case cursorproto.ServerMsgExecBgShellSpawn:
-					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecBackgroundShellSpawnRejected(msg.ExecMsgId, msg.ExecId, msg.Command, msg.WorkingDirectory, rejectReason), 0))
+					if errReply := writeCursorReply(stream, cursorproto.EncodeExecBackgroundShellSpawnRejected(msg.ExecMsgId, msg.ExecId, msg.Command, msg.WorkingDirectory, rejectReason)); errReply != nil {
+						return errReply
+					}
 				case cursorproto.ServerMsgExecFetchArgs:
-					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecFetchError(msg.ExecMsgId, msg.ExecId, msg.Url, rejectReason), 0))
+					if errReply := writeCursorReply(stream, cursorproto.EncodeExecFetchError(msg.ExecMsgId, msg.ExecId, msg.Url, rejectReason)); errReply != nil {
+						return errReply
+					}
 				case cursorproto.ServerMsgExecDiagnostics:
-					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecDiagnosticsResult(msg.ExecMsgId, msg.ExecId), 0))
+					if errReply := writeCursorReply(stream, cursorproto.EncodeExecDiagnosticsResult(msg.ExecMsgId, msg.ExecId)); errReply != nil {
+						return errReply
+					}
 				case cursorproto.ServerMsgExecWriteShellStdin:
-					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecWriteShellStdinError(msg.ExecMsgId, msg.ExecId, rejectReason), 0))
+					if errReply := writeCursorReply(stream, cursorproto.EncodeExecWriteShellStdinError(msg.ExecMsgId, msg.ExecId, rejectReason)); errReply != nil {
+						return errReply
+					}
 				}
 			}
 
