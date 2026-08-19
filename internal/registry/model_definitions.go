@@ -37,6 +37,11 @@ func GetClaudeModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Claude)
 }
 
+// IsClaudeModelID reports whether id exactly matches the current Claude catalog.
+func IsClaudeModelID(id string) bool {
+	return modelsCatalogStore.isClaudeModelID(id)
+}
+
 // GetGeminiModels returns the standard Gemini model definitions.
 func GetGeminiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Gemini)

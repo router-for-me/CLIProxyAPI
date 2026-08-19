@@ -81,8 +81,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 		return
 	}
 
-	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
-	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
+	_, rawJSON = canonicalizeClaudeNamespacedRequest(rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -113,15 +112,12 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 		return
 	}
 
-	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
-	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
-
 	c.Header("Content-Type", "application/json")
 
 	alt := h.GetAlt(c)
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 
-	modelName := gjson.GetBytes(rawJSON, "model").String()
+	modelName, rawJSON := canonicalizeClaudeNamespacedRequest(rawJSON)
 
 	resp, upstreamHeaders, errMsg := h.ExecuteCountWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
 	if errMsg != nil {
@@ -134,19 +130,20 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 	cliCancel()
 }
 
-// rewriteClaudeDDModelInBody decodes model IDs of the form claude-fable-5-dd-<reversed>
-// back into the original model name used for routing and upstream requests.
-func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
+// canonicalizeClaudeNamespacedRequest removes the public Anthropic namespace
+// from both the routing model and the working request body. Native Claude model
+// IDs and requests without a model are returned unchanged.
+func canonicalizeClaudeNamespacedRequest(rawJSON []byte) (string, []byte) {
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	resolved := claudemodels.ResolveClaudeModelIDPrefix(modelName)
 	if resolved == modelName {
-		return rawJSON
+		return modelName, rawJSON
 	}
 	updated, errSet := sjson.SetBytes(rawJSON, "model", resolved)
 	if errSet != nil {
-		return rawJSON
+		return modelName, rawJSON
 	}
-	return updated
+	return resolved, updated
 }
 
 // ClaudeModels handles the Claude models listing endpoint.
@@ -155,8 +152,7 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
-	disableCloaking := h.Cfg != nil && h.Cfg.ClaudeCode.DisableCloakingModelList
-	c.JSON(http.StatusOK, claudemodels.BuildResponse(h.Models(), disableCloaking))
+	c.JSON(http.StatusOK, claudemodels.BuildResponse(h.Models()))
 }
 
 // handleNonStreamingResponse handles non-streaming content generation requests for Claude models.

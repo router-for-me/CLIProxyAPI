@@ -4,16 +4,19 @@ package models
 import (
 	"sort"
 	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 )
 
-const claudeDDModelPrefix = "claude-fable-5-dd-"
+const claudeTranslatedModelPrefix = "claude/"
 
 // BuildResponse builds an Anthropic model response from available models.
-func BuildResponse(availableModels []map[string]any, disableCloaking bool) map[string]any {
+func BuildResponse(availableModels []map[string]any) map[string]any {
 	models := make([]map[string]any, len(availableModels))
 	for i, model := range availableModels {
 		models[i] = cloneModel(model)
-		if id, ok := models[i]["id"].(string); ok && !disableCloaking {
+		if id, ok := models[i]["id"].(string); ok {
 			models[i]["id"] = EnsureClaudeModelIDPrefix(id)
 		}
 	}
@@ -44,35 +47,42 @@ func BuildResponse(availableModels []map[string]any, disableCloaking bool) map[s
 	}
 }
 
-// EnsureClaudeModelIDPrefix rewrites model IDs for Anthropic model listings.
-// IDs that already start with "claude-" are returned unchanged; all other IDs
-// become "claude-fable-5-dd-" plus the original ID with its characters reversed.
+// EnsureClaudeModelIDPrefix namespaces translated model IDs for Anthropic model listings.
+// Catalog Claude and already-namespaced IDs are returned unchanged.
 func EnsureClaudeModelIDPrefix(id string) string {
-	if id == "" || strings.HasPrefix(id, "claude-") {
+	if id == "" {
 		return id
 	}
-	return claudeDDModelPrefix + reverseModelID(id)
+	base := thinking.ParseSuffix(id).ModelName
+	if registry.IsClaudeModelID(base) || strings.HasPrefix(id, claudeTranslatedModelPrefix) {
+		return id
+	}
+	return claudeTranslatedModelPrefix + id
 }
 
-// ResolveClaudeModelIDPrefix reverses EnsureClaudeModelIDPrefix for request routing.
-// Optional thinking suffixes in model(value) form are preserved.
+// ResolveClaudeModelIDPrefix removes every translated-model namespace layer for request routing.
+// Catalog Claude IDs stop namespace removal, and thinking suffixes are preserved exactly.
 func ResolveClaudeModelIDPrefix(id string) string {
 	if id == "" {
 		return id
 	}
-	base, suffix, hasSuffix := splitModelThinkingSuffix(id)
-	if !strings.HasPrefix(base, claudeDDModelPrefix) {
+
+	base := thinking.ParseSuffix(id).ModelName
+	if registry.IsClaudeModelID(base) {
 		return id
 	}
-	encoded := base[len(claudeDDModelPrefix):]
-	if encoded == "" {
+
+	resolved := base
+	for strings.HasPrefix(resolved, claudeTranslatedModelPrefix) {
+		resolved = strings.TrimPrefix(resolved, claudeTranslatedModelPrefix)
+		if registry.IsClaudeModelID(resolved) {
+			break
+		}
+	}
+	if resolved == base {
 		return id
 	}
-	resolved := reverseModelID(encoded)
-	if hasSuffix {
-		return resolved + "(" + suffix + ")"
-	}
-	return resolved
+	return resolved + id[len(base):]
 }
 
 func cloneModel(model map[string]any) map[string]any {
@@ -81,20 +91,4 @@ func cloneModel(model map[string]any) map[string]any {
 		cloned[key] = value
 	}
 	return cloned
-}
-
-func splitModelThinkingSuffix(model string) (base, suffix string, hasSuffix bool) {
-	lastOpen := strings.LastIndex(model, "(")
-	if lastOpen == -1 || !strings.HasSuffix(model, ")") {
-		return model, "", false
-	}
-	return model[:lastOpen], model[lastOpen+1 : len(model)-1], true
-}
-
-func reverseModelID(id string) string {
-	runes := []rune(id)
-	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
-		runes[i], runes[j] = runes[j], runes[i]
-	}
-	return string(runes)
 }

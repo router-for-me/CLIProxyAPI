@@ -724,8 +724,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 	isClaude := isAnthropicModelsRequest(c)
 
 	if isClaude {
-		disableCloaking := s.cfg != nil && s.cfg.ClaudeCode.DisableCloakingModelList
-		c.JSON(http.StatusOK, claudemodels.BuildResponse(formatHomeClaudeModels(entries), disableCloaking))
+		c.JSON(http.StatusOK, claudemodels.BuildResponse(formatHomeClaudeModels(entries)))
 		return
 	}
 

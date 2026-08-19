@@ -172,11 +172,6 @@ transient-error-cooldown-seconds: 0
 # "auto" behavior (cloak only non-Claude-Code clients).
 disable-claude-cloak-mode: false
 
-# Claude Code compatibility settings.
-claude-code:
-  # When true, return original model IDs in Anthropic model list responses instead of cloaked IDs.
-  disable-cloaking-model-list: false
-
 # disable-image-generation supports: false (default), true, "chat", or "passthrough".
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.

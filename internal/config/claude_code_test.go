@@ -2,33 +2,12 @@ package config
 
 import "testing"
 
-func TestParseConfigBytesClaudeCodeModelListCloaking(t *testing.T) {
-	tests := []struct {
-		name string
-		yaml string
-		want bool
-	}{
-		{
-			name: "defaults to enabled cloaking",
-			yaml: "port: 8317\n",
-			want: false,
-		},
-		{
-			name: "disables model list cloaking",
-			yaml: "claude-code:\n  disable-cloaking-model-list: true\n",
-			want: true,
-		},
+func TestParseConfigBytesIgnoresRemovedClaudeCodeModelListCloaking(t *testing.T) {
+	cfg, err := ParseConfigBytes([]byte("port: 9123\nclaude-code:\n  disable-cloaking-model-list: true\n"))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg, errParse := ParseConfigBytes([]byte(tt.yaml))
-			if errParse != nil {
-				t.Fatalf("ParseConfigBytes() error = %v", errParse)
-			}
-			if got := cfg.ClaudeCode.DisableCloakingModelList; got != tt.want {
-				t.Fatalf("DisableCloakingModelList = %t, want %t", got, tt.want)
-			}
-		})
+	if cfg.Port != 9123 {
+		t.Fatalf("Port = %d, want 9123", cfg.Port)
 	}
 }
