@@ -2417,7 +2417,7 @@
       "type": "openai",
       "display_name": "GPT 5.6 Sol",
       "version": "gpt-5.6",
-      "description": "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, dig into research, produce polished documents, and take on your most ambitious work. Sol is highly capable at lower reasoning efforts—try starting lower, then turn it up for harder jobs.",
+      "description": "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, dig into research, produce polished documents, and take on your most ambitious work. Sol is highly capable at lower reasoning efforts\u2014try starting lower, then turn it up for harder jobs.",
       "context_length": 372000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -2667,7 +2667,7 @@
       "type": "openai",
       "display_name": "GPT 5.6 Sol",
       "version": "gpt-5.6",
-      "description": "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, dig into research, produce polished documents, and take on your most ambitious work. Sol is highly capable at lower reasoning efforts—try starting lower, then turn it up for harder jobs.",
+      "description": "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, dig into research, produce polished documents, and take on your most ambitious work. Sol is highly capable at lower reasoning efforts\u2014try starting lower, then turn it up for harder jobs.",
       "context_length": 372000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -2917,8 +2917,8 @@
       "type": "openai",
       "display_name": "GPT 5.6 Sol",
       "version": "gpt-5.6",
-      "description": "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, dig into research, produce polished documents, and take on your most ambitious work. Sol is highly capable at lower reasoning efforts—try starting lower, then turn it up for harder jobs.",
-      "context_length": 921000,
+      "description": "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, dig into research, produce polished documents, and take on your most ambitious work. Sol is highly capable at lower reasoning efforts\u2014try starting lower, then turn it up for harder jobs.",
+      "context_length": 372000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -3645,7 +3645,7 @@
       "type": "xai",
       "display_name": "Grok Build 0.1",
       "name": "grok-build-0.1",
-      "description": "Grok Build 0.1 is xAI’s fast coding model trained specifically for agentic software engineering workflows.",
+      "description": "Grok Build 0.1 is xAI\u2019s fast coding model trained specifically for agentic software engineering workflows.",
       "context_length": 256000,
       "max_completion_tokens": 256000,
       "supportedInputModalities": [
@@ -3846,7 +3846,7 @@
       "owned_by": "qoder",
       "type": "qoder",
       "display_name": "Qoder Auto",
-      "description": "Qoder Auto — automatically selects the best model for your prompt",
+      "description": "Qoder Auto \u2014 automatically selects the best model for your prompt",
       "context_length": 180000,
       "supported_input_modalities": [
         "TEXT",
@@ -3860,7 +3860,7 @@
       "owned_by": "qoder",
       "type": "qoder",
       "display_name": "Qoder Ultimate",
-      "description": "Qoder Ultimate — highest quality tier",
+      "description": "Qoder Ultimate \u2014 highest quality tier",
       "context_length": 180000,
       "supported_input_modalities": [
         "TEXT",
@@ -3887,7 +3887,7 @@
       "owned_by": "qoder",
       "type": "qoder",
       "display_name": "Qoder Performance",
-      "description": "Qoder Performance — balanced quality and speed",
+      "description": "Qoder Performance \u2014 balanced quality and speed",
       "context_length": 272000,
       "supported_input_modalities": [
         "TEXT",
@@ -3914,7 +3914,7 @@
       "owned_by": "qoder",
       "type": "qoder",
       "display_name": "Qoder Efficient",
-      "description": "Qoder Efficient — cost-efficient tier",
+      "description": "Qoder Efficient \u2014 cost-efficient tier",
       "context_length": 180000,
       "supported_input_modalities": [
         "TEXT",
@@ -3928,7 +3928,7 @@
       "owned_by": "qoder",
       "type": "qoder",
       "display_name": "Qoder Lite",
-      "description": "Qoder Lite — fastest and most affordable tier",
+      "description": "Qoder Lite \u2014 fastest and most affordable tier",
       "context_length": 180000
     },
     {
@@ -3938,7 +3938,7 @@
       "owned_by": "qoder",
       "type": "qoder",
       "display_name": "Qwen3.7 Plus (Qoder)",
-      "description": "Qoder frontier — Qwen3.7 Plus",
+      "description": "Qoder frontier \u2014 Qwen3.7 Plus",
       "context_length": 180000,
       "supported_input_modalities": [
         "TEXT",
@@ -3952,7 +3952,7 @@
       "owned_by": "qoder",
       "type": "qoder",
       "display_name": "Qwen3.7 Max (Qoder)",
-      "description": "Qoder frontier — Qwen3.7 Max (latest Qwen)",
+      "description": "Qoder frontier \u2014 Qwen3.7 Max (latest Qwen)",
       "context_length": 180000,
       "supported_input_modalities": [
         "TEXT",
@@ -3966,7 +3966,7 @@
       "owned_by": "qoder",
       "type": "qoder",
       "display_name": "DeepSeek V4 Pro (Qoder)",
-      "description": "Qoder frontier — DeepSeek V4 Pro",
+      "description": "Qoder frontier \u2014 DeepSeek V4 Pro",
       "context_length": 180000,
       "supported_input_modalities": [
         "TEXT",
@@ -3990,7 +3990,7 @@
       "owned_by": "qoder",
       "type": "qoder",
       "display_name": "DeepSeek V4 Flash (Qoder)",
-      "description": "Qoder frontier — DeepSeek V4 Flash",
+      "description": "Qoder frontier \u2014 DeepSeek V4 Flash",
       "context_length": 180000,
       "supported_input_modalities": [
         "TEXT",
@@ -4014,7 +4014,7 @@
       "owned_by": "qoder",
       "type": "qoder",
       "display_name": "GLM 5.1 (Qoder)",
-      "description": "Qoder frontier — GLM 5.1",
+      "description": "Qoder frontier \u2014 GLM 5.1",
       "context_length": 180000,
       "supported_input_modalities": [
         "TEXT",
@@ -4038,7 +4038,7 @@
       "owned_by": "qoder",
       "type": "qoder",
       "display_name": "Kimi K2.6 (Qoder)",
-      "description": "Qoder frontier — Kimi K2.6",
+      "description": "Qoder frontier \u2014 Kimi K2.6",
       "context_length": 256000,
       "supported_input_modalities": [
         "TEXT",
@@ -4052,12 +4052,80 @@
       "owned_by": "qoder",
       "type": "qoder",
       "display_name": "MiniMax M3 (Qoder)",
-      "description": "Qoder frontier — MiniMax M3",
+      "description": "Qoder frontier \u2014 MiniMax M3",
       "context_length": 180000,
       "supported_input_modalities": [
         "TEXT",
         "IMAGE"
       ]
+    }
+  ],
+  "devin": [
+    {
+      "id": "glm-5-2",
+      "object": "model",
+      "created": 1757500000,
+      "owned_by": "devin",
+      "type": "devin",
+      "display_name": "GLM-5.2 High",
+      "description": "GLM-5.2 High - Free model via Devin CLI (200K context)",
+      "context_length": 200000,
+      "max_completion_tokens": 64000
+    },
+    {
+      "id": "glm-5-2-1m",
+      "object": "model",
+      "created": 1757500000,
+      "owned_by": "devin",
+      "type": "devin",
+      "display_name": "GLM-5.2 High 1M",
+      "description": "GLM-5.2 High 1M context - via Devin CLI",
+      "context_length": 1000000,
+      "max_completion_tokens": 64000
+    },
+    {
+      "id": "glm-5-2-max",
+      "object": "model",
+      "created": 1757500000,
+      "owned_by": "devin",
+      "type": "devin",
+      "display_name": "GLM-5.2 Max",
+      "description": "GLM-5.2 Max - via Devin CLI",
+      "context_length": 200000,
+      "max_completion_tokens": 64000
+    },
+    {
+      "id": "swe-1-7",
+      "object": "model",
+      "created": 1757500000,
+      "owned_by": "devin",
+      "type": "devin",
+      "display_name": "SWE-1.7 Max",
+      "description": "SWE-1.7 Max - Free model via Devin CLI (262K context)",
+      "context_length": 262000,
+      "max_completion_tokens": 64000
+    },
+    {
+      "id": "swe-1-7-medium",
+      "object": "model",
+      "created": 1757500000,
+      "owned_by": "devin",
+      "type": "devin",
+      "display_name": "SWE-1.7 Medium",
+      "description": "SWE-1.7 Medium - Free model via Devin CLI (262K context)",
+      "context_length": 262000,
+      "max_completion_tokens": 64000
+    },
+    {
+      "id": "swe-1-6",
+      "object": "model",
+      "created": 1757500000,
+      "owned_by": "devin",
+      "type": "devin",
+      "display_name": "SWE-1.6",
+      "description": "SWE-1.6 - Free model via Devin CLI (200K context)",
+      "context_length": 200000,
+      "max_completion_tokens": 64000
     }
   ]
 }
