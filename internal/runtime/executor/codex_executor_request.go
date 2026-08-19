@@ -144,6 +144,12 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		identityState.originalPromptCacheKey = cache.ID
 		identityState.promptCacheKey = codexIdentityConfuseUUID(identityState.authID, "prompt-cache", cache.ID)
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", identityState.promptCacheKey)
+		if turnMetadata := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-turn-metadata").String()); turnMetadata != "" {
+			rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-turn-metadata", applyCodexTurnMetadataIdentityConfuse(turnMetadata, &identityState))
+		}
+		if windowID := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-window-id").String()); windowID != "" {
+			rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-window-id", identityState.promptCacheKey+":0")
+		}
 	}
 	if identityState.promptCacheKey != "" {
 		cache.ID = identityState.promptCacheKey
@@ -594,7 +600,7 @@ func codexPromptCacheKeyFromHeaders(ctx context.Context) string {
 
 func codexPromptCacheKeyFromHeader(headers http.Header) string {
 	for _, name := range []string{"X-Session-ID", "Session_id", "Conversation_id"} {
-		if value := strings.TrimSpace(headers.Get(name)); value != "" {
+		if value := headerValueCaseInsensitive(headers, name); value != "" {
 			return value
 		}
 	}
