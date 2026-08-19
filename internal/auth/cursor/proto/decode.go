@@ -75,6 +75,21 @@ type DecodedServerMessage struct {
 	CheckpointData []byte
 }
 
+// isReplyRequiredType reports whether the decoded message type carries a
+// server request that must receive an inline client reply.
+func isReplyRequiredType(t ServerMessageType) bool {
+	switch t {
+	case ServerMsgKvGetBlob, ServerMsgKvSetBlob,
+		ServerMsgExecRequestCtx, ServerMsgExecMcpArgs,
+		ServerMsgExecShellArgs, ServerMsgExecReadArgs, ServerMsgExecWriteArgs,
+		ServerMsgExecDeleteArgs, ServerMsgExecLsArgs, ServerMsgExecGrepArgs,
+		ServerMsgExecFetchArgs, ServerMsgExecDiagnostics, ServerMsgExecShellStream,
+		ServerMsgExecBgShellSpawn, ServerMsgExecWriteShellStdin, ServerMsgExecOther:
+		return true
+	}
+	return false
+}
+
 // DecodeAgentServerMessage parses an AgentServerMessage and returns
 // a structured representation of the first meaningful message found.
 func DecodeAgentServerMessage(data []byte) (*DecodedServerMessage, error) {
@@ -100,8 +115,16 @@ func DecodeAgentServerMessage(data []byte) (*DecodedServerMessage, error) {
 
 			switch num {
 			case ASM_InteractionUpdate:
-				log.Debugf("DecodeAgentServerMessage: calling decodeInteractionUpdate")
-				decodeInteractionUpdate(val, msg)
+				if isReplyRequiredType(msg.Type) {
+					// A co-threaded exec/KV request decoded earlier in this
+					// frame must not be clobbered by a trailing interaction
+					// update: dropping it would strand the server waiting for
+					// the inline reply it expects.
+					log.Debugf("DecodeAgentServerMessage: skipping trailing InteractionUpdate to preserve %v", msg.Type)
+				} else {
+					log.Debugf("DecodeAgentServerMessage: calling decodeInteractionUpdate")
+					decodeInteractionUpdate(val, msg)
+				}
 			case ASM_ExecServerMessage:
 				log.Debugf("DecodeAgentServerMessage: calling decodeExecServerMessage")
 				decodeExecServerMessage(val, msg)
