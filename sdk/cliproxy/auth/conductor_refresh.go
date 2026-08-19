@@ -31,7 +31,7 @@ const (
 	// burn CPU at idle.
 	refreshIneffectiveBackoff = 30 * time.Second
 	quotaBackoffBase          = time.Second
-	quotaBackoffMax           = 30 * time.Minute
+	quotaBackoffMax           = 5 * time.Hour
 	transientErrorCooldown    = time.Minute
 )
 
