@@ -356,7 +356,49 @@ func (m configTabModel) parseConfig(cfg map[string]any) []configField {
 	// WebSocket auth
 	fields = append(fields, configField{"WebSocket Auth", "ws-auth", "bool", fmt.Sprintf("%v", getBool(cfg, "ws-auth")), nil})
 
+	channels, ordered := summarizeOAuthModelAlias(cfg["oauth-model-alias"])
+	fields = append(fields, configField{
+		T("oauth_model_alias_label"),
+		"oauth-model-alias",
+		"readonly",
+		fmt.Sprintf(T("oauth_model_alias_summary"), channels, ordered),
+		nil,
+	})
+
 	return fields
+}
+
+func summarizeOAuthModelAlias(raw any) (channels int, orderedAliases int) {
+	byChannel, ok := raw.(map[string]any)
+	if !ok || len(byChannel) == 0 {
+		return 0, 0
+	}
+	for _, entriesRaw := range byChannel {
+		entries, ok := entriesRaw.([]any)
+		if !ok || len(entries) == 0 {
+			continue
+		}
+		channels++
+		counts := make(map[string]int)
+		for _, entryRaw := range entries {
+			entry, ok := entryRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			alias, _ := entry["alias"].(string)
+			alias = strings.ToLower(strings.TrimSpace(alias))
+			if alias == "" {
+				continue
+			}
+			counts[alias]++
+		}
+		for _, n := range counts {
+			if n > 1 {
+				orderedAliases++
+			}
+		}
+	}
+	return channels, orderedAliases
 }
 
 func fieldSection(apiPath string) string {
