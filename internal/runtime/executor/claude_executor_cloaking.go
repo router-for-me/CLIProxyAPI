@@ -1245,6 +1245,26 @@ func countCacheControls(payload []byte) int {
 	return count
 }
 
+// stripCacheControls removes Anthropic-only prompt-caching fields before a
+// delegated Claude-format request is sent to a provider that does not support
+// them, such as Kimi.
+func stripCacheControls(payload []byte) []byte {
+	result := payload
+	for i := range gjson.GetBytes(result, "tools").Array() {
+		result, _ = sjson.DeleteBytes(result, fmt.Sprintf("tools.%d.cache_control", i))
+	}
+	for i := range gjson.GetBytes(result, "system").Array() {
+		result, _ = sjson.DeleteBytes(result, fmt.Sprintf("system.%d.cache_control", i))
+	}
+	for messageIndex, message := range gjson.GetBytes(result, "messages").Array() {
+		result, _ = sjson.DeleteBytes(result, fmt.Sprintf("messages.%d.cache_control", messageIndex))
+		for contentIndex := range message.Get("content").Array() {
+			result, _ = sjson.DeleteBytes(result, fmt.Sprintf("messages.%d.content.%d.cache_control", messageIndex, contentIndex))
+		}
+	}
+	return result
+}
+
 // normalizeCacheControlTTL ensures cache_control TTL values don't violate the
 // prompt-caching-scope-2026-01-05 ordering constraint: a 1h-TTL block must not
 // appear after a 5m-TTL block anywhere in the evaluation order.

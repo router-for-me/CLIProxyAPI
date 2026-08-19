@@ -172,10 +172,10 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			Storage:  tokenStorage,
 			Metadata: metadata,
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "anthropic"); errGuard != nil {
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "anthropic", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
 			return
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
@@ -321,10 +321,10 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 				"account_id": tokenStorage.AccountID,
 			},
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "codex", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
 			return
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
@@ -487,10 +487,10 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			Label:    label,
 			Metadata: metadata,
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "antigravity"); errGuard != nil {
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "antigravity", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
 			return
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save token to file: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save token to file")
@@ -594,10 +594,10 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 				"base_url":  tokenStorage.BaseURL,
 			},
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "xai"); errGuard != nil {
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "xai", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
 			return
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save xAI token to file: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save token to file")
@@ -692,10 +692,10 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 			Storage:  tokenStorage,
 			Metadata: metadata,
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "kimi"); errGuard != nil {
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "kimi", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
 			return
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
@@ -813,7 +813,7 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 					c.JSON(http.StatusOK, gin.H{"status": "error", "error": "Authentication failed"})
 					return
 				}
-				if errSave := h.savePluginLoginRecords(ctx, records); errSave != nil {
+				if errSave := h.savePluginLoginRecords(ctx, state, provider, records); errSave != nil {
 					log.WithError(errSave).WithField("provider", provider).Error("failed to save plugin auth tokens")
 					SetOAuthSessionError(state, "Failed to save authentication tokens")
 					c.JSON(http.StatusOK, gin.H{"status": "error", "error": "Failed to save authentication tokens"})
@@ -850,7 +850,10 @@ func pluginLoginPollAuths(host *pluginhost.Host, resp pluginapi.AuthLoginPollRes
 	return records
 }
 
-func (h *Handler) savePluginLoginRecords(ctx context.Context, records []*coreauth.Auth) error {
+func (h *Handler) savePluginLoginRecords(ctx context.Context, state, provider string, records []*coreauth.Auth) error {
+	if errBegin := beginOAuthSessionSave(state, provider); errBegin != nil {
+		return errBegin
+	}
 	savedPaths := make([]string, 0, len(records))
 	for _, record := range records {
 		savedPath, errSave := h.saveTokenRecord(ctx, record)

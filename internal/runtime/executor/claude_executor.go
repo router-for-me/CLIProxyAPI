@@ -24,6 +24,7 @@ type ClaudeExecutor struct {
 	cfg                     *config.Config
 	requestLogProvider      string
 	upstreamModelNormalizer func(string) string
+	cacheControlDisabled    bool
 	oauthProfileFetcher     claudeOAuthProfileFetcher
 }
 
@@ -140,6 +141,11 @@ func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecu
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
 
+// ProviderKey returns the provider identity used for usage attribution.
+// Executors reusing the Claude wire format under another provider (e.g. zai)
+// override this method so usage is attributed correctly.
+func (e *ClaudeExecutor) ProviderKey() string { return "claude" }
+
 func (e *ClaudeExecutor) upstreamRequestLogProvider() string {
 	if provider := strings.TrimSpace(e.requestLogProvider); provider != "" {
 		return provider
@@ -216,8 +222,9 @@ func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 		return nil
 	}
 	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
+	forceXAPIKey := auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["anthropic_auth_scheme"]), "x-api-key")
 	isAnthropicBase := isAnthropicUpstreamURL(req.URL)
-	if isAnthropicBase && useAPIKey {
+	if forceXAPIKey || (isAnthropicBase && useAPIKey) {
 		req.Header.Del("Authorization")
 		req.Header.Set("x-api-key", apiKey)
 	} else {

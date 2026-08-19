@@ -86,6 +86,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 		return nil, true, nil
 	}
 	buffered := make([]cliproxyexecutor.StreamChunk, 0, 1)
+	var bootstrap streamBootstrapState
 	for {
 		var (
 			chunk cliproxyexecutor.StreamChunk
@@ -104,10 +105,10 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			return buffered, true, nil
 		}
 		if chunk.Err != nil {
-			return nil, false, chunk.Err
+			return buffered, false, chunk.Err
 		}
 		buffered = append(buffered, chunk)
-		if len(chunk.Payload) > 0 {
+		if bootstrap.observe(chunk.Payload) {
 			return buffered, false, nil
 		}
 	}
@@ -345,6 +346,28 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 		}
 		if bootstrapErr != nil {
+			// The upstream emitted payload before failing. When that buffered
+			// output carries real content the client must still receive it
+			// followed by the terminal failure; an empty/metadata-only prefix
+			// keeps the original rotate-to-next-auth behavior.
+			if len(buffered) > 0 && ctx.Err() == nil && !isEmptyCompletion(buffered) {
+				failure := cliproxyexecutor.StreamChunk{Err: bootstrapErr}
+				ch := make(chan cliproxyexecutor.StreamChunk, len(buffered)+1)
+				for _, bufferedChunk := range buffered {
+					ch <- bufferedChunk
+				}
+				ch <- failure
+				close(ch)
+				rerr := resultErrorFromError(bootstrapErr)
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: execOpts}
+				result.RetryAfter = retryAfterFromError(bootstrapErr)
+				if isCredentialScopedError(bootstrapErr) {
+					result.CredentialScope = true
+				}
+				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, execModel, aliasResult)
+				return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, nil, ch, attemptAliasResult, ephemeralResult, execOpts), nil
+			}
 			action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.runtimeConfigSnapshot())
 			if okAction {
 				rerr := resultErrorFromError(bootstrapErr)
@@ -402,16 +425,29 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 		}
 
-		if closed && len(buffered) == 0 {
-			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr, Options: execOpts}
-			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
-			if idx < len(execModels)-1 {
-				lastErr = emptyErr
-				continue
-			}
-			return nil, newStreamBootstrapError(emptyErr, streamResult.Headers)
+	if closed && len(buffered) == 0 {
+		emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
+		result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr, Options: execOpts}
+		m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+		if idx < len(execModels)-1 {
+			lastErr = emptyErr
+			continue
 		}
+		return nil, newStreamBootstrapError(emptyErr, streamResult.Headers)
+	}
+
+	// A stream that closed cleanly with only an empty completion (no content,
+	// no tool calls) is treated as a retriable failure so execution rotates to
+	// another auth/model instead of silently returning nothing to the client.
+	if closed && isEmptyCompletion(buffered) && ctx.Err() == nil {
+		emptyResult := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: errEmptyCompletion, Options: execOpts}
+		authErr := m.markEmptyCompletion(ctx, &emptyResult)
+		if idx < len(execModels)-1 {
+			lastErr = authErr
+			continue
+		}
+		return nil, newStreamBootstrapError(authErr, streamResult.Headers)
+	}
 
 		remaining := streamResult.Chunks
 		if closed {

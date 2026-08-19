@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -55,6 +57,11 @@ func TestSavePluginLoginRecordsRollsBackSavedAuthsOnFailure(t *testing.T) {
 	store := &pluginLoginRollbackStore{failAt: 2}
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 	h.tokenStore = store
+	sessionStore := newOAuthSessionStore(time.Minute)
+	replaceOAuthSessionStoreForTest(t, sessionStore)
+	if errRegister := sessionStore.RegisterPlugin("plugin-save-state", "gemini-cli", nil); errRegister != nil {
+		t.Fatalf("register plugin OAuth session: %v", errRegister)
+	}
 
 	records := []*coreauth.Auth{
 		{
@@ -71,7 +78,7 @@ func TestSavePluginLoginRecordsRollsBackSavedAuthsOnFailure(t *testing.T) {
 		},
 	}
 
-	errSave := h.savePluginLoginRecords(context.Background(), records)
+	errSave := h.savePluginLoginRecords(context.Background(), "plugin-save-state", "gemini-cli", records)
 	if errSave == nil {
 		t.Fatal("savePluginLoginRecords() error = nil, want rollback-triggering error")
 	}
@@ -80,6 +87,70 @@ func TestSavePluginLoginRecordsRollsBackSavedAuthsOnFailure(t *testing.T) {
 	}
 	if !store.deleted["geminicli.json"] || !store.deleted["geminicli-project-a.json"] {
 		t.Fatalf("deleted = %#v, want both saved auths rolled back", store.deleted)
+	}
+}
+
+func TestConcurrentPluginSaveReturnsWaitAndWritesOnce(t *testing.T) {
+	store := &blockingPluginSaveStore{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+	h.tokenStore = store
+	sessionStore := newOAuthSessionStore(time.Minute)
+	replaceOAuthSessionStoreForTest(t, sessionStore)
+	if errRegister := sessionStore.RegisterPlugin("plugin-race-state", "gemini-cli", nil); errRegister != nil {
+		t.Fatalf("register plugin OAuth session: %v", errRegister)
+	}
+	records := []*coreauth.Auth{{
+		ID:       "geminicli.json",
+		FileName: "geminicli.json",
+		Provider: "gemini-cli",
+		Metadata: map[string]any{"type": "gemini-cli"},
+	}}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- h.savePluginLoginRecords(
+			context.Background(),
+			"plugin-race-state",
+			"gemini-cli",
+			records,
+		)
+	}()
+	<-store.started
+
+	if errSecond := h.savePluginLoginRecords(
+		context.Background(),
+		"plugin-race-state",
+		"gemini-cli",
+		records,
+	); !errors.Is(errSecond, errOAuthSessionSaving) {
+		t.Fatalf("second save error = %v, want %v", errSecond, errOAuthSessionSaving)
+	}
+
+	router := gin.New()
+	router.GET("/status", h.GetAuthStatus)
+	status := performOAuthStatusRequest(t, router, "plugin-race-state")
+	if status.Status != "wait" || status.Error != "" {
+		t.Fatalf("status during save = %#v, want wait", status)
+	}
+	if CancelOAuthSession("plugin-race-state") {
+		t.Fatal("CancelOAuthSession() = true after save began, want false")
+	}
+
+	close(store.release)
+	if errFirst := <-firstDone; errFirst != nil {
+		t.Fatalf("first save error = %v, want nil", errFirst)
+	}
+	if got := store.saveCount(); got != 1 {
+		t.Fatalf("store save count = %d, want 1", got)
+	}
+
+	CompleteOAuthSession("plugin-race-state")
+	status = performOAuthStatusRequest(t, router, "plugin-race-state")
+	if status.Status != "ok" || status.Error != "" {
+		t.Fatalf("status after completion = %#v, want ok", status)
 	}
 }
 
@@ -257,3 +328,36 @@ func (s *pluginLoginRollbackStore) Delete(_ context.Context, id string) error {
 }
 
 func (s *pluginLoginRollbackStore) SetBaseDir(string) {}
+
+type blockingPluginSaveStore struct {
+	mu      sync.Mutex
+	started chan struct{}
+	release chan struct{}
+	saves   int
+	once    sync.Once
+}
+
+func (s *blockingPluginSaveStore) List(context.Context) ([]*coreauth.Auth, error) {
+	return nil, nil
+}
+
+func (s *blockingPluginSaveStore) Save(_ context.Context, auth *coreauth.Auth) (string, error) {
+	s.mu.Lock()
+	s.saves++
+	s.mu.Unlock()
+	s.once.Do(func() { close(s.started) })
+	<-s.release
+	return auth.FileName, nil
+}
+
+func (s *blockingPluginSaveStore) Delete(context.Context, string) error {
+	return nil
+}
+
+func (s *blockingPluginSaveStore) SetBaseDir(string) {}
+
+func (s *blockingPluginSaveStore) saveCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saves
+}

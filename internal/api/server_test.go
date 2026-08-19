@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
@@ -1352,7 +1353,7 @@ func TestNewServerWithoutPluginHostLeavesHandlerInterceptorsDisabled(t *testing.
 	}
 }
 
-func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
+func TestManagementUsageEndpointsRequireManagementAuthAndServePlusContracts(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
 	prevQueueEnabled := redisqueue.Enabled()
@@ -1363,6 +1364,7 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 	})
 
 	server := newTestServer(t)
+	server.mgmt.SetUsageStatistics(internalusage.NewRequestStatistics())
 
 	redisqueue.Enqueue([]byte(`{"id":1}`))
 	redisqueue.Enqueue([]byte(`{"id":2}`))
@@ -1378,8 +1380,21 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 	legacyReq.Header.Set("Authorization", "Bearer test-management-key")
 	legacyRR := httptest.NewRecorder()
 	server.engine.ServeHTTP(legacyRR, legacyReq)
-	if legacyRR.Code != http.StatusNotFound {
-		t.Fatalf("legacy usage status = %d, want %d body=%s", legacyRR.Code, http.StatusNotFound, legacyRR.Body.String())
+	if legacyRR.Code != http.StatusOK {
+		t.Fatalf("legacy usage status = %d, want %d body=%s", legacyRR.Code, http.StatusOK, legacyRR.Body.String())
+	}
+
+	var usagePayload struct {
+		Usage struct {
+			TotalRequests int64 `json:"total_requests"`
+		} `json:"usage"`
+		FailedRequests int64 `json:"failed_requests"`
+	}
+	if errUnmarshal := json.Unmarshal(legacyRR.Body.Bytes(), &usagePayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal legacy usage response: %v body=%s", errUnmarshal, legacyRR.Body.String())
+	}
+	if usagePayload.Usage.TotalRequests != 0 || usagePayload.FailedRequests != 0 {
+		t.Fatalf("legacy usage payload = %+v, want zeroed statistics", usagePayload)
 	}
 
 	authReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)
@@ -1411,6 +1426,38 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 
 	if remaining := redisqueue.PopOldest(1); len(remaining) != 0 {
 		t.Fatalf("remaining queue = %q, want empty", remaining)
+	}
+}
+
+func TestCorsMiddlewareSkipsManagementRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(corsMiddleware())
+	router.OPTIONS("/v0/management/config", func(c *gin.Context) {
+		c.Status(http.StatusUnauthorized)
+	})
+	router.OPTIONS("/v1/models", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	managementReq := httptest.NewRequest(http.MethodOptions, "/v0/management/config", nil)
+	managementRR := httptest.NewRecorder()
+	router.ServeHTTP(managementRR, managementReq)
+	if managementRR.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("management CORS origin = %q, want empty", managementRR.Header().Get("Access-Control-Allow-Origin"))
+	}
+	if managementRR.Code != http.StatusUnauthorized {
+		t.Fatalf("management status = %d, want %d", managementRR.Code, http.StatusUnauthorized)
+	}
+
+	apiReq := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
+	apiRR := httptest.NewRecorder()
+	router.ServeHTTP(apiRR, apiReq)
+	if apiRR.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("api CORS origin = %q, want *", apiRR.Header().Get("Access-Control-Allow-Origin"))
+	}
+	if apiRR.Code != http.StatusNoContent {
+		t.Fatalf("api status = %d, want %d", apiRR.Code, http.StatusNoContent)
 	}
 }
 
@@ -1470,6 +1517,77 @@ func TestManagementPluginsRouteRegistered(t *testing.T) {
 	server.engine.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("delete status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+}
+
+func TestManagementAmpRoutesRegistered(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	routes := make(map[string]struct{})
+	for _, route := range server.engine.Routes() {
+		routes[route.Method+" "+route.Path] = struct{}{}
+	}
+
+	expected := []string{
+		"GET /v0/management/ampcode",
+		"GET /v0/management/ampcode/upstream-url",
+		"PUT /v0/management/ampcode/upstream-url",
+		"PATCH /v0/management/ampcode/upstream-url",
+		"DELETE /v0/management/ampcode/upstream-url",
+		"GET /v0/management/ampcode/upstream-api-key",
+		"PUT /v0/management/ampcode/upstream-api-key",
+		"PATCH /v0/management/ampcode/upstream-api-key",
+		"DELETE /v0/management/ampcode/upstream-api-key",
+		"GET /v0/management/ampcode/restrict-management-to-localhost",
+		"PUT /v0/management/ampcode/restrict-management-to-localhost",
+		"PATCH /v0/management/ampcode/restrict-management-to-localhost",
+		"GET /v0/management/ampcode/model-mappings",
+		"PUT /v0/management/ampcode/model-mappings",
+		"PATCH /v0/management/ampcode/model-mappings",
+		"DELETE /v0/management/ampcode/model-mappings",
+		"GET /v0/management/ampcode/force-model-mappings",
+		"PUT /v0/management/ampcode/force-model-mappings",
+		"PATCH /v0/management/ampcode/force-model-mappings",
+		"GET /v0/management/ampcode/upstream-api-keys",
+		"PUT /v0/management/ampcode/upstream-api-keys",
+		"PATCH /v0/management/ampcode/upstream-api-keys",
+		"DELETE /v0/management/ampcode/upstream-api-keys",
+	}
+	for _, route := range expected {
+		if _, ok := routes[route]; !ok {
+			t.Errorf("missing management route %s", route)
+		}
+	}
+}
+
+func TestPlusServerModulesCallbacksAndCompatibilityRoutesRegistered(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	routes := make(map[string]struct{})
+	for _, route := range server.engine.Routes() {
+		routes[route.Method+" "+route.Path] = struct{}{}
+	}
+
+	expected := []string{
+		"POST /api/internal",
+		"GET /auth/*path",
+		"POST /api/provider/:provider/v1/messages",
+		"GET /v0/oauth/kiro",
+		"GET /v0/oauth/kiro/start",
+		"POST /v0/oauth/kiro/import",
+		"GET /gitlab/callback",
+		"GET /google/callback",
+		"GET /kiro/callback",
+		"GET /iflow/callback",
+		"POST /api/event_logging/batch",
+		"GET /v0/management/copilot-quota",
+	}
+	for _, route := range expected {
+		if _, ok := routes[route]; !ok {
+			t.Errorf("missing Plus compatibility route %s", route)
+		}
 	}
 }
 

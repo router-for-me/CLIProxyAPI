@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
 	fileauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -161,6 +162,143 @@ func TestPatchAuthFileFields_HeadersEmptyMapIsNoop(t *testing.T) {
 	}
 	if got := headersMeta["X-Kee"]; got != "1" {
 		t.Fatalf("metadata.headers.X-Kee = %#v, want %q", got, "1")
+	}
+}
+
+func TestPatchAuthFileFields_SyncsExcludedModelsAttributes(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{
+		ID:       "kiro.json",
+		FileName: "kiro.json",
+		Provider: "kiro",
+		Attributes: map[string]string{
+			"path": "/tmp/kiro.json",
+		},
+		Metadata: map[string]any{
+			"type": "kiro",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	body := `{"name":"kiro.json","excluded_models":["kiro-auto"," KIRO-AUTO ","custom-undetected"]}`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.PatchAuthFileFields(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	updated, ok := manager.GetByID("kiro.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth record to exist after patch")
+	}
+	if got := updated.Attributes["excluded_models"]; got != "kiro-auto,custom-undetected" {
+		t.Fatalf("attrs excluded_models = %q, want %q", got, "kiro-auto,custom-undetected")
+	}
+	if got, ok := updated.Metadata["excluded_models"].([]string); !ok || len(got) != 2 || got[0] != "kiro-auto" || got[1] != "custom-undetected" {
+		t.Fatalf("metadata excluded_models = %#v, want canonical []string", updated.Metadata["excluded_models"])
+	}
+	if _, ok := updated.Metadata["excluded-models"]; ok {
+		t.Fatalf("expected metadata excluded-models alias to be removed")
+	}
+	wantHash := diff.ComputeExcludedModelsHash([]string{"kiro-auto", "custom-undetected"})
+	if got := updated.Attributes["excluded_models_hash"]; got != wantHash {
+		t.Fatalf("attrs excluded_models_hash = %q, want %q", got, wantHash)
+	}
+}
+
+func TestPatchAuthFileFields_ExcludedModelsAliasReplacesAndClears(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{
+		ID:       "alias.json",
+		FileName: "alias.json",
+		Provider: "kiro",
+		Attributes: map[string]string{
+			"path":                 "/tmp/alias.json",
+			"excluded_models":      "stale-underscore,stale-hyphen",
+			"excluded_models_hash": "stale",
+		},
+		Metadata: map[string]any{
+			"type":            "kiro",
+			"excluded_models": []any{"stale-underscore"},
+			"excluded-models": []any{"stale-hyphen"},
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	body := `{"name":"alias.json","excluded-models":["new-model"]}`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.PatchAuthFileFields(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	updated, ok := manager.GetByID("alias.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth record to exist after patch")
+	}
+	if got := updated.Attributes["excluded_models"]; got != "new-model" {
+		t.Fatalf("attrs excluded_models = %q, want %q", got, "new-model")
+	}
+	if got, ok := updated.Metadata["excluded_models"].([]string); !ok || len(got) != 1 || got[0] != "new-model" {
+		t.Fatalf("metadata excluded_models = %#v, want [new-model]", updated.Metadata["excluded_models"])
+	}
+	if _, ok := updated.Metadata["excluded-models"]; ok {
+		t.Fatalf("expected metadata excluded-models alias to be removed")
+	}
+
+	body = `{"name":"alias.json","excluded_models":[]}`
+	rec = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(rec)
+	req = httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	h.PatchAuthFileFields(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	updated, ok = manager.GetByID("alias.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth record to exist after clear")
+	}
+	if _, ok := updated.Attributes["excluded_models"]; ok {
+		t.Fatalf("expected attrs excluded_models to be cleared")
+	}
+	if _, ok := updated.Attributes["excluded_models_hash"]; ok {
+		t.Fatalf("expected attrs excluded_models_hash to be cleared")
+	}
+	if _, ok := updated.Metadata["excluded_models"]; ok {
+		t.Fatalf("expected metadata excluded_models to be cleared")
+	}
+	if _, ok := updated.Metadata["excluded-models"]; ok {
+		t.Fatalf("expected metadata excluded-models alias to be cleared")
 	}
 }
 

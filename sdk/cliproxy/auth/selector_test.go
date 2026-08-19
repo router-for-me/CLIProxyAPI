@@ -2327,3 +2327,85 @@ func TestManagerSetSelectorConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// recordingFallbackSelector wraps a Selector and records the auth IDs passed to
+// each Pick call, so tests can assert the fallback only receives available auths.
+type recordingFallbackSelector struct {
+	inner Selector
+	mu    sync.Mutex
+	last  []string
+}
+
+func (r *recordingFallbackSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	r.mu.Lock()
+	r.last = make([]string, 0, len(auths))
+	for _, a := range auths {
+		r.last = append(r.last, a.ID)
+	}
+	r.mu.Unlock()
+	return r.inner.Pick(ctx, provider, model, opts, auths)
+}
+
+func (r *recordingFallbackSelector) lastPick() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.last))
+	copy(out, r.last)
+	return out
+}
+
+// TestSessionAffinitySelector_FallbackReselectReceivesOnlyAvailable is a
+// regression test for the fallback reselect path: when the cached auth is no
+// longer available, the fallback must only receive the available auths, not the
+// full list (which could include the now-unavailable cached auth).
+func TestSessionAffinitySelector_FallbackReselectReceivesOnlyAvailable(t *testing.T) {
+	t.Parallel()
+
+	rec := &recordingFallbackSelector{inner: &RoundRobinSelector{}}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: rec,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+		{ID: "auth-c"},
+	}
+
+	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_fallback-reselect-test"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+
+	// First pick establishes the binding (fallback receives the full list here).
+	first, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+
+	// Make the bound auth unavailable so it is filtered out of `available`.
+	bound := first.ID
+	for _, a := range auths {
+		if a.ID == bound {
+			a.Unavailable = true
+			a.NextRetryAfter = time.Now().Add(time.Hour)
+		}
+	}
+
+	// Second pick with the SAME full auths list: the cached auth is now filtered
+	// out of available, so the fallback reselect path fires. It must receive
+	// only the two still-available auths, not the full list.
+	if _, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths); err != nil {
+		t.Fatalf("Pick() after failover error = %v", err)
+	}
+
+	got := rec.lastPick()
+	if len(got) != 2 {
+		t.Fatalf("fallback reselect received %d auths, want 2 (only available); got %v", len(got), got)
+	}
+	for _, id := range got {
+		if id == bound {
+			t.Fatalf("fallback reselect received unavailable cached auth %q; received %v", bound, got)
+		}
+	}
+}

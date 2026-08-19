@@ -4,9 +4,33 @@
 package misc
 
 import (
+	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
 )
+
+const (
+	GeminiCLIVersion         = "0.34.0"
+	GeminiCLIApiClientHeader = "google-genai-sdk/1.41.0 gl-node/v22.19.0"
+)
+
+func GeminiCLIUserAgent(model string) string {
+	if model == "" {
+		model = "unknown"
+	}
+	osName := runtime.GOOS
+	if osName == "windows" {
+		osName = "win32"
+	}
+	arch := runtime.GOARCH
+	if arch == "amd64" {
+		arch = "x64"
+	} else if arch == "386" {
+		arch = "x86"
+	}
+	return fmt.Sprintf("GeminiCLI/%s/%s (%s; %s; terminal)", GeminiCLIVersion, model, osName, arch)
+}
 
 // ScrubProxyAndFingerprintHeaders removes all headers that could reveal
 // proxy infrastructure, client identity, or browser fingerprints from an

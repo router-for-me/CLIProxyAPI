@@ -1,17 +1,21 @@
 # Binaries
 cli-proxy-api
+/cliproxy
+/server
 *.exe
+
 
 # Configuration
 config.yaml
 .env
-
+.mcp.json
 # Generated content
 bin/*
 /logs
 conv/*
 temp/*
 refs/*
+tmp/*
 plugins/*
 examples/plugin/bin/*
 
@@ -53,6 +57,7 @@ AGENTS.override.md
 .bmad/*
 _bmad/*
 _bmad-output/*
+.mcp/cache/
 .gocache/
 .gitnexus/
 

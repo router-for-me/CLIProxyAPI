@@ -12,14 +12,53 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 func TestGeminiExecutorRecordsSuccessfulZeroUsageInQueue(t *testing.T) {
-	model := fmt.Sprintf("gemini-2.5-flash-zero-usage-%d", time.Now().UnixNano())
-	source := fmt.Sprintf("zero-usage-%d@example.com", time.Now().UnixNano())
+	prevQueueEnabled := redisqueue.Enabled()
+	prevUsageEnabled := redisqueue.UsageStatisticsEnabled()
+	redisqueue.SetEnabled(false)
+	redisqueue.SetEnabled(true)
+	redisqueue.SetUsageStatisticsEnabled(true)
+	t.Cleanup(func() {
+		redisqueue.SetEnabled(false)
+		redisqueue.SetEnabled(prevQueueEnabled)
+		redisqueue.SetUsageStatisticsEnabled(prevUsageEnabled)
+	})
+
+	model, _ := executeGeminiZeroUsage(t, "queue")
+	waitForQueuedUsageModelTotalTokens(t, "gemini", model, 0)
+}
+
+func TestGeminiExecutorRecordsSuccessfulZeroUsageInStatistics(t *testing.T) {
+	prevStatsEnabled := internalusage.StatisticsEnabled()
+	internalusage.SetStatisticsEnabled(true)
+	t.Cleanup(func() {
+		internalusage.SetStatisticsEnabled(prevStatsEnabled)
+	})
+
+	model, source := executeGeminiZeroUsage(t, "stats")
+	detail := waitForStatisticsDetail(t, "gemini", model)
+	if detail.Source == source {
+		t.Fatalf("detail source leaked raw account identifier")
+	}
+	if detail.Failed {
+		t.Fatalf("detail failed = true, want false")
+	}
+	if detail.Tokens.TotalTokens != 0 {
+		t.Fatalf("total tokens = %d, want 0", detail.Tokens.TotalTokens)
+	}
+}
+
+func executeGeminiZeroUsage(t *testing.T, suffix string) (string, string) {
+	t.Helper()
+
+	model := fmt.Sprintf("gemini-2.5-flash-zero-usage-%s-%d", suffix, time.Now().UnixNano())
+	source := fmt.Sprintf("zero-usage-%s-%d@example.com", suffix, time.Now().UnixNano())
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		wantPath := "/v1beta/models/" + model + ":generateContent"
@@ -43,17 +82,6 @@ func TestGeminiExecutorRecordsSuccessfulZeroUsageInQueue(t *testing.T) {
 		},
 	}
 
-	prevQueueEnabled := redisqueue.Enabled()
-	prevUsageEnabled := redisqueue.UsageStatisticsEnabled()
-	redisqueue.SetEnabled(false)
-	redisqueue.SetEnabled(true)
-	redisqueue.SetUsageStatisticsEnabled(true)
-	t.Cleanup(func() {
-		redisqueue.SetEnabled(false)
-		redisqueue.SetEnabled(prevQueueEnabled)
-		redisqueue.SetUsageStatisticsEnabled(prevUsageEnabled)
-	})
-
 	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   model,
 		Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
@@ -65,7 +93,7 @@ func TestGeminiExecutorRecordsSuccessfulZeroUsageInQueue(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	waitForQueuedUsageModelTotalTokens(t, "gemini", model, 0)
+	return model, source
 }
 
 func waitForQueuedUsageModelTotalTokens(t *testing.T, wantProvider, wantModel string, wantTokens int64) {
@@ -94,6 +122,34 @@ func waitForQueuedUsageModelTotalTokens(t *testing.T, wantProvider, wantModel st
 	}
 
 	t.Fatalf("timed out waiting for queued usage payload for provider=%q model=%q", wantProvider, wantModel)
+}
+
+func waitForStatisticsDetail(t *testing.T, apiName, model string) internalusage.RequestDetail {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := internalusage.GetRequestStatistics().Snapshot()
+		apiSnapshot, ok := snapshot.APIs[apiName]
+		if !ok {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		modelSnapshot, ok := apiSnapshot.Models[model]
+		if !ok {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		for _, detail := range modelSnapshot.Details {
+			if detail.Source != "" {
+				return detail
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for statistics detail for api=%q model=%q", apiName, model)
+	return internalusage.RequestDetail{}
 }
 
 type queuedUsagePayload struct {

@@ -225,38 +225,137 @@ func TestCancelOAuthSessionAndCallbackRejectAfterCancel(t *testing.T) {
 	}
 }
 
-func TestGuardOAuthSessionPendingForSave(t *testing.T) {
+func TestBeginOAuthSessionSaveCoversBuiltinAndPluginProviders(t *testing.T) {
 	store := newOAuthSessionStore(time.Minute)
 	replaceOAuthSessionStoreForTest(t, store)
 
-	providers := []string{"anthropic", "codex", "antigravity", "xai", "kimi"}
+	providers := []string{
+		"anthropic",
+		"codex",
+		"gitlab",
+		"antigravity",
+		"xai",
+		"qoder",
+		"kimi",
+		"iflow",
+		"github-copilot",
+		"kiro",
+		"kilo",
+		"cursor",
+	}
 	for _, provider := range providers {
-		state := provider + "-save-guard"
+		state := provider + "-begin-save"
 		store.Register(state, provider)
 
-		if errGuard := guardOAuthSessionPendingForSave(state, provider); errGuard != nil {
-			t.Fatalf("%s pending guard error = %v, want nil", provider, errGuard)
+		if errBegin := beginOAuthSessionSave(state, provider); errBegin != nil {
+			t.Fatalf("%s begin save error = %v, want nil", provider, errBegin)
 		}
-
-		if !CancelOAuthSession(state) {
-			t.Fatalf("%s CancelOAuthSession() = false, want true", provider)
+		if CancelOAuthSession(state) {
+			t.Fatalf("%s CancelOAuthSession() = true after save began, want false", provider)
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, provider); !errors.Is(errGuard, errOAuthSessionNotPending) {
-			t.Fatalf("%s after cancel guard error = %v, want %v", provider, errGuard, errOAuthSessionNotPending)
+		if errBegin := beginOAuthSessionSave(state, provider); !errors.Is(errBegin, errOAuthSessionSaving) {
+			t.Fatalf("%s repeated begin error = %v, want %v", provider, errBegin, errOAuthSessionSaving)
 		}
 	}
 
-	// Completed and errored sessions must also refuse save.
+	const pluginState = "plugin-begin-save"
+	if errRegister := store.RegisterPlugin(pluginState, "gemini-cli", nil); errRegister != nil {
+		t.Fatalf("RegisterPlugin() error = %v", errRegister)
+	}
+	if errBegin := beginOAuthSessionSave(pluginState, "gemini-cli"); errBegin != nil {
+		t.Fatalf("plugin begin save error = %v, want nil", errBegin)
+	}
+	if CancelOAuthSession(pluginState) {
+		t.Fatal("plugin CancelOAuthSession() = true after save began, want false")
+	}
+}
+
+func TestBeginOAuthSessionSaveRejectsCancelledCompletedErroredAndMismatchedSessions(t *testing.T) {
+	store := newOAuthSessionStore(time.Minute)
+	replaceOAuthSessionStoreForTest(t, store)
+
+	store.Register("cancelled-save", "anthropic")
+	if !CancelOAuthSession("cancelled-save") {
+		t.Fatal("CancelOAuthSession() = false, want true")
+	}
+	if errBegin := beginOAuthSessionSave("cancelled-save", "anthropic"); !errors.Is(errBegin, errOAuthSessionNotPending) {
+		t.Fatalf("cancelled begin error = %v, want %v", errBegin, errOAuthSessionNotPending)
+	}
+
 	store.Register("completed-save", "codex")
 	store.Complete("completed-save")
-	if errGuard := guardOAuthSessionPendingForSave("completed-save", "codex"); !errors.Is(errGuard, errOAuthSessionNotPending) {
-		t.Fatalf("completed guard error = %v, want %v", errGuard, errOAuthSessionNotPending)
+	if errBegin := beginOAuthSessionSave("completed-save", "codex"); !errors.Is(errBegin, errOAuthSessionNotPending) {
+		t.Fatalf("completed begin error = %v, want %v", errBegin, errOAuthSessionNotPending)
 	}
 
 	store.Register("error-save", "anthropic")
 	store.SetError("error-save", "Authentication failed")
-	if errGuard := guardOAuthSessionPendingForSave("error-save", "anthropic"); !errors.Is(errGuard, errOAuthSessionNotPending) {
-		t.Fatalf("error guard error = %v, want %v", errGuard, errOAuthSessionNotPending)
+	if errBegin := beginOAuthSessionSave("error-save", "anthropic"); !errors.Is(errBegin, errOAuthSessionNotPending) {
+		t.Fatalf("error begin error = %v, want %v", errBegin, errOAuthSessionNotPending)
+	}
+
+	store.Register("provider-mismatch", "codex")
+	if errBegin := beginOAuthSessionSave("provider-mismatch", "anthropic"); !errors.Is(errBegin, errOAuthSessionNotPending) {
+		t.Fatalf("provider mismatch begin error = %v, want %v", errBegin, errOAuthSessionNotPending)
+	}
+}
+
+func TestOAuthSessionStoreKiroPresentationStatusesRemainCancellableAndSaveable(t *testing.T) {
+	for _, status := range []string{
+		"device_code|https://example.test/verify|ABCD-EFGH",
+		"auth_url|https://example.test/oauth",
+	} {
+		cancelStore := newOAuthSessionStore(time.Minute)
+		cancelStore.Register("kiro-cancel", "kiro")
+		cancelStore.SetError("kiro-cancel", status)
+		if !cancelStore.IsPending("kiro-cancel", "kiro") {
+			t.Fatalf("Kiro status %q should remain pending", status)
+		}
+		if !cancelStore.Cancel("kiro-cancel") {
+			t.Fatalf("Cancel() = false for Kiro status %q, want true", status)
+		}
+
+		saveStore := newOAuthSessionStore(time.Minute)
+		saveStore.Register("kiro-save", "kiro")
+		saveStore.SetError("kiro-save", status)
+		if errBegin := saveStore.BeginSave("kiro-save", "kiro"); errBegin != nil {
+			t.Fatalf("BeginSave() error = %v for Kiro status %q, want nil", errBegin, status)
+		}
+		if saveStore.Cancel("kiro-save") {
+			t.Fatalf("Cancel() = true after Kiro save began for status %q, want false", status)
+		}
+	}
+}
+
+func TestOAuthSessionStoreCancelAndSaveHaveOneWinner(t *testing.T) {
+	for iteration := 0; iteration < 100; iteration++ {
+		store := newOAuthSessionStore(time.Minute)
+		store.Register("racing-state", "xai")
+
+		start := make(chan struct{})
+		cancelled := make(chan bool, 1)
+		saveBegan := make(chan bool, 1)
+		go func() {
+			<-start
+			cancelled <- store.Cancel("racing-state")
+		}()
+		go func() {
+			<-start
+			saveBegan <- store.BeginSave("racing-state", "xai") == nil
+		}()
+		close(start)
+
+		cancelWon := <-cancelled
+		saveWon := <-saveBegan
+		if cancelWon == saveWon {
+			t.Fatalf("iteration %d cancel/save winners = %t/%t, want exactly one winner", iteration, cancelWon, saveWon)
+		}
+		if cancelWon && store.IsPending("racing-state", "xai") {
+			t.Fatalf("iteration %d cancelled session remained pending", iteration)
+		}
+		if saveWon && store.Cancel("racing-state") {
+			t.Fatalf("iteration %d cancellation succeeded after save won", iteration)
+		}
 	}
 }
 

@@ -106,6 +106,22 @@ type Config struct {
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
+	// KiroKey defines Kiro (AWS CodeWhisperer) configurations.
+	KiroKey []KiroKey `yaml:"kiro" json:"kiro"`
+
+	// KiroFingerprint defines a global fingerprint configuration for Kiro requests.
+	KiroFingerprint *KiroFingerprintConfig `yaml:"kiro-fingerprint,omitempty" json:"kiro-fingerprint,omitempty"`
+
+	// KiroPreferredEndpoint sets the default Kiro endpoint.
+	KiroPreferredEndpoint string `yaml:"kiro-preferred-endpoint" json:"kiro-preferred-endpoint"`
+
+	// KiroRateLimit configures Kiro request rate limiting.
+	KiroRateLimit *KiroRateLimitConfig `yaml:"kiro-rate-limit,omitempty" json:"kiro-rate-limit,omitempty"`
+
+	KiroSystemPromptInjectEnable *bool `yaml:"kiro-system-prompt-inject-enable,omitempty" json:"kiro-system-prompt-inject-enable,omitempty"`
+	KiroTruncationDetectorEnable *bool `yaml:"kiro-truncation-detector-enable,omitempty" json:"kiro-truncation-detector-enable,omitempty"`
+	KiroExtractThinkingTagEnable *bool `yaml:"kiro-extract-thinking-tag-enable,omitempty" json:"kiro-extract-thinking-tag-enable,omitempty"`
+
 	// InteractionsKey defines native Google Interactions API key configurations.
 	InteractionsKey []GeminiKey `yaml:"interactions-api-key" json:"interactions-api-key"`
 
@@ -147,12 +163,15 @@ type Config struct {
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
 
+	// AmpCode contains the fork-maintained Amp CLI routing and management configuration.
+	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
+
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
 	// OAuthModelAlias defines global model name aliases for OAuth/file-backed auth channels.
 	// These aliases affect both model listing and model routing for supported channels:
-	// vertex, aistudio, antigravity, claude, codex, kimi, xai.
+	// vertex, aistudio, antigravity, claude, codex, kimi, xai, zai.
 	//
 	// NOTE: This does not apply to existing per-credential model alias features under:
 	// gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, claude-api-key, openai-compatibility, and vertex-api-key.
@@ -160,4 +179,9 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+
+	// IncognitoBrowser opens OAuth URLs in an incognito/private browser window.
+	IncognitoBrowser bool `yaml:"incognito-browser" json:"incognito-browser"`
+
+	legacyMigrationPending bool `yaml:"-" json:"-"`
 }

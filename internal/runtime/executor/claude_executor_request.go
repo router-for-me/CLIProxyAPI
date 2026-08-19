@@ -689,7 +689,8 @@ func applyClaudeHeadersWithNativeProfile(
 	preserveCallerFingerprint := !applyCLIFingerprint && !confirmedClaudeCode
 	useOAuthBetas := fp.UseOAuthBetas
 	isAnthropicBase := isAnthropicUpstreamURL(r.URL)
-	if isAnthropicBase && useAPIKey {
+	forceXAPIKey := auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["anthropic_auth_scheme"]), "x-api-key")
+	if forceXAPIKey || (isAnthropicBase && useAPIKey) {
 		r.Header.Del("Authorization")
 		r.Header.Set("x-api-key", apiKey)
 	} else {
@@ -805,7 +806,7 @@ func applyClaudeHeadersWithNativeProfile(
 		if auth != nil {
 			attrs = auth.Attributes
 		}
-		util.ApplyCustomHeadersFromAttrs(r, attrs)
+		util.ApplyCustomHeadersFromAttrs(r, attrs, incomingHeaders)
 		// Scope the custom-header escape hatch exactly like the CLI path below, which
 		// claws overrides back on api.anthropic.com (an operator Anthropic-Beta reaches
 		// a first-party API that rejects unknown values) and on any streaming request

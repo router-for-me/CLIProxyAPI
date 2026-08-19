@@ -1,153 +1,194 @@
 name: docker-image
+run-name: >-
+  docker-image tag=${{ inputs.tag || github.ref_name }}
+  commit=${{ inputs.commit || github.sha }}
+
+# Builds and publishes the multi-arch Docker image for CLIProxyAPIPlus.
+#
+# Triggers:
+#   - push of any v* tag (works when a PAT pushes the tag; sync-release-tag.yml
+#     pushes via GITHUB_TOKEN and explicitly dispatches this workflow because
+#     GITHUB_TOKEN events do not cascade)
+#   - workflow_dispatch with optional `tag` input
+#
+# Runner: self-hosted `cliproxy` (docker host LXC). QEMU + buildx produce both
+# linux/amd64 and linux/arm64 from a single x64 host.
+#
+# Registries:
+#   - GHCR: ghcr.io/<owner>/cli-proxy-api-plus using built-in GITHUB_TOKEN
+#   - Docker Hub: kaitranntt/cli-proxy-api-plus when DOCKERHUB_TOKEN is
+#     configured (DOCKERHUB_USERNAME is optional; defaults to kaitranntt)
 
 on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build, e.g. v6.9.45-0'
+        required: false
+        type: string
+      commit:
+        description: 'Exact commit the supplied tag must resolve to'
+        required: false
+        type: string
   push:
     tags:
-      - v*
+      - 'v*'
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   APP_NAME: CLIProxyAPI
-  DOCKERHUB_REPO: eceasy/cli-proxy-api
+  GHCR_REGISTRY: ghcr.io
+  GHCR_IMAGE_NAME: ${{ github.repository_owner }}/cli-proxy-api-plus
+  DOCKERHUB_IMAGE_NAME: kaitranntt/cli-proxy-api-plus
+  MODELS_REPOSITORY_REF: fb13a81071567e9d772e8abc5541a6558075e5f2
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-image-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
-  docker_amd64:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: [self-hosted, cliproxy]
     steps:
+      - name: Resolve build ref
+        id: ref
+        run: |
+          REF="${{ inputs.tag }}"
+          if [ -z "${REF}" ]; then REF="${GITHUB_REF_NAME}"; fi
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          fetch-depth: 0
+
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
           cache: true
+
       - name: Refresh models catalog
         run: bash .github/scripts/refresh-model-catalogs.sh
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Login to DockerHub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Generate Build Metadata
-        run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
-      - name: Build and push (amd64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          build-args: |
-            VERSION=${{ env.VERSION }}
-            COMMIT=${{ env.COMMIT }}
-            BUILD_DATE=${{ env.BUILD_DATE }}
-          tags: |
-            ${{ env.DOCKERHUB_REPO }}:latest-amd64
-            ${{ env.DOCKERHUB_REPO }}:${{ env.VERSION }}-amd64
 
-  docker_arm64:
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Refresh models catalog
-        run: bash .github/scripts/refresh-model-catalogs.sh
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Login to DockerHub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Generate Build Metadata
-        run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
-      - name: Build and push (arm64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/arm64
-          push: true
-          build-args: |
-            VERSION=${{ env.VERSION }}
-            COMMIT=${{ env.COMMIT }}
-            BUILD_DATE=${{ env.BUILD_DATE }}
-          tags: |
-            ${{ env.DOCKERHUB_REPO }}:latest-arm64
-            ${{ env.DOCKERHUB_REPO }}:${{ env.VERSION }}-arm64
-
-  docker_manifest:
-    runs-on: ubuntu-latest
-    needs:
-      - docker_amd64
-      - docker_arm64
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Login to DockerHub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Generate Build Metadata
-        run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
-      - name: Create and push multi-arch manifests
-        run: |
-          docker buildx imagetools create \
-            --tag "${DOCKERHUB_REPO}:latest" \
-            "${DOCKERHUB_REPO}:latest-amd64" \
-            "${DOCKERHUB_REPO}:latest-arm64"
-          docker buildx imagetools create \
-            --tag "${DOCKERHUB_REPO}:${VERSION}" \
-            "${DOCKERHUB_REPO}:${VERSION}-amd64" \
-            "${DOCKERHUB_REPO}:${VERSION}-arm64"
-      - name: Cleanup temporary tags
-        continue-on-error: true
+      - name: Verify requested image commit
+        if: inputs.commit != ''
         env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          EXPECTED_COMMIT: ${{ inputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "${EXPECTED_COMMIT}"
+
+      - name: Set up QEMU (for arm64 emulation on x64 self-hosted runner)
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Login to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ${{ env.GHCR_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Detect Docker Hub credentials
+        id: dockerhub
+        env:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          namespace="${DOCKERHUB_REPO%%/*}"
-          repo_name="${DOCKERHUB_REPO#*/}"
+          if [ -n "${DOCKERHUB_TOKEN}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
 
-          token="$(
-            curl -fsSL \
-              -H 'Content-Type: application/json' \
-              -d "{\"username\":\"${DOCKERHUB_USERNAME}\",\"password\":\"${DOCKERHUB_TOKEN}\"}" \
-              'https://hub.docker.com/v2/users/login/' \
-              | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
-          )"
+      - name: Login to Docker Hub
+        if: steps.dockerhub.outputs.enabled == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME || 'kaitranntt' }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-          delete_tag() {
-            local tag="$1"
-            local url="https://hub.docker.com/v2/repositories/${namespace}/${repo_name}/tags/${tag}/"
-            local http_code
-            http_code="$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE -H "Authorization: JWT ${token}" "${url}" || true)"
-            if [ "${http_code}" = "204" ] || [ "${http_code}" = "404" ]; then
-              echo "Docker Hub tag removed (or missing): ${DOCKERHUB_REPO}:${tag} (HTTP ${http_code})"
-              return 0
+      - name: Lowercase image names
+        id: img
+        run: |
+          GHCR_IMG="${GHCR_REGISTRY}/${GHCR_IMAGE_NAME}"
+          GHCR_IMG_LC="$(echo "${GHCR_IMG}" | tr '[:upper:]' '[:lower:]')"
+          DOCKERHUB_IMG_LC="$(echo "${DOCKERHUB_IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
+          {
+            echo "ghcr_ref=${GHCR_IMG_LC}"
+            echo "dockerhub_ref=${DOCKERHUB_IMG_LC}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build metadata
+        id: meta
+        run: |
+          VERSION="${{ steps.ref.outputs.ref }}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          {
+            echo "version=${VERSION}"
+            echo "commit=${COMMIT}"
+            echo "build_date=${BUILD_DATE}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build tag list
+        id: tags
+        env:
+          GHCR_REF: ${{ steps.img.outputs.ghcr_ref }}
+          DOCKERHUB_REF: ${{ steps.img.outputs.dockerhub_ref }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          DOCKERHUB_ENABLED: ${{ steps.dockerhub.outputs.enabled }}
+        run: |
+          {
+            echo "tags<<EOF"
+            echo "${GHCR_REF}:${VERSION}"
+            echo "${GHCR_REF}:latest"
+            if [ "${DOCKERHUB_ENABLED}" = "true" ]; then
+              echo "${DOCKERHUB_REF}:${VERSION}"
+              echo "${DOCKERHUB_REF}:latest"
             fi
-            echo "Docker Hub tag delete failed: ${DOCKERHUB_REPO}:${tag} (HTTP ${http_code})"
-            return 0
-          }
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
-          delete_tag "latest-amd64"
-          delete_tag "latest-arm64"
-          delete_tag "${VERSION}-amd64"
-          delete_tag "${VERSION}-arm64"
+      - name: Build and push (multi-arch)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ steps.meta.outputs.commit }}
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
+          tags: ${{ steps.tags.outputs.tags }}
+
+      - name: Summary
+        env:
+          GHCR_REF: ${{ steps.img.outputs.ghcr_ref }}
+          DOCKERHUB_REF: ${{ steps.img.outputs.dockerhub_ref }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          DOCKERHUB_ENABLED: ${{ steps.dockerhub.outputs.enabled }}
+        run: |
+          {
+            echo "## Published"
+            echo "- \`${GHCR_REF}:${VERSION}\`"
+            echo "- \`${GHCR_REF}:latest\`"
+            if [ "${DOCKERHUB_ENABLED}" = "true" ]; then
+              echo "- \`${DOCKERHUB_REF}:${VERSION}\`"
+              echo "- \`${DOCKERHUB_REF}:latest\`"
+              echo
+              echo "Pull: \`docker pull ${DOCKERHUB_REF}:${VERSION}\`"
+            else
+              echo
+              echo "Docker Hub skipped: configure \`DOCKERHUB_TOKEN\` to publish \`${DOCKERHUB_REF}\`. Set \`DOCKERHUB_USERNAME\` only if the login account is not \`kaitranntt\`."
+              echo
+              echo "Pull: \`docker pull ${GHCR_REF}:${VERSION}\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

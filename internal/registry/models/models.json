@@ -3239,6 +3239,148 @@
       ]
     }
   ],
+  "zai": [
+    {
+      "id": "glm-5.2",
+      "object": "model",
+      "created": 1781740800,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-5.2",
+      "description": "Z.AI GLM-5.2 - flagship coding model on the GLM Coding Plan",
+      "context_length": 1000000,
+      "max_completion_tokens": 131072,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "glm-4.5",
+      "object": "model",
+      "created": 1753142400,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-4.5",
+      "description": "Z.AI GLM-4.5 - flagship hybrid reasoning coding model",
+      "context_length": 131072,
+      "max_completion_tokens": 98304,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.5-air",
+      "object": "model",
+      "created": 1753142400,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-4.5-Air",
+      "description": "Z.AI GLM-4.5-Air - lightweight, lower-latency GLM-4.5 variant",
+      "context_length": 131072,
+      "max_completion_tokens": 98304,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.6",
+      "object": "model",
+      "created": 1759276800,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-4.6",
+      "description": "Z.AI GLM-4.6 - 200K context hybrid reasoning coding model",
+      "context_length": 200000,
+      "max_completion_tokens": 131072,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.7",
+      "object": "model",
+      "created": 1771200000,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-4.7",
+      "description": "Z.AI GLM-4.7 - hybrid reasoning coding model",
+      "context_length": 200000,
+      "max_completion_tokens": 131072,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-5",
+      "object": "model",
+      "created": 1778198400,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-5",
+      "description": "Z.AI GLM-5 - latest flagship reasoning coding model",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-5.1",
+      "object": "model",
+      "created": 1780396800,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-5.1",
+      "description": "Z.AI GLM-5.1 - latest GLM-5 series reasoning coding model",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-5-turbo",
+      "object": "model",
+      "created": 1778198400,
+      "owned_by": "zai",
+      "type": "zai",
+      "display_name": "GLM-5-Turbo",
+      "description": "Z.AI GLM-5-Turbo - faster, lower-cost GLM-5 variant",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    }
+  ],
   "antigravity": [
     {
       "id": "claude-opus-4-6-thinking",
@@ -3836,6 +3978,228 @@
       "description": "xAI Composer 2.5 Fast model for the Responses API.",
       "context_length": 200000,
       "max_completion_tokens": 32768
+    }
+  ],
+  "qoder": [
+    {
+      "id": "qoder/auto",
+      "object": "model",
+      "created": 1767196800,
+      "owned_by": "qoder",
+      "type": "qoder",
+      "display_name": "Qoder Auto",
+      "description": "Qoder Auto — automatically selects the best model for your prompt",
+      "context_length": 180000,
+      "supported_input_modalities": [
+        "TEXT",
+        "IMAGE"
+      ]
+    },
+    {
+      "id": "qoder/ultimate",
+      "object": "model",
+      "created": 1767196800,
+      "owned_by": "qoder",
+      "type": "qoder",
+      "display_name": "Qoder Ultimate",
+      "description": "Qoder Ultimate — highest quality tier",
+      "context_length": 180000,
+      "supported_input_modalities": [
+        "TEXT",
+        "IMAGE"
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "max",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "qoder/performance",
+      "object": "model",
+      "created": 1767196800,
+      "owned_by": "qoder",
+      "type": "qoder",
+      "display_name": "Qoder Performance",
+      "description": "Qoder Performance — balanced quality and speed",
+      "context_length": 272000,
+      "supported_input_modalities": [
+        "TEXT",
+        "IMAGE"
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "max",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "qoder/efficient",
+      "object": "model",
+      "created": 1767196800,
+      "owned_by": "qoder",
+      "type": "qoder",
+      "display_name": "Qoder Efficient",
+      "description": "Qoder Efficient — cost-efficient tier",
+      "context_length": 180000,
+      "supported_input_modalities": [
+        "TEXT",
+        "IMAGE"
+      ]
+    },
+    {
+      "id": "qoder/lite",
+      "object": "model",
+      "created": 1767196800,
+      "owned_by": "qoder",
+      "type": "qoder",
+      "display_name": "Qoder Lite",
+      "description": "Qoder Lite — fastest and most affordable tier",
+      "context_length": 180000
+    },
+    {
+      "id": "qoder/qmodel",
+      "object": "model",
+      "created": 1767196800,
+      "owned_by": "qoder",
+      "type": "qoder",
+      "display_name": "Qwen3.7 Plus (Qoder)",
+      "description": "Qoder frontier — Qwen3.7 Plus",
+      "context_length": 180000,
+      "supported_input_modalities": [
+        "TEXT",
+        "IMAGE"
+      ]
+    },
+    {
+      "id": "qoder/qmodel_latest",
+      "object": "model",
+      "created": 1767196800,
+      "owned_by": "qoder",
+      "type": "qoder",
+      "display_name": "Qwen3.7 Max (Qoder)",
+      "description": "Qoder frontier — Qwen3.7 Max (latest Qwen)",
+      "context_length": 180000,
+      "supported_input_modalities": [
+        "TEXT",
+        "IMAGE"
+      ]
+    },
+    {
+      "id": "qoder/dmodel",
+      "object": "model",
+      "created": 1767196800,
+      "owned_by": "qoder",
+      "type": "qoder",
+      "display_name": "DeepSeek V4 Pro (Qoder)",
+      "description": "Qoder frontier — DeepSeek V4 Pro",
+      "context_length": 180000,
+      "supported_input_modalities": [
+        "TEXT",
+        "IMAGE"
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "qoder/dfmodel",
+      "object": "model",
+      "created": 1767196800,
+      "owned_by": "qoder",
+      "type": "qoder",
+      "display_name": "DeepSeek V4 Flash (Qoder)",
+      "description": "Qoder frontier — DeepSeek V4 Flash",
+      "context_length": 180000,
+      "supported_input_modalities": [
+        "TEXT",
+        "IMAGE"
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "qoder/gm51model",
+      "object": "model",
+      "created": 1767196800,
+      "owned_by": "qoder",
+      "type": "qoder",
+      "display_name": "GLM 5.1 (Qoder)",
+      "description": "Qoder frontier — GLM 5.1",
+      "context_length": 180000,
+      "supported_input_modalities": [
+        "TEXT",
+        "IMAGE"
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "qoder/kmodel",
+      "object": "model",
+      "created": 1767196800,
+      "owned_by": "qoder",
+      "type": "qoder",
+      "display_name": "Kimi K2.6 (Qoder)",
+      "description": "Qoder frontier — Kimi K2.6",
+      "context_length": 256000,
+      "supported_input_modalities": [
+        "TEXT",
+        "IMAGE"
+      ]
+    },
+    {
+      "id": "qoder/mmodel",
+      "object": "model",
+      "created": 1767196800,
+      "owned_by": "qoder",
+      "type": "qoder",
+      "display_name": "MiniMax M3 (Qoder)",
+      "description": "Qoder frontier — MiniMax M3",
+      "context_length": 180000,
+      "supported_input_modalities": [
+        "TEXT",
+        "IMAGE"
+      ]
     }
   ]
 }

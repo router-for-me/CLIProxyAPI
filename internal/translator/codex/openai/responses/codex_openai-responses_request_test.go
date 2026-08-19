@@ -291,6 +291,41 @@ func TestConvertOpenAIResponsesRequestToCodexNormalizesRequiredFields(t *testing
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_ServiceTier(t *testing.T) {
+	tests := []struct {
+		name        string
+		serviceTier string
+		want        string
+	}{
+		{name: "priority passes through", serviceTier: "priority", want: "priority"},
+		{name: "fast normalizes to priority", serviceTier: "fast", want: "priority"},
+		{name: "invalid tier is stripped", serviceTier: "default", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := []byte(`{
+				"model": "gpt-5.4",
+				"service_tier": "` + tt.serviceTier + `",
+				"input": "hello"
+			}`)
+
+			output := ConvertOpenAIResponsesRequestToCodex("gpt-5.4", inputJSON, false)
+
+			if tt.want == "" {
+				if gjson.GetBytes(output, "service_tier").Exists() {
+					t.Fatalf("service_tier should be stripped. Output: %s", string(output))
+				}
+				return
+			}
+
+			if got := gjson.GetBytes(output, "service_tier").String(); got != tt.want {
+				t.Fatalf("service_tier = %q, want %q. Output: %s", got, tt.want, string(output))
+			}
+		})
+	}
+}
+
 // TestConvertSystemRoleToDeveloper_AssistantRole tests that assistant role is preserved
 func TestConvertSystemRoleToDeveloper_AssistantRole(t *testing.T) {
 	inputJSON := []byte(`{
