@@ -28,10 +28,17 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 	// Extract tools and forward map early so request contents and toolDeclarations use the exact same forward map
 	functionDeclarations, forwardMap, _ := util.BuildGeminiFunctionDeclarations(root)
+	var geminiTools [][]byte
 	if len(functionDeclarations) > 0 {
-		geminiTools := []byte(`[{"functionDeclarations":[]}]`)
-		geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations", translatorcommon.JoinRawArray(functionDeclarations))
-		out, _ = sjson.SetRawBytes(out, "tools", geminiTools)
+		functionTool := []byte(`{"functionDeclarations":[]}`)
+		functionTool, _ = sjson.SetRawBytes(functionTool, "functionDeclarations", translatorcommon.JoinRawArray(functionDeclarations))
+		geminiTools = append(geminiTools, functionTool)
+	}
+	if hasOpenAIResponsesWebSearchTool(inputRawJSON) {
+		geminiTools = append(geminiTools, []byte(`{"googleSearch":{}}`))
+	}
+	if len(geminiTools) > 0 {
+		out = translatorcommon.SetRawArrayItems(out, "tools", geminiTools)
 	}
 
 	// Handle tool_choice if present

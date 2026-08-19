@@ -635,10 +635,32 @@ func hasAntigravityGoogleSearchTool(payload []byte) bool {
 	return false
 }
 
+func hasAntigravityOpenAIResponsesWebSearchTool(payload []byte) bool {
+	tools := util.GetGJSONBytesNoCopy(payload, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
+		if toolType == "web_search" || strings.HasPrefix(toolType, "web_search_") {
+			return true
+		}
+	}
+	return false
+}
+
 func shouldResolveAntigravityWebSearchGroundingURLs(from sdktranslator.Format, originalRequestRawJSON, requestRawJSON []byte) bool {
-	return from.String() == "claude" &&
-		hasAntigravityClaudeTypedWebSearchTool(originalRequestRawJSON) &&
-		hasAntigravityGoogleSearchTool(requestRawJSON)
+	if !hasAntigravityGoogleSearchTool(requestRawJSON) {
+		return false
+	}
+	switch from {
+	case sdktranslator.FormatClaude:
+		return hasAntigravityClaudeTypedWebSearchTool(originalRequestRawJSON)
+	case sdktranslator.FormatOpenAIResponse:
+		return hasAntigravityOpenAIResponsesWebSearchTool(originalRequestRawJSON)
+	default:
+		return false
+	}
 }
 
 func (e *AntigravityExecutor) resolveWebSearchGroundingURLs(ctx context.Context, auth *cliproxyauth.Auth, from sdktranslator.Format, originalRequestRawJSON, requestRawJSON, responseRawJSON []byte) []byte {
