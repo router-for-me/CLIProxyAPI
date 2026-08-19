@@ -1085,6 +1085,59 @@ func TestCleanJSONSchemaForGemini_RemovesGeminiUnsupportedMetadataFields(t *test
 	compareJSON(t, expected, result)
 }
 
+func TestCleanJSONSchemaForGemini_RemovesEncryptedMarker(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"arg": {
+				"type": "string",
+				"description": "some arg",
+				"encrypted": true
+			},
+			"nested": {
+				"type": "object",
+				"properties": {
+					"deep": {
+						"type": "string",
+						"encrypted": false
+					}
+				}
+			},
+			"encrypted": {
+				"type": "boolean",
+				"description": "a property actually named encrypted must be preserved"
+			}
+		},
+		"required": ["arg"]
+	}`
+
+	expected := `{
+		"type": "object",
+		"properties": {
+			"arg": {
+				"type": "string",
+				"description": "some arg"
+			},
+			"nested": {
+				"type": "object",
+				"properties": {
+					"deep": {
+						"type": "string"
+					}
+				}
+			},
+			"encrypted": {
+				"type": "boolean",
+				"description": "a property actually named encrypted must be preserved"
+			}
+		},
+		"required": ["arg"]
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+	compareJSON(t, expected, result)
+}
+
 func TestRemoveExtensionFields(t *testing.T) {
 	tests := []struct {
 		name     string
