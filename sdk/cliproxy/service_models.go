@@ -168,6 +168,12 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case "zai":
 		models = registry.GetZAIModels()
 		models = applyExcludedModels(models, excluded)
+	case constant.OpenCode:
+		models = registry.GetOpenCodeModels("zen")
+		models = applyExcludedModels(models, excluded)
+	case constant.OpenCodeGo:
+		models = registry.GetOpenCodeModels("go")
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {

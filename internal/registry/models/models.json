@@ -4204,21 +4204,479 @@
   ],
   "opencode": [
     {
+      "id": "gpt-5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5 (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5-nano",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5 Nano (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5-nano",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.1",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.1 (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.1",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.1-codex",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.1 Codex (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.1-codex",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.1-codex-max",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.1 Codex Max (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.1-codex-max",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.1-codex-mini",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.1 Codex Mini (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.1-codex-mini",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.2",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.2 (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.2",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.2-codex",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.2 Codex (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.2-codex",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.3 Codex (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.3-codex",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.3-codex-spark",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.3 Codex Spark (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.3-codex-spark",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.4",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.4 (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.4",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.4 Mini (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.4-mini",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.4-nano",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.4 Nano (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.4-nano",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.4-pro",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.4 Pro (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.4-pro",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.5 (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.5",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.5-pro",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.5 Pro (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.5-pro",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
       "id": "gpt-5.6-luna",
       "object": "model",
       "owned_by": "opencode",
       "type": "opencode",
-      "display_name": "GPT-5.6 Luna (Zen)",
-      "description": "OpenCode Zen gateway — GPT-5.6 Luna via OpenAI Responses API",
+      "display_name": "Gpt 5.6 Luna (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.6-luna",
       "context_length": 500000,
       "max_completion_tokens": 65536,
       "supported_input_modalities": [
-        "text",
-        "image"
+        "text"
       ],
       "supported_output_modalities": [
         "text"
-      ]
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.6 Sol (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.6-sol",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gpt 5.6 Terra (Zen)",
+      "description": "OpenCode Zen gateway — gpt-5.6-terra",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
     },
     {
       "id": "grok-4.5",
@@ -4226,8 +4684,56 @@
       "owned_by": "opencode",
       "type": "opencode",
       "display_name": "Grok 4.5 (Zen)",
-      "description": "OpenCode Zen gateway — Grok 4.5 via OpenAI Responses API",
+      "description": "OpenCode Zen gateway — grok-4.5",
       "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "zero_allowed": false
+      }
+    },
+    {
+      "id": "grok-4.6",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Grok 4.6 (Zen)",
+      "description": "OpenCode Zen gateway — grok-4.6",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "zero_allowed": false
+      }
+    },
+    {
+      "id": "grok-build-0.1",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Grok Build 0.1 (Zen)",
+      "description": "OpenCode Zen gateway — grok-build-0.1",
+      "context_length": 256000,
       "max_completion_tokens": 65536,
       "supported_input_modalities": [
         "text"
@@ -4237,23 +4743,384 @@
       ]
     },
     {
-      "id": "claude-opus-5",
+      "id": "muse-spark-1.2",
       "object": "model",
       "owned_by": "opencode",
       "type": "opencode",
-      "display_name": "Claude Opus 5 (Zen)",
-      "description": "OpenCode Zen gateway — Claude Opus 5 via Anthropic Messages",
+      "display_name": "Muse Spark 1.2 (Zen)",
+      "description": "OpenCode Zen gateway — muse-spark-1.2",
+      "context_length": 200000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-spark-1.2-contributor",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Muse Spark 1.2 Contributor (Zen)",
+      "description": "OpenCode Zen gateway — muse-spark-1.2-contributor",
+      "context_length": 200000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "claude-fable-5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Claude Fable 5 (Zen)",
+      "description": "OpenCode Zen gateway — claude-fable-5",
       "context_length": 200000,
       "max_completion_tokens": 64000,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
       "thinking": {
         "min": 1024,
         "max": 64000,
         "zero_allowed": true,
         "dynamic_allowed": true
-      },
+      }
+    },
+    {
+      "id": "claude-sonnet-5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Claude Sonnet 5 (Zen)",
+      "description": "OpenCode Zen gateway — claude-sonnet-5",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
       "supported_input_modalities": [
         "text",
         "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "claude-sonnet-4-5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Claude Sonnet 4 5 (Zen)",
+      "description": "OpenCode Zen gateway — claude-sonnet-4-5",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Claude Sonnet 4 6 (Zen)",
+      "description": "OpenCode Zen gateway — claude-sonnet-4-6",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "claude-opus-4-5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Claude Opus 4 5 (Zen)",
+      "description": "OpenCode Zen gateway — claude-opus-4-5",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "claude-opus-4-6",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Claude Opus 4 6 (Zen)",
+      "description": "OpenCode Zen gateway — claude-opus-4-6",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "claude-opus-4-7",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Claude Opus 4 7 (Zen)",
+      "description": "OpenCode Zen gateway — claude-opus-4-7",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "claude-opus-4-8",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Claude Opus 4 8 (Zen)",
+      "description": "OpenCode Zen gateway — claude-opus-4-8",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "claude-opus-5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Claude Opus 5 (Zen)",
+      "description": "OpenCode Zen gateway — claude-opus-5",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Claude Haiku 4 5 (Zen)",
+      "description": "OpenCode Zen gateway — claude-haiku-4-5",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "qwen3.5-plus",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Qwen3.5 Plus (Zen)",
+      "description": "OpenCode Zen gateway — qwen3.5-plus",
+      "context_length": 262144,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "qwen3.6-plus",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Qwen3.6 Plus (Zen)",
+      "description": "OpenCode Zen gateway — qwen3.6-plus",
+      "context_length": 262144,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "qwen3.7-plus",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Qwen3.7 Plus (Zen)",
+      "description": "OpenCode Zen gateway — qwen3.7-plus",
+      "context_length": 262144,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "qwen3.7-max",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Qwen3.7 Max (Zen)",
+      "description": "OpenCode Zen gateway — qwen3.7-max",
+      "context_length": 262144,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "minimax-m2.5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Minimax M2.5 (Zen)",
+      "description": "OpenCode Zen gateway — minimax-m2.5",
+      "context_length": 200000,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "minimax-m2.7",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Minimax M2.7 (Zen)",
+      "description": "OpenCode Zen gateway — minimax-m2.7",
+      "context_length": 200000,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "minimax-m3",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Minimax M3 (Zen)",
+      "description": "OpenCode Zen gateway — minimax-m3",
+      "context_length": 200000,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Deepseek V4 Flash (Zen)",
+      "description": "OpenCode Zen gateway — deepseek-v4-flash",
+      "context_length": 128000,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
       ],
       "supported_output_modalities": [
         "text"
@@ -4264,8 +5131,8 @@
       "object": "model",
       "owned_by": "opencode",
       "type": "opencode",
-      "display_name": "DeepSeek V4 Pro (Zen)",
-      "description": "OpenCode Zen gateway — DeepSeek V4 Pro via OpenAI-compatible chat",
+      "display_name": "Deepseek V4 Pro (Zen)",
+      "description": "OpenCode Zen gateway — deepseek-v4-pro",
       "context_length": 272000,
       "max_completion_tokens": 8192,
       "supported_input_modalities": [
@@ -4274,6 +5141,401 @@
       "supported_output_modalities": [
         "text"
       ]
+    },
+    {
+      "id": "deepseek-v4-flash-free",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Deepseek V4 Flash Free (Zen)",
+      "description": "OpenCode Zen gateway — deepseek-v4-flash-free",
+      "context_length": 128000,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "mimo-v2.5-free",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Mimo V2.5 Free (Zen)",
+      "description": "OpenCode Zen gateway — mimo-v2.5-free",
+      "context_length": 200000,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "mimo-v2.5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Mimo V2.5 (Zen)",
+      "description": "OpenCode Zen gateway — mimo-v2.5",
+      "context_length": 200000,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "hy3-free",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Hy3 Free (Zen)",
+      "description": "OpenCode Zen gateway — hy3-free",
+      "context_length": 200000,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "big-pickle",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Big Pickle (Zen)",
+      "description": "OpenCode Zen gateway — big-pickle",
+      "context_length": 200000,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "nemotron-3-ultra-free",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Nemotron 3 Ultra Free (Zen)",
+      "description": "OpenCode Zen gateway — nemotron-3-ultra-free",
+      "context_length": 200000,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "nemotron-3.5-lightning-free",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Nemotron 3.5 Lightning Free (Zen)",
+      "description": "OpenCode Zen gateway — nemotron-3.5-lightning-free",
+      "context_length": 200000,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "laguna-s-2.1-free",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Laguna S 2.1 Free (Zen)",
+      "description": "OpenCode Zen gateway — laguna-s-2.1-free",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "glm-5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Glm 5 (Zen)",
+      "description": "OpenCode Zen gateway — glm-5",
+      "context_length": 131072,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "glm-5.1",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Glm 5.1 (Zen)",
+      "description": "OpenCode Zen gateway — glm-5.1",
+      "context_length": 131072,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "glm-5.2",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Glm 5.2 (Zen)",
+      "description": "OpenCode Zen gateway — glm-5.2",
+      "context_length": 131072,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "glm-5.3",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Glm 5.3 (Zen)",
+      "description": "OpenCode Zen gateway — glm-5.3",
+      "context_length": 131072,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kimi-k2.5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Kimi K2.5 (Zen)",
+      "description": "OpenCode Zen gateway — kimi-k2.5",
+      "context_length": 262144,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kimi-k2.6",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Kimi K2.6 (Zen)",
+      "description": "OpenCode Zen gateway — kimi-k2.6",
+      "context_length": 262144,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Kimi K2.7 Code (Zen)",
+      "description": "OpenCode Zen gateway — kimi-k2.7-code",
+      "context_length": 262144,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kimi-k3",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Kimi K3 (Zen)",
+      "description": "OpenCode Zen gateway — kimi-k3",
+      "context_length": 262144,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "gemini-3-flash",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gemini 3 Flash (Zen)",
+      "description": "OpenCode Zen gateway — gemini-3-flash",
+      "context_length": 1000000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "high"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gemini 3.5 Flash (Zen)",
+      "description": "OpenCode Zen gateway — gemini-3.5-flash",
+      "context_length": 1000000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "high"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-3.5-flash-lite",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gemini 3.5 Flash Lite (Zen)",
+      "description": "OpenCode Zen gateway — gemini-3.5-flash-lite",
+      "context_length": 1000000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "high"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-3.6-flash",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gemini 3.6 Flash (Zen)",
+      "description": "OpenCode Zen gateway — gemini-3.6-flash",
+      "context_length": 1000000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "high"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-3.7-flash",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gemini 3.7 Flash (Zen)",
+      "description": "OpenCode Zen gateway — gemini-3.7-flash",
+      "context_length": 1000000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "high"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "gemini-3.1-pro",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Gemini 3.1 Pro (Zen)",
+      "description": "OpenCode Zen gateway — gemini-3.1-pro",
+      "context_length": 1000000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "high"
+        ],
+        "dynamic_allowed": true
+      }
     }
   ],
   "opencode-go": [
@@ -4282,17 +5544,25 @@
       "object": "model",
       "owned_by": "opencode",
       "type": "opencode",
-      "display_name": "GPT-5.6 Luna (Go)",
-      "description": "OpenCode Go gateway — GPT-5.6 Luna via OpenAI Responses API",
+      "display_name": "Gpt 5.6 Luna (Go)",
+      "description": "OpenCode Go gateway — gpt-5.6-luna",
       "context_length": 500000,
       "max_completion_tokens": 65536,
       "supported_input_modalities": [
-        "text",
-        "image"
+        "text"
       ],
       "supported_output_modalities": [
         "text"
-      ]
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "dynamic_allowed": false
+      }
     },
     {
       "id": "grok-4.5",
@@ -4300,8 +5570,32 @@
       "owned_by": "opencode",
       "type": "opencode",
       "display_name": "Grok 4.5 (Go)",
-      "description": "OpenCode Go gateway — Grok 4.5 via OpenAI Responses API",
+      "description": "OpenCode Go gateway — grok-4.5",
       "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "zero_allowed": false
+      }
+    },
+    {
+      "id": "muse-spark-1.2-contributor",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Muse Spark 1.2 Contributor (Go)",
+      "description": "OpenCode Go gateway — muse-spark-1.2-contributor",
+      "context_length": 200000,
       "max_completion_tokens": 65536,
       "supported_input_modalities": [
         "text"
@@ -4311,23 +5605,151 @@
       ]
     },
     {
-      "id": "claude-opus-5",
+      "id": "claude-fable-5",
       "object": "model",
       "owned_by": "opencode",
       "type": "opencode",
-      "display_name": "Claude Opus 5 (Go)",
-      "description": "OpenCode Go gateway — Claude Opus 5 via Anthropic Messages",
+      "display_name": "Claude Fable 5 (Go)",
+      "description": "OpenCode Go gateway — claude-fable-5",
       "context_length": 200000,
       "max_completion_tokens": 64000,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ],
       "thinking": {
         "min": 1024,
         "max": 64000,
         "zero_allowed": true,
         "dynamic_allowed": true
-      },
+      }
+    },
+    {
+      "id": "glm-5.3",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Glm 5.3 (Go)",
+      "description": "OpenCode Go gateway — glm-5.3",
+      "context_length": 131072,
+      "max_completion_tokens": 8192,
       "supported_input_modalities": [
-        "text",
-        "image"
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "glm-5.2",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Glm 5.2 (Go)",
+      "description": "OpenCode Go gateway — glm-5.2",
+      "context_length": 131072,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "glm-5.1",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Glm 5.1 (Go)",
+      "description": "OpenCode Go gateway — glm-5.1",
+      "context_length": 131072,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "glm-5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Glm 5 (Go)",
+      "description": "OpenCode Go gateway — glm-5",
+      "context_length": 131072,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kimi-k3",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Kimi K3 (Go)",
+      "description": "OpenCode Go gateway — kimi-k3",
+      "context_length": 262144,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Kimi K2.7 Code (Go)",
+      "description": "OpenCode Go gateway — kimi-k2.7-code",
+      "context_length": 262144,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kimi-k2.6",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Kimi K2.6 (Go)",
+      "description": "OpenCode Go gateway — kimi-k2.6",
+      "context_length": 262144,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kimi-k2.5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Kimi K2.5 (Go)",
+      "description": "OpenCode Go gateway — kimi-k2.5",
+      "context_length": 262144,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
       ],
       "supported_output_modalities": [
         "text"
@@ -4338,9 +5760,249 @@
       "object": "model",
       "owned_by": "opencode",
       "type": "opencode",
-      "display_name": "DeepSeek V4 Pro (Go)",
-      "description": "OpenCode Go gateway — DeepSeek V4 Pro via OpenAI-compatible chat",
+      "display_name": "Deepseek V4 Pro (Go)",
+      "description": "OpenCode Go gateway — deepseek-v4-pro",
+      "context_length": 272000,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Deepseek V4 Flash (Go)",
+      "description": "OpenCode Go gateway — deepseek-v4-flash",
       "context_length": 128000,
+      "max_completion_tokens": 8192,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "mimo-v2.5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Mimo V2.5 (Go)",
+      "description": "OpenCode Go gateway — mimo-v2.5",
+      "context_length": 200000,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "mimo-v2-pro",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Mimo V2 Pro (Go)",
+      "description": "OpenCode Go gateway — mimo-v2-pro",
+      "context_length": 200000,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "mimo-v2.5-pro",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Mimo V2.5 Pro (Go)",
+      "description": "OpenCode Go gateway — mimo-v2.5-pro",
+      "context_length": 200000,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "minimax-m2.5",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Minimax M2.5 (Go)",
+      "description": "OpenCode Go gateway — minimax-m2.5",
+      "context_length": 200000,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "minimax-m2.7",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Minimax M2.7 (Go)",
+      "description": "OpenCode Go gateway — minimax-m2.7",
+      "context_length": 200000,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "minimax-m3",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Minimax M3 (Go)",
+      "description": "OpenCode Go gateway — minimax-m3",
+      "context_length": 200000,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-spark-1.2",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Muse Spark 1.2 (Go)",
+      "description": "OpenCode Go gateway — muse-spark-1.2",
+      "context_length": 200000,
+      "max_completion_tokens": 65536,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "qwen3.7-max",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Qwen3.7 Max (Go)",
+      "description": "OpenCode Go gateway — qwen3.7-max",
+      "context_length": 262144,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "qwen3.8-max",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Qwen3.8 Max (Go)",
+      "description": "OpenCode Go gateway — qwen3.8-max",
+      "context_length": 262144,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "qwen3.7-plus",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Qwen3.7 Plus (Go)",
+      "description": "OpenCode Go gateway — qwen3.7-plus",
+      "context_length": 262144,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "qwen3.6-plus",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Qwen3.6 Plus (Go)",
+      "description": "OpenCode Go gateway — qwen3.6-plus",
+      "context_length": 262144,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "hy3",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Hy3 (Go)",
+      "description": "OpenCode Go gateway — hy3",
+      "context_length": 200000,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "hy3-preview",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Hy3 Preview (Go)",
+      "description": "OpenCode Go gateway — hy3-preview",
+      "context_length": 200000,
+      "max_completion_tokens": 16384,
+      "supported_input_modalities": [
+        "text"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "qwen3.5-plus",
+      "object": "model",
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Qwen3.5 Plus (Go)",
+      "description": "OpenCode Go gateway — qwen3.5-plus",
+      "context_length": 262144,
       "max_completion_tokens": 16384,
       "supported_input_modalities": [
         "text"
@@ -4399,6 +6061,24 @@
       "type": "poolside",
       "display_name": "Laguna S 2.1 (Poolside)",
       "description": "Poolside AI gateway — fallback model proxying to Claude Sonnet 4.6 via Anthropic Messages",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supported_input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "poolside/laguna-xs-2.1",
+      "object": "model",
+      "created": 1771372800,
+      "owned_by": "poolside",
+      "type": "poolside",
+      "display_name": "Laguna XS 2.1 (Poolside)",
+      "description": "Poolside AI gateway — small Laguna 2.1 model proxying to Claude Sonnet 4.6 via Anthropic Messages",
       "context_length": 200000,
       "max_completion_tokens": 64000,
       "supported_input_modalities": [

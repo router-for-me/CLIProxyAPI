@@ -100,6 +100,7 @@
     "qwen3.7-plus": "messages",
     "qwen3.6-plus": "messages",
     "hy3": "chat",
-    "hy3-preview": "chat"
+    "hy3-preview": "chat",
+    "qwen3.5-plus": "messages"
   }
 }

@@ -928,6 +928,9 @@ func GetZAIModels() []*ModelInfo {
 // ("zen" or "go"). Models are generated from the embedded opencode_routes.json
 // route table.
 func GetOpenCodeModels(gateway string) []*ModelInfo {
+	if strings.EqualFold(gateway, "go") {
+		return cloneModelInfos(getModels().OpenCodeGo)
+	}
 	return cloneModelInfos(getModels().OpenCode)
 }
 
