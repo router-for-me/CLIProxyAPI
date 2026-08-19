@@ -305,7 +305,6 @@ func TestJitteredCooldownWaitBounds(t *testing.T) {
 	}
 }
 
-
 // assertWithinJitter checks that got falls inside the +/-20% jitter band that
 // nextQuotaCooldown applies around a nominal backoff duration. Jitter exists so a
 // pool of credentials that exhaust quota together do not all retry in lockstep.

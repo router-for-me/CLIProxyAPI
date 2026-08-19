@@ -877,7 +877,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									}
 									next = now.Add(cooldown).Round(0)
 								} else {
+									reused := state.Quota.NextRecoverAt.After(now)
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
+									if !reused {
+										next = applyProviderQuotaFloor(auth.Provider, next, now)
+									}
 								}
 								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
 									next = state.Quota.NextRecoverAt
@@ -1190,6 +1194,30 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.NextRetryAfter = time.Time{}
 	state.LastError = nil
 	applyCooldownFields(&state.Quota, QuotaState{})
+	state.UpdatedAt = now
+}
+
+// resetModelStateKeepingQuota clears transient error state while leaving quota accounting intact.
+func resetModelStateKeepingQuota(state *ModelState, now time.Time) {
+	if state == nil {
+		return
+	}
+	prev := state.Quota
+	if prev.Exceeded && prev.NextRecoverAt.After(now) {
+		state.LastError = nil
+		state.NextRetryAfter = prev.NextRecoverAt
+		state.Unavailable = true
+		state.Status = StatusError
+		state.StatusMessage = prev.Reason
+		state.UpdatedAt = now
+		return
+	}
+	state.Unavailable = false
+	state.Status = StatusActive
+	state.StatusMessage = ""
+	state.NextRetryAfter = time.Time{}
+	state.LastError = nil
+	state.Quota = QuotaState{BackoffLevel: prev.BackoffLevel}
 	state.UpdatedAt = now
 }
 
@@ -2287,6 +2315,23 @@ func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) 
 		return withCooldownJitter(quotaBackoffMax), prevLevel
 	}
 	return withCooldownJitter(cooldown), prevLevel + 1
+}
+
+var anthropicQuotaFloor = 15 * time.Minute
+
+func SetAnthropicQuotaFloor(d time.Duration) { anthropicQuotaFloor = d }
+
+func applyProviderQuotaFloor(provider string, next, now time.Time) time.Time {
+	if anthropicQuotaFloor <= 0 || next.IsZero() {
+		return next
+	}
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude", "anthropic":
+		if floor := now.Add(withCooldownJitter(anthropicQuotaFloor)); floor.After(next) {
+			return floor
+		}
+	}
+	return next
 }
 
 // withCooldownJitter spreads recovery across credentials that hit the same quota
