@@ -18,7 +18,6 @@ import (
 )
 
 func TestOpenAIChatCompletionsWithGitLabDuoOpenAIGateway(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	var gotPath, gotAuthHeader, gotRealmHeader string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +63,6 @@ func TestOpenAIChatCompletionsWithGitLabDuoOpenAIGateway(t *testing.T) {
 }
 
 func TestOpenAIResponsesStreamWithGitLabDuoOpenAIGateway(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	var gotPath, gotAuthHeader string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
