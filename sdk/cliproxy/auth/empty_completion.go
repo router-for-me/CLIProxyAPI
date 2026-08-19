@@ -187,7 +187,7 @@ type emptyCompletionAccum struct {
 	// terminal event, and real completions always carry usage there: without
 	// usage we cannot prove the completion is empty unless the response object
 	// carried an explicit output field.
-	responseAPI      bool
+	responseAPI       bool
 	sawResponseOutput bool
 }
 

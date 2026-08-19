@@ -425,29 +425,29 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 		}
 
-	if closed && len(buffered) == 0 {
-		emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
-		result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr, Options: execOpts}
-		m.recordExecutionResult(ctx, result, auth, ephemeralResult)
-		if idx < len(execModels)-1 {
-			lastErr = emptyErr
-			continue
+		if closed && len(buffered) == 0 {
+			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr, Options: execOpts}
+			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			if idx < len(execModels)-1 {
+				lastErr = emptyErr
+				continue
+			}
+			return nil, newStreamBootstrapError(emptyErr, streamResult.Headers)
 		}
-		return nil, newStreamBootstrapError(emptyErr, streamResult.Headers)
-	}
 
-	// A stream that closed cleanly with only an empty completion (no content,
-	// no tool calls) is treated as a retriable failure so execution rotates to
-	// another auth/model instead of silently returning nothing to the client.
-	if closed && isEmptyCompletion(buffered) && ctx.Err() == nil {
-		emptyResult := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: errEmptyCompletion, Options: execOpts}
-		authErr := m.markEmptyCompletion(ctx, &emptyResult)
-		if idx < len(execModels)-1 {
-			lastErr = authErr
-			continue
+		// A stream that closed cleanly with only an empty completion (no content,
+		// no tool calls) is treated as a retriable failure so execution rotates to
+		// another auth/model instead of silently returning nothing to the client.
+		if closed && isEmptyCompletion(buffered) && ctx.Err() == nil {
+			emptyResult := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: errEmptyCompletion, Options: execOpts}
+			authErr := m.markEmptyCompletion(ctx, &emptyResult)
+			if idx < len(execModels)-1 {
+				lastErr = authErr
+				continue
+			}
+			return nil, newStreamBootstrapError(authErr, streamResult.Headers)
 		}
-		return nil, newStreamBootstrapError(authErr, streamResult.Headers)
-	}
 
 		remaining := streamResult.Chunks
 		if closed {

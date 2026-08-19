@@ -384,8 +384,8 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 	}
 
 	ctxToken := ctx
-httpClient := &http.Client{
-		Timeout:   defaultAPICallTimeout,
+	httpClient := &http.Client{
+		Timeout: defaultAPICallTimeout,
 	}
 	ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
 
@@ -1077,7 +1077,7 @@ func (h *Handler) GetCopilotQuota(c *gin.Context) {
 	req.Header.Set("Accept", "application/json")
 
 	httpClient := &http.Client{
-		Timeout:   defaultAPICallTimeout,
+		Timeout: defaultAPICallTimeout,
 	}
 
 	resp, errDo := httpClient.Do(req)
@@ -1193,7 +1193,7 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 	req.Header.Set("Accept", "application/json")
 
 	httpClient := &http.Client{
-		Timeout:   defaultAPICallTimeout,
+		Timeout: defaultAPICallTimeout,
 	}
 
 	quotaResp, errDo := httpClient.Do(req)

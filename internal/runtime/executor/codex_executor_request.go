@@ -137,6 +137,14 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	rawJSON = normalizeCodexDeveloperCurrentTimeForPromptCache(from, rawJSON)
 	var identityState codexIdentityConfuseState
 	rawJSON, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, rawJSON)
+	if identityState.promptCacheKey == "" && identityState.enabled && cache.ID != "" {
+		// The resolved client key came from provider options or session
+		// headers rather than the payload body; remap it through the same
+		// identity-confusion derivation so the original never leaks upstream.
+		identityState.originalPromptCacheKey = cache.ID
+		identityState.promptCacheKey = codexIdentityConfuseUUID(identityState.authID, "prompt-cache", cache.ID)
+		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", identityState.promptCacheKey)
+	}
 	if identityState.promptCacheKey != "" {
 		cache.ID = identityState.promptCacheKey
 	}
@@ -552,7 +560,7 @@ func codexPromptCacheKeyFromClient(ctx context.Context, req cliproxyexecutor.Req
 	if key := codexPromptCacheKeyFromHeaders(ctx); key != "" {
 		return key
 	}
-	return headerValueCaseInsensitive(headers, "X-Session-ID")
+	return codexPromptCacheKeyFromHeader(headers)
 }
 
 func codexPromptCacheKeyFromJSON(payload []byte) string {

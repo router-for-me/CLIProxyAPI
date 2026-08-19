@@ -50,9 +50,11 @@ func permanentOrderedStopError(err error) bool {
 		// We rely on isRequestInvalidError above to catch the shape variants.
 	}
 	if status == http.StatusBadRequest && !isRequestShapeFaultError(err) {
-		// A generic 400 may be provider-specific payload rejection; the next
-		// candidate in the ordered chain may accept the same request shape.
-		// Only identified request-shape faults stop the chain.
+		// A generic 400 is neither a permanent-stop taxonomy member nor
+		// retryable pre-first-byte: the chain stops at this candidate and the
+		// error is returned verbatim (no fallback trace annotation), because
+		// only identified request-shape faults prove the request is broken
+		// across every candidate.
 		return false
 	}
 	if isRequestInvalidError(err) {

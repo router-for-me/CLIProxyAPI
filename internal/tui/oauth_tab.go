@@ -355,37 +355,37 @@ func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 		providerKey := ""
 		for _, p := range oauthProviders {
 			if p.name == m.providerName {
-		// Map provider name to the canonical key the API expects
-			switch p.apiPath {
-			case "anthropic-auth-url":
-				providerKey = "anthropic"
-			case "codex-auth-url":
-				providerKey = "codex"
-			case "antigravity-auth-url":
-				providerKey = "antigravity"
-			case "kimi-auth-url":
-				providerKey = "kimi"
-			case "xai-auth-url":
-				providerKey = "xai"
-			case "zai-auth-url":
-				providerKey = "zai"
-			case "bigmodel-auth-url":
-				providerKey = "bigmodel"
-			case "gitlab-auth-url":
-				providerKey = "gitlab"
-			case "kilo-auth-url":
-				providerKey = "kilo"
-			case "iflow-auth-url":
-				providerKey = "iflow"
-			case "kiro-auth-url":
-				providerKey = "kiro"
-			case "cursor-auth-url":
-				providerKey = "cursor"
-			case "github-auth-url":
-				providerKey = "github"
-			case "qoder-auth-url":
-				providerKey = "qoder"
-			}
+				// Map provider name to the canonical key the API expects
+				switch p.apiPath {
+				case "anthropic-auth-url":
+					providerKey = "anthropic"
+				case "codex-auth-url":
+					providerKey = "codex"
+				case "antigravity-auth-url":
+					providerKey = "antigravity"
+				case "kimi-auth-url":
+					providerKey = "kimi"
+				case "xai-auth-url":
+					providerKey = "xai"
+				case "zai-auth-url":
+					providerKey = "zai"
+				case "bigmodel-auth-url":
+					providerKey = "bigmodel"
+				case "gitlab-auth-url":
+					providerKey = "gitlab"
+				case "kilo-auth-url":
+					providerKey = "kilo"
+				case "iflow-auth-url":
+					providerKey = "iflow"
+				case "kiro-auth-url":
+					providerKey = "kiro"
+				case "cursor-auth-url":
+					providerKey = "cursor"
+				case "github-auth-url":
+					providerKey = "github"
+				case "qoder-auth-url":
+					providerKey = "qoder"
+				}
 				break
 			}
 		}
