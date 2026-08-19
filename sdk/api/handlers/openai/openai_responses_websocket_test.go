@@ -5707,6 +5707,40 @@ func TestNormalizeSubsequentRequestCompactMergesWhenCompactionReplayUnsupported(
 	}
 }
 
+func TestNormalizeSubsequentRequestDropsConsumedCompactionTrigger(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.6-sol","stream":true,"input":[
+		{"type":"message","role":"user","id":"msg-old","content":"old prompt"}
+	]}`)
+	triggerRequest := []byte(`{"type":"response.create","previous_response_id":"resp-before-compact","input":[
+		{"type":"message","role":"user","id":"msg-tool-output","content":"done"},
+		{"type":"compaction_trigger"}
+	]}`)
+
+	_, stateAfterTrigger, errMsg := normalizeResponsesWebsocketRequestWithMode(triggerRequest, lastRequest, nil, false, false)
+	if errMsg != nil {
+		t.Fatalf("normalize trigger request: %v", errMsg.Error)
+	}
+
+	compactionOutput := []byte(`[
+		{"type":"compaction","id":"cmp-1","encrypted_content":"opaque"}
+	]`)
+	replayRequest := []byte(`{"type":"response.create","input":[
+		{"type":"message","role":"developer","id":"msg-new-context","content":"new context"},
+		{"type":"compaction","id":"cmp-1","encrypted_content":"opaque"},
+		{"type":"message","role":"user","id":"msg-next","content":"continue"}
+	]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithMode(replayRequest, stateAfterTrigger, compactionOutput, false, false)
+	if errMsg != nil {
+		t.Fatalf("normalize compact replay: %v", errMsg.Error)
+	}
+	for _, item := range gjson.GetBytes(normalized, "input").Array() {
+		if item.Get("type").String() == "compaction_trigger" {
+			t.Fatalf("consumed compaction_trigger was replayed: %s", normalized)
+		}
+	}
+}
+
 func TestNormalizeSubsequentRequestIncrementalInputStillMerges(t *testing.T) {
 	// Normal incremental flow: user sends function_call_output (no assistant message).
 	lastRequest := []byte(`{"model":"gpt-5.4","stream":true,"input":[
