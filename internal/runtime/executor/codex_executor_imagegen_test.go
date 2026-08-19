@@ -259,15 +259,51 @@ func TestEnsureImageGenerationTool_WebSearchAndImageGen(t *testing.T) {
 	}
 }
 
-func TestEnsureImageGenerationTool_GPT53CodexSparkDoesNotInjectTool(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.3-codex-spark","input":"draw a cat"}`)
-	result := ensureImageGenerationTool(body, "gpt-5.3-codex-spark", nil, nil)
-
-	if string(result) != string(body) {
-		t.Fatalf("expected body to be unchanged, got %s", string(result))
+func TestEnsureImageGenerationTool_ExcludedAndIncludedModels(t *testing.T) {
+	tests := []struct {
+		name         string
+		model        string
+		expectInject bool
+	}{
+		{
+			name:         "muse-spark-1.2 excluded",
+			model:        "muse-spark-1.2",
+			expectInject: false,
+		},
+		{
+			name:         "gpt-5.3-codex-spark excluded via suffix",
+			model:        "gpt-5.3-codex-spark",
+			expectInject: false,
+		},
+		{
+			name:         "gpt-5.4 official codex model receives image generation tool",
+			model:        "gpt-5.4",
+			expectInject: true,
+		},
 	}
-	if gjson.GetBytes(result, "tools").Exists() {
-		t.Fatalf("expected no tools for gpt-5.3-codex-spark, got %s", gjson.GetBytes(result, "tools").Raw)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"model":"` + tc.model + `","input":"draw a cat"}`)
+			result := ensureImageGenerationTool(body, tc.model, nil, nil)
+			tools := gjson.GetBytes(result, "tools")
+
+			if !tc.expectInject {
+				if string(result) != string(body) {
+					t.Fatalf("expected body to be unchanged, got %s", string(result))
+				}
+				if tools.Exists() {
+					t.Fatalf("expected no tools for %s, got %s", tc.model, tools.Raw)
+				}
+			} else {
+				if !tools.IsArray() || len(tools.Array()) != 1 {
+					t.Fatalf("expected 1 tool for %s, got %v", tc.model, tools.Raw)
+				}
+				if got := tools.Array()[0].Get("type").String(); got != "image_generation" {
+					t.Fatalf("expected tool type=image_generation, got %s", got)
+				}
+			}
+		})
 	}
 }
 
