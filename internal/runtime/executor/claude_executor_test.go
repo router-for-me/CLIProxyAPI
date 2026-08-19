@@ -6319,3 +6319,100 @@ func TestClaudeExecutor_CacheTTLIsPairedWithExtendedCacheTTLBeta(t *testing.T) {
 		})
 	}
 }
+
+func TestClaudeExecutor_PreservesNativeAgentAndEnvironmentHeaders(t *testing.T) {
+	tests := []struct {
+		name            string
+		incomingHeaders http.Header
+		wantHeaders     map[string]string
+		wantAbsent      []string
+	}{
+		{
+			name: "preserves canonical agent and parent agent headers",
+			incomingHeaders: http.Header{
+				"X-Claude-Code-Agent-Id":        {"subagent-001"},
+				"X-Claude-Code-Parent-Agent-Id": {"parent-agent-root"},
+			},
+			wantHeaders: map[string]string{
+				"X-Claude-Code-Agent-Id":        "subagent-001",
+				"X-Claude-Code-Parent-Agent-Id": "parent-agent-root",
+			},
+		},
+		{
+			name: "preserves lowercased agent and environment headers",
+			incomingHeaders: http.Header{
+				"x-claude-code-agent-id":            {"agent-xyz"},
+				"x-claude-remote-container-id":      {"container-123"},
+				"x-claude-remote-session-id":        {"remote-sess-456"},
+				"x-client-app":                      {"custom-sdk"},
+				"x-anthropic-additional-protection": {"true"},
+			},
+			wantHeaders: map[string]string{
+				"X-Claude-Code-Agent-Id":            "agent-xyz",
+				"X-Claude-Remote-Container-Id":      "container-123",
+				"X-Claude-Remote-Session-Id":        "remote-sess-456",
+				"X-Client-App":                      "custom-sdk",
+				"X-Anthropic-Additional-Protection": "true",
+			},
+		},
+		{
+			name: "does not fabricate agent header when absent",
+			incomingHeaders: http.Header{
+				"User-Agent": {"test-client"},
+			},
+			wantAbsent: []string{
+				"X-Claude-Code-Agent-Id",
+				"X-Claude-Code-Parent-Agent-Id",
+				"X-Claude-Remote-Container-Id",
+				"X-Claude-Remote-Session-Id",
+				"X-Client-App",
+				"X-Anthropic-Additional-Protection",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var seenHeaders http.Header
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seenHeaders = r.Header.Clone()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"msg_agent","type":"message","model":"claude-opus-4-6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+			}))
+			defer server.Close()
+
+			executor := NewClaudeExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				ID: "agent-header-test",
+				Attributes: map[string]string{
+					"api_key":    "sk-ant-test-key",
+					"base_url":   server.URL,
+					"cloak_mode": "always",
+				},
+				Metadata: claudeOAuthTestMetadata(),
+			}
+
+			_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "claude-opus-4-6",
+				Payload: []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatClaude,
+				Headers:      tt.incomingHeaders,
+			})
+			if errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+
+			for wantKey, wantVal := range tt.wantHeaders {
+				if got := seenHeaders.Get(wantKey); got != wantVal {
+					t.Errorf("header %s = %q, want %q", wantKey, got, wantVal)
+				}
+			}
+			for _, absentKey := range tt.wantAbsent {
+				if got := seenHeaders.Get(absentKey); got != "" {
+					t.Errorf("header %s = %q, want absent", absentKey, got)
+				}
+			}
+		})
+	}
+}

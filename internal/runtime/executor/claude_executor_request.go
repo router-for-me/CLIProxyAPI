@@ -624,7 +624,10 @@ func copyClaudeCallerFingerprintHeaders(dst, src http.Header) {
 			lowerName != "x-app" && lowerName != "x-client-request-id" &&
 			!strings.HasPrefix(lowerName, "anthropic-") &&
 			!strings.HasPrefix(lowerName, "x-stainless-") &&
-			!strings.HasPrefix(lowerName, "x-claude-code-") {
+			!strings.HasPrefix(lowerName, "x-claude-code-") &&
+			!strings.HasPrefix(lowerName, "x-claude-remote-") &&
+			lowerName != "x-client-app" &&
+			lowerName != "x-anthropic-additional-protection" {
 			continue
 		}
 		dst.Del(name)
@@ -879,6 +882,19 @@ func applyClaudeHeadersWithNativeProfile(
 			return errSessionID
 		}
 		identityHeader("X-Claude-Code-Session-Id", sessionID)
+	}
+	// Preserve native Claude Code subagent and environment headers when present in the incoming request.
+	for _, hdr := range []string{
+		"X-Claude-Code-Agent-Id",
+		"X-Claude-Code-Parent-Agent-Id",
+		"X-Claude-Remote-Container-Id",
+		"X-Claude-Remote-Session-Id",
+		"X-Client-App",
+		"X-Anthropic-Additional-Protection",
+	} {
+		if val := helps.HeaderValueCaseInsensitive(incomingHeaders, hdr); val != "" {
+			r.Header.Set(hdr, val)
+		}
 	}
 	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
 	// identityHeader prefers the incoming value for a confirmed client, so a confirmed
