@@ -174,6 +174,13 @@ type QuotaState struct {
 	NextRecoverAt time.Time `json:"next_recover_at"`
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
 	BackoffLevel int `json:"backoff_level,omitempty"`
+	// FirstExceededAt records when the current quota-exhaustion episode began.
+	// Anthropic returns no reset headers on 429, so the 5-hour and 7-day
+	// windows are unknowable from upstream. This timestamp lets the operator
+	// estimate them: a rolling 5h window likely resets around FirstExceededAt+5h,
+	// and a weekly window around FirstExceededAt+7d. These are estimates,
+	// not upstream-provided values.
+	FirstExceededAt time.Time `json:"first_exceeded_at,omitempty"`
 }
 
 // ModelState captures the execution state for a specific model under an auth entry.

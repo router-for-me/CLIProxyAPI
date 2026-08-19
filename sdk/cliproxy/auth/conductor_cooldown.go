@@ -841,11 +841,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								}
 							}
 							state.NextRetryAfter = next
+							firstExceeded := state.Quota.FirstExceededAt
+							if firstExceeded.IsZero() {
+								firstExceeded = now
+							}
 							state.Quota = QuotaState{
-								Exceeded:      true,
-								Reason:        "quota",
-								NextRecoverAt: next,
-								BackoffLevel:  backoffLevel,
+								Exceeded:        true,
+								Reason:          "quota",
+								NextRecoverAt:   next,
+								BackoffLevel:    backoffLevel,
+								FirstExceededAt: firstExceeded,
 							}
 							if !disableCooling {
 								suspendReason = "quota"
