@@ -154,8 +154,8 @@ func isPlaceholderAPIKey(key string) bool {
 
 // rejectPlaceholderClaudeAPIKey returns a 401 when the selected Claude credential
 // is a known config placeholder. Shared by Execute, ExecuteStream, CountTokens,
-// and PrepareRequest (HttpRequest) so every entrypoint fails closed before any
-// upstream call.
+// PrepareRequest (HttpRequest), and PrepareRequestAuth so every entrypoint
+// fails closed before any upstream call, including OAuth profile fetch.
 func rejectPlaceholderClaudeAPIKey(auth *cliproxyauth.Auth) error {
 	apiKey, _ := claudeCreds(auth)
 	if !isPlaceholderAPIKey(apiKey) {
