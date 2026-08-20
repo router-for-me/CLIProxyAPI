@@ -450,7 +450,7 @@ nonstream-keepalive-interval: 0
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1
 #     prefix: "cb" # optional: require calls like "cb/glm-5.2" to target this credential
 #     disable-cooling: false # optional override
-#     base-url: "https://copilot.tencent.com/v2/chat/completions" # optional override
+#     base-url: "https://copilot.tencent.com/v2" # optional override (executor appends /chat/completions)
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
