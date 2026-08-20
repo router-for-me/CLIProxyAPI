@@ -228,6 +228,17 @@ codex:
   identity-confuse: false
   # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
   disable-codex-cloaking: false
+  # Hold back the initial handshake events (response.created, response.in_progress and the
+  # websocket metadata frames) until the upstream emits its first generated event.
+  # Why: the upstream smuggles `server_is_overloaded` rejections *inside* an HTTP 200 stream,
+  # right after those handshake events, instead of returning 503 on the wire. Buffering them
+  # keeps the downstream response headers uncommitted long enough to transparently retry on
+  # another credential. Only overload/rate-limit rejections trigger failover; every other
+  # terminal failure is still delivered in-stream exactly as before.
+  # Trade-off: response headers are delayed until generation starts, which can trip client or
+  # reverse-proxy read timeouts (e.g. nginx proxy_read_timeout) on long reasoning requests.
+  # Default: false
+  stream-bootstrap-buffering: false
   # When true, optimize Codex Desktop, codex-tui, and codex_cli_rs requests for multi-agent v2.
   # This refreshes Codex spawn_agent model details, removes message parameter encryption,
   # normalizes encrypted agent_message content for Codex, and converts agent_message input
