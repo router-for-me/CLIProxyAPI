@@ -887,6 +887,8 @@ func main() {
 		cmd.DoKiroIDCLogin(cfg, options, kiroIDCStartURL, kiroIDCRegion, kiroIDCFlow)
 	} else if xaiLogin {
 		cmd.DoXAILogin(cfg, options)
+	} else if zaiLogin {
+		cmd.DoZAILogin(cfg, options, zaiProvider)
 	} else if qoderLogin {
 		cmd.DoQoderLogin(cfg, options)
 	} else {

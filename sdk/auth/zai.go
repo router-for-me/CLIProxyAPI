@@ -9,6 +9,7 @@ import (
 	zaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/zai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -75,10 +76,73 @@ func (a ZAIAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *L
 		}
 	}
 
+	// Wait for the loopback callback, or a manually pasted callback URL when the
+	// operator's browser cannot reach 127.0.0.1 (remote/desktop environments).
+	var manualPromptC <-chan time.Time
+	if opts.Prompt != nil {
+		manualPromptTimer := time.NewTimer(15 * time.Second)
+		manualPromptC = manualPromptTimer.C
+		defer manualPromptTimer.Stop()
+	}
+
+	var manualInputCh <-chan string
+	var manualInputErrCh <-chan error
+
 	fmt.Println("Waiting for authorization...")
-	authResult, err := authSvc.WaitForAuthorization(ctx, init)
+	authResult, err := func() (*zaiauth.ReadyResult, error) {
+		waitResult := make(chan *zaiauth.ReadyResult, 1)
+		waitErr := make(chan error, 1)
+		go func() {
+			ready, errWait := authSvc.WaitForAuthorization(ctx, init)
+			if errWait != nil {
+				waitErr <- errWait
+				return
+			}
+			waitResult <- ready
+		}()
+
+		for {
+			select {
+			case ready := <-waitResult:
+				return ready, nil
+			case errWait := <-waitErr:
+				return nil, fmt.Errorf("zai: %w", errWait)
+			case <-ctx.Done():
+				return nil, fmt.Errorf("zai: context cancelled: %w", ctx.Err())
+			case <-manualPromptC:
+				manualPromptC = nil
+				select {
+				case ready := <-waitResult:
+					return ready, nil
+				case errWait := <-waitErr:
+					return nil, fmt.Errorf("zai: %w", errWait)
+				default:
+				}
+				manualInputCh, manualInputErrCh = misc.AsyncPrompt(opts.Prompt, "Paste the Z.AI callback URL (or press Enter to keep waiting): ")
+			case input := <-manualInputCh:
+				manualInputCh = nil
+				manualInputErrCh = nil
+				parsed, errParse := misc.ParseOAuthCallback(input)
+				if errParse != nil {
+					return nil, fmt.Errorf("zai: %w", errParse)
+				}
+				if parsed == nil {
+					continue
+				}
+				if parsed.Error != "" {
+					return nil, fmt.Errorf("zai: authorization: %s", parsed.Error)
+				}
+				if parsed.Code != "" {
+					authSvc.InjectCallback(parsed.Code)
+					continue
+				}
+			case errManual := <-manualInputErrCh:
+				return nil, errManual
+			}
+		}
+	}()
 	if err != nil {
-		return nil, fmt.Errorf("zai: %w", err)
+		return nil, err
 	}
 
 	// Exchange the OAuth login for a standard coding-plan API key (the same

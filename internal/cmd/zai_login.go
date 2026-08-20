@@ -21,11 +21,16 @@ func DoZAILogin(cfg *config.Config, options *LoginOptions, provider string) {
 
 	provider = zaiauth.NormalizeProvider(provider)
 
+	promptFn := options.Prompt
+	if promptFn == nil {
+		promptFn = defaultProjectPrompt()
+	}
+
 	manager := newAuthManager()
 	authOpts := &sdkAuth.LoginOptions{
 		NoBrowser:    options.NoBrowser,
 		Metadata:     map[string]string{"provider": provider},
-		Prompt:       options.Prompt,
+		Prompt:       promptFn,
 		CallbackPort: options.CallbackPort,
 	}
 
