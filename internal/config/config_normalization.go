@@ -179,12 +179,16 @@ func (cfg *Config) SanitizeOpenCodeGoKeys() {
 	cfg.OpenCodeGoKey = normalizeCodexKeyEntries(cfg.OpenCodeGoKey, false)
 }
 
-// SanitizePoolsideKeys applies the same normalization rules as codex-api-key.
+// SanitizePoolsideKeys normalizes Poolside key entries. Entries are NOT removed
+// when BaseURL is empty: the Poolside executor supplies a gateway default
+// base-url (https://inference.poolside.ai/v1), so an empty BaseURL is valid and
+// must survive config load — same rule as OpenCode. Dropping it here was the
+// root cause of Poolside keys silently disappearing from the proxy.
 func (cfg *Config) SanitizePoolsideKeys() {
 	if cfg == nil {
 		return
 	}
-	cfg.PoolsideKey = sanitizeCodexKeyEntries(cfg.PoolsideKey)
+	cfg.PoolsideKey = normalizeCodexKeyEntries(cfg.PoolsideKey, false)
 }
 
 // SanitizeXAIKeys removes xAI API key entries missing a BaseURL.
