@@ -52,13 +52,13 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
 	// xAI API Keys
 	out = append(out, s.synthesizeXAIKeys(ctx)...)
-	// Command Code: prefer the `cmdc login` CLI credential (default Go path).
-	// The explicit commandcode-api-key config remains an optional advanced
-	// override and is only synthesized when no CLI credential exists.
-	if cli := s.synthesizeCommandCodeCLI(ctx); len(cli) > 0 {
-		out = append(out, cli...)
+	// Command Code: an explicit commandcode-api-key config takes precedence
+	// (matching other providers' config-key semantics). When no config key is
+	// present, fall back to the `cmdc login` CLI credential (default Go path).
+	if keys := s.synthesizeCommandCodeKeys(ctx); len(keys) > 0 {
+		out = append(out, keys...)
 	} else {
-		out = append(out, s.synthesizeCommandCodeKeys(ctx)...)
+		out = append(out, s.synthesizeCommandCodeCLI(ctx)...)
 	}
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)

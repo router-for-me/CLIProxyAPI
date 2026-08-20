@@ -187,9 +187,9 @@ func TestSynthesizeCommandCodeCLI_DefaultConfigNeedsNoAPIKey(t *testing.T) {
 	}
 }
 
-func TestSynthesizeCommandCodeCLI_ConfigKeyUsedOnlyWhenNoCLI(t *testing.T) {
-	// CLI credential absent + explicit commandcode-api-key present: config path
-	// (advanced override) must still produce an auth.
+func TestSynthesizeCommandCodeCLI_ConfigKeyTakesPrecedence(t *testing.T) {
+	// CLI credential absent + explicit commandcode-api-key present: config key
+	// path must produce an auth (config-key precedence).
 	orig := commandCodeCLIAuthPathFn
 	commandCodeCLIAuthPathFn = func() (string, error) {
 		return filepath.Join(t.TempDir(), "missing.json"), nil
@@ -220,5 +220,40 @@ func TestSynthesizeCommandCodeCLI_ConfigKeyUsedOnlyWhenNoCLI(t *testing.T) {
 	}
 	if cmdCount != 1 {
 		t.Errorf("expected config override auth, got %d", cmdCount)
+	}
+}
+
+// TestSynthesizeCommandCodeCLI_ConfigKeyBeatsCLICredential verifies the
+// precedence rule when both sources exist: an explicit commandcode-api-key
+// config wins over the auto-imported `cmdc login` CLI credential.
+func TestSynthesizeCommandCodeCLI_ConfigKeyBeatsCLICredential(t *testing.T) {
+	// Both CLI credential and config key present.
+	cleanup := writeCommandCodeCLIAuth(t, fakeCommandCodeCLICredential("cmdc-cli-credential-key"))
+	defer cleanup()
+
+	cfg := &config.Config{
+		CommandCodeKey: []config.CommandCodeKey{{APIKey: "cmdc-config-explicit-key"}},
+	}
+	ctx := &SynthesisContext{
+		Config:      cfg,
+		Now:         time.Unix(1700000000, 0),
+		IDGenerator: NewStableIDGenerator(),
+	}
+	s := NewConfigSynthesizer()
+	auths, err := s.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("Synthesize error: %v", err)
+	}
+	cmdCount := 0
+	for _, a := range auths {
+		if a.Provider == constant.CommandCode {
+			cmdCount++
+			if got := a.Attributes["api_key"]; got != "cmdc-config-explicit-key" {
+				t.Errorf("explicit config key must win over CLI credential, got %q", got)
+			}
+		}
+	}
+	if cmdCount != 1 {
+		t.Errorf("expected exactly one commandcode auth, got %d", cmdCount)
 	}
 }

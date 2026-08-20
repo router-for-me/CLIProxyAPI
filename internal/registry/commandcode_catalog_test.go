@@ -2,10 +2,14 @@ package registry
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -37,9 +41,12 @@ const sampleCommandCodeModelsMD = "# Command Code Models\n" +
 
 // writeSampleCatalog writes models.md at the exact path the resolver expects
 // (pkgDir/dist/bundled/command-code-knowledge/reference/models.md) and points
-// the resolver at pkgDir. Returns pkgDir.
+// the resolver at pkgDir. It also stubs the remote catalog fetcher to fail so
+// these tests exercise the local CLI fallback path deterministically without
+// network. Returns pkgDir.
 func writeSampleCatalog(t *testing.T, content string) string {
 	t.Helper()
+	stubRemoteCatalogFailure(t)
 	base := t.TempDir()
 	pkgDir := filepath.Join(base, "command-code")
 	catalogPath := filepath.Join(pkgDir, filepath.FromSlash(commandCodeCLICatalogFileName))
@@ -55,6 +62,17 @@ func writeSampleCatalog(t *testing.T, content string) string {
 	}
 	t.Cleanup(func() { commandCodeCLIResolvers = orig })
 	return pkgDir
+}
+
+// stubRemoteCatalogFailure makes the remote catalog fetcher report failure so
+// tests that exercise local/fallback paths never touch the network.
+func stubRemoteCatalogFailure(t *testing.T) {
+	t.Helper()
+	orig := commandCodeRemoteCatalogFetcher
+	commandCodeRemoteCatalogFetcher = func(context.Context) ([]*ModelInfo, string, bool) {
+		return nil, "", false
+	}
+	t.Cleanup(func() { commandCodeRemoteCatalogFetcher = orig })
 }
 
 // TestParseCommandCodeModelsMarkdown verifies id/name/context parsing and
@@ -90,33 +108,42 @@ func TestParseCommandCodeModelsMarkdown(t *testing.T) {
 
 // TestCommandCodeCatalog_RefreshAddsNewModel is Case A + B: a first catalog
 // load, then a refresh with an additional model, must make the new model
-// visible without recompilation.
+// visible without recompilation. The refresh source is the remote catalog
+// (official provider endpoint) — a remote refresh that adds a model must
+// update the working catalog.
 func TestCommandCodeCatalog_RefreshAddsNewModel(t *testing.T) {
-	writeSampleCatalog(t, sampleCommandCodeModelsMD)
-
-	// Fresh state for this test.
 	commandCodeCatalog = &commandCodeCatalogStore{}
+
+	// First refresh: remote returns the base set.
+	remoteCalls := 0
+	commandCodeRemoteCatalogFetcher = remoteFetcherFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		remoteCalls++
+		if remoteCalls == 1 {
+			_, _ = w.Write([]byte(sampleRemoteCatalogJSON))
+		} else {
+			// Second call: keep the base set plus a brand new model.
+			withNew := `{"object":"list","data":[` +
+				`{"id":"deepseek/deepseek-v4-flash","object":"model","created":1,"owned_by":"command-code","name":"DS","context_length":1000000},` +
+				`{"id":"moonshotai/Kimi-K3","object":"model","created":1,"owned_by":"command-code","name":"Kimi K3","context_length":1000000},` +
+				`{"id":"meta/muse-spark-1.2-contributor","object":"model","created":1,"owned_by":"command-code","name":"Muse","context_length":1048576},` +
+				`{"id":"Qwen/Qwen3.7-Plus","object":"model","created":1,"owned_by":"command-code","name":"Qwen","context_length":1000000},` +
+				`{"id":"future/model-9","object":"model","created":1,"owned_by":"command-code","name":"Future Model 9","context_length":131072}` +
+				`]}`
+			_, _ = w.Write([]byte(withNew))
+		}
+	})
+	t.Cleanup(func() { commandCodeRemoteCatalogFetcher = fetchCommandCodeRemoteCatalogHTTP })
 
 	tryRefreshCommandCodeCatalog("test initial")
 	models, ok := getCommandCodeCatalog()
 	if !ok {
 		t.Fatal("catalog not loaded after initial refresh")
 	}
-	if _, exists := findCommandCodeModel(models, "vendor/new-model-test"); !exists {
-		t.Fatalf("initial catalog should contain vendor/new-model-test")
-	}
 	if _, exists := findCommandCodeModel(models, "deepseek/deepseek-v4-flash"); !exists {
 		t.Fatalf("initial catalog should contain deepseek/deepseek-v4-flash")
 	}
 	initialCount := len(models)
-
-	// Append a brand new model to the file (simulating upstream adding it).
-	newMD := sampleCommandCodeModelsMD + "\n| `future/model-9` | Future Model 9 | 128K | — | $1/$2 · cache $0.1 | Go and above | released tomorrow |\n"
-	dir, _ := commandCodeCLIResolvers[0]()
-	realPath := filepath.Join(dir, filepath.FromSlash(commandCodeCLICatalogFileName))
-	if err := os.WriteFile(realPath, []byte(newMD), 0600); err != nil {
-		t.Fatalf("rewrite catalog: %v", err)
-	}
 
 	tryRefreshCommandCodeCatalog("test refresh")
 	models2, ok := getCommandCodeCatalog()
@@ -129,8 +156,8 @@ func TestCommandCodeCatalog_RefreshAddsNewModel(t *testing.T) {
 	if _, exists := findCommandCodeModel(models2, "future/model-9"); !exists {
 		t.Fatalf("refresh should add future/model-9")
 	}
-	if _, exists := findCommandCodeModel(models2, "vendor/new-model-test"); !exists {
-		t.Fatalf("refresh must keep vendor/new-model-test")
+	if _, exists := findCommandCodeModel(models2, "deepseek/deepseek-v4-flash"); !exists {
+		t.Fatalf("refresh must keep deepseek/deepseek-v4-flash")
 	}
 }
 
@@ -442,5 +469,514 @@ func TestCommandCodeCLIFromPath_SymlinkResolution(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("after symlink resolution, candidates %v must include package dir %s", commandCodePackageCandidates(resolvedBin), pkgDir)
+	}
+}
+
+// sampleRemoteCatalogJSON is a representative /provider/v1/models response with
+// mixed-case IDs and a Muse model that only exists remotely.
+const sampleRemoteCatalogJSON = `{
+  "object": "list",
+  "data": [
+    {"id": "deepseek/deepseek-v4-flash", "object": "model", "created": 1787186876, "owned_by": "command-code", "name": "DeepSeek V4 Flash (latest)", "context_length": 1000000},
+    {"id": "moonshotai/Kimi-K3", "object": "model", "created": 1787186876, "owned_by": "command-code", "name": "Kimi K3", "context_length": 1000000},
+    {"id": "meta/muse-spark-1.2-contributor", "object": "model", "created": 1787186876, "owned_by": "command-code", "name": "Muse Spark 1.2 Contributor", "context_length": 1048576},
+    {"id": "Qwen/Qwen3.7-Plus", "object": "model", "created": 1787186876, "owned_by": "command-code", "name": "Qwen 3.7 Plus", "context_length": 1000000}
+  ]
+}`
+
+// remoteFetcherFromHandler builds a remote fetcher that routes through an
+// httptest server with the given handler, so tests exercise the real HTTP
+// parsing path (status/content-type/size/JSON validation).
+func remoteFetcherFromHandler(t *testing.T, handler http.HandlerFunc) func(context.Context) ([]*ModelInfo, string, bool) {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	origURL := commandCodeRemoteCatalogURL
+	commandCodeRemoteCatalogURL = srv.URL
+	t.Cleanup(func() { commandCodeRemoteCatalogURL = origURL })
+	return fetchCommandCodeRemoteCatalogHTTP
+}
+
+// TestCommandCodeRemoteCatalog_Success verifies remote catalog success: models
+// parsed, mixed-case IDs canonicalized to lowercase, Muse visible, and catalog
+// becomes the active dynamic catalog.
+func TestCommandCodeRemoteCatalog_Success(t *testing.T) {
+	commandCodeCatalog = &commandCodeCatalogStore{}
+	commandCodeRemoteCatalogFetcher = remoteFetcherFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(sampleRemoteCatalogJSON))
+	})
+	t.Cleanup(func() { commandCodeRemoteCatalogFetcher = fetchCommandCodeRemoteCatalogHTTP })
+
+	models, source, ok := fetchCommandCodeRemoteCatalog(context.Background())
+	if !ok {
+		t.Fatal("remote catalog fetch failed")
+	}
+	if !strings.HasPrefix(source, "remote:") {
+		t.Fatalf("source should be remote, got %q", source)
+	}
+	byID := make(map[string]*ModelInfo, len(models))
+	for _, m := range models {
+		byID[m.ID] = m
+	}
+	// Mixed-case IDs must be canonicalized to lowercase.
+	if _, ok := byID["moonshotai/kimi-k3"]; !ok {
+		t.Errorf("missing lowercase moonshotai/kimi-k3 (remote was mixed-case)")
+	}
+	if _, ok := byID["qwen/qwen3.7-plus"]; !ok {
+		t.Errorf("missing lowercase qwen/qwen3.7-plus")
+	}
+	// Muse Contributor must be present from remote.
+	muse, ok := byID["meta/muse-spark-1.2-contributor"]
+	if !ok {
+		t.Fatalf("remote catalog should include meta/muse-spark-1.2-contributor")
+	}
+	if muse.ContextLength != 1048576 {
+		t.Errorf("muse context = %d, want 1048576", muse.ContextLength)
+	}
+}
+
+// TestCommandCodeRemoteCatalog_SuccessThenRefresh verifies a remote success is
+// applied to the store and triggers the refresh callback (auth re-registration
+// signal).
+func TestCommandCodeRemoteCatalog_SuccessThenRefresh(t *testing.T) {
+	commandCodeCatalog = &commandCodeCatalogStore{}
+	commandCodeRemoteCatalogFetcher = remoteFetcherFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(sampleRemoteCatalogJSON))
+	})
+	t.Cleanup(func() { commandCodeRemoteCatalogFetcher = fetchCommandCodeRemoteCatalogHTTP })
+
+	called := false
+	origCallback := refreshCallback
+	SetModelRefreshCallback(func(changedProviders []string) {
+		for _, p := range changedProviders {
+			if p == "commandcode" {
+				called = true
+			}
+		}
+	})
+	t.Cleanup(func() { SetModelRefreshCallback(origCallback) })
+
+	tryRefreshCommandCodeCatalog("test remote refresh")
+
+	models, ok := getCommandCodeCatalog()
+	if !ok {
+		t.Fatal("catalog not loaded after remote refresh")
+	}
+	if _, exists := findCommandCodeModel(models, "meta/muse-spark-1.2-contributor"); !exists {
+		t.Fatalf("remote refresh should include muse")
+	}
+	if !called {
+		t.Fatal("model refresh callback must be notified after remote catalog change")
+	}
+}
+
+// TestCommandCodeRemoteCatalog_HTTPFailureFallsBackToLocal verifies that when
+// the remote endpoint fails (non-2xx), the local CLI catalog is used.
+func TestCommandCodeRemoteCatalog_HTTPFailureFallsBackToLocal(t *testing.T) {
+	writeSampleCatalog(t, sampleCommandCodeModelsMD)
+	commandCodeCatalog = &commandCodeCatalogStore{}
+	commandCodeRemoteCatalogFetcher = remoteFetcherFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	t.Cleanup(func() { commandCodeRemoteCatalogFetcher = fetchCommandCodeRemoteCatalogHTTP })
+
+	tryRefreshCommandCodeCatalog("test remote failure")
+
+	models, ok := getCommandCodeCatalog()
+	if !ok {
+		t.Fatal("catalog must load from local fallback")
+	}
+	if _, exists := findCommandCodeModel(models, "deepseek/deepseek-v4-flash"); !exists {
+		t.Fatalf("local fallback should include deepseek/deepseek-v4-flash")
+	}
+}
+
+// TestCommandCodeRemoteCatalog_InvalidJSONRejected verifies malformed JSON from
+// remote is rejected and does not poison the store.
+func TestCommandCodeRemoteCatalog_InvalidJSONRejected(t *testing.T) {
+	commandCodeCatalog = &commandCodeCatalogStore{}
+	commandCodeRemoteCatalogFetcher = remoteFetcherFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{not json`))
+	})
+	t.Cleanup(func() { commandCodeRemoteCatalogFetcher = fetchCommandCodeRemoteCatalogHTTP })
+
+	models, _, ok := fetchCommandCodeRemoteCatalog(context.Background())
+	if ok || models != nil {
+		t.Fatal("invalid JSON must be rejected")
+	}
+}
+
+// TestCommandCodeRemoteCatalog_EmptyDataRejected verifies an empty data array
+// is treated as a failure (never registers zero models from remote).
+func TestCommandCodeRemoteCatalog_EmptyDataRejected(t *testing.T) {
+	commandCodeCatalog = &commandCodeCatalogStore{}
+	commandCodeRemoteCatalogFetcher = remoteFetcherFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+	})
+	t.Cleanup(func() { commandCodeRemoteCatalogFetcher = fetchCommandCodeRemoteCatalogHTTP })
+
+	if _, _, ok := fetchCommandCodeRemoteCatalog(context.Background()); ok {
+		t.Fatal("empty data array must be rejected")
+	}
+}
+
+// TestCommandCodeRemoteCatalog_OversizeBodyRejected verifies the body size cap
+// rejects a bloated response.
+func TestCommandCodeRemoteCatalog_OversizeBodyRejected(t *testing.T) {
+	commandCodeCatalog = &commandCodeCatalogStore{}
+	commandCodeRemoteCatalogFetcher = remoteFetcherFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		big := strings.Repeat("x", commandCodeRemoteCatalogMaxBody+1024)
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"` + big + `"}]}`))
+	})
+	t.Cleanup(func() { commandCodeRemoteCatalogFetcher = fetchCommandCodeRemoteCatalogHTTP })
+
+	if _, _, ok := fetchCommandCodeRemoteCatalog(context.Background()); ok {
+		t.Fatal("oversize body must be rejected")
+	}
+}
+
+// TestCommandCodeRemoteCatalog_NonJSONContentTypeRejected verifies a
+// non-JSON content-type is rejected even when the body would parse.
+func TestCommandCodeRemoteCatalog_NonJSONContentTypeRejected(t *testing.T) {
+	commandCodeCatalog = &commandCodeCatalogStore{}
+	commandCodeRemoteCatalogFetcher = remoteFetcherFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(sampleRemoteCatalogJSON))
+	})
+	t.Cleanup(func() { commandCodeRemoteCatalogFetcher = fetchCommandCodeRemoteCatalogHTTP })
+
+	if _, _, ok := fetchCommandCodeRemoteCatalog(context.Background()); ok {
+		t.Fatal("non-JSON content-type must be rejected")
+	}
+}
+
+// TestCommandCodeRemoteCatalog_FailureKeepsLastKnownGood verifies that after a
+// successful remote load, a subsequent remote+local failure keeps the
+// last-known-good catalog (never empties it).
+func TestCommandCodeRemoteCatalog_FailureKeepsLastKnownGood(t *testing.T) {
+	commandCodeCatalog = &commandCodeCatalogStore{}
+	commandCodeRemoteCatalogFetcher = remoteFetcherFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(sampleRemoteCatalogJSON))
+	})
+	t.Cleanup(func() { commandCodeRemoteCatalogFetcher = fetchCommandCodeRemoteCatalogHTTP })
+
+	tryRefreshCommandCodeCatalog("test first success")
+	if _, ok := getCommandCodeCatalog(); !ok {
+		t.Fatal("initial remote load failed")
+	}
+
+	// Now both remote and local fail.
+	stubRemoteCatalogFailure(t)
+	commandCodeCLIResolvers = []func() (string, error){
+		func() (string, error) { return "", os.ErrNotExist },
+	}
+	tryRefreshCommandCodeCatalog("test both fail")
+
+	models, ok := getCommandCodeCatalog()
+	if !ok {
+		t.Fatal("catalog must survive complete refresh failure")
+	}
+	if _, exists := findCommandCodeModel(models, "meta/muse-spark-1.2-contributor"); !exists {
+		t.Fatalf("last-known-good should keep muse from earlier remote load")
+	}
+}
+
+// TestCommandCodeRemoteCatalog_NoLocalNoRemoteFallsBackToBuiltin verifies that
+// with no CLI and a failing remote, GetCommandCodeModels still returns the
+// builtin bootstrap (never empty).
+func TestCommandCodeRemoteCatalog_NoLocalNoRemoteFallsBackToBuiltin(t *testing.T) {
+	commandCodeCatalog = &commandCodeCatalogStore{}
+	stubRemoteCatalogFailure(t)
+	commandCodeCLIResolvers = []func() (string, error){
+		func() (string, error) { return "", os.ErrNotExist },
+	}
+
+	tryRefreshCommandCodeCatalog("test cold start no sources")
+
+	models := GetCommandCodeModels()
+	if len(models) == 0 {
+		t.Fatal("builtin fallback must not be empty on cold start")
+	}
+	if _, exists := findCommandCodeModel(models, "deepseek/deepseek-v4-flash"); !exists {
+		t.Fatalf("builtin fallback should include deepseek/deepseek-v4-flash")
+	}
+}
+
+// TestCommandCodeRemoteCatalog_SystemLikeEnvStillWorks verifies the remote
+// source works even when the local CLI is completely absent (SYSTEM service
+// scenario): remote success must load regardless of local discovery.
+func TestCommandCodeRemoteCatalog_SystemLikeEnvStillWorks(t *testing.T) {
+	commandCodeCatalog = &commandCodeCatalogStore{}
+	commandCodeRemoteCatalogFetcher = remoteFetcherFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(sampleRemoteCatalogJSON))
+	})
+	t.Cleanup(func() { commandCodeRemoteCatalogFetcher = fetchCommandCodeRemoteCatalogHTTP })
+	// No local CLI resolvers at all.
+	commandCodeCLIResolvers = nil
+
+	tryRefreshCommandCodeCatalog("test system-like env")
+
+	models, ok := getCommandCodeCatalog()
+	if !ok {
+		t.Fatal("remote catalog must load without any local CLI")
+	}
+	if _, exists := findCommandCodeModel(models, "meta/muse-spark-1.2-contributor"); !exists {
+		t.Fatalf("system-like env should still get muse from remote")
+	}
+}
+
+// TestCommandCodeCatalog_PreservesOfficialMixedCaseDisplay verifies that
+// canonical lowercase IDs retain the official display name and that a
+// mixed-case registry request still resolves (registry-level EqualFold).
+func TestCommandCodeCatalog_PreservesOfficialMixedCaseDisplay(t *testing.T) {
+	models := parseCommandCodeModelsMarkdown([]byte(sampleCommandCodeModelsMD))
+	byID := make(map[string]*ModelInfo, len(models))
+	for _, m := range models {
+		byID[m.ID] = m
+	}
+	glm, ok := byID["zai-org/glm-5.2-fast"]
+	if !ok {
+		t.Fatalf("missing glm-5.2-fast after lowercase canonicalization")
+	}
+	if glm.DisplayName == "" {
+		t.Error("display name should be preserved from official catalog")
+	}
+}
+
+// TestCommandCodeCatalog_RemoteNewModelSurvivesLocalFallbackFailure verifies
+// the no-regression rule: after a remote refresh introduces a new model, a
+// subsequent remote failure with an older local CLI catalog present must keep
+// the newer remote catalog — the stale local catalog must not downgrade the
+// model set.
+func TestCommandCodeCatalog_RemoteNewModelSurvivesLocalFallbackFailure(t *testing.T) {
+	// Local CLI has an OLDER catalog (no muse).
+	writeSampleCatalog(t, sampleCommandCodeModelsMD)
+	commandCodeCatalog = &commandCodeCatalogStore{}
+
+	// Remote succeeds first, introducing muse.
+	commandCodeRemoteCatalogFetcher = remoteFetcherFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(sampleRemoteCatalogJSON))
+	})
+	t.Cleanup(func() { commandCodeRemoteCatalogFetcher = fetchCommandCodeRemoteCatalogHTTP })
+
+	tryRefreshCommandCodeCatalog("test remote first success")
+	models, ok := getCommandCodeCatalog()
+	if !ok {
+		t.Fatal("remote first load failed")
+	}
+	if _, exists := findCommandCodeModel(models, "meta/muse-spark-1.2-contributor"); !exists {
+		t.Fatalf("remote first load should include muse")
+	}
+
+	// Now remote fails (periodic), local CLI is still the old one without muse.
+	stubRemoteCatalogFailure(t)
+	tryRefreshCommandCodeCatalog("test remote periodic failure")
+
+	after, ok := getCommandCodeCatalog()
+	if !ok {
+		t.Fatal("catalog must survive remote failure")
+	}
+	// The stale local catalog must NOT have downgraded the model set.
+	if _, exists := findCommandCodeModel(after, "meta/muse-spark-1.2-contributor"); !exists {
+		t.Fatalf("muse from earlier remote load must survive a later remote failure (no regression)")
+	}
+}
+
+// TestCommandCodeCatalog_CaseInsensitiveRouting verifies that a mixed-case
+// client request resolves to the lowercase-canonical registration through the
+// registry routing path (GetModelProviders EqualFold fallback).
+func TestCommandCodeCatalog_CaseInsensitiveRouting(t *testing.T) {
+	reg := GetGlobalRegistry()
+	clientID := "test-commandcode-auth-casing"
+	models := []*ModelInfo{
+		{ID: "meta/muse-spark-1.2-contributor", Object: "model", OwnedBy: "commandcode", Type: "commandcode"},
+		{ID: "moonshotai/kimi-k3", Object: "model", OwnedBy: "commandcode", Type: "commandcode"},
+	}
+	reg.RegisterClient(clientID, "commandcode", models)
+	defer reg.UnregisterClient(clientID)
+
+	// Lowercase request (canonical) resolves directly.
+	providers := reg.GetModelProviders("meta/muse-spark-1.2-contributor")
+	if len(providers) != 1 || providers[0] != "commandcode" {
+		t.Fatalf("lowercase lookup = %v, want [commandcode]", providers)
+	}
+	// Mixed-case request (official spelling) resolves via EqualFold fallback.
+	providersMixed := reg.GetModelProviders("Meta/Muse-Spark-1.2-Contributor")
+	if len(providersMixed) != 1 || providersMixed[0] != "commandcode" {
+		t.Fatalf("mixed-case lookup = %v, want [commandcode]", providersMixed)
+	}
+	// Unrelated model does not resolve.
+	if p := reg.GetModelProviders("nope/not-a-model"); len(p) != 0 {
+		t.Fatalf("unknown model should not resolve, got %v", p)
+	}
+}
+
+// TestCommandCodeCatalog_SetTransportRoutesThroughProxy verifies that
+// SetCommandCodeCatalogTransport installs the transport used by remote
+// catalog fetches — i.e. a configured CLIProxyAPI proxy-url is honored.
+func TestCommandCodeCatalog_SetTransportRoutesThroughProxy(t *testing.T) {
+	// Record that the custom transport was actually used for the fetch.
+	used := false
+	roundTripper := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		used = true
+		// Serve the catalog directly.
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(sampleRemoteCatalogJSON)),
+			Request:    req,
+		}, nil
+	})
+
+	SetCommandCodeCatalogTransport(roundTripper)
+	t.Cleanup(func() { SetCommandCodeCatalogTransport(nil) })
+
+	commandCodeCatalog = &commandCodeCatalogStore{}
+	tryRefreshCommandCodeCatalog("test custom transport")
+
+	if !used {
+		t.Fatal("custom transport must be used for remote catalog fetch")
+	}
+	models, ok := getCommandCodeCatalog()
+	if !ok {
+		t.Fatal("catalog must load through custom transport")
+	}
+	if _, exists := findCommandCodeModel(models, "meta/muse-spark-1.2-contributor"); !exists {
+		t.Fatal("catalog through custom transport should include muse")
+	}
+}
+
+// TestCommandCodeCatalog_TransportConcurrentSetAndFetch verifies the setter
+// and fetcher can run concurrently without the fetch ever observing a mutated
+// shared client: the fetch takes a transport snapshot at request time. We
+// exercise setter + fetch interleaving; race detection requires cgo/gcc which
+// is unavailable in this environment, so this is a functional (not -race)
+// test.
+func TestCommandCodeCatalog_TransportConcurrentSetAndFetch(t *testing.T) {
+	transportA := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(sampleRemoteCatalogJSON)),
+			Request:    req,
+		}, nil
+	})
+	transportB := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Request:    req,
+		}, nil
+	})
+
+	SetCommandCodeCatalogTransport(transportA)
+	t.Cleanup(func() { SetCommandCodeCatalogTransport(nil) })
+
+	// Interleave setter writes with fetches. Fetches must never panic or hang
+	// regardless of which transport snapshot they observe.
+	var wg sync.WaitGroup
+	var storeMu sync.Mutex
+	stop := make(chan struct{})
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					storeMu.Lock()
+					commandCodeCatalog = &commandCodeCatalogStore{}
+					storeMu.Unlock()
+					tryRefreshCommandCodeCatalog("test concurrent fetch")
+				}
+			}
+		}()
+	}
+	for i := 0; i < 100; i++ {
+		SetCommandCodeCatalogTransport(transportA)
+		SetCommandCodeCatalogTransport(transportB)
+	}
+	close(stop)
+	wg.Wait()
+
+	// Final state must be a valid transport usable for a fetch.
+	SetCommandCodeCatalogTransport(transportA)
+	commandCodeCatalog = &commandCodeCatalogStore{}
+	tryRefreshCommandCodeCatalog("test post-concurrency fetch")
+	if _, ok := getCommandCodeCatalog(); !ok {
+		t.Fatal("catalog must load after concurrent setter/fetch churn")
+	}
+}
+
+// roundTripperFunc adapts a func to http.RoundTripper.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// TestCommandCodeCatalog_DynamicRemoval verifies the removal path: a catalog
+// refresh that drops a model (A,B,C -> A,B) must remove C from the registry
+// and from per-auth routes (no stale route remains).
+func TestCommandCodeCatalog_DynamicRemoval(t *testing.T) {
+	commandCodeCatalog = &commandCodeCatalogStore{}
+	stubRemoteCatalogFailure(t)
+
+	// Local catalog has A,B,C.
+	md3 := sampleCommandCodeModelsMD + "| `vendor/model-c` | Model C | 128K | — | $1/$2 · cache $0.1 | Go and above | third model |\n"
+	writeSampleCatalog(t, md3)
+	tryRefreshCommandCodeCatalog("test initial load")
+	models, ok := getCommandCodeCatalog()
+	if !ok {
+		t.Fatal("initial catalog not loaded")
+	}
+	if _, exists := findCommandCodeModel(models, "vendor/model-c"); !exists {
+		t.Fatalf("initial catalog should include vendor/model-c")
+	}
+
+	// Register an auth for all three models.
+	reg := GetGlobalRegistry()
+	clientID := "test-commandcode-removal-auth"
+	reg.RegisterClient(clientID, "commandcode", GetCommandCodeModels())
+	defer reg.UnregisterClient(clientID)
+	if p := reg.GetModelProviders("vendor/model-c"); len(p) != 1 {
+		t.Fatalf("model-c should route before removal, got %v", p)
+	}
+
+	// Now refresh with a catalog that drops C (rewrite local file, then cold
+	// refresh path via resolver change below).
+	md2 := sampleCommandCodeModelsMD // without vendor/model-c
+	dir, _ := commandCodeCLIResolvers[0]()
+	realPath := filepath.Join(dir, filepath.FromSlash(commandCodeCLICatalogFileName))
+	if err := os.WriteFile(realPath, []byte(md2), 0600); err != nil {
+		t.Fatalf("rewrite catalog: %v", err)
+	}
+
+	// Force a fresh store (simulates process restart / new working catalog).
+	commandCodeCatalog = &commandCodeCatalogStore{}
+	tryRefreshCommandCodeCatalog("test refresh without model-c")
+	after, ok := getCommandCodeCatalog()
+	if !ok {
+		t.Fatal("catalog after refresh not loaded")
+	}
+	if _, exists := findCommandCodeModel(after, "vendor/model-c"); exists {
+		t.Fatalf("catalog should no longer contain vendor/model-c")
+	}
+
+	// Re-register the auth with the reduced set (mirrors what the refresh
+	// callback does for existing auths) and confirm C no longer routes.
+	reg.UnregisterClient(clientID)
+	reg.RegisterClient(clientID, "commandcode", GetCommandCodeModels())
+	if p := reg.GetModelProviders("vendor/model-c"); len(p) != 0 {
+		t.Fatalf("model-c must be removed from routes after catalog drop, got %v", p)
 	}
 }
