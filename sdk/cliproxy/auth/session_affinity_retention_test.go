@@ -623,3 +623,159 @@ func TestSessionAffinity_StickyTemporaryFallbackTTLExpiry(t *testing.T) {
 		t.Fatal("fallback Pick() after TTL returned nil")
 	}
 }
+
+func TestSessionAffinity_StickyTemporaryFallbackSharedAcrossAliases(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Hour,
+	})
+	defer selector.Stop()
+
+	authA := &Auth{ID: "auth-a"}
+	authB := &Auth{ID: "auth-b"}
+	authC := &Auth{ID: "auth-c"}
+	allAuths := []*Auth{authA, authB, authC}
+
+	// Payload with both prompt_cache_key (primary) and conversation.id (fallback alias)
+	payloadBoth := []byte(`{"prompt_cache_key":"pck-shared-test","conversation":{"id":"conv-shared-test"}}`)
+	optsBoth := cliproxyexecutor.Options{OriginalRequest: payloadBoth}
+
+	// Payload with ONLY conversation.id (the alias)
+	payloadConvOnly := []byte(`{"conversation":{"id":"conv-shared-test"}}`)
+	optsConvOnly := cliproxyexecutor.Options{OriginalRequest: payloadConvOnly}
+
+	// Payload with ONLY prompt_cache_key (the primary)
+	payloadPckOnly := []byte(`{"prompt_cache_key":"pck-shared-test"}`)
+	optsPckOnly := cliproxyexecutor.Options{OriginalRequest: payloadPckOnly}
+
+	// 1. Initial request with both aliases establishes binding to auth-a on both
+	first, err := selector.Pick(context.Background(), "claude", "claude-3", optsBoth, allAuths)
+	if err != nil {
+		t.Fatalf("initial Pick() error = %v", err)
+	}
+	if first.ID != "auth-a" {
+		t.Fatalf("initial Pick() = %q, want auth-a", first.ID)
+	}
+	selector.OnResult(Result{AuthID: first.ID, Provider: "claude", Model: "claude-3", Options: optsBoth, Success: true})
+
+	// 2. Primary auth-a cools down (only auth-b and auth-c available)
+	coolingAuths := []*Auth{authB, authC}
+
+	// Request under optsBoth selects fallback (e.g. auth-c) and must bind temp fallback to BOTH aliases
+	fallback1, err := selector.Pick(context.Background(), "claude", "claude-3", optsBoth, coolingAuths)
+	if err != nil {
+		t.Fatalf("first fallback Pick() error = %v", err)
+	}
+	expectedFallbackID := fallback1.ID
+
+	// 3. Subsequent request identifying the SAME session via conversation alias ONLY
+	// Must hit the sticky temporary fallback (expectedFallbackID) rather than alternating via round-robin to another auth!
+	gotConv, errConv := selector.Pick(context.Background(), "claude", "claude-3", optsConvOnly, coolingAuths)
+	if errConv != nil {
+		t.Fatalf("Pick() with conversation alias error = %v", errConv)
+	}
+	if gotConv.ID != expectedFallbackID {
+		t.Fatalf("Pick() with conversation alias = %q, want sticky fallback %q (temporary fallback must be shared across aliases)", gotConv.ID, expectedFallbackID)
+	}
+
+	// 4. Subsequent request identifying the session via prompt_cache_key ONLY
+	gotPck, errPck := selector.Pick(context.Background(), "claude", "claude-3", optsPckOnly, coolingAuths)
+	if errPck != nil {
+		t.Fatalf("Pick() with pck alias error = %v", errPck)
+	}
+	if gotPck.ID != expectedFallbackID {
+		t.Fatalf("Pick() with pck alias = %q, want sticky fallback %q", gotPck.ID, expectedFallbackID)
+	}
+
+	// 5. Primary auth-a recovers: request under either alias returns auth-a and clears temporary fallbacks
+	recoveredConv, errRecConv := selector.Pick(context.Background(), "claude", "claude-3", optsConvOnly, allAuths)
+	if errRecConv != nil {
+		t.Fatalf("recovered Pick(conv) error = %v", errRecConv)
+	}
+	if recoveredConv.ID != "auth-a" {
+		t.Fatalf("recovered Pick(conv) = %q, want primary %q", recoveredConv.ID, "auth-a")
+	}
+
+	recoveredPck, errRecPck := selector.Pick(context.Background(), "claude", "claude-3", optsPckOnly, allAuths)
+	if errRecPck != nil {
+		t.Fatalf("recovered Pick(pck) error = %v", errRecPck)
+	}
+	if recoveredPck.ID != "auth-a" {
+		t.Fatalf("recovered Pick(pck) = %q, want primary %q", recoveredPck.ID, "auth-a")
+	}
+}
+
+func TestSessionAffinity_StickyTemporaryFallbackSecondaryBranch(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Hour,
+	})
+	defer selector.Stop()
+
+	authA := &Auth{ID: "auth-a"}
+	authB := &Auth{ID: "auth-b"}
+	authC := &Auth{ID: "auth-c"}
+	allAuths := []*Auth{authA, authB, authC}
+
+	payloadBoth := []byte(`{"prompt_cache_key":"pck-sec-branch","conversation":{"id":"conv-sec-branch"}}`)
+	optsBoth := cliproxyexecutor.Options{OriginalRequest: payloadBoth}
+
+	payloadConvOnly := []byte(`{"conversation":{"id":"conv-sec-branch"}}`)
+	optsConvOnly := cliproxyexecutor.Options{OriginalRequest: payloadConvOnly}
+
+	payloadPckOnly := []byte(`{"prompt_cache_key":"pck-sec-branch"}`)
+	optsPckOnly := cliproxyexecutor.Options{OriginalRequest: payloadPckOnly}
+
+	// 1. Initial request binds both aliases to auth-a
+	first, err := selector.Pick(context.Background(), "claude", "claude-3", optsBoth, allAuths)
+	if err != nil {
+		t.Fatalf("initial Pick() error = %v", err)
+	}
+	if first.ID != "auth-a" {
+		t.Fatalf("initial Pick() = %q, want auth-a", first.ID)
+	}
+	selector.OnResult(Result{AuthID: first.ID, Provider: "claude", Model: "claude-3", Options: optsBoth, Success: true})
+
+	// 2. Primary auth-a cools down
+	coolingAuths := []*Auth{authB, authC}
+
+	// Request under conv alias ONLY initiates fallback pick (secondary fallback branch)
+	fallbackFromConv, err := selector.Pick(context.Background(), "claude", "claude-3", optsConvOnly, coolingAuths)
+	if err != nil {
+		t.Fatalf("fallback Pick from conv alias error = %v", err)
+	}
+	expectedFallbackID := fallbackFromConv.ID
+
+	// 3. Subsequent request under pck alias MUST return the same fallback
+	gotPck, errPck := selector.Pick(context.Background(), "claude", "claude-3", optsPckOnly, coolingAuths)
+	if errPck != nil {
+		t.Fatalf("Pick() with pck alias error = %v", errPck)
+	}
+	if gotPck.ID != expectedFallbackID {
+		t.Fatalf("Pick() with pck alias = %q, want %q", gotPck.ID, expectedFallbackID)
+	}
+
+	// 4. Subsequent request under both aliases MUST return the same fallback
+	gotBoth, errBoth := selector.Pick(context.Background(), "claude", "claude-3", optsBoth, coolingAuths)
+	if errBoth != nil {
+		t.Fatalf("Pick() with both aliases error = %v", errBoth)
+	}
+	if gotBoth.ID != expectedFallbackID {
+		t.Fatalf("Pick() with both aliases = %q, want %q", gotBoth.ID, expectedFallbackID)
+	}
+
+	// 5. Recovery of auth-a returns to auth-a under any alias
+	recovered, errRec := selector.Pick(context.Background(), "claude", "claude-3", optsBoth, allAuths)
+	if errRec != nil {
+		t.Fatalf("recovered Pick() error = %v", errRec)
+	}
+	if recovered.ID != "auth-a" {
+		t.Fatalf("recovered Pick() = %q, want %q", recovered.ID, "auth-a")
+	}
+}

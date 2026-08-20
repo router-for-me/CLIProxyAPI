@@ -93,6 +93,23 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 	return entry.authID, true
 }
 
+// Aliases returns all currently known alias identifiers for the session entry.
+func (c *SessionCache) Aliases(sessionID string) []string {
+	if sessionID == "" {
+		return nil
+	}
+	now := time.Now()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.entries[sessionID]
+	if !ok || !now.Before(entry.expiresAt) {
+		return nil
+	}
+	res := make([]string, len(entry.aliases))
+	copy(res, entry.aliases)
+	return res
+}
+
 // Set binds a session to an auth ID with TTL refresh. Existing aliases for the
 // same logical session remain attached when the binding is refreshed or moved.
 func (c *SessionCache) Set(sessionID, authID string) {

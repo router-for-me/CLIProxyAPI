@@ -699,10 +699,58 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	tempFallbackKey := cacheKey + "::fallback"
+	var tempFallbackKeyFallback string
+	if fallbackKey != "" {
+		tempFallbackKeyFallback = fallbackKey + "::fallback"
+	}
+	collectTempFallbackKeys := func() []string {
+		keys := []string{tempFallbackKey}
+		if tempFallbackKeyFallback != "" {
+			keys = append(keys, tempFallbackKeyFallback)
+		}
+		if aliases := s.cache.Aliases(cacheKey); len(aliases) > 0 {
+			for _, alias := range aliases {
+				if alias != "" {
+					keys = append(keys, alias+"::fallback")
+				}
+			}
+		}
+		if fallbackKey != "" {
+			if aliases := s.cache.Aliases(fallbackKey); len(aliases) > 0 {
+				for _, alias := range aliases {
+					if alias != "" {
+						keys = append(keys, alias+"::fallback")
+					}
+				}
+			}
+		}
+		return keys
+	}
+	bindTempFallback := func(authID string) {
+		s.cache.SetAliases(authID, collectTempFallbackKeys()...)
+	}
+	invalidateTempFallback := func() {
+		for _, key := range collectTempFallbackKeys() {
+			s.cache.Invalidate(key)
+		}
+	}
+	getTempFallbackAuth := func() (*Auth, bool) {
+		for _, key := range collectTempFallbackKeys() {
+			if tempAuthID, ok := s.cache.GetAndRefresh(key); ok {
+				for _, auth := range available {
+					if auth.ID == tempAuthID {
+						return auth, true
+					}
+				}
+			}
+		}
+		return nil, false
+	}
+
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
-				s.cache.Invalidate(tempFallbackKey)
+				invalidateTempFallback()
 				bind(auth.ID)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
@@ -710,48 +758,39 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 		// Primary cached auth is unavailable (cooling down).
 		// Check for an active sticky temporary fallback binding:
-		if tempAuthID, ok := s.cache.GetAndRefresh(tempFallbackKey); ok {
-			for _, auth := range available {
-				if auth.ID == tempAuthID {
-					entry.Infof("session-affinity: sticky fallback cache hit | session=%s primary_cooling=%s fallback_auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model)
-					return auth, nil
-				}
-			}
+		if fallbackAuth, ok := getTempFallbackAuth(); ok {
+			entry.Infof("session-affinity: sticky fallback cache hit | session=%s primary_cooling=%s fallback_auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, fallbackAuth.ID, provider, model)
+			return fallbackAuth, nil
 		}
-		// Reselect fallback auth and record it as the sticky temporary fallback
+		// Reselect fallback auth and record it as the sticky temporary fallback across aliases
 		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 		if err != nil {
 			return nil, err
 		}
-		s.cache.Set(tempFallbackKey, auth.ID)
+		bindTempFallback(auth.ID)
 		entry.Infof("session-affinity: cache hit but auth unavailable, reselected sticky fallback | session=%s primary_cooling=%s fallback_auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model)
 		return auth, nil
 	}
 
 	if fallbackKey != "" {
-		tempFallbackKeyFallback := fallbackKey + "::fallback"
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
-					s.cache.Invalidate(tempFallbackKeyFallback)
+					invalidateTempFallback()
 					bind(auth.ID)
 					entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 					return auth, nil
 				}
 			}
-			if tempAuthID, ok := s.cache.GetAndRefresh(tempFallbackKeyFallback); ok {
-				for _, auth := range available {
-					if auth.ID == tempAuthID {
-						entry.Infof("session-affinity: sticky secondary fallback cache hit | session=%s fallback=%s temp_auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
-						return auth, nil
-					}
-				}
+			if fallbackAuth, ok := getTempFallbackAuth(); ok {
+				entry.Infof("session-affinity: sticky secondary fallback cache hit | session=%s fallback=%s temp_auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), fallbackAuth.ID, provider, model)
+				return fallbackAuth, nil
 			}
 			auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 			if err != nil {
 				return nil, err
 			}
-			s.cache.Set(tempFallbackKeyFallback, auth.ID)
+			bindTempFallback(auth.ID)
 			entry.Infof("session-affinity: fallback cache hit but auth unavailable, reselected sticky fallback | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 			return auth, nil
 		}
@@ -825,22 +864,47 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		fallbackKey = ns + "::" + fallbackID + "::" + nsModel
 		tempFallbackKeyFallback = fallbackKey + "::fallback"
 	}
+	collectResultTempFallbackKeys := func() []string {
+		keys := []string{tempFallbackKey}
+		if tempFallbackKeyFallback != "" {
+			keys = append(keys, tempFallbackKeyFallback)
+		}
+		if aliases := s.cache.Aliases(cacheKey); len(aliases) > 0 {
+			for _, alias := range aliases {
+				if alias != "" {
+					keys = append(keys, alias+"::fallback")
+				}
+			}
+		}
+		if fallbackKey != "" {
+			if aliases := s.cache.Aliases(fallbackKey); len(aliases) > 0 {
+				for _, alias := range aliases {
+					if alias != "" {
+						keys = append(keys, alias+"::fallback")
+					}
+				}
+			}
+		}
+		return keys
+	}
 	if res.Success {
 		s.cache.Touch(cacheKey, res.AuthID)
-		s.cache.Touch(tempFallbackKey, res.AuthID)
 		if fallbackKey != "" {
 			s.cache.Touch(fallbackKey, res.AuthID)
-			s.cache.Touch(tempFallbackKeyFallback, res.AuthID)
+		}
+		for _, tk := range collectResultTempFallbackKeys() {
+			s.cache.Touch(tk, res.AuthID)
 		}
 		return
 	}
 
 	if res.Error != nil && isTerminalSessionAffinityError(res.Error) {
 		s.cache.CompareAndDelete(cacheKey, res.AuthID)
-		s.cache.CompareAndDelete(tempFallbackKey, res.AuthID)
 		if fallbackKey != "" {
 			s.cache.CompareAndDelete(fallbackKey, res.AuthID)
-			s.cache.CompareAndDelete(tempFallbackKeyFallback, res.AuthID)
+		}
+		for _, tk := range collectResultTempFallbackKeys() {
+			s.cache.CompareAndDelete(tk, res.AuthID)
 		}
 	}
 }
