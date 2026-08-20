@@ -1777,6 +1777,62 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 	})
 }
 
+func TestOpenAIModelsIncludeRegistryTokenLimits(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-openai-models-token-limits"
+	const modelID = "claude-sonnet-token-limits"
+	modelRegistry.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+		ID:                  modelID,
+		Object:              "model",
+		OwnedBy:             "anthropic",
+		Type:                "claude",
+		ContextLength:       200000,
+		MaxCompletionTokens: 128000,
+	}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
+	}
+
+	var model map[string]any
+	for _, entry := range resp.Data {
+		if id, _ := entry["id"].(string); id == modelID {
+			model = entry
+			break
+		}
+	}
+	if model == nil {
+		t.Fatalf("expected %s in response, got %s", modelID, rr.Body.String())
+	}
+	for field, want := range map[string]float64{"context_length": 200000, "max_completion_tokens": 128000} {
+		got, ok := model[field].(float64)
+		if !ok {
+			t.Fatalf("expected %q in model listing, got %v", field, model)
+		}
+		if got != want {
+			t.Fatalf("%s = %v, want %v", field, got, want)
+		}
+	}
+}
+
 func TestClaudeModelListCloakingConfigHotReload(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-claude-model-list-cloaking-hot-reload"
