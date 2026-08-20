@@ -829,6 +829,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							if !disableCooling {
 								if result.RetryAfter != nil {
 									next = now.Add(*result.RetryAfter)
+									next = capQuotaCooldown(next, now)
 								} else {
 									reused := state.Quota.NextRecoverAt.After(now)
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
@@ -890,6 +891,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								if auth.Quota.NextRecoverAt.After(authNext) {
 									authNext = auth.Quota.NextRecoverAt
 								}
+								authNext = capQuotaCooldown(authNext, now)
 								auth.Quota.NextRecoverAt = authNext
 								auth.NextRetryAfter = authNext
 							}
@@ -1996,6 +1998,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		if !disableCooling {
 			if retryAfter != nil {
 				next = now.Add(*retryAfter)
+				next = capQuotaCooldown(next, now)
 			} else {
 				next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
 			}
@@ -2102,4 +2105,16 @@ func withCooldownJitter(d time.Duration) time.Duration {
 		return d
 	}
 	return time.Duration(int64(d) - delta + rand.Int63n(2*delta+1))
+}
+
+// capQuotaCooldown bounds an upstream-supplied rate-limit reset. The unified
+// Anthropic rate-limit headers can report resets days out, which would park a
+// credential far longer than its quota actually needs. Bounding the wait means
+// the pool re-probes at the cap; if the credential is still exhausted the next
+// 429 simply re-applies the cooldown.
+func capQuotaCooldown(next, now time.Time) time.Time {
+	if deadline := now.Add(quotaBackoffMax); next.After(deadline) {
+		return deadline
+	}
+	return next
 }
