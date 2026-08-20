@@ -18,7 +18,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	multiagentv2 "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/optimize-multi-agent-v2"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/optimize-multi-agent-v2"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -616,74 +616,6 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 
 }
 
-func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
-	if framer == nil {
-		framer = &responsesSSEFramer{}
-	}
-	if isCodexResponsesClientRequest(c) {
-		framer.failureEvent = "response.failed"
-	} else {
-		framer.failureEvent = "error"
-	}
-	writeTerminalError := func(errMsg *interfaces.ErrorMessage) {
-		framer.Flush(c.Writer)
-		if errMsg == nil {
-			return
-		}
-		status := http.StatusInternalServerError
-		if errMsg.StatusCode > 0 {
-			status = errMsg.StatusCode
-		}
-		errText := responsesStreamErrorText(errMsg, status)
-		h.logResponsesStreamError(c, framer, errMsg)
-		if framer.terminalEvent != "" {
-			return
-		}
-		if isCodexResponsesClientRequest(c) {
-			chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, 0)
-			_, _ = fmt.Fprintf(c.Writer, "\nevent: response.failed\ndata: %s\n\n", string(chunk))
-			return
-		}
-		chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
-		_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
-	}
-
-	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
-		NormalizeTerminalError: sanitizeResponsesStreamErrorMessage,
-		WriteChunk: func(chunk []byte) {
-			framer.WriteChunk(c.Writer, chunk)
-		},
-		ChunkError: func() *interfaces.ErrorMessage {
-			if framer.terminalError != nil {
-				h.logResponsesStreamError(c, framer, framer.terminalError)
-			}
-			return framer.terminalError
-		},
-		WriteTerminalError: writeTerminalError,
-		CloseError: func() *interfaces.ErrorMessage {
-			framer.Flush(c.Writer)
-			if framer.terminalError != nil {
-				return framer.terminalError
-			}
-			if framer.terminalEvent != "" {
-				return nil
-			}
-			lastEvent := framer.lastEvent
-			if lastEvent == "" {
-				lastEvent = "none"
-			}
-			return &interfaces.ErrorMessage{
-				StatusCode: http.StatusBadGateway,
-				Error:      fmt.Errorf("upstream stream closed before a terminal event (last event: %s)", lastEvent),
-			}
-		},
-		WriteDone: func() {
-			framer.Flush(c.Writer)
-			_, _ = c.Writer.Write([]byte("\n"))
-		},
-	})
-}
-
 func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	rawJSON, err := handlers.ReadRequestBody(c)
 	if err != nil {
@@ -877,6 +809,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 					_, _ = c.Writer.Write(initialOutput.Bytes())
 					flusher.Flush()
 					if framer.terminalError != nil {
+						h.logResponsesStreamError(c, framer, framer.terminalError)
 						cliCancel(framer.terminalError.Error)
 						return
 					}
@@ -938,7 +871,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Contex
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, OpenAI, modelName, chatJSON, "")
 	var param any
-	framer := &responsesSSEFramer{failureEvent: "error", context: c}
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -988,7 +920,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Contex
 			writeChatAsResponsesChunk(c, cliCtx, modelName, originalResponsesJSON, chunk, &param)
 			flusher.Flush()
 
-			h.forwardChatAsResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, cliCtx, modelName, originalResponsesJSON, &param, framer)
+			h.forwardChatAsResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, cliCtx, modelName, originalResponsesJSON, &param)
 			return
 		}
 	}
@@ -1009,7 +941,7 @@ func writeChatAsResponsesChunk(c *gin.Context, ctx context.Context, modelName st
 	}
 }
 
-func (h *OpenAIResponsesAPIHandler) forwardChatAsResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, ctx context.Context, modelName string, originalResponsesJSON []byte, param *any, framer *responsesSSEFramer) {
+func (h *OpenAIResponsesAPIHandler) forwardChatAsResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, ctx context.Context, modelName string, originalResponsesJSON []byte, param *any) {
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
 			outputs := responsesconverter.ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx, modelName, originalResponsesJSON, originalResponsesJSON, chunk, param)
@@ -1026,25 +958,7 @@ func (h *OpenAIResponsesAPIHandler) forwardChatAsResponsesStream(c *gin.Context,
 			}
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
-			framer.Flush(c.Writer)
-			if errMsg == nil {
-				return
-			}
-			status := http.StatusInternalServerError
-			if errMsg.StatusCode > 0 {
-				status = errMsg.StatusCode
-			}
-			errText := http.StatusText(status)
-			if errMsg.Error != nil && errMsg.Error.Error() != "" {
-				errText = errMsg.Error.Error()
-			}
-			if isCodexResponsesClientRequest(c) {
-				chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, nextResponsesSequence(c))
-				_, _ = fmt.Fprintf(c.Writer, "\nevent: response.failed\ndata: %s\n\n", string(chunk))
-				return
-			}
-			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, nextResponsesSequence(c))
-			_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
+			writeResponsesTerminalError(c, errMsg)
 		},
 		WriteDone: func() {
 			_, _ = c.Writer.Write([]byte("\n"))

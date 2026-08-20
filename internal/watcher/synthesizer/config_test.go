@@ -171,6 +171,119 @@ func TestConfigSynthesizer_GeminiKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_OpenCodeKeys(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenCodeKey: []config.OpenCodeKey{
+				{
+					APIKey:         "opencode-key-123",
+					Prefix:         "dev",
+					BaseURL:        "https://opencode.ai",
+					ProxyURL:       "http://proxy.local",
+					DisableCooling: boolPointer(true),
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+
+	if auths[0].Provider != "opencode" {
+		t.Errorf("expected provider opencode, got %s", auths[0].Provider)
+	}
+	if auths[0].Label != "opencode-apikey" {
+		t.Errorf("expected label opencode-apikey, got %s", auths[0].Label)
+	}
+	if auths[0].Attributes["api_key"] != "opencode-key-123" {
+		t.Errorf("expected api_key opencode-key-123, got %s", auths[0].Attributes["api_key"])
+	}
+	if auths[0].ProxyURL != "http://proxy.local" {
+		t.Errorf("expected proxy_url http://proxy.local, got %s", auths[0].ProxyURL)
+	}
+	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
+		t.Errorf("expected disable_cooling=true, got %v", auths[0].Metadata["disable_cooling"])
+	}
+}
+
+func TestConfigSynthesizer_OpenCodeGoKeys(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenCodeGoKey: []config.OpenCodeGoKey{
+				{
+					APIKey:  "opencode-go-key-123",
+					Prefix:  "dev",
+					BaseURL: "https://opencode.ai/zen/go",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("unexpected error: %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if auths[0].Provider != "opencode-go" {
+		t.Errorf("expected provider opencode-go, got %s", auths[0].Provider)
+	}
+	if auths[0].Label != "opencode-go-apikey" {
+		t.Errorf("expected label opencode-go-apikey, got %s", auths[0].Label)
+	}
+	if auths[0].Attributes["api_key"] != "opencode-go-key-123" {
+		t.Errorf("expected api_key opencode-go-key-123, got %s", auths[0].Attributes["api_key"])
+	}
+	if auths[0].Attributes["base_url"] != "https://opencode.ai/zen/go" {
+		t.Errorf("expected base_url https://opencode.ai/zen/go, got %s", auths[0].Attributes["base_url"])
+	}
+}
+
+func TestConfigSynthesizer_PoolsideKeys(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			PoolsideKey: []config.PoolsideKey{
+				{APIKey: "poolside-key-123", BaseURL: "https://inference.poolside.ai/v1"},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("unexpected error: %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if auths[0].Provider != "poolside" {
+		t.Errorf("expected provider poolside, got %s", auths[0].Provider)
+	}
+	if auths[0].Label != "poolside-apikey" {
+		t.Errorf("expected label poolside-apikey, got %s", auths[0].Label)
+	}
+	if auths[0].Attributes["api_key"] != "poolside-key-123" {
+		t.Errorf("expected api_key poolside-key-123, got %s", auths[0].Attributes["api_key"])
+	}
+	if auths[0].Attributes["base_url"] != "https://inference.poolside.ai/v1" {
+		t.Errorf("expected base_url https://inference.poolside.ai/v1, got %s", auths[0].Attributes["base_url"])
+	}
+}
+
 func TestConfigSynthesizer_InteractionsKeys(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

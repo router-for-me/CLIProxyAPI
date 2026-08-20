@@ -157,6 +157,31 @@ func (cfg *Config) SanitizeCodexKeys() {
 	cfg.CodexKey = sanitizeCodexKeyEntries(cfg.CodexKey)
 }
 
+// SanitizeOpenCodeKeys applies the same normalization rules as codex-api-key.
+// It applies the same normalization rules as the Codex API keys.
+func (cfg *Config) SanitizeOpenCodeKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.OpenCodeKey = sanitizeCodexKeyEntries(cfg.OpenCodeKey)
+}
+
+// SanitizeOpenCodeGoKeys applies the same normalization rules as opencode-api-key.
+func (cfg *Config) SanitizeOpenCodeGoKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.OpenCodeGoKey = sanitizeCodexKeyEntries(cfg.OpenCodeGoKey)
+}
+
+// SanitizePoolsideKeys applies the same normalization rules as codex-api-key.
+func (cfg *Config) SanitizePoolsideKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.PoolsideKey = sanitizeCodexKeyEntries(cfg.PoolsideKey)
+}
+
 // SanitizeXAIKeys removes xAI API key entries missing a BaseURL.
 // It applies the same normalization rules as codex-api-key.
 func (cfg *Config) SanitizeXAIKeys() {

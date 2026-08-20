@@ -159,6 +159,15 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Codex keys: drop entries without base-url
 	cfg.SanitizeCodexKeys()
 
+	// Sanitize OpenCode keys: drop entries without base-url
+	cfg.SanitizeOpenCodeKeys()
+
+	// Sanitize OpenCode Go keys: drop entries without base-url
+	cfg.SanitizeOpenCodeGoKeys()
+
+	// Sanitize Poolside keys: drop entries without base-url
+	cfg.SanitizePoolsideKeys()
+
 	// Sanitize xAI keys: drop entries without base-url
 	cfg.SanitizeXAIKeys()
 

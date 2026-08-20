@@ -131,6 +131,18 @@ type Config struct {
 	// XAIKey defines xAI API key configurations using the same structure as Codex API keys.
 	XAIKey []XAIKey `yaml:"xai-api-key" json:"xai-api-key"`
 
+	// OpenCodeKey defines OpenCode API key configurations using the same structure as Codex API keys.
+	OpenCodeKey []OpenCodeKey `yaml:"opencode-api-key" json:"opencode-api-key"`
+
+	// OpenCodeGoKey defines OpenCode Go API key configurations using the same structure as Codex API keys.
+	OpenCodeGoKey []OpenCodeGoKey `yaml:"opencode-go-api-key" json:"opencode-go-api-key"`
+
+	// PoolsideKey defines Poolside API key configurations using the same structure as Codex API keys.
+	PoolsideKey []PoolsideKey `yaml:"poolside-api-key" json:"poolside-api-key"`
+
+	// Poolside configures provider-wide Poolside request behavior.
+	Poolside PoolsideConfig `yaml:"poolside" json:"poolside"`
+
 	// XAI configures provider-wide xAI request behavior.
 	XAI XAIConfig `yaml:"xai" json:"xai"`
 

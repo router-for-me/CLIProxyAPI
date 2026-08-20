@@ -429,18 +429,19 @@ var openAIResponseEventTypes = map[string]bool{
 // emptyCompletionAccum accumulates the properties relevant to deciding whether
 // an OpenAI-, Claude-, or Gemini-style completion is empty.
 type emptyCompletionAccum struct {
-	recognized       bool
-	sawUnknownData   bool
-	terminal         bool
-	hasContent       bool
-	hasToolCalls     bool
-	completionTokens int
-	sawUsage         bool
-	blocked          bool
-	sawMetadataOnly  bool
-	sawMessageData   bool
-	geminiTerminal   bool
-	claudeTerminal   bool
+	recognized        bool
+	sawUnknownData    bool
+	terminal          bool
+	hasContent        bool
+	hasToolCalls      bool
+	completionTokens  int
+	sawUsage          bool
+	blocked           bool
+	sawMetadataOnly   bool
+	sawMessageData    bool
+	sawResponseOutput bool
+	geminiTerminal    bool
+	claudeTerminal    bool
 }
 
 func (a *emptyCompletionAccum) evalJSON(data []byte) bool {

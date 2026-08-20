@@ -31,6 +31,7 @@ func validateCredentialWeightYAML(data []byte) error {
 	families := map[string]struct{}{
 		"gemini-api-key": {}, "interactions-api-key": {}, "claude-api-key": {},
 		"vertex-api-key": {}, "codex-api-key": {}, "xai-api-key": {},
+		"opencode-api-key": {}, "opencode-go-api-key": {}, "poolside-api-key": {},
 	}
 	for index := 0; root != nil && root.Kind == yaml.MappingNode && index+1 < len(root.Content); index += 2 {
 		name := root.Content[index].Value
@@ -139,6 +140,21 @@ func (cfg *Config) ValidateCredentialWeights() error {
 	for index := range cfg.XAIKey {
 		if errValidate := ValidateCredentialWeight(cfg.XAIKey[index].Weight); errValidate != nil {
 			return fmt.Errorf("xai-api-key[%d].weight: %w", index, errValidate)
+		}
+	}
+	for index := range cfg.OpenCodeKey {
+		if errValidate := ValidateCredentialWeight(cfg.OpenCodeKey[index].Weight); errValidate != nil {
+			return fmt.Errorf("opencode-api-key[%d].weight: %w", index, errValidate)
+		}
+	}
+	for index := range cfg.OpenCodeGoKey {
+		if errValidate := ValidateCredentialWeight(cfg.OpenCodeGoKey[index].Weight); errValidate != nil {
+			return fmt.Errorf("opencode-go-api-key[%d].weight: %w", index, errValidate)
+		}
+	}
+	for index := range cfg.PoolsideKey {
+		if errValidate := ValidateCredentialWeight(cfg.PoolsideKey[index].Weight); errValidate != nil {
+			return fmt.Errorf("poolside-api-key[%d].weight: %w", index, errValidate)
 		}
 	}
 	for providerIndex := range cfg.OpenAICompatibility {
