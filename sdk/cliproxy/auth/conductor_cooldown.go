@@ -1597,6 +1597,58 @@ func isCountTokensEndpointNotFoundError(err error, requestedModel string) bool {
 	return !isExplicitModelNotFoundError(err, baseModel)
 }
 
+func isResponsesCompactRequest(opts cliproxyexecutor.Options) bool {
+	return opts.Alt == "responses/compact"
+}
+
+func isResponsesCompactRequestFaultError(opts cliproxyexecutor.Options, err error) bool {
+	if !isResponsesCompactRequest(opts) || err == nil {
+		return false
+	}
+	if isCredentialScopedError(err) || isCloudflareChallengeError(err) || isInvalidGrantError(err) {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if clienterror.IsRequestFault(status, err) {
+		return true
+	}
+	switch status {
+	case http.StatusBadRequest,
+		http.StatusNotFound,
+		http.StatusMethodNotAllowed,
+		http.StatusConflict,
+		http.StatusRequestEntityTooLarge,
+		http.StatusUnprocessableEntity,
+		http.StatusNotImplemented:
+		return true
+	default:
+		return false
+	}
+}
+
+func isResponsesCompactAvailabilityNeutralError(opts cliproxyexecutor.Options, err error, resultErr *Error) bool {
+	if !isResponsesCompactRequest(opts) {
+		return false
+	}
+	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown {
+		return false
+	}
+	if isCredentialScopedError(err) || isCloudflareChallengeError(err) || isInvalidGrantError(err) {
+		return false
+	}
+	if resultErr != nil && (isCloudflareChallengeResultError(resultErr) || isInvalidGrantResultError(resultErr)) {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if status == 0 && resultErr != nil {
+		status = statusCodeFromResult(resultErr)
+	}
+	if status == http.StatusUnauthorized || status == http.StatusPaymentRequired || status == http.StatusForbidden || status == http.StatusTooManyRequests {
+		return false
+	}
+	return true
+}
+
 func isExplicitModelNotFoundError(err error, requestedModel string) bool {
 	if err == nil {
 		return false

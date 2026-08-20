@@ -592,3 +592,24 @@ func TestAntigravityBuildRequestStripsPropertyNamesFromOutboundBody(t *testing.T
 		}
 	}
 }
+
+// TestSanitizeAntigravityRequestSchemasStripsEncryptedMetadata covers Codex client tool parameters
+// that carry "encrypted": true or "encrypted": false markers.
+func TestSanitizeAntigravityRequestSchemasStripsEncryptedMetadata(t *testing.T) {
+	encryptedSchema := `{"type":"object","properties":{"key":{"type":"string","encrypted":true},"timeout":{"type":"integer","encrypted":false}},"required":["key"]}`
+
+	for _, declContainer := range []string{"functionDeclarations", "function_declarations"} {
+		payload := `{"request":{"tools":[{"` + declContainer + `":[{"name":"test_tool","parameters":` + encryptedSchema + `}]}]}}`
+
+		for _, useAntigravitySchema := range []bool{false, true} {
+			got := sanitizeAntigravityRequestSchemas(payload, useAntigravitySchema)
+			if strings.Contains(got, `"encrypted"`) {
+				t.Errorf("declContainer=%s antigravity=%v: 'encrypted' marker survived sanitization: %s", declContainer, useAntigravitySchema, got)
+			}
+			schema := gjson.Get(got, "request.tools.0."+declContainer+".0.parameters")
+			if !schema.Get("properties.key.type").Exists() || schema.Get("properties.key.type").String() != "string" {
+				t.Errorf("declContainer=%s antigravity=%v: key property was corrupted: %s", declContainer, useAntigravitySchema, schema.Raw)
+			}
+		}
+	}
+}

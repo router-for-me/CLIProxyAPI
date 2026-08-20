@@ -766,7 +766,7 @@ func removeUnsupportedKeywords(jsonStr string, options jsonSchemaCleanOptions) s
 		"$schema", "$defs", "definitions", "const", "$ref", "$id", "additionalProperties",
 		"propertyNames", "patternProperties", // Gemini doesn't support these schema keywords
 		"if", "then", "else",
-		"$comment", "enumDescriptions", "enumTitles", "prefill", "deprecated", // Schema metadata fields unsupported by Gemini
+		"$comment", "enumDescriptions", "enumTitles", "prefill", "deprecated", "encrypted", // Schema metadata fields unsupported by Gemini
 	)
 	if options.antigravitySemantics {
 		keywords = append(keywords, "not")

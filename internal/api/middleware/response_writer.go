@@ -5,11 +5,14 @@ package middleware
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	log "github.com/sirupsen/logrus"
@@ -116,7 +119,7 @@ func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 			status = http.StatusOK
 		}
 	}
-	return status >= http.StatusBadRequest
+	return status >= http.StatusBadRequest && status != clienterror.StatusClientClosedRequest
 }
 
 // WriteString wraps the underlying ResponseWriter's WriteString method to capture response data.
@@ -283,7 +286,7 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		}
 	}
 
-	hasAPIError := len(slicesAPIResponseError) > 0 || finalStatusCode >= http.StatusBadRequest
+	hasAPIError := hasActionableError(c, finalStatusCode, slicesAPIResponseError)
 	forceLog := w.logOnErrorOnly && hasAPIError && !w.logger.IsEnabled()
 	websocketTimelineSource := w.extractWebsocketTimelineSource(c)
 	apiRequestSource := w.extractAPIRequestSource(c)
@@ -718,4 +721,41 @@ func cleanupFileBodySources(sources ...*logging.FileBodySource) {
 			log.WithError(errCleanup).Warn("failed to clean up log part files")
 		}
 	}
+}
+
+func isClientCancellationErrorMessage(errMsg *interfaces.ErrorMessage) bool {
+	if errMsg == nil {
+		return true
+	}
+	return clienterror.IsClientCancellation(errMsg.StatusCode, errMsg.Error)
+}
+
+func hasActionableAPIResponseErrors(apiErrors []*interfaces.ErrorMessage) bool {
+	for _, err := range apiErrors {
+		if !isClientCancellationErrorMessage(err) {
+			return true
+		}
+	}
+	return false
+}
+
+func isContextCanceled(c *gin.Context) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	ctx := c.Request.Context()
+	return ctx != nil && errors.Is(ctx.Err(), context.Canceled)
+}
+
+func hasActionableError(c *gin.Context, statusCode int, apiErrors []*interfaces.ErrorMessage) bool {
+	if hasActionableAPIResponseErrors(apiErrors) {
+		return true
+	}
+	if statusCode == clienterror.StatusClientClosedRequest {
+		return false
+	}
+	if isContextCanceled(c) && statusCode < http.StatusBadRequest {
+		return false
+	}
+	return statusCode >= http.StatusBadRequest
 }

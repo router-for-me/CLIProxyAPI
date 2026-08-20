@@ -108,7 +108,7 @@ func TestApplyClaudeHeaders_FastModeBetaIsConditional(t *testing.T) {
 		},
 	}
 
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-fast-mode-beta"}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-fast-mode-beta", "cloak_mode": "always"}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			extraBetas, body := extractAndRemoveBetas([]byte(tt.body))
@@ -193,6 +193,7 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 		ID: "auth-baseline",
 		Attributes: map[string]string{
 			"api_key":                            "key-baseline",
+			"cloak_mode":                         "always",
 			"header:User-Agent":                  "evil-client/9.9",
 			"header:X-Stainless-Os":              "Linux",
 			"header:X-Stainless-Arch":            "x64",
@@ -233,7 +234,8 @@ func TestApplyClaudeHeaders_RejectsUnmeasuredClaudeCLIFingerprints(t *testing.T)
 	auth := &cliproxyauth.Auth{
 		ID: "auth-upgrade",
 		Attributes: map[string]string{
-			"api_key": "key-upgrade",
+			"api_key":    "key-upgrade",
+			"cloak_mode": "always",
 		},
 	}
 
@@ -347,7 +349,8 @@ func TestApplyClaudeHeaders_UpgradesCachedSoftwareFingerprintWhenBaselineAdvance
 	auth := &cliproxyauth.Auth{
 		ID: "auth-baseline-reload",
 		Attributes: map[string]string{
-			"api_key": "key-baseline-reload",
+			"api_key":    "key-baseline-reload",
+			"cloak_mode": "always",
 		},
 	}
 
@@ -389,7 +392,8 @@ func TestApplyClaudeHeaders_LearnsOfficialFingerprintAfterCustomBaselineFallback
 	auth := &cliproxyauth.Auth{
 		ID: "auth-custom-baseline-learning",
 		Attributes: map[string]string{
-			"api_key": "key-custom-baseline-learning",
+			"api_key":    "key-custom-baseline-learning",
+			"cloak_mode": "always",
 		},
 	}
 
@@ -547,7 +551,8 @@ func TestApplyClaudeHeaders_ThirdPartyBaselineThenOfficialUpgradeKeepsPinnedPlat
 	auth := &cliproxyauth.Auth{
 		ID: "auth-third-party-then-official",
 		Attributes: map[string]string{
-			"api_key": "key-third-party-then-official",
+			"api_key":    "key-third-party-then-official",
+			"cloak_mode": "always",
 		},
 	}
 
@@ -589,7 +594,8 @@ func TestApplyClaudeHeaders_DisableDeviceProfileStabilization(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		ID: "auth-disable-stability",
 		Attributes: map[string]string{
-			"api_key": "key-disable-stability",
+			"api_key":    "key-disable-stability",
+			"cloak_mode": "always",
 		},
 	}
 
@@ -673,7 +679,8 @@ func TestApplyClaudeHeaders_LegacyThirdPartyUsesStableConfiguredOSArch(t *testin
 	auth := &cliproxyauth.Auth{
 		ID: "auth-legacy-runtime-os-arch",
 		Attributes: map[string]string{
-			"api_key": "key-legacy-runtime-os-arch",
+			"api_key":    "key-legacy-runtime-os-arch",
+			"cloak_mode": "always",
 		},
 	}
 
@@ -700,7 +707,8 @@ func TestApplyClaudeHeaders_UnsetStabilizationUsesStableConfiguredOSArch(t *test
 	auth := &cliproxyauth.Auth{
 		ID: "auth-unset-runtime-os-arch",
 		Attributes: map[string]string{
-			"api_key": "key-unset-runtime-os-arch",
+			"api_key":    "key-unset-runtime-os-arch",
+			"cloak_mode": "always",
 		},
 	}
 
@@ -745,8 +753,9 @@ func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode220CLIFingerprint(t *testi
 
 	executor := NewClaudeExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":  "key-sdk-fingerprint",
-		"base_url": server.URL,
+		"api_key":    "key-sdk-fingerprint",
+		"base_url":   server.URL,
+		"cloak_mode": "always",
 	}}
 	payload := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":[{"type":"text","text":"x"}]}]}`)
 
@@ -1020,8 +1029,9 @@ func TestClaudeExecutor_CopiedVSCodeAgentSDKHeadersWithoutMetadataAreCloaked(t *
 	payload := []byte(`{"model":"claude-opus-5","system":"spoofed-system","messages":[{"role":"user","content":"x"}]}`)
 	executor := NewClaudeExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":  "key-spoofed-client",
-		"base_url": server.URL,
+		"api_key":    "key-spoofed-client",
+		"base_url":   server.URL,
+		"cloak_mode": "always",
 	}}
 	_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "claude-opus-5",
@@ -1068,8 +1078,9 @@ func TestClaudeExecutor_AgentSDKEntrypointWithStrongSignalsUsesCLICloak(t *testi
 	payload := []byte(`{"model":"claude-opus-4-6","system":"agent-sdk-system","messages":[{"role":"user","content":"x"}],"metadata":{"user_id":"agent-sdk-user"}}`)
 	executor := NewClaudeExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":  "key-agent-sdk-client",
-		"base_url": server.URL,
+		"api_key":    "key-agent-sdk-client",
+		"base_url":   server.URL,
+		"cloak_mode": "always",
 	}}
 	_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "claude-opus-4-6",
@@ -2676,7 +2687,7 @@ func TestClaudeExecutor_ReusesUserIDAcrossModelsWhenCacheEnabled(t *testing.T) {
 	t.Logf("✓ End-to-end test passed: Same user_id (%s) was used for both models", userIDs[0])
 }
 
-func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
+func TestClaudeExecutor_DefaultDoesNotInjectUserID(t *testing.T) {
 	var userIDs []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -2708,14 +2719,8 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 	if len(userIDs) != 2 {
 		t.Fatalf("expected 2 requests, got %d", len(userIDs))
 	}
-	if userIDs[0] == "" || userIDs[1] == "" {
-		t.Fatal("expected user_id to be populated")
-	}
-	if userIDs[0] == userIDs[1] {
-		t.Fatalf("expected user_id to change when caching is not enabled, got identical values %q", userIDs[0])
-	}
-	if !helps.IsValidUserID(userIDs[0]) || !helps.IsValidUserID(userIDs[1]) {
-		t.Fatalf("user_ids should be valid, got %q and %q", userIDs[0], userIDs[1])
+	if userIDs[0] != "" || userIDs[1] != "" {
+		t.Fatalf("default API-key requests must preserve caller metadata without injecting user_id, got %q and %q", userIDs[0], userIDs[1])
 	}
 }
 
@@ -4245,7 +4250,7 @@ func TestCheckSystemInstructionsWithSigningMode_LongPromptIsExactAndIdempotent(t
 	}
 }
 
-func TestClaudeExecutor_CustomBaseURLOmitsCCHByDefault(t *testing.T) {
+func TestClaudeExecutor_CustomBaseURLPreservesBodyByDefault(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -4273,12 +4278,8 @@ func TestClaudeExecutor_CustomBaseURLOmitsCCHByDefault(t *testing.T) {
 		t.Fatal("expected request body to be captured")
 	}
 
-	billingHeader := gjson.GetBytes(seenBody, "system.0.text").String()
-	if !strings.HasPrefix(billingHeader, "x-anthropic-billing-header:") {
-		t.Fatalf("system.0.text = %q, want billing header", billingHeader)
-	}
-	if strings.Contains(billingHeader, "cch=") {
-		t.Fatalf("custom BaseURL must not include CCH, got %q", billingHeader)
+	if strings.Contains(string(seenBody), "x-anthropic-billing-header:") || strings.Contains(string(seenBody), "cch=") {
+		t.Fatalf("default custom BaseURL request must not inject billing/CCH: %s", seenBody)
 	}
 }
 
@@ -4316,13 +4317,11 @@ func TestClaudeExecutor_CustomBaseURLAPIKeyDoesNotEnableCCHSigning(t *testing.T)
 	if len(seenBody) == 0 {
 		t.Fatal("expected request body to be captured")
 	}
-	if got := gjson.GetBytes(seenBody, "messages.0.content.1.text").String(); got != messageText {
+	if got := gjson.GetBytes(seenBody, "messages.0.content.0.text").String(); got != messageText {
 		t.Fatalf("message text = %q, want %q", got, messageText)
 	}
-	assertClaudeCodeCurrentDateBlock(t, gjson.GetBytes(seenBody, "messages.0.content.0"))
-
-	if billing := gjson.GetBytes(seenBody, "system.0.text").String(); strings.Contains(billing, "cch=") {
-		t.Fatalf("custom BaseURL billing header must not contain CCH: %q", billing)
+	if strings.Contains(string(seenBody), "x-anthropic-billing-header:") {
+		t.Fatalf("default custom BaseURL request must not inject a billing header: %s", seenBody)
 	}
 }
 
@@ -5591,21 +5590,18 @@ func TestApplyClaudeHeaders_StreamTransportNegotiation(t *testing.T) {
 	}
 }
 
-func TestApplyClaudeHeaders_CallerBetasScopedByUpstream(t *testing.T) {
+func TestApplyClaudeHeaders_DefaultPreservesCallerBetas(t *testing.T) {
 	incoming := http.Header{"Anthropic-Beta": []string{"caller-only-beta"}}
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-caller-betas"}}
 	body := []byte(`{"model":"claude-opus-4-6"}`)
 
-	// Direct Anthropic must not echo a beta real Claude Code never sends.
+	// Default API-key mode preserves caller betas on direct Anthropic.
 	directReq := newClaudeHeaderTestRequest(t, incoming)
 	if errApply := applyClaudeHeaders(directReq, auth, "key-caller-betas", false, nil, body, nil, incoming, false); errApply != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", errApply)
 	}
-	if got := directReq.Header.Get("Anthropic-Beta"); strings.Contains(got, "caller-only-beta") {
-		t.Fatalf("Anthropic-Beta = %q, want caller beta dropped on api.anthropic.com", got)
-	}
-	if got, want := directReq.Header.Get("Anthropic-Beta"), claudeCodeCLIBetas(body, nil, false); got != want {
-		t.Fatalf("Anthropic-Beta = %q, want exactly the CLI baseline %q", got, want)
+	if got := directReq.Header.Get("Anthropic-Beta"); got != "caller-only-beta" {
+		t.Fatalf("Anthropic-Beta = %q, want caller beta on api.anthropic.com", got)
 	}
 
 	// Other Anthropic-compatible upstreams keep caller betas functional.
@@ -6086,7 +6082,7 @@ func executeClaudeContextManagementRequest(t *testing.T, cfg *config.Config, pay
 	})
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 	executor := NewClaudeExecutor(cfg)
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-payload-rule"}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-payload-rule", "cloak_mode": "always"}}
 	request := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}
 	options := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
 
@@ -6184,7 +6180,7 @@ func TestValidateClaudeCallerSystemBlocksRejectsNonTextBlock(t *testing.T) {
 
 func TestApplyCloakingRejectsNonTextCallerSystemBlock(t *testing.T) {
 	cfg := &config.Config{}
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123", "cloak_mode": "always"}}
 	payload := []byte(`{"model":"claude-opus-5","system":[{"type":"text","text":"S1"},{"type":"input_image"}],"messages":[{"role":"user","content":[{"type":"text","text":"U1"}]}]}`)
 
 	out, cloaked, errCloaking := applyCloaking(context.Background(), cfg, auth, payload, "key-123", false, true)
@@ -6290,8 +6286,9 @@ func TestClaudeExecutor_CacheTTLIsPairedWithExtendedCacheTTLBeta(t *testing.T) {
 			auth := &cliproxyauth.Auth{
 				ID: "cache-ttl-pairing",
 				Attributes: map[string]string{
-					"api_key":  test.apiKey,
-					"base_url": server.URL,
+					"api_key":    test.apiKey,
+					"base_url":   server.URL,
+					"cloak_mode": "always",
 				},
 				Metadata: claudeOAuthTestMetadata(),
 			}
@@ -6318,6 +6315,103 @@ func TestClaudeExecutor_CacheTTLIsPairedWithExtendedCacheTTLBeta(t *testing.T) {
 			// without a 1h body ttl, is a combination native never produces.
 			if (gotTTL == "1h") != gotBeta {
 				t.Fatalf("body ttl %q and extended-cache-ttl beta %v disagree", gotTTL, gotBeta)
+			}
+		})
+	}
+}
+
+func TestClaudeExecutor_PreservesNativeAgentAndEnvironmentHeaders(t *testing.T) {
+	tests := []struct {
+		name            string
+		incomingHeaders http.Header
+		wantHeaders     map[string]string
+		wantAbsent      []string
+	}{
+		{
+			name: "preserves canonical agent and parent agent headers",
+			incomingHeaders: http.Header{
+				"X-Claude-Code-Agent-Id":        {"subagent-001"},
+				"X-Claude-Code-Parent-Agent-Id": {"parent-agent-root"},
+			},
+			wantHeaders: map[string]string{
+				"X-Claude-Code-Agent-Id":        "subagent-001",
+				"X-Claude-Code-Parent-Agent-Id": "parent-agent-root",
+			},
+		},
+		{
+			name: "preserves lowercased agent and environment headers",
+			incomingHeaders: http.Header{
+				"x-claude-code-agent-id":            {"agent-xyz"},
+				"x-claude-remote-container-id":      {"container-123"},
+				"x-claude-remote-session-id":        {"remote-sess-456"},
+				"x-client-app":                      {"custom-sdk"},
+				"x-anthropic-additional-protection": {"true"},
+			},
+			wantHeaders: map[string]string{
+				"X-Claude-Code-Agent-Id":            "agent-xyz",
+				"X-Claude-Remote-Container-Id":      "container-123",
+				"X-Claude-Remote-Session-Id":        "remote-sess-456",
+				"X-Client-App":                      "custom-sdk",
+				"X-Anthropic-Additional-Protection": "true",
+			},
+		},
+		{
+			name: "does not fabricate agent header when absent",
+			incomingHeaders: http.Header{
+				"User-Agent": {"test-client"},
+			},
+			wantAbsent: []string{
+				"X-Claude-Code-Agent-Id",
+				"X-Claude-Code-Parent-Agent-Id",
+				"X-Claude-Remote-Container-Id",
+				"X-Claude-Remote-Session-Id",
+				"X-Client-App",
+				"X-Anthropic-Additional-Protection",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var seenHeaders http.Header
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seenHeaders = r.Header.Clone()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"msg_agent","type":"message","model":"claude-opus-4-6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+			}))
+			defer server.Close()
+
+			executor := NewClaudeExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				ID: "agent-header-test",
+				Attributes: map[string]string{
+					"api_key":    "sk-ant-test-key",
+					"base_url":   server.URL,
+					"cloak_mode": "always",
+				},
+				Metadata: claudeOAuthTestMetadata(),
+			}
+
+			_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "claude-opus-4-6",
+				Payload: []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatClaude,
+				Headers:      tt.incomingHeaders,
+			})
+			if errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+
+			for wantKey, wantVal := range tt.wantHeaders {
+				if got := seenHeaders.Get(wantKey); got != wantVal {
+					t.Errorf("header %s = %q, want %q", wantKey, got, wantVal)
+				}
+			}
+			for _, absentKey := range tt.wantAbsent {
+				if got := seenHeaders.Get(absentKey); got != "" {
+					t.Errorf("header %s = %q, want absent", absentKey, got)
+				}
 			}
 		})
 	}

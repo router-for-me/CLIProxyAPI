@@ -1532,3 +1532,89 @@ func TestSortByDepthUsesSegmentsAndIsStable(t *testing.T) {
 		t.Fatalf("sortByDepth() = %v, want %v", paths, want)
 	}
 }
+
+// TestCleanJSONSchemaStripsEncryptedMetadata covers Codex client tool definitions where
+// properties carry the Responses-only "encrypted" marker (e.g. "encrypted": true or "encrypted": false).
+// The Gemini backend strictly rejects unknown schema fields with an INVALID_ARGUMENT 400.
+func TestCleanJSONSchemaStripsEncryptedMetadata(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"api_key": {
+				"type": "string",
+				"description": "API credential",
+				"encrypted": true
+			},
+			"timeout": {
+				"type": "integer",
+				"encrypted": false
+			},
+			"nested": {
+				"type": "object",
+				"properties": {
+					"secret": {
+						"type": "string",
+						"encrypted": true
+					}
+				}
+			}
+		},
+		"required": ["api_key"]
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"gemini":              CleanJSONSchemaForGemini,
+		"antigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		got := clean(input)
+		if strings.Contains(got, `"encrypted"`) {
+			t.Errorf("%s: 'encrypted' marker survived cleaning: %s", cleaner, got)
+		}
+		parsed := gjson.Parse(got)
+		if !parsed.Get("properties.api_key.type").Exists() || parsed.Get("properties.api_key.description").String() != "API credential" {
+			t.Errorf("%s: api_key schema was corrupted: %s", cleaner, got)
+		}
+		if !parsed.Get("properties.nested.properties.secret.type").Exists() {
+			t.Errorf("%s: nested property secret was corrupted: %s", cleaner, got)
+		}
+	}
+}
+
+// TestCleanJSONSchemaKeepsPropertyNamedEncrypted guards the legitimate case where a tool
+// parameter itself is named "encrypted" (e.g. properties.encrypted: {"type": "boolean"}).
+func TestCleanJSONSchemaKeepsPropertyNamedEncrypted(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"encrypted": {
+				"type": "boolean",
+				"description": "Whether the payload is encrypted",
+				"encrypted": true
+			},
+			"data": {
+				"type": "string"
+			}
+		},
+		"required": ["encrypted"]
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity": CleanJSONSchemaForAntigravity,
+		"gemini":      CleanJSONSchemaForGemini,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+		if !parsed.Get("properties.encrypted").Exists() {
+			t.Errorf("%s: property named 'encrypted' was removed: %s", cleaner, got)
+		}
+		if parsed.Get("properties.encrypted.type").String() != "boolean" {
+			t.Errorf("%s: property named 'encrypted' type corrupted: %s", cleaner, got)
+		}
+		// The inner attribute "encrypted": true must be stripped
+		if parsed.Get("properties.encrypted.encrypted").Exists() {
+			t.Errorf("%s: inner 'encrypted' attribute survived: %s", cleaner, got)
+		}
+	}
+}

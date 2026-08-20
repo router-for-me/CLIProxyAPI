@@ -107,6 +107,7 @@ attemptLoop:
 					return nil, err
 				}
 			}
+			requestPayload = ensureAntigravityGeminiLeadingUserContent(baseModel, requestPayload)
 			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
 			if errReq != nil {
 				err = errReq

@@ -298,10 +298,8 @@ func TestKimiExecutorClaudeStreamForwardsAnthropicBetaAndLogsUpstream(t *testing
 		t.Fatalf("upstream URL = %q, want Kimi messages endpoint", got)
 	}
 	upstreamBetas := upstreamRequest.Header.Get("Anthropic-Beta")
-	for _, beta := range []string{"client-beta-one", "client-beta-two", "oauth-2025-04-20", "interleaved-thinking-2025-05-14"} {
-		if !strings.Contains(upstreamBetas, beta) {
-			t.Fatalf("Anthropic-Beta = %q, want %q", upstreamBetas, beta)
-		}
+	if upstreamBetas != "client-beta-one,client-beta-two" {
+		t.Fatalf("Anthropic-Beta = %q, want caller beta values only", upstreamBetas)
 	}
 
 	rawAPIRequest, existsRequest := ginCtx.Get("API_REQUEST")

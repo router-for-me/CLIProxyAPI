@@ -162,3 +162,28 @@ func hasRequestFaultBody(err error) bool {
 	}
 	return false
 }
+
+// IsClientCancellation reports whether an HTTP status code or error represents
+// a client-initiated cancellation (HTTP 499 StatusClientClosedRequest or context.Canceled).
+func IsClientCancellation(status int, err error) bool {
+	if status == StatusClientClosedRequest {
+		return true
+	}
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return true
+		}
+		type statusCoder interface {
+			StatusCode() int
+		}
+		var sc statusCoder
+		if errors.As(err, &sc) && sc != nil && sc.StatusCode() == StatusClientClosedRequest {
+			return true
+		}
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "context canceled") || strings.Contains(lower, "client closed request") {
+			return true
+		}
+	}
+	return false
+}
