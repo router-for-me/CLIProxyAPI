@@ -175,6 +175,10 @@ CLIProxyAPIをベースにした以下のプロジェクトがあります：
 
 macOSネイティブのメニューバーアプリで、Claude CodeとChatGPTのサブスクリプションをAIコーディングツールで使用可能 - APIキー不要
 
+### [ModelMoor](https://github.com/Kingfish404/ModelMoor)
+
+CLIProxyAPIを管理対象のローカルsidecarとして運用し、対応するサブスクリプションアカウント、SSHホスト上のモデル、OpenAI互換APIを、認証付きの単一エンドポイントに統合するmacOSネイティブのメニューバーアプリおよびCLIです。
+
 ### [Subtitle Translator](https://github.com/VjayC/SRT-Subtitle-Translator-Validator)
 
 CLIProxyAPI経由で既存のLLMサブスクリプション（Gemini、ChatGPT、Claude, etc.）を使用してSRT字幕を翻訳および検証する、クロスプラットフォームのデスクトップおよびWebアプリ - APIキー不要。
