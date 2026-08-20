@@ -3,6 +3,7 @@ package executor
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -120,6 +121,79 @@ func TestClaudeExecutor_ExecuteStreamTranslatedPrematureEOFYieldsError(t *testin
 	}
 	if len(rec.errs) != 1 {
 		t.Fatalf("error chunk count = %d, want exactly 1 after translated payloads (premature EOF must not close the channel silently); payloads=%d", len(rec.errs), len(rec.payloads))
+	}
+}
+
+func runClaudeStreamBody(
+	t *testing.T,
+	body string,
+	contentType string,
+	sourceFormat sdktranslator.Format,
+) claudeStreamRecorder {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	executor, auth := newClaudeStreamTerminalExecutor(server)
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	if sourceFormat != sdktranslator.FromString("claude") {
+		payload = []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+	}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sourceFormat})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var rec claudeStreamRecorder
+	rec.record(result)
+	return rec
+}
+
+func TestScanClaudeResponseLinesAcceptsSSELineEndings(t *testing.T) {
+	for _, separator := range []string{"\n", "\r\n", "\r"} {
+		t.Run(fmt.Sprintf("%q", separator), func(t *testing.T) {
+			scanner := bufio.NewScanner(strings.NewReader(
+				"event: test" + separator + "data: {}" + separator + separator,
+			))
+			scanner.Split(scanClaudeResponseLines)
+			var lines []string
+			for scanner.Scan() {
+				lines = append(lines, scanner.Text())
+			}
+			if err := scanner.Err(); err != nil {
+				t.Fatalf("scan lines: %v", err)
+			}
+			if got := strings.Join(lines, "|"); got != "event: test|data: {}|" {
+				t.Fatalf("lines = %q", got)
+			}
+		})
+	}
+}
+
+func TestClaudeExecutor_ExecuteStreamCROnlyMessageStopSucceeds(t *testing.T) {
+	body := strings.ReplaceAll(claudeStreamCompleteBody, "\n", "\r")
+	for _, test := range []struct {
+		name         string
+		sourceFormat sdktranslator.Format
+	}{
+		{name: "direct", sourceFormat: sdktranslator.FromString("claude")},
+		{name: "translated", sourceFormat: sdktranslator.FormatOpenAI},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rec := runClaudeStreamBody(t, body, "text/event-stream", test.sourceFormat)
+			if len(rec.errs) != 0 {
+				t.Fatalf("complete CR-only stream produced %d error chunk(s): %v", len(rec.errs), rec.errs)
+			}
+			if len(rec.payloads) == 0 {
+				t.Fatal("complete CR-only stream emitted no payload")
+			}
+		})
 	}
 }
 

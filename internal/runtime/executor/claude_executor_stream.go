@@ -306,6 +306,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			responseTracker := newClaudeResponseTracker(httpResp.Header)
 			scanner := bufio.NewScanner(responseTracker.reader(decodedBody))
 			scanner.Buffer(nil, claudeResponseScanLimit)
+			scanner.Split(scanClaudeResponseLines)
 			var event bytes.Buffer
 			var upstreamMessageID string
 			upstreamCompleted := false
@@ -375,6 +376,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		responseTracker := newClaudeResponseTracker(httpResp.Header)
 		scanner := bufio.NewScanner(responseTracker.reader(decodedBody))
 		scanner.Buffer(nil, claudeResponseScanLimit)
+		scanner.Split(scanClaudeResponseLines)
 		var param any
 		var upstreamMessageID string
 		upstreamCompleted := false
@@ -443,6 +445,29 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		result = wrapClaudeThinkingReplayStream(ctx, result, replayScope)
 	}
 	return result, nil
+}
+
+// scanClaudeResponseLines accepts every line ending allowed by SSE.
+// bufio.ScanLines does not split records separated by a lone carriage return.
+func scanClaudeResponseLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	for index, current := range data {
+		switch current {
+		case '\n':
+			return index + 1, data[:index], nil
+		case '\r':
+			if index+1 == len(data) && !atEOF {
+				return 0, nil, nil
+			}
+			if index+1 < len(data) && data[index+1] == '\n' {
+				return index + 2, data[:index], nil
+			}
+			return index + 1, data[:index], nil
+		}
+	}
+	if atEOF && len(data) != 0 {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
 }
 
 func claudeStreamPrematureEOFError() error {
