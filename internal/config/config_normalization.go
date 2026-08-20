@@ -181,9 +181,10 @@ func (cfg *Config) SanitizeOpenCodeGoKeys() {
 
 // SanitizePoolsideKeys normalizes Poolside key entries. Entries are NOT removed
 // when BaseURL is empty: the Poolside executor supplies a gateway default
-// base-url (https://inference.poolside.ai/v1), so an empty BaseURL is valid and
-// must survive config load — same rule as OpenCode. Dropping it here was the
-// root cause of Poolside keys silently disappearing from the proxy.
+// base-url (https://inference.poolside.ai, the bare host — ClaudeExecutor
+// appends /v1/messages), so an empty BaseURL is valid and must survive config
+// load — same rule as OpenCode. Dropping it here was the root cause of Poolside
+// keys silently disappearing from the proxy.
 func (cfg *Config) SanitizePoolsideKeys() {
 	if cfg == nil {
 		return

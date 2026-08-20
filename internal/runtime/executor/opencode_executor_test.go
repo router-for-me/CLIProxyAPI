@@ -239,6 +239,31 @@ func TestPoolsideExecutor_IdentifierAndProvider(t *testing.T) {
 	}
 }
 
+// TestPoolsideDefaultBaseURLHasNoV1Suffix is the root-cause guard for the
+// runtime 404 observed with the released -dc9/-dc10 binaries: ClaudeExecutor
+// appends "/v1/messages" to the auth base_url, so a PoolsideBaseURL default
+// carrying "/v1" produced https://inference.poolside.ai/v1/v1/messages and the
+// live upstream answered 404 (while https://inference.poolside.ai/v1/messages
+// returns 200). The default must therefore be the bare host.
+func TestPoolsideDefaultBaseURLHasNoV1Suffix(t *testing.T) {
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(PoolsideBaseURL)), "/v1") {
+		t.Fatalf("PoolsideBaseURL = %q must not end with /v1 (ClaudeExecutor appends /v1/messages)", PoolsideBaseURL)
+	}
+	exec := NewPoolsideExecutor(&config.Config{})
+	auth := &clipoauth.Auth{
+		Provider:   constant.Poolside,
+		Attributes: map[string]string{"api_key": "poolside-secret"},
+	}
+	cloned := exec.cloneAuthWithBaseURL(auth)
+	got := cloned.Attributes["base_url"]
+	if got != PoolsideBaseURL {
+		t.Fatalf("default base_url = %q, want %q", got, PoolsideBaseURL)
+	}
+	if strings.Contains(got+"/v1/messages", "/v1/v1/") {
+		t.Fatalf("default base_url %q would produce a duplicated /v1 path segment", got)
+	}
+}
+
 func TestOpenCodeCredentialsFromMetadata(t *testing.T) {
 	auth := &clipoauth.Auth{Metadata: map[string]any{"api_key": "sk-test"}}
 	token, ok := openCodeCreds(auth)

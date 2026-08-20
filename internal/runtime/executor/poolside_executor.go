@@ -12,7 +12,12 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
-const PoolsideBaseURL = "https://inference.poolside.ai/v1"
+// PoolsideBaseURL is the Poolside inference host WITHOUT the /v1 suffix:
+// ClaudeExecutor appends "/v1/messages" itself, so a base carrying /v1 would
+// produce https://inference.poolside.ai/v1/v1/messages (upstream 404 — the
+// runtime failure observed with the released -dc9/-dc10 binaries). The full
+// service surface is https://inference.poolside.ai/v1/*.
+const PoolsideBaseURL = "https://inference.poolside.ai"
 
 // PoolsideExecutor is a stateless executor for Poolside AI's OpenAI-compatible
 // inference endpoint. It reuses ClaudeExecutor for protocol translation (the

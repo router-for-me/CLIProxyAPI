@@ -6082,46 +6082,6 @@
   ],
   "poolside": [
     {
-      "id": "claude-opus-4-8",
-      "object": "model",
-      "owned_by": "poolside",
-      "type": "poolside",
-      "display_name": "Claude Opus 4.8 (Poolside)",
-      "description": "Poolside AI gateway — Claude Opus 4.8 via Anthropic Messages",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "thinking": {
-        "min": 1024,
-        "max": 64000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      },
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "claude-sonnet-4-6",
-      "object": "model",
-      "owned_by": "poolside",
-      "type": "poolside",
-      "display_name": "Claude Sonnet 4.6 (Poolside)",
-      "description": "Poolside AI gateway — Claude Sonnet 4.6 via Anthropic Messages",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
       "id": "poolside/laguna-s-2.1",
       "object": "model",
       "created": 1771372800,

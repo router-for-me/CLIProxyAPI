@@ -50,7 +50,7 @@ func TestSanitizeCodexKeysStillDropsEntryWithoutBaseURL(t *testing.T) {
 
 // TestSanitizePoolsideKeysPreservesEntryWithoutBaseURL is the root-cause guard
 // for "Poolside keys silently dropped at config load". The Poolside executor
-// supplies a default base-url (https://inference.poolside.ai/v1), so an empty
+// supplies a default base-url (https://inference.poolside.ai), so an empty
 // BaseURL is valid and must survive, exactly like OpenCode.
 func TestSanitizePoolsideKeysPreservesEntryWithoutBaseURL(t *testing.T) {
 	cfg := &Config{
