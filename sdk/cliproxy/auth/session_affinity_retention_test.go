@@ -779,3 +779,85 @@ func TestSessionAffinity_StickyTemporaryFallbackSecondaryBranch(t *testing.T) {
 		t.Fatalf("recovered Pick() = %q, want %q", recovered.ID, "auth-a")
 	}
 }
+
+
+func TestSessionAffinity_ModelFallbackSuffixDoesNotCollideWithTemporaryFallback(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Hour,
+	})
+	defer selector.Stop()
+
+	authA := &Auth{ID: "auth-a"}
+	authB := &Auth{ID: "auth-b"}
+	authC := &Auth{ID: "auth-c"}
+	allAuths := []*Auth{authA, authB, authC}
+
+	sessionID := "sess-fallback-suffix-collision"
+	opts := cliproxyexecutor.Options{
+		Headers: http.Header{"X-Session-Id": []string{sessionID}},
+	}
+
+	baseModel := "gpt-4"
+	suffixedModel := "gpt-4::fallback"
+
+	// 1. Establish binding for suffixedModel ("gpt-4::fallback") to auth-a
+	pickSuffixed1, err := selector.Pick(context.Background(), "openai", suffixedModel, opts, allAuths)
+	if err != nil {
+		t.Fatalf("initial pick for suffixed model error = %v", err)
+	}
+	if pickSuffixed1.ID != "auth-a" {
+		t.Fatalf("initial pick for suffixed model = %q, want auth-a", pickSuffixed1.ID)
+	}
+	selector.OnResult(Result{AuthID: pickSuffixed1.ID, Provider: "openai", Model: suffixedModel, Options: opts, Success: true})
+
+	// 2. Establish binding for baseModel ("gpt-4") to auth-b
+	pickBase1, err := selector.Pick(context.Background(), "openai", baseModel, opts, []*Auth{authB, authC})
+	if err != nil {
+		t.Fatalf("initial pick for base model error = %v", err)
+	}
+	if pickBase1.ID != "auth-b" {
+		t.Fatalf("initial pick for base model = %q, want auth-b", pickBase1.ID)
+	}
+	selector.OnResult(Result{AuthID: pickBase1.ID, Provider: "openai", Model: baseModel, Options: opts, Success: true})
+
+	// 3. Primary auth-b for baseModel cools down; temporary fallback for baseModel is selected as auth-c
+	coolingBaseAuths := []*Auth{authC}
+	pickBaseFallback, err := selector.Pick(context.Background(), "openai", baseModel, opts, coolingBaseAuths)
+	if err != nil {
+		t.Fatalf("fallback pick for base model error = %v", err)
+	}
+	if pickBaseFallback.ID != "auth-c" {
+		t.Fatalf("fallback pick for base model = %q, want auth-c", pickBaseFallback.ID)
+	}
+	selector.OnResult(Result{AuthID: pickBaseFallback.ID, Provider: "openai", Model: baseModel, Options: opts, Success: true})
+
+	// 4. Request for suffixedModel ("gpt-4::fallback") MUST NOT be overwritten or corrupted by baseModel's temporary fallback
+	pickSuffixed2, err := selector.Pick(context.Background(), "openai", suffixedModel, opts, allAuths)
+	if err != nil {
+		t.Fatalf("subsequent pick for suffixed model error = %v", err)
+	}
+	if pickSuffixed2.ID != "auth-a" {
+		t.Fatalf("subsequent pick for suffixed model = %q, want bound %q (must not collide with base model's temporary fallback)", pickSuffixed2.ID, "auth-a")
+	}
+
+	// 5. When baseModel's primary auth-b recovers, invalidating baseModel's temporary fallback MUST NOT purge suffixedModel's binding
+	recoveredBase, err := selector.Pick(context.Background(), "openai", baseModel, opts, allAuths)
+	if err != nil {
+		t.Fatalf("recovered pick for base model error = %v", err)
+	}
+	if recoveredBase.ID != "auth-b" {
+		t.Fatalf("recovered pick for base model = %q, want auth-b", recoveredBase.ID)
+	}
+
+	pickSuffixed3, err := selector.Pick(context.Background(), "openai", suffixedModel, opts, allAuths)
+	if err != nil {
+		t.Fatalf("pick for suffixed model after base recovery error = %v", err)
+	}
+	if pickSuffixed3.ID != "auth-a" {
+		t.Fatalf("pick for suffixed model after base recovery = %q, want bound %q (must not be purged when base model clears temporary fallback)", pickSuffixed3.ID, "auth-a")
+	}
+}
