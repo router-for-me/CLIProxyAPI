@@ -19,11 +19,11 @@ type failExecutor struct {
 func (e *failExecutor) Identifier() string { return e.provider }
 func (e *failExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	e.calls.Add(1)
-	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusInternalServerError, Message: "upstream failure"}
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusUnauthorized, Message: "invalid api key"}
 }
 func (e *failExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	e.calls.Add(1)
-	return nil, &Error{HTTPStatus: http.StatusInternalServerError, Message: "upstream failure"}
+	return nil, &Error{HTTPStatus: http.StatusUnauthorized, Message: "invalid api key"}
 }
 func (e *failExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) { return auth, nil }
 func (e *failExecutor) CountTokens(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -252,7 +252,7 @@ func TestSessionAffinityOnResultWithMismatchedNamespaceFailsToUnbind(t *testing.
 		Provider: "gemini", // actual provider
 		Model:    model,
 		Success:  false,
-		Error:    &Error{HTTPStatus: http.StatusInternalServerError},
+		Error:    &Error{HTTPStatus: http.StatusUnauthorized, Message: "invalid api key"},
 		Options: cliproxyexecutor.Options{
 			Headers: http.Header{"X-Session-Id": []string{"sess-ns-1"}},
 			Metadata: map[string]any{

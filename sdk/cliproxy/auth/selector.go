@@ -711,7 +711,6 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		if err != nil {
 			return nil, err
 		}
-		bind(auth.ID)
 		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 		return auth, nil
 	}
@@ -725,6 +724,12 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 					return auth, nil
 				}
 			}
+			auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+			if err != nil {
+				return nil, err
+			}
+			entry.Infof("session-affinity: fallback cache hit but auth unavailable, reselected | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+			return auth, nil
 		}
 	}
 
@@ -802,13 +807,42 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		return
 	}
 
-	if res.Error != nil && shouldSkipCredentialCooldown(res.Error) {
-		return
+	if res.Error != nil && isTerminalSessionAffinityError(res.Error) {
+		s.cache.CompareAndDelete(cacheKey, res.AuthID)
+		if fallbackKey != "" {
+			s.cache.CompareAndDelete(fallbackKey, res.AuthID)
+		}
 	}
+}
 
-	s.cache.CompareAndDelete(cacheKey, res.AuthID)
-	if fallbackKey != "" {
-		s.cache.CompareAndDelete(fallbackKey, res.AuthID)
+// isTerminalSessionAffinityError reports whether a failure represents a permanent
+// credential or authorization rejection (such as an invalid API key, revoked grant,
+// depleted balance, or unsupported model on the account) that warrants purging
+// the long-lived session binding from cache. Transient errors (5xx, 429, timeouts,
+// cloudflare challenge) retain affinity so the session returns to its warm prompt
+// cache once the cooldown or rate limit clears.
+func isTerminalSessionAffinityError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	if shouldSkipCredentialCooldown(err) {
+		return false
+	}
+	if isInvalidGrantResultError(err) || isModelSupportResultError(err) {
+		return true
+	}
+	if isCloudflareChallengeResultError(err) {
+		return false
+	}
+	statusCode := statusCodeFromResult(err)
+	switch statusCode {
+	case http.StatusUnauthorized,   // 401: invalid API key / unauthorized
+		http.StatusPaymentRequired, // 402: insufficient balance / credits depleted
+		http.StatusForbidden,       // 403: account banned / forbidden
+		http.StatusNotFound:        // 404: model not found / unsupported for account
+		return true
+	default:
+		return false
 	}
 }
 
