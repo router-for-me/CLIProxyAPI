@@ -183,7 +183,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			sess.clearActive(conn, readCh)
 		}()
 	}
-	restoreMultiAgentV2 := !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
+	previousResponseID := strings.TrimSpace(gjson.GetBytes(wsReqBody, "previous_response_id").String())
+	restoreMultiAgentV2 := sess.multiAgentV2OptimizedForRequest(conn, previousResponseID, optimizeMultiAgentV2, multiAgentV2Conflict)
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
 		errSend = mapCodexWebsocketWriteError(sess, conn, errSend)
@@ -217,7 +218,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 					return resp, errBind
 				}
 				readCh = sess.activate(conn)
-				restoreMultiAgentV2 = !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
+				restoreMultiAgentV2 = sess.multiAgentV2OptimizedForRequest(conn, previousResponseID, optimizeMultiAgentV2, multiAgentV2Conflict)
 				wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
@@ -249,10 +250,6 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
 			return resp, errSend
 		}
-	}
-
-	if optimizeMultiAgentV2 || multiAgentV2Conflict {
-		sess.setMultiAgentV2Optimized(conn, optimizeMultiAgentV2 && !multiAgentV2Conflict)
 	}
 
 	outputItemsByIndex := make(map[int64][]byte)
@@ -316,6 +313,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
 		case "response.completed":
 			payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
+			sess.recordMultiAgentV2Lineage(conn, gjson.GetBytes(payload, "response.id").String(), restoreMultiAgentV2)
 			cacheCodexReasoningReplayFromCompleted(replayScope, payload)
 			if detail, ok := helps.ParseCodexUsage(payload); ok {
 				reporter.Publish(ctx, detail)
