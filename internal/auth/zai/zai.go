@@ -143,7 +143,7 @@ func NewZAIAuth(cfg *config.Config, provider, proxyURL string, callbackPort int)
 func (a *ZAIAuth) Provider() string { return a.provider }
 
 // StartFlow initiates the OAuth flow and returns the authorization URL plus the
-// poll token used to wait for completion.
+// state token used to wait for completion.
 func (a *ZAIAuth) StartFlow(ctx context.Context) (*InitResponse, error) {
 	// Both Z.AI international and BigModel now use the browser-callback flow
 	// (local loopback server captures the authorization code). The old

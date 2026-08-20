@@ -957,14 +957,14 @@ func GetOpenCodeModels(gateway string) []*ModelInfo {
 // generated catalog mirrors.
 func openCodeRoutesModelInfo(gateway, modelID, protocol string) *ModelInfo {
 	info := &ModelInfo{
-		ID:                       modelID,
-		Object:                   "model",
-		OwnedBy:                  "opencode",
-		Type:                     "opencode",
-		DisplayName:              modelID,
-		Description:              "OpenCode " + gateway + " gateway — " + modelID,
-		ContextLength:            500000,
-		MaxCompletionTokens:      65536,
+		ID:                        modelID,
+		Object:                    "model",
+		OwnedBy:                   "opencode",
+		Type:                      "opencode",
+		DisplayName:               modelID,
+		Description:               "OpenCode " + gateway + " gateway — " + modelID,
+		ContextLength:             500000,
+		MaxCompletionTokens:       65536,
 		SupportedInputModalities:  []string{"text"},
 		SupportedOutputModalities: []string{"text"},
 		Thinking: &ThinkingSupport{

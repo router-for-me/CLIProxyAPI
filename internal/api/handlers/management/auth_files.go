@@ -623,13 +623,12 @@ func (h *Handler) requestZAIToken(c *gin.Context, provider string) {
 
 	go func() {
 		fmt.Println("Waiting for authentication...")
-		// BigModel uses a loopback callback a remote browser cannot reach, so also
+		stop := make(chan struct{})
+		defer close(stop)
+		// Both Z.AI international and BigModel use a loopback callback. When the
+		// browser runs on a different host, it cannot reach 127.0.0.1, so also
 		// accept the manually pasted callback that /oauth-callback writes to disk.
-		if provider == zaiauth.ProviderBigModel {
-			stop := make(chan struct{})
-			defer close(stop)
-			go h.watchManualZAICallback(state, zaiAuth, stop)
-		}
+		go h.watchManualZAICallback(state, zaiAuth, stop)
 		ready, errWait := zaiAuth.WaitForAuthorization(ctx, init)
 		if errWait != nil {
 			SetOAuthSessionError(state, "Authentication failed")
