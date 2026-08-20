@@ -1,0 +1,1103 @@
+package helps
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
+
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+)
+
+// Factory/Droid native tool markup that Grok sometimes leaks into assistant
+// text instead of emitting OpenAI tool_calls. Factory's first-party Grok
+// adapter parses this; generic OpenAI chat-completion clients do not, so the
+// turn ends as plain text (worker_exited_without_handoff).
+const (
+	xaiNativeToolCallsBegin = "<|tool_calls_begin|>"
+	xaiNativeToolCallBegin  = "<|tool_call_begin|>"
+	xaiNativeToolCallEnd    = "<|tool_call_end|>"
+	xaiNativeToolCallsEnd   = "<|tool_calls_end|>"
+	xaiNativeToolSep        = "<|tool_sep|>"
+)
+
+type xaiNativeToolCall struct {
+	Name      string
+	Arguments map[string]any
+}
+
+type xaiNativeToolMarkup struct {
+	Prefix string
+	Suffix string
+	Calls  []xaiNativeToolCall
+}
+
+// parseXAINativeToolMarkup extracts Factory/Droid tool markup from assistant
+// text. It returns false when the text has no usable calls, when any call is
+// truncated, or when the block never reaches <|tool_calls_end|>. A batch that
+// ends after a closed call but before the aggregate terminator is left as
+// text so a dropped stream cannot execute only the first side effect.
+func parseXAINativeToolMarkup(text string) (xaiNativeToolMarkup, bool) {
+	begin := strings.Index(text, xaiNativeToolCallsBegin)
+	if begin < 0 {
+		return xaiNativeToolMarkup{}, false
+	}
+
+	prefix := text[:begin]
+	cursor := begin + len(xaiNativeToolCallsBegin)
+	var calls []xaiNativeToolCall
+
+	for cursor < len(text) {
+		if strings.HasPrefix(text[cursor:], xaiNativeToolCallsEnd) {
+			suffix := text[cursor+len(xaiNativeToolCallsEnd):]
+			if len(calls) == 0 {
+				return xaiNativeToolMarkup{}, false
+			}
+			return xaiNativeToolMarkup{Prefix: prefix, Suffix: suffix, Calls: calls}, true
+		}
+		rel := strings.Index(text[cursor:], xaiNativeToolCallBegin)
+		if rel < 0 {
+			break
+		}
+		cursor += rel + len(xaiNativeToolCallBegin)
+		limit := nextXAINativeMarker(text, cursor, []string{xaiNativeToolCallEnd, xaiNativeToolCallsEnd, xaiNativeToolCallBegin})
+		if limit < 0 {
+			limit = len(text)
+		}
+		call, end, ok := parseXAINativeToolCall(text, cursor, limit)
+		if !ok {
+			// A later truncated/malformed call must invalidate the whole
+			// block so we do not execute a prefix of a parallel batch.
+			return xaiNativeToolMarkup{}, false
+		}
+		calls = append(calls, call)
+		cursor = end
+		if cursor < len(text) && strings.HasPrefix(text[cursor:], xaiNativeToolCallEnd) {
+			cursor += len(xaiNativeToolCallEnd)
+		}
+	}
+	return xaiNativeToolMarkup{}, false
+}
+
+func parseXAINativeToolCall(text string, start, limit int) (xaiNativeToolCall, int, bool) {
+	cursor := skipXAINativeWhitespace(text, start, limit)
+	if cursor >= limit {
+		return xaiNativeToolCall{}, cursor, false
+	}
+
+	nameEnd := nextXAINativeMarkerUntil(text, cursor, []string{xaiNativeToolSep, xaiNativeToolCallEnd, xaiNativeToolCallsEnd, xaiNativeToolCallBegin}, limit)
+	nameClosedByMarker := nameEnd >= 0
+	if nameEnd < 0 {
+		nameEnd = nextXAINativeNewline(text, cursor, limit)
+	}
+	if nameEnd < 0 {
+		if xaiNativeClosedByLimitMarker(text, limit) {
+			nameEnd = limit
+			nameClosedByMarker = true
+		} else {
+			return xaiNativeToolCall{}, cursor, false
+		}
+	}
+	name := strings.TrimSpace(text[cursor:nameEnd])
+	if name == "" {
+		return xaiNativeToolCall{}, cursor, false
+	}
+
+	cursor = nameEnd
+	if cursor < limit && text[cursor] == '\r' {
+		cursor++
+	}
+	if cursor < limit && text[cursor] == '\n' {
+		cursor++
+	}
+
+	arguments := make(map[string]any)
+	for cursor < limit && strings.HasPrefix(text[cursor:], xaiNativeToolSep) {
+		cursor += len(xaiNativeToolSep)
+		cursor = skipXAINativeHorizontalWhitespace(text, cursor, limit)
+		if cursor < limit && text[cursor] == '\r' {
+			cursor++
+		}
+		if cursor < limit && text[cursor] == '\n' {
+			cursor++
+		}
+
+		keyEnd := nextXAINativeNewline(text, cursor, limit)
+		if keyEnd < 0 {
+			keyEnd = nextXAINativeMarkerUntil(text, cursor, []string{xaiNativeToolSep, xaiNativeToolCallEnd, xaiNativeToolCallsEnd}, limit)
+		}
+		if keyEnd < 0 {
+			if xaiNativeClosedByLimitMarker(text, limit) {
+				keyEnd = limit
+			} else {
+				return xaiNativeToolCall{}, cursor, false
+			}
+		}
+		key := strings.TrimSpace(text[cursor:keyEnd])
+		cursor = keyEnd
+		if cursor < limit && text[cursor] == '\r' {
+			cursor++
+		}
+		if cursor < limit && text[cursor] == '\n' {
+			cursor++
+		}
+
+		valueEnd := nextXAINativeMarkerUntil(text, cursor, []string{xaiNativeToolSep, xaiNativeToolCallEnd, xaiNativeToolCallsEnd, xaiNativeToolCallBegin}, limit)
+		if valueEnd < 0 {
+			if xaiNativeClosedByLimitMarker(text, limit) {
+				valueEnd = limit
+			} else {
+				return xaiNativeToolCall{}, cursor, false
+			}
+		}
+		value := text[cursor:valueEnd]
+		if strings.HasSuffix(value, "\r\n") {
+			value = value[:len(value)-2]
+		} else if strings.HasSuffix(value, "\n") || strings.HasSuffix(value, "\r") {
+			value = value[:len(value)-1]
+		}
+		if colon := strings.IndexByte(key, ':'); colon >= 0 {
+			inline := strings.TrimSpace(key[colon+1:])
+			if inline != "" && strings.TrimSpace(value) == "" {
+				key = strings.TrimSpace(key[:colon])
+				value = inline
+			}
+		}
+		if key != "" {
+			arguments[key] = coerceXAINativeJSONValue(value)
+		}
+		cursor = valueEnd
+	}
+
+	if !nameClosedByMarker && len(arguments) == 0 && !xaiNativeClosedByLimitMarker(text, limit) {
+		if cursor >= limit ||
+			!(strings.HasPrefix(text[cursor:], xaiNativeToolCallEnd) ||
+				strings.HasPrefix(text[cursor:], xaiNativeToolCallsEnd) ||
+				strings.HasPrefix(text[cursor:], xaiNativeToolCallBegin)) {
+			return xaiNativeToolCall{}, cursor, false
+		}
+	}
+
+	return xaiNativeToolCall{Name: name, Arguments: arguments}, cursor, true
+}
+
+func xaiNativeClosedByLimitMarker(text string, limit int) bool {
+	if limit < 0 || limit >= len(text) {
+		return false
+	}
+	return strings.HasPrefix(text[limit:], xaiNativeToolCallEnd) ||
+		strings.HasPrefix(text[limit:], xaiNativeToolCallsEnd) ||
+		strings.HasPrefix(text[limit:], xaiNativeToolCallBegin) ||
+		strings.HasPrefix(text[limit:], xaiNativeToolSep)
+}
+
+func coerceXAINativeJSONValue(raw string) any {
+	trimmed := strings.TrimSpace(raw)
+	if ((strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) ||
+		(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]"))) &&
+		gjson.Valid(trimmed) {
+		var decoded any
+		dec := json.NewDecoder(strings.NewReader(trimmed))
+		dec.UseNumber()
+		if err := dec.Decode(&decoded); err == nil {
+			return decoded
+		}
+	}
+	return raw
+}
+
+// rewriteXAINativeToolMarkupChatJSON lifts markup out of choices[0].message.content
+// into OpenAI tool_calls. It returns false when the body is unchanged, including
+// when tool_calls are already present or no parsed call matches a declared tool.
+func rewriteXAINativeToolMarkupChatJSON(body []byte, declared xaiNativeDeclaredTools) ([]byte, bool) {
+	if !gjson.ValidBytes(body) {
+		return nil, false
+	}
+	choice := gjson.GetBytes(body, "choices.0")
+	if !choice.Exists() {
+		return nil, false
+	}
+	message := choice.Get("message")
+	if !message.Exists() || xaiNativeHasToolCalls(message.Get("tool_calls")) {
+		return nil, false
+	}
+	content := message.Get("content")
+	if content.Type != gjson.String {
+		return nil, false
+	}
+	parsed, ok := parseXAINativeToolMarkup(content.String())
+	if !ok {
+		return nil, false
+	}
+	calls := declared.filter(parsed.Calls)
+	if len(calls) == 0 {
+		return nil, false
+	}
+
+	out := body
+	if content := parsed.Prefix + parsed.Suffix; content == "" {
+		out, _ = sjson.SetRawBytes(out, "choices.0.message.content", []byte("null"))
+	} else {
+		out, _ = sjson.SetBytes(out, "choices.0.message.content", content)
+	}
+	out, _ = sjson.SetRawBytes(out, "choices.0.message.tool_calls", encodeXAINativeToolCalls(calls, false))
+	out, _ = sjson.SetBytes(out, "choices.0.finish_reason", "tool_calls")
+	if choice.Get("native_finish_reason").Exists() {
+		out, _ = sjson.SetBytes(out, "choices.0.native_finish_reason", "tool_calls")
+	}
+	return out, true
+}
+
+// rewriteXAINativeToolMarkupSSE reassembles an OpenAI chat-completion SSE body
+// and replaces leaked markup with tool_calls deltas. Markup split across
+// content deltas is handled because the body is assembled first. Returns false
+// when unchanged, including when any chunk already carries tool_calls.
+func rewriteXAINativeToolMarkupSSE(sse []byte, declared xaiNativeDeclaredTools) ([]byte, bool) {
+	events := xaiNativeSSEDataPayloads(sse)
+	if len(events) == 0 {
+		return nil, false
+	}
+
+	var content strings.Builder
+	alreadyHasToolCalls := false
+	id := "chatcmpl-grok-native"
+	model := "grok-4.6"
+	created := time.Now().Unix()
+	var usage rawJSON
+
+	for i, payload := range events {
+		if payload == "[DONE]" {
+			continue
+		}
+		if !gjson.Valid(payload) {
+			continue
+		}
+		obj := gjson.Parse(payload)
+		if i == 0 || id == "chatcmpl-grok-native" {
+			if value := obj.Get("id"); value.Exists() && value.Type == gjson.String {
+				id = value.String()
+			}
+			if value := obj.Get("model"); value.Exists() && value.Type == gjson.String {
+				model = value.String()
+			}
+			if value := obj.Get("created"); value.Exists() {
+				created = value.Int()
+			}
+		}
+		if value := obj.Get("usage"); value.Exists() {
+			usage = rawJSON(value.Raw)
+		}
+		choice := obj.Get("choices.0")
+		if !choice.Exists() {
+			continue
+		}
+		if message := choice.Get("message"); message.Exists() {
+			if xaiNativeHasToolCalls(message.Get("tool_calls")) {
+				alreadyHasToolCalls = true
+			}
+			if text := message.Get("content"); text.Type == gjson.String {
+				content.WriteString(text.String())
+			}
+		}
+		if delta := choice.Get("delta"); delta.Exists() {
+			if xaiNativeHasToolCalls(delta.Get("tool_calls")) {
+				alreadyHasToolCalls = true
+			}
+			if text := delta.Get("content"); text.Type == gjson.String {
+				content.WriteString(text.String())
+			}
+		}
+	}
+	if alreadyHasToolCalls {
+		return nil, false
+	}
+	parsed, ok := parseXAINativeToolMarkup(content.String())
+	if !ok {
+		return nil, false
+	}
+	calls := declared.filter(parsed.Calls)
+	if len(calls) == 0 {
+		return nil, false
+	}
+
+	var out bytes.Buffer
+	if content := parsed.Prefix + parsed.Suffix; content != "" {
+		out.Write(xaiNativeSSELine(xaiNativeChatChunk(id, model, created, map[string]any{
+			"role":    "assistant",
+			"content": content,
+		}, "", nil)))
+	} else {
+		out.Write(xaiNativeSSELine(xaiNativeChatChunk(id, model, created, map[string]any{
+			"role": "assistant",
+		}, "", nil)))
+	}
+
+	toolCalls := encodeXAINativeToolCalls(calls, true)
+	out.Write(xaiNativeSSELine(xaiNativeChatChunk(id, model, created, map[string]any{
+		"tool_calls": json.RawMessage(toolCalls),
+	}, "", nil)))
+	out.Write(xaiNativeSSELine(xaiNativeChatChunk(id, model, created, map[string]any{}, "tool_calls", usage)))
+	out.WriteString("data: [DONE]\n\n")
+	return out.Bytes(), true
+}
+
+type rawJSON []byte
+
+func (r rawJSON) MarshalJSON() ([]byte, error) {
+	if len(r) == 0 {
+		return []byte("null"), nil
+	}
+	return r, nil
+}
+
+// ApplyXAINativeToolMarkupChatJSON rewrites an OpenAI chat-completion body when
+// the client format is OpenAI chat and assistant content contains native Grok
+// tool markup that matches a tool declared on originalRequest. Other formats
+// and undeclared/quoted markup examples are returned unchanged.
+func ApplyXAINativeToolMarkupChatJSON(format sdktranslator.Format, body, originalRequest []byte) []byte {
+	if format != sdktranslator.FormatOpenAI {
+		return body
+	}
+	rewritten, ok := rewriteXAINativeToolMarkupChatJSON(body, parseXAINativeDeclaredTools(originalRequest))
+	if !ok {
+		return body
+	}
+	log.Debugf("xai: lifted native tool markup in chat completion content into tool_calls")
+	return rewritten
+}
+
+// XAINativeToolMarkupChatStream buffers OpenAI chat-completion chunks once
+// native markup appears (or a chunk boundary might be splitting a marker) and
+// rewrites the assembled SSE at Flush. Chunks before the marker are forwarded
+// immediately so ordinary text streams stay low-latency.
+type XAINativeToolMarkupChatStream struct {
+	enabled   bool
+	passthru  bool
+	buffering bool
+	confirmed bool
+	held      [][]byte
+	declared  xaiNativeDeclaredTools
+}
+
+// NewXAINativeToolMarkupChatStream returns a rewriter that is active only for
+// OpenAI chat-completion client streams. originalRequest supplies the declared
+// tool set used to gate lifts and restore shortened names.
+func NewXAINativeToolMarkupChatStream(format sdktranslator.Format, originalRequest []byte) *XAINativeToolMarkupChatStream {
+	declared := parseXAINativeDeclaredTools(originalRequest)
+	return &XAINativeToolMarkupChatStream{
+		enabled:  format == sdktranslator.FormatOpenAI && len(declared.restore) > 0 && !declared.choiceNone,
+		declared: declared,
+	}
+}
+
+// Ingest forwards a translated chat chunk or holds it until Flush when markup
+// may be present. Callers must emit the returned payloads immediately.
+func (s *XAINativeToolMarkupChatStream) Ingest(chunk []byte) [][]byte {
+	if s == nil || !s.enabled || s.passthru {
+		if len(chunk) == 0 {
+			return nil
+		}
+		return [][]byte{chunk}
+	}
+	if xaiNativeChunkHasToolCalls(chunk) {
+		s.passthru = true
+		if len(s.held) == 0 {
+			return [][]byte{chunk}
+		}
+		out := append(append([][]byte{}, s.held...), chunk)
+		s.held = nil
+		s.buffering = false
+		s.confirmed = false
+		return out
+	}
+	if s.buffering || xaiNativeChunkMayContainMarkup(chunk) {
+		s.held = append(s.held, bytes.Clone(chunk))
+		s.buffering = true
+		if s.confirmed {
+			return nil
+		}
+		switch xaiNativeHeldMarkupState(s.held) {
+		case xaiNativeMarkupConfirmed:
+			s.confirmed = true
+			return nil
+		case xaiNativeMarkupPossible:
+			return nil
+		default:
+			out := s.held
+			s.held = nil
+			s.buffering = false
+			return out
+		}
+	}
+	return [][]byte{chunk}
+}
+
+// Release emits any buffered chat chunks unchanged. Use this when the
+// upstream stream did not complete successfully so we do not synthesize
+// a finished tool_calls turn from an incomplete response.
+func (s *XAINativeToolMarkupChatStream) Release() [][]byte {
+	if s == nil || len(s.held) == 0 {
+		return nil
+	}
+	held := s.held
+	s.held = nil
+	s.buffering = false
+	s.confirmed = false
+	return held
+}
+
+// Flush emits any buffered chat chunks, rewriting assembled markup into
+// tool_calls when parsing succeeds.
+func (s *XAINativeToolMarkupChatStream) Flush() [][]byte {
+	if s == nil || !s.enabled || len(s.held) == 0 {
+		return nil
+	}
+	held := s.held
+	s.held = nil
+	s.buffering = false
+	s.confirmed = false
+	if s.passthru {
+		return held
+	}
+	rewritten, ok := rewriteXAINativeToolMarkupChatChunks(held, s.declared)
+	if !ok {
+		return held
+	}
+	log.Debugf("xai: lifted native tool markup in streamed chat completion content into tool_calls")
+	return rewritten
+}
+
+func rewriteXAINativeToolMarkupChatChunks(chunks [][]byte, declared xaiNativeDeclaredTools) ([][]byte, bool) {
+	var assembled bytes.Buffer
+	for _, chunk := range chunks {
+		payload := bytes.TrimSpace(chunk)
+		if len(payload) == 0 {
+			continue
+		}
+		if bytes.HasPrefix(payload, []byte("data:")) {
+			assembled.Write(payload)
+			if !bytes.HasSuffix(payload, []byte("\n\n")) {
+				assembled.WriteString("\n\n")
+			}
+			continue
+		}
+		assembled.WriteString("data: ")
+		assembled.Write(payload)
+		assembled.WriteString("\n\n")
+	}
+	rewritten, ok := rewriteXAINativeToolMarkupSSE(assembled.Bytes(), declared)
+	if !ok {
+		return nil, false
+	}
+	return xaiNativeSSEToChatChunks(rewritten), true
+}
+
+func xaiNativeSSEToChatChunks(sse []byte) [][]byte {
+	var chunks [][]byte
+	for _, payload := range xaiNativeSSEDataPayloads(sse) {
+		if payload == "[DONE]" {
+			continue
+		}
+		chunks = append(chunks, []byte(payload))
+	}
+	return chunks
+}
+
+// xaiNativeDeclaredTools is the request-local set of client tool names plus the
+// Codex-style short→original reverse map. Markup is lifted only when the parsed
+// name matches a declared original or its shortened upstream form.
+type xaiNativeDeclaredTools struct {
+	restore    map[string]string
+	properties map[string]map[string]string
+	choiceNone bool
+	allowed    map[string]struct{}
+}
+
+func parseXAINativeDeclaredTools(original []byte) xaiNativeDeclaredTools {
+	names := collectXAINativeDeclaredToolNames(original)
+	if len(names) == 0 {
+		return xaiNativeDeclaredTools{}
+	}
+	// restore is strictly upstream/short name → original owner. Identity
+	// entries for original names are not written here: a shortened name can
+	// collide with another tool's original name, and map iteration would
+	// overwrite the short→original mapping.
+	restore := make(map[string]string, len(names))
+	for originalName, shortName := range buildXAINativeShortNameMap(names) {
+		restore[shortName] = originalName
+	}
+	choiceNone, allowed := parseXAINativeToolChoice(original)
+	return xaiNativeDeclaredTools{
+		restore:    restore,
+		properties: collectXAINativeToolPropertyTypes(original),
+		choiceNone: choiceNone,
+		allowed:    allowed,
+	}
+}
+
+func parseXAINativeToolChoice(original []byte) (none bool, allowed map[string]struct{}) {
+	if len(original) == 0 || !gjson.ValidBytes(original) {
+		return false, nil
+	}
+	choice := gjson.GetBytes(original, "tool_choice")
+	if !choice.Exists() {
+		return false, nil
+	}
+	if choice.Type == gjson.String {
+		if choice.String() == "none" {
+			return true, nil
+		}
+		return false, nil
+	}
+	if !choice.IsObject() {
+		return false, nil
+	}
+	switch choice.Get("type").String() {
+	case "none":
+		return true, nil
+	case "function":
+		name := strings.TrimSpace(choice.Get("function.name").String())
+		if name == "" {
+			name = strings.TrimSpace(choice.Get("name").String())
+		}
+		if name != "" {
+			return false, map[string]struct{}{name: {}}
+		}
+	case "custom":
+		if name := strings.TrimSpace(choice.Get("name").String()); name != "" {
+			return false, map[string]struct{}{name: {}}
+		}
+	case "tool":
+		if name := strings.TrimSpace(choice.Get("name").String()); name != "" {
+			return false, map[string]struct{}{name: {}}
+		}
+	case "allowed_tools":
+		forced := make(map[string]struct{})
+		for _, tool := range choice.Get("tools").Array() {
+			name := strings.TrimSpace(tool.Get("function.name").String())
+			if name == "" {
+				name = strings.TrimSpace(tool.Get("name").String())
+			}
+			if name != "" {
+				forced[name] = struct{}{}
+			}
+		}
+		if len(forced) > 0 {
+			return false, forced
+		}
+	}
+	return false, nil
+}
+
+func (d xaiNativeDeclaredTools) resolve(name string) (string, bool) {
+	if originalName, ok := d.restore[name]; ok {
+		return originalName, true
+	}
+	for _, originalName := range d.restore {
+		if originalName == name {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+func (d xaiNativeDeclaredTools) filter(calls []xaiNativeToolCall) []xaiNativeToolCall {
+	if d.choiceNone || len(d.restore) == 0 || len(calls) == 0 {
+		return nil
+	}
+	out := make([]xaiNativeToolCall, 0, len(calls))
+	for _, call := range calls {
+		originalName, ok := d.resolve(call.Name)
+		if !ok {
+			return nil
+		}
+		if d.allowed != nil {
+			if _, ok := d.allowed[originalName]; !ok {
+				return nil
+			}
+		}
+		call.Name = originalName
+		call.Arguments = applyXAINativeDeclaredArgumentTypes(originalName, call.Arguments, d.properties)
+		out = append(out, call)
+	}
+	return out
+}
+
+func collectXAINativeDeclaredToolNames(original []byte) []string {
+	if len(original) == 0 || !gjson.ValidBytes(original) {
+		return nil
+	}
+	tools := gjson.GetBytes(original, "tools")
+	if !tools.IsArray() || len(tools.Array()) == 0 {
+		return nil
+	}
+	var names []string
+	seen := map[string]struct{}{}
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		if _, exists := seen[name]; exists {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	for _, tool := range tools.Array() {
+		switch tool.Get("type").String() {
+		case "function":
+			if name := tool.Get("function.name").String(); name != "" {
+				add(name)
+			} else {
+				add(tool.Get("name").String())
+			}
+		case "custom":
+			add(tool.Get("name").String())
+		default:
+			if name := tool.Get("function.name").String(); name != "" {
+				add(name)
+			} else {
+				add(tool.Get("name").String())
+			}
+		}
+	}
+	return names
+}
+
+func collectXAINativeToolPropertyTypes(original []byte) map[string]map[string]string {
+	if len(original) == 0 || !gjson.ValidBytes(original) {
+		return nil
+	}
+	tools := gjson.GetBytes(original, "tools")
+	if !tools.IsArray() {
+		return nil
+	}
+	out := make(map[string]map[string]string)
+	for _, tool := range tools.Array() {
+		name := strings.TrimSpace(tool.Get("function.name").String())
+		if name == "" {
+			name = strings.TrimSpace(tool.Get("name").String())
+		}
+		if name == "" {
+			continue
+		}
+		props := tool.Get("function.parameters.properties")
+		if !props.IsObject() {
+			props = tool.Get("parameters.properties")
+		}
+		if !props.IsObject() {
+			continue
+		}
+		types := make(map[string]string)
+		props.ForEach(func(key, value gjson.Result) bool {
+			if declared := firstXAINativeSchemaType(value.Get("type")); declared != "" {
+				types[key.String()] = declared
+			}
+			return true
+		})
+		if len(types) > 0 {
+			out[name] = types
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func firstXAINativeSchemaType(value gjson.Result) string {
+	if value.Type == gjson.String {
+		if value.String() == "null" {
+			return ""
+		}
+		return value.String()
+	}
+	if value.IsArray() {
+		for _, item := range value.Array() {
+			if s := item.String(); s != "" && s != "null" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func applyXAINativeDeclaredArgumentTypes(toolName string, arguments map[string]any, properties map[string]map[string]string) map[string]any {
+	if len(arguments) == 0 {
+		return arguments
+	}
+	schema := properties[toolName]
+	out := make(map[string]any, len(arguments))
+	for key, value := range arguments {
+		out[key] = coerceXAINativeArgumentForType(value, schema[key])
+	}
+	return out
+}
+
+func coerceXAINativeArgumentForType(value any, declaredType string) any {
+	raw, isString := value.(string)
+	switch declaredType {
+	case "string":
+		return xaiNativeValueAsString(value)
+	case "boolean":
+		if isString {
+			switch strings.TrimSpace(raw) {
+			case "true":
+				return true
+			case "false":
+				return false
+			}
+		}
+		return value
+	case "integer", "number":
+		if isString {
+			if number, ok := xaiNativeJSONNumber(raw); ok {
+				return number
+			}
+		}
+		return value
+	default:
+		return value
+	}
+}
+
+func xaiNativeJSONNumber(raw string) (json.Number, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || !gjson.Valid(trimmed) {
+		return "", false
+	}
+	parsed := gjson.Parse(trimmed)
+	if parsed.Type != gjson.Number {
+		return "", false
+	}
+	return json.Number(parsed.Raw), true
+}
+
+func xaiNativeValueAsString(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
+	case nil:
+		return "null"
+	case json.Number:
+		return v.String()
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	default:
+		data, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Sprint(v)
+		}
+		return string(data)
+	}
+}
+
+// buildXAINativeShortNameMap mirrors the Codex OpenAI request translator: names
+// longer than 64 characters are shortened the same way before they are sent
+// upstream, so leaked markup may contain the short form.
+func buildXAINativeShortNameMap(names []string) map[string]string {
+	const limit = 64
+	used := map[string]struct{}{}
+	m := make(map[string]string, len(names))
+
+	baseCandidate := func(n string) string {
+		if len(n) <= limit {
+			return n
+		}
+		if strings.HasPrefix(n, "mcp__") {
+			idx := strings.LastIndex(n, "__")
+			if idx > 0 {
+				cand := "mcp__" + n[idx+2:]
+				if len(cand) > limit {
+					cand = cand[:limit]
+				}
+				return cand
+			}
+		}
+		return n[:limit]
+	}
+
+	makeUnique := func(cand string) string {
+		if _, ok := used[cand]; !ok {
+			return cand
+		}
+		base := cand
+		for i := 1; ; i++ {
+			suffix := "_" + strconv.Itoa(i)
+			allowed := limit - len(suffix)
+			if allowed < 0 {
+				allowed = 0
+			}
+			tmp := base
+			if len(tmp) > allowed {
+				tmp = tmp[:allowed]
+			}
+			tmp += suffix
+			if _, ok := used[tmp]; !ok {
+				return tmp
+			}
+		}
+	}
+
+	for _, n := range names {
+		uniq := makeUnique(baseCandidate(n))
+		used[uniq] = struct{}{}
+		m[n] = uniq
+	}
+	return m
+}
+
+func encodeXAINativeToolCalls(calls []xaiNativeToolCall, indexed bool) []byte {
+	out := []byte("[]")
+	for i, call := range calls {
+		item := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
+		item, _ = sjson.SetBytes(item, "id", xaiNativeToolCallID(call.Name, i))
+		item, _ = sjson.SetBytes(item, "function.name", call.Name)
+		item, _ = sjson.SetBytes(item, "function.arguments", xaiNativeArgumentsJSON(call.Arguments))
+		if indexed {
+			item, _ = sjson.SetBytes(item, "index", i)
+		}
+		out, _ = sjson.SetRawBytes(out, "-1", item)
+	}
+	return out
+}
+
+func xaiNativeToolCallID(name string, index int) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			b.WriteRune(r)
+		}
+	}
+	return shortenXAINativeToolCallID("call_grok_native_" + strconv.Itoa(index) + "_" + b.String())
+}
+
+func shortenXAINativeToolCallID(id string) string {
+	const limit = 64
+	if len(id) <= limit {
+		return id
+	}
+	sum := sha256.Sum256([]byte(id))
+	suffix := "_" + hex.EncodeToString(sum[:8])
+	prefixLen := limit - len(suffix)
+	if prefixLen <= 0 {
+		return suffix[len(suffix)-limit:]
+	}
+	return id[:prefixLen] + suffix
+}
+
+func xaiNativeArgumentsJSON(arguments map[string]any) string {
+	if len(arguments) == 0 {
+		return "{}"
+	}
+	data, err := json.Marshal(arguments)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
+func xaiNativeChatChunk(id, model string, created int64, delta map[string]any, finishReason string, usage rawJSON) []byte {
+	chunk := []byte(`{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{},"finish_reason":null}]}`)
+	chunk, _ = sjson.SetBytes(chunk, "id", id)
+	chunk, _ = sjson.SetBytes(chunk, "created", created)
+	chunk, _ = sjson.SetBytes(chunk, "model", model)
+	if len(delta) > 0 {
+		raw, err := json.Marshal(delta)
+		if err == nil {
+			chunk, _ = sjson.SetRawBytes(chunk, "choices.0.delta", raw)
+		}
+	}
+	if finishReason != "" {
+		chunk, _ = sjson.SetBytes(chunk, "choices.0.finish_reason", finishReason)
+		chunk, _ = sjson.SetBytes(chunk, "choices.0.native_finish_reason", finishReason)
+	}
+	if len(usage) > 0 {
+		chunk, _ = sjson.SetRawBytes(chunk, "usage", usage)
+	}
+	return chunk
+}
+
+func xaiNativeSSELine(object []byte) []byte {
+	var b bytes.Buffer
+	b.WriteString("data: ")
+	b.Write(object)
+	b.WriteString("\n\n")
+	return b.Bytes()
+}
+
+func xaiNativeSSEDataPayloads(sse []byte) []string {
+	var payloads []string
+	for _, rawLine := range bytes.Split(sse, []byte("\n")) {
+		line := bytes.TrimSuffix(rawLine, []byte("\r"))
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(line[len("data:"):])
+		payloads = append(payloads, string(payload))
+	}
+	return payloads
+}
+
+func xaiNativeChunkJSON(chunk []byte) gjson.Result {
+	payload := bytes.TrimSpace(chunk)
+	if bytes.HasPrefix(payload, []byte("data:")) {
+		payload = bytes.TrimSpace(payload[len("data:"):])
+	}
+	if bytes.Equal(payload, []byte("[DONE]")) || !gjson.ValidBytes(payload) {
+		return gjson.Result{}
+	}
+	return gjson.ParseBytes(payload)
+}
+
+func xaiNativeChunkHasToolCalls(chunk []byte) bool {
+	obj := xaiNativeChunkJSON(chunk)
+	if !obj.Exists() {
+		return false
+	}
+	choice := obj.Get("choices.0")
+	return xaiNativeHasToolCalls(choice.Get("message.tool_calls")) || xaiNativeHasToolCalls(choice.Get("delta.tool_calls"))
+}
+
+func xaiNativeHasToolCalls(value gjson.Result) bool {
+	if !value.Exists() || value.Type == gjson.Null {
+		return false
+	}
+	if value.IsArray() {
+		return len(value.Array()) > 0
+	}
+	return true
+}
+
+func xaiNativeChunkContent(chunk []byte) string {
+	obj := xaiNativeChunkJSON(chunk)
+	if !obj.Exists() {
+		return ""
+	}
+	choice := obj.Get("choices.0")
+	var b strings.Builder
+	if text := choice.Get("message.content"); text.Type == gjson.String {
+		b.WriteString(text.String())
+	}
+	if text := choice.Get("delta.content"); text.Type == gjson.String {
+		b.WriteString(text.String())
+	}
+	return b.String()
+}
+
+type xaiNativeMarkupState int
+
+const (
+	xaiNativeMarkupNone xaiNativeMarkupState = iota
+	xaiNativeMarkupPossible
+	xaiNativeMarkupConfirmed
+)
+
+func xaiNativeChunkMayContainMarkup(chunk []byte) bool {
+	return xaiNativeContentMarkupState(xaiNativeChunkContent(chunk)) != xaiNativeMarkupNone
+}
+
+func xaiNativeHeldMarkupState(chunks [][]byte) xaiNativeMarkupState {
+	var content strings.Builder
+	for _, chunk := range chunks {
+		content.WriteString(xaiNativeChunkContent(chunk))
+	}
+	return xaiNativeContentMarkupState(content.String())
+}
+
+func xaiNativeContentMarkupState(content string) xaiNativeMarkupState {
+	if content == "" {
+		return xaiNativeMarkupNone
+	}
+	if strings.Contains(content, xaiNativeToolCallsBegin) {
+		return xaiNativeMarkupConfirmed
+	}
+	if xaiHasMarkerPrefixSuffix(content, xaiNativeToolCallsBegin) || xaiHasMarkerPrefixSuffix(content, xaiNativeToolCallBegin) {
+		return xaiNativeMarkupPossible
+	}
+	return xaiNativeMarkupNone
+}
+
+func xaiHasMarkerPrefixSuffix(text, marker string) bool {
+	max := len(marker) - 1
+	if max > len(text) {
+		max = len(text)
+	}
+	for n := max; n > 0; n-- {
+		if strings.HasPrefix(marker, text[len(text)-n:]) {
+			return true
+		}
+	}
+	return false
+}
+
+func nextXAINativeMarker(text string, start int, markers []string) int {
+	return nextXAINativeMarkerUntil(text, start, markers, len(text))
+}
+
+func nextXAINativeMarkerUntil(text string, start int, markers []string, limit int) int {
+	if start > limit {
+		return -1
+	}
+	best := -1
+	window := text[start:limit]
+	for _, marker := range markers {
+		if idx := strings.Index(window, marker); idx >= 0 {
+			abs := start + idx
+			if best < 0 || abs < best {
+				best = abs
+			}
+		}
+	}
+	return best
+}
+
+func nextXAINativeNewline(text string, start, limit int) int {
+	for i := start; i < limit; i++ {
+		if text[i] == '\n' || text[i] == '\r' {
+			return i
+		}
+	}
+	return -1
+}
+
+func skipXAINativeWhitespace(text string, start, limit int) int {
+	i := start
+	for i < limit {
+		r, size := utf8.DecodeRuneInString(text[i:limit])
+		if r == utf8.RuneError && size == 1 {
+			break
+		}
+		if !unicode.IsSpace(r) {
+			break
+		}
+		i += size
+	}
+	return i
+}
+
+func skipXAINativeHorizontalWhitespace(text string, start, limit int) int {
+	i := start
+	for i < limit && (text[i] == ' ' || text[i] == '\t') {
+		i++
+	}
+	return i
+}
