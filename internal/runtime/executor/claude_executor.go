@@ -137,9 +137,12 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 var placeholderPatterns = []string{
 	"your_oauth_token_here",
 	"your_api_key_here",
+	"your-api-key",
+	"your-key",
 	"placeholder",
 	"replace_me",
 	"changeme",
+	"change-me",
 }
 
 func isPlaceholderAPIKey(key string) bool {
