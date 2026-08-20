@@ -927,7 +927,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 			continue
 		}
 
-		model := r.convertModelToMap(r.conservativeModelInfoLocked(modelID, registration.Info), handlerType)
+		model := r.convertModelToMap(r.conservativeModelInfoLocked(modelID, registration), handlerType)
 		if model != nil {
 			models = append(models, model)
 		}
@@ -937,46 +937,74 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 }
 
 // conservativeModelInfoLocked returns model metadata whose token limits are the
-// smallest advertised by any client registered for the model. Registration.Info
-// keeps whichever client registered last — and keeps it even after that client
-// is unregistered — but requests are load balanced across every client serving
-// the model ID, so the published limits must hold for all of them (for example
-// gpt-5.6-terra allows 372000 context tokens on some Codex plans and 921000 on
-// others). Limits left at zero mean "unknown" and are ignored rather than
-// collapsing the result to zero.
-func (r *ModelRegistry) conservativeModelInfoLocked(modelID string, info *ModelInfo) *ModelInfo {
-	if info == nil || modelID == "" {
-		return info
+// smallest advertised by any client that can currently serve the model.
+// Registration.Info keeps whichever client registered last — and keeps it even
+// after that client is unregistered — but requests are load balanced across
+// every client serving the model ID, so the published limits must hold for all
+// of them (for example gpt-5.6-terra allows 372000 context tokens on most Codex
+// plans and 921000 on Pro). Catalogs express the same limit under either the
+// OpenAI or the Gemini field name, so both are folded into one value before the
+// minimum is taken; limits left at zero mean "unknown" and are ignored rather
+// than collapsing the result to zero.
+func (r *ModelRegistry) conservativeModelInfoLocked(modelID string, registration *ModelRegistration) *ModelInfo {
+	if registration == nil || modelID == "" {
+		return nil
+	}
+	info := registration.Info
+	if info == nil {
+		return nil
 	}
 
-	var contextLength, maxCompletionTokens, inputTokenLimit, outputTokenLimit int
+	var contextLimit, outputLimit int
 	seen := false
-	for _, clientInfos := range r.clientModelInfos {
+	for clientID, clientInfos := range r.clientModelInfos {
 		clientInfo := clientInfos[modelID]
 		if clientInfo == nil {
 			continue
 		}
+		// Non-quota suspension removes a client from the routable count in
+		// modelRegistrationAvailability, so its limits must not drag the
+		// advertised minimum below what the remaining backends support.
+		if reason, suspended := registration.SuspendedClients[clientID]; suspended && !strings.EqualFold(reason, "quota") {
+			continue
+		}
 		seen = true
-		contextLength = smallestPositive(contextLength, clientInfo.ContextLength)
-		maxCompletionTokens = smallestPositive(maxCompletionTokens, clientInfo.MaxCompletionTokens)
-		inputTokenLimit = smallestPositive(inputTokenLimit, clientInfo.InputTokenLimit)
-		outputTokenLimit = smallestPositive(outputTokenLimit, clientInfo.OutputTokenLimit)
+		contextLimit = smallestPositive(contextLimit, firstPositive(clientInfo.ContextLength, clientInfo.InputTokenLimit))
+		outputLimit = smallestPositive(outputLimit, firstPositive(clientInfo.MaxCompletionTokens, clientInfo.OutputTokenLimit))
 	}
 	if !seen {
 		return info
 	}
 
-	if contextLength == info.ContextLength && maxCompletionTokens == info.MaxCompletionTokens &&
-		inputTokenLimit == info.InputTokenLimit && outputTokenLimit == info.OutputTokenLimit {
-		return info
-	}
-
+	// Only the values are normalized; each catalog keeps the field shape it
+	// registered with so the per-handler conversions stay unchanged.
 	conservative := cloneModelInfo(info)
-	conservative.ContextLength = contextLength
-	conservative.MaxCompletionTokens = maxCompletionTokens
-	conservative.InputTokenLimit = inputTokenLimit
-	conservative.OutputTokenLimit = outputTokenLimit
+	if contextLimit > 0 {
+		if conservative.ContextLength > 0 {
+			conservative.ContextLength = contextLimit
+		}
+		if conservative.InputTokenLimit > 0 {
+			conservative.InputTokenLimit = contextLimit
+		}
+	}
+	if outputLimit > 0 {
+		if conservative.MaxCompletionTokens > 0 {
+			conservative.MaxCompletionTokens = outputLimit
+		}
+		if conservative.OutputTokenLimit > 0 {
+			conservative.OutputTokenLimit = outputLimit
+		}
+	}
 	return conservative
+}
+
+// firstPositive returns the first limit that is set, treating a non-positive
+// value as an absent limit.
+func firstPositive(primary, fallback int) int {
+	if primary > 0 {
+		return primary
+	}
+	return fallback
 }
 
 // smallestPositive returns the smaller of two limits, treating a non-positive
