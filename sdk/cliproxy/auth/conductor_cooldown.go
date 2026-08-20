@@ -876,6 +876,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										cooldown = minQuotaCooldownFloor
 									}
 									next = now.Add(cooldown).Round(0)
+									next = capQuotaCooldown(next, now)
 								} else {
 									reused := state.Quota.NextRecoverAt.After(now)
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
@@ -2259,6 +2260,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 						cooldown = minQuotaCooldownFloor
 					}
 					next = now.Add(cooldown).Round(0)
+					next = capQuotaCooldown(next, now)
 				} else {
 					next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
 				}
@@ -2304,11 +2306,22 @@ func quotaCooldownAfterFailure(quota QuotaState, now time.Time) (time.Time, int)
 	var next time.Time
 	if cooldown > 0 {
 		next = now.Add(cooldown).Round(0)
+		next = capQuotaCooldown(next, now)
 	}
 	return next, nextLevel
 }
 
 // nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.
+func capQuotaCooldown(next, now time.Time) time.Time {
+	if next.IsZero() {
+		return next
+	}
+	if max := now.Add(quotaBackoffMax); next.After(max) {
+		return max
+	}
+	return next
+}
+
 func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) {
 	if prevLevel < 0 {
 		prevLevel = 0

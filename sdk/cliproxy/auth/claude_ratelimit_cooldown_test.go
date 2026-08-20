@@ -12,7 +12,7 @@ import (
 
 func TestAuthManager_ConcurrentSuccessDoesNotClearActiveCredentialCooldown(t *testing.T) {
 	now := time.Now()
-	sevenDayReset := now.Add(7 * 24 * time.Hour)
+	cappedReset := now.Add(quotaBackoffMax)
 
 	manager := NewManager(nil, nil, nil)
 
@@ -63,7 +63,7 @@ func TestAuthManager_ConcurrentSuccessDoesNotClearActiveCredentialCooldown(t *te
 	if !ok || updatedAuth == nil {
 		t.Fatal("auth not found")
 	}
-	if !updatedAuth.Quota.Exceeded || !updatedAuth.Quota.NextRecoverAt.After(now.Add(6*24*time.Hour)) {
+	if !updatedAuth.Quota.Exceeded || !updatedAuth.Quota.NextRecoverAt.After(now.Add(4*time.Hour)) {
 		t.Fatalf("auth quota was cleared or shortened by concurrent success: quota=%+v", updatedAuth.Quota)
 	}
 
@@ -73,8 +73,8 @@ func TestAuthManager_ConcurrentSuccessDoesNotClearActiveCredentialCooldown(t *te
 		if !blocked {
 			t.Fatalf("model %q was unblocked despite active 7d credential cooldown", m)
 		}
-		if reason != blockReasonCooldown || next.Before(sevenDayReset.Add(-time.Minute)) {
-			t.Fatalf("model %q block reason=%v next=%v, want cooldown ~7d", m, reason, next)
+		if reason != blockReasonCooldown || next.Before(cappedReset.Add(-time.Minute)) {
+			t.Fatalf("model %q block reason=%v next=%v, want cooldown ~quotaBackoffMax", m, reason, next)
 		}
 	}
 }
@@ -131,7 +131,7 @@ func TestAuthManager_UpdatePreservesActiveCredentialCooldown(t *testing.T) {
 	if !ok || persistedAuth == nil {
 		t.Fatal("auth not found after update")
 	}
-	if !persistedAuth.Quota.Exceeded || persistedAuth.Quota.Reason != "credential_quota" || !persistedAuth.Quota.NextRecoverAt.After(now.Add(6*24*time.Hour)) {
+	if !persistedAuth.Quota.Exceeded || persistedAuth.Quota.Reason != "credential_quota" || !persistedAuth.Quota.NextRecoverAt.After(now.Add(4*time.Hour)) {
 		t.Fatalf("credential cooldown was lost after Update: quota=%+v", persistedAuth.Quota)
 	}
 
@@ -297,7 +297,7 @@ func TestAuthManager_CooldownPersistenceAcrossRestore(t *testing.T) {
 	if !ok || restoredAuth == nil {
 		t.Fatal("restored auth not found")
 	}
-	if !restoredAuth.Quota.Exceeded || restoredAuth.Quota.NextRecoverAt.Before(time.Now().Add(6*24*time.Hour)) {
+	if !restoredAuth.Quota.Exceeded || restoredAuth.Quota.NextRecoverAt.Before(time.Now().Add(4*time.Hour)) {
 		t.Fatalf("restored auth quota was not preserved: quota=%+v", restoredAuth.Quota)
 	}
 }
@@ -312,4 +312,58 @@ func (s *mockCooldownStateStore) Load(context.Context) ([]CooldownStateRecord, e
 
 func (s *mockCooldownStateStore) Save(context.Context, []CooldownStateRecord) error {
 	return nil
+}
+
+func TestAuthManager_LongUpstreamRetryAfterIsCapped(t *testing.T) {
+	now := time.Now()
+	manager := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:         uuid.NewString() + "-claude-cap",
+		Provider:   "claude",
+		Attributes: map[string]string{"api_key": "test-key"},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "claude-3-5-sonnet-20241022"}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	upstreamReset := 131 * time.Hour
+	manager.MarkResult(context.Background(), Result{
+		AuthID:          auth.ID,
+		Provider:        "claude",
+		Model:           "claude-3-5-sonnet-20241022",
+		Success:         false,
+		RetryAfter:      &upstreamReset,
+		CredentialScope: true,
+		Error:           &Error{HTTPStatus: http.StatusTooManyRequests, Message: "unified reset far in future"},
+	})
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("auth not found")
+	}
+
+	if !updated.Quota.Exceeded {
+		t.Fatal("credential should be marked quota exceeded")
+	}
+	ceiling := now.Add(quotaBackoffMax + time.Minute)
+	if updated.Quota.NextRecoverAt.After(ceiling) {
+		t.Fatalf("credential cooldown %v exceeds cap %v", updated.Quota.NextRecoverAt, ceiling)
+	}
+	if !updated.Quota.NextRecoverAt.After(now) {
+		t.Fatalf("credential cooldown %v should still be in the future", updated.Quota.NextRecoverAt)
+	}
+
+	state := updated.ModelStates["claude-3-5-sonnet-20241022"]
+	if state == nil {
+		t.Fatal("expected model state for the rate-limited model")
+	}
+	if state.Quota.NextRecoverAt.After(ceiling) {
+		t.Fatalf("model cooldown %v exceeds cap %v", state.Quota.NextRecoverAt, ceiling)
+	}
 }
