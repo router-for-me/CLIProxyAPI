@@ -8485,6 +8485,7 @@ func TestClaudeExecutor_PreservesNativeAgentAndEnvironmentHeaders(t *testing.T) 
 				}
 			}
 		})
+	}
 }
 
 // ---------------------------------------------------------------------------
