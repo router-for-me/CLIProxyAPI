@@ -125,14 +125,17 @@ func extractMessagesAndSystem(rawJSON []byte) string {
 		}
 	}
 	// Responses format places content in "input" (an array of message objects).
+	// Each message may carry text via either a `content` block (string or array
+	// of content parts) or a top-level `text` field — the `text` field must be
+	// picked up regardless of whether the message also declares a `role`, so a
+	// role-less message that holds its prompt body in `text` is not silently
+	// dropped from scoring.
 	for _, msg := range root.Get("input").Array() {
 		if t := extractMessageString(msg.Get("content")); t != "" {
 			parts = append(parts, t)
 		}
-		if role := msg.Get("role").String(); role != "" {
-			if t := msg.Get("text").String(); t != "" {
-				parts = append(parts, t)
-			}
+		if t := msg.Get("text").String(); t != "" {
+			parts = append(parts, t)
 		}
 	}
 	return strings.ToLower(strings.Join(parts, " "))

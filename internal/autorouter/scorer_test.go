@@ -169,3 +169,28 @@ func TestScoreDimensionsInRange(t *testing.T) {
 		}
 	}
 }
+
+// TestScoreResponsesInputTextNoRole guards against a regression where
+// Responses-format messages that carry their text via a top-level `text` field
+// (and lack an explicit `role`) get silently dropped from scoring. Without the
+// fix the body scores as SIMPLE; with the fix the heavy engineering prompt
+// scores above SIMPLE.
+func TestScoreResponsesInputTextNoRole(t *testing.T) {
+	body := `{"model":"x","input":[{"text":"refactor this retry loop to use goroutines and implement exponential backoff with jitter and add tests"},{"content":[{"type":"text","text":"and handle timeout errors"}]}]}`
+	s := Score([]byte(body), "openai")
+	if s.Tier == TierSimple {
+		t.Fatalf("expected non-SIMPLE tier when input[].text carries a heavy engineering prompt, got %q (total=%v)", s.Tier, s.Total)
+	}
+}
+
+// TestScoreResponsesInputRoleOnlyText guards the case where a Responses-format
+// message carries only `role` + `text` (no `content` block). The score must
+// reflect the `text` payload, and a prompt that hits >= the reasoning-marker
+// threshold must be classified REASONING (not silently downgraded).
+func TestScoreResponsesInputRoleOnlyText(t *testing.T) {
+	body := `{"input":[{"role":"user","text":"explain why this algorithm is correct, prove the time complexity bound, and analyze the memory layout trade-off"}]}`
+	s := Score([]byte(body), "openai")
+	if s.Tier != TierReasoning {
+		t.Fatalf("expected REASONING from input[].text prompt, got %q (markers=%d)", s.Tier, s.ReasoningMarkers)
+	}
+}
