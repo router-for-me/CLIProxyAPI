@@ -102,16 +102,21 @@ func TestClassifyClaudeUpstreamError_FableRetryDurationRemainsAvailable(t *testi
 		min, max time.Duration
 	}{
 		{
-			name: "7d_oi reset",
+			// A Fable-only rejection must not inherit the 7d_oi reset as its
+			// cooldown: that window can be a full week out and would strand the
+			// model even though only the Fable-specific window is exhausted.
+			// Retry-After stays authoritative when Anthropic supplies it.
+			name: "7d_oi reset prefers retry-after",
 			headers: http.Header{
 				"Anthropic-Ratelimit-Unified-Status":       []string{"rejected"},
 				"Anthropic-Ratelimit-Unified-5h-Status":    []string{"allowed"},
 				"Anthropic-Ratelimit-Unified-7d-Status":    []string{"allowed"},
 				"Anthropic-Ratelimit-Unified-7d_oi-Status": []string{"rejected"},
 				"Anthropic-Ratelimit-Unified-7d_oi-Reset":  []string{strconv.FormatInt(time.Now().Add(2*time.Hour).Unix(), 10)},
+				"Retry-After": []string{"120"},
 			},
-			min: 2*time.Hour - 5*time.Second,
-			max: 2*time.Hour + 35*time.Second,
+			min: 2 * time.Minute,
+			max: 2*time.Minute + 30*time.Second,
 		},
 		{
 			name: "retry-after",

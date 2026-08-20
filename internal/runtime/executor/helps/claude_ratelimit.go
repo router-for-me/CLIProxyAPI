@@ -102,8 +102,14 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 		}
 	}
 
-	// 4. Fable-specific 7-day window reset (only when rejected)
-	if status7dOI == "rejected" {
+	// A Fable-only rejection leaves both shared windows explicitly allowed. Its
+	// 7d_oi reset lies up to a week out, so folding it into the shared candidate
+	// set would cool the model down for the whole Fable week even though only the
+	// Fable-specific window is exhausted. Prefer the Retry-After hint instead.
+	fableOnlyRejection := unifiedStatus == "rejected" && status5h == "allowed" && status7d == "allowed" && status7dOI == "rejected"
+
+	// 4. Fable-specific 7-day window reset (only when rejected and not Fable-only)
+	if status7dOI == "rejected" && !fableOnlyRejection {
 		if raw := getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d_oi-Reset"); raw != "" {
 			if t, ok := parseUnixOrTimestamp(raw); ok && t.After(now) {
 				candidateDeadlines = append(candidateDeadlines, t)
@@ -112,7 +118,8 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 	}
 
 	// 5. Unified reset header:
-	unifiedRejected := unifiedStatus == "rejected" || status5h == "rejected" || status7d == "rejected" || status7dOI == "rejected" ||
+	unifiedRejected := (unifiedStatus == "rejected" && !fableOnlyRejection) || status5h == "rejected" || status7d == "rejected" ||
+		(status7dOI == "rejected" && !fableOnlyRejection) ||
 		(unifiedStatus == "" && status5h != "allowed" && status7d != "allowed")
 
 	if unifiedRejected {
