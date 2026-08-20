@@ -147,9 +147,9 @@ func (h *BaseAPIHandler) resolveAutoRouterModel(ctx context.Context, entryProtoc
 //
 // Behaviour matches the global/per-key route path (handlers_routing.go):
 //   - intersect the computed providers with the tier's pinned Providers;
-//   - when the intersection is empty, leave the computed providers unchanged
-//     (so an unmapped-but-valid target still resolves to its default routing)
-//     rather than hard-failing;
+//   - when the intersection is empty, return an empty slice so the upstream
+//     dispatch fails fast with a clear "no pinned provider available" error
+//     instead of silently routing to a provider that was never pinned;
 //   - when the tier strategy is "priority"/"failover", reorder by descending
 //     priority and stash the strategy so the conductor honours it.
 func (h *BaseAPIHandler) applyAutoRouterRoute(ctx context.Context, providers []string, route *autorouter.Resolved) []string {
@@ -158,7 +158,12 @@ func (h *BaseAPIHandler) applyAutoRouterRoute(ctx context.Context, providers []s
 	}
 	filtered := intersectProviders(providers, route.Providers)
 	if len(filtered) == 0 {
-		return providers
+		// Pin is enforced strictly: returning the full computed list here would
+		// silently forward the request to a provider that was never pinned in
+		// the tier mapping, which is exactly what the operator's pin was meant
+		// to prevent. Surface the failure by handing back an empty slice so
+		// providersForExecution's caller treats it as "no provider available".
+		return nil
 	}
 	strategy := strings.ToLower(strings.TrimSpace(route.Strategy))
 	if strategy == "priority" || strategy == "failover" {

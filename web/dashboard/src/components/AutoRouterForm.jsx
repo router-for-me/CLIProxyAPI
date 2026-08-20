@@ -345,35 +345,25 @@ export default function AutoRouterForm({ initial, onChange }) {
   }
 
   // addTarget appends a new target row to a tier. The new target always starts
-  // with its OWN explicit route (a copy of the tier default when one is set,
-  // otherwise a copy of the primary target's route) so it never silently
-  // inherits a default — "always custom route". Its route editor opens
-  // immediately so the operator can adjust the seeded values.
+  // with an empty route so it inherits whatever the tier routing section
+  // resolves to (the tier default if one is configured, otherwise the model's
+  // default providers). Seeding the route with the primary target's pins
+  // made "pinned providers count = N+1" misleading: every operator-visible
+  // count of pinned providers included the silently-pre-selected seed that the
+  // operator never actually chose. Start empty so the on-screen pin count
+  // matches what the operator genuinely selected.
   function addTarget(i) {
     const mapping = form.mappings[i] || { targets: [], providers: [], strategy: '', priorities: [] };
     const newIndex = (mapping.targets || []).length;
-    const tierHasDefault = (mapping.providers || []).length > 0
-      || (mapping.strategy || '').trim() !== ''
-      || (mapping.priorities || []).length > 0;
-    const primary = (mapping.targets || [])[0]?.route || emptyRoute();
-    const seedRoute = tierHasDefault
-      ? {
-          providers: [...(mapping.providers || [])],
-          strategy: mapping.strategy || '',
-          priorities: (mapping.priorities || []).map((p) => ({ ...p })),
-        }
-      : {
-          providers: [...(primary.providers || [])],
-          strategy: primary.strategy || '',
-          priorities: (primary.priorities || []).map((p) => ({ ...p })),
-        };
     setForm((f) => ({
       ...f,
       mappings: f.mappings.map((m, idx) => (
-        idx === i ? { ...m, targets: [...m.targets, { model: '', weight: 1, route: seedRoute }] } : m
+        idx === i ? { ...m, targets: [...m.targets, { model: '', weight: 1, route: emptyRoute() }] } : m
       )),
     }));
-    // Auto-expand the new target's route editor.
+    // Auto-expand the new target's route editor only once it has a model
+    // selected (route editor is gated on `filled`). For now mark it open so the
+    // operator sees the inheritance hint immediately.
     setExpandedTargets((prev) => {
       const tier = prev[i] ? new Set(prev[i]) : new Set();
       tier.add(newIndex);

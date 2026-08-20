@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 )
 
@@ -97,5 +98,54 @@ func TestResolveAutoRouterUnmatchedLeavesTierEmpty(t *testing.T) {
 	if res := hDisabled.resolveAutoRouterModel(context.Background(), "openai", "router:smart",
 		[]byte(`{"model":"router:smart","messages":[{"role":"user","content":"hi"}]}`)); res.matched {
 		t.Fatalf("expected unmatched for a disabled router, got %+v", res)
+	}
+}
+
+// TestApplyAutoRouterRouteEnforcesPinEmptyIntersection verifies that when the
+// tier pin (route.Providers) shares zero providers with the computed execution
+// providers, the route is enforced strictly and the result is empty (signalling
+// an upstream "no pinned provider available" failure). The previous behaviour
+// silently fell back to the full computed providers list, which let requests
+// reach providers that were never pinned in the tier mapping.
+func TestApplyAutoRouterRouteEnforcesPinEmptyIntersection(t *testing.T) {
+	h := &BaseAPIHandler{}
+	route := &autorouter.Resolved{
+		Model:     "claude-opus-4-5",
+		Providers: []string{"anthropic"},
+	}
+	computed := []string{"openai", "azure"}
+	got := h.applyAutoRouterRoute(context.Background(), computed, route)
+	if len(got) != 0 {
+		t.Fatalf("expected empty providers when pin intersection is empty, got %v (pin=%v)", got, route.Providers)
+	}
+}
+
+// TestApplyAutoRouterRouteEnforcesPinPartialIntersection verifies that when
+// some computed providers match the pin, only those providers are kept and the
+// rest are filtered out — i.e. the pin is an authoritative override, not a
+// hint.
+func TestApplyAutoRouterRouteEnforcesPinPartialIntersection(t *testing.T) {
+	h := &BaseAPIHandler{}
+	route := &autorouter.Resolved{
+		Model:     "claude-opus-4-5",
+		Providers: []string{"anthropic"},
+	}
+	computed := []string{"openai", "anthropic", "azure"}
+	got := h.applyAutoRouterRoute(context.Background(), computed, route)
+	if len(got) != 1 || got[0] != "anthropic" {
+		t.Fatalf("expected only pinned provider, got %v (pin=%v)", got, route.Providers)
+	}
+}
+
+// TestApplyAutoRouterRouteNoPinReturnsComputed verifies the unchanged fallback:
+// when the route has no pinned providers at all, the computed providers are
+// passed through unchanged (the target model's default providers apply).
+func TestApplyAutoRouterRouteNoPinReturnsComputed(t *testing.T) {
+	h := &BaseAPIHandler{}
+	route := &autorouter.Resolved{Model: "claude-opus-4-5"}
+	computed := []string{"openai", "azure"}
+	got := h.applyAutoRouterRoute(context.Background(), computed, route)
+	if len(got) != 2 {
+		t.Fatalf("expected computed providers to pass through, got %v", got)
 	}
 }
