@@ -484,3 +484,142 @@ func TestSessionAffinitySelector_OnResult_TransientVsTerminalClassification(t *t
 		})
 	}
 }
+
+func TestSessionAffinity_StickyTemporaryFallbackDuringPrimaryCooldown(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Hour,
+	})
+	defer selector.Stop()
+
+	authA := &Auth{ID: "auth-a"}
+	authB := &Auth{ID: "auth-b"}
+	authC := &Auth{ID: "auth-c"}
+	allAuths := []*Auth{authA, authB, authC}
+
+	sessionID := "sess-sticky-fallback-test"
+	opts := cliproxyexecutor.Options{
+		Headers: http.Header{"X-Session-Id": []string{sessionID}},
+	}
+
+	// 1. Initial Pick: auth-a is picked and bound as primary
+	first, err := selector.Pick(context.Background(), "claude", "claude-3", opts, allAuths)
+	if err != nil {
+		t.Fatalf("initial Pick() error = %v", err)
+	}
+	if first.ID != "auth-a" {
+		t.Fatalf("initial Pick() = %q, want auth-a", first.ID)
+	}
+	selector.OnResult(Result{AuthID: first.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
+
+	// 2. Primary auth-a is cooling down (only auth-b and auth-c available)
+	coolingAuths := []*Auth{authB, authC}
+
+	// First pick during cooldown chooses a fallback auth (e.g. auth-b)
+	firstFallback, err := selector.Pick(context.Background(), "claude", "claude-3", opts, coolingAuths)
+	if err != nil {
+		t.Fatalf("first fallback Pick() error = %v", err)
+	}
+	firstFallbackID := firstFallback.ID
+
+	// 5 consecutive picks during cooldown MUST all return the exact same fallback auth (sticky, no round-robin wandering)
+	for i := 1; i <= 5; i++ {
+		got, errPick := selector.Pick(context.Background(), "claude", "claude-3", opts, coolingAuths)
+		if errPick != nil {
+			t.Fatalf("consecutive fallback Pick %d error = %v", i, errPick)
+		}
+		if got.ID != firstFallbackID {
+			t.Fatalf("consecutive fallback Pick %d = %q, want sticky %q (prevent round-robin wandering during cooldown)", i, got.ID, firstFallbackID)
+		}
+		selector.OnResult(Result{AuthID: got.ID, Provider: "claude", Model: "claude-3", Options: opts, Success: true})
+	}
+
+	// 3. Primary auth-a recovers (allAuths available again)
+	recovered, errRecover := selector.Pick(context.Background(), "claude", "claude-3", opts, allAuths)
+	if errRecover != nil {
+		t.Fatalf("recovered Pick() error = %v", errRecover)
+	}
+	if recovered.ID != "auth-a" {
+		t.Fatalf("recovered Pick() = %q, want primary %q", recovered.ID, "auth-a")
+	}
+
+	// 4. If primary auth-a cools down again, and first fallback auth (auth-b) ALSO fails/cools down:
+	onlyC := []*Auth{authC}
+	nextFallback, errNext := selector.Pick(context.Background(), "claude", "claude-3", opts, onlyC)
+	if errNext != nil {
+		t.Fatalf("fallback when B down Pick() error = %v", errNext)
+	}
+	if nextFallback.ID != "auth-c" {
+		t.Fatalf("fallback when B down = %q, want auth-c", nextFallback.ID)
+	}
+
+	// Subsequent picks stick to auth-c
+	for i := 1; i <= 3; i++ {
+		got, errPick := selector.Pick(context.Background(), "claude", "claude-3", opts, onlyC)
+		if errPick != nil {
+			t.Fatalf("subsequent fallback C Pick %d error = %v", i, errPick)
+		}
+		if got.ID != "auth-c" {
+			t.Fatalf("subsequent fallback C Pick %d = %q, want auth-c", i, got.ID)
+		}
+	}
+}
+
+func TestSessionAffinity_StickyTemporaryFallbackTTLExpiry(t *testing.T) {
+	t.Parallel()
+
+	shortTTL := 50 * time.Millisecond
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      shortTTL,
+	})
+	defer selector.Stop()
+
+	authA := &Auth{ID: "auth-a"}
+	authB := &Auth{ID: "auth-b"}
+	authC := &Auth{ID: "auth-c"}
+	allAuths := []*Auth{authA, authB, authC}
+
+	sessionID := "sess-sticky-fallback-ttl"
+	opts := cliproxyexecutor.Options{
+		Headers: http.Header{"X-Session-Id": []string{sessionID}},
+	}
+
+	// 1. Initial binding to auth-a
+	_, err := selector.Pick(context.Background(), "claude", "claude-3", opts, allAuths)
+	if err != nil {
+		t.Fatalf("initial Pick() error = %v", err)
+	}
+
+	// 2. Primary cooling down, pick fallback
+	coolingAuths := []*Auth{authB, authC}
+	fb1, err := selector.Pick(context.Background(), "claude", "claude-3", opts, coolingAuths)
+	if err != nil {
+		t.Fatalf("fallback Pick() error = %v", err)
+	}
+
+	// 3. Before TTL expires: sticks to fb1
+	fb2, err := selector.Pick(context.Background(), "claude", "claude-3", opts, coolingAuths)
+	if err != nil {
+		t.Fatalf("consecutive fallback Pick() error = %v", err)
+	}
+	if fb2.ID != fb1.ID {
+		t.Fatalf("fallback Pick() before TTL = %q, want sticky %q", fb2.ID, fb1.ID)
+	}
+
+	// 4. Wait for TTL to expire
+	time.Sleep(shortTTL * 2)
+
+	// After TTL expires, temporary key is evicted and a new pick can be made
+	fb3, err := selector.Pick(context.Background(), "claude", "claude-3", opts, coolingAuths)
+	if err != nil {
+		t.Fatalf("fallback Pick() after TTL error = %v", err)
+	}
+	if fb3 == nil {
+		t.Fatal("fallback Pick() after TTL returned nil")
+	}
+}
