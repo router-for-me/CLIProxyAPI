@@ -81,6 +81,13 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
+		repeatGuard := helps.NewXAIClaudeToolRepeatGuard(prepared.originalPayload, prepared.body, prepared.from)
+		type bufferedXAIEvent struct {
+			name string
+			data []byte
+		}
+		var guardedEvents []bufferedXAIEvent
+		guardActive := repeatGuard != nil
 		var pendingEventLine []byte
 		emitTranslatedLine := func(translatedLine []byte) bool {
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, translatedLine, &param, claudeInputTokens)
@@ -118,6 +125,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 						continue
 					}
 					normalizedEventName := gjson.GetBytes(eventData, "type").String()
+					blockedDuplicate := false
 					switch normalizedEventName {
 					case "response.output_item.done":
 						xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -127,8 +135,51 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 						}
 						eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 						eventData = xaiNormalizeReasoningSummaryData(eventData)
+						eventData, blockedDuplicate = repeatGuard.PatchCompleted(eventData)
+						if xaiCompletedHasReasoningOnly(eventData) {
+							errReasoningOnly := statusErr{code: http.StatusBadGateway, msg: "xai upstream completed with reasoning only and no final answer"}
+							reporter.PublishFailure(ctx, errReasoningOnly)
+							select {
+							case out <- cliproxyexecutor.StreamChunk{Err: errReasoningOnly}:
+							case <-ctx.Done():
+							}
+							return
+						}
 						cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, eventData)
 						normalizedEventName = gjson.GetBytes(eventData, "type").String()
+					}
+
+					if guardActive {
+						guardedEvents = append(guardedEvents, bufferedXAIEvent{name: normalizedEventName, data: bytes.Clone(eventData)})
+						if normalizedEventName != "response.completed" {
+							continue
+						}
+						if blockedDuplicate {
+							filtered := guardedEvents[:0]
+							for _, buffered := range guardedEvents {
+								if buffered.name == "response.output_item.added" || buffered.name == "response.output_item.done" {
+									if repeatGuard.IsDuplicateItem(gjson.GetBytes(buffered.data, "item")) {
+										continue
+									}
+								}
+								if (buffered.name == "response.function_call_arguments.delta" || buffered.name == "response.function_call_arguments.done") && repeatGuard.IsBlockedCallEvent(gjson.ParseBytes(buffered.data)) {
+									continue
+								}
+								if buffered.name == "response.completed" {
+									filtered = append(filtered, bufferedXAIEvent{name: "response.output_item.done", data: helps.XAIClaudeRepeatedToolOutputEvent()})
+								}
+								filtered = append(filtered, buffered)
+							}
+							guardedEvents = filtered
+						}
+						for _, buffered := range guardedEvents {
+							if !emitTranslatedLine([]byte("event: "+buffered.name)) || !emitTranslatedLine(append([]byte("data: "), buffered.data...)) {
+								return
+							}
+						}
+						guardedEvents = nil
+						pendingEventLine = nil
+						continue
 					}
 
 					if hasPendingEventLine {

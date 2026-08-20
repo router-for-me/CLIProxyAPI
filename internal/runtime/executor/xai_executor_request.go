@@ -103,6 +103,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	if e.cfg != nil && e.cfg.XAI.InjectXSearch {
 		body = ensureXAINativeXSearchTool(body)
 	}
+	body = helps.AnnotateXAIClaudeToolResults(body, req.Payload, from)
 	var replayScope xaiReasoningReplayScope
 	body, replayScope, err = applyXAIReasoningReplayCacheRequired(ctx, from, req, opts, body)
 	if err != nil {
