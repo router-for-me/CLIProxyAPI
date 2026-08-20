@@ -710,6 +710,8 @@ type HostAuthFileEntry struct {
 	LastRefresh time.Time `json:"last_refresh,omitempty"`
 	// NextRetryAfter is the next retry timestamp.
 	NextRetryAfter time.Time `json:"next_retry_after,omitempty"`
+	// ModelStates contains a safe per-model runtime quota snapshot.
+	ModelStates map[string]HostModelState `json:"model_states,omitempty"`
 	// Email is the credential email when available.
 	Email string `json:"email,omitempty"`
 	// ProjectID is the credential project identifier when available.
@@ -730,6 +732,18 @@ type HostAuthFileEntry struct {
 	Failed int64 `json:"failed,omitempty"`
 	// RecentRequests is the recent request snapshot.
 	RecentRequests []HostRecentRequestEntry `json:"recent_requests,omitempty"`
+}
+
+// HostModelState describes the runtime availability and reset time for one model.
+type HostModelState struct {
+	Status         string    `json:"status,omitempty"`
+	StatusMessage  string    `json:"status_message,omitempty"`
+	Unavailable    bool      `json:"unavailable,omitempty"`
+	NextRetryAfter time.Time `json:"next_retry_after,omitempty"`
+	QuotaExceeded  bool      `json:"quota_exceeded,omitempty"`
+	QuotaReason    string    `json:"quota_reason,omitempty"`
+	NextReset      time.Time `json:"next_reset,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at,omitempty"`
 }
 
 // HostAuthGetRequest asks the host for credential JSON by auth index.

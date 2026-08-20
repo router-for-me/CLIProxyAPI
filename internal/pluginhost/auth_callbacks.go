@@ -442,6 +442,31 @@ func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFi
 	if !auth.NextRetryAfter.IsZero() {
 		entry.NextRetryAfter = auth.NextRetryAfter
 	}
+	if len(auth.ModelStates) > 0 {
+		entry.ModelStates = make(map[string]pluginapi.HostModelState, len(auth.ModelStates))
+		for model, state := range auth.ModelStates {
+			if state == nil {
+				continue
+			}
+			nextReset := state.NextRetryAfter
+			if state.Quota.NextRecoverAt.After(nextReset) {
+				nextReset = state.Quota.NextRecoverAt
+			}
+			entry.ModelStates[model] = pluginapi.HostModelState{
+				Status:         string(state.Status),
+				StatusMessage:  state.StatusMessage,
+				Unavailable:    state.Unavailable,
+				NextRetryAfter: state.NextRetryAfter,
+				QuotaExceeded:  state.Quota.Exceeded,
+				QuotaReason:    state.Quota.Reason,
+				NextReset:      nextReset,
+				UpdatedAt:      state.UpdatedAt,
+			}
+		}
+		if len(entry.ModelStates) == 0 {
+			entry.ModelStates = nil
+		}
+	}
 	if path != "" {
 		entry.Path = path
 		entry.Source = "file"
