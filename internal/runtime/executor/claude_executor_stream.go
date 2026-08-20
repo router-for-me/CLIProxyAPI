@@ -532,13 +532,30 @@ func (t *claudeResponseTracker) Write(data []byte) (int, error) {
 }
 
 func (t *claudeResponseTracker) observe(line []byte) {
-	trimmed := bytes.TrimSpace(line)
-	if bytes.HasPrefix(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) {
+	if isClaudeSSEFramingLine(line) {
 		t.sawSSELine = true
 		t.captureJSON = false
 		t.jsonTooLarge = false
 		t.jsonBody.Reset()
 	}
+}
+
+func isClaudeSSEFramingLine(line []byte) bool {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return false
+	}
+	if trimmed[0] == ':' {
+		return true
+	}
+	field := trimmed
+	if separator := bytes.IndexByte(field, ':'); separator >= 0 {
+		field = field[:separator]
+	}
+	return bytes.Equal(field, []byte("data")) ||
+		bytes.Equal(field, []byte("event")) ||
+		bytes.Equal(field, []byte("id")) ||
+		bytes.Equal(field, []byte("retry"))
 }
 
 func (t *claudeResponseTracker) isSSE() bool {

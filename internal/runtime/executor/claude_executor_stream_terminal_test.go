@@ -275,6 +275,51 @@ func assertClaudeStreamPrematureEOFFails(t *testing.T, rec claudeStreamRecorder)
 
 // Observable SSE framing must keep the truncation guard active even when the
 // upstream omits or mislabels Content-Type.
+func TestIsClaudeSSEFramingLine(t *testing.T) {
+	for _, test := range []struct {
+		line string
+		want bool
+	}{
+		{line: ": ping", want: true},
+		{line: "data: {}", want: true},
+		{line: "event: message", want: true},
+		{line: "id: checkpoint", want: true},
+		{line: "retry: 1000", want: true},
+		{line: "data", want: true},
+		{line: "", want: false},
+		{line: `{"id":"message"}`, want: false},
+		{line: `"retry: 1000"`, want: false},
+		{line: "field: value", want: false},
+	} {
+		t.Run(test.line, func(t *testing.T) {
+			if got := isClaudeSSEFramingLine([]byte(test.line)); got != test.want {
+				t.Fatalf("isClaudeSSEFramingLine(%q) = %t, want %t", test.line, got, test.want)
+			}
+		})
+	}
+}
+
+func TestClaudeExecutor_ExecuteStreamSSECommentWithoutValidContentTypeFailsOnEOF(t *testing.T) {
+	for _, contentType := range []string{"", "not a media type"} {
+		for _, sourceFormat := range []sdktranslator.Format{
+			sdktranslator.FromString("claude"),
+			sdktranslator.FormatOpenAI,
+		} {
+			name := fmt.Sprintf("content-type=%q/source=%s", contentType, sourceFormat)
+			t.Run(name, func(t *testing.T) {
+				rec := runClaudeStreamBody(t, ": ping\n\n", contentType, sourceFormat)
+				if len(rec.errs) != 1 {
+					t.Fatalf("error chunk count = %d, want exactly 1 after SSE comment EOF", len(rec.errs))
+				}
+				status, ok := rec.errs[0].(interface{ StatusCode() int })
+				if !ok || status.StatusCode() != http.StatusBadGateway {
+					t.Fatalf("SSE comment EOF error = %v, want HTTP 502", rec.errs[0])
+				}
+			})
+		}
+	}
+}
+
 func TestClaudeExecutor_ExecuteStreamSSEWithoutContentTypeHeaderStillFailsOnPrematureEOF(t *testing.T) {
 	assertClaudeStreamPrematureEOFFails(t, runClaudeStreamTerminalSSE(t, ""))
 }
