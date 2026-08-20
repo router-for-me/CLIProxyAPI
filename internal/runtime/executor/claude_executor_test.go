@@ -6629,22 +6629,35 @@ func TestClaudeExecutor_PrepareRequest_RejectsPlaceholderKey(t *testing.T) {
 	}
 }
 
-// TestApplyClaudeHeaders_DoesNotHardcodeStainlessHelperMethod guards the review
-// requirement that X-Stainless-Helper-Method must not be stamped onto every
-// Claude request. Real Claude Code uses messages.create({stream:true}), not
-// messages.stream(), so the Stainless SDK never injects this header; keeping it
-// off both stream and non-stream paths avoids a fingerprint mismatch.
-func TestApplyClaudeHeaders_DoesNotHardcodeStainlessHelperMethod(t *testing.T) {
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-helper-method"}}
+// TestApplyClaudeHeaders_GatesStainlessHelperMethodOnStream guards the review
+// requirement that X-Stainless-Helper-Method: stream is attached only when
+// stream=true. Non-stream messages.create and count_tokens must omit it.
+func TestApplyClaudeHeaders_GatesStainlessHelperMethodOnStream(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-helper-method", "cloak_mode": "always"}}
 	body := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"hi"}]}`)
 
-	for _, stream := range []bool{false, true} {
-		req := newClaudeHeaderTestRequest(t, nil)
-		if err := applyClaudeHeaders(req, auth, "key-helper-method", stream, nil, body, nil, nil, false); err != nil {
-			t.Fatalf("applyClaudeHeaders(stream=%v) error = %v", stream, err)
-		}
-		if got := req.Header.Get("X-Stainless-Helper-Method"); got != "" {
-			t.Fatalf("stream=%v: X-Stainless-Helper-Method = %q, want unset", stream, got)
-		}
+	nonStream := newClaudeHeaderTestRequest(t, nil)
+	if err := applyClaudeHeaders(nonStream, auth, "key-helper-method", false, nil, body, nil, nil, false); err != nil {
+		t.Fatalf("applyClaudeHeaders(stream=false) error = %v", err)
+	}
+	if got := nonStream.Header.Get("X-Stainless-Helper-Method"); got != "" {
+		t.Fatalf("stream=false: X-Stainless-Helper-Method = %q, want unset", got)
+	}
+
+	streamReq := newClaudeHeaderTestRequest(t, nil)
+	if err := applyClaudeHeaders(streamReq, auth, "key-helper-method", true, nil, body, nil, nil, false); err != nil {
+		t.Fatalf("applyClaudeHeaders(stream=true) error = %v", err)
+	}
+	if got := streamReq.Header.Get("X-Stainless-Helper-Method"); got != "stream" {
+		t.Fatalf("stream=true: X-Stainless-Helper-Method = %q, want %q", got, "stream")
+	}
+
+	countTokens := newClaudeHeaderTestRequest(t, nil)
+	countTokens.URL.Path = "/v1/messages/count_tokens"
+	if err := applyClaudeHeaders(countTokens, auth, "key-helper-method", false, nil, body, nil, nil, false); err != nil {
+		t.Fatalf("applyClaudeHeaders(count_tokens) error = %v", err)
+	}
+	if got := countTokens.Header.Get("X-Stainless-Helper-Method"); got != "" {
+		t.Fatalf("count_tokens: X-Stainless-Helper-Method = %q, want unset", got)
 	}
 }
