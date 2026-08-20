@@ -918,7 +918,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 	models := make([]map[string]any, 0, len(r.models))
 	var expiresAt time.Time
 
-	for _, registration := range r.models {
+	for modelID, registration := range r.models {
 		available, registrationExpiresAt := modelRegistrationAvailability(registration, now)
 		if !registrationExpiresAt.IsZero() && (expiresAt.IsZero() || registrationExpiresAt.Before(expiresAt)) {
 			expiresAt = registrationExpiresAt
@@ -927,13 +927,68 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 			continue
 		}
 
-		model := r.convertModelToMap(registration.Info, handlerType)
+		model := r.convertModelToMap(r.conservativeModelInfoLocked(modelID, registration.Info), handlerType)
 		if model != nil {
 			models = append(models, model)
 		}
 	}
 
 	return models, expiresAt
+}
+
+// conservativeModelInfoLocked returns model metadata whose token limits are the
+// smallest advertised by any client registered for the model. Registration.Info
+// keeps whichever client registered last — and keeps it even after that client
+// is unregistered — but requests are load balanced across every client serving
+// the model ID, so the published limits must hold for all of them (for example
+// gpt-5.6-terra allows 372000 context tokens on some Codex plans and 921000 on
+// others). Limits left at zero mean "unknown" and are ignored rather than
+// collapsing the result to zero.
+func (r *ModelRegistry) conservativeModelInfoLocked(modelID string, info *ModelInfo) *ModelInfo {
+	if info == nil || modelID == "" {
+		return info
+	}
+
+	var contextLength, maxCompletionTokens, inputTokenLimit, outputTokenLimit int
+	seen := false
+	for _, clientInfos := range r.clientModelInfos {
+		clientInfo := clientInfos[modelID]
+		if clientInfo == nil {
+			continue
+		}
+		seen = true
+		contextLength = smallestPositive(contextLength, clientInfo.ContextLength)
+		maxCompletionTokens = smallestPositive(maxCompletionTokens, clientInfo.MaxCompletionTokens)
+		inputTokenLimit = smallestPositive(inputTokenLimit, clientInfo.InputTokenLimit)
+		outputTokenLimit = smallestPositive(outputTokenLimit, clientInfo.OutputTokenLimit)
+	}
+	if !seen {
+		return info
+	}
+
+	if contextLength == info.ContextLength && maxCompletionTokens == info.MaxCompletionTokens &&
+		inputTokenLimit == info.InputTokenLimit && outputTokenLimit == info.OutputTokenLimit {
+		return info
+	}
+
+	conservative := cloneModelInfo(info)
+	conservative.ContextLength = contextLength
+	conservative.MaxCompletionTokens = maxCompletionTokens
+	conservative.InputTokenLimit = inputTokenLimit
+	conservative.OutputTokenLimit = outputTokenLimit
+	return conservative
+}
+
+// smallestPositive returns the smaller of two limits, treating a non-positive
+// value as an absent limit.
+func smallestPositive(current, candidate int) int {
+	if candidate <= 0 {
+		return current
+	}
+	if current <= 0 || candidate < current {
+		return candidate
+	}
+	return current
 }
 
 func cloneModelMaps(models []map[string]any) []map[string]any {
