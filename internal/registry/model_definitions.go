@@ -3,6 +3,7 @@
 package registry
 
 import (
+	"sort"
 	"strings"
 )
 
@@ -932,12 +933,65 @@ func GetZAIModels() []*ModelInfo {
 
 // GetOpenCodeModels returns the OpenCode model definitions for the given gateway
 // ("zen" or "go"). Models are generated from the embedded opencode_routes.json
-// route table.
+// route table, which is the canonical, refresh-immune source: models.json is a
+// generated projection that the CI "Refresh models catalog" step replaces with a
+// remote catalog that does not carry OpenCode-specific route tables, so the
+// embedded table is the source of truth for the listing. When a refreshed
+// catalog still carries richer OpenCode entries, those are preferred.
 func GetOpenCodeModels(gateway string) []*ModelInfo {
 	if strings.EqualFold(gateway, "go") {
-		return cloneModelInfos(getModels().OpenCodeGo)
+		if m := getModels().OpenCodeGo; len(m) > 0 {
+			return cloneModelInfos(m)
+		}
+		return openCodeModelsFromRoutes("go")
 	}
-	return cloneModelInfos(getModels().OpenCode)
+	if m := getModels().OpenCode; len(m) > 0 {
+		return cloneModelInfos(m)
+	}
+	return openCodeModelsFromRoutes("zen")
+}
+
+// openCodeRoutesModelInfo builds a ModelInfo from an embedded OpenCode route-table
+// entry (opencode_routes.json). The route table only carries ID -> protocol, so
+// capability fields are populated with the OpenCode-wide defaults that the
+// generated catalog mirrors.
+func openCodeRoutesModelInfo(gateway, modelID, protocol string) *ModelInfo {
+	info := &ModelInfo{
+		ID:                       modelID,
+		Object:                   "model",
+		OwnedBy:                  "opencode",
+		Type:                     "opencode",
+		DisplayName:              modelID,
+		Description:              "OpenCode " + gateway + " gateway — " + modelID,
+		ContextLength:            500000,
+		MaxCompletionTokens:      65536,
+		SupportedInputModalities:  []string{"text"},
+		SupportedOutputModalities: []string{"text"},
+		Thinking: &ThinkingSupport{
+			Levels: []string{"low", "medium", "high", "xhigh"},
+		},
+	}
+	if protocol == "gemini" {
+		info.SupportedEndpoints = []string{"/v1/models/" + modelID}
+	} else {
+		info.SupportedEndpoints = []string{OpenCodeModelPath(gateway, modelID)}
+	}
+	return info
+}
+
+// openCodeModelsFromRoutes materializes ModelInfo entries from the embedded
+// opencode_routes.json route table for the given gateway.
+func openCodeModelsFromRoutes(gateway string) []*ModelInfo {
+	routes, ok := openCodeRoutes[gateway]
+	if !ok || len(routes) == 0 {
+		return nil
+	}
+	out := make([]*ModelInfo, 0, len(routes))
+	for id, protocol := range routes {
+		out = append(out, openCodeRoutesModelInfo(gateway, id, protocol))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // GetPoolsideModels returns the Poolside model definitions.

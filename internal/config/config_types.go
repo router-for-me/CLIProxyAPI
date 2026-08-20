@@ -8,7 +8,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-<<<<<<<<< Temporary merge branch 1
 // AmpModelMapping maps an Amp-requested model to an available proxy model.
 type AmpModelMapping struct {
 	From  string `yaml:"from" json:"from"`
@@ -203,6 +202,13 @@ type XAIConfig struct {
 type AntigravityConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+}
+
+// PoolsideConfig configures provider-wide Poolside request behavior.
+type PoolsideConfig struct {
+	// FallbackModel is the Poolside model used when the requested model is not
+	// registered for the Poolside provider. An empty value disables fallback.
+	FallbackModel string `yaml:"fallback-model,omitempty" json:"fallback-model,omitempty"`
 }
 
 // CodexConfig configures provider-wide Codex request behavior.
@@ -609,6 +615,15 @@ type XAIKey = CodexKey
 
 // XAIModel uses the Codex model mapping structure for xAI models.
 type XAIModel = CodexModel
+
+// OpenCodeKey uses the Codex API key structure for native OpenCode (Zen/Go) execution.
+type OpenCodeKey = CodexKey
+
+// OpenCodeGoKey uses the Codex API key structure for native OpenCode Go execution.
+type OpenCodeGoKey = CodexKey
+
+// PoolsideKey uses the Codex API key structure for native Poolside execution.
+type PoolsideKey = CodexKey
 
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.

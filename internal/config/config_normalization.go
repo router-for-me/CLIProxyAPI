@@ -157,6 +157,36 @@ func (cfg *Config) SanitizeCodexKeys() {
 	cfg.CodexKey = sanitizeCodexKeyEntries(cfg.CodexKey)
 }
 
+// SanitizeOpenCodeKeys normalizes OpenCode (Zen) key entries. Unlike Codex,
+// OpenCode entries are NOT removed when BaseURL is empty: the OpenCode executor
+// applies a gateway default base-url (https://opencode.ai/zen), so an empty
+// BaseURL is valid and must survive config load. Dropping it here was the root
+// cause of OpenCode models being absent from /v1/models.
+func (cfg *Config) SanitizeOpenCodeKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.OpenCodeKey = normalizeCodexKeyEntries(cfg.OpenCodeKey, false)
+}
+
+// SanitizeOpenCodeGoKeys normalizes OpenCode Go key entries. It does not drop
+// entries without a BaseURL because the OpenCode Go executor defaults the
+// base-url to https://opencode.ai/zen/go. See SanitizeOpenCodeKeys.
+func (cfg *Config) SanitizeOpenCodeGoKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.OpenCodeGoKey = normalizeCodexKeyEntries(cfg.OpenCodeGoKey, false)
+}
+
+// SanitizePoolsideKeys applies the same normalization rules as codex-api-key.
+func (cfg *Config) SanitizePoolsideKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.PoolsideKey = sanitizeCodexKeyEntries(cfg.PoolsideKey)
+}
+
 // SanitizeXAIKeys removes xAI API key entries missing a BaseURL.
 // It applies the same normalization rules as codex-api-key.
 func (cfg *Config) SanitizeXAIKeys() {
@@ -169,7 +199,7 @@ func (cfg *Config) SanitizeXAIKeys() {
 	}
 }
 
-func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
+func normalizeCodexKeyEntries(entries []CodexKey, dropEmptyBaseURL bool) []CodexKey {
 	if len(entries) == 0 {
 		return entries
 	}
@@ -180,12 +210,21 @@ func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
-		if e.BaseURL == "" {
+		if dropEmptyBaseURL && e.BaseURL == "" {
+			// Skip providers with no base-url; treated as removed
 			continue
 		}
 		out = append(out, e)
 	}
 	return out
+}
+
+// sanitizeCodexKeyEntries drops Codex-compatible entries missing a BaseURL
+// (Codex, Poolside, XAI). Providers whose executor supplies a default BaseURL
+// (e.g. OpenCode/OpenCodeGo) must call normalizeCodexKeyEntries with
+// dropEmptyBaseURL=false instead.
+func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
+	return normalizeCodexKeyEntries(entries, true)
 }
 
 // SanitizeClaudeKeys normalizes headers for Claude credentials.

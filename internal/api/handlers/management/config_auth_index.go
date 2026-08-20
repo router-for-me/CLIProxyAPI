@@ -202,6 +202,50 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 	return out
 }
 
+// codexStyleKeysWithAuthIndex is the generic auth-index resolver for config
+// key slices that share the CodexKey layout (OpenCode, OpenCodeGo, Poolside).
+// provider is used to derive the stable auth ID prefix (e.g. "opencode:apikey").
+func (h *Handler) codexStyleKeysWithAuthIndex(entries []config.CodexKey, provider string) []codexKeyWithAuthIndex {
+	if h == nil {
+		return nil
+	}
+	liveIndexByID := h.liveAuthIndexByID()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return nil
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	out := make([]codexKeyWithAuthIndex, len(entries))
+	for i := range entries {
+		entry := entries[i]
+		authIndex := ""
+		if key := strings.TrimSpace(entry.APIKey); key != "" {
+			id, _ := idGen.Next(provider+":apikey", key, entry.BaseURL)
+			authIndex = liveIndexByID[id]
+		}
+		out[i] = codexKeyWithAuthIndex{
+			CodexKey:  entry,
+			AuthIndex: authIndex,
+		}
+	}
+	return out
+}
+
+func (h *Handler) openCodeKeysWithAuthIndex() []codexKeyWithAuthIndex {
+	return h.codexStyleKeysWithAuthIndex(h.cfg.OpenCodeKey, "opencode")
+}
+
+func (h *Handler) openCodeGoKeysWithAuthIndex() []codexKeyWithAuthIndex {
+	return h.codexStyleKeysWithAuthIndex(h.cfg.OpenCodeGoKey, "opencode-go")
+}
+
+func (h *Handler) poolsideKeysWithAuthIndex() []codexKeyWithAuthIndex {
+	return h.codexStyleKeysWithAuthIndex(h.cfg.PoolsideKey, "poolside")
+}
+
 func (h *Handler) xaiKeysWithAuthIndex() []xaiKeyWithAuthIndex {
 	if h == nil {
 		return nil

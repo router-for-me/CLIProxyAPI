@@ -1553,6 +1553,14 @@ func TestManagementAmpRoutesRegistered(t *testing.T) {
 		"PUT /v0/management/ampcode/upstream-api-keys",
 		"PATCH /v0/management/ampcode/upstream-api-keys",
 		"DELETE /v0/management/ampcode/upstream-api-keys",
+		"GET /v0/management/opencode-go-api-key",
+		"PUT /v0/management/opencode-go-api-key",
+		"PATCH /v0/management/opencode-go-api-key",
+		"DELETE /v0/management/opencode-go-api-key",
+		"GET /v0/management/poolside-api-key",
+		"PUT /v0/management/poolside-api-key",
+		"PATCH /v0/management/poolside-api-key",
+		"DELETE /v0/management/poolside-api-key",
 	}
 	for _, route := range expected {
 		if _, ok := routes[route]; !ok {

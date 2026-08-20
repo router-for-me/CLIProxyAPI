@@ -177,6 +177,17 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case constant.OpenCodeGo:
 		models = registry.GetOpenCodeModels("go")
 		models = applyExcludedModels(models, excluded)
+	case constant.Poolside:
+		models = registry.GetPoolsideModels()
+		if fb := strings.TrimSpace(s.cfg.Poolside.FallbackModel); fb != "" {
+			models = append(models, &registry.ModelInfo{
+				ID:          fb,
+				Name:        fb,
+				DisplayName: fb + " (Poolside fallback)",
+				OwnedBy:     "poolside",
+			})
+		}
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {

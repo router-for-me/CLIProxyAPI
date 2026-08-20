@@ -163,6 +163,21 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/xai-api-key", s.mgmt.PatchXAIKey)
 		mgmt.DELETE("/xai-api-key", s.mgmt.DeleteXAIKey)
 
+		mgmt.GET("/opencode-api-key", s.mgmt.GetOpenCodeKeys)
+		mgmt.PUT("/opencode-api-key", s.mgmt.PutOpenCodeKeys)
+		mgmt.PATCH("/opencode-api-key", s.mgmt.PatchOpenCodeKey)
+		mgmt.DELETE("/opencode-api-key", s.mgmt.DeleteOpenCodeKey)
+
+		mgmt.GET("/opencode-go-api-key", s.mgmt.GetOpenCodeGoKeys)
+		mgmt.PUT("/opencode-go-api-key", s.mgmt.PutOpenCodeGoKeys)
+		mgmt.PATCH("/opencode-go-api-key", s.mgmt.PatchOpenCodeGoKey)
+		mgmt.DELETE("/opencode-go-api-key", s.mgmt.DeleteOpenCodeGoKey)
+
+		mgmt.GET("/poolside-api-key", s.mgmt.GetPoolsideKeys)
+		mgmt.PUT("/poolside-api-key", s.mgmt.PutPoolsideKeys)
+		mgmt.PATCH("/poolside-api-key", s.mgmt.PatchPoolsideKey)
+		mgmt.DELETE("/poolside-api-key", s.mgmt.DeletePoolsideKey)
+
 		mgmt.GET("/openai-compatibility", s.mgmt.GetOpenAICompat)
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)

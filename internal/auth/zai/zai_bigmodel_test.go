@@ -19,7 +19,7 @@ func TestBigModelStartFlowBuildsLocalhostAuthorizeURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartFlow: %v", err)
 	}
-	defer a.shutdownBigModelServer()
+	defer a.shutdownServer()
 
 	u, err := url.Parse(init.AuthorizeURL)
 	if err != nil {
@@ -45,7 +45,6 @@ func TestBigModelStartFlowBuildsLocalhostAuthorizeURL(t *testing.T) {
 // (from --oauth-callback-port) is used for the local server and redirect URI,
 // matching the other OAuth providers.
 func TestBigModelStartFlowHonorsCallbackPort(t *testing.T) {
-	// Reserve a free port, release it, then assert the override binds to it.
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("probe listen: %v", err)
@@ -58,7 +57,7 @@ func TestBigModelStartFlowHonorsCallbackPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartFlow: %v", err)
 	}
-	defer a.shutdownBigModelServer()
+	defer a.shutdownServer()
 
 	u, err := url.Parse(init.AuthorizeURL)
 	if err != nil {
@@ -73,13 +72,13 @@ func TestBigModelStartFlowHonorsCallbackPort(t *testing.T) {
 // the authCode and state from the redirect query.
 func TestBigModelCallbackCapturesCode(t *testing.T) {
 	a := NewZAIAuth(nil, ProviderBigModel, "", 0)
-	a.bmState = "state-123"
-	a.bmResult = make(chan bmCallback, 1)
+	a.state = "state-123"
+	a.result = make(chan callbackResult, 1)
 
 	req := httptest.NewRequest("GET", "/callback?authCode=the-code&state=state-123", nil)
-	a.handleBigModelCallback(httptest.NewRecorder(), req)
+	a.handleCallback(httptest.NewRecorder(), req)
 
-	cb := <-a.bmResult
+	cb := <-a.result
 	if cb.err != nil {
 		t.Fatalf("unexpected callback error: %v", cb.err)
 	}
@@ -91,16 +90,35 @@ func TestBigModelCallbackCapturesCode(t *testing.T) {
 	}
 }
 
+// TestBigModelCallbackCapturesCodeParam verifies the handler accepts the "code"
+// query parameter in addition to "authCode".
+func TestBigModelCallbackCapturesCodeParam(t *testing.T) {
+	a := NewZAIAuth(nil, ProviderBigModel, "", 0)
+	a.state = "state-123"
+	a.result = make(chan callbackResult, 1)
+
+	req := httptest.NewRequest("GET", "/callback?code=the-code&state=state-123", nil)
+	a.handleCallback(httptest.NewRecorder(), req)
+
+	cb := <-a.result
+	if cb.err != nil {
+		t.Fatalf("unexpected callback error: %v", cb.err)
+	}
+	if cb.code != "the-code" {
+		t.Fatalf("code = %q, want the-code", cb.code)
+	}
+}
+
 // TestBigModelInjectCallback verifies a manually supplied authorization code is
 // delivered to a pending flow tagged with the flow's own OAuth state.
 func TestBigModelInjectCallback(t *testing.T) {
 	a := NewZAIAuth(nil, ProviderBigModel, "", 0)
-	a.bmState = "flow-state"
-	a.bmResult = make(chan bmCallback, 1)
+	a.state = "flow-state"
+	a.result = make(chan callbackResult, 1)
 
 	a.InjectCallback("code-x")
 	select {
-	case cb := <-a.bmResult:
+	case cb := <-a.result:
 		if cb.code != "code-x" || cb.state != "flow-state" {
 			t.Fatalf("unexpected callback: %+v", cb)
 		}
@@ -117,12 +135,12 @@ func TestBigModelInjectCallback(t *testing.T) {
 // leaving it to hang until the authorization timeout.
 func TestBigModelInjectError(t *testing.T) {
 	a := NewZAIAuth(nil, ProviderBigModel, "", 0)
-	a.bmState = "flow-state"
-	a.bmResult = make(chan bmCallback, 1)
+	a.state = "flow-state"
+	a.result = make(chan callbackResult, 1)
 
 	a.InjectError("access_denied")
 	select {
-	case cb := <-a.bmResult:
+	case cb := <-a.result:
 		if cb.err == nil || !strings.Contains(cb.err.Error(), "access_denied") {
 			t.Fatalf("expected an error carrying the provider message, got %+v", cb)
 		}
@@ -139,12 +157,12 @@ func TestBigModelInjectError(t *testing.T) {
 // reported with the provider's error rather than a generic missing-code message.
 func TestBigModelCallbackSurfacesError(t *testing.T) {
 	a := NewZAIAuth(nil, ProviderBigModel, "", 0)
-	a.bmResult = make(chan bmCallback, 1)
+	a.result = make(chan callbackResult, 1)
 
 	req := httptest.NewRequest("GET", "/callback?error=access_denied&state=s", nil)
-	a.handleBigModelCallback(httptest.NewRecorder(), req)
+	a.handleCallback(httptest.NewRecorder(), req)
 
-	cb := <-a.bmResult
+	cb := <-a.result
 	if cb.err == nil || !strings.Contains(cb.err.Error(), "access_denied") {
 		t.Fatalf("expected the callback to surface the OAuth error, got %+v", cb)
 	}
@@ -154,12 +172,12 @@ func TestBigModelCallbackSurfacesError(t *testing.T) {
 // is reported as an error rather than silently accepted.
 func TestBigModelCallbackRejectsMissingCode(t *testing.T) {
 	a := NewZAIAuth(nil, ProviderBigModel, "", 0)
-	a.bmResult = make(chan bmCallback, 1)
+	a.result = make(chan callbackResult, 1)
 
 	req := httptest.NewRequest("GET", "/callback?state=only-state", nil)
-	a.handleBigModelCallback(httptest.NewRecorder(), req)
+	a.handleCallback(httptest.NewRecorder(), req)
 
-	cb := <-a.bmResult
+	cb := <-a.result
 	if cb.err == nil {
 		t.Fatal("expected an error for a callback missing authCode")
 	}

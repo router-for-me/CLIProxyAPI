@@ -118,12 +118,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Delegated Anthropic-compatible providers (e.g. Kimi) reject the
 	// Anthropic-only cache_control field: strip it entirely instead of injecting.
-	cpaOwnsCacheControl := false
 	if e.cacheControlDisabled {
 		body = stripCacheControls(body)
 	} else {
-		cpaOwnsCacheControl = shouldEnsureCacheControl(body, cloaked, confirmedClaudeCode)
-		if cpaOwnsCacheControl {
 		cpaOwnsCacheControl := shouldEnsureCacheControl(body, cloaked, confirmedClaudeCode)
 		if cpaOwnsCacheControl {
 			body = ensureCacheControl(body)

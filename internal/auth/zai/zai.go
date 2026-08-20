@@ -20,9 +20,8 @@ import (
 )
 
 const (
-	// DefaultOAuthBaseURL is the ZCode CLI OAuth base endpoint. The init and poll
-	// endpoints are derived from it. The same base serves both identity providers;
-	// the provider is selected via the init request body.
+	// DefaultOAuthBaseURL is the ZCode OAuth base endpoint for token exchange.
+	// Both Z.AI international and BigModel exchange authorization codes here.
 	DefaultOAuthBaseURL = "https://zcode.z.ai/api/v1"
 
 	// ProviderZAI authenticates against Z.AI international (chat.z.ai).
@@ -30,22 +29,21 @@ const (
 	// ProviderBigModel authenticates against Zhipu BigModel, China mainland (bigmodel.cn).
 	ProviderBigModel = "bigmodel"
 
-	// defaultPollInterval is used when the server does not advertise an interval.
-	defaultPollInterval = 2 * time.Second
 	// maxPollDuration bounds how long we wait for the user to authorize.
 	maxPollDuration = 10 * time.Minute
-	// pollTokenBytes is the size of the client-generated poll token (matches ZCode).
+	// pollTokenBytes is the size of the client-generated state token.
 	pollTokenBytes = 32
-	// maxConsecutivePollErrors is how many transient poll failures (network blips,
-	// 5xx) are tolerated in a row before the login is aborted. The multi-minute
-	// authorization window makes brief glitches likely, so we retry rather than
-	// fail the whole flow on the first hiccup.
-	maxConsecutivePollErrors = 5
 
-	// bigModelLoginURL / bigModelAppID drive the BigModel browser-redirect login.
-	// BigModel (unlike Z.AI international) rejects the server-mediated CLI callback
-	// but accepts a localhost redirect, so its login runs a local callback server
-	// and exchanges the returned code at the ZCode oauth/token endpoint.
+	// zaiAuthorizeURL is the Z.AI international OAuth authorize endpoint.
+	// Discovered from the official ZCode desktop app (v3.7.7).
+	zaiAuthorizeURL = "https://chat.z.ai/api/oauth/authorize"
+	// zaiClientID is the Z.AI international OAuth client ID from the official ZCode app.
+	zaiClientID = "client_P8X5CMWmlaRO9gyO-KSqtg"
+
+	// bigModelLoginURL drives the BigModel browser-redirect login. BigModel
+	// rejects the server-mediated CLI callback but accepts a localhost redirect,
+	// so its login runs a local callback server and exchanges the returned code
+	// at the ZCode oauth/token endpoint.
 	bigModelLoginURL = "https://bigmodel.cn/login"
 	bigModelAppID    = "zcode"
 )
@@ -61,13 +59,11 @@ func NormalizeProvider(provider string) string {
 	}
 }
 
-// InitResponse is the parsed payload of the OAuth init call.
+// InitResponse is the parsed payload of the OAuth flow init.
 type InitResponse struct {
-	FlowID          string `json:"flow_id"`
-	PollToken       string `json:"poll_token"`
-	AuthorizeURL    string `json:"authorize_url"`
-	ExpiresAt       int64  `json:"expires_at"`
-	PollIntervalSec int    `json:"poll_interval_sec"`
+	FlowID       string `json:"flow_id"`
+	PollToken    string `json:"poll_token"`
+	AuthorizeURL string `json:"authorize_url"`
 }
 
 // ReadyResult holds the credentials returned when authorization completes.
@@ -89,28 +85,31 @@ type envelope struct {
 	Data json.RawMessage `json:"data"`
 }
 
-// ZAIAuth handles the ZCode CLI OAuth flow for a single identity provider.
+// ZAIAuth handles the OAuth flow for a single ZCode identity provider
+// (Z.AI international or BigModel). Both providers now use the same
+// browser-callback pattern: a local loopback server captures the
+// authorization code, which is then exchanged at the ZCode OAuth token endpoint.
 type ZAIAuth struct {
 	httpClient *http.Client
 	provider   string
 	baseURL    string
-	// callbackPort is the loopback port for the BigModel OAuth callback. Zero
+	// callbackPort is the loopback port for the OAuth callback. Zero
 	// selects an automatic free port; a positive value (from --oauth-callback-port)
 	// is used verbatim, matching the other OAuth providers.
 	callbackPort int
 
-	// BigModel browser-redirect flow state, populated by StartFlow when the
-	// provider is bigmodel and consumed by WaitForAuthorization on the same
-	// instance. (The SDK login and management handler both keep one instance.)
-	bmServer   *http.Server
-	bmListener net.Listener
-	bmState    string
-	bmRedirect string
-	bmResult   chan bmCallback
+	// Browser-redirect flow state, populated by StartFlow and consumed by
+	// WaitForAuthorization on the same instance. (The SDK login and management
+	// handler both keep one instance.)
+	server   *http.Server
+	listener net.Listener
+	state    string
+	redirect string
+	result   chan callbackResult
 }
 
-// bmCallback carries the BigModel OAuth result captured by the local callback.
-type bmCallback struct {
+// callbackResult carries the OAuth result captured by the local callback.
+type callbackResult struct {
 	code  string
 	state string
 	err   error
@@ -118,7 +117,7 @@ type bmCallback struct {
 
 // NewZAIAuth creates a ZAIAuth bound to the given identity provider. proxyURL
 // overrides cfg.ProxyURL when non-empty. callbackPort overrides the automatic
-// BigModel callback port when positive (used only by the bigmodel flow).
+// loopback callback port when positive (used by both Z.AI and BigModel flows).
 func NewZAIAuth(cfg *config.Config, provider, proxyURL string, callbackPort int) *ZAIAuth {
 	client := &http.Client{Timeout: 30 * time.Second}
 	var sdkCfg config.SDKConfig
@@ -146,158 +145,25 @@ func (a *ZAIAuth) Provider() string { return a.provider }
 // StartFlow initiates the OAuth flow and returns the authorization URL plus the
 // poll token used to wait for completion.
 func (a *ZAIAuth) StartFlow(ctx context.Context) (*InitResponse, error) {
-	if a.provider == ProviderBigModel {
-		return a.startBigModelFlow()
-	}
-	pollToken, err := newPollToken()
-	if err != nil {
-		return nil, fmt.Errorf("zai: generate poll token: %w", err)
-	}
-
-	body, _ := json.Marshal(map[string]string{"provider": a.provider})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+"/oauth/cli/init", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("zai: create init request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+pollToken)
-
-	data, err := a.doEnvelope(req)
-	if err != nil {
-		return nil, err
-	}
-	var out InitResponse
-	if err = json.Unmarshal(data, &out); err != nil {
-		return nil, fmt.Errorf("zai: parse init response: %w", err)
-	}
-	if strings.TrimSpace(out.FlowID) == "" || strings.TrimSpace(out.AuthorizeURL) == "" {
-		return nil, fmt.Errorf("zai: invalid init response (missing flow_id or authorize_url)")
-	}
-	// The server returns the authoritative poll token; fall back to the
-	// client-generated one only if the server omitted it.
-	if strings.TrimSpace(out.PollToken) == "" {
-		out.PollToken = pollToken
-	}
-	return &out, nil
+	// Both Z.AI international and BigModel now use the browser-callback flow
+	// (local loopback server captures the authorization code). The old
+	// zcode.z.ai/api/v1/oauth/cli/init endpoint was deprecated/removed.
+	return a.startBrowserFlow()
 }
 
-// WaitForAuthorization polls until the user authorizes the request or the flow
-// expires, then returns the minted credentials.
+// WaitForAuthorization waits for the user to authorize the request in the browser
+// (via the local loopback callback) or the flow to expire, then returns the
+// minted credentials.
 func (a *ZAIAuth) WaitForAuthorization(ctx context.Context, init *InitResponse) (*ReadyResult, error) {
-	if a.provider == ProviderBigModel {
-		return a.waitForBigModelAuthorization(ctx)
-	}
-	if init == nil {
-		return nil, fmt.Errorf("zai: init response is nil")
-	}
-
-	interval := time.Duration(init.PollIntervalSec) * time.Second
-	if interval < defaultPollInterval {
-		interval = defaultPollInterval
-	}
-
-	deadline := time.Now().Add(maxPollDuration)
-	if init.ExpiresAt > 0 {
-		if codeDeadline := time.Unix(init.ExpiresAt, 0); codeDeadline.Before(deadline) {
-			deadline = codeDeadline
-		}
-	}
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	consecutiveErrors := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("zai: context cancelled: %w", ctx.Err())
-		case <-ticker.C:
-			if time.Now().After(deadline) {
-				return nil, fmt.Errorf("zai: authorization timed out")
-			}
-			result, done, terminal, err := a.poll(ctx, init)
-			if err != nil {
-				if terminal {
-					return nil, err
-				}
-				consecutiveErrors++
-				if consecutiveErrors >= maxConsecutivePollErrors {
-					return nil, fmt.Errorf("zai: polling failed after %d consecutive errors: %w", consecutiveErrors, err)
-				}
-				log.Warnf("zai: transient polling error (%d/%d), will retry: %v", consecutiveErrors, maxConsecutivePollErrors, err)
-				continue
-			}
-			consecutiveErrors = 0
-			if done {
-				return result, nil
-			}
-			// Keep polling.
-		}
-	}
+	return a.waitForBrowserAuthorization(ctx)
 }
 
-// poll performs a single poll request. It returns (result, done, terminal, error)
-// where terminal reports whether the error is definitive (authorization denied or
-// a protocol error) and must not be retried. Non-terminal errors are transient
-// (network/HTTP/decode failures) and may be retried by the caller.
-func (a *ZAIAuth) poll(ctx context.Context, init *InitResponse) (*ReadyResult, bool, bool, error) {
-	url := fmt.Sprintf("%s/oauth/cli/poll/%s", a.baseURL, init.FlowID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, false, true, fmt.Errorf("zai: create poll request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+init.PollToken)
-
-	data, err := a.doEnvelope(req)
-	if err != nil {
-		// Network / HTTP / envelope errors are transient: let the caller retry.
-		return nil, false, false, err
-	}
-
-	var poll struct {
-		Status string `json:"status"`
-		Token  string `json:"token"`
-		User   struct {
-			UserID string `json:"user_id"`
-			Email  string `json:"email"`
-			Name   string `json:"name"`
-		} `json:"user"`
-		ZAI struct {
-			AccessToken string `json:"access_token"`
-		} `json:"zai"`
-	}
-	if err = json.Unmarshal(data, &poll); err != nil {
-		return nil, false, true, fmt.Errorf("zai: parse poll response: %w", err)
-	}
-
-	switch poll.Status {
-	case "pending", "":
-		return nil, false, false, nil
-	case "failed":
-		return nil, false, true, fmt.Errorf("zai: authorization failed or was denied")
-	case "ready":
-		if strings.TrimSpace(poll.Token) == "" {
-			return nil, false, true, fmt.Errorf("zai: ready response missing token")
-		}
-		return &ReadyResult{
-			Token:          poll.Token,
-			ZAIAccessToken: poll.ZAI.AccessToken,
-			UserID:         poll.User.UserID,
-			Email:          poll.User.Email,
-			Name:           poll.User.Name,
-		}, true, false, nil
-	default:
-		return nil, false, true, fmt.Errorf("zai: unexpected poll status %q", poll.Status)
-	}
-}
-
-// startBigModelFlow starts a local callback server and builds the BigModel
-// authorize URL. BigModel rejects the server-mediated CLI callback that Z.AI
-// international accepts, but it does accept a localhost redirect, so the login
-// captures the authorization code on a local HTTP server.
-func (a *ZAIAuth) startBigModelFlow() (*InitResponse, error) {
+// startBrowserFlow starts a local callback server and builds the OAuth
+// authorize URL for the configured provider. Both Z.AI international and
+// BigModel reject the server-mediated CLI callback but accept a localhost
+// redirect, so the login runs a local callback server and exchanges the
+// returned code at the ZCode oauth/token endpoint.
+func (a *ZAIAuth) startBrowserFlow() (*InitResponse, error) {
 	state, err := newPollToken()
 	if err != nil {
 		return nil, fmt.Errorf("zai: generate state: %w", err)
@@ -311,42 +177,66 @@ func (a *ZAIAuth) startBigModelFlow() (*InitResponse, error) {
 		return nil, fmt.Errorf("zai: start callback listener: %w", err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	a.bmState = state
-	a.bmRedirect = fmt.Sprintf("http://127.0.0.1:%d/callback", port)
-	a.bmResult = make(chan bmCallback, 1)
-	// Capture the server in a local so the serving goroutine never reads the
-	// a.bmServer field, which shutdownBigModelServer may concurrently nil out.
-	srv := &http.Server{Handler: http.HandlerFunc(a.handleBigModelCallback)}
-	a.bmListener = ln
-	a.bmServer = srv
+	a.state = state
+	a.redirect = fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+	a.result = make(chan callbackResult, 1)
+	srv := &http.Server{Handler: http.HandlerFunc(a.handleCallback)}
+	a.listener = ln
+	a.server = srv
 	go func() {
 		if errServe := srv.Serve(ln); errServe != nil && errServe != http.ErrServerClosed {
-			log.Debugf("zai: bigmodel callback server stopped: %v", errServe)
+			log.Debugf("zai: callback server stopped: %v", errServe)
 		}
 	}()
 
-	params := url.Values{
-		"redirect": {a.bmRedirect},
-		"appId":    {bigModelAppID},
-		"state":    {state},
+	authorizeURL, err := buildAuthorizeURL(a.provider, a.redirect, state)
+	if err != nil {
+		a.shutdownServer()
+		return nil, err
 	}
+
 	return &InitResponse{
-		FlowID:       "bigmodel-browser",
-		AuthorizeURL: bigModelLoginURL + "?" + params.Encode(),
+		FlowID:       a.provider,
+		AuthorizeURL: authorizeURL,
 		PollToken:    state,
 	}, nil
 }
 
-// handleBigModelCallback captures the authorization code from the local redirect.
-func (a *ZAIAuth) handleBigModelCallback(w http.ResponseWriter, r *http.Request) {
+// buildAuthorizeURL constructs the OAuth authorize URL for the given provider.
+// Z.AI international uses the ZCode desktop client's OAuth endpoints.
+// BigModel uses its own authorize URL with the "zcode" app ID.
+func buildAuthorizeURL(provider, redirectURI, state string) (string, error) {
+	switch provider {
+	case ProviderZAI:
+		params := url.Values{
+			"client_id":     {zaiClientID},
+			"response_type": {"code"},
+			"redirect_uri":  {redirectURI},
+			"state":         {state},
+		}
+		return zaiAuthorizeURL + "?" + params.Encode(), nil
+	case ProviderBigModel:
+		params := url.Values{
+			"redirect": {redirectURI},
+			"appId":    {bigModelAppID},
+			"state":    {state},
+		}
+		return bigModelLoginURL + "?" + params.Encode(), nil
+	default:
+		return "", fmt.Errorf("zai: unknown provider %q", provider)
+	}
+}
+
+// handleCallback captures the authorization code from the local redirect.
+func (a *ZAIAuth) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(r.URL.Path, "/callback") {
 		http.NotFound(w, r)
 		return
 	}
 	q := r.URL.Query()
-	code := strings.TrimSpace(q.Get("authCode"))
+	code := strings.TrimSpace(q.Get("code"))
 	if code == "" {
-		code = strings.TrimSpace(q.Get("code"))
+		code = strings.TrimSpace(q.Get("authCode"))
 	}
 	state := strings.TrimSpace(q.Get("state"))
 	errParam := strings.TrimSpace(q.Get("error"))
@@ -357,88 +247,89 @@ func (a *ZAIAuth) handleBigModelCallback(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = io.WriteString(w, "<!doctype html><html><body style=\"font-family:sans-serif\"><h2>Authorization received. You can close this tab and return to the terminal.</h2></body></html>")
 
-	cb := bmCallback{code: code, state: state}
+	cb := callbackResult{code: code, state: state}
 	switch {
 	case errParam != "":
-		cb.err = fmt.Errorf("zai: bigmodel authorization: %s", errParam)
+		cb.err = fmt.Errorf("zai: authorization: %s", errParam)
 	case code == "" || state == "":
-		cb.err = fmt.Errorf("zai: bigmodel callback missing authCode or state")
+		cb.err = fmt.Errorf("zai: callback missing code or state")
 	}
 	select {
-	case a.bmResult <- cb:
+	case a.result <- cb:
 	default:
 	}
 }
 
 // InjectCallback delivers a manually supplied authorization code into a pending
-// BigModel flow. The management /oauth-callback watcher uses it when a remote
+// flow. The management /oauth-callback watcher uses it when a remote
 // browser cannot reach the loopback listener. The watcher has already validated
-// the callback against the management session (which uses a different state than
-// the BigModel OAuth redirect), so the code is delivered with the flow's own state.
-// It is a no-op when no flow is waiting.
+// the callback against the management session (which uses a different state),
+// so the code is delivered with the flow's own state. It is a no-op when no
+// flow is waiting.
 func (a *ZAIAuth) InjectCallback(authCode string) {
-	if a.bmResult == nil || strings.TrimSpace(authCode) == "" {
+	if a.result == nil || strings.TrimSpace(authCode) == "" {
 		return
 	}
 	select {
-	case a.bmResult <- bmCallback{code: authCode, state: a.bmState}:
+	case a.result <- callbackResult{code: authCode, state: a.state}:
 	default:
 	}
 }
 
-// InjectError fails a pending BigModel flow with the given message — used when a
-// pasted (or loopback) callback carried an OAuth error instead of an authorization
-// code, so the login fails promptly instead of waiting for the authorization
-// timeout. It is a no-op when no flow is waiting.
+// InjectError fails a pending flow with the given message — used when a
+// pasted (or loopback) callback carried an OAuth error instead of an
+// authorization code, so the login fails promptly instead of waiting for the
+// authorization timeout. It is a no-op when no flow is waiting.
 func (a *ZAIAuth) InjectError(message string) {
-	if a.bmResult == nil {
+	if a.result == nil {
 		return
 	}
 	if strings.TrimSpace(message) == "" {
 		message = "authorization failed or was denied"
 	}
 	select {
-	case a.bmResult <- bmCallback{state: a.bmState, err: fmt.Errorf("zai: bigmodel authorization: %s", message)}:
+	case a.result <- callbackResult{state: a.state, err: fmt.Errorf("zai: authorization: %s", message)}:
 	default:
 	}
 }
 
-// waitForBigModelAuthorization waits for the local callback, validates the state,
-// and exchanges the authorization code for a BigModel access token.
-func (a *ZAIAuth) waitForBigModelAuthorization(ctx context.Context) (*ReadyResult, error) {
-	defer a.shutdownBigModelServer()
-	if a.bmResult == nil {
-		return nil, fmt.Errorf("zai: bigmodel flow not started")
+// waitForBrowserAuthorization waits for the local callback, validates the state,
+// and exchanges the authorization code for a provider access token via the
+// ZCode oauth/token endpoint.
+func (a *ZAIAuth) waitForBrowserAuthorization(ctx context.Context) (*ReadyResult, error) {
+	defer a.shutdownServer()
+	if a.result == nil {
+		return nil, fmt.Errorf("zai: browser flow not started")
 	}
 	select {
 	case <-ctx.Done():
 		return nil, fmt.Errorf("zai: context cancelled: %w", ctx.Err())
 	case <-time.After(maxPollDuration):
-		return nil, fmt.Errorf("zai: bigmodel authorization timed out")
-	case cb := <-a.bmResult:
+		return nil, fmt.Errorf("zai: authorization timed out")
+	case cb := <-a.result:
 		if cb.err != nil {
 			return nil, cb.err
 		}
-		if cb.state != a.bmState {
-			return nil, fmt.Errorf("zai: bigmodel state mismatch")
+		if cb.state != a.state {
+			return nil, fmt.Errorf("zai: state mismatch")
 		}
-		return a.exchangeBigModelCode(ctx, cb.code)
+		return a.exchangeCode(ctx, cb.code)
 	}
 }
 
-// exchangeBigModelCode swaps the BigModel authorization code for an access token
-// via the ZCode oauth/token endpoint (the same exchange the official client uses).
-func (a *ZAIAuth) exchangeBigModelCode(ctx context.Context, code string) (*ReadyResult, error) {
+// exchangeCode swaps the authorization code for an access token via the
+// ZCode oauth/token endpoint (the same exchange the official ZCode client uses).
+// The ZCode oauth/token endpoint occasionally returns a transient upstream error
+// (e.g. HTTP 500 {"code":2007,"msg":"http error"}) while it validates the
+// authorization code with the identity provider, so retry a few times before giving up.
+func (a *ZAIAuth) exchangeCode(ctx context.Context, code string) (*ReadyResult, error) {
 	body, _ := json.Marshal(map[string]string{
-		"provider":     ProviderBigModel,
+		"provider":     a.provider,
 		"code":         code,
-		"redirect_uri": a.bmRedirect,
-		"state":        a.bmState,
+		"redirect_uri": a.redirect,
+		"state":        a.state,
 	})
 
-	// The ZCode oauth/token endpoint occasionally returns a transient upstream
-	// error (e.g. HTTP 500 {"code":2007,"msg":"http error"}) while it validates the
-	// authorization code with BigModel, so retry a few times before giving up.
 	var data json.RawMessage
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -454,7 +345,7 @@ func (a *ZAIAuth) exchangeBigModelCode(ctx context.Context, code string) (*Ready
 			break
 		}
 		if attempt < 3 {
-			log.Warnf("zai: bigmodel token exchange attempt %d/3 failed, retrying: %v", attempt, lastErr)
+			log.Warnf("zai: token exchange attempt %d/3 failed, retrying: %v", attempt, lastErr)
 			select {
 			case <-ctx.Done():
 				return nil, fmt.Errorf("zai: context cancelled: %w", ctx.Err())
@@ -463,57 +354,50 @@ func (a *ZAIAuth) exchangeBigModelCode(ctx context.Context, code string) (*Ready
 		}
 	}
 	if lastErr != nil {
-		return nil, fmt.Errorf("zai: bigmodel token exchange: %w", lastErr)
+		return nil, fmt.Errorf("zai: token exchange: %w", lastErr)
 	}
 	var out struct {
-		BigModel struct {
-			AccessToken      string `json:"access_token"`
-			AccessTokenCamel string `json:"accessToken"`
-		} `json:"bigmodel"`
-		AccessToken      string `json:"access_token"`
-		AccessTokenCamel string `json:"accessToken"`
-		User             struct {
+		Token string `json:"token"`
+		User  struct {
 			UserID string `json:"user_id"`
 			Email  string `json:"email"`
 			Name   string `json:"name"`
 		} `json:"user"`
+		ZAI struct {
+			AccessToken string `json:"access_token"`
+		} `json:"zai"`
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, fmt.Errorf("zai: parse bigmodel token exchange: %w", err)
+		return nil, fmt.Errorf("zai: parse token exchange: %w", err)
 	}
-	token := strings.TrimSpace(out.BigModel.AccessToken)
+	token := strings.TrimSpace(out.Token)
 	if token == "" {
-		token = strings.TrimSpace(out.BigModel.AccessTokenCamel)
+		return nil, fmt.Errorf("zai: token exchange returned no token")
 	}
-	if token == "" {
-		token = strings.TrimSpace(out.AccessToken)
-	}
-	if token == "" {
-		token = strings.TrimSpace(out.AccessTokenCamel)
-	}
-	if token == "" {
-		return nil, fmt.Errorf("zai: bigmodel token exchange returned no access token")
+	access := strings.TrimSpace(out.ZAI.AccessToken)
+	if access == "" {
+		access = token
 	}
 	return &ReadyResult{
 		Token:          token,
-		ZAIAccessToken: token,
+		ZAIAccessToken: access,
 		UserID:         out.User.UserID,
 		Email:          out.User.Email,
 		Name:           out.User.Name,
 	}, nil
 }
 
-// shutdownBigModelServer stops the local callback server, if running.
-func (a *ZAIAuth) shutdownBigModelServer() {
-	if a.bmServer != nil {
+// shutdownServer stops the local callback server, if running.
+func (a *ZAIAuth) shutdownServer() {
+	if a.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = a.bmServer.Shutdown(ctx)
+		_ = a.server.Shutdown(ctx)
 		cancel()
-		a.bmServer = nil
+		a.server = nil
 	}
-	if a.bmListener != nil {
-		_ = a.bmListener.Close()
-		a.bmListener = nil
+	if a.listener != nil {
+		_ = a.listener.Close()
+		a.listener = nil
 	}
 }
 

@@ -56,6 +56,12 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeKiroKeys(ctx)...)
 	// xAI API Keys
 	out = append(out, s.synthesizeXAIKeys(ctx)...)
+	// OpenCode API Keys
+	out = append(out, s.synthesizeOpenCodeKeys(ctx)...)
+	// OpenCode Go API Keys
+	out = append(out, s.synthesizeOpenCodeGoKeys(ctx)...)
+	// Poolside API Keys
+	out = append(out, s.synthesizePoolsideKeys(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
@@ -207,6 +213,21 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 // synthesizeXAIKeys creates Auth entries for xAI API keys.
 func (s *ConfigSynthesizer) synthesizeXAIKeys(ctx *SynthesisContext) []*coreauth.Auth {
 	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.XAIKey, "xai")
+}
+
+// synthesizeOpenCodeKeys creates Auth entries for OpenCode API keys.
+func (s *ConfigSynthesizer) synthesizeOpenCodeKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.OpenCodeKey, "opencode")
+}
+
+// synthesizeOpenCodeGoKeys creates Auth entries for OpenCode Go API keys.
+func (s *ConfigSynthesizer) synthesizeOpenCodeGoKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.OpenCodeGoKey, "opencode-go")
+}
+
+// synthesizePoolsideKeys creates Auth entries for Poolside API keys.
+func (s *ConfigSynthesizer) synthesizePoolsideKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.PoolsideKey, "poolside")
 }
 
 func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entries []config.CodexKey, provider string) []*coreauth.Auth {
