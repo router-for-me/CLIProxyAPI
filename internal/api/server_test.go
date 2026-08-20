@@ -1779,18 +1779,29 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 
 func TestOpenAIModelsIncludeRegistryTokenLimits(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
-	clientID := "test-openai-models-token-limits"
-	const modelID = "claude-sonnet-token-limits"
-	modelRegistry.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
-		ID:                  modelID,
+	const claudeModelID = "claude-sonnet-token-limits"
+	const geminiModelID = "gemini-token-limits"
+
+	modelRegistry.RegisterClient("test-openai-models-token-limits-claude", "claude", []*registry.ModelInfo{{
+		ID:                  claudeModelID,
 		Object:              "model",
 		OwnedBy:             "anthropic",
 		Type:                "claude",
 		ContextLength:       200000,
 		MaxCompletionTokens: 128000,
 	}})
+	// Gemini catalogs express the same limits as inputTokenLimit/outputTokenLimit.
+	modelRegistry.RegisterClient("test-openai-models-token-limits-gemini", "gemini", []*registry.ModelInfo{{
+		ID:               geminiModelID,
+		Object:           "model",
+		OwnedBy:          "google",
+		Type:             "gemini",
+		InputTokenLimit:  1048576,
+		OutputTokenLimit: 65536,
+	}})
 	t.Cleanup(func() {
-		modelRegistry.UnregisterClient(clientID)
+		modelRegistry.UnregisterClient("test-openai-models-token-limits-claude")
+		modelRegistry.UnregisterClient("test-openai-models-token-limits-gemini")
 	})
 
 	server := newTestServer(t)
@@ -1812,23 +1823,29 @@ func TestOpenAIModelsIncludeRegistryTokenLimits(t *testing.T) {
 		t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
 	}
 
-	var model map[string]any
+	models := make(map[string]map[string]any, len(resp.Data))
 	for _, entry := range resp.Data {
-		if id, _ := entry["id"].(string); id == modelID {
-			model = entry
-			break
+		if id, _ := entry["id"].(string); id != "" {
+			models[id] = entry
 		}
 	}
-	if model == nil {
-		t.Fatalf("expected %s in response, got %s", modelID, rr.Body.String())
-	}
-	for field, want := range map[string]float64{"context_length": 200000, "max_completion_tokens": 128000} {
-		got, ok := model[field].(float64)
+
+	for modelID, want := range map[string]map[string]float64{
+		claudeModelID: {"context_length": 200000, "max_completion_tokens": 128000},
+		geminiModelID: {"context_length": 1048576, "max_completion_tokens": 65536},
+	} {
+		model, ok := models[modelID]
 		if !ok {
-			t.Fatalf("expected %q in model listing, got %v", field, model)
+			t.Fatalf("expected %s in response, got %s", modelID, rr.Body.String())
 		}
-		if got != want {
-			t.Fatalf("%s = %v, want %v", field, got, want)
+		for field, wantValue := range want {
+			got, okField := model[field].(float64)
+			if !okField {
+				t.Fatalf("expected %q in %s listing, got %v", field, modelID, model)
+			}
+			if got != wantValue {
+				t.Fatalf("%s %s = %v, want %v", modelID, field, got, wantValue)
+			}
 		}
 	}
 }
