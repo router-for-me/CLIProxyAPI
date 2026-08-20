@@ -1,12 +1,63 @@
 package executor
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/tidwall/gjson"
 
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
+
+func TestPrepareCodeBuddyCNAuthUsesOAuthTokenAndHeaders(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "codebuddy-cn",
+		Metadata: map[string]any{
+			"access_token": "oauth-access",
+		},
+		Attributes: map[string]string{
+			"header:X-IDE-Name": "custom-client",
+		},
+	}
+	prepared := prepareCodeBuddyCNAuth(auth)
+	if prepared == auth {
+		t.Fatal("prepareCodeBuddyCNAuth returned original auth")
+	}
+	if got := prepared.Attributes["api_key"]; got != "oauth-access" {
+		t.Fatalf("api_key = %q", got)
+	}
+	if got := prepared.Attributes["base_url"]; got != "https://copilot.tencent.com/v2" {
+		t.Fatalf("base_url = %q", got)
+	}
+	if got := prepared.Attributes["header:X-IDE-Name"]; got != "custom-client" {
+		t.Fatalf("custom X-IDE-Name = %q", got)
+	}
+	if got := prepared.Attributes["header:X-Product"]; got != "SaaS" {
+		t.Fatalf("X-Product = %q", got)
+	}
+	if _, ok := auth.Attributes["api_key"]; ok {
+		t.Fatal("original auth was mutated")
+	}
+}
+
+func TestCodeBuddyCNPrepareRequestUsesOAuthAccessToken(t *testing.T) {
+	executor := NewCodeBuddyCNExecutor(nil)
+	req, err := http.NewRequest(http.MethodPost, "https://example.test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = executor.PrepareRequest(req, &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "oauth-access"}})
+	if err != nil {
+		t.Fatalf("PrepareRequest() error = %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer oauth-access" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if got := req.Header.Get("X-Codebuddy-Request"); got != "1" {
+		t.Fatalf("X-Codebuddy-Request = %q", got)
+	}
+}
 
 func TestApplyCodeBuddyCNReasoning(t *testing.T) {
 	tests := []struct {

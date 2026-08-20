@@ -844,7 +844,7 @@ func (s *Service) resolveConfigCodeBuddyCNKey(auth *coreauth.Auth) *config.CodeB
 }
 
 func matchCodeBuddyCNConfigKey(auth *coreauth.Auth, entries []config.CodeBuddyCNKey) *config.CodeBuddyCNKey {
-	if auth == nil {
+	if auth == nil || auth.AuthKind() != coreauth.AuthKindAPIKey {
 		return nil
 	}
 	var attrKey, attrBase string

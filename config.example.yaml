@@ -441,6 +441,8 @@ nonstream-keepalive-interval: 0
 #       - "grok-3-*"             # wildcard matching prefix
 
 # CodeBuddy CN (Tencent) API keys — OpenAI-compatible gateway at copilot.tencent.com.
+# OAuth accounts can be added with `--codebuddy-cn-login` or from the TUI OAuth tab;
+# OAuth tokens are stored under auth-dir and can be used alongside API keys.
 # The gateway rejects non-stream chat requests, so the executor forces streaming and
 # re-aggregates SSE for non-streaming clients. reasoning_effort is mapped to
 # reasoning_summary:"auto" (dropped for "none"/"off"); agent system prompts are

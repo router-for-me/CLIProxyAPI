@@ -197,6 +197,15 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	if provider == "codebuddy-cn" {
+		a.Attributes[coreauth.AttributeAuthKind] = coreauth.AuthKindOAuth
+		baseURL, _ := metadata["base_url"].(string)
+		baseURL = strings.TrimSpace(baseURL)
+		if baseURL == "" {
+			baseURL = "https://copilot.tencent.com/v2"
+		}
+		a.Attributes["base_url"] = baseURL
+	}
 	// Read priority from auth file.
 	if rawPriority, ok := metadata["priority"]; ok {
 		switch v := rawPriority.(type) {

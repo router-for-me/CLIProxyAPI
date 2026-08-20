@@ -5,14 +5,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
+	codebuddyauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddycn"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -58,6 +63,7 @@ func (e *CodeBuddyCNExecutor) Identifier() string { return constant.CodeBuddyCN 
 // non-stream requests (HTTP 400 code 11101), so the non-streaming path must
 // drive a streamed upstream request and fold the chunks into a chat.completion.
 func (e *CodeBuddyCNExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	auth = prepareCodeBuddyCNAuth(auth)
 	opts.Stream = true
 	streamResult, err := e.OpenAICompatExecutor.ExecuteStream(ctx, auth, req, opts)
 	if err != nil {
@@ -86,7 +92,113 @@ func (e *CodeBuddyCNExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 // ExecuteStream forces streaming and delegates to the OpenAI-compatible executor.
 func (e *CodeBuddyCNExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	opts.Stream = true
-	return e.OpenAICompatExecutor.ExecuteStream(ctx, auth, req, opts)
+	return e.OpenAICompatExecutor.ExecuteStream(ctx, prepareCodeBuddyCNAuth(auth), req, opts)
+}
+
+// PrepareRequest injects CodeBuddy OAuth or API-key credentials into ad-hoc requests.
+func (e *CodeBuddyCNExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
+	return e.OpenAICompatExecutor.PrepareRequest(req, prepareCodeBuddyCNAuth(auth))
+}
+
+// HttpRequest executes an ad-hoc CodeBuddy request with normalized credentials.
+func (e *CodeBuddyCNExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
+	return e.OpenAICompatExecutor.HttpRequest(ctx, prepareCodeBuddyCNAuth(auth), req)
+}
+
+// Refresh rotates CodeBuddy OAuth credentials using the stored refresh token.
+func (e *CodeBuddyCNExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.OpenAICompatExecutor.cfg, auth); handled {
+		return refreshed, err
+	}
+	if auth == nil {
+		return nil, fmt.Errorf("codebuddy-cn executor: auth is nil")
+	}
+	refreshToken := codeBuddyCNMetadataString(auth, "refresh_token")
+	if refreshToken == "" {
+		return auth, nil
+	}
+	token, err := codebuddyauth.NewClientWithProxyURL(e.OpenAICompatExecutor.cfg, auth.ProxyURL).Refresh(ctx, refreshToken)
+	if err != nil {
+		return nil, err
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["type"] = constant.CodeBuddyCN
+	auth.Metadata["auth_kind"] = cliproxyauth.AuthKindOAuth
+	auth.Metadata["access_token"] = token.AccessToken
+	if strings.TrimSpace(token.RefreshToken) != "" {
+		auth.Metadata["refresh_token"] = token.RefreshToken
+	}
+	if strings.TrimSpace(token.TokenType) != "" {
+		auth.Metadata["token_type"] = token.TokenType
+	}
+	if token.ExpiresIn > 0 {
+		auth.Metadata["expires_in"] = token.ExpiresIn
+	}
+	if !token.ExpiresAt.IsZero() {
+		auth.Metadata["expired"] = token.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	auth.Metadata["last_refresh"] = time.Now().UTC().Format(time.RFC3339)
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes[cliproxyauth.AttributeAuthKind] = cliproxyauth.AuthKindOAuth
+	if strings.TrimSpace(auth.Attributes["base_url"]) == "" {
+		auth.Attributes["base_url"] = codebuddyauth.APIBaseURL
+	}
+	return auth, nil
+}
+
+func prepareCodeBuddyCNAuth(auth *cliproxyauth.Auth) *cliproxyauth.Auth {
+	if auth == nil {
+		return nil
+	}
+	prepared := auth.Clone()
+	if prepared.Attributes == nil {
+		prepared.Attributes = make(map[string]string)
+	}
+	if strings.TrimSpace(prepared.Attributes["base_url"]) == "" {
+		baseURL := codeBuddyCNMetadataString(prepared, "base_url")
+		if baseURL == "" {
+			baseURL = codebuddyauth.APIBaseURL
+		}
+		prepared.Attributes["base_url"] = baseURL
+	}
+	if strings.TrimSpace(prepared.Attributes["api_key"]) == "" {
+		prepared.Attributes["api_key"] = codeBuddyCNMetadataString(prepared, "access_token")
+	}
+	defaults := map[string]string{
+		"User-Agent":          "CLI/2.108.1 CodeBuddy/2.108.1",
+		"X-Product":           "SaaS",
+		"X-IDE-Type":          "CLI",
+		"X-IDE-Name":          "CLI",
+		"X-Requested-With":    "XMLHttpRequest",
+		"X-Codebuddy-Request": "1",
+	}
+	for name, value := range defaults {
+		if !codeBuddyCNHasCustomHeader(prepared.Attributes, name) {
+			prepared.Attributes["header:"+name] = value
+		}
+	}
+	return prepared
+}
+
+func codeBuddyCNMetadataString(auth *cliproxyauth.Auth, key string) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	value, _ := auth.Metadata[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func codeBuddyCNHasCustomHeader(attrs map[string]string, name string) bool {
+	for key := range attrs {
+		if strings.HasPrefix(key, "header:") && strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(key, "header:")), name) {
+			return true
+		}
+	}
+	return false
 }
 
 // applyCodeBuddyCNOutgoingTransforms mutates the final OpenAI upstream body:
