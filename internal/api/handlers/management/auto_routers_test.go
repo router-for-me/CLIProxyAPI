@@ -96,3 +96,19 @@ func TestValidateTierMappingsTargetRouting(t *testing.T) {
 		t.Fatal("expected per-target priority on an unpinned provider to be rejected")
 	}
 }
+
+// TestValidateTierMappingsDuplicateTargets guards against a regression where a
+// single tier could list the same target model more than once. Without the
+// guard, the weighted selection silently collapses the two entries into one
+// effective weight (e.g. gpt-4o x2 weight 5+3 → only gpt-4o ever picked),
+// misleading operators about their distribution.
+func TestValidateTierMappingsDuplicateTargets(t *testing.T) {
+	if msg := validateTierMappings([]store.TierMapping{
+		{Tier: "complex", Targets: []store.TierTarget{
+			{Model: "gpt-4o", Weight: 5},
+			{Model: "gpt-4o", Weight: 3},
+		}},
+	}); msg == "" {
+		t.Fatal("expected duplicate target models to be rejected")
+	}
+}

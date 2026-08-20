@@ -300,10 +300,21 @@ func validateTierMappings(mappings []store.TierMapping) string {
 			return fmt.Sprintf("tier_mappings: tier %q must specify a target model or targets", m.Tier)
 		}
 		if hasTargets {
+			seenTarget := map[string]bool{}
 			for _, t := range m.Targets {
 				if strings.TrimSpace(t.Model) == "" {
 					return fmt.Sprintf("tier_mappings: tier %q has a target without a model", m.Tier)
 				}
+				// Reject duplicate target models in the same tier: the weighted
+				// resolver would collapse both entries onto one effective weight
+				// (e.g. gpt-4o x2 weight 5+3 → only gpt-4o ever picked), so the
+				// operator's intended distribution is silently skewed. Catch it
+				// at validation so the config matches the dashboard preview.
+				tKey := strings.ToLower(strings.TrimSpace(t.Model))
+				if seenTarget[tKey] {
+					return fmt.Sprintf("tier_mappings: tier %q has duplicate target model %q", m.Tier, t.Model)
+				}
+				seenTarget[tKey] = true
 				// Per-target routing mirrors the tier-level rules: the target's
 				// strategy must be a supported value, and every priority entry
 				// must reference one of the target's pinned providers.
