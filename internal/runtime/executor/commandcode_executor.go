@@ -145,19 +145,17 @@ func (e *CommandCodeExecutor) resolveVersion(a *cliproxyauth.Auth) string {
 func (e *CommandCodeExecutor) resolveAPIKey(a *cliproxyauth.Auth) (string, error) {
 	if a != nil {
 		if a.Attributes != nil {
-			if ak := strings.TrimSpace(a.Attributes["api_key"]); ak != "" {
-				return ak, nil
-			}
-			if ak := strings.TrimSpace(a.Attributes["token"]); ak != "" {
-				return ak, nil
+			for _, k := range []string{"api_key", "apiKey"} {
+				if ak := strings.TrimSpace(a.Attributes[k]); ak != "" {
+					return ak, nil
+				}
 			}
 		}
 		if a.Metadata != nil {
-			if ak, ok := a.Metadata["api_key"].(string); ok && strings.TrimSpace(ak) != "" {
-				return strings.TrimSpace(ak), nil
-			}
-			if ak, ok := a.Metadata["token"].(string); ok && strings.TrimSpace(ak) != "" {
-				return strings.TrimSpace(ak), nil
+			for _, k := range []string{"api_key", "apiKey"} {
+				if ak, ok := a.Metadata[k].(string); ok && strings.TrimSpace(ak) != "" {
+					return strings.TrimSpace(ak), nil
+				}
 			}
 		}
 	}

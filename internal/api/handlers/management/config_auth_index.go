@@ -28,6 +28,11 @@ type xaiKeyWithAuthIndex struct {
 	AuthIndex string `json:"auth-index,omitempty"`
 }
 
+type commandCodeKeyWithAuthIndex struct {
+	config.CommandCodeKey
+	AuthIndex string `json:"auth-index,omitempty"`
+}
+
 type vertexCompatKeyWithAuthIndex struct {
 	config.VertexCompatKey
 	AuthIndex string `json:"auth-index,omitempty"`
@@ -226,6 +231,35 @@ func (h *Handler) xaiKeysWithAuthIndex() []xaiKeyWithAuthIndex {
 		out[i] = xaiKeyWithAuthIndex{
 			XAIKey:    entry,
 			AuthIndex: authIndex,
+		}
+	}
+	return out
+}
+
+func (h *Handler) commandCodeKeysWithAuthIndex() []commandCodeKeyWithAuthIndex {
+	if h == nil {
+		return nil
+	}
+	liveIndexByID := h.liveAuthIndexByID()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return nil
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	out := make([]commandCodeKeyWithAuthIndex, len(h.cfg.CommandCodeKey))
+	for i := range h.cfg.CommandCodeKey {
+		entry := h.cfg.CommandCodeKey[i]
+		authIndex := ""
+		if key := strings.TrimSpace(entry.APIKey); key != "" {
+			id, _ := idGen.Next("commandcode:apikey", key, entry.BaseURL)
+			authIndex = liveIndexByID[id]
+		}
+		out[i] = commandCodeKeyWithAuthIndex{
+			CommandCodeKey: entry,
+			AuthIndex:      authIndex,
 		}
 	}
 	return out

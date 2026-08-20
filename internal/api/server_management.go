@@ -135,6 +135,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/xai-api-key", s.mgmt.PatchXAIKey)
 		mgmt.DELETE("/xai-api-key", s.mgmt.DeleteXAIKey)
 
+		mgmt.GET("/commandcode-api-key", s.mgmt.GetCommandCodeKeys)
+		mgmt.PUT("/commandcode-api-key", s.mgmt.PutCommandCodeKeys)
+		mgmt.PATCH("/commandcode-api-key", s.mgmt.PatchCommandCodeKey)
+		mgmt.DELETE("/commandcode-api-key", s.mgmt.DeleteCommandCodeKey)
+
 		mgmt.GET("/openai-compatibility", s.mgmt.GetOpenAICompat)
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)

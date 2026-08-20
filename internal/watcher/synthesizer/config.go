@@ -52,20 +52,77 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
 	// xAI API Keys
 	out = append(out, s.synthesizeXAIKeys(ctx)...)
-	// Command Code: an explicit commandcode-api-key config takes precedence
-	// (matching other providers' config-key semantics). When no config key is
-	// present, fall back to the `cmdc login` CLI credential (default Go path).
-	if keys := s.synthesizeCommandCodeKeys(ctx); len(keys) > 0 {
-		out = append(out, keys...)
-	} else {
-		out = append(out, s.synthesizeCommandCodeCLI(ctx)...)
-	}
+	// Command Code: explicit config key (Level 1) > auth-dir files (Level 2) > explicit env (Level 3) > cmdc auth.json (Level 4)
+	out = append(out, s.synthesizeCommandCode(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
 
 	return out, nil
+}
+
+// synthesizeCommandCode resolves Command Code credentials following the precedence
+// semantics for distinct keys (which coexist as separate accounts) and identical
+// keys (which dedupe to the highest-precedence source):
+//   Level 1: explicit config in config.yaml (commandcode-api-key)
+//   Level 2: auth-dir managed credential files (handled by FileSynthesizer)
+//   Level 3: explicit environment variable (COMMANDCODE_API_KEY / COMMAND_CODE_API_KEY)
+//   Level 4: convenience / migration fallback from ~/.commandcode/auth.json (cmdc login)
+func (s *ConfigSynthesizer) synthesizeCommandCode(ctx *SynthesisContext) []*coreauth.Auth {
+	// Level 1: explicit config key in config.yaml
+	configAuths := s.synthesizeCommandCodeKeys(ctx)
+	seenKeys := make(map[string]struct{}, len(configAuths))
+	for _, a := range configAuths {
+		if a != nil {
+			if k := strings.TrimSpace(a.Attributes["api_key"]); k != "" {
+				seenKeys[k] = struct{}{}
+			}
+		}
+	}
+
+	// gather keys from auth-dir files (Level 2, consumed by FileSynthesizer)
+	var authDirKeys []string
+	if ctx != nil {
+		authDirKeys = commandCodeKeysInAuthDir(ctx.AuthDir)
+	}
+	for _, k := range authDirKeys {
+		if _, exists := seenKeys[k]; !exists {
+			seenKeys[k] = struct{}{}
+		}
+	}
+
+	// Level 3: explicit environment variable — only register if not already present
+	// from a higher-precedence source (config key or auth-dir managed credential).
+	var envAuth *coreauth.Auth
+	if envCandidates := s.synthesizeCommandCodeEnv(ctx); len(envCandidates) > 0 {
+		envAuth = envCandidates[0]
+		if envAuth != nil {
+			envKey := strings.TrimSpace(envAuth.Attributes["api_key"])
+			if _, exists := seenKeys[envKey]; exists {
+				// Same key already registered via config / auth-dir → dedupe, drop env
+				envAuth = nil
+			} else {
+				seenKeys[envKey] = struct{}{}
+			}
+		}
+	}
+
+	// Level 4: cmdc auth.json — only when NO explicit credential is present
+	// (config key, auth-dir managed credential, or env), to avoid injecting an
+	// implicit account on top of explicit ones.
+	var cliAuths []*coreauth.Auth
+	if len(seenKeys) == 0 && envAuth == nil {
+		cliAuths = s.synthesizeCommandCodeCLI(ctx)
+	}
+
+	out := make([]*coreauth.Auth, 0, len(configAuths)+1+len(cliAuths))
+	out = append(out, configAuths...)
+	if envAuth != nil {
+		out = append(out, envAuth)
+	}
+	out = append(out, cliAuths...)
+	return out
 }
 
 // synthesizeGeminiKeys creates Auth entries for Gemini API keys.

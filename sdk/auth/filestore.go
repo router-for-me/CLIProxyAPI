@@ -448,6 +448,12 @@ func (s *FileTokenStore) labelFor(metadata map[string]any) string {
 	if project, ok := metadata["project_id"].(string); ok && project != "" {
 		return project
 	}
+	if user, ok := metadata["user_name"].(string); ok && user != "" {
+		return user
+	}
+	if user, ok := metadata["userName"].(string); ok && user != "" {
+		return user
+	}
 	return ""
 }
 

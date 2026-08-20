@@ -47,6 +47,85 @@ type commandCodeCLICredential struct {
 	AuthenticatedAt string `json:"authenticatedAt"`
 }
 
+// getCommandCodeEnvKey returns the explicit API key from environment variables if present.
+func getCommandCodeEnvKey() string {
+	if env := strings.TrimSpace(os.Getenv("COMMANDCODE_API_KEY")); env != "" {
+		return env
+	}
+	if env := strings.TrimSpace(os.Getenv("COMMAND_CODE_API_KEY")); env != "" {
+		return env
+	}
+	return ""
+}
+
+// commandCodeKeysInAuthDir reads all distinct Command Code API keys present in auth-dir JSON files.
+func commandCodeKeysInAuthDir(authDir string) []string {
+	if strings.TrimSpace(authDir) == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(authDir)
+	if err != nil {
+		return nil
+	}
+	var keys []string
+	seen := make(map[string]struct{})
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".json") {
+			continue
+		}
+		full := filepath.Join(authDir, e.Name())
+		data, errRead := os.ReadFile(full)
+		if errRead != nil || len(data) == 0 {
+			continue
+		}
+		var meta map[string]any
+		if errUnmarshal := json.Unmarshal(data, &meta); errUnmarshal != nil {
+			continue
+		}
+		t, _ := meta["type"].(string)
+		if strings.EqualFold(strings.TrimSpace(t), constant.CommandCode) {
+			for _, k := range []string{"api_key", "apiKey"} {
+				if v, ok := meta[k].(string); ok {
+					if key := strings.TrimSpace(v); key != "" {
+						if _, exists := seen[key]; !exists {
+							seen[key] = struct{}{}
+							keys = append(keys, key)
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+	return keys
+}
+
+// synthesizeCommandCodeEnv creates an Auth entry from the explicit environment variable.
+func (s *ConfigSynthesizer) synthesizeCommandCodeEnv(ctx *SynthesisContext) []*coreauth.Auth {
+	if ctx == nil || ctx.IDGenerator == nil {
+		return nil
+	}
+	envKey := getCommandCodeEnvKey()
+	if envKey == "" {
+		return nil
+	}
+	id, _ := ctx.IDGenerator.Next("commandcode:env", envKey)
+	a := &coreauth.Auth{
+		ID:       id,
+		Provider: constant.CommandCode,
+		Label:    "commandcode-env",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"source":    "env:commandcode",
+			"api_key":   envKey,
+			"auth_kind": "apikey",
+		},
+		CreatedAt: ctx.Now,
+		UpdatedAt: ctx.Now,
+	}
+	return []*coreauth.Auth{a}
+}
+
 // synthesizeCommandCodeCLI imports the credential produced by `cmdc login`
 // into a CLIProxyAPI Auth entry. It is the default Go path: no provider API
 // key needs to be generated or configured. If the CLI credential is missing
