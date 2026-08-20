@@ -133,6 +133,38 @@ func TestSelectAutoRouterModelStats(t *testing.T) {
 	}
 }
 
+// TestSelectAutoRouterModelStatsExcludesNonRouted verifies that the per-model
+// aggregation excludes events whose tier is NULL (non-routed rows), even if
+// their router_id matches the filter. Without the NULL-tier guard, a non-routed
+// row that happens to carry a router_id would leak into the per-target-model
+// rollup and skew the cost totals.
+func TestSelectAutoRouterModelStatsExcludesNonRouted(t *testing.T) {
+	store := newTestPostgresStore(t, "auto_router_model_stats_unrouted")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(store)
+
+	insert := func(e UsageEvent) { insertTestEvent(t, us, ctx, e) }
+
+	// One routed event — must show up.
+	insert(UsageEvent{Provider: "p", Model: "m-a", Tier: "simple", RouterID: "router:smart", RequestedAt: time.Now().UTC(), TotalTokens: 100, CostUSD: 2.0})
+	// A non-routed event (NULL tier) that shares the router_id — must NOT leak in.
+	insert(UsageEvent{Provider: "p", Model: "m-leak", Tier: "", RouterID: "router:smart", RequestedAt: time.Now().UTC(), TotalTokens: 999, CostUSD: 99.0})
+
+	stats, err := us.SelectAutoRouterModelStats(ctx, UsageFilter{RouterID: "router:smart"})
+	if err != nil {
+		t.Fatalf("SelectAutoRouterModelStats: %v", err)
+	}
+	if len(stats) != 1 {
+		t.Fatalf("expected 1 model (the null-tier row excluded); got %d: %+v", len(stats), stats)
+	}
+	if stats[0].Model != "m-a" {
+		t.Errorf("model = %q, want m-a", stats[0].Model)
+	}
+	if stats[0].CostUSD != 2.0 {
+		t.Errorf("cost = %v, want 2.0 (null-tier row must not contribute)", stats[0].CostUSD)
+	}
+}
+
 func TestSelectAggregateRouterIDFilter(t *testing.T) {
 	store := newTestPostgresStore(t, "aggregate_router_id")
 	ctx := cancelableTestCtx(t)

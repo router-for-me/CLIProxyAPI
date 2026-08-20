@@ -1891,7 +1891,11 @@ func (s *UsageStore) SelectAutoRouterModelStats(ctx context.Context, filter Usag
 		COUNT(*), COALESCE(SUM(e.total_tokens), 0), COALESCE(SUM(e.cost_usd), 0)
 		FROM `)
 	b.WriteString(s.eventsTable)
-	b.WriteString(` e WHERE e.router_id = $1`)
+	// Mirror SelectAutoRouterTierStats: restrict to events that were actually
+	// routed (tier IS NOT NULL), so a non-routed event that happens to carry a
+	// router_id (e.g. a future attribution change) cannot leak into the
+	// per-target-model rollup.
+	b.WriteString(` e WHERE e.tier IS NOT NULL AND e.router_id = $1`)
 	args := []any{filter.RouterID}
 	addUsageScopeArgs(&b, &args, filter)
 	b.WriteString(` GROUP BY e.model ORDER BY COALESCE(SUM(e.cost_usd), 0) DESC`)
