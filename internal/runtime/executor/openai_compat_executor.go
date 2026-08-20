@@ -42,6 +42,13 @@ const (
 type OpenAICompatExecutor struct {
 	provider string
 	cfg      *config.Config
+
+	// outgoingTransforms is an optional hook invoked on the final translated
+	// OpenAI upstream body before it is sent. It defaults to a no-op. Because Go
+	// does not dispatch methods virtually through embedding, provider-specific
+	// executors must install the hook via this field rather than overriding a
+	// method (see CodeBuddyCNExecutor).
+	outgoingTransforms func(ctx context.Context, auth *cliproxyauth.Auth, baseModel string, opts cliproxyexecutor.Options, translated []byte) []byte
 }
 
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
@@ -917,12 +924,14 @@ func (e *OpenAICompatExecutor) applyPromptCacheKey(ctx context.Context, auth *cl
 	return helps.SetStringIfDifferent(translated, "prompt_cache_key", promptCacheKey), nil
 }
 
-// applyOutgoingTransforms lets provider-specific executors that embed
-// OpenAICompatExecutor mutate the final translated OpenAI upstream body before
-// it is sent. The base implementation is a no-op; CodeBuddy CN overrides it to
-// force streaming and adjust reasoning/agent prompt fields.
+// applyOutgoingTransforms mutates the final OpenAI upstream body via the
+// optional outgoingTransforms hook. When no hook is installed the body is
+// returned unchanged.
 func (e *OpenAICompatExecutor) applyOutgoingTransforms(ctx context.Context, auth *cliproxyauth.Auth, baseModel string, opts cliproxyexecutor.Options, translated []byte) []byte {
-	return translated
+	if e == nil || e.outgoingTransforms == nil {
+		return translated
+	}
+	return e.outgoingTransforms(ctx, auth, baseModel, opts, translated)
 }
 
 func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string) {

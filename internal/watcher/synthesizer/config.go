@@ -16,9 +16,11 @@ import (
 // It handles Gemini, Interactions, Claude, Codex, xAI, OpenAI-compat, and Vertex-compat providers.
 type ConfigSynthesizer struct{}
 
-// codeBuddyCNDefaultBaseURL is the Tencent CodeBuddy CN OpenAI-compatible gateway used
-// when a codebuddy-cn-api-key entry does not specify its own base-url.
-const codeBuddyCNDefaultBaseURL = "https://copilot.tencent.com/v2/chat/completions"
+// codeBuddyCNDefaultBaseURL is the Tencent CodeBuddy CN OpenAI-compatible gateway host
+// prefix used when a codebuddy-cn-api-key entry does not specify its own base-url.
+// The OpenAI-compatible executor appends "/chat/completions" to this value, yielding
+// https://copilot.tencent.com/v2/chat/completions.
+const codeBuddyCNDefaultBaseURL = "https://copilot.tencent.com/v2"
 
 // NewConfigSynthesizer creates a new ConfigSynthesizer instance.
 func NewConfigSynthesizer() *ConfigSynthesizer {
