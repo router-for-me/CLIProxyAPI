@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -17,6 +18,8 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
+
+const claudeResponseScanLimit = 50 * 1024 * 1024
 
 func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	if opts.Alt == "responses/compact" {
@@ -300,8 +303,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 		// If the response target is Claude, directly forward complete SSE events without translation.
 		if responseFormat == to {
-			scanner := bufio.NewScanner(decodedBody)
-			scanner.Buffer(nil, 52_428_800) // 50MB
+			responseTracker := newClaudeResponseTracker(httpResp.Header)
+			scanner := bufio.NewScanner(responseTracker.reader(decodedBody))
+			scanner.Buffer(nil, claudeResponseScanLimit)
 			var event bytes.Buffer
 			var upstreamMessageID string
 			upstreamCompleted := false
@@ -321,6 +325,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
+				responseTracker.observe(line)
+				if responseTracker.exceededJSONLimit() {
+					emitResponseError(claudeJSONValidationLimitError())
+					return
+				}
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)
@@ -345,31 +354,38 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if emitCancellation(scanner.Err()) {
 				return
 			}
-			if errScan := scanner.Err(); errScan != nil {
-				errScan = wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errScan)
-				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-				reporter.PublishFailure(ctx, errScan)
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-				case <-ctx.Done():
+			if !upstreamCompleted {
+				// A transport read error must surface regardless of the response
+				// kind: swallowing it would hand the client a truncated body as
+				// a successful stream.
+				if scanErr := scanner.Err(); scanErr != nil {
+					emitResponseError(scanErr)
+					return
 				}
-				return
+				if endErr := responseTracker.cleanEOFError(); endErr != nil {
+					emitResponseError(endErr)
+					return
+				}
 			}
-			if upstreamCompleted {
-				commitClaudeDiagnostics(diagnosticsState, upstreamMessageID)
-			}
+			commitClaudeDiagnostics(diagnosticsState, upstreamMessageID)
 			return
 		}
 
 		// For other formats, use translation
-		scanner := bufio.NewScanner(decodedBody)
-		scanner.Buffer(nil, 52_428_800) // 50MB
+		responseTracker := newClaudeResponseTracker(httpResp.Header)
+		scanner := bufio.NewScanner(responseTracker.reader(decodedBody))
+		scanner.Buffer(nil, claudeResponseScanLimit)
 		var param any
 		var upstreamMessageID string
 		upstreamCompleted := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
+			responseTracker.observe(line)
+			if responseTracker.exceededJSONLimit() {
+				emitResponseError(claudeJSONValidationLimitError())
+				return
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
@@ -407,25 +423,118 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if emitCancellation(scanner.Err()) {
 			return
 		}
-		if errScan := scanner.Err(); errScan != nil {
-			errScan = wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errScan)
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-			case <-ctx.Done():
+		if !upstreamCompleted {
+			// Same rule as the direct branch: a transport read error surfaces
+			// regardless of the response kind, and a clean EOF without
+			// message_stop on an actual SSE stream is an explicit failure.
+			if scanErr := scanner.Err(); scanErr != nil {
+				emitResponseError(scanErr)
+				return
 			}
-			return
+			if endErr := responseTracker.cleanEOFError(); endErr != nil {
+				emitResponseError(endErr)
+				return
+			}
 		}
-		if upstreamCompleted {
-			commitClaudeDiagnostics(diagnosticsState, upstreamMessageID)
-		}
+		commitClaudeDiagnostics(diagnosticsState, upstreamMessageID)
 	}()
 	result := &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}
 	if replayScope.valid() {
 		result = wrapClaudeThinkingReplayStream(ctx, result, replayScope)
 	}
 	return result, nil
+}
+
+func claudeStreamPrematureEOFError() error {
+	return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream stream ended before message_stop"}
+}
+
+func claudeJSONPrematureEOFError() error {
+	return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream response ended before complete JSON"}
+}
+
+func claudeJSONValidationLimitError() error {
+	return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream JSON response exceeds validation limit"}
+}
+
+// claudeResponseTracker keeps SSE framing distinct from a JSON response that
+// may legitimately arrive through ExecuteStream without stream=true.
+type claudeResponseTracker struct {
+	declaredSSE  bool
+	declaredJSON bool
+	sawSSELine   bool
+	captureJSON  bool
+	jsonTooLarge bool
+	jsonBody     bytes.Buffer
+}
+
+func newClaudeResponseTracker(header http.Header) *claudeResponseTracker {
+	mediaType, _, errParse := mime.ParseMediaType(header.Get("Content-Type"))
+	if errParse != nil {
+		// Observable SSE framing below still protects a response with a malformed header.
+		return &claudeResponseTracker{}
+	}
+	declaredJSON := strings.EqualFold(mediaType, "application/json")
+	return &claudeResponseTracker{
+		declaredSSE:  strings.EqualFold(mediaType, "text/event-stream"),
+		declaredJSON: declaredJSON,
+		captureJSON:  declaredJSON,
+	}
+}
+
+func (t *claudeResponseTracker) reader(body io.Reader) io.Reader {
+	if !t.captureJSON {
+		return body
+	}
+	return io.TeeReader(body, t)
+}
+
+func (t *claudeResponseTracker) Write(data []byte) (int, error) {
+	if !t.captureJSON {
+		return len(data), nil
+	}
+	remaining := claudeResponseScanLimit - t.jsonBody.Len()
+	if len(data) > remaining {
+		if remaining > 0 {
+			_, _ = t.jsonBody.Write(data[:remaining])
+		}
+		t.captureJSON = false
+		t.jsonTooLarge = true
+		return len(data), nil
+	}
+	_, _ = t.jsonBody.Write(data)
+	return len(data), nil
+}
+
+func (t *claudeResponseTracker) observe(line []byte) {
+	trimmed := bytes.TrimSpace(line)
+	if bytes.HasPrefix(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) {
+		t.sawSSELine = true
+		t.captureJSON = false
+		t.jsonTooLarge = false
+		t.jsonBody.Reset()
+	}
+}
+
+func (t *claudeResponseTracker) isSSE() bool {
+	return t.declaredSSE || t.sawSSELine
+}
+
+func (t *claudeResponseTracker) exceededJSONLimit() bool {
+	return t.jsonTooLarge && !t.isSSE()
+}
+
+func (t *claudeResponseTracker) cleanEOFError() error {
+	if t.isSSE() {
+		return claudeStreamPrematureEOFError()
+	}
+	if t.jsonTooLarge {
+		return claudeJSONValidationLimitError()
+	}
+	if t.declaredJSON && !gjson.ValidBytes(t.jsonBody.Bytes()) {
+		return claudeJSONPrematureEOFError()
+	}
+	return nil
 }
 
 func validateClaudeStreamingResponse(data []byte) error {
