@@ -3,8 +3,11 @@ package executor
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -14,6 +17,54 @@ import (
 	"github.com/tidwall/sjson"
 	"github.com/tiktoken-go/tokenizer"
 )
+
+const (
+	claudeLiveUsageTickInterval  = 2 * time.Second
+	claudeThinkingTokenCountBeta = "thinking-token-count-2026-05-13"
+	// Claude clients treat unknown gateway model IDs as 200k-context models and
+	// enter their native compact-and-retry path after a context_too_large error.
+	// This compatibility boundary does not change the routed upstream model.
+	claudeBridgeContextWindow = int64(200_000)
+)
+
+func claudeThinkingTokenCountRequested(headers http.Header) bool {
+	if strings.Contains(strings.ToLower(headers.Get("Anthropic-Beta")), claudeThinkingTokenCountBeta) {
+		return true
+	}
+	// Claude App workflow workers currently omit the beta header while retaining
+	// the Claude CLI session headers and support for estimated_tokens deltas.
+	return strings.EqualFold(strings.TrimSpace(headers.Get("X-App")), "cli") && strings.TrimSpace(headers.Get("X-Claude-Code-Session-Id")) != ""
+}
+
+func validateClaudeBridgeContextWindow(model string, body []byte, opts cliproxyexecutor.Options) (int64, error) {
+	if opts.Alt != constant.ClaudeResponsesBridgeAlt {
+		return 0, nil
+	}
+	count, errCount := estimateCodexInputTokens(model, body)
+	if errCount != nil {
+		return 0, errCount
+	}
+	if count <= claudeBridgeContextWindow || hasClaudeCompactionReplay(body) {
+		return count, nil
+	}
+	errorBody := []byte(`{"error":{"message":"","type":"invalid_request_error","code":"context_too_large"}}`)
+	errorBody, _ = sjson.SetBytes(errorBody, "error.message", fmt.Sprintf("prompt is too long: %d tokens > %d maximum", count, claudeBridgeContextWindow))
+	return count, newCodexStatusErr(http.StatusBadRequest, errorBody)
+}
+
+func hasClaudeCompactionReplay(body []byte) bool {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return false
+	}
+	for _, item := range input.Array() {
+		switch item.Get("type").String() {
+		case "compaction", "compaction_summary":
+			return strings.TrimSpace(item.Get("encrypted_content").String()) != ""
+		}
+	}
+	return false
+}
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -41,7 +92,6 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex executor: tokenizer init failed: %w", err)
 	}
-
 	count, err := countCodexInputTokens(enc, body)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex executor: token counting failed: %w", err)
@@ -50,6 +100,23 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	usageJSON := fmt.Sprintf(`{"response":{"usage":{"input_tokens":%d,"output_tokens":0,"total_tokens":%d}}}`, count, count)
 	translated := sdktranslator.TranslateTokenCount(ctx, to, responseFormat, count, []byte(usageJSON))
 	return cliproxyexecutor.Response{Payload: translated}, nil
+}
+
+func estimateCodexInputTokens(model string, body []byte) (int64, error) {
+	enc, err := tokenizerForCodexModel(model)
+	if err != nil {
+		return 0, fmt.Errorf("tokenizer init failed: %w", err)
+	}
+	count, err := countCodexInputTokens(enc, body)
+	if err != nil {
+		return 0, fmt.Errorf("token counting failed: %w", err)
+	}
+	// Account conservatively for the Codex request framing and provider prompt that
+	// are included in terminal upstream usage but are not present in the JSON body.
+	if count > 0 {
+		count += 256
+	}
+	return count, nil
 }
 
 func tokenizerForCodexModel(model string) (tokenizer.Codec, error) {

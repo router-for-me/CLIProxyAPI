@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -23,7 +25,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if opts.Alt == "responses/compact" {
+	if opts.Alt == "responses/compact" || opts.Alt == constant.ClaudeResponsesCompactBridgeAlt {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
 
@@ -45,6 +47,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 	originalPayload := originalPayloadSource
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true)
+	if opts.Alt == constant.ClaudeResponsesBridgeAlt {
+		originalTranslated = applyClaudeResponsesCompactionReplay(originalTranslated, originalPayload, opts)
+		body = applyClaudeResponsesCompactionReplay(body, req.Payload, opts)
+	}
 
 	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -66,6 +72,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
 	if errReplay != nil {
 		return nil, errReplay
+	}
+	estimatedClaudeInputTokens, errContext := validateClaudeBridgeContextWindow(baseModel, body, opts)
+	if errContext != nil {
+		return nil, errContext
 	}
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -297,6 +307,25 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
+		var usageEstimator *helps.ClaudeStreamUsageEstimator
+		if opts.Alt == constant.ClaudeResponsesBridgeAlt {
+			var errEstimator error
+			usageEstimator, errEstimator = helps.NewClaudeStreamUsageEstimator(baseModel, estimatedClaudeInputTokens)
+			if errEstimator != nil {
+				log.WithError(errEstimator).WithField("model", baseModel).Warn("Claude Responses bridge live usage estimation is unavailable")
+			}
+		}
+		thinkingTokenEmitter := helps.NewClaudeThinkingTokenCountEmitter(claudeThinkingTokenCountRequested(opts.Headers))
+		var usageTicker *time.Ticker
+		var usageTicks <-chan time.Time
+		if usageEstimator != nil {
+			usageTicker = time.NewTicker(claudeLiveUsageTickInterval)
+			usageTicks = usageTicker.C
+			defer usageTicker.Stop()
+			if sess == nil {
+				readCh = startStandaloneCodexWebsocketReader(ctx, conn)
+			}
+		}
 		for {
 			if ctx != nil && ctx.Err() != nil {
 				terminateReason = "context_done"
@@ -304,7 +333,24 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 				return
 			}
-			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+			msgType, payload, tickAt, usageTick, errRead := readCodexWebsocketMessageOrTick(ctx, sess, conn, readCh, usageTicks)
+			if usageTick {
+				if snapshot, emit := usageEstimator.ObserveTime(tickAt); emit {
+					thinkingTokenUpdate := thinkingTokenEmitter.Event(snapshot)
+					if len(thinkingTokenUpdate) > 0 && !send(cliproxyexecutor.StreamChunk{Payload: thinkingTokenUpdate}) {
+						terminateReason = "context_done"
+						terminateErr = ctx.Err()
+						return
+					}
+					usageUpdate := helps.ClaudeCumulativeUsageEvent(snapshot)
+					if len(usageUpdate) > 0 && !send(cliproxyexecutor.StreamChunk{Payload: usageUpdate}) {
+						terminateReason = "context_done"
+						terminateErr = ctx.Err()
+						return
+					}
+				}
+				continue
+			}
 			if errRead != nil {
 				if sess != nil && ctx != nil && ctx.Err() != nil {
 					terminateReason = "context_done"
@@ -418,14 +464,41 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			eventType = gjson.GetBytes(payload, "type").String()
 			clientPayload = applyCodexIdentityExposeResponsePayload(payload, identityState)
+			var usageUpdate []byte
+			var usageSnapshot helps.ClaudeUsageSnapshot
+			usageSnapshotEmitted := false
+			if usageEstimator != nil {
+				if snapshot, emit := usageEstimator.ObserveCodexEvent(clientPayload); emit {
+					usageSnapshot = snapshot
+					usageSnapshotEmitted = true
+					usageUpdate = helps.ClaudeCumulativeUsageEvent(snapshot)
+				}
+			}
 			line := encodeCodexWebsocketAsSSE(clientPayload)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, clientBody, line, &param, claudeInputTokens)
+			if usageSnapshotEmitted && usageSnapshot.OutputTokens == 0 && helps.ClaudeApplyMessageStartUsage(chunks, usageSnapshot) {
+				usageUpdate = nil
+			}
+			if usageSnapshotEmitted {
+				thinkingTokenUpdate := thinkingTokenEmitter.Event(usageSnapshot)
+				if len(thinkingTokenUpdate) > 0 && !send(cliproxyexecutor.StreamChunk{Payload: thinkingTokenUpdate}) {
+					terminateReason = "context_done"
+					terminateErr = ctx.Err()
+					return
+				}
+			}
 			for i := range chunks {
 				if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 					terminateReason = "context_done"
 					terminateErr = ctx.Err()
 					return
 				}
+			}
+			thinkingTokenEmitter.ObserveTranslatedChunks(chunks)
+			if len(usageUpdate) > 0 && !send(cliproxyexecutor.StreamChunk{Payload: usageUpdate}) {
+				terminateReason = "context_done"
+				terminateErr = ctx.Err()
+				return
 			}
 			if eventType == "response.completed" || eventType == "response.done" {
 				return
