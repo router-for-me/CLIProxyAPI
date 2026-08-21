@@ -56,6 +56,8 @@ type Handler struct {
 	postAuthPersistHook     coreauth.PostAuthHook
 	pluginHost              *pluginhost.Host
 	pluginUpdateDeferrer    pluginUpdateDeferrer
+	pluginInstallLocksMu    sync.Mutex
+	pluginInstallLocks      map[string]*sync.Mutex
 	configReloadHook        func(context.Context, *config.Config)
 	pluginStoreRegistryURL  string
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
@@ -165,6 +167,25 @@ func (h *Handler) pluginUpdateDeferrerSnapshot() pluginUpdateDeferrer {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.pluginUpdateDeferrer
+}
+
+func (h *Handler) lockPluginInstall(id string) func() {
+	if h == nil {
+		return func() {}
+	}
+	id = strings.TrimSpace(id)
+	h.pluginInstallLocksMu.Lock()
+	if h.pluginInstallLocks == nil {
+		h.pluginInstallLocks = make(map[string]*sync.Mutex)
+	}
+	installMu := h.pluginInstallLocks[id]
+	if installMu == nil {
+		installMu = &sync.Mutex{}
+		h.pluginInstallLocks[id] = installMu
+	}
+	h.pluginInstallLocksMu.Unlock()
+	installMu.Lock()
+	return installMu.Unlock
 }
 
 // SetConfigReloadHook updates the callback used after management saves config changes.

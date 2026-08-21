@@ -565,6 +565,7 @@ func (h *Host) cleanupCanceledPluginLoad(id string, request *pluginLoadRequest) 
 		return
 	}
 	request.cleanupStarted = true
+	h.rebindDeferredPluginUpdateLocked(id, request)
 	h.mu.Unlock()
 
 	go func() {
@@ -585,9 +586,28 @@ func (h *Host) cleanupPluginLoad(id string, request *pluginLoadRequest, loaded *
 		return
 	}
 	request.cleanupStarted = true
+	h.rebindDeferredPluginUpdateLocked(id, request)
 	h.mu.Unlock()
 
 	h.finishPluginLoadCleanup(id, request, loaded)
+}
+
+func (h *Host) rebindDeferredPluginUpdateLocked(id string, request *pluginLoadRequest) {
+	if h == nil || request == nil {
+		return
+	}
+	deferred, ok := h.deferredPluginUpdates[id]
+	if !ok || cleanPluginPath(deferred.path) != cleanPluginPath(request.path) || (deferred.version != "" && strings.TrimSpace(deferred.version) != strings.TrimSpace(request.version)) {
+		return
+	}
+	if loaded := h.loaded[id]; loaded != nil && cleanPluginPath(loaded.path) != "" {
+		h.deferredPluginUpdates[id] = deferredPluginIdentity{
+			path:    cleanPluginPath(loaded.path),
+			version: strings.TrimSpace(loaded.version),
+		}
+		return
+	}
+	delete(h.deferredPluginUpdates, id)
 }
 
 func (h *Host) finishPluginLoadCleanup(id string, request *pluginLoadRequest, loaded *loadedPlugin) {

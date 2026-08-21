@@ -230,6 +230,8 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	if !okID {
 		return
 	}
+	unlockPluginInstall := h.lockPluginInstall(id)
+	defer unlockPluginInstall()
 	requestedVersion, errVersionRequest := pluginInstallRequestedVersion(c)
 	if errVersionRequest != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": errVersionRequest.Error()})

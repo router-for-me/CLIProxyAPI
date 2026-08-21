@@ -1113,7 +1113,7 @@ func TestHostPreparePluginUpdateReportsMarkerOwnership(t *testing.T) {
 	h.ShutdownAll()
 }
 
-func TestHostCanceledReplacementFallsBackToLoadedIdentity(t *testing.T) {
+func TestHostCanceledReplacementRepinsAndFallsBackToLoadedIdentity(t *testing.T) {
 	first := newTestSymbolLookup(&testPlugin{
 		registerResult:    validTestPlugin("alpha-v1"),
 		reconfigureResult: validTestPlugin("alpha-v1"),
@@ -1145,11 +1145,17 @@ func TestHostCanceledReplacementFallsBackToLoadedIdentity(t *testing.T) {
 		close(replacementDone)
 	}()
 	waitForHostTestSignal(t, second.started, "replacement registration")
+	if deferred, created := h.PreparePluginUpdate("alpha"); !deferred || !created {
+		t.Fatalf("PreparePluginUpdate() before cancellation = deferred:%v created:%v, want true,true", deferred, created)
+	}
 	cancel()
 	waitForHostTestSignal(t, replacementDone, "canceled replacement apply")
 
-	if deferred, created := h.PreparePluginUpdate("alpha"); !deferred || !created {
-		t.Fatalf("PreparePluginUpdate() = deferred:%v created:%v, want true,true", deferred, created)
+	h.mu.Lock()
+	deferred := h.deferredPluginUpdates["alpha"]
+	h.mu.Unlock()
+	if deferred.path != paths["1.0.0"] || deferred.version != "1.0.0" {
+		t.Fatalf("deferred identity after cancellation = %#v, want loaded v1", deferred)
 	}
 	h.ApplyConfig(context.Background(), configForVersion("2.0.0"))
 	if !h.PluginRegistered("alpha") || !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -1326,6 +1327,30 @@ func TestInstallPluginFromStoreConfigUnavailableRetainsExistingDeferredUpdate(t 
 	}
 	if !deferredUpdate.deferred || deferredUpdate.clearCalls != 0 {
 		t.Fatalf("deferred update state = deferred:%v clear_calls:%d, want existing marker retained", deferredUpdate.deferred, deferredUpdate.clearCalls)
+	}
+}
+
+func TestLockPluginInstallSerializesSameID(t *testing.T) {
+	h := &Handler{}
+	unlockFirst := h.lockPluginInstall("alpha")
+	acquired := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		unlockSecond := h.lockPluginInstall("alpha")
+		close(acquired)
+		unlockSecond()
+		close(done)
+	}()
+	select {
+	case <-acquired:
+		t.Fatal("second install acquired the same plugin lock before the first released it")
+	case <-time.After(20 * time.Millisecond):
+	}
+	unlockFirst()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("second install did not acquire the plugin lock after release")
 	}
 }
 
