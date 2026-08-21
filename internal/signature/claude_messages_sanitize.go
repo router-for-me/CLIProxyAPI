@@ -156,9 +156,20 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 					if isEmptyClaudeThinkingPlaceholder(part) {
 						report.Preserved++
 						keptParts = append(keptParts, part.Raw)
-					} else if targetProvider == SignatureProviderClaude && isClaudeReplayableShortSignature(rawSignature) {
-						report.Preserved++
-						keptParts = append(keptParts, part.Raw)
+					} else if targetProvider == SignatureProviderClaude {
+						if replayable, normalized := isClaudeReplayableShortSignature(rawSignature); replayable {
+							report.Preserved++
+							if normalized != rawSignature {
+								updated, _ := sjson.Set(part.Raw, "signature", normalized)
+								keptParts = append(keptParts, updated)
+							} else {
+								keptParts = append(keptParts, part.Raw)
+							}
+						} else {
+							report.DroppedSignatures++
+							updated, _ := sjson.Delete(part.Raw, "signature")
+							keptParts = append(keptParts, updated)
+						}
 					} else {
 						report.DroppedSignatures++
 						updated, _ := sjson.Delete(part.Raw, "signature")
@@ -317,27 +328,39 @@ func deleteEmptyJSONObjectPath(raw, path string) (string, bool) {
 	return updated, true
 }
 
-// isClaudeReplayableShortSignature preserves decodable Claude E/R-shaped
-// signatures in compat mode, but only when the value is not explicitly
-// prefixed or identified as a foreign provider. This prevents Gemini
-// E-prefixed signatures (or values like "gemini#<E-sig>") and unrecognized
-// vendor prefixes (e.g. "vendor#<E-sig>") from slipping through the Claude
-// fallback and failing upstream validation.
-func isClaudeReplayableShortSignature(rawSignature string) bool {
-	if !HasDecodableClaudeThinkingSignature(rawSignature) {
-		return false
-	}
-	if provider, _, ok := SplitSignatureProviderPrefix(rawSignature); ok {
+// isClaudeReplayableShortSignature reports whether rawSignature is a decodable
+// Claude E/R-shaped value safe to replay. It rejects foreign provider prefixes
+// and, when a "claude#" prefix is present, validates the payload behind the
+// prefix and returns the unprefixed value. This prevents Gemini E-prefixed
+// signatures (e.g. "gemini#<E-sig>"), unrecognized vendor prefixes, or genuine
+// Gemini payloads mislabeled with a Claude prefix from slipping through the
+// Claude fallback.
+func isClaudeReplayableShortSignature(rawSignature string) (bool, string) {
+	if provider, payload, ok := SplitSignatureProviderPrefix(rawSignature); ok {
 		if provider != SignatureProviderClaude {
-			return false
+			return false, ""
 		}
-	} else if strings.Contains(rawSignature, "#") {
+		// Validate the payload behind the prefix; a genuine Gemini or other
+		// foreign signature hiding behind "claude#" must be rejected.
+		if !HasDecodableClaudeThinkingSignature(payload) {
+			return false, ""
+		}
+		detected := DetectSignatureProviderForBlock(payload, SignatureBlockKindClaudeThinking)
+		if detected != SignatureProviderUnknown && detected != SignatureProviderClaude {
+			return false, ""
+		}
+		return true, payload
+	}
+	if strings.Contains(rawSignature, "#") {
 		// Unrecognized provider prefix (e.g. vendor#...).
-		return false
+		return false, ""
+	}
+	if !HasDecodableClaudeThinkingSignature(rawSignature) {
+		return false, ""
 	}
 	detected := DetectSignatureProviderForBlock(rawSignature, SignatureBlockKindClaudeThinking)
 	if detected != SignatureProviderUnknown && detected != SignatureProviderClaude {
-		return false
+		return false, ""
 	}
-	return true
+	return true, rawSignature
 }

@@ -31,6 +31,17 @@ func TestSanitizeClaudeMessagesForClaudeUpstreamStripsGeminiPrefixInCompatMode(t
 	}
 }
 
+func TestSanitizeClaudeMessagesForClaudeUpstreamStripsMislabeledClaudePrefixInCompatMode(t *testing.T) {
+	geminiSig := testGemini3ThoughtSignature([]byte{0x01, 0x0c, 0x39, 0xd6, 0xc7, 0x34})
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"claude#` + geminiSig + `"}]}]}`)
+
+	withCompat, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4", true)
+	part := gjson.GetBytes(withCompat, "messages.0.content.0")
+	if part.Get("type").String() != "thinking" || part.Get("signature").Exists() {
+		t.Fatalf("compat sanitizer preserved Gemini payload behind claude# prefix: %s", withCompat)
+	}
+}
+
 func TestSanitizeClaudeMessagesForClaudeUpstreamStripsUnknownVendorPrefixInCompatMode(t *testing.T) {
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"vendor#EgI="}]}]}`)
 
