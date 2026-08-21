@@ -247,7 +247,7 @@ func interactionsStepStartToResponses(root gjson.Result, st *interactionsToRespo
 		}
 		call := &interactionsFunctionCallState{
 			ID:   itemID,
-			Name: step.Get("name").String(),
+			Name: translatorcommon.AntigravityUpstreamToolNameToClient(step.Get("name").String()),
 		}
 		if args := step.Get("arguments"); args.Exists() && strings.TrimSpace(args.Raw) != "{}" {
 			call.Arguments.WriteString(jsonStringValue(args, "{}"))
@@ -641,7 +641,10 @@ func openAIResponsesOutputItemToInteractionsStep(item gjson.Result) ([]byte, boo
 		})
 		return step, true
 	case "function_call":
-		return responsesFunctionCallToInteractions(item), true
+		// Responses -> Interactions direction: the client replays its own
+		// function_call history. Names pass through unchanged here — aliasing
+		// for antigravity targets happens on the request-conversion path.
+		return responsesFunctionCallToInteractions(item, false), true
 	case "reasoning":
 		step := []byte(`{"type":"thought","content":[]}`)
 		item.Get("summary").ForEach(func(_, summary gjson.Result) bool {
@@ -664,7 +667,7 @@ func openAIResponsesOutputItemAddedToInteractions(modelName string, root gjson.R
 		out := ensureInteractionsCreatedDirect(nil, st, modelName)
 		out = appendInteractionsStepStopDirect(out, st)
 		step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
-		step, _ = sjson.SetBytes(step, "name", item.Get("name").String())
+		step, _ = sjson.SetBytes(step, "name", translatorcommon.AntigravityUpstreamToolNameToClient(item.Get("name").String()))
 		if callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String()); callID != "" {
 			step, _ = sjson.SetBytes(step, "id", callID)
 			step, _ = sjson.SetBytes(step, "call_id", callID)
@@ -809,7 +812,7 @@ func appendInteractionsStepStartDirect(out [][]byte, st *responsesToInteractions
 			payload, _ = sjson.SetBytes(payload, "step.id", id)
 			payload, _ = sjson.SetBytes(payload, "step.call_id", id)
 		}
-		payload, _ = sjson.SetBytes(payload, "step.name", step.Get("name").String())
+		payload, _ = sjson.SetBytes(payload, "step.name", translatorcommon.AntigravityUpstreamToolNameToClient(step.Get("name").String()))
 		payload, _ = sjson.SetRawBytes(payload, "step.arguments", []byte(`{}`))
 	}
 	return append(out, emitInteractionsEvent("step.start", payload))

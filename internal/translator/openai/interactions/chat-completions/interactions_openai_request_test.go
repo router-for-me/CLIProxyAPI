@@ -66,8 +66,12 @@ func TestConvertOpenAIRequestToInteractionsMapsToolCallsAndResults(t *testing.T)
 	if got := gjson.GetBytes(out, "input.0.type").String(); got != "function_call" {
 		t.Fatalf("input.0.type = %q, want function_call. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "input.0.call_id").String(); got != "call_1" {
-		t.Fatalf("call_id = %q, want call_1. Output: %s", got, string(out))
+	// Google's Interactions input steps REJECT an "id"/"call_id" field on
+	// function_call steps (400: Unknown parameter 'call_id' at 'input[N]'),
+	// so the translator deliberately drops it; function_result steps keep
+	// their call_id for continuation matching.
+	if got := gjson.GetBytes(out, "input.0.call_id").Exists(); got {
+		t.Fatalf("call_id should NOT be set on function_call input step. Output: %s", string(out))
 	}
 	if got := gjson.GetBytes(out, "input.0.arguments.q").String(); got != "x" {
 		t.Fatalf("arguments.q = %q, want x. Output: %s", got, string(out))
@@ -75,8 +79,20 @@ func TestConvertOpenAIRequestToInteractionsMapsToolCallsAndResults(t *testing.T)
 	if got := gjson.GetBytes(out, "input.1.type").String(); got != "function_result" {
 		t.Fatalf("input.1.type = %q, want function_result. Output: %s", got, string(out))
 	}
+	// Bare-string results are forwarded unchanged for non-antigravity
+	// Interactions models (they accept plain strings); antigravity targets
+	// get the wrapped {"result": ...} object because that endpoint rejects
+	// bare strings.
 	if got := gjson.GetBytes(out, "input.1.result").String(); got != "ok" {
-		t.Fatalf("result = %q, want ok. Output: %s", got, string(out))
+		t.Fatalf("result = %q, want plain string ok for non-antigravity model. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToInteractionsWrapsToolResultsForAntigravity(t *testing.T) {
+	raw := []byte(`{"model":"antigravity-preview-05-2026","messages":[{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"x\"}"}}]},{"role":"tool","tool_call_id":"call_1","content":"ok"}]}`)
+	out := ConvertOpenAIRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	if got := gjson.GetBytes(out, "input.1.result.result").String(); got != "ok" {
+		t.Fatalf("result.result = %q, want ok (wrapped object for antigravity). Output: %s", got, string(out))
 	}
 }
 
@@ -136,8 +152,55 @@ func TestConvertOpenAIRequestToInteractions_AntigravitySanitizesGenerationConfig
 			t.Fatalf("generation_config.%s should be stripped for antigravity model. Output: %s", knob, string(out))
 		}
 	}
-	if got := gjson.GetBytes(out, "agent_config.max_total_tokens").Int(); got != 1024 {
-		t.Fatalf("agent_config.max_total_tokens = %d, want 1024. Output: %s", got, string(out))
+	if got := gjson.GetBytes(out, "agent_config.max_total_tokens").Exists(); got {
+		t.Fatalf("agent_config.max_total_tokens should NOT be set for antigravity (Google returns incomplete interactions when it is). Output: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "agent_config.type").String(); got != "antigravity" {
+		t.Fatalf("agent_config.type = %q, want antigravity. Output: %s", got, string(out))
+	}
+}
+
+// TestConvertOpenAIRequestToInteractions_AntigravitySetsAgentConfigWithoutTokenLimit
+// verifies the discriminator is set even when the client sends no
+// max_tokens/max_output_tokens (a valid OpenAI request). Google requires
+// agent_config.type on every antigravity request regardless of limits.
+func TestConvertOpenAIRequestToInteractions_AntigravitySetsAgentConfigWithoutTokenLimit(t *testing.T) {
+	raw := []byte(`{
+		"model":"antigravity-preview-05-2026",
+		"messages":[{"role":"user","content":"hi"}]
+	}`)
+	out := ConvertOpenAIRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	if got := gjson.GetBytes(out, "agent_config.type").String(); got != "antigravity" {
+		t.Fatalf("agent_config.type = %q, want antigravity even without max_tokens. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToInteractionsRenamesConflictingAntigravityTools(t *testing.T) {
+	// read_file/write_file collide with the antigravity agent's built-in tools
+	// and cause Google to return 500 "Unknown Error" — they must be prefixed.
+	raw := []byte(`{"model":"antigravity-preview-05-2026","messages":[{"role":"user","content":"read it"}],"tools":[
+		{"type":"function","function":{"name":"read_file","description":"r","parameters":{"type":"object"}}},
+		{"type":"function","function":{"name":"write_file","description":"w","parameters":{"type":"object"}}},
+		{"type":"function","function":{"name":"web_search","description":"s","parameters":{"type":"object"}}}
+	]}`)
+	out := ConvertOpenAIRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "external_read_file" {
+		t.Fatalf("tools.0.name = %q, want external_read_file. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "external_write_file" {
+		t.Fatalf("tools.1.name = %q, want external_write_file. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.2.name").String(); got != "web_search" {
+		t.Fatalf("tools.2.name = %q, want web_search (unchanged). Output: %s", got, string(out))
+	}
+	// Non-antigravity models must stay untouched.
+	out = ConvertOpenAIRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "read_file" {
+		t.Fatalf("gemini tools.0.name = %q, want read_file (no rename). Output: %s", got, string(out))
+	}
+	// Round-trip: upstream name maps back to the client name.
+	if got := antigravityUpstreamToolNameToClient("external_read_file"); got != "read_file" {
+		t.Fatalf("antigravityUpstreamToolNameToClient(external_read_file) = %q, want read_file", got)
 	}
 }
 

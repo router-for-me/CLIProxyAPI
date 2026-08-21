@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -92,6 +93,30 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 		"object": "list",
 		"data":   filteredModels,
 	})
+}
+
+// OpenAIModel handles the GET /v1/models/:model endpoint.
+// OpenAI SDK clients (including Hermes) validate a model by fetching its
+// individual record before use; without this route they get 404 and fall
+// back to another provider.
+func (h *OpenAIAPIHandler) OpenAIModel(c *gin.Context) {
+	// Wildcard param: strip the leading slash Gin keeps ("/teamA/gemini-x").
+	modelID := strings.TrimPrefix(c.Param("model"), "/")
+	if modelID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing model id"})
+		return
+	}
+	// The Codex client list payload is only valid on the collection endpoint
+	// (/v1/models?client_version=...). On the detail route always perform the
+	// normal single-record lookup so unknown IDs return 404 and model
+	// validation stays meaningful.
+	for _, model := range h.Models() {
+		if id, _ := model["id"].(string); id == modelID {
+			c.JSON(http.StatusOK, model)
+			return
+		}
+	}
+	c.JSON(http.StatusNotFound, gin.H{"error": "model not found"})
 }
 
 // ChatCompletions handles the /v1/chat/completions endpoint.

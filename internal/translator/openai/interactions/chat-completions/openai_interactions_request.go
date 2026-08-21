@@ -10,9 +10,16 @@ import (
 
 func ConvertOpenAIRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
-	out := []byte(`{"model":"","input":[]}`)
+	out := []byte(`{"input":[]}`)
 	model := firstNonEmpty(modelName, root.Get("model").String())
-	out, _ = sjson.SetBytes(out, "model", model)
+	// The Interactions API identifies the agent via the "agent" field, not "model".
+	// Google rejects requests that put the antigravity agent name under "model"
+	// (400: unknown provider / Function calling is not enabled).
+	if isAntigravityModel(model) {
+		out, _ = sjson.SetBytes(out, "agent", model)
+	} else {
+		out, _ = sjson.SetBytes(out, "model", model)
+	}
 	if streamValue, ok := openAIRequestStreamValue(root, stream); ok {
 		out, _ = sjson.SetBytes(out, "stream", streamValue)
 	}
@@ -22,12 +29,9 @@ func ConvertOpenAIRequestToInteractions(modelName string, inputRawJSON []byte, s
 	if environmentID := firstNonEmpty(root.Get("environment_id").String(), root.Get("environment.id").String()); environmentID != "" {
 		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
 	}
-	if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
-		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(agentConfig.Raw))
-	}
-	out = appendOpenAIMessagesToInteractions(out, root.Get("messages"))
+	out = appendOpenAIMessagesToInteractions(out, root.Get("messages"), isAntigravityModel(model))
 	out = copyOpenAIChatGenerationConfigToInteractions(out, root, model)
-	out = appendOpenAIChatToolsToInteractions(out, root.Get("tools"))
+	out = appendOpenAIChatToolsToInteractions(out, root.Get("tools"), model)
 	return out
 }
 
@@ -41,7 +45,7 @@ func openAIRequestStreamValue(root gjson.Result, stream bool) (bool, bool) {
 	return false, false
 }
 
-func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result) []byte {
+func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result, forAntigravity bool) []byte {
 	if !messages.Exists() || !messages.IsArray() {
 		return out
 	}
@@ -58,7 +62,7 @@ func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result) []byt
 				systemBuilder.WriteString(text)
 			}
 		default:
-			appendOpenAIMessageToInteractions(&inputItems, message)
+			appendOpenAIMessageToInteractions(&inputItems, message, forAntigravity)
 		}
 		return true
 	})
@@ -69,7 +73,7 @@ func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result) []byt
 	return out
 }
 
-func appendOpenAIMessageToInteractions(items *[][]byte, message gjson.Result) {
+func appendOpenAIMessageToInteractions(items *[][]byte, message gjson.Result, forAntigravity bool) {
 	role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
 	switch role {
 	case "assistant":
@@ -83,14 +87,14 @@ func appendOpenAIMessageToInteractions(items *[][]byte, message gjson.Result) {
 		}
 		if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-				if step, ok := openAIToolCallToInteractionsStep(toolCall); ok {
+				if step, ok := openAIToolCallToInteractionsStep(toolCall, forAntigravity); ok {
 					*items = append(*items, step)
 				}
 				return true
 			})
 		}
 	case "tool", "function":
-		*items = append(*items, openAIToolResultToInteractions(message))
+		*items = append(*items, openAIToolResultToInteractions(message, forAntigravity))
 	default:
 		if step, ok := openAIChatContentStep("user_input", message.Get("content")); ok {
 			*items = append(*items, step)
@@ -201,18 +205,40 @@ func openAIChatImagePartToInteractions(part gjson.Result) []byte {
 	return out
 }
 
-func openAIToolResultToInteractions(message gjson.Result) []byte {
+func openAIToolResultToInteractions(message gjson.Result, forAntigravity bool) []byte {
 	out := []byte(`{"type":"function_result","result":""}`)
+	// Google's Interactions function_result step accepts only
+	// type/name/call_id/result — it REJECTS an "id" field
+	// (400: Unknown parameter 'id' at 'input[N]').
 	if callID := firstNonEmpty(message.Get("tool_call_id").String(), message.Get("id").String()); callID != "" {
-		out, _ = sjson.SetBytes(out, "id", callID)
 		out, _ = sjson.SetBytes(out, "call_id", callID)
 	}
 	if name := message.Get("name").String(); name != "" {
+		if forAntigravity {
+			name = translatorcommon.AntigravityToolNameToUpstream(name)
+		}
 		out, _ = sjson.SetBytes(out, "name", name)
 	}
 	content := message.Get("content")
 	if content.Exists() && content.Type == gjson.String {
-		out, _ = sjson.SetBytes(out, "result", content.String())
+		if forAntigravity {
+			// Google's antigravity Interactions function_result REQUIRES a
+			// structured "result" (a JSON object / number / boolean) and
+			// rejects a bare string with 400. If the tool output parses as
+			// valid JSON, send it raw; otherwise wrap it in an object.
+			raw := strings.TrimSpace(content.String())
+			if raw != "" && (gjson.Valid(raw)) && !(strings.HasPrefix(raw, "\"") && strings.HasSuffix(raw, "\"")) {
+				out, _ = sjson.SetRawBytes(out, "result", []byte(raw))
+			} else {
+				o := `{}`
+				o, _ = sjson.Set(o, "result", content.String())
+				out, _ = sjson.SetRawBytes(out, "result", []byte(o))
+			}
+		} else {
+			// Other Interactions models accept plain strings; forward the
+			// tool output unchanged.
+			out, _ = sjson.SetBytes(out, "result", content.String())
+		}
 	} else if content.Exists() {
 		out, _ = sjson.SetRawBytes(out, "result", []byte(content.Raw))
 	}
@@ -225,10 +251,28 @@ func isAntigravityModel(model string) bool {
 
 func copyOpenAIChatGenerationConfigToInteractions(out []byte, root gjson.Result, model string) []byte {
 	if isAntigravityModel(model) {
-		if maxOutputTokens := firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens"), root.Get("max_output_tokens")); maxOutputTokens.Exists() && !root.Get("agent_config.max_total_tokens").Exists() {
-			out, _ = sjson.SetBytes(out, "agent_config.max_total_tokens", maxOutputTokens.Int())
-		}
-	} else {
+		// agent_config for the antigravity agent REQUIRES the discriminator
+		// field "type": "antigravity". Without it Google rejects the request
+		// with 400 "Unknown parameter 'agent_config'". Set it unconditionally:
+		// an OpenAI request without max_tokens/max_output_tokens is valid and
+		// must still carry the discriminator.
+		//
+		// Note: antigravity's Interactions API does NOT support
+		// max_total_tokens / max_output_tokens. Sending it makes Google
+		// truncate the agent run and return an "incomplete" interaction
+		// with an empty model_output on the tool-continuation turn, so we
+		// deliberately drop any client-supplied token limit for the
+		// antigravity agent.
+		cfg := `{"type":"antigravity"}`
+		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(cfg))
+	}
+	if agentConfig := root.Get("agent_config"); agentConfig.Exists() && !isAntigravityModel(model) {
+		// Non-antigravity Interactions models keep supporting the client
+		// agent_config extension: copy it verbatim as the pre-antigravity
+		// converter did, independently of generation controls below.
+		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(agentConfig.Raw))
+	}
+	if !isAntigravityModel(model) {
 		copyNumber(&out, "generation_config.max_output_tokens", firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens")))
 		copyNumber(&out, "generation_config.temperature", root.Get("temperature"))
 		copyNumber(&out, "generation_config.top_p", root.Get("top_p"))
@@ -257,13 +301,17 @@ func copyOpenAIChatGenerationConfigToInteractions(out []byte, root gjson.Result,
 	return out
 }
 
-func appendOpenAIChatToolsToInteractions(out []byte, tools gjson.Result) []byte {
+func appendOpenAIChatToolsToInteractions(out []byte, tools gjson.Result, model string) []byte {
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
+	forAntigravity := isAntigravityModel(model)
 	var toolItems [][]byte
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		if converted, ok := openAIChatToolToInteractions(tool); ok {
+			if forAntigravity {
+				converted = renameConflictingAntigravityToolName(converted)
+			}
 			toolItems = append(toolItems, converted)
 		}
 		return true
@@ -272,6 +320,38 @@ func appendOpenAIChatToolsToInteractions(out []byte, tools gjson.Result) []byte 
 		out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolItems))
 	}
 	return out
+}
+
+// renameConflictingAntigravityToolName prefixes tool names that collide with
+// the antigravity agent's built-in tools (e.g. read_file / write_file). Google
+// returns 500 "Unknown Error" when a user-defined function re-declares one of
+// the agent's intrinsic tools. The OpenAI client keeps seeing the original
+// names because the response translator strips the prefix again.
+func renameConflictingAntigravityToolName(tool []byte) []byte {
+	root := gjson.ParseBytes(tool)
+	name := root.Get("name").String()
+	if mapped, ok := antigravityToolNameToUpstream(name); ok && mapped != name {
+		tool, _ = sjson.SetBytes(tool, "name", mapped)
+	}
+	return tool
+}
+
+// antigravityToolNameToUpstream maps client-facing tool names to the names
+// actually sent to the antigravity Interactions API, and
+// antigravityUpstreamToolNameToClient maps them back. Colliding names get an
+// "external_" prefix upstream (Google's antigravity agent ships its own
+// read_file/write_file sandbox tools; redefining them 500s) and are restored
+// to the client-facing name in every response path. The shared implementation
+// lives in internal/translator/common so the responses translator reuses it.
+const antigravityToolPrefix = translatorcommon.ExternalToolPrefix
+
+func antigravityToolNameToUpstream(name string) (string, bool) {
+	mapped := translatorcommon.AntigravityToolNameToUpstream(name)
+	return mapped, mapped != name
+}
+
+func antigravityUpstreamToolNameToClient(name string) string {
+	return translatorcommon.AntigravityUpstreamToolNameToClient(name)
 }
 
 func openAIChatToolToInteractions(tool gjson.Result) ([]byte, bool) {

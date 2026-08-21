@@ -70,8 +70,9 @@ func ConvertOpenAIResponseToInteractionsNonStream(ctx context.Context, modelName
 			steps = append(steps, interactionsTextStep("model_output", content.String()))
 		}
 		if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
+			forAntigravity := isAntigravityModel(modelName)
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-				if step, ok := openAIToolCallToInteractionsStep(toolCall); ok {
+				if step, ok := openAIToolCallToInteractionsStep(toolCall, forAntigravity); ok {
 					steps = append(steps, step)
 				}
 				return true
@@ -152,7 +153,7 @@ func appendOpenAIToolCallDelta(out [][]byte, st *openAIToInteractionsStreamState
 	}
 	function := toolCall.Get("function")
 	if name := function.Get("name").String(); name != "" {
-		st.ToolCallNames[index] = name
+		st.ToolCallNames[index] = antigravityUpstreamToolNameToClient(name)
 	}
 	stepID := firstNonEmpty(st.ToolCallIDs[index], fmt.Sprintf("call_%d", index))
 	stepName := st.ToolCallNames[index]
@@ -325,7 +326,7 @@ func interactionsTextStep(stepType, text string) []byte {
 	return step
 }
 
-func openAIToolCallToInteractionsStep(toolCall gjson.Result) ([]byte, bool) {
+func openAIToolCallToInteractionsStep(toolCall gjson.Result, forAntigravity bool) ([]byte, bool) {
 	if toolType := toolCall.Get("type").String(); toolType != "" && toolType != "function" {
 		return nil, false
 	}
@@ -334,11 +335,16 @@ func openAIToolCallToInteractionsStep(toolCall gjson.Result) ([]byte, bool) {
 		return nil, false
 	}
 	step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
-	if id := toolCall.Get("id").String(); id != "" {
-		step, _ = sjson.SetBytes(step, "id", id)
-		step, _ = sjson.SetBytes(step, "call_id", id)
+	// Google's Interactions function_call step accepts only
+	// type/name/arguments — it REJECTS an "id"/"call_id" field
+	// (400: Unknown parameter 'call_id' at 'input[N]').
+	name := function.Get("name").String()
+	if forAntigravity {
+		// Replayed history must match the aliased declaration sent upstream:
+		// a client tool "read_file" was declared as external_read_file.
+		name = translatorcommon.AntigravityToolNameToUpstream(name)
 	}
-	step, _ = sjson.SetBytes(step, "name", function.Get("name").String())
+	step, _ = sjson.SetBytes(step, "name", name)
 	setRawJSONValue(&step, "arguments", function.Get("arguments"), []byte(`{}`))
 	return step, true
 }
