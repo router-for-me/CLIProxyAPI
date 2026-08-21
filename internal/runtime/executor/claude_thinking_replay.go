@@ -47,66 +47,12 @@ func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyaut
 		sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
 	}
 	if sessionKey == "" {
-		sessionKey = claudeThinkingReplayConversationSessionKey(auth, req, opts)
+		sessionKey = helps.ClaudeThinkingReplayConversationSessionKey(auth, req, opts)
 	}
 	return claudeThinkingReplayScope{
 		modelFamily: claudeThinkingReplayModelFamily(auth, req.Model),
 		sessionKey:  sessionKey,
 	}
-}
-
-// claudeThinkingReplayConversationSessionKey returns a stable per-conversation
-// key for sessionless clients. It mixes caller identity signals (credential id,
-// caller-scope metadata, selected headers) with the first message, system
-// prompt, and tools so two callers sharing a credential and the same initial
-// prompt cannot see each other's replay state.
-func claudeThinkingReplayConversationSessionKey(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
-	h := sha256.New()
-	h.Write([]byte("conversation"))
-
-	if auth != nil {
-		if id := strings.TrimSpace(auth.ID); id != "" {
-			h.Write([]byte(id))
-		} else if apiKey, _ := claudeCreds(auth); apiKey != "" {
-			h.Write([]byte(apiKey))
-		}
-	}
-
-	if scope := metadataString(opts.Metadata, cliproxyexecutor.CallerScopeMetadataKey); scope != "" {
-		h.Write([]byte(scope))
-	}
-	if scope := metadataString(req.Metadata, cliproxyexecutor.CallerScopeMetadataKey); scope != "" {
-		h.Write([]byte(scope))
-	}
-	if derived := metadataString(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey); derived != "" {
-		h.Write([]byte(derived))
-	}
-	if derived := metadataString(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey); derived != "" {
-		h.Write([]byte(derived))
-	}
-
-	if opts.Headers != nil {
-		h.Write([]byte(opts.Headers.Get("User-Agent")))
-		h.Write([]byte(opts.Headers.Get("X-App")))
-		h.Write([]byte(opts.Headers.Get("X-Codex-Client-Id")))
-	}
-
-	payload := req.Payload
-	if len(payload) == 0 {
-		return ""
-	}
-	for _, path := range []string{"messages.0", "system", "tools"} {
-		part := gjson.GetBytes(payload, path)
-		if !part.Exists() {
-			continue
-		}
-		if canon, ok := kimiCanonicalJSON([]byte(part.Raw)); ok {
-			h.Write(canon)
-		} else {
-			h.Write([]byte(part.Raw))
-		}
-	}
-	return "conversation:" + hex.EncodeToString(h.Sum(nil)[:16])
 }
 
 func claudeThinkingReplayModelFamily(auth *cliproxyauth.Auth, model string) string {
