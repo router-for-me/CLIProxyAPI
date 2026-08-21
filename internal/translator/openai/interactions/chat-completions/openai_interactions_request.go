@@ -245,16 +245,18 @@ func copyOpenAIChatGenerationConfigToInteractions(out []byte, root gjson.Result,
 	if isAntigravityModel(model) {
 		// agent_config for the antigravity agent REQUIRES the discriminator
 		// field "type": "antigravity". Without it Google rejects the request
-		// with 400 "Unknown parameter 'agent_config'".
-		if maxOutputTokens := firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens"), root.Get("max_output_tokens")); maxOutputTokens.Exists() && !root.Get("agent_config.max_total_tokens").Exists() {
-			// Note: antigravity's Interactions API does NOT support
-			// max_total_tokens / max_output_tokens. Sending it makes Google
-			// truncate the agent run and return an "incomplete" interaction
-			// with an empty model_output on the tool-continuation turn, so we
-			// deliberately drop the limit for the antigravity agent.
-			cfg := `{"type":"antigravity"}`
-			out, _ = sjson.SetRawBytes(out, "agent_config", []byte(cfg))
-		}
+		// with 400 "Unknown parameter 'agent_config'". Set it unconditionally:
+		// an OpenAI request without max_tokens/max_output_tokens is valid and
+		// must still carry the discriminator.
+		//
+		// Note: antigravity's Interactions API does NOT support
+		// max_total_tokens / max_output_tokens. Sending it makes Google
+		// truncate the agent run and return an "incomplete" interaction
+		// with an empty model_output on the tool-continuation turn, so we
+		// deliberately drop any client-supplied token limit for the
+		// antigravity agent.
+		cfg := `{"type":"antigravity"}`
+		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(cfg))
 	} else {
 		copyNumber(&out, "generation_config.max_output_tokens", firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens")))
 		copyNumber(&out, "generation_config.temperature", root.Get("temperature"))

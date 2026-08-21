@@ -151,6 +151,21 @@ func TestConvertOpenAIRequestToInteractions_AntigravitySanitizesGenerationConfig
 	}
 }
 
+// TestConvertOpenAIRequestToInteractions_AntigravitySetsAgentConfigWithoutTokenLimit
+// verifies the discriminator is set even when the client sends no
+// max_tokens/max_output_tokens (a valid OpenAI request). Google requires
+// agent_config.type on every antigravity request regardless of limits.
+func TestConvertOpenAIRequestToInteractions_AntigravitySetsAgentConfigWithoutTokenLimit(t *testing.T) {
+	raw := []byte(`{
+		"model":"antigravity-preview-05-2026",
+		"messages":[{"role":"user","content":"hi"}]
+	}`)
+	out := ConvertOpenAIRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	if got := gjson.GetBytes(out, "agent_config.type").String(); got != "antigravity" {
+		t.Fatalf("agent_config.type = %q, want antigravity even without max_tokens. Output: %s", got, string(out))
+	}
+}
+
 func TestConvertOpenAIRequestToInteractionsRenamesConflictingAntigravityTools(t *testing.T) {
 	// read_file/write_file collide with the antigravity agent's built-in tools
 	// and cause Google to return 500 "Unknown Error" — they must be prefixed.
