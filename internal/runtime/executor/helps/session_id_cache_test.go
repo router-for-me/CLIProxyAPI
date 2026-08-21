@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 func resetSessionIDCache() {
@@ -84,12 +85,12 @@ func TestCachedSessionIDRequiredHomeReusesKVAcrossLocalCacheReset(t *testing.T) 
 	client := newFakeClaudeIDKVClient()
 	useFakeClaudeIDKVClient(t, client, true, nil)
 
-	first, errFirst := CachedSessionIDRequired(context.Background(), "api-key-1")
+	first, errFirst := CachedSessionIDRequired(context.Background(), "api-key-1", nil)
 	if errFirst != nil {
 		t.Fatalf("CachedSessionIDRequired() first error = %v", errFirst)
 	}
 	resetSessionIDCache()
-	second, errSecond := CachedSessionIDRequired(context.Background(), "api-key-1")
+	second, errSecond := CachedSessionIDRequired(context.Background(), "api-key-1", nil)
 	if errSecond != nil {
 		t.Fatalf("CachedSessionIDRequired() second error = %v", errSecond)
 	}
@@ -114,7 +115,7 @@ func TestCachedSessionIDRequiredEmptyAPIKeyDoesNotUseHomeKV(t *testing.T) {
 	client := newFakeClaudeIDKVClient()
 	useFakeClaudeIDKVClient(t, client, true, nil)
 
-	value, errValue := CachedSessionIDRequired(context.Background(), "")
+	value, errValue := CachedSessionIDRequired(context.Background(), "", nil)
 	if errValue != nil {
 		t.Fatalf("CachedSessionIDRequired(empty) error = %v", errValue)
 	}
@@ -139,7 +140,7 @@ func TestCachedSessionIDRequiredHomeKVFailures(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			useFakeClaudeIDKVClient(t, tc.client, true, nil)
-			if _, errValue := CachedSessionIDRequired(context.Background(), "api-key-1"); errValue == nil {
+			if _, errValue := CachedSessionIDRequired(context.Background(), "api-key-1", nil); errValue == nil {
 				t.Fatalf("CachedSessionIDRequired() error = nil, want error")
 			}
 		})
@@ -151,7 +152,7 @@ func TestCachedSessionIDRequiredHomeRequiresReadAfterSet(t *testing.T) {
 	client.setNoPersist = true
 	useFakeClaudeIDKVClient(t, client, true, nil)
 
-	if _, errValue := CachedSessionIDRequired(context.Background(), "api-key-1"); errValue == nil {
+	if _, errValue := CachedSessionIDRequired(context.Background(), "api-key-1", nil); errValue == nil {
 		t.Fatalf("CachedSessionIDRequired() error = nil, want missing-after-set error")
 	}
 }
@@ -161,11 +162,11 @@ func TestCachedSessionIDRequiredNonHomeModeUsesLocalMap(t *testing.T) {
 	client := newFakeClaudeIDKVClient()
 	useFakeClaudeIDKVClient(t, client, false, nil)
 
-	first, errFirst := CachedSessionIDRequired(context.Background(), "api-key-1")
+	first, errFirst := CachedSessionIDRequired(context.Background(), "api-key-1", nil)
 	if errFirst != nil {
 		t.Fatalf("CachedSessionIDRequired() first error = %v", errFirst)
 	}
-	second, errSecond := CachedSessionIDRequired(context.Background(), "api-key-1")
+	second, errSecond := CachedSessionIDRequired(context.Background(), "api-key-1", nil)
 	if errSecond != nil {
 		t.Fatalf("CachedSessionIDRequired() second error = %v", errSecond)
 	}
@@ -174,5 +175,32 @@ func TestCachedSessionIDRequiredNonHomeModeUsesLocalMap(t *testing.T) {
 	}
 	if client.getCount != 0 || client.setCount != 0 || client.expireCount != 0 {
 		t.Fatalf("KV calls = get %d set %d expire %d, want all zero", client.getCount, client.setCount, client.expireCount)
+	}
+}
+
+func TestCachedSessionIDRequiredDistinctEmptyAPIKeyCredentials(t *testing.T) {
+	resetSessionIDCache()
+
+	authA := &cliproxyauth.Auth{ID: "custom-header-cred-a"}
+	authB := &cliproxyauth.Auth{ID: "custom-header-cred-b"}
+
+	a, errA := CachedSessionIDRequired(context.Background(), "", authA)
+	if errA != nil {
+		t.Fatalf("CachedSessionIDRequired(authA) error = %v", errA)
+	}
+	b, errB := CachedSessionIDRequired(context.Background(), "", authB)
+	if errB != nil {
+		t.Fatalf("CachedSessionIDRequired(authB) error = %v", errB)
+	}
+	if a == b {
+		t.Fatalf("custom-header-only credentials share the same session id %q", a)
+	}
+
+	a2, errA2 := CachedSessionIDRequired(context.Background(), "", authA)
+	if errA2 != nil {
+		t.Fatalf("CachedSessionIDRequired(authA) second error = %v", errA2)
+	}
+	if a != a2 {
+		t.Fatalf("same credential got different session ids: %q vs %q", a, a2)
 	}
 }
