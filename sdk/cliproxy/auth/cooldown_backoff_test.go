@@ -458,10 +458,13 @@ func (h *testLogCaptureHook) Fire(entry *log.Entry) error {
 func TestMarkResultPerAttemptFailureLogging(t *testing.T) {
 	hook := &testLogCaptureHook{}
 	logger := log.StandardLogger()
+	savedHooks := make(log.LevelHooks)
+	for lvl, hs := range logger.Hooks {
+		savedHooks[lvl] = append([]log.Hook(nil), hs...)
+	}
 	logger.AddHook(hook)
 	t.Cleanup(func() {
-		// remove hook by replacing hooks map
-		logger.ReplaceHooks(make(log.LevelHooks))
+		logger.ReplaceHooks(savedHooks)
 	})
 
 	manager := NewManager(nil, nil, nil)
