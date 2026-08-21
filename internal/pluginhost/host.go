@@ -214,9 +214,13 @@ func (h *Host) DeferPluginUpdateUntilRestart(id, targetPath, targetVersion strin
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	activePath := cleanPluginPath(h.activePluginPaths[id])
-	activeVersion := strings.TrimSpace(h.activePluginVersions[id])
-	if activePath == "" || h.loaded[id] == nil {
+	lp := h.loaded[id]
+	if lp == nil {
+		return false
+	}
+	activePath := cleanPluginPath(lp.path)
+	activeVersion := strings.TrimSpace(lp.version)
+	if activePath == "" {
 		return false
 	}
 	if !contentChanged && activePath == targetPath && activeVersion == targetVersion {

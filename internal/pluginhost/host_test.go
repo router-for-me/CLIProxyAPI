@@ -855,13 +855,18 @@ func TestHostApplyConfigDefersActiveUpdateUntilRestart(t *testing.T) {
 		t.Fatalf("initial plugin was not registered at v1: registered=%v", h.PluginRegistered("alpha"))
 	}
 	paths["2.0.0"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	h.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{Dir: pluginsDir}})
+	if h.PluginRegistered("alpha") {
+		t.Fatal("PluginRegistered(alpha) = true after disabling plugins, want no active capability")
+	}
+	if !h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = false after disabling plugins, want retained library")
+	}
 	if !h.DeferPluginUpdateUntilRestart("alpha", paths["2.0.0"], "2.0.0", false) {
-		t.Fatal("DeferPluginUpdateUntilRestart() = false, want true for staged v2")
+		t.Fatal("DeferPluginUpdateUntilRestart() = false, want true for staged v2 while v1 is retained")
 	}
 
 	h.ApplyConfig(context.Background(), cfgV2)
-	h.ApplyConfig(context.Background(), cfgV2)
-	h.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{Dir: pluginsDir}})
 	h.ApplyConfig(context.Background(), cfgV2)
 	if !h.PluginRegistered("alpha") {
 		t.Fatal("PluginRegistered(alpha) = false, want old v1 to remain effective before restart")
