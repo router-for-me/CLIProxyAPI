@@ -386,3 +386,60 @@ func TestApplyAuthFailureStateSubSecondQuotaHintStillEscalates(t *testing.T) {
 		t.Fatalf("expected the escalated window to close at %v, got %v", after.Add(2*quotaBackoffBase), auth.Quota.NextRecoverAt)
 	}
 }
+
+func TestMarkResultZeroRetryAfterDoesNotApplyLadderFloor(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-zero-retry-after",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex"},
+		ModelStates: map[string]*ModelState{
+			"gpt-5": {
+				Status: StatusActive,
+				Quota:  QuotaState{BackoffLevel: 0},
+			},
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	zeroHint := time.Duration(0)
+	result := quotaResult(auth.ID, "gpt-5")
+	result.RetryAfter = &zeroHint
+
+	now := time.Now()
+	manager.MarkResult(context.Background(), result)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after failure")
+	}
+	state := updated.ModelStates["gpt-5"]
+	if state.Quota.BackoffLevel != 0 {
+		t.Fatalf("expected BackoffLevel to remain 0 for zero RetryAfter, got %d", state.Quota.BackoffLevel)
+	}
+	if state.Quota.NextRecoverAt.After(now.Add(500 * time.Millisecond)) {
+		t.Fatalf("zero RetryAfter was given ladder floor: NextRecoverAt=%v, want <= %v", state.Quota.NextRecoverAt, now)
+	}
+}
+
+func TestApplyAuthFailureStateZeroRetryAfterDoesNotApplyLadderFloor(t *testing.T) {
+	now := time.Now()
+	err := &Error{Code: "rate_limit", Message: "websocket_connection_limit_reached", HTTPStatus: http.StatusTooManyRequests}
+	zeroHint := time.Duration(0)
+	auth := &Auth{ID: "auth-zero-hint"}
+
+	applyAuthFailureState(auth, err, &zeroHint, now, false)
+	if auth.Quota.BackoffLevel != 0 {
+		t.Fatalf("expected BackoffLevel 0 for zero RetryAfter, got %d", auth.Quota.BackoffLevel)
+	}
+	if auth.Quota.NextRecoverAt.After(now) {
+		t.Fatalf("expected zero RetryAfter not to receive ladder floor, NextRecoverAt=%v, want %v", auth.Quota.NextRecoverAt, now)
+	}
+	if auth.NextRetryAfter.After(now) {
+		t.Fatalf("expected NextRetryAfter not to receive ladder floor, NextRetryAfter=%v, want %v", auth.NextRetryAfter, now)
+	}
+}

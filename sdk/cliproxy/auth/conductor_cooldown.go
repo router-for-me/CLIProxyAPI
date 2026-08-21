@@ -826,12 +826,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
 							if !disableCooling {
-								next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
-								if result.RetryAfter != nil {
-									// A provider hint can be sub-second even when the quota is exhausted for
-									// the whole day, so never let it undercut the escalating quota ladder.
-									if hinted := now.Add(*result.RetryAfter); hinted.After(next) {
-										next = hinted
+								if result.RetryAfter != nil && *result.RetryAfter <= 0 {
+									next = now.Add(*result.RetryAfter)
+								} else {
+									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
+									if result.RetryAfter != nil {
+										// A provider hint can be sub-second even when the quota is exhausted for
+										// the whole day, so never let it undercut the escalating quota ladder.
+										if hinted := now.Add(*result.RetryAfter); hinted.After(next) {
+											next = hinted
+										}
 									}
 								}
 								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
@@ -1943,12 +1947,16 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.Quota.Reason = "quota"
 		var next time.Time
 		if !disableCooling {
-			next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
-			if retryAfter != nil {
-				// A provider hint can be sub-second even when the quota is exhausted for the
-				// whole day, so never let it undercut the escalating quota ladder.
-				if hinted := now.Add(*retryAfter); hinted.After(next) {
-					next = hinted
+			if retryAfter != nil && *retryAfter <= 0 {
+				next = now.Add(*retryAfter)
+			} else {
+				next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
+				if retryAfter != nil {
+					// A provider hint can be sub-second even when the quota is exhausted for the
+					// whole day, so never let it undercut the escalating quota ladder.
+					if hinted := now.Add(*retryAfter); hinted.After(next) {
+						next = hinted
+					}
 				}
 			}
 			if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
