@@ -64,6 +64,19 @@ func TestSanitizeClaudeMessagesForClaudeUpstreamRetainsEmptySignatureOnUnknownVe
 	}
 }
 
+func TestSanitizeClaudeMessagesForClaudeUpstreamNormalizesWhitespacePaddedShortSignatureInCompatMode(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"  EgI=  "}]}]}`)
+
+	withCompat, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4", true)
+	part := gjson.GetBytes(withCompat, "messages.0.content.0")
+	if part.Get("type").String() != "thinking" || !part.Get("signature").Exists() {
+		t.Fatalf("compat sanitizer dropped the thinking block: %s", withCompat)
+	}
+	if got := part.Get("signature").String(); got != "EgI=" {
+		t.Fatalf("compat sanitizer forwarded whitespace-padded short signature %q, want %q", got, "EgI=")
+	}
+}
+
 func TestSanitizeClaudeMessagesForClaudeUpstreamRejectsGrokOpaqueERInCompatMode(t *testing.T) {
 	// Grok/xAI encrypted_content is uniformly distributed and can base64-encode
 	// to a string starting with 'E' or 'R', but it is not a valid Claude

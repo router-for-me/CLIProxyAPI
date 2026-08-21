@@ -357,8 +357,8 @@ func isClaudeReplayableShortSignature(rawSignature string) (bool, string) {
 			// Reject nested or residual provider prefixes (e.g. claude#vendor#...).
 			return false, ""
 		}
-		if isShortClaudeSyntheticSignature(payload) {
-			return true, payload
+		if ok, normalized := isShortClaudeSyntheticSignature(payload); ok {
+			return true, normalized
 		}
 		return false, ""
 	}
@@ -366,8 +366,8 @@ func isClaudeReplayableShortSignature(rawSignature string) (bool, string) {
 		// Unrecognized provider prefix (e.g. vendor#...).
 		return false, ""
 	}
-	if isShortClaudeSyntheticSignature(rawSignature) {
-		return true, rawSignature
+	if ok, normalized := isShortClaudeSyntheticSignature(rawSignature); ok {
+		return true, normalized
 	}
 	return false, ""
 }
@@ -375,18 +375,22 @@ func isClaudeReplayableShortSignature(rawSignature string) (bool, string) {
 // isShortClaudeSyntheticSignature reports whether rawSignature is the minimal
 // 1-2 byte E-prefixed synthetic used by the Claude thinking replay cache.
 // Anything larger is rejected without decoding, so this does not allocate for
-// multi-kilobyte opaque blobs.
-func isShortClaudeSyntheticSignature(rawSignature string) bool {
+// multi-kilobyte opaque blobs. The returned string is the trimmed, normalized
+// form to avoid forwarding whitespace-padded signatures upstream.
+func isShortClaudeSyntheticSignature(rawSignature string) (bool, string) {
 	sig := strings.TrimSpace(rawSignature)
 	// Valid base64 is a multiple of 4 characters; 4 characters decode to at most
 	// 3 bytes. Only 1-2 byte payloads can be the short synthetic, so anything
 	// longer is rejected before decoding.
 	if len(sig) > 4 {
-		return false
+		return false, ""
 	}
 	decoded, err := base64.StdEncoding.DecodeString(sig)
 	if err != nil || len(decoded) == 0 || len(decoded) > 2 {
-		return false
+		return false, ""
 	}
-	return decoded[0] == 0x12
+	if decoded[0] != 0x12 {
+		return false, ""
+	}
+	return true, sig
 }
