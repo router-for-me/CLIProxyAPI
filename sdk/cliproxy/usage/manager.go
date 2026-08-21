@@ -54,6 +54,26 @@ type Record struct {
 	// alias is the client-requested model string and is not a reliable aggregation
 	// key across renames.
 	RouterID string
+	// AutoRouterScoredTier is the tier derived from the configured scorer profile
+	// (thresholds + weights) before any literal keyword override or mapping
+	// fallback. Empty for non-routed requests.
+	AutoRouterScoredTier string
+	// AutoRouterMappingTier is the tier whose mapping the resolver actually used
+	// to pick a target model. It may be lower than the scored/effective tier when
+	// the requested tier has no mapping and the resolver falls back. Empty for
+	// non-routed requests.
+	AutoRouterMappingTier string
+	// AutoRouterDecisionCause explains why the effective tier differs from the
+	// scored tier (literal_keyword_match) or matches it (complexity_scorer).
+	AutoRouterDecisionCause string
+	// AutoRouterProfileVersion is the version of the profile used to score the
+	// request. Zero when the default built-in profile was used.
+	AutoRouterProfileVersion int64
+	// AutoRouterProfileHash identifies the exact profile configuration used.
+	AutoRouterProfileHash string
+	// AutoRouterDecisionJSON is the marshaled explainability snapshot persisted as
+	// a JSONB blob. Empty bytes mean "no snapshot" (non-routed requests).
+	AutoRouterDecisionJSON []byte
 	// Generate reports whether the client requested actual generation.
 	// nil or true means generation is enabled; only an explicit false disables generation.
 	// Use GenerateFlag to set the value and GenerateEnabled to read it with the default.
@@ -121,6 +141,16 @@ type routerTierContextValue struct {
 	routerID string
 }
 type routerTierContextKey struct{}
+
+type autoRouterDecisionContextValue struct {
+	scoredTier     string
+	mappingTier    string
+	cause          string
+	profileVersion int64
+	profileHash    string
+	snapshot       []byte
+}
+type autoRouterDecisionContextKey struct{}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -255,7 +285,34 @@ func RouterIDFromContext(ctx context.Context) string {
 	return ""
 }
 
-// WithGenerate stores whether the client requested actual generation for usage sinks.
+// WithAutoRouterDecision stores an immutable Auto Router explainability
+// snapshot for usage sinks. The snapshot is copied before it enters the async
+// usage queue so callers may safely reuse their buffer.
+func WithAutoRouterDecision(ctx context.Context, scoredTier, mappingTier, cause string, profileVersion int64, profileHash string, snapshot []byte) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(scoredTier) == "" && strings.TrimSpace(mappingTier) == "" && len(snapshot) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, autoRouterDecisionContextKey{}, autoRouterDecisionContextValue{
+		scoredTier: strings.TrimSpace(scoredTier), mappingTier: strings.TrimSpace(mappingTier), cause: strings.TrimSpace(cause),
+		profileVersion: profileVersion, profileHash: strings.TrimSpace(profileHash), snapshot: append([]byte(nil), snapshot...),
+	})
+}
+
+// AutoRouterDecisionFromContext returns a copied decision context value.
+func AutoRouterDecisionFromContext(ctx context.Context) (scoredTier, mappingTier, cause string, profileVersion int64, profileHash string, snapshot []byte) {
+	if ctx == nil {
+		return "", "", "", 0, "", nil
+	}
+	value, ok := ctx.Value(autoRouterDecisionContextKey{}).(autoRouterDecisionContextValue)
+	if !ok {
+		return "", "", "", 0, "", nil
+	}
+	return value.scoredTier, value.mappingTier, value.cause, value.profileVersion, value.profileHash, append([]byte(nil), value.snapshot...)
+}
+
 // Missing context values default to true; only an explicit false disables generation.
 func WithGenerate(ctx context.Context, generate bool) context.Context {
 	if ctx == nil {

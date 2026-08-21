@@ -242,6 +242,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.mgmt.SetUpstreamProvidersStore(handles.UpstreamProviders)
 		s.mgmt.SetModelGroupStore(handles.ModelGroups)
 		s.mgmt.SetAutoRouterStore(handles.AutoRouters)
+		s.mgmt.SetAutoRouterProfileStore(handles.AutoRouterProfiles)
 		// Wire the Manage-LiteLLM stores (dedicated litellm_* tables). No-op
 		// when PG is not configured — the /litellm routes return 503.
 		s.mgmt.SetLiteLLMStores(handles.LiteLLMUsers, handles.LiteLLMKeys)
@@ -289,7 +290,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		// Wire the Auto Router resolver so requests whose model id matches an
 		// Auto Router are scored and forwarded to a tier-appropriate upstream
 		// model. Non-nil only when PG is configured and routers exist.
-		s.handlers.SetAutoRouterResolver(store.NewAutoRoutersResolver(handles.AutoRouters))
+		s.handlers.SetAutoRouterResolver(store.NewAutoRoutersResolver(handles.AutoRouters, handles.AutoRouterProfiles))
 		// Surface official_provider on Usage Stats / Errors rows so the
 		// dashboard can show "Provider Official" (e.g. "anthropic") instead of
 		// the raw internal provider key (e.g. "claude").

@@ -3,35 +3,32 @@ package store
 import (
 	"context"
 	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter"
 )
 
-// AutoRoutersResolverImpl adapts *AutoRouterStore to the
-// handlers.AutoRouterResolver contract: given a requested model id, return the
-// matching Auto Router definition (or nil when the model id does not belong to
-// any router). It implements AutoRouterForModel(ctx, modelID) *AutoRouter
-// without importing the handlers package (the interface is satisfied
-// structurally, mirroring ModelsCatalogResolverImpl).
-//
-// The store serves results from its in-memory per-model cache, so request-time
-// reads hit the DB at most once per model id.
+// AutoRoutersResolverImpl adapts AutoRouterStore and the optional profile store
+// to the request-time Auto Router resolver contract.
 type AutoRoutersResolverImpl struct {
-	store *AutoRouterStore
+	store    *AutoRouterStore
+	profiles *AutoRouterProfileStore
 }
 
-// NewAutoRoutersResolver wraps an AutoRouterStore. Returns nil when the store
-// is nil (file-based deployments) so callers can short-circuit.
-func NewAutoRoutersResolver(store *AutoRouterStore) *AutoRoutersResolverImpl {
+// NewAutoRoutersResolver wraps an AutoRouterStore. The optional profile store
+// enables versioned scoring policies; omitting it preserves built-in defaults.
+func NewAutoRoutersResolver(store *AutoRouterStore, profiles ...*AutoRouterProfileStore) *AutoRoutersResolverImpl {
 	if store == nil {
 		return nil
 	}
-	return &AutoRoutersResolverImpl{store: store}
+	var profileStore *AutoRouterProfileStore
+	if len(profiles) > 0 {
+		profileStore = profiles[0]
+	}
+	return &AutoRoutersResolverImpl{store: store, profiles: profileStore}
 }
 
 // AutoRouterForModel returns the Auto Router exposing the supplied client-facing
-// model id, or nil when no router owns it. The returned pointer is a copy from
-// the store cache, so the caller may not mutate it. An empty match (unknown or
-// not-a-router model id) yields nil, signalling the caller to use normal
-// model-to-provider routing.
+// model id, or nil when no router owns it.
 func (r *AutoRoutersResolverImpl) AutoRouterForModel(ctx context.Context, modelID string) *AutoRouter {
 	if r == nil || r.store == nil || ctx == nil {
 		return nil
@@ -44,7 +41,29 @@ func (r *AutoRoutersResolverImpl) AutoRouterForModel(ctx context.Context, modelI
 	if err != nil {
 		return nil
 	}
-	// Copy so the caller cannot mutate the cached object.
 	cp := router
 	return &cp
 }
+
+// AutoRouterProfile returns the active profile for a persisted router id. A
+// missing profile is represented by the built-in default profile.
+func (r *AutoRoutersResolverImpl) AutoRouterProfile(ctx context.Context, routerID string) *autorouter.Profile {
+	if r == nil || ctx == nil {
+		return nil
+	}
+	if r.profiles == nil {
+		profile := autorouter.DefaultProfile()
+		return &profile
+	}
+	profile, err := r.profiles.Get(ctx, strings.TrimSpace(routerID))
+	if err != nil {
+		profile := autorouter.DefaultProfile()
+		return &profile
+	}
+	return &profile
+}
+
+var _ interface {
+	AutoRouterForModel(context.Context, string) *AutoRouter
+	AutoRouterProfile(context.Context, string) *autorouter.Profile
+} = (*AutoRoutersResolverImpl)(nil)

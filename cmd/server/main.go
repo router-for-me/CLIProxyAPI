@@ -716,17 +716,18 @@ func main() {
 	// These remain nil when the PG backend is inactive; downstream features
 	// detect the nil state and degrade to file-only behavior.
 	var (
-		pgAPIKeyStore *store.APIKeyStore
-		pgUsageStore  *store.UsageStore
-		pgModelsStore *store.ModelsStore
-		pgUserStore   *store.UserStore
-		pgMgmtTokens  *store.ManagementTokenStore
-		pgSyncLog     *store.SyncLogStore
-		pgSyncAdapter *registry.PGSync
-		pgModelGroups *store.ModelGroupStore
-		pgAutoRouters *store.AutoRouterStore
-		policySvc     policy.PolicyService
-		usageFlusher  *store.UsageFlusher
+		pgAPIKeyStore        *store.APIKeyStore
+		pgUsageStore         *store.UsageStore
+		pgModelsStore        *store.ModelsStore
+		pgUserStore          *store.UserStore
+		pgMgmtTokens         *store.ManagementTokenStore
+		pgSyncLog            *store.SyncLogStore
+		pgSyncAdapter        *registry.PGSync
+		pgModelGroups        *store.ModelGroupStore
+		pgAutoRouters        *store.AutoRouterStore
+		pgAutoRouterProfiles *store.AutoRouterProfileStore
+		policySvc            policy.PolicyService
+		usageFlusher         *store.UsageFlusher
 	)
 	if usePostgresStore {
 		pgAPIKeyStore = store.NewAPIKeyStore(pgStoreInst)
@@ -737,6 +738,7 @@ func main() {
 		pgSyncLog = store.NewSyncLogStore(pgStoreInst)
 		pgModelGroups = store.NewModelGroupStore(pgStoreInst)
 		pgAutoRouters = store.NewAutoRouterStore(pgStoreInst)
+		pgAutoRouterProfiles = store.NewAutoRouterProfileStore(pgStoreInst)
 		pgModelHealth := store.NewModelHealthStore(pgStoreInst)
 		pgAlerts := store.NewAlertStore(pgStoreInst)
 		// Manage-LiteLLM stores (dedicated litellm_* tables, management-only).
@@ -833,27 +835,28 @@ func main() {
 		// Expose the PG stores + policy service to the API server so the
 		// policy middleware and PG management routes are activated.
 		serverOptions = append(serverOptions, api.WithPolicyService(policySvc, &api.PgStoreHandles{
-			APIKeys:           pgAPIKeyStore,
-			Usage:             pgUsageStore,
-			Models:            pgModelsStore,
-			Users:             pgUserStore,
-			PGSync:            pgSyncAdapter,
-			Policy:            policySvc,
-			ErrorMessages:     pgErrorMessages,
-			PricingSources:    pgPricingSources,
-			PricingSourcesDir: pgPricingSourcesDir,
-			ManagementTokens:  pgMgmtTokens,
-			UpstreamProviders: pgUpstreamProviders,
-			SyncLog:           pgSyncLog,
-			ModelGroups:       pgModelGroups,
-			AutoRouters:       pgAutoRouters,
-			ModelHealth:       pgModelHealth,
-			Alerts:            pgAlerts,
-			Backup:            pgStoreInst,
-			LiteLLMUsers:      pgLiteLLMUsers,
-			LiteLLMKeys:       pgLiteLLMKeys,
-			LiteLLMSync:       pgLiteLLMSync,
-			Flusher:           usageFlusher,
+			APIKeys:            pgAPIKeyStore,
+			Usage:              pgUsageStore,
+			Models:             pgModelsStore,
+			Users:              pgUserStore,
+			PGSync:             pgSyncAdapter,
+			Policy:             policySvc,
+			ErrorMessages:      pgErrorMessages,
+			PricingSources:     pgPricingSources,
+			PricingSourcesDir:  pgPricingSourcesDir,
+			ManagementTokens:   pgMgmtTokens,
+			UpstreamProviders:  pgUpstreamProviders,
+			SyncLog:            pgSyncLog,
+			ModelGroups:        pgModelGroups,
+			AutoRouters:        pgAutoRouters,
+			AutoRouterProfiles: pgAutoRouterProfiles,
+			ModelHealth:        pgModelHealth,
+			Alerts:             pgAlerts,
+			Backup:             pgStoreInst,
+			LiteLLMUsers:       pgLiteLLMUsers,
+			LiteLLMKeys:        pgLiteLLMKeys,
+			LiteLLMSync:        pgLiteLLMSync,
+			Flusher:            usageFlusher,
 		}))
 	}
 

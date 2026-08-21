@@ -109,12 +109,8 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		resolvedAR = rr
 		executionModel = resolvedAR.targetModel
 		autoRoute = resolvedAR.route
-		ctx = coreusage.WithRouterTier(ctx, resolvedAR.tier, resolvedAR.routerID)
+		ctx = resolvedAR.withDecisionContext(ctx)
 	}
-	// Vision bridge: when the tier target lacks vision support and the request
-	// carries images, analyze them via the router's bridge model and replace the
-	// image blocks with the textual analysis before dispatching to the target.
-	// Falls back to the original request on bridge failure (never breaks flow).
 	if resolvedAR.matched {
 		rawJSON = h.autoRouterRequestAdjustments(ctx, resolvedAR, rawJSON)
 	}

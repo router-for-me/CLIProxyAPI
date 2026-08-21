@@ -1,11 +1,13 @@
 package handlers
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"golang.org/x/net/context"
 )
 
@@ -90,30 +92,29 @@ func storeRouterToConfig(r *store.AutoRouter) *autorouter.Config {
 // the concrete target model plus its per-model routing (providers/strategy/
 // priorities). matched reports whether the requested model was an auto router
 // that resolved to a usable target. visionBridgeModel is the per-router vision
-// bridge model id (empty = feature disabled for this router).
+// bridge model id (empty = feature disabled for this router). decision is the
+// explainability snapshot persisted with the usage event.
 type autoRouterResolved struct {
 	targetModel       string
 	route             *autorouter.Resolved
 	visionBridgeModel string
 	tier              string
 	routerID          string
+	decision          autorouter.DecisionSnapshot
 	matched           bool
+}
+
+func (r autoRouterResolved) withDecisionContext(ctx context.Context) context.Context {
+	if !r.matched {
+		return ctx
+	}
+	raw, _ := json.Marshal(r.decision)
+	ctx = coreusage.WithRouterTier(ctx, r.tier, r.routerID)
+	return coreusage.WithAutoRouterDecision(ctx, string(r.decision.ScoredTier), string(r.decision.MappingTier), r.decision.DecisionCause, r.decision.ProfileVersion, r.decision.ProfileHash, raw)
 }
 
 // resolveAutoRouterModel scores an incoming request and returns the upstream
 // model id to send it to, when the requested model matches an Auto Router.
-//
-// matched is false when the requested model is not an Auto Router id (so the
-// caller uses normal routing), when the router is disabled, or when no tier
-// mapping resolves to a usable model.
-//
-// targetModel is the concrete upstream model id chosen by the router's tier
-// mapping. It may carry a thinking suffix (e.g. "claude-opus-4-5(high)"), which
-// the downstream thinking application already understands. route carries the
-// tier's per-model routing (providers/strategy/priorities) so the caller can
-// apply it at request time; its Providers may be empty (target model defaults
-// then apply). Runtime cost attribution follows the resolved target model's
-// pricing.
 func (h *BaseAPIHandler) resolveAutoRouterModel(ctx context.Context, entryProtocol, modelName string, rawJSON []byte) autoRouterResolved {
 	parsed := thinking.ParseSuffix(modelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
@@ -122,21 +123,22 @@ func (h *BaseAPIHandler) resolveAutoRouterModel(ctx context.Context, entryProtoc
 	if router == nil {
 		return autoRouterResolved{}
 	}
-
-	cfg := storeRouterToConfig(router)
-	score := autorouter.Score(rawJSON, entryProtocol)
-	resolved, ok := autorouter.Resolve(score.Tier, cfg)
+	var profile *autorouter.Profile
+	if h.AutoRouterProfileResolver != nil {
+		profile = h.AutoRouterProfileResolver.AutoRouterProfile(ctx, router.ID)
+	}
+	result := autorouter.ScoreWithProfile(rawJSON, entryProtocol, profile)
+	resolved, ok := autorouter.Resolve(result.EffectiveTier, storeRouterToConfig(router))
 	if !ok || resolved == nil || strings.TrimSpace(resolved.Model) == "" {
 		return autoRouterResolved{}
 	}
-	return autoRouterResolved{
-		targetModel:       resolved.Model,
-		route:             resolved,
-		visionBridgeModel: strings.TrimSpace(router.VisionBridgeModel),
-		tier:              string(score.Tier),
-		routerID:          strings.TrimSpace(router.ModelID),
-		matched:           true,
+	decision := autorouter.DecisionSnapshot{
+		ProfileVersion: result.ProfileVersion, ProfileHash: result.ProfileHash, ProfileSnapshot: result.ProfileConfig,
+		ScoreTotal: result.Score.Total, ScoreFields: result.Score.Fields, ReasoningMarkers: result.Score.ReasoningMarkers,
+		ScoredTier: result.Score.Tier, EffectiveTier: result.EffectiveTier, DecisionCause: result.DecisionCause,
+		MatchedRules: result.MatchedRules, MappingTier: resolved.MappingTier, FallbackChain: resolved.FallbackChain, TargetModel: resolved.Model,
 	}
+	return autoRouterResolved{targetModel: resolved.Model, route: resolved, visionBridgeModel: strings.TrimSpace(router.VisionBridgeModel), tier: string(result.EffectiveTier), routerID: strings.TrimSpace(router.ModelID), decision: decision, matched: true}
 }
 
 // applyAutoRouterRoute applies a resolved tier's per-model routing (providers +

@@ -17,6 +17,12 @@ type Resolved struct {
 	// TargetStrategy is the tier's target-selection strategy
 	// (""/"weighted"/"priority"), kept for observability.
 	TargetStrategy string
+	// MappingTier is the tier mapping that supplied the selected target. It may
+	// be lower than the requested tier when resolution falls back.
+	MappingTier Tier
+	// FallbackChain lists the requested tier followed by each lower tier checked
+	// before MappingTier resolved. It is empty only for legacy zero values.
+	FallbackChain []Tier
 }
 
 // Resolve maps a classified tier to a concrete upstream target model for the
@@ -42,12 +48,18 @@ func resolveWithRand(tier Tier, c *Config, rng *rand.Rand) (*Resolved, bool) {
 	if c == nil {
 		return nil, false
 	}
+	chain := tierAndBelow(tier)
 	// Walk from the chosen tier downwards so an unmapped hard tier degrades to
 	// the best available softer mapping.
-	for _, t := range tierAndBelow(tier) {
+	for _, t := range chain {
 		if m := c.mappingFor(t); m != nil {
 			if targets := mappingTargets(m); len(targets) > 0 {
-				return resolvedFromMapping(m, targets, rng), true
+				resolved := resolvedFromMapping(m, targets, rng)
+				if resolved != nil {
+					resolved.MappingTier = t
+					resolved.FallbackChain = append([]Tier(nil), chain...)
+				}
+				return resolved, resolved != nil
 			}
 		}
 	}
@@ -55,7 +67,12 @@ func resolveWithRand(tier Tier, c *Config, rng *rand.Rand) (*Resolved, bool) {
 	// (acts as the router default target).
 	for i := range c.Mappings {
 		if targets := mappingTargets(&c.Mappings[i]); len(targets) > 0 {
-			return resolvedFromMapping(&c.Mappings[i], targets, rng), true
+			resolved := resolvedFromMapping(&c.Mappings[i], targets, rng)
+			if resolved != nil {
+				resolved.MappingTier = c.Mappings[i].Tier
+				resolved.FallbackChain = append([]Tier(nil), chain...)
+			}
+			return resolved, resolved != nil
 		}
 	}
 	return nil, false

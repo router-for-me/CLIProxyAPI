@@ -115,6 +115,12 @@ type Handler struct {
 	// PG is not configured — the /auto-routers routes return 503 in that case.
 	pgAutoRouters *store.AutoRouterStore
 
+	// pgAutoRouterProfiles stores the per-router scoring profile (thresholds,
+	// weights, keyword rules) plus the active version. nil when PG is not
+	// configured — the /auto-routers/:id/profile and /decisions endpoints
+	// return 503 in that case.
+	pgAutoRouterProfiles *store.AutoRouterProfileStore
+
 	// pgModelHealth stores the model health-check snapshots + history +
 	// operator settings (Analysis → Model Health page + the public
 	// /v0/model-health/uptime endpoint). nil when PG is not configured — the
@@ -431,6 +437,18 @@ func (h *Handler) SetAutoRouterStore(routers *store.AutoRouterStore) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pgAutoRouters = routers
+}
+
+// SetAutoRouterProfileStore wires the PG-backed store for Auto Router scoring
+// profiles (thresholds, weights, keyword rules). When nil, the
+// /v0/management/auto-routers/:id/profile endpoint returns 503.
+func (h *Handler) SetAutoRouterProfileStore(profiles *store.AutoRouterProfileStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pgAutoRouterProfiles = profiles
 }
 
 // SetModelHealthStore wires the PG-backed store for model health-check

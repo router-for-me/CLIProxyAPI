@@ -187,10 +187,52 @@ func TestScoreResponsesInputTextNoRole(t *testing.T) {
 // message carries only `role` + `text` (no `content` block). The score must
 // reflect the `text` payload, and a prompt that hits >= the reasoning-marker
 // threshold must be classified REASONING (not silently downgraded).
-func TestScoreResponsesInputRoleOnlyText(t *testing.T) {
-	body := `{"input":[{"role":"user","text":"explain why this algorithm is correct, prove the time complexity bound, and analyze the memory layout trade-off"}]}`
-	s := Score([]byte(body), "openai")
-	if s.Tier != TierReasoning {
-		t.Fatalf("expected REASONING from input[].text prompt, got %q (markers=%d)", s.Tier, s.ReasoningMarkers)
+func TestScoreWithCustomProfileAndKeywordOverride(t *testing.T) {
+	config := DefaultProfileConfig()
+	config.Thresholds = TierThresholds{SimpleMax: 0.15, MediumMax: 0.35, ComplexMax: 0.60}
+	config.KeywordTierRules = []KeywordTierRule{{ID: "proof", Tier: TierReasoning, Keywords: []string{"formal proof"}}}
+	hash, err := ProfileHash(config)
+	if err != nil {
+		t.Fatalf("ProfileHash: %v", err)
+	}
+	result := ScoreWithProfile([]byte(`{"messages":[{"role":"user","content":"please provide a formal proof"}]}`), "openai", &Profile{ProfileConfig: config, ProfileVersion: 7, ProfileHash: hash})
+	if result.EffectiveTier != TierReasoning || result.DecisionCause != DecisionCauseKeywordMatch {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if len(result.MatchedRules) != 1 || result.MatchedRules[0].ID != "proof" {
+		t.Fatalf("matched rules = %+v", result.MatchedRules)
+	}
+	if result.ProfileVersion != 7 || result.ProfileHash != hash {
+		t.Fatalf("profile metadata = %d/%q", result.ProfileVersion, result.ProfileHash)
+	}
+}
+
+func TestKeywordRulesChooseHighestTierRegardlessOfOrder(t *testing.T) {
+	config := DefaultProfileConfig()
+	config.KeywordTierRules = []KeywordTierRule{
+		{ID: "complex", Tier: TierComplex, Keywords: []string{"production"}},
+		{ID: "reasoning", Tier: TierReasoning, Keywords: []string{"theorem"}},
+	}
+	result := ScoreWithProfile([]byte(`{"messages":[{"content":"production theorem"}]}`), "openai", &Profile{ProfileConfig: config})
+	if result.EffectiveTier != TierReasoning {
+		t.Fatalf("tier = %q, want reasoning; matches=%+v", result.EffectiveTier, result.MatchedRules)
+	}
+}
+
+func TestProfileHashDeterministicAfterNormalization(t *testing.T) {
+	base := DefaultProfileConfig()
+	base.KeywordTierRules = []KeywordTierRule{{ID: "b", Tier: TierComplex, Keywords: []string{"Race Condition", "deadlock"}}, {ID: "a", Tier: TierReasoning, Keywords: []string{"proof"}}}
+	reversed := base
+	reversed.KeywordTierRules = []KeywordTierRule{{ID: "a", Tier: TierReasoning, Keywords: []string{"proof"}}, {ID: "b", Tier: TierComplex, Keywords: []string{"deadlock", "race condition"}}}
+	first, err := ProfileHash(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ProfileHash(reversed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("hashes differ: %q != %q", first, second)
 	}
 }

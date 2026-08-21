@@ -422,6 +422,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/auto-routers/:id", s.mgmt.GetAutoRouter)
 		mgmt.PUT("/auto-routers/:id", s.mgmt.UpdateAutoRouter)
 		mgmt.DELETE("/auto-routers/:id", s.mgmt.DeleteAutoRouter)
+		// Sub-routes for the per-router scoring profile (GET/PUT) and the
+		// persisted decision explainability feed (GET). PG-only, return 503
+		// when not configured, mirroring the parent router endpoints.
+		mgmt.GET("/auto-routers/:id/profile", s.mgmt.GetAutoRouterProfile)
+		mgmt.PUT("/auto-routers/:id/profile", s.mgmt.UpdateAutoRouterProfile)
+		mgmt.GET("/auto-routers/:id/decisions", s.mgmt.ListAutoRouterDecisions)
 
 		// PG-backed management API tokens: gate access to the /v0/management
 		// REST surface with per-token policy (read/write scope, per-endpoint

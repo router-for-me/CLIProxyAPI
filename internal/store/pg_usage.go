@@ -46,7 +46,29 @@ type UsageEvent struct {
 	Tier string `json:"tier,omitempty"`
 	// RouterID stores the Auto Router id (e.g. "router:smart") that owned the
 	// tier decision. Empty for non-routed requests.
-	RouterID            string  `json:"router_id,omitempty"`
+	RouterID string `json:"router_id,omitempty"`
+	// ScoredTier is the tier the scorer derived from the configured thresholds
+	// and weights before any keyword override or mapping fallback. Empty for
+	// non-routed requests.
+	ScoredTier string `json:"scored_tier,omitempty"`
+	// EffectiveTier mirrors Tier but is persisted as its own column for
+	// fast filtering alongside ScoredTier. Empty for non-routed requests.
+	EffectiveTier string `json:"effective_tier,omitempty"`
+	// MappingTier is the tier whose mapping the resolver actually used to
+	// pick a target model. May be lower than the effective tier when the
+	// resolver fell back. Empty for non-routed requests.
+	MappingTier string `json:"mapping_tier,omitempty"`
+	// DecisionCause explains why the effective tier differs from the scored
+	// tier (literal_keyword_match) or matches it (complexity_scorer).
+	DecisionCause string `json:"decision_cause,omitempty"`
+	// ProfileVersion identifies the Auto Router profile version used to score
+	// the request. Zero when the default built-in profile was used.
+	ProfileVersion int64 `json:"profile_version,omitempty"`
+	// ProfileHash identifies the exact profile configuration used.
+	ProfileHash string `json:"profile_hash,omitempty"`
+	// AutoRouterDecision is the marshaled explainability snapshot. Empty
+	// bytes mean "no snapshot" (non-routed requests).
+	AutoRouterDecision  []byte  `json:"auto_router_decision,omitempty"`
 	InputTokens         int64   `json:"input_tokens"`
 	OutputTokens        int64   `json:"output_tokens"`
 	ReasoningTokens     int64   `json:"reasoning_tokens"`
@@ -140,6 +162,44 @@ type AutoRouterModelStat struct {
 	TotalTokens   int64   `json:"total_tokens"`
 	CostUSD       float64 `json:"cost_usd"`
 	AvgCostPerReq float64 `json:"avg_cost_per_request"`
+}
+
+// AutoRouterDecisionFilter narrows the auto-router decisions listing. Empty
+// fields mean "no constraint". RouterID is required by the management
+// endpoint; the rest are optional and stack.
+type AutoRouterDecisionFilter struct {
+	APIKeyID      string
+	ScoredTier    string
+	EffectiveTier string
+	MappingTier   string
+	DecisionCause string
+	TargetModel   string
+	ProfileHash   string
+	From          time.Time
+	To            time.Time
+}
+
+// AutoRouterDecisionRow is one explainability record returned by
+// ListAutoRouterDecisions. It carries the persisted snapshot fields plus the
+// minimal request metadata needed to reconcile against usage_events.
+type AutoRouterDecisionRow struct {
+	ID                 int64           `json:"id"`
+	RequestedAt        time.Time       `json:"requested_at"`
+	RequestID          string          `json:"request_id,omitempty"`
+	APIKeyID           string          `json:"api_key_id,omitempty"`
+	Model              string          `json:"model"`
+	Alias              string          `json:"alias,omitempty"`
+	ScoredTier         string          `json:"scored_tier,omitempty"`
+	EffectiveTier      string          `json:"effective_tier,omitempty"`
+	MappingTier        string          `json:"mapping_tier,omitempty"`
+	DecisionCause      string          `json:"decision_cause,omitempty"`
+	ProfileVersion     int64           `json:"profile_version,omitempty"`
+	ProfileHash        string          `json:"profile_hash,omitempty"`
+	AutoRouterDecision json.RawMessage `json:"auto_router_decision,omitempty"`
+	InputTokens        int64           `json:"input_tokens"`
+	OutputTokens       int64           `json:"output_tokens"`
+	TotalTokens        int64           `json:"total_tokens"`
+	CostUSD            float64         `json:"cost_usd"`
 }
 
 // UsageWindow mirrors a row in usage_windows and is used both for budget
@@ -237,10 +297,12 @@ func (s *UsageStore) PricingTable() string {
 const usageEventColumnList = `
 	request_id, api_key_id, api_key_principal, user_id, provider, executor_type, model,
 	alias, endpoint, client_ip, forwarded_for, auth_type, source, reasoning_effort, service_tier,
-	response_service_tier, tier, router_id, input_tokens, output_tokens, reasoning_tokens,
+	response_service_tier, tier, router_id, scored_tier, effective_tier, mapping_tier, decision_cause,
+	profile_version, profile_hash, auto_router_decision, input_tokens, output_tokens, reasoning_tokens,
 	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, discount_pct, original_cost_usd, latency_ms,
 	ttft_ms, failed, fail_status_code, generate, requested_at
 `
+const usageEventColumnCount = 40
 
 // InsertEvent records a single usage event. The api_key_principal field is
 // sealed at rest via the configured Sealer before being bound. When the
@@ -262,7 +324,7 @@ func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (%s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-			$26, $27, $28, $29, $30, $31, $32, $33)
+			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40)
 	`, s.eventsTable, usageEventColumnList),
 		e.RequestID, nullableString(e.APIKeyID), nullableString(principal),
 		nullableString(e.UserID),
@@ -271,6 +333,8 @@ func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 		e.AuthType,
 		e.Source, e.ReasoningEffort, e.ServiceTier, e.ResponseServiceTier,
 		nullableString(e.Tier), nullableString(e.RouterID),
+		nullableString(e.ScoredTier), nullableString(e.EffectiveTier), nullableString(e.MappingTier), nullableString(e.DecisionCause),
+		nullableInt64(e.ProfileVersion), nullableString(e.ProfileHash), nullableJSONB(e.AutoRouterDecision),
 		e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.CachedTokens,
 		e.CacheCreationTokens, e.TotalTokens, e.CostUSD, e.DiscountPct, e.OriginalCostUSD, e.LatencyMs, e.TTFTMs,
 		e.Failed, e.FailStatusCode, e.Generate, e.RequestedAt,
@@ -297,18 +361,18 @@ func (s *UsageStore) BatchInsertEvents(ctx context.Context, events []UsageEvent)
 	b.WriteString(" (")
 	b.WriteString(usageEventColumnList)
 	b.WriteString(") VALUES ")
-	args := make([]any, 0, len(events)*33)
+	args := make([]any, 0, len(events)*usageEventColumnCount)
 	for i, ev := range events {
 		if i > 0 {
 			b.WriteByte(',')
 		}
 		b.WriteByte('(')
-		for j := 1; j <= 33; j++ {
+		for j := 1; j <= usageEventColumnCount; j++ {
 			if j > 1 {
 				b.WriteByte(',')
 			}
 			b.WriteByte('$')
-			b.WriteString(itoa(i*33 + j))
+			b.WriteString(itoa(i*usageEventColumnCount + j))
 		}
 		b.WriteByte(')')
 		if ev.RequestedAt.IsZero() {
@@ -368,18 +432,18 @@ func (s *UsageStore) ImportLiteLLMSpendLogs(ctx context.Context, events []UsageE
 		b.WriteString(" (")
 		b.WriteString(usageEventColumnList)
 		b.WriteString(") VALUES ")
-		args := make([]any, 0, len(chunk)*33)
+		args := make([]any, 0, len(chunk)*usageEventColumnCount)
 		for i, ev := range chunk {
 			if i > 0 {
 				b.WriteByte(',')
 			}
 			b.WriteByte('(')
-			for j := 1; j <= 33; j++ {
+			for j := 1; j <= usageEventColumnCount; j++ {
 				if j > 1 {
 					b.WriteByte(',')
 				}
 				b.WriteByte('$')
-				b.WriteString(itoa(i*33 + j))
+				b.WriteString(itoa(i*usageEventColumnCount + j))
 			}
 			b.WriteByte(')')
 			if ev.RequestedAt.IsZero() {
@@ -397,6 +461,8 @@ func (s *UsageStore) ImportLiteLLMSpendLogs(ctx context.Context, events []UsageE
 				ev.AuthType,
 				ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
 				nullableString(ev.Tier), nullableString(ev.RouterID),
+				nullableString(ev.ScoredTier), nullableString(ev.EffectiveTier), nullableString(ev.MappingTier), nullableString(ev.DecisionCause),
+				nullableInt64(ev.ProfileVersion), nullableString(ev.ProfileHash), nullableJSONB(ev.AutoRouterDecision),
 				ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
 				ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
 				ev.Failed, ev.FailStatusCode, ev.Generate, ev.RequestedAt)
@@ -1067,9 +1133,19 @@ func nullableString(s string) any {
 	return s
 }
 
-// MarshalModelsHelper exists so internal/store does not import testing-only
-// json helpers; package-internal callers can reuse the pattern.
-var _ = json.Marshal
+func nullableInt64(v int64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
+}
+
+func nullableJSONB(raw []byte) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	return string(raw)
+}
 
 // UsageTimeSeriesPoint is one bucket in a time-series query.
 type UsageTimeSeriesPoint struct {
@@ -1695,6 +1771,110 @@ func (s *UsageStore) SelectFilterOptions(ctx context.Context, filter UsageFilter
 // to usage_events (e.g. router_id) must be filtered by the caller's own query
 // instead of being widened into this shared clause.
 //
+// ListAutoRouterDecisions returns a page of decision-snapshot rows for one
+// router. It is the explainability companion of SelectAutoRouterTierStats /
+// SelectAutoRouterModelStats: every event returned carries the persisted
+// auto_router_decision JSONB plus the persisted tier fields, so an operator
+// can reconstruct what the scorer saw without needing the live profile. The
+// full-text prompt is intentionally NOT projected.
+//
+// routerID is required; filter fields are AND-ed and empty means "no
+// constraint". Pagination mirrors SelectEvents: a COUNT(*) runs first so the
+// pager math is correct even when the page is empty.
+func (s *UsageStore) ListAutoRouterDecisions(ctx context.Context, routerID string, filter AutoRouterDecisionFilter, page, pageSize int) ([]AutoRouterDecisionRow, int64, error) {
+	if s == nil || s.db == nil {
+		return nil, 0, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	routerID = strings.TrimSpace(routerID)
+	if routerID == "" {
+		return nil, 0, fmt.Errorf("postgres store: list auto router decisions: router_id is required")
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 25
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+	where, args := buildAutoRouterDecisionWhere(routerID, filter)
+	var total int64
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+s.eventsTable+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("postgres store: count auto router decisions: %w", err)
+	}
+	args = append(args, pageSize, (page-1)*pageSize)
+	limitClause := fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)-1, len(args))
+	query := `SELECT id, requested_at, COALESCE(request_id, ''), COALESCE(api_key_id, ''),
+		model, COALESCE(alias, ''), COALESCE(scored_tier, ''), COALESCE(effective_tier, ''),
+		COALESCE(mapping_tier, ''), COALESCE(decision_cause, ''), COALESCE(profile_version, 0),
+		COALESCE(profile_hash, ''), auto_router_decision,
+		input_tokens, output_tokens, total_tokens, cost_usd
+		FROM ` + s.eventsTable + where + " ORDER BY requested_at DESC, id DESC" + limitClause
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("postgres store: select auto router decisions: %w", err)
+	}
+	defer rows.Close()
+	out := make([]AutoRouterDecisionRow, 0, pageSize)
+	for rows.Next() {
+		var (
+			r        AutoRouterDecisionRow
+			snapshot []byte
+			at       time.Time
+		)
+		if err := rows.Scan(&r.ID, &at, &r.RequestID, &r.APIKeyID, &r.Model, &r.Alias,
+			&r.ScoredTier, &r.EffectiveTier, &r.MappingTier, &r.DecisionCause,
+			&r.ProfileVersion, &r.ProfileHash, &snapshot,
+			&r.InputTokens, &r.OutputTokens, &r.TotalTokens, &r.CostUSD); err != nil {
+			return nil, 0, fmt.Errorf("postgres store: scan auto router decision: %w", err)
+		}
+		r.RequestedAt = at.UTC()
+		if len(snapshot) > 0 {
+			r.AutoRouterDecision = append(json.RawMessage(nil), snapshot...)
+		}
+		out = append(out, r)
+	}
+	return out, total, rows.Err()
+}
+
+// buildAutoRouterDecisionWhere assembles a router-scoped WHERE clause that
+// AND-s every non-empty AutoRouterDecisionFilter field. The router id is
+// always required and is the first positional parameter.
+func buildAutoRouterDecisionWhere(routerID string, filter AutoRouterDecisionFilter) (string, []any) {
+	var b strings.Builder
+	b.WriteString(" WHERE router_id = $1 AND router_id IS NOT NULL AND router_id <> ''")
+	args := []any{routerID}
+	add := func(column, value string) {
+		if value == "" {
+			return
+		}
+		args = append(args, value)
+		b.WriteString(" AND ")
+		b.WriteString(column)
+		b.WriteString(" = $")
+		b.WriteString(itoa(len(args)))
+	}
+	add("api_key_id", filter.APIKeyID)
+	add("scored_tier", filter.ScoredTier)
+	add("effective_tier", filter.EffectiveTier)
+	add("mapping_tier", filter.MappingTier)
+	add("decision_cause", filter.DecisionCause)
+	add("model", filter.TargetModel)
+	add("profile_hash", filter.ProfileHash)
+	if !filter.From.IsZero() {
+		args = append(args, filter.From)
+		b.WriteString(" AND requested_at >= $")
+		b.WriteString(itoa(len(args)))
+	}
+	if !filter.To.IsZero() {
+		args = append(args, filter.To)
+		b.WriteString(" AND requested_at < $")
+		b.WriteString(itoa(len(args)))
+	}
+	return b.String(), args
+}
+
 // The Principal field is intentionally NOT applied: api_key_principal is
 // sealed at rest and cannot be matched against a plaintext WHERE value.
 // Operators should filter via APIKeyID (resolved in the dashboard from the

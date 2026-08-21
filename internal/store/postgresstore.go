@@ -48,6 +48,7 @@ const (
 	defaultUpstreamSyncLogTable          = "upstream_sync_log"
 	defaultModelGroupsTable              = "model_groups"
 	defaultAutoRoutersTable              = "auto_routers"
+	defaultAutoRouterProfilesTable       = "auto_router_profiles"
 	defaultModelHealthTable              = "model_health"
 	defaultModelHealthLogTable           = "model_health_log"
 	defaultModelHealthSettingsTable      = "model_health_settings"
@@ -188,6 +189,9 @@ type PostgresStoreConfig struct {
 	// scores requests and forwards them to a tier-appropriate model). Multiple
 	// routers are supported, each with a unique name and requestable model_id.
 	AutoRoutersTable string
+	// AutoRouterProfilesTable stores one active, versioned scoring profile per
+	// Auto Router. Empty uses auto_router_profiles.
+	AutoRouterProfilesTable string
 
 	// ModelHealthTable stores the latest health-check snapshot for each model
 	// id (one row per model). Updated in place on every sweep; surfaced on the
@@ -336,6 +340,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.AutoRoutersTable == "" {
 		cfg.AutoRoutersTable = defaultAutoRoutersTable
+	}
+	if cfg.AutoRouterProfilesTable == "" {
+		cfg.AutoRouterProfilesTable = defaultAutoRouterProfilesTable
 	}
 	if cfg.ModelHealthTable == "" {
 		cfg.ModelHealthTable = defaultModelHealthTable
@@ -948,6 +955,37 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS router_id TEXT`, usageEventsTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: alter usage_events add router_id: %w", err)
+	}
+	// decision explainability columns: scored/effective/mapping tiers, the
+	// decision cause (literal_keyword_match | complexity_scorer), and the
+	// active profile identity. Auto Router Decision snapshot is a JSONB blob
+	// carrying the full per-request decision. Idempotent so older deployments
+	// pick the columns up on next boot without rebuild.
+	for _, col := range []struct {
+		name string
+		def  string
+	}{
+		{"scored_tier", "TEXT"},
+		{"effective_tier", "TEXT"},
+		{"mapping_tier", "TEXT"},
+		{"decision_cause", "TEXT"},
+		{"profile_version", "BIGINT"},
+		{"profile_hash", "TEXT"},
+		{"auto_router_decision", "JSONB"},
+	} {
+		def := col.def
+		if col.name == "auto_router_decision" {
+			def = "JSONB"
+		}
+		statement := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s`, usageEventsTable, col.name, def)
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("postgres store: alter usage_events add %s: %w", col.name, err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_usage_events_router_effective ON %s(router_id, effective_tier, requested_at) WHERE router_id IS NOT NULL`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create usage_events router+effective index: %w", err)
 	}
 	// Backfill the discount_pct column on usage_events. Stamped by the usage
 	// flusher with the resolved model-group discount percentage (0-100; 0/NULL
@@ -1693,14 +1731,31 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		return fmt.Errorf("postgres store: alter auto_routers add vision_bridge_model: %w", err)
 	}
 
+	// auto_router_profiles stores one active scoring policy per Auto Router.
+	// JSONB fields retain the operator-editable thresholds, scorer weights, and
+	// deterministic literal keyword rules; profile_version/hash identify the
+	// exact policy used by new requests.
+	autoRouterProfilesTable := s.fullTableName(s.cfg.AutoRouterProfilesTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			router_id           TEXT PRIMARY KEY REFERENCES %s(id) ON DELETE CASCADE,
+			profile_version    BIGINT NOT NULL DEFAULT 1,
+			profile_hash       TEXT NOT NULL,
+			thresholds         JSONB NOT NULL,
+			weights            JSONB NOT NULL,
+			keyword_tier_rules JSONB NOT NULL DEFAULT '[]'::jsonb,
+			updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, autoRouterProfilesTable, autoRoutersTable)); err != nil {
+		return fmt.Errorf("postgres store: create auto_router_profiles table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_auto_router_profiles_hash ON %s(profile_hash)`, autoRouterProfilesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create auto_router_profiles hash index: %w", err)
+	}
+
 	// model_health stores the latest health-check snapshot for each model id
-	// (one row per model). Updated in place on every sweep. Surfaced on the
-	// Analysis → Model Health page and through the public
-	// /v0/model-health/uptime endpoint.
-	// prompt_message/completion carry the actual request/response text of the
-	// last probe (AES-GCM-sealed at rest; see ModelHealthStore).
-	// upstream_provider/upstream_auth_id/upstream_model record which credential
-	// and resolved model served the probe.
 	modelHealthTable := s.fullTableName(s.cfg.ModelHealthTable)
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s (
@@ -2211,6 +2266,15 @@ func (s *PostgresStore) AutoRoutersTable() string {
 		return quoteIdentifier(defaultAutoRoutersTable)
 	}
 	return s.fullTableName(s.cfg.AutoRoutersTable)
+}
+
+// AutoRouterProfilesTable returns the fully-qualified name of the
+// auto_router_profiles table containing one active scoring profile per router.
+func (s *PostgresStore) AutoRouterProfilesTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultAutoRouterProfilesTable)
+	}
+	return s.fullTableName(s.cfg.AutoRouterProfilesTable)
 }
 
 // ModelHealthTable returns the fully-qualified name of the model_health table

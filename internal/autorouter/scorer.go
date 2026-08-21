@@ -8,63 +8,133 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// Score inspects the raw request body of an incoming LLM request across seven
-// dimensions and returns the weighted complexity score plus the resulting tier.
-// The body is read with gjson (no struct binding, matching the repo's JSON
-// pipeline) so every supported request format can be handled without parsing.
-//
-// Supported formats (matched on the constant format identifiers):
-//   - constant.OpenAI / OpenaiResponse: "messages" (+ Responses "input"/"instructions")
-//   - constant.Claude: "messages" + "system"
-//   - constant.Gemini / Interactions: "contents[].parts[].text"
-//
-// format may be empty, in which case the presence of known top-level fields is
-// probed to pick a reader.
+// ScoreResult is the result of scoring one request against an optional
+// scoring profile. When Profile is nil the built-in thresholds and weights
+// apply.
+type ScoreResult struct {
+	Score          RequestScore         `json:"score"`
+	EffectiveTier  Tier                 `json:"effective_tier"`
+	DecisionCause  string               `json:"decision_cause"`
+	MatchedRules   []MatchedKeywordRule `json:"matched_rules,omitempty"`
+	ProfileVersion int64                `json:"profile_version"`
+	ProfileHash    string               `json:"profile_hash"`
+	ProfileConfig  ProfileConfig        `json:"profile_config"`
+}
+
+// DecisionCause values emitted in ScoreResult.DecisionCause / snapshot.
+const (
+	DecisionCauseKeywordMatch     = "literal_keyword_match"
+	DecisionCauseComplexityScorer = "complexity_scorer"
+)
+
+// Score inspects the raw request body using the built-in scoring policy. It
+// retains the original RequestScore API for existing callers.
 func Score(rawJSON []byte, format string) RequestScore {
+	return ScoreWithProfile(rawJSON, format, nil).Score
+}
+
+// ScoreWithProfile runs Score using the supplied profile. When profile is nil
+// the built-in thresholds and weights apply, which preserves the historical
+// behavior for callers that have not yet been migrated.
+func ScoreWithProfile(rawJSON []byte, format string, profile *Profile) ScoreResult {
+	config := DefaultProfileConfig()
+	hash := ""
+	version := int64(1)
+	if profile != nil {
+		config = profile.ProfileConfig
+		hash = profile.ProfileHash
+		version = profile.ProfileVersion
+	}
 	text := extractText(rawJSON, format)
 	fields := scoreDimensions(text)
+	weights := config.Weights
+	if weights == nil {
+		weights = DefaultWeights
+	}
 	total := 0.0
 	norm := 0.0
 	for _, f := range []ScoreField{
 		FieldTokens, FieldCode, FieldReasoningMark, FieldTechnicalTerms,
 		FieldMultiStep, FieldQuestion,
 	} {
-		total += fields[f] * DefaultWeights[f]
-		norm += DefaultWeights[f]
+		weight, ok := weights[f]
+		if !ok {
+			weight = DefaultWeights[f]
+		}
+		total += fields[f] * weight
+		norm += weight
 	}
-	// Simple indicators act as a penalty: a request full of greetings/trivial
-	// phrasing is easier, so its positive sub-score subtracts from the total.
-	total -= fields[FieldSimpleIndic] * DefaultWeights[FieldSimpleIndic]
+	simpleWeight, ok := weights[FieldSimpleIndic]
+	if !ok {
+		simpleWeight = DefaultWeights[FieldSimpleIndic]
+	}
+	total -= fields[FieldSimpleIndic] * simpleWeight
 	if norm > 0 {
 		total /= norm
 	}
 	total = clamp01(total)
 	markers := countReasoningMarkers(text)
-	tier := tierFor(total, markers)
-	return RequestScore{
-		Fields:           fields,
-		Total:            total,
-		ReasoningMarkers: markers,
-		Tier:             tier,
+	scoredTier := tierFor(total, markers, config.Thresholds)
+	matched := matchedKeywordRules(text, config.KeywordTierRules)
+	effective := scoredTier
+	cause := DecisionCauseComplexityScorer
+	if len(matched) > 0 {
+		effective = scoredTier
+		cause = DecisionCauseComplexityScorer
+		for _, rule := range matched {
+			if tierIndex(rule.Tier) > tierIndex(effective) {
+				effective = rule.Tier
+			}
+		}
+		if effective != scoredTier {
+			cause = DecisionCauseKeywordMatch
+		}
+	}
+	return ScoreResult{
+		Score: RequestScore{
+			Fields:           fields,
+			Total:            total,
+			ReasoningMarkers: markers,
+			Tier:             effective,
+		},
+		EffectiveTier:  effective,
+		DecisionCause:  cause,
+		MatchedRules:   matched,
+		ProfileVersion: version,
+		ProfileHash:    hash,
+		ProfileConfig:  config,
 	}
 }
 
 // tierFor maps a weighted total and reasoning-marker count to a tier. Two or
 // more independent reasoning markers force REASONING regardless of the score.
-func tierFor(total float64, reasonerMarkers int) Tier {
+func tierFor(total float64, reasonerMarkers int, configured ...TierThresholds) Tier {
+	thresholds := TierThresholds{SimpleMax: SimpleMax, MediumMax: MediumMax, ComplexMax: ComplexMax}
+	if len(configured) > 0 {
+		thresholds = configured[0]
+	}
 	if reasonerMarkers >= ReasonerMarkerThreshold {
 		return TierReasoning
 	}
 	switch {
-	case total < SimpleMax:
+	case total < thresholds.SimpleMax:
 		return TierSimple
-	case total < MediumMax:
+	case total < thresholds.MediumMax:
 		return TierMedium
-	case total <= ComplexMax:
+	case total <= thresholds.ComplexMax:
 		return TierComplex
 	default:
 		return TierReasoning
 	}
+}
+
+func tierIndex(t Tier) int {
+	for i, candidate := range TierOrder {
+		if candidate == t {
+			return i
+		}
+	}
+	return -1
 }
 
 // extractMessageString renders a single message content value (a plain string

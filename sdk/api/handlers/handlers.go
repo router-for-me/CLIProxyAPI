@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
@@ -328,6 +329,10 @@ type BaseAPIHandler struct {
 	// no Auto Router matching occurs and requests use normal model-to-provider
 	// routing.
 	AutoRouterResolver AutoRouterResolver
+
+	// AutoRouterProfileResolver optionally loads the versioned scoring profile
+	// for a router. When nil the scorer uses built-in defaults.
+	AutoRouterProfileResolver AutoRouterProfileResolver
 }
 
 // ModelsCatalogResolver resolves an internal provider key to the official
@@ -341,6 +346,12 @@ type ModelsCatalogResolver interface {
 // model id in the model catalog. Returns nil when no override is set.
 type GlobalModelRouteResolver interface {
 	GlobalModelRoute(ctx context.Context, modelID string) *store.ModelRoute
+}
+
+// AutoRouterProfileResolver is an optional extension implemented by the PG
+// resolver when versioned per-router scoring profiles are available.
+type AutoRouterProfileResolver interface {
+	AutoRouterProfile(ctx context.Context, routerID string) *autorouter.Profile
 }
 
 // AutoRouterResolver resolves an Auto Router definition by its client-facing
@@ -381,6 +392,11 @@ func (h *BaseAPIHandler) SetAutoRouterResolver(r AutoRouterResolver) {
 		return
 	}
 	h.AutoRouterResolver = r
+	if profileResolver, ok := r.(AutoRouterProfileResolver); ok {
+		h.AutoRouterProfileResolver = profileResolver
+	} else {
+		h.AutoRouterProfileResolver = nil
+	}
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.

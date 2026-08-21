@@ -91,6 +91,11 @@ type PgStoreHandles struct {
 	// tier-appropriate model). nil when PG is not configured — the
 	// /auto-routers routes return 503 in that case.
 	AutoRouters *store.AutoRouterStore
+	// AutoRouterProfiles is the PG-backed store for per-router scoring
+	// profiles (thresholds + weights + keyword rules). nil when PG is not
+	// configured — the /auto-routers/:id/profile and /decisions endpoints
+	// return 503 in that case.
+	AutoRouterProfiles *store.AutoRouterProfileStore
 	// ModelHealth is the PG-backed store for model health-check snapshots +
 	// history + operator settings (Analysis → Model Health page + the public
 	// /v0/model-health/uptime endpoint). nil when PG is not configured — the

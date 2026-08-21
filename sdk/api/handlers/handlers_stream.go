@@ -9,7 +9,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"golang.org/x/net/context"
@@ -255,7 +254,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		resolvedAR = rr
 		executionModel = resolvedAR.targetModel
 		autoRoute = resolvedAR.route
-		ctx = coreusage.WithRouterTier(ctx, resolvedAR.tier, resolvedAR.routerID)
+		ctx = resolvedAR.withDecisionContext(ctx)
 	}
 	if resolvedAR.matched {
 		rawJSON = h.autoRouterRequestAdjustments(ctx, resolvedAR, rawJSON)

@@ -41,6 +41,12 @@ type UsageReporter struct {
 	serviceTier     string
 	tier            string
 	routerID        string
+	scoredTier      string
+	mappingTier     string
+	decisionCause   string
+	profileVersion  int64
+	profileHash     string
+	decisionJSON    []byte
 	generate        bool
 	// requestID is the per-request correlation identifier sourced from the
 	// logging context. Persisted on usage_events/usage_errors so a row can be
@@ -77,21 +83,27 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	}
 	clientIP, forwardedFor := clientInfoFromContext(ctx)
 	reporter := &UsageReporter{
-		provider:     provider,
-		model:        model,
-		alias:        strings.TrimSpace(alias),
-		clientIP:     clientIP,
-		forwardedFor: forwardedFor,
-		requestedAt:  time.Now(),
-		apiKey:       apiKey,
-		source:       resolveUsageSource(auth, apiKey),
-		authType:     resolveUsageAuthType(auth),
-		reasoning:    usage.ReasoningEffortFromContext(ctx),
-		serviceTier:  usage.ServiceTierFromContext(ctx),
-		tier:         usage.RouterTierFromContext(ctx),
-		routerID:     usage.RouterIDFromContext(ctx),
-		generate:     usage.GenerateFromContext(ctx),
-		requestID:    internallogging.GetRequestID(ctx),
+		provider:       provider,
+		model:          model,
+		alias:          strings.TrimSpace(alias),
+		clientIP:       clientIP,
+		forwardedFor:   forwardedFor,
+		requestedAt:    time.Now(),
+		apiKey:         apiKey,
+		source:         resolveUsageSource(auth, apiKey),
+		authType:       resolveUsageAuthType(auth),
+		reasoning:      usage.ReasoningEffortFromContext(ctx),
+		serviceTier:    usage.ServiceTierFromContext(ctx),
+		tier:           usage.RouterTierFromContext(ctx),
+		routerID:       usage.RouterIDFromContext(ctx),
+		scoredTier:     func() string { v, _, _, _, _, _ := usage.AutoRouterDecisionFromContext(ctx); return v }(),
+		mappingTier:    func() string { _, v, _, _, _, _ := usage.AutoRouterDecisionFromContext(ctx); return v }(),
+		decisionCause:  func() string { _, _, v, _, _, _ := usage.AutoRouterDecisionFromContext(ctx); return v }(),
+		profileVersion: func() int64 { _, _, _, v, _, _ := usage.AutoRouterDecisionFromContext(ctx); return v }(),
+		profileHash:    func() string { _, _, _, _, v, _ := usage.AutoRouterDecisionFromContext(ctx); return v }(),
+		decisionJSON:   func() []byte { _, _, _, _, _, v := usage.AutoRouterDecisionFromContext(ctx); return v }(),
+		generate:       usage.GenerateFromContext(ctx),
+		requestID:      internallogging.GetRequestID(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -387,33 +399,39 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
 	}
 	return usage.Record{
-		Provider:            r.provider,
-		ExecutorType:        r.executorType,
-		Model:               model,
-		Alias:               r.alias,
-		RouteModel:          r.routeModel,
-		Endpoint:            r.endpoint,
-		ClientIP:            r.clientIP,
-		ForwardedFor:        r.forwardedFor,
-		Source:              r.source,
-		APIKey:              r.apiKey,
-		RequestID:           r.requestID,
-		AuthID:              r.authID,
-		AuthIndex:           r.authIndex,
-		AccessTokenSHA256:   r.accessTokenFingerprint(),
-		AuthType:            r.authType,
-		ReasoningEffort:     r.reasoning,
-		ServiceTier:         r.serviceTier,
-		Tier:                r.tier,
-		RouterID:            r.routerID,
-		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
-		Generate:            usage.GenerateFlag(r.generate),
-		RequestedAt:         r.requestedAt,
-		Latency:             r.latency(),
-		TTFT:                r.ttftDuration(),
-		Failed:              failed,
-		Fail:                fail,
-		Detail:              detail,
+		Provider:                 r.provider,
+		ExecutorType:             r.executorType,
+		Model:                    model,
+		Alias:                    r.alias,
+		RouteModel:               r.routeModel,
+		Endpoint:                 r.endpoint,
+		ClientIP:                 r.clientIP,
+		ForwardedFor:             r.forwardedFor,
+		Source:                   r.source,
+		APIKey:                   r.apiKey,
+		RequestID:                r.requestID,
+		AuthID:                   r.authID,
+		AuthIndex:                r.authIndex,
+		AccessTokenSHA256:        r.accessTokenFingerprint(),
+		AuthType:                 r.authType,
+		ReasoningEffort:          r.reasoning,
+		ServiceTier:              r.serviceTier,
+		Tier:                     r.tier,
+		RouterID:                 r.routerID,
+		AutoRouterScoredTier:     r.scoredTier,
+		AutoRouterMappingTier:    r.mappingTier,
+		AutoRouterDecisionCause:  r.decisionCause,
+		AutoRouterProfileVersion: r.profileVersion,
+		AutoRouterProfileHash:    r.profileHash,
+		AutoRouterDecisionJSON:   append([]byte(nil), r.decisionJSON...),
+		ResponseServiceTier:      strings.TrimSpace(detail.ResponseServiceTier),
+		Generate:                 usage.GenerateFlag(r.generate),
+		RequestedAt:              r.requestedAt,
+		Latency:                  r.latency(),
+		TTFT:                     r.ttftDuration(),
+		Failed:                   failed,
+		Fail:                     fail,
+		Detail:                   detail,
 	}
 }
 
