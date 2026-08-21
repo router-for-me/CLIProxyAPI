@@ -864,7 +864,7 @@ func TestHostApplyConfigDefersActiveUpdateUntilRestart(t *testing.T) {
 	if !h.PluginLoaded("alpha") {
 		t.Fatal("PluginLoaded(alpha) = false after disabling plugins, want retained library")
 	}
-	if !h.DeferPluginUpdateUntilRestart("alpha", paths["2.0.0"], "2.0.0", false) {
+	if deferred, _ := h.DeferPluginUpdateUntilRestart("alpha", paths["2.0.0"], "2.0.0", false); !deferred {
 		t.Fatal("DeferPluginUpdateUntilRestart() = false, want true for staged v2 while v1 is retained")
 	}
 
@@ -939,7 +939,7 @@ func TestHostCleanupKeepsDeferredPluginArtifact(t *testing.T) {
 	h.mu.Lock()
 	h.cleanupFilesPending = true
 	h.mu.Unlock()
-	if !h.DeferPluginUpdateUntilRestart("alpha", paths["2.0.0"], "2.0.0", false) {
+	if deferred, _ := h.DeferPluginUpdateUntilRestart("alpha", paths["2.0.0"], "2.0.0", false); !deferred {
 		t.Fatal("DeferPluginUpdateUntilRestart() = false, want true for staged update")
 	}
 	paths["2.0.0"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
@@ -966,7 +966,7 @@ func TestHostDeferPluginUpdateFreshInstallDoesNotRequireRestart(t *testing.T) {
 	})
 	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0")
 	h := NewForTest(loader)
-	if h.DeferPluginUpdateUntilRestart("alpha", paths["1.0.0"], "1.0.0", true) {
+	if deferred, _ := h.DeferPluginUpdateUntilRestart("alpha", paths["1.0.0"], "1.0.0", true); deferred {
 		t.Fatal("fresh install was marked restart-required before any active plugin existed")
 	}
 	h.ApplyConfig(context.Background(), &config.Config{
@@ -1012,7 +1012,7 @@ func TestHostDeferPluginUpdateSameIdentityUsesContentChange(t *testing.T) {
 			}
 			h := NewForTest(loader)
 			h.ApplyConfig(context.Background(), cfg)
-			if got := h.DeferPluginUpdateUntilRestart("alpha", paths["1.0.0"], "1.0.0", tt.contentChanged); got != tt.wantRestart {
+			if got, _ := h.DeferPluginUpdateUntilRestart("alpha", paths["1.0.0"], "1.0.0", tt.contentChanged); got != tt.wantRestart {
 				t.Fatalf("DeferPluginUpdateUntilRestart() = %v, want %v", got, tt.wantRestart)
 			}
 			h.ApplyConfig(context.Background(), cfg)
@@ -1065,10 +1065,10 @@ func TestHostDeferPluginUpdatePreservesPendingDeferralForSameIdentity(t *testing
 
 	h := NewForTest(loader)
 	h.ApplyConfig(context.Background(), configForVersion("1.0.0"))
-	if !h.DeferPluginUpdateUntilRestart("alpha", paths["2.0.0"], "2.0.0", false) {
+	if deferred, _ := h.DeferPluginUpdateUntilRestart("alpha", paths["2.0.0"], "2.0.0", false); !deferred {
 		t.Fatal("initial deferred update = false, want true")
 	}
-	if !h.DeferPluginUpdateUntilRestart("alpha", paths["1.0.0"], "1.0.0", false) {
+	if deferred, _ := h.DeferPluginUpdateUntilRestart("alpha", paths["1.0.0"], "1.0.0", false); !deferred {
 		t.Fatal("same-identity follow-up = false, want true while an update remains deferred")
 	}
 
@@ -1082,6 +1082,93 @@ func TestHostDeferPluginUpdatePreservesPendingDeferralForSameIdentity(t *testing
 	}
 	if openCalls, active := loader.stats(); openCalls != 1 || !active {
 		t.Fatalf("exclusive loader state = calls %d active %v, want one active v1 client", openCalls, active)
+	}
+	h.ShutdownAll()
+}
+
+func TestHostPreparePluginUpdateReportsMarkerOwnership(t *testing.T) {
+	loader := newExclusiveTestLoader(map[string]*testPlugin{
+		"1.0.0": {
+			registerResult:    validTestPlugin("alpha-v1"),
+			reconfigureResult: validTestPlugin("alpha-v1"),
+		},
+	})
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0")
+	h := NewForTest(loader)
+	h.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: enabledPluginConfigs("alpha"),
+	}})
+
+	if deferred, created := h.PreparePluginUpdate("alpha"); !deferred || !created {
+		t.Fatalf("first PreparePluginUpdate() = deferred:%v created:%v, want true,true", deferred, created)
+	}
+	if deferred, created := h.PreparePluginUpdate("alpha"); !deferred || created {
+		t.Fatalf("second PreparePluginUpdate() = deferred:%v created:%v, want true,false", deferred, created)
+	}
+	if deferred, created := h.DeferPluginUpdateUntilRestart("alpha", paths["1.0.0"], "1.0.0", false); !deferred || created {
+		t.Fatalf("follow-up DeferPluginUpdateUntilRestart() = deferred:%v created:%v, want true,false", deferred, created)
+	}
+	h.ShutdownAll()
+}
+
+func TestHostCanceledReplacementFallsBackToLoadedIdentity(t *testing.T) {
+	first := newTestSymbolLookup(&testPlugin{
+		registerResult:    validTestPlugin("alpha-v1"),
+		reconfigureResult: validTestPlugin("alpha-v1"),
+	})
+	second := &blockingInitializationClient{
+		started:      make(chan struct{}),
+		release:      make(chan struct{}),
+		registration: validTestPlugin("alpha-v2"),
+	}
+	loader := &countingPluginLoader{client: first, replacement: second}
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0", "2.0.0")
+	configForVersion := func(version string) *config.Config {
+		return &config.Config{Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": enabledPluginConfigWithStoreVersion(t, version),
+			},
+		}}
+	}
+	h := NewForTest(loader)
+	h.ApplyConfig(context.Background(), configForVersion("1.0.0"))
+	paths["2.0.0"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	replacementDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(ctx, configForVersion("2.0.0"))
+		close(replacementDone)
+	}()
+	waitForHostTestSignal(t, second.started, "replacement registration")
+	cancel()
+	waitForHostTestSignal(t, replacementDone, "canceled replacement apply")
+
+	if deferred, created := h.PreparePluginUpdate("alpha"); !deferred || !created {
+		t.Fatalf("PreparePluginUpdate() = deferred:%v created:%v, want true,true", deferred, created)
+	}
+	h.ApplyConfig(context.Background(), configForVersion("2.0.0"))
+	if !h.PluginRegistered("alpha") || !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatal("canceled replacement displaced the registered v1 plugin")
+	}
+	if h.pluginIdentityCurrent("alpha", paths["2.0.0"], "2.0.0") {
+		t.Fatal("canceled replacement became effective before restart")
+	}
+	if got := loader.calls.Load(); got != 2 {
+		t.Fatalf("Open calls = %d, want one initial and one canceled replacement load", got)
+	}
+
+	close(second.release)
+	deadline := time.Now().Add(time.Second)
+	for second.shutdown.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := second.shutdown.Load(); got != 1 {
+		t.Fatalf("canceled replacement shutdown calls = %d, want 1", got)
 	}
 	h.ShutdownAll()
 }
@@ -1407,7 +1494,7 @@ func TestHostDeferPluginUpdateWhilePluginLoading(t *testing.T) {
 	if h.PluginLoaded("alpha") {
 		t.Fatal("PluginLoaded(alpha) = true, want false while plugin is still loading")
 	}
-	if !h.DeferPluginUpdateUntilRestart("alpha", paths["2.0.0"], "2.0.0", false) {
+	if deferred, _ := h.DeferPluginUpdateUntilRestart("alpha", paths["2.0.0"], "2.0.0", false); !deferred {
 		t.Fatal("DeferPluginUpdateUntilRestart() = false, want true while v1 is loading")
 	}
 
@@ -1475,7 +1562,7 @@ func TestHostDeferPluginUpdatePinsUnversionedPluginAfterRegistration(t *testing.
 		close(applyDone)
 	}()
 	waitForHostTestSignal(t, openStarted, "unversioned plugin open start")
-	if !h.DeferPluginUpdateUntilRestart("alpha", versionedPath, "2.0.0", false) {
+	if deferred, _ := h.DeferPluginUpdateUntilRestart("alpha", versionedPath, "2.0.0", false); !deferred {
 		t.Fatal("DeferPluginUpdateUntilRestart() = false, want true while unversioned plugin is loading")
 	}
 
@@ -1555,7 +1642,7 @@ func TestHostDeferPluginUpdatePrefersInFlightReplacement(t *testing.T) {
 		close(replacementDone)
 	}()
 	waitForHostTestSignal(t, openStarted, "replacement plugin open start")
-	if !h.DeferPluginUpdateUntilRestart("alpha", paths["3.0.0"], "3.0.0", false) {
+	if deferred, _ := h.DeferPluginUpdateUntilRestart("alpha", paths["3.0.0"], "3.0.0", false); !deferred {
 		t.Fatal("DeferPluginUpdateUntilRestart() = false, want true while replacement v2 is loading")
 	}
 

@@ -202,62 +202,62 @@ func (h *Host) PluginBusy(id string) bool {
 }
 
 // DeferPluginUpdateUntilRestart keeps an active plugin identity pinned until a
-// fresh host is created. It reports whether the requested artifact differs from
-// the currently effective plugin or changed its bytes in place, and keeps an
-// existing deferral pinned while queued reloads drain.
-func (h *Host) DeferPluginUpdateUntilRestart(id, targetPath, targetVersion string, contentChanged bool) bool {
+// fresh host is created. It returns whether restart is required and whether this
+// call created the deferral marker.
+func (h *Host) DeferPluginUpdateUntilRestart(id, targetPath, targetVersion string, contentChanged bool) (bool, bool) {
 	if h == nil {
-		return false
+		return false, false
 	}
 	id = strings.TrimSpace(id)
 	targetPath = cleanPluginPath(targetPath)
 	targetVersion = strings.TrimSpace(targetVersion)
 	if id == "" || targetPath == "" {
-		return false
+		return false, false
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	activePath, activeVersion := h.pluginIdentityLocked(id)
 	if activePath == "" {
-		return false
+		return false, false
 	}
 	if _, ok := h.deferredPluginUpdates[id]; ok {
-		return true
+		return true, false
 	}
 	if !contentChanged && activePath == targetPath && activeVersion == targetVersion {
-		return false
+		return false, false
 	}
 	if h.deferredPluginUpdates == nil {
 		h.deferredPluginUpdates = make(map[string]deferredPluginIdentity)
 	}
 	h.deferredPluginUpdates[id] = deferredPluginIdentity{path: activePath, version: activeVersion}
-	return true
+	return true, true
 }
 
 // PreparePluginUpdate pins the currently effective plugin before an artifact is
 // written, allowing concurrent config reloads to keep the old library active.
-func (h *Host) PreparePluginUpdate(id string) bool {
+// It returns whether restart is required and whether this call created the marker.
+func (h *Host) PreparePluginUpdate(id string) (bool, bool) {
 	if h == nil {
-		return false
+		return false, false
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return false
+		return false, false
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if _, ok := h.deferredPluginUpdates[id]; ok {
-		return true
+		return true, false
 	}
 	activePath, activeVersion := h.pluginIdentityLocked(id)
 	if activePath == "" {
-		return false
+		return false, false
 	}
 	if h.deferredPluginUpdates == nil {
 		h.deferredPluginUpdates = make(map[string]deferredPluginIdentity)
 	}
 	h.deferredPluginUpdates[id] = deferredPluginIdentity{path: activePath, version: activeVersion}
-	return true
+	return true, true
 }
 
 // ClearDeferredPluginUpdate releases a pending update marker after an explicit
@@ -275,13 +275,13 @@ func (h *Host) ClearDeferredPluginUpdate(id string) {
 	h.mu.Unlock()
 }
 
-// pluginIdentityLocked returns the identity being loaded, or the registered
-// identity when no load is in flight. Callers must hold h.mu.
+// pluginIdentityLocked returns a non-canceled load identity, or the registered
+// identity when no such load is in flight. Callers must hold h.mu.
 func (h *Host) pluginIdentityLocked(id string) (string, string) {
 	if h == nil {
 		return "", ""
 	}
-	if request := h.loading[id]; request != nil {
+	if request := h.loading[id]; request != nil && !request.cleanupStarted {
 		return cleanPluginPath(request.path), strings.TrimSpace(request.version)
 	}
 	if lp := h.loaded[id]; lp != nil {

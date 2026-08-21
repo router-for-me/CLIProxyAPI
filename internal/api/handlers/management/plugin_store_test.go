@@ -1257,6 +1257,78 @@ func TestInstallPluginFromStoreConfigSaveFailureRetainsDeferredUpdate(t *testing
 	}
 }
 
+func TestInstallPluginFromStoreConfigUnavailableRetainsExistingDeferredUpdate(t *testing.T) {
+	pluginsDir := t.TempDir()
+	existingPath := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH, "sample-provider-v0.1.0"+managementPluginExtension(runtime.GOOS))
+	if errMkdir := os.MkdirAll(filepath.Dir(existingPath), 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(existingPath), errMkdir)
+	}
+	if errWrite := os.WriteFile(existingPath, []byte("old-library-data"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", existingPath, errWrite)
+	}
+	archiveData := makeManagementPluginStoreZip(t, "sample-provider"+managementPluginExtension(runtime.GOOS), "new-library-data")
+	archiveName := "sample-provider_0.1.0_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip"
+	checksum := sha256.Sum256(archiveData)
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample-provider": pluginConfigFromYAML(t, "enabled: true\n"),
+				},
+			},
+		},
+		configFilePath:         writeTestConfigFile(t),
+		pluginStoreRegistryURL: "https://registry.example/registry.json",
+	}
+	h.pluginStoreHTTPClient = &mutatingPluginStoreHTTPClient{
+		responses: fakePluginStoreHTTPClient{
+			"https://registry.example/registry.json": registryJSON(t),
+			"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(`{
+				"tag_name": "v0.1.0",
+				"assets": [
+					{"name": "` + archiveName + `", "browser_download_url": "https://downloads.example/` + archiveName + `"},
+					{"name": "checksums.txt", "browser_download_url": "https://downloads.example/checksums.txt"}
+				]
+			}`),
+			"https://downloads.example/" + archiveName: archiveData,
+			"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
+		},
+		mutate: func() {
+			h.mu.Lock()
+			h.cfg = nil
+			h.mu.Unlock()
+		},
+	}
+	deferredUpdate := &recordingPluginUpdateDeferrer{restart: true}
+	h.pluginUpdateDeferrer = deferredUpdate
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install", nil)
+
+	h.InstallPluginFromStore(c)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "config_unavailable") {
+		t.Fatalf("body = %s, want config_unavailable", rec.Body.String())
+	}
+	data, errRead := os.ReadFile(existingPath)
+	if errRead != nil {
+		t.Fatalf("ReadFile(%s) error = %v", existingPath, errRead)
+	}
+	if string(data) != "new-library-data" {
+		t.Fatalf("installed file = %q, want new-library-data", data)
+	}
+	if !deferredUpdate.deferred || deferredUpdate.clearCalls != 0 {
+		t.Fatalf("deferred update state = deferred:%v clear_calls:%d, want existing marker retained", deferredUpdate.deferred, deferredUpdate.clearCalls)
+	}
+}
+
 func TestInstallPluginFromStoreFailedVerificationPreservesActiveState(t *testing.T) {
 	pluginsDir := t.TempDir()
 	existingPath := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH, "sample-provider-v0.1.0"+managementPluginExtension(runtime.GOOS))
@@ -1398,12 +1470,25 @@ type countingPluginStoreHTTPClient struct {
 	counts    map[string]int
 }
 
+type mutatingPluginStoreHTTPClient struct {
+	responses fakePluginStoreHTTPClient
+	mutate    func()
+	once      sync.Once
+}
+
+func (c *mutatingPluginStoreHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	c.once.Do(c.mutate)
+	return c.responses.Do(req)
+}
+
 type recordingPluginUpdateDeferrer struct {
-	restart      bool
-	deferred     bool
-	prepareCalls int
-	clearCalls   int
-	calls        []pluginUpdateDeferralCall
+	restart        bool
+	prepareCreated bool
+	deferCreated   bool
+	deferred       bool
+	prepareCalls   int
+	clearCalls     int
+	calls          []pluginUpdateDeferralCall
 }
 
 type pluginUpdateDeferralCall struct {
@@ -1413,13 +1498,13 @@ type pluginUpdateDeferralCall struct {
 	contentChanged bool
 }
 
-func (d *recordingPluginUpdateDeferrer) PreparePluginUpdate(string) bool {
+func (d *recordingPluginUpdateDeferrer) PreparePluginUpdate(string) (bool, bool) {
 	d.prepareCalls++
 	d.deferred = d.restart
-	return d.restart
+	return d.restart, d.prepareCreated
 }
 
-func (d *recordingPluginUpdateDeferrer) DeferPluginUpdateUntilRestart(id, targetPath, targetVersion string, contentChanged bool) bool {
+func (d *recordingPluginUpdateDeferrer) DeferPluginUpdateUntilRestart(id, targetPath, targetVersion string, contentChanged bool) (bool, bool) {
 	d.calls = append(d.calls, pluginUpdateDeferralCall{
 		id:             id,
 		targetPath:     targetPath,
@@ -1427,7 +1512,7 @@ func (d *recordingPluginUpdateDeferrer) DeferPluginUpdateUntilRestart(id, target
 		contentChanged: contentChanged,
 	})
 	d.deferred = d.restart
-	return d.restart
+	return d.restart, d.deferCreated
 }
 
 func (d *recordingPluginUpdateDeferrer) ClearDeferredPluginUpdate(string) {

@@ -264,14 +264,17 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	}
 	deferredUpdate := h.pluginUpdateDeferrerSnapshot()
 	restartRequired := false
+	deferredUpdateCreated := false
 	if deferredUpdate != nil {
 		installOptions.BeforeWrite = func() error {
-			restartRequired = deferredUpdate.PreparePluginUpdate(id)
+			var created bool
+			restartRequired, created = deferredUpdate.PreparePluginUpdate(id)
+			deferredUpdateCreated = deferredUpdateCreated || created
 			return nil
 		}
 	}
 	clearDeferredUpdate := func() {
-		if restartRequired {
+		if deferredUpdateCreated {
 			deferredUpdate.ClearDeferredPluginUpdate(id)
 		}
 	}
@@ -320,14 +323,14 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		}
 	}
 	if deferredUpdate != nil {
-		if deferredUpdate.DeferPluginUpdateUntilRestart(
+		deferred, created := deferredUpdate.DeferPluginUpdateUntilRestart(
 			id,
 			result.Path,
 			result.Version,
 			!result.Skipped,
-		) {
-			restartRequired = true
-		}
+		)
+		restartRequired = restartRequired || deferred
+		deferredUpdateCreated = deferredUpdateCreated || created
 	}
 
 	h.mu.Lock()
