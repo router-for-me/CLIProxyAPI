@@ -1,5 +1,10 @@
 package auth
 
+import (
+	"errors"
+	"strings"
+)
+
 // ErrorCodeRequestScoped identifies failures tied to the current request rather
 // than the selected credential.
 const ErrorCodeRequestScoped = "request_scoped"
@@ -68,4 +73,52 @@ func NewRequestScopedError(message string, httpStatus int) *Error {
 		Message:    message,
 		HTTPStatus: httpStatus,
 	}
+}
+
+// diagnosticError attaches server-side detail to a selection failure. The detail
+// is kept beside the error rather than inside Error so the exported struct stays
+// usable as an unkeyed literal, and so the text can never be serialized toward a
+// client by accident.
+type diagnosticError struct {
+	cause      *Error
+	diagnostic string
+}
+
+// Error implements the error interface.
+func (e *diagnosticError) Error() string {
+	if e == nil || e.cause == nil {
+		return ""
+	}
+	return e.cause.Error()
+}
+
+// Unwrap exposes the underlying Error so errors.As keeps working on it.
+func (e *diagnosticError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+// withDiagnostic wraps err with server-side detail, returning err unchanged when
+// there is nothing to add.
+func withDiagnostic(err *Error, diagnostic string) error {
+	if err == nil {
+		return nil
+	}
+	if strings.TrimSpace(diagnostic) == "" {
+		return err
+	}
+	return &diagnosticError{cause: err, diagnostic: diagnostic}
+}
+
+// SelectionDiagnostic returns the server-side detail recorded for a failed auth
+// selection, or an empty string when the error carries none. The detail is meant
+// for logs and must not be returned to clients.
+func SelectionDiagnostic(err error) string {
+	var diagErr *diagnosticError
+	if errors.As(err, &diagErr) && diagErr != nil {
+		return diagErr.diagnostic
+	}
+	return ""
 }

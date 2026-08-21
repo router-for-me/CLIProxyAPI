@@ -268,6 +268,67 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 	return available, cooldownCount, earliest
 }
 
+// blockedAuthSummaryLimit caps how many blocked credentials a diagnostic lists so
+// a large pool cannot produce an unreadable log line.
+const blockedAuthSummaryLimit = 5
+
+// summarizeBlockedAuths describes why each candidate credential is unusable, so an
+// auth_unavailable failure can be explained from the server logs instead of only
+// from the error body the client receives.
+func summarizeBlockedAuths(auths []*Auth, model string, now time.Time) string {
+	entries := make([]string, 0, blockedAuthSummaryLimit)
+	omitted := 0
+	for i := 0; i < len(auths); i++ {
+		blocked, reason, next := isAuthBlockedForModel(auths[i], model, now)
+		if !blocked {
+			continue
+		}
+		if len(entries) >= blockedAuthSummaryLimit {
+			omitted++
+			continue
+		}
+		entries = append(entries, describeBlockedAuth(auths[i], reason, next, now))
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+	summary := strings.Join(entries, ", ")
+	if omitted > 0 {
+		summary = fmt.Sprintf("%s, +%d more", summary, omitted)
+	}
+	return summary
+}
+
+func describeBlockedAuth(auth *Auth, reason blockReason, next, now time.Time) string {
+	id := "unknown"
+	detail := blockReasonLabel(reason)
+	if auth != nil {
+		if trimmed := strings.TrimSpace(auth.ID); trimmed != "" {
+			id = trimmed
+		}
+	}
+	if !next.IsZero() && next.After(now) {
+		detail = fmt.Sprintf("%s for %s", detail, next.Sub(now).Round(time.Second))
+	}
+	if auth != nil {
+		if message := strings.TrimSpace(auth.StatusMessage); message != "" {
+			detail = fmt.Sprintf("%s (%s)", detail, message)
+		}
+	}
+	return id + "=" + detail
+}
+
+func blockReasonLabel(reason blockReason) string {
+	switch reason {
+	case blockReasonCooldown:
+		return "cooldown"
+	case blockReasonDisabled:
+		return "disabled"
+	default:
+		return "unavailable"
+	}
+}
+
 func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
 	return getAvailableAuthsWithPriorityMode(auths, provider, model, now, false)
 }
@@ -294,7 +355,10 @@ func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, no
 			}
 			return nil, newModelCooldownError(model, providerForError, resetIn)
 		}
-		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+		return nil, withDiagnostic(
+			&Error{Code: "auth_unavailable", Message: "no auth available"},
+			summarizeBlockedAuths(auths, model, now),
+		)
 	}
 
 	return availableAuthsFromPriorityBuckets(availableByPriority, allPriorities), nil

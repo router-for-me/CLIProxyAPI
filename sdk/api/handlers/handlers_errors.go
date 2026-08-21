@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"golang.org/x/net/context"
 )
@@ -27,7 +28,7 @@ func isAuthSelectionUnavailable(err error) bool {
 	return code == "auth_not_found" || code == "auth_unavailable"
 }
 
-func enrichAuthSelectionError(err error, providers []string, model string) error {
+func enrichAuthSelectionError(ctx context.Context, err error, providers []string, model string) error {
 	if err == nil {
 		return nil
 	}
@@ -67,6 +68,15 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 		status = http.StatusServiceUnavailable
 	}
 
+	// The failure never reaches an upstream, so without this line the only trace
+	// of why the request was rejected is the error body the client receives.
+	if diagnostic := strings.TrimSpace(coreauth.SelectionDiagnostic(err)); diagnostic != "" {
+		helps.LogWithRequestID(ctx).Warnf("auth selection failed: %s; blocked credentials: %s", detail, diagnostic)
+	} else {
+		helps.LogWithRequestID(ctx).Warnf("auth selection failed: %s", detail)
+	}
+
+	// Diagnostic is deliberately dropped here: it is server-side detail.
 	return &coreauth.Error{
 		Code:       authErr.Code,
 		Message:    detail,

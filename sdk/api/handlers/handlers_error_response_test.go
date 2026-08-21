@@ -172,7 +172,7 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 
 func TestEnrichAuthSelectionError_DefaultsTo503WithContext(t *testing.T) {
 	in := &coreauth.Error{Code: "auth_not_found", Message: "no auth available"}
-	out := enrichAuthSelectionError(in, []string{"claude"}, "claude-sonnet-4-6")
+	out := enrichAuthSelectionError(context.Background(), in, []string{"claude"}, "claude-sonnet-4-6")
 
 	var got *coreauth.Error
 	if !errors.As(out, &got) || got == nil {
@@ -194,7 +194,7 @@ func TestEnrichAuthSelectionError_DefaultsTo503WithContext(t *testing.T) {
 
 func TestEnrichAuthSelectionError_PreservesExplicitStatus(t *testing.T) {
 	in := &coreauth.Error{Code: "auth_unavailable", Message: "no auth available", HTTPStatus: http.StatusTooManyRequests}
-	out := enrichAuthSelectionError(in, []string{"gemini"}, "gemini-2.5-pro")
+	out := enrichAuthSelectionError(context.Background(), in, []string{"gemini"}, "gemini-2.5-pro")
 
 	var got *coreauth.Error
 	if !errors.As(out, &got) || got == nil {
@@ -207,7 +207,7 @@ func TestEnrichAuthSelectionError_PreservesExplicitStatus(t *testing.T) {
 
 func TestEnrichAuthSelectionError_IgnoresOtherErrors(t *testing.T) {
 	in := errors.New("boom")
-	out := enrichAuthSelectionError(in, []string{"claude"}, "claude-sonnet-4-6")
+	out := enrichAuthSelectionError(context.Background(), in, []string{"claude"}, "claude-sonnet-4-6")
 	if out != in {
 		t.Fatalf("expected original error to be returned unchanged")
 	}
