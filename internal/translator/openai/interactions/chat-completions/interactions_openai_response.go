@@ -70,8 +70,9 @@ func ConvertOpenAIResponseToInteractionsNonStream(ctx context.Context, modelName
 			steps = append(steps, interactionsTextStep("model_output", content.String()))
 		}
 		if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
+			forAntigravity := isAntigravityModel(modelName)
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-				if step, ok := openAIToolCallToInteractionsStep(toolCall); ok {
+				if step, ok := openAIToolCallToInteractionsStep(toolCall, forAntigravity); ok {
 					steps = append(steps, step)
 				}
 				return true
@@ -325,7 +326,7 @@ func interactionsTextStep(stepType, text string) []byte {
 	return step
 }
 
-func openAIToolCallToInteractionsStep(toolCall gjson.Result) ([]byte, bool) {
+func openAIToolCallToInteractionsStep(toolCall gjson.Result, forAntigravity bool) ([]byte, bool) {
 	if toolType := toolCall.Get("type").String(); toolType != "" && toolType != "function" {
 		return nil, false
 	}
@@ -337,7 +338,13 @@ func openAIToolCallToInteractionsStep(toolCall gjson.Result) ([]byte, bool) {
 	// Google's Interactions function_call step accepts only
 	// type/name/arguments — it REJECTS an "id"/"call_id" field
 	// (400: Unknown parameter 'call_id' at 'input[N]').
-	step, _ = sjson.SetBytes(step, "name", function.Get("name").String())
+	name := function.Get("name").String()
+	if forAntigravity {
+		// Replayed history must match the aliased declaration sent upstream:
+		// a client tool "read_file" was declared as external_read_file.
+		name = translatorcommon.AntigravityToolNameToUpstream(name)
+	}
+	step, _ = sjson.SetBytes(step, "name", name)
 	setRawJSONValue(&step, "arguments", function.Get("arguments"), []byte(`{}`))
 	return step, true
 }

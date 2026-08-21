@@ -29,7 +29,7 @@ func ConvertOpenAIRequestToInteractions(modelName string, inputRawJSON []byte, s
 	if environmentID := firstNonEmpty(root.Get("environment_id").String(), root.Get("environment.id").String()); environmentID != "" {
 		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
 	}
-	out = appendOpenAIMessagesToInteractions(out, root.Get("messages"))
+	out = appendOpenAIMessagesToInteractions(out, root.Get("messages"), isAntigravityModel(model))
 	out = copyOpenAIChatGenerationConfigToInteractions(out, root, model)
 	out = appendOpenAIChatToolsToInteractions(out, root.Get("tools"), model)
 	return out
@@ -45,7 +45,7 @@ func openAIRequestStreamValue(root gjson.Result, stream bool) (bool, bool) {
 	return false, false
 }
 
-func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result) []byte {
+func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result, forAntigravity bool) []byte {
 	if !messages.Exists() || !messages.IsArray() {
 		return out
 	}
@@ -62,7 +62,7 @@ func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result) []byt
 				systemBuilder.WriteString(text)
 			}
 		default:
-			appendOpenAIMessageToInteractions(&inputItems, message)
+			appendOpenAIMessageToInteractions(&inputItems, message, forAntigravity)
 		}
 		return true
 	})
@@ -73,7 +73,7 @@ func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result) []byt
 	return out
 }
 
-func appendOpenAIMessageToInteractions(items *[][]byte, message gjson.Result) {
+func appendOpenAIMessageToInteractions(items *[][]byte, message gjson.Result, forAntigravity bool) {
 	role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
 	switch role {
 	case "assistant":
@@ -87,14 +87,14 @@ func appendOpenAIMessageToInteractions(items *[][]byte, message gjson.Result) {
 		}
 		if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-				if step, ok := openAIToolCallToInteractionsStep(toolCall); ok {
+				if step, ok := openAIToolCallToInteractionsStep(toolCall, forAntigravity); ok {
 					*items = append(*items, step)
 				}
 				return true
 			})
 		}
 	case "tool", "function":
-		*items = append(*items, openAIToolResultToInteractions(message))
+		*items = append(*items, openAIToolResultToInteractions(message, forAntigravity))
 	default:
 		if step, ok := openAIChatContentStep("user_input", message.Get("content")); ok {
 			*items = append(*items, step)
@@ -205,7 +205,7 @@ func openAIChatImagePartToInteractions(part gjson.Result) []byte {
 	return out
 }
 
-func openAIToolResultToInteractions(message gjson.Result) []byte {
+func openAIToolResultToInteractions(message gjson.Result, forAntigravity bool) []byte {
 	out := []byte(`{"type":"function_result","result":""}`)
 	// Google's Interactions function_result step accepts only
 	// type/name/call_id/result — it REJECTS an "id" field
@@ -214,6 +214,9 @@ func openAIToolResultToInteractions(message gjson.Result) []byte {
 		out, _ = sjson.SetBytes(out, "call_id", callID)
 	}
 	if name := message.Get("name").String(); name != "" {
+		if forAntigravity {
+			name = translatorcommon.AntigravityToolNameToUpstream(name)
+		}
 		out, _ = sjson.SetBytes(out, "name", name)
 	}
 	content := message.Get("content")

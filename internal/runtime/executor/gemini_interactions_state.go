@@ -81,7 +81,8 @@ func goframeCacheAntigravityInteractionsState(ctx context.Context, modelName str
 	}
 	// Record call_id -> function name from any function_call steps in this
 	// payload so a later Responses-style tool-result turn (call_id + output
-	// only) can still be given the required function_result.name.
+	// only) can still be given the required function_result.name. Non-stream
+	// responses may nest the array under "interaction.steps".
 	names := map[string]string{}
 	for k, v := range state.ToolNames {
 		names[k] = v
@@ -89,18 +90,27 @@ func goframeCacheAntigravityInteractionsState(ctx context.Context, modelName str
 	for k, v := range stepNames {
 		names[k] = v
 	}
-	if gjson.GetBytes(payload, "steps").IsArray() {
-		gjson.GetBytes(payload, "steps").ForEach(func(_, step gjson.Result) bool {
-			if !strings.EqualFold(strings.TrimSpace(step.Get("type").String()), "function_call") {
+	stepsArrays := [][]gjson.Result{}
+	for _, path := range []string{"steps", "interaction.steps"} {
+		if arr := gjson.GetBytes(payload, path); arr.IsArray() {
+			stepsArrays = append(stepsArrays, []gjson.Result{})
+			arr.ForEach(func(_, step gjson.Result) bool {
+				stepsArrays[len(stepsArrays)-1] = append(stepsArrays[len(stepsArrays)-1], step)
 				return true
+			})
+		}
+	}
+	for _, steps := range stepsArrays {
+		for _, step := range steps {
+			if !strings.EqualFold(strings.TrimSpace(step.Get("type").String()), "function_call") {
+				continue
 			}
 			callID := strings.TrimSpace(step.Get("id").String())
 			name := strings.TrimSpace(step.Get("name").String())
 			if callID != "" && name != "" {
 				names[callID] = name
 			}
-			return true
-		})
+		}
 	}
 	if len(names) > 0 {
 		state.ToolNames = names
