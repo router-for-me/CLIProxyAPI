@@ -43,6 +43,8 @@ type pluginUnloadTarget struct {
 type pluginLoadRequest struct {
 	result         chan pluginLoadResult
 	cleanupStarted bool
+	path           string
+	version        string
 }
 
 type pluginLoadResult struct {
@@ -215,12 +217,7 @@ func (h *Host) DeferPluginUpdateUntilRestart(id, targetPath, targetVersion strin
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	lp := h.loaded[id]
-	if lp == nil {
-		return false
-	}
-	activePath := cleanPluginPath(lp.path)
-	activeVersion := strings.TrimSpace(lp.version)
+	activePath, activeVersion := h.pluginIdentityLocked(id)
 	if activePath == "" {
 		return false
 	}
@@ -255,6 +252,21 @@ func (h *Host) ClearDeferredPluginUpdate(id string) {
 	h.mu.Unlock()
 }
 
+// pluginIdentityLocked returns the registered identity, or the identity being
+// loaded when registration has not completed yet. Callers must hold h.mu.
+func (h *Host) pluginIdentityLocked(id string) (string, string) {
+	if h == nil {
+		return "", ""
+	}
+	if lp := h.loaded[id]; lp != nil {
+		return cleanPluginPath(lp.path), strings.TrimSpace(lp.version)
+	}
+	if request := h.loading[id]; request != nil {
+		return cleanPluginPath(request.path), strings.TrimSpace(request.version)
+	}
+	return "", ""
+}
+
 func (h *Host) deferredPluginFile(file pluginFile) pluginFile {
 	if h == nil {
 		return file
@@ -265,13 +277,7 @@ func (h *Host) deferredPluginFile(file pluginFile) pluginFile {
 	}
 	h.mu.Lock()
 	deferred, ok := h.deferredPluginUpdates[id]
-	lp := h.loaded[id]
-	activePath := ""
-	activeVersion := ""
-	if lp != nil {
-		activePath = cleanPluginPath(lp.path)
-		activeVersion = strings.TrimSpace(lp.version)
-	}
+	activePath, activeVersion := h.pluginIdentityLocked(id)
 	h.mu.Unlock()
 	if !ok || activePath == "" || activePath != deferred.path || activeVersion != deferred.version {
 		return file
@@ -358,7 +364,11 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		var plugin pluginapi.Plugin
 		registeredNow := false
 		if lp == nil {
-			request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1)}
+			request := &pluginLoadRequest{
+				result:  make(chan pluginLoadResult, 1),
+				path:    file.Path,
+				version: file.Version,
+			}
 			h.mu.Lock()
 			if _, loading := h.loading[file.ID]; loading {
 				h.mu.Unlock()

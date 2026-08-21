@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1308,6 +1309,80 @@ func TestHostPluginBusyReportsLoadingPlugin(t *testing.T) {
 	}
 }
 
+func TestHostDeferPluginUpdateWhilePluginLoading(t *testing.T) {
+	loader := newExclusiveTestLoader(map[string]*testPlugin{
+		"1.0.0": {
+			registerResult:    validTestPlugin("alpha-v1"),
+			reconfigureResult: validTestPlugin("alpha-v1"),
+		},
+		"2.0.0": {
+			registerResult:    validTestPlugin("alpha-v2"),
+			reconfigureResult: validTestPlugin("alpha-v2"),
+		},
+	})
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0", "2.0.0")
+	if errRemove := os.Remove(paths["2.0.0"]); errRemove != nil {
+		t.Fatalf("Remove(%s) error = %v", paths["2.0.0"], errRemove)
+	}
+	configForVersion := func(version string) *config.Config {
+		return &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"alpha": enabledPluginConfigWithStoreVersion(t, version),
+				},
+			},
+		}
+	}
+
+	openStarted := make(chan struct{})
+	releaseOpen := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseOpen) }) }
+	t.Cleanup(release)
+	h := NewForTest(&blockingOpenLoader{
+		inner:   loader,
+		started: openStarted,
+		release: releaseOpen,
+	})
+
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), configForVersion("1.0.0"))
+		close(applyDone)
+	}()
+	waitForHostTestSignal(t, openStarted, "plugin open start")
+	if h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = true, want false while plugin is still loading")
+	}
+	if !h.DeferPluginUpdateUntilRestart("alpha", paths["2.0.0"], "2.0.0", false) {
+		t.Fatal("DeferPluginUpdateUntilRestart() = false, want true while v1 is loading")
+	}
+
+	release()
+	waitForHostTestSignal(t, applyDone, "initial plugin load")
+	paths["2.0.0"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	h.ApplyConfig(context.Background(), configForVersion("2.0.0"))
+	if !h.PluginRegistered("alpha") || !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatal("retained v1 was not effective after deferred update")
+	}
+	if h.pluginIdentityCurrent("alpha", paths["2.0.0"], "2.0.0") {
+		t.Fatal("replacement v2 became active before restart")
+	}
+	if openCalls, active := loader.stats(); openCalls != 1 || !active {
+		t.Fatalf("exclusive loader state = calls %d active %v, want one active v1 client", openCalls, active)
+	}
+
+	h.ShutdownAll()
+	fresh := NewForTest(loader)
+	fresh.ApplyConfig(context.Background(), configForVersion("2.0.0"))
+	if !fresh.PluginRegistered("alpha") || !fresh.pluginIdentityCurrent("alpha", paths["2.0.0"], "2.0.0") {
+		t.Fatal("fresh host did not register desired v2")
+	}
+	fresh.ShutdownAll()
+}
+
 func TestHostCanceledInitializationDiscardsBlockedClient(t *testing.T) {
 	client := &blockingInitializationClient{
 		started:      make(chan struct{}),
@@ -1770,7 +1845,7 @@ func (c *blockingHostCallClient) Shutdown() {
 }
 
 type blockingOpenLoader struct {
-	inner     *testSymbolLoader
+	inner     pluginLoader
 	started   chan struct{}
 	release   <-chan struct{}
 	startOnce sync.Once
