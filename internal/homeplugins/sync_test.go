@@ -379,6 +379,15 @@ func TestSyncPlatformWithReportDefersActiveUpdateUntilRestart(t *testing.T) {
 	if !report.OK || runtimeHost.prepareCalls != 1 || runtimeHost.deferCalls != 1 || runtimeHost.clearCalls != 0 {
 		t.Fatalf("report = %+v, runtime hooks = prepare:%d defer:%d clear:%d; want one prepare/defer and no clear", report, runtimeHost.prepareCalls, runtimeHost.deferCalls, runtimeHost.clearCalls)
 	}
+	if len(report.Plugins) != 1 || !report.Plugins[0].RestartRequired {
+		t.Fatalf("plugin report = %+v, want restart_required for active update", report.Plugins)
+	}
+	if errLoad := MarkLoadResults(&report, fakePluginLoadInspector{"sample": true}); errLoad != nil {
+		t.Fatalf("MarkLoadResults() error = %v, want deferred update to remain successful", errLoad)
+	}
+	if report.Plugins[0].LoadStatus != pluginLoadStatusRestartRequired {
+		t.Fatalf("load status = %q, want %q", report.Plugins[0].LoadStatus, pluginLoadStatusRestartRequired)
+	}
 	data, errRead := os.ReadFile(target)
 	if errRead != nil {
 		t.Fatalf("ReadFile(%s) error = %v", target, errRead)

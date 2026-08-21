@@ -347,6 +347,18 @@ func (h *Host) takeDeferredPluginLoadLocked(file pluginFile, request *pluginLoad
 	return h.loaded[file.ID], h.deferredPluginFileLocked(file), true
 }
 
+func (h *Host) takeRetainedPluginLoadLocked(file pluginFile, request *pluginLoadRequest) (*loadedPlugin, pluginFile, bool) {
+	if h == nil || request == nil || h.loading[file.ID] != request {
+		return nil, file, false
+	}
+	lp := h.loaded[file.ID]
+	if lp == nil {
+		return nil, file, false
+	}
+	delete(h.loading, file.ID)
+	return lp, pluginFile{ID: file.ID, Path: lp.path, Version: lp.version}, true
+}
+
 func (h *Host) deferredPluginFile(file pluginFile) pluginFile {
 	if h == nil {
 		return file
@@ -479,6 +491,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			}
 			h.mu.Lock()
 			fallbackPlugin, fallbackFile, deferred := h.takeDeferredPluginLoadLocked(file, request)
+			if !deferred && loadResult.deferred {
+				fallbackPlugin, fallbackFile, deferred = h.takeRetainedPluginLoadLocked(file, request)
+			}
 			if deferred {
 				h.mu.Unlock()
 				h.discardLoadedPlugin(loadResult.loaded)

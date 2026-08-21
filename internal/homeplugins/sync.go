@@ -64,17 +64,18 @@ type SyncReport struct {
 }
 
 type PluginInstallStatus struct {
-	ID            string `json:"id"`
-	Version       string `json:"version,omitempty"`
-	ReleaseTag    string `json:"release_tag,omitempty"`
-	Repository    string `json:"repository,omitempty"`
-	InstallType   string `json:"install_type,omitempty"`
-	InstallStatus string `json:"install_status"`
-	LoadStatus    string `json:"load_status,omitempty"`
-	Path          string `json:"path,omitempty"`
-	Skipped       bool   `json:"skipped,omitempty"`
-	Overwritten   bool   `json:"overwritten,omitempty"`
-	Error         string `json:"error,omitempty"`
+	ID              string `json:"id"`
+	Version         string `json:"version,omitempty"`
+	ReleaseTag      string `json:"release_tag,omitempty"`
+	Repository      string `json:"repository,omitempty"`
+	InstallType     string `json:"install_type,omitempty"`
+	InstallStatus   string `json:"install_status"`
+	LoadStatus      string `json:"load_status,omitempty"`
+	RestartRequired bool   `json:"restart_required,omitempty"`
+	Path            string `json:"path,omitempty"`
+	Skipped         bool   `json:"skipped,omitempty"`
+	Overwritten     bool   `json:"overwritten,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 const (
@@ -86,13 +87,14 @@ const (
 	pluginTaskPhaseLoad    = "load"
 	pluginTaskPhaseDelete  = "delete"
 
-	pluginInstallStatusInstalled = "installed"
-	pluginInstallStatusSkipped   = "skipped"
-	pluginInstallStatusFailed    = "failed"
-	pluginInstallStatusDeleted   = "deleted"
-	pluginInstallStatusMissing   = "missing"
-	pluginLoadStatusLoaded       = "loaded"
-	pluginLoadStatusFailed       = "failed"
+	pluginInstallStatusInstalled    = "installed"
+	pluginInstallStatusSkipped      = "skipped"
+	pluginInstallStatusFailed       = "failed"
+	pluginInstallStatusDeleted      = "deleted"
+	pluginInstallStatusMissing      = "missing"
+	pluginLoadStatusLoaded          = "loaded"
+	pluginLoadStatusRestartRequired = "restart_required"
+	pluginLoadStatusFailed          = "failed"
 )
 
 // CurrentPlatform reports the platform used by pluginhost discovery.
@@ -183,7 +185,7 @@ func SyncPlatformWithReport(ctx context.Context, cfg *config.Config, pluginRunti
 			continue
 		}
 		status := pluginStatusFromManifest(manifest)
-		result, errSync := installManifest(ctx, client, manifest, root, platform, pluginRuntime)
+		result, restartRequired, errSync := installManifest(ctx, client, manifest, root, platform, pluginRuntime)
 		if errSync != nil {
 			status.InstallStatus = pluginInstallStatusFailed
 			status.Error = errSync.Error()
@@ -194,6 +196,7 @@ func SyncPlatformWithReport(ctx context.Context, cfg *config.Config, pluginRunti
 		status.Path = strings.TrimSpace(result.Path)
 		status.Skipped = result.Skipped
 		status.Overwritten = result.Overwritten
+		status.RestartRequired = restartRequired
 		if result.Skipped {
 			status.InstallStatus = pluginInstallStatusSkipped
 		} else {
@@ -235,7 +238,7 @@ func SyncResolvedWithReport(ctx context.Context, cfg *config.Config, items []sdk
 		item := &items[index]
 		manifest := item.Manifest
 		status := pluginStatusFromManifest(manifest)
-		result, errInstall := installResolvedManifest(ctx, cfg, manifest, item.Auth, expiresAt, root, platform, pluginRuntime)
+		result, restartRequired, errInstall := installResolvedManifest(ctx, cfg, manifest, item.Auth, expiresAt, root, platform, pluginRuntime)
 		item.Clear()
 		if errInstall != nil {
 			status.InstallStatus = pluginInstallStatusFailed
@@ -247,6 +250,7 @@ func SyncResolvedWithReport(ctx context.Context, cfg *config.Config, items []sdk
 		status.Path = strings.TrimSpace(result.Path)
 		status.Skipped = result.Skipped
 		status.Overwritten = result.Overwritten
+		status.RestartRequired = restartRequired
 		if result.Skipped {
 			status.InstallStatus = pluginInstallStatusSkipped
 		} else {
@@ -326,7 +330,7 @@ func upsertPluginInstallStatus(report *SyncReport, status PluginInstallStatus) {
 	report.Plugins = append(report.Plugins, status)
 }
 
-func installResolvedManifest(ctx context.Context, cfg *config.Config, manifest sdkpluginstore.Manifest, auth []sdkpluginstore.ResolvedAuthConfig, expiresAt time.Time, root string, platform Platform, pluginRuntime PluginRuntime) (sdkpluginstore.InstallResult, error) {
+func installResolvedManifest(ctx context.Context, cfg *config.Config, manifest sdkpluginstore.Manifest, auth []sdkpluginstore.ResolvedAuthConfig, expiresAt time.Time, root string, platform Platform, pluginRuntime PluginRuntime) (sdkpluginstore.InstallResult, bool, error) {
 	client := newResolvedPluginStoreClient(cfg, auth, expiresAt)
 	defer client.ClearAuth()
 	return installManifest(ctx, client, manifest, root, platform, pluginRuntime)
@@ -357,10 +361,10 @@ func InstalledVersions(cfg *config.Config) (map[string]string, error) {
 	return versions, nil
 }
 
-func installManifest(ctx context.Context, client sdkpluginstore.Client, manifest sdkpluginstore.Manifest, root string, platform Platform, pluginRuntime PluginRuntime) (sdkpluginstore.InstallResult, error) {
+func installManifest(ctx context.Context, client sdkpluginstore.Client, manifest sdkpluginstore.Manifest, root string, platform Platform, pluginRuntime PluginRuntime) (sdkpluginstore.InstallResult, bool, error) {
 	id := strings.TrimSpace(manifest.ID)
 	if id == "" {
-		return sdkpluginstore.InstallResult{}, fmt.Errorf("home plugins: manifest plugin id is empty")
+		return sdkpluginstore.InstallResult{}, false, fmt.Errorf("home plugins: manifest plugin id is empty")
 	}
 	pluginIsBusy := func() bool {
 		return pluginRuntime != nil && pluginRuntime.PluginBusy(id)
@@ -390,12 +394,13 @@ func installManifest(ctx context.Context, client sdkpluginstore.Client, manifest
 		if deferredUpdateCreated {
 			deferredUpdate.ClearDeferredPluginUpdate(id)
 		}
-		return sdkpluginstore.InstallResult{}, fmt.Errorf("home plugins: install %s: %w", id, errInstall)
+		return sdkpluginstore.InstallResult{}, false, fmt.Errorf("home plugins: install %s: %w", id, errInstall)
 	}
+	restartRequired := false
 	if deferredUpdate != nil {
-		deferredUpdate.DeferPluginUpdateUntilRestart(id, result.Path, result.Version, !result.Skipped)
+		restartRequired, _ = deferredUpdate.DeferPluginUpdateUntilRestart(id, result.Path, result.Version, !result.Skipped)
 	}
-	return result, nil
+	return result, restartRequired, nil
 }
 
 func DeleteWithReport(ctx context.Context, cfg *config.Config, pluginRuntime PluginRuntime, taskID uint, pluginID string) SyncReport {
@@ -728,6 +733,10 @@ func MarkLoadResults(report *SyncReport, inspector PluginLoadInspector) error {
 					loadErrors = append(loadErrors, fmt.Errorf("home plugins: plugin %s install failed", status.ID))
 				}
 			}
+			continue
+		}
+		if status.RestartRequired {
+			status.LoadStatus = pluginLoadStatusRestartRequired
 			continue
 		}
 		if inspector != nil && inspector.PluginRegistered(status.ID) {

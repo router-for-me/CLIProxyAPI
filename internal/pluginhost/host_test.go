@@ -1750,6 +1750,65 @@ func TestHostDeferredWritePreventsPublishedLoadFromOpeningReplacement(t *testing
 	fresh.ShutdownAll()
 }
 
+func TestHostDeferredLoadMarkerClearRetainsLoadedPlugin(t *testing.T) {
+	loader := newExclusiveTestLoader(map[string]*testPlugin{
+		"1.0.0": {
+			registerResult:    validTestPlugin("alpha-v1"),
+			reconfigureResult: validTestPlugin("alpha-v1"),
+		},
+		"2.0.0": {
+			registerResult:    validTestPlugin("alpha-v2"),
+			reconfigureResult: validTestPlugin("alpha-v2"),
+		},
+	})
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0", "2.0.0")
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	h.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: map[string]config.PluginInstanceConfig{
+			"alpha": enabledPluginConfigWithStoreVersion(t, "1.0.0"),
+		},
+	}})
+
+	request := &pluginLoadRequest{
+		result:  make(chan pluginLoadResult, 1),
+		path:    paths["2.0.0"],
+		version: "2.0.0",
+	}
+	file := pluginFile{ID: "alpha", Path: paths["2.0.0"], Version: "2.0.0"}
+	h.mu.Lock()
+	h.deferredPluginUpdates["alpha"] = deferredPluginIdentity{path: paths["1.0.0"], version: "1.0.0"}
+	h.loading["alpha"] = request
+	h.mu.Unlock()
+	h.startPluginLoad(context.Background(), file, runtimeItemConfig{}, request)
+	loadResult := <-request.result
+	if !loadResult.deferred {
+		t.Fatalf("load result = %+v, want deferred", loadResult)
+	}
+	h.ClearDeferredPluginUpdate("alpha")
+
+	h.mu.Lock()
+	fallback, fallbackFile, retained := h.takeRetainedPluginLoadLocked(file, request)
+	h.mu.Unlock()
+	if !retained || fallback == nil {
+		t.Fatalf("retained fallback = %v, %+v; want loaded plugin", retained, fallback)
+	}
+	if fallbackFile.Path != paths["1.0.0"] || fallbackFile.Version != "1.0.0" {
+		t.Fatalf("fallback file = %+v, want retained v1", fallbackFile)
+	}
+	if !h.PluginRegistered("alpha") || !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatal("retained v1 was not still registered and effective after marker cleanup")
+	}
+	h.mu.Lock()
+	_, loading := h.loading["alpha"]
+	h.mu.Unlock()
+	if loading {
+		t.Fatal("deferred load request remained after retaining the loaded plugin")
+	}
+}
+
 func TestHostCanceledInitializationDiscardsBlockedClient(t *testing.T) {
 	client := &blockingInitializationClient{
 		started:      make(chan struct{}),
