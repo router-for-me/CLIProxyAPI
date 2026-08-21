@@ -41,6 +41,10 @@ type pluginArtifactLocker interface {
 	LockPluginArtifact(id string) func()
 }
 
+type pluginOperationLocker interface {
+	LockPluginOperation(id string) func()
+}
+
 type pluginUpdateDeferrer interface {
 	PreparePluginUpdate(id string) (deferred bool, created bool)
 	DeferPluginUpdateUntilRestart(id, targetPath, targetVersion string, contentChanged bool) (deferred bool, created bool)
@@ -366,6 +370,13 @@ func installManifest(ctx context.Context, client sdkpluginstore.Client, manifest
 	if id == "" {
 		return sdkpluginstore.InstallResult{}, false, fmt.Errorf("home plugins: manifest plugin id is empty")
 	}
+	unlockOperation := func() {}
+	if operationLocker, ok := pluginRuntime.(pluginOperationLocker); ok {
+		if unlock := operationLocker.LockPluginOperation(id); unlock != nil {
+			unlockOperation = unlock
+		}
+	}
+	defer unlockOperation()
 	pluginIsBusy := func() bool {
 		return pluginRuntime != nil && pluginRuntime.PluginBusy(id)
 	}

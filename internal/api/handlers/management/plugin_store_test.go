@@ -1153,6 +1153,9 @@ func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testin
 	if len(deferredUpdate.calls) != 1 || !deferredUpdate.calls[0].contentChanged {
 		t.Fatalf("deferred update calls = %#v, want one changed-content classification", deferredUpdate.calls)
 	}
+	if deferredUpdate.operationCalls != 1 || deferredUpdate.operationHeld || deferredUpdate.operationViolations != 0 {
+		t.Fatalf("operation lock state = calls:%d held:%v violations:%d, want one completed operation around deferral", deferredUpdate.operationCalls, deferredUpdate.operationHeld, deferredUpdate.operationViolations)
+	}
 	cfgSnapshot := waitForAsyncReload(t, reloads)
 	waitForReloadDone(t, reloadDone)
 	if cfgSnapshot == h.cfg {
@@ -1507,13 +1510,16 @@ func (c *mutatingPluginStoreHTTPClient) Do(req *http.Request) (*http.Response, e
 }
 
 type recordingPluginUpdateDeferrer struct {
-	restart        bool
-	prepareCreated bool
-	deferCreated   bool
-	deferred       bool
-	prepareCalls   int
-	clearCalls     int
-	calls          []pluginUpdateDeferralCall
+	restart             bool
+	prepareCreated      bool
+	deferCreated        bool
+	deferred            bool
+	prepareCalls        int
+	clearCalls          int
+	operationCalls      int
+	operationHeld       bool
+	operationViolations int
+	calls               []pluginUpdateDeferralCall
 }
 
 type pluginUpdateDeferralCall struct {
@@ -1524,12 +1530,18 @@ type pluginUpdateDeferralCall struct {
 }
 
 func (d *recordingPluginUpdateDeferrer) PreparePluginUpdate(string) (bool, bool) {
+	if !d.operationHeld {
+		d.operationViolations++
+	}
 	d.prepareCalls++
 	d.deferred = d.restart
 	return d.restart, d.prepareCreated
 }
 
 func (d *recordingPluginUpdateDeferrer) DeferPluginUpdateUntilRestart(id, targetPath, targetVersion string, contentChanged bool) (bool, bool) {
+	if !d.operationHeld {
+		d.operationViolations++
+	}
 	d.calls = append(d.calls, pluginUpdateDeferralCall{
 		id:             id,
 		targetPath:     targetPath,
@@ -1543,6 +1555,12 @@ func (d *recordingPluginUpdateDeferrer) DeferPluginUpdateUntilRestart(id, target
 func (d *recordingPluginUpdateDeferrer) ClearDeferredPluginUpdate(string) {
 	d.clearCalls++
 	d.deferred = false
+}
+
+func (d *recordingPluginUpdateDeferrer) LockPluginOperation(string) func() {
+	d.operationCalls++
+	d.operationHeld = true
+	return func() { d.operationHeld = false }
 }
 
 func (c *countingPluginStoreHTTPClient) Do(req *http.Request) (*http.Response, error) {

@@ -29,9 +29,12 @@ type fakePluginRuntime struct {
 
 type deferredPluginRuntime struct {
 	fakePluginRuntime
-	prepareCalls int
-	deferCalls   int
-	clearCalls   int
+	prepareCalls        int
+	deferCalls          int
+	clearCalls          int
+	operationCalls      int
+	operationHeld       bool
+	operationViolations int
 }
 
 type fakePluginLoadInspector map[string]bool
@@ -47,17 +50,29 @@ func (r *fakePluginRuntime) UnloadPlugin(id string) bool {
 }
 
 func (r *deferredPluginRuntime) PreparePluginUpdate(string) (bool, bool) {
+	if !r.operationHeld {
+		r.operationViolations++
+	}
 	r.prepareCalls++
 	return r.busy, r.busy
 }
 
 func (r *deferredPluginRuntime) DeferPluginUpdateUntilRestart(string, string, string, bool) (bool, bool) {
+	if !r.operationHeld {
+		r.operationViolations++
+	}
 	r.deferCalls++
 	return r.busy, false
 }
 
 func (r *deferredPluginRuntime) ClearDeferredPluginUpdate(string) {
 	r.clearCalls++
+}
+
+func (r *deferredPluginRuntime) LockPluginOperation(string) func() {
+	r.operationCalls++
+	r.operationHeld = true
+	return func() { r.operationHeld = false }
 }
 
 func (i fakePluginLoadInspector) PluginRegistered(id string) bool {
@@ -376,8 +391,8 @@ func TestSyncPlatformWithReportDefersActiveUpdateUntilRestart(t *testing.T) {
 	if errSync != nil {
 		t.Fatalf("SyncPlatformWithReport() error = %v", errSync)
 	}
-	if !report.OK || runtimeHost.prepareCalls != 1 || runtimeHost.deferCalls != 1 || runtimeHost.clearCalls != 0 {
-		t.Fatalf("report = %+v, runtime hooks = prepare:%d defer:%d clear:%d; want one prepare/defer and no clear", report, runtimeHost.prepareCalls, runtimeHost.deferCalls, runtimeHost.clearCalls)
+	if !report.OK || runtimeHost.prepareCalls != 1 || runtimeHost.deferCalls != 1 || runtimeHost.clearCalls != 0 || runtimeHost.operationCalls != 1 || runtimeHost.operationHeld || runtimeHost.operationViolations != 0 {
+		t.Fatalf("report = %+v, runtime hooks = prepare:%d defer:%d clear:%d operation:%d held:%v violations:%d; want one operation around prepare/defer and no clear", report, runtimeHost.prepareCalls, runtimeHost.deferCalls, runtimeHost.clearCalls, runtimeHost.operationCalls, runtimeHost.operationHeld, runtimeHost.operationViolations)
 	}
 	if len(report.Plugins) != 1 || !report.Plugins[0].RestartRequired {
 		t.Fatalf("plugin report = %+v, want restart_required for active update", report.Plugins)

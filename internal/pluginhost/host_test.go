@@ -981,6 +981,30 @@ func TestHostCleanupKeepsDeferredPluginArtifactBeforeConfigSave(t *testing.T) {
 	h.ShutdownAll()
 }
 
+func TestHostLockPluginOperationSerializesSameID(t *testing.T) {
+	h := New()
+	unlocked := h.LockPluginOperation("alpha")
+	acquired := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		unlockSecond := h.LockPluginOperation("alpha")
+		close(acquired)
+		unlockSecond()
+		close(done)
+	}()
+	select {
+	case <-acquired:
+		t.Fatal("second operation acquired the same plugin lock before the first released it")
+	case <-time.After(20 * time.Millisecond):
+	}
+	unlocked()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("second operation did not acquire the plugin lock after release")
+	}
+}
+
 func TestHostDeferPluginUpdateFreshInstallDoesNotRequireRestart(t *testing.T) {
 	loader := newExclusiveTestLoader(map[string]*testPlugin{
 		"1.0.0": {

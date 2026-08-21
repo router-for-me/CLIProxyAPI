@@ -265,6 +265,13 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		PluginLoaded: pluginIsBusy,
 	}
 	deferredUpdate := h.pluginUpdateDeferrerSnapshot()
+	unlockOperation := func() {}
+	if operationLocker, ok := deferredUpdate.(pluginOperationLocker); ok {
+		if unlock := operationLocker.LockPluginOperation(id); unlock != nil {
+			unlockOperation = unlock
+		}
+	}
+	defer unlockOperation()
 	restartRequired := false
 	deferredUpdateCreated := false
 	if deferredUpdate != nil {

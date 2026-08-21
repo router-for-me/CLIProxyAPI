@@ -70,6 +70,7 @@ type Host struct {
 	fused                  map[string]string
 	deferredPluginUpdates  map[string]deferredPluginIdentity
 	artifactLocks          map[string]*sync.Mutex
+	operationLocks         map[string]*sync.Mutex
 	pluginFileVersions     map[string]string
 	activePluginVersions   map[string]string
 	activePluginPaths      map[string]string
@@ -105,6 +106,7 @@ func New() *Host {
 		fused:                  make(map[string]string),
 		deferredPluginUpdates:  make(map[string]deferredPluginIdentity),
 		artifactLocks:          make(map[string]*sync.Mutex),
+		operationLocks:         make(map[string]*sync.Mutex),
 		pluginFileVersions:     make(map[string]string),
 		activePluginVersions:   make(map[string]string),
 		activePluginPaths:      make(map[string]string),
@@ -222,6 +224,30 @@ func (h *Host) LockPluginArtifact(id string) func() {
 	if lock == nil {
 		lock = &sync.Mutex{}
 		h.artifactLocks[id] = lock
+	}
+	h.mu.Unlock()
+	lock.Lock()
+	return lock.Unlock
+}
+
+// LockPluginOperation serializes the complete install lifecycle for one plugin
+// across management and Home sync callers, including marker ownership cleanup.
+func (h *Host) LockPluginOperation(id string) func() {
+	if h == nil {
+		return func() {}
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return func() {}
+	}
+	h.mu.Lock()
+	if h.operationLocks == nil {
+		h.operationLocks = make(map[string]*sync.Mutex)
+	}
+	lock := h.operationLocks[id]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		h.operationLocks[id] = lock
 	}
 	h.mu.Unlock()
 	lock.Lock()
