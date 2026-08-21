@@ -143,6 +143,7 @@ var placeholderPatterns = []string{
 	"replace_me",
 	"changeme",
 	"change-me",
+	"sk-atsm",
 }
 
 func isPlaceholderAPIKey(key string) bool {
