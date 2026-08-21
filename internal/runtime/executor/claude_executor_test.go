@@ -6485,6 +6485,8 @@ func TestIsPlaceholderAPIKey(t *testing.T) {
 		{"your-key", true},
 		{"your-api-key", true},
 		{"your-api-key-1", true},
+		{"sk-atSM...", true},
+		{"sk-atsm-example", true},
 		{"  Placeholder  ", true},
 		{"sk-ant-api03-real-key", false},
 		{"", false},
