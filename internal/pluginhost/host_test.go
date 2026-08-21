@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1379,6 +1380,81 @@ func TestHostDeferPluginUpdateWhilePluginLoading(t *testing.T) {
 	fresh.ApplyConfig(context.Background(), configForVersion("2.0.0"))
 	if !fresh.PluginRegistered("alpha") || !fresh.pluginIdentityCurrent("alpha", paths["2.0.0"], "2.0.0") {
 		t.Fatal("fresh host did not register desired v2")
+	}
+	fresh.ShutdownAll()
+}
+
+func TestHostDeferPluginUpdatePinsUnversionedPluginAfterRegistration(t *testing.T) {
+	loader := newTestSymbolLoader()
+	loader.lookups["alpha"] = newTestSymbolLookup(&testPlugin{
+		registerResult:    validTestPlugin("alpha-v1"),
+		reconfigureResult: validTestPlugin("alpha-v1"),
+	})
+	pluginsDir := makePluginDir(t, "alpha")
+	versionedPath := writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	if errRemove := os.Remove(versionedPath); errRemove != nil {
+		t.Fatalf("Remove(%s) error = %v", versionedPath, errRemove)
+	}
+	initialConfig := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: enabledPluginConfigs("alpha"),
+	}}
+	versionedConfig := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: map[string]config.PluginInstanceConfig{
+			"alpha": enabledPluginConfigWithStoreVersion(t, "2.0.0"),
+		},
+	}}
+
+	openStarted := make(chan struct{})
+	releaseOpen := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseOpen) }) }
+	t.Cleanup(release)
+	h := NewForTest(&blockingOpenLoader{
+		inner:   loader,
+		started: openStarted,
+		release: releaseOpen,
+	})
+
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), initialConfig)
+		close(applyDone)
+	}()
+	waitForHostTestSignal(t, openStarted, "unversioned plugin open start")
+	if !h.DeferPluginUpdateUntilRestart("alpha", versionedPath, "2.0.0", false) {
+		t.Fatal("DeferPluginUpdateUntilRestart() = false, want true while unversioned plugin is loading")
+	}
+
+	release()
+	waitForHostTestSignal(t, applyDone, "unversioned plugin load")
+	versionedPath = writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	h.ApplyConfig(context.Background(), versionedConfig)
+	unversionedPath := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH, "alpha"+pluginExtension(runtime.GOOS))
+	if !h.PluginRegistered("alpha") || !h.pluginIdentityCurrent("alpha", unversionedPath, "") {
+		t.Fatal("unversioned plugin was not kept effective after registration populated its metadata version")
+	}
+	h.mu.Lock()
+	loadedVersion := h.loaded["alpha"].version
+	h.mu.Unlock()
+	if loadedVersion != "1.0.0" {
+		t.Fatalf("loaded metadata version = %q, want 1.0.0", loadedVersion)
+	}
+	if h.pluginIdentityCurrent("alpha", versionedPath, "2.0.0") {
+		t.Fatal("versioned replacement became active before restart")
+	}
+	if loader.openCalls != 1 {
+		t.Fatalf("Open calls = %d, want one retained unversioned client", loader.openCalls)
+	}
+
+	h.ShutdownAll()
+	fresh := NewForTest(loader)
+	fresh.ApplyConfig(context.Background(), versionedConfig)
+	if !fresh.PluginRegistered("alpha") || !fresh.pluginIdentityCurrent("alpha", versionedPath, "2.0.0") {
+		t.Fatal("fresh host did not register desired versioned plugin")
 	}
 	fresh.ShutdownAll()
 }

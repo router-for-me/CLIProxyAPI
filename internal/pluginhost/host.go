@@ -287,7 +287,7 @@ func (h *Host) deferredPluginFileLocked(file pluginFile) pluginFile {
 	}
 	deferred, ok := h.deferredPluginUpdates[id]
 	activePath, activeVersion := h.pluginIdentityLocked(id)
-	if !ok || activePath == "" || activePath != deferred.path || activeVersion != deferred.version {
+	if !ok || activePath == "" || activePath != deferred.path || (deferred.version != "" && activeVersion != deferred.version) {
 		return file
 	}
 	file.Path = deferred.path
