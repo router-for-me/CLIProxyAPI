@@ -957,6 +957,30 @@ func TestHostCleanupKeepsDeferredPluginArtifact(t *testing.T) {
 	h.ShutdownAll()
 }
 
+func TestHostCleanupKeepsDeferredPluginArtifactBeforeConfigSave(t *testing.T) {
+	h, cfg, registerStarted, releaseRegister := newBlockingRegisterHost(t)
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), cfg)
+		close(applyDone)
+	}()
+	waitForHostTestSignal(t, registerStarted, "plugin registration")
+	if deferred, created := h.PreparePluginUpdate("alpha"); !deferred || !created {
+		t.Fatalf("PreparePluginUpdate() = deferred:%v created:%v, want true,true", deferred, created)
+	}
+	target := writeVersionedPluginFile(t, cfg.Plugins.Dir, "alpha", "2.0.0")
+	releaseRegister()
+	waitForHostTestSignal(t, applyDone, "initial plugin apply")
+
+	if !h.PluginRegistered("alpha") {
+		t.Fatal("PluginRegistered(alpha) = false, want initial version active")
+	}
+	if _, errStat := os.Stat(target); errStat != nil {
+		t.Fatalf("deferred target artifact was removed before config persistence: %v", errStat)
+	}
+	h.ShutdownAll()
+}
+
 func TestHostDeferPluginUpdateFreshInstallDoesNotRequireRestart(t *testing.T) {
 	loader := newExclusiveTestLoader(map[string]*testPlugin{
 		"1.0.0": {

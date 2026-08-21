@@ -249,7 +249,7 @@ func pluginVersionSegment(segments []string, index int) (int64, bool) {
 	return number, true
 }
 
-func cleanupUnselectedPluginFiles(root string, loaded []pluginFile) error {
+func cleanupUnselectedPluginFiles(root string, loaded []pluginFile, isDeferred func(string) bool, lockArtifact func(string) func()) error {
 	if len(loaded) == 0 {
 		return nil
 	}
@@ -271,18 +271,32 @@ func cleanupUnselectedPluginFiles(root string, loaded []pluginFile) error {
 	}
 	var errs []error
 	for _, candidate := range candidates {
+		unlockArtifact := func() {}
+		if lockArtifact != nil {
+			if unlock := lockArtifact(candidate.ID); unlock != nil {
+				unlockArtifact = unlock
+			}
+		}
+		if isDeferred != nil && isDeferred(candidate.ID) {
+			unlockArtifact()
+			continue
+		}
 		paths := loadedByID[candidate.ID]
 		if len(paths) == 0 {
+			unlockArtifact()
 			continue
 		}
 		if _, selected := paths[filepath.Clean(candidate.Path)]; selected {
+			unlockArtifact()
 			continue
 		}
 		if errRemove := os.Remove(candidate.Path); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
+			unlockArtifact()
 			errs = append(errs, errRemove)
 			log.WithError(errRemove).Warnf("pluginhost: failed to remove old plugin file %s", candidate.Path)
 			continue
 		}
+		unlockArtifact()
 		log.WithFields(pluginLogFields(candidate.ID, "", candidate.Version, candidate.Path)).Info("pluginhost: old plugin file removed")
 	}
 	return errors.Join(errs...)

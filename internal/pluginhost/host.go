@@ -590,7 +590,13 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	if cleanupFiles && len(loadedFiles) > 0 {
 		cleanupFilesToKeep := append([]pluginFile(nil), loadedFiles...)
 		cleanupFilesToKeep = append(cleanupFilesToKeep, deferredFiles...)
-		if errCleanup := cleanupUnselectedPluginFiles(rc.Dir, cleanupFilesToKeep); errCleanup != nil {
+		isDeferred := func(id string) bool {
+			h.mu.Lock()
+			_, ok := h.deferredPluginUpdates[strings.TrimSpace(id)]
+			h.mu.Unlock()
+			return ok
+		}
+		if errCleanup := cleanupUnselectedPluginFiles(rc.Dir, cleanupFilesToKeep, isDeferred, h.LockPluginArtifact); errCleanup != nil {
 			log.Warnf("pluginhost: failed to clean old plugin files: %v", errCleanup)
 		}
 	}
