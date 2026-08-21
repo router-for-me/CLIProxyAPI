@@ -201,7 +201,8 @@ func (h *Host) PluginBusy(id string) bool {
 
 // DeferPluginUpdateUntilRestart keeps an active plugin identity pinned until a
 // fresh host is created. It reports whether the requested artifact differs from
-// the currently effective plugin or changed its bytes in place.
+// the currently effective plugin or changed its bytes in place, and keeps an
+// existing deferral pinned while queued reloads drain.
 func (h *Host) DeferPluginUpdateUntilRestart(id, targetPath, targetVersion string, contentChanged bool) bool {
 	if h == nil {
 		return false
@@ -224,7 +225,12 @@ func (h *Host) DeferPluginUpdateUntilRestart(id, targetPath, targetVersion strin
 		return false
 	}
 	if !contentChanged && activePath == targetPath && activeVersion == targetVersion {
-		delete(h.deferredPluginUpdates, id)
+		if deferred, ok := h.deferredPluginUpdates[id]; ok {
+			if deferred.path != activePath || deferred.version != activeVersion {
+				h.deferredPluginUpdates[id] = deferredPluginIdentity{path: activePath, version: activeVersion}
+			}
+			return true
+		}
 		return false
 	}
 	if h.deferredPluginUpdates == nil {

@@ -1184,6 +1184,76 @@ func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testin
 	}
 }
 
+func TestInstallPluginFromStoreConfigSaveFailureRetainsDeferredUpdate(t *testing.T) {
+	pluginsDir := t.TempDir()
+	existingPath := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH, "sample-provider-v0.1.0"+managementPluginExtension(runtime.GOOS))
+	if errMkdir := os.MkdirAll(filepath.Dir(existingPath), 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(existingPath), errMkdir)
+	}
+	if errWrite := os.WriteFile(existingPath, []byte("old-library-data"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", existingPath, errWrite)
+	}
+	archiveData := makeManagementPluginStoreZip(t, "sample-provider"+managementPluginExtension(runtime.GOOS), "new-library-data")
+	archiveName := "sample-provider_0.1.0_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip"
+	checksum := sha256.Sum256(archiveData)
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample-provider": pluginConfigFromYAML(t, "enabled: true\n"),
+				},
+			},
+		},
+		// A directory cannot be read as the YAML config file, forcing the save path to fail.
+		configFilePath:         t.TempDir(),
+		pluginStoreRegistryURL: "https://registry.example/registry.json",
+		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
+			"https://registry.example/registry.json": registryJSON(t),
+			"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(`{
+				"tag_name": "v0.1.0",
+				"assets": [
+					{"name": "` + archiveName + `", "browser_download_url": "https://downloads.example/` + archiveName + `"},
+					{"name": "checksums.txt", "browser_download_url": "https://downloads.example/checksums.txt"}
+				]
+			}`),
+			"https://downloads.example/" + archiveName: archiveData,
+			"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
+		},
+	}
+	deferredUpdate := &recordingPluginUpdateDeferrer{restart: true}
+	h.pluginUpdateDeferrer = deferredUpdate
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install", nil)
+
+	h.InstallPluginFromStore(c)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "config_save_failed") {
+		t.Fatalf("body = %s, want config_save_failed", rec.Body.String())
+	}
+	data, errRead := os.ReadFile(existingPath)
+	if errRead != nil {
+		t.Fatalf("ReadFile(%s) error = %v", existingPath, errRead)
+	}
+	if string(data) != "new-library-data" {
+		t.Fatalf("installed file = %q, want new-library-data", data)
+	}
+	if !deferredUpdate.deferred || deferredUpdate.clearCalls != 0 {
+		t.Fatalf("deferred update state = deferred:%v clear_calls:%d, want retained without clearing", deferredUpdate.deferred, deferredUpdate.clearCalls)
+	}
+	item := h.cfg.Plugins.Configs["sample-provider"]
+	if item.Enabled == nil || !*item.Enabled {
+		t.Fatalf("plugin enabled = %#v, want desired config retained in memory", item.Enabled)
+	}
+}
+
 func TestInstallPluginFromStoreFailedVerificationPreservesActiveState(t *testing.T) {
 	pluginsDir := t.TempDir()
 	existingPath := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH, "sample-provider-v0.1.0"+managementPluginExtension(runtime.GOOS))
@@ -1326,8 +1396,10 @@ type countingPluginStoreHTTPClient struct {
 }
 
 type recordingPluginUpdateDeferrer struct {
-	restart bool
-	calls   []pluginUpdateDeferralCall
+	restart    bool
+	deferred   bool
+	clearCalls int
+	calls      []pluginUpdateDeferralCall
 }
 
 type pluginUpdateDeferralCall struct {
@@ -1344,10 +1416,14 @@ func (d *recordingPluginUpdateDeferrer) DeferPluginUpdateUntilRestart(id, target
 		targetVersion:  targetVersion,
 		contentChanged: contentChanged,
 	})
+	d.deferred = d.restart
 	return d.restart
 }
 
-func (d *recordingPluginUpdateDeferrer) ClearDeferredPluginUpdate(string) {}
+func (d *recordingPluginUpdateDeferrer) ClearDeferredPluginUpdate(string) {
+	d.clearCalls++
+	d.deferred = false
+}
 
 func (c *countingPluginStoreHTTPClient) Do(req *http.Request) (*http.Response, error) {
 	c.mu.Lock()

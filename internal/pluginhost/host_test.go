@@ -987,6 +987,53 @@ func TestHostDeferPluginUpdateSameIdentityUsesContentChange(t *testing.T) {
 	}
 }
 
+func TestHostDeferPluginUpdatePreservesPendingDeferralForSameIdentity(t *testing.T) {
+	loader := newExclusiveTestLoader(map[string]*testPlugin{
+		"1.0.0": {
+			registerResult:    validTestPlugin("alpha-v1"),
+			reconfigureResult: validTestPlugin("alpha-v1"),
+		},
+		"2.0.0": {
+			registerResult:    validTestPlugin("alpha-v2"),
+			reconfigureResult: validTestPlugin("alpha-v2"),
+		},
+	})
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0", "2.0.0")
+	configForVersion := func(version string) *config.Config {
+		return &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"alpha": enabledPluginConfigWithStoreVersion(t, version),
+				},
+			},
+		}
+	}
+
+	h := NewForTest(loader)
+	h.ApplyConfig(context.Background(), configForVersion("1.0.0"))
+	if !h.DeferPluginUpdateUntilRestart("alpha", paths["2.0.0"], "2.0.0", false) {
+		t.Fatal("initial deferred update = false, want true")
+	}
+	if !h.DeferPluginUpdateUntilRestart("alpha", paths["1.0.0"], "1.0.0", false) {
+		t.Fatal("same-identity follow-up = false, want true while an update remains deferred")
+	}
+
+	h.ApplyConfig(context.Background(), configForVersion("2.0.0"))
+	h.ApplyConfig(context.Background(), configForVersion("1.0.0"))
+	if !h.PluginRegistered("alpha") || !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatal("retained v1 was not effective while deferred reloads drained")
+	}
+	if h.pluginIdentityCurrent("alpha", paths["2.0.0"], "2.0.0") {
+		t.Fatal("replacement v2 became active before restart")
+	}
+	if openCalls, active := loader.stats(); openCalls != 1 || !active {
+		t.Fatalf("exclusive loader state = calls %d active %v, want one active v1 client", openCalls, active)
+	}
+	h.ShutdownAll()
+}
+
 func TestHostApplyConfigLogsLoadedWhenRegistrationInvalid(t *testing.T) {
 	var out bytes.Buffer
 	originalOut := log.StandardLogger().Out

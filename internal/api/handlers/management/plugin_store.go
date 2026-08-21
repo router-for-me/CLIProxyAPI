@@ -339,7 +339,6 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
-		clearDeferredUpdate()
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "config_save_failed",
