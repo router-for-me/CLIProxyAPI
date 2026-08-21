@@ -167,12 +167,12 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 							}
 						} else {
 							report.DroppedSignatures++
-							updated, _ := sjson.Delete(part.Raw, "signature")
+							updated, _ := sjson.Set(part.Raw, "signature", "")
 							keptParts = append(keptParts, updated)
 						}
 					} else {
 						report.DroppedSignatures++
-						updated, _ := sjson.Delete(part.Raw, "signature")
+						updated, _ := sjson.Set(part.Raw, "signature", "")
 						keptParts = append(keptParts, updated)
 					}
 					messageModified = true

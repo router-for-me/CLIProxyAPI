@@ -21,44 +21,44 @@ func TestSanitizeClaudeMessagesForClaudeUpstreamPreservesEmptyThinkingInCompatMo
 	}
 }
 
-func TestSanitizeClaudeMessagesForClaudeUpstreamStripsGeminiPrefixInCompatMode(t *testing.T) {
+func TestSanitizeClaudeMessagesForClaudeUpstreamRetainsEmptySignatureOnGeminiPrefixInCompatMode(t *testing.T) {
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"gemini#EgI="}]}]}`)
 
 	withCompat, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4", true)
 	part := gjson.GetBytes(withCompat, "messages.0.content.0")
-	if part.Get("type").String() != "thinking" || part.Get("signature").String() != "" {
-		t.Fatalf("compat sanitizer preserved gemini-prefixed signature: %s", withCompat)
+	if part.Get("type").String() != "thinking" || !part.Get("signature").Exists() || part.Get("signature").String() != "" {
+		t.Fatalf("compat sanitizer did not retain empty signature member on foreign-prefixed thinking block: %s", withCompat)
 	}
 }
 
-func TestSanitizeClaudeMessagesForClaudeUpstreamStripsMislabeledClaudePrefixInCompatMode(t *testing.T) {
+func TestSanitizeClaudeMessagesForClaudeUpstreamRetainsEmptySignatureOnMislabeledClaudePrefixInCompatMode(t *testing.T) {
 	geminiSig := testGemini3ThoughtSignature([]byte{0x01, 0x0c, 0x39, 0xd6, 0xc7, 0x34})
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"claude#` + geminiSig + `"}]}]}`)
 
 	withCompat, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4", true)
 	part := gjson.GetBytes(withCompat, "messages.0.content.0")
-	if part.Get("type").String() != "thinking" || part.Get("signature").Exists() {
-		t.Fatalf("compat sanitizer preserved Gemini payload behind claude# prefix: %s", withCompat)
+	if part.Get("type").String() != "thinking" || !part.Get("signature").Exists() || part.Get("signature").String() != "" {
+		t.Fatalf("compat sanitizer did not retain empty signature member on mislabeled claude# block: %s", withCompat)
 	}
 }
 
-func TestSanitizeClaudeMessagesForClaudeUpstreamStripsNestedClaudePrefixInCompatMode(t *testing.T) {
+func TestSanitizeClaudeMessagesForClaudeUpstreamRetainsEmptySignatureOnNestedClaudePrefixInCompatMode(t *testing.T) {
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"claude#vendor#EgI="}]}]}`)
 
 	withCompat, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4", true)
 	part := gjson.GetBytes(withCompat, "messages.0.content.0")
-	if part.Get("type").String() != "thinking" || part.Get("signature").Exists() {
-		t.Fatalf("compat sanitizer preserved nested claude#vendor# signature: %s", withCompat)
+	if part.Get("type").String() != "thinking" || !part.Get("signature").Exists() || part.Get("signature").String() != "" {
+		t.Fatalf("compat sanitizer did not retain empty signature member on nested claude# block: %s", withCompat)
 	}
 }
 
-func TestSanitizeClaudeMessagesForClaudeUpstreamStripsUnknownVendorPrefixInCompatMode(t *testing.T) {
+func TestSanitizeClaudeMessagesForClaudeUpstreamRetainsEmptySignatureOnUnknownVendorPrefixInCompatMode(t *testing.T) {
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"vendor#EgI="}]}]}`)
 
 	withCompat, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4", true)
 	part := gjson.GetBytes(withCompat, "messages.0.content.0")
-	if part.Get("type").String() != "thinking" || part.Get("signature").Exists() {
-		t.Fatalf("compat sanitizer preserved unknown vendor-prefixed signature: %s", withCompat)
+	if part.Get("type").String() != "thinking" || !part.Get("signature").Exists() || part.Get("signature").String() != "" {
+		t.Fatalf("compat sanitizer did not retain empty signature member on unknown-vendor block: %s", withCompat)
 	}
 }
 
@@ -72,7 +72,7 @@ func TestSanitizeClaudeMessagesForClaudeUpstreamStripsOpaqueThinkingSignatureInC
 
 	withCompat, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "deepseek-v4", true)
 	part := gjson.GetBytes(withCompat, "messages.0.content.0")
-	if part.Get("type").String() != "thinking" || part.Get("signature").String() != "" {
-		t.Fatalf("compat sanitizer dropped opaque thinking block: %s", withCompat)
+	if part.Get("type").String() != "thinking" || !part.Get("signature").Exists() || part.Get("signature").String() != "" {
+		t.Fatalf("compat sanitizer did not retain empty signature member on opaque-signature block: %s", withCompat)
 	}
 }
