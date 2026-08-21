@@ -125,12 +125,13 @@ func goframeCacheAntigravityInteractionsState(ctx context.Context, modelName str
 	// Responses tool-result turn. A standard HTTP Responses loop sends only
 	// previous_response_id + function_call_output — session.Enrich cannot
 	// re-derive the original identity from that input, so without this alias
-	// entry the cached environment would never be found.
+	// entry the cached environment would never be found. The alias keeps the
+	// same caller namespace as the primary key.
 	if responseID := strings.TrimSpace(firstNonEmptyString(
 		gjson.GetBytes(payload, "interaction.id").String(),
 		gjson.GetBytes(payload, "id").String(),
 	)); responseID != "" {
-		internalcache.CacheAntigravityInteractionsStateBestEffort(ctx, modelName, "response-id:"+responseID, state)
+		internalcache.CacheAntigravityInteractionsStateBestEffort(ctx, modelName, sessionKey+"\x00response-id:"+responseID, state)
 	}
 	log.Debugf("antigravity interactions state: cached model=%s session=%s interaction=%s env=%s", modelName, sessionKey, state.InteractionID, state.EnvironmentID)
 }
@@ -182,6 +183,16 @@ func antigravityConversationPrefixKey(raw []byte) string {
 // independent so the interactions-agent cache never collides with the OAuth /
 // Code Assist replay cache.
 func antigravityExecSessionKey(opts cliproxyexecutor.Options, originalRequest []byte) string {
+	// Namespace every key by the downstream caller scope: two API keys using
+	// the same explicit session value (e.g. "Session-Id: default") must never
+	// share one upstream interaction.
+	callerScope := metadataString(opts.Metadata, cliproxyexecutor.CallerScopeMetadataKey)
+	namespaced := func(key string) string {
+		if callerScope == "" {
+			return key
+		}
+		return "caller:" + callerScope + "\x00" + key
+	}
 	// Reuse the full session-affinity extraction used for credential
 	// selection: it recognizes every supported explicit signal
 	// (X-Claude-Code-Session-Id, Session-Id/Session_id, X-Session-ID,
@@ -190,17 +201,17 @@ func antigravityExecSessionKey(opts cliproxyexecutor.Options, originalRequest []
 	// metadata). Keeping one list avoids drift between auth selection and
 	// continuation keying.
 	if value := strings.TrimSpace(cliproxyauth.ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)); value != "" {
-		return "session:" + value
+		return namespaced("session:" + value)
 	}
 	if value := strings.TrimSpace(cliproxyauth.ExtractSessionID(opts.Headers, originalRequest, opts.Metadata)); value != "" {
-		return "session:" + value
+		return namespaced("session:" + value)
 	}
 	// Context-derived identity (conductor runs session.Enrich before exec):
 	// stable per downstream caller+conversation even when the client sends no
 	// explicit marker. This isolates identical conversation prefixes coming
 	// from different callers so they never share one upstream interaction.
 	if value := helps.DerivedSessionID(opts.Metadata); value != "" {
-		return "derived:" + value
+		return namespaced("derived:" + value)
 	}
 	// Fallback for chat/completions clients (e.g. Hermes delegation) that send
 	// no explicit session marker: derive a stable key from the conversation
@@ -212,7 +223,7 @@ func antigravityExecSessionKey(opts cliproxyexecutor.Options, originalRequest []
 			continue
 		}
 		if key := antigravityConversationPrefixKey(raw); key != "" {
-			return key
+			return namespaced(key)
 		}
 	}
 	return ""
@@ -276,12 +287,12 @@ func goframeApplyAntigravityInteractionsContinuation(ctx context.Context, modelN
 		state, ok = internalcache.GetAntigravityInteractionsState(ctx, modelName, sessionKey)
 	}
 	// Responses tool loops reference the prior turn by previous_response_id /
-	// previous_interaction_id; the state was indexed under that id at capture
-	// time, so try the alias entry before giving up.
+	// previous_interaction_id; the state was indexed under sessionKey +
+	// that id at capture time, so try the alias entry before giving up.
 	if !ok {
 		for _, path := range []string{"previous_response_id", "previous_interaction_id"} {
-			if responseID := strings.TrimSpace(gjson.GetBytes(body, path).String()); responseID != "" {
-				if state, ok = internalcache.GetAntigravityInteractionsState(ctx, modelName, "response-id:"+responseID); ok {
+			if responseID := strings.TrimSpace(gjson.GetBytes(body, path).String()); responseID != "" && sessionKey != "" {
+				if state, ok = internalcache.GetAntigravityInteractionsState(ctx, modelName, sessionKey+"\x00response-id:"+responseID); ok {
 					break
 				}
 			}
