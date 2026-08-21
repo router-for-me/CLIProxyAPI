@@ -45,6 +45,21 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 }
 
+func TestBuildCodexWebsocketRequestBodyStripsTopLevelMetadataPreservesClientMetadata(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","metadata":{"user_id":"remove-me"},"client_metadata":{"sentinel":"must-remain"}}`)
+
+	got := buildCodexWebsocketRequestBody(body)
+	if gjson.GetBytes(got, "metadata").Exists() {
+		t.Fatalf("top-level metadata was forwarded: %s", got)
+	}
+	if value := gjson.GetBytes(got, "client_metadata.sentinel").String(); value != "must-remain" {
+		t.Fatalf("client_metadata.sentinel = %q, want %q; body=%s", value, "must-remain", got)
+	}
+	if value := gjson.GetBytes(got, "type").String(); value != "response.create" {
+		t.Fatalf("type = %q, want response.create", value)
+	}
+}
+
 func BenchmarkBuildCodexWebsocketRequestBodyLargePayload(b *testing.B) {
 	body := []byte(`{"model":"gpt-5.6","input":[{"type":"message","id":"msg_1","role":"user","content":"` + strings.Repeat("x", 8<<20) + `"}]}`)
 	b.ReportAllocs()
