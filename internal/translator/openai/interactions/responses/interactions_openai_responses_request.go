@@ -323,7 +323,7 @@ func responsesImagePartToInteractions(part gjson.Result) []byte {
 
 func responsesFunctionCallToInteractions(item gjson.Result) []byte {
 	out := []byte(`{"type":"function_call","name":"","arguments":{}}`)
-	out, _ = sjson.SetBytes(out, "name", item.Get("name").String())
+	out, _ = sjson.SetBytes(out, "name", translatorcommon.AntigravityToolNameToUpstream(item.Get("name").String()))
 	if callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String()); callID != "" {
 		out, _ = sjson.SetBytes(out, "call_id", callID)
 	}
@@ -335,9 +335,9 @@ func responsesFunctionOutputToInteractions(item gjson.Result, functionNamesByCal
 	out := []byte(`{"type":"function_result","name":"","result":{}}`)
 	callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String())
 	if name := item.Get("name").String(); name != "" {
-		out, _ = sjson.SetBytes(out, "name", name)
+		out, _ = sjson.SetBytes(out, "name", translatorcommon.AntigravityToolNameToUpstream(name))
 	} else if name := functionNamesByCallID[callID]; name != "" {
-		out, _ = sjson.SetBytes(out, "name", name)
+		out, _ = sjson.SetBytes(out, "name", translatorcommon.AntigravityToolNameToUpstream(name))
 	}
 	if callID != "" {
 		out, _ = sjson.SetBytes(out, "call_id", callID)
@@ -400,7 +400,7 @@ func functionToolToInteractions(tool gjson.Result) ([]byte, bool) {
 		return nil, false
 	}
 	out := []byte(`{"type":"function","name":""}`)
-	out, _ = sjson.SetBytes(out, "name", name)
+	out, _ = sjson.SetBytes(out, "name", translatorcommon.AntigravityToolNameToUpstream(name))
 	copyOptionalString(&out, "description", firstExisting(tool.Get("description"), tool.Get("function.description")))
 	copyOptionalRaw(&out, "parameters", firstExisting(tool.Get("parameters"), tool.Get("function.parameters")))
 	return out, true
@@ -412,7 +412,7 @@ func functionDeclarationFromTool(tool gjson.Result) ([]byte, bool) {
 		return nil, false
 	}
 	out := []byte(`{"name":""}`)
-	out, _ = sjson.SetBytes(out, "name", name)
+	out, _ = sjson.SetBytes(out, "name", translatorcommon.AntigravityToolNameToUpstream(name))
 	copyOptionalString(&out, "description", firstExisting(tool.Get("description"), tool.Get("function.description")))
 	copyOptionalRaw(&out, "parameters", firstExisting(tool.Get("parameters"), tool.Get("function.parameters")))
 	return out, true
@@ -559,7 +559,7 @@ func interactionsFunctionCallToResponses(item gjson.Result) []byte {
 	if callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String()); callID != "" {
 		out, _ = sjson.SetBytes(out, "call_id", callID)
 	}
-	out, _ = sjson.SetBytes(out, "name", item.Get("name").String())
+	out, _ = sjson.SetBytes(out, "name", translatorcommon.AntigravityUpstreamToolNameToClient(item.Get("name").String()))
 	out, _ = sjson.SetBytes(out, "arguments", jsonStringValue(item.Get("arguments"), "{}"))
 	return out
 }
@@ -570,7 +570,7 @@ func interactionsFunctionResultToResponses(item gjson.Result) []byte {
 		out, _ = sjson.SetBytes(out, "call_id", callID)
 	}
 	if name := item.Get("name").String(); name != "" {
-		out, _ = sjson.SetBytes(out, "name", name)
+		out, _ = sjson.SetBytes(out, "name", translatorcommon.AntigravityUpstreamToolNameToClient(name))
 	}
 	result := item.Get("result")
 	if !result.Exists() {

@@ -146,7 +146,7 @@ func interactionsStepStartToOpenAIChat(modelName string, root gjson.Result, st *
 	case "function_call":
 		st.SawToolCall = true
 		st.ToolIDs[index] = firstNonEmpty(step.Get("call_id").String(), step.Get("id").String(), fmt.Sprintf("call_%d", index))
-		st.ToolNames[index] = step.Get("name").String()
+		st.ToolNames[index] = antigravityUpstreamToolNameToClient(step.Get("name").String())
 		if st.ToolArguments[index] == nil {
 			st.ToolArguments[index] = &strings.Builder{}
 		}

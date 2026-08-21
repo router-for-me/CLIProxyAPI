@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"strings"
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
@@ -65,10 +66,20 @@ func antigravityConversationPrefixKey(raw []byte) string {
 	if !msgs.IsArray() {
 		return ""
 	}
+	// Canonical JSON per message (sorted keys, no whitespace) so the hash is
+	// stable across clients that re-serialize the history differently.
+	canonical := func(msg gjson.Result) string {
+		v := msg.Value()
+		b, err := json.Marshal(v)
+		if err != nil {
+			return msg.Raw
+		}
+		return string(b)
+	}
 	var prefix []string
 	lastUser := -1
 	msgs.ForEach(func(_, msg gjson.Result) bool {
-		prefix = append(prefix, msg.Raw)
+		prefix = append(prefix, canonical(msg))
 		if strings.EqualFold(strings.TrimSpace(msg.Get("role").String()), "user") {
 			lastUser = len(prefix) - 1
 		}

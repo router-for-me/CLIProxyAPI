@@ -324,26 +324,17 @@ func renameConflictingAntigravityToolName(tool []byte) []byte {
 // antigravityUpstreamToolNameToClient maps them back. Colliding names get an
 // "external_" prefix upstream (Google's antigravity agent ships its own
 // read_file/write_file sandbox tools; redefining them 500s) and are restored
-// to the client-facing name in every response path.
-const antigravityToolPrefix = "external_"
-
-var antigravityToolNameMap = map[string]string{
-	"read_file":  "external_read_file",
-	"write_file": "external_write_file",
-}
+// to the client-facing name in every response path. The shared implementation
+// lives in internal/translator/common so the responses translator reuses it.
+const antigravityToolPrefix = translatorcommon.ExternalToolPrefix
 
 func antigravityToolNameToUpstream(name string) (string, bool) {
-	mapped, ok := antigravityToolNameMap[name]
-	return mapped, ok
+	mapped := translatorcommon.AntigravityToolNameToUpstream(name)
+	return mapped, mapped != name
 }
 
 func antigravityUpstreamToolNameToClient(name string) string {
-	for client, upstream := range antigravityToolNameMap {
-		if upstream == name {
-			return client
-		}
-	}
-	return name
+	return translatorcommon.AntigravityUpstreamToolNameToClient(name)
 }
 
 func openAIChatToolToInteractions(tool gjson.Result) ([]byte, bool) {
