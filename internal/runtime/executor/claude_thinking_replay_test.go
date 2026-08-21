@@ -267,6 +267,81 @@ func claudeReplayThinkingStream() string {
 		"data: {\"type\":\"message_stop\"}\n\n"
 }
 
+func TestClaudeExecutorCompatThinkingReplayRestoresBeforeMCPToolNameRemap(t *testing.T) {
+	internalcacheClearClaudeThinkingReplay(t)
+
+	var mu sync.Mutex
+	var requestBodies [][]byte
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+			return
+		}
+		mu.Lock()
+		requestBodies = append(requestBodies, bytes.Clone(body))
+		callCount++
+		call := callCount
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			// The upstream tool name is the alias; echo it back so the cache stores
+			// the caller-facing name after restoreClaudeOAuthToolNamesFromResponse.
+			aliasName := gjson.GetBytes(body, "tools.0.name").String()
+			_, _ = w.Write([]byte(`{"id":"msg-1","type":"message","role":"assistant","model":"claude-synthetic-4772","content":[{"type":"thinking","thinking":"provider reasoning","signature":"EgI="},{"type":"tool_use","id":"toolu_1","name":"` + aliasName + `","input":{"path":"README.md"}}],"stop_reason":"tool_use"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"msg-2","type":"message","role":"assistant","model":"claude-synthetic-4772","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(nil)
+	auth := claudeReplayTestAuth(server.URL)
+	auth.Attributes["fingerprint_profile"] = "claude-code-cli"
+
+	tools := `[{"name":"my_tool","input_schema":{"type":"object"}}]`
+	firstPayload := []byte(`{"messages":[{"role":"user","content":"call my_tool"}],"tools":` + tools + `}`)
+	firstRequest, firstOptions := claudeReplayTestRequest(firstPayload, "mcp-replay", true, sdktranslator.FormatClaude)
+	if _, errExecute := executor.Execute(context.Background(), auth, firstRequest, firstOptions); errExecute != nil {
+		t.Fatalf("first Execute() error = %v", errExecute)
+	}
+
+	secondPayload := []byte(`{"messages":[{"role":"user","content":"call my_tool"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"my_tool","input":{"path":"README.md"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}],"tools":` + tools + `}`)
+	secondRequest, secondOptions := claudeReplayTestRequest(secondPayload, "mcp-replay", true, sdktranslator.FormatClaude)
+	if _, errExecute := executor.Execute(context.Background(), auth, secondRequest, secondOptions); errExecute != nil {
+		t.Fatalf("second Execute() error = %v", errExecute)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requestBodies) != 2 {
+		t.Fatalf("upstream request count = %d, want 2", len(requestBodies))
+	}
+
+	secondContent := gjson.GetBytes(requestBodies[1], "messages.1.content").Array()
+	if len(secondContent) != 2 {
+		t.Fatalf("second assistant content = %s, want thinking and tool_use", gjson.GetBytes(requestBodies[1], "messages.1.content").Raw)
+	}
+	if got := secondContent[0].Get("type").String(); got != "thinking" {
+		t.Fatalf("restored first content type = %q, want thinking", got)
+	}
+	if got := secondContent[0].Get("signature").String(); got != "EgI=" {
+		t.Fatalf("restored signature = %q, want EgI=", got)
+	}
+
+	// The restored tool_use name must be remapped for upstream, matching the
+	// alias in the second request's tools array.
+	secondToolName := gjson.GetBytes(requestBodies[1], "tools.0.name").String()
+	if secondToolName == "" || secondToolName == "my_tool" {
+		t.Fatalf("second request tool name was not aliased: %q", secondToolName)
+	}
+	if got := secondContent[1].Get("name").String(); got != secondToolName {
+		t.Fatalf("restored tool_use name = %q, want alias %q", got, secondToolName)
+	}
+}
+
 func TestClaudeExecutorCompatThinkingReplayClearsAfterUpstreamBadRequest(t *testing.T) {
 	internalcacheClearClaudeThinkingReplay(t)
 

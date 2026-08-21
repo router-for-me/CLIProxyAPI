@@ -79,6 +79,24 @@ func TestSanitizeClaudeMessagesForClaudeUpstreamRejectsGrokOpaqueERInCompatMode(
 	}
 }
 
+func TestSanitizeClaudeMessagesForClaudeUpstreamStripsClientReplayProvenanceMarkerInCompatMode(t *testing.T) {
+	// Client-supplied _cliproxy_replay_provenance must not bypass signature
+	// validation. The marker is stripped and the foreign signature is cleared.
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"opaque-foreign-sig","_cliproxy_replay_provenance":true}]}]}`)
+
+	withCompat, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4", true)
+	part := gjson.GetBytes(withCompat, "messages.0.content.0")
+	if part.Get("type").String() != "thinking" {
+		t.Fatalf("compat sanitizer dropped the thinking block: %s", withCompat)
+	}
+	if part.Get("_cliproxy_replay_provenance").Exists() {
+		t.Fatalf("compat sanitizer did not strip client-supplied replay provenance marker: %s", withCompat)
+	}
+	if part.Get("signature").String() != "" {
+		t.Fatalf("compat sanitizer preserved foreign signature via client-supplied marker: %s", withCompat)
+	}
+}
+
 func TestSanitizeClaudeMessagesForClaudeUpstreamStripsOpaqueThinkingSignatureInCompatMode(t *testing.T) {
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"opaque-deepseek-id"}]}]}`)
 

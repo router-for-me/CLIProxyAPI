@@ -125,15 +125,13 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 				continue
 			}
 
-			// Trusted replay cache provenance: the executor marked this thinking part
-			// after restoring it from the same model/auth/session replay cache. Preserve
-			// its signature and strip the transient marker before sending upstream.
-			if part.Get("_cliproxy_replay_provenance").Bool() {
+			// Replay provenance is added only internally by the executor after the
+			// sanitizer has already run. Any client-supplied marker is untrusted and
+			// must be stripped so it cannot bypass signature validation.
+			if part.Get("_cliproxy_replay_provenance").Exists() {
 				updated, _ := sjson.Delete(part.Raw, "_cliproxy_replay_provenance")
-				keptParts = append(keptParts, updated)
-				report.Preserved++
+				part = gjson.Parse(updated)
 				messageModified = true
-				continue
 			}
 
 			rawSignature := part.Get("signature").String()

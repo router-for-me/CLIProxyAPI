@@ -91,7 +91,9 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 }
 
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
-// When useCache is false, a new user ID is generated for every call.
+// The user ID is derived deterministically from the auth credential and session
+// so the same credential always produces the same upstream metadata, preserving
+// prompt-cache prefix stability.
 func injectFakeUserID(ctx context.Context, payload []byte, apiKey string, useCache bool) ([]byte, error) {
 	generateID := func() (string, error) {
 		if useCache {

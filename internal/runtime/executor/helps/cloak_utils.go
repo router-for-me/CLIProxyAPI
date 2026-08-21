@@ -1,7 +1,7 @@
 package helps
 
 import (
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"regexp"
@@ -19,18 +19,25 @@ type claudeMetadataUserID struct {
 
 // generateFakeUserID generates metadata.user_id in the JSON string format used
 // by Claude Code 2.1.78 and newer.
+// The device_id is derived deterministically so the same auth + session always
+// produces the same upstream request metadata and preserves prompt-cache prefix
+// stability. Callers that need a per-request random value can still supply a
+// fresh session UUID.
 func generateFakeUserID() string {
-	return generateFakeUserIDWithSessionID(uuid.New().String())
+	return generateDeterministicFakeUserID("", uuid.New().String())
 }
 
 func generateFakeUserIDWithSessionID(sessionID string) string {
+	return generateDeterministicFakeUserID("", sessionID)
+}
+
+func generateDeterministicFakeUserID(seed, sessionID string) string {
 	if _, errParse := uuid.Parse(sessionID); errParse != nil {
 		sessionID = uuid.New().String()
 	}
-	hexBytes := make([]byte, 32)
-	_, _ = rand.Read(hexBytes)
+	h := sha256.Sum256([]byte(seed + ":" + sessionID))
 	value, _ := json.Marshal(claudeMetadataUserID{
-		DeviceID:    hex.EncodeToString(hexBytes),
+		DeviceID:    hex.EncodeToString(h[:]),
 		AccountUUID: "",
 		SessionID:   sessionID,
 	})

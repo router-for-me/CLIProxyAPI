@@ -71,11 +71,23 @@ func TestCachedUserID_ExpiresAfterTTL(t *testing.T) {
 	userIDCacheMu.Unlock()
 
 	newID := CachedUserID("api-key-expired")
-	if newID == expiredID {
-		t.Fatalf("expected expired user_id to be replaced, got %q", newID)
-	}
 	if newID == "" {
 		t.Fatal("expected regenerated user_id to be non-empty")
+	}
+	if !IsValidUserID(newID) {
+		t.Fatalf("regenerated user_id %q is not valid", newID)
+	}
+	// The derived user_id is deterministic, so it is the same value with a
+	// refreshed TTL rather than a new random replacement.
+	if newID != expiredID {
+		t.Fatalf("expected deterministic user_id to be stable after expiry, got %q want %q", newID, expiredID)
+	}
+
+	userIDCacheMu.RLock()
+	entry := userIDCache[cacheKey]
+	userIDCacheMu.RUnlock()
+	if !entry.expire.After(time.Now().Add(30 * time.Minute)) {
+		t.Fatalf("expected expired cache entry to be refreshed, got expire %v", entry.expire)
 	}
 }
 

@@ -69,7 +69,7 @@ func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
 		if errSessionID != nil {
 			return "", errSessionID
 		}
-		return generateFakeUserIDWithSessionID(sessionID), nil
+		return generateDeterministicFakeUserID(apiKey, sessionID), nil
 	}
 
 	if apiKey == "" {
