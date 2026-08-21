@@ -340,6 +340,10 @@ func isClaudeReplayableShortSignature(rawSignature string) (bool, string) {
 		if provider != SignatureProviderClaude {
 			return false, ""
 		}
+		if strings.Contains(payload, "#") {
+			// Reject nested or residual provider prefixes (e.g. claude#vendor#...).
+			return false, ""
+		}
 		// Validate the payload behind the prefix; a genuine Gemini or other
 		// foreign signature hiding behind "claude#" must be rejected.
 		if !HasDecodableClaudeThinkingSignature(payload) {

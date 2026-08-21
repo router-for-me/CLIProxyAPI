@@ -42,6 +42,16 @@ func TestSanitizeClaudeMessagesForClaudeUpstreamStripsMislabeledClaudePrefixInCo
 	}
 }
 
+func TestSanitizeClaudeMessagesForClaudeUpstreamStripsNestedClaudePrefixInCompatMode(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"claude#vendor#EgI="}]}]}`)
+
+	withCompat, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4", true)
+	part := gjson.GetBytes(withCompat, "messages.0.content.0")
+	if part.Get("type").String() != "thinking" || part.Get("signature").Exists() {
+		t.Fatalf("compat sanitizer preserved nested claude#vendor# signature: %s", withCompat)
+	}
+}
+
 func TestSanitizeClaudeMessagesForClaudeUpstreamStripsUnknownVendorPrefixInCompatMode(t *testing.T) {
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"vendor#EgI="}]}]}`)
 
