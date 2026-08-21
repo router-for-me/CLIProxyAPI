@@ -47,7 +47,7 @@ func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyaut
 		sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
 	}
 	if sessionKey == "" {
-		sessionKey = claudeThinkingReplayConversationSessionKey(req.Payload)
+		sessionKey = claudeThinkingReplayConversationSessionKey(auth, req, opts)
 	}
 	return claudeThinkingReplayScope{
 		modelFamily: claudeThinkingReplayModelFamily(auth, req.Model),
@@ -56,31 +56,54 @@ func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyaut
 }
 
 // claudeThinkingReplayConversationSessionKey returns a stable per-conversation
-// key for sessionless clients. It hashes the first message and the system
-// prompt so two different conversations through the same credential do not
-// share replay state.
-func claudeThinkingReplayConversationSessionKey(payload []byte) string {
+// key for sessionless clients. It mixes caller identity signals (credential id,
+// caller-scope metadata, selected headers) with the first message, system
+// prompt, and tools so two callers sharing a credential and the same initial
+// prompt cannot see each other's replay state.
+func claudeThinkingReplayConversationSessionKey(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
+	h := sha256.New()
+	h.Write([]byte("conversation"))
+
+	if auth != nil {
+		if id := strings.TrimSpace(auth.ID); id != "" {
+			h.Write([]byte(id))
+		} else if apiKey, _ := claudeCreds(auth); apiKey != "" {
+			h.Write([]byte(apiKey))
+		}
+	}
+
+	if scope := metadataString(opts.Metadata, cliproxyexecutor.CallerScopeMetadataKey); scope != "" {
+		h.Write([]byte(scope))
+	}
+	if scope := metadataString(req.Metadata, cliproxyexecutor.CallerScopeMetadataKey); scope != "" {
+		h.Write([]byte(scope))
+	}
+	if derived := metadataString(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey); derived != "" {
+		h.Write([]byte(derived))
+	}
+	if derived := metadataString(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey); derived != "" {
+		h.Write([]byte(derived))
+	}
+
+	if opts.Headers != nil {
+		h.Write([]byte(opts.Headers.Get("User-Agent")))
+		h.Write([]byte(opts.Headers.Get("X-App")))
+		h.Write([]byte(opts.Headers.Get("X-Codex-Client-Id")))
+	}
+
+	payload := req.Payload
 	if len(payload) == 0 {
 		return ""
 	}
-	h := sha256.New()
-	h.Write([]byte("conversation"))
-	firstMsg := gjson.GetBytes(payload, "messages.0")
-	if firstMsg.Exists() {
-		if canon, ok := kimiCanonicalJSON([]byte(firstMsg.Raw)); ok {
-			h.Write(canon)
-		} else {
-			h.Write([]byte(firstMsg.Raw))
+	for _, path := range []string{"messages.0", "system", "tools"} {
+		part := gjson.GetBytes(payload, path)
+		if !part.Exists() {
+			continue
 		}
-	} else {
-		h.Write([]byte(""))
-	}
-	system := gjson.GetBytes(payload, "system")
-	if system.Exists() {
-		if canon, ok := kimiCanonicalJSON([]byte(system.Raw)); ok {
+		if canon, ok := kimiCanonicalJSON([]byte(part.Raw)); ok {
 			h.Write(canon)
 		} else {
-			h.Write([]byte(system.Raw))
+			h.Write([]byte(part.Raw))
 		}
 	}
 	return "conversation:" + hex.EncodeToString(h.Sum(nil)[:16])

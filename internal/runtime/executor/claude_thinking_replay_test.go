@@ -789,6 +789,92 @@ func TestClaudeExecutorCompatThinkingReplayIsConversationScopedForSessionlessCli
 	}
 }
 
+func TestClaudeExecutorCompatThinkingReplayIsCallerScopedForSessionlessClients(t *testing.T) {
+	internalcacheClearClaudeThinkingReplay(t)
+
+	opaqueA := bytes.Repeat([]byte{0x12, 0xff, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33}, 4)
+	opaqueSigA := base64.StdEncoding.EncodeToString(opaqueA)
+	opaqueB := bytes.Repeat([]byte{0x34, 0xff, 0x99, 0x11, 0x22, 0x33, 0x44, 0x55}, 4)
+	opaqueSigB := base64.StdEncoding.EncodeToString(opaqueB)
+
+	var mu sync.Mutex
+	var requestBodies [][]byte
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+			return
+		}
+		mu.Lock()
+		requestBodies = append(requestBodies, bytes.Clone(body))
+		callCount++
+		call := callCount
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			_, _ = w.Write([]byte(`{"id":"msg-1","type":"message","role":"assistant","model":"claude-synthetic-4772","content":[{"type":"thinking","thinking":"provider reasoning","signature":"` + opaqueSigA + `"},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"one"}}],"stop_reason":"tool_use"}`))
+			return
+		}
+		if call == 2 {
+			_, _ = w.Write([]byte(`{"id":"msg-2","type":"message","role":"assistant","model":"claude-synthetic-4772","content":[{"type":"thinking","thinking":"provider reasoning","signature":"` + opaqueSigB + `"},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"one"}}],"stop_reason":"tool_use"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"msg-3","type":"message","role":"assistant","model":"claude-synthetic-4772","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(nil)
+	auth := claudeReplayTestAuth(server.URL)
+	basePayload := []byte(`{"messages":[{"role":"user","content":"same task"}]}`)
+
+	// Caller A: first turn.
+	aReq, aOpts := claudeReplayTestRequest(basePayload, "", true, sdktranslator.FormatClaude)
+	aOpts.Headers = http.Header{"User-Agent": []string{"client-A"}}
+	if _, errExecute := executor.Execute(context.Background(), auth, aReq, aOpts); errExecute != nil {
+		t.Fatalf("caller A first Execute() error = %v", errExecute)
+	}
+
+	// Caller B: same credential, same first message, different caller signal.
+	bReq, bOpts := claudeReplayTestRequest(basePayload, "", true, sdktranslator.FormatClaude)
+	bOpts.Headers = http.Header{"User-Agent": []string{"client-B"}}
+	if _, errExecute := executor.Execute(context.Background(), auth, bReq, bOpts); errExecute != nil {
+		t.Fatalf("caller B first Execute() error = %v", errExecute)
+	}
+
+	// Caller A second turn: same User-Agent, must restore sigA.
+	a2Payload := []byte(`{"messages":[{"role":"user","content":"same task"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"one"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}]}`)
+	a2Req, a2Opts := claudeReplayTestRequest(a2Payload, "", true, sdktranslator.FormatClaude)
+	a2Opts.Headers = http.Header{"User-Agent": []string{"client-A"}}
+	if _, errExecute := executor.Execute(context.Background(), auth, a2Req, a2Opts); errExecute != nil {
+		t.Fatalf("caller A second Execute() error = %v", errExecute)
+	}
+
+	// Caller B second turn: same User-Agent, must restore sigB (not sigA).
+	b2Req, b2Opts := claudeReplayTestRequest(a2Payload, "", true, sdktranslator.FormatClaude)
+	b2Opts.Headers = http.Header{"User-Agent": []string{"client-B"}}
+	if _, errExecute := executor.Execute(context.Background(), auth, b2Req, b2Opts); errExecute != nil {
+		t.Fatalf("caller B second Execute() error = %v", errExecute)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requestBodies) != 4 {
+		t.Fatalf("upstream request count = %d, want 4", len(requestBodies))
+	}
+
+	aContent := gjson.GetBytes(requestBodies[2], "messages.1.content").Array()
+	if aContent[0].Get("signature").String() != opaqueSigA {
+		t.Fatalf("caller A did not restore its own signature: %s", aContent[0].Get("signature").String())
+	}
+
+	bContent := gjson.GetBytes(requestBodies[3], "messages.1.content").Array()
+	if bContent[0].Get("signature").String() != opaqueSigB {
+		t.Fatalf("caller B did not restore its own signature or leaked caller A's: %s", bContent[0].Get("signature").String())
+	}
+}
+
 func internalcacheClearClaudeThinkingReplay(t *testing.T) {
 	t.Helper()
 	internalcache.ClearClaudeThinkingReplayCache()
