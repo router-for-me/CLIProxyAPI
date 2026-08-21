@@ -218,6 +218,9 @@ routing:
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
+  # When true, a recovered higher-priority credential preempts a lower-priority
+  # session binding. Equal-priority bindings remain sticky. Default: false.
+  session-affinity-priority-failback: false
 
 # Codex provider behavior.
 codex:

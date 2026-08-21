@@ -116,6 +116,59 @@ func TestManagerSessionAffinityPreservesBindingAcrossHigherPriorityRecovery(t *t
 	}
 }
 
+func TestSessionAffinityPriorityFailbackRebindsRecoveredHigherPriority(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback:         &RoundRobinSelector{},
+		TTL:              time.Hour,
+		PriorityFailback: true,
+	})
+	defer selector.Stop()
+
+	high := &Auth{
+		ID:          "high",
+		Provider:    "test",
+		Status:      StatusActive,
+		Unavailable: true,
+		Attributes:  map[string]string{"priority": "1"},
+	}
+	low := &Auth{
+		ID:         "low",
+		Provider:   "test",
+		Status:     StatusActive,
+		Attributes: map[string]string{"priority": "0"},
+	}
+	auths := []*Auth{high, low}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.DerivedSessionIDMetadataKey: "stable-session",
+	}}
+
+	got, errPick := selector.Pick(context.Background(), "test", "model", opts, auths)
+	if errPick != nil {
+		t.Fatalf("initial Pick: %v", errPick)
+	}
+	if got.ID != low.ID {
+		t.Fatalf("initial binding = %q, want available lower priority %q", got.ID, low.ID)
+	}
+
+	high.Unavailable = false
+	got, errPick = selector.Pick(context.Background(), "test", "model", opts, auths)
+	if errPick != nil {
+		t.Fatalf("Pick after recovery: %v", errPick)
+	}
+	if got.ID != high.ID {
+		t.Fatalf("binding after higher-priority recovery = %q, want %q", got.ID, high.ID)
+	}
+
+	peer := &Auth{ID: "peer", Provider: "test", Status: StatusActive, Attributes: map[string]string{"priority": "1"}}
+	got, errPick = selector.Pick(context.Background(), "test", "model", opts, append(auths, peer))
+	if errPick != nil {
+		t.Fatalf("Pick with equal-priority peer: %v", errPick)
+	}
+	if got.ID != high.ID {
+		t.Fatalf("binding with equal-priority peer = %q, want sticky %q", got.ID, high.ID)
+	}
+}
+
 func TestSessionAffinityFallbackOnlyReceivesHighestAvailablePriority(t *testing.T) {
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
 		Fallback: lastAuthSelector{},

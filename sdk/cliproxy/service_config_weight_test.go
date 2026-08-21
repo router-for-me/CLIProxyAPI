@@ -21,6 +21,54 @@ func TestWeightedRoundRobinRoutingSelector(t *testing.T) {
 	}
 }
 
+func TestSessionAffinityPriorityFailbackRoutingConfig(t *testing.T) {
+	state := normalizedRoutingRuntimeState(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{
+			SessionAffinity:                 true,
+			SessionAffinityPriorityFailback: true,
+		},
+	})
+	selector, ok := newRoutingSelector(state).(*coreauth.SessionAffinitySelector)
+	if !ok {
+		t.Fatalf("selector type = %T, want *auth.SessionAffinitySelector", newRoutingSelector(state))
+	}
+	defer selector.Stop()
+
+	high := &coreauth.Auth{
+		ID:          "high",
+		Provider:    "test",
+		Status:      coreauth.StatusActive,
+		Unavailable: true,
+		Attributes:  map[string]string{"priority": "1"},
+	}
+	low := &coreauth.Auth{
+		ID:         "low",
+		Provider:   "test",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"priority": "0"},
+	}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.DerivedSessionIDMetadataKey: "stable-session",
+	}}
+
+	got, errPick := selector.Pick(context.Background(), "test", "model", opts, []*coreauth.Auth{high, low})
+	if errPick != nil {
+		t.Fatalf("initial Pick: %v", errPick)
+	}
+	if got.ID != low.ID {
+		t.Fatalf("initial binding = %q, want %q", got.ID, low.ID)
+	}
+
+	high.Unavailable = false
+	got, errPick = selector.Pick(context.Background(), "test", "model", opts, []*coreauth.Auth{high, low})
+	if errPick != nil {
+		t.Fatalf("Pick after recovery: %v", errPick)
+	}
+	if got.ID != high.ID {
+		t.Fatalf("binding after higher-priority recovery = %q, want %q", got.ID, high.ID)
+	}
+}
+
 func TestServiceRejectsInvalidCredentialWeightConfigCommit(t *testing.T) {
 	originalCfg := &internalconfig.Config{}
 	service := &Service{cfg: originalCfg}
