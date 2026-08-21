@@ -274,6 +274,25 @@ func TestNewAntigravityStatusErrMarksTransientRateLimit(t *testing.T) {
 		t.Fatal("expected an unclassified 429 to stay on the escalating cooldown ladder")
 	}
 
+	// A reasoned RATE_LIMIT_EXCEEDED without a RetryInfo hint is still a
+	// short-lived throttle, not an exhausted quota.
+	noHint := []byte(`{
+		"error": {
+			"code": 429,
+			"status": "RESOURCE_EXHAUSTED",
+			"details": [
+				{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "RATE_LIMIT_EXCEEDED", "domain": "cloudcode-pa.googleapis.com"}
+			]
+		}
+	}`)
+	noHintErr := newAntigravityStatusErr(http.StatusTooManyRequests, noHint)
+	if !noHintErr.TransientRateLimit() {
+		t.Fatal("expected a RATE_LIMIT_EXCEEDED 429 without RetryInfo to be marked transient")
+	}
+	if noHintErr.RetryAfter() != nil {
+		t.Fatal("expected no retry hint when Google omits RetryInfo")
+	}
+
 	if nonRateLimit := newAntigravityStatusErr(http.StatusServiceUnavailable, rateLimited); nonRateLimit.TransientRateLimit() {
 		t.Fatal("expected a non-429 status not to be marked transient")
 	}

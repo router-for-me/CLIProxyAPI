@@ -341,7 +341,13 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 		}
 		// Only a decisively rate-limited 429 may keep its raw retry hint downstream;
 		// exhausted quota and unclassified bodies stay on the escalating cooldown ladder.
-		err.transientRateLimit = classifyAntigravity429(body) == antigravity429RateLimited
+		// A RATE_LIMIT_EXCEEDED reason without a RetryInfo hint is still a short-lived
+		// throttle, not an exhausted quota, so it is transient too — but only when the
+		// classification comes from the ErrorInfo reason, not from the bare
+		// "too many requests" message heuristic.
+		category := classifyAntigravity429(body)
+		err.transientRateLimit = category == antigravity429RateLimited ||
+			(category == antigravity429SoftRateLimit && strings.EqualFold(decideAntigravity429(body).reason, "RATE_LIMIT_EXCEEDED"))
 	}
 	return err
 }
