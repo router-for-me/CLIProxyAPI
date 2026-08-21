@@ -93,7 +93,7 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 			partType := part.Get("type").String()
 			if partType == "tool_use" {
 				if opts.DropToolSignatures {
-					updatedPart, changed := stripClaudeToolUseSignatureFields(part)
+					updatedPart, changed := StripClaudeToolUseSignatureFields(part)
 					if changed {
 						messageModified = true
 						report.DroppedSignatures++
@@ -244,7 +244,11 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 	return output, report
 }
 
-func stripClaudeToolUseSignatureFields(part gjson.Result) (string, bool) {
+// StripClaudeToolUseSignatureFields removes tool-use signature/provenance
+// fields and empty extra_content.google/extra_content wrappers. It is exported
+// so the executor's replay-cache match can normalize cached tool_use parts with
+// the same logic the upstream sanitizer applies.
+func StripClaudeToolUseSignatureFields(part gjson.Result) (string, bool) {
 	updated := part.Raw
 	changed := false
 	for _, sigPath := range claudeToolUseProvenancePaths() {

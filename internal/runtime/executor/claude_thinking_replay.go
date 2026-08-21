@@ -9,6 +9,7 @@ import (
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -91,7 +92,41 @@ func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.
 	if !found {
 		return scope, nil, false
 	}
-	return scope, contents, true
+	// Normalize cached tool_use parts to match the shape the sanitizer will apply
+	// to the upstream body, so an echo'd tool_use with provenance fields does not
+	// fail the canonical comparison.
+	normalized := make([][]byte, len(contents))
+	for i, content := range contents {
+		normalized[i] = claudeThinkingReplayNormalizeCachedContent(content)
+	}
+	return scope, normalized, true
+}
+
+// claudeThinkingReplayNormalizeCachedContent strips tool-use signature/provenance
+// fields from a cached assistant content array. This lets the replay match compare
+// the same normalized shape the upstream sanitizer produces, while the restored
+// content still carries the trusted thinking signature.
+func claudeThinkingReplayNormalizeCachedContent(content []byte) []byte {
+	root := gjson.ParseBytes(content)
+	if !root.IsArray() {
+		return content
+	}
+	parts := root.Array()
+	outParts := make([]string, len(parts))
+	modified := false
+	for i, part := range parts {
+		if strings.TrimSpace(part.Get("type").String()) == "tool_use" {
+			updated, changed := signature.StripClaudeToolUseSignatureFields(part)
+			outParts[i] = updated
+			modified = modified || changed
+			continue
+		}
+		outParts[i] = part.Raw
+	}
+	if !modified {
+		return content
+	}
+	return []byte("[" + strings.Join(outParts, ",") + "]")
 }
 
 // stripClaudeThinkingReplayProvenanceMarkers removes any client-supplied
