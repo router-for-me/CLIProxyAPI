@@ -12,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
@@ -39,6 +40,16 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		return out, nil
 	}
 
+	seenCommandCodeKeys := make(map[string]struct{})
+	// Pre-seed with explicit config keys so duplicate credentials in auth files do not spawn duplicate clients
+	if ctx.Config != nil {
+		for _, ck := range ctx.Config.CommandCodeKey {
+			if k := strings.TrimSpace(ck.APIKey); k != "" {
+				seenCommandCodeKeys[k] = struct{}{}
+			}
+		}
+	}
+
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -60,7 +71,22 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		if len(auths) == 0 {
 			continue
 		}
-		out = append(out, auths...)
+		for _, a := range auths {
+			if a == nil {
+				continue
+			}
+			if a.Provider == constant.CommandCode {
+				key := strings.TrimSpace(a.Attributes["api_key"])
+				if key != "" {
+					if _, exists := seenCommandCodeKeys[key]; exists {
+						log.Debugf("skipping duplicate commandcode credential from auth file %s", name)
+						continue
+					}
+					seenCommandCodeKeys[key] = struct{}{}
+				}
+			}
+			out = append(out, a)
+		}
 	}
 	return out, nil
 }
@@ -142,8 +168,14 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 		return nil, nil
 	}
 	label := provider
-	if email, _ := metadata["email"].(string); email != "" {
+	if l, ok := metadata["label"].(string); ok && strings.TrimSpace(l) != "" {
+		label = strings.TrimSpace(l)
+	} else if email, _ := metadata["email"].(string); email != "" {
 		label = email
+	} else if userName, _ := metadata["user_name"].(string); userName != "" {
+		label = fmt.Sprintf("commandcode:%s", userName)
+	} else if userName, _ := metadata["userName"].(string); userName != "" {
+		label = fmt.Sprintf("commandcode:%s", userName)
 	}
 	// Use relative path under authDir as ID to stay consistent with the file-based token store.
 	id := fullPath
@@ -196,6 +228,17 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 		Metadata:  metadata,
 		CreatedAt: now,
 		UpdatedAt: now,
+	}
+	if provider == "commandcode" {
+		for _, k := range []string{"api_key", "apiKey"} {
+			if v, ok := metadata[k].(string); ok && strings.TrimSpace(v) != "" {
+				a.Attributes["api_key"] = strings.TrimSpace(v)
+				break
+			}
+		}
+		if a.Attributes["auth_kind"] == "" {
+			a.Attributes["auth_kind"] = "apikey"
+		}
 	}
 	// Read priority from auth file.
 	if rawPriority, ok := metadata["priority"]; ok {
