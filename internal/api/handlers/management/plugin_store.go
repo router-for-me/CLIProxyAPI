@@ -262,6 +262,19 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		GOARCH:       goarch,
 		PluginLoaded: pluginIsBusy,
 	}
+	deferredUpdate := h.pluginUpdateDeferrerSnapshot()
+	restartRequired := false
+	if deferredUpdate != nil {
+		installOptions.BeforeWrite = func() error {
+			restartRequired = deferredUpdate.PreparePluginUpdate(id)
+			return nil
+		}
+	}
+	clearDeferredUpdate := func() {
+		if restartRequired {
+			deferredUpdate.ClearDeferredPluginUpdate(id)
+		}
+	}
 	var manifest pluginstore.Manifest
 	var result pluginstore.InstallResult
 	var errInstall error
@@ -281,6 +294,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	if errInstall != nil {
+		clearDeferredUpdate()
 		if errors.Is(errInstall, pluginstore.ErrLoadedPluginLocked) {
 			c.JSON(http.StatusConflict, gin.H{
 				"error":            "plugin_update_requires_restart",
@@ -296,6 +310,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		var errManifest error
 		manifest, errManifest = pluginStoreManifestForInstall(source, plugin, result)
 		if errManifest != nil {
+			clearDeferredUpdate()
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":   "plugin_manifest_failed",
 				"message": fmt.Sprintf("plugin file installed at %s but creating store manifest failed: %s", result.Path, errManifest.Error()),
@@ -304,16 +319,14 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 			return
 		}
 	}
-	deferredUpdate := h.pluginUpdateDeferrerSnapshot()
-	restartRequired := deferredUpdate != nil && deferredUpdate.DeferPluginUpdateUntilRestart(
-		id,
-		result.Path,
-		result.Version,
-		!result.Skipped,
-	)
-	clearDeferredUpdate := func() {
-		if restartRequired {
-			deferredUpdate.ClearDeferredPluginUpdate(id)
+	if deferredUpdate != nil {
+		if deferredUpdate.DeferPluginUpdateUntilRestart(
+			id,
+			result.Path,
+			result.Version,
+			!result.Skipped,
+		) {
+			restartRequired = true
 		}
 	}
 

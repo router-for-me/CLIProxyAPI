@@ -120,6 +120,33 @@ func TestInstallArchivePreparesLoadedWindowsPluginBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestInstallArchivePreparesNewPluginBeforeWrite(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	prepared := false
+	result, errInstall := InstallArchive(makeZip(t, map[string]string{
+		"sample-provider.dll": "new",
+	}), testPlugin(), InstallOptions{
+		PluginsDir: root,
+		GOOS:       "windows",
+		GOARCH:     "amd64",
+		BeforeWrite: func() error {
+			prepared = true
+			return nil
+		},
+	})
+	if errInstall != nil {
+		t.Fatalf("InstallArchive() error = %v", errInstall)
+	}
+	if !prepared {
+		t.Fatal("BeforeWrite was not called for a new artifact")
+	}
+	if result.Overwritten {
+		t.Fatal("Overwritten = true, want false for a new artifact")
+	}
+}
+
 func TestInstallArchiveSkipsIdenticalLoadedWindowsPlugin(t *testing.T) {
 	t.Parallel()
 

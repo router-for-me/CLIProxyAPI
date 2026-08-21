@@ -69,6 +69,7 @@ type configReloadSnapshot struct {
 }
 
 type pluginUpdateDeferrer interface {
+	PreparePluginUpdate(id string) bool
 	DeferPluginUpdateUntilRestart(id, targetPath, targetVersion string, contentChanged bool) bool
 	ClearDeferredPluginUpdate(id string)
 }

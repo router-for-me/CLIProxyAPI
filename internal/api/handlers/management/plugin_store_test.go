@@ -1146,6 +1146,9 @@ func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testin
 	if !body.RestartRequired {
 		t.Fatal("restart_required = false, want true for an active update")
 	}
+	if deferredUpdate.prepareCalls != 1 {
+		t.Fatalf("prepare calls = %d, want one before artifact write", deferredUpdate.prepareCalls)
+	}
 	if len(deferredUpdate.calls) != 1 || !deferredUpdate.calls[0].contentChanged {
 		t.Fatalf("deferred update calls = %#v, want one changed-content classification", deferredUpdate.calls)
 	}
@@ -1396,10 +1399,11 @@ type countingPluginStoreHTTPClient struct {
 }
 
 type recordingPluginUpdateDeferrer struct {
-	restart    bool
-	deferred   bool
-	clearCalls int
-	calls      []pluginUpdateDeferralCall
+	restart      bool
+	deferred     bool
+	prepareCalls int
+	clearCalls   int
+	calls        []pluginUpdateDeferralCall
 }
 
 type pluginUpdateDeferralCall struct {
@@ -1407,6 +1411,12 @@ type pluginUpdateDeferralCall struct {
 	targetPath     string
 	targetVersion  string
 	contentChanged bool
+}
+
+func (d *recordingPluginUpdateDeferrer) PreparePluginUpdate(string) bool {
+	d.prepareCalls++
+	d.deferred = d.restart
+	return d.restart
 }
 
 func (d *recordingPluginUpdateDeferrer) DeferPluginUpdateUntilRestart(id, targetPath, targetVersion string, contentChanged bool) bool {

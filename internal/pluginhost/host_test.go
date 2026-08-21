@@ -907,6 +907,56 @@ func TestHostApplyConfigDefersActiveUpdateUntilRestart(t *testing.T) {
 	fresh.ShutdownAll()
 }
 
+func TestHostCleanupKeepsDeferredPluginArtifact(t *testing.T) {
+	loader := newExclusiveTestLoader(map[string]*testPlugin{
+		"1.0.0": {
+			registerResult:    validTestPlugin("alpha-v1"),
+			reconfigureResult: validTestPlugin("alpha-v1"),
+		},
+		"2.0.0": {
+			registerResult:    validTestPlugin("alpha-v2"),
+			reconfigureResult: validTestPlugin("alpha-v2"),
+		},
+	})
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0", "2.0.0")
+	if errRemove := os.Remove(paths["2.0.0"]); errRemove != nil {
+		t.Fatalf("Remove(%s) error = %v", paths["2.0.0"], errRemove)
+	}
+	configForVersion := func(version string) *config.Config {
+		return &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"alpha": enabledPluginConfigWithStoreVersion(t, version),
+				},
+			},
+		}
+	}
+
+	h := NewForTest(loader)
+	h.ApplyConfig(context.Background(), configForVersion("1.0.0"))
+	h.mu.Lock()
+	h.cleanupFilesPending = true
+	h.mu.Unlock()
+	if !h.DeferPluginUpdateUntilRestart("alpha", paths["2.0.0"], "2.0.0", false) {
+		t.Fatal("DeferPluginUpdateUntilRestart() = false, want true for staged update")
+	}
+	paths["2.0.0"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+
+	h.ApplyConfig(context.Background(), configForVersion("2.0.0"))
+	if !h.PluginRegistered("alpha") || !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatal("retained v1 was not effective during cleanup")
+	}
+	if _, errStat := os.Stat(paths["2.0.0"]); errStat != nil {
+		t.Fatalf("deferred target artifact was removed: %v", errStat)
+	}
+	if openCalls, active := loader.stats(); openCalls != 1 || !active {
+		t.Fatalf("exclusive loader state = calls %d active %v, want one active v1 client", openCalls, active)
+	}
+	h.ShutdownAll()
+}
+
 func TestHostDeferPluginUpdateFreshInstallDoesNotRequireRestart(t *testing.T) {
 	loader := newExclusiveTestLoader(map[string]*testPlugin{
 		"1.0.0": {

@@ -221,13 +221,36 @@ func (h *Host) DeferPluginUpdateUntilRestart(id, targetPath, targetVersion strin
 	if activePath == "" {
 		return false
 	}
+	if _, ok := h.deferredPluginUpdates[id]; ok {
+		return true
+	}
 	if !contentChanged && activePath == targetPath && activeVersion == targetVersion {
-		if deferred, ok := h.deferredPluginUpdates[id]; ok {
-			if deferred.path != activePath || deferred.version != activeVersion {
-				h.deferredPluginUpdates[id] = deferredPluginIdentity{path: activePath, version: activeVersion}
-			}
-			return true
-		}
+		return false
+	}
+	if h.deferredPluginUpdates == nil {
+		h.deferredPluginUpdates = make(map[string]deferredPluginIdentity)
+	}
+	h.deferredPluginUpdates[id] = deferredPluginIdentity{path: activePath, version: activeVersion}
+	return true
+}
+
+// PreparePluginUpdate pins the currently effective plugin before an artifact is
+// written, allowing concurrent config reloads to keep the old library active.
+func (h *Host) PreparePluginUpdate(id string) bool {
+	if h == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.deferredPluginUpdates[id]; ok {
+		return true
+	}
+	activePath, activeVersion := h.pluginIdentityLocked(id)
+	if activePath == "" {
 		return false
 	}
 	if h.deferredPluginUpdates == nil {
@@ -344,8 +367,10 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 
 	records := make([]capabilityRecord, 0, len(files))
 	loadedFiles := make([]pluginFile, 0, len(files))
+	deferredFiles := make([]pluginFile, 0)
 	hotReloadLogs := make([]log.Fields, 0)
 	for _, file := range files {
+		selectedFile := file
 		item, ok := rc.Items[file.ID]
 		if !ok {
 			item = defaultRuntimeItemConfig(file.ID)
@@ -356,6 +381,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		var request *pluginLoadRequest
 		h.mu.Lock()
 		file = h.deferredPluginFileLocked(file)
+		if cleanPluginPath(file.Path) != cleanPluginPath(selectedFile.Path) || file.Version != selectedFile.Version {
+			deferredFiles = append(deferredFiles, selectedFile)
+		}
 		lp := h.loaded[file.ID]
 		var replaced *loadedPlugin
 		if lp != nil && cleanPluginPath(lp.path) != cleanPluginPath(file.Path) {
@@ -475,7 +503,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		log.WithFields(fields).Info("pluginhost: plugin hot reloaded")
 	}
 	if cleanupFiles && len(loadedFiles) > 0 {
-		if errCleanup := cleanupUnselectedPluginFiles(rc.Dir, loadedFiles); errCleanup != nil {
+		cleanupFilesToKeep := append([]pluginFile(nil), loadedFiles...)
+		cleanupFilesToKeep = append(cleanupFilesToKeep, deferredFiles...)
+		if errCleanup := cleanupUnselectedPluginFiles(rc.Dir, cleanupFilesToKeep); errCleanup != nil {
 			log.Warnf("pluginhost: failed to clean old plugin files: %v", errCleanup)
 		}
 	}
