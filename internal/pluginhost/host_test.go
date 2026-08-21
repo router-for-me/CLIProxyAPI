@@ -818,6 +818,170 @@ func TestHostApplyConfigKeepsLoadedVersionWhenPinnedVersionMissing(t *testing.T)
 	}
 }
 
+func TestHostApplyConfigDefersActiveUpdateUntilRestart(t *testing.T) {
+	loader := newExclusiveTestLoader(map[string]*testPlugin{
+		"1.0.0": {
+			registerResult:    validTestPlugin("alpha-v1"),
+			reconfigureResult: validTestPlugin("alpha-v1"),
+		},
+		"2.0.0": {
+			registerResult:    validTestPlugin("alpha-v2"),
+			reconfigureResult: validTestPlugin("alpha-v2"),
+		},
+	})
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0")
+	cfgV1 := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": enabledPluginConfigWithStoreVersion(t, "1.0.0"),
+			},
+		},
+	}
+	cfgV2 := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": enabledPluginConfigWithStoreVersion(t, "2.0.0"),
+			},
+		},
+	}
+
+	h := NewForTest(loader)
+	h.ApplyConfig(context.Background(), cfgV1)
+	if !h.PluginRegistered("alpha") || !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatalf("initial plugin was not registered at v1: registered=%v", h.PluginRegistered("alpha"))
+	}
+	paths["2.0.0"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	if !h.DeferPluginUpdateUntilRestart("alpha", paths["2.0.0"], "2.0.0", false) {
+		t.Fatal("DeferPluginUpdateUntilRestart() = false, want true for staged v2")
+	}
+
+	h.ApplyConfig(context.Background(), cfgV2)
+	h.ApplyConfig(context.Background(), cfgV2)
+	h.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{Dir: pluginsDir}})
+	h.ApplyConfig(context.Background(), cfgV2)
+	if !h.PluginRegistered("alpha") {
+		t.Fatal("PluginRegistered(alpha) = false, want old v1 to remain effective before restart")
+	}
+	if !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatal("active plugin identity changed before restart")
+	}
+	if h.pluginIdentityCurrent("alpha", paths["2.0.0"], "2.0.0") {
+		t.Fatal("desired v2 became active before restart")
+	}
+	if got := len(h.activeRecords()); got != 1 {
+		t.Fatalf("active record count = %d, want 1 before restart", got)
+	}
+	if plugins := h.RegisteredPlugins(); len(plugins) != 1 || plugins[0].Metadata.Name != "alpha-v1" {
+		t.Fatalf("RegisteredPlugins() = %#v, want effective alpha-v1", plugins)
+	}
+	if openCalls, active := loader.stats(); openCalls != 1 || !active {
+		t.Fatalf("exclusive loader state = calls %d active %v, want one active v1 client", openCalls, active)
+	}
+
+	h.ShutdownAll()
+	fresh := NewForTest(loader)
+	fresh.ApplyConfig(context.Background(), cfgV2)
+	if !fresh.PluginRegistered("alpha") || !fresh.pluginIdentityCurrent("alpha", paths["2.0.0"], "2.0.0") {
+		t.Fatalf("fresh host did not register desired v2: registered=%v", fresh.PluginRegistered("alpha"))
+	}
+	if fresh.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatal("fresh host retained old v1 identity")
+	}
+	if plugins := fresh.RegisteredPlugins(); len(plugins) != 1 || plugins[0].Metadata.Name != "alpha-v2" {
+		t.Fatalf("fresh RegisteredPlugins() = %#v, want effective alpha-v2", plugins)
+	}
+	if openCalls, active := loader.stats(); openCalls != 2 || !active {
+		t.Fatalf("fresh exclusive loader state = calls %d active %v, want v2 as second active client", openCalls, active)
+	}
+	fresh.ShutdownAll()
+}
+
+func TestHostDeferPluginUpdateFreshInstallDoesNotRequireRestart(t *testing.T) {
+	loader := newExclusiveTestLoader(map[string]*testPlugin{
+		"1.0.0": {
+			registerResult:    validTestPlugin("alpha"),
+			reconfigureResult: validTestPlugin("alpha"),
+		},
+	})
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0")
+	h := NewForTest(loader)
+	if h.DeferPluginUpdateUntilRestart("alpha", paths["1.0.0"], "1.0.0", true) {
+		t.Fatal("fresh install was marked restart-required before any active plugin existed")
+	}
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: enabledPluginConfigs("alpha"),
+		},
+	})
+	if !h.PluginRegistered("alpha") {
+		t.Fatal("fresh install did not register immediately")
+	}
+	if openCalls, _ := loader.stats(); openCalls != 1 {
+		t.Fatalf("Open calls = %d, want 1 for fresh install", openCalls)
+	}
+	h.ShutdownAll()
+}
+
+func TestHostDeferPluginUpdateSameIdentityUsesContentChange(t *testing.T) {
+	tests := []struct {
+		name           string
+		contentChanged bool
+		wantRestart    bool
+	}{
+		{name: "identical artifact", contentChanged: false, wantRestart: false},
+		{name: "changed bytes", contentChanged: true, wantRestart: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loader := newExclusiveTestLoader(map[string]*testPlugin{
+				"1.0.0": {
+					registerResult:    validTestPlugin("alpha"),
+					reconfigureResult: validTestPlugin("alpha"),
+				},
+			})
+			pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0")
+			cfg := &config.Config{
+				Plugins: config.PluginsConfig{
+					Enabled: true,
+					Dir:     pluginsDir,
+					Configs: enabledPluginConfigs("alpha"),
+				},
+			}
+			h := NewForTest(loader)
+			h.ApplyConfig(context.Background(), cfg)
+			if got := h.DeferPluginUpdateUntilRestart("alpha", paths["1.0.0"], "1.0.0", tt.contentChanged); got != tt.wantRestart {
+				t.Fatalf("DeferPluginUpdateUntilRestart() = %v, want %v", got, tt.wantRestart)
+			}
+			h.ApplyConfig(context.Background(), cfg)
+			if !h.PluginRegistered("alpha") || !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+				t.Fatal("same active plugin was not kept effective")
+			}
+			if openCalls, _ := loader.stats(); openCalls != 1 {
+				t.Fatalf("Open calls = %d, want 1", openCalls)
+			}
+			if tt.wantRestart {
+				if !h.UnloadPlugin("alpha") {
+					t.Fatal("UnloadPlugin(alpha) = false, want true")
+				}
+				h.ApplyConfig(context.Background(), cfg)
+				if !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+					t.Fatal("plugin did not load after explicit unload cleared deferred state")
+				}
+				if openCalls, _ := loader.stats(); openCalls != 2 {
+					t.Fatalf("Open calls after explicit unload = %d, want 2", openCalls)
+				}
+			}
+			h.ShutdownAll()
+		})
+	}
+}
+
 func TestHostApplyConfigLogsLoadedWhenRegistrationInvalid(t *testing.T) {
 	var out bytes.Buffer
 	originalOut := log.StandardLogger().Out

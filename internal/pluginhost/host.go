@@ -52,6 +52,11 @@ type pluginLoadResult struct {
 	err         error
 }
 
+type deferredPluginIdentity struct {
+	path    string
+	version string
+}
+
 type Host struct {
 	applyMu                chan struct{}
 	mu                     sync.Mutex
@@ -60,6 +65,7 @@ type Host struct {
 	retired                map[string][]*loadedPlugin
 	loading                map[string]*pluginLoadRequest
 	fused                  map[string]string
+	deferredPluginUpdates  map[string]deferredPluginIdentity
 	pluginFileVersions     map[string]string
 	activePluginVersions   map[string]string
 	activePluginPaths      map[string]string
@@ -93,6 +99,7 @@ func New() *Host {
 		retired:                make(map[string][]*loadedPlugin),
 		loading:                make(map[string]*pluginLoadRequest),
 		fused:                  make(map[string]string),
+		deferredPluginUpdates:  make(map[string]deferredPluginIdentity),
 		pluginFileVersions:     make(map[string]string),
 		activePluginVersions:   make(map[string]string),
 		activePluginPaths:      make(map[string]string),
@@ -192,6 +199,78 @@ func (h *Host) PluginBusy(id string) bool {
 	return ok
 }
 
+// DeferPluginUpdateUntilRestart keeps an active plugin identity pinned until a
+// fresh host is created. It reports whether the requested artifact differs from
+// the currently effective plugin or changed its bytes in place.
+func (h *Host) DeferPluginUpdateUntilRestart(id, targetPath, targetVersion string, contentChanged bool) bool {
+	if h == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	targetPath = cleanPluginPath(targetPath)
+	targetVersion = strings.TrimSpace(targetVersion)
+	if id == "" || targetPath == "" {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	activePath := cleanPluginPath(h.activePluginPaths[id])
+	activeVersion := strings.TrimSpace(h.activePluginVersions[id])
+	if activePath == "" || h.loaded[id] == nil {
+		return false
+	}
+	if !contentChanged && activePath == targetPath && activeVersion == targetVersion {
+		delete(h.deferredPluginUpdates, id)
+		return false
+	}
+	if h.deferredPluginUpdates == nil {
+		h.deferredPluginUpdates = make(map[string]deferredPluginIdentity)
+	}
+	h.deferredPluginUpdates[id] = deferredPluginIdentity{path: activePath, version: activeVersion}
+	return true
+}
+
+// ClearDeferredPluginUpdate releases a pending update marker after an explicit
+// management operation fails before its desired configuration is persisted.
+func (h *Host) ClearDeferredPluginUpdate(id string) {
+	if h == nil {
+		return
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	h.mu.Lock()
+	delete(h.deferredPluginUpdates, id)
+	h.mu.Unlock()
+}
+
+func (h *Host) deferredPluginFile(file pluginFile) pluginFile {
+	if h == nil {
+		return file
+	}
+	id := strings.TrimSpace(file.ID)
+	if id == "" {
+		return file
+	}
+	h.mu.Lock()
+	deferred, ok := h.deferredPluginUpdates[id]
+	lp := h.loaded[id]
+	activePath := ""
+	activeVersion := ""
+	if lp != nil {
+		activePath = cleanPluginPath(lp.path)
+		activeVersion = strings.TrimSpace(lp.version)
+	}
+	h.mu.Unlock()
+	if !ok || activePath == "" || activePath != deferred.path || activeVersion != deferred.version {
+		return file
+	}
+	file.Path = deferred.path
+	file.Version = deferred.version
+	return file
+}
+
 func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	if h == nil || !h.lockApply(ctx) {
 		return
@@ -243,6 +322,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	loadedFiles := make([]pluginFile, 0, len(files))
 	hotReloadLogs := make([]log.Fields, 0)
 	for _, file := range files {
+		file = h.deferredPluginFile(file)
 		item, ok := rc.Items[file.ID]
 		if !ok {
 			item = defaultRuntimeItemConfig(file.ID)
@@ -545,12 +625,14 @@ func (h *Host) UnloadPluginContext(ctx context.Context, id string) bool {
 		targets = append(targets, pluginUnloadTarget{id: retired.id, name: retired.name, path: retired.path, version: retired.version, client: retired.client})
 	}
 	if len(targets) == 0 {
+		delete(h.deferredPluginUpdates, id)
 		h.mu.Unlock()
 		return false
 	}
 	delete(h.loaded, id)
 	delete(h.retired, id)
 	delete(h.fused, id)
+	delete(h.deferredPluginUpdates, id)
 	delete(h.activePluginVersions, id)
 	delete(h.activePluginPaths, id)
 	for _, target := range targets {
@@ -633,6 +715,7 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	h.pluginFileVersions = make(map[string]string)
 	h.activePluginVersions = make(map[string]string)
 	h.activePluginPaths = make(map[string]string)
+	h.deferredPluginUpdates = make(map[string]deferredPluginIdentity)
 	h.snapshot.Store(emptySnapshot())
 	h.mu.Unlock()
 

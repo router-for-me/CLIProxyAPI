@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -18,6 +19,60 @@ import (
 type testSymbolLoader struct {
 	openCalls int
 	lookups   map[string]*testSymbolLookup
+}
+
+type exclusiveTestLoader struct {
+	mu        sync.Mutex
+	active    bool
+	openCalls int
+	plugins   map[string]*testPlugin
+}
+
+func newExclusiveTestLoader(plugins map[string]*testPlugin) *exclusiveTestLoader {
+	return &exclusiveTestLoader{plugins: plugins}
+}
+
+func (l *exclusiveTestLoader) Open(file pluginFile, _ *Host) (pluginClient, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.active {
+		return nil, fmt.Errorf("exclusive test resource already open")
+	}
+	plugin := l.plugins[file.Version]
+	if plugin == nil {
+		return nil, fmt.Errorf("missing exclusive test plugin for %s", file.Version)
+	}
+	l.active = true
+	l.openCalls++
+	return &exclusiveTestClient{
+		lookup: newTestSymbolLookup(plugin),
+		loader: l,
+	}, nil
+}
+
+func (l *exclusiveTestLoader) stats() (int, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.openCalls, l.active
+}
+
+type exclusiveTestClient struct {
+	lookup *testSymbolLookup
+	loader *exclusiveTestLoader
+	once   sync.Once
+}
+
+func (c *exclusiveTestClient) Call(ctx context.Context, method string, request []byte) ([]byte, error) {
+	return c.lookup.Call(ctx, method, request)
+}
+
+func (c *exclusiveTestClient) Shutdown() {
+	c.once.Do(func() {
+		c.lookup.Shutdown()
+		c.loader.mu.Lock()
+		c.loader.active = false
+		c.loader.mu.Unlock()
+	})
 }
 
 func newTestSymbolLoader() *testSymbolLoader {

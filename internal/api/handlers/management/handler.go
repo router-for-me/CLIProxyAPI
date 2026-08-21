@@ -55,6 +55,7 @@ type Handler struct {
 	postAuthHook            coreauth.PostAuthHook
 	postAuthPersistHook     coreauth.PostAuthHook
 	pluginHost              *pluginhost.Host
+	pluginUpdateDeferrer    pluginUpdateDeferrer
 	configReloadHook        func(context.Context, *config.Config)
 	pluginStoreRegistryURL  string
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
@@ -65,6 +66,11 @@ type Handler struct {
 type configReloadSnapshot struct {
 	cfg        *config.Config
 	generation uint64
+}
+
+type pluginUpdateDeferrer interface {
+	DeferPluginUpdateUntilRestart(id, targetPath, targetVersion string, contentChanged bool) bool
+	ClearDeferredPluginUpdate(id string)
 }
 
 // NewHandler creates a new management handler instance.
@@ -147,7 +153,17 @@ func (h *Handler) SetPluginHost(host *pluginhost.Host) {
 	}
 	h.mu.Lock()
 	h.pluginHost = host
+	h.pluginUpdateDeferrer = host
 	h.mu.Unlock()
+}
+
+func (h *Handler) pluginUpdateDeferrerSnapshot() pluginUpdateDeferrer {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.pluginUpdateDeferrer
 }
 
 // SetConfigReloadHook updates the callback used after management saves config changes.

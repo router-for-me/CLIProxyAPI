@@ -1125,6 +1125,8 @@ func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testin
 			"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
 		},
 	}
+	deferredUpdate := &recordingPluginUpdateDeferrer{restart: true}
+	h.pluginUpdateDeferrer = deferredUpdate
 	reloads, reloadDone := captureConfigReload(h)
 
 	rec := httptest.NewRecorder()
@@ -1136,6 +1138,16 @@ func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testin
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body pluginInstallResponse
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatalf("Unmarshal() error = %v; body=%s", errDecode, rec.Body.String())
+	}
+	if !body.RestartRequired {
+		t.Fatal("restart_required = false, want true for an active update")
+	}
+	if len(deferredUpdate.calls) != 1 || !deferredUpdate.calls[0].contentChanged {
+		t.Fatalf("deferred update calls = %#v, want one changed-content classification", deferredUpdate.calls)
 	}
 	cfgSnapshot := waitForAsyncReload(t, reloads)
 	waitForReloadDone(t, reloadDone)
@@ -1169,6 +1181,71 @@ func TestInstallPluginFromStoreOverwritesFilePreservesConfigAndReloads(t *testin
 	}
 	if raw := marshalPluginRaw(t, snapshotItem); !strings.Contains(raw, "mode: fast") || !strings.Contains(raw, "extra: keep") {
 		t.Fatalf("snapshot plugin raw config lost custom fields:\n%s", raw)
+	}
+}
+
+func TestInstallPluginFromStoreFailedVerificationPreservesActiveState(t *testing.T) {
+	pluginsDir := t.TempDir()
+	existingPath := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH, "sample-provider-v0.1.0"+managementPluginExtension(runtime.GOOS))
+	if errMkdir := os.MkdirAll(filepath.Dir(existingPath), 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(existingPath), errMkdir)
+	}
+	if errWrite := os.WriteFile(existingPath, []byte("old-library-data"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", existingPath, errWrite)
+	}
+	archiveData := makeManagementPluginStoreZip(t, "sample-provider"+managementPluginExtension(runtime.GOOS), "new-library-data")
+	archiveName := "sample-provider_0.1.0_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip"
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample-provider": pluginConfigFromYAML(t, "enabled: true\nmode: fast\n"),
+				},
+			},
+		},
+		configFilePath:         writeTestConfigFile(t),
+		pluginStoreRegistryURL: "https://registry.example/registry.json",
+		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
+			"https://registry.example/registry.json": registryJSON(t),
+			"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(`{
+				"tag_name": "v0.1.0",
+				"assets": [
+					{"name": "` + archiveName + `", "browser_download_url": "https://downloads.example/` + archiveName + `"},
+					{"name": "checksums.txt", "browser_download_url": "https://downloads.example/checksums.txt"}
+				]
+			}`),
+			"https://downloads.example/" + archiveName: archiveData,
+			"https://downloads.example/checksums.txt":  []byte(strings.Repeat("0", 64) + "  " + archiveName + "\n"),
+		},
+	}
+	deferredUpdate := &recordingPluginUpdateDeferrer{restart: true}
+	h.pluginUpdateDeferrer = deferredUpdate
+	originalConfig := marshalPluginRaw(t, h.cfg.Plugins.Configs["sample-provider"])
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/plugin-store/sample-provider/install", nil)
+
+	h.InstallPluginFromStore(c)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	data, errRead := os.ReadFile(existingPath)
+	if errRead != nil {
+		t.Fatalf("ReadFile(%s) error = %v", existingPath, errRead)
+	}
+	if string(data) != "old-library-data" {
+		t.Fatalf("active artifact = %q, want old-library-data", data)
+	}
+	if got := marshalPluginRaw(t, h.cfg.Plugins.Configs["sample-provider"]); got != originalConfig {
+		t.Fatalf("config changed after failed verification:\n%s", got)
+	}
+	if len(deferredUpdate.calls) != 0 {
+		t.Fatalf("deferred update calls = %#v, want none after failed verification", deferredUpdate.calls)
 	}
 }
 
@@ -1247,6 +1324,30 @@ type countingPluginStoreHTTPClient struct {
 	mu        sync.Mutex
 	counts    map[string]int
 }
+
+type recordingPluginUpdateDeferrer struct {
+	restart bool
+	calls   []pluginUpdateDeferralCall
+}
+
+type pluginUpdateDeferralCall struct {
+	id             string
+	targetPath     string
+	targetVersion  string
+	contentChanged bool
+}
+
+func (d *recordingPluginUpdateDeferrer) DeferPluginUpdateUntilRestart(id, targetPath, targetVersion string, contentChanged bool) bool {
+	d.calls = append(d.calls, pluginUpdateDeferralCall{
+		id:             id,
+		targetPath:     targetPath,
+		targetVersion:  targetVersion,
+		contentChanged: contentChanged,
+	})
+	return d.restart
+}
+
+func (d *recordingPluginUpdateDeferrer) ClearDeferredPluginUpdate(string) {}
 
 func (c *countingPluginStoreHTTPClient) Do(req *http.Request) (*http.Response, error) {
 	c.mu.Lock()

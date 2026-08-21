@@ -304,10 +304,22 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 			return
 		}
 	}
-	restartRequired := false
+	deferredUpdate := h.pluginUpdateDeferrerSnapshot()
+	restartRequired := deferredUpdate != nil && deferredUpdate.DeferPluginUpdateUntilRestart(
+		id,
+		result.Path,
+		result.Version,
+		!result.Skipped,
+	)
+	clearDeferredUpdate := func() {
+		if restartRequired {
+			deferredUpdate.ClearDeferredPluginUpdate(id)
+		}
+	}
 
 	h.mu.Lock()
 	if h.cfg == nil {
+		clearDeferredUpdate()
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "config_unavailable",
@@ -317,6 +329,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	if errEnable := h.enablePluginConfigLocked(id, manifest); errEnable != nil {
+		clearDeferredUpdate()
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "config_update_failed",
@@ -326,6 +339,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
+		clearDeferredUpdate()
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "config_save_failed",
