@@ -225,6 +225,60 @@ func TestClassifyAntigravity429(t *testing.T) {
 	})
 }
 
+func TestNewAntigravityStatusErrMarksTransientRateLimit(t *testing.T) {
+	rateLimited := []byte(`{
+		"error": {
+			"code": 429,
+			"message": "You have exhausted your capacity on this model. Your quota will reset after 0s.",
+			"status": "RESOURCE_EXHAUSTED",
+			"details": [
+				{
+					"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+					"reason": "RATE_LIMIT_EXCEEDED",
+					"domain": "cloudcode-pa.googleapis.com"
+				},
+				{
+					"@type": "type.googleapis.com/google.rpc.RetryInfo",
+					"retryDelay": "0.479417207s"
+				}
+			]
+		}
+	}`)
+	transient := newAntigravityStatusErr(http.StatusTooManyRequests, rateLimited)
+	if !transient.TransientRateLimit() {
+		t.Fatal("expected a RATE_LIMIT_EXCEEDED 429 with a sub-second hint to be marked transient")
+	}
+	if transient.RetryAfter() == nil {
+		t.Fatal("expected the provider retry hint to be preserved on a transient rate limit")
+	}
+
+	exhausted := []byte(`{
+		"error": {
+			"code": 429,
+			"status": "RESOURCE_EXHAUSTED",
+			"details": [
+				{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "QUOTA_EXHAUSTED"},
+				{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "0.479417207s"}
+			]
+		}
+	}`)
+	quotaErr := newAntigravityStatusErr(http.StatusTooManyRequests, exhausted)
+	if quotaErr.TransientRateLimit() {
+		t.Fatal("expected a QUOTA_EXHAUSTED 429 not to be marked transient")
+	}
+	if quotaErr.RetryAfter() == nil {
+		t.Fatal("expected the provider retry hint to be preserved on an exhausted quota")
+	}
+
+	if soft := newAntigravityStatusErr(http.StatusTooManyRequests, []byte(`{"error":{"message":"too many requests"}}`)); soft.TransientRateLimit() {
+		t.Fatal("expected an unclassified 429 to stay on the escalating cooldown ladder")
+	}
+
+	if nonRateLimit := newAntigravityStatusErr(http.StatusServiceUnavailable, rateLimited); nonRateLimit.TransientRateLimit() {
+		t.Fatal("expected a non-429 status not to be marked transient")
+	}
+}
+
 func TestAntigravityShouldRetryNoCapacity_Standard503(t *testing.T) {
 	body := []byte(`{
 		"error": {

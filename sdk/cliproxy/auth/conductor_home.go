@@ -1121,6 +1121,9 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
+				if isTransientRateLimitError(errExec) {
+					result.TransientRateLimit = true
+				}
 				if isCredentialScopedError(errExec) {
 					result.CredentialScope = true
 				}

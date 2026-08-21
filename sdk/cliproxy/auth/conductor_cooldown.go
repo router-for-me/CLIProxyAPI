@@ -826,13 +826,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
 							if !disableCooling {
-								if result.RetryAfter != nil && *result.RetryAfter <= 0 {
+								if result.RetryAfter != nil && (*result.RetryAfter <= 0 || result.TransientRateLimit) {
+									// Zero-delay retries and 429s the provider classified as a short-lived
+									// rate limit keep their hint verbatim: flooring them at the quota ladder
+									// would park a still-usable credential for up to the full ladder step.
 									next = now.Add(*result.RetryAfter)
 								} else {
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
 									if result.RetryAfter != nil {
-										// A provider hint can be sub-second even when the quota is exhausted for
-										// the whole day, so never let it undercut the escalating quota ladder.
+										// An exhausted-quota hint can be sub-second even when the quota is gone
+										// for the whole day, so never let it undercut the escalating ladder.
 										if hinted := now.Add(*result.RetryAfter); hinted.After(next) {
 											next = hinted
 										}
@@ -908,7 +911,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 					disableCooling = false
 				}
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling, result.TransientRateLimit)
 			}
 		}
 
@@ -1451,6 +1454,19 @@ func retryAfterFromError(err error) *time.Duration {
 	return &value
 }
 
+// isTransientRateLimitError reports whether the executor classified the failure
+// as a short-lived provider rate limit rather than an exhausted quota window.
+func isTransientRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type transientRateLimitProvider interface {
+		TransientRateLimit() bool
+	}
+	var trp transientRateLimitProvider
+	return errors.As(err, &trp) && trp != nil && trp.TransientRateLimit()
+}
+
 func isCredentialScopedError(err error) bool {
 	if err == nil {
 		return false
@@ -1875,7 +1891,7 @@ func isRequestInvalidError(err error) bool {
 	return false
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool, transientRateLimit bool) {
 	if auth == nil {
 		return
 	}
@@ -1947,13 +1963,16 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.Quota.Reason = "quota"
 		var next time.Time
 		if !disableCooling {
-			if retryAfter != nil && *retryAfter <= 0 {
+			if retryAfter != nil && (*retryAfter <= 0 || transientRateLimit) {
+				// Zero-delay retries and 429s the provider classified as a short-lived rate
+				// limit keep their hint verbatim: flooring them at the quota ladder would park
+				// a still-usable credential for up to the full ladder step.
 				next = now.Add(*retryAfter)
 			} else {
 				next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
 				if retryAfter != nil {
-					// A provider hint can be sub-second even when the quota is exhausted for the
-					// whole day, so never let it undercut the escalating quota ladder.
+					// An exhausted-quota hint can be sub-second even when the quota is gone for
+					// the whole day, so never let it undercut the escalating quota ladder.
 					if hinted := now.Add(*retryAfter); hinted.After(next) {
 						next = hinted
 					}

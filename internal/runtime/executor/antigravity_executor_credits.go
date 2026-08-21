@@ -339,6 +339,9 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
+		// Only a decisively rate-limited 429 may keep its raw retry hint downstream;
+		// exhausted quota and unclassified bodies stay on the escalating cooldown ladder.
+		err.transientRateLimit = classifyAntigravity429(body) == antigravity429RateLimited
 	}
 	return err
 }
