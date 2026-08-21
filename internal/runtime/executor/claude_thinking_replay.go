@@ -37,13 +37,40 @@ func claudeThinkingReplayEnabled(auth *cliproxyauth.Auth, req cliproxyexecutor.R
 }
 
 // A missing session identity intentionally disables replay instead of sharing hidden reasoning across callers.
+// When no caller session is available, we fall back to a credential-scoped key
+// so a standard Claude Messages client that provides no session metadata can
+// still replay same-upstream signatures for the same credential.
 func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) claudeThinkingReplayScope {
 	sessionKey := codexReasoningReplaySessionKey(ctx, sdktranslator.FormatClaude, req, opts, req.Payload)
-	sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
+	if sessionKey != "" {
+		sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
+	}
+	if sessionKey == "" {
+		sessionKey = claudeThinkingReplayCredentialSessionKey(auth)
+	}
 	return claudeThinkingReplayScope{
 		modelFamily: claudeThinkingReplayModelFamily(auth, req.Model),
 		sessionKey:  sessionKey,
 	}
+}
+
+func claudeThinkingReplayCredentialSessionKey(auth *cliproxyauth.Auth) string {
+	identity := ""
+	if auth != nil {
+		identity = strings.TrimSpace(auth.ID)
+		if identity == "" {
+			apiKey, baseURL := claudeCreds(auth)
+			identity = strings.TrimSpace(baseURL)
+			if identity == "" {
+				identity = strings.TrimSpace(apiKey)
+			}
+		}
+	}
+	if identity == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(identity))
+	return "credential:" + hex.EncodeToString(sum[:8])
 }
 
 func claudeThinkingReplayModelFamily(auth *cliproxyauth.Auth, model string) string {
