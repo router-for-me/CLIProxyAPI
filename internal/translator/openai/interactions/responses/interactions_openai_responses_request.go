@@ -237,7 +237,7 @@ func responsesInputItemToInteractions(item gjson.Result, functionNamesByCallID m
 				functionNamesByCallID[callID] = name
 			}
 		}
-		return responsesFunctionCallToInteractions(item)
+		return responsesFunctionCallToInteractions(item, forAntigravity)
 	case "function_call_output":
 		return responsesFunctionOutputToInteractions(item, functionNamesByCallID, forAntigravity)
 	case "input_text", "output_text", "text":
@@ -328,9 +328,16 @@ func responsesImagePartToInteractions(part gjson.Result) []byte {
 	return out
 }
 
-func responsesFunctionCallToInteractions(item gjson.Result) []byte {
+func responsesFunctionCallToInteractions(item gjson.Result, forAntigravity bool) []byte {
 	out := []byte(`{"type":"function_call","name":"","arguments":{}}`)
-	out, _ = sjson.SetBytes(out, "name", translatorcommon.AntigravityToolNameToUpstream(item.Get("name").String()))
+	name := item.Get("name").String()
+	if forAntigravity {
+		// Alias colliding names only for antigravity targets; a non-antigravity
+		// request replaying a legitimate read_file call must keep its declared
+		// name so history matches the tool declaration.
+		name = translatorcommon.AntigravityToolNameToUpstream(name)
+	}
+	out, _ = sjson.SetBytes(out, "name", name)
 	if callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String()); callID != "" {
 		out, _ = sjson.SetBytes(out, "call_id", callID)
 	}

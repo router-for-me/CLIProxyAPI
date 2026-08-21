@@ -40,7 +40,21 @@ func goframeCacheAntigravityInteractionsState(ctx context.Context, modelName str
 		gjson.GetBytes(payload, "interaction.environment.id").String(),
 		gjson.GetBytes(payload, "environment.id").String(),
 	))
-	if interactionID == "" && envID == "" {
+	// Streamed tool calls arrive as step.start frames carrying step.id +
+	// step.name but no interaction coordinates. Capture those names even when
+	// this frame has none — a later Responses-style continuation (call_id +
+	// output only) needs them to fill function_result.name.
+	stepNames := map[string]string{}
+	if step := gjson.GetBytes(payload, "step"); step.Exists() {
+		if strings.EqualFold(strings.TrimSpace(step.Get("type").String()), "function_call") {
+			callID := strings.TrimSpace(step.Get("id").String())
+			name := strings.TrimSpace(step.Get("name").String())
+			if callID != "" && name != "" {
+				stepNames[callID] = name
+			}
+		}
+	}
+	if interactionID == "" && envID == "" && len(stepNames) == 0 {
 		return
 	}
 	sessionKey := antigravityExecSessionKey(opts, originalRequest)
@@ -68,11 +82,14 @@ func goframeCacheAntigravityInteractionsState(ctx context.Context, modelName str
 	// Record call_id -> function name from any function_call steps in this
 	// payload so a later Responses-style tool-result turn (call_id + output
 	// only) can still be given the required function_result.name.
+	names := map[string]string{}
+	for k, v := range state.ToolNames {
+		names[k] = v
+	}
+	for k, v := range stepNames {
+		names[k] = v
+	}
 	if gjson.GetBytes(payload, "steps").IsArray() {
-		names := map[string]string{}
-		for k, v := range state.ToolNames {
-			names[k] = v
-		}
 		gjson.GetBytes(payload, "steps").ForEach(func(_, step gjson.Result) bool {
 			if !strings.EqualFold(strings.TrimSpace(step.Get("type").String()), "function_call") {
 				return true
@@ -84,9 +101,9 @@ func goframeCacheAntigravityInteractionsState(ctx context.Context, modelName str
 			}
 			return true
 		})
-		if len(names) > 0 {
-			state.ToolNames = names
-		}
+	}
+	if len(names) > 0 {
+		state.ToolNames = names
 	}
 	internalcache.CacheAntigravityInteractionsStateBestEffort(ctx, modelName, sessionKey, state)
 	log.Debugf("antigravity interactions state: cached model=%s session=%s interaction=%s env=%s", modelName, sessionKey, state.InteractionID, state.EnvironmentID)

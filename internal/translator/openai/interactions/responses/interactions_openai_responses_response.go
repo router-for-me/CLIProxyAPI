@@ -641,7 +641,10 @@ func openAIResponsesOutputItemToInteractionsStep(item gjson.Result) ([]byte, boo
 		})
 		return step, true
 	case "function_call":
-		return responsesFunctionCallToInteractions(item), true
+		// Responses -> Interactions direction: the client replays its own
+		// function_call history. Names pass through unchanged here — aliasing
+		// for antigravity targets happens on the request-conversion path.
+		return responsesFunctionCallToInteractions(item, false), true
 	case "reasoning":
 		step := []byte(`{"type":"thought","content":[]}`)
 		item.Get("summary").ForEach(func(_, summary gjson.Result) bool {
