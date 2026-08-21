@@ -3702,6 +3702,8 @@
         "text"
       ]
     }
+    ,{"id":"gemini-3.7-flash-low","object":"model","owned_by":"antigravity","type":"antigravity","display_name":"Gemini 3.7 Flash (Low)","name":"gemini-3.7-flash-low","description":"Gemini 3.7 Flash (Low)","context_length":1048576,"max_completion_tokens":65535,"thinking":{"min":1,"max":65535,"dynamic_allowed":true,"levels":["low","medium","high"]},"supportedInputModalities":["text","image","audio","video"],"supportedOutputModalities":["text"]}
+    ,{"id":"gemini-3.7-flash-mid","object":"model","owned_by":"antigravity","type":"antigravity","display_name":"Gemini 3.7 Flash (Mid)","name":"gemini-3.7-flash-mid","description":"Gemini 3.7 Flash (Mid)","context_length":1048576,"max_completion_tokens":65535,"thinking":{"min":1,"max":65535,"dynamic_allowed":true,"levels":["low","medium","high"]},"supportedInputModalities":["text","image","audio","video"],"supportedOutputModalities":["text"]}
   ],
   "xai": [
     {
