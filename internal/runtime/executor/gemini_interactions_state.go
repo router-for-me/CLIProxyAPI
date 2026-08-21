@@ -67,11 +67,15 @@ func goframeCacheAntigravityInteractionsState(ctx context.Context, modelName str
 	// only one of the two (e.g. a completion event repeating just the ID), and
 	// overwriting the whole entry would blank the missing coordinate, leaving
 	// the next tool-result turn unable to resume.
+	//
+	// The read runs on a detached context: this capture is best-effort and
+	// must never block (or outlive) the stream read loop — a slow Home store
+	// would otherwise stall frame processing and break connection pooling.
 	state := internalcache.AntigravityInteractionsState{
 		InteractionID: interactionID,
 		EnvironmentID: envID,
 	}
-	if existing, ok := internalcache.GetAntigravityInteractionsState(ctx, modelName, sessionKey); ok {
+	if existing, ok := internalcache.GetAntigravityInteractionsState(context.Background(), modelName, sessionKey); ok {
 		if state.InteractionID == "" {
 			state.InteractionID = existing.InteractionID
 		}
