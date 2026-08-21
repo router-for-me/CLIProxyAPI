@@ -180,3 +180,64 @@ func TestExecutionModelCandidates_APIKeyPoolForCodex(t *testing.T) {
 		t.Fatalf("first codex candidates = %v, want [deepseek-v4 gpt-5.4]", first)
 	}
 }
+
+func TestPredictedHomeConcurrencyModel_APIKeyPoolRejectsMulti(t *testing.T) {
+	cfg := &internalconfig.Config{ClaudeKey: []internalconfig.ClaudeKey{{
+		APIKey: "test-key",
+		Prefix: "tenant",
+		Models: []internalconfig.ClaudeModel{
+			{Name: "claude-sonnet-4", Alias: "public"},
+			{Name: "claude-sonnet-3.5", Alias: "public"},
+		},
+	}}}
+
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+
+	auth := &Auth{
+		ID:       "auth-claude-pool-home",
+		Provider: "claude",
+		Prefix:   "tenant",
+		Attributes: map[string]string{
+			AttributeAuthKind:    AuthKindAPIKey,
+			AttributeAPIKey:      "test-key",
+			AttributeSource:      "config:claude[0]",
+			AttributeConfigIndex: "0",
+		},
+	}
+
+	model, ok := manager.predictedHomeConcurrencyModel(auth, "tenant/public")
+	if ok {
+		t.Fatalf("predictedHomeConcurrencyModel for multi-model pool = (%q, true), want empty", model)
+	}
+}
+
+func TestPredictedHomeConcurrencyModel_APIKeyPoolAcceptsSingle(t *testing.T) {
+	cfg := &internalconfig.Config{ClaudeKey: []internalconfig.ClaudeKey{{
+		APIKey: "test-key",
+		Prefix: "tenant",
+		Models: []internalconfig.ClaudeModel{
+			{Name: "claude-sonnet-4", Alias: "public"},
+		},
+	}}}
+
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+
+	auth := &Auth{
+		ID:       "auth-claude-single-home",
+		Provider: "claude",
+		Prefix:   "tenant",
+		Attributes: map[string]string{
+			AttributeAuthKind:    AuthKindAPIKey,
+			AttributeAPIKey:      "test-key",
+			AttributeSource:      "config:claude[0]",
+			AttributeConfigIndex: "0",
+		},
+	}
+
+	model, ok := manager.predictedHomeConcurrencyModel(auth, "tenant/public")
+	if !ok || model != "claude-sonnet-4" {
+		t.Fatalf("predictedHomeConcurrencyModel for single-model pool = (%q, %t), want (claude-sonnet-4, true)", model, ok)
+	}
+}
