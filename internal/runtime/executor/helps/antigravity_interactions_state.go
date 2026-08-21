@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"context"
@@ -9,7 +9,6 @@ import (
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -26,7 +25,7 @@ import (
 // Only antigravity model names are considered. The reasoning-replay cache used
 // by the antigravity OAuth / Code Assist path is never touched (distinct KV
 // prefix in internal/cache).
-func goframeCacheAntigravityInteractionsState(ctx context.Context, modelName string, originalRequest []byte, opts cliproxyexecutor.Options, payload []byte) {
+func CacheAntigravityInteractionsState(ctx context.Context, modelName string, originalRequest []byte, opts cliproxyexecutor.Options, payload []byte) {
 	modelName = strings.TrimSpace(modelName)
 	if !strings.Contains(strings.ToLower(modelName), "antigravity") {
 		return
@@ -58,7 +57,7 @@ func goframeCacheAntigravityInteractionsState(ctx context.Context, modelName str
 	if interactionID == "" && envID == "" && len(stepNames) == 0 {
 		return
 	}
-	sessionKey := antigravityExecSessionKey(opts, originalRequest)
+	sessionKey := AntigravityExecSessionKey(opts, originalRequest)
 	if sessionKey == "" {
 		log.Debugf("antigravity interactions state: no session key for model=%s", modelName)
 		return
@@ -181,7 +180,7 @@ func antigravityConversationPrefixKey(raw []byte) string {
 // conversation. It mirrors the reasoning-replay scope derivation but stays
 // independent so the interactions-agent cache never collides with the OAuth /
 // Code Assist replay cache.
-func antigravityExecSessionKey(opts cliproxyexecutor.Options, originalRequest []byte) string {
+func AntigravityExecSessionKey(opts cliproxyexecutor.Options, originalRequest []byte) string {
 	// Namespace every key by the downstream caller scope: two API keys using
 	// the same explicit session value (e.g. "Session-Id: default") must never
 	// share one upstream interaction.
@@ -209,7 +208,7 @@ func antigravityExecSessionKey(opts cliproxyexecutor.Options, originalRequest []
 	// stable per downstream caller+conversation even when the client sends no
 	// explicit marker. This isolates identical conversation prefixes coming
 	// from different callers so they never share one upstream interaction.
-	if value := helps.DerivedSessionID(opts.Metadata); value != "" {
+	if value := DerivedSessionID(opts.Metadata); value != "" {
 		return namespaced("derived:" + value)
 	}
 	// Fallback for chat/completions clients (e.g. Hermes delegation) that send
@@ -260,7 +259,7 @@ func originalRequestRawJSON(req cliproxyexecutor.Request, opts cliproxyexecutor.
 //     user_input / model_output / function_call history that Google rejects).
 //
 // When no continuation state is present, the body is returned unchanged.
-func goframeApplyAntigravityInteractionsContinuation(ctx context.Context, modelName string, originalRequest []byte, opts cliproxyexecutor.Options, body []byte) []byte {
+func ApplyAntigravityInteractionsContinuation(ctx context.Context, modelName string, originalRequest []byte, opts cliproxyexecutor.Options, body []byte) []byte {
 	modelName = strings.TrimSpace(modelName)
 	if !strings.Contains(strings.ToLower(modelName), "antigravity") {
 		return body
@@ -280,7 +279,7 @@ func goframeApplyAntigravityInteractionsContinuation(ctx context.Context, modelN
 	if !hasToolResult {
 		return body
 	}
-	sessionKey := antigravityExecSessionKey(opts, originalRequest)
+	sessionKey := AntigravityExecSessionKey(opts, originalRequest)
 	state, ok := internalcache.AntigravityInteractionsState{}, false
 	if sessionKey != "" {
 		state, ok = internalcache.GetAntigravityInteractionsState(ctx, modelName, sessionKey)

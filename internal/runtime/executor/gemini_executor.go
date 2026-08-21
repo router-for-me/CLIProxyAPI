@@ -412,7 +412,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	// history. Otherwise Google rejects with "Cannot specify tool calls
 	// outside of Turn items". Applied AFTER payload-config so the rewrite is
 	// the final authoritative body.
-	body = goframeApplyAntigravityInteractionsContinuation(ctx, targetName, originalRequestRawJSON(req, opts), opts, body)
+	body = helps.ApplyAntigravityInteractionsContinuation(ctx, targetName, originalRequestRawJSON(req, opts), opts, body)
 	// Metadata only: the full body may carry prompts, file content, and tool
 	// results that must not bypass the configured request-recording path.
 	log.Debugf("gemini interactions upstream REQUEST target=%s bytes=%d steps=%d", targetName, len(body), len(gjson.GetBytes(body, "input").Array()))
@@ -470,7 +470,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	reporter.Publish(ctx, helps.ParseInteractionsUsage(data))
 	// Capture the upstream continuation coordinates so a later tool-calling
 	// turn can resume this antigravity agent (non-stream variant).
-	goframeCacheAntigravityInteractionsState(ctx, targetName, originalRequestRawJSON(req, opts), opts, data)
+	helps.CacheAntigravityInteractionsState(ctx, targetName, originalRequestRawJSON(req, opts), opts, data)
 	// Metadata only: success bodies can embed full model output; errors keep
 	// the summarized body for diagnostics.
 	log.Debugf("gemini interactions non-stream upstream response: status=%d bytes=%d", httpResp.StatusCode, len(data))
@@ -509,7 +509,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	// history. Otherwise Google rejects with "Cannot specify tool calls
 	// outside of Turn items". Applied AFTER payload-config so the rewrite is
 	// the final authoritative body.
-	body = goframeApplyAntigravityInteractionsContinuation(ctx, targetName, originalRequestRawJSON(req, opts), opts, body)
+	body = helps.ApplyAntigravityInteractionsContinuation(ctx, targetName, originalRequestRawJSON(req, opts), opts, body)
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/interactions", baseURL, glAPIVersion)
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -593,7 +593,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 				// tool-calling turn can resume this antigravity agent instead
 				// of replaying the full assistant tool-call history (Google:
 				// "Cannot specify tool calls outside of Turn items").
-				goframeCacheAntigravityInteractionsState(ctx, targetName, originalRequest, opts, payload)
+				helps.CacheAntigravityInteractionsState(ctx, targetName, originalRequest, opts, payload)
 			}
 			if responseFormat == sdktranslator.FormatInteractions {
 				visibleFrame := append(bytes.TrimRight(rawFrame, "\r\n"), '\n', '\n')
@@ -995,4 +995,13 @@ func fixGeminiImageAspectRatio(modelName string, rawJSON []byte) []byte {
 		}
 	}
 	return rawJSON
+}
+
+// originalRequestRawJSON resolves the client-facing request body the same way
+// the executor does elsewhere (opts.OriginalRequest falls back to Payload).
+func originalRequestRawJSON(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) []byte {
+	if len(opts.OriginalRequest) > 0 {
+		return opts.OriginalRequest
+	}
+	return req.Payload
 }

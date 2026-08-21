@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"context"
@@ -16,7 +16,7 @@ func TestGoframeCacheAntigravityInteractionsState(t *testing.T) {
 	opts.Headers = map[string][]string{"Session-Id": {"sess-123"}}
 
 	payload := []byte(`{"interaction":{"id":"inter_abc","environment_id":"env_def","status":"in_progress"}}`)
-	goframeCacheAntigravityInteractionsState(context.Background(), model, nil, opts, payload)
+	CacheAntigravityInteractionsState(context.Background(), model, nil, opts, payload)
 
 	// The session key now comes from the shared ExtractSessionID extraction,
 	// which prefixes explicit header ids with "codex:".
@@ -37,7 +37,7 @@ func TestGoframeCacheIgnoresNonAntigravity(t *testing.T) {
 	opts := cliproxyexecutor.Options{}
 	opts.Headers = map[string][]string{"Session-Id": {"sess"}, "namespace_key": {"x"}}
 	payload := []byte(`{"interaction":{"id":"inter_x","environment_id":"env_x"}}`)
-	goframeCacheAntigravityInteractionsState(context.Background(), "gemini-3.7-flash", nil, opts, payload)
+	CacheAntigravityInteractionsState(context.Background(), "gemini-3.7-flash", nil, opts, payload)
 	if _, ok := internalcache.GetAntigravityInteractionsState(context.Background(), "gemini-3.7-flash", "responses:sess"); ok {
 		t.Fatalf("should not cache state for non-antigravity model")
 	}
@@ -67,7 +67,7 @@ func TestGoframeApplyAntigravityInteractionsContinuation(t *testing.T) {
 		"stream":true
 	}`)
 
-	out := goframeApplyAntigravityInteractionsContinuation(context.Background(), model, []byte(`{"model":"`+model+`"}`), opts, body)
+	out := ApplyAntigravityInteractionsContinuation(context.Background(), model, []byte(`{"model":"`+model+`"}`), opts, body)
 	root := gjson.ParseBytes(out)
 
 	if got := root.Get("previous_interaction_id").String(); got != "inter_cont" {
@@ -98,7 +98,7 @@ func TestGoframeApplyNoContinuation(t *testing.T) {
 	opts.Headers = map[string][]string{"Session-Id": {"sess-none"}, "namespace_key": {"x"}}
 
 	body := []byte(`{"agent":"` + model + `","input":[{"type":"function_result","name":"f","call_id":"c","result":"1"}],"stream":true}`)
-	out := goframeApplyAntigravityInteractionsContinuation(context.Background(), model, nil, opts, body)
+	out := ApplyAntigravityInteractionsContinuation(context.Background(), model, nil, opts, body)
 	if string(out) != string(body) {
 		t.Fatalf("expected unchanged body, got %s", string(out))
 	}
@@ -124,8 +124,8 @@ func TestAntigravityConversationPrefixKeyFallback(t *testing.T) {
 	]}`)
 
 	opts := cliproxyexecutor.Options{} // no headers, no metadata
-	key1 := antigravityExecSessionKey(opts, turn1)
-	key2 := antigravityExecSessionKey(opts, turn2)
+	key1 := AntigravityExecSessionKey(opts, turn1)
+	key2 := AntigravityExecSessionKey(opts, turn2)
 	if key1 == "" || key2 == "" {
 		t.Fatalf("expected non-empty fallback keys, got %q and %q", key1, key2)
 	}
@@ -135,13 +135,13 @@ func TestAntigravityConversationPrefixKeyFallback(t *testing.T) {
 
 	// Cache under turn1's key, then confirm continuation resolves via turn2.
 	payload := []byte(`{"id":"inter_fb","environment_id":"env_fb"}`)
-	goframeCacheAntigravityInteractionsState(context.Background(), model, turn1, opts, payload)
+	CacheAntigravityInteractionsState(context.Background(), model, turn1, opts, payload)
 
 	body := []byte(`{
 		"agent":"` + model + `",
 		"input":[{"type":"function_result","name":"read_file","call_id":"c1","result":"file body"}]
 	}`)
-	out := goframeApplyAntigravityInteractionsContinuation(context.Background(), model, turn2, opts, body)
+	out := ApplyAntigravityInteractionsContinuation(context.Background(), model, turn2, opts, body)
 	root := gjson.ParseBytes(out)
 	if got := root.Get("previous_interaction_id").String(); got != "inter_fb" {
 		t.Errorf("previous_interaction_id = %q, want inter_fb (continuation must resolve via prefix key)", got)
@@ -155,7 +155,7 @@ func TestAntigravityConversationPrefixKeyFallback(t *testing.T) {
 		{"role":"system","content":"You are helpful."},
 		{"role":"user","content":"Different question"}
 	]}`)
-	if key3 := antigravityExecSessionKey(opts, turn3); key3 == key1 {
+	if key3 := AntigravityExecSessionKey(opts, turn3); key3 == key1 {
 		t.Fatalf("new user turn must produce a different session key")
 	}
 }
