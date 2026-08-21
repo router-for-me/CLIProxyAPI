@@ -1262,40 +1262,89 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FinishRe
 
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_ReasoningFallback(t *testing.T) {
 	tests := []struct {
-		name string
-		raw  string
+		name          string
+		rawJSON       string
+		requestJSON   string
+		wantReasoning bool
+		wantText      string
 	}{
 		{
-			name: "missing reasoning_content",
-			raw:  `{"id":"chatcmpl_reasoning_fallback","object":"chat.completion","created":1773896263,"model":"grok-3","choices":[{"index":0,"message":{"role":"assistant","content":"42","reasoning":"step by step thought"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+			name:          "reasoning_content field present",
+			rawJSON:       `{"id":"chatcmpl_rc","object":"chat.completion","created":1773896263,"model":"o3-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning_content":"thought from reasoning_content"},"finish_reason":"stop"}]}`,
+			wantReasoning: true,
+			wantText:      "thought from reasoning_content",
 		},
 		{
-			name: "empty reasoning_content",
-			raw:  `{"id":"chatcmpl_reasoning_fallback","object":"chat.completion","created":1773896263,"model":"grok-3","choices":[{"index":0,"message":{"role":"assistant","content":"42","reasoning_content":"","reasoning":"step by step thought"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+			name:          "reasoning fallback field present",
+			rawJSON:       `{"id":"chatcmpl_r","object":"chat.completion","created":1773896263,"model":"o3-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning":"thought from reasoning"},"finish_reason":"stop"}]}`,
+			wantReasoning: true,
+			wantText:      "thought from reasoning",
+		},
+		{
+			name:          "both reasoning_content and reasoning present (reasoning_content priority)",
+			rawJSON:       `{"id":"chatcmpl_both","object":"chat.completion","created":1773896263,"model":"o3-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning_content":"priority thought","reasoning":"ignored thought"},"finish_reason":"stop"}]}`,
+			wantReasoning: true,
+			wantText:      "priority thought",
+		},
+		{
+			name:          "empty reasoning_content falls back to reasoning",
+			rawJSON:       `{"id":"chatcmpl_empty_rc","object":"chat.completion","created":1773896263,"model":"o3-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning_content":"","reasoning":"fallback thought"},"finish_reason":"stop"}]}`,
+			wantReasoning: true,
+			wantText:      "fallback thought",
+		},
+		{
+			name:          "neither field present without request reasoning",
+			rawJSON:       `{"id":"chatcmpl_none","object":"chat.completion","created":1773896263,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`,
+			wantReasoning: false,
+		},
+		{
+			name:          "neither field present with request reasoning produces empty summary",
+			rawJSON:       `{"id":"chatcmpl_req_only","object":"chat.completion","created":1773896263,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`,
+			requestJSON:   `{"model":"gpt-4o","reasoning":{"effort":"medium"}}`,
+			wantReasoning: true,
+			wantText:      "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "grok-3", nil, nil, []byte(tt.raw), nil)
+			var reqBytes []byte
+			if tt.requestJSON != "" {
+				reqBytes = []byte(tt.requestJSON)
+			}
+			out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "o3-mini", reqBytes, reqBytes, []byte(tt.rawJSON), nil)
 			data := gjson.ParseBytes(out)
 
-			reasoningType := data.Get("output.0.type").String()
-			if reasoningType != "reasoning" {
-				t.Fatalf("output.0.type = %q, want reasoning; out=%s", reasoningType, out)
-			}
-			reasoningText := data.Get("output.0.summary.0.text").String()
-			if reasoningText != "step by step thought" {
-				t.Fatalf("output.0.summary.0.text = %q, want %q; out=%s", reasoningText, "step by step thought", out)
+			var reasoningItem gjson.Result
+			found := false
+			data.Get("output").ForEach(func(_, item gjson.Result) bool {
+				if item.Get("type").String() == "reasoning" {
+					found = true
+					reasoningItem = item
+					return false
+				}
+				return true
+			})
+
+			if tt.wantReasoning != found {
+				t.Fatalf("reasoning found = %v, want %v; out=%s", found, tt.wantReasoning, out)
 			}
 
-			msgType := data.Get("output.1.type").String()
-			if msgType != "message" {
-				t.Fatalf("output.1.type = %q, want message; out=%s", msgType, out)
-			}
-			msgText := data.Get("output.1.content.0.text").String()
-			if msgText != "42" {
-				t.Fatalf("output.1.content.0.text = %q, want %q; out=%s", msgText, "42", out)
+			if tt.wantReasoning {
+				if tt.wantText != "" {
+					gotText := reasoningItem.Get("summary.0.text").String()
+					if gotText != tt.wantText {
+						t.Fatalf("summary.0.text = %q, want %q; out=%s", gotText, tt.wantText, out)
+					}
+					gotType := reasoningItem.Get("summary.0.type").String()
+					if gotType != "summary_text" {
+						t.Fatalf("summary.0.type = %q, want summary_text; out=%s", gotType, out)
+					}
+				} else {
+					if len(reasoningItem.Get("summary").Array()) != 0 {
+						t.Fatalf("summary = %s, want empty array; out=%s", reasoningItem.Get("summary").Raw, out)
+					}
+				}
 			}
 		})
 	}
