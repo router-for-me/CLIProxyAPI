@@ -261,13 +261,14 @@ func cacheClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingR
 	if !scope.valid() || !scope.cacheReady {
 		return
 	}
+	// Unsigned or non-replayable responses must not evict earlier signed turns.
+	// Only append turns that carry signed thinking; prior replay state is retained
+	// for the next request that echoes an earlier assistant message.
 	if kimiThinkingReplayContentIsReplayable(content) {
 		if _, errReplace := internalcache.ReplaceClaudeThinkingReplayIfUnchanged(ctx, scope.modelFamily, scope.sessionKey, scope.snapshot, content); errReplace != nil {
 			log.Warnf("claude compatible thinking replay cache replace failed: %v", errReplace)
 		}
-		return
 	}
-	clearClaudeThinkingReplayContent(ctx, scope)
 }
 
 func clearClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingReplayScope) {
