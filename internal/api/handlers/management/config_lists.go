@@ -526,20 +526,17 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
-		APIKey                  *string                          `json:"api-key"`
-		FingerprintProfile      *string                          `json:"fingerprint-profile"`
-		Weight                  json.RawMessage                  `json:"weight"`
-		Prefix                  *string                          `json:"prefix"`
-		BaseURL                 *string                          `json:"base-url"`
-		ProxyURL                *string                          `json:"proxy-url"`
-		Models                  *[]config.ClaudeModel            `json:"models"`
-		Headers                 *map[string]string               `json:"headers"`
-		ExcludedModels          *[]string                        `json:"excluded-models"`
-		RebuildMidSystemMessage *bool                            `json:"rebuild-mid-system-message"`
-		DisableCooling          json.RawMessage                  `json:"disable-cooling"`
-		RequestRetry            *int                             `json:"request-retry"`
-		RequestScopedErrors     *[]config.RequestScopedErrorRule `json:"request-scoped-errors"`
->>>>>>> f1b0431c (feat(claude): add fingerprint-profile=claude-code-cli for API keys and delegated providers (#5047))
+		APIKey                  *string               `json:"api-key"`
+		Weight                  json.RawMessage       `json:"weight"`
+		Prefix                  *string               `json:"prefix"`
+		BaseURL                 *string               `json:"base-url"`
+		ProxyURL                *string               `json:"proxy-url"`
+		Models                  *[]config.ClaudeModel `json:"models"`
+		Headers                 *map[string]string    `json:"headers"`
+		ExcludedModels          *[]string             `json:"excluded-models"`
+		RebuildMidSystemMessage *bool                 `json:"rebuild-mid-system-message"`
+		DisableCooling          json.RawMessage       `json:"disable-cooling"`
+		RequestRetry            *int                  `json:"request-retry"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -574,9 +571,6 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	entry := h.cfg.ClaudeKey[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
-	}
-	if body.Value.FingerprintProfile != nil {
-		entry.FingerprintProfile = strings.TrimSpace(*body.Value.FingerprintProfile)
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -1598,7 +1592,6 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 		return
 	}
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
-	entry.FingerprintProfile = strings.TrimSpace(entry.FingerprintProfile)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)

@@ -174,7 +174,6 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
-		entry.FingerprintProfile = strings.TrimSpace(entry.FingerprintProfile)
 	}
 }
 
