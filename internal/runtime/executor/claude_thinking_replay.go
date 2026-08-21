@@ -66,27 +66,26 @@ func claudeThinkingReplayModelFamily(auth *cliproxyauth.Auth, model string) stri
 	return "claude:" + hex.EncodeToString(sum[:8]) + ":" + baseModel
 }
 
-func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, claudeThinkingReplayScope) {
+// prepareClaudeThinkingReplayRequest loads cached assistant content for this
+// request. It does not modify req: the restore is intentionally applied to the
+// already-sanitized upstream body so cache-provenanced signatures are not
+// cleared by the compat sanitizer.
+func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (claudeThinkingReplayScope, [][]byte, bool) {
 	scope := claudeThinkingReplayScopeFromRequest(ctx, auth, req, opts)
 	if !scope.valid() {
-		return req, scope
+		return scope, nil, false
 	}
 	contents, snapshot, found, errGet := internalcache.GetClaudeThinkingReplayWithSnapshotRequired(ctx, scope.modelFamily, scope.sessionKey)
 	scope.snapshot = snapshot
 	scope.cacheReady = errGet == nil
 	if errGet != nil {
 		log.Warnf("claude compatible thinking replay cache read failed: %v", errGet)
-		return req, scope
+		return scope, nil, false
 	}
 	if !found {
-		return req, scope
+		return scope, nil, false
 	}
-	updated, restored := restoreClaudeThinkingReplayContents(req.Payload, contents)
-	if restored {
-		req.Payload = updated
-		scope.replayApplied = true
-	}
-	return req, scope
+	return scope, contents, true
 }
 
 func restoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) ([]byte, bool) {
