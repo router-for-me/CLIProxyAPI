@@ -58,6 +58,12 @@ func (e *KimiExecutor) RequestToFormat(_ cliproxyexecutor.Request, opts cliproxy
 	return sdktranslator.FormatOpenAI
 }
 
+// CountTokensToFormat reports the Claude Messages format used by Kimi token counting.
+// Unlike generation, token counting always delegates to the embedded Claude executor.
+func (e *KimiExecutor) CountTokensToFormat(_ cliproxyexecutor.Request, _ cliproxyexecutor.Options) sdktranslator.Format {
+	return sdktranslator.FormatClaude
+}
+
 // PrepareRequest injects Kimi credentials into the outgoing HTTP request.
 func (e *KimiExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if req == nil {

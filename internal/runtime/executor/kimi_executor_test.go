@@ -63,6 +63,27 @@ func TestKimiExecutorRequestToFormatMatchesWireProtocol(t *testing.T) {
 	}
 }
 
+func TestKimiExecutorCountTokensToFormatMatchesWireProtocol(t *testing.T) {
+	type countTokensToFormatReporter interface {
+		CountTokensToFormat(cliproxyexecutor.Request, cliproxyexecutor.Options) sdktranslator.Format
+	}
+
+	executor := NewKimiExecutor(&config.Config{})
+	reporter, ok := any(executor).(countTokensToFormatReporter)
+	if !ok {
+		t.Fatal("Kimi executor does not report its token-count request format")
+	}
+
+	for _, source := range []sdktranslator.Format{sdktranslator.FormatClaude, sdktranslator.FormatOpenAI} {
+		t.Run(source.String(), func(t *testing.T) {
+			got := reporter.CountTokensToFormat(cliproxyexecutor.Request{}, cliproxyexecutor.Options{SourceFormat: source})
+			if got != sdktranslator.FormatClaude {
+				t.Fatalf("CountTokensToFormat() = %q, want %q", got, sdktranslator.FormatClaude)
+			}
+		})
+	}
+}
+
 func TestKimiExecutorClaudeRequestPreservesInternalModelSemantics(t *testing.T) {
 	var upstreamBody []byte
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
