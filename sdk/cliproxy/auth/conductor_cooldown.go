@@ -1919,6 +1919,8 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if shouldSkipCredentialCooldown(resultErr) {
 		return
 	}
+	prevUnavailable := auth.Unavailable
+	prevNextRetry := auth.NextRetryAfter
 	defer func() {
 		if disableCooling && auth.NextRetryAfter.IsZero() && auth.Quota.NextRecoverAt.IsZero() {
 			auth.Unavailable = false
@@ -2024,6 +2026,8 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.StatusMessage = prevStatusMessage
 			auth.Quota.Exceeded = prevExceeded
 			auth.Quota.Reason = prevReason
+			auth.Unavailable = prevUnavailable
+			auth.NextRetryAfter = prevNextRetry
 			break
 		}
 		auth.Quota.NextRecoverAt = next
