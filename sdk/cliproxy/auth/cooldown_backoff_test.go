@@ -308,3 +308,81 @@ func TestJitteredCooldownWaitBounds(t *testing.T) {
 		t.Fatalf("expected sub-4ns wait to stay unchanged, got %v", got)
 	}
 }
+
+// Gemini and Antigravity answer an exhausted daily quota with a RetryInfo hint of
+// well under a second (see internal/runtime/executor/helps/json_retry_helpers.go).
+// Honouring such a hint verbatim returned dead credentials to the pool a few hundred
+// milliseconds later and pinned the backoff ladder at its current level forever, so
+// every request kept walking the whole exhausted pool before failing.
+const observedExhaustedQuotaHint = 479417207 * time.Nanosecond
+
+func TestMarkResultSubSecondQuotaHintStillEscalates(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	expired := time.Now().Add(-time.Second)
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-quota-subsecond-hint",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex"},
+		ModelStates: map[string]*ModelState{
+			"gpt-5": {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: expired,
+				Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: expired, BackoffLevel: 3},
+			},
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	hint := observedExhaustedQuotaHint
+	result := quotaResult(auth.ID, "gpt-5")
+	result.RetryAfter = &hint
+
+	before := time.Now()
+	manager.MarkResult(context.Background(), result)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after failure")
+	}
+	state := updated.ModelStates["gpt-5"]
+	if state.Quota.BackoffLevel != 4 {
+		t.Fatalf("expected BackoffLevel 4 after hinted post-window failure, got %d", state.Quota.BackoffLevel)
+	}
+	if !state.Quota.NextRecoverAt.After(before.Add(hint)) {
+		t.Fatalf("sub-second hint was not floored: window closes at %v, the hint alone would close it at %v", state.Quota.NextRecoverAt, before.Add(hint))
+	}
+	if got := state.Quota.NextRecoverAt.Sub(before); got < 8*quotaBackoffBase {
+		t.Fatalf("expected at least the level-3 ladder step (%v), got %v", 8*quotaBackoffBase, got)
+	}
+}
+
+func TestApplyAuthFailureStateSubSecondQuotaHintStillEscalates(t *testing.T) {
+	now := time.Now()
+	quotaErr := &Error{Code: "rate_limit", Message: "quota", HTTPStatus: http.StatusTooManyRequests}
+	hint := observedExhaustedQuotaHint
+	auth := &Auth{ID: "auth-subsecond-hint"}
+
+	applyAuthFailureState(auth, quotaErr, &hint, now, false)
+	if auth.Quota.BackoffLevel != 1 {
+		t.Fatalf("expected BackoffLevel 1 after the first hinted failure, got %d", auth.Quota.BackoffLevel)
+	}
+	if !auth.Quota.NextRecoverAt.Equal(now.Add(quotaBackoffBase)) {
+		t.Fatalf("expected the sub-second hint to be floored at %v, got %v", now.Add(quotaBackoffBase), auth.Quota.NextRecoverAt)
+	}
+
+	// A later failure, once the first window has closed, must climb the ladder even
+	// though the provider keeps repeating the same sub-second hint.
+	after := now.Add(20 * time.Second)
+	applyAuthFailureState(auth, quotaErr, &hint, after, false)
+	if auth.Quota.BackoffLevel != 2 {
+		t.Fatalf("expected BackoffLevel 2 after the repeated hinted failure, got %d", auth.Quota.BackoffLevel)
+	}
+	if !auth.Quota.NextRecoverAt.Equal(after.Add(2 * quotaBackoffBase)) {
+		t.Fatalf("expected the escalated window to close at %v, got %v", after.Add(2*quotaBackoffBase), auth.Quota.NextRecoverAt)
+	}
+}
