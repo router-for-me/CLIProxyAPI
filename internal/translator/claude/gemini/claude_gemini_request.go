@@ -86,12 +86,41 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		return ids
 	}
 
+	usedToolIDs := make(map[string]bool)
+	if contents := root.Get("contents"); contents.Exists() && contents.IsArray() {
+		contents.ForEach(func(_, content gjson.Result) bool {
+			if parts := content.Get("parts"); parts.Exists() && parts.IsArray() {
+				parts.ForEach(func(_, part gjson.Result) bool {
+					if id := getGeminiToolID(part.Get("functionCall")); id != "" {
+						usedToolIDs[id] = true
+					}
+					if id := getGeminiToolID(part.Get("functionResponse")); id != "" {
+						usedToolIDs[id] = true
+					}
+					return true
+				})
+			}
+			return true
+		})
+	}
+
 	// FIFO queue to store tool call IDs for matching with tool results
 	// Gemini uses sequential pairing across possibly multiple in-flight
 	// functionCalls, so we keep a FIFO queue of generated tool IDs and
 	// consume them in order when functionResponses arrive.
 	var pendingToolIDs []string
-	toolCallCounter := 0
+	toolIDCounter := 0
+
+	generateToolID := func() string {
+		for {
+			toolIDCounter++
+			id := fmt.Sprintf("toolu_%d", toolIDCounter)
+			if !usedToolIDs[id] {
+				usedToolIDs[id] = true
+				return id
+			}
+		}
+	}
 
 	// Model mapping to specify which Claude Code model to use
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -273,8 +302,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						// Reuse gateway-provided IDs when present, otherwise generate one for pairing.
 						toolID := getGeminiToolID(fc)
 						if toolID == "" {
-							toolCallCounter++
-							toolID = fmt.Sprintf("toolu_gemini_%016d", toolCallCounter)
+							toolID = generateToolID()
 						}
 						pendingToolIDs = append(pendingToolIDs, toolID)
 						toolUse, _ = sjson.SetBytes(toolUse, "id", toolID)
@@ -305,8 +333,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 							pendingToolIDs = pendingToolIDs[1:]
 						} else {
 							// Fallback: generate new ID if no pending tool_use found
-							toolCallCounter++
-							toolID = fmt.Sprintf("toolu_gemini_%016d", toolCallCounter)
+							toolID = generateToolID()
 						}
 						toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", toolID)
 
