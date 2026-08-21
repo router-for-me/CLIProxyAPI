@@ -125,6 +125,17 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 				continue
 			}
 
+			// Trusted replay cache provenance: the executor marked this thinking part
+			// after restoring it from the same model/auth/session replay cache. Preserve
+			// its signature and strip the transient marker before sending upstream.
+			if part.Get("_cliproxy_replay_provenance").Bool() {
+				updated, _ := sjson.Delete(part.Raw, "_cliproxy_replay_provenance")
+				keptParts = append(keptParts, updated)
+				report.Preserved++
+				messageModified = true
+				continue
+			}
+
 			rawSignature := part.Get("signature").String()
 			if opts.PreserveEmptyThinkingBlocks {
 				// In compat mode the block shape must survive, but the signature still

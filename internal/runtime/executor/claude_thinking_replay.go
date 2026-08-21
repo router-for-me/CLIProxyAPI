@@ -14,6 +14,7 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // claudeThinkingReplayScope reuses the bounded replay state shape shared with Kimi.
@@ -66,26 +67,63 @@ func claudeThinkingReplayModelFamily(auth *cliproxyauth.Auth, model string) stri
 	return "claude:" + hex.EncodeToString(sum[:8]) + ":" + baseModel
 }
 
-// prepareClaudeThinkingReplayRequest loads cached assistant content for this
-// request. It does not modify req: the restore is intentionally applied to the
-// already-sanitized upstream body so cache-provenanced signatures are not
-// cleared by the compat sanitizer.
-func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (claudeThinkingReplayScope, [][]byte, bool) {
+// prepareClaudeThinkingReplayRequest restores cached assistant content into
+// req.Payload before translation and sanitization. Each restored thinking part
+// carries an internal _cliproxy_replay_provenance marker so the compat
+// sanitizer can preserve trusted replay signatures while still rejecting
+// unprovenanced client-provided signatures.
+func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, claudeThinkingReplayScope) {
 	scope := claudeThinkingReplayScopeFromRequest(ctx, auth, req, opts)
 	if !scope.valid() {
-		return scope, nil, false
+		return req, scope
 	}
 	contents, snapshot, found, errGet := internalcache.GetClaudeThinkingReplayWithSnapshotRequired(ctx, scope.modelFamily, scope.sessionKey)
 	scope.snapshot = snapshot
 	scope.cacheReady = errGet == nil
 	if errGet != nil {
 		log.Warnf("claude compatible thinking replay cache read failed: %v", errGet)
-		return scope, nil, false
+		return req, scope
 	}
 	if !found {
-		return scope, nil, false
+		return req, scope
 	}
-	return scope, contents, true
+	markedContents := make([][]byte, len(contents))
+	for i, content := range contents {
+		markedContents[i] = claudeThinkingReplayMarkProvenance(content)
+	}
+	updated, restored := restoreClaudeThinkingReplayContents(req.Payload, markedContents)
+	if restored {
+		req.Payload = updated
+		scope.replayApplied = true
+	}
+	return req, scope
+}
+
+// claudeThinkingReplayMarkProvenance adds a transient _cliproxy_replay_provenance
+// marker to each thinking part in a cached assistant content array. The
+// sanitizer uses the marker to preserve trusted replay signatures and removes
+// it before the body is sent upstream.
+func claudeThinkingReplayMarkProvenance(content []byte) []byte {
+	root := gjson.ParseBytes(content)
+	if !root.IsArray() {
+		return content
+	}
+	parts := root.Array()
+	modified := false
+	outParts := make([]string, len(parts))
+	for i, part := range parts {
+		if strings.TrimSpace(part.Get("type").String()) == "thinking" {
+			updated, _ := sjson.Set(part.Raw, "_cliproxy_replay_provenance", true)
+			outParts[i] = updated
+			modified = true
+		} else {
+			outParts[i] = part.Raw
+		}
+	}
+	if !modified {
+		return content
+	}
+	return []byte("[" + strings.Join(outParts, ",") + "]")
 }
 
 func restoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) ([]byte, bool) {
