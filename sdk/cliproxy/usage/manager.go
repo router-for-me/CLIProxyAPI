@@ -313,6 +313,13 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	if m == nil {
 		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	} else {
+		// Usage delivery is asynchronous and commonly runs after the request ends.
+		// Preserve request values without letting request cancellation drop the record.
+		ctx = context.WithoutCancel(ctx)
+	}
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
 	m.mu.Lock()
