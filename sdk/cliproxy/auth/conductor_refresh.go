@@ -32,7 +32,7 @@ const (
 	refreshIneffectiveBackoff = 30 * time.Second
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
-	transientErrorCooldown    = time.Minute
+	transientErrorCooldown    = 10 * time.Second
 )
 
 // StartAutoRefresh launches a background loop that evaluates auth freshness
