@@ -199,10 +199,47 @@ func stripClaudeThinkingReplayProvenanceMarkers(payload []byte) []byte {
 func restoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) ([]byte, bool) {
 	updated := body
 	restored := false
-	for _, cachedContent := range cachedContents {
-		var restoredTurn bool
-		updated, restoredTurn = restoreKimiThinkingReplayContent(updated, cachedContent)
-		restored = restored || restoredTurn
+	consumed := make([]bool, len(cachedContents))
+	messages := gjson.GetBytes(updated, "messages")
+	if !messages.IsArray() {
+		return body, false
+	}
+	for i, message := range messages.Array() {
+		if !strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "assistant") {
+			continue
+		}
+		currentContent := message.Get("content")
+		if !currentContent.IsArray() {
+			continue
+		}
+		for j, cachedContent := range cachedContents {
+			if consumed[j] {
+				continue
+			}
+			if kimiJSONEqual([]byte(currentContent.Raw), cachedContent) {
+				consumed[j] = true
+				break
+			}
+			cachedParts, ok := kimiNonThinkingContentParts(gjson.ParseBytes(cachedContent))
+			if !ok {
+				continue
+			}
+			currentParts, ok := kimiNonThinkingContentParts(currentContent)
+			if !ok || !kimiCanonicalPartsEqual(currentParts, cachedParts) {
+				continue
+			}
+			if kimiContentHasThinking(currentContent) && !kimiThinkingMatchesCachedIgnoringSignature(currentContent, gjson.ParseBytes(cachedContent)) {
+				continue
+			}
+			var errSet error
+			updated, errSet = sjson.SetRawBytes(updated, fmt.Sprintf("messages.%d.content", i), cachedContent)
+			if errSet != nil {
+				return body, false
+			}
+			consumed[j] = true
+			restored = true
+			break
+		}
 	}
 	return updated, restored
 }

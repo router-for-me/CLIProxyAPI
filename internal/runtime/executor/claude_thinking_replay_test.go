@@ -997,6 +997,91 @@ func TestClaudeExecutorCompatThinkingReplayRestoresAfterSensitiveWordObfuscation
 	}
 }
 
+func TestClaudeExecutorCompatThinkingReplaySkipsObfuscationWhenCloakingDisabled(t *testing.T) {
+	internalcacheClearClaudeThinkingReplay(t)
+
+	var mu sync.Mutex
+	var requestBodies [][]byte
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+			return
+		}
+		mu.Lock()
+		requestBodies = append(requestBodies, bytes.Clone(body))
+		callCount++
+		call := callCount
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			_, _ = w.Write([]byte(`{"id":"msg-1","type":"message","role":"assistant","model":"claude-synthetic-4772","content":[{"type":"thinking","thinking":"provider reasoning","signature":"opaque-sig-obfuscate"},{"type":"text","text":"the secret answer"}],"stop_reason":"end_turn"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"msg-2","type":"message","role":"assistant","model":"claude-synthetic-4772","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`))
+	}))
+	defer server.Close()
+
+	auth := claudeReplayTestAuth(server.URL)
+	auth.Attributes["cloak_mode"] = "never"
+	auth.Attributes["cloak_sensitive_words"] = "secret"
+
+	executor := NewClaudeExecutor(nil)
+	firstPayload := []byte(`{"messages":[{"role":"user","content":"what is the secret"}]}`)
+	firstRequest, firstOptions := claudeReplayTestRequest(firstPayload, "obfuscate-replay-disabled", true, sdktranslator.FormatClaude)
+	if _, errExecute := executor.Execute(context.Background(), auth, firstRequest, firstOptions); errExecute != nil {
+		t.Fatalf("first Execute() error: %v", errExecute)
+	}
+
+	secondPayload := []byte(`{"messages":[{"role":"user","content":"what is the secret"},{"role":"assistant","content":[{"type":"text","text":"the secret answer"}]},{"role":"user","content":"thanks"}]}`)
+	secondRequest, secondOptions := claudeReplayTestRequest(secondPayload, "obfuscate-replay-disabled", true, sdktranslator.FormatClaude)
+	if _, errExecute := executor.Execute(context.Background(), auth, secondRequest, secondOptions); errExecute != nil {
+		t.Fatalf("second Execute() error: %v", errExecute)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requestBodies) != 2 {
+		t.Fatalf("upstream request count = %d, want 2", len(requestBodies))
+	}
+	content := gjson.GetBytes(requestBodies[1], "messages.1.content").Array()
+	if len(content) != 2 || content[0].Get("type").String() != "thinking" {
+		t.Fatalf("second assistant content = %s, want restored thinking and text", gjson.GetBytes(requestBodies[1], "messages.1.content").Raw)
+	}
+	if got := content[0].Get("signature").String(); got != "opaque-sig-obfuscate" {
+		t.Fatalf("restored signature = %q, want opaque-sig-obfuscate", got)
+	}
+	text := content[1].Get("text").String()
+	if text != "the secret answer" {
+		t.Fatalf("sensitive word incorrectly obfuscated when cloaking disabled: %q", text)
+	}
+}
+
+func TestRestoreClaudeThinkingReplayContents_MatchesDuplicateTurnsInChronologicalOrder(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"text","text":"same"}]},{"role":"user","content":"again"},{"role":"assistant","content":[{"type":"text","text":"same"}]}]}`)
+	cached := [][]byte{
+		[]byte(`[{"type":"thinking","thinking":"first","signature":"sig-1"},{"type":"text","text":"same"}]`),
+		[]byte(`[{"type":"thinking","thinking":"second","signature":"sig-2"},{"type":"text","text":"same"}]`),
+	}
+
+	updated, restored := restoreClaudeThinkingReplayContents(body, cached)
+	if !restored {
+		t.Fatal("expected restore")
+	}
+
+	first := gjson.GetBytes(updated, "messages.1.content").Array()
+	if first[0].Get("signature").String() != "sig-1" {
+		t.Fatalf("first turn matched wrong signature: %s", first[0].Get("signature").String())
+	}
+
+	second := gjson.GetBytes(updated, "messages.3.content").Array()
+	if second[0].Get("signature").String() != "sig-2" {
+		t.Fatalf("second turn matched wrong signature: %s", second[0].Get("signature").String())
+	}
+}
+
 func internalcacheClearClaudeThinkingReplay(t *testing.T) {
 	t.Helper()
 	internalcache.ClearClaudeThinkingReplayCache()
