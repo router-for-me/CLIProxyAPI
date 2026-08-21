@@ -93,8 +93,11 @@ func TestBuildInteractionsExecutionRequestUsesAgentAuthSelectionModel(t *testing
 	if req.ForcedProvider != "gemini-interactions" {
 		t.Fatalf("ForcedProvider = %q, want gemini-interactions", req.ForcedProvider)
 	}
-	if req.AuthSelectionModel != interactionsAgentAuthSelectionModel {
-		t.Fatalf("AuthSelectionModel = %q, want %q", req.AuthSelectionModel, interactionsAgentAuthSelectionModel)
+	// Auth selection stays unfiltered: any credential registered for the
+	// gemini-interactions provider is eligible, so --local-model deployments
+	// never depend on a hard-coded id existing in the static catalog.
+	if req.AuthSelectionModel != "" {
+		t.Fatalf("AuthSelectionModel = %q, want empty (unfiltered pick)", req.AuthSelectionModel)
 	}
 	if req.Model != "agents/test-agent" {
 		t.Fatalf("Model = %q, want agents/test-agent", req.Model)
@@ -204,7 +207,10 @@ func TestInteractionsAgentUsesNativeInteractionsEndpoint(t *testing.T) {
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("manager.Register(): %v", errRegister)
 	}
-	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: interactionsAgentAuthSelectionModel}})
+	// Register both the agent id (the request's model) and a backing Gemini
+	// model: agent auth selection is unfiltered, so any registered model on
+	// the provider makes the credential eligible.
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "agents/test-agent"}, {ID: "gemini-3.6-flash"}})
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
 	})
