@@ -91,6 +91,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// functionCalls, so we keep a FIFO queue of generated tool IDs and
 	// consume them in order when functionResponses arrive.
 	var pendingToolIDs []string
+	toolCallCounter := 0
 
 	// Model mapping to specify which Claude Code model to use
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -272,7 +273,8 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						// Reuse gateway-provided IDs when present, otherwise generate one for pairing.
 						toolID := getGeminiToolID(fc)
 						if toolID == "" {
-							toolID = translatorcommon.GenerateClaudeToolCallID()
+							toolCallCounter++
+							toolID = fmt.Sprintf("toolu_gemini_%016d", toolCallCounter)
 						}
 						pendingToolIDs = append(pendingToolIDs, toolID)
 						toolUse, _ = sjson.SetBytes(toolUse, "id", toolID)
@@ -303,7 +305,8 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 							pendingToolIDs = pendingToolIDs[1:]
 						} else {
 							// Fallback: generate new ID if no pending tool_use found
-							toolID = translatorcommon.GenerateClaudeToolCallID()
+							toolCallCounter++
+							toolID = fmt.Sprintf("toolu_gemini_%016d", toolCallCounter)
 						}
 						toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", toolID)
 

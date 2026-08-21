@@ -886,8 +886,12 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 
 	// Build output list from choices[...]
 	var outputItems [][]byte
-	// Detect and capture reasoning content if present
-	rcText := gjson.GetBytes(rawJSON, "choices.0.message.reasoning_content").String()
+	// Detect and capture reasoning content if present (with fallback to reasoning)
+	rc := gjson.GetBytes(rawJSON, "choices.0.message.reasoning_content")
+	if !rc.Exists() || rc.String() == "" {
+		rc = gjson.GetBytes(rawJSON, "choices.0.message.reasoning")
+	}
+	rcText := rc.String()
 	includeReasoning := rcText != ""
 	if !includeReasoning && len(requestRawJSON) > 0 {
 		includeReasoning = gjson.GetBytes(requestRawJSON, "reasoning").Exists()

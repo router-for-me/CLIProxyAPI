@@ -94,16 +94,21 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		if len(eventData) == 0 {
 			continue
 		}
-		switch gjson.GetBytes(eventData, "type").String() {
+		eventType := gjson.GetBytes(eventData, "type").String()
+		switch eventType {
 		case "response.output_item.done":
 			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-		case "response.completed":
+		case "response.completed", "response.incomplete":
 			if detail, ok := helps.ParseCodexUsage(eventData); ok {
 				reporter.Publish(ctx, detail)
 			}
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			completedData = xaiNormalizeReasoningSummaryData(completedData)
-			cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
+			if eventType == "response.completed" {
+				// A truncated turn carries no replayable terminal state, so only a
+				// completed response may refresh the reasoning replay cache.
+				cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
+			}
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
 			if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
@@ -113,7 +118,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		}
 	}
 
-	return resp, statusErr{code: http.StatusRequestTimeout, msg: "xai stream error: stream disconnected before response.completed"}
+	return resp, statusErr{code: http.StatusRequestTimeout, msg: "xai stream error: stream disconnected before response.completed or response.incomplete"}
 }
 
 func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {

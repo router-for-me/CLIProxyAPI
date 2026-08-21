@@ -1259,3 +1259,44 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FinishRe
 		t.Fatalf("output.0.status = %q, want incomplete; out=%s", got, out)
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_ReasoningFallback(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "missing reasoning_content",
+			raw:  `{"id":"chatcmpl_reasoning_fallback","object":"chat.completion","created":1773896263,"model":"grok-3","choices":[{"index":0,"message":{"role":"assistant","content":"42","reasoning":"step by step thought"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+		},
+		{
+			name: "empty reasoning_content",
+			raw:  `{"id":"chatcmpl_reasoning_fallback","object":"chat.completion","created":1773896263,"model":"grok-3","choices":[{"index":0,"message":{"role":"assistant","content":"42","reasoning_content":"","reasoning":"step by step thought"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "grok-3", nil, nil, []byte(tt.raw), nil)
+			data := gjson.ParseBytes(out)
+
+			reasoningType := data.Get("output.0.type").String()
+			if reasoningType != "reasoning" {
+				t.Fatalf("output.0.type = %q, want reasoning; out=%s", reasoningType, out)
+			}
+			reasoningText := data.Get("output.0.summary.0.text").String()
+			if reasoningText != "step by step thought" {
+				t.Fatalf("output.0.summary.0.text = %q, want %q; out=%s", reasoningText, "step by step thought", out)
+			}
+
+			msgType := data.Get("output.1.type").String()
+			if msgType != "message" {
+				t.Fatalf("output.1.type = %q, want message; out=%s", msgType, out)
+			}
+			msgText := data.Get("output.1.content.0.text").String()
+			if msgText != "42" {
+				t.Fatalf("output.1.content.0.text = %q, want %q; out=%s", msgText, "42", out)
+			}
+		})
+	}
+}

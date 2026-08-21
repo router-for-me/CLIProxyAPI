@@ -1501,3 +1501,37 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_RestoresAdditionalNames
 		t.Fatalf("non-stream output value = %q, want PROBE", got)
 	}
 }
+
+func TestConvertGeminiResponseToOpenAIResponses_MessageOutputItemDoneFields(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7},"modelVersion":"gemini-2.5-flash","responseId":"resp_item_done_test"}`),
+	}
+	originalReq := []byte(`{"model":"gemini-2.5-flash","input":"Reply with exactly: hello"}`)
+
+	var param any
+	var gotItemDone bool
+	for _, chunk := range chunks {
+		for _, output := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-2.5-flash", originalReq, nil, chunk, &param) {
+			event, data := parseSSEEvent(t, output)
+			if event == "response.output_item.done" && data.Get("item.type").String() == "message" {
+				gotItemDone = true
+				if !data.Get("item.content.0.annotations").Exists() {
+					t.Fatalf("missing item.content.0.annotations in response.output_item.done: %s", data.Raw)
+				}
+				if !data.Get("item.content.0.annotations").IsArray() {
+					t.Fatalf("item.content.0.annotations should be an array: %s", data.Raw)
+				}
+				if !data.Get("item.content.0.logprobs").Exists() {
+					t.Fatalf("missing item.content.0.logprobs in response.output_item.done: %s", data.Raw)
+				}
+				if !data.Get("item.content.0.logprobs").IsArray() {
+					t.Fatalf("item.content.0.logprobs should be an array: %s", data.Raw)
+				}
+			}
+		}
+	}
+
+	if !gotItemDone {
+		t.Fatalf("missing message response.output_item.done event")
+	}
+}

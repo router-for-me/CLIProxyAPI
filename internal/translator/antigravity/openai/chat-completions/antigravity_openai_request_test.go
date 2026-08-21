@@ -455,3 +455,40 @@ func TestConvertOpenAIRequestToAntigravityTranslatesVideoURL(t *testing.T) {
 		t.Fatalf("inlineData.data = %q, want AAAAIGZ0eXBtcDQy. Output: %s", got, out)
 	}
 }
+
+func TestConvertOpenAIRequestToAntigravity_MaxCompletionTokens(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		expected float64
+	}{
+		{
+			name:     "only max_tokens",
+			body:     `{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":100}`,
+			expected: 100,
+		},
+		{
+			name:     "only max_completion_tokens",
+			body:     `{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":200}`,
+			expected: 200,
+		},
+		{
+			name:     "max_tokens preferred over max_completion_tokens",
+			body:     `{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":100,"max_completion_tokens":200}`,
+			expected: 100,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertOpenAIRequestToAntigravity("gemini-2.5-flash", []byte(tt.body), false)
+			got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens")
+			if !got.Exists() {
+				t.Fatalf("request.generationConfig.maxOutputTokens missing. Output: %s", out)
+			}
+			if got.Float() != tt.expected {
+				t.Fatalf("maxOutputTokens = %v, want %v. Output: %s", got.Float(), tt.expected, out)
+			}
+		})
+	}
+}
