@@ -3,8 +3,10 @@ package helps
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"hash"
 	"strings"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -19,33 +21,33 @@ import (
 // prompt cannot see each other's replay state.
 func ClaudeThinkingReplayConversationSessionKey(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
 	h := sha256.New()
-	h.Write([]byte("conversation"))
+	hashString(h, "conversation")
 
 	if auth != nil {
 		if id := strings.TrimSpace(auth.ID); id != "" {
-			h.Write([]byte(id))
+			hashString(h, id)
 		} else if apiKey, _ := claudeCredentialKey(auth); apiKey != "" {
-			h.Write([]byte(apiKey))
+			hashString(h, apiKey)
+		} else {
+			hashString(h, "")
 		}
+	} else {
+		hashString(h, "")
 	}
 
-	if scope := metadataString(opts.Metadata, cliproxyexecutor.CallerScopeMetadataKey); scope != "" {
-		h.Write([]byte(scope))
-	}
-	if scope := metadataString(req.Metadata, cliproxyexecutor.CallerScopeMetadataKey); scope != "" {
-		h.Write([]byte(scope))
-	}
-	if derived := metadataString(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey); derived != "" {
-		h.Write([]byte(derived))
-	}
-	if derived := metadataString(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey); derived != "" {
-		h.Write([]byte(derived))
-	}
+	hashString(h, metadataString(opts.Metadata, cliproxyexecutor.CallerScopeMetadataKey))
+	hashString(h, metadataString(req.Metadata, cliproxyexecutor.CallerScopeMetadataKey))
+	hashString(h, metadataString(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey))
+	hashString(h, metadataString(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey))
 
 	if opts.Headers != nil {
-		h.Write([]byte(opts.Headers.Get("User-Agent")))
-		h.Write([]byte(opts.Headers.Get("X-App")))
-		h.Write([]byte(opts.Headers.Get("X-Codex-Client-Id")))
+		hashString(h, opts.Headers.Get("User-Agent"))
+		hashString(h, opts.Headers.Get("X-App"))
+		hashString(h, opts.Headers.Get("X-Codex-Client-Id"))
+	} else {
+		hashString(h, "")
+		hashString(h, "")
+		hashString(h, "")
 	}
 
 	if len(req.Payload) == 0 {
@@ -54,15 +56,30 @@ func ClaudeThinkingReplayConversationSessionKey(auth *cliproxyauth.Auth, req cli
 	for _, path := range []string{"messages.0", "system", "tools"} {
 		part := gjson.GetBytes(req.Payload, path)
 		if !part.Exists() {
+			hashBytes(h, nil)
 			continue
 		}
 		if canon, ok := claudeReplayCanonicalJSON([]byte(part.Raw)); ok {
-			h.Write(canon)
+			hashBytes(h, canon)
 		} else {
-			h.Write([]byte(part.Raw))
+			hashBytes(h, []byte(part.Raw))
 		}
 	}
 	return "conversation:" + hex.EncodeToString(h.Sum(nil)[:16])
+}
+
+// hashString writes s to h as a length-prefixed UTF-8 string so adjacent
+// fields cannot be confused when concatenated.
+func hashString(h hash.Hash, s string) {
+	hashBytes(h, []byte(s))
+}
+
+// hashBytes writes b to h as a length-prefixed byte slice.
+func hashBytes(h hash.Hash, b []byte) {
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(b)))
+	h.Write(length[:])
+	h.Write(b)
 }
 
 // claudeCredentialKey returns the most identifying credential value available
