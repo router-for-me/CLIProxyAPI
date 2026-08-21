@@ -21,7 +21,17 @@ func TestSanitizeClaudeMessagesForClaudeUpstreamPreservesEmptyThinkingInCompatMo
 	}
 }
 
-func TestSanitizeClaudeMessagesForClaudeUpstreamPreservesOpaqueThinkingSignatureInCompatMode(t *testing.T) {
+func TestSanitizeClaudeMessagesForClaudeUpstreamStripsGeminiPrefixInCompatMode(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"gemini#EgI="}]}]}`)
+
+	withCompat, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4", true)
+	part := gjson.GetBytes(withCompat, "messages.0.content.0")
+	if part.Get("type").String() != "thinking" || part.Get("signature").String() != "" {
+		t.Fatalf("compat sanitizer preserved gemini-prefixed signature: %s", withCompat)
+	}
+}
+
+func TestSanitizeClaudeMessagesForClaudeUpstreamStripsOpaqueThinkingSignatureInCompatMode(t *testing.T) {
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"opaque-deepseek-id"}]}]}`)
 
 	withoutCompat, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "deepseek-v4")
@@ -31,7 +41,7 @@ func TestSanitizeClaudeMessagesForClaudeUpstreamPreservesOpaqueThinkingSignature
 
 	withCompat, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "deepseek-v4", true)
 	part := gjson.GetBytes(withCompat, "messages.0.content.0")
-	if part.Get("type").String() != "thinking" || part.Get("signature").String() != "opaque-deepseek-id" {
-		t.Fatalf("compat sanitizer dropped opaque signature: %s", withCompat)
+	if part.Get("type").String() != "thinking" || part.Get("signature").String() != "" {
+		t.Fatalf("compat sanitizer dropped opaque thinking block: %s", withCompat)
 	}
 }
