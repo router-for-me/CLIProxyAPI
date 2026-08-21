@@ -15,6 +15,13 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// interactionsAgentAuthSelectionModel is used only for credential selection
+// when routing native agent requests. It must be an id present in the static
+// Gemini catalog (gemini-interactions credentials register GetGeminiModels()),
+// and it matches the antigravity default documented by Google: the agent is
+// powered by Gemini 3.6 Flash unless agent_config overrides it.
+const interactionsAgentAuthSelectionModel = "gemini-3.6-flash"
+
 type interactionsRequestTarget struct {
 	Model  string
 	Agent  string
@@ -70,18 +77,20 @@ func normalizeGeminiModelResourceName(model string) string {
 
 func buildInteractionsExecutionRequest(target interactionsRequestTarget, modelName string, rawJSON []byte, alt string) handlers.ProtocolExecutionRequest {
 	forcedProvider := ""
+	authSelectionModel := ""
 	if target.Agent != "" {
-		// Forced provider only: leave AuthSelectionModel empty so the
-		// conductor's model-aware checks treat this as an unfiltered pick and
-		// select any available credential registered for the gemini-interactions
-		// provider. A hard-coded selection id breaks --local-model deployments
-		// whenever the id is missing from the static catalog.
+		// The agent id itself is not in any model catalog, so selection needs
+		// a catalog-backed id; use the documented antigravity default
+		// (Gemini 3.6 Flash) so --local-model deployments still resolve a
+		// credential.
 		forcedProvider = GeminiInteractions
+		authSelectionModel = interactionsAgentAuthSelectionModel
 	}
 	return handlers.ProtocolExecutionRequest{
 		EntryProtocol:      Interactions,
 		ExitProtocol:       Interactions,
 		ForcedProvider:     forcedProvider,
+		AuthSelectionModel: authSelectionModel,
 		Model:              modelName,
 		Stream:             target.Stream,
 		Body:               rawJSON,

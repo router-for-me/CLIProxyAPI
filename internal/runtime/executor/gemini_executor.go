@@ -413,7 +413,9 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	// outside of Turn items". Applied AFTER payload-config so the rewrite is
 	// the final authoritative body.
 	body = goframeApplyAntigravityInteractionsContinuation(ctx, targetName, originalRequestRawJSON(req, opts), opts, body)
-	log.Debugf("gemini interactions upstream REQUEST target=%s body=%s", targetName, string(body))
+	// Metadata only: the full body may carry prompts, file content, and tool
+	// results that must not bypass the configured request-recording path.
+	log.Debugf("gemini interactions upstream REQUEST target=%s bytes=%d steps=%d", targetName, len(body), len(gjson.GetBytes(body, "input").Array()))
 
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/interactions", baseURL, glAPIVersion)
@@ -469,7 +471,9 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	// Capture the upstream continuation coordinates so a later tool-calling
 	// turn can resume this antigravity agent (non-stream variant).
 	goframeCacheAntigravityInteractionsState(ctx, targetName, originalRequestRawJSON(req, opts), opts, data)
-	log.Debugf("gemini interactions non-stream upstream response: status=%d body=%s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+	// Metadata only: success bodies can embed full model output; errors keep
+	// the summarized body for diagnostics.
+	log.Debugf("gemini interactions non-stream upstream response: status=%d bytes=%d", httpResp.StatusCode, len(data))
 	targetFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatInteractions, targetFormat, req.Model, opts.OriginalRequest, body, data, &param)

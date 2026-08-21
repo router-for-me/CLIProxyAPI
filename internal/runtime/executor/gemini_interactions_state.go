@@ -366,6 +366,7 @@ func goframeApplyAntigravityInteractionsContinuation(ctx context.Context, modelN
 		out, _ = sjson.SetBytes(out, "stream", v.Bool())
 	}
 	out, _ = sjson.SetRawBytes(out, "input", translatorcommon.JoinRawArray(kept))
-	log.Debugf("antigravity continuation: final upstream body %s", string(out))
+	// Metadata only: the continuation body carries the caller's tool output.
+	log.Debugf("antigravity continuation: resuming interaction=%s env=%s results=%d", state.InteractionID, state.EnvironmentID, len(kept))
 	return out
 }

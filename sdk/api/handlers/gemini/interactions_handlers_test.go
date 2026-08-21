@@ -93,11 +93,10 @@ func TestBuildInteractionsExecutionRequestUsesAgentAuthSelectionModel(t *testing
 	if req.ForcedProvider != "gemini-interactions" {
 		t.Fatalf("ForcedProvider = %q, want gemini-interactions", req.ForcedProvider)
 	}
-	// Auth selection stays unfiltered: any credential registered for the
-	// gemini-interactions provider is eligible, so --local-model deployments
-	// never depend on a hard-coded id existing in the static catalog.
-	if req.AuthSelectionModel != "" {
-		t.Fatalf("AuthSelectionModel = %q, want empty (unfiltered pick)", req.AuthSelectionModel)
+	// Auth selection uses the catalog-backed antigravity default so
+	// --local-model deployments resolve a credential.
+	if req.AuthSelectionModel != interactionsAgentAuthSelectionModel {
+		t.Fatalf("AuthSelectionModel = %q, want %q", req.AuthSelectionModel, interactionsAgentAuthSelectionModel)
 	}
 	if req.Model != "agents/test-agent" {
 		t.Fatalf("Model = %q, want agents/test-agent", req.Model)
