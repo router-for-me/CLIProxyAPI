@@ -853,6 +853,67 @@ func TestManager_MarkResult_Transient429WithoutHintBypassesQuotaLadder(t *testin
 	}
 }
 
+// With transient cooldowns disabled (transientErrorCooldownSeconds < 0) the
+// transient-429 fallback yields a zero retry time. That zero must not be
+// stored as state: an unavailable/quota-exceeded flag with an empty
+// NextRetryAfter would read as an indefinite block and hide the credential
+// forever.
+func TestManager_MarkResult_Transient429WithoutHintRespectsDisabledCooldown(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(-1)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevQuota)
+		transientErrorCooldownSeconds.Store(prevTransient)
+	})
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-transient-429-disabled", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-transient-429-disabled"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    "rate limited",
+		},
+		TransientRateLimit: true,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("auth %s missing after MarkResult", auth.ID)
+	}
+
+	if !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected credential NextRetryAfter to stay zero with transient cooldowns disabled, got %v", updated.NextRetryAfter)
+	}
+	if updated.Quota.Exceeded {
+		t.Fatal("expected the credential quota state to stay clear with transient cooldowns disabled")
+	}
+
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected per-model state for %s", model)
+	}
+	if state.Unavailable {
+		t.Fatal("expected the model to stay available with transient cooldowns disabled")
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected per-model NextRetryAfter to stay zero, got %v", state.NextRetryAfter)
+	}
+	if state.Quota.Exceeded {
+		t.Fatal("expected the per-model quota state to stay clear with transient cooldowns disabled")
+	}
+}
+
 func TestManager_MarkResult_TransientErrorCooldownDisabled(t *testing.T) {
 	prevQuota := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
