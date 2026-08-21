@@ -119,37 +119,43 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = reconcileClaudeCodeContextManagement(body, contextManagementState)
 	body = normalizeClaudeSamplingForUpstream(body, confirmedClaudeCode)
 
-	// Default cache_control for translated entrypoints (Responses/Chat/Gemini) and other
-	// non-native callers. Confirmed native Claude Code owns its marker placement and must
-	// not be rewritten. Cloaked requests always run section-independent ensure so cloaking's
-	// first-user marker cannot suppress system/latest-user breakpoints.
+	// Embedders that do not support Anthropic cache_control (e.g. Kimi reusing
+	// the Claude path) must strip all existing cache_control fields. Otherwise,
+	// default cache_control for translated entrypoints and other non-native
+	// callers. Confirmed native Claude Code owns its marker placement and must
+	// not be rewritten. Cloaked requests always run section-independent ensure so
+	// cloaking's first-user marker cannot suppress system/latest-user breakpoints.
 	// cloaked and confirmedClaudeCode are mutually exclusive: resolveClaudeWirePolicy
 	// forces Cloak off for a confirmed native client.
-	cpaOwnsCacheControl := shouldEnsureCacheControl(body, cloaked, confirmedClaudeCode)
-	if cpaOwnsCacheControl {
-		body = ensureCacheControl(body)
+	if e.cacheControlDisabled {
+		body = stripCacheControls(body)
+	} else {
+		cpaOwnsCacheControl := shouldEnsureCacheControl(body, cloaked, confirmedClaudeCode)
+		if cpaOwnsCacheControl {
+			body = ensureCacheControl(body)
+		}
+
+		// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
+		body = enforceCacheControlLimit(body, 4)
+
+		// Native selects the 1h cache pool only for OAuth credentials and pairs it with
+		// extended-cache-ttl-2025-04-11, which claudeCodeCLIBetas emits on exactly the
+		// same credential condition. Upgrading after placement is settled mirrors the
+		// native ttl helper.
+		//
+		// This runs only while CPA owns placement, and it then owns the ttl of every
+		// breakpoint it can reach: a marker carrying no ttl is the wire default, not an
+		// opt-in to 5m, so a cloaked caller's bare {"type":"ephemeral"} is upgraded too.
+		// Only a ttl the caller wrote out explicitly survives, because
+		// upgradeClaudeCacheControlTTL skips any block that already has one.
+		// claude-code-cli fingerprint profiles emit extended-cache-ttl and must use the same 1h pool.
+		if cpaOwnsCacheControl && fp.ProfileClaudeCodeCLI {
+			body = upgradeClaudeCacheControlTTL(body, claudeCacheControlTTL1h)
+		}
+
+		// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
+		body = normalizeCacheControlTTL(body)
 	}
-
-	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
-	body = enforceCacheControlLimit(body, 4)
-
-	// Native selects the 1h cache pool only for OAuth credentials and pairs it with
-	// extended-cache-ttl-2025-04-11, which claudeCodeCLIBetas emits on exactly the
-	// same credential condition. Upgrading after placement is settled mirrors the
-	// native ttl helper.
-	//
-	// This runs only while CPA owns placement, and it then owns the ttl of every
-	// breakpoint it can reach: a marker carrying no ttl is the wire default, not an
-	// opt-in to 5m, so a cloaked caller's bare {"type":"ephemeral"} is upgraded too.
-	// Only a ttl the caller wrote out explicitly survives, because
-	// upgradeClaudeCacheControlTTL skips any block that already has one.
-	// claude-code-cli fingerprint profiles emit extended-cache-ttl and must use the same 1h pool.
-	if cpaOwnsCacheControl && fp.ProfileClaudeCodeCLI {
-		body = upgradeClaudeCacheControlTTL(body, claudeCacheControlTTL1h)
-	}
-
-	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
-	body = normalizeCacheControlTTL(body)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
