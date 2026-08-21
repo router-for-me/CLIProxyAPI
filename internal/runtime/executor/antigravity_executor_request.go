@@ -58,14 +58,8 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	}
 	payload = geminiToAntigravity(modelName, payload, projectID, derivedSessionIDs...)
 
-	// Cap maxOutputTokens to model's max_completion_tokens from registry
-	if maxOut := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == gjson.Number {
-		if modelInfo := registry.LookupModelInfo(modelName, "antigravity"); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
-			if int(maxOut.Int()) > modelInfo.MaxCompletionTokens {
-				payload, _ = sjson.SetBytes(payload, "request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
-			}
-		}
-	}
+	payload = capAntigravityMaxOutputTokens(payload, modelName)
+	payload = capAntigravityClaudeThinkingBudget(payload, modelName)
 
 	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
 	var (
@@ -78,8 +72,6 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		if strings.Contains(modelName, "claude") {
 			updated, _ := sjson.SetBytes([]byte(payloadStr), "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 			payloadStr = string(updated)
-		} else {
-			payloadStr, _ = sjson.Delete(payloadStr, "request.generationConfig.maxOutputTokens")
 		}
 
 		payloadStrBytes := applyAntigravityNativeSignatureReplayIfNeeded(modelName, []byte(payloadStr))
@@ -90,8 +82,6 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	} else {
 		if strings.Contains(modelName, "claude") {
 			payload, _ = sjson.SetBytes(payload, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
-		} else {
-			payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.maxOutputTokens")
 		}
 
 		payload = applyAntigravityNativeSignatureReplayIfNeeded(modelName, payload)
@@ -383,6 +373,62 @@ func antigravityRequestNeedsSchemaSanitization(payload []byte) bool {
 	}
 	return false
 }
+
+func capAntigravityMaxOutputTokens(payload []byte, modelName string) []byte {
+	maxOut := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens")
+	if !maxOut.Exists() || maxOut.Type != gjson.Number {
+		return payload
+	}
+	modelInfo := registry.LookupModelInfo(modelName, "antigravity")
+	if modelInfo == nil {
+		return payload
+	}
+	limit := modelInfo.OutputTokenLimit
+	if limit <= 0 {
+		limit = modelInfo.MaxCompletionTokens
+	}
+	if limit <= 0 {
+		return payload
+	}
+	if maxOut.Num > float64(limit) {
+		payload, _ = sjson.SetBytes(payload, "request.generationConfig.maxOutputTokens", limit)
+	}
+	return payload
+}
+
+func capAntigravityClaudeThinkingBudget(payload []byte, modelName string) []byte {
+	if !strings.Contains(strings.ToLower(modelName), "claude") {
+		return payload
+	}
+	modelInfo := registry.LookupModelInfo(modelName, "antigravity")
+	if modelInfo == nil {
+		return payload
+	}
+	maxOut := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens")
+	if !maxOut.Exists() || maxOut.Type != gjson.Number {
+		return payload
+	}
+	maxNum := maxOut.Num
+	maxInt := int64(maxNum)
+	if maxNum <= 0 || float64(maxInt) != maxNum {
+		return payload
+	}
+	budget := gjson.GetBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget")
+	if !budget.Exists() || budget.Type != gjson.Number {
+		return payload
+	}
+	if budget.Num < maxNum {
+		return payload
+	}
+	newBudget := maxInt - 1
+	if modelInfo.Thinking != nil && modelInfo.Thinking.Min > 0 && newBudget < int64(modelInfo.Thinking.Min) {
+		payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.thinkingConfig")
+		return payload
+	}
+	payload, _ = sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget", newBudget)
+	return payload
+}
+
 func buildBaseURL(auth *cliproxyauth.Auth) string {
 	if baseURLs := antigravityBaseURLFallbackOrder(auth); len(baseURLs) > 0 {
 		return baseURLs[0]
