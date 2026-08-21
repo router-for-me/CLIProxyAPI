@@ -861,6 +861,15 @@ func applyClaudeHeadersWithNativeProfile(
 	identityHeader("X-Stainless-Retry-Count", "0")
 	identityHeader("X-Stainless-Runtime", "node")
 	identityHeader("X-Stainless-Lang", "js")
+	// Official Anthropic SDK attaches X-Stainless-Helper-Method: stream only
+	// from the streaming helper (messages.stream). Non-stream messages.create
+	// and count_tokens omit it; stamping it on every request fingerprints
+	// those paths as the stream helper.
+	if stream {
+		identityHeader("X-Stainless-Helper-Method", "stream")
+	} else {
+		r.Header.Del("X-Stainless-Helper-Method")
+	}
 	// Native async SDK helpers add this header independently of body.stream.
 	// Preserve it only after the complete native-client detector succeeds.
 	if confirmedClaudeCode && incomingHeaders.Get("X-Stainless-Async") == "async" {
