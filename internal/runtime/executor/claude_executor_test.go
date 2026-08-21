@@ -2784,6 +2784,57 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsEmptyClaudeStream(t *testin
 	}
 }
 
+func TestInjectFakeUserID_CacheEnabledIsDeterministic(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	first, errFirst := injectFakeUserID(context.Background(), payload, "key-cache-enabled", true)
+	if errFirst != nil {
+		t.Fatalf("first injectFakeUserID error: %v", errFirst)
+	}
+	second, errSecond := injectFakeUserID(context.Background(), payload, "key-cache-enabled", true)
+	if errSecond != nil {
+		t.Fatalf("second injectFakeUserID error: %v", errSecond)
+	}
+
+	firstID := gjson.GetBytes(first, "metadata.user_id").String()
+	secondID := gjson.GetBytes(second, "metadata.user_id").String()
+	if firstID == "" || secondID == "" {
+		t.Fatalf("user_id not injected: first=%q second=%q", firstID, secondID)
+	}
+	if firstID != secondID {
+		t.Fatalf("cache-user-id:true must produce a stable user_id, got %q and %q", firstID, secondID)
+	}
+}
+
+func TestInjectFakeUserID_CacheDisabledIsRandomPerRequest(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	first, errFirst := injectFakeUserID(context.Background(), payload, "key-cache-disabled", false)
+	if errFirst != nil {
+		t.Fatalf("first injectFakeUserID error: %v", errFirst)
+	}
+	second, errSecond := injectFakeUserID(context.Background(), payload, "key-cache-disabled", false)
+	if errSecond != nil {
+		t.Fatalf("second injectFakeUserID error: %v", errSecond)
+	}
+
+	firstID := gjson.GetBytes(first, "metadata.user_id").String()
+	secondID := gjson.GetBytes(second, "metadata.user_id").String()
+	if firstID == "" || secondID == "" {
+		t.Fatalf("user_id not injected: first=%q second=%q", firstID, secondID)
+	}
+
+	firstDevice := gjson.Get(firstID, "device_id").String()
+	secondDevice := gjson.Get(secondID, "device_id").String()
+	if firstDevice == secondDevice {
+		t.Fatalf("cache-user-id:false must produce a fresh device_id per request, got %q", firstDevice)
+	}
+
+	firstSession := gjson.Get(firstID, "session_id").String()
+	secondSession := gjson.Get(secondID, "session_id").String()
+	if firstSession == "" || firstSession != secondSession {
+		t.Fatalf("cache-user-id:false must keep the stable session_id, got %q vs %q", firstSession, secondSession)
+	}
+}
+
 func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsClaudeErrorEvent(t *testing.T) {
 	body := `data: {"type":"error","error":{"type":"overloaded_error","message":"upstream overloaded"}}` + "\n"
 	_, err := executeOpenAIChatCompletionThroughClaude(t, body)

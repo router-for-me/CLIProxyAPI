@@ -71,6 +71,13 @@ func GenerateFakeUserIDWithSessionID(sessionID string) string {
 	return generateFakeUserIDWithSessionID(sessionID)
 }
 
+// GenerateRandomFakeUserIDForSession returns a metadata.user_id with a fresh
+// random device_id while keeping the session_id stable. This is the legacy
+// per-request random behavior used when cache-user-id is false.
+func GenerateRandomFakeUserIDForSession(sessionID string) string {
+	return generateDeterministicFakeUserID(uuid.New().String(), sessionID)
+}
+
 func IsValidUserID(userID string) bool {
 	return isValidUserID(userID)
 }

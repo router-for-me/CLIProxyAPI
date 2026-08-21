@@ -91,19 +91,19 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 }
 
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
-// The user ID is derived deterministically from the auth credential and session
-// so the same credential always produces the same upstream metadata, preserving
-// prompt-cache prefix stability.
+// When useCache is true, the user ID is cached and stable per credential.
+// When useCache is false, the device_id is fresh per request while the session_id
+// stays stable, preserving header/body session alignment.
 func injectFakeUserID(ctx context.Context, payload []byte, apiKey string, useCache bool) ([]byte, error) {
 	generateID := func() (string, error) {
-		if useCache {
-			return helps.CachedUserIDRequired(ctx, apiKey)
-		}
 		sessionID, errSessionID := helps.CachedSessionIDRequired(ctx, apiKey)
 		if errSessionID != nil {
 			return "", errSessionID
 		}
-		return helps.GenerateFakeUserIDWithSessionID(sessionID), nil
+		if useCache {
+			return helps.CachedUserIDRequired(ctx, apiKey)
+		}
+		return helps.GenerateRandomFakeUserIDForSession(sessionID), nil
 	}
 
 	metadata := gjson.GetBytes(payload, "metadata")
