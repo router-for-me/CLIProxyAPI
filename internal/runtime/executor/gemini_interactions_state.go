@@ -220,12 +220,39 @@ func goframeApplyAntigravityInteractionsContinuation(ctx context.Context, modelN
 
 	// Rebuild the body keeping only function_result input items so the
 	// continuation is a clean "turn" on the prior interaction.
+	//
+	// Chat Completions tool loops send role:"tool" messages with only
+	// tool_call_id + content, so their function_result steps may lack "name"
+	// — but the Interactions function-result schema requires it. Collect the
+	// call_id -> name mapping from the replayed assistant function_call steps
+	// first, then fill any missing names before dropping the history.
+	namesByCallID := map[string]string{}
+	if root.Get("input").IsArray() {
+		root.Get("input").ForEach(func(_, item gjson.Result) bool {
+			if strings.EqualFold(strings.TrimSpace(item.Get("type").String()), "function_call") {
+				callID := strings.TrimSpace(item.Get("call_id").String())
+				name := strings.TrimSpace(item.Get("name").String())
+				if callID != "" && name != "" {
+					namesByCallID[callID] = name
+				}
+			}
+			return true
+		})
+	}
 	kept := make([][]byte, 0, 1)
 	if root.Get("input").IsArray() {
 		root.Get("input").ForEach(func(_, item gjson.Result) bool {
-			if strings.EqualFold(strings.TrimSpace(item.Get("type").String()), "function_result") {
-				kept = append(kept, []byte(item.Raw))
+			if !strings.EqualFold(strings.TrimSpace(item.Get("type").String()), "function_result") {
+				return true
 			}
+			result := []byte(item.Raw)
+			if strings.TrimSpace(item.Get("name").String()) == "" {
+				callID := strings.TrimSpace(item.Get("call_id").String())
+				if name := namesByCallID[callID]; name != "" {
+					result, _ = sjson.SetBytes(result, "name", name)
+				}
+			}
+			kept = append(kept, result)
 			return true
 		})
 	}
