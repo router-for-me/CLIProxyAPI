@@ -150,10 +150,13 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 					messageModified = true
 				default:
 					// DropBlock, DropSignature, or NoCompatibleReplacement: keep the
-					// block shape for the compat endpoint, but strip the signature unless
-					// it is an unprefixed, non-foreign decodable Claude E/R shape (short
-					// synthetic signatures used by the Claude thinking replay cache).
-					if targetProvider == SignatureProviderClaude && isClaudeReplayableShortSignature(rawSignature) {
+					// block shape for the compat endpoint. Preserve empty placeholders
+					// with their required signature member, and keep only unprefixed,
+					// non-foreign decodable Claude E/R shapes as a fallback.
+					if isEmptyClaudeThinkingPlaceholder(part) {
+						report.Preserved++
+						keptParts = append(keptParts, part.Raw)
+					} else if targetProvider == SignatureProviderClaude && isClaudeReplayableShortSignature(rawSignature) {
 						report.Preserved++
 						keptParts = append(keptParts, part.Raw)
 					} else {
@@ -317,13 +320,19 @@ func deleteEmptyJSONObjectPath(raw, path string) (string, bool) {
 // isClaudeReplayableShortSignature preserves decodable Claude E/R-shaped
 // signatures in compat mode, but only when the value is not explicitly
 // prefixed or identified as a foreign provider. This prevents Gemini
-// E-prefixed signatures (or values like "gemini#<E-sig>") from slipping
-// through the Claude fallback and failing upstream validation.
+// E-prefixed signatures (or values like "gemini#<E-sig>") and unrecognized
+// vendor prefixes (e.g. "vendor#<E-sig>") from slipping through the Claude
+// fallback and failing upstream validation.
 func isClaudeReplayableShortSignature(rawSignature string) bool {
 	if !HasDecodableClaudeThinkingSignature(rawSignature) {
 		return false
 	}
-	if provider, _, ok := SplitSignatureProviderPrefix(rawSignature); ok && provider != SignatureProviderClaude {
+	if provider, _, ok := SplitSignatureProviderPrefix(rawSignature); ok {
+		if provider != SignatureProviderClaude {
+			return false
+		}
+	} else if strings.Contains(rawSignature, "#") {
+		// Unrecognized provider prefix (e.g. vendor#...).
 		return false
 	}
 	detected := DetectSignatureProviderForBlock(rawSignature, SignatureBlockKindClaudeThinking)
