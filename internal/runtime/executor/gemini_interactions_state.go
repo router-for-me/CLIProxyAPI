@@ -71,7 +71,7 @@ func goframeCacheAntigravityInteractionsState(ctx context.Context, modelName str
 		InteractionID: interactionID,
 		EnvironmentID: envID,
 	}
-	if existing, ok := internalcache.GetAntigravityInteractionsState(modelName, sessionKey); ok {
+	if existing, ok := internalcache.GetAntigravityInteractionsState(ctx, modelName, sessionKey); ok {
 		if state.InteractionID == "" {
 			state.InteractionID = existing.InteractionID
 		}
@@ -269,7 +269,7 @@ func goframeApplyAntigravityInteractionsContinuation(ctx context.Context, modelN
 	sessionKey := antigravityExecSessionKey(opts, originalRequest)
 	state, ok := internalcache.AntigravityInteractionsState{}, false
 	if sessionKey != "" {
-		state, ok = internalcache.GetAntigravityInteractionsState(modelName, sessionKey)
+		state, ok = internalcache.GetAntigravityInteractionsState(ctx, modelName, sessionKey)
 	}
 	// Responses tool loops reference the prior turn by previous_response_id /
 	// previous_interaction_id; the state was indexed under that id at capture
@@ -277,7 +277,7 @@ func goframeApplyAntigravityInteractionsContinuation(ctx context.Context, modelN
 	if !ok {
 		for _, path := range []string{"previous_response_id", "previous_interaction_id"} {
 			if responseID := strings.TrimSpace(gjson.GetBytes(body, path).String()); responseID != "" {
-				if state, ok = internalcache.GetAntigravityInteractionsState(modelName, "response-id:"+responseID); ok {
+				if state, ok = internalcache.GetAntigravityInteractionsState(ctx, modelName, "response-id:"+responseID); ok {
 					break
 				}
 			}

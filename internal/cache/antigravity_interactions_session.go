@@ -111,8 +111,10 @@ func CacheAntigravityInteractionsStateBestEffort(ctx context.Context, modelName,
 }
 
 // GetAntigravityInteractionsState retrieves the continuation state for an
-// antigravity agent conversation, if still fresh.
-func GetAntigravityInteractionsState(modelName, sessionKey string) (AntigravityInteractionsState, bool) {
+// antigravity agent conversation, if still fresh. The ctx parameter carries
+// the caller's request context so a Home-backed lookup is canceled together
+// with the request instead of stalling it past cancellation.
+func GetAntigravityInteractionsState(ctx context.Context, modelName, sessionKey string) (AntigravityInteractionsState, bool) {
 	key := antigravityInteractionsCacheKey(modelName, sessionKey)
 	if key == "" {
 		return AntigravityInteractionsState{}, false
@@ -121,7 +123,7 @@ func GetAntigravityInteractionsState(modelName, sessionKey string) (AntigravityI
 		if errClient != nil {
 			return AntigravityInteractionsState{}, false
 		}
-		raw, ok, errGet := client.KVGet(context.Background(), antigravityInteractionsKVKey(modelName, sessionKey))
+		raw, ok, errGet := client.KVGet(ctx, antigravityInteractionsKVKey(modelName, sessionKey))
 		if errGet != nil || !ok || len(raw) == 0 {
 			return AntigravityInteractionsState{}, false
 		}

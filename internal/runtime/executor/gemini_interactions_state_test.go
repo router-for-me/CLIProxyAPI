@@ -20,7 +20,7 @@ func TestGoframeCacheAntigravityInteractionsState(t *testing.T) {
 
 	// The session key now comes from the shared ExtractSessionID extraction,
 	// which prefixes explicit header ids with "codex:".
-	state, ok := internalcache.GetAntigravityInteractionsState(model, "session:codex:sess-123")
+	state, ok := internalcache.GetAntigravityInteractionsState(context.Background(), model, "session:codex:sess-123")
 	if !ok {
 		t.Fatalf("expected cached state")
 	}
@@ -38,7 +38,7 @@ func TestGoframeCacheIgnoresNonAntigravity(t *testing.T) {
 	opts.Headers = map[string][]string{"Session-Id": {"sess"}, "namespace_key": {"x"}}
 	payload := []byte(`{"interaction":{"id":"inter_x","environment_id":"env_x"}}`)
 	goframeCacheAntigravityInteractionsState(context.Background(), "gemini-3.7-flash", nil, opts, payload)
-	if _, ok := internalcache.GetAntigravityInteractionsState("gemini-3.7-flash", "responses:sess"); ok {
+	if _, ok := internalcache.GetAntigravityInteractionsState(context.Background(), "gemini-3.7-flash", "responses:sess"); ok {
 		t.Fatalf("should not cache state for non-antigravity model")
 	}
 }

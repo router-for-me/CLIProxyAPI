@@ -221,18 +221,23 @@ func openAIToolResultToInteractions(message gjson.Result, forAntigravity bool) [
 	}
 	content := message.Get("content")
 	if content.Exists() && content.Type == gjson.String {
-		// Google's Interactions function_result REQUIRES a structured "result"
-		// (a JSON object / number / boolean) and rejects a bare string with
-		// 400 "Request contains an invalid argument". If the tool output parses
-		// as valid JSON, send it raw; otherwise wrap it in an object so the
-		// result is structured rather than a plain string.
-		raw := strings.TrimSpace(content.String())
-		if raw != "" && (gjson.Valid(raw)) && !(strings.HasPrefix(raw, "\"") && strings.HasSuffix(raw, "\"")) {
-			out, _ = sjson.SetRawBytes(out, "result", []byte(raw))
+		if forAntigravity {
+			// Google's antigravity Interactions function_result REQUIRES a
+			// structured "result" (a JSON object / number / boolean) and
+			// rejects a bare string with 400. If the tool output parses as
+			// valid JSON, send it raw; otherwise wrap it in an object.
+			raw := strings.TrimSpace(content.String())
+			if raw != "" && (gjson.Valid(raw)) && !(strings.HasPrefix(raw, "\"") && strings.HasSuffix(raw, "\"")) {
+				out, _ = sjson.SetRawBytes(out, "result", []byte(raw))
+			} else {
+				o := `{}`
+				o, _ = sjson.Set(o, "result", content.String())
+				out, _ = sjson.SetRawBytes(out, "result", []byte(o))
+			}
 		} else {
-			o := `{}`
-			o, _ = sjson.Set(o, "result", content.String())
-			out, _ = sjson.SetRawBytes(out, "result", []byte(o))
+			// Other Interactions models accept plain strings; forward the
+			// tool output unchanged.
+			out, _ = sjson.SetBytes(out, "result", content.String())
 		}
 	} else if content.Exists() {
 		out, _ = sjson.SetRawBytes(out, "result", []byte(content.Raw))
@@ -260,12 +265,14 @@ func copyOpenAIChatGenerationConfigToInteractions(out []byte, root gjson.Result,
 		// antigravity agent.
 		cfg := `{"type":"antigravity"}`
 		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(cfg))
-	} else if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
+	}
+	if agentConfig := root.Get("agent_config"); agentConfig.Exists() && !isAntigravityModel(model) {
 		// Non-antigravity Interactions models keep supporting the client
 		// agent_config extension: copy it verbatim as the pre-antigravity
-		// converter did.
+		// converter did, independently of generation controls below.
 		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(agentConfig.Raw))
-	} else {
+	}
+	if !isAntigravityModel(model) {
 		copyNumber(&out, "generation_config.max_output_tokens", firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens")))
 		copyNumber(&out, "generation_config.temperature", root.Get("temperature"))
 		copyNumber(&out, "generation_config.top_p", root.Get("top_p"))

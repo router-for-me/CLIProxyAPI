@@ -79,11 +79,20 @@ func TestConvertOpenAIRequestToInteractionsMapsToolCallsAndResults(t *testing.T)
 	if got := gjson.GetBytes(out, "input.1.type").String(); got != "function_result" {
 		t.Fatalf("input.1.type = %q, want function_result. Output: %s", got, string(out))
 	}
-	// Bare-string results are wrapped in an object because Google's
-	// Interactions API rejects a plain-string "result" (400 invalid argument);
-	// structured JSON (numbers/objects/booleans) is passed through raw.
+	// Bare-string results are forwarded unchanged for non-antigravity
+	// Interactions models (they accept plain strings); antigravity targets
+	// get the wrapped {"result": ...} object because that endpoint rejects
+	// bare strings.
+	if got := gjson.GetBytes(out, "input.1.result").String(); got != "ok" {
+		t.Fatalf("result = %q, want plain string ok for non-antigravity model. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToInteractionsWrapsToolResultsForAntigravity(t *testing.T) {
+	raw := []byte(`{"model":"antigravity-preview-05-2026","messages":[{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"x\"}"}}]},{"role":"tool","tool_call_id":"call_1","content":"ok"}]}`)
+	out := ConvertOpenAIRequestToInteractions("antigravity-preview-05-2026", raw, false)
 	if got := gjson.GetBytes(out, "input.1.result.result").String(); got != "ok" {
-		t.Fatalf("result.result = %q, want ok (wrapped object). Output: %s", got, string(out))
+		t.Fatalf("result.result = %q, want ok (wrapped object for antigravity). Output: %s", got, string(out))
 	}
 }
 
