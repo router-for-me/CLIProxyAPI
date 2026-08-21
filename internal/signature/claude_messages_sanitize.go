@@ -1,6 +1,7 @@
 package signature
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 
@@ -328,13 +329,14 @@ func deleteEmptyJSONObjectPath(raw, path string) (string, bool) {
 	return updated, true
 }
 
-// isClaudeReplayableShortSignature reports whether rawSignature is a proven
+// isClaudeReplayableShortSignature reports whether rawSignature is a short
 // Claude thinking signature safe to replay. It rejects foreign provider
 // prefixes and, when a "claude#" prefix is present, validates the payload
 // behind the prefix and returns the unprefixed value. Unknown or
-// unprovenanced E/R-shaped opaque payloads (e.g. Grok/xAI encrypted_content
-// that happens to start with 'E' or 'R') are rejected so the compat fallback
-// never forwards untrusted signatures to a Claude-compatible target.
+// unprovenanced E/R-shaped opaque payloads are rejected unless they are the
+// minimal short synthetic shape used by the Claude thinking replay cache
+// (e.g. "EgI="); longer unknown blobs such as Grok/xAI encrypted_content that
+// happens to base64-encode to 'E' or 'R' are never forwarded.
 func isClaudeReplayableShortSignature(rawSignature string) (bool, string) {
 	if provider, payload, ok := SplitSignatureProviderPrefix(rawSignature); ok {
 		if provider != SignatureProviderClaude {
@@ -345,15 +347,15 @@ func isClaudeReplayableShortSignature(rawSignature string) (bool, string) {
 			return false, ""
 		}
 		// Validate the payload behind the prefix; only a proven Claude thinking
-		// signature may pass this fallback.
+		// signature or the minimal short synthetic may pass this fallback.
 		if !HasDecodableClaudeThinkingSignature(payload) {
 			return false, ""
 		}
 		detected := DetectSignatureProviderForBlock(payload, SignatureBlockKindClaudeThinking)
-		if detected != SignatureProviderClaude {
-			return false, ""
+		if detected == SignatureProviderClaude || isShortClaudeSyntheticSignature(payload) {
+			return true, payload
 		}
-		return true, payload
+		return false, ""
 	}
 	if strings.Contains(rawSignature, "#") {
 		// Unrecognized provider prefix (e.g. vendor#...).
@@ -363,8 +365,21 @@ func isClaudeReplayableShortSignature(rawSignature string) (bool, string) {
 		return false, ""
 	}
 	detected := DetectSignatureProviderForBlock(rawSignature, SignatureBlockKindClaudeThinking)
-	if detected != SignatureProviderClaude {
-		return false, ""
+	if detected == SignatureProviderClaude || isShortClaudeSyntheticSignature(rawSignature) {
+		return true, rawSignature
 	}
-	return true, rawSignature
+	return false, ""
+}
+
+// isShortClaudeSyntheticSignature identifies the minimal E-prefixed short
+// signatures used by the Claude thinking replay cache (e.g. "EgI="). These
+// payloads are too small for DetectSignatureProviderForBlock to classify, but
+// they are a known short synthetic shape rather than untrusted opaque
+// ciphertext.
+func isShortClaudeSyntheticSignature(rawSignature string) bool {
+	decoded, err := base64.StdEncoding.DecodeString(stripClaudeSignaturePrefix(rawSignature))
+	if err != nil {
+		return false
+	}
+	return len(decoded) <= 2
 }
