@@ -3,9 +3,11 @@ package executor
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"net/http"
 	"strings"
 
@@ -59,7 +61,7 @@ func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyaut
 	// history can change the key and orphan cached turns. Try to resolve the
 	// original conversation scope through any remaining message.
 	if fallback && sessionKey != "" {
-		if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(modelFamily, claudeThinkingReplayMessageHashes(modelFamily, callerHash, req.Payload)); ok {
+		if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, claudeThinkingReplayMessageHashes(modelFamily, callerHash, req.Payload)); ok {
 			sessionKey = resolved
 		}
 	}
@@ -144,7 +146,7 @@ func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.
 	// first request in a conversation can be rediscovered after compaction.
 	if scope.fallbackKey {
 		for _, h := range claudeThinkingReplayMessageHashes(scope.modelFamily, scope.callerHash, req.Payload) {
-			internalcache.RegisterClaudeThinkingReplayAlias(scope.modelFamily, scope.sessionKey, h)
+			internalcache.RegisterClaudeThinkingReplayAlias(ctx, scope.modelFamily, scope.sessionKey, h)
 		}
 	}
 	if !found {
@@ -406,21 +408,34 @@ func claudeThinkingReplayHash(modelFamily, callerHash string, canon []byte) stri
 
 func claudeThinkingReplayCallerHash(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
 	h := sha256.New()
+	var identity string
 	if auth != nil {
 		if id := strings.TrimSpace(auth.ID); id != "" {
-			h.Write([]byte(id))
+			identity = id
 		} else if apiKey, _ := claudeCreds(auth); apiKey != "" {
-			h.Write([]byte(apiKey))
+			identity = apiKey
 		}
 	}
-	h.Write([]byte(metadataString(opts.Metadata, cliproxyexecutor.CallerScopeMetadataKey)))
-	h.Write([]byte(metadataString(req.Metadata, cliproxyexecutor.CallerScopeMetadataKey)))
-	h.Write([]byte(metadataString(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)))
-	h.Write([]byte(metadataString(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)))
-	h.Write([]byte(headerFirstValue(opts.Headers, "User-Agent")))
-	h.Write([]byte(headerFirstValue(opts.Headers, "X-App")))
-	h.Write([]byte(headerFirstValue(opts.Headers, "X-Codex-Client-Id")))
+	claudeThinkingReplayHashString(h, identity)
+	claudeThinkingReplayHashString(h, metadataString(opts.Metadata, cliproxyexecutor.CallerScopeMetadataKey))
+	claudeThinkingReplayHashString(h, metadataString(req.Metadata, cliproxyexecutor.CallerScopeMetadataKey))
+	claudeThinkingReplayHashString(h, metadataString(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey))
+	claudeThinkingReplayHashString(h, metadataString(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey))
+	claudeThinkingReplayHashString(h, headerFirstValue(opts.Headers, "User-Agent"))
+	claudeThinkingReplayHashString(h, headerFirstValue(opts.Headers, "X-App"))
+	claudeThinkingReplayHashString(h, headerFirstValue(opts.Headers, "X-Codex-Client-Id"))
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+func claudeThinkingReplayHashString(h hash.Hash, s string) {
+	claudeThinkingReplayHashBytes(h, []byte(s))
+}
+
+func claudeThinkingReplayHashBytes(h hash.Hash, b []byte) {
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(b)))
+	h.Write(length[:])
+	h.Write(b)
 }
 
 func headerFirstValue(headers http.Header, key string) string {
@@ -464,7 +479,7 @@ func cacheClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingR
 		// original conversation scope.
 		if scope.fallbackKey {
 			if h := claudeThinkingReplayAssistantMessageHash(scope.modelFamily, scope.callerHash, content); h != "" {
-				internalcache.RegisterClaudeThinkingReplayAlias(scope.modelFamily, scope.sessionKey, h)
+				internalcache.RegisterClaudeThinkingReplayAlias(ctx, scope.modelFamily, scope.sessionKey, h)
 			}
 		}
 	}

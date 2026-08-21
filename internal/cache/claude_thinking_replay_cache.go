@@ -38,6 +38,10 @@ const (
 	// ClaudeThinkingReplayCacheMaxTotalBytes bounds aggregate in-process Claude replay content.
 	ClaudeThinkingReplayCacheMaxTotalBytes = 256 << 20
 
+	// ClaudeThinkingReplayCacheMaxAliases bounds the number of message-to-scope
+	// aliases kept in the local fallback map.
+	ClaudeThinkingReplayCacheMaxAliases = 102400
+
 	claudeThinkingReplayCacheMaxSerializedBytes = ClaudeThinkingReplayCacheMaxBytesPerSession + 1024
 )
 
@@ -67,8 +71,14 @@ var (
 	// conversation-scoped session key that first saw it. This lets sessionless
 	// clients compact history without orphaning the replay cache: the first
 	// remaining message in a truncated request can resolve the original scope.
-	claudeThinkingReplayAliases = make(map[string]string)
+	claudeThinkingReplayAliases    = make(map[string]claudeThinkingReplayAliasEntry)
+	claudeThinkingReplayAliasBytes int
 )
+
+type claudeThinkingReplayAliasEntry struct {
+	sessionKey string
+	timestamp  time.Time
+}
 
 var currentClaudeThinkingReplayKVClient = func() (kimiThinkingReplayKVClient, bool, error) {
 	return homekv.CurrentKVClient()
@@ -290,42 +300,130 @@ func ClearClaudeThinkingReplayCache() {
 	claudeThinkingReplayMu.Unlock()
 
 	claudeThinkingReplayAliasMu.Lock()
-	claudeThinkingReplayAliases = make(map[string]string)
+	claudeThinkingReplayAliases = make(map[string]claudeThinkingReplayAliasEntry)
+	claudeThinkingReplayAliasBytes = 0
 	claudeThinkingReplayAliasMu.Unlock()
 }
 
 // RegisterClaudeThinkingReplayAlias records that a request message belongs to a
 // specific conversation scope. Compacted requests can later resolve the same
-// scope through one of their remaining messages.
-func RegisterClaudeThinkingReplayAlias(modelFamily, sessionKey, messageHash string) {
+// scope through one of their remaining messages. In Home KV mode the alias is
+// stored as a separate KV entry so different instances can resolve it.
+func RegisterClaudeThinkingReplayAlias(ctx context.Context, modelFamily, sessionKey, messageHash string) {
 	if modelFamily == "" || sessionKey == "" || messageHash == "" {
 		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client, homeMode, errClient := currentClaudeThinkingReplayKVClient()
+	if homeMode {
+		if errClient != nil {
+			return
+		}
+		_, _ = client.KVSet(ctx, claudeThinkingReplayAliasKVKey(modelFamily, messageHash), []byte(sessionKey), homekv.KVSetOptions{EX: ClaudeThinkingReplayCacheTTL})
+		return
+	}
+
 	key := claudeThinkingReplayAliasKey(modelFamily, messageHash)
 	claudeThinkingReplayAliasMu.Lock()
 	defer claudeThinkingReplayAliasMu.Unlock()
-	claudeThinkingReplayAliases[key] = sessionKey
+	now := time.Now()
+	purgeExpiredClaudeThinkingReplayAliasesLocked(now)
+	enforceClaudeThinkingReplayAliasLimitsLocked()
+	old, ok := claudeThinkingReplayAliases[key]
+	if ok {
+		claudeThinkingReplayAliasBytes -= len(key) + len(old.sessionKey)
+	}
+	claudeThinkingReplayAliases[key] = claudeThinkingReplayAliasEntry{sessionKey: sessionKey, timestamp: now}
+	claudeThinkingReplayAliasBytes += len(key) + len(sessionKey)
 }
 
 // ResolveClaudeThinkingReplaySessionKey looks for an existing conversation scope
 // that any of the provided message hashes belongs to. This is used by the
 // sessionless fallback when messages.0 has changed due to compaction.
-func ResolveClaudeThinkingReplaySessionKey(modelFamily string, messageHashes []string) (string, bool) {
+func ResolveClaudeThinkingReplaySessionKey(ctx context.Context, modelFamily string, messageHashes []string) (string, bool) {
 	if modelFamily == "" || len(messageHashes) == 0 {
 		return "", false
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client, homeMode, errClient := currentClaudeThinkingReplayKVClient()
+	if homeMode {
+		if errClient != nil {
+			return "", false
+		}
+		for _, h := range messageHashes {
+			raw, found, err := client.KVGet(ctx, claudeThinkingReplayAliasKVKey(modelFamily, h))
+			if err != nil || !found {
+				continue
+			}
+			sessionKey := string(raw)
+			if sessionKey != "" {
+				return sessionKey, true
+			}
+		}
+		return "", false
+	}
+
 	claudeThinkingReplayAliasMu.RLock()
 	defer claudeThinkingReplayAliasMu.RUnlock()
+	now := time.Now()
 	for _, h := range messageHashes {
-		if sessionKey, ok := claudeThinkingReplayAliases[claudeThinkingReplayAliasKey(modelFamily, h)]; ok {
-			return sessionKey, true
+		key := claudeThinkingReplayAliasKey(modelFamily, h)
+		entry, ok := claudeThinkingReplayAliases[key]
+		if !ok {
+			continue
 		}
+		if now.Sub(entry.timestamp) > ClaudeThinkingReplayCacheTTL {
+			continue
+		}
+		return entry.sessionKey, true
 	}
 	return "", false
 }
 
 func claudeThinkingReplayAliasKey(modelFamily, messageHash string) string {
 	return strings.Join([]string{modelFamily, messageHash}, "\x00")
+}
+
+func claudeThinkingReplayAliasKVKey(modelFamily, messageHash string) string {
+	return "cpa:claude:thinking-replay-alias:" + homekv.HashKeyPart(strings.TrimSpace(modelFamily)) + ":" + homekv.HashKeyPart(strings.TrimSpace(messageHash))
+}
+
+func purgeExpiredClaudeThinkingReplayAliasesLocked(now time.Time) {
+	for key, entry := range claudeThinkingReplayAliases {
+		if now.Sub(entry.timestamp) > ClaudeThinkingReplayCacheTTL {
+			claudeThinkingReplayAliasBytes -= len(key) + len(entry.sessionKey)
+			delete(claudeThinkingReplayAliases, key)
+		}
+	}
+}
+
+func enforceClaudeThinkingReplayAliasLimitsLocked() {
+	for len(claudeThinkingReplayAliases) > ClaudeThinkingReplayCacheMaxAliases {
+		type candidate struct {
+			key       string
+			timestamp time.Time
+		}
+		candidates := make([]candidate, 0, len(claudeThinkingReplayAliases))
+		for key, entry := range claudeThinkingReplayAliases {
+			candidates = append(candidates, candidate{key: key, timestamp: entry.timestamp})
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].timestamp.Before(candidates[j].timestamp)
+		})
+		batch := ClaudeThinkingReplayCacheEvictBatchSize
+		if batch > len(candidates) {
+			batch = len(candidates)
+		}
+		for i := 0; i < batch; i++ {
+			entry := claudeThinkingReplayAliases[candidates[i].key]
+			claudeThinkingReplayAliasBytes -= len(candidates[i].key) + len(entry.sessionKey)
+			delete(claudeThinkingReplayAliases, candidates[i].key)
+		}
+	}
 }
 
 func readOrReserveClaudeThinkingReplayHomeValue(ctx context.Context, client kimiThinkingReplayKVClient, key string) ([]byte, error) {
@@ -525,4 +623,8 @@ func purgeExpiredClaudeThinkingReplayCache(now time.Time) {
 		}
 	}
 	claudeThinkingReplayMu.Unlock()
+
+	claudeThinkingReplayAliasMu.Lock()
+	purgeExpiredClaudeThinkingReplayAliasesLocked(now)
+	claudeThinkingReplayAliasMu.Unlock()
 }
