@@ -293,3 +293,31 @@ func TestClassifyClaudeUpstreamError_OtherStatusesUnaffected(t *testing.T) {
 		t.Fatal("non-429 status was misclassified as request-scoped")
 	}
 }
+
+// An ordinary model-level Claude 429 (no unified 5h/7d rejection headers) is
+// a transient throttle: the conductor must rotate to the next credential
+// instead of escalating BackoffLevel as if quota were exhausted.
+func TestClassifyClaudeUpstreamError_OrdinaryRateLimitIsTransient(t *testing.T) {
+	body := []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Number of requests has exceeded your rate limit."}}`)
+	err := classifyClaudeUpstreamError(http.StatusTooManyRequests, nil, body)
+
+	var transient interface{ TransientRateLimit() bool }
+	if !errors.As(err, &transient) || !transient.TransientRateLimit() {
+		t.Fatalf("ordinary Claude 429 = %v, want a transient rate limit", err)
+	}
+}
+
+// The unified 5h/7d rejection stays on the quota ladder: it must NOT be
+// reported as a transient rate limit.
+func TestClassifyClaudeUpstreamError_UnifiedRejectionNotTransient(t *testing.T) {
+	headers := http.Header{
+		"Anthropic-Ratelimit-Unified-5h-Status": []string{"rejected"},
+		"Anthropic-Ratelimit-Unified-7d-Status": []string{"allowed"},
+	}
+	err := classifyClaudeUpstreamError(http.StatusTooManyRequests, headers, []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Shared usage window rejected."}}`))
+
+	var transient interface{ TransientRateLimit() bool }
+	if errors.As(err, &transient) && transient.TransientRateLimit() {
+		t.Fatal("unified 5h/7d rejection must stay on the quota ladder, not be marked transient")
+	}
+}
