@@ -2130,6 +2130,30 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	}
 }
 
+func TestFormatHomeOpenAIModelsIncludesRegistryMetadata(t *testing.T) {
+	models := formatHomeOpenAIModels([]homeModelEntry{{
+		id:                  "gpt-5.6-sol",
+		created:             1776902400,
+		ownedBy:             "openai",
+		displayName:         "GPT-5.6 Sol",
+		contextLength:       372000,
+		maxCompletionTokens: 128000,
+	}})
+	if len(models) != 1 {
+		t.Fatalf("models = %d, want 1", len(models))
+	}
+	model := models[0]
+	if got := model["display_name"]; got != "GPT-5.6 Sol" {
+		t.Fatalf("display_name = %v, want GPT-5.6 Sol", got)
+	}
+	if got := model["context_length"]; got != 372000 {
+		t.Fatalf("context_length = %v, want 372000", got)
+	}
+	if got := model["max_completion_tokens"]; got != 128000 {
+		t.Fatalf("max_completion_tokens = %v, want 128000", got)
+	}
+}
+
 func TestFormatHomeClaudeModelIncludesAnthropicSchemaFields(t *testing.T) {
 	withMetadata := formatHomeClaudeModel(homeModelEntry{
 		id:                  "claude-sonnet-4-6",
