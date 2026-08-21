@@ -24,7 +24,14 @@ aliases:
   - alias: Iterative-Model
     display_name: Iterative Model
     targets:
-      - {provider: codex, model: terra, repeat: 3}
+      - provider: codex
+        model: terra
+        repeat: 3
+        efforts:
+          low: {model: luna}
+          medium: xhigh
+          high: {model: luna, effort: xhigh}
+          xhigh: {model: "luna(high)", effort: medium}
       - {provider: claude, model: "opus(high)"}
 `), 1)
 	if errCompile != nil {
@@ -36,7 +43,7 @@ aliases:
 	return runtime
 }
 
-func TestRouterMatchingSuffixAndOperations(t *testing.T) {
+func TestRouterMatchingSuffixAndSequence(t *testing.T) {
 	runtime := newTestRuntime(t)
 	unmatched := runtime.route(pluginapi.ModelRouteRequest{RequestedModel: "other", AvailableProviders: []string{"codex"}})
 	if unmatched.Handled {
@@ -47,18 +54,9 @@ func TestRouterMatchingSuffixAndOperations(t *testing.T) {
 		AvailableProviders: []string{"codex", "claude"},
 		Headers:            http.Header{"Session-Id": {"session-a"}},
 	}
-	peek := base
-	peek.Operation = pluginapi.ModelRouteOperationCountTokens
-	peekResp := runtime.route(peek)
-	generateResp := runtime.route(base)
-	if !peekResp.Handled || peekResp.Target != "codex" || peekResp.TargetModel != "terra(max)" {
-		t.Fatalf("peek response = %#v", peekResp)
-	}
-	if generateResp.Target != peekResp.Target || generateResp.TargetModel != peekResp.TargetModel {
-		t.Fatalf("generation = %#v, want same target as peek %#v", generateResp, peekResp)
-	}
-	if generateResp.ResponseModel != "Iterative-Model" || generateResp.Reason != routeReason {
-		t.Fatalf("response alias fields = %#v", generateResp)
+	first := runtime.route(base)
+	if !first.Handled || first.Target != "codex" || first.TargetModel != "terra(max)" || first.Reason != routeReason {
+		t.Fatalf("first response = %#v", first)
 	}
 	second := runtime.route(base)
 	third := runtime.route(base)
@@ -68,6 +66,33 @@ func TestRouterMatchingSuffixAndOperations(t *testing.T) {
 	}
 	if fourth.Target != "claude" || fourth.TargetModel != "opus(high)" {
 		t.Fatalf("configured suffix did not win: %#v", fourth)
+	}
+}
+
+func TestRouterAppliesSlotEffortTiers(t *testing.T) {
+	runtime := newTestRuntime(t)
+	cases := map[string]string{
+		"iterative-model(medium)":  "terra(xhigh)",
+		"iterative-model(low)":     "luna(low)",
+		"iterative-model(high)":    "luna(xhigh)",
+		"iterative-model(xhigh)":   "luna(high)",
+		"iterative-model(minimal)": "terra(minimal)",
+		"iterative-model(max)":     "terra(max)",
+		"iterative-model(8000)":    "terra(8000)",
+		"iterative-model(auto)":    "terra(auto)",
+		"iterative-model(none)":    "terra(none)",
+		"iterative-model":          "terra",
+	}
+	for requested, want := range cases {
+		t.Run(requested, func(t *testing.T) {
+			got := runtime.route(pluginapi.ModelRouteRequest{
+				RequestedModel:     requested,
+				AvailableProviders: []string{"codex", "claude"},
+			})
+			if !got.Handled || got.Target != "codex" || got.TargetModel != want {
+				t.Fatalf("route(%q) = %#v, want codex/%s", requested, got, want)
+			}
+		})
 	}
 }
 
@@ -178,7 +203,6 @@ func TestRouterLogsSelectionThroughHostWithoutSensitiveIdentifiers(t *testing.T)
 	resp := runtime.routeWithCallback(pluginapi.ModelRouteRequest{
 		RequestedModel:     "iterative-model(max)",
 		AvailableProviders: []string{"codex", "claude"},
-		Operation:          pluginapi.ModelRouteOperationCountTokens,
 		Headers: http.Header{
 			"X-Session-ID":  {sessionID},
 			"Authorization": {"Bearer private-token"},
@@ -189,12 +213,14 @@ func TestRouterLogsSelectionThroughHostWithoutSensitiveIdentifiers(t *testing.T)
 		t.Fatalf("response/logs = %#v / %#v", resp, logs)
 	}
 	got := logs[0]
-	if got.level != "debug" || got.message != "model-sequence-router: selected target" || got.hostCallbackID != "callback-123" {
+	wantMessage := "model-sequence-router: selected target alias=Iterative-Model position=0 requested=max"
+	if got.level != "debug" || got.message != wantMessage || got.hostCallbackID != "callback-123" {
 		t.Fatalf("log identity = %#v", got)
 	}
 	if got.fields["alias"] != "Iterative-Model" || got.fields["provider"] != "codex" ||
-		got.fields["model"] != "terra(max)" || got.fields["operation"] != pluginapi.ModelRouteOperationCountTokens ||
-		got.fields["advanced"] != false || got.fields["random_start"] != true || got.fields["sequence_index"] != 0 {
+		got.fields["model"] != "terra(max)" ||
+		got.fields["advanced"] != true || got.fields["random_start"] != true || got.fields["sequence_index"] != 0 ||
+		got.fields["requested_effort"] != "max" {
 		t.Fatalf("log fields = %#v", got.fields)
 	}
 	if got.fields["session_hash"] != shortSessionHash("header:"+sessionID) {

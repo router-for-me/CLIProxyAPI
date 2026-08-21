@@ -99,11 +99,165 @@ Terra → Terra → Opus → Terra → Gemini Pro → repeat
 
 Any number of aliases, targets, and providers is supported. `repeat` defaults to `1`; an alias's expanded sequence is limited to 65,536 positions.
 
+## Worked example: four aliases
+
+Nothing in this section is a default. The plugin ships no aliases, no models, and no effort tiers; every value below is an illustration of the mechanism, and the model names are placeholders for whatever a deployment actually has credentials for. Alias names, sequences, scores, and tiers are all deployment choices.
+
+The four aliases below span a capability range. Two state no tiers and two retune their GPT slots.
+
+### Illustrative intelligence scores
+
+Effort remapping is worth configuring when two models in one rotation answer the same effort label at different levels. The figures below are an example measurement set used to derive the tiers that follow; substitute current measurements for the models in use.
+
+| Score | Model | Effort | Cost |
+|---:|---|---|---:|
+| 24 | Claude Haiku 4.5 | non-reasoning | not published |
+| 33 | Luna | low | $68.80 |
+| 37 | Claude Haiku 4.5 | reasoning | $619.69 |
+| 38 | Luna | medium | $105.84 |
+| 40 | Terra | low | $160.65 |
+| 46 | Terra | medium | $240.23 |
+| 49 | Sol | low | $353.49 |
+| 53 | Claude Sonnet 5 | max | $4010.12 |
+| 54 | Sol | medium | $593.04 |
+| 55 | Terra | max | $2060.40 |
+| 56 | Sol | high | $955.55 |
+| 56 | Claude Opus 4.8 | max | $3752.55 |
+| 58 | Sol | xhigh | $1542.52 |
+| 59 | Sol | max | $2824.18 |
+| 60 | Claude Fable 5 | max, with fallback | $5630.52 |
+
+### Entry tier, no remapping
+
+```yaml
+- alias: mist
+  display_name: Mist
+  targets:
+    - provider: codex
+      model: gpt-5.6-luna
+      repeat: 1
+    - provider: claude
+      model: claude-haiku-4-5-20251001
+      repeat: 1
+```
+
+Haiku 4.5 carries no effort ladder in the sample data: one non-reasoning point and one reasoning point, with nothing between. Tiers derived from a two-point curve would collapse every sub-`max` request onto a single Luna setting and discard the requested level, so omitting `efforts` preserves caller intent.
+
+### Balanced tier, no remapping
+
+```yaml
+- alias: jade
+  display_name: Jade
+  targets:
+    - provider: codex
+      model: gpt-5.6-terra
+      repeat: 1
+    - provider: claude
+      model: claude-sonnet-5
+      repeat: 1
+```
+
+Terra scores at or above Sonnet 5 at the only level both publish, so no tier would raise parity and every tier would raise cost. When two slots already track each other, write no `efforts` map.
+
+### Frontier tier, effort retuned in place
+
+```yaml
+- alias: opal
+  display_name: Opal
+  targets:
+    - provider: codex
+      model: gpt-5.6-sol
+      repeat: 1
+      efforts:
+        medium: high
+        high: xhigh
+    - provider: claude
+      model: claude-opus-5
+      repeat: 1
+```
+
+| Requested | Position 0 emitted | Position 1 emitted | Rule |
+|---|---|---|---|
+| `low` | `gpt-5.6-sol(low)` | `claude-opus-5(low)` | passthrough |
+| `medium` | `gpt-5.6-sol(high)` | `claude-opus-5(medium)` | tier |
+| `high` | `gpt-5.6-sol(xhigh)` | `claude-opus-5(high)` | tier |
+| `xhigh` | `gpt-5.6-sol(xhigh)` | `claude-opus-5(xhigh)` | passthrough |
+| `max` | `gpt-5.6-sol(max)` | `claude-opus-5(max)` | reserved |
+| `8000` | `gpt-5.6-sol(8000)` | `claude-opus-5(8000)` | outside the level lattice |
+| none | `gpt-5.6-sol` | `claude-opus-5` | absent suffix |
+
+In the sample data the Sol ladder rises steeply at the bottom and flattens at the top, so its middle labels sit below the Claude model answering the same label in the same rotation. Shifting `medium` and `high` one rung up closes that band. The ends stay unwritten deliberately: `low` is the cheapest entry, `max` is reserved by rule, and `xhigh` already resolves to the rung `high` was raised to.
+
+### Replacing the model for one effort
+
+A tier may name a different model of the same provider instead of, or in addition to, an effort. This suits a model whose strength sits at one point of the ladder rather than across it.
+
+```yaml
+- alias: opal-substituted
+  display_name: Opal Substituted
+  targets:
+    - provider: codex
+      model: gpt-5.6-sol
+      repeat: 1
+      efforts:
+        medium: high
+        high: xhigh
+    - provider: claude
+      model: claude-opus-5
+      repeat: 1
+      efforts:
+        medium:
+          model: claude-opus-4-8
+          effort: medium
+        high:
+          model: claude-opus-4-8
+```
+
+| Requested | Position 1 emitted | Tier form |
+|---|---|---|
+| `low` | `claude-opus-5(low)` | no tier, passthrough |
+| `medium` | `claude-opus-4-8(medium)` | `model` and `effort` |
+| `high` | `claude-opus-4-8(high)` | `model` only, caller effort carried across |
+| `max` | `claude-opus-5(max)` | no tier, reserved |
+
+Both substituted levels stay within the `claude` provider, because `provider` is the root of a target definition and a tier refines only a model that same provider serves.
+
+### Maximum tier, repeated slots
+
+```yaml
+- alias: ruby
+  display_name: Ruby
+  targets:
+    - provider: codex
+      model: gpt-5.6-sol
+      repeat: 1
+      efforts:
+        medium: high
+        high: xhigh
+    - provider: claude
+      model: claude-opus-5
+      repeat: 1
+    - provider: codex
+      model: gpt-5.6-sol
+      repeat: 1
+      efforts:
+        medium: high
+        high: xhigh
+    - provider: claude
+      model: claude-opus-5
+      repeat: 1
+    - provider: claude
+      model: claude-fable-5
+      repeat: 1
+```
+
+Five positions alternate providers four times before reaching the most expensive model, spreading cheaper turns ahead of it. Both Sol slots repeat the same tiers literally rather than sharing a YAML anchor, because a management-panel rewrite of the configuration does not preserve anchors.
+
 ## Routing behavior
 
-- Alias matching is case-insensitive and ignores a supported thinking suffix. The configured alias spelling is used in model catalogs.
+- Alias matching is case-insensitive and ignores a supported effort suffix. The configured alias spelling is used in model catalogs.
 - The plugin selects a provider and target model. Response model presentation stays with the host and the upstream provider.
-- A client thinking suffix is preserved on the selected target unless that target already has its own suffix.
+- A client effort suffix is preserved on the selected target unless that target already has its own suffix or the selected slot's effort tier states a different effort for the requested level.
 - If the next provider is not currently registered, the router scans forward to the next available provider. Every matched stateful route consumes the positions it skips.
 - If no configured provider is available, the route is declined so normal host routing can continue.
 - Requests without an identifiable conversation always use the first available target and do not create or advance state.
@@ -111,11 +265,48 @@ Any number of aliases, targets, and providers is supported. `repeat` defaults to
 - Cursor state is in memory with a sliding TTL. Proxy restart, plugin reload, disable/enable, and successful reconfiguration reset all positions.
 - Successful reconfiguration atomically replaces the alias catalog and configuration. Invalid reconfiguration leaves the prior configuration and cursor state active.
 
+### Per-slot effort tiers
+
+A rotation slot may state an `efforts` map deciding how that slot answers one requested effort. A tier refines the slot beneath its `provider`: `model` names another model of the same provider, and `effort` names the level that model receives.
+
+```yaml
+targets:
+  - provider: codex
+    model: gpt-5.6-sol
+    repeat: 1
+    efforts:
+      medium: high
+      high: {effort: xhigh}
+  - provider: claude
+    model: claude-opus-5
+    efforts:
+      medium:
+        model: claude-opus-4-8
+        effort: medium
+```
+
+| Tier entry | Model used | Emitted effort |
+|---|---|---|
+| level absent | the slot's | the caller's, unchanged |
+| bare level, or `effort` only | the slot's | the stated effort |
+| `model` only | the tier's | the caller's, unchanged |
+| `model` and `effort` | the tier's | the stated effort |
+
+- Keys are the discrete levels `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`, spelled in lower case. A bare level is shorthand for `{effort: <level>}`.
+- Omission is passthrough. A level with no tier forwards the caller's suffix to the slot's own model, so `max` reaches each model's native ceiling without an entry.
+- `max` is reserved. A tier emits `max` under the `max` key and under no other, and the `max` key must emit `max`. The check reads the suffix the tier actually emits, so a tier model carrying its own `(max)` is rejected under a lower key.
+- Numeric budgets, `none`, `auto`, and an absent suffix carry no discrete level. They never match a tier and pass through unchanged on the slot's own model.
+- A tier cannot name a provider. `provider` is the root of a target definition, and a tier refines only a model that same provider serves.
+- Across tiers that only retune the slot's own model, the mapping must not decrease, so a higher request never receives a lower effort. Tiers naming another model are exempt, because no ordering relates two distinct models.
+- A suffix written on the effective `model:` value outranks both the caller suffix and the tier's `effort`.
+- `repeat` shares one compiled tier map across every sequence position the slot expands into.
+- An invalid `efforts` map fails reconfiguration, leaving the prior configuration and cursor state active.
+
 ## Verifying routing in logs
 
-Set the top-level `debug: true` in `config.yaml`. Route decisions are emitted through the host logger as `model-sequence-router: selected target` with these structured fields:
+Set the top-level `debug: true` in `config.yaml`. Route decisions are emitted through the host logger as `model-sequence-router: selected target alias=<alias> position=<index> requested=<effort>`, where `requested=unset` marks a caller that sent no suffix. Those three values ride in the message because a host decides for itself which structured fields it prints. The same decision also carries these structured fields:
 
-- `alias`, `sequence_index`, `provider`, and the effective target `model`
+- `alias`, `sequence_index`, the caller's `requested_effort`, `provider`, and the effective target `model`
 - `advanced`, `true` when a conversation cursor moved and `false` for stateless routing
 - `random_start`, showing the alias policy used for a new or expired cursor
 - `session_hash`, an eight-character hash used to correlate one conversation without logging its identifier

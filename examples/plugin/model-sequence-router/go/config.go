@@ -63,9 +63,10 @@ func (c *aliasConfig) UnmarshalYAML(node *yaml.Node) error {
 }
 
 type targetConfig struct {
-	Provider string `yaml:"provider"`
-	Model    string `yaml:"model"`
-	Repeat   int    `yaml:"repeat"`
+	Provider string                                `yaml:"provider"`
+	Model    string                                `yaml:"model"`
+	Repeat   int                                   `yaml:"repeat"`
+	Efforts  map[thinking.ThinkingLevel]effortTier `yaml:"efforts"`
 }
 
 func (c *targetConfig) UnmarshalYAML(node *yaml.Node) error {
@@ -98,6 +99,7 @@ type compiledAlias struct {
 type compiledTarget struct {
 	Provider string
 	Model    string
+	Efforts  map[thinking.ThinkingLevel]effortTier
 }
 
 func defaultPluginConfig() pluginConfig {
@@ -163,7 +165,7 @@ func decodeAndCompileConfig(raw []byte, generation uint64) (*compiledConfig, err
 		if aliasName == "" {
 			return nil, fmt.Errorf("aliases[%d].alias must not be blank", aliasIndex)
 		}
-		aliasBase, _, _ := parseSupportedThinkingSuffix(aliasName)
+		aliasBase, _, _ := parseSupportedEffortSuffix(aliasName)
 		lookupKey := normalizedAliasKey(aliasBase)
 		if _, exists := compiled.ByLookup[lookupKey]; exists {
 			return nil, fmt.Errorf("duplicate alias %q", aliasName)
@@ -198,8 +200,11 @@ func decodeAndCompileConfig(raw []byte, generation uint64) (*compiledConfig, err
 			if repeat > maxEffectiveTargets-effectiveLength {
 				return nil, fmt.Errorf("alias %q effective sequence exceeds %d positions", aliasName, maxEffectiveTargets)
 			}
+			if errEfforts := validateEfforts(model, rawTarget.Efforts); errEfforts != nil {
+				return nil, fmt.Errorf("alias %q target[%d]: %w", aliasName, targetIndex, errEfforts)
+			}
 			for range repeat {
-				alias.Sequence = append(alias.Sequence, compiledTarget{Provider: provider, Model: model})
+				alias.Sequence = append(alias.Sequence, compiledTarget{Provider: provider, Model: model, Efforts: rawTarget.Efforts})
 			}
 			effectiveLength += repeat
 		}
@@ -213,7 +218,7 @@ func normalizedAliasKey(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
-func parseSupportedThinkingSuffix(model string) (base string, rawSuffix string, ok bool) {
+func parseSupportedEffortSuffix(model string) (base string, rawSuffix string, ok bool) {
 	parsed := thinking.ParseSuffix(model)
 	if !parsed.HasSuffix {
 		return model, "", false

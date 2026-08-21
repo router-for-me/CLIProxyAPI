@@ -69,7 +69,7 @@ import (
 
 const (
 	pluginIdentifier = "model-sequence-router"
-	pluginVersion    = "0.3.1"
+	pluginVersion    = "0.8.0"
 )
 
 type envelope struct {
