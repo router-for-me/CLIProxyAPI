@@ -819,3 +819,47 @@ func TestParseMetaFloat(t *testing.T) {
 		})
 	}
 }
+
+func TestAntigravityCountTokensClassifiesTransient429(t *testing.T) {
+	body := `{
+		"error": {
+			"code": 429,
+			"status": "RESOURCE_EXHAUSTED",
+			"details": [
+				{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "RATE_LIMIT_EXCEEDED"},
+				{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "0.479417207s"}
+			]
+		}
+	}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	exec := NewAntigravityExecutor(&config.Config{RequestRetry: 1})
+	_, errCount := exec.CountTokens(context.Background(), testAntigravityAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "gemini-3.6-flash-high",
+		Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatGemini,
+		ResponseFormat: sdktranslator.FormatGemini,
+	})
+	if errCount == nil {
+		t.Fatal("expected CountTokens to fail on an upstream 429")
+	}
+
+	var classified interface{ TransientRateLimit() bool }
+	if !errors.As(errCount, &classified) {
+		t.Fatalf("CountTokens error carries no 429 classification: %T", errCount)
+	}
+	if !classified.TransientRateLimit() {
+		t.Fatal("expected a RATE_LIMIT_EXCEEDED token-count 429 to be marked transient")
+	}
+
+	var hinted interface{ RetryAfter() *time.Duration }
+	if !errors.As(errCount, &hinted) || hinted.RetryAfter() == nil {
+		t.Fatal("expected the provider retry hint to survive the token-count path")
+	}
+}
