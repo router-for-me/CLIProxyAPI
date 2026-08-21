@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -103,7 +104,8 @@ func (h *OpenAIAPIHandler) OpenAIModel(c *gin.Context) {
 		c.JSON(http.StatusOK, h.codexClientModelsResponse())
 		return
 	}
-	modelID := c.Param("model")
+	// Wildcard param: strip the leading slash Gin keeps ("/teamA/gemini-x").
+	modelID := strings.TrimPrefix(c.Param("model"), "/")
 	if modelID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing model id"})
 		return

@@ -63,7 +63,10 @@ func (s *Server) setupRoutes() {
 	v1.Use(AuthMiddleware(s.accessManager))
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
-		v1.GET("/models/:model", openaiHandlers.OpenAIModel)
+		// :model is a wildcard so prefixed IDs containing slashes (e.g.
+		// "teamA/gemini-3-pro-preview" exposed by force-model-prefix) reach
+		// the handler; it strips the leading "models/" itself.
+		v1.GET("/models/*model", openaiHandlers.OpenAIModel)
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)

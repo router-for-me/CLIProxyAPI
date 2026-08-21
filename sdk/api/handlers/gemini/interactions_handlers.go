@@ -15,7 +15,13 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const interactionsAgentAuthSelectionModel = "gemini-3.7-flash"
+// interactionsAgentAuthSelectionModel is the model id used only for credential
+// selection when routing native agent requests. It must exist in the static
+// Gemini catalog so selection works even with --local-model (no remote catalog
+// refresh). "gemini-3-flash" is present in both the Gemini and Antigravity
+// catalogs; "gemini-3.7-flash" is not in the Gemini catalog and would leave
+// local-model deployments without a selectable auth.
+const interactionsAgentAuthSelectionModel = "gemini-3-flash"
 
 type interactionsRequestTarget struct {
 	Model  string

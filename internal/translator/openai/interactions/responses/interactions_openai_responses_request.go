@@ -34,7 +34,7 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 	if input := root.Get("input"); input.Exists() {
 		out = setResponsesInputOnInteractions(out, input)
 	}
-	out = appendResponsesToolsToInteractions(out, root.Get("tools"))
+	out = appendResponsesToolsToInteractions(out, root.Get("tools"), isAntigravityModel(model))
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
 		out, _ = sjson.SetRawBytes(out, "generation_config.tool_choice", []byte(toolChoice.Raw))
 	}
@@ -67,6 +67,11 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 		for _, knob := range []string{"temperature", "top_p", "top_k", "stop_sequences", "max_output_tokens", "presence_penalty", "frequency_penalty", "candidate_count"} {
 			out, _ = sjson.DeleteBytes(out, "generation_config."+knob)
 		}
+	} else if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
+		// Non-antigravity Interactions models keep supporting the client
+		// agent_config extension: copy it verbatim as the pre-antigravity
+		// converter did.
+		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(agentConfig.Raw))
 	}
 	return out
 }
@@ -359,7 +364,7 @@ func interactionsTextStep(stepType, text string) []byte {
 	return step
 }
 
-func appendResponsesToolsToInteractions(out []byte, tools gjson.Result) []byte {
+func appendResponsesToolsToInteractions(out []byte, tools gjson.Result, forAntigravity bool) []byte {
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
@@ -367,7 +372,7 @@ func appendResponsesToolsToInteractions(out []byte, tools gjson.Result) []byte {
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		switch tool.Get("type").String() {
 		case "function", "":
-			if converted, ok := functionToolToInteractions(tool); ok {
+			if converted, ok := functionToolToInteractions(tool, forAntigravity); ok {
 				toolItems = append(toolItems, converted)
 			}
 		case "namespace":
@@ -377,7 +382,7 @@ func appendResponsesToolsToInteractions(out []byte, tools gjson.Result) []byte {
 				children = tool.Get("tools")
 			}
 			children.ForEach(func(_, child gjson.Result) bool {
-				if converted, ok := functionDeclarationFromTool(child); ok {
+				if converted, ok := functionDeclarationFromTool(child, forAntigravity); ok {
 					declarationItems = append(declarationItems, converted)
 				}
 				return true
@@ -396,25 +401,31 @@ func appendResponsesToolsToInteractions(out []byte, tools gjson.Result) []byte {
 	return out
 }
 
-func functionToolToInteractions(tool gjson.Result) ([]byte, bool) {
+func functionToolToInteractions(tool gjson.Result, forAntigravity bool) ([]byte, bool) {
 	name := firstNonEmpty(tool.Get("name").String(), tool.Get("function.name").String())
 	if name == "" {
 		return nil, false
 	}
 	out := []byte(`{"type":"function","name":""}`)
-	out, _ = sjson.SetBytes(out, "name", translatorcommon.AntigravityToolNameToUpstream(name))
+	if forAntigravity {
+		name = translatorcommon.AntigravityToolNameToUpstream(name)
+	}
+	out, _ = sjson.SetBytes(out, "name", name)
 	copyOptionalString(&out, "description", firstExisting(tool.Get("description"), tool.Get("function.description")))
 	copyOptionalRaw(&out, "parameters", firstExisting(tool.Get("parameters"), tool.Get("function.parameters")))
 	return out, true
 }
 
-func functionDeclarationFromTool(tool gjson.Result) ([]byte, bool) {
+func functionDeclarationFromTool(tool gjson.Result, forAntigravity bool) ([]byte, bool) {
 	name := firstNonEmpty(tool.Get("name").String(), tool.Get("function.name").String())
 	if name == "" {
 		return nil, false
 	}
 	out := []byte(`{"name":""}`)
-	out, _ = sjson.SetBytes(out, "name", translatorcommon.AntigravityToolNameToUpstream(name))
+	if forAntigravity {
+		name = translatorcommon.AntigravityToolNameToUpstream(name)
+	}
+	out, _ = sjson.SetBytes(out, "name", name)
 	copyOptionalString(&out, "description", firstExisting(tool.Get("description"), tool.Get("function.description")))
 	copyOptionalRaw(&out, "parameters", firstExisting(tool.Get("parameters"), tool.Get("function.parameters")))
 	return out, true

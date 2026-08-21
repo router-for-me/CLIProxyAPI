@@ -9,6 +9,7 @@ import (
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -47,11 +48,24 @@ func goframeCacheAntigravityInteractionsState(ctx context.Context, modelName str
 		log.Debugf("antigravity interactions state: no session key for model=%s", modelName)
 		return
 	}
-	internalcache.CacheAntigravityInteractionsStateBestEffort(ctx, modelName, sessionKey, internalcache.AntigravityInteractionsState{
+	// Merge with any previously cached coordinates: stream events may carry
+	// only one of the two (e.g. a completion event repeating just the ID), and
+	// overwriting the whole entry would blank the missing coordinate, leaving
+	// the next tool-result turn unable to resume.
+	state := internalcache.AntigravityInteractionsState{
 		InteractionID: interactionID,
 		EnvironmentID: envID,
-	})
-	log.Debugf("antigravity interactions state: cached model=%s session=%s interaction=%s env=%s", modelName, sessionKey, interactionID, envID)
+	}
+	if existing, ok := internalcache.GetAntigravityInteractionsState(modelName, sessionKey); ok {
+		if state.InteractionID == "" {
+			state.InteractionID = existing.InteractionID
+		}
+		if state.EnvironmentID == "" {
+			state.EnvironmentID = existing.EnvironmentID
+		}
+	}
+	internalcache.CacheAntigravityInteractionsStateBestEffort(ctx, modelName, sessionKey, state)
+	log.Debugf("antigravity interactions state: cached model=%s session=%s interaction=%s env=%s", modelName, sessionKey, state.InteractionID, state.EnvironmentID)
 }
 
 // antigravityConversationPrefixKey derives a continuity key from an OpenAI
@@ -116,6 +130,13 @@ func antigravityExecSessionKey(opts cliproxyexecutor.Options, originalRequest []
 	}
 	if value := metadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
 		return "execution:" + value
+	}
+	// Context-derived identity (conductor runs session.Enrich before exec):
+	// stable per downstream caller+conversation even when the client sends no
+	// explicit marker. This isolates identical conversation prefixes coming
+	// from different callers so they never share one upstream interaction.
+	if value := helps.DerivedSessionID(opts.Metadata); value != "" {
+		return "derived:" + value
 	}
 	// Fallback for chat/completions clients (e.g. Hermes delegation) that send
 	// no explicit session marker: derive a stable key from the conversation

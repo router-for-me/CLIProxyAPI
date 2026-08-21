@@ -257,6 +257,11 @@ func copyOpenAIChatGenerationConfigToInteractions(out []byte, root gjson.Result,
 		// antigravity agent.
 		cfg := `{"type":"antigravity"}`
 		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(cfg))
+	} else if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
+		// Non-antigravity Interactions models keep supporting the client
+		// agent_config extension: copy it verbatim as the pre-antigravity
+		// converter did.
+		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(agentConfig.Raw))
 	} else {
 		copyNumber(&out, "generation_config.max_output_tokens", firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens")))
 		copyNumber(&out, "generation_config.temperature", root.Get("temperature"))
