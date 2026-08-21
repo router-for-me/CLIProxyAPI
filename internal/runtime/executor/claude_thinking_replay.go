@@ -37,16 +37,17 @@ func claudeThinkingReplayEnabled(auth *cliproxyauth.Auth, req cliproxyexecutor.R
 }
 
 // A missing session identity intentionally disables replay instead of sharing hidden reasoning across callers.
-// When no caller session is available, we fall back to a credential-scoped key
-// so a standard Claude Messages client that provides no session metadata can
-// still replay same-upstream signatures for the same credential.
+// When no caller session is available, we fall back to a conversation-scoped
+// key derived from the first user message and system content, so distinct
+// conversations through the same credential cannot see each other's cached
+// signatures.
 func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) claudeThinkingReplayScope {
 	sessionKey := codexReasoningReplaySessionKey(ctx, sdktranslator.FormatClaude, req, opts, req.Payload)
 	if sessionKey != "" {
 		sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
 	}
 	if sessionKey == "" {
-		sessionKey = claudeThinkingReplayCredentialSessionKey(auth)
+		sessionKey = claudeThinkingReplayConversationSessionKey(req.Payload)
 	}
 	return claudeThinkingReplayScope{
 		modelFamily: claudeThinkingReplayModelFamily(auth, req.Model),
@@ -54,23 +55,35 @@ func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyaut
 	}
 }
 
-func claudeThinkingReplayCredentialSessionKey(auth *cliproxyauth.Auth) string {
-	identity := ""
-	if auth != nil {
-		identity = strings.TrimSpace(auth.ID)
-		if identity == "" {
-			apiKey, baseURL := claudeCreds(auth)
-			identity = strings.TrimSpace(baseURL)
-			if identity == "" {
-				identity = strings.TrimSpace(apiKey)
-			}
-		}
-	}
-	if identity == "" {
+// claudeThinkingReplayConversationSessionKey returns a stable per-conversation
+// key for sessionless clients. It hashes the first message and the system
+// prompt so two different conversations through the same credential do not
+// share replay state.
+func claudeThinkingReplayConversationSessionKey(payload []byte) string {
+	if len(payload) == 0 {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(identity))
-	return "credential:" + hex.EncodeToString(sum[:8])
+	h := sha256.New()
+	h.Write([]byte("conversation"))
+	firstMsg := gjson.GetBytes(payload, "messages.0")
+	if firstMsg.Exists() {
+		if canon, ok := kimiCanonicalJSON([]byte(firstMsg.Raw)); ok {
+			h.Write(canon)
+		} else {
+			h.Write([]byte(firstMsg.Raw))
+		}
+	} else {
+		h.Write([]byte(""))
+	}
+	system := gjson.GetBytes(payload, "system")
+	if system.Exists() {
+		if canon, ok := kimiCanonicalJSON([]byte(system.Raw)); ok {
+			h.Write(canon)
+		} else {
+			h.Write([]byte(system.Raw))
+		}
+	}
+	return "conversation:" + hex.EncodeToString(h.Sum(nil)[:16])
 }
 
 func claudeThinkingReplayModelFamily(auth *cliproxyauth.Auth, model string) string {
