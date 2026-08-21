@@ -160,11 +160,15 @@ func restoreKimiThinkingReplayContent(body, cachedContent []byte) ([]byte, bool)
 		if kimiJSONEqual([]byte(currentContent.Raw), cachedContent) {
 			return body, false
 		}
-		if kimiContentHasThinking(currentContent) {
-			continue
-		}
 		currentParts, currentOK := kimiNonThinkingContentParts(currentContent)
 		if !currentOK || !kimiCanonicalPartsEqual(currentParts, cachedParts) {
+			continue
+		}
+		// Non-thinking parts already match. If the current content has a
+		// thinking block, restore only when it matches the cached thinking block
+		// ignoring signature, so a sanitized echoed turn gets its cached
+		// provenance back.
+		if kimiContentHasThinking(currentContent) && !kimiThinkingMatchesCachedIgnoringSignature(currentContent, gjson.ParseBytes(cachedContent)) {
 			continue
 		}
 		updated, errSet := sjson.SetRawBytes(body, fmt.Sprintf("messages.%d.content", index), cachedContent)
@@ -187,6 +191,52 @@ func kimiContentHasThinking(content gjson.Result) bool {
 		}
 	}
 	return false
+}
+
+// kimiThinkingMatchesCachedIgnoringSignature checks that every thinking or
+// redacted_thinking part in current matches the corresponding cached part after
+// removing signature fields. Non-thinking parts are assumed to be equal by the
+// caller (kimiNonThinkingContentParts/kimiCanonicalPartsEqual).
+func kimiThinkingMatchesCachedIgnoringSignature(current, cached gjson.Result) bool {
+	if !current.IsArray() || !cached.IsArray() {
+		return false
+	}
+	currentParts := current.Array()
+	cachedParts := cached.Array()
+	if len(currentParts) != len(cachedParts) {
+		return false
+	}
+	for i, curPart := range currentParts {
+		cachedPart := cachedParts[i]
+		curType := strings.TrimSpace(curPart.Get("type").String())
+		cachedType := strings.TrimSpace(cachedPart.Get("type").String())
+		if curType != cachedType {
+			return false
+		}
+		switch curType {
+		case "thinking", "redacted_thinking":
+			curClean := kimiThinkingPartWithoutSignature(curPart)
+			cachedClean := kimiThinkingPartWithoutSignature(cachedPart)
+			curCanon, ok1 := kimiCanonicalJSON([]byte(curClean))
+			cachedCanon, ok2 := kimiCanonicalJSON([]byte(cachedClean))
+			if !ok1 || !ok2 || !bytes.Equal(curCanon, cachedCanon) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// kimiThinkingPartWithoutSignature returns a thinking/redacted_thinking part
+// with signature fields removed so two parts can be compared ignoring provenance.
+func kimiThinkingPartWithoutSignature(part gjson.Result) string {
+	updated := part.Raw
+	for _, path := range []string{"signature", "thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
+		if gjson.Get(updated, path).Exists() {
+			updated, _ = sjson.Delete(updated, path)
+		}
+	}
+	return updated
 }
 
 func kimiNonThinkingContentParts(content gjson.Result) ([][]byte, bool) {
