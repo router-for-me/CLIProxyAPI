@@ -124,14 +124,13 @@ func goframeCacheAntigravityInteractionsState(ctx context.Context, modelName str
 	// Also index by the response id the client will reference in its next
 	// Responses tool-result turn. A standard HTTP Responses loop sends only
 	// previous_response_id + function_call_output — session.Enrich cannot
-	// re-derive the original identity from that input, so without this alias
-	// entry the cached environment would never be found. The alias keeps the
-	// same caller namespace as the primary key.
+	// re-derive the original identity from that input, so the follow-up has no
+	// session key and must resolve the state through this caller-scoped alias.
 	if responseID := strings.TrimSpace(firstNonEmptyString(
 		gjson.GetBytes(payload, "interaction.id").String(),
 		gjson.GetBytes(payload, "id").String(),
 	)); responseID != "" {
-		internalcache.CacheAntigravityInteractionsStateBestEffort(ctx, modelName, sessionKey+"\x00response-id:"+responseID, state)
+		internalcache.CacheAntigravityInteractionsStateBestEffort(ctx, modelName, "response-id:"+responseID, state)
 	}
 	log.Debugf("antigravity interactions state: cached model=%s session=%s interaction=%s env=%s", modelName, sessionKey, state.InteractionID, state.EnvironmentID)
 }
@@ -287,12 +286,13 @@ func goframeApplyAntigravityInteractionsContinuation(ctx context.Context, modelN
 		state, ok = internalcache.GetAntigravityInteractionsState(ctx, modelName, sessionKey)
 	}
 	// Responses tool loops reference the prior turn by previous_response_id /
-	// previous_interaction_id; the state was indexed under sessionKey +
-	// that id at capture time, so try the alias entry before giving up.
+	// previous_interaction_id; the state was indexed under that id at capture
+	// time (caller-scoped), so try the alias entry even when no session key
+	// could be derived from this follow-up.
 	if !ok {
 		for _, path := range []string{"previous_response_id", "previous_interaction_id"} {
-			if responseID := strings.TrimSpace(gjson.GetBytes(body, path).String()); responseID != "" && sessionKey != "" {
-				if state, ok = internalcache.GetAntigravityInteractionsState(ctx, modelName, sessionKey+"\x00response-id:"+responseID); ok {
+			if responseID := strings.TrimSpace(gjson.GetBytes(body, path).String()); responseID != "" {
+				if state, ok = internalcache.GetAntigravityInteractionsState(ctx, modelName, "response-id:"+responseID); ok {
 					break
 				}
 			}
