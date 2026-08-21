@@ -1383,6 +1383,78 @@ func TestHostDeferPluginUpdateWhilePluginLoading(t *testing.T) {
 	fresh.ShutdownAll()
 }
 
+func TestHostDeferPluginUpdatePrefersInFlightReplacement(t *testing.T) {
+	loader := newTestSymbolLoader()
+	loader.lookups["alpha"] = newTestSymbolLookup(&testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	})
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0", "2.0.0", "3.0.0")
+	for _, version := range []string{"2.0.0", "3.0.0"} {
+		if errRemove := os.Remove(paths[version]); errRemove != nil {
+			t.Fatalf("Remove(%s) error = %v", paths[version], errRemove)
+		}
+	}
+	configForVersion := func(version string) *config.Config {
+		return &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"alpha": enabledPluginConfigWithStoreVersion(t, version),
+				},
+			},
+		}
+	}
+
+	h := NewForTest(loader)
+	h.ApplyConfig(context.Background(), configForVersion("1.0.0"))
+	paths["2.0.0"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	paths["3.0.0"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "3.0.0")
+
+	openStarted := make(chan struct{})
+	releaseOpen := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseOpen) }) }
+	t.Cleanup(release)
+	h.loader = &blockingOpenLoader{
+		inner:   loader,
+		started: openStarted,
+		release: releaseOpen,
+	}
+
+	replacementDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), configForVersion("2.0.0"))
+		close(replacementDone)
+	}()
+	waitForHostTestSignal(t, openStarted, "replacement plugin open start")
+	if !h.DeferPluginUpdateUntilRestart("alpha", paths["3.0.0"], "3.0.0", false) {
+		t.Fatal("DeferPluginUpdateUntilRestart() = false, want true while replacement v2 is loading")
+	}
+
+	release()
+	waitForHostTestSignal(t, replacementDone, "replacement plugin load")
+	h.ApplyConfig(context.Background(), configForVersion("3.0.0"))
+	if !h.PluginRegistered("alpha") || !h.pluginIdentityCurrent("alpha", paths["2.0.0"], "2.0.0") {
+		t.Fatal("in-flight replacement v2 was not kept effective while v3 was deferred")
+	}
+	if h.pluginIdentityCurrent("alpha", paths["3.0.0"], "3.0.0") {
+		t.Fatal("staged v3 became active before restart")
+	}
+	if loader.openCalls != 2 {
+		t.Fatalf("Open calls = %d, want two calls through the replacement load", loader.openCalls)
+	}
+
+	h.ShutdownAll()
+	fresh := NewForTest(loader)
+	fresh.ApplyConfig(context.Background(), configForVersion("3.0.0"))
+	if !fresh.PluginRegistered("alpha") || !fresh.pluginIdentityCurrent("alpha", paths["3.0.0"], "3.0.0") {
+		t.Fatal("fresh host did not register desired v3")
+	}
+	fresh.ShutdownAll()
+}
+
 func TestHostCanceledInitializationDiscardsBlockedClient(t *testing.T) {
 	client := &blockingInitializationClient{
 		started:      make(chan struct{}),

@@ -252,17 +252,17 @@ func (h *Host) ClearDeferredPluginUpdate(id string) {
 	h.mu.Unlock()
 }
 
-// pluginIdentityLocked returns the registered identity, or the identity being
-// loaded when registration has not completed yet. Callers must hold h.mu.
+// pluginIdentityLocked returns the identity being loaded, or the registered
+// identity when no load is in flight. Callers must hold h.mu.
 func (h *Host) pluginIdentityLocked(id string) (string, string) {
 	if h == nil {
 		return "", ""
 	}
-	if lp := h.loaded[id]; lp != nil {
-		return cleanPluginPath(lp.path), strings.TrimSpace(lp.version)
-	}
 	if request := h.loading[id]; request != nil {
 		return cleanPluginPath(request.path), strings.TrimSpace(request.version)
+	}
+	if lp := h.loaded[id]; lp != nil {
+		return cleanPluginPath(lp.path), strings.TrimSpace(lp.version)
 	}
 	return "", ""
 }
