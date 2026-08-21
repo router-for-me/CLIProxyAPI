@@ -328,13 +328,13 @@ func deleteEmptyJSONObjectPath(raw, path string) (string, bool) {
 	return updated, true
 }
 
-// isClaudeReplayableShortSignature reports whether rawSignature is a decodable
-// Claude E/R-shaped value safe to replay. It rejects foreign provider prefixes
-// and, when a "claude#" prefix is present, validates the payload behind the
-// prefix and returns the unprefixed value. This prevents Gemini E-prefixed
-// signatures (e.g. "gemini#<E-sig>"), unrecognized vendor prefixes, or genuine
-// Gemini payloads mislabeled with a Claude prefix from slipping through the
-// Claude fallback.
+// isClaudeReplayableShortSignature reports whether rawSignature is a proven
+// Claude thinking signature safe to replay. It rejects foreign provider
+// prefixes and, when a "claude#" prefix is present, validates the payload
+// behind the prefix and returns the unprefixed value. Unknown or
+// unprovenanced E/R-shaped opaque payloads (e.g. Grok/xAI encrypted_content
+// that happens to start with 'E' or 'R') are rejected so the compat fallback
+// never forwards untrusted signatures to a Claude-compatible target.
 func isClaudeReplayableShortSignature(rawSignature string) (bool, string) {
 	if provider, payload, ok := SplitSignatureProviderPrefix(rawSignature); ok {
 		if provider != SignatureProviderClaude {
@@ -344,13 +344,13 @@ func isClaudeReplayableShortSignature(rawSignature string) (bool, string) {
 			// Reject nested or residual provider prefixes (e.g. claude#vendor#...).
 			return false, ""
 		}
-		// Validate the payload behind the prefix; a genuine Gemini or other
-		// foreign signature hiding behind "claude#" must be rejected.
+		// Validate the payload behind the prefix; only a proven Claude thinking
+		// signature may pass this fallback.
 		if !HasDecodableClaudeThinkingSignature(payload) {
 			return false, ""
 		}
 		detected := DetectSignatureProviderForBlock(payload, SignatureBlockKindClaudeThinking)
-		if detected != SignatureProviderUnknown && detected != SignatureProviderClaude {
+		if detected != SignatureProviderClaude {
 			return false, ""
 		}
 		return true, payload
@@ -363,7 +363,7 @@ func isClaudeReplayableShortSignature(rawSignature string) (bool, string) {
 		return false, ""
 	}
 	detected := DetectSignatureProviderForBlock(rawSignature, SignatureBlockKindClaudeThinking)
-	if detected != SignatureProviderUnknown && detected != SignatureProviderClaude {
+	if detected != SignatureProviderClaude {
 		return false, ""
 	}
 	return true, rawSignature

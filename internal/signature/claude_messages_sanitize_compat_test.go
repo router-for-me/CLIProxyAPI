@@ -1,6 +1,8 @@
 package signature
 
 import (
+	"bytes"
+	"encoding/base64"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -59,6 +61,21 @@ func TestSanitizeClaudeMessagesForClaudeUpstreamRetainsEmptySignatureOnUnknownVe
 	part := gjson.GetBytes(withCompat, "messages.0.content.0")
 	if part.Get("type").String() != "thinking" || !part.Get("signature").Exists() || part.Get("signature").String() != "" {
 		t.Fatalf("compat sanitizer did not retain empty signature member on unknown-vendor block: %s", withCompat)
+	}
+}
+
+func TestSanitizeClaudeMessagesForClaudeUpstreamRejectsGrokOpaqueERInCompatMode(t *testing.T) {
+	// Grok/xAI encrypted_content is uniformly distributed and can base64-encode
+	// to a string starting with 'E' or 'R', but it is not a valid Claude
+	// thinking signature and must not pass the short-signature fallback.
+	grokLike := bytes.Repeat([]byte{0x12, 0xff, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33}, 4)
+	sig := base64.StdEncoding.EncodeToString(grokLike)
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"` + sig + `"}]}]}`)
+
+	withCompat, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4", true)
+	part := gjson.GetBytes(withCompat, "messages.0.content.0")
+	if part.Get("type").String() != "thinking" || !part.Get("signature").Exists() || part.Get("signature").String() != "" {
+		t.Fatalf("compat sanitizer did not clear Grok-style E/R opaque signature: %s", withCompat)
 	}
 }
 
