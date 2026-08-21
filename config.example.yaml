@@ -744,6 +744,8 @@ nonstream-keepalive-interval: 0
 #     - "grok-3-mini"
 
 # OAuth provider request-scoped error rules (custom error classification for OAuth credentials)
+# Supported actions: "stop", "stop-and-cooldown", "continue", "continue-and-cooldown"
+# The status field is optional; omit it or set it to 0 to match any HTTP status (body-only rule).
 # oauth-request-scoped-errors:
 #   vertex:
 #     - status: 400
@@ -753,7 +755,7 @@ nonstream-keepalive-interval: 0
 #       match-regexr:
 #         - "maximum_context_length$"
 #         - "^context_length_exceeded"
-#       action: "stop" # options: "stop", "stop-and-cooldown", "continue", "continue-and-cooldown"
+#       action: "stop"
 #   aistudio:
 #     - status: 400
 #       match:
@@ -765,8 +767,7 @@ nonstream-keepalive-interval: 0
 #         - "internal_server_error"
 #       action: "stop-and-cooldown"
 #   claude:
-#     - status: 400
-#       match:
+#     - match:
 #         - "prompt is too long"
 #       action: "stop"
 #   codex:
