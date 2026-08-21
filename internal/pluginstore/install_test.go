@@ -147,6 +147,66 @@ func TestInstallArchivePreparesNewPluginBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestInstallArchiveWriteLockCoversWriteAndPreparationFailure(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	targetPath := filepath.Join(root, "windows", "amd64", "sample-provider-v0.1.0.dll")
+	held := false
+	result, errInstall := InstallArchive(makeZip(t, map[string]string{
+		"sample-provider.dll": "new",
+	}), testPlugin(), InstallOptions{
+		PluginsDir: root,
+		GOOS:       "windows",
+		GOARCH:     "amd64",
+		WriteLock: func() func() {
+			held = true
+			return func() {
+				if _, errStat := os.Stat(targetPath); errStat != nil {
+					t.Errorf("target was not written before WriteLock release: %v", errStat)
+				}
+				held = false
+			}
+		},
+		BeforeWrite: func() error {
+			if !held {
+				t.Fatal("BeforeWrite ran without the write lock")
+			}
+			return nil
+		},
+	})
+	if errInstall != nil {
+		t.Fatalf("InstallArchive() error = %v", errInstall)
+	}
+	if result.Path != targetPath {
+		t.Fatalf("Path = %q, want %q", result.Path, targetPath)
+	}
+	if held {
+		t.Fatal("WriteLock remained held after a successful install")
+	}
+
+	releasedAfterFailure := false
+	_, errInstall = InstallArchive(makeZip(t, map[string]string{
+		"sample-provider.dll": "newer",
+	}), testPlugin(), InstallOptions{
+		PluginsDir: root,
+		GOOS:       "windows",
+		GOARCH:     "amd64",
+		WriteLock: func() func() {
+			return func() { releasedAfterFailure = true }
+		},
+		BeforeWrite: func() error {
+			return errors.New("stop before write")
+		},
+	})
+	if errInstall == nil {
+		t.Fatal("InstallArchive() error = nil, want preparation failure")
+	}
+	if !releasedAfterFailure {
+		t.Fatal("WriteLock was not released after preparation failure")
+	}
+}
+
 func TestInstallArchiveSkipsIdenticalLoadedWindowsPlugin(t *testing.T) {
 	t.Parallel()
 

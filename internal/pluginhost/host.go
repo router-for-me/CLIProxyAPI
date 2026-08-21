@@ -51,6 +51,7 @@ type pluginLoadResult struct {
 	loaded      *loadedPlugin
 	plugin      pluginapi.Plugin
 	initialized bool
+	deferred    bool
 	err         error
 }
 
@@ -68,6 +69,7 @@ type Host struct {
 	loading                map[string]*pluginLoadRequest
 	fused                  map[string]string
 	deferredPluginUpdates  map[string]deferredPluginIdentity
+	artifactLocks          map[string]*sync.Mutex
 	pluginFileVersions     map[string]string
 	activePluginVersions   map[string]string
 	activePluginPaths      map[string]string
@@ -102,6 +104,7 @@ func New() *Host {
 		loading:                make(map[string]*pluginLoadRequest),
 		fused:                  make(map[string]string),
 		deferredPluginUpdates:  make(map[string]deferredPluginIdentity),
+		artifactLocks:          make(map[string]*sync.Mutex),
 		pluginFileVersions:     make(map[string]string),
 		activePluginVersions:   make(map[string]string),
 		activePluginPaths:      make(map[string]string),
@@ -201,6 +204,30 @@ func (h *Host) PluginBusy(id string) bool {
 	return ok
 }
 
+// LockPluginArtifact serializes a plugin artifact write with the library open
+// performed by a concurrent load. The returned function releases the lock.
+func (h *Host) LockPluginArtifact(id string) func() {
+	if h == nil {
+		return func() {}
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return func() {}
+	}
+	h.mu.Lock()
+	if h.artifactLocks == nil {
+		h.artifactLocks = make(map[string]*sync.Mutex)
+	}
+	lock := h.artifactLocks[id]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		h.artifactLocks[id] = lock
+	}
+	h.mu.Unlock()
+	lock.Lock()
+	return lock.Unlock
+}
+
 // DeferPluginUpdateUntilRestart keeps an active plugin identity pinned until a
 // fresh host is created. It returns whether restart is required and whether this
 // call created the deferral marker.
@@ -249,7 +276,7 @@ func (h *Host) PreparePluginUpdate(id string) (bool, bool) {
 	if _, ok := h.deferredPluginUpdates[id]; ok {
 		return true, false
 	}
-	activePath, activeVersion := h.pluginIdentityLocked(id)
+	activePath, activeVersion := h.pluginUpdateIdentityLocked(id)
 	if activePath == "" {
 		return false, false
 	}
@@ -288,6 +315,36 @@ func (h *Host) pluginIdentityLocked(id string) (string, string) {
 		return cleanPluginPath(lp.path), strings.TrimSpace(lp.version)
 	}
 	return "", ""
+}
+
+func (h *Host) pluginUpdateIdentityLocked(id string) (string, string) {
+	if h == nil {
+		return "", ""
+	}
+	if lp := h.loaded[id]; lp != nil {
+		return cleanPluginPath(lp.path), strings.TrimSpace(lp.version)
+	}
+	return h.pluginIdentityLocked(id)
+}
+
+func (h *Host) pluginLoadDeferredLocked(id string, request *pluginLoadRequest) bool {
+	if h == nil || request == nil || h.loading[id] != request {
+		return false
+	}
+	deferred, ok := h.deferredPluginUpdates[id]
+	if !ok {
+		return false
+	}
+	return cleanPluginPath(deferred.path) != cleanPluginPath(request.path) ||
+		(deferred.version != "" && strings.TrimSpace(deferred.version) != strings.TrimSpace(request.version))
+}
+
+func (h *Host) takeDeferredPluginLoadLocked(file pluginFile, request *pluginLoadRequest) (*loadedPlugin, pluginFile, bool) {
+	if !h.pluginLoadDeferredLocked(file.ID, request) {
+		return nil, file, false
+	}
+	delete(h.loading, file.ID)
+	return h.loaded[file.ID], h.deferredPluginFileLocked(file), true
 }
 
 func (h *Host) deferredPluginFile(file pluginFile) pluginFile {
@@ -420,37 +477,50 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			if !completed {
 				return
 			}
-			if loadResult.err != nil {
-				h.cleanupPluginLoad(file.ID, request, loadResult.loaded)
-				log.Warnf("pluginhost: failed to load plugin %s from %s: %v", file.ID, file.Path, loadResult.err)
-				continue
-			}
-
 			h.mu.Lock()
-			if h.loading[file.ID] != request {
+			fallbackPlugin, fallbackFile, deferred := h.takeDeferredPluginLoadLocked(file, request)
+			if deferred {
 				h.mu.Unlock()
 				h.discardLoadedPlugin(loadResult.loaded)
-				return
-			}
-			if errContext := ctx.Err(); errContext != nil {
+				file = fallbackFile
+				deferredFiles = append(deferredFiles, selectedFile)
+				lp = fallbackPlugin
+				if lp == nil {
+					continue
+				}
+			} else if loadResult.err != nil || loadResult.deferred {
 				h.mu.Unlock()
 				h.cleanupPluginLoad(file.ID, request, loadResult.loaded)
-				return
+				if loadResult.err != nil {
+					log.Warnf("pluginhost: failed to load plugin %s from %s: %v", file.ID, file.Path, loadResult.err)
+				}
+				continue
+			} else {
+				if h.loading[file.ID] != request {
+					h.mu.Unlock()
+					h.discardLoadedPlugin(loadResult.loaded)
+					return
+				}
+				if errContext := ctx.Err(); errContext != nil {
+					h.mu.Unlock()
+					h.cleanupPluginLoad(file.ID, request, loadResult.loaded)
+					return
+				}
+				delete(h.loading, file.ID)
+				lp = loadResult.loaded
+				if replaced != nil {
+					hotReloadFields = pluginHotReloadLogFields(file.ID, file.Version, file.Path, replaced.version, replaced.path)
+					h.retireLoadedPluginLocked(replaced)
+					delete(h.fused, file.ID)
+					h.removePluginRuntimeStateLocked(file.ID)
+				}
+				h.loaded[file.ID] = lp
+				loadedNow = true
+				plugin = loadResult.plugin
+				registeredNow = loadResult.initialized
+				h.mu.Unlock()
+				log.WithFields(pluginLogFields(file.ID, "", file.Version, file.Path)).Info("pluginhost: plugin loaded")
 			}
-			delete(h.loading, file.ID)
-			lp = loadResult.loaded
-			if replaced != nil {
-				hotReloadFields = pluginHotReloadLogFields(file.ID, file.Version, file.Path, replaced.version, replaced.path)
-				h.retireLoadedPluginLocked(replaced)
-				delete(h.fused, file.ID)
-				h.removePluginRuntimeStateLocked(file.ID)
-			}
-			h.loaded[file.ID] = lp
-			loadedNow = true
-			plugin = loadResult.plugin
-			registeredNow = loadResult.initialized
-			h.mu.Unlock()
-			log.WithFields(pluginLogFields(file.ID, "", file.Version, file.Path)).Info("pluginhost: plugin loaded")
 		}
 
 		if !registeredNow {
@@ -519,7 +589,22 @@ func (h *Host) startPluginLoad(ctx context.Context, file pluginFile, item runtim
 		ctx = context.Background()
 	}
 	go func() {
-		client, errOpen := h.loader.Open(file, h)
+		client, errOpen, deferred := func() (pluginClient, error, bool) {
+			unlockArtifact := h.LockPluginArtifact(file.ID)
+			defer unlockArtifact()
+			h.mu.Lock()
+			deferred := h.pluginLoadDeferredLocked(file.ID, request)
+			h.mu.Unlock()
+			if deferred {
+				return nil, nil, true
+			}
+			client, errOpen := h.loader.Open(file, h)
+			return client, errOpen, false
+		}()
+		if deferred {
+			request.result <- pluginLoadResult{deferred: true}
+			return
+		}
 		if errOpen != nil {
 			request.result <- pluginLoadResult{err: errOpen}
 			return

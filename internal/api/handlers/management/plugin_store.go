@@ -268,6 +268,11 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	restartRequired := false
 	deferredUpdateCreated := false
 	if deferredUpdate != nil {
+		if artifactLocker, ok := deferredUpdate.(pluginArtifactLocker); ok {
+			installOptions.WriteLock = func() func() {
+				return artifactLocker.LockPluginArtifact(id)
+			}
+		}
 		installOptions.BeforeWrite = func() error {
 			var created bool
 			restartRequired, created = deferredUpdate.PreparePluginUpdate(id)

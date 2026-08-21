@@ -1674,6 +1674,82 @@ func TestHostDeferPluginUpdatePrefersInFlightReplacement(t *testing.T) {
 	fresh.ShutdownAll()
 }
 
+func TestHostDeferredWritePreventsPublishedLoadFromOpeningReplacement(t *testing.T) {
+	loader := newExclusiveTestLoader(map[string]*testPlugin{
+		"1.0.0": {
+			registerResult:    validTestPlugin("alpha-v1"),
+			reconfigureResult: validTestPlugin("alpha-v1"),
+		},
+		"2.0.0": {
+			registerResult:    validTestPlugin("alpha-v2"),
+			reconfigureResult: validTestPlugin("alpha-v2"),
+		},
+	})
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0", "2.0.0")
+	configForVersion := func(version string) *config.Config {
+		return &config.Config{Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": enabledPluginConfigWithStoreVersion(t, version),
+			},
+		}}
+	}
+
+	if errRemove := os.Remove(paths["2.0.0"]); errRemove != nil {
+		t.Fatalf("Remove(%s) error = %v", paths["2.0.0"], errRemove)
+	}
+	h := NewForTest(loader)
+	h.ApplyConfig(context.Background(), configForVersion("1.0.0"))
+	paths["2.0.0"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+
+	unlockArtifact := h.LockPluginArtifact("alpha")
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), configForVersion("2.0.0"))
+		close(applyDone)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		h.mu.Lock()
+		_, loading := h.loading["alpha"]
+		h.mu.Unlock()
+		if loading {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for replacement load request")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if deferred, created := h.PreparePluginUpdate("alpha"); !deferred || !created {
+		t.Fatalf("PreparePluginUpdate() = deferred:%v created:%v, want true,true", deferred, created)
+	}
+	if errWrite := os.WriteFile(paths["2.0.0"], []byte("replacement-bytes"), 0o755); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", paths["2.0.0"], errWrite)
+	}
+	unlockArtifact()
+	waitForHostTestSignal(t, applyDone, "deferred replacement apply")
+
+	if !h.PluginRegistered("alpha") || !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatal("retained v1 was not effective after a published load was deferred")
+	}
+	if h.pluginIdentityCurrent("alpha", paths["2.0.0"], "2.0.0") {
+		t.Fatal("replacement v2 became active before restart")
+	}
+	if openCalls, active := loader.stats(); openCalls != 1 || !active {
+		t.Fatalf("exclusive loader state = calls %d active %v, want one active v1 client", openCalls, active)
+	}
+
+	h.ShutdownAll()
+	fresh := NewForTest(loader)
+	fresh.ApplyConfig(context.Background(), configForVersion("2.0.0"))
+	if !fresh.PluginRegistered("alpha") || !fresh.pluginIdentityCurrent("alpha", paths["2.0.0"], "2.0.0") {
+		t.Fatal("fresh host did not register desired replacement after restart")
+	}
+	fresh.ShutdownAll()
+}
+
 func TestHostCanceledInitializationDiscardsBlockedClient(t *testing.T) {
 	client := &blockingInitializationClient{
 		started:      make(chan struct{}),

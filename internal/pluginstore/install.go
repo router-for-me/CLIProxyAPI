@@ -28,6 +28,10 @@ type InstallOptions struct {
 	// BeforeWrite runs after the archive has been downloaded and verified, but
 	// before the target plugin file is written or replaced.
 	BeforeWrite func() error
+	// WriteLock serializes the target file replacement with a host load of the
+	// same plugin. The returned function is called after the write completes or
+	// fails.
+	WriteLock func() func()
 }
 
 // ErrLoadedPluginLocked is returned when an install would overwrite a plugin
@@ -286,6 +290,13 @@ func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (
 			}, nil
 		}
 	}
+	unlockWrite := func() {}
+	if options.WriteLock != nil {
+		if release := options.WriteLock(); release != nil {
+			unlockWrite = release
+		}
+	}
+	defer unlockWrite()
 	// Re-check immediately before writing: the same version may have been loaded
 	// while the archive was being downloaded and verified.
 	if options.BeforeWrite != nil {

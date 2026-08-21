@@ -76,6 +76,10 @@ type pluginUpdateDeferrer interface {
 	ClearDeferredPluginUpdate(id string)
 }
 
+type pluginArtifactLocker interface {
+	LockPluginArtifact(id string) func()
+}
+
 // NewHandler creates a new management handler instance.
 func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Manager) *Handler {
 	envSecret, _ := os.LookupEnv("MANAGEMENT_PASSWORD")

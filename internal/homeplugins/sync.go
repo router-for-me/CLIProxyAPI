@@ -37,6 +37,10 @@ type contextualPluginUnloader interface {
 	UnloadPluginContext(ctx context.Context, id string) bool
 }
 
+type pluginArtifactLocker interface {
+	LockPluginArtifact(id string) func()
+}
+
 type SyncReport struct {
 	SchemaVersion int                   `json:"schema_version"`
 	TaskID        uint                  `json:"task_id,omitempty"`
@@ -355,12 +359,18 @@ func installManifest(ctx context.Context, client sdkpluginstore.Client, manifest
 	pluginIsBusy := func() bool {
 		return pluginRuntime != nil && pluginRuntime.PluginBusy(id)
 	}
-	result, errInstall := client.InstallManifest(ctx, manifest, sdkpluginstore.InstallOptions{
+	installOptions := sdkpluginstore.InstallOptions{
 		PluginsDir:   root,
 		GOOS:         platform.GOOS,
 		GOARCH:       platform.GOARCH,
 		PluginLoaded: pluginIsBusy,
-	})
+	}
+	if artifactLocker, ok := pluginRuntime.(pluginArtifactLocker); ok {
+		installOptions.WriteLock = func() func() {
+			return artifactLocker.LockPluginArtifact(id)
+		}
+	}
+	result, errInstall := client.InstallManifest(ctx, manifest, installOptions)
 	if errInstall != nil {
 		return sdkpluginstore.InstallResult{}, fmt.Errorf("home plugins: install %s: %w", id, errInstall)
 	}
