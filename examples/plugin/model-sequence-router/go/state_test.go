@@ -23,47 +23,47 @@ func TestCursorSequenceWrapAndIndependentKeys(t *testing.T) {
 	keyB := cursorKey{Generation: 1, Alias: "iterative", SessionID: "b"}
 	want := []string{"terra", "terra", "terra", "opus", "terra"}
 	for i, model := range want {
-		got, _, ok := store.selectTarget(keyA, testSequence(), available, time.Hour, true)
+		got, _, ok := store.selectTarget(keyA, testSequence(), available, time.Hour, false)
 		if !ok || got.Model != model {
 			t.Fatalf("session A selection %d = %#v, %v; want %q", i, got, ok, model)
 		}
 	}
-	gotB, _, okB := store.selectTarget(keyB, testSequence(), available, time.Hour, true)
+	gotB, _, okB := store.selectTarget(keyB, testSequence(), available, time.Hour, false)
 	if !okB || gotB.Model != "terra" {
 		t.Fatalf("session B first selection = %#v, %v", gotB, okB)
 	}
 	otherAlias := cursorKey{Generation: 1, Alias: "other", SessionID: "a"}
-	gotAlias, _, okAlias := store.selectTarget(otherAlias, testSequence(), available, time.Hour, true)
+	gotAlias, _, okAlias := store.selectTarget(otherAlias, testSequence(), available, time.Hour, false)
 	if !okAlias || gotAlias.Model != "terra" {
 		t.Fatalf("other alias first selection = %#v, %v", gotAlias, okAlias)
 	}
 }
 
-func TestCursorPeekExpirationAndSlidingTTL(t *testing.T) {
+func TestCursorExpirationAndSlidingTTL(t *testing.T) {
 	now := time.Unix(100, 0)
 	store := newCursorStore(func() time.Time { return now })
 	key := cursorKey{Generation: 1, Alias: "iterative", SessionID: "a"}
 	available := map[string]struct{}{"codex": {}, "claude": {}}
-	first, _, _ := store.selectTarget(key, testSequence(), available, time.Minute, false)
-	generated, _, _ := store.selectTarget(key, testSequence(), available, time.Minute, true)
-	if first != generated {
-		t.Fatalf("peek = %#v, generation = %#v", first, generated)
+	first, firstIndex, _ := store.selectTarget(key, testSequence(), available, time.Minute, false)
+	second, secondIndex, _ := store.selectTarget(key, testSequence(), available, time.Minute, false)
+	if firstIndex != 0 || secondIndex != 1 || first.Model != "terra" || second.Model != "terra" {
+		t.Fatalf("successive selections = %#v@%d / %#v@%d", first, firstIndex, second, secondIndex)
 	}
 	now = now.Add(30 * time.Second)
 	_, _, _ = store.selectTarget(key, testSequence(), available, time.Minute, false)
 	now = now.Add(31 * time.Second)
-	next, index, _ := store.selectTarget(key, testSequence(), available, time.Minute, true)
-	if index != 1 || next.Model != "terra" {
-		t.Fatalf("sliding TTL selection = %#v at %d, want position 1", next, index)
+	next, index, _ := store.selectTarget(key, testSequence(), available, time.Minute, false)
+	if index != 3 || next.Model != "opus" {
+		t.Fatalf("sliding TTL selection = %#v at %d, want position 3", next, index)
 	}
 	now = now.Add(time.Minute)
-	restarted, index, _ := store.selectTarget(key, testSequence(), available, time.Minute, true)
+	restarted, index, _ := store.selectTarget(key, testSequence(), available, time.Minute, false)
 	if index != 0 || restarted.Model != "terra" {
 		t.Fatalf("expired selection = %#v at %d, want restart", restarted, index)
 	}
 }
 
-func TestRandomStartChosenOnceAndPeekedWithoutAdvancing(t *testing.T) {
+func TestRandomStartChosenOnceThenAdvances(t *testing.T) {
 	store := newCursorStore(nil)
 	randomCalls := 0
 	store.random = func(limit int) int {
@@ -76,12 +76,11 @@ func TestRandomStartChosenOnceAndPeekedWithoutAdvancing(t *testing.T) {
 	key := cursorKey{Generation: 1, Alias: "random", SessionID: "a"}
 	available := map[string]struct{}{"codex": {}, "claude": {}}
 
-	peeked, peekIndex, okPeek := store.selectTarget(key, testSequence(), available, time.Hour, false, true)
-	generated, generatedIndex, okGenerated := store.selectTarget(key, testSequence(), available, time.Hour, true, true)
-	if !okPeek || !okGenerated || peekIndex != 3 || generatedIndex != 3 || peeked.Model != "opus" || generated != peeked {
-		t.Fatalf("peek/generation = %#v@%d / %#v@%d", peeked, peekIndex, generated, generatedIndex)
+	first, firstIndex, okFirst := store.selectTarget(key, testSequence(), available, time.Hour, true)
+	if !okFirst || firstIndex != 3 || first.Model != "opus" {
+		t.Fatalf("random start selection = %#v@%d", first, firstIndex)
 	}
-	next, nextIndex, okNext := store.selectTarget(key, testSequence(), available, time.Hour, true, true)
+	next, nextIndex, okNext := store.selectTarget(key, testSequence(), available, time.Hour, true)
 	if !okNext || nextIndex != 0 || next.Model != "terra" {
 		t.Fatalf("next = %#v@%d", next, nextIndex)
 	}
@@ -99,8 +98,8 @@ func TestRandomStartIsIndependentPerConversation(t *testing.T) {
 		return start
 	}
 	available := map[string]struct{}{"codex": {}, "claude": {}}
-	_, firstIndex, _ := store.selectTarget(cursorKey{Generation: 1, Alias: "random", SessionID: "a"}, testSequence(), available, time.Hour, true, true)
-	_, secondIndex, _ := store.selectTarget(cursorKey{Generation: 1, Alias: "random", SessionID: "b"}, testSequence(), available, time.Hour, true, true)
+	_, firstIndex, _ := store.selectTarget(cursorKey{Generation: 1, Alias: "random", SessionID: "a"}, testSequence(), available, time.Hour, true)
+	_, secondIndex, _ := store.selectTarget(cursorKey{Generation: 1, Alias: "random", SessionID: "b"}, testSequence(), available, time.Hour, true)
 	if firstIndex != 2 || secondIndex != 3 {
 		t.Fatalf("random starts = %d/%d", firstIndex, secondIndex)
 	}
@@ -118,9 +117,9 @@ func TestRandomStartIsChosenAgainAfterExpiration(t *testing.T) {
 	available := map[string]struct{}{"codex": {}, "claude": {}}
 	key := cursorKey{Generation: 1, Alias: "random", SessionID: "a"}
 
-	_, firstIndex, _ := store.selectTarget(key, testSequence(), available, time.Minute, true, true)
+	_, firstIndex, _ := store.selectTarget(key, testSequence(), available, time.Minute, true)
 	now = now.Add(time.Minute)
-	_, secondIndex, _ := store.selectTarget(key, testSequence(), available, time.Minute, true, true)
+	_, secondIndex, _ := store.selectTarget(key, testSequence(), available, time.Minute, true)
 	if firstIndex != 1 || secondIndex != 3 {
 		t.Fatalf("random starts before/after expiration = %d/%d", firstIndex, secondIndex)
 	}
@@ -166,7 +165,7 @@ func TestCursorConcurrentReservationsPreserveCounts(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			target, _, ok := store.selectTarget(key, testSequence(), available, time.Hour, true)
+			target, _, ok := store.selectTarget(key, testSequence(), available, time.Hour, false)
 			if !ok {
 				t.Error("selection failed")
 				return
@@ -187,8 +186,8 @@ func TestConfigurationGenerationIsolated(t *testing.T) {
 	available := map[string]struct{}{"codex": {}, "claude": {}}
 	oldKey := cursorKey{Generation: 1, Alias: "iterative", SessionID: "a"}
 	newKey := cursorKey{Generation: 2, Alias: "iterative", SessionID: "a"}
-	_, _, _ = store.selectTarget(oldKey, testSequence(), available, time.Hour, true)
-	target, index, _ := store.selectTarget(newKey, testSequence(), available, time.Hour, true)
+	_, _, _ = store.selectTarget(oldKey, testSequence(), available, time.Hour, false)
+	target, index, _ := store.selectTarget(newKey, testSequence(), available, time.Hour, false)
 	if index != 0 || target.Model != "terra" {
 		t.Fatalf("new generation selection = %#v at %d", target, index)
 	}

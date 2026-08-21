@@ -21,7 +21,7 @@ func (r *runtimeState) routeWithCallback(req pluginapi.ModelRouteRequest, hostCa
 		return pluginapi.ModelRouteResponse{Handled: false}
 	}
 	requested := strings.TrimSpace(req.RequestedModel)
-	requestedBase, requestedSuffix, hasRequestedSuffix := parseSupportedThinkingSuffix(requested)
+	requestedBase, requestedSuffix, _ := parseSupportedEffortSuffix(requested)
 	alias := cfg.ByLookup[normalizedAliasKey(requestedBase)]
 	if alias == nil {
 		return pluginapi.ModelRouteResponse{Handled: false}
@@ -54,17 +54,14 @@ func (r *runtimeState) routeWithCallback(req pluginapi.ModelRouteRequest, hostCa
 		}, hostCallbackID)
 		return pluginapi.ModelRouteResponse{Handled: false}
 	}
-	targetModel := selected.Model
-	_, _, targetHasSuffix := parseSupportedThinkingSuffix(targetModel)
-	if hasRequestedSuffix && !targetHasSuffix {
-		targetModel += "(" + requestedSuffix + ")"
-	}
+	targetModel := selected.effectiveModel(requestedSuffix)
 
 	// A conversation cursor reserved and moved one sequence position; stateless routing moves none.
 	advanced := sessionID != ""
 	fields := map[string]any{
 		"alias": alias.Alias, "sequence_index": index, "provider": selected.Provider,
 		"model": targetModel, "advanced": advanced, "random_start": alias.RandomStart,
+		"requested_effort": requestedSuffix,
 	}
 	if sessionID != "" {
 		fields["session_hash"] = shortSessionHash(sessionID)
@@ -101,7 +98,7 @@ func (r *runtimeState) routeWithCallback(req pluginapi.ModelRouteRequest, hostCa
 			}
 		}
 	}
-	r.log("debug", "model-sequence-router: selected target", fields, hostCallbackID)
+	r.log("debug", routeSummary(alias.Alias, index, requestedSuffix), fields, hostCallbackID)
 	return pluginapi.ModelRouteResponse{
 		Handled:     true,
 		TargetKind:  pluginapi.ModelRouteTargetProvider,
@@ -109,6 +106,20 @@ func (r *runtimeState) routeWithCallback(req pluginapi.ModelRouteRequest, hostCa
 		TargetModel: targetModel,
 		Reason:      routeReason,
 	}
+}
+
+// routeSummary renders the alias, the sequence position, and the caller's
+// requested effort into the log message. A host prints the message verbatim
+// while selecting only a subset of the structured fields, so carrying these
+// values in the message keeps a route decision readable on any host.
+func routeSummary(alias string, index int, requestedSuffix string) string {
+	var requested string
+	if requestedSuffix == "" {
+		requested = "unset"
+	} else {
+		requested = requestedSuffix
+	}
+	return fmt.Sprintf("model-sequence-router: selected target alias=%s position=%d requested=%s", alias, index, requested)
 }
 
 func uniqueProviders(sequence []compiledTarget) []string {

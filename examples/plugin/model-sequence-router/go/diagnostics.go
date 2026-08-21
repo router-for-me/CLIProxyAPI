@@ -359,7 +359,7 @@ func (r *runtimeState) handleUsage(record pluginapi.UsageRecord) {
 	if cfg == nil || !cfg.Enabled {
 		return
 	}
-	aliasBase, _, _ := parseSupportedThinkingSuffix(strings.TrimSpace(record.Alias))
+	aliasBase, _, _ := parseSupportedEffortSuffix(strings.TrimSpace(record.Alias))
 	if cfg.ByLookup[normalizedAliasKey(aliasBase)] == nil {
 		return
 	}

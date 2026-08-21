@@ -37,7 +37,7 @@ func TestRPCRegistrationRouteReconfigureAndShutdown(t *testing.T) {
 	if errUnmarshal := json.Unmarshal(wrapped.Result, &route); errUnmarshal != nil {
 		t.Fatal(errUnmarshal)
 	}
-	if !route.Handled || route.ResponseModel != "routed" {
+	if !route.Handled || route.TargetModel != "terra" {
 		t.Fatalf("route = %#v", route)
 	}
 	before := runtimePlugin.loadedConfig()
