@@ -32,7 +32,7 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
 	}
 	if input := root.Get("input"); input.Exists() {
-		out = setResponsesInputOnInteractions(out, input)
+		out = setResponsesInputOnInteractions(out, input, isAntigravityModel(model))
 	}
 	out = appendResponsesToolsToInteractions(out, root.Get("tools"), isAntigravityModel(model))
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
@@ -197,20 +197,20 @@ func interactionsThinkingEffort(root gjson.Result) string {
 	return ""
 }
 
-func setResponsesInputOnInteractions(out []byte, input gjson.Result) []byte {
+func setResponsesInputOnInteractions(out []byte, input gjson.Result, forAntigravity bool) []byte {
 	functionNamesByCallID := make(map[string]string)
 	items := make([][]byte, 0)
 	if input.Type == gjson.String {
 		items = append(items, interactionsTextStep("user_input", input.String()))
 	} else if input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
-			if converted := responsesInputItemToInteractions(item, functionNamesByCallID); converted != nil {
+			if converted := responsesInputItemToInteractions(item, functionNamesByCallID, forAntigravity); converted != nil {
 				items = append(items, converted)
 			}
 			return true
 		})
 	} else if input.IsObject() {
-		if converted := responsesInputItemToInteractions(input, functionNamesByCallID); converted != nil {
+		if converted := responsesInputItemToInteractions(input, functionNamesByCallID, forAntigravity); converted != nil {
 			items = append(items, converted)
 		}
 	}
@@ -220,7 +220,7 @@ func setResponsesInputOnInteractions(out []byte, input gjson.Result) []byte {
 	return out
 }
 
-func responsesInputItemToInteractions(item gjson.Result, functionNamesByCallID map[string]string) []byte {
+func responsesInputItemToInteractions(item gjson.Result, functionNamesByCallID map[string]string, forAntigravity bool) []byte {
 	switch item.Get("type").String() {
 	case "message":
 		stepType := "user_input"
@@ -239,7 +239,7 @@ func responsesInputItemToInteractions(item gjson.Result, functionNamesByCallID m
 		}
 		return responsesFunctionCallToInteractions(item)
 	case "function_call_output":
-		return responsesFunctionOutputToInteractions(item, functionNamesByCallID)
+		return responsesFunctionOutputToInteractions(item, functionNamesByCallID, forAntigravity)
 	case "input_text", "output_text", "text":
 		stepType := "user_input"
 		if item.Get("type").String() == "output_text" {
@@ -338,7 +338,7 @@ func responsesFunctionCallToInteractions(item gjson.Result) []byte {
 	return out
 }
 
-func responsesFunctionOutputToInteractions(item gjson.Result, functionNamesByCallID map[string]string) []byte {
+func responsesFunctionOutputToInteractions(item gjson.Result, functionNamesByCallID map[string]string, forAntigravity bool) []byte {
 	out := []byte(`{"type":"function_result","name":"","result":{}}`)
 	callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String())
 	if name := item.Get("name").String(); name != "" {
@@ -352,6 +352,20 @@ func responsesFunctionOutputToInteractions(item gjson.Result, functionNamesByCal
 	result := item.Get("output")
 	if !result.Exists() {
 		result = item.Get("result")
+	}
+	if forAntigravity && result.Exists() && result.Type == gjson.String {
+		// Google's antigravity Interactions endpoint rejects a bare-string
+		// function_result.result. Mirror the Chat Completions converter: send
+		// valid JSON raw, otherwise wrap the text in a structured object.
+		raw := strings.TrimSpace(result.String())
+		if raw != "" && gjson.Valid(raw) && !(strings.HasPrefix(raw, "\"") && strings.HasSuffix(raw, "\"")) {
+			out, _ = sjson.SetRawBytes(out, "result", []byte(raw))
+			return out
+		}
+		wrapped := `{}`
+		wrapped, _ = sjson.Set(wrapped, "result", result.String())
+		out, _ = sjson.SetRawBytes(out, "result", []byte(wrapped))
+		return out
 	}
 	setJSONValue(&out, "result", result, []byte(`{}`))
 	return out

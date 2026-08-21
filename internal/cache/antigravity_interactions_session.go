@@ -29,7 +29,12 @@ const AntigravityInteractionsCacheEvictBatchSize = 64
 type AntigravityInteractionsState struct {
 	InteractionID string
 	EnvironmentID string
-	UpdatedAt     time.Time
+	// ToolNames maps upstream call_id -> function name observed on the prior
+	// interaction. Responses tool loops send function_call_output with only
+	// call_id + output (no name), so the continuation rewrite needs this map
+	// to fill the required function_result.name.
+	ToolNames map[string]string `json:"tool_names,omitempty"`
+	UpdatedAt time.Time
 }
 
 type antigravityInteractionsEntry struct {

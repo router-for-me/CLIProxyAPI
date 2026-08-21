@@ -63,6 +63,30 @@ func goframeCacheAntigravityInteractionsState(ctx context.Context, modelName str
 		if state.EnvironmentID == "" {
 			state.EnvironmentID = existing.EnvironmentID
 		}
+		state.ToolNames = existing.ToolNames
+	}
+	// Record call_id -> function name from any function_call steps in this
+	// payload so a later Responses-style tool-result turn (call_id + output
+	// only) can still be given the required function_result.name.
+	if gjson.GetBytes(payload, "steps").IsArray() {
+		names := map[string]string{}
+		for k, v := range state.ToolNames {
+			names[k] = v
+		}
+		gjson.GetBytes(payload, "steps").ForEach(func(_, step gjson.Result) bool {
+			if !strings.EqualFold(strings.TrimSpace(step.Get("type").String()), "function_call") {
+				return true
+			}
+			callID := strings.TrimSpace(step.Get("id").String())
+			name := strings.TrimSpace(step.Get("name").String())
+			if callID != "" && name != "" {
+				names[callID] = name
+			}
+			return true
+		})
+		if len(names) > 0 {
+			state.ToolNames = names
+		}
 	}
 	internalcache.CacheAntigravityInteractionsStateBestEffort(ctx, modelName, sessionKey, state)
 	log.Debugf("antigravity interactions state: cached model=%s session=%s interaction=%s env=%s", modelName, sessionKey, state.InteractionID, state.EnvironmentID)
@@ -248,7 +272,14 @@ func goframeApplyAntigravityInteractionsContinuation(ctx context.Context, modelN
 			result := []byte(item.Raw)
 			if strings.TrimSpace(item.Get("name").String()) == "" {
 				callID := strings.TrimSpace(item.Get("call_id").String())
-				if name := namesByCallID[callID]; name != "" {
+				name := namesByCallID[callID]
+				if name == "" {
+					// Responses tool loops do not replay the function_call,
+					// so fall back to the cached call_id -> name mapping
+					// captured from the prior upstream interaction.
+					name = state.ToolNames[callID]
+				}
+				if name != "" {
 					result, _ = sjson.SetBytes(result, "name", name)
 				}
 			}
