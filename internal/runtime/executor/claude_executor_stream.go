@@ -94,6 +94,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
+	// If cloaking obfuscated the upstream body, cached assistant content must be
+	// obfuscated with the same words before the replay match/restore runs.
+	_, cloakSettings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
+	if len(cloakSettings.sensitiveWords) > 0 && len(replayContents) > 0 {
+		replayContents = obfuscateClaudeThinkingReplayContents(replayContents, cloakSettings.sensitiveWords)
+	}
 	systemPlacementState := captureClaudeCodeSystemPlacement(bodyBeforeCloaking, body, cloaked)
 	// Only the Messages endpoint on Anthropic itself was captured; count_tokens
 	// keeps its own shape and other gateways never see this field.

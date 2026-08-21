@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"hash"
+	"net/http"
 	"strings"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -40,20 +41,16 @@ func ClaudeThinkingReplayConversationSessionKey(auth *cliproxyauth.Auth, req cli
 	hashString(h, metadataString(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey))
 	hashString(h, metadataString(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey))
 
-	if opts.Headers != nil {
-		hashString(h, opts.Headers.Get("User-Agent"))
-		hashString(h, opts.Headers.Get("X-App"))
-		hashString(h, opts.Headers.Get("X-Codex-Client-Id"))
-	} else {
-		hashString(h, "")
-		hashString(h, "")
-		hashString(h, "")
-	}
+	// Read identity headers case-insensitively so callers that supply lowercase
+	// keys (e.g. x-codex-client-id) are not collapsed with missing values.
+	hashString(h, headerFirstValue(opts.Headers, "User-Agent"))
+	hashString(h, headerFirstValue(opts.Headers, "X-App"))
+	hashString(h, headerFirstValue(opts.Headers, "X-Codex-Client-Id"))
 
 	if len(req.Payload) == 0 {
 		return ""
 	}
-	for _, path := range []string{"messages.0", "system", "tools"} {
+	for _, path := range []string{"messages.0", "system"} {
 		part := gjson.GetBytes(req.Payload, path)
 		if !part.Exists() {
 			hashBytes(h, nil)
@@ -66,6 +63,20 @@ func ClaudeThinkingReplayConversationSessionKey(auth *cliproxyauth.Auth, req cli
 		}
 	}
 	return "conversation:" + hex.EncodeToString(h.Sum(nil)[:16])
+}
+
+// headerFirstValue returns the first value for key from headers, matching the
+// key case-insensitively to tolerate callers that use lowercase header names.
+func headerFirstValue(headers http.Header, key string) string {
+	if headers == nil {
+		return ""
+	}
+	for k, vv := range headers {
+		if strings.EqualFold(k, key) && len(vv) > 0 {
+			return vv[0]
+		}
+	}
+	return ""
 }
 
 // hashString writes s to h as a length-prefixed UTF-8 string so adjacent

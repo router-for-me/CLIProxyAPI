@@ -125,20 +125,15 @@ func kimiThinkingReplayContentIsReplayable(content []byte) bool {
 		return false
 	}
 	hasSignedThinking := false
-	hasToolUse := false
 	for _, part := range root.Array() {
 		switch strings.TrimSpace(part.Get("type").String()) {
 		case "thinking":
 			if strings.TrimSpace(part.Get("signature").String()) != "" {
 				hasSignedThinking = true
 			}
-		case "tool_use":
-			if strings.TrimSpace(part.Get("id").String()) != "" {
-				hasToolUse = true
-			}
 		}
 	}
-	return hasSignedThinking && hasToolUse
+	return hasSignedThinking
 }
 
 func restoreKimiThinkingReplayContent(body, cachedContent []byte) ([]byte, bool) {
@@ -244,7 +239,6 @@ func kimiNonThinkingContentParts(content gjson.Result) ([][]byte, bool) {
 		return nil, false
 	}
 	parts := make([][]byte, 0, len(content.Array()))
-	hasToolUse := false
 	for _, part := range content.Array() {
 		switch strings.TrimSpace(part.Get("type").String()) {
 		case "thinking", "redacted_thinking":
@@ -253,7 +247,6 @@ func kimiNonThinkingContentParts(content gjson.Result) ([][]byte, bool) {
 			if strings.TrimSpace(part.Get("id").String()) == "" {
 				return nil, false
 			}
-			hasToolUse = true
 		}
 		canonical, ok := kimiCanonicalJSON([]byte(part.Raw))
 		if !ok {
@@ -261,7 +254,7 @@ func kimiNonThinkingContentParts(content gjson.Result) ([][]byte, bool) {
 		}
 		parts = append(parts, canonical)
 	}
-	return parts, hasToolUse
+	return parts, true
 }
 
 func kimiCanonicalPartsEqual(left, right [][]byte) bool {

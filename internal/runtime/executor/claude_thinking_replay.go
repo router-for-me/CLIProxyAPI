@@ -78,6 +78,30 @@ func claudeThinkingReplayModelFamily(auth *cliproxyauth.Auth, model string) stri
 	return "claude:" + hex.EncodeToString(sum[:8]) + ":" + baseModel
 }
 
+// obfuscateClaudeThinkingReplayContents applies the same sensitive-word
+// obfuscation to cached assistant content that applyCloaking applies to the
+// upstream body. This lets the post-cloak replay match compare like-for-like
+// bytes instead of failing because the caller body is obfuscated and the cache
+// is not.
+func obfuscateClaudeThinkingReplayContents(contents [][]byte, words []string) [][]byte {
+	matcher := helps.BuildSensitiveWordMatcher(words)
+	if matcher == nil {
+		return contents
+	}
+	out := make([][]byte, len(contents))
+	for i, content := range contents {
+		wrapper, _ := sjson.SetRawBytes([]byte(`{"messages":[{"role":"assistant"}]}`), "messages.0.content", content)
+		obfuscated := helps.ObfuscateSensitiveWords(wrapper, matcher)
+		obfuscatedContent := gjson.GetBytes(obfuscated, "messages.0.content")
+		if !obfuscatedContent.Exists() {
+			out[i] = content
+			continue
+		}
+		out[i] = []byte(obfuscatedContent.Raw)
+	}
+	return out
+}
+
 // prepareClaudeThinkingReplayRequest loads cached assistant content for this
 // request and strips any client-supplied _cliproxy_replay_provenance markers
 // from req.Payload. The actual restore is applied to bodyForUpstream after
