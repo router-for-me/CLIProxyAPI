@@ -826,12 +826,23 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
 							if !disableCooling {
-								if result.RetryAfter != nil && (*result.RetryAfter <= 0 || result.TransientRateLimit) {
-									// Zero-delay retries and 429s the provider classified as a short-lived
-									// rate limit keep their hint verbatim: flooring them at the quota ladder
-									// would park a still-usable credential for up to the full ladder step.
+								switch {
+								case result.TransientRateLimit:
+									// A 429 the provider classified as a short-lived rate limit bypasses
+									// the quota ladder entirely: flooring a transient throttle at the
+									// escalating ladder would park a still-usable credential. With no
+									// parseable hint, fall back to the standard transient-error cooldown.
+									if result.RetryAfter != nil {
+										next = now.Add(*result.RetryAfter)
+									} else {
+										next = nextTransientErrorRetryAfter(now)
+									}
+								case result.RetryAfter != nil && *result.RetryAfter <= 0:
+									// Zero-delay retries keep their hint verbatim: flooring them at the
+									// quota ladder would park a still-usable credential for up to the
+									// full ladder step.
 									next = now.Add(*result.RetryAfter)
-								} else {
+								default:
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
 									if result.RetryAfter != nil {
 										// An exhausted-quota hint can be sub-second even when the quota is gone
@@ -1963,12 +1974,22 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.Quota.Reason = "quota"
 		var next time.Time
 		if !disableCooling {
-			if retryAfter != nil && (*retryAfter <= 0 || transientRateLimit) {
-				// Zero-delay retries and 429s the provider classified as a short-lived rate
-				// limit keep their hint verbatim: flooring them at the quota ladder would park
-				// a still-usable credential for up to the full ladder step.
+			switch {
+			case transientRateLimit:
+				// A 429 the provider classified as a short-lived rate limit bypasses the
+				// quota ladder entirely: flooring a transient throttle at the escalating
+				// ladder would park a still-usable credential. With no parseable hint,
+				// fall back to the standard transient-error cooldown.
+				if retryAfter != nil {
+					next = now.Add(*retryAfter)
+				} else {
+					next = nextTransientErrorRetryAfter(now)
+				}
+			case retryAfter != nil && *retryAfter <= 0:
+				// Zero-delay retries keep their hint verbatim: flooring them at the quota
+				// ladder would park a still-usable credential for up to the full ladder step.
 				next = now.Add(*retryAfter)
-			} else {
+			default:
 				next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
 				if retryAfter != nil {
 					// An exhausted-quota hint can be sub-second even when the quota is gone for
