@@ -25,6 +25,8 @@ type kimiThinkingReplayScope struct {
 	snapshot      internalcache.KimiThinkingReplaySnapshot
 	cacheReady    bool
 	replayApplied bool
+	fallbackKey   bool
+	callerHash    string
 }
 
 func (s kimiThinkingReplayScope) valid() bool {

@@ -61,6 +61,13 @@ var (
 	claudeThinkingReplayMu         sync.Mutex
 	claudeThinkingReplayEntries    = make(map[string]claudeThinkingReplayEntry)
 	claudeThinkingReplayTotalBytes int
+
+	claudeThinkingReplayAliasMu sync.RWMutex
+	// claudeThinkingReplayAliases maps a per-model message hash to the
+	// conversation-scoped session key that first saw it. This lets sessionless
+	// clients compact history without orphaning the replay cache: the first
+	// remaining message in a truncated request can resolve the original scope.
+	claudeThinkingReplayAliases = make(map[string]string)
 )
 
 var currentClaudeThinkingReplayKVClient = func() (kimiThinkingReplayKVClient, bool, error) {
@@ -274,12 +281,51 @@ func DeleteClaudeThinkingReplayRequired(ctx context.Context, modelFamily, sessio
 	return nil
 }
 
-// ClearClaudeThinkingReplayCache clears only Claude replay state.
+// ClearClaudeThinkingReplayCache clears only Claude replay state and its
+// message-to-scope aliases.
 func ClearClaudeThinkingReplayCache() {
 	claudeThinkingReplayMu.Lock()
 	claudeThinkingReplayEntries = make(map[string]claudeThinkingReplayEntry)
 	claudeThinkingReplayTotalBytes = 0
 	claudeThinkingReplayMu.Unlock()
+
+	claudeThinkingReplayAliasMu.Lock()
+	claudeThinkingReplayAliases = make(map[string]string)
+	claudeThinkingReplayAliasMu.Unlock()
+}
+
+// RegisterClaudeThinkingReplayAlias records that a request message belongs to a
+// specific conversation scope. Compacted requests can later resolve the same
+// scope through one of their remaining messages.
+func RegisterClaudeThinkingReplayAlias(modelFamily, sessionKey, messageHash string) {
+	if modelFamily == "" || sessionKey == "" || messageHash == "" {
+		return
+	}
+	key := claudeThinkingReplayAliasKey(modelFamily, messageHash)
+	claudeThinkingReplayAliasMu.Lock()
+	defer claudeThinkingReplayAliasMu.Unlock()
+	claudeThinkingReplayAliases[key] = sessionKey
+}
+
+// ResolveClaudeThinkingReplaySessionKey looks for an existing conversation scope
+// that any of the provided message hashes belongs to. This is used by the
+// sessionless fallback when messages.0 has changed due to compaction.
+func ResolveClaudeThinkingReplaySessionKey(modelFamily string, messageHashes []string) (string, bool) {
+	if modelFamily == "" || len(messageHashes) == 0 {
+		return "", false
+	}
+	claudeThinkingReplayAliasMu.RLock()
+	defer claudeThinkingReplayAliasMu.RUnlock()
+	for _, h := range messageHashes {
+		if sessionKey, ok := claudeThinkingReplayAliases[claudeThinkingReplayAliasKey(modelFamily, h)]; ok {
+			return sessionKey, true
+		}
+	}
+	return "", false
+}
+
+func claudeThinkingReplayAliasKey(modelFamily, messageHash string) string {
+	return strings.Join([]string{modelFamily, messageHash}, "\x00")
 }
 
 func readOrReserveClaudeThinkingReplayHomeValue(ctx context.Context, client kimiThinkingReplayKVClient, key string) ([]byte, error) {
