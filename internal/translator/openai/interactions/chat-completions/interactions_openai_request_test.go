@@ -160,11 +160,11 @@ func TestConvertOpenAIRequestToInteractionsRenamesConflictingAntigravityTools(t 
 		{"type":"function","function":{"name":"web_search","description":"s","parameters":{"type":"object"}}}
 	]}`)
 	out := ConvertOpenAIRequestToInteractions("antigravity-preview-05-2026", raw, false)
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "hermes_read_file" {
-		t.Fatalf("tools.0.name = %q, want hermes_read_file. Output: %s", got, string(out))
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "external_read_file" {
+		t.Fatalf("tools.0.name = %q, want external_read_file. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "hermes_write_file" {
-		t.Fatalf("tools.1.name = %q, want hermes_write_file. Output: %s", got, string(out))
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "external_write_file" {
+		t.Fatalf("tools.1.name = %q, want external_write_file. Output: %s", got, string(out))
 	}
 	if got := gjson.GetBytes(out, "tools.2.name").String(); got != "web_search" {
 		t.Fatalf("tools.2.name = %q, want web_search (unchanged). Output: %s", got, string(out))
@@ -175,8 +175,8 @@ func TestConvertOpenAIRequestToInteractionsRenamesConflictingAntigravityTools(t 
 		t.Fatalf("gemini tools.0.name = %q, want read_file (no rename). Output: %s", got, string(out))
 	}
 	// Round-trip: upstream name maps back to the client name.
-	if got := antigravityUpstreamToolNameToClient("hermes_read_file"); got != "read_file" {
-		t.Fatalf("antigravityUpstreamToolNameToClient(hermes_read_file) = %q, want read_file", got)
+	if got := antigravityUpstreamToolNameToClient("external_read_file"); got != "read_file" {
+		t.Fatalf("antigravityUpstreamToolNameToClient(external_read_file) = %q, want read_file", got)
 	}
 }
 

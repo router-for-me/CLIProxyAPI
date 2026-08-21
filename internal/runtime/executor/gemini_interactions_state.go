@@ -2,6 +2,8 @@ package executor
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
@@ -51,6 +53,38 @@ func goframeCacheAntigravityInteractionsState(ctx context.Context, modelName str
 	log.Debugf("antigravity interactions state: cached model=%s session=%s interaction=%s env=%s", modelName, sessionKey, interactionID, envID)
 }
 
+// antigravityConversationPrefixKey derives a continuity key from an OpenAI
+// chat/completions body that carries no explicit session identifier. It hashes
+// the stable conversation prefix: every message up to and including the LAST
+// user message. The initial tool-calling turn ([system, user]) and its
+// tool-result continuation ([system, user, assistant(tool_calls), tool])
+// share this prefix, so both map to the same key while a new user turn starts
+// a fresh one.
+func antigravityConversationPrefixKey(raw []byte) string {
+	msgs := gjson.GetBytes(raw, "messages")
+	if !msgs.IsArray() {
+		return ""
+	}
+	var prefix []string
+	lastUser := -1
+	msgs.ForEach(func(_, msg gjson.Result) bool {
+		prefix = append(prefix, msg.Raw)
+		if strings.EqualFold(strings.TrimSpace(msg.Get("role").String()), "user") {
+			lastUser = len(prefix) - 1
+		}
+		return true
+	})
+	if lastUser < 0 {
+		return ""
+	}
+	hasher := sha256.New()
+	for i := 0; i <= lastUser; i++ {
+		hasher.Write([]byte(prefix[i]))
+		hasher.Write([]byte{0})
+	}
+	return "chat:" + hex.EncodeToString(hasher.Sum(nil))[:16]
+}
+
 // antigravityExecSessionKey derives a stable continuity key for the agent
 // conversation. It mirrors the reasoning-replay scope derivation but stays
 // independent so the interactions-agent cache never collides with the OAuth /
@@ -71,6 +105,19 @@ func antigravityExecSessionKey(opts cliproxyexecutor.Options, originalRequest []
 	}
 	if value := metadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
 		return "execution:" + value
+	}
+	// Fallback for chat/completions clients (e.g. Hermes delegation) that send
+	// no explicit session marker: derive a stable key from the conversation
+	// prefix. Antigravity function calling is stateful-only upstream, so
+	// without this key the proxy could never attach previous_interaction_id to
+	// the tool-result turn.
+	for _, raw := range [][]byte{opts.OriginalRequest, originalRequest} {
+		if len(raw) == 0 {
+			continue
+		}
+		if key := antigravityConversationPrefixKey(raw); key != "" {
+			return key
+		}
 	}
 	return ""
 }

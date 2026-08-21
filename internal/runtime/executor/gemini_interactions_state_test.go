@@ -101,3 +101,59 @@ func TestGoframeApplyNoContinuation(t *testing.T) {
 		t.Fatalf("expected unchanged body, got %s", string(out))
 	}
 }
+
+// TestAntigravityConversationPrefixKeyFallback verifies the chat/completions
+// fallback: a client that sends no Session-Id/session_id still gets a stable
+// continuity key, because the tool-result turn shares the conversation prefix
+// (everything up to the last user message) with the initial turn.
+func TestAntigravityConversationPrefixKeyFallback(t *testing.T) {
+	internalcache.ClearAntigravityInteractionsCache()
+	const model = "antigravity-preview-05-2026"
+
+	turn1 := []byte(`{"model":"antigravity","messages":[
+		{"role":"system","content":"You are helpful."},
+		{"role":"user","content":"Summarize /tmp/x"}
+	]}`)
+	turn2 := []byte(`{"model":"antigravity","messages":[
+		{"role":"system","content":"You are helpful."},
+		{"role":"user","content":"Summarize /tmp/x"},
+		{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"/tmp/x\"}"}}]},
+		{"role":"tool","tool_call_id":"c1","content":"file body"}
+	]}`)
+
+	opts := cliproxyexecutor.Options{} // no headers, no metadata
+	key1 := antigravityExecSessionKey(opts, turn1)
+	key2 := antigravityExecSessionKey(opts, turn2)
+	if key1 == "" || key2 == "" {
+		t.Fatalf("expected non-empty fallback keys, got %q and %q", key1, key2)
+	}
+	if key1 != key2 {
+		t.Fatalf("prefix keys diverged: turn1=%q turn2=%q", key1, key2)
+	}
+
+	// Cache under turn1's key, then confirm continuation resolves via turn2.
+	payload := []byte(`{"id":"inter_fb","environment_id":"env_fb"}`)
+	goframeCacheAntigravityInteractionsState(context.Background(), model, turn1, opts, payload)
+
+	body := []byte(`{
+		"agent":"` + model + `",
+		"input":[{"type":"function_result","name":"read_file","call_id":"c1","result":"file body"}]
+	}`)
+	out := goframeApplyAntigravityInteractionsContinuation(context.Background(), model, turn2, opts, body)
+	root := gjson.ParseBytes(out)
+	if got := root.Get("previous_interaction_id").String(); got != "inter_fb" {
+		t.Errorf("previous_interaction_id = %q, want inter_fb (continuation must resolve via prefix key)", got)
+	}
+	if got := root.Get("environment").String(); got != "env_fb" {
+		t.Errorf("environment = %q, want env_fb", got)
+	}
+
+	// A NEW user message must start a fresh key.
+	turn3 := []byte(`{"model":"antigravity","messages":[
+		{"role":"system","content":"You are helpful."},
+		{"role":"user","content":"Different question"}
+	]}`)
+	if key3 := antigravityExecSessionKey(opts, turn3); key3 == key1 {
+		t.Fatalf("new user turn must produce a different session key")
+	}
+}

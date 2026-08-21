@@ -320,11 +320,16 @@ func renameConflictingAntigravityToolName(tool []byte) []byte {
 }
 
 // antigravityToolNameToUpstream maps client-facing tool names to the names
-// actually sent to the antigravity Interactions API (prefixing built-in
-// collisions), and antigravityUpstreamToolNameToClient maps them back.
+// actually sent to the antigravity Interactions API, and
+// antigravityUpstreamToolNameToClient maps them back. Colliding names get an
+// "external_" prefix upstream (Google's antigravity agent ships its own
+// read_file/write_file sandbox tools; redefining them 500s) and are restored
+// to the client-facing name in every response path.
+const antigravityToolPrefix = "external_"
+
 var antigravityToolNameMap = map[string]string{
-	"read_file":  "hermes_read_file",
-	"write_file": "hermes_write_file",
+	"read_file":  "external_read_file",
+	"write_file": "external_write_file",
 }
 
 func antigravityToolNameToUpstream(name string) (string, bool) {
