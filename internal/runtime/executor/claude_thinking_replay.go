@@ -204,7 +204,27 @@ func restoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) (
 	if !messages.IsArray() {
 		return body, false
 	}
-	for i, message := range messages.Array() {
+	msgList := messages.Array()
+
+	// Anchor the match window to the first assistant message present in the
+	// incoming request. When clients compact or truncate earlier history, cached
+	// turns older than the first echoed assistant message must not be replayed
+	// into a later matching turn.
+	firstAssistant := -1
+	for i, message := range msgList {
+		if strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "assistant") {
+			firstAssistant = i
+			break
+		}
+	}
+	if firstAssistant >= 0 {
+		start := claudeThinkingReplayFindStartIndex(msgList[firstAssistant].Get("content"), cachedContents)
+		for j := 0; j < start; j++ {
+			consumed[j] = true
+		}
+	}
+
+	for i, message := range msgList {
 		if !strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "assistant") {
 			continue
 		}
@@ -216,32 +236,64 @@ func restoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) (
 			if consumed[j] {
 				continue
 			}
-			if kimiJSONEqual([]byte(currentContent.Raw), cachedContent) {
-				consumed[j] = true
-				break
-			}
-			cachedParts, ok := kimiNonThinkingContentParts(gjson.ParseBytes(cachedContent))
-			if !ok {
+			cached := gjson.ParseBytes(cachedContent)
+			if !claudeThinkingReplayContentsMatch(currentContent, cached) {
 				continue
 			}
-			currentParts, ok := kimiNonThinkingContentParts(currentContent)
-			if !ok || !kimiCanonicalPartsEqual(currentParts, cachedParts) {
-				continue
-			}
-			if kimiContentHasThinking(currentContent) && !kimiThinkingMatchesCachedIgnoringSignature(currentContent, gjson.ParseBytes(cachedContent)) {
-				continue
-			}
-			var errSet error
-			updated, errSet = sjson.SetRawBytes(updated, fmt.Sprintf("messages.%d.content", i), cachedContent)
-			if errSet != nil {
-				return body, false
+			if !kimiJSONEqual([]byte(currentContent.Raw), cachedContent) {
+				var errSet error
+				updated, errSet = sjson.SetRawBytes(updated, fmt.Sprintf("messages.%d.content", i), cachedContent)
+				if errSet != nil {
+					return body, false
+				}
+				restored = true
 			}
 			consumed[j] = true
-			restored = true
 			break
 		}
 	}
 	return updated, restored
+}
+
+// claudeThinkingReplayContentsMatch reports whether an incoming assistant
+// content array matches a cached assistant turn. It accepts exact equality or
+// non-thinking parts equal and, when the incoming content already contains a
+// thinking block, the thinking text matching the cached one.
+func claudeThinkingReplayContentsMatch(currentContent, cachedContent gjson.Result) bool {
+	if !currentContent.IsArray() || !cachedContent.IsArray() {
+		return false
+	}
+	if kimiJSONEqual([]byte(currentContent.Raw), []byte(cachedContent.Raw)) {
+		return true
+	}
+	cachedParts, ok := kimiNonThinkingContentParts(cachedContent)
+	if !ok {
+		return false
+	}
+	currentParts, ok := kimiNonThinkingContentParts(currentContent)
+	if !ok || !kimiCanonicalPartsEqual(currentParts, cachedParts) {
+		return false
+	}
+	if kimiContentHasThinking(currentContent) && !kimiThinkingMatchesCachedIgnoringSignature(currentContent, cachedContent) {
+		return false
+	}
+	return true
+}
+
+// claudeThinkingReplayFindStartIndex finds the index of the first cached turn
+// that matches the first assistant message present in the request. Cached
+// entries before this index are older than the client's oldest echoed
+// assistant message and must not be replayed into later turns.
+func claudeThinkingReplayFindStartIndex(firstContent gjson.Result, cachedContents [][]byte) int {
+	if !firstContent.IsArray() {
+		return 0
+	}
+	for j, cachedContent := range cachedContents {
+		if claudeThinkingReplayContentsMatch(firstContent, gjson.ParseBytes(cachedContent)) {
+			return j
+		}
+	}
+	return 0
 }
 
 func cacheClaudeThinkingReplayResponse(ctx context.Context, scope claudeThinkingReplayScope, response []byte) {

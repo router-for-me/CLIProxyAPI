@@ -1149,6 +1149,69 @@ func TestClaudeExecutorCompatThinkingReplayRetainsSignedTurnAfterUnsignedRespons
 	}
 }
 
+func TestRestoreClaudeThinkingReplayContents_AlignsAfterTruncatedHistory(t *testing.T) {
+	// Client drops the first assistant turn. The remaining sequence is a suffix
+	// of the conversation, so the first echoed assistant should align with the
+	// second cached turn, not the oldest one.
+	body := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"user","content":"continue"},{"role":"assistant","content":[{"type":"text","text":"second"}]},{"role":"user","content":"again"},{"role":"assistant","content":[{"type":"text","text":"third"}]},{"role":"user","content":"final"}]}`)
+	cached := [][]byte{
+		[]byte(`[{"type":"thinking","thinking":"first","signature":"sig-1"},{"type":"text","text":"first"}]`),
+		[]byte(`[{"type":"thinking","thinking":"second","signature":"sig-2"},{"type":"text","text":"second"}]`),
+		[]byte(`[{"type":"thinking","thinking":"third","signature":"sig-3"},{"type":"text","text":"third"}]`),
+	}
+
+	updated, restored := restoreClaudeThinkingReplayContents(body, cached)
+	if !restored {
+		t.Fatal("expected restore")
+	}
+
+	first := gjson.GetBytes(updated, "messages.2.content").Array()
+	if first[0].Get("signature").String() != "sig-2" {
+		t.Fatalf("first retained assistant matched wrong signature: %s", first[0].Get("signature").String())
+	}
+
+	second := gjson.GetBytes(updated, "messages.4.content").Array()
+	if second[0].Get("signature").String() != "sig-3" {
+		t.Fatalf("second retained assistant matched wrong signature: %s", second[0].Get("signature").String())
+	}
+
+	// The dropped first turn must not leak into the retained assistants.
+	if first[0].Get("thinking").String() == "first" || second[0].Get("thinking").String() == "first" {
+		t.Fatalf("dropped first turn leaked into retained assistants: %s", gjson.GetBytes(updated, "messages").Raw)
+	}
+}
+
+func TestRestoreClaudeThinkingReplayContents_SkipsUnsignedLeadingAssistant(t *testing.T) {
+	// Client dropped the first signed assistant and the leading assistant in the
+	// request is an unsigned new turn. No cached entry matches it, so matching
+	// must not start from an older cached turn and the later signed assistant
+	// should still align correctly.
+	body := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"text","text":"new unsigned"}]},{"role":"user","content":"again"},{"role":"assistant","content":[{"type":"text","text":"second"}]},{"role":"user","content":"final"}]}`)
+	cached := [][]byte{
+		[]byte(`[{"type":"thinking","thinking":"first","signature":"sig-1"},{"type":"text","text":"first"}]`),
+		[]byte(`[{"type":"thinking","thinking":"second","signature":"sig-2"},{"type":"text","text":"second"}]`),
+	}
+
+	updated, restored := restoreClaudeThinkingReplayContents(body, cached)
+	if !restored {
+		t.Fatal("expected restore")
+	}
+
+	unsigned := gjson.GetBytes(updated, "messages.1.content").Array()
+	if len(unsigned) != 1 || unsigned[0].Get("text").String() != "new unsigned" {
+		t.Fatalf("unsigned leading assistant content unexpectedly changed: %s", gjson.GetBytes(updated, "messages.1.content").Raw)
+	}
+
+	second := gjson.GetBytes(updated, "messages.3.content").Array()
+	if second[0].Get("signature").String() != "sig-2" {
+		t.Fatalf("later signed assistant matched wrong signature: %s", second[0].Get("signature").String())
+	}
+
+	if second[0].Get("thinking").String() == "first" {
+		t.Fatalf("dropped first signed turn leaked into later assistant: %s", gjson.GetBytes(updated, "messages.3.content").Raw)
+	}
+}
+
 func internalcacheClearClaudeThinkingReplay(t *testing.T) {
 	t.Helper()
 	internalcache.ClearClaudeThinkingReplayCache()
