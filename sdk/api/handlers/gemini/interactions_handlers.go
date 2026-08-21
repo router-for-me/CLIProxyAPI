@@ -15,7 +15,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const interactionsAgentAuthSelectionModel = "gemini-2.5-flash"
+const interactionsAgentAuthSelectionModel = "gemini-3.7-flash"
 
 type interactionsRequestTarget struct {
 	Model  string
