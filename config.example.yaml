@@ -195,6 +195,15 @@ video-result-auth-cache-ttl: "3h"
 # When > 0, overrides the default worker count (16).
 # auth-auto-refresh-workers: 16
 
+# Maximum number of scheduled OAuth/file-based auth refreshes per minute.
+# 0 keeps the legacy unlimited behavior. Request-triggered 401 refreshes are not limited.
+# auth-auto-refresh-max-per-minute: 0
+
+# Spread scheduled auth refreshes earlier by a deterministic per-auth offset.
+# This helps avoid synchronized refresh bursts when many credentials expire together.
+# 0 keeps the legacy schedule without jitter.
+# auth-auto-refresh-jitter-seconds: 0
+
 # Quota exceeded behavior
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded

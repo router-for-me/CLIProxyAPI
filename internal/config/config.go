@@ -75,6 +75,12 @@ type Config struct {
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh worker pool.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
+	// AuthAutoRefreshMaxPerMinute limits scheduled OAuth/file-based auth refreshes.
+	// When <= 0, scheduled refreshes are not rate limited.
+	AuthAutoRefreshMaxPerMinute int `yaml:"auth-auto-refresh-max-per-minute" json:"auth-auto-refresh-max-per-minute"`
+	// AuthAutoRefreshJitterSeconds spreads scheduled refreshes earlier by a stable,
+	// per-auth offset. When <= 0, scheduled refreshes are not jittered.
+	AuthAutoRefreshJitterSeconds int `yaml:"auth-auto-refresh-jitter-seconds" json:"auth-auto-refresh-jitter-seconds"`
 
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
