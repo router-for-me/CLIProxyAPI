@@ -780,7 +780,6 @@ func TestSessionAffinity_StickyTemporaryFallbackSecondaryBranch(t *testing.T) {
 	}
 }
 
-
 func TestSessionAffinity_ModelFallbackSuffixDoesNotCollideWithTemporaryFallback(t *testing.T) {
 	t.Parallel()
 

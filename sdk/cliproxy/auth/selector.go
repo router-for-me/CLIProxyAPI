@@ -942,7 +942,7 @@ func isTerminalSessionAffinityError(err *Error) bool {
 	}
 	statusCode := statusCodeFromResult(err)
 	switch statusCode {
-	case http.StatusUnauthorized,   // 401: invalid API key / unauthorized
+	case http.StatusUnauthorized, // 401: invalid API key / unauthorized
 		http.StatusPaymentRequired, // 402: insufficient balance / credits depleted
 		http.StatusForbidden,       // 403: account banned / forbidden
 		http.StatusNotFound:        // 404: model not found / unsupported for account
