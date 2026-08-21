@@ -27,6 +27,13 @@ type fakePluginRuntime struct {
 	unloaded []string
 }
 
+type deferredPluginRuntime struct {
+	fakePluginRuntime
+	prepareCalls int
+	deferCalls   int
+	clearCalls   int
+}
+
 type fakePluginLoadInspector map[string]bool
 
 func (r *fakePluginRuntime) PluginBusy(id string) bool {
@@ -37,6 +44,20 @@ func (r *fakePluginRuntime) UnloadPlugin(id string) bool {
 	r.unloaded = append(r.unloaded, id)
 	r.busy = false
 	return true
+}
+
+func (r *deferredPluginRuntime) PreparePluginUpdate(string) (bool, bool) {
+	r.prepareCalls++
+	return r.busy, r.busy
+}
+
+func (r *deferredPluginRuntime) DeferPluginUpdateUntilRestart(string, string, string, bool) (bool, bool) {
+	r.deferCalls++
+	return r.busy, false
+}
+
+func (r *deferredPluginRuntime) ClearDeferredPluginUpdate(string) {
+	r.clearCalls++
 }
 
 func (i fakePluginLoadInspector) PluginRegistered(id string) bool {
@@ -321,6 +342,49 @@ func TestSyncPlatformWithReportRecordsSuccessfulInstall(t *testing.T) {
 	}
 	if wantPath := pluginTestPath(root, "windows", "amd64", "sample", "0.2.0"); plugin.Path != wantPath {
 		t.Fatalf("plugin path = %q, want %q", plugin.Path, wantPath)
+	}
+}
+
+func TestSyncPlatformWithReportDefersActiveUpdateUntilRestart(t *testing.T) {
+	root := t.TempDir()
+	target := pluginTestPath(root, "linux", "amd64", "sample", "0.2.0")
+	if errMkdir := os.MkdirAll(filepath.Dir(target), 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(target), errMkdir)
+	}
+	if errWrite := os.WriteFile(target, []byte("old-library-data"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", target, errWrite)
+	}
+	archiveData := makeZip(t, map[string]string{"sample.so": "new-library-data"})
+	archiveName := "sample_0.2.0_linux_amd64.zip"
+	checksum := sha256.Sum256(archiveData)
+	httpClient := mapHTTPDoer{
+		"https://api.github.com/repos/owner/sample-plugin/releases/tags/v0.2.0": []byte(`{
+			"tag_name": "v0.2.0",
+			"assets": [
+				{"name": "` + archiveName + `", "browser_download_url": "https://downloads.example/` + archiveName + `"},
+				{"name": "checksums.txt", "browser_download_url": "https://downloads.example/checksums.txt"}
+			]
+		}`),
+		"https://downloads.example/" + archiveName: archiveData,
+		"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
+	}
+	restore := replacePluginStoreClientForTest(httpClient)
+	defer restore()
+	runtimeHost := &deferredPluginRuntime{fakePluginRuntime: fakePluginRuntime{busy: true}}
+
+	report, errSync := SyncPlatformWithReport(context.Background(), syncTestConfig(t, root), runtimeHost, Platform{GOOS: "linux", GOARCH: "amd64"})
+	if errSync != nil {
+		t.Fatalf("SyncPlatformWithReport() error = %v", errSync)
+	}
+	if !report.OK || runtimeHost.prepareCalls != 1 || runtimeHost.deferCalls != 1 || runtimeHost.clearCalls != 0 {
+		t.Fatalf("report = %+v, runtime hooks = prepare:%d defer:%d clear:%d; want one prepare/defer and no clear", report, runtimeHost.prepareCalls, runtimeHost.deferCalls, runtimeHost.clearCalls)
+	}
+	data, errRead := os.ReadFile(target)
+	if errRead != nil {
+		t.Fatalf("ReadFile(%s) error = %v", target, errRead)
+	}
+	if string(data) != "new-library-data" {
+		t.Fatalf("installed file = %q, want new-library-data", data)
 	}
 }
 

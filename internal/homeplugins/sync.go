@@ -41,6 +41,12 @@ type pluginArtifactLocker interface {
 	LockPluginArtifact(id string) func()
 }
 
+type pluginUpdateDeferrer interface {
+	PreparePluginUpdate(id string) (deferred bool, created bool)
+	DeferPluginUpdateUntilRestart(id, targetPath, targetVersion string, contentChanged bool) (deferred bool, created bool)
+	ClearDeferredPluginUpdate(id string)
+}
+
 type SyncReport struct {
 	SchemaVersion int                   `json:"schema_version"`
 	TaskID        uint                  `json:"task_id,omitempty"`
@@ -365,6 +371,15 @@ func installManifest(ctx context.Context, client sdkpluginstore.Client, manifest
 		GOARCH:       platform.GOARCH,
 		PluginLoaded: pluginIsBusy,
 	}
+	deferredUpdate, _ := pluginRuntime.(pluginUpdateDeferrer)
+	deferredUpdateCreated := false
+	if deferredUpdate != nil {
+		installOptions.BeforeWrite = func() error {
+			_, created := deferredUpdate.PreparePluginUpdate(id)
+			deferredUpdateCreated = deferredUpdateCreated || created
+			return nil
+		}
+	}
 	if artifactLocker, ok := pluginRuntime.(pluginArtifactLocker); ok {
 		installOptions.WriteLock = func() func() {
 			return artifactLocker.LockPluginArtifact(id)
@@ -372,7 +387,13 @@ func installManifest(ctx context.Context, client sdkpluginstore.Client, manifest
 	}
 	result, errInstall := client.InstallManifest(ctx, manifest, installOptions)
 	if errInstall != nil {
+		if deferredUpdateCreated {
+			deferredUpdate.ClearDeferredPluginUpdate(id)
+		}
 		return sdkpluginstore.InstallResult{}, fmt.Errorf("home plugins: install %s: %w", id, errInstall)
+	}
+	if deferredUpdate != nil {
+		deferredUpdate.DeferPluginUpdateUntilRestart(id, result.Path, result.Version, !result.Skipped)
 	}
 	return result, nil
 }
