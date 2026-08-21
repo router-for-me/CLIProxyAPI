@@ -535,8 +535,6 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		Headers                 *map[string]string    `json:"headers"`
 		ExcludedModels          *[]string             `json:"excluded-models"`
 		RebuildMidSystemMessage *bool                 `json:"rebuild-mid-system-message"`
-		DisableCooling          json.RawMessage       `json:"disable-cooling"`
-		RequestRetry            *int                  `json:"request-retry"`
 	}
 	var body struct {
 		Index *int            `json:"index"`

@@ -176,7 +176,17 @@ reverse-remap logic before they can be ported. Out of scope for current session.
 
 ### Files NOT to commit in this state
 
-- Branch is **not** pushed to origin
+- ~~Branch is **not** pushed to origin~~ → pushed as `upstream/v7.2.138-claude-sync`
 - Branch is **not** merged to main
-- Tag `v7.2.138-0.1.0` is **not** created
-- Design doc committed locally only
+- ~~Tag `v7.2.138-0.1.0` is **not** created~~ → created and pushed
+
+### Release actions taken (2026-08-22)
+
+- Branch `upstream/v7.2.138-claude-sync` pushed to origin
+  (`https://github.com/abilfida/nixllm/tree/upstream/v7.2.138-claude-sync`).
+- Annotated tag `v7.2.138-0.1.0` created at `bf8e87bb` (final cleanup commit)
+  and pushed. Tag message: "v7.2.138-0.1.0: upstream core sync to v7.2.138
+  (10 Claude-area commits, 2 reverted due to NixLLM-divergence)".
+- Tag follows the NixLLM release-tag convention `v<core>-0.<patch>` per
+  `nixllm-version-tag-pairing.md`. Core bumped from v7.2.128 → v7.2.138;
+  patch reset to 0.1.0 to signal the core rebase.
