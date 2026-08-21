@@ -48,6 +48,7 @@ func claudeThinkingReplayEnabled(auth *cliproxyauth.Auth, req cliproxyexecutor.R
 func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) claudeThinkingReplayScope {
 	modelFamily := claudeThinkingReplayModelFamily(auth, req.Model)
 	callerHash := claudeThinkingReplayCallerHash(auth, req, opts)
+	firstUserHash := claudeThinkingReplayFirstUserHash(modelFamily, callerHash, req.Payload)
 	sessionKey := codexReasoningReplaySessionKey(ctx, sdktranslator.FormatClaude, req, opts, req.Payload)
 	fallback := false
 	if sessionKey != "" {
@@ -58,18 +59,21 @@ func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyaut
 		fallback = true
 	}
 	// When the sessionless fallback key is based on messages.0, a compacted
-	// history can change the key and orphan cached turns. Try to resolve the
-	// original conversation scope through any remaining message.
+	// history can change the key and orphan caches. Resolve the original
+	// conversation scope through any remaining message, weighting user
+	// messages and conversation-first-user context more strongly.
 	if fallback && sessionKey != "" {
-		if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, claudeThinkingReplayMessageHashes(modelFamily, callerHash, req.Payload)); ok {
+		resolvedMessages := claudeThinkingReplayMessageHashes(modelFamily, callerHash, req.Payload)
+		if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, resolvedMessages, firstUserHash); ok {
 			sessionKey = resolved
 		}
 	}
 	return claudeThinkingReplayScope{
-		modelFamily: modelFamily,
-		sessionKey:  sessionKey,
-		fallbackKey: fallback,
-		callerHash:  callerHash,
+		modelFamily:   modelFamily,
+		sessionKey:    sessionKey,
+		fallbackKey:   fallback,
+		callerHash:    callerHash,
+		firstUserHash: firstUserHash,
 	}
 }
 
@@ -145,8 +149,8 @@ func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.
 	// messages.0 has changed. This is done even when the cache is empty so the
 	// first request in a conversation can be rediscovered after compaction.
 	if scope.fallbackKey {
-		for _, h := range claudeThinkingReplayMessageHashes(scope.modelFamily, scope.callerHash, req.Payload) {
-			internalcache.RegisterClaudeThinkingReplayAlias(ctx, scope.modelFamily, scope.sessionKey, h)
+		for _, m := range claudeThinkingReplayMessageHashes(scope.modelFamily, scope.callerHash, req.Payload) {
+			internalcache.RegisterClaudeThinkingReplayAlias(ctx, scope.modelFamily, scope.sessionKey, m.Hash, scope.firstUserHash)
 		}
 	}
 	if !found {
@@ -323,16 +327,16 @@ func claudeThinkingReplayFindStartIndex(firstContent gjson.Result, cachedContent
 	return 0
 }
 
-// claudeThinkingReplayMessageHashes returns a stable hash for each user and
-// assistant message in the payload. These hashes are used to resolve and
-// register conversation-scope aliases when a sessionless client compacts
-// history so messages.0 no longer matches the original key.
-func claudeThinkingReplayMessageHashes(modelFamily, callerHash string, payload []byte) []string {
+// claudeThinkingReplayMessageHashes returns a stable weighted hash for each
+// user and assistant message in the payload. User messages receive a higher
+// weight because they are the strongest conversation anchor; an echoed
+// assistant can be shared across conversations and is a weaker signal.
+func claudeThinkingReplayMessageHashes(modelFamily, callerHash string, payload []byte) []internalcache.ClaudeThinkingReplayAliasMessage {
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.IsArray() {
 		return nil
 	}
-	var hashes []string
+	var out []internalcache.ClaudeThinkingReplayAliasMessage
 	for _, msg := range messages.Array() {
 		role := strings.ToLower(strings.TrimSpace(msg.Get("role").String()))
 		if role != "user" && role != "assistant" {
@@ -344,11 +348,16 @@ func claudeThinkingReplayMessageHashes(modelFamily, callerHash string, payload [
 		} else {
 			h = claudeThinkingReplayUserMessageHash(modelFamily, callerHash, msg)
 		}
-		if h != "" {
-			hashes = append(hashes, h)
+		if h == "" {
+			continue
 		}
+		weight := 2
+		if role == "assistant" {
+			weight = 1
+		}
+		out = append(out, internalcache.ClaudeThinkingReplayAliasMessage{Hash: h, Weight: weight})
 	}
-	return hashes
+	return out
 }
 
 func claudeThinkingReplayUserMessageHash(modelFamily, callerHash string, msg gjson.Result) string {
@@ -404,6 +413,22 @@ func claudeThinkingReplayHash(modelFamily, callerHash string, canon []byte) stri
 	h.Write([]byte{0})
 	h.Write(canon)
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+func claudeThinkingReplayFirstUserHash(modelFamily, callerHash string, payload []byte) string {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	for _, msg := range messages.Array() {
+		if strings.ToLower(strings.TrimSpace(msg.Get("role").String())) != "user" {
+			continue
+		}
+		if h := claudeThinkingReplayUserMessageHash(modelFamily, callerHash, msg); h != "" {
+			return h
+		}
+	}
+	return ""
 }
 
 func claudeThinkingReplayCallerHash(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
@@ -479,7 +504,7 @@ func cacheClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingR
 		// original conversation scope.
 		if scope.fallbackKey {
 			if h := claudeThinkingReplayAssistantMessageHash(scope.modelFamily, scope.callerHash, content); h != "" {
-				internalcache.RegisterClaudeThinkingReplayAlias(ctx, scope.modelFamily, scope.sessionKey, h)
+				internalcache.RegisterClaudeThinkingReplayAlias(ctx, scope.modelFamily, scope.sessionKey, h, scope.firstUserHash)
 			}
 		}
 	}

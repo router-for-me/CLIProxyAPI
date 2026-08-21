@@ -1,89 +1,210 @@
 package cache
 
 import (
-	"bytes"
 	"context"
 	"testing"
+	"time"
+
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 )
 
-func useFakeClaudeThinkingReplayKVClient(t *testing.T, client *fakeKimiThinkingReplayKVClient) {
+type fakeClaudeThinkingReplayKVClient struct {
+	values  map[string][]byte
+	sets    int
+	dels    int
+	getErr  error
+	setErr  error
+	delErr  error
+	swapErr error
+}
+
+func newFakeClaudeThinkingReplayKVClient() *fakeClaudeThinkingReplayKVClient {
+	return &fakeClaudeThinkingReplayKVClient{values: make(map[string][]byte)}
+}
+
+func (c *fakeClaudeThinkingReplayKVClient) KVGet(_ context.Context, key string) ([]byte, bool, error) {
+	if c.getErr != nil {
+		return nil, false, c.getErr
+	}
+	v, ok := c.values[key]
+	return append([]byte(nil), v...), ok, nil
+}
+
+func (c *fakeClaudeThinkingReplayKVClient) KVSet(_ context.Context, key string, value []byte, _ homekv.KVSetOptions) (bool, error) {
+	if c.setErr != nil {
+		return false, c.setErr
+	}
+	c.values[key] = append([]byte(nil), value...)
+	c.sets++
+	return true, nil
+}
+
+func (c *fakeClaudeThinkingReplayKVClient) KVDel(_ context.Context, keys ...string) (int64, error) {
+	if c.delErr != nil {
+		return 0, c.delErr
+	}
+	var n int64
+	for _, k := range keys {
+		if _, ok := c.values[k]; ok {
+			delete(c.values, k)
+			n++
+		}
+	}
+	c.dels += int(n)
+	return n, nil
+}
+
+func (c *fakeClaudeThinkingReplayKVClient) KVCompareAndSwap(_ context.Context, key string, expected []byte, _ bool, newValue []byte, _ time.Duration) (bool, error) {
+	if c.swapErr != nil {
+		return false, c.swapErr
+	}
+	current, ok := c.values[key]
+	if !ok && expected == nil {
+		c.values[key] = append([]byte(nil), newValue...)
+		c.sets++
+		return true, nil
+	}
+	if ok && string(current) == string(expected) {
+		c.values[key] = append([]byte(nil), newValue...)
+		c.sets++
+		return true, nil
+	}
+	return false, nil
+}
+
+func (c *fakeClaudeThinkingReplayKVClient) KVExpire(context.Context, string, time.Duration) (bool, error) {
+	return true, nil
+}
+
+func useFakeClaudeThinkingReplayKVClient(t *testing.T, client *fakeClaudeThinkingReplayKVClient, homeMode bool) {
 	t.Helper()
-	previous := currentClaudeThinkingReplayKVClient
+	prev := currentClaudeThinkingReplayKVClient
 	currentClaudeThinkingReplayKVClient = func() (kimiThinkingReplayKVClient, bool, error) {
-		return client, true, nil
+		return client, homeMode, nil
 	}
 	t.Cleanup(func() {
-		currentClaudeThinkingReplayKVClient = previous
+		currentClaudeThinkingReplayKVClient = prev
+		ClearClaudeThinkingReplayCache()
 	})
 }
 
-func TestClaudeThinkingReplayAppendsAssistantTurns(t *testing.T) {
-	client := newFakeKimiThinkingReplayKVClient()
-	useFakeClaudeThinkingReplayKVClient(t, client)
+func TestResolveClaudeThinkingReplayAliasScoresByWeightAndFirstUser(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
 
-	const modelFamily = "claude:auth:model"
-	const sessionKey = "execution:multi-turn"
-	first := []byte(`[{"type":"thinking","thinking":"first","signature":"sig-1"},{"type":"tool_use","id":"toolu-1","name":"Read","input":{"path":"one"}}]`)
-	second := []byte(`[{"type":"thinking","thinking":"second","signature":"sig-2"},{"type":"tool_use","id":"toolu-2","name":"Read","input":{"path":"two"}}]`)
+	ctx := context.Background()
+	const modelFamily = "claude:test"
 
-	if !CacheClaudeThinkingReplayBestEffort(context.Background(), modelFamily, sessionKey, first) {
-		t.Fatal("failed to seed first Claude replay turn")
-	}
-	_, snapshot, found, errGet := GetClaudeThinkingReplayWithSnapshotRequired(context.Background(), modelFamily, sessionKey)
-	if errGet != nil || !found {
-		t.Fatalf("initial Claude replay read = found %v, error %v", found, errGet)
-	}
-	replaced, errReplace := ReplaceClaudeThinkingReplayIfUnchanged(context.Background(), modelFamily, sessionKey, snapshot, second)
-	if errReplace != nil || !replaced {
-		t.Fatalf("append Claude replay turn = replaced %v, error %v", replaced, errReplace)
+	firstA := "firstA"
+	firstB := "firstB"
+
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "sessionA", "msg1", firstA)
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "sessionA", "msg2", firstA)
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "sessionB", "msg1", firstB)
+
+	// A request with first user A and messages [msg1, msg2] should resolve to A.
+	msgs := []ClaudeThinkingReplayAliasMessage{{Hash: "msg1", Weight: 1}, {Hash: "msg2", Weight: 2}}
+	if s, ok := ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, msgs, firstA); !ok || s != "sessionA" {
+		t.Fatalf("resolve first A: got %q, want sessionA", s)
 	}
 
-	contents, found, errGet := GetClaudeThinkingReplayRequired(context.Background(), modelFamily, sessionKey)
-	if errGet != nil || !found || len(contents) != 2 {
-		t.Fatalf("Claude replay contents = %d, found %v, error %v; want two turns", len(contents), found, errGet)
-	}
-	if !bytes.Equal(contents[0], first) || !bytes.Equal(contents[1], second) {
-		t.Fatalf("Claude replay contents lost ordering: got %s / %s", contents[0], contents[1])
+	// Same messages with first user B should resolve to B, even though msg2
+	// only belongs to A; msg1 is shared, but the first-user bonus for B tips
+	// the scales.
+	msgs = []ClaudeThinkingReplayAliasMessage{{Hash: "msg1", Weight: 1}}
+	if s, ok := ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, msgs, firstB); !ok || s != "sessionB" {
+		t.Fatalf("resolve first B: got %q, want sessionB", s)
 	}
 }
 
-func TestClaudeThinkingReplayClearDoesNotClearKimiState(t *testing.T) {
-	previousClaudeClient := currentClaudeThinkingReplayKVClient
-	previousKimiClient := currentKimiThinkingReplayKVClient
-	currentClaudeThinkingReplayKVClient = func() (kimiThinkingReplayKVClient, bool, error) {
-		return nil, false, nil
-	}
-	currentKimiThinkingReplayKVClient = func() (kimiThinkingReplayKVClient, bool, error) {
-		return nil, false, nil
-	}
-	t.Cleanup(func() {
-		currentClaudeThinkingReplayKVClient = previousClaudeClient
-		currentKimiThinkingReplayKVClient = previousKimiClient
-	})
+func TestResolveClaudeThinkingReplayAliasIgnoresExpiredEntries(t *testing.T) {
 	ClearClaudeThinkingReplayCache()
-	ClearKimiThinkingReplayCache()
-	t.Cleanup(ClearClaudeThinkingReplayCache)
-	t.Cleanup(ClearKimiThinkingReplayCache)
+	defer ClearClaudeThinkingReplayCache()
 
-	const modelFamily = "shared-model"
-	const sessionKey = "execution:shared-session"
-	kimiContent := []byte(`[{"type":"thinking","signature":"kimi"}]`)
-	claudeContent := []byte(`[{"type":"thinking","signature":"claude"}]`)
-	if !CacheKimiThinkingReplayBestEffort(context.Background(), modelFamily, sessionKey, kimiContent) {
-		t.Fatal("failed to seed Kimi replay state")
-	}
-	if !CacheClaudeThinkingReplayBestEffort(context.Background(), modelFamily, sessionKey, claudeContent) {
-		t.Fatal("failed to seed Claude replay state")
-	}
+	ctx := context.Background()
+	const modelFamily = "claude:test"
 
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "sessionA", "msg1", "firstA")
+
+	// Expire the alias by advancing time.
+	claudeThinkingReplayAliasMu.Lock()
+	for key, list := range claudeThinkingReplayAliases {
+		for i := range list {
+			list[i].timestamp = time.Now().Add(-2 * ClaudeThinkingReplayCacheTTL)
+		}
+		claudeThinkingReplayAliases[key] = list
+	}
+	claudeThinkingReplayAliasMu.Unlock()
+
+	msgs := []ClaudeThinkingReplayAliasMessage{{Hash: "msg1", Weight: 1}}
+	if _, ok := ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, msgs, "firstA"); ok {
+		t.Fatal("expected no resolve for expired alias")
+	}
+}
+
+func TestClaudeThinkingReplayAliasHomeCappedPerCredential(t *testing.T) {
 	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
 
-	gotKimi, foundKimi, errKimi := GetKimiThinkingReplayRequired(context.Background(), modelFamily, sessionKey)
-	if errKimi != nil || !foundKimi || !bytes.Equal(gotKimi, kimiContent) {
-		t.Fatalf("Kimi replay after Claude clear = %s, found %v, error %v; want preserved state", gotKimi, foundKimi, errKimi)
+	client := newFakeClaudeThinkingReplayKVClient()
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+
+	// Register more than the per-credential cap and ensure the oldest keys
+	// are evicted from the index.
+	max := ClaudeThinkingReplayCacheMaxAliasesPerCredential
+	for i := 0; i < max+10; i++ {
+		RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHashFor(i), "first")
 	}
-	gotClaude, foundClaude, errClaude := GetClaudeThinkingReplayRequired(context.Background(), modelFamily, sessionKey)
-	if errClaude != nil || foundClaude || len(gotClaude) != 0 {
-		t.Fatalf("Claude replay after Claude clear = %d turns, found %v, error %v; want cleared state", len(gotClaude), foundClaude, errClaude)
+
+	// The number of stored alias values should not exceed the cap.
+	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
+	index, _ := decodeClaudeThinkingReplayAliasIndex(client.values[indexKey])
+	if len(index.Aliases) > max {
+		t.Fatalf("credential alias cap exceeded: %d > %d", len(index.Aliases), max)
 	}
+
+	// The oldest entries should have been deleted.
+	live := 0
+	for k := range client.values {
+		if k != indexKey {
+			live++
+		}
+	}
+	if live > max+1 { // +1 for the index key itself
+		t.Fatalf("too many live alias keys: %d", live)
+	}
+}
+
+func TestClaudeThinkingReplayAliasHomeMultiSessionResolve(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	client := newFakeClaudeThinkingReplayKVClient()
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "sessionA", "msg1", "firstA")
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "sessionA", "msg2", "firstA")
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "sessionB", "msg1", "firstB")
+
+	msgs := []ClaudeThinkingReplayAliasMessage{{Hash: "msg1", Weight: 1}, {Hash: "msg2", Weight: 2}}
+	if s, ok := ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, msgs, "firstA"); !ok || s != "sessionA" {
+		t.Fatalf("home resolve: got %q, want sessionA", s)
+	}
+}
+
+func messageHashFor(i int) string {
+	const chars = "abcdefghijklmnopqrstuvwxyz"
+	s := make([]byte, 0, 8)
+	v := i
+	for j := 0; j < 8; j++ {
+		s = append(s, chars[v%26])
+		v /= 26
+	}
+	return string(s)
 }

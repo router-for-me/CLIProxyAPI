@@ -27,6 +27,7 @@ type kimiThinkingReplayScope struct {
 	replayApplied bool
 	fallbackKey   bool
 	callerHash    string
+	firstUserHash string
 }
 
 func (s kimiThinkingReplayScope) valid() bool {
