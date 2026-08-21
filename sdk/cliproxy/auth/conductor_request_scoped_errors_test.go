@@ -1238,3 +1238,60 @@ func TestRequestScopedErrors_ResponseBodyProvider_MatchesUnderlyingPayload(t *te
 		t.Fatal("expected auth1 to be in cooldown when matching ResponseBody()")
 	}
 }
+
+func TestRequestScopedErrors_BodyOnlyRule(t *testing.T) {
+	bodyOnlyRule := []internalconfig.RequestScopedErrorRule{
+		{
+			Match:  []string{"body_only_phrase"},
+			Action: "stop",
+		},
+	}
+	statusRule := []internalconfig.RequestScopedErrorRule{
+		{
+			Status: 400,
+			Match:  []string{"status_qualified_phrase"},
+			Action: "stop-and-cooldown",
+		},
+	}
+
+	bodyOnlyAuth := &Auth{
+		ID:       "auth-body-only",
+		Provider: "claude",
+		Metadata: map[string]any{"request_scoped_errors": bodyOnlyRule},
+	}
+	statusAuth := &Auth{
+		ID:       "auth-status-qualified",
+		Provider: "claude",
+		Metadata: map[string]any{"request_scoped_errors": statusRule},
+	}
+
+	// Body-only rule matches across multiple HTTP statuses.
+	for _, code := range []int{400, 500} {
+		action, ok := matchRequestScopedErrorAction(bodyOnlyAuth, customStatusError{code: code, msg: "body_only_phrase"}, nil)
+		if !ok || action != "stop" {
+			t.Fatalf("body-only rule should match status %d, got action=%q ok=%v", code, action, ok)
+		}
+	}
+
+	// Body-only rule matches a typed/internal error with no HTTP status.
+	action, ok := matchRequestScopedErrorAction(bodyOnlyAuth, errors.New("body_only_phrase"), nil)
+	if !ok || action != "stop" {
+		t.Fatalf("body-only rule should match typed error, got action=%q ok=%v", action, ok)
+	}
+
+	// Status-qualified rule still requires an exact status match.
+	action, ok = matchRequestScopedErrorAction(statusAuth, customStatusError{code: 400, msg: "status_qualified_phrase"}, nil)
+	if !ok || action != "stop-and-cooldown" {
+		t.Fatalf("status-qualified rule should match status 400, got action=%q ok=%v", action, ok)
+	}
+
+	action, ok = matchRequestScopedErrorAction(statusAuth, customStatusError{code: 500, msg: "status_qualified_phrase"}, nil)
+	if ok {
+		t.Fatalf("status-qualified rule should not match status 500, got action=%q", action)
+	}
+
+	action, ok = matchRequestScopedErrorAction(statusAuth, errors.New("status_qualified_phrase"), nil)
+	if ok {
+		t.Fatalf("status-qualified rule should not match typed error with no status, got action=%q", action)
+	}
+}

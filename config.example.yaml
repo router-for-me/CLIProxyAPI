@@ -311,7 +311,7 @@ nonstream-keepalive-interval: 0
 #     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
-#       - status: 400        # HTTP status code to match
+#       - status: 400        # HTTP status code to match; omit or set to 0 to match any status (body-only rule)
 #         match:             # optional: string contains matching
 #           - "maximum_context_length"
 #           - "context_length_exceeded"

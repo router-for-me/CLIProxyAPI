@@ -188,7 +188,8 @@ func matchRequestScopedErrorAction(auth *Auth, err error, cfg *internalconfig.Co
 	body := extractErrorBody(err)
 
 	for _, rule := range rules {
-		if rule.Status <= 0 || rule.Status != statusCode {
+		// Status == 0 (unset or omitted) matches any HTTP status; otherwise the status must match exactly.
+		if rule.Status != 0 && rule.Status != statusCode {
 			continue
 		}
 		if len(rule.Match) == 0 && len(rule.MatchRegexr) == 0 {
