@@ -885,6 +885,163 @@ func TestManagerExecuteStream_AntigravityInvalidGrantFallsBackAndSuspendsAuth(t 
 	}
 }
 
+// TestManagerExecute_InvalidAPIKeyFallsBackAndSuspendsAuth covers a dead Gemini API
+// key: Google answers 400 INVALID_ARGUMENT ("API key not valid"), which is an
+// auth-level failure, not a request fault. The conductor must rotate to the next
+// auth and cool down the dead key for 30 minutes instead of surfacing the error.
+func TestManagerExecute_InvalidAPIKeyFallsBackAndSuspendsAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	invalidKeyErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `bad response status code 400, body: {"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}`,
+	}
+	executor := &authFallbackExecutor{
+		id: "gemini",
+		executeErrors: map[string]error{
+			"dead-key-auth": invalidKeyErr,
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "gemini-2.5-flash"
+	badAuth := &Auth{ID: "dead-key-auth", Provider: "gemini"}
+	goodAuth := &Auth{ID: "live-key-auth", Provider: "gemini"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "gemini", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "gemini", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	request := cliproxyexecutor.Request{Model: model}
+	for i := 0; i < 2; i++ {
+		resp, errExecute := m.Execute(context.Background(), []string{"gemini"}, request, cliproxyexecutor.Options{})
+		if errExecute != nil {
+			t.Fatalf("execute %d error = %v, want success", i, errExecute)
+		}
+		if string(resp.Payload) != goodAuth.ID {
+			t.Fatalf("execute %d payload = %q, want %q", i, string(resp.Payload), goodAuth.ID)
+		}
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{badAuth.ID, goodAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	state := updatedBad.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state for %q", model)
+	}
+	if !state.Unavailable {
+		t.Fatalf("expected bad auth model state to be unavailable")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected bad auth model state cooldown to be set")
+	}
+	if cooldown := time.Until(state.NextRetryAfter); cooldown < 29*time.Minute || cooldown > 31*time.Minute {
+		t.Fatalf("cooldown = %v, want about 30 minutes", cooldown)
+	}
+	if state.StatusMessage != invalidKeyErr.Message {
+		t.Fatalf("status message = %q, want %q", state.StatusMessage, invalidKeyErr.Message)
+	}
+}
+
+func TestManagerExecute_InvalidAPIKeyQuarantinesAcrossModels(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	invalidKeyErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `bad response status code 400, body: {"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}`,
+	}
+	executor := &authFallbackExecutor{
+		id: "gemini",
+		executeErrors: map[string]error{
+			"dead-key-auth": invalidKeyErr,
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	modelA := "gemini-2.5-flash"
+	modelB := "gemini-2.5-pro"
+	badAuth := &Auth{ID: "dead-key-auth", Provider: "gemini"}
+	goodAuth := &Auth{ID: "live-key-auth", Provider: "gemini"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "gemini", []*registry.ModelInfo{{ID: modelA}, {ID: modelB}})
+	reg.RegisterClient(goodAuth.ID, "gemini", []*registry.ModelInfo{{ID: modelA}, {ID: modelB}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	respA, errExecute := m.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: modelA}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute model A error = %v, want success", errExecute)
+	}
+	if string(respA.Payload) != goodAuth.ID {
+		t.Fatalf("execute model A payload = %q, want %q", string(respA.Payload), goodAuth.ID)
+	}
+
+	respB, errExecute := m.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: modelB}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute model B error = %v, want success", errExecute)
+	}
+	if string(respB.Payload) != goodAuth.ID {
+		t.Fatalf("execute model B payload = %q, want %q", string(respB.Payload), goodAuth.ID)
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{badAuth.ID, goodAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	for _, targetModel := range []string{modelA, modelB, "gemini-3-flash"} {
+		blocked, reason, next := isAuthBlockedForModel(updatedBad, targetModel, time.Now())
+		if !blocked {
+			t.Fatalf("model %q was unblocked despite invalid API key failure on credential", targetModel)
+		}
+		if reason != blockReasonCooldown || next.IsZero() {
+			t.Fatalf("model %q block reason=%v next=%v, want cooldown ~30m", targetModel, reason, next)
+		}
+	}
+}
+
 func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{
@@ -1381,7 +1538,13 @@ func TestManager_Execute_DisableCooling_DoesNotBlackoutAfter429RetryAfter(t *tes
 	}
 }
 
-func TestManager_Execute_DisableCooling_RetriesAfter429RetryAfter(t *testing.T) {
+// Retry config (3 attempts, 100ms cap) plus a 5ms Retry-After gives a genuine
+// nonzero retry opportunity here: shouldRetryAfterError returns (5ms, true) for
+// attempts 0-2. Pre-fix the same auth was re-picked on every outer retry
+// (4 executor calls); post-fix the request-scoped exclusion of failed auths
+// stops re-invocation, so a single auth with a retryable 429 is executed
+// exactly once per request.
+func TestManager_Execute_DisableCooling_NoReinvokeOnRetryable429(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
 	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
@@ -1427,8 +1590,8 @@ func TestManager_Execute_DisableCooling_RetriesAfter429RetryAfter(t *testing.T) 
 	}
 
 	calls := executor.ExecuteCalls()
-	if len(calls) != 4 {
-		t.Fatalf("execute calls = %d, want 4 (initial + 3 retries)", len(calls))
+	if len(calls) != 1 {
+		t.Fatalf("execute calls = %d, want 1", len(calls))
 	}
 }
 
@@ -2484,5 +2647,205 @@ func TestManager_MarkResult_RequestFaultBodyDoesNotCooldownModelOrAuth(t *testin
 	}
 	if state := updatedFail.ModelStates[model]; state == nil || !state.Unavailable || state.NextRetryAfter.IsZero() {
 		t.Fatalf("expected real 401 authentication error to set model cooldown state, got %#v", state)
+	}
+}
+
+func TestIsCredentialScopedError_InvalidAPIKey(t *testing.T) {
+	invalidKey400 := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `bad response status code 400, body: {"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}`,
+	}
+	if !isCredentialScopedError(invalidKey400) {
+		t.Fatalf("expected isCredentialScopedError(invalidKey400) = true, got false")
+	}
+
+	invalidKey401 := &Error{
+		HTTPStatus: http.StatusUnauthorized,
+		Message:    `{"error":{"code":"api_key_invalid","message":"Invalid API key"}}`,
+	}
+	if !isCredentialScopedError(invalidKey401) {
+		t.Fatalf("expected isCredentialScopedError(invalidKey401) = true, got false")
+	}
+
+	normal400 := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `invalid argument: field "prompt" cannot be empty`,
+	}
+	if isCredentialScopedError(normal400) {
+		t.Fatalf("expected isCredentialScopedError(normal400) = false, got true")
+	}
+}
+
+func TestManagerExecute_InvalidAPIKeyStopsModelPoolRetries(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name: "gemini",
+				Models: []internalconfig.OpenAICompatibilityModel{
+					{
+						Name:  "gemini-pool",
+						Alias: "gemini-2.5-flash,gemini-2.5-pro,gemini-1.5-flash",
+					},
+				},
+			},
+		},
+	}
+	m.SetConfig(cfg)
+
+	invalidKeyErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `bad response status code 400, body: {"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}`,
+	}
+	executor := &authFallbackExecutor{
+		id: "openai-compatibility",
+		executeErrors: map[string]error{
+			"dead-key-auth": invalidKeyErr,
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	badAuth := &Auth{
+		ID:       "dead-key-auth",
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"api_key":      "key1",
+			"provider_key": "gemini",
+		},
+	}
+	goodAuth := &Auth{
+		ID:       "live-key-auth",
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"api_key":      "key2",
+			"provider_key": "gemini",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	models := []*registry.ModelInfo{
+		{ID: "gemini-pool"},
+		{ID: "gemini-2.5-flash"},
+		{ID: "gemini-2.5-pro"},
+		{ID: "gemini-1.5-flash"},
+	}
+	reg.RegisterClient(badAuth.ID, "openai-compatibility", models)
+	reg.RegisterClient(goodAuth.ID, "openai-compatibility", models)
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"openai-compatibility"}, cliproxyexecutor.Request{Model: "gemini-pool"}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != goodAuth.ID {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), goodAuth.ID)
+	}
+
+	calls := executor.ExecuteCalls()
+	t.Logf("calls: %v", calls)
+	wantCalls := []string{badAuth.ID, goodAuth.ID}
+	if len(calls) != len(wantCalls) {
+		t.Fatalf("execute calls = %v, want %v", calls, wantCalls)
+	}
+}
+
+func TestManagerExecuteStream_InvalidAPIKeyStopsModelPoolRetries(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name: "gemini",
+				Models: []internalconfig.OpenAICompatibilityModel{
+					{
+						Name:  "gemini-pool",
+						Alias: "gemini-2.5-flash,gemini-2.5-pro,gemini-1.5-flash",
+					},
+				},
+			},
+		},
+	}
+	m.SetConfig(cfg)
+
+	invalidKeyErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `bad response status code 400, body: {"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}`,
+	}
+	executor := &authFallbackExecutor{
+		id: "openai-compatibility",
+		streamFirstErrors: map[string]error{
+			"dead-key-auth": invalidKeyErr,
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	badAuth := &Auth{
+		ID:       "dead-key-auth",
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"api_key":      "key1",
+			"provider_key": "gemini",
+		},
+	}
+	goodAuth := &Auth{
+		ID:       "live-key-auth",
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"api_key":      "key2",
+			"provider_key": "gemini",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	models := []*registry.ModelInfo{
+		{ID: "gemini-pool"},
+		{ID: "gemini-2.5-flash"},
+		{ID: "gemini-2.5-pro"},
+		{ID: "gemini-1.5-flash"},
+	}
+	reg.RegisterClient(badAuth.ID, "openai-compatibility", models)
+	reg.RegisterClient(goodAuth.ID, "openai-compatibility", models)
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	streamResult, errStream := m.ExecuteStream(context.Background(), []string{"openai-compatibility"}, cliproxyexecutor.Request{Model: "gemini-pool"}, cliproxyexecutor.Options{})
+	if errStream != nil {
+		t.Fatalf("execute stream error = %v, want success", errStream)
+	}
+	if streamResult == nil {
+		t.Fatalf("execute stream result is nil")
+	}
+	var payloads []string
+	for chunk := range streamResult.Chunks {
+		if len(chunk.Payload) > 0 {
+			payloads = append(payloads, string(chunk.Payload))
+		}
+	}
+	if len(payloads) == 0 || payloads[0] != goodAuth.ID {
+		t.Fatalf("stream payloads = %v, want [%s]", payloads, goodAuth.ID)
+	}
+
+	calls := executor.StreamCalls()
+	wantCalls := []string{badAuth.ID, goodAuth.ID}
+	if len(calls) != len(wantCalls) {
+		t.Fatalf("stream calls = %v, want %v", calls, wantCalls)
 	}
 }

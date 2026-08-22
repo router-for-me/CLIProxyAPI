@@ -315,11 +315,12 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 	var terminated *coreexecutor.RequestTerminatedError
 	if errors.As(err, &terminated) && terminated != nil {
 		return &interfaces.ErrorMessage{
-			StatusCode:     normalizedTerminationStatus(terminated.StatusCode()),
-			Error:          err,
-			DirectResponse: true,
-			Body:           terminated.ResponseBody(),
-			Headers:        terminated.ResponseHeaders(),
+			StatusCode:            normalizedTerminationStatus(terminated.StatusCode()),
+			Error:                 err,
+			DirectResponse:        true,
+			TrustedDirectResponse: terminated.Trusted,
+			Body:                  terminated.ResponseBody(),
+			Headers:               terminated.ResponseHeaders(),
 		}
 	}
 	status := http.StatusInternalServerError

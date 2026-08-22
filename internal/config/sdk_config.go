@@ -79,4 +79,11 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// StreamConnectTimeoutSeconds controls the maximum time to wait for connection/stream establishment from an upstream stream before timing out and failing over.
+	// Zero or a negative value disables the timeout.
+	StreamConnectTimeoutSeconds int `yaml:"stream-connect-timeout-seconds,omitempty" json:"stream-connect-timeout-seconds,omitempty"`
+
+	// StreamFirstChunkTimeoutSeconds is a deprecated alias for StreamConnectTimeoutSeconds.
+	StreamFirstChunkTimeoutSeconds int `yaml:"stream-first-chunk-timeout-seconds,omitempty" json:"stream-first-chunk-timeout-seconds,omitempty"`
 }

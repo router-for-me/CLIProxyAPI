@@ -44,22 +44,27 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	tracker := newRouteAttemptTracker()
 	if m.HomeEnabled() {
-		resp, errHome := m.executeHome(ctx, normalized, req, opts, false)
-		return resp, unwrapRequestStopError(errHome)
+		resp, errHome := m.executeHome(ctx, normalized, req, opts, false, tracker)
+		return resp, wrapRouteExhaustion(unwrapRequestStopError(errHome), tracker)
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	tried := make(map[string]struct{})
 	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, attempt, defaultRequestRetry)
+		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, attempt, defaultRequestRetry, tried, tracker)
 		if errExec == nil {
 			return resp, nil
 		}
+		if lastErr != nil && isAuthUnavailableOrNotFound(errExec) {
+			errExec = lastErr
+		}
 		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
-			return cliproxyexecutor.Response{}, unwrapRequestStopError(errExec)
+			return cliproxyexecutor.Response{}, wrapRouteExhaustion(unwrapRequestStopError(errExec), tracker)
 		}
 		lastErr = errExec
 		wait, shouldRetry := m.shouldRetryAfterErrorWithHomeRetryLimit(ctx, opts, errExec, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry)
@@ -74,14 +79,14 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		lastErr = unwrapRequestStopError(lastErr)
 		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if resp, ok, errCredits := m.tryAntigravityCreditsExecute(ctx, req, opts); errCredits != nil {
-				return cliproxyexecutor.Response{}, errCredits
+				return cliproxyexecutor.Response{}, wrapRouteExhaustion(errCredits, tracker)
 			} else if ok {
 				return resp, nil
 			}
 		}
-		return cliproxyexecutor.Response{}, lastErr
+		return cliproxyexecutor.Response{}, wrapRouteExhaustion(lastErr, tracker)
 	}
-	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+	return cliproxyexecutor.Response{}, wrapRouteExhaustion(&Error{Code: "auth_not_found", Message: "no auth available"}, tracker)
 }
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
@@ -91,22 +96,27 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	tracker := newRouteAttemptTracker()
 	if m.HomeEnabled() {
-		resp, errHome := m.executeHome(ctx, normalized, req, opts, true)
-		return resp, unwrapRequestStopError(errHome)
+		resp, errHome := m.executeHome(ctx, normalized, req, opts, true, tracker)
+		return resp, wrapRouteExhaustion(unwrapRequestStopError(errHome), tracker)
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	tried := make(map[string]struct{})
 	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, attempt, defaultRequestRetry)
+		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, attempt, defaultRequestRetry, tried, tracker)
 		if errExec == nil {
 			return resp, nil
 		}
+		if lastErr != nil && isAuthUnavailableOrNotFound(errExec) {
+			errExec = lastErr
+		}
 		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
-			return cliproxyexecutor.Response{}, unwrapRequestStopError(errExec)
+			return cliproxyexecutor.Response{}, wrapRouteExhaustion(unwrapRequestStopError(errExec), tracker)
 		}
 		lastErr = errExec
 		wait, shouldRetry := m.shouldRetryAfterErrorWithHomeRetryLimit(ctx, opts, errExec, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry)
@@ -118,9 +128,9 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		}
 	}
 	if lastErr != nil {
-		return cliproxyexecutor.Response{}, unwrapRequestStopError(lastErr)
+		return cliproxyexecutor.Response{}, wrapRouteExhaustion(unwrapRequestStopError(lastErr), tracker)
 	}
-	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+	return cliproxyexecutor.Response{}, wrapRouteExhaustion(&Error{Code: "auth_not_found", Message: "no auth available"}, tracker)
 }
 
 // ExecuteStream performs a streaming execution using the configured selector and executor.
@@ -145,10 +155,15 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	attempt := 0
 	retryRoundPending := false
 	retryRoundWaited := false
+	tracker := newRouteAttemptTracker()
+	tried := make(map[string]struct{})
 	for {
-		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, &homeRetryLimit, attempt, defaultRequestRetry)
+		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, &homeRetryLimit, attempt, defaultRequestRetry, tried, tracker)
 		if errStream == nil {
 			return result, nil
+		}
+		if lastErr != nil && isAuthUnavailableOrNotFound(errStream) {
+			errStream = lastErr
 		}
 		if m.HomeEnabled() && retryRoundPending {
 			if wait, okWait := pendingHomeRetryRoundDelay(errStream, maxWait, &homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == ""); okWait && m.homeRetryAllowed(attempt-1, homeRetryLimit) {
@@ -165,7 +180,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		retryRoundPending = false
 		retryRoundWaited = false
 		if isRequestTerminatedError(errStream) || isRequestStopError(errStream) {
-			return nil, unwrapRequestStopError(errStream)
+			return nil, wrapRouteExhaustion(unwrapRequestStopError(errStream), tracker)
 		}
 		lastErr = errStream
 		wait, shouldRetry := m.shouldRetryAfterErrorWithHomeRetryLimit(ctx, opts, errStream, attempt, normalized, retryModel, maxWait, homeRetryLimit, defaultRequestRetry)
@@ -183,18 +198,18 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		lastErr = unwrapRequestStopError(lastErr)
 		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if result, ok, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); errCredits != nil {
-				return nil, errCredits
+				return nil, wrapRouteExhaustion(errCredits, tracker)
 			} else if ok {
 				return result, nil
 			}
 		}
 		var bootstrapErr *streamBootstrapError
 		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
-			return streamErrorResult(bootstrapErr.Headers(), lastErr), nil
+			return streamErrorResult(bootstrapErr.Headers(), wrapRouteExhaustion(lastErr, tracker)), nil
 		}
-		return nil, lastErr
+		return nil, wrapRouteExhaustion(lastErr, tracker)
 	}
-	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	return nil, wrapRouteExhaustion(&Error{Code: "auth_not_found", Message: "no auth available"}, tracker)
 }
 
 type requestToFormatResolver interface {
@@ -231,6 +246,7 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 			HTTPStatus: resp.StatusCode,
 			Header:     cloneRequestHeaders(resp.ResponseHeaders),
 			Body:       bytes.Clone(resp.ResponseBody),
+			Trusted:    true,
 		}
 	}
 	return req, opts, nil
@@ -300,7 +316,32 @@ func mergeRequestHeaders(current, updates http.Header, clear []string) http.Head
 	return out
 }
 
-func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, retryRound int, defaultRequestRetry int) (cliproxyexecutor.Response, error) {
+func isAuthUnavailableOrNotFound(err error) bool {
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
+	}
+	return authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable" || authErr.Code == "home_unavailable"
+}
+
+func persistExcludedAuthForRetry(m *Manager, auth *Auth, err error, retryRound int, defaultRequestRetry int, excluded map[string]struct{}) {
+	if auth == nil || excluded == nil {
+		return
+	}
+	if effectiveRequestRetryLimit(auth, defaultRequestRetry) <= retryRound {
+		excluded[auth.ID] = struct{}{}
+		return
+	}
+	if m.cooldownDisabledForAuth(auth) && retryAfterFromError(err) != nil {
+		excluded[auth.ID] = struct{}{}
+	}
+}
+
+func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, retryRound int, defaultRequestRetry int, excluded map[string]struct{}, optionalTracker ...*routeAttemptTracker) (cliproxyexecutor.Response, error) {
+	var tracker *routeAttemptTracker
+	if len(optionalTracker) > 0 {
+		tracker = optionalTracker[0]
+	}
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -309,9 +350,18 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
+	if excluded == nil {
+		excluded = make(map[string]struct{})
+	}
 	tried := make(map[string]struct{})
+	for authID := range excluded {
+		tried[authID] = struct{}{}
+	}
 	if !homeMode {
 		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
+			tried[authID] = struct{}{}
+		}
+		for authID := range extractExcludedAuthIDs(opts.Metadata) {
 			tried[authID] = struct{}{}
 		}
 	}
@@ -364,6 +414,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
+			tracker.Record(auth, errPrepare)
+			persistExcludedAuthForRetry(m, auth, errPrepare, retryRound, defaultRequestRetry, excluded)
 			continue
 		}
 		var authErr error
@@ -413,6 +465,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil, Options: execOpts}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
+				tracker.Record(auth, errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
@@ -431,6 +484,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 						return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
 					}
 					authErr = errExec
+					tracker.Record(auth, errExec)
 					if result.CredentialScope {
 						break
 					}
@@ -440,12 +494,26 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				tracker.Record(auth, errExec)
+				persistExcludedAuthForRetry(m, auth, errExec, retryRound, defaultRequestRetry, excluded)
 				if result.CredentialScope {
 					break
 				}
 				continue
 			}
 			m.MarkResult(execCtx, result)
+			if isEmptyCompletionPayload(resp.Payload) {
+				result.Success = false
+				result.Error = errEmptyCompletion
+				m.MarkResult(execCtx, result)
+				lastErr = errEmptyCompletion
+				tracker.Record(auth, errEmptyCompletion)
+				persistExcludedAuthForRetry(m, auth, errEmptyCompletion, retryRound, defaultRequestRetry, excluded)
+				if homeMode {
+					homeAuthCount++
+				}
+				continue
+			}
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)
 			return resp, nil
@@ -466,6 +534,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				return cliproxyexecutor.Response{}, authErr
 			}
 			lastErr = authErr
+			persistExcludedAuthForRetry(m, auth, authErr, retryRound, defaultRequestRetry, excluded)
 			if homeMode {
 				homeAuthCount++
 			}
@@ -474,7 +543,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 }
 
-func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, retryRound int, defaultRequestRetry int) (cliproxyexecutor.Response, error) {
+func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, retryRound int, defaultRequestRetry int, excluded map[string]struct{}, optionalTracker ...*routeAttemptTracker) (cliproxyexecutor.Response, error) {
+	var tracker *routeAttemptTracker
+	if len(optionalTracker) > 0 {
+		tracker = optionalTracker[0]
+	}
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -483,9 +556,18 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
+	if excluded == nil {
+		excluded = make(map[string]struct{})
+	}
 	tried := make(map[string]struct{})
+	for authID := range excluded {
+		tried[authID] = struct{}{}
+	}
 	if !homeMode {
 		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
+			tried[authID] = struct{}{}
+		}
+		for authID := range extractExcludedAuthIDs(opts.Metadata) {
 			tried[authID] = struct{}{}
 		}
 	}
@@ -538,6 +620,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
+			tracker.Record(auth, errPrepare)
+			persistExcludedAuthForRetry(m, auth, errPrepare, retryRound, defaultRequestRetry, excluded)
 			continue
 		}
 		var authErr error
@@ -587,6 +671,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil, Options: execOpts}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
+				tracker.Record(auth, errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
@@ -609,6 +694,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 						return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
 					}
 					authErr = errExec
+					tracker.Record(auth, errExec)
 					if result.CredentialScope {
 						break
 					}
@@ -618,12 +704,26 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				tracker.Record(auth, errExec)
+				persistExcludedAuthForRetry(m, auth, errExec, retryRound, defaultRequestRetry, excluded)
 				if result.CredentialScope {
 					break
 				}
 				continue
 			}
 			m.MarkResult(execCtx, result)
+			if isEmptyCompletionPayload(resp.Payload) {
+				result.Success = false
+				result.Error = errEmptyCompletion
+				m.MarkResult(execCtx, result)
+				lastErr = errEmptyCompletion
+				tracker.Record(auth, errEmptyCompletion)
+				persistExcludedAuthForRetry(m, auth, errEmptyCompletion, retryRound, defaultRequestRetry, excluded)
+				if homeMode {
+					homeAuthCount++
+				}
+				continue
+			}
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)
 			return resp, nil
@@ -644,6 +744,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				return cliproxyexecutor.Response{}, authErr
 			}
 			lastErr = authErr
+			persistExcludedAuthForRetry(m, auth, authErr, retryRound, defaultRequestRetry, excluded)
 			if homeMode {
 				homeAuthCount++
 			}
@@ -652,7 +753,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	}
 }
 
-func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, homeRetryLimit *int, retryRound int, defaultRequestRetry int) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, homeRetryLimit *int, retryRound int, defaultRequestRetry int, excluded map[string]struct{}, optionalTracker ...*routeAttemptTracker) (*cliproxyexecutor.StreamResult, error) {
+	var tracker *routeAttemptTracker
+	if len(optionalTracker) > 0 {
+		tracker = optionalTracker[0]
+	}
 	if len(providers) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -662,9 +767,18 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
+	if excluded == nil {
+		excluded = make(map[string]struct{})
+	}
 	tried := make(map[string]struct{})
+	for authID := range excluded {
+		tried[authID] = struct{}{}
+	}
 	if !homeMode {
 		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
+			tried[authID] = struct{}{}
+		}
+		for authID := range extractExcludedAuthIDs(opts.Metadata) {
 			tried[authID] = struct{}{}
 		}
 	}
@@ -674,6 +788,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	homeSameAuthRetryPending := false
 	attempted := make(map[string]struct{})
 	unauthorizedRefreshTried := make(map[string]struct{})
+	emptyCompletionTried := make(map[string]struct{})
 	var lastErr error
 	var roundTiming homeRetryRoundTiming
 	for {
@@ -745,6 +860,24 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			homeSameAuthRetryPending = false
 		}
 		if selection != nil {
+			// #4881: an auth that already returned an empty completion must rotate.
+			if _, emptyAlready := emptyCompletionTried[auth.ID]; emptyAlready {
+				selection.End("repeated_empty_completion_auth")
+				if lastErr != nil {
+					return nil, lastErr
+				}
+				return nil, errEmptyCompletion
+			}
+
+			// #4881: an auth that already had an unauthorized refresh must rotate.
+			if _, refreshedAlready := unauthorizedRefreshTried[auth.ID]; refreshedAlready {
+				selection.End("repeated_refresh_auth")
+				if lastErr != nil {
+					return nil, lastErr
+				}
+				return nil, errEmptyCompletion
+			}
+
 			// A legacy Home may ignore excluded_auth_ids and return the same
 			// credential again. Reject credentials explicitly excluded from this
 			// round while retaining the explicit same-auth retry path, which
@@ -857,6 +990,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				m.MarkResult(execCtx, result)
 			}
 			lastErr = errPrepare
+			tracker.Record(auth, errPrepare)
+			persistExcludedAuthForRetry(m, auth, errPrepare, retryRound, defaultRequestRetry, excluded)
 			if homeMode {
 				roundTiming.Observe(lastErr)
 			}
@@ -908,10 +1043,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					return nil, wrapRequestStopError(errStream)
 				}
 				lastErr = errStream
+				tracker.Record(auth, errStream)
+				persistExcludedAuthForRetry(m, auth, errStream, retryRound, defaultRequestRetry, excluded)
 				if homeMode {
 					roundTiming.Observe(lastErr)
-				}
-				if homeMode {
+					if isEmptyCompletionError(errStream) {
+						emptyCompletionTried[auth.ID] = struct{}{}
+					}
 					homeAuthCount++
 				}
 				continue
@@ -920,10 +1058,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errStream
 			}
 			lastErr = errStream
+			tracker.Record(auth, errStream)
+			persistExcludedAuthForRetry(m, auth, errStream, retryRound, defaultRequestRetry, excluded)
 			if homeMode {
 				roundTiming.Observe(lastErr)
-			}
-			if homeMode {
+				if isEmptyCompletionError(errStream) {
+					emptyCompletionTried[auth.ID] = struct{}{}
+				}
 				homeAuthCount++
 			}
 			continue
@@ -949,6 +1090,26 @@ func shouldExcludeHomeAuthAfterStreamError(ctx context.Context, auth *Auth, err 
 		return false
 	}
 	return !isUnauthorizedError(err) || auth == nil || auth.AuthKind() != AuthKindOAuth
+}
+
+func extractExcludedAuthIDs(meta map[string]any) map[string]struct{} {
+	excluded := make(map[string]struct{})
+	if meta == nil {
+		return excluded
+	}
+	if existing, ok := meta[cliproxyexecutor.ExcludedAuthIDsMetadataKey]; ok {
+		switch v := existing.(type) {
+		case map[string]struct{}:
+			for id := range v {
+				excluded[id] = struct{}{}
+			}
+		case []string:
+			for _, id := range v {
+				excluded[id] = struct{}{}
+			}
+		}
+	}
+	return excluded
 }
 
 func cloneRequestMetadata(src map[string]any) map[string]any {

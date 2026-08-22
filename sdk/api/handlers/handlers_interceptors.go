@@ -154,10 +154,11 @@ func requestTerminationError(resp pluginapi.RequestInterceptResponse) *interface
 
 func directTerminationError(statusCode int, headers http.Header, body []byte) *interfaces.ErrorMessage {
 	return &interfaces.ErrorMessage{
-		StatusCode:     normalizedTerminationStatus(statusCode),
-		DirectResponse: true,
-		Body:           cloneBytes(body),
-		Headers:        cloneHeader(headers),
+		StatusCode:            normalizedTerminationStatus(statusCode),
+		DirectResponse:        true,
+		TrustedDirectResponse: true,
+		Body:                  cloneBytes(body),
+		Headers:               cloneHeader(headers),
 	}
 }
 

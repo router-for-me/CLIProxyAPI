@@ -201,12 +201,18 @@ func forceMappingStreamUpstreamChunks(provider, upstreamModel string) [][]byte {
 			[]byte("event:message_start\n"),
 			[]byte("data:" + msg + "\n\n"),
 			[]byte("data: " + chat + "\n\n"),
+			[]byte("data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"" + upstreamModel + "\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n"),
+			[]byte("data: [DONE]\n\n"),
 		}
 	case "xai":
 		msg := strings.Replace(liveXAIMessagesStartUpstream, "grok-4.3", upstreamModel, 1)
 		return [][]byte{
 			[]byte("event: message_start\n"),
 			[]byte("data: " + msg + "\n\n"),
+			[]byte("event: content_block_start\n"),
+			[]byte("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"ok\"}}\n\n"),
+			[]byte("event: message_stop\n"),
+			[]byte("data: {\"type\":\"message_stop\"}\n\n"),
 		}
 	case "antigravity":
 		msg := strings.Replace(liveAntigravityMessagesStartUpstream, "gemini-3-flash", upstreamModel, 1)
@@ -217,6 +223,7 @@ func forceMappingStreamUpstreamChunks(provider, upstreamModel string) [][]byte {
 	default:
 		return [][]byte{
 			[]byte(`data: {"type":"response.created","response":{"model":"` + upstreamModel + `"}}` + "\n\n"),
+			[]byte(`data: {"type":"response.completed","response":{"model":"` + upstreamModel + `","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n"),
 		}
 	}
 }
