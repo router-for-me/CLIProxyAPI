@@ -63,12 +63,12 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		}
 	}
 
-	// helper for generating paired call IDs in the form: call_gemini_<seq>
+	// helper for generating paired call IDs in the form: call_<number>
 	// Gemini uses sequential pairing across possibly multiple in-flight
 	// functionCalls, so we keep a FIFO queue of generated call IDs and
 	// consume them in order when functionResponses arrive.
 	var pendingCallIDs []string
-	callCounter := 0
+	callIDCounter := 0
 
 	getGeminiCallID := func(value gjson.Result) string {
 		if callID := strings.TrimSpace(value.Get("id").String()); callID != "" {
@@ -87,6 +87,35 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			}
 		}
 		return ids
+	}
+
+	usedCallIDs := make(map[string]bool)
+	if contents := root.Get("contents"); contents.Exists() && contents.IsArray() {
+		contents.ForEach(func(_, content gjson.Result) bool {
+			if parts := content.Get("parts"); parts.Exists() && parts.IsArray() {
+				parts.ForEach(func(_, part gjson.Result) bool {
+					if id := getGeminiCallID(part.Get("functionCall")); id != "" {
+						usedCallIDs[id] = true
+					}
+					if id := getGeminiCallID(part.Get("functionResponse")); id != "" {
+						usedCallIDs[id] = true
+					}
+					return true
+				})
+			}
+			return true
+		})
+	}
+
+	generateCallID := func() string {
+		for {
+			callIDCounter++
+			id := fmt.Sprintf("call_%d", callIDCounter)
+			if !usedCallIDs[id] {
+				usedCallIDs[id] = true
+				return id
+			}
+		}
 	}
 
 	// Model
@@ -185,8 +214,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					// Reuse gateway-provided IDs when present, otherwise generate one for pairing.
 					id := getGeminiCallID(fc)
 					if id == "" {
-						callCounter++
-						id = fmt.Sprintf("call_gemini_%016d", callCounter)
+						id = generateCallID()
 					}
 					fn, _ = sjson.SetBytes(fn, "call_id", id)
 					pendingCallIDs = append(pendingCallIDs, id)
@@ -215,8 +243,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 						// pop the first element
 						pendingCallIDs = pendingCallIDs[1:]
 					} else {
-						callCounter++
-						id = fmt.Sprintf("call_gemini_%016d", callCounter)
+						id = generateCallID()
 					}
 					fno, _ = sjson.SetBytes(fno, "call_id", id)
 					inputItems = append(inputItems, fno)

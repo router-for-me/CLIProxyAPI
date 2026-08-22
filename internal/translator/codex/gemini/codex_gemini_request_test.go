@@ -116,31 +116,31 @@ func TestConvertGeminiRequestToCodex_DropsHiddenThoughtParts(t *testing.T) {
 	})
 }
 
-func TestConvertGeminiRequestToCodex_DeterministicCallIDs(t *testing.T) {
+func TestConvertGeminiRequestToCodex_DeterministicCallIDsAcrossRepeatedTranslations(t *testing.T) {
 	raw := []byte(`{
 		"contents": [
 			{
+				"role": "user",
+				"parts": [{"text": "check weather in Paris and Tokyo"}]
+			},
+			{
 				"role": "model",
 				"parts": [
-					{"functionCall": {"name": "first_tool", "args": {"q": "one"}}}
+					{"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}},
+					{"functionCall": {"name": "get_weather", "args": {"city": "Tokyo"}}}
 				]
 			},
 			{
 				"role": "user",
 				"parts": [
-					{"functionResponse": {"name": "first_tool", "response": {"result": "ok1"}}}
+					{"functionResponse": {"name": "get_weather", "response": {"result": "Paris: 15C"}}},
+					{"functionResponse": {"name": "get_weather", "response": {"result": "Tokyo: 20C"}}}
 				]
 			},
 			{
 				"role": "model",
 				"parts": [
-					{"functionCall": {"name": "second_tool", "args": {"q": "two"}}}
-				]
-			},
-			{
-				"role": "user",
-				"parts": [
-					{"functionResponse": {"name": "second_tool", "response": {"result": "ok2"}}}
+					{"functionCall": {"name": "get_forecast", "args": {"city": "Paris"}}}
 				]
 			}
 		]
@@ -149,22 +149,172 @@ func TestConvertGeminiRequestToCodex_DeterministicCallIDs(t *testing.T) {
 	out1 := ConvertGeminiRequestToCodex("gpt-5.1-codex", raw, false)
 	out2 := ConvertGeminiRequestToCodex("gpt-5.1-codex", raw, false)
 
-	if string(out1) != string(out2) {
-		t.Fatalf("expected deterministic output across multiple conversions, got different outputs:\nout1=%s\nout2=%s", string(out1), string(out2))
+	call1_id1 := gjson.GetBytes(out1, "input.1.call_id").String()
+	call2_id1 := gjson.GetBytes(out1, "input.2.call_id").String()
+	resp1_id1 := gjson.GetBytes(out1, "input.3.call_id").String()
+	resp2_id1 := gjson.GetBytes(out1, "input.4.call_id").String()
+	call3_id1 := gjson.GetBytes(out1, "input.5.call_id").String()
+
+	call1_id2 := gjson.GetBytes(out2, "input.1.call_id").String()
+	call2_id2 := gjson.GetBytes(out2, "input.2.call_id").String()
+	resp1_id2 := gjson.GetBytes(out2, "input.3.call_id").String()
+	resp2_id2 := gjson.GetBytes(out2, "input.4.call_id").String()
+	call3_id2 := gjson.GetBytes(out2, "input.5.call_id").String()
+
+	if call1_id1 != call1_id2 || call2_id1 != call2_id2 || call3_id1 != call3_id2 {
+		t.Fatalf("call_ids are not deterministic across calls:\nout1 calls: [%s, %s, %s]\nout2 calls: [%s, %s, %s]",
+			call1_id1, call2_id1, call3_id1, call1_id2, call2_id2, call3_id2)
 	}
 
-	wantID1 := "call_gemini_0000000000000001"
-	wantID2 := "call_gemini_0000000000000002"
-
-	gotCall1 := gjson.GetBytes(out1, "input.0.call_id").String()
-	gotResp1 := gjson.GetBytes(out1, "input.1.call_id").String()
-	gotCall2 := gjson.GetBytes(out1, "input.2.call_id").String()
-	gotResp2 := gjson.GetBytes(out1, "input.3.call_id").String()
-
-	if gotCall1 != wantID1 || gotResp1 != wantID1 {
-		t.Fatalf("expected first tool pair to have id %q, got call=%q, resp=%q", wantID1, gotCall1, gotResp1)
+	if resp1_id1 != resp1_id2 || resp2_id1 != resp2_id2 {
+		t.Fatalf("function_call_output call_ids are not deterministic across calls:\nout1 resps: [%s, %s]\nout2 resps: [%s, %s]",
+			resp1_id1, resp2_id1, resp1_id2, resp2_id2)
 	}
-	if gotCall2 != wantID2 || gotResp2 != wantID2 {
-		t.Fatalf("expected second tool pair to have id %q, got call=%q, resp=%q", wantID2, gotCall2, gotResp2)
+
+	if call1_id1 != resp1_id1 {
+		t.Fatalf("first call ID %q does not match first response ID %q", call1_id1, resp1_id1)
+	}
+	if call2_id1 != resp2_id1 {
+		t.Fatalf("second call ID %q does not match second response ID %q", call2_id1, resp2_id1)
+	}
+}
+
+func TestConvertGeminiRequestToCodex_CallIDsUniqueWithinRequest(t *testing.T) {
+	raw := []byte(`{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"name": "func1", "args": {}}},
+					{"functionCall": {"name": "func2", "args": {}}},
+					{"functionCall": {"name": "func3", "args": {}}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToCodex("gpt-5.1-codex", raw, false)
+	id1 := gjson.GetBytes(out, "input.0.call_id").String()
+	id2 := gjson.GetBytes(out, "input.1.call_id").String()
+	id3 := gjson.GetBytes(out, "input.2.call_id").String()
+
+	if id1 == "" || id2 == "" || id3 == "" {
+		t.Fatalf("expected non-empty IDs, got id1=%q, id2=%q, id3=%q", id1, id2, id3)
+	}
+	if id1 == id2 || id1 == id3 || id2 == id3 {
+		t.Fatalf("call IDs must be unique within request: id1=%q, id2=%q, id3=%q", id1, id2, id3)
+	}
+}
+
+func TestConvertGeminiRequestToCodex_ExplicitIDWinsOverGenerated(t *testing.T) {
+	raw := []byte(`{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"name": "func1", "id": "explicit_call_123", "args": {}}},
+					{"functionCall": {"name": "func2", "args": {}}}
+				]
+			},
+			{
+				"role": "user",
+				"parts": [
+					{"functionResponse": {"name": "func1", "id": "explicit_call_123", "response": {"result": "ok"}}},
+					{"functionResponse": {"name": "func2", "response": {"result": "ok"}}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToCodex("gpt-5.1-codex", raw, false)
+	call0ID := gjson.GetBytes(out, "input.0.call_id").String()
+	call1ID := gjson.GetBytes(out, "input.1.call_id").String()
+	resp0ID := gjson.GetBytes(out, "input.2.call_id").String()
+	resp1ID := gjson.GetBytes(out, "input.3.call_id").String()
+
+	if call0ID != "explicit_call_123" {
+		t.Fatalf("expected explicit ID %q, got %q", "explicit_call_123", call0ID)
+	}
+	if resp0ID != "explicit_call_123" {
+		t.Fatalf("expected explicit response ID %q, got %q", "explicit_call_123", resp0ID)
+	}
+	if call1ID == "explicit_call_123" {
+		t.Fatalf("generated ID must not collide with explicit ID, got %q", call1ID)
+	}
+	if resp1ID != call1ID {
+		t.Fatalf("generated response ID %q must match generated call ID %q", resp1ID, call1ID)
+	}
+}
+
+func TestConvertGeminiRequestToCodex_ExplicitIDCollisionAvoided(t *testing.T) {
+	raw := []byte(`{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"name": "func1", "id": "call_1", "args": {}}},
+					{"functionCall": {"name": "func2", "args": {}}}
+				]
+			},
+			{
+				"role": "user",
+				"parts": [
+					{"functionResponse": {"name": "func1", "id": "call_1", "response": {"result": "ok1"}}},
+					{"functionResponse": {"name": "func2", "response": {"result": "ok2"}}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToCodex("gpt-5.1-codex", raw, false)
+	call0ID := gjson.GetBytes(out, "input.0.call_id").String()
+	call1ID := gjson.GetBytes(out, "input.1.call_id").String()
+	resp0ID := gjson.GetBytes(out, "input.2.call_id").String()
+	resp1ID := gjson.GetBytes(out, "input.3.call_id").String()
+
+	if call0ID == call1ID {
+		t.Fatalf("duplicate call_id detected: call0=%q, call1=%q", call0ID, call1ID)
+	}
+	if call0ID != "call_1" {
+		t.Fatalf("expected call0 ID %q, got %q", "call_1", call0ID)
+	}
+	if resp0ID != call0ID {
+		t.Fatalf("response 0 ID %q does not match call 0 ID %q", resp0ID, call0ID)
+	}
+	if resp1ID != call1ID {
+		t.Fatalf("response 1 ID %q does not match call 1 ID %q", resp1ID, call1ID)
+	}
+	if call1ID != "call_2" {
+		t.Fatalf("expected call1 ID %q, got %q", "call_2", call1ID)
+	}
+}
+
+func TestConvertGeminiRequestToCodex_ExplicitIDAfterGeneratedCollisionAvoided(t *testing.T) {
+	raw := []byte(`{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"name": "func1", "args": {}}},
+					{"functionCall": {"name": "func2", "id": "call_1", "args": {}}},
+					{"functionCall": {"name": "func3", "args": {}}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToCodex("gpt-5.1-codex", raw, false)
+	call0ID := gjson.GetBytes(out, "input.0.call_id").String()
+	call1ID := gjson.GetBytes(out, "input.1.call_id").String()
+	call2ID := gjson.GetBytes(out, "input.2.call_id").String()
+
+	if call0ID != "call_2" {
+		t.Fatalf("expected call0 ID %q (skipping explicit call_1), got %q", "call_2", call0ID)
+	}
+	if call1ID != "call_1" {
+		t.Fatalf("expected call1 ID %q (explicit), got %q", "call_1", call1ID)
+	}
+	if call2ID != "call_3" {
+		t.Fatalf("expected call2 ID %q, got %q", "call_3", call2ID)
 	}
 }
