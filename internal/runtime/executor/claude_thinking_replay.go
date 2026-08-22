@@ -538,6 +538,26 @@ func cacheClaudeThinkingReplayResponse(ctx context.Context, scope claudeThinking
 	}
 }
 
+// claudeThinkingReplayContentIsReplayable reports whether a content array
+// carries a decodable Claude thinking signature. Only provenanced signed turns
+// are cached; unsigned or malformed-signature responses must not evict earlier
+// replay state.
+func claudeThinkingReplayContentIsReplayable(content []byte) bool {
+	root := gjson.ParseBytes(content)
+	if !root.IsArray() {
+		return false
+	}
+	for _, part := range root.Array() {
+		if strings.TrimSpace(part.Get("type").String()) != "thinking" {
+			continue
+		}
+		if signature.HasDecodableClaudeThinkingSignature(part.Get("signature").String()) {
+			return true
+		}
+	}
+	return false
+}
+
 func cacheClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingReplayScope, content []byte) {
 	if !scope.valid() || !scope.cacheReady {
 		return
@@ -545,7 +565,7 @@ func cacheClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingR
 	// Unsigned or non-replayable responses must not evict earlier signed turns.
 	// Only append turns that carry signed thinking; prior replay state is retained
 	// for the next request that echoes an earlier assistant message.
-	if kimiThinkingReplayContentIsReplayable(content) {
+	if claudeThinkingReplayContentIsReplayable(content) {
 		if _, errReplace := internalcache.ReplaceClaudeThinkingReplayIfUnchanged(ctx, scope.modelFamily, scope.sessionKey, scope.snapshot, content); errReplace != nil {
 			log.Warnf("claude compatible thinking replay cache replace failed: %v", errReplace)
 		}

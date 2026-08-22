@@ -50,6 +50,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if claudeThinkingReplayEnabled(auth, req, opts) {
 		replayScope, replayContents, _ = prepareClaudeThinkingReplayRequest(ctx, auth, req, opts)
 	}
+	var replayAccum *kimiThinkingReplayStreamAccumulator
+	if replayScope.valid() && responseFormat != to {
+		replayAccum = newKimiThinkingReplayStreamAccumulator()
+	}
 	defer func() {
 		if err != nil && replayScope.replayApplied && shouldClearKimiThinkingReplayAfterError(err) {
 			clearClaudeThinkingReplayContent(ctx, replayScope)
@@ -384,6 +388,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
+			if replayAccum != nil {
+				replayAccum.observe(line)
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
@@ -433,6 +440,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		if upstreamCompleted {
 			commitClaudeDiagnostics(diagnosticsState, upstreamMessageID)
+		}
+		if replayAccum != nil && upstreamCompleted {
+			if content, completed := replayAccum.content(); completed {
+				cacheClaudeThinkingReplayContent(ctx, replayScope, content)
+			}
 		}
 	}()
 	result := &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}
