@@ -970,9 +970,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	result.SourceAuth = nil
 
 	if result.IsProbe {
-		// Detach the hook context from the probe lifetime so async observers
-		// see a usable (non-canceled) context.
-		hookCtx := context.WithoutCancel(ctx)
+		// Prober hooks should not be canceled when the individual probe
+		// returns, but they must still be tied to the prober/service lifecycle
+		// so shutdown can stop them.
+		hookCtx := m.proberParent
+		if hookCtx == nil {
+			hookCtx = context.WithoutCancel(ctx)
+		}
 		go m.hook.OnResult(hookCtx, result)
 		if result.Error != nil {
 			m.publishErrorEvent(result, authSnapshot)

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -39,6 +40,65 @@ func (e *countingRefreshExecutor) CountTokens(context.Context, *Auth, cliproxyex
 
 func (e *countingRefreshExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
 	return nil, nil
+}
+
+func TestRefreshAuthForRequest_ClearsAuthLevelCooldownAndProberState(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &countingRefreshExecutor{id: "openai-compatible-custom"}
+	manager.RegisterExecutor(executor)
+
+	next := time.Now().Add(time.Hour)
+	auth := &Auth{
+		ID:       "compat-oauth",
+		Provider: "plugin-provider",
+		Attributes: map[string]string{
+			"compat_name":  "custom",
+			"provider_key": "custom",
+			"base_url":     "https://compat.example.com/v1",
+		},
+		Metadata: map[string]any{
+			"access_token":  "old-token",
+			"refresh_token": "refresh-1",
+		},
+		Status:                  StatusError,
+		Unavailable:             true,
+		NextRetryAfter:          next,
+		authLevelCooldown:       true,
+		authLevelUnavailable:    true,
+		authLevelNextRetryAfter: next,
+		proberCooldown:          true,
+		proberBackoff:           3,
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	refreshed, errRefresh := manager.refreshAuthForRequest(ctx, auth.ID, "old-token")
+	if errRefresh != nil {
+		t.Fatalf("refreshAuthForRequest() error = %v", errRefresh)
+	}
+	if refreshed == nil {
+		t.Fatal("refreshAuthForRequest() returned nil auth")
+	}
+	if refreshed.NextRetryAfter.Equal(next) {
+		t.Fatalf("NextRetryAfter was not cleared: %v", refreshed.NextRetryAfter)
+	}
+	if refreshed.authLevelCooldown {
+		t.Fatal("authLevelCooldown was not cleared")
+	}
+	if refreshed.authLevelUnavailable {
+		t.Fatal("authLevelUnavailable was not cleared")
+	}
+	if !refreshed.authLevelNextRetryAfter.IsZero() {
+		t.Fatalf("authLevelNextRetryAfter was not cleared: %v", refreshed.authLevelNextRetryAfter)
+	}
+	if refreshed.proberCooldown {
+		t.Fatal("proberCooldown was not cleared")
+	}
+	if refreshed.proberBackoff != 0 {
+		t.Fatalf("proberBackoff = %d, want 0", refreshed.proberBackoff)
+	}
 }
 
 func TestRefreshAuthForRequest_UsesExecutorKeyFromAuth(t *testing.T) {

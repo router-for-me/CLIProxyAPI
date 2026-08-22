@@ -1284,6 +1284,45 @@ func TestProberDiscardsStaleAuthResult(t *testing.T) {
 	}
 }
 
+type lifecycleProberHook struct {
+	done chan struct{}
+}
+
+func (h *lifecycleProberHook) OnAuthRegistered(context.Context, *Auth) {}
+func (h *lifecycleProberHook) OnAuthUpdated(context.Context, *Auth)    {}
+func (h *lifecycleProberHook) OnResult(ctx context.Context, _ Result) {
+	<-ctx.Done()
+	close(h.done)
+}
+
+func TestProberHookContextTiedToServiceShutdown(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	h := &lifecycleProberHook{done: make(chan struct{})}
+	m := NewManager(nil, nil, h)
+	m.SetProberParentContext(parent)
+
+	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	m.MarkResult(context.Background(), Result{AuthID: "a1", Provider: "test", Success: true, IsProbe: true})
+
+	select {
+	case <-h.done:
+		t.Fatal("hook returned before service shutdown")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancel()
+
+	select {
+	case <-h.done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("hook did not return after service shutdown")
+	}
+}
+
 type proberCallbackHook struct {
 	didCall int32
 	manager *Manager
