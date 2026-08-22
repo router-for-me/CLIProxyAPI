@@ -752,6 +752,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				return a, nil
 			}
 		}
+		// The conflicting auth is no longer available; rebind the full alias
+		// group to the winning auth so the entire group follows it.
+		s.cache.SetAliases(auth.ID, coldKeys...)
+		entry.Infof("session-affinity: cache miss, conflicting auth unavailable, rebinding group | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	}
 	return auth, nil
 }

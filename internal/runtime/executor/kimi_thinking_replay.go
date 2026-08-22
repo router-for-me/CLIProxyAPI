@@ -177,27 +177,20 @@ func restoreKimiThinkingReplayContent(body, cachedContent []byte) ([]byte, bool)
 	}
 
 	// A single unambiguous match is fine. Multiple matches are only safe when
-	// at least one still carries thinking that matches the cached turn; in that
-	// case prefer the rightmost (latest) retained match. Without any retained
-	// thinking, multiple text-only duplicates are indistinguishable and the
-	// restoration must be refused.
+	// exactly one carries thinking that matches the cached turn. More than one
+	// retained candidate is ambiguous; without any retained candidate, multiple
+	// text-only duplicates are indistinguishable. Both cases must fail closed.
 	if len(matches) > 1 {
-		hasMatch := false
+		var retained []int
 		for _, idx := range matches {
 			if helps.ContentHasThinking(messageItems[idx].Get("content")) {
-				hasMatch = true
-				break
+				retained = append(retained, idx)
 			}
 		}
-		if !hasMatch {
+		if len(retained) != 1 {
 			return body, false
 		}
-		for _, idx := range matches {
-			if helps.ContentHasThinking(messageItems[idx].Get("content")) {
-				matches = []int{idx}
-				break
-			}
-		}
+		matches = retained
 	}
 
 	idx := matches[0]

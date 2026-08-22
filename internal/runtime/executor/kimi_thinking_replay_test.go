@@ -129,6 +129,26 @@ func TestRestoreKimiThinkingReplayContentPrefersRetainedDuplicate(t *testing.T) 
 	}
 }
 
+func TestRestoreKimiThinkingReplayContentRejectsMultipleRetainedCandidates(t *testing.T) {
+	cached := []byte(`[{"type":"thinking","thinking":"cached","signature":"cached-signature"},{"type":"text","text":"OK"}]`)
+	// Two matching assistants both retain a thinking block with the same visible
+	// text; the cached signature must not be restored because the match is ambiguous.
+	body := []byte(`{"messages":[
+		{"role":"user","content":"hi"},
+		{"role":"assistant","content":[{"type":"thinking","thinking":"cached","signature":"sig-1"},{"type":"text","text":"OK"}]},
+		{"role":"user","content":"again"},
+		{"role":"assistant","content":[{"type":"thinking","thinking":"cached","signature":"sig-2"},{"type":"text","text":"OK"}]}
+	]}`)
+
+	updated, restored := restoreKimiThinkingReplayContent(body, cached)
+	if restored {
+		t.Fatalf("multiple retained candidates must fail closed: %s", updated)
+	}
+	if !helps.JSONEqual(updated, body) {
+		t.Fatalf("request body changed when it should not: %s", updated)
+	}
+}
+
 func TestPrepareKimiThinkingReplayRequestSharesOnlyK3Variants(t *testing.T) {
 	internalcache.ClearKimiThinkingReplayCache()
 	t.Cleanup(internalcache.ClearKimiThinkingReplayCache)

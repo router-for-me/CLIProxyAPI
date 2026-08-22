@@ -1029,6 +1029,59 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_RebindsFullAliasGroupWhenConflictingAuthUnavailable(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+	}
+
+	// Seed the cache so the fallback conversation alias is already bound to an
+	// unavailable auth, while a separate alias shares the same group.
+	seedKey := "claude::conv:existing-session::claude-3"
+	otherAlias := "claude::conv:other-session::claude-3"
+	selector.cache.SetAliases("auth-unavailable", seedKey, otherAlias)
+
+	// Request carries a new prompt_cache_key plus the existing conversation id
+	// as fallback; the new primary key must follow the rebinding winner.
+	payload := []byte(`{"prompt_cache_key":"pck:rebind-test","conversation":{"id":"existing-session"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+
+	available := auths
+	first, err := selector.Pick(context.Background(), "claude", "claude-3", opts, available)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if first.ID == "auth-unavailable" {
+		t.Fatalf("Pick() returned unavailable auth")
+	}
+
+	// The full alias group (including the pre-existing aliases) should now
+	// resolve to the winning auth.
+	for i := 0; i < 5; i++ {
+		got, _ := selector.Pick(context.Background(), "claude", "claude-3", opts, available)
+		if got.ID != first.ID {
+			t.Fatalf("Pick() #%d inconsistent: got %q, want %q", i, got.ID, first.ID)
+		}
+	}
+
+	// A request using the other alias in the same group should also hit the winner.
+	otherPayload := []byte(`{"prompt_cache_key":"pck:other","conversation":{"id":"other-session"}}`)
+	otherOpts := cliproxyexecutor.Options{OriginalRequest: otherPayload}
+	got, _ := selector.Pick(context.Background(), "claude", "claude-3", otherOpts, available)
+	if got.ID != first.ID {
+		t.Fatalf("other alias did not follow winner: got %q, want %q", got.ID, first.ID)
+	}
+}
+
 func TestExtractSessionID_ClaudeCodePriorityOverHeader(t *testing.T) {
 	t.Parallel()
 
