@@ -2440,6 +2440,34 @@ func TestSessionCache_StopConcurrent(t *testing.T) {
 	}
 }
 
+func TestReplaceAliasesIfUnchanged_MergesSameAuthGroups(t *testing.T) {
+	t.Parallel()
+
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	// Two separate alias groups bound to the same unavailable auth.
+	cache.SetAliases("auth-unavailable", "claude::conv:group1::claude-3")
+	cache.SetAliases("auth-unavailable", "claude::conv:group2::claude-3")
+
+	coldKeys := []string{
+		"claude::conv:group1::claude-3",
+		"claude::conv:group2::claude-3",
+		"claude::pck:rebind-test::claude-3",
+	}
+
+	rebound, ok := cache.ReplaceAliasesIfUnchanged("auth-unavailable", "auth-a", coldKeys...)
+	if !ok || rebound != "auth-a" {
+		t.Fatalf("ReplaceAliasesIfUnchanged() = %q, %v, want auth-a, true", rebound, ok)
+	}
+
+	for _, key := range coldKeys {
+		if got, exists := cache.Get(key); !exists || got != "auth-a" {
+			t.Fatalf("key %q = %q, %v, want auth-a, true", key, got, exists)
+		}
+	}
+}
+
 type mockStoppableSelector struct {
 	stopped bool
 }

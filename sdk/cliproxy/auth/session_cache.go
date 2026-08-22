@@ -327,10 +327,13 @@ func (c *SessionCache) SetAliasesIfNoConflict(authID string, sessionIDs ...strin
 
 // ReplaceAliasesIfUnchanged rebinds the alias group currently bound to
 // expectedAuthID to newAuthID, merging in the provided sessionIDs. It succeeds
-// only when every sessionID is either absent or bound to expectedAuthID with the
-// same alias list, and every alias in that group still maps to expectedAuthID.
-// If a concurrent caller already rebound the group to a different auth, the
-// current auth is returned and the cache is left untouched.
+// only when every provided sessionID is either absent or bound to
+// expectedAuthID, at least one provided sessionID is live and bound to
+// expectedAuthID, and every reachable alias of that auth still maps to
+// expectedAuthID. Multiple alias groups bound to the same expectedAuthID are
+// merged into one before the rebind. If a concurrent caller already rebound the
+// group to a different auth, the current auth is returned and the cache is left
+// untouched.
 func (c *SessionCache) ReplaceAliasesIfUnchanged(expectedAuthID, newAuthID string, sessionIDs ...string) (string, bool) {
 	if c == nil || expectedAuthID == "" || newAuthID == "" || len(sessionIDs) == 0 {
 		return "", false
@@ -339,44 +342,102 @@ func (c *SessionCache) ReplaceAliasesIfUnchanged(expectedAuthID, newAuthID strin
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	var representative sessionEntry
-	found := false
+	aliasesSet := make(map[string]struct{})
+	foundLive := false
 	for _, sid := range sessionIDs {
 		if sid == "" {
 			continue
 		}
 		entry, ok := c.entries[sid]
 		if !ok || !now.Before(entry.expiresAt) {
+			aliasesSet[sid] = struct{}{}
 			continue
 		}
 		if entry.authID != expectedAuthID {
 			return entry.authID, false
 		}
-		if !found {
-			representative = entry
-			found = true
-		} else if !equalSessionAliases(entry.aliases, representative.aliases) {
-			return entry.authID, false
+		foundLive = true
+		aliasesSet[sid] = struct{}{}
+		for _, alias := range entry.aliases {
+			aliasesSet[alias] = struct{}{}
 		}
 	}
-	if !found {
+	if !foundLive || len(aliasesSet) == 0 {
 		return "", false
 	}
 
-	expectedAliases := representative.aliases
+	// Closure: merge every alias group currently bound to expectedAuthID that
+	// is reachable from the cold keys.
+	for {
+		added := false
+		for alias := range aliasesSet {
+			entry, ok := c.entries[alias]
+			if !ok || !now.Before(entry.expiresAt) || entry.authID != expectedAuthID {
+				continue
+			}
+			for _, a := range entry.aliases {
+				if _, exists := aliasesSet[a]; !exists {
+					aliasesSet[a] = struct{}{}
+					added = true
+				}
+			}
+		}
+		if !added {
+			break
+		}
+	}
+
+	expectedAliases := compactSessionAliases(setToSlice(aliasesSet))
+
+	// Verify the merged view is consistent: any already-live alias in the merged
+	// group is still bound to expectedAuthID and has no aliases outside the
+	// merged set. Absent aliases are added by the replacement.
 	for _, alias := range expectedAliases {
 		entry, ok := c.entries[alias]
-		if !ok || !now.Before(entry.expiresAt) || entry.authID != expectedAuthID || !equalSessionAliases(entry.aliases, expectedAliases) {
+		if !ok || !now.Before(entry.expiresAt) {
+			continue
+		}
+		if entry.authID != expectedAuthID {
 			return "", false
 		}
+		for _, a := range entry.aliases {
+			if _, exists := aliasesSet[a]; !exists {
+				return "", false
+			}
+		}
+	}
+
+	// Capture previous groups for deletion. Distinct entries are keyed by their
+	// alias list so overlapping alias groups are only removed once.
+	previousGroups := make(map[string]sessionEntry, len(expectedAliases))
+	for _, alias := range expectedAliases {
+		entry, ok := c.entries[alias]
+		if !ok || !now.Before(entry.expiresAt) || entry.authID != expectedAuthID {
+			continue
+		}
+		key := strings.Join(entry.aliases, "\x00")
+		previousGroups[key] = entry
+	}
+
+	groups := make([]sessionEntry, 0, len(previousGroups))
+	for _, entry := range previousGroups {
+		groups = append(groups, entry)
 	}
 
 	newAliases := compactSessionAliases(mergeSessionAliases(expectedAliases, sessionIDs...))
 	if len(newAliases) == 0 {
 		return "", false
 	}
-	c.replaceAliasGroupsLocked(newAuthID, now.Add(c.ttl), newAliases, representative)
+	c.replaceAliasGroupsLocked(newAuthID, now.Add(c.ttl), newAliases, groups...)
 	return newAuthID, true
+}
+
+func setToSlice(set map[string]struct{}) []string {
+	slice := make([]string, 0, len(set))
+	for s := range set {
+		slice = append(slice, s)
+	}
+	return slice
 }
 
 // Touch refreshes the expiration for a session binding if it currently matches expectedAuthID.

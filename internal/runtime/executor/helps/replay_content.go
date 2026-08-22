@@ -93,6 +93,9 @@ func NonThinkingContentParts(content gjson.Result) ([][]byte, bool) {
 		}
 		parts = append(parts, canonical)
 	}
+	if len(parts) == 0 {
+		return nil, false
+	}
 	return parts, true
 }
 
