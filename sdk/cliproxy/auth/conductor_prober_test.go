@@ -535,6 +535,51 @@ func TestProberIgnoresCancellationResult(t *testing.T) {
 	}
 }
 
+func TestProberDiscardsResultIfAuthReplaced(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	block := make(chan struct{})
+	exec := &proberTestExecutor{provider: "test", err: fmt.Errorf("unauthorized"), blockUntil: block}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://example.com",
+		},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.StartProber(ctx, cfg)
+
+	for exec.calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	auth2 := auth.Clone()
+	auth2.Metadata = map[string]any{"token": "refreshed"}
+	if _, err := m.Register(ctx, auth2); err != nil {
+		t.Fatalf("Register replacement: %v", err)
+	}
+
+	close(block)
+	time.Sleep(100 * time.Millisecond)
+	m.StopProber()
+
+	updated, ok := m.GetByID("a1")
+	if !ok {
+		t.Fatal("auth not found")
+	}
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("probe result for stale credential should have been discarded; got Unavailable=%v NextRetryAfter=%v", updated.Unavailable, updated.NextRetryAfter)
+	}
+}
+
 func TestProberBackoffFor(t *testing.T) {
 	l := newAuthProberLoop(nil, internalconfig.CredentialProberConfig{BackoffBase: 30 * time.Second, BackoffMax: 5 * time.Minute})
 	cases := []struct {

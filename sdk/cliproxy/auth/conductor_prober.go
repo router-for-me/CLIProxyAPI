@@ -267,6 +267,16 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 		return
 	}
 
+	// Re-fetch the auth under the manager lock. snapshotAuths may have
+	// returned a pointer that was replaced by an auto-refresh or watcher
+	// update while this probe was waiting in the rate-limit queue.
+	l.manager.mu.RLock()
+	auth = l.manager.auths[auth.ID]
+	l.manager.mu.RUnlock()
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return
+	}
+
 	// The prober must not carry a whole-request deadline into response
 	// processing. Drop any inherited deadline while still allowing the parent
 	// cancellation to stop the probe.
@@ -354,6 +364,15 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 
 	if log.IsLevelEnabled(log.DebugLevel) {
 		log.Debugf("credential prober failure for %s: %s", auth.ID, resultErr.Message)
+	}
+
+	// If the credential was replaced while the request was in flight, the
+	// result belongs to stale state and must not be applied to the replacement.
+	l.manager.mu.RLock()
+	after := l.manager.auths[auth.ID]
+	l.manager.mu.RUnlock()
+	if after == nil || after != auth {
+		return
 	}
 
 	l.manager.mu.RLock()
