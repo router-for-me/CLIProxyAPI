@@ -945,6 +945,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			cooldownStateChanged = !cooldownStateRecordsEqual(cooldownRecordsBefore, cooldownRecordsAfter)
 		}
 	}
+
+	var probeHookCtx context.Context
+	if result.IsProbe {
+		probeHookCtx = m.proberCtx
+		if probeHookCtx == nil {
+			probeHookCtx = m.proberParent
+		}
+	}
 	m.mu.Unlock()
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
@@ -972,8 +980,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.IsProbe {
 		// Prober hooks should not be canceled when the individual probe
 		// returns, but they must still be tied to the prober/service lifecycle
-		// so shutdown can stop them.
-		hookCtx := m.proberParent
+		// so shutdown can stop them. Prefer the live loop context, then the
+		// registered service parent, then a detached context as a last resort.
+		hookCtx := probeHookCtx
 		if hookCtx == nil {
 			hookCtx = context.WithoutCancel(ctx)
 		}

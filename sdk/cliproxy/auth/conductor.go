@@ -168,6 +168,7 @@ type Manager struct {
 	proberCancel      context.CancelFunc
 	proberLoop        *authProberLoop
 	proberParent      context.Context
+	proberCtx         context.Context
 	proberWg          sync.WaitGroup
 	proberLifecycleMu sync.Mutex
 

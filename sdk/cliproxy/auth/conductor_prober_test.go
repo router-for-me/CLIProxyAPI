@@ -1286,13 +1286,14 @@ func TestProberDiscardsStaleAuthResult(t *testing.T) {
 
 type lifecycleProberHook struct {
 	done chan struct{}
+	once sync.Once
 }
 
 func (h *lifecycleProberHook) OnAuthRegistered(context.Context, *Auth) {}
 func (h *lifecycleProberHook) OnAuthUpdated(context.Context, *Auth)    {}
 func (h *lifecycleProberHook) OnResult(ctx context.Context, _ Result) {
 	<-ctx.Done()
-	close(h.done)
+	h.once.Do(func() { close(h.done) })
 }
 
 func TestProberHookContextTiedToServiceShutdown(t *testing.T) {
@@ -1320,6 +1321,37 @@ func TestProberHookContextTiedToServiceShutdown(t *testing.T) {
 	case <-h.done:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("hook did not return after service shutdown")
+	}
+}
+
+func TestProberHookContextCancelsOnStopProber(t *testing.T) {
+	ctx := context.Background()
+	h := &lifecycleProberHook{done: make(chan struct{})}
+	m := NewManager(nil, nil, h)
+
+	exec := &proberTestExecutor{provider: "test"}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.StartProber(ctx, cfg)
+
+	select {
+	case <-h.done:
+		t.Fatal("hook returned before StopProber")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	m.StopProber()
+
+	select {
+	case <-h.done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("hook did not return after StopProber")
 	}
 }
 

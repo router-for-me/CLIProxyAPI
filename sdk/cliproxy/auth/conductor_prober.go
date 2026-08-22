@@ -111,6 +111,7 @@ func (m *Manager) startProberUnlocked(parent context.Context, cfg internalconfig
 	m.mu.Lock()
 	m.proberCancel = cancel
 	m.proberLoop = loop
+	m.proberCtx = ctx
 	m.mu.Unlock()
 
 	m.proberWg.Add(1)
@@ -136,6 +137,7 @@ func (m *Manager) stopProberUnlocked() {
 	cancel := m.proberCancel
 	m.proberCancel = nil
 	m.proberLoop = nil
+	m.proberCtx = nil
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()
