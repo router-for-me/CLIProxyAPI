@@ -35,6 +35,24 @@ func claudeReplayPayloadWithConversationID(payload []byte, conversationID string
 
 const claudeReplayResolvedModelInfoKey = "cliproxy.resolved_api_key_model_info"
 
+func TestClaudeThinkingReplayScopeFromRequest_FallbackKeyOnlyForContent(t *testing.T) {
+	auth := &cliproxyauth.Auth{ID: "auth-id"}
+
+	noncePayload := []byte(`{"messages":[{"role":"user","content":"hello"}],"client_metadata":{"conversation_id":"conv-1"}}`)
+	withNonceReq := cliproxyexecutor.Request{Model: "claude-3-opus", Payload: noncePayload}
+	withNonce := claudeThinkingReplayScopeFromRequest(context.Background(), auth, withNonceReq, cliproxyexecutor.Options{})
+	if withNonce.fallbackKey {
+		t.Fatalf("fallbackKey must be false when a conversation nonce is used")
+	}
+
+	contentPayload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	contentReq := cliproxyexecutor.Request{Model: "claude-3-opus", Payload: contentPayload}
+	content := claudeThinkingReplayScopeFromRequest(context.Background(), auth, contentReq, cliproxyexecutor.Options{})
+	if !content.fallbackKey {
+		t.Fatalf("fallbackKey must be true for a content-derived fallback scope")
+	}
+}
+
 func TestClaudeThinkingReplayCallerHash_IgnoresWhitespaceOnlyHeaders(t *testing.T) {
 	auth := &cliproxyauth.Auth{ID: "auth-id"}
 	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
