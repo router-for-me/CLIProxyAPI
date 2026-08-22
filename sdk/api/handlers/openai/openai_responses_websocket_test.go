@@ -92,7 +92,6 @@ func (*homeResponsesWebsocketExecutor) HttpRequest(context.Context, *coreauth.Au
 }
 
 func TestResponsesWebsocketHomeSelectedAuthCallbackPinsAndReusesFirstSelection(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	dispatcher := &homeResponsesWebsocketDispatcher{}
 	executor := &homeResponsesWebsocketExecutor{}
@@ -457,7 +456,6 @@ func TestTruncateWebsocketCloseReason(t *testing.T) {
 }
 
 func TestForwardResponsesWebsocketMirrorsMappedMessageTooBig(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	serverErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -526,7 +524,6 @@ func TestForwardResponsesWebsocketMirrorsMappedMessageTooBig(t *testing.T) {
 }
 
 func TestForwardResponsesWebsocketMirrorsPayloadMessageTooBig(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	serverErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1987,7 +1984,6 @@ func TestAppendWebsocketTimelineEvent(t *testing.T) {
 }
 
 func TestSetWebsocketTimelineBody(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 
@@ -2011,7 +2007,6 @@ func TestSetWebsocketTimelineBody(t *testing.T) {
 }
 
 func TestWebsocketTimelineLogFallsBackToMemoryWithoutSource(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	ts := time.Date(2026, time.April, 1, 12, 34, 56, 789000000, time.UTC)
@@ -2439,7 +2434,6 @@ func TestRecordResponsesWebsocketCustomToolCallsFromOutputItemDoneWithCache(t *t
 }
 
 func TestForwardResponsesWebsocketRestoresAndForwardsCompletedOutput(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	serverErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2543,7 +2537,6 @@ func TestForwardResponsesWebsocketRestoresAndForwardsCompletedOutput(t *testing.
 }
 
 func TestForwardResponsesWebsocketTreatsResponseDoneAsTerminalWithoutRewriting(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	serverErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2713,7 +2706,6 @@ func TestResponsesUpstreamErrorBodyDrivesExposure(t *testing.T) {
 }
 
 func TestForwardResponsesWebsocketTreatsErrorPayloadAsTerminal(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	serverErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2799,7 +2791,6 @@ func TestRecordPendingToolCallIDsFromPayloadDropsSatisfiedCalls(t *testing.T) {
 }
 
 func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	serverErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2864,7 +2855,6 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 }
 
 func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: true}, manager)
@@ -2927,7 +2917,6 @@ func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 }
 
 func TestResponsesWebsocketMirrorsUpstreamMessageTooBigDisconnect(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	for _, provider := range []string{"codex", "xai"} {
 		t.Run(provider, func(t *testing.T) {
@@ -2978,7 +2967,6 @@ func TestResponsesWebsocketMirrorsUpstreamMessageTooBigDisconnect(t *testing.T) 
 }
 
 func TestResponsesWebsocketSendsJSONErrorOnUpstreamCyberPolicyDisconnect(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &websocketUpstreamDisconnectExecutor{provider: "codex", subscribed: make(chan string, 1)}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -3038,7 +3026,6 @@ func TestResponsesWebsocketSendsJSONErrorOnUpstreamCyberPolicyDisconnect(t *test
 }
 
 func TestResponsesWebsocketHidesNonClientUpstreamDisconnectErrors(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
 		name string
@@ -3121,7 +3108,6 @@ func TestResponsesWebsocketHidesNonClientUpstreamDisconnectErrors(t *testing.T) 
 // with status 400 on the stream path and 502 through the disconnect channel. Both
 // must reach the client, because no credential rotation can satisfy the request.
 func TestResponsesWebsocketExposesCyberPolicyRegardlessOfStatus(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	const cyberPolicyBody = `{"error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk.","param":null}}`
 
@@ -3247,7 +3233,6 @@ func TestResponsesWebsocketTerminalErrorWrittenOnceAcrossForwardAndDisconnect(t 
 }
 
 func TestResponsesWebsocketCodexWebsocketPassthroughPassesCompactedRequestWithoutTranscriptMerge(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &websocketDirectCaptureExecutor{done: make(chan struct{})}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -3326,7 +3311,6 @@ func TestResponsesWebsocketCodexWebsocketPassthroughPassesCompactedRequestWithou
 }
 
 func TestResponsesWebsocketXAIWebsocketPassthroughKeepsNativeIncrementalRequest(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	modelName := "xai-websocket-passthrough-model"
 	executor := &websocketDirectCaptureExecutor{provider: "xai", done: make(chan struct{})}
@@ -3411,7 +3395,6 @@ func TestResponsesWebsocketXAIWebsocketPassthroughKeepsNativeIncrementalRequest(
 }
 
 func TestResponsesWebsocketFullRequestCanRouteFromNativeWebsocketToBuiltInProvider(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	const sourceModel = "codex-provider-route-source"
 	const targetModel = "claude-provider-route-target"
@@ -3490,7 +3473,6 @@ func TestResponsesWebsocketFullRequestCanRouteFromNativeWebsocketToBuiltInProvid
 }
 
 func TestResponsesWebsocketHidesProviderRouteAuthFailure(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	const sourceModel = "codex-provider-route-failure-source"
 	const targetModel = "claude-provider-route-target"
@@ -3557,7 +3539,6 @@ func TestResponsesWebsocketHidesProviderRouteAuthFailure(t *testing.T) {
 }
 
 func TestResponsesWebsocketDeltaRouteToBuiltInProviderRequiresFullReplay(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	const sourceModel = "codex-provider-route-delta-source"
 	const targetModel = "claude-provider-route-target"
@@ -3624,7 +3605,6 @@ func TestResponsesWebsocketDeltaRouteToBuiltInProviderRequiresFullReplay(t *test
 }
 
 func TestResponsesWebsocketClosesForHTTPReplayWhenWebsocketEligibilityChanges(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	modelName := "xai-websocket-mode-change-model"
 	executor := &websocketDirectCaptureExecutor{provider: "xai", done: make(chan struct{})}
@@ -3750,7 +3730,6 @@ func TestResponsesWebsocketClosesForHTTPReplayWhenWebsocketEligibilityChanges(t 
 }
 
 func TestResponsesWebsocketRejectsUnknownPreviousResponseOnNewSocket(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	modelName := "xai-websocket-reconnect-model"
 	executor := &websocketDirectCaptureExecutor{provider: "xai"}
@@ -3827,7 +3806,6 @@ func TestResponsesWebsocketRejectsUnknownPreviousResponseOnNewSocket(t *testing.
 }
 
 func TestResponsesWebsocketClosesAfterNonRetryableClientError(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	modelName := "xai-websocket-rollback-model"
 	executor := &websocketCanonicalRollbackExecutor{}
@@ -3904,7 +3882,6 @@ const itemNotPersistedUpstreamMessage = "Item with id 'rs_0b5f3eb6f51f175c0169ca
 // conversation must survive: after reconnecting with the full input the turn
 // succeeds, and no stale per-socket transcript leaks into the new connection.
 func TestResponsesWebsocketExposesItemNotPersistedAndRecoversOnReconnect(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	modelName := "xai-item-miss-model"
 	executor := &websocketCanonicalRollbackExecutor{
@@ -4017,7 +3994,6 @@ func TestResponsesWebsocketSwitchesPinnedAuthAcrossProviders(t *testing.T) {
 		{name: "xai websocket different model", xaiWebsockets: true, returnToDifferentXAIModel: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			gin.SetMode(gin.TestMode)
 
 			xaiModel := "xai-provider-switch-" + strings.ReplaceAll(testCase.name, " ", "-")
 			returnXAIModel := xaiModel
@@ -4299,7 +4275,6 @@ func TestWebsocketUpstreamSupportsCompactionReplayForModelFalseWhenMixedBackends
 }
 
 func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &websocketCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -4406,7 +4381,6 @@ func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 }
 
 func TestResponsesWebsocketMergesTranscriptForNonPassthroughUpstream(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &websocketCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -4478,7 +4452,6 @@ func TestResponsesWebsocketMergesTranscriptForNonPassthroughUpstream(t *testing.
 }
 
 func TestResponsesWebsocketDoesNotInjectPreviousResponseIDWhenPendingToolOutputMissing(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &websocketCompactionCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -4554,7 +4527,6 @@ func TestResponsesWebsocketDoesNotInjectPreviousResponseIDWhenPendingToolOutputM
 }
 
 func TestResponsesWebsocketStripsGenerateWhenWebsocketAttemptFallsBackToHTTP(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	selector := &orderedWebsocketSelector{order: []string{"auth-ws", "auth-http", "auth-http"}}
 	executor := &websocketBootstrapFallbackExecutor{}
@@ -4650,7 +4622,6 @@ func TestResponsesWebsocketStripsGenerateWhenWebsocketAttemptFallsBackToHTTP(t *
 }
 
 func TestWebsocketClientAddressUsesGinClientIP(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	recorder := httptest.NewRecorder()
 	c, engine := gin.CreateTestContext(recorder)
@@ -4675,7 +4646,6 @@ func TestWebsocketClientAddressReturnsEmptyForNilContext(t *testing.T) {
 }
 
 func TestResponsesWebsocketPinsOnlyWebsocketCapableAuth(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	selector := &orderedWebsocketSelector{order: []string{"auth-sse", "auth-ws"}}
 	executor := &websocketAuthCaptureExecutor{}
@@ -4745,7 +4715,6 @@ func TestResponsesWebsocketPinsOnlyWebsocketCapableAuth(t *testing.T) {
 }
 
 func TestResponsesWebsocketUsesNativeIncrementalAfterPinningWebsocketAuthFromMixedPool(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	modelName := "xai-mixed-pool-model"
 	selector := &orderedWebsocketSelector{order: []string{"auth-http", "auth-ws"}}
@@ -4820,7 +4789,6 @@ func TestResponsesWebsocketUsesNativeIncrementalAfterPinningWebsocketAuthFromMix
 }
 
 func TestResponsesWebsocketReplaysImmediatelyAfterPinnedAuthFailure(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
 		name            string
@@ -5047,7 +5015,6 @@ func (e *websocketPinnedPrematureCloseExecutor) Payloads(authID string) [][]byte
 }
 
 func TestResponsesWebsocketReleasesPinnedAuthAfterStreamClosed408(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	selector := &orderedWebsocketSelector{order: []string{"auth-a", "auth-b"}}
 	executor := &websocketPinnedPrematureCloseExecutor{}
@@ -5338,7 +5305,6 @@ func TestDedupeResponsesWebsocketInputItemsByIDKeepsReferencedToolCall(t *testin
 }
 
 func TestResponsesWebsocketCompactionResetsTurnStateOnCustomToolTranscriptReplacement(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &websocketCompactionCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -5442,7 +5408,6 @@ func TestResponsesWebsocketCompactionResetsTurnStateOnCustomToolTranscriptReplac
 }
 
 func TestResponsesWebsocketCompactionResetsTurnStateOnTranscriptReplacement(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &websocketCompactionCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)

@@ -128,7 +128,6 @@ func newResponsesMultiAgentTestHandler(t *testing.T, executor *responsesMultiAge
 }
 
 func TestResponsesWebsocketPreparesCodexMultiAgentV2Tools(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	executor := &websocketDirectCaptureExecutor{provider: "codex"}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)

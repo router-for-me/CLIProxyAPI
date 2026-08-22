@@ -17,7 +17,6 @@ import (
 func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *httptest.ResponseRecorder, *gin.Context, http.Flusher) {
 	t.Helper()
 
-	gin.SetMode(gin.TestMode)
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
 	h := NewOpenAIResponsesAPIHandler(base)
 
