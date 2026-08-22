@@ -598,6 +598,87 @@ func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testin
 	}
 }
 
+func TestIsAuthBlockedForModel_AuthLevelBlockOverridesCleanModelState(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	model := "test-model"
+	auth := &Auth{
+		ID: "a",
+		// Simulate a credential-scoped probe failure.
+		Unavailable:       true,
+		NextRetryAfter:    now.Add(time.Minute),
+		authLevelCooldown: true,
+		Status:            StatusError,
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:      StatusActive,
+				Unavailable: false,
+			},
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, model, now)
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
+	}
+	if !next.Equal(auth.NextRetryAfter) {
+		t.Fatalf("next = %v, want %v", next, auth.NextRetryAfter)
+	}
+	if reason != blockReasonOther {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonOther)
+	}
+}
+
+func TestIsAuthBlockedForModel_ProberFailureBlocksCleanModelState(t *testing.T) {
+	t.Parallel()
+
+	m := NewManager(nil, nil, nil)
+	now := time.Now()
+	model := "test-model"
+	auth := &Auth{
+		ID:       "a",
+		Provider: "test",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:      StatusActive,
+				Unavailable: false,
+			},
+		},
+	}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	retryAfter := time.Minute
+	m.MarkResult(context.Background(), Result{
+		AuthID:          auth.ID,
+		Provider:        auth.Provider,
+		Success:         false,
+		CredentialScope: true,
+		Error: &Error{
+			Code:       ErrorCodeForceCooldown,
+			Message:    "prober: upstream unreachable",
+			HTTPStatus: http.StatusServiceUnavailable,
+			Retryable:  true,
+		},
+		RetryAfter: &retryAfter,
+	})
+
+	updated, _ := m.GetByID(auth.ID)
+	blocked, reason, next := isAuthBlockedForModel(updated, model, now)
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
+	}
+	if !next.Equal(updated.NextRetryAfter) {
+		t.Fatalf("next = %v, want %v", next, updated.NextRetryAfter)
+	}
+	if reason != blockReasonOther {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonOther)
+	}
+}
+
 func TestIsAuthBlockedForModel_ThinkingSuffixStatesBlockCanonicalModel(t *testing.T) {
 	t.Parallel()
 

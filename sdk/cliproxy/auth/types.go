@@ -102,6 +102,10 @@ type Auth struct {
 	// proberBackoff counts consecutive probe failures for the exponential
 	// prober backoff ladder. It is not persisted.
 	proberBackoff int `json:"-"`
+
+	// authLevelCooldown marks an auth-level (non-aggregated) cooldown such as
+	// a prober or invalid_grant failure. It is not persisted.
+	authLevelCooldown bool `json:"-"`
 }
 
 const (

@@ -1246,6 +1246,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.Quota.NextRecoverAt = time.Time{}
 	auth.Quota.BackoffLevel = 0
 	auth.proberBackoff = 0
+	auth.authLevelCooldown = false
 	auth.LastError = nil
 	auth.NextRetryAfter = time.Time{}
 	auth.UpdatedAt = now
@@ -1880,6 +1881,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	defer func() {
 		if disableCooling && auth.NextRetryAfter.IsZero() && auth.Quota.NextRecoverAt.IsZero() {
 			auth.Unavailable = false
+			auth.authLevelCooldown = false
 			auth.Quota.Exceeded = false
 		}
 	}()
@@ -1898,6 +1900,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && retryAfter != nil {
 		auth.NextRetryAfter = now.Add(*retryAfter)
 		auth.proberBackoff++
+		auth.authLevelCooldown = true
 		return
 	}
 	statusCode := statusCodeFromResult(resultErr)
@@ -1976,6 +1979,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.NextRetryAfter = now.Add(transientErrorCooldown)
 		auth.Unavailable = true
 	}
+	auth.authLevelCooldown = auth.Unavailable
 }
 
 // quotaCooldownAfterFailure returns the recovery deadline and backoff level for
