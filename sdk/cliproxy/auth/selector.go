@@ -610,8 +610,9 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
 type SessionAffinitySelector struct {
-	fallback Selector
-	cache    *SessionCache
+	fallback      Selector
+	cache         *SessionCache
+	fallbackCache *SessionCache
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -637,8 +638,9 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		cfg.TTL = time.Hour
 	}
 	return &SessionAffinitySelector{
-		fallback: cfg.Fallback,
-		cache:    NewSessionCache(cfg.TTL),
+		fallback:      cfg.Fallback,
+		cache:         NewSessionCache(cfg.TTL),
+		fallbackCache: NewSessionCache(cfg.TTL),
 	}
 }
 
@@ -698,21 +700,79 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		s.cache.Set(cacheKey, authID)
 	}
 
+	collectTempFallbackKeys := func() []string {
+		keys := []string{cacheKey}
+		if fallbackKey != "" {
+			keys = append(keys, fallbackKey)
+		}
+		if aliases := s.cache.Aliases(cacheKey); len(aliases) > 0 {
+			for _, alias := range aliases {
+				if alias != "" {
+					keys = append(keys, alias)
+				}
+			}
+		}
+		if fallbackKey != "" {
+			if aliases := s.cache.Aliases(fallbackKey); len(aliases) > 0 {
+				for _, alias := range aliases {
+					if alias != "" {
+						keys = append(keys, alias)
+					}
+				}
+			}
+		}
+		return keys
+	}
+	bindTempFallback := func(authID string) {
+		if s.fallbackCache != nil {
+			s.fallbackCache.SetAliases(authID, collectTempFallbackKeys()...)
+		}
+	}
+	invalidateTempFallback := func() {
+		if s.fallbackCache != nil {
+			for _, key := range collectTempFallbackKeys() {
+				s.fallbackCache.Invalidate(key)
+			}
+		}
+	}
+	getTempFallbackAuth := func() (*Auth, bool) {
+		if s.fallbackCache == nil {
+			return nil, false
+		}
+		for _, key := range collectTempFallbackKeys() {
+			if tempAuthID, ok := s.fallbackCache.GetAndRefresh(key); ok {
+				for _, auth := range available {
+					if auth.ID == tempAuthID {
+						return auth, true
+					}
+				}
+			}
+		}
+		return nil, false
+	}
+
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
+				invalidateTempFallback()
 				bind(auth.ID)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
 			}
 		}
-		// Cached auth not available, reselect via fallback selector for even distribution
+		// Primary cached auth is unavailable (cooling down).
+		// Check for an active sticky temporary fallback binding:
+		if fallbackAuth, ok := getTempFallbackAuth(); ok {
+			entry.Infof("session-affinity: sticky fallback cache hit | session=%s primary_cooling=%s fallback_auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, fallbackAuth.ID, provider, model)
+			return fallbackAuth, nil
+		}
+		// Reselect fallback auth and record it as the sticky temporary fallback across aliases
 		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 		if err != nil {
 			return nil, err
 		}
-		bind(auth.ID)
-		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		bindTempFallback(auth.ID)
+		entry.Infof("session-affinity: cache hit but auth unavailable, reselected sticky fallback | session=%s primary_cooling=%s fallback_auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model)
 		return auth, nil
 	}
 
@@ -720,11 +780,23 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
+					invalidateTempFallback()
 					bind(auth.ID)
 					entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 					return auth, nil
 				}
 			}
+			if fallbackAuth, ok := getTempFallbackAuth(); ok {
+				entry.Infof("session-affinity: sticky secondary fallback cache hit | session=%s fallback=%s temp_auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), fallbackAuth.ID, provider, model)
+				return fallbackAuth, nil
+			}
+			auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+			if err != nil {
+				return nil, err
+			}
+			bindTempFallback(auth.ID)
+			entry.Infof("session-affinity: fallback cache hit but auth unavailable, reselected sticky fallback | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+			return auth, nil
 		}
 	}
 
@@ -760,6 +832,9 @@ func (s *SessionAffinitySelector) Stop() {
 	if s.cache != nil {
 		s.cache.Stop()
 	}
+	if s.fallbackCache != nil {
+		s.fallbackCache.Stop()
+	}
 }
 
 // InvalidateAuth removes all session bindings for a specific auth.
@@ -767,6 +842,9 @@ func (s *SessionAffinitySelector) Stop() {
 func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 	if s.cache != nil {
 		s.cache.InvalidateAuth(authID)
+	}
+	if s.fallbackCache != nil {
+		s.fallbackCache.InvalidateAuth(authID)
 	}
 }
 
@@ -794,21 +872,83 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	if fallbackID != "" && fallbackID != primaryID {
 		fallbackKey = ns + "::" + fallbackID + "::" + nsModel
 	}
+	collectResultTempFallbackKeys := func() []string {
+		keys := []string{cacheKey}
+		if fallbackKey != "" {
+			keys = append(keys, fallbackKey)
+		}
+		if aliases := s.cache.Aliases(cacheKey); len(aliases) > 0 {
+			for _, alias := range aliases {
+				if alias != "" {
+					keys = append(keys, alias)
+				}
+			}
+		}
+		if fallbackKey != "" {
+			if aliases := s.cache.Aliases(fallbackKey); len(aliases) > 0 {
+				for _, alias := range aliases {
+					if alias != "" {
+						keys = append(keys, alias)
+					}
+				}
+			}
+		}
+		return keys
+	}
 	if res.Success {
 		s.cache.Touch(cacheKey, res.AuthID)
 		if fallbackKey != "" {
 			s.cache.Touch(fallbackKey, res.AuthID)
 		}
+		if s.fallbackCache != nil {
+			for _, tk := range collectResultTempFallbackKeys() {
+				s.fallbackCache.Touch(tk, res.AuthID)
+			}
+		}
 		return
 	}
 
-	if res.Error != nil && shouldSkipCredentialCooldown(res.Error) {
-		return
+	if res.Error != nil && isTerminalSessionAffinityError(res.Error) {
+		s.cache.CompareAndDelete(cacheKey, res.AuthID)
+		if fallbackKey != "" {
+			s.cache.CompareAndDelete(fallbackKey, res.AuthID)
+		}
+		if s.fallbackCache != nil {
+			for _, tk := range collectResultTempFallbackKeys() {
+				s.fallbackCache.CompareAndDelete(tk, res.AuthID)
+			}
+		}
 	}
+}
 
-	s.cache.CompareAndDelete(cacheKey, res.AuthID)
-	if fallbackKey != "" {
-		s.cache.CompareAndDelete(fallbackKey, res.AuthID)
+// isTerminalSessionAffinityError reports whether a failure represents a permanent
+// credential or authorization rejection (such as an invalid API key, revoked grant,
+// depleted balance, or unsupported model on the account) that warrants purging
+// the long-lived session binding from cache. Transient errors (5xx, 429, timeouts,
+// cloudflare challenge) retain affinity so the session returns to its warm prompt
+// cache once the cooldown or rate limit clears.
+func isTerminalSessionAffinityError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	if shouldSkipCredentialCooldown(err) {
+		return false
+	}
+	if isInvalidGrantResultError(err) || isModelSupportResultError(err) {
+		return true
+	}
+	if isCloudflareChallengeResultError(err) {
+		return false
+	}
+	statusCode := statusCodeFromResult(err)
+	switch statusCode {
+	case http.StatusUnauthorized, // 401: invalid API key / unauthorized
+		http.StatusPaymentRequired, // 402: insufficient balance / credits depleted
+		http.StatusForbidden,       // 403: account banned / forbidden
+		http.StatusNotFound:        // 404: model not found / unsupported for account
+		return true
+	default:
+		return false
 	}
 }
 
