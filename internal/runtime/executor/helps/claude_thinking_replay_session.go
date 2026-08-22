@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"hash"
 	"net/http"
+	"sort"
 	"strings"
 
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
@@ -113,15 +114,26 @@ func ClaudeThinkingReplayConversationSessionKey(auth *cliproxyauth.Auth, req cli
 }
 
 // headerFirstValue returns the first non-empty, trimmed value for key from
-// headers, matching the key case-insensitively to tolerate callers that use
-// lowercase header names. Whitespace-only values are treated as missing.
+// headers, matching the key case-insensitively. Matching header names are
+// collected and sorted so the same logical header under multiple casings always
+// returns the same value. Whitespace-only values are treated as missing.
 func headerFirstValue(headers http.Header, key string) string {
 	if headers == nil {
 		return ""
 	}
-	for k, vv := range headers {
-		if strings.EqualFold(k, key) && len(vv) > 0 {
-			if v := strings.TrimSpace(vv[0]); v != "" {
+	var keys []string
+	for k := range headers {
+		if strings.EqualFold(k, key) {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		for _, v := range headers[k] {
+			if v := strings.TrimSpace(v); v != "" {
 				return v
 			}
 		}
