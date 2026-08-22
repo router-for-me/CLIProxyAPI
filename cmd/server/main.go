@@ -34,9 +34,12 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usercontrol"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
 	log "github.com/sirupsen/logrus"
 )
@@ -599,6 +602,22 @@ func main() {
 		serverOptions = append(serverOptions, api.WithExampleAPIKeySafeMode())
 	}
 
+	var managedUsers *usercontrol.Service
+	if usePostgresStore {
+		repository := pgStoreInst.UserControlRepository()
+		ctxManagedUsers, cancelManagedUsers := context.WithTimeout(context.Background(), 30*time.Second)
+		errManagedUsers := repository.EnsureSchema(ctxManagedUsers)
+		cancelManagedUsers()
+		if errManagedUsers != nil {
+			log.Errorf("failed to initialize managed users: %v", errManagedUsers)
+			return
+		}
+		managedUsers = usercontrol.NewService(repository)
+		serverOptions = append(serverOptions, api.WithMiddleware(managedUsers.Middleware()), api.WithUserControl(managedUsers))
+		coreusage.RegisterNamedPlugin(managedUsers.Identifier(), managedUsers)
+		log.Info("managed users and OAuth invitations enabled with PostgreSQL")
+	}
+
 	// Register the shared token store once so all components use the same persistence backend.
 	if usePostgresStore {
 		sdkAuth.RegisterTokenStore(pgStoreInst)
@@ -612,6 +631,9 @@ func main() {
 
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
+	if managedUsers != nil {
+		sdkaccess.RegisterProvider(managedUsers.Identifier(), managedUsers)
+	}
 	pluginHost.ApplyConfig(context.Background(), cfg)
 	if configLoadedFromHome && homePluginStatusReady {
 		errHomePluginLoad := homeplugins.MarkLoadResults(&homePluginSyncReport, pluginHost)

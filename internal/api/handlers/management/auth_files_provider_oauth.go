@@ -67,6 +67,9 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	}
 
 	RegisterOAuthSession(state, "anthropic")
+	if !h.reserveOAuthInvite(c, state, "anthropic") {
+		return
+	}
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -187,6 +190,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			fmt.Println("API key obtained and saved")
 		}
 		fmt.Println("You can now use Claude services through this CLI")
+		h.completeOAuthContribution(ctx, state, record)
 		CompleteOAuthSession(state)
 	}()
 
@@ -227,6 +231,9 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	}
 
 	RegisterOAuthSession(state, "codex")
+	if !h.reserveOAuthInvite(c, state, "codex") {
+		return
+	}
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -335,6 +342,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			fmt.Println("API key obtained and saved")
 		}
 		fmt.Println("You can now use Codex services through this CLI")
+		h.completeOAuthContribution(ctx, state, record)
 		CompleteOAuthSession(state)
 	}()
 
@@ -360,6 +368,9 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
 	RegisterOAuthSession(state, "antigravity")
+	if !h.reserveOAuthInvite(c, state, "antigravity") {
+		return
+	}
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -497,6 +508,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			return
 		}
 
+		h.completeOAuthContribution(ctx, state, record)
 		CompleteOAuthSession(state)
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
 		if projectID != "" {
@@ -529,6 +541,9 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 	}
 
 	RegisterOAuthSession(state, "xai")
+	if !h.reserveOAuthInvite(c, state, "xai") {
+		return
+	}
 
 	go func() {
 		pollCtx, cancelPoll := context.WithCancel(ctx)
@@ -604,6 +619,7 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 			return
 		}
 
+		h.completeOAuthContribution(ctx, state, record)
 		CompleteOAuthSession(state)
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
 		fmt.Println("You can now use xAI services through this CLI")
@@ -644,6 +660,9 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 	}
 
 	RegisterOAuthSession(state, "kimi")
+	if !h.reserveOAuthInvite(c, state, "kimi") {
+		return
+	}
 
 	go func() {
 		pollCtx, cancelPoll := context.WithCancel(ctx)
@@ -704,6 +723,7 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
 		fmt.Println("You can now use Kimi services through this CLI")
+		h.completeOAuthContribution(ctx, state, record)
 		CompleteOAuthSession(state)
 	}()
 
