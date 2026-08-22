@@ -175,18 +175,11 @@ func (m *Manager) ApplyConfigWithCooldownStateStore(ctx context.Context, cfg *in
 	}
 
 	m.configCooldownMu.Lock()
-	restart := false
-	defer func() {
-		m.configCooldownMu.Unlock()
-		if restart {
-			m.restartProberLocked()
-		}
-	}()
+	defer m.configCooldownMu.Unlock()
 	m.mu.RLock()
 	oldStore := m.cooldownStore
 	m.mu.RUnlock()
 	m.setConfigSnapshotLocked(cfg)
-	restart = true
 	if oldStore != nil && !m.persistCooldownStatesToLocked(ctx, oldStore) {
 		return false
 	}
@@ -365,6 +358,8 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	if model == "" {
 		auth.Unavailable = true
 		auth.authLevelCooldown = true
+		auth.authLevelUnavailable = true
+		auth.authLevelNextRetryAfter = record.NextRetryAfter
 		auth.Status = StatusError
 		auth.NextRetryAfter = record.NextRetryAfter
 		auth.Quota = quota
@@ -395,9 +390,11 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		return false
 	}
 	changed := false
-	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
+	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.authLevelUnavailable || !auth.authLevelNextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
 		auth.Unavailable = false
 		auth.authLevelCooldown = false
+		auth.authLevelUnavailable = false
+		auth.authLevelNextRetryAfter = time.Time{}
 		auth.NextRetryAfter = time.Time{}
 		auth.Quota = QuotaState{}
 		auth.UpdatedAt = now
@@ -660,7 +657,7 @@ func cooldownErrorEqual(a, b *Error) bool {
 }
 
 func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bool) {
-	if auth == nil || !auth.Unavailable || auth.NextRetryAfter.IsZero() || !auth.NextRetryAfter.After(now) {
+	if auth == nil || !auth.authLevelUnavailable || auth.authLevelNextRetryAfter.IsZero() || !auth.authLevelNextRetryAfter.After(now) {
 		return CooldownStateRecord{}, false
 	}
 	return CooldownStateRecord{
@@ -668,7 +665,7 @@ func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bo
 		AuthID:         auth.ID,
 		AuthFile:       cooldownAuthFile(auth),
 		Status:         "cooling",
-		NextRetryAfter: auth.NextRetryAfter,
+		NextRetryAfter: auth.authLevelNextRetryAfter,
 		Reason:         cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError),
 		Quota:          auth.Quota,
 		LastError:      cloneError(auth.LastError),
@@ -730,17 +727,25 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
+		// If the auth was replaced between request time and this update, the
+		// result belongs to stale state and must not be applied.
+		if result.SourceAuth != nil && result.SourceAuth != auth {
+			m.mu.Unlock()
+			return
+		}
 		now := time.Now()
 		var cooldownRecordsBefore []CooldownStateRecord
 		trackCooldownState := m.cooldownStore != nil
 		if trackCooldownState {
 			cooldownRecordsBefore = m.cooldownStateRecordsForAuthLocked(auth, now)
 		}
-		auth.recordRecentRequest(now, result.Success)
-		if result.Success {
-			auth.Success++
-		} else {
-			auth.Failed++
+		if !result.IsProbe {
+			auth.recordRecentRequest(now, result.Success)
+			if result.Success {
+				auth.Success++
+			} else {
+				auth.Failed++
+			}
 		}
 
 		if result.Success {
@@ -758,6 +763,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				auth.UpdatedAt = now
 				shouldResumeModel = true
 				clearModelQuota = true
+			} else if result.IsProbe {
+				clearProberStateOnSuccess(auth, now)
 			} else {
 				clearAuthStateOnSuccess(auth, now)
 			}
@@ -879,6 +886,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									}
 								}
 								auth.Unavailable = true
+								auth.authLevelUnavailable = true
+								auth.authLevelCooldown = true
 								auth.Quota.Exceeded = true
 								auth.Quota.Reason = "credential_quota"
 								authNext := next
@@ -887,6 +896,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								}
 								auth.Quota.NextRecoverAt = authNext
 								auth.NextRetryAfter = authNext
+								auth.authLevelNextRetryAfter = authNext
 							}
 						case 408, 500, 502, 503, 504:
 							state.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
@@ -945,9 +955,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, modelKey, suspendReason)
 	}
 
-	m.hook.OnResult(ctx, result)
-	m.publishErrorEvent(result, authSnapshot)
-	m.updateSessionAffinity(result)
+	if result.IsProbe {
+		go m.hook.OnResult(ctx, result)
+		if result.Error != nil {
+			m.publishErrorEvent(result, authSnapshot)
+		}
+	} else {
+		m.hook.OnResult(ctx, result)
+		m.publishErrorEvent(result, authSnapshot)
+		m.updateSessionAffinity(result)
+	}
 }
 
 func (m *Manager) updateSessionAffinity(result Result) {
@@ -1251,6 +1268,8 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 		return
 	}
 	auth.Unavailable = false
+	auth.authLevelUnavailable = false
+	auth.authLevelNextRetryAfter = time.Time{}
 	auth.Status = StatusActive
 	auth.StatusMessage = ""
 	auth.Quota.Exceeded = false
@@ -1262,6 +1281,38 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.LastError = nil
 	auth.NextRetryAfter = time.Time{}
 	auth.UpdatedAt = now
+}
+
+func clearProberStateOnSuccess(auth *Auth, now time.Time) {
+	if auth == nil {
+		return
+	}
+	if auth.proberBackoff == 0 && !auth.authLevelCooldown {
+		return
+	}
+	auth.proberBackoff = 0
+	auth.authLevelCooldown = false
+	auth.authLevelUnavailable = false
+	auth.authLevelNextRetryAfter = time.Time{}
+	if auth.LastError != nil && auth.LastError.Code == ErrorCodeForceCooldown {
+		auth.LastError = nil
+		auth.StatusMessage = ""
+	}
+	if auth.Status == StatusError && (auth.StatusMessage == "" || strings.HasPrefix(auth.StatusMessage, "prober:")) {
+		auth.Status = StatusActive
+	}
+	if strings.HasPrefix(auth.StatusMessage, "prober:") {
+		auth.StatusMessage = ""
+	}
+	auth.Unavailable = false
+	auth.NextRetryAfter = time.Time{}
+	auth.UpdatedAt = now
+	updateAggregatedAvailability(auth, now)
+	if auth.Unavailable || auth.Quota.Exceeded {
+		auth.Status = StatusError
+	} else {
+		auth.Status = StatusActive
+	}
 }
 
 func cloneError(err *Error) *Error {
@@ -1894,8 +1945,13 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		if disableCooling && auth.NextRetryAfter.IsZero() && auth.Quota.NextRecoverAt.IsZero() {
 			auth.Unavailable = false
 			auth.authLevelCooldown = false
+			auth.authLevelUnavailable = false
+			auth.authLevelNextRetryAfter = time.Time{}
 			auth.Quota.Exceeded = false
 		}
+		auth.authLevelUnavailable = auth.Unavailable
+		auth.authLevelNextRetryAfter = auth.NextRetryAfter
+		auth.authLevelCooldown = auth.authLevelUnavailable
 	}()
 	auth.Unavailable = true
 	auth.Status = StatusError
@@ -1912,7 +1968,6 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && retryAfter != nil {
 		auth.NextRetryAfter = now.Add(*retryAfter)
 		auth.proberBackoff++
-		auth.authLevelCooldown = true
 		return
 	}
 	statusCode := statusCodeFromResult(resultErr)
@@ -1991,7 +2046,6 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.NextRetryAfter = now.Add(transientErrorCooldown)
 		auth.Unavailable = true
 	}
-	auth.authLevelCooldown = auth.Unavailable
 }
 
 // quotaCooldownAfterFailure returns the recovery deadline and backoff level for

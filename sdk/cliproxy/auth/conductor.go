@@ -56,6 +56,12 @@ type Result struct {
 	RetryAfter *time.Duration
 	// CredentialScope indicates that the failure affects the whole credential across models (e.g. Anthropic 5h/7d unified limits).
 	CredentialScope bool
+	// IsProbe distinguishes prober health-check results from real execution results.
+	// Probe results update cooldown state but do not count toward user statistics or session affinity.
+	IsProbe bool
+	// SourceAuth is the auth pointer used at request time; MarkResult discards
+	// the result if the manager has replaced the auth with a newer copy before the update.
+	SourceAuth *Auth
 	// Error describes the failure when Success is false.
 	Error *Error
 	// Options carries execution request options (headers, metadata, etc.) for result tracking.

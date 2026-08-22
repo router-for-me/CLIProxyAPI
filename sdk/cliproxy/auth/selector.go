@@ -545,7 +545,13 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	// take precedence over per-model state so a credential-scoped failure
 	// blocks every model even if some model state still appears active.
 	if auth.authLevelCooldown {
-		if blocked, reason, next := availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now); blocked {
+		unavailable := auth.authLevelUnavailable
+		next := auth.authLevelNextRetryAfter
+		if !unavailable && (auth.Unavailable || !auth.NextRetryAfter.IsZero()) {
+			unavailable = auth.Unavailable
+			next = auth.NextRetryAfter
+		}
+		if blocked, reason, next := availabilityBlock(unavailable, auth.Quota.Exceeded, next, auth.Quota.NextRecoverAt, now); blocked {
 			return true, reason, next
 		}
 	}

@@ -15,6 +15,8 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
+func intPtr(v int) *int { return &v }
+
 func newProberManager() *Manager {
 	m := NewManager(nil, nil, nil)
 	m.SetProberParentContext(context.Background())
@@ -23,7 +25,7 @@ func newProberManager() *Manager {
 
 type proberTestExecutor struct {
 	provider      string
-	statusCode    int
+	statusCode    *int
 	body          string
 	err           error
 	calls         atomic.Int32
@@ -33,6 +35,12 @@ type proberTestExecutor struct {
 	blockUntil    chan struct{}
 	mu            sync.Mutex
 	lastURL       string
+
+	refreshCalled atomic.Bool
+	refreshToken  string
+	refreshStatus int
+	manager       *Manager
+	replaceAuth   bool
 }
 
 func (e *proberTestExecutor) Identifier() string { return e.provider }
@@ -45,7 +53,18 @@ func (e *proberTestExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecu
 	return nil, nil
 }
 
-func (e *proberTestExecutor) Refresh(context.Context, *Auth) (*Auth, error) { return nil, nil }
+func (e *proberTestExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	if e.refreshToken == "" {
+		return nil, nil
+	}
+	e.refreshCalled.Store(true)
+	refreshed := auth.Clone()
+	if refreshed.Metadata == nil {
+		refreshed.Metadata = map[string]any{}
+	}
+	refreshed.Metadata["access_token"] = e.refreshToken
+	return refreshed, nil
+}
 
 func (e *proberTestExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, nil
@@ -59,6 +78,9 @@ func (e *proberTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *h
 		e.lastURL = req.URL.String()
 		e.mu.Unlock()
 	}
+	if e.manager != nil && e.replaceAuth && auth != nil {
+		e.manager.Register(ctx, auth.Clone())
+	}
 	if _, ok := ctx.Deadline(); ok {
 		e.deadlineSet.Store(true)
 	}
@@ -68,17 +90,25 @@ func (e *proberTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *h
 	if e.err != nil {
 		return nil, e.err
 	}
-	status := e.statusCode
+	e.mu.Lock()
+	status := 0
+	if e.statusCode != nil {
+		status = *e.statusCode
+	}
 	if status <= 0 {
 		status = e.respondStatus
 	}
 	if status <= 0 {
 		status = http.StatusOK
 	}
+	if e.refreshCalled.Load() && e.refreshStatus > 0 {
+		status = e.refreshStatus
+	}
 	body := e.body
 	if body == "" {
 		body = "{}"
 	}
+	e.mu.Unlock()
 	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}, nil
 }
 
@@ -163,7 +193,7 @@ func TestProberMarksAuthUnavailableOnFailure(t *testing.T) {
 func TestProberLeavesAuthActiveOnSuccess(t *testing.T) {
 	ctx := context.Background()
 	m := newProberManager()
-	exec := &proberTestExecutor{provider: "test", statusCode: http.StatusOK}
+	exec := &proberTestExecutor{provider: "test", statusCode: intPtr(http.StatusOK)}
 	m.RegisterExecutor(exec)
 
 	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
@@ -199,7 +229,7 @@ func TestProberUsesCanonicalExecutorKey(t *testing.T) {
 	m := newProberManager()
 
 	// Executor is registered under the lower-cased canonical key.
-	exec := &proberTestExecutor{provider: "openai", statusCode: http.StatusOK}
+	exec := &proberTestExecutor{provider: "openai", statusCode: intPtr(http.StatusOK)}
 	m.RegisterExecutor(exec)
 
 	auth := &Auth{
@@ -228,7 +258,7 @@ func TestProberUsesCompatNameExecutorKey(t *testing.T) {
 	ctx := context.Background()
 	m := newProberManager()
 
-	exec := &proberTestExecutor{provider: "openai-compatible-custom", statusCode: http.StatusOK}
+	exec := &proberTestExecutor{provider: "openai-compatible-custom", statusCode: intPtr(http.StatusOK)}
 	m.RegisterExecutor(exec)
 
 	auth := &Auth{
@@ -254,10 +284,10 @@ func TestProberUsesCompatNameExecutorKey(t *testing.T) {
 	}
 }
 
-func TestProberMarksAuthUnavailableOnEmptyResponse(t *testing.T) {
+func TestProberAcceptsNoContentResponse(t *testing.T) {
 	ctx := context.Background()
 	m := newProberManager()
-	exec := &proberTestExecutor{provider: "test", statusCode: http.StatusNoContent}
+	exec := &proberTestExecutor{provider: "test", statusCode: intPtr(http.StatusNoContent)}
 	m.RegisterExecutor(exec)
 
 	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
@@ -277,8 +307,11 @@ func TestProberMarksAuthUnavailableOnEmptyResponse(t *testing.T) {
 	if updated == nil {
 		t.Fatal("auth disappeared")
 	}
-	if !updated.Unavailable {
-		t.Fatalf("auth.Unavailable = %v, want true", updated.Unavailable)
+	if updated.Unavailable {
+		t.Fatalf("auth.Unavailable = %v, want false", updated.Unavailable)
+	}
+	if updated.proberBackoff != 0 {
+		t.Fatalf("auth.proberBackoff = %d, want 0", updated.proberBackoff)
 	}
 }
 
@@ -287,7 +320,7 @@ func TestProberDropsContextDeadline(t *testing.T) {
 	defer cancel()
 
 	m := newProberManager()
-	exec := &proberTestExecutor{provider: "test", statusCode: http.StatusOK}
+	exec := &proberTestExecutor{provider: "test", statusCode: intPtr(http.StatusOK)}
 	m.RegisterExecutor(exec)
 
 	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
@@ -324,7 +357,7 @@ func TestProberStopWaitsForInFlightProbe(t *testing.T) {
 	}
 
 	block := make(chan struct{})
-	exec := &proberTestExecutor{provider: "test", statusCode: http.StatusOK, blockUntil: block}
+	exec := &proberTestExecutor{provider: "test", statusCode: intPtr(http.StatusOK), blockUntil: block}
 	m.RegisterExecutor(exec)
 
 	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
@@ -360,7 +393,7 @@ func TestProberRestartDuringStopIsBlocked(t *testing.T) {
 	}
 
 	block := make(chan struct{})
-	first := &proberTestExecutor{provider: "test", statusCode: http.StatusOK, blockUntil: block}
+	first := &proberTestExecutor{provider: "test", statusCode: intPtr(http.StatusOK), blockUntil: block}
 	m.RegisterExecutor(first)
 
 	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
@@ -435,7 +468,7 @@ func TestSetConfigDoesNotDeadlockWithFailingProbe(t *testing.T) {
 func TestProberDoesNotStartBeforeParentContext(t *testing.T) {
 	ctx := context.Background()
 	m := NewManager(nil, nil, nil)
-	exec := &proberTestExecutor{provider: "test", statusCode: http.StatusOK}
+	exec := &proberTestExecutor{provider: "test", statusCode: intPtr(http.StatusOK)}
 	m.RegisterExecutor(exec)
 
 	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
@@ -463,7 +496,7 @@ func TestProberDoesNotStartBeforeParentContext(t *testing.T) {
 func TestProberUsesProviderSpecificProbePath(t *testing.T) {
 	ctx := context.Background()
 	m := newProberManager()
-	exec := &proberTestExecutor{provider: "gemini", statusCode: http.StatusOK}
+	exec := &proberTestExecutor{provider: "gemini", statusCode: intPtr(http.StatusOK)}
 	m.RegisterExecutor(exec)
 
 	auth := &Auth{
@@ -695,6 +728,217 @@ func TestProberProbePathForProvider(t *testing.T) {
 		if got := proberProbePathForProvider(c.provider, c.configured); got != c.want {
 			t.Fatalf("proberProbePathForProvider(%q, %q) = %q, want %q", c.provider, c.configured, got, c.want)
 		}
+	}
+}
+
+func TestProberRedactsTransportErrorURL(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "test", err: fmt.Errorf("Get \"https://example.com/v1/models?api_key=super-secret-token&x=1\": connection refused")}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+
+	updated, _ := m.GetByID(auth.ID)
+	if updated == nil || updated.LastError == nil {
+		t.Fatal("expected LastError")
+	}
+	if strings.Contains(updated.LastError.Message, "api_key=super-secret-token") || strings.Contains(updated.LastError.Message, "super-secret") {
+		t.Fatalf("LastError message leaks token: %s", updated.LastError.Message)
+	}
+}
+
+func TestProberUsesDefaultBaseURL(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "claude"}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{ID: "a1", Provider: "claude", Status: StatusActive}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+
+	if exec.calls.Load() != 1 {
+		t.Fatalf("prober calls = %d, want 1", exec.calls.Load())
+	}
+	exec.mu.Lock()
+	url := exec.lastURL
+	exec.mu.Unlock()
+	if url != "https://api.anthropic.com/v1/models" {
+		t.Fatalf("prober URL = %q, want %q", url, "https://api.anthropic.com/v1/models")
+	}
+}
+
+func TestProberDoesNotCountStats(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "test", statusCode: intPtr(http.StatusInternalServerError)}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+
+	updated, _ := m.GetByID(auth.ID)
+	if updated == nil {
+		t.Fatal("auth disappeared")
+	}
+	if !updated.Unavailable {
+		t.Fatalf("auth.Unavailable = %v, want true", updated.Unavailable)
+	}
+	if updated.Success != 0 || updated.Failed != 0 {
+		t.Fatalf("auth stats = %d/%d, want 0/0", updated.Success, updated.Failed)
+	}
+}
+
+func TestProberClearsProberStateOnRecovery(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "test", statusCode: intPtr(http.StatusInternalServerError)}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{
+		Enabled:            true,
+		Interval:           50 * time.Millisecond,
+		MaxConcurrency:     1,
+		RateLimitPerMinute: 1000,
+		BackoffBase:        25 * time.Millisecond,
+		BackoffMax:         100 * time.Millisecond,
+	}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+
+	updated, _ := m.GetByID(auth.ID)
+	if updated == nil || !updated.Unavailable {
+		t.Fatal("auth should be unavailable after first failure")
+	}
+
+	exec.mu.Lock()
+	*exec.statusCode = http.StatusOK
+	exec.mu.Unlock()
+	time.Sleep(200 * time.Millisecond)
+
+	updated, _ = m.GetByID(auth.ID)
+	if updated == nil {
+		t.Fatal("auth disappeared")
+	}
+	if updated.Unavailable {
+		t.Fatalf("auth.Unavailable = %v, want false", updated.Unavailable)
+	}
+	if updated.proberBackoff != 0 {
+		t.Fatalf("auth.proberBackoff = %d, want 0", updated.proberBackoff)
+	}
+	if updated.LastError != nil && strings.Contains(updated.LastError.Message, "prober:") {
+		t.Fatalf("auth.LastError not cleared: %v", updated.LastError)
+	}
+}
+
+func TestProberClampsRateLimit(t *testing.T) {
+	m := newProberManager()
+	m.SetConfig(&internalconfig.Config{CredentialProber: internalconfig.CredentialProberConfig{
+		Enabled:            true,
+		Interval:           time.Hour,
+		MaxConcurrency:     1,
+		RateLimitPerMinute: 100_000_000_000,
+	}})
+	l := m.proberLoop
+	if l == nil {
+		t.Fatal("prober not started")
+	}
+	if l.cfg.RateLimitPerMinute != proberMaxRateLimitPerMinute {
+		t.Fatalf("RateLimitPerMinute = %d, want %d", l.cfg.RateLimitPerMinute, proberMaxRateLimitPerMinute)
+	}
+}
+
+func TestProberRefreshOn401(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{
+		provider:      "test",
+		statusCode:    intPtr(http.StatusUnauthorized),
+		refreshToken:  "new-token",
+		refreshStatus: http.StatusOK,
+	}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://example.com",
+		},
+		Metadata: map[string]any{"refresh_token": "old-token"},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(200 * time.Millisecond)
+
+	if !exec.refreshCalled.Load() {
+		t.Fatal("Refresh not called on 401")
+	}
+	if exec.calls.Load() < 2 {
+		t.Fatalf("prober calls = %d, want >= 2", exec.calls.Load())
+	}
+	updated, _ := m.GetByID(auth.ID)
+	if updated == nil || updated.Unavailable {
+		t.Fatalf("auth should recover after refresh; Unavailable = %v", updated.Unavailable)
+	}
+}
+
+func TestProberDiscardsStaleAuthResult(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "test", statusCode: intPtr(http.StatusInternalServerError), manager: m, replaceAuth: true}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+
+	updated, _ := m.GetByID(auth.ID)
+	if updated == nil {
+		t.Fatal("auth disappeared")
+	}
+	if updated.Unavailable {
+		t.Fatalf("stale probe result should be discarded; Unavailable = %v", updated.Unavailable)
 	}
 }
 

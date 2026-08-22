@@ -106,6 +106,12 @@ type Auth struct {
 	// authLevelCooldown marks an auth-level (non-aggregated) cooldown such as
 	// a prober or invalid_grant failure. It is not persisted.
 	authLevelCooldown bool `json:"-"`
+
+	// authLevelUnavailable and authLevelNextRetryAfter keep credential-scoped
+	// cooldown state separate from the model-state aggregate stored in Unavailable
+	// and NextRetryAfter. They are not persisted.
+	authLevelUnavailable    bool      `json:"-"`
+	authLevelNextRetryAfter time.Time `json:"-"`
 }
 
 const (

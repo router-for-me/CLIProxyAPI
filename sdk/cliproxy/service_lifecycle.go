@@ -87,6 +87,12 @@ func (s *Service) Run(ctx context.Context) error {
 				log.Warnf("failed to restore cooldown state: %v", errRestoreCooldown)
 			}
 		}
+		auths := s.coreManager.List()
+		s.registerAvailableExecutors(coreauth.WithSkipPersist(ctx), executorRegistrationOptions{
+			includeBaseline:   true,
+			forceReplaceAuths: true,
+			auths:             auths,
+		})
 		s.coreManager.RestartProber()
 	}
 

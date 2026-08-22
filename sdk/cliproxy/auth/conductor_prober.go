@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -17,11 +18,12 @@ import (
 )
 
 const (
-	proberCheckInterval  = 60 * time.Second
-	proberMaxConcurrency = 4
-	proberRatePerMinute  = 60
-	proberDefaultPath    = "/models"
-	proberMaxBodyBytes   = 1024
+	proberCheckInterval         = 60 * time.Second
+	proberMaxConcurrency        = 4
+	proberRatePerMinute         = 60
+	proberMaxRateLimitPerMinute = 60_000_000
+	proberDefaultPath           = "/models"
+	proberMaxBodyBytes          = 1024
 )
 
 // authProberLoop runs periodic lightweight health probes for registered auths.
@@ -40,6 +42,9 @@ func newAuthProberLoop(manager *Manager, cfg internalconfig.CredentialProberConf
 	}
 	if cfg.RateLimitPerMinute <= 0 {
 		cfg.RateLimitPerMinute = proberRatePerMinute
+	}
+	if cfg.RateLimitPerMinute > proberMaxRateLimitPerMinute {
+		cfg.RateLimitPerMinute = proberMaxRateLimitPerMinute
 	}
 	if strings.TrimSpace(cfg.DefaultProbePath) == "" {
 		cfg.DefaultProbePath = proberDefaultPath
@@ -204,7 +209,11 @@ func (l *authProberLoop) sweep(ctx context.Context) {
 
 	var ticker *time.Ticker
 	if ratePerMinute > 0 {
-		ticker = time.NewTicker(time.Minute / time.Duration(ratePerMinute))
+		period := time.Minute / time.Duration(ratePerMinute)
+		if period <= 0 {
+			period = time.Nanosecond
+		}
+		ticker = time.NewTicker(period)
 		defer ticker.Stop()
 	}
 
@@ -290,10 +299,7 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 	}()
 	defer cancel()
 
-	baseURL := ""
-	if auth.Attributes != nil {
-		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
-	}
+	baseURL := proberBaseURLForProvider(auth)
 	if baseURL == "" {
 		return
 	}
@@ -308,57 +314,88 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 		return
 	}
 
-	req, errReq := http.NewRequestWithContext(probeCtx, http.MethodGet, probeURL, nil)
-	if errReq != nil {
-		return
-	}
+	var (
+		resp      *http.Response
+		errExec   error
+		bodyBytes int64
+		resultErr *Error
+	)
+	for attempt := 0; attempt < 2; attempt++ {
+		req, errReq := http.NewRequestWithContext(probeCtx, http.MethodGet, probeURL, nil)
+		if errReq != nil {
+			return
+		}
+		resp, errExec = exec.HttpRequest(probeCtx, auth, req)
+		bodyBytes = 0
+		if resp != nil && resp.Body != nil {
+			bodyBytes, _ = io.CopyN(io.Discard, resp.Body, proberMaxBodyBytes)
+			_ = resp.Body.Close()
+		}
 
-	resp, errExec := exec.HttpRequest(probeCtx, auth, req)
-	var bodyBytes int64
-	if resp != nil && resp.Body != nil {
-		bodyBytes, _ = io.CopyN(io.Discard, resp.Body, proberMaxBodyBytes)
-		_ = resp.Body.Close()
-	}
+		if errors.Is(probeCtx.Err(), context.Canceled) {
+			return
+		}
 
-	if errors.Is(probeCtx.Err(), context.Canceled) {
-		return
-	}
+		resultErr = nil
+		if errExec != nil {
+			resultErr = &Error{
+				Code:       ErrorCodeForceCooldown,
+				Message:    "prober: " + redactProbeError(errExec),
+				HTTPStatus: http.StatusServiceUnavailable,
+				Retryable:  true,
+			}
+		} else if resp == nil {
+			resultErr = &Error{
+				Code:       ErrorCodeForceCooldown,
+				Message:    "prober: empty upstream response",
+				HTTPStatus: http.StatusServiceUnavailable,
+				Retryable:  true,
+			}
+		} else if resp.StatusCode == http.StatusOK && bodyBytes == 0 {
+			resultErr = &Error{
+				Code:       ErrorCodeForceCooldown,
+				Message:    "prober: empty 200 response",
+				HTTPStatus: http.StatusServiceUnavailable,
+				Retryable:  true,
+			}
+		} else if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			resultErr = &Error{
+				Code:       ErrorCodeForceCooldown,
+				Message:    fmt.Sprintf("prober: upstream returned %d", resp.StatusCode),
+				HTTPStatus: resp.StatusCode,
+				Retryable:  resp.StatusCode >= 500 || resp.StatusCode == 429,
+			}
+		}
 
-	var resultErr *Error
-	if errExec != nil {
-		resultErr = &Error{
-			Code:       ErrorCodeForceCooldown,
-			Message:    "prober: " + errExec.Error(),
-			HTTPStatus: http.StatusServiceUnavailable,
-			Retryable:  true,
+		if resultErr == nil || resultErr.HTTPStatus != http.StatusUnauthorized || attempt > 0 {
+			break
 		}
-	} else if resp == nil {
-		resultErr = &Error{
-			Code:       ErrorCodeForceCooldown,
-			Message:    "prober: empty upstream response",
-			HTTPStatus: http.StatusServiceUnavailable,
-			Retryable:  true,
+
+		refreshed := proberTryRefreshOn401(probeCtx, exec, auth)
+		if refreshed == nil {
+			break
 		}
-	} else if resp.StatusCode == http.StatusNoContent || (resp.StatusCode == http.StatusOK && bodyBytes == 0) {
-		resultErr = &Error{
-			Code:       ErrorCodeForceCooldown,
-			Message:    "prober: empty 200/204 response",
-			HTTPStatus: http.StatusServiceUnavailable,
-			Retryable:  true,
+		if _, errRegister := l.manager.Register(probeCtx, refreshed); errRegister != nil {
+			break
 		}
-	} else if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		resultErr = &Error{
-			Code:       ErrorCodeForceCooldown,
-			Message:    fmt.Sprintf("prober: upstream returned %d", resp.StatusCode),
-			HTTPStatus: resp.StatusCode,
-			Retryable:  resp.StatusCode >= 500 || resp.StatusCode == 429,
+		l.manager.mu.RLock()
+		current := l.manager.auths[auth.ID]
+		l.manager.mu.RUnlock()
+		if current == nil {
+			return
 		}
+		auth = current
 	}
 
 	if resultErr == nil {
-		l.manager.mu.Lock()
-		auth.proberBackoff = 0
-		l.manager.mu.Unlock()
+		l.manager.MarkResult(probeCtx, Result{
+			AuthID:          auth.ID,
+			Provider:        auth.Provider,
+			Success:         true,
+			CredentialScope: true,
+			IsProbe:         true,
+			SourceAuth:      auth,
+		})
 		return
 	}
 
@@ -385,6 +422,8 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 		Provider:        auth.Provider,
 		Success:         false,
 		CredentialScope: true,
+		IsProbe:         true,
+		SourceAuth:      auth,
 		Error:           resultErr,
 		RetryAfter:      &retryAfter,
 	})
@@ -416,6 +455,39 @@ var proberProviderProbePaths = map[string]string{
 	"aistudio":            "/v1beta/models",
 	"xai":                 "/v1/models",
 	"kimi":                "/v1/models",
+	"claude":              "/v1/models",
+	"codex":               "/v1/models",
+}
+
+// proberProviderBaseURLs supplies a default base URL for file-backed OAuth
+// credentials that do not carry an explicit base_url attribute.
+var proberProviderBaseURLs = map[string]string{
+	"gemini":               "https://generativelanguage.googleapis.com",
+	"gemini-interactions":  "https://generativelanguage.googleapis.com",
+	"aistudio":             "https://generativelanguage.googleapis.com",
+	"xai":                  "https://api.x.ai/v1",
+	"kimi":                 "https://api.kimi.com/coding",
+	"claude":               "https://api.anthropic.com",
+	"codex":                "https://api.openai.com/v1",
+	"openai-compatibility": "https://api.openai.com/v1",
+}
+
+// proberBaseURLForProvider returns the base URL for the probe, using the
+// auth attribute if present and falling back to provider defaults for OAuth.
+func proberBaseURLForProvider(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if baseURL := strings.TrimSpace(auth.Attributes["base_url"]); baseURL != "" {
+			return baseURL
+		}
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if p, ok := proberProviderBaseURLs[provider]; ok {
+		return p
+	}
+	return ""
 }
 
 // proberProbePathForProvider returns the probe path for the provider.
@@ -436,6 +508,58 @@ func proberProbePathForProvider(provider, configured string) string {
 		return configured
 	}
 	return ""
+}
+
+var proberURLRegex = regexp.MustCompile(`https?://[^ \t\n\r\"'<>]+`)
+
+// redactProbeError removes userinfo and query parameters from any URL that
+// appears in a transport error, so tokens in query strings are not logged or
+// stored in LastError.
+func redactProbeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return proberURLRegex.ReplaceAllStringFunc(err.Error(), func(raw string) string {
+		u, parseErr := url.Parse(raw)
+		if parseErr != nil {
+			return raw
+		}
+		u.User = nil
+		u.RawQuery = ""
+		u.Fragment = ""
+		return u.String()
+	})
+}
+
+func proberAccessToken(auth *Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	for _, key := range []string{"access_token", "token", "id_token"} {
+		if v := auth.Metadata[key]; v != nil {
+			return strings.TrimSpace(fmt.Sprint(v))
+		}
+	}
+	return ""
+}
+
+// proberTryRefreshOn401 attempts to refresh an OAuth credential and returns
+// the refreshed auth if the token changed. It returns nil if no refresh token
+// is available or the refresh did not produce a new token.
+func proberTryRefreshOn401(ctx context.Context, exec ProviderExecutor, auth *Auth) *Auth {
+	if exec == nil || auth == nil {
+		return nil
+	}
+	before := proberAccessToken(auth)
+	refreshed, err := exec.Refresh(ctx, auth)
+	if err != nil || refreshed == nil {
+		return nil
+	}
+	after := proberAccessToken(refreshed)
+	if before == after {
+		return nil
+	}
+	return refreshed
 }
 
 // resolveProbeURL resolves the probe path against baseURL without duplicating

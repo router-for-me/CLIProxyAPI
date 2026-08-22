@@ -679,6 +679,57 @@ func TestIsAuthBlockedForModel_ProberFailureBlocksCleanModelState(t *testing.T) 
 	}
 }
 
+func TestIsAuthBlockedForModel_AuthLevelNotOverriddenByModelAggregate(t *testing.T) {
+	t.Parallel()
+
+	m := NewManager(nil, nil, nil)
+	now := time.Now()
+	model := "test-model"
+	auth := &Auth{ID: "a", Provider: "test", Status: StatusActive}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	retryAfter := time.Minute
+	m.MarkResult(context.Background(), Result{
+		AuthID:          auth.ID,
+		Provider:        auth.Provider,
+		Success:         false,
+		CredentialScope: true,
+		IsProbe:         true,
+		Error: &Error{
+			Code:       ErrorCodeForceCooldown,
+			Message:    "prober: unreachable",
+			HTTPStatus: http.StatusServiceUnavailable,
+			Retryable:  true,
+		},
+		RetryAfter: &retryAfter,
+	})
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  true,
+	})
+
+	updated, _ := m.GetByID(auth.ID)
+	if updated == nil {
+		t.Fatal("auth disappeared")
+	}
+	if !updated.authLevelUnavailable || updated.authLevelNextRetryAfter.IsZero() {
+		t.Fatal("auth-level cooldown missing")
+	}
+
+	blocked, reason, _ := isAuthBlockedForModel(updated, model, now)
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
+	}
+	if reason != blockReasonOther {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonOther)
+	}
+}
+
 func TestIsAuthBlockedForModel_ThinkingSuffixStatesBlockCanonicalModel(t *testing.T) {
 	t.Parallel()
 
