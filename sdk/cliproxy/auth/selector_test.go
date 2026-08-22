@@ -1082,6 +1082,70 @@ func TestSessionAffinitySelector_RebindsFullAliasGroupWhenConflictingAuthUnavail
 	}
 }
 
+func TestSessionAffinitySelector_ConcurrentUnavailableAuthRebindDoesNotOverwriteWinner(t *testing.T) {
+	t.Parallel()
+
+	const attempts = 50
+	for i := 0; i < attempts; i++ {
+		func() {
+			fallback := &RoundRobinSelector{}
+			selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+				Fallback: fallback,
+				TTL:      time.Minute,
+			})
+			defer selector.Stop()
+
+			auths := []*Auth{
+				{ID: "auth-a"},
+				{ID: "auth-b"},
+			}
+
+			seedKey := "claude::conv:existing-session::claude-3"
+			selector.cache.SetAliases("auth-unavailable", seedKey)
+
+			payload := []byte(`{"prompt_cache_key":"pck:rebind-test","conversation":{"id":"existing-session"}}`)
+			opts := cliproxyexecutor.Options{OriginalRequest: payload}
+
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			results := make([]string, 2)
+			errs := make([]error, 2)
+			for j := 0; j < 2; j++ {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					<-start
+					a, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+					if err != nil {
+						errs[idx] = err
+						return
+					}
+					if a != nil {
+						results[idx] = a.ID
+					}
+				}(j)
+			}
+			close(start)
+			wg.Wait()
+
+			for _, err := range errs {
+				if err != nil {
+					t.Fatalf("iteration %d: Pick() error = %v", i, err)
+				}
+			}
+			if results[0] == "" || results[1] == "" || results[0] != results[1] {
+				t.Fatalf("iteration %d: concurrent picks diverged: %v", i, results)
+			}
+
+			// Subsequent picks should keep returning the winning auth.
+			got, _ := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+			if got.ID != results[0] {
+				t.Fatalf("iteration %d: follow-up pick returned %q, want %q", i, got.ID, results[0])
+			}
+		}()
+	}
+}
+
 func TestExtractSessionID_ClaudeCodePriorityOverHeader(t *testing.T) {
 	t.Parallel()
 

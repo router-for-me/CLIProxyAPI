@@ -325,6 +325,60 @@ func (c *SessionCache) SetAliasesIfNoConflict(authID string, sessionIDs ...strin
 	return authID, true
 }
 
+// ReplaceAliasesIfUnchanged rebinds the alias group currently bound to
+// expectedAuthID to newAuthID, merging in the provided sessionIDs. It succeeds
+// only when every sessionID is either absent or bound to expectedAuthID with the
+// same alias list, and every alias in that group still maps to expectedAuthID.
+// If a concurrent caller already rebound the group to a different auth, the
+// current auth is returned and the cache is left untouched.
+func (c *SessionCache) ReplaceAliasesIfUnchanged(expectedAuthID, newAuthID string, sessionIDs ...string) (string, bool) {
+	if c == nil || expectedAuthID == "" || newAuthID == "" || len(sessionIDs) == 0 {
+		return "", false
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var representative sessionEntry
+	found := false
+	for _, sid := range sessionIDs {
+		if sid == "" {
+			continue
+		}
+		entry, ok := c.entries[sid]
+		if !ok || !now.Before(entry.expiresAt) {
+			continue
+		}
+		if entry.authID != expectedAuthID {
+			return entry.authID, false
+		}
+		if !found {
+			representative = entry
+			found = true
+		} else if !equalSessionAliases(entry.aliases, representative.aliases) {
+			return entry.authID, false
+		}
+	}
+	if !found {
+		return "", false
+	}
+
+	expectedAliases := representative.aliases
+	for _, alias := range expectedAliases {
+		entry, ok := c.entries[alias]
+		if !ok || !now.Before(entry.expiresAt) || entry.authID != expectedAuthID || !equalSessionAliases(entry.aliases, expectedAliases) {
+			return "", false
+		}
+	}
+
+	newAliases := compactSessionAliases(mergeSessionAliases(expectedAliases, sessionIDs...))
+	if len(newAliases) == 0 {
+		return "", false
+	}
+	c.replaceAliasGroupsLocked(newAuthID, now.Add(c.ttl), newAliases, representative)
+	return newAuthID, true
+}
+
 // Touch refreshes the expiration for a session binding if it currently matches expectedAuthID.
 func (c *SessionCache) Touch(sessionID, expectedAuthID string) bool {
 	if sessionID == "" || expectedAuthID == "" {
