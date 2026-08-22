@@ -237,13 +237,9 @@ func geminiThinkingEnabled(out []byte, prefix string) bool {
 }
 
 func geminiThinkingDisabled(out []byte, prefix string) bool {
-	includeThoughts := gjson.GetBytes(out, prefix+".includeThoughts")
-	if includeThoughts.Exists() && includeThoughts.String() == "true" {
-		return false
-	}
-	if includeThoughts.Exists() && includeThoughts.String() == "false" {
-		return true
-	}
+	// Only an explicit level of "none" or a zero budget establishes that
+	// thinking is disabled. `includeThoughts` controls summary visibility, so
+	// a high level with includeThoughts:false is still enabled reasoning.
 	if gjson.GetBytes(out, prefix+".thinkingLevel").String() == "none" {
 		return true
 	}
