@@ -153,6 +153,37 @@ func TestRestoreClaudeThinkingReplayContents_RejectDuplicateRequestSideAnchors(t
 	}
 }
 
+func TestRestoreClaudeThinkingReplayContents_RejectDuplicateAnchorsInMultiTurnSuffix(t *testing.T) {
+	// A cached [A, B] with duplicate visible A in the request (both unsigned)
+	// must not restore A's signature onto the later unsigned A. The match for
+	// the ambiguous A should fail and the algorithm should fall back to a
+	// length-1 suffix restoring only B.
+	body := []byte(`{"messages":[{"role":"user","content":"u1"},{"role":"assistant","content":[{"type":"text","text":"A"}]},{"role":"user","content":"u2"},{"role":"assistant","content":[{"type":"text","text":"A"}]},{"role":"user","content":"u3"},{"role":"assistant","content":[{"type":"text","text":"B"}]},{"role":"user","content":"u4"}]}`)
+	cached := [][]byte{
+		[]byte(`[{"type":"thinking","thinking":"a","signature":"sig-a"},{"type":"text","text":"A"}]`),
+		[]byte(`[{"type":"thinking","thinking":"b","signature":"sig-b"},{"type":"text","text":"B"}]`),
+	}
+
+	updated, restored := helps.RestoreClaudeThinkingReplayContents(body, cached)
+	if !restored {
+		t.Fatal("expected restore for unambiguous B suffix")
+	}
+
+	first := gjson.GetBytes(updated, "messages.1.content").Array()
+	duplicate := gjson.GetBytes(updated, "messages.3.content").Array()
+	last := gjson.GetBytes(updated, "messages.5.content").Array()
+
+	if first[0].Get("signature").String() != "" {
+		t.Fatalf("first A should remain unsigned: %s", first[0].Get("signature").String())
+	}
+	if duplicate[0].Get("signature").String() != "" {
+		t.Fatalf("duplicate A should not receive cached A signature: %s", duplicate[0].Get("signature").String())
+	}
+	if last[0].Get("signature").String() != "sig-b" {
+		t.Fatalf("B should be restored from latest cached suffix, got %s", last[0].Get("signature").String())
+	}
+}
+
 func TestClaudeThinkingReplayAssistantMessageHash_NormalizesStringShorthand(t *testing.T) {
 	modelFamily := "claude:test"
 	callerHash := "caller"
