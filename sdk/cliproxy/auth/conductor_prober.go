@@ -323,7 +323,6 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 	var (
 		resp      *http.Response
 		errExec   error
-		bodyBytes int64
 		resultErr *Error
 	)
 	for attempt := 0; attempt < 2; attempt++ {
@@ -332,9 +331,8 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 			return
 		}
 		resp, errExec = exec.HttpRequest(probeCtx, auth, req)
-		bodyBytes = 0
 		if resp != nil && resp.Body != nil {
-			bodyBytes, _ = io.CopyN(io.Discard, resp.Body, proberMaxBodyBytes)
+			_, _ = io.CopyN(io.Discard, resp.Body, proberMaxBodyBytes)
 			_ = resp.Body.Close()
 		}
 
@@ -354,13 +352,6 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 			resultErr = &Error{
 				Code:       ErrorCodeForceCooldown,
 				Message:    "prober: empty upstream response",
-				HTTPStatus: http.StatusServiceUnavailable,
-				Retryable:  true,
-			}
-		} else if resp.StatusCode == http.StatusOK && bodyBytes == 0 {
-			resultErr = &Error{
-				Code:       ErrorCodeForceCooldown,
-				Message:    "prober: empty 200 response",
 				HTTPStatus: http.StatusServiceUnavailable,
 				Retryable:  true,
 			}
@@ -468,8 +459,9 @@ var proberProviderBaseURLs = map[string]string{
 	"openai-compatibility": "https://api.openai.com/v1",
 }
 
-// proberBaseURLForProvider returns the base URL for the probe, using the
-// auth attribute if present and falling back to provider defaults for OAuth.
+// proberBaseURLForProvider returns the base URL for the probe, using the auth
+// attribute or metadata if present and falling back to provider defaults for
+// OAuth. File-backed credentials store the configured base_url in Metadata.
 func proberBaseURLForProvider(auth *Auth, cfg *internalconfig.Config) string {
 	if auth == nil {
 		return ""
@@ -477,6 +469,13 @@ func proberBaseURLForProvider(auth *Auth, cfg *internalconfig.Config) string {
 	if auth.Attributes != nil {
 		if baseURL := strings.TrimSpace(auth.Attributes["base_url"]); baseURL != "" {
 			return baseURL
+		}
+	}
+	if auth.Metadata != nil {
+		if v := auth.Metadata["base_url"]; v != nil {
+			if baseURL := strings.TrimSpace(fmt.Sprint(v)); baseURL != "" {
+				return baseURL
+			}
 		}
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))

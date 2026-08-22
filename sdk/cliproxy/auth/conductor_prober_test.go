@@ -109,11 +109,71 @@ func (e *proberTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *h
 		status = e.refreshStatus
 	}
 	body := e.body
-	if body == "" {
-		body = "{}"
-	}
 	e.mu.Unlock()
 	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}, nil
+}
+
+func TestProberHonorsMetadataBaseURL(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "xai"}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "xai",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"base_url": "https://custom.x.ai",
+		},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+
+	if exec.calls.Load() != 1 {
+		t.Fatalf("prober calls = %d, want 1", exec.calls.Load())
+	}
+	exec.mu.Lock()
+	url := exec.lastURL
+	exec.mu.Unlock()
+	if url != "https://custom.x.ai/v1/models" {
+		t.Fatalf("prober URL = %q, want %q", url, "https://custom.x.ai/v1/models")
+	}
+}
+
+func TestProberAcceptsEmpty200(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "test", statusCode: intPtr(http.StatusOK)}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://example.com",
+		},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+
+	updated, _ := m.GetByID(auth.ID)
+	if updated == nil || updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("empty 200 should not force cooldown; Unavailable=%v NextRetryAfter=%v", updated.Unavailable, updated.NextRetryAfter)
+	}
 }
 
 func TestProberDisabledByDefault(t *testing.T) {
