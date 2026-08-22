@@ -62,7 +62,7 @@ func TestCachedUserID_ExpiresAfterTTL(t *testing.T) {
 	resetUserIDCache()
 
 	expiredID := CachedUserID("api-key-expired")
-	cacheKey := userIDCacheKey("api-key-expired")
+	cacheKey := userIDCacheKey("api-key-expired", "")
 	userIDCacheMu.Lock()
 	userIDCache[cacheKey] = userIDCacheEntry{
 		value:  expiredID,
@@ -107,7 +107,7 @@ func TestCachedUserID_RenewsTTLOnHit(t *testing.T) {
 
 	key := "api-key-renew"
 	id := CachedUserID(key)
-	cacheKey := userIDCacheKey(key)
+	cacheKey := userIDCacheKey(key, "")
 
 	soon := time.Now()
 	userIDCacheMu.Lock()
@@ -185,7 +185,7 @@ func TestCachedUserIDRequiredHomeKVFailures(t *testing.T) {
 		{name: "get", client: &fakeClaudeIDKVClient{values: make(map[string][]byte), getErr: errors.New("get failed")}},
 		{name: "set", client: &fakeClaudeIDKVClient{values: make(map[string][]byte), setErr: errors.New("set failed")}},
 		{name: "expire", client: &fakeClaudeIDKVClient{values: map[string][]byte{
-			claudeUserIDKVKey("api-key-1"): []byte(GenerateFakeUserID()),
+			claudeUserIDKVKey("api-key-1", ""): []byte(GenerateFakeUserID()),
 		}, expireErr: errors.New("expire failed")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

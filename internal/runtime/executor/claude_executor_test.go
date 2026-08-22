@@ -2786,11 +2786,11 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsEmptyClaudeStream(t *testin
 
 func TestInjectFakeUserID_CacheEnabledIsDeterministic(t *testing.T) {
 	payload := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
-	first, errFirst := injectFakeUserID(context.Background(), payload, "key-cache-enabled", true)
+	first, errFirst := injectFakeUserID(context.Background(), payload, nil, "key-cache-enabled", true)
 	if errFirst != nil {
 		t.Fatalf("first injectFakeUserID error: %v", errFirst)
 	}
-	second, errSecond := injectFakeUserID(context.Background(), payload, "key-cache-enabled", true)
+	second, errSecond := injectFakeUserID(context.Background(), payload, nil, "key-cache-enabled", true)
 	if errSecond != nil {
 		t.Fatalf("second injectFakeUserID error: %v", errSecond)
 	}
@@ -2807,11 +2807,11 @@ func TestInjectFakeUserID_CacheEnabledIsDeterministic(t *testing.T) {
 
 func TestInjectFakeUserID_CacheDisabledIsRandomPerRequest(t *testing.T) {
 	payload := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
-	first, errFirst := injectFakeUserID(context.Background(), payload, "key-cache-disabled", false)
+	first, errFirst := injectFakeUserID(context.Background(), payload, nil, "key-cache-disabled", false)
 	if errFirst != nil {
 		t.Fatalf("first injectFakeUserID error: %v", errFirst)
 	}
-	second, errSecond := injectFakeUserID(context.Background(), payload, "key-cache-disabled", false)
+	second, errSecond := injectFakeUserID(context.Background(), payload, nil, "key-cache-disabled", false)
 	if errSecond != nil {
 		t.Fatalf("second injectFakeUserID error: %v", errSecond)
 	}

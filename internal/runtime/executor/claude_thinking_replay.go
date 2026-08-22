@@ -53,7 +53,7 @@ func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyaut
 		sessionKey, usedNonce = helps.ClaudeThinkingReplayConversationSessionKey(auth, req, opts)
 		fallback = sessionKey != "" && !usedNonce
 		if fallback {
-			resolvedMessages := helps.ClaudeThinkingReplayMessageHashes(modelFamily, callerHash, req.Payload)
+			resolvedMessages := capClaudeThinkingReplayAliasMessages(helps.ClaudeThinkingReplayMessageHashes(modelFamily, callerHash, req.Payload))
 			if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, resolvedMessages, firstUserHash); ok {
 				sessionKey = resolved
 			}
@@ -73,6 +73,16 @@ func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyaut
 // histories from generating unbounded alias registration round trips and
 // evicting useful earlier aliases.
 const claudeThinkingReplayMaxAliasesPerRequest = 64
+
+func capClaudeThinkingReplayAliasMessages(hashes []internalcache.ClaudeThinkingReplayAliasMessage) []internalcache.ClaudeThinkingReplayAliasMessage {
+	if len(hashes) <= claudeThinkingReplayMaxAliasesPerRequest {
+		return hashes
+	}
+	keep := make([]internalcache.ClaudeThinkingReplayAliasMessage, 0, claudeThinkingReplayMaxAliasesPerRequest)
+	keep = append(keep, hashes[0])
+	keep = append(keep, hashes[len(hashes)-claudeThinkingReplayMaxAliasesPerRequest+1:]...)
+	return keep
+}
 
 // prepareClaudeThinkingReplayRequest loads cached assistant content for this
 // request and strips any client-supplied _cliproxy_replay_provenance markers
@@ -102,13 +112,7 @@ func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.
 	// messages.0 has changed. This is done even when the cache is empty so the
 	// first request in a conversation can be rediscovered after compaction.
 	if scope.fallbackKey {
-		hashes := helps.ClaudeThinkingReplayMessageHashes(scope.modelFamily, scope.callerHash, req.Payload)
-		if len(hashes) > claudeThinkingReplayMaxAliasesPerRequest {
-			keep := make([]internalcache.ClaudeThinkingReplayAliasMessage, 0, claudeThinkingReplayMaxAliasesPerRequest)
-			keep = append(keep, hashes[0])
-			keep = append(keep, hashes[len(hashes)-claudeThinkingReplayMaxAliasesPerRequest+1:]...)
-			hashes = keep
-		}
+		hashes := capClaudeThinkingReplayAliasMessages(helps.ClaudeThinkingReplayMessageHashes(scope.modelFamily, scope.callerHash, req.Payload))
 		for _, m := range hashes {
 			internalcache.RegisterClaudeThinkingReplayAlias(ctx, scope.modelFamily, scope.sessionKey, m.Hash, scope.firstUserHash)
 		}

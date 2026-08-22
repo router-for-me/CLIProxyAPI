@@ -49,13 +49,16 @@ func purgeExpiredUserIDs() {
 	userIDCacheMu.Unlock()
 }
 
-func userIDCacheKey(apiKey string) string {
-	sum := sha256.Sum256([]byte(apiKey))
+func userIDCacheKey(apiKey, credential string) string {
+	sum := sha256.Sum256([]byte(sessionIDScope(apiKey, credential)))
 	return hex.EncodeToString(sum[:])
 }
 
-func CachedUserID(apiKey string) string {
-	value, errValue := CachedUserIDRequired(context.Background(), apiKey)
+// CachedUserID returns a stable fake user ID per apiKey, refreshing the TTL on each access.
+// An optional credential scopes anonymous (empty apiKey) user IDs.
+func CachedUserID(apiKey string, credential ...string) string {
+	cred := firstCredential(credential)
+	value, errValue := CachedUserIDRequired(context.Background(), apiKey, cred)
 	if errValue == nil && value != "" {
 		return value
 	}
@@ -63,9 +66,11 @@ func CachedUserID(apiKey string) string {
 }
 
 // CachedUserIDRequired returns a stable fake user ID per apiKey for request-time paths.
-func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
+// An optional credential scopes anonymous user IDs.
+func CachedUserIDRequired(ctx context.Context, apiKey string, credential ...string) (string, error) {
+	cred := firstCredential(credential)
 	newUserID := func() (string, error) {
-		sessionID, errSessionID := CachedSessionIDRequired(ctx, apiKey)
+		sessionID, errSessionID := CachedSessionIDRequired(ctx, apiKey, cred)
 		if errSessionID != nil {
 			return "", errSessionID
 		}
@@ -80,7 +85,7 @@ func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
 		if errClient != nil {
 			return "", errClient
 		}
-		key := claudeUserIDKVKey(apiKey)
+		key := claudeUserIDKVKey(apiKey, cred)
 		raw, found, errGet := client.KVGet(ctx, key)
 		if errGet != nil {
 			return "", errGet
@@ -110,7 +115,7 @@ func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
 
 	userIDCacheCleanupOnce.Do(startUserIDCacheCleanup)
 
-	key := userIDCacheKey(apiKey)
+	key := userIDCacheKey(apiKey, cred)
 	now := time.Now()
 
 	userIDCacheMu.RLock()
@@ -145,6 +150,6 @@ func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
 	return entry.value, nil
 }
 
-func claudeUserIDKVKey(apiKey string) string {
-	return "cpa:claude:user-id:" + homekv.HashKeyPart(apiKey)
+func claudeUserIDKVKey(apiKey, credential string) string {
+	return "cpa:claude:user-id:" + homekv.HashKeyPart(sessionIDScope(apiKey, credential))
 }

@@ -134,7 +134,7 @@ func TestCachedSessionIDRequiredHomeKVFailures(t *testing.T) {
 		{name: "get", client: &fakeClaudeIDKVClient{values: make(map[string][]byte), getErr: errors.New("get failed")}},
 		{name: "set", client: &fakeClaudeIDKVClient{values: make(map[string][]byte), setErr: errors.New("set failed")}},
 		{name: "expire", client: &fakeClaudeIDKVClient{values: map[string][]byte{
-			claudeSessionIDKVKey("api-key-1"): []byte(uuid.New().String()),
+			claudeSessionIDKVKey("api-key-1", ""): []byte(uuid.New().String()),
 		}, expireErr: errors.New("expire failed")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -174,5 +174,52 @@ func TestCachedSessionIDRequiredNonHomeModeUsesLocalMap(t *testing.T) {
 	}
 	if client.getCount != 0 || client.setCount != 0 || client.expireCount != 0 {
 		t.Fatalf("KV calls = get %d set %d expire %d, want all zero", client.getCount, client.setCount, client.expireCount)
+	}
+}
+
+func TestDeterministicSessionID_ScopesAnonymousByCredential(t *testing.T) {
+	withCredential := deterministicSessionID("", "cred-a")
+	withOther := deterministicSessionID("", "cred-b")
+	without := deterministicSessionID("", "")
+	withKey := deterministicSessionID("api-key", "cred-a")
+
+	if withCredential == withOther {
+		t.Fatalf("anonymous session IDs for different credentials must differ")
+	}
+	if withCredential == without {
+		t.Fatalf("anonymous session ID must differ from global anonymous when credential is present")
+	}
+	if withKey == withCredential {
+		t.Fatalf("non-empty apiKey must not match empty apiKey with credential")
+	}
+
+	if _, err := uuid.Parse(withCredential); err != nil {
+		t.Fatalf("session id %q is not a UUID: %v", withCredential, err)
+	}
+}
+
+func TestCachedSessionIDRequired_ScopesAnonymousByCredential(t *testing.T) {
+	resetSessionIDCache()
+	client := newFakeClaudeIDKVClient()
+	useFakeClaudeIDKVClient(t, client, true, nil)
+
+	first, errFirst := CachedSessionIDRequired(context.Background(), "", "cred-a")
+	if errFirst != nil {
+		t.Fatalf("CachedSessionIDRequired(empty,cred-a) error = %v", errFirst)
+	}
+	second, errSecond := CachedSessionIDRequired(context.Background(), "", "cred-b")
+	if errSecond != nil {
+		t.Fatalf("CachedSessionIDRequired(empty,cred-b) error = %v", errSecond)
+	}
+	if first == second {
+		t.Fatalf("anonymous session IDs for different credentials must differ, got %q and %q", first, second)
+	}
+
+	third, errThird := CachedSessionIDRequired(context.Background(), "", "cred-a")
+	if errThird != nil {
+		t.Fatalf("CachedSessionIDRequired(empty,cred-a) second error = %v", errThird)
+	}
+	if first != third {
+		t.Fatalf("same credential must produce the same session id, got %q and %q", first, third)
 	}
 }

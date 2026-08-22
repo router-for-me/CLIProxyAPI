@@ -94,14 +94,21 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 // When useCache is true, the user ID is cached and stable per credential.
 // When useCache is false, the device_id is fresh per request while the session_id
 // stays stable, preserving header/body session alignment.
-func injectFakeUserID(ctx context.Context, payload []byte, apiKey string, useCache bool) ([]byte, error) {
+func injectFakeUserID(ctx context.Context, payload []byte, auth *cliproxyauth.Auth, apiKey string, useCache bool) ([]byte, error) {
+	credential := ""
+	if auth != nil {
+		credential = strings.TrimSpace(auth.Index)
+		if credential == "" {
+			credential = strings.TrimSpace(auth.ID)
+		}
+	}
 	generateID := func() (string, error) {
-		sessionID, errSessionID := helps.CachedSessionIDRequired(ctx, apiKey)
+		sessionID, errSessionID := helps.CachedSessionIDRequired(ctx, apiKey, credential)
 		if errSessionID != nil {
 			return "", errSessionID
 		}
 		if useCache {
-			return helps.CachedUserIDRequired(ctx, apiKey)
+			return helps.CachedUserIDRequired(ctx, apiKey, credential)
 		}
 		return helps.GenerateRandomFakeUserIDForSession(sessionID), nil
 	}
@@ -1035,7 +1042,7 @@ func applyCloaking(
 	// Other non-OAuth cloaking keeps the legacy per-request fake user_id.
 	if !policy.ProfileClaudeCodeCLI {
 		var errFakeUserID error
-		payload, errFakeUserID = injectFakeUserID(ctx, payload, apiKey, settings.cacheUserID)
+		payload, errFakeUserID = injectFakeUserID(ctx, payload, auth, apiKey, settings.cacheUserID)
 		if errFakeUserID != nil {
 			return nil, false, errFakeUserID
 		}

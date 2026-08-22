@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -51,6 +52,24 @@ func TestClaudeThinkingReplayScopeFromRequest_FallbackKeyOnlyForContent(t *testi
 	content := claudeThinkingReplayScopeFromRequest(context.Background(), auth, contentReq, cliproxyexecutor.Options{})
 	if !content.fallbackKey {
 		t.Fatalf("fallbackKey must be true for a content-derived fallback scope")
+	}
+}
+
+func TestCapClaudeThinkingReplayAliasMessages_KeepsFirstAndMostRecent(t *testing.T) {
+	var all []internalcache.ClaudeThinkingReplayAliasMessage
+	for i := 0; i < 100; i++ {
+		all = append(all, internalcache.ClaudeThinkingReplayAliasMessage{Hash: fmt.Sprintf("hash-%d", i)})
+	}
+	capped := capClaudeThinkingReplayAliasMessages(all)
+	if len(capped) != claudeThinkingReplayMaxAliasesPerRequest {
+		t.Fatalf("capped len = %d, want %d", len(capped), claudeThinkingReplayMaxAliasesPerRequest)
+	}
+	if capped[0].Hash != "hash-0" {
+		t.Fatalf("capped should keep first message, got %q", capped[0].Hash)
+	}
+	wantLast := "hash-99"
+	if capped[len(capped)-1].Hash != wantLast {
+		t.Fatalf("capped should keep most recent messages, got last %q, want %q", capped[len(capped)-1].Hash, wantLast)
 	}
 }
 
