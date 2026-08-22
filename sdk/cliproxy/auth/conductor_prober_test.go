@@ -14,6 +14,12 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
+func newProberManager() *Manager {
+	m := NewManager(nil, nil, nil)
+	m.SetProberParentContext(context.Background())
+	return m
+}
+
 type proberTestExecutor struct {
 	provider      string
 	statusCode    int
@@ -70,7 +76,7 @@ func (e *proberTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *h
 
 func TestProberDisabledByDefault(t *testing.T) {
 	ctx := context.Background()
-	m := NewManager(nil, nil, nil)
+	m := newProberManager()
 	exec := &proberTestExecutor{provider: "test"}
 	m.RegisterExecutor(exec)
 
@@ -90,7 +96,7 @@ func TestProberDisabledByDefault(t *testing.T) {
 
 func TestProberSkipsDisabledAuth(t *testing.T) {
 	ctx := context.Background()
-	m := NewManager(nil, nil, nil)
+	m := newProberManager()
 	exec := &proberTestExecutor{provider: "test", err: fmt.Errorf("boom")}
 	m.RegisterExecutor(exec)
 
@@ -110,7 +116,7 @@ func TestProberSkipsDisabledAuth(t *testing.T) {
 
 func TestProberMarksAuthUnavailableOnFailure(t *testing.T) {
 	ctx := context.Background()
-	m := NewManager(nil, nil, nil)
+	m := newProberManager()
 	exec := &proberTestExecutor{provider: "test", err: fmt.Errorf("upstream unreachable")}
 	m.RegisterExecutor(exec)
 
@@ -148,7 +154,7 @@ func TestProberMarksAuthUnavailableOnFailure(t *testing.T) {
 
 func TestProberLeavesAuthActiveOnSuccess(t *testing.T) {
 	ctx := context.Background()
-	m := NewManager(nil, nil, nil)
+	m := newProberManager()
 	exec := &proberTestExecutor{provider: "test", statusCode: http.StatusOK}
 	m.RegisterExecutor(exec)
 
@@ -182,7 +188,7 @@ func TestProberLeavesAuthActiveOnSuccess(t *testing.T) {
 
 func TestProberUsesCanonicalExecutorKey(t *testing.T) {
 	ctx := context.Background()
-	m := NewManager(nil, nil, nil)
+	m := newProberManager()
 
 	// Executor is registered under the lower-cased canonical key.
 	exec := &proberTestExecutor{provider: "openai", statusCode: http.StatusOK}
@@ -212,7 +218,7 @@ func TestProberUsesCanonicalExecutorKey(t *testing.T) {
 
 func TestProberUsesCompatNameExecutorKey(t *testing.T) {
 	ctx := context.Background()
-	m := NewManager(nil, nil, nil)
+	m := newProberManager()
 
 	exec := &proberTestExecutor{provider: "openai-compatible-custom", statusCode: http.StatusOK}
 	m.RegisterExecutor(exec)
@@ -242,7 +248,7 @@ func TestProberUsesCompatNameExecutorKey(t *testing.T) {
 
 func TestProberMarksAuthUnavailableOnEmptyResponse(t *testing.T) {
 	ctx := context.Background()
-	m := NewManager(nil, nil, nil)
+	m := newProberManager()
 	exec := &proberTestExecutor{provider: "test", statusCode: http.StatusNoContent}
 	m.RegisterExecutor(exec)
 
@@ -272,7 +278,7 @@ func TestProberDropsContextDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
 	defer cancel()
 
-	m := NewManager(nil, nil, nil)
+	m := newProberManager()
 	exec := &proberTestExecutor{provider: "test", statusCode: http.StatusOK}
 	m.RegisterExecutor(exec)
 
@@ -303,7 +309,7 @@ func TestProberDropsContextDeadline(t *testing.T) {
 
 func TestProberStopWaitsForInFlightProbe(t *testing.T) {
 	ctx := context.Background()
-	m := NewManager(nil, nil, nil)
+	m := newProberManager()
 	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
 	if _, err := m.Register(ctx, auth); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -339,7 +345,7 @@ func TestProberStopWaitsForInFlightProbe(t *testing.T) {
 
 func TestProberRestartDuringStopIsBlocked(t *testing.T) {
 	ctx := context.Background()
-	m := NewManager(nil, nil, nil)
+	m := newProberManager()
 	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
 	if _, err := m.Register(ctx, auth); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -382,7 +388,7 @@ func TestProberRestartDuringStopIsBlocked(t *testing.T) {
 
 func TestSetConfigDoesNotDeadlockWithFailingProbe(t *testing.T) {
 	ctx := context.Background()
-	m := NewManager(nil, nil, nil)
+	m := newProberManager()
 	m.SetCooldownStateStore(&recordingCooldownStateStore{})
 
 	block := make(chan struct{})
@@ -418,6 +424,34 @@ func TestSetConfigDoesNotDeadlockWithFailingProbe(t *testing.T) {
 	}
 }
 
+func TestProberDoesNotStartBeforeParentContext(t *testing.T) {
+	ctx := context.Background()
+	m := NewManager(nil, nil, nil)
+	exec := &proberTestExecutor{provider: "test", statusCode: http.StatusOK}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+	if exec.calls.Load() != 0 {
+		t.Fatalf("prober calls = %d, want 0 before parent context is set", exec.calls.Load())
+	}
+
+	m.SetProberParentContext(ctx)
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+	if exec.calls.Load() != 1 {
+		t.Fatalf("prober calls = %d, want 1 after parent context is set", exec.calls.Load())
+	}
+}
+
 func TestProberBackoffFor(t *testing.T) {
 	l := newAuthProberLoop(nil, internalconfig.CredentialProberConfig{BackoffBase: 30 * time.Second, BackoffMax: 5 * time.Minute})
 	cases := []struct {
@@ -442,7 +476,7 @@ func TestProberBackoffFor(t *testing.T) {
 
 func TestProberBackoffOverridesStatusCooldowns(t *testing.T) {
 	ctx := context.Background()
-	m := NewManager(nil, nil, nil)
+	m := newProberManager()
 	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
 	if _, err := m.Register(ctx, auth); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -476,7 +510,7 @@ func TestProberBackoffOverridesStatusCooldowns(t *testing.T) {
 
 func TestProberBackoffEscalates(t *testing.T) {
 	ctx := context.Background()
-	m := NewManager(nil, nil, nil)
+	m := newProberManager()
 	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
 	if _, err := m.Register(ctx, auth); err != nil {
 		t.Fatalf("Register: %v", err)

@@ -57,6 +57,8 @@ func newAuthProberLoop(manager *Manager, cfg internalconfig.CredentialProberConf
 
 // SetProberParentContext binds the prober to a service-wide context so it is
 // cancelled when the parent service shuts down instead of outliving it.
+// It does not start the prober; callers with a running manager must call
+// restartProberLocked/StartProber explicitly.
 func (m *Manager) SetProberParentContext(ctx context.Context) {
 	if m == nil {
 		return
@@ -124,6 +126,13 @@ func (m *Manager) stopProberUnlocked() {
 	m.proberWg.Wait()
 }
 
+// RestartProber re-evaluates the runtime prober config and starts or stops
+// the background loop. It is intended for the embeddable Service to start
+// probing after auth/executor initialization.
+func (m *Manager) RestartProber() {
+	m.restartProberLocked()
+}
+
 func (m *Manager) restartProberLocked() {
 	if m == nil {
 		return
@@ -134,11 +143,20 @@ func (m *Manager) restartProberLocked() {
 	}
 	m.proberLifecycleMu.Lock()
 	defer m.proberLifecycleMu.Unlock()
-	if cfg.CredentialProber.Enabled {
-		m.startProberUnlocked(context.Background(), cfg.CredentialProber)
-	} else {
+	if !cfg.CredentialProber.Enabled {
 		m.stopProberUnlocked()
+		return
 	}
+	m.mu.RLock()
+	parent := m.proberParent
+	m.mu.RUnlock()
+	if parent == nil {
+		// Service has not yet installed the lifecycle context; do not start
+		// a detached prober during build/initialization.
+		return
+	}
+	m.stopProberUnlocked()
+	m.startProberUnlocked(parent, cfg.CredentialProber)
 }
 
 func (l *authProberLoop) run(ctx context.Context) {

@@ -87,6 +87,7 @@ func (s *Service) Run(ctx context.Context) error {
 				log.Warnf("failed to restore cooldown state: %v", errRestoreCooldown)
 			}
 		}
+		s.coreManager.RestartProber()
 	}
 
 	if !homeEnabled {
@@ -116,6 +117,9 @@ func (s *Service) Run(ctx context.Context) error {
 		})
 		// Home mode does not expose in-process Redis RESP usage output; usage is forwarded to home instead.
 		redisqueue.SetEnabled(true)
+		if s.coreManager != nil {
+			s.coreManager.RestartProber()
+		}
 	}
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
