@@ -140,18 +140,20 @@ func (l *authProberLoop) sweep(ctx context.Context) {
 		defer ticker.Stop()
 	}
 
+	authLoop := false
 	for _, auth := range auths {
 		if ctx.Err() != nil {
+			authLoop = true
 			break
 		}
 		if ticker != nil {
 			select {
 			case <-ctx.Done():
-				break
+				authLoop = true
 			case <-ticker.C:
 			}
 		}
-		if ctx.Err() != nil {
+		if authLoop {
 			break
 		}
 
