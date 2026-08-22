@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -307,6 +308,10 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 	if resp != nil && resp.Body != nil {
 		bodyBytes, _ = io.CopyN(io.Discard, resp.Body, proberMaxBodyBytes)
 		_ = resp.Body.Close()
+	}
+
+	if errors.Is(probeCtx.Err(), context.Canceled) {
+		return
 	}
 
 	var resultErr *Error

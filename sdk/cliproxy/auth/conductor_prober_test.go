@@ -493,6 +493,48 @@ func TestProberUsesProviderSpecificProbePath(t *testing.T) {
 	}
 }
 
+func TestProberIgnoresCancellationResult(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	block := make(chan struct{})
+	exec := &proberTestExecutor{provider: "test", blockUntil: block}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.StartProber(ctx, cfg)
+
+	for exec.calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		m.StopProber()
+		close(stopDone)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	close(block)
+
+	select {
+	case <-stopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StopProber timed out")
+	}
+
+	m.mu.RLock()
+	updated := m.auths["a1"]
+	m.mu.RUnlock()
+	if updated != nil && (updated.Unavailable || !updated.NextRetryAfter.IsZero()) {
+		t.Fatalf("canceled probe should not mark auth unavailable; got Unavailable=%v NextRetryAfter=%v", updated.Unavailable, updated.NextRetryAfter)
+	}
+}
+
 func TestProberBackoffFor(t *testing.T) {
 	l := newAuthProberLoop(nil, internalconfig.CredentialProberConfig{BackoffBase: 30 * time.Second, BackoffMax: 5 * time.Minute})
 	cases := []struct {
