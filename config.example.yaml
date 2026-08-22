@@ -322,7 +322,7 @@ nonstream-keepalive-interval: 0
 #     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
-#       - status: 400        # HTTP status code to match
+#       - status: 400        # HTTP status code to match; omit or set to 0 to match any status (body-only rule)
 #         match:             # optional: string contains matching
 #           - "maximum_context_length"
 #           - "context_length_exceeded"
@@ -757,6 +757,8 @@ nonstream-keepalive-interval: 0
 #     - "grok-3-mini"
 
 # OAuth provider request-scoped error rules (custom error classification for OAuth credentials)
+# Supported actions: "stop", "stop-and-cooldown", "continue", "continue-and-cooldown"
+# The status field is optional; omit it or set it to 0 to match any HTTP status (body-only rule).
 # oauth-request-scoped-errors:
 #   vertex:
 #     - status: 400
@@ -766,7 +768,7 @@ nonstream-keepalive-interval: 0
 #       match-regexr:
 #         - "maximum_context_length$"
 #         - "^context_length_exceeded"
-#       action: "stop" # options: "stop", "stop-and-cooldown", "continue", "continue-and-cooldown"
+#       action: "stop"
 #   aistudio:
 #     - status: 400
 #       match:
@@ -778,8 +780,7 @@ nonstream-keepalive-interval: 0
 #         - "internal_server_error"
 #       action: "stop-and-cooldown"
 #   claude:
-#     - status: 400
-#       match:
+#     - match:
 #         - "prompt is too long"
 #       action: "stop"
 #   codex:
