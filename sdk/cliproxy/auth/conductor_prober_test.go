@@ -1043,6 +1043,47 @@ func TestProberBaseURLIgnoresOpenAICompatIndexForNativeProvider(t *testing.T) {
 	}
 }
 
+func TestProberXAIRoutesOAuthDefaultToCLIChatProxy(t *testing.T) {
+	cases := []struct {
+		name string
+		auth *Auth
+		want string
+	}{
+		{
+			name: "oauth default no base_url",
+			auth: &Auth{Provider: "xai", Attributes: map[string]string{"auth_kind": "oauth"}},
+			want: "https://cli-chat-proxy.grok.com/v1",
+		},
+		{
+			name: "oauth default official base_url",
+			auth: &Auth{Provider: "xai", Attributes: map[string]string{"auth_kind": "oauth", "base_url": "https://api.x.ai/v1"}},
+			want: "https://cli-chat-proxy.grok.com/v1",
+		},
+		{
+			name: "api-key default no base_url",
+			auth: &Auth{Provider: "xai", Attributes: map[string]string{"api_key": "secret"}},
+			want: "https://api.x.ai/v1",
+		},
+		{
+			name: "using_api true keeps official base",
+			auth: &Auth{Provider: "xai", Attributes: map[string]string{"auth_kind": "oauth", "using_api": "true", "base_url": "https://api.x.ai/v1"}},
+			want: "https://api.x.ai/v1",
+		},
+		{
+			name: "oauth explicit custom base_url",
+			auth: &Auth{Provider: "xai", Attributes: map[string]string{"auth_kind": "oauth", "base_url": "https://gateway.example.com/v1"}},
+			want: "https://gateway.example.com/v1",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := proberBaseURLForProvider(c.auth, nil); got != c.want {
+				t.Fatalf("proberBaseURLForProvider() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestProberRefreshOn401(t *testing.T) {
 	ctx := context.Background()
 	m := newProberManager()

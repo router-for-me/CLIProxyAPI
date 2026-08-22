@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	log "github.com/sirupsen/logrus"
 )
@@ -493,6 +494,12 @@ func proberBaseURLForProvider(auth *Auth, cfg *internalconfig.Config) string {
 	if auth == nil {
 		return ""
 	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if provider == "xai" {
+		// xAI routing depends on auth_kind/using_api as well as base_url, so use
+		// the same resolution the executor uses for chat requests.
+		return proberXAIChatBaseURL(auth)
+	}
 	if auth.Attributes != nil {
 		if baseURL := strings.TrimSpace(auth.Attributes["base_url"]); baseURL != "" {
 			return baseURL
@@ -505,7 +512,6 @@ func proberBaseURLForProvider(auth *Auth, cfg *internalconfig.Config) string {
 			}
 		}
 	}
-	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	if cfg != nil {
 		if u := proberOpenAICompatBaseURL(auth, cfg); u != "" {
 			return u
@@ -563,6 +569,99 @@ func proberOpenAICompatBaseURL(auth *Auth, cfg *internalconfig.Config) string {
 		}
 	}
 	return ""
+}
+
+// proberXAIChatBaseURL mirrors the executor's xaiChatBaseURL semantics so xAI
+// OAuth probes target the same upstream used for normal chat requests.
+func proberXAIChatBaseURL(auth *Auth) string {
+	_, baseURL := proberXAICreds(auth)
+	if proberXAIUsingAPI(auth) {
+		if baseURL == "" {
+			return xaiauth.DefaultAPIBaseURL
+		}
+		return baseURL
+	}
+	if baseURL != "" && !proberXAIIsDefaultAPIBaseURL(baseURL) {
+		return baseURL
+	}
+	return xaiauth.CLIChatProxyBaseURL
+}
+
+func proberXAICreds(auth *Auth) (token, baseURL string) {
+	if auth == nil {
+		return "", ""
+	}
+	if auth.Attributes != nil {
+		token = strings.TrimSpace(auth.Attributes["api_key"])
+		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	if auth.Metadata != nil {
+		if token == "" {
+			token = proberXAIMetadataString(auth.Metadata, "access_token")
+		}
+		if baseURL == "" {
+			baseURL = proberXAIMetadataString(auth.Metadata, "base_url")
+		}
+	}
+	return token, baseURL
+}
+
+func proberXAIUsingAPI(auth *Auth) bool {
+	if auth == nil {
+		return true
+	}
+	if len(auth.Attributes) > 0 {
+		if raw := strings.TrimSpace(auth.Attributes["using_api"]); raw != "" {
+			if parsed, err := strconv.ParseBool(raw); err == nil {
+				return parsed
+			}
+		}
+	}
+	if len(auth.Metadata) > 0 {
+		raw, ok := auth.Metadata["using_api"]
+		if ok && raw != nil {
+			switch v := raw.(type) {
+			case bool:
+				return v
+			case string:
+				if parsed, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
+					return parsed
+				}
+			}
+		}
+	}
+	if raw := strings.TrimSpace(auth.Attributes["auth_kind"]); raw != "" {
+		return !strings.EqualFold(raw, "oauth")
+	}
+	return !strings.EqualFold(proberXAIMetadataString(auth.Metadata, "auth_kind"), "oauth")
+}
+
+func proberXAIMetadataString(meta map[string]any, key string) string {
+	if len(meta) == 0 || key == "" {
+		return ""
+	}
+	value, ok := meta[key]
+	if !ok || value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []byte:
+		return strings.TrimSpace(string(typed))
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
+}
+
+func proberXAINormalizeBaseURL(baseURL string) string {
+	return strings.TrimRight(strings.TrimSpace(baseURL), "/")
+}
+
+func proberXAIIsDefaultAPIBaseURL(baseURL string) bool {
+	return proberXAINormalizeBaseURL(baseURL) == proberXAINormalizeBaseURL(xaiauth.DefaultAPIBaseURL)
 }
 
 // proberProbePathForProvider returns the probe path for the provider.
