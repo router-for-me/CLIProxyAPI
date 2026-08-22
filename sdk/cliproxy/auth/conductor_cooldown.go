@@ -395,6 +395,7 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		auth.authLevelCooldown = false
 		auth.authLevelUnavailable = false
 		auth.authLevelNextRetryAfter = time.Time{}
+		auth.proberCooldown = false
 		auth.NextRetryAfter = time.Time{}
 		auth.Quota = QuotaState{}
 		auth.UpdatedAt = now
@@ -1277,6 +1278,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.Quota.NextRecoverAt = time.Time{}
 	auth.Quota.BackoffLevel = 0
 	auth.proberBackoff = 0
+	auth.proberCooldown = false
 	auth.authLevelCooldown = false
 	auth.LastError = nil
 	auth.NextRetryAfter = time.Time{}
@@ -1287,10 +1289,15 @@ func clearProberStateOnSuccess(auth *Auth, now time.Time) {
 	if auth == nil {
 		return
 	}
-	if auth.proberBackoff == 0 && !auth.authLevelCooldown {
+	if !auth.proberCooldown && auth.proberBackoff == 0 {
 		return
 	}
+	owned := auth.proberCooldown
 	auth.proberBackoff = 0
+	auth.proberCooldown = false
+	if !owned {
+		return
+	}
 	auth.authLevelCooldown = false
 	auth.authLevelUnavailable = false
 	auth.authLevelNextRetryAfter = time.Time{}
@@ -1941,6 +1948,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if shouldSkipCredentialCooldown(resultErr) {
 		return
 	}
+	// A non-probe credential-scoped failure overwrites any prober cooldown so
+	// the next successful probe does not clear cooldown state it did not create.
+	auth.proberCooldown = false
 	defer func() {
 		if disableCooling && auth.NextRetryAfter.IsZero() && auth.Quota.NextRecoverAt.IsZero() {
 			auth.Unavailable = false
@@ -1948,6 +1958,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.authLevelUnavailable = false
 			auth.authLevelNextRetryAfter = time.Time{}
 			auth.Quota.Exceeded = false
+			auth.proberCooldown = false
 		}
 		auth.authLevelUnavailable = auth.Unavailable
 		auth.authLevelNextRetryAfter = auth.NextRetryAfter
@@ -1968,6 +1979,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && retryAfter != nil {
 		auth.NextRetryAfter = now.Add(*retryAfter)
 		auth.proberBackoff++
+		auth.proberCooldown = true
 		return
 	}
 	statusCode := statusCodeFromResult(resultErr)

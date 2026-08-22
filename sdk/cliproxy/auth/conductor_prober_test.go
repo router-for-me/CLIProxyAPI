@@ -1326,3 +1326,119 @@ func TestProberCapsMaxConcurrency(t *testing.T) {
 		t.Fatalf("prober calls = %d, want 2", exec.calls.Load())
 	}
 }
+
+func TestProberHonorsAuthLevelCooldown(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "test"}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://example.com",
+		},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	m.MarkResult(ctx, Result{
+		AuthID:          auth.ID,
+		Provider:        auth.Provider,
+		Success:         false,
+		CredentialScope: true,
+		Error: &Error{
+			Code:       "unauthorized",
+			Message:    "auth-level 401",
+			HTTPStatus: http.StatusUnauthorized,
+			Retryable:  true,
+		},
+	})
+
+	// A model success clears the aggregate Unavailable/NextRetryAfter fields but
+	// leaves the auth-level cooldown active, so the prober must still skip it.
+	m.MarkResult(ctx, Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Success:  true,
+		Model:    "test-model",
+	})
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+
+	if exec.calls.Load() != 0 {
+		t.Fatalf("prober calls = %d, want 0 while auth-level cooldown active", exec.calls.Load())
+	}
+}
+
+func TestProberSuccessDoesNotClearNonProberCooldown(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "test"}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://example.com",
+		},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	retryAfter := time.Hour
+	m.MarkResult(ctx, Result{
+		AuthID:          auth.ID,
+		Provider:        auth.Provider,
+		Success:         false,
+		CredentialScope: true,
+		IsProbe:         true,
+		Error: &Error{
+			Code:       ErrorCodeForceCooldown,
+			Message:    "prober: unreachable",
+			HTTPStatus: http.StatusServiceUnavailable,
+			Retryable:  true,
+		},
+		RetryAfter: &retryAfter,
+	})
+
+	// A concurrent non-probe credential-scoped failure overwrites prober ownership.
+	m.MarkResult(ctx, Result{
+		AuthID:          auth.ID,
+		Provider:        auth.Provider,
+		Success:         false,
+		CredentialScope: true,
+		Error: &Error{
+			Code:       "unauthorized",
+			Message:    "auth-level 401",
+			HTTPStatus: http.StatusUnauthorized,
+			Retryable:  true,
+		},
+	})
+
+	// A later successful probe must not clear the non-prober failure.
+	m.MarkResult(ctx, Result{
+		AuthID:          auth.ID,
+		Provider:        auth.Provider,
+		Success:         true,
+		CredentialScope: true,
+		IsProbe:         true,
+	})
+
+	updated, _ := m.GetByID(auth.ID)
+	if updated == nil || !updated.Unavailable || updated.NextRetryAfter.IsZero() {
+		t.Fatalf("non-prober cooldown should survive probe success; Unavailable=%v NextRetryAfter=%v", updated.Unavailable, updated.NextRetryAfter)
+	}
+	if !updated.authLevelCooldown {
+		t.Fatalf("auth-level cooldown should survive probe success")
+	}
+}

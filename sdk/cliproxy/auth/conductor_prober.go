@@ -277,6 +277,9 @@ func (l *authProberLoop) snapshotAuths() []*Auth {
 		if auth.Unavailable && auth.NextRetryAfter.After(now) {
 			continue
 		}
+		if auth.authLevelUnavailable && auth.authLevelNextRetryAfter.After(now) {
+			continue
+		}
 		out = append(out, auth)
 	}
 	return out
