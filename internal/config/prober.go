@@ -6,7 +6,7 @@ const (
 	defaultCredentialProberInterval       = 60 * time.Second
 	defaultCredentialProberMaxConcurrency = 4
 	defaultCredentialProberRatePerMinute  = 60
-	defaultCredentialProberPath           = "/v1/models"
+	defaultCredentialProberPath           = "/models"
 )
 
 // CredentialProberConfig controls optional active health probing for registered credentials.

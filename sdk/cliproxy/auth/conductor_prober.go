@@ -19,7 +19,7 @@ const (
 	proberCheckInterval  = 60 * time.Second
 	proberMaxConcurrency = 4
 	proberRatePerMinute  = 60
-	proberDefaultPath    = "/v1/models"
+	proberDefaultPath    = "/models"
 	proberMaxBodyBytes   = 1024
 )
 

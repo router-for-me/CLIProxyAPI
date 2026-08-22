@@ -197,3 +197,30 @@ func TestProberMarksAuthUnavailableOnEmptyResponse(t *testing.T) {
 		t.Fatalf("auth.Unavailable = %v, want true", updated.Unavailable)
 	}
 }
+
+func TestResolveProbeURL(t *testing.T) {
+	cases := []struct {
+		baseURL string
+		path    string
+		want    string
+	}{
+		{"https://api.openai.com/v1", "/models", "https://api.openai.com/v1/models"},
+		{"https://api.x.ai/v1", "/models", "https://api.x.ai/v1/models"},
+		{"https://generativelanguage.googleapis.com/v1beta", "/models", "https://generativelanguage.googleapis.com/v1beta/models"},
+		{"https://example.com", "/models", "https://example.com/models"},
+		{"https://example.com/v1", "/v1/models", "https://example.com/v1/models"},
+		{"https://example.com/v1/", "/v1/models", "https://example.com/v1/models"},
+		{"https://example.com/v1/models", "/models", "https://example.com/v1/models"},
+		{"https://example.com", "/v1/models", "https://example.com/v1/models"},
+	}
+
+	for _, c := range cases {
+		got, err := resolveProbeURL(c.baseURL, c.path)
+		if err != nil {
+			t.Fatalf("resolveProbeURL(%q, %q): %v", c.baseURL, c.path, err)
+		}
+		if got != c.want {
+			t.Fatalf("resolveProbeURL(%q, %q) = %q, want %q", c.baseURL, c.path, got, c.want)
+		}
+	}
+}

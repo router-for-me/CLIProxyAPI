@@ -85,7 +85,7 @@ pprof:
 #   interval: 60s
 #   max-concurrency: 4
 #   rate-limit-per-minute: 60
-#   default-probe-path: "/v1/models"
+#   default-probe-path: "/models"
 
 # Standard dynamic library plugins are trusted in-process code. They are disabled by default.
 # Build Go examples with go build -buildmode=c-shared for the target GOOS/GOARCH.
