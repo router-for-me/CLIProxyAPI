@@ -609,3 +609,49 @@ func TestManagerResultSaveWaitsForCooldownStoreTransition(t *testing.T) {
 		t.Fatalf("new store save count = %d, want 1", got)
 	}
 }
+
+func TestManager_RestoreAuthLevelCooldownBlocksCleanModelState(t *testing.T) {
+	nextRetry := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	store := &recordingCooldownStateStore{
+		load: []CooldownStateRecord{
+			{
+				Provider:       "test",
+				AuthID:         "auth-1",
+				Status:         "cooling",
+				NextRetryAfter: nextRetry,
+				Reason:         "prober: upstream unreachable",
+			},
+		},
+	}
+	manager := NewManager(nil, nil, nil)
+	manager.SetCooldownStateStore(store)
+	if _, err := manager.Register(WithSkipPersist(context.Background()), &Auth{
+		ID:       "auth-1",
+		Provider: "test",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			"test-model": {
+				Status:      StatusActive,
+				Unavailable: false,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Register() returned error: %v", err)
+	}
+
+	if err := manager.RestoreCooldownStates(context.Background()); err != nil {
+		t.Fatalf("RestoreCooldownStates() returned error: %v", err)
+	}
+
+	auth, ok := manager.GetByID("auth-1")
+	if !ok {
+		t.Fatal("restored auth was not found")
+	}
+	if !auth.authLevelCooldown {
+		t.Fatal("auth.authLevelCooldown = false, want true")
+	}
+	blocked, _, _ := isAuthBlockedForModel(auth, "test-model", time.Now())
+	if !blocked {
+		t.Fatal("restored auth-level cooldown did not block the clean model state")
+	}
+}

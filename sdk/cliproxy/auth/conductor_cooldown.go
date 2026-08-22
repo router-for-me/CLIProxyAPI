@@ -364,6 +364,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 
 	if model == "" {
 		auth.Unavailable = true
+		auth.authLevelCooldown = true
 		auth.Status = StatusError
 		auth.NextRetryAfter = record.NextRetryAfter
 		auth.Quota = quota
@@ -396,6 +397,7 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	changed := false
 	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
 		auth.Unavailable = false
+		auth.authLevelCooldown = false
 		auth.NextRetryAfter = time.Time{}
 		auth.Quota = QuotaState{}
 		auth.UpdatedAt = now
