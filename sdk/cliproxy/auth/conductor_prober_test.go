@@ -793,6 +793,7 @@ func TestProberBackoffEscalates(t *testing.T) {
 			Provider:        auth.Provider,
 			Success:         false,
 			CredentialScope: true,
+			IsProbe:         true,
 			Error:           &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusUnauthorized, Retryable: true},
 			RetryAfter:      &d,
 		})

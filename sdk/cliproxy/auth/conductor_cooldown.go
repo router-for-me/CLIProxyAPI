@@ -931,7 +931,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 					disableCooling = false
 				}
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling, result.IsProbe)
 			}
 		}
 
@@ -1956,7 +1956,7 @@ func isRequestInvalidError(err error) bool {
 	return false
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling, isProbe bool) {
 	if auth == nil {
 		return
 	}
@@ -1991,10 +1991,14 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 
 	// Prober failures carry an explicit RetryAfter derived from the configured
 	// probe backoff bounds, overriding the generic status-code cooldowns.
+	// Only prober-originated results may take ownership of the prober cooldown
+	// state so caller-owned force cooldowns are not cleared by later probes.
 	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && retryAfter != nil {
 		auth.NextRetryAfter = now.Add(*retryAfter)
-		auth.proberBackoff++
-		auth.proberCooldown = true
+		if isProbe {
+			auth.proberBackoff++
+			auth.proberCooldown = true
+		}
 		return
 	}
 	statusCode := statusCodeFromResult(resultErr)
