@@ -23,6 +23,7 @@ type proberTestExecutor struct {
 	respondStatus int
 	deadlineSet   atomic.Bool
 	ctx           context.Context
+	blockUntil    chan struct{}
 }
 
 func (e *proberTestExecutor) Identifier() string { return e.provider }
@@ -46,6 +47,9 @@ func (e *proberTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *h
 	e.ctx = ctx
 	if _, ok := ctx.Deadline(); ok {
 		e.deadlineSet.Store(true)
+	}
+	if e.blockUntil != nil {
+		<-e.blockUntil
 	}
 	if e.err != nil {
 		return nil, e.err
@@ -235,6 +239,85 @@ func TestProberDropsContextDeadline(t *testing.T) {
 			t.Fatal("prober passed a context with a deadline to the executor")
 		}
 	}
+}
+
+func TestProberStopWaitsForInFlightProbe(t *testing.T) {
+	ctx := context.Background()
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	block := make(chan struct{})
+	exec := &proberTestExecutor{provider: "test", statusCode: http.StatusOK, blockUntil: block}
+	m.RegisterExecutor(exec)
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.StartProber(ctx, cfg)
+
+	for exec.calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		m.StopProber()
+		close(stopDone)
+	}()
+
+	// StopProber must not return while the probe is still blocked.
+	select {
+	case <-stopDone:
+		t.Fatal("StopProber returned before the in-flight probe completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(block)
+	<-stopDone
+}
+
+func TestProberRestartDuringStopIsBlocked(t *testing.T) {
+	ctx := context.Background()
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	block := make(chan struct{})
+	first := &proberTestExecutor{provider: "test", statusCode: http.StatusOK, blockUntil: block}
+	m.RegisterExecutor(first)
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.StartProber(ctx, cfg)
+
+	for first.calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		m.StopProber()
+		close(stopDone)
+	}()
+
+	startDone := make(chan struct{})
+	go func() {
+		m.StartProber(ctx, cfg)
+		close(startDone)
+	}()
+
+	// StartProber must not start a new prober while StopProber holds the lock.
+	select {
+	case <-startDone:
+		t.Fatal("StartProber returned before StopProber released the lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(block)
+	<-stopDone
+	<-startDone
 }
 
 func TestProberBackoffFor(t *testing.T) {

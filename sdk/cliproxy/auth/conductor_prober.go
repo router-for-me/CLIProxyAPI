@@ -72,8 +72,13 @@ func (m *Manager) StartProber(parent context.Context, cfg internalconfig.Credent
 	if m == nil {
 		return
 	}
+	m.proberLifecycleMu.Lock()
+	defer m.proberLifecycleMu.Unlock()
+	m.startProberUnlocked(parent, cfg)
+}
 
-	m.StopProber()
+func (m *Manager) startProberUnlocked(parent context.Context, cfg internalconfig.CredentialProberConfig) {
+	m.stopProberUnlocked()
 
 	m.mu.RLock()
 	if m.proberParent != nil {
@@ -102,6 +107,12 @@ func (m *Manager) StopProber() {
 	if m == nil {
 		return
 	}
+	m.proberLifecycleMu.Lock()
+	defer m.proberLifecycleMu.Unlock()
+	m.stopProberUnlocked()
+}
+
+func (m *Manager) stopProberUnlocked() {
 	m.mu.Lock()
 	cancel := m.proberCancel
 	m.proberCancel = nil
@@ -117,10 +128,12 @@ func (m *Manager) restartProberLocked(cfg *internalconfig.Config) {
 	if m == nil || cfg == nil {
 		return
 	}
+	m.proberLifecycleMu.Lock()
+	defer m.proberLifecycleMu.Unlock()
 	if cfg.CredentialProber.Enabled {
-		m.StartProber(context.Background(), cfg.CredentialProber)
+		m.startProberUnlocked(context.Background(), cfg.CredentialProber)
 	} else {
-		m.StopProber()
+		m.stopProberUnlocked()
 	}
 }
 

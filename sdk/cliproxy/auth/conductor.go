@@ -158,10 +158,11 @@ type Manager struct {
 	refreshLoop   *authAutoRefreshLoop
 
 	// Active credential prober state
-	proberCancel context.CancelFunc
-	proberLoop   *authProberLoop
-	proberParent context.Context
-	proberWg     sync.WaitGroup
+	proberCancel      context.CancelFunc
+	proberLoop        *authProberLoop
+	proberParent      context.Context
+	proberWg          sync.WaitGroup
+	proberLifecycleMu sync.Mutex
 
 	requestPrepareLocks sync.Map
 	// refreshLocks serializes credential refresh per auth ID so concurrent

@@ -285,18 +285,20 @@ func (s *Service) Shutdown(ctx context.Context) error {
 
 		// legacy refresh loop removed; only stopping core auth manager below
 
+		// Fully stop the watcher before stopping the prober so no config update can
+		// start a fresh prober while shutdown is in progress.
 		if s.watcherCancel != nil {
 			s.watcherCancel()
-		}
-		if s.coreManager != nil {
-			s.coreManager.StopProber()
-			s.coreManager.StopAutoRefresh()
 		}
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {
 				log.Errorf("failed to stop file watcher: %v", err)
 				shutdownErr = err
 			}
+		}
+		if s.coreManager != nil {
+			s.coreManager.StopProber()
+			s.coreManager.StopAutoRefresh()
 		}
 		if s.wsGateway != nil {
 			if err := s.wsGateway.Stop(ctx); err != nil {
