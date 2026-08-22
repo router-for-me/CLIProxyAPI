@@ -266,6 +266,9 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if IsConfigAPIKeyAuth(auth) {
 		return nil
 	}
+	if IsConfigADCAuth(auth) {
+		return nil
+	}
 	if auth.Attributes != nil {
 		if v := strings.ToLower(strings.TrimSpace(auth.Attributes["runtime_only"])); v == "true" {
 			return nil

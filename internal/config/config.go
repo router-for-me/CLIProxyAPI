@@ -152,6 +152,11 @@ type Config struct {
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
 
+	// VertexADC defines Vertex AI credentials backed by Application Default
+	// Credentials: on GCE the metadata server is used automatically, elsewhere
+	// GOOGLE_APPLICATION_CREDENTIALS must point at a credentials file.
+	VertexADC []VertexADCConfig `yaml:"vertex-adc" json:"vertex-adc"`
+
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
