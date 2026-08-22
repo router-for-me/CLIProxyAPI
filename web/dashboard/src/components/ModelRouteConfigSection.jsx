@@ -43,6 +43,42 @@ function rankGlyph(i) {
   return i < RANK_GLYPHS.length ? RANK_GLYPHS[i] : `${i + 1}`;
 }
 
+// upstreamDisplayLabel picks the human-readable identifier for an upstream
+// provider row. The list shows several candidates (name / label / email /
+// file_name) so a row whose `name` was left blank still gets a usable label.
+// Falls back to the routing key when nothing is set so the chip is never empty.
+function upstreamDisplayLabel(row) {
+  if (!row) return '';
+  const candidates = [row.name, row.label, row.email, row.file_name];
+  for (const c of candidates) {
+    const s = typeof c === 'string' ? c.trim() : '';
+    if (s) return s;
+  }
+  return '';
+}
+
+// upstreamTypeLabel turns the upstream's provider_type into the short channel
+// label operators see in the picker ("Claude API Key", "Claude OAuth", …).
+// Falls back to the raw provider_type when the catalog is unknown.
+function upstreamTypeLabel(providerType) {
+  if (!providerType) return '';
+  if (providerType.startsWith('oauth:')) {
+    const channel = providerType.slice('oauth:'.length);
+    return `${channel} (OAuth)`;
+  }
+  if (providerType === 'openai-compatibility') return 'OpenAI-compat';
+  // Built-in api-key types: strip the "-api-key" suffix and title-case the
+  // channel so "claude-api-key" renders as "Claude API key".
+  const m = /^(.+?)-api-key$/.exec(providerType);
+  if (m) return `${capitalize(m[1])} API key`;
+  return providerType;
+}
+
+function capitalize(s) {
+  if (!s) return '';
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 // computeRanks returns, for each selected provider, its rank (0-indexed)
 // within the descending-priority ordering. Providers sharing a priority
 // share a rank (tie) and are surfaced as a conflict for the operator.
@@ -65,9 +101,16 @@ function computeRanks(selected, priorityFor) {
 export default function ModelRouteConfigSection({ model, route, onChange }) {
   const [liveProviders, setLiveProviders] = useState(null); // null = loading
   const [allProviderKeys, setAllProviderKeys] = useState(null); // null = loading
+  // Full upstream rows keyed by their provider_key, so the picker can show
+  // the operator's stored identity (name/label/email/file_name) alongside the
+  // raw routing key. Populated from listUpstreamProviders().
+  const [upstreamByKey, setUpstreamByKey] = useState(new Map());
 
   // Load the live providers serving this model + every configured upstream
-  // key once on mount.
+  // row once on mount. We keep the full row (not just provider_key) so the
+  // picker can show the operator's stored identifier instead of an opaque
+  // executor key they may not recognise (e.g. a "Claude API Key" row whose
+  // name field is "anthropic" still renders as "anthropic · Claude API key").
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -83,14 +126,39 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
       try {
         const res = await listUpstreamProviders();
         const rows = Array.isArray(res?.providers) ? res.providers : [];
-        const keys = rows
-          .filter((r) => !r.disabled)
-          .map((r) => (typeof r.provider_key === 'string' ? r.provider_key : ''))
-          .filter((k) => k)
-          .sort((a, b) => a.localeCompare(b));
-        if (!cancelled) setAllProviderKeys(keys);
+        const byKey = new Map();
+        const keys = [];
+        for (const r of rows) {
+          if (!r || r.disabled) continue;
+          const key = typeof r.provider_key === 'string' ? r.provider_key.trim() : '';
+          if (!key) continue;
+          keys.push(key);
+          // Multiple rows can share a routing key (e.g. two "claude-api-key"
+          // entries collapse to provider_key="claude"). Keep the first row as
+          // the display source and record the running count for the chip hint.
+          const existing = byKey.get(key);
+          if (existing) {
+            existing.count += 1;
+          } else {
+            byKey.set(key, {
+              key,
+              row: r,
+              label: upstreamDisplayLabel(r),
+              providerType: r.provider_type || '',
+              count: 1,
+            });
+          }
+        }
+        keys.sort((a, b) => a.localeCompare(b));
+        if (!cancelled) {
+          setUpstreamByKey(byKey);
+          setAllProviderKeys(keys);
+        }
       } catch {
-        if (!cancelled) setAllProviderKeys([]);
+        if (!cancelled) {
+          setUpstreamByKey(new Map());
+          setAllProviderKeys([]);
+        }
       }
     })();
     return () => { cancelled = true; };
@@ -110,19 +178,35 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
   const choices = useMemo(() => {
     const seen = new Set();
     const out = [];
+    // Live keys first so the operator sees the actually-serving providers
+    // up top; configured-only keys follow. Each choice carries its routing
+    // key (the value that gets saved into route.providers) plus display
+    // metadata from the upstream row when one exists.
     for (const p of liveProviders || []) {
       const key = String(p || '').trim();
       if (!key || seen.has(key)) continue;
       seen.add(key);
-      out.push(key);
+      const upstream = upstreamByKey.get(key);
+      out.push({
+        key,
+        label: upstream ? upstream.label : key,
+        providerType: upstream ? upstream.providerType : '',
+        count: upstream ? upstream.count : 0,
+      });
     }
     for (const key of allProviderKeys || []) {
       if (!key || seen.has(key)) continue;
       seen.add(key);
-      out.push(key);
+      const upstream = upstreamByKey.get(key);
+      out.push({
+        key,
+        label: upstream ? upstream.label : key,
+        providerType: upstream ? upstream.providerType : '',
+        count: upstream ? upstream.count : 0,
+      });
     }
     return out;
-  }, [liveProviders, allProviderKeys]);
+  }, [liveProviders, allProviderKeys, upstreamByKey]);
 
   // True while either provider list is still loading.
   const loading = liveProviders === null && allProviderKeys === null;
@@ -242,19 +326,33 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
                 No live providers serve this model; pin to a configured upstream below.
               </td></tr>
             )}
-            {choices.map((p) => {
-              const on = selected.includes(p);
-              const isLive = liveLoaded && liveProviders.includes(p);
-              const priority = on ? priorityFor(p) : 0;
-              const rank = on ? ranks[p] : -1;
+            {choices.map((choice) => {
+              const on = selected.includes(choice.key);
+              const isLive = liveLoaded && liveProviders.includes(choice.key);
+              const priority = on ? priorityFor(choice.key) : 0;
+              const rank = on ? ranks[choice.key] : -1;
+              // The display label prefers the upstream row's stored identity
+              // (name/label/email/file_name) over the raw routing key, so the
+              // operator sees "anthropic · Claude API key" rather than an
+              // opaque "claude" they may not recognise.
+              const labelText = choice.label || choice.key;
+              const typeText = upstreamTypeLabel(choice.providerType);
+              const countSuffix = choice.count > 1 ? ` ×${choice.count}` : '';
               return (
                 <tr
-                  key={p}
+                  key={choice.key}
                   className={`row-link ${on ? 'row--selected' : ''}`}
-                  onClick={() => toggleProvider(p)}
-                  title={`${p}\n${isLive ? 'Live provider (currently serving this model)' : 'Configured upstream (no live auth right now)'}${on && strategyActive ? `\nRank ${rank + 1} · priority ${priority}` : ''}`}
+                  onClick={() => toggleProvider(choice.key)}
+                  title={`${choice.key}${typeText ? ` · ${typeText}` : ''}${countSuffix}\n${isLive ? 'Live provider (currently serving this model)' : 'Configured upstream (no live auth right now)'}${on && strategyActive ? `\nRank ${rank + 1} · priority ${priority}` : ''}`}
                 >
-                  <td className="mono">{p}{isLive ? '' : ' *'}</td>
+                  <td>
+                    <div className="cell-stack">
+                      <span className="cell-stack__main mono">{labelText}{isLive ? '' : ' *'}</span>
+                      <span className="dim" style={{ fontSize: 11 }}>
+                        <code>{choice.key}</code>{typeText ? ` · ${typeText}` : ''}{countSuffix}
+                      </span>
+                    </div>
+                  </td>
                   <td>
                     <span className={`live-dot ${isLive ? 'live-dot--on' : 'live-dot--off'}`} aria-hidden="true" />
                     <span className="muted">{isLive ? 'live' : 'config'}</span>
@@ -268,9 +366,9 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
                           value={priority}
                           min={0}
                           step={1}
-                          aria-label={`Priority for ${p} (higher = primary)`}
+                          aria-label={`Priority for ${labelText} (higher = primary)`}
                           onClick={(e) => e.stopPropagation()}
-                          onChange={(e) => setPriority(p, parseInt(e.target.value, 10) || 0)}
+                          onChange={(e) => setPriority(choice.key, parseInt(e.target.value, 10) || 0)}
                         />
                       ) : (
                         <span className="dim">—</span>
@@ -287,8 +385,8 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
                       type="button"
                       className="row-actions__btn"
                       aria-pressed={on}
-                      onClick={(e) => { e.stopPropagation(); toggleProvider(p); }}
-                      aria-label={on ? `Unpin ${p}` : `Pin ${p}`}
+                      onClick={(e) => { e.stopPropagation(); toggleProvider(choice.key); }}
+                      aria-label={on ? `Unpin ${labelText}` : `Pin ${labelText}`}
                     >
                       {on ? 'Pinned' : 'Pin'}
                     </button>

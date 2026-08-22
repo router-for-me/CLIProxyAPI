@@ -16,9 +16,18 @@ func TestUpstreamProviderKey(t *testing.T) {
 		{"oauth claude", "oauth:claude", "anything", "claude"},
 		{"oauth codex", "oauth:codex", "anything", "codex"},
 		{"oauth aistudio", "oauth:aistudio", "anything", "aistudio"},
-		{"claude-api-key with name", "claude-api-key", "minimax", "minimax"},
-		{"gemini-api-key with name", "gemini-api-key", "MyGeminiKey", "mygeminikey"},
-		{"codex-api-key with name", "codex-api-key", "teamA", "teama"},
+		// Built-in -api-key channels always use the fixed channel name (the
+		// row's `name` is just an identifier label). Regression for the
+		// per-model routing picker, which depends on this key matching
+		// the live provider key returned by registry.GetModelProviders.
+		{"claude-api-key ignores name", "claude-api-key", "minimax", "claude"},
+		{"gemini-api-key ignores name", "gemini-api-key", "MyGeminiKey", "gemini"},
+		{"codex-api-key ignores name", "codex-api-key", "teamA", "codex"},
+		{"xai-api-key ignores name", "xai-api-key", "team-b", "xai"},
+		{"vertex-api-key ignores name", "vertex-api-key", "team-c", "vertex"},
+		{"interactions-api-key ignores name", "interactions-api-key", "team-d", "interactions"},
+		{"-api suffix (legacy) maps to channel", "claude-api", "team-e", "claude"},
+		{"claude-api-key with blank name", "claude-api-key", "", "claude"},
 		{"empty providerType falls back to openai-compatible key", "", "opencode", "openai-compatible-opencode"},
 		{"unknown providerType falls back to lowercased name", "custom-kind", "FooBar", "foobar"},
 	}

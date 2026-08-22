@@ -12,12 +12,13 @@ import "strings"
 // and operators could not pin a model to an upstream that was disabled or
 // mid-refresh).
 //
-// Conventions (kept in sync with executorKeyFromAuth):
+// Conventions (kept in sync with executorKeyFromAuth + the auth synthesizer):
 //   - openai-compatibility              → OpenAICompatibleProviderKey(name)
 //   - oauth:<channel>                   → channel (e.g. "claude", "codex")
-//   - gemini-api-key / codex-api-key /  → the bare provider name lower-cased
-//     xai-api-key / claude-api-key /
-//     vertex-api-key / interactions-api-key
+//   - gemini-api-key / codex-api-key /  → the fixed channel name lower-cased
+//     xai-api-key / claude-api-key /     (NOT the row's `name` field, which is
+//     vertex-api-key / interactions-api-key  a free-form label; the synthesizer
+//     hard-codes `auth.Provider = "<channel>"` for these types).
 //
 // Empty/unknown types fall back to the lower-cased name, matching the
 // executor's "return strings.ToLower(auth.Provider)" tail when the auth
@@ -31,7 +32,16 @@ func UpstreamProviderKey(providerType, name string) string {
 	case strings.HasPrefix(pt, "oauth:"):
 		return strings.ToLower(strings.TrimPrefix(pt, "oauth:"))
 	case strings.HasSuffix(pt, "-api-key") || strings.HasSuffix(pt, "-api"):
-		return strings.ToLower(name)
+		// Built-in API key channels share a fixed executor/registry key —
+		// the per-row `name` column is a free-form label and must NOT be
+		// used here, otherwise the per-model routing picker can never
+		// match the live provider key returned by registry.GetModelProviders
+		// (which always uses the channel name, not the row label).
+		channel := strings.TrimSuffix(strings.TrimSuffix(pt, "-api-key"), "-api")
+		if channel == "" {
+			return strings.ToLower(name)
+		}
+		return channel
 	default:
 		return strings.ToLower(name)
 	}
