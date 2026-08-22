@@ -133,7 +133,6 @@ func StripClaudeThinkingReplayProvenanceMarkers(payload []byte) []byte {
 func RestoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) ([]byte, bool) {
 	updated := body
 	restored := false
-	consumed := make([]bool, len(cachedContents))
 	messages := gjson.GetBytes(updated, "messages")
 	if !messages.IsArray() {
 		return body, false
@@ -162,69 +161,38 @@ func RestoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) (
 	}
 
 	// Anchor the match window to the latest suffix of cached turns that matches
-	// a suffix of the request's assistant sequence. When clients compact or
-	// truncate earlier history, the remaining sequence is a suffix of the
-	// conversation; duplicate visible content must resolve to the correct
-	// cached thinking/signature.
-	start, off := -1, -1
+	// an ordered subsequence of the request's assistant sequence. When clients
+	// compact or truncate earlier history, the matched turns may be separated by
+	// unsigned assistant responses; those gaps are skipped rather than restored.
+	start, matches := -1, []int(nil)
 	if len(assistantContents) > 0 {
-		start, off = ClaudeThinkingReplayFindStartIndex(assistantContents, cachedContents)
-	}
-	if start >= 0 {
-		for j := 0; j < start; j++ {
-			consumed[j] = true
-		}
+		start, matches = ClaudeThinkingReplayFindStartIndex(assistantContents, cachedContents)
 	}
 
-	from := 0
-	if start >= 0 {
-		from = start
-	} else {
-		// No cached suffix matches a contiguous block; refuse partial fallback
-		// that could pair a retained turn with the wrong hidden signature.
-		from = len(cachedContents)
+	matchedCache := make([]int, len(assistantContents))
+	for i := range matchedCache {
+		matchedCache[i] = -1
+	}
+	if start >= 0 && len(matches) > 0 {
+		for k, ai := range matches {
+			matchedCache[ai] = start + k
+		}
 	}
 
 	for ai, i := range assistantMsgIndices {
 		content := assistantContents[ai]
-		// Assistant turns before the anchored request offset are not eligible
-		// for restoration; they intentionally have no cached match in this
-		// window.
-		if start >= 0 && ai < off {
+		j := matchedCache[ai]
+		if j < 0 {
 			continue
 		}
-		matchedJ := -1
-		// When anchored, the aligned cached turn is at start+(ai-off).
-		if start >= 0 && off >= 0 {
-			j := start + (ai - off)
-			if j < len(cachedContents) && ClaudeThinkingReplayContentsMatch(content, gjson.ParseBytes(cachedContents[j])) {
-				matchedJ = j
-			}
-		}
-		if matchedJ < 0 {
-			for j := from; j < len(cachedContents); j++ {
-				if consumed[j] {
-					continue
-				}
-				cached := gjson.ParseBytes(cachedContents[j])
-				if ClaudeThinkingReplayContentsMatch(content, cached) {
-					matchedJ = j
-					break
-				}
-			}
-		}
-		if matchedJ < 0 {
-			continue
-		}
-		if !JSONEqual([]byte(content.Raw), cachedContents[matchedJ]) {
+		if !JSONEqual([]byte(content.Raw), cachedContents[j]) {
 			var errSet error
-			updated, errSet = sjson.SetRawBytes(updated, fmt.Sprintf("messages.%d.content", i), cachedContents[matchedJ])
+			updated, errSet = sjson.SetRawBytes(updated, fmt.Sprintf("messages.%d.content", i), cachedContents[j])
 			if errSet != nil {
 				return body, false
 			}
 			restored = true
 		}
-		consumed[matchedJ] = true
 	}
 	return updated, restored
 }
@@ -254,64 +222,99 @@ func ClaudeThinkingReplayContentsMatch(currentContent, cachedContent gjson.Resul
 	return true
 }
 
-// ClaudeThinkingReplayFindStartIndex finds the latest starting index in
-// cachedContents such that a suffix of the request's assistant sequence can be
-// matched contiguously. It also returns the request offset where the matched
-// suffix begins, so restoration can skip unsigned leading assistant turns and
-// only restore from the anchor onward. It returns -1, -1 when no anchor exists.
-func ClaudeThinkingReplayFindStartIndex(assistantContents []gjson.Result, cachedContents [][]byte) (int, int) {
+// ClaudeThinkingReplayFindStartIndex finds the latest suffix of cachedContents
+// that matches an ordered subsequence of the request's assistant contents. It
+// returns the starting index in cachedContents and a slice of request offsets
+// that map each matched cached turn to its request position, so restoration can
+// skip unsigned assistant gaps and leading turns. It returns -1, nil when no
+// unambiguous anchor exists.
+func ClaudeThinkingReplayFindStartIndex(assistantContents []gjson.Result, cachedContents [][]byte) (int, []int) {
 	if len(assistantContents) == 0 || len(cachedContents) == 0 {
-		return -1, -1
+		return -1, nil
 	}
 	maxL := len(assistantContents)
 	if maxL > len(cachedContents) {
 		maxL = len(cachedContents)
 	}
-	for l := maxL; l >= 1; l-- {
+
+	type candidate struct {
+		start   int
+		matches []int
+	}
+	var candidates []candidate
+
+	for l := 1; l <= maxL; l++ {
 		start := len(cachedContents) - l
-		// Iterate offsets from the end of the request so the latest suffix is
-		// preferred and unsigned leading turns do not steal the anchor.
-		for off := len(assistantContents) - l; off >= 0; off-- {
-			matched := true
+		if matches := rightmostSubsequenceMatch(assistantContents, cachedContents, start, l); matches != nil {
+			candidates = append(candidates, candidate{start: start, matches: matches})
+		}
+	}
+	if len(candidates) == 0 {
+		return -1, nil
+	}
+
+	// Prefer the match whose last request offset is latest (so the anchor ends
+	// closest to the current request). If the last offset ties, prefer the
+	// longest match.
+	best := 0
+	for i := 1; i < len(candidates); i++ {
+		a, b := candidates[best], candidates[i]
+		aLast, bLast := a.matches[len(a.matches)-1], b.matches[len(b.matches)-1]
+		if bLast > aLast {
+			best = i
+		} else if bLast == aLast && len(b.matches) > len(a.matches) {
+			best = i
+		}
+	}
+	chosen := candidates[best]
+
+	// A partial match that leaves trailing request turns unmatched is ambiguous
+	// when another cached block of the same length matches the same request
+	// positions. Suffix-of-request matches are not rejected this way.
+	lastMatch := chosen.matches[len(chosen.matches)-1]
+	if lastMatch < len(assistantContents)-1 {
+		l := len(chosen.matches)
+		for d := 0; d <= len(cachedContents)-l; d++ {
+			if d == chosen.start {
+				continue
+			}
+			otherMatched := true
 			for k := 0; k < l; k++ {
-				if !ClaudeThinkingReplayContentsMatch(assistantContents[off+k], gjson.ParseBytes(cachedContents[start+k])) {
-					matched = false
+				if !ClaudeThinkingReplayContentsMatch(assistantContents[chosen.matches[k]], gjson.ParseBytes(cachedContents[d+k])) {
+					otherMatched = false
 					break
 				}
 			}
-			if !matched {
-				continue
+			if otherMatched {
+				return -1, nil
 			}
-			// A partial suffix that leaves trailing turns unmatched is
-			// ambiguous when another cached block matches the same request
-			// segment; a duplicate visible turn could supply the wrong hidden
-			// signature. Suffix-of-request matches are still allowed.
-			if off+l < len(assistantContents) {
-				ambiguous := false
-				for d := 0; d <= len(cachedContents)-l; d++ {
-					if d == start {
-						continue
-					}
-					otherMatched := true
-					for k := 0; k < l; k++ {
-						if !ClaudeThinkingReplayContentsMatch(assistantContents[off+k], gjson.ParseBytes(cachedContents[d+k])) {
-							otherMatched = false
-							break
-						}
-					}
-					if otherMatched {
-						ambiguous = true
-						break
-					}
-				}
-				if ambiguous {
-					continue
-				}
-			}
-			return start, off
 		}
 	}
-	return -1, -1
+	return chosen.start, chosen.matches
+}
+
+// rightmostSubsequenceMatch finds the rightmost strictly increasing sequence of
+// request indices such that assistantContents[matches[k]] matches
+// cachedContents[start+k]. It returns nil if no such subsequence exists.
+func rightmostSubsequenceMatch(assistantContents []gjson.Result, cachedContents [][]byte, start, l int) []int {
+	matches := make([]int, l)
+	limit := len(assistantContents)
+	for k := l - 1; k >= 0; k-- {
+		cached := gjson.ParseBytes(cachedContents[start+k])
+		found := -1
+		for i := limit - 1; i >= 0; i-- {
+			if ClaudeThinkingReplayContentsMatch(assistantContents[i], cached) {
+				found = i
+				break
+			}
+		}
+		if found < 0 {
+			return nil
+		}
+		matches[k] = found
+		limit = found
+	}
+	return matches
 }
 
 // ClaudeThinkingReplayMessageHashes returns a stable weighted hash for each

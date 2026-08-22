@@ -70,8 +70,29 @@ func TestClaudeThinkingReplayFindStartIndex_RefusesPartialAnchor(t *testing.T) {
 	assistantFull := []gjson.Result{
 		gjson.Parse(`[{"type":"text","text":"A-new"}]`),
 	}
-	if got, off := helps.ClaudeThinkingReplayFindStartIndex(assistantFull, cached); got != 1 || off != 0 {
-		t.Fatalf("expected latest full match start 1 off 0, got %d %d", got, off)
+	if got, off := helps.ClaudeThinkingReplayFindStartIndex(assistantFull, cached); got != 1 || len(off) != 1 || off[0] != 0 {
+		t.Fatalf("expected latest full match start 1 off [0], got %d %v", got, off)
+	}
+
+	// Cached turns separated by an uncached unsigned assistant should still
+	// anchor both retained turns.
+	body := []byte(`{"messages":[{"role":"user","content":"u"},{"role":"assistant","content":[{"type":"thinking","thinking":"r","signature":"sig1"},{"type":"text","text":"A"}]},{"role":"assistant","content":[{"type":"text","text":"X"}]},{"role":"assistant","content":[{"type":"thinking","thinking":"r","signature":"sig2"},{"type":"text","text":"B"}]},{"role":"user","content":"u2"}]}`)
+	retained := [][]byte{
+		[]byte(`[{"type":"thinking","thinking":"r","signature":"sig1"},{"type":"text","text":"A"}]`),
+		[]byte(`[{"type":"thinking","thinking":"r","signature":"sig2"},{"type":"text","text":"B"}]`),
+	}
+	updated, _ := helps.RestoreClaudeThinkingReplayContents(body, retained)
+	a := gjson.GetBytes(updated, "messages.1.content").Array()
+	unsignedX := gjson.GetBytes(updated, "messages.2.content").Array()
+	b := gjson.GetBytes(updated, "messages.3.content").Array()
+	if a[0].Get("signature").String() != "sig1" {
+		t.Fatalf("first retained turn should keep sig1, got %s", a[0].Get("signature").String())
+	}
+	if unsignedX[0].Get("signature").String() != "" {
+		t.Fatalf("unsigned gap should not receive a cached signature: %s", unsignedX[0].Get("signature").String())
+	}
+	if b[0].Get("signature").String() != "sig2" {
+		t.Fatalf("second retained turn should keep sig2, got %s", b[0].Get("signature").String())
 	}
 }
 
