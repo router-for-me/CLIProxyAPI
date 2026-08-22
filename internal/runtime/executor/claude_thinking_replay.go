@@ -345,7 +345,6 @@ func claudeThinkingReplayFindStartIndex(assistantContents []gjson.Result, cached
 		return -1
 	}
 	bestStart := -1
-	bestLen := 0
 	for start := 0; start < len(cachedContents); start++ {
 		j := start
 		prefixLen := 0
@@ -364,13 +363,9 @@ func claudeThinkingReplayFindStartIndex(assistantContents []gjson.Result, cached
 			}
 			prefixLen++
 		}
-		if prefixLen > bestLen || (prefixLen == bestLen && start > bestStart) {
-			bestLen = prefixLen
+		if prefixLen == len(assistantContents) && start > bestStart {
 			bestStart = start
 		}
-	}
-	if bestLen == 0 {
-		return -1
 	}
 	return bestStart
 }

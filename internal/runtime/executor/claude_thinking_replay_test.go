@@ -53,6 +53,27 @@ func TestClaudeThinkingReplayScopeFromRequest_FallbackKeyOnlyForContent(t *testi
 	}
 }
 
+func TestClaudeThinkingReplayFindStartIndex_RefusesPartialAnchor(t *testing.T) {
+	assistant := []gjson.Result{
+		gjson.Parse(`[{"type":"text","text":"A-old"}]`),
+		gjson.Parse(`[{"type":"text","text":"X"}]`),
+	}
+	cached := [][]byte{
+		[]byte(`[{"type":"text","text":"A-old"}]`),
+		[]byte(`[{"type":"text","text":"A-new"}]`),
+	}
+	if got := claudeThinkingReplayFindStartIndex(assistant, cached); got != -1 {
+		t.Fatalf("expected -1 for partial match with unsigned trailing turn, got %d", got)
+	}
+
+	assistantFull := []gjson.Result{
+		gjson.Parse(`[{"type":"text","text":"A-new"}]`),
+	}
+	if got := claudeThinkingReplayFindStartIndex(assistantFull, cached); got != 1 {
+		t.Fatalf("expected latest full match start 1, got %d", got)
+	}
+}
+
 func TestClaudeThinkingReplayCallerHash_IgnoresWhitespaceOnlyHeaders(t *testing.T) {
 	auth := &cliproxyauth.Auth{ID: "auth-id"}
 	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
