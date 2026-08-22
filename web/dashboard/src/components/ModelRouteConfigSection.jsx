@@ -133,9 +133,12 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
           const key = typeof r.provider_key === 'string' ? r.provider_key.trim() : '';
           if (!key) continue;
           keys.push(key);
-          // Multiple rows can share a routing key (e.g. two "claude-api-key"
-          // entries collapse to provider_key="claude"). Keep the first row as
-          // the display source and record the running count for the chip hint.
+          // Each upstream row now maps to a unique routing key (e.g.
+          // "claude:42"), so two rows of the same channel no longer collapse
+          // onto one chip. Last writer wins on the display label — if two
+          // rows somehow share a routing key (e.g. a legacy bare key
+          // alongside a compound one), the picker keeps the first one and
+          // the count column below tells the operator the number of rows.
           const existing = byKey.get(key);
           if (existing) {
             existing.count += 1;

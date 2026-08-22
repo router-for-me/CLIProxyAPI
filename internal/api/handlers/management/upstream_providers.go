@@ -30,7 +30,7 @@ type UpstreamProviderResponse struct {
 func toUpstreamProviderResponse(p store.UpstreamProvider) UpstreamProviderResponse {
 	return UpstreamProviderResponse{
 		UpstreamProvider: p,
-		ProviderKey:      util.UpstreamProviderKey(p.ProviderType, p.Name),
+		ProviderKey:      util.UpstreamProviderKey(p.ProviderType, p.Name, p.ID),
 	}
 }
 

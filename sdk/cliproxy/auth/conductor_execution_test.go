@@ -1,0 +1,262 @@
+package auth
+
+import (
+	"strings"
+	"testing"
+)
+
+// TestRoutingKeyFromAuth covers the new routing-key helper that lets the
+// per-model routing picker address a single built-in api-key upstream row
+// (e.g. "claude:42") instead of collapsing it onto every other Claude
+// API key auth.
+func TestRoutingKeyFromAuth(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		auth *Auth
+		want string
+	}{
+		{
+			name: "nil auth yields empty string",
+			auth: nil,
+			want: "",
+		},
+		{
+			name: "legacy auth without provider_key returns executor key",
+			auth: &Auth{Provider: "claude"},
+			want: "claude",
+		},
+		{
+			name: "compound provider_key wins over executor key",
+			auth: &Auth{
+				Provider:   "claude",
+				Attributes: map[string]string{"provider_key": "claude:42"},
+			},
+			want: "claude:42",
+		},
+		{
+			name: "compound provider_key lowercased",
+			auth: &Auth{
+				Provider:   "claude",
+				Attributes: map[string]string{"provider_key": "CLAUDE:42"},
+			},
+			want: "claude:42",
+		},
+		{
+			name: "openai-compat provider_key returned verbatim",
+			auth: &Auth{
+				Provider:   "openai-compatibility",
+				Attributes: map[string]string{"provider_key": "openai-compatible-openrouter"},
+			},
+			want: "openai-compatible-openrouter",
+		},
+		{
+			name: "whitespace-only provider_key falls back to executor key",
+			auth: &Auth{
+				Provider:   "claude",
+				Attributes: map[string]string{"provider_key": "   "},
+			},
+			want: "claude",
+		},
+		{
+			name: "vertex row with compound routing key",
+			auth: &Auth{
+				Provider:   "vertex",
+				Attributes: map[string]string{"provider_key": "vertex:7"},
+			},
+			want: "vertex:7",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := routingKeyFromAuth(tc.auth)
+			if got != tc.want {
+				t.Fatalf("routingKeyFromAuth() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExecutorKeyFromRoutingKey confirms the conductor can translate a
+// routing pin like "claude:42" back into the "claude" channel key the
+// executor manager registers executors under.
+func TestExecutorKeyFromRoutingKey(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"compound claude key", "claude:42", "claude"},
+		{"compound gemini key with whitespace", "  GEMINI:7  ", "gemini"},
+		{"compound vertex key", "vertex:11", "vertex"},
+		{"bare channel key passes through", "claude", "claude"},
+		{"empty input returns", "", ""},
+		{"only-colon input returns empty (no channel prefix)", ":", ""},
+		{"colon at position 0 returns empty", ":42", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := executorKeyFromRoutingKey(tc.in)
+			if got != tc.want {
+				t.Fatalf("executorKeyFromRoutingKey(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAuthMatchesProvider covers the cross-version compatibility helper
+// that lets a route pinned to bare "claude" still serve every Claude API
+// key auth — both the legacy no-attribute auths and the new per-row
+// compound-key auths from v7.2.138-0.1.2.
+func TestAuthMatchesProvider(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		auth *Auth
+		p    string
+		want bool
+	}{
+		{
+			name: "exact compound matches",
+			auth: &Auth{
+				Provider:   "claude",
+				Attributes: map[string]string{"provider_key": "claude:42"},
+			},
+			p:    "claude:42",
+			want: true,
+		},
+		{
+			name: "different compound does not match",
+			auth: &Auth{
+				Provider:   "claude",
+				Attributes: map[string]string{"provider_key": "claude:42"},
+			},
+			p:    "claude:99",
+			want: false,
+		},
+		{
+			name: "bare pin matches legacy no-attribute auth",
+			auth: &Auth{Provider: "claude"},
+			p:    "claude",
+			want: true,
+		},
+		{
+			name: "bare pin matches per-row compound auth (cross-version wildcard)",
+			auth: &Auth{
+				Provider:   "claude",
+				Attributes: map[string]string{"provider_key": "claude:42"},
+			},
+			p:    "claude",
+			want: true,
+		},
+		{
+			name: "bare pin for one channel does not match another channel's auth",
+			auth: &Auth{
+				Provider:   "gemini",
+				Attributes: map[string]string{"provider_key": "gemini:3"},
+			},
+			p:    "claude",
+			want: false,
+		},
+		{
+			name: "empty provider never matches",
+			auth: &Auth{Provider: "claude"},
+			p:    "",
+			want: false,
+		},
+		{
+			name: "different channel's compound never matches",
+			auth: &Auth{
+				Provider:   "gemini",
+				Attributes: map[string]string{"provider_key": "gemini:3"},
+			},
+			p:    "claude:42",
+			want: false,
+		},
+		{
+			name: "whitespace in provider is trimmed",
+			auth: &Auth{
+				Provider:   "claude",
+				Attributes: map[string]string{"provider_key": "claude:42"},
+			},
+			p:    "  claude:42  ",
+			want: true,
+		},
+		{
+			name: "openai-compat per-name still matches exactly",
+			auth: &Auth{
+				Provider:   "openai-compatibility",
+				Attributes: map[string]string{"provider_key": "openai-compatible-openrouter", "compat_name": "openrouter"},
+			},
+			p:    "openai-compatible-openrouter",
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := authMatchesProvider(tc.auth, tc.p)
+			if got != tc.want {
+				t.Fatalf("authMatchesProvider(%v, %q) = %v, want %v", tc.auth, tc.p, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAuthMatchesAnyProvider guards the set-iteration helper used by the
+// conductor's candidate filtering loops.
+func TestAuthMatchesAnyProvider(t *testing.T) {
+	t.Parallel()
+	auth := &Auth{
+		Provider:   "claude",
+		Attributes: map[string]string{"provider_key": "claude:42"},
+	}
+	set := map[string]struct{}{
+		"claude:99": {},
+		"claude":    {},
+	}
+	if !authMatchesAnyProvider(auth, set) {
+		t.Fatal("authMatchesAnyProvider() = false, want true (bare \"claude\" wildcard)")
+	}
+
+	onlyOtherChannel := map[string]struct{}{"gemini:1": {}, "gemini": {}}
+	if authMatchesAnyProvider(auth, onlyOtherChannel) {
+		t.Fatal("authMatchesAnyProvider() = true, want false (only gemini keys in set)")
+	}
+
+	exact := map[string]struct{}{"claude:42": {}}
+	if !authMatchesAnyProvider(auth, exact) {
+		t.Fatal("authMatchesAnyProvider() = false, want true (exact compound match)")
+	}
+
+	empty := map[string]struct{}{}
+	if authMatchesAnyProvider(auth, empty) {
+		t.Fatal("authMatchesAnyProvider() with empty set = true, want false")
+	}
+
+	if authMatchesAnyProvider(nil, map[string]struct{}{"claude": {}}) {
+		t.Fatal("authMatchesAnyProvider(nil, ...) = true, want false")
+	}
+}
+
+// TestAuthMatchesProviderCaseInsensitive ensures the routing pin survives
+// whatever the dashboard or a hand-edited route does to the casing.
+func TestAuthMatchesProviderCaseInsensitive(t *testing.T) {
+	t.Parallel()
+	auth := &Auth{
+		Provider:   "claude",
+		Attributes: map[string]string{"provider_key": "claude:42"},
+	}
+	if !authMatchesProvider(auth, "CLAUDE:42") {
+		t.Fatal("uppercase pin should match lowercase auth key")
+	}
+	if !authMatchesProvider(auth, "Claude") {
+		t.Fatal("mixed-case bare pin should match lowercase auth key")
+	}
+}
+
+// helper used by some sub-tests above to keep assertions readable.
+var _ = strings.TrimSpace

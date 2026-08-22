@@ -830,8 +830,7 @@ func (m *Manager) closestCooldownWait(providers []string, model string, attempt 
 		if auth == nil {
 			continue
 		}
-		providerKey := executorKeyFromAuth(auth)
-		if _, ok := providerSet[providerKey]; !ok {
+		if !authMatchesAnyProvider(auth, providerSet) {
 			continue
 		}
 		effectiveRetry := defaultRetry
@@ -890,8 +889,7 @@ func (m *Manager) retryAllowed(attempt int, providers []string) bool {
 		if auth == nil {
 			continue
 		}
-		providerKey := executorKeyFromAuth(auth)
-		if _, ok := providerSet[providerKey]; !ok {
+		if !authMatchesAnyProvider(auth, providerSet) {
 			continue
 		}
 		effectiveRetry := defaultRetry
@@ -1129,7 +1127,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	m.mu.RLock()
 	selector := m.selector
 	pluginScheduler := m.pluginScheduler
-	executor, okExecutor := m.executors[provider]
+	executor, okExecutor := m.executors[executorKeyFromRoutingKey(provider)]
 	if !okExecutor {
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
@@ -1145,7 +1143,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	}
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
-		if candidate == nil || executorKeyFromAuth(candidate) != provider || candidate.Disabled {
+		if candidate == nil || !authMatchesProvider(candidate, provider) || candidate.Disabled {
 			continue
 		}
 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
@@ -1394,7 +1392,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		}
 		m.mu.RUnlock()
 	}
-	executor, okExecutor := m.Executor(provider)
+	executor, okExecutor := m.Executor(executorKeyFromRoutingKey(provider))
 	if !okExecutor {
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
@@ -1464,17 +1462,16 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if !eligibility.allows(candidate) {
 			continue
 		}
-		providerKey := executorKeyFromAuth(candidate)
-		if providerKey == "" {
+		if executorKeyFromAuth(candidate) == "" {
 			continue
 		}
-		if _, ok := providerSet[providerKey]; !ok {
+		if !authMatchesAnyProvider(candidate, providerSet) {
 			continue
 		}
 		if _, used := tried[candidate.ID]; used {
 			continue
 		}
-		if _, ok := m.executors[providerKey]; !ok {
+		if _, ok := m.executors[executorKeyFromAuth(candidate)]; !ok {
 			continue
 		}
 		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
@@ -1566,7 +1563,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			if candidate == nil || candidate.Disabled {
 				continue
 			}
-			if _, ok := providerSet[executorKeyFromAuth(candidate)]; !ok {
+			if !authMatchesAnyProvider(candidate, providerSet) {
 				continue
 			}
 			if !eligibility.allows(candidate) {

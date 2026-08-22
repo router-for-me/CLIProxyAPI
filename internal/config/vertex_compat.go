@@ -45,6 +45,12 @@ type VertexCompatKey struct {
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// UpstreamProviderID, when non-zero, carries the stable database id of
+	// the upstream_providers row this entry was rendered from. See
+	// ClaudeKey (in config_types.go) for the full rationale; this field is
+	// populated by the upstreamsync renderer and ignored when zero.
+	UpstreamProviderID int64 `yaml:"-" json:"-"`
 }
 
 func (k VertexCompatKey) GetAPIKey() string   { return k.APIKey }

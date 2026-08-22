@@ -86,13 +86,14 @@ func RenderConfig(providers []store.UpstreamProvider) config.Config {
 
 func geminiKeyFromProvider(p store.UpstreamProvider) config.GeminiKey {
 	k := config.GeminiKey{
-		APIKey:         p.APIKey,
-		Priority:       p.Priority,
-		Prefix:         p.Prefix,
-		BaseURL:        p.BaseURL,
-		ProxyURL:       p.ProxyURL,
-		Headers:        p.Headers,
-		ExcludedModels: p.ExcludedModels,
+		APIKey:             p.APIKey,
+		Priority:           p.Priority,
+		Prefix:             p.Prefix,
+		BaseURL:            p.BaseURL,
+		ProxyURL:           p.ProxyURL,
+		Headers:            p.Headers,
+		ExcludedModels:     p.ExcludedModels,
+		UpstreamProviderID: p.ID,
 	}
 	for _, m := range p.Models {
 		k.Models = append(k.Models, config.GeminiModel{
@@ -110,14 +111,15 @@ func geminiKeyFromProvider(p store.UpstreamProvider) config.GeminiKey {
 
 func codexKeyFromProvider(p store.UpstreamProvider) config.CodexKey {
 	k := config.CodexKey{
-		APIKey:         p.APIKey,
-		Priority:       p.Priority,
-		Prefix:         p.Prefix,
-		BaseURL:        p.BaseURL,
-		Websockets:     p.Websockets,
-		ProxyURL:       p.ProxyURL,
-		Headers:        p.Headers,
-		ExcludedModels: p.ExcludedModels,
+		APIKey:             p.APIKey,
+		Priority:           p.Priority,
+		Prefix:             p.Prefix,
+		BaseURL:            p.BaseURL,
+		Websockets:         p.Websockets,
+		ProxyURL:           p.ProxyURL,
+		Headers:            p.Headers,
+		ExcludedModels:     p.ExcludedModels,
+		UpstreamProviderID: p.ID,
 	}
 	for _, m := range p.Models {
 		k.Models = append(k.Models, config.CodexModel{
@@ -144,6 +146,7 @@ func claudeKeyFromProvider(p store.UpstreamProvider) config.ClaudeKey {
 		ExcludedModels:          p.ExcludedModels,
 		RebuildMidSystemMessage: p.RebuildMidSystemMessage,
 		ExperimentalCCHSigning:  p.ExperimentalCCHSigning,
+		UpstreamProviderID:      p.ID,
 	}
 	for _, m := range p.Models {
 		k.Models = append(k.Models, config.ClaudeModel{
@@ -206,13 +209,14 @@ func openAICompatFromProvider(p store.UpstreamProvider) config.OpenAICompatibili
 
 func vertexKeyFromProvider(p store.UpstreamProvider) config.VertexCompatKey {
 	k := config.VertexCompatKey{
-		APIKey:         p.APIKey,
-		Priority:       p.Priority,
-		Prefix:         p.Prefix,
-		BaseURL:        p.BaseURL,
-		ProxyURL:       p.ProxyURL,
-		Headers:        p.Headers,
-		ExcludedModels: p.ExcludedModels,
+		APIKey:             p.APIKey,
+		Priority:           p.Priority,
+		Prefix:             p.Prefix,
+		BaseURL:            p.BaseURL,
+		ProxyURL:           p.ProxyURL,
+		Headers:            p.Headers,
+		ExcludedModels:     p.ExcludedModels,
+		UpstreamProviderID: p.ID,
 	}
 	for _, m := range p.Models {
 		k.Models = append(k.Models, config.VertexCompatModel{

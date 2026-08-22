@@ -949,3 +949,157 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigSynthesizer_BuiltInAPIKeyProviderKeyAttribute covers the new
+// v7.2.138-0.1.2 behaviour where each built-in api-key upstream row gets
+// its own routing key in the `provider_key` attribute (e.g. "claude:42")
+// instead of collapsing onto the bare channel key. Without
+// UpstreamProviderID the attribute is absent — the runtime then falls
+// back to the bare channel key for backward compatibility with operators
+// who still ship YAML-only configs.
+func TestConfigSynthesizer_BuiltInAPIKeyProviderKeyAttribute(t *testing.T) {
+	cases := []struct {
+		name      string
+		buildCtx  func() *SynthesisContext
+		wantProv  string
+		wantKey   string
+		absentKey bool
+	}{
+		{
+			name: "claude-api-key with row id encodes compound routing key",
+			buildCtx: func() *SynthesisContext {
+				return &SynthesisContext{
+					Config: &config.Config{
+						ClaudeKey: []config.ClaudeKey{
+							{APIKey: "sk-ant-1", UpstreamProviderID: 42},
+						},
+					},
+					Now:         time.Now(),
+					IDGenerator: NewStableIDGenerator(),
+				}
+			},
+			wantProv: "claude",
+			wantKey:  "claude:42",
+		},
+		{
+			name: "claude-api-key without row id leaves provider_key absent",
+			buildCtx: func() *SynthesisContext {
+				return &SynthesisContext{
+					Config: &config.Config{
+						ClaudeKey: []config.ClaudeKey{
+							{APIKey: "sk-ant-2"},
+						},
+					},
+					Now:         time.Now(),
+					IDGenerator: NewStableIDGenerator(),
+				}
+			},
+			wantProv:  "claude",
+			absentKey: true,
+		},
+		{
+			name: "gemini-api-key with row id encodes compound routing key",
+			buildCtx: func() *SynthesisContext {
+				return &SynthesisContext{
+					Config: &config.Config{
+						GeminiKey: []config.GeminiKey{
+							{APIKey: "gk-1", UpstreamProviderID: 7},
+						},
+					},
+					Now:         time.Now(),
+					IDGenerator: NewStableIDGenerator(),
+				}
+			},
+			wantProv: "gemini",
+			wantKey:  "gemini:7",
+		},
+		{
+			name: "codex-api-key with row id encodes compound routing key",
+			buildCtx: func() *SynthesisContext {
+				return &SynthesisContext{
+					Config: &config.Config{
+						CodexKey: []config.CodexKey{
+							{APIKey: "ck-1", UpstreamProviderID: 9},
+						},
+					},
+					Now:         time.Now(),
+					IDGenerator: NewStableIDGenerator(),
+				}
+			},
+			wantProv: "codex",
+			wantKey:  "codex:9",
+		},
+		{
+			name: "xai-api-key with row id encodes compound routing key",
+			buildCtx: func() *SynthesisContext {
+				return &SynthesisContext{
+					Config: &config.Config{
+						XAIKey: []config.CodexKey{
+							{APIKey: "xk-1", UpstreamProviderID: 4},
+						},
+					},
+					Now:         time.Now(),
+					IDGenerator: NewStableIDGenerator(),
+				}
+			},
+			wantProv: "xai",
+			wantKey:  "xai:4",
+		},
+		{
+			name: "vertex-compat with row id encodes compound routing key",
+			buildCtx: func() *SynthesisContext {
+				return &SynthesisContext{
+					Config: &config.Config{
+						VertexCompatAPIKey: []config.VertexCompatKey{
+							{APIKey: "vk-1", UpstreamProviderID: 11},
+						},
+					},
+					Now:         time.Now(),
+					IDGenerator: NewStableIDGenerator(),
+				}
+			},
+			wantProv: "vertex",
+			wantKey:  "vertex:11",
+		},
+		{
+			name: "interactions-api-key with row id encodes compound routing key",
+			buildCtx: func() *SynthesisContext {
+				return &SynthesisContext{
+					Config: &config.Config{
+						InteractionsKey: []config.GeminiKey{
+							{APIKey: "ik-1", UpstreamProviderID: 5},
+						},
+					},
+					Now:         time.Now(),
+					IDGenerator: NewStableIDGenerator(),
+				}
+			},
+			wantProv: "gemini-interactions",
+			wantKey:  "gemini-interactions:5",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			synth := NewConfigSynthesizer()
+			auths, err := synth.Synthesize(tc.buildCtx())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("expected 1 auth, got %d", len(auths))
+			}
+			if got := auths[0].Provider; got != tc.wantProv {
+				t.Errorf("Provider = %q, want %q", got, tc.wantProv)
+			}
+			if tc.absentKey {
+				if v, ok := auths[0].Attributes["provider_key"]; ok {
+					t.Errorf("expected provider_key absent, got %q", v)
+				}
+				return
+			}
+			if got := auths[0].Attributes["provider_key"]; got != tc.wantKey {
+				t.Errorf("provider_key attribute = %q, want %q", got, tc.wantKey)
+			}
+		})
+	}
+}

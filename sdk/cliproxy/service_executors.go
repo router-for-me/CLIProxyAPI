@@ -443,7 +443,22 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		GlobalModelRegistry().UnregisterClient(a.ID)
 		return
 	}
-	GlobalModelRegistry().RegisterClient(a.ID, providerKey, normalizedModels)
+	// The registry provider key needs to match the routing key the
+	// per-model router uses (see routingKeyFromAuth in
+	// sdk/cliproxy/auth/conductor_execution.go). Built-in api-key channels
+	// store a per-row compound key on the auth's `provider_key` attribute
+	// (e.g. "claude:42") so each upstream row gets its own live-status
+	// entry in the picker; honour it here when present. Falls back to the
+	// caller-supplied providerKey (e.g. for OpenAI-compat and OAuth,
+	// which already encode their identity in the providerKey arg) and to
+	// the bare auth.Provider as a last resort.
+	registryKey := providerKey
+	if a.Attributes != nil {
+		if k := strings.TrimSpace(a.Attributes["provider_key"]); k != "" {
+			registryKey = strings.ToLower(k)
+		}
+	}
+	GlobalModelRegistry().RegisterClient(a.ID, registryKey, normalizedModels)
 }
 
 func (s *Service) pluginModelsForProvider(providerKey string) []*ModelInfo {

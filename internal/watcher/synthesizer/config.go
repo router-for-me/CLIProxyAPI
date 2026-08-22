@@ -32,6 +32,27 @@ func addWeightToAttrs(weight *int, attrs map[string]string) {
 	attrs[coreauth.AttributeWeight] = strconv.Itoa(normalized)
 }
 
+// addUpstreamProviderKey stamps the per-row routing identifier onto the
+// auth's attributes when the entry was rendered from a PG-backed
+// upstream_providers row. The renderer populates
+// `entry.UpstreamProviderID`; when non-zero we encode it into a routing
+// key of the form `<channel>:<rowID>` so the per-model routing picker
+// can address this row individually instead of collapsing it onto
+// every other auth of the same channel. The runtime executor manager
+// still resolves the underlying executor via auth.Provider (the bare
+// channel name), so per-row routing keys are routing-only.
+//
+// Legacy YAML-only configs leave UpstreamProviderID at zero; the
+// runtime then matches the auth under the bare channel key, preserving
+// the previous "all-rows-collapsed" semantics for operators who never
+// used the upstream_providers dashboard.
+func addUpstreamProviderKey(attrs map[string]string, channel string, rowID int64) {
+	if attrs == nil || channel == "" || rowID <= 0 {
+		return
+	}
+	attrs["provider_key"] = channel + ":" + strconv.FormatInt(rowID, 10)
+}
+
 // Synthesize generates Auth entries from config API keys.
 func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
 	out := make([]*coreauth.Auth, 0, 32)
@@ -106,6 +127,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(entry.Headers, attrs)
+		addUpstreamProviderKey(attrs, provider, entry.UpstreamProviderID)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   provider,
@@ -166,6 +188,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
+		addUpstreamProviderKey(attrs, "claude", ck.UpstreamProviderID)
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{
 			ID:         id,
@@ -239,6 +262,7 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(entry.Headers, attrs)
+		addUpstreamProviderKey(attrs, provider, entry.UpstreamProviderID)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   provider,
@@ -405,6 +429,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(compat.Headers, attrs)
+		addUpstreamProviderKey(attrs, providerName, compat.UpstreamProviderID)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   providerName,

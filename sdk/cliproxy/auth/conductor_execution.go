@@ -1171,6 +1171,125 @@ func executorKeyFromAuth(auth *Auth) string {
 	return strings.ToLower(strings.TrimSpace(auth.Provider))
 }
 
+// routingKeyFromAuth returns the routing identifier the per-model router
+// uses to pin a request to a specific upstream row. Built-in api-key
+// channels (claude, gemini, codex, xai, vertex, interactions) all share a
+// single executor per channel, but each upstream row gets its own routing
+// key encoded in the auth's `provider_key` attribute (e.g. "claude:42") so
+// operators can pin a model to one specific row instead of every row of
+// that channel. When the attribute is absent (legacy YAML-only configs
+// and pre-v7.2.138-0.1.2 PG rows that were never re-rendered) the routing
+// key falls back to the bare executor key, preserving the prior
+// "all-rows-collapsed" semantics. OAuth channels and OpenAI-compat
+// already encode their identity into provider_key today; this helper
+// returns it directly so the conductor's auth filters and the
+// per-model routing picker stay symmetric.
+func routingKeyFromAuth(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if k := strings.TrimSpace(auth.Attributes["provider_key"]); k != "" {
+			return strings.ToLower(k)
+		}
+	}
+	return executorKeyFromAuth(auth)
+}
+
+// routingKeyHasChannelPrefix reports whether the auth's routing key starts
+// with "<channel>" followed by a colon (i.e. is a per-row compound key
+// belonging to that channel). Auths without a per-row compound key report
+// false even if their executor key equals channel, because we only want to
+// treat the bare-equals-compound case as a wildcard match when the bare key
+// has been opted-in by the route author (see authMatchesProvider).
+func routingKeyHasChannelPrefix(auth *Auth, channel string) bool {
+	if auth == nil || channel == "" {
+		return false
+	}
+	rk := routingKeyFromAuth(auth)
+	prefix := strings.ToLower(strings.TrimSpace(channel)) + ":"
+	return strings.HasPrefix(rk, prefix)
+}
+
+// authMatchesProvider reports whether the given auth is eligible to serve
+// requests pinned to `provider` by the per-model router.
+//
+// Three cases match:
+//
+//  1. Exact: provider == routingKeyFromAuth(auth) (covers OpenAI-compat's
+//     per-name keys, OAuth's per-channel keys, and per-row compound keys
+//     like "claude:42").
+//  2. Legacy wildcard: provider is the bare channel key and the auth has
+//     no per-row provider_key attribute. Keeps v7.2.138-0.1.1-style
+//     routes working for operators who never re-rendered their config.
+//  3. Cross-version wildcard: provider is the bare channel key and the
+//     auth is a per-row compound key for the same channel. An operator
+//     who pinned to "claude" before upgrading still expects every Claude
+//     API key auth (legacy AND per-row) to serve that route; the picker
+//     no longer shows the bare key, but a saved route may still carry it.
+//
+// authMatchesProvider never returns true when provider names a different
+// channel than the auth's executor key.
+func authMatchesProvider(auth *Auth, provider string) bool {
+	if auth == nil {
+		return false
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return false
+	}
+	rk := routingKeyFromAuth(auth)
+	if rk == provider {
+		return true
+	}
+	exec := executorKeyFromAuth(auth)
+	if provider != exec {
+		return false
+	}
+	// provider matches the auth's executor key. The auth is eligible under
+	// either of two wildcard cases:
+	//   (a) the auth has no per-row provider_key attribute (legacy),
+	//   (b) the auth is a per-row compound key for this channel.
+	return !strings.Contains(rk, ":") || strings.HasPrefix(rk, provider+":")
+}
+
+// authMatchesAnyProvider reports whether the auth is eligible to serve
+// requests pinned to any provider in the set. Equivalent to looping
+// authMatchesProvider over the set.
+func authMatchesAnyProvider(auth *Auth, providerSet map[string]struct{}) bool {
+	if auth == nil || len(providerSet) == 0 {
+		return false
+	}
+	for p := range providerSet {
+		if authMatchesProvider(auth, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// executorKeyFromRoutingKey returns the bare channel identifier the
+// executor manager should use to find the executor for the given routing
+// key. Compound keys like "claude:42" lose the ":42" suffix; bare keys
+// pass through unchanged. This lets the conductor translate a route's
+// "claude:42" routing pin into the correct "claude" executor lookup.
+// Malformed input (a leading colon, or just ":") yields empty so the
+// caller falls back to the standard "executor_not_found" error path.
+func executorKeyFromRoutingKey(provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return ""
+	}
+	i := strings.IndexByte(provider, ':')
+	if i <= 0 {
+		if i == 0 {
+			return ""
+		}
+		return provider
+	}
+	return provider[:i]
+}
+
 // logEntryWithRequestID returns a logrus entry with request_id field if available in context.
 func logEntryWithRequestID(ctx context.Context) *log.Entry {
 	if ctx == nil {
