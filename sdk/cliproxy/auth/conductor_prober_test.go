@@ -189,6 +189,80 @@ func TestProberSetsAnthropicVersionHeaderForClaude(t *testing.T) {
 	}
 }
 
+func TestProberSetsClaudeOAuthBetaHeader(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name        string
+		auth        *Auth
+		wantBeta    bool
+		wantBetaVal string
+	}{
+		{
+			name: "oauth credential gets oauth beta",
+			auth: &Auth{
+				ID:       "a1",
+				Provider: "claude",
+				Status:   StatusActive,
+				Attributes: map[string]string{
+					AttributeAuthKind: AuthKindOAuth,
+					"base_url":        "https://api.anthropic.com",
+				},
+			},
+			wantBeta:    true,
+			wantBetaVal: "oauth-2025-04-20",
+		},
+		{
+			name: "api-key credential does not get oauth beta",
+			auth: &Auth{
+				ID:       "a2",
+				Provider: "claude",
+				Status:   StatusActive,
+				Attributes: map[string]string{
+					AttributeAuthKind: AuthKindAPIKey,
+					"api_key":         "secret",
+					"base_url":        "https://api.anthropic.com",
+				},
+			},
+			wantBeta: false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := newProberManager()
+			exec := &proberTestExecutor{provider: "claude"}
+			m.RegisterExecutor(exec)
+
+			if _, err := m.Register(ctx, c.auth); err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+
+			cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+			m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+			time.Sleep(100 * time.Millisecond)
+
+			if exec.calls.Load() != 1 {
+				t.Fatalf("prober calls = %d, want 1", exec.calls.Load())
+			}
+			exec.mu.Lock()
+			defer exec.mu.Unlock()
+			if got := exec.lastHeaders.Get("Anthropic-Version"); got != "2023-06-01" {
+				t.Fatalf("Anthropic-Version header = %q, want 2023-06-01", got)
+			}
+			got := exec.lastHeaders.Get("Anthropic-Beta")
+			if c.wantBeta {
+				if got != c.wantBetaVal {
+					t.Fatalf("Anthropic-Beta header = %q, want %q", got, c.wantBetaVal)
+				}
+			} else if got != "" {
+				t.Fatalf("Anthropic-Beta header = %q, want empty", got)
+			}
+		})
+	}
+}
+
 func TestProberAcceptsEmpty200(t *testing.T) {
 	ctx := context.Background()
 	m := newProberManager()

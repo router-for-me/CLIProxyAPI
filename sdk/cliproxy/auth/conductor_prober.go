@@ -361,6 +361,9 @@ func (l *authProberLoop) probeWithLimiter(parent context.Context, auth *Auth, li
 		}
 		if strings.EqualFold(exec.Identifier(), "claude") {
 			req.Header.Set("Anthropic-Version", "2023-06-01")
+			if auth != nil && auth.AuthKind() != AuthKindAPIKey {
+				req.Header.Set("Anthropic-Beta", "oauth-2025-04-20")
+			}
 		}
 		resp, errExec = exec.HttpRequest(probeCtx, auth, req)
 		if resp != nil && resp.Body != nil {
