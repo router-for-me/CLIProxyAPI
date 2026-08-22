@@ -185,6 +185,48 @@ func compactSessionAliasesWith(aliases []string, isPromptCacheAlias func(string)
 	return compacted
 }
 
+// compactSessionAliasesWithKeep compacts aliases while preserving every alias in
+// keep. Aliases in keep are placed first, then remaining aliases are added up to
+// the per-group caps. This prevents a rebind from dropping a session ID supplied
+// by the current request.
+func compactSessionAliasesWithKeep(aliases, keep []string) []string {
+	seen := make(map[string]struct{}, len(aliases))
+	compacted := make([]string, 0, len(aliases))
+	hasPromptCacheKey := false
+	stableAliases := 0
+
+	process := func(alias string) bool {
+		if alias == "" {
+			return false
+		}
+		if _, ok := seen[alias]; ok {
+			return false
+		}
+		seen[alias] = struct{}{}
+		if isLocalPromptCacheSessionAlias(alias) {
+			if hasPromptCacheKey {
+				return false
+			}
+			hasPromptCacheKey = true
+		} else {
+			if stableAliases >= maxStableSessionAliases {
+				return false
+			}
+			stableAliases++
+		}
+		compacted = append(compacted, alias)
+		return true
+	}
+
+	for _, alias := range keep {
+		process(alias)
+	}
+	for _, alias := range aliases {
+		process(alias)
+	}
+	return compacted
+}
+
 func isLocalPromptCacheSessionAlias(alias string) bool {
 	if strings.HasPrefix(alias, "pck:") {
 		return true
@@ -387,12 +429,12 @@ func (c *SessionCache) ReplaceAliasesIfUnchanged(expectedAuthID, newAuthID strin
 		}
 	}
 
-	expectedAliases := compactSessionAliases(setToSlice(aliasesSet))
+	allAliases := setToSlice(aliasesSet)
 
 	// Verify the merged view is consistent: any already-live alias in the merged
 	// group is still bound to expectedAuthID and has no aliases outside the
 	// merged set. Absent aliases are added by the replacement.
-	for _, alias := range expectedAliases {
+	for _, alias := range allAliases {
 		entry, ok := c.entries[alias]
 		if !ok || !now.Before(entry.expiresAt) {
 			continue
@@ -409,8 +451,8 @@ func (c *SessionCache) ReplaceAliasesIfUnchanged(expectedAuthID, newAuthID strin
 
 	// Capture previous groups for deletion. Distinct entries are keyed by their
 	// alias list so overlapping alias groups are only removed once.
-	previousGroups := make(map[string]sessionEntry, len(expectedAliases))
-	for _, alias := range expectedAliases {
+	previousGroups := make(map[string]sessionEntry, len(allAliases))
+	for _, alias := range allAliases {
 		entry, ok := c.entries[alias]
 		if !ok || !now.Before(entry.expiresAt) || entry.authID != expectedAuthID {
 			continue
@@ -424,7 +466,8 @@ func (c *SessionCache) ReplaceAliasesIfUnchanged(expectedAuthID, newAuthID strin
 		groups = append(groups, entry)
 	}
 
-	newAliases := compactSessionAliases(mergeSessionAliases(expectedAliases, sessionIDs...))
+	// Compact while preserving the session IDs supplied by the current request.
+	newAliases := compactSessionAliasesWithKeep(allAliases, sessionIDs)
 	if len(newAliases) == 0 {
 		return "", false
 	}

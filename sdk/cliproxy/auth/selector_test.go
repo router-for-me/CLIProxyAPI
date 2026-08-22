@@ -2468,6 +2468,39 @@ func TestReplaceAliasesIfUnchanged_MergesSameAuthGroups(t *testing.T) {
 	}
 }
 
+func TestReplaceAliasesIfUnchanged_KeepsRequestedAliases(t *testing.T) {
+	t.Parallel()
+
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	// Existing group already has a prompt-cache alias. The new request supplies
+	// a different prompt-cache alias and a new stable alias. The requested
+	// aliases must survive compaction/rebind even though compactSessionAliases
+	// would otherwise keep only the first prompt-cache alias it sees.
+	oldPrompt := "claude::pck:old::claude-3"
+	oldStable := "claude::conv:existing-session::claude-3"
+	cache.SetAliases("auth-unavailable", oldPrompt, oldStable)
+
+	newPrompt := "claude::pck:new::claude-3"
+	newStable := "claude::conv:new-session::claude-3"
+	// The request hits the existing group through oldStable and also supplies
+	// two new aliases that must be preserved during compaction.
+	coldKeys := []string{newPrompt, newStable, oldStable}
+
+	rebound, ok := cache.ReplaceAliasesIfUnchanged("auth-unavailable", "auth-a", coldKeys...)
+	if !ok || rebound != "auth-a" {
+		t.Fatalf("ReplaceAliasesIfUnchanged() = %q, %v, want auth-a, true", rebound, ok)
+	}
+
+	if got, exists := cache.Get(newPrompt); !exists || got != "auth-a" {
+		t.Fatalf("requested prompt-cache alias %q = %q, %v, want auth-a, true", newPrompt, got, exists)
+	}
+	if got, exists := cache.Get(newStable); !exists || got != "auth-a" {
+		t.Fatalf("requested stable alias %q = %q, %v, want auth-a, true", newStable, got, exists)
+	}
+}
+
 type mockStoppableSelector struct {
 	stopped bool
 }
