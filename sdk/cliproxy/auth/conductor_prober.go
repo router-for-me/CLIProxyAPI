@@ -46,6 +46,17 @@ func newAuthProberLoop(manager *Manager, cfg internalconfig.CredentialProberConf
 	return &authProberLoop{manager: manager, cfg: cfg}
 }
 
+// SetProberParentContext binds the prober to a service-wide context so it is
+// cancelled when the parent service shuts down instead of outliving it.
+func (m *Manager) SetProberParentContext(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.proberParent = ctx
+	m.mu.Unlock()
+}
+
 // StartProber launches a background credential health prober.
 // Only one loop is kept alive; starting a new one cancels the previous run.
 func (m *Manager) StartProber(parent context.Context, cfg internalconfig.CredentialProberConfig) {
@@ -55,6 +66,12 @@ func (m *Manager) StartProber(parent context.Context, cfg internalconfig.Credent
 
 	m.StopProber()
 
+	m.mu.RLock()
+	if m.proberParent != nil {
+		parent = m.proberParent
+	}
+	m.mu.RUnlock()
+
 	ctx, cancel := context.WithCancel(parent)
 	loop := newAuthProberLoop(m, cfg)
 
@@ -63,10 +80,15 @@ func (m *Manager) StartProber(parent context.Context, cfg internalconfig.Credent
 	m.proberLoop = loop
 	m.mu.Unlock()
 
-	go loop.run(ctx)
+	m.proberWg.Add(1)
+	go func() {
+		defer m.proberWg.Done()
+		loop.run(ctx)
+	}()
 }
 
-// StopProber cancels the background prober loop, if running.
+// StopProber cancels the background prober loop, if running, and waits for it
+// to return before service shutdown continues.
 func (m *Manager) StopProber() {
 	if m == nil {
 		return
@@ -79,6 +101,7 @@ func (m *Manager) StopProber() {
 	if cancel != nil {
 		cancel()
 	}
+	m.proberWg.Wait()
 }
 
 func (m *Manager) restartProberLocked(cfg *internalconfig.Config) {

@@ -36,6 +36,9 @@ func (s *Service) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if s.coreManager != nil {
+		s.coreManager.SetProberParentContext(ctx)
+	}
 	ctx, runCancel := context.WithCancel(ctx)
 	s.homeMu.Lock()
 	s.runCancel = runCancel
