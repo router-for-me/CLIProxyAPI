@@ -34,6 +34,29 @@ func claudeReplayPayloadWithConversationID(payload []byte, conversationID string
 
 const claudeReplayResolvedModelInfoKey = "cliproxy.resolved_api_key_model_info"
 
+func TestClaudeThinkingReplayCallerHash_IgnoresWhitespaceOnlyHeaders(t *testing.T) {
+	auth := &cliproxyauth.Auth{ID: "auth-id"}
+	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	req := cliproxyexecutor.Request{Payload: payload}
+
+	withWhitespace := claudeThinkingReplayCallerHash(auth, req, cliproxyexecutor.Options{
+		Headers: http.Header{
+			"User-Agent":        []string{"client/1.0"},
+			"X-App":             []string{"   "},
+			"X-Codex-Client-Id": []string{"\t\n"},
+		},
+	})
+	withoutWhitespace := claudeThinkingReplayCallerHash(auth, req, cliproxyexecutor.Options{
+		Headers: http.Header{
+			"User-Agent": []string{"client/1.0"},
+		},
+	})
+
+	if withWhitespace != withoutWhitespace {
+		t.Fatalf("whitespace-only headers changed caller hash: %q vs %q", withWhitespace, withoutWhitespace)
+	}
+}
+
 func claudeReplayTestAuth(baseURL string) *cliproxyauth.Auth {
 	return &cliproxyauth.Auth{
 		ID:       "claude-replay-auth",

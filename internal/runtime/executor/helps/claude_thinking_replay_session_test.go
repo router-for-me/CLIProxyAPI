@@ -88,6 +88,46 @@ func TestClaudeThinkingReplayConversationSessionKey_ReadsHeadersCaseInsensitivel
 	}
 }
 
+func TestClaudeThinkingReplayConversationSessionKey_IgnoresWhitespaceOnlyHeaders(t *testing.T) {
+	basePayload := []byte(`{"messages":[{"role":"user","content":"hello"}],"client_metadata":{"conversation_id":"conv-ws"}}`)
+	req := cliproxyexecutor.Request{Payload: basePayload}
+	auth := &cliproxyauth.Auth{ID: "auth-id"}
+
+	withWhitespace := cliproxyexecutor.Options{
+		Headers: map[string][]string{
+			"User-Agent":        {"client/1.0"},
+			"X-App":             {"   "},
+			"X-Codex-Client-Id": {"\t\n"},
+		},
+	}
+	withoutWhitespace := cliproxyexecutor.Options{
+		Headers: map[string][]string{
+			"User-Agent": {"client/1.0"},
+		},
+	}
+
+	withKey := ClaudeThinkingReplayConversationSessionKey(auth, req, withWhitespace)
+	withoutKey := ClaudeThinkingReplayConversationSessionKey(auth, req, withoutWhitespace)
+	if withKey == "" || withoutKey == "" {
+		t.Fatalf("conversation key empty: %q, %q", withKey, withoutKey)
+	}
+	if withKey != withoutKey {
+		t.Fatalf("whitespace-only headers changed the replay key: %q vs %q", withKey, withoutKey)
+	}
+
+	// A whitespace-only conversation header must not become the nonce.
+	wsNoncePayload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	wsNonceReq := cliproxyexecutor.Request{Payload: wsNoncePayload}
+	wsOpts := cliproxyexecutor.Options{
+		Headers: map[string][]string{
+			"X-Conversation-Id": {"   "},
+		},
+	}
+	if got := ClaudeThinkingReplayConversationSessionKey(auth, wsNonceReq, wsOpts); got != "" {
+		t.Fatalf("whitespace-only conversation header produced a key: %q", got)
+	}
+}
+
 func TestClaudeThinkingReplayConversationSessionKey_StableForIdenticalInputs(t *testing.T) {
 	payload := []byte(`{"messages":[{"role":"user","content":"hello"}],"client_metadata":{"conversation_id":"conv-stable"}}`)
 	req := cliproxyexecutor.Request{Payload: payload}

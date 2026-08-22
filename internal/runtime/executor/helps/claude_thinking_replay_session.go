@@ -101,15 +101,18 @@ func ClaudeThinkingReplayConversationSessionKey(auth *cliproxyauth.Auth, req cli
 	return "conversation:" + hex.EncodeToString(h.Sum(nil)[:16])
 }
 
-// headerFirstValue returns the first value for key from headers, matching the
-// key case-insensitively to tolerate callers that use lowercase header names.
+// headerFirstValue returns the first non-empty, trimmed value for key from
+// headers, matching the key case-insensitively to tolerate callers that use
+// lowercase header names. Whitespace-only values are treated as missing.
 func headerFirstValue(headers http.Header, key string) string {
 	if headers == nil {
 		return ""
 	}
 	for k, vv := range headers {
 		if strings.EqualFold(k, key) && len(vv) > 0 {
-			return vv[0]
+			if v := strings.TrimSpace(vv[0]); v != "" {
+				return v
+			}
 		}
 	}
 	return ""

@@ -507,7 +507,9 @@ func headerFirstValue(headers http.Header, key string) string {
 	}
 	for k, vv := range headers {
 		if strings.EqualFold(k, key) && len(vv) > 0 {
-			return vv[0]
+			if v := strings.TrimSpace(vv[0]); v != "" {
+				return v
+			}
 		}
 	}
 	return ""
