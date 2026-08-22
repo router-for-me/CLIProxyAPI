@@ -21,6 +21,7 @@ import (
 
 const (
 	proberCheckInterval         = 60 * time.Second
+	proberMinInterval           = 5 * time.Millisecond
 	proberMaxConcurrency        = 4
 	proberMaxConcurrencyCap     = 1024
 	proberRatePerMinute         = 60
@@ -39,6 +40,9 @@ type authProberLoop struct {
 func newAuthProberLoop(manager *Manager, cfg internalconfig.CredentialProberConfig) *authProberLoop {
 	if cfg.Interval <= 0 {
 		cfg.Interval = proberCheckInterval
+	}
+	if cfg.Interval < proberMinInterval {
+		cfg.Interval = proberMinInterval
 	}
 	if cfg.MaxConcurrency <= 0 {
 		cfg.MaxConcurrency = proberMaxConcurrency
@@ -498,7 +502,13 @@ func proberBaseURLForProvider(auth *Auth, cfg *internalconfig.Config) string {
 	if provider == "xai" {
 		// xAI routing depends on auth_kind/using_api as well as base_url, so use
 		// the same resolution the executor uses for chat requests.
-		return proberXAIChatBaseURL(auth)
+		baseURL := proberXAIChatBaseURL(auth)
+		if baseURL == xaiauth.CLIChatProxyBaseURL {
+			// cli-chat-proxy only accepts POST chat requests; a GET /v1/models
+			// probe would 404/405 and falsely force-cool the credential.
+			return ""
+		}
+		return baseURL
 	}
 	if auth.Attributes != nil {
 		if baseURL := strings.TrimSpace(auth.Attributes["base_url"]); baseURL != "" {

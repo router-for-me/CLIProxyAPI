@@ -985,6 +985,26 @@ func TestProberClampsRateLimit(t *testing.T) {
 	}
 }
 
+func TestProberClampsMinimumInterval(t *testing.T) {
+	m := newProberManager()
+	m.SetConfig(&internalconfig.Config{CredentialProber: internalconfig.CredentialProberConfig{
+		Enabled:            true,
+		Interval:           1,
+		MaxConcurrency:     1,
+		RateLimitPerMinute: 1000,
+	}})
+	time.Sleep(20 * time.Millisecond)
+	m.mu.RLock()
+	l := m.proberLoop
+	m.mu.RUnlock()
+	if l == nil {
+		t.Fatal("prober not started")
+	}
+	if l.cfg.Interval != proberMinInterval {
+		t.Fatalf("Interval = %v, want %v", l.cfg.Interval, proberMinInterval)
+	}
+}
+
 func TestProberBaseURLCaseInsensitiveOpenAICompatName(t *testing.T) {
 	cfg := &internalconfig.Config{
 		OpenAICompatibility: []internalconfig.OpenAICompatibility{
@@ -1043,24 +1063,24 @@ func TestProberBaseURLIgnoresOpenAICompatIndexForNativeProvider(t *testing.T) {
 	}
 }
 
-func TestProberXAIRoutesOAuthDefaultToCLIChatProxy(t *testing.T) {
+func TestProberXAIBaseURL(t *testing.T) {
 	cases := []struct {
 		name string
 		auth *Auth
 		want string
 	}{
 		{
-			name: "oauth default no base_url",
+			name: "oauth default skipped",
 			auth: &Auth{Provider: "xai", Attributes: map[string]string{"auth_kind": "oauth"}},
-			want: "https://cli-chat-proxy.grok.com/v1",
+			want: "",
 		},
 		{
-			name: "oauth default official base_url",
+			name: "oauth default official base_url skipped",
 			auth: &Auth{Provider: "xai", Attributes: map[string]string{"auth_kind": "oauth", "base_url": "https://api.x.ai/v1"}},
-			want: "https://cli-chat-proxy.grok.com/v1",
+			want: "",
 		},
 		{
-			name: "api-key default no base_url",
+			name: "api-key default uses official api",
 			auth: &Auth{Provider: "xai", Attributes: map[string]string{"api_key": "secret"}},
 			want: "https://api.x.ai/v1",
 		},
@@ -1070,7 +1090,7 @@ func TestProberXAIRoutesOAuthDefaultToCLIChatProxy(t *testing.T) {
 			want: "https://api.x.ai/v1",
 		},
 		{
-			name: "oauth explicit custom base_url",
+			name: "oauth explicit custom base_url probed",
 			auth: &Auth{Provider: "xai", Attributes: map[string]string{"auth_kind": "oauth", "base_url": "https://gateway.example.com/v1"}},
 			want: "https://gateway.example.com/v1",
 		},
