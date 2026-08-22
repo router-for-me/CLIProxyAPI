@@ -298,6 +298,7 @@ type kimiThinkingReplayStreamBlock struct {
 	thinking             strings.Builder
 	signature            strings.Builder
 	input                strings.Builder
+	citations            []byte
 	textInitialized      bool
 	thinkingInitialized  bool
 	signatureInitialized bool
@@ -396,6 +397,27 @@ func (a *kimiThinkingReplayStreamAccumulator) observeBlockDelta(root gjson.Resul
 			block.input.WriteString(suffix)
 			block.hasInputDelta = true
 		}
+	case "citations_delta":
+		citation := delta.Get("citation")
+		if !citation.IsObject() {
+			a.abandon()
+			return
+		}
+		raw := []byte(citation.Raw)
+		if len(block.citations) == 0 {
+			if !a.reserveBytes(len(raw) + 2) {
+				return
+			}
+			block.citations = append(append([]byte("["), raw...), ']')
+		} else {
+			if !a.reserveBytes(len(raw) + 1) {
+				return
+			}
+			block.citations = block.citations[:len(block.citations)-1]
+			block.citations = append(block.citations, ',')
+			block.citations = append(block.citations, raw...)
+			block.citations = append(block.citations, ']')
+		}
 	default:
 		a.abandon()
 	}
@@ -472,6 +494,9 @@ func (a *kimiThinkingReplayStreamAccumulator) content() ([]byte, bool) {
 		}
 		if errSet == nil && block.hasInputDelta {
 			raw, errSet = sjson.SetRawBytes(raw, "input", []byte(block.input.String()))
+		}
+		if errSet == nil && len(block.citations) > 0 {
+			raw, errSet = sjson.SetRawBytes(raw, "citations", block.citations)
 		}
 		if errSet != nil {
 			a.abandon()

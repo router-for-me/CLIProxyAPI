@@ -358,6 +358,35 @@ func TestKimiExecutorClaudeStreamReplaysThinkingAcrossK3VariantSwitch(t *testing
 	}
 }
 
+func TestKimiThinkingReplayStreamAccumulator_PreservesCitations(t *testing.T) {
+	accumulator := newKimiThinkingReplayStreamAccumulator()
+	chunks := []byte(
+		"event: message_start\n" +
+			`data: {"type":"message_start","message":{"id":"msg_1","model":"k3"}}` + "\n\n" +
+			"event: content_block_start\n" +
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"","citations":[]}}` + "\n\n" +
+			"event: content_block_delta\n" +
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","url":"https://example.com"}}}` + "\n\n" +
+			"event: content_block_delta\n" +
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}` + "\n\n" +
+			"event: content_block_stop\n" +
+			`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+			"event: message_stop\n" +
+			`data: {"type":"message_stop"}` + "\n\n",
+	)
+	accumulator.observe(chunks)
+	content, ok := accumulator.content()
+	if !ok {
+		t.Fatal("accumulator did not complete")
+	}
+	if !strings.Contains(string(content), `"citations"`) {
+		t.Fatalf("cached content missing citations: %s", content)
+	}
+	if !strings.Contains(string(content), `"https://example.com"`) {
+		t.Fatalf("cached citation missing url: %s", content)
+	}
+}
+
 func TestKimiThinkingReplayUnknownStreamDeltaPreservesPreviousCache(t *testing.T) {
 	internalcache.ClearKimiThinkingReplayCache()
 	t.Cleanup(internalcache.ClearKimiThinkingReplayCache)
