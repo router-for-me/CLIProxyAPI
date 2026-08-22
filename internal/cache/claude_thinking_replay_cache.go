@@ -580,6 +580,7 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 	// Multiple sessionless conversations can register the same message hash
 	// concurrently, so an unconditional KVSet would let the last writer discard
 	// the others.
+	var committedAliasRaw []byte
 	for attempt := 0; attempt < 4; attempt++ {
 		var value claudeThinkingReplayAliasHomeValue
 		raw, found, errGet := client.KVGet(ctx, aliasKey)
@@ -611,6 +612,7 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 			return
 		}
 		if swapped {
+			committedAliasRaw = newRaw
 			break
 		}
 		if attempt == 3 {
@@ -620,10 +622,13 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 	}
 
 	// Maintain the per-credential index so old aliases can be evicted.
+	var evicted []string
+	indexUpdated := false
 	for attempt := 0; attempt < 4; attempt++ {
 		indexRaw, indexFound, errIndex := client.KVGet(ctx, indexKey)
 		if errIndex != nil {
 			log.Warnf("claude thinking replay alias index read failed: %v", errIndex)
+			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw)
 			return
 		}
 		index, ok := decodeClaudeThinkingReplayAliasIndex(indexRaw)
@@ -632,7 +637,7 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 		}
 		index.Aliases = purgeExpiredClaudeThinkingReplayAliasIndex(index.Aliases, now)
 		index.Aliases = claudeThinkingReplayAliasIndexUpsert(index.Aliases, aliasKey, now)
-		var evicted []string
+		evicted = evicted[:0]
 		if len(index.Aliases) > ClaudeThinkingReplayCacheMaxAliasesPerCredential {
 			sort.Slice(index.Aliases, func(i, j int) bool {
 				return index.Aliases[i].Timestamp.Before(index.Aliases[j].Timestamp)
@@ -645,29 +650,82 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 		indexBytes, errMarshal := json.Marshal(index)
 		if errMarshal != nil {
 			log.Warnf("claude thinking replay alias index marshal failed: %v", errMarshal)
+			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw)
 			return
 		}
 		swapped, errSwap := client.KVCompareAndSwap(ctx, indexKey, indexRaw, indexFound, indexBytes, ClaudeThinkingReplayCacheTTL)
 		if errSwap != nil {
 			log.Warnf("claude thinking replay alias index cas failed: %v", errSwap)
+			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw)
 			return
 		}
 		if swapped {
-			// Only delete evicted alias values after the index CAS succeeds.
-			// A concurrent worker may have refreshed an alias between our read
-			// and the CAS; deleting before the CAS could erase a still-indexed
-			// alias and break compacted continuations.
-			for _, key := range evicted {
-				if _, errDel := client.KVDel(ctx, key); errDel != nil {
-					log.Warnf("claude thinking replay alias eviction failed: %v", errDel)
-				}
-			}
+			indexUpdated = true
 			break
 		}
 		if attempt == 3 {
 			log.Warnf("claude thinking replay alias index cas exhausted after %d attempts", attempt+1)
+			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw)
 			return
 		}
+	}
+
+	if !indexUpdated {
+		// Defensive: should have rolled back above, but ensure no half-registered state.
+		rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw)
+		return
+	}
+
+	// Only delete evicted alias values after the index CAS succeeds and a fresh
+	// read confirms the alias is still absent from the index. A concurrent
+	// worker may have re-registered an evicted alias after our CAS.
+	currentIndexRaw, _, errCurrentIndex := client.KVGet(ctx, indexKey)
+	if errCurrentIndex != nil {
+		log.Warnf("claude thinking replay alias index re-read failed: %v", errCurrentIndex)
+		return
+	}
+	currentIndex, _ := decodeClaudeThinkingReplayAliasIndex(currentIndexRaw)
+	present := make(map[string]struct{}, len(currentIndex.Aliases))
+	for _, a := range currentIndex.Aliases {
+		present[a.AliasKey] = struct{}{}
+	}
+	for _, key := range evicted {
+		if _, ok := present[key]; ok {
+			continue
+		}
+		if _, errDel := client.KVDel(ctx, key); errDel != nil {
+			log.Warnf("claude thinking replay alias eviction failed: %v", errDel)
+		}
+	}
+}
+
+// rollBackClaudeThinkingReplayAliasHome removes an alias value that was
+// committed but could not be added to the index, so it does not become an
+// unindexed, uncapped KV entry. The rollback only deletes the value when no
+// other worker has modified it and the alias is not currently indexed.
+func rollBackClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThinkingReplayKVClient, aliasKey, indexKey string, committedAliasRaw []byte) {
+	if len(committedAliasRaw) == 0 {
+		return
+	}
+	currentRaw, found, errCurrent := client.KVGet(ctx, aliasKey)
+	if errCurrent != nil || !found {
+		return
+	}
+	if !bytes.Equal(currentRaw, committedAliasRaw) {
+		return
+	}
+	indexRaw, _, errIndex := client.KVGet(ctx, indexKey)
+	if errIndex != nil {
+		return
+	}
+	index, _ := decodeClaudeThinkingReplayAliasIndex(indexRaw)
+	for _, a := range index.Aliases {
+		if a.AliasKey == aliasKey {
+			return
+		}
+	}
+	if _, errDel := client.KVDel(ctx, aliasKey); errDel != nil {
+		log.Warnf("claude thinking replay alias rollback failed: %v", errDel)
 	}
 }
 

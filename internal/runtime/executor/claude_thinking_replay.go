@@ -40,11 +40,12 @@ func claudeThinkingReplayEnabled(auth *cliproxyauth.Auth, req cliproxyexecutor.R
 	return strings.TrimSpace(apiKey) != "" && !isClaudeOAuthToken(apiKey)
 }
 
-// A missing session identity intentionally disables replay instead of sharing hidden reasoning across callers.
-// When no caller session is available, we fall back to a conversation-scoped
-// key derived from the first user message and system content, so distinct
-// conversations through the same credential cannot see each other's cached
-// signatures.
+// A missing session identity or conversation nonce intentionally disables
+// replay instead of sharing hidden reasoning across callers. When the caller
+// provides a conversation nonce (client_metadata.conversation_id,
+// conversation_id body field, or X-Conversation-Id header) but no explicit
+// session, we fall back to a conversation-scoped key that mixes the nonce,
+// caller identity and first message.
 func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) claudeThinkingReplayScope {
 	modelFamily := claudeThinkingReplayModelFamily(auth, req.Model)
 	callerHash := claudeThinkingReplayCallerHash(auth, req, opts)
@@ -56,17 +57,7 @@ func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyaut
 	}
 	if sessionKey == "" {
 		sessionKey = helps.ClaudeThinkingReplayConversationSessionKey(auth, req, opts)
-		fallback = true
-	}
-	// When the sessionless fallback key is based on messages.0, a compacted
-	// history can change the key and orphan caches. Resolve the original
-	// conversation scope through any remaining message, weighting user
-	// messages and conversation-first-user context more strongly.
-	if fallback && sessionKey != "" {
-		resolvedMessages := claudeThinkingReplayMessageHashes(modelFamily, callerHash, req.Payload)
-		if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, resolvedMessages, firstUserHash); ok {
-			sessionKey = resolved
-		}
+		fallback = sessionKey != ""
 	}
 	return claudeThinkingReplayScope{
 		modelFamily:   modelFamily,

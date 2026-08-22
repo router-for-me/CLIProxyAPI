@@ -436,6 +436,107 @@ func TestClaudeThinkingReplayAliasHomeEvictionIsAtomicWithIndexCAS(t *testing.T)
 	}
 }
 
+func TestClaudeThinkingReplayAliasHomeRollbackOnIndexFailure(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
+	messageHash := "new-msg"
+	aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHash)
+
+	base := newFakeClaudeThinkingReplayKVClient()
+	client := &failingIndexClaudeThinkingReplayKVClient{
+		fakeClaudeThinkingReplayKVClient: base,
+		indexKey:                         indexKey,
+	}
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHash, "first")
+
+	if _, ok := client.values[aliasKey]; ok {
+		t.Fatalf("alias %q was committed but not indexed; expected rollback", aliasKey)
+	}
+}
+
+// readdEvictedClaudeThinkingReplayKVClient simulates a concurrent worker that
+// re-registers the evicted alias between the successful index CAS and the
+// eviction re-read. The re-read should see the alias back in the index and skip
+// deletion.
+type readdEvictedClaudeThinkingReplayKVClient struct {
+	*fakeClaudeThinkingReplayKVClient
+	indexKey string
+	evicted  string
+	swapped  bool
+}
+
+func (c *readdEvictedClaudeThinkingReplayKVClient) KVGet(ctx context.Context, key string) ([]byte, bool, error) {
+	if key == c.indexKey && c.swapped {
+		idx, ok := decodeClaudeThinkingReplayAliasIndex(c.values[c.indexKey])
+		if !ok {
+			idx = claudeThinkingReplayAliasIndex{}
+		}
+		idx.Aliases = append(idx.Aliases, claudeThinkingReplayAliasIndexRecord{
+			AliasKey:  c.evicted,
+			Timestamp: time.Now(),
+		})
+		raw, _ := json.Marshal(idx)
+		return raw, true, nil
+	}
+	return c.fakeClaudeThinkingReplayKVClient.KVGet(ctx, key)
+}
+
+func (c *readdEvictedClaudeThinkingReplayKVClient) KVCompareAndSwap(ctx context.Context, key string, expected []byte, expectedExists bool, newValue []byte, ttl time.Duration) (bool, error) {
+	swapped, err := c.fakeClaudeThinkingReplayKVClient.KVCompareAndSwap(ctx, key, expected, expectedExists, newValue, ttl)
+	if err == nil && swapped && key == c.indexKey {
+		c.swapped = true
+	}
+	return swapped, err
+}
+
+func TestClaudeThinkingReplayAliasHomeEvictionSkipsReaddedAlias(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
+
+	base := newFakeClaudeThinkingReplayKVClient()
+	client := &readdEvictedClaudeThinkingReplayKVClient{
+		fakeClaudeThinkingReplayKVClient: base,
+		indexKey:                         indexKey,
+	}
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	max := ClaudeThinkingReplayCacheMaxAliasesPerCredential
+	now := time.Now()
+	var index claudeThinkingReplayAliasIndex
+	for i := 0; i < max; i++ {
+		aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHashFor(i))
+		index.Aliases = append(index.Aliases, claudeThinkingReplayAliasIndexRecord{
+			AliasKey:  aliasKey,
+			Timestamp: now.Add(-time.Duration(max-i) * time.Second),
+		})
+		value, _ := json.Marshal(claudeThinkingReplayAliasHomeValue{
+			Sessions: []claudeThinkingReplayAliasHomeSession{
+				{SessionKey: "session", FirstUserHash: "first", Timestamp: now},
+			},
+		})
+		client.values[aliasKey] = value
+	}
+	client.evicted = index.Aliases[0].AliasKey
+	indexBytes, _ := json.Marshal(index)
+	client.values[indexKey] = indexBytes
+
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHashFor(max), "first")
+
+	if _, ok := client.values[client.evicted]; !ok {
+		t.Fatalf("evicted alias %q was deleted while re-added to index", client.evicted)
+	}
+}
+
 func messageHashFor(i int) string {
 	const chars = "abcdefghijklmnopqrstuvwxyz"
 	s := make([]byte, 0, 8)

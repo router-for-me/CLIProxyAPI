@@ -9,7 +9,7 @@ import (
 )
 
 func TestClaudeThinkingReplayConversationSessionKey_DelimitsConcatenatedFields(t *testing.T) {
-	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	payload := []byte(`{"messages":[{"role":"user","content":"hello"}],"client_metadata":{"conversation_id":"conv-1"}}`)
 	req := cliproxyexecutor.Request{Payload: payload}
 
 	// auth.ID="ab" and no caller scope. The raw concatenation of relevant
@@ -32,13 +32,16 @@ func TestClaudeThinkingReplayConversationSessionKey_DelimitsConcatenatedFields(t
 		},
 	)
 
+	if keyA == "" || keyB == "" {
+		t.Fatalf("conversation key empty: %q, %q", keyA, keyB)
+	}
 	if keyA == keyB {
 		t.Fatalf("distinct caller tuples collided on the same replay key: %q", keyA)
 	}
 }
 
 func TestClaudeThinkingReplayConversationSessionKey_IgnoresToolsList(t *testing.T) {
-	base := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	base := []byte(`{"messages":[{"role":"user","content":"hello"}],"client_metadata":{"conversation_id":"conv-tools"}}`)
 	a := append([]byte(nil), base...)
 	b, _ := sjson.SetRawBytes(base, "tools", []byte(`[{"name":"tool_a"}]`))
 
@@ -56,7 +59,7 @@ func TestClaudeThinkingReplayConversationSessionKey_IgnoresToolsList(t *testing.
 }
 
 func TestClaudeThinkingReplayConversationSessionKey_ReadsHeadersCaseInsensitively(t *testing.T) {
-	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	payload := []byte(`{"messages":[{"role":"user","content":"hello"}],"client_metadata":{"conversation_id":"conv-header"}}`)
 	req := cliproxyexecutor.Request{Payload: payload}
 	auth := &cliproxyauth.Auth{ID: "auth-id"}
 
@@ -77,13 +80,16 @@ func TestClaudeThinkingReplayConversationSessionKey_ReadsHeadersCaseInsensitivel
 
 	lowerKey := ClaudeThinkingReplayConversationSessionKey(auth, req, lowerOpts)
 	upperKey := ClaudeThinkingReplayConversationSessionKey(auth, req, upperOpts)
+	if lowerKey == "" || upperKey == "" {
+		t.Fatalf("conversation key empty: %q, %q", lowerKey, upperKey)
+	}
 	if lowerKey != upperKey {
 		t.Fatalf("lowercase and canonical headers produced different keys: %q vs %q", lowerKey, upperKey)
 	}
 }
 
 func TestClaudeThinkingReplayConversationSessionKey_StableForIdenticalInputs(t *testing.T) {
-	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	payload := []byte(`{"messages":[{"role":"user","content":"hello"}],"client_metadata":{"conversation_id":"conv-stable"}}`)
 	req := cliproxyexecutor.Request{Payload: payload}
 	opts := cliproxyexecutor.Options{
 		Headers: map[string][]string{
@@ -97,7 +103,37 @@ func TestClaudeThinkingReplayConversationSessionKey_StableForIdenticalInputs(t *
 	auth := &cliproxyauth.Auth{ID: "auth-id"}
 	first := ClaudeThinkingReplayConversationSessionKey(auth, req, opts)
 	second := ClaudeThinkingReplayConversationSessionKey(auth, req, opts)
+	if first == "" {
+		t.Fatal("conversation key empty for stable inputs")
+	}
 	if first != second {
 		t.Fatalf("same inputs produced different keys: %q vs %q", first, second)
+	}
+}
+
+func TestClaudeThinkingReplayConversationSessionKey_DistinctForDifferentConversationIDs(t *testing.T) {
+	basePayload := []byte(`{"messages":[{"role":"user","content":"hello"}],"client_metadata":{"conversation_id":"conv-a"}}`)
+	reqA := cliproxyexecutor.Request{Payload: basePayload}
+	reqB := cliproxyexecutor.Request{Payload: []byte(`{"messages":[{"role":"user","content":"hello"}],"client_metadata":{"conversation_id":"conv-b"}}`)}
+	auth := &cliproxyauth.Auth{ID: "auth-id"}
+	opts := cliproxyexecutor.Options{}
+
+	keyA := ClaudeThinkingReplayConversationSessionKey(auth, reqA, opts)
+	keyB := ClaudeThinkingReplayConversationSessionKey(auth, reqB, opts)
+	if keyA == "" || keyB == "" {
+		t.Fatalf("conversation key empty: %q, %q", keyA, keyB)
+	}
+	if keyA == keyB {
+		t.Fatalf("different conversation ids produced the same key: %q", keyA)
+	}
+}
+
+func TestClaudeThinkingReplayConversationSessionKey_EmptyWhenNoConversationNonce(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	req := cliproxyexecutor.Request{Payload: payload}
+	auth := &cliproxyauth.Auth{ID: "auth-id"}
+
+	if got := ClaudeThinkingReplayConversationSessionKey(auth, req, cliproxyexecutor.Options{}); got != "" {
+		t.Fatalf("expected empty key without conversation nonce, got %q", got)
 	}
 }

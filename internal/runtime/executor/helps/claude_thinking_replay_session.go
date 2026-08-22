@@ -15,12 +15,47 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// conversationNonceSources lists the gjson paths and header names that may
+// carry an explicit conversation identifier. An explicit nonce is required for
+// the fallback conversation key so two identical conversation openings do not
+// share a replay scope.
+var conversationNonceSources = struct {
+	paths  []string
+	header []string
+}{
+	paths:  []string{"client_metadata.conversation_id", "client_metadata.conversationId", "conversation_id"},
+	header: []string{"X-Conversation-Id", "Conversation-Id", "Conversation_id"},
+}
+
+// claudeReplayConversationNonce returns a genuine conversation nonce when one
+// is explicitly provided by the caller. It returns an empty string when no
+// nonce exists, signaling that fallback replay should not be used.
+func claudeReplayConversationNonce(payload []byte, headers http.Header) string {
+	for _, path := range conversationNonceSources.paths {
+		if value := strings.TrimSpace(gjson.GetBytes(payload, path).String()); value != "" {
+			return value
+		}
+	}
+	for _, key := range conversationNonceSources.header {
+		if value := headerFirstValue(headers, key); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // ClaudeThinkingReplayConversationSessionKey returns a stable per-conversation
-// key for sessionless clients. It mixes a caller identity (credential id,
-// caller-scope metadata, selected headers) with the first message, system
-// prompt, and tools so two callers sharing a credential and the same initial
-// prompt cannot see each other's replay state.
+// key for sessionless clients when the caller provides a genuine conversation
+// nonce. It mixes the caller identity with the nonce, first message and system
+// prompt so two identical openings with different nonces cannot see each
+// other's replay state. If no nonce is present it returns an empty string,
+// which disables fallback replay.
 func ClaudeThinkingReplayConversationSessionKey(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
+	nonce := claudeReplayConversationNonce(req.Payload, opts.Headers)
+	if nonce == "" {
+		return ""
+	}
+
 	h := sha256.New()
 	hashString(h, "conversation")
 
@@ -46,6 +81,7 @@ func ClaudeThinkingReplayConversationSessionKey(auth *cliproxyauth.Auth, req cli
 	hashString(h, headerFirstValue(opts.Headers, "User-Agent"))
 	hashString(h, headerFirstValue(opts.Headers, "X-App"))
 	hashString(h, headerFirstValue(opts.Headers, "X-Codex-Client-Id"))
+	hashString(h, nonce)
 
 	if len(req.Payload) == 0 {
 		return ""
