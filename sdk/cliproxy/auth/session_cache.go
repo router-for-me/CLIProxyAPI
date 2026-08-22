@@ -224,6 +224,42 @@ func mergeSessionAliases(existing []string, candidates ...string) []string {
 }
 
 // Touch refreshes the expiration for a session binding if it currently matches expectedAuthID.
+// RestoreAliasesIfAbsent atomically sets the still-absent aliases to authID.
+// Any alias that is currently live (bound to another active group) is left untouched.
+// Returns true if at least one alias was restored, false otherwise.
+func (c *SessionCache) RestoreAliasesIfAbsent(authID string, sessionIDs ...string) bool {
+	if c == nil || authID == "" || len(sessionIDs) == 0 {
+		return false
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var absent []string
+	for _, sid := range sessionIDs {
+		if sid == "" {
+			continue
+		}
+		if entry, ok := c.entries[sid]; !ok || !now.Before(entry.expiresAt) {
+			absent = append(absent, sid)
+		}
+	}
+	aliases := compactSessionAliases(absent)
+	if len(aliases) == 0 {
+		return false
+	}
+	entry := sessionEntry{
+		authID:    authID,
+		expiresAt: now.Add(c.ttl),
+		aliases:   aliases,
+	}
+	for _, alias := range aliases {
+		c.entries[alias] = entry
+	}
+	return true
+}
+
+// Touch refreshes the expiration for a session binding if it currently matches expectedAuthID.
 func (c *SessionCache) Touch(sessionID, expectedAuthID string) bool {
 	if sessionID == "" || expectedAuthID == "" {
 		return false

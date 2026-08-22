@@ -732,8 +732,37 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil {
 		return nil, err
 	}
-	bind(auth.ID)
-	entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+
+	// Cold cache binding: only install the binding if no concurrent request
+	// already did. This prevents multiple cache-miss callers from returning
+	// different auths when the fallback selector picks concurrently.
+	coldKeys := []string{cacheKey}
+	if fallbackKey != "" {
+		coldKeys = append(coldKeys, fallbackKey)
+	}
+	if s.cache.RestoreAliasesIfAbsent(auth.ID, coldKeys...) {
+		entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		return auth, nil
+	}
+
+	// Another caller won the race. Return whatever it bound.
+	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
+		for _, a := range available {
+			if a.ID == cachedAuthID {
+				entry.Infof("session-affinity: cache miss, won by concurrent binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), a.ID, provider, model)
+				return a, nil
+			}
+		}
+	}
+	if fallbackKey != "" {
+		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
+			for _, a := range available {
+				if a.ID == cachedAuthID {
+					return a, nil
+				}
+			}
+		}
+	}
 	return auth, nil
 }
 

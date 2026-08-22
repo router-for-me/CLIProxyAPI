@@ -1956,6 +1956,58 @@ func TestSessionAffinitySelector_Concurrent(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_ConcurrentCacheMissBindsOneAuth(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}, {ID: "auth-c"}}
+	opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_concurrent-cache-miss"}}`)}
+
+	const goroutines = 64
+	start := make(chan struct{})
+	results := make(chan string, goroutines)
+	errs := make(chan error, goroutines)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			auth, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- auth.ID
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("concurrent cache-miss Pick() error = %v", err)
+	}
+	var expected string
+	for authID := range results {
+		if expected == "" {
+			expected = authID
+		}
+		if authID != expected {
+			t.Fatalf("concurrent cache-miss Pick() returned %q after %q was bound", authID, expected)
+		}
+	}
+	if expected == "" {
+		t.Fatal("concurrent cache-miss Pick() returned no auth")
+	}
+}
+
 func TestExtractSessionIDNativeSignals(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
