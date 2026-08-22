@@ -534,7 +534,7 @@ func proberOpenAICompatBaseURL(auth *Auth, cfg *internalconfig.Config) string {
 			continue
 		}
 		for _, cand := range candidates {
-			if cand != "" && (c.Name == cand || c.Name == strings.ToLower(cand)) {
+			if cand != "" && strings.EqualFold(c.Name, cand) {
 				return strings.TrimRight(c.BaseURL, "/")
 			}
 		}

@@ -368,6 +368,12 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 			auth.StatusMessage = reason
 		}
 		auth.LastError = cloneError(record.LastError)
+		if (record.LastError != nil && record.LastError.Code == ErrorCodeForceCooldown) || strings.HasPrefix(reason, "prober:") {
+			auth.proberCooldown = true
+			if auth.proberBackoff < 1 {
+				auth.proberBackoff = 1
+			}
+		}
 		return true
 	}
 

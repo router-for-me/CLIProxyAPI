@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -559,6 +560,44 @@ func TestManager_RestoreCooldownStatesCanonicalizesThinkingSuffixes(t *testing.T
 	}
 	if len(modelRecords) != 1 || modelRecords[0].Model != "gemini-3.1-pro-preview" || !modelRecords[0].NextRetryAfter.Equal(laterRetry) {
 		t.Fatalf("persisted model records = %+v, want one canonical record until %v", modelRecords, laterRetry)
+	}
+}
+
+func TestManager_RestoreCooldownStatesRestoresProberOwnership(t *testing.T) {
+	nextRetry := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	now := time.Now().UTC().Truncate(time.Second)
+	store := &recordingCooldownStateStore{
+		load: []CooldownStateRecord{
+			{
+				Provider:       "xai",
+				AuthID:         "auth-prober",
+				Status:         "cooling",
+				NextRetryAfter: nextRetry,
+				Reason:         "prober: unreachable",
+				LastError:      &Error{Code: ErrorCodeForceCooldown, Message: "prober: unreachable", HTTPStatus: http.StatusServiceUnavailable, Retryable: true},
+				UpdatedAt:      now,
+			},
+		},
+	}
+	manager := NewManager(nil, nil, nil)
+	manager.SetCooldownStateStore(store)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-prober", Provider: "xai"}); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+
+	if errRestore := manager.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatalf("RestoreCooldownStates() returned error: %v", errRestore)
+	}
+
+	auth, ok := manager.GetByID("auth-prober")
+	if !ok || auth == nil {
+		t.Fatal("restored auth was not found")
+	}
+	if !auth.proberCooldown {
+		t.Fatalf("proberCooldown = false, want true after restoring prober cooldown")
+	}
+	if auth.proberBackoff == 0 {
+		t.Fatalf("proberBackoff = 0, want > 0 after restoring prober cooldown")
 	}
 }
 

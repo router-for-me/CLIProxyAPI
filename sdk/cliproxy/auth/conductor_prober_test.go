@@ -943,6 +943,39 @@ func TestProberClampsRateLimit(t *testing.T) {
 	}
 }
 
+func TestProberBaseURLCaseInsensitiveOpenAICompatName(t *testing.T) {
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name:    "MyOpenAI",
+				BaseURL: "https://custom.example.com/v1",
+			},
+		},
+	}
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"compat_name": "myopenai",
+		},
+	}
+	if got := proberBaseURLForProvider(auth, cfg); got != "https://custom.example.com/v1" {
+		t.Fatalf("proberBaseURLForProvider() = %q, want %q", got, "https://custom.example.com/v1")
+	}
+
+	auth.Attributes["compat_name"] = "MYOPENAI"
+	if got := proberBaseURLForProvider(auth, cfg); got != "https://custom.example.com/v1" {
+		t.Fatalf("proberBaseURLForProvider() = %q, want %q", got, "https://custom.example.com/v1")
+	}
+
+	auth.Attributes["provider_key"] = "MyOpenAI"
+	auth.Attributes["compat_name"] = ""
+	if got := proberBaseURLForProvider(auth, cfg); got != "https://custom.example.com/v1" {
+		t.Fatalf("proberBaseURLForProvider() = %q, want %q", got, "https://custom.example.com/v1")
+	}
+}
+
 func TestProberRefreshOn401(t *testing.T) {
 	ctx := context.Background()
 	m := newProberManager()
