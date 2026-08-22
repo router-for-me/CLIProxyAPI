@@ -278,6 +278,12 @@ func TestSingleTransient503Cooldown(t *testing.T) {
 	if cooldown <= 0 {
 		t.Fatalf("cooldown must be positive, got %v", cooldown)
 	}
+	if cooldown >= 50*time.Second {
+		t.Skipf("current main still uses ~%v transient cooldown; enable after Plus #205 lowers default to 10s.", cooldown)
+	}
+	if cooldown > 15*time.Second || cooldown < 1*time.Second {
+		t.Fatalf("cooldown = %v, want around 10s", cooldown)
+	}
 }
 
 // TestEmptyCompletionRotatesNonStream and TestEmptyCompletionRotatesStream verify
@@ -424,7 +430,9 @@ func TestAffinityStaysHealthyAfterTransientBlip(t *testing.T) {
 
 	exec := newDoctrineExecutor("claude")
 	manager, _, model := newDoctrineManager(t, exec, 2)
-	manager.SetSelector(NewSessionAffinitySelector(&RoundRobinSelector{cursors: make(map[string]int)}))
+	affinity := NewSessionAffinitySelector(&RoundRobinSelector{cursors: make(map[string]int)})
+	defer affinity.Stop()
+	manager.SetSelector(affinity)
 
 	// The first execution attempt is a transient 503; the rotated fallback
 	// becomes the session's healthy anchor.
