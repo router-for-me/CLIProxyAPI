@@ -148,6 +148,7 @@ func restoreKimiThinkingReplayContent(body, cachedContent []byte) ([]byte, bool)
 		return body, false
 	}
 	messageItems := messages.Array()
+	var matches []int
 	for index := len(messageItems) - 1; index >= 0; index-- {
 		message := messageItems[index]
 		if !strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "assistant") {
@@ -168,13 +169,43 @@ func restoreKimiThinkingReplayContent(body, cachedContent []byte) ([]byte, bool)
 		if helps.ContentHasThinking(currentContent) && !helps.ThinkingMatchesCachedIgnoringSignature(currentContent, gjson.ParseBytes(cachedContent)) {
 			continue
 		}
-		updated, errSet := sjson.SetRawBytes(body, fmt.Sprintf("messages.%d.content", index), cachedContent)
-		if errSet != nil {
+		matches = append(matches, index)
+	}
+
+	if len(matches) == 0 {
+		return body, false
+	}
+
+	// A single unambiguous match is fine. Multiple matches are only safe when
+	// at least one still carries thinking that matches the cached turn; in that
+	// case prefer the rightmost (latest) retained match. Without any retained
+	// thinking, multiple text-only duplicates are indistinguishable and the
+	// restoration must be refused.
+	if len(matches) > 1 {
+		hasMatch := false
+		for _, idx := range matches {
+			if helps.ContentHasThinking(messageItems[idx].Get("content")) {
+				hasMatch = true
+				break
+			}
+		}
+		if !hasMatch {
 			return body, false
 		}
-		return updated, true
+		for _, idx := range matches {
+			if helps.ContentHasThinking(messageItems[idx].Get("content")) {
+				matches = []int{idx}
+				break
+			}
+		}
 	}
-	return body, false
+
+	idx := matches[0]
+	updated, errSet := sjson.SetRawBytes(body, fmt.Sprintf("messages.%d.content", idx), cachedContent)
+	if errSet != nil {
+		return body, false
+	}
+	return updated, true
 }
 
 type kimiThinkingReplayStreamBlock struct {

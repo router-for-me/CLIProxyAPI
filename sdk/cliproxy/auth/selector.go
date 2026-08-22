@@ -749,6 +749,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if boundAuth != "" {
 		for _, a := range available {
 			if a.ID == boundAuth {
+				// Attach the still-free aliases to the winning group so a later
+				// turn that retains only the conversation ID stays sticky.
+				s.cache.SetAliases(boundAuth, coldKeys...)
 				entry.Infof("session-affinity: cache miss, alias already bound to %s | session=%s provider=%s model=%s", a.ID, truncateSessionID(primaryID), provider, model)
 				return a, nil
 			}

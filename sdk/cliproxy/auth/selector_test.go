@@ -2029,6 +2029,30 @@ func TestSessionCache_SetAliasesIfAllAbsent_HonorsOccupiedAlias(t *testing.T) {
 	}
 }
 
+func TestSessionCache_SetAliasesIfAllAbsent_AttachesFreeAliasToWinner(t *testing.T) {
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	cache.SetAliases("auth-a", "shared")
+
+	bound, ok := cache.SetAliasesIfAllAbsent("auth-b", "shared", "conv-b")
+	if ok {
+		t.Fatalf("SetAliasesIfAllAbsent must not succeed when an alias is occupied")
+	}
+	if bound != "auth-a" {
+		t.Fatalf("SetAliasesIfAllAbsent must return existing auth, got %q", bound)
+	}
+
+	// The caller should attach the free alias to the winning group.
+	cache.SetAliases(bound, "shared", "conv-b")
+	if got, ok := cache.Get("conv-b"); !ok || got != "auth-a" {
+		t.Fatalf("conv-b must be bound to the winning auth, got %q, %v", got, ok)
+	}
+	if got, ok := cache.Get("shared"); !ok || got != "auth-a" {
+		t.Fatalf("shared must remain auth-a, got %q, %v", got, ok)
+	}
+}
+
 func TestExtractSessionIDNativeSignals(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
