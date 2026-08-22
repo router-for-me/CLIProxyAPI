@@ -2,6 +2,9 @@ package cache
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -76,7 +79,7 @@ func (c *fakeClaudeThinkingReplayKVClient) KVExpire(context.Context, string, tim
 	return true, nil
 }
 
-func useFakeClaudeThinkingReplayKVClient(t *testing.T, client *fakeClaudeThinkingReplayKVClient, homeMode bool) {
+func useFakeClaudeThinkingReplayKVClient(t *testing.T, client kimiThinkingReplayKVClient, homeMode bool) {
 	t.Helper()
 	prev := currentClaudeThinkingReplayKVClient
 	currentClaudeThinkingReplayKVClient = func() (kimiThinkingReplayKVClient, bool, error) {
@@ -195,6 +198,134 @@ func TestClaudeThinkingReplayAliasHomeMultiSessionResolve(t *testing.T) {
 	msgs := []ClaudeThinkingReplayAliasMessage{{Hash: "msg1", Weight: 1}, {Hash: "msg2", Weight: 2}}
 	if s, ok := ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, msgs, "firstA"); !ok || s != "sessionA" {
 		t.Fatalf("home resolve: got %q, want sessionA", s)
+	}
+}
+
+// raceyClaudeThinkingReplayKVClient is a test client that fails the first
+// KVCompareAndSwap on a specific alias key and injects a new value, simulating
+// a concurrent writer. This verifies that the alias update retries and merges
+// instead of overwriting the injected session.
+type raceyClaudeThinkingReplayKVClient struct {
+	*fakeClaudeThinkingReplayKVClient
+	aliasKey string
+	injected []byte
+	attempts int
+	mu       sync.Mutex
+}
+
+func (c *raceyClaudeThinkingReplayKVClient) KVCompareAndSwap(ctx context.Context, key string, expected []byte, expectedExists bool, newValue []byte, ttl time.Duration) (bool, error) {
+	if key == c.aliasKey {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.attempts == 0 {
+			c.attempts++
+			c.values[key] = append([]byte(nil), c.injected...)
+			return false, nil
+		}
+		c.values[key] = append([]byte(nil), newValue...)
+		return true, nil
+	}
+	return c.fakeClaudeThinkingReplayKVClient.KVCompareAndSwap(ctx, key, expected, expectedExists, newValue, ttl)
+}
+
+func TestClaudeThinkingReplayAliasHomeAtomicListUpdates(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, "msg")
+
+	aValue, _ := json.Marshal(claudeThinkingReplayAliasHomeValue{
+		Sessions: []claudeThinkingReplayAliasHomeSession{
+			{SessionKey: "sessionA", FirstUserHash: "firstA", Timestamp: time.Now()},
+		},
+	})
+	abValue, _ := json.Marshal(claudeThinkingReplayAliasHomeValue{
+		Sessions: []claudeThinkingReplayAliasHomeSession{
+			{SessionKey: "sessionA", FirstUserHash: "firstA", Timestamp: time.Now()},
+			{SessionKey: "sessionB", FirstUserHash: "firstB", Timestamp: time.Now()},
+		},
+	})
+
+	base := newFakeClaudeThinkingReplayKVClient()
+	base.values[aliasKey] = aValue
+	client := &raceyClaudeThinkingReplayKVClient{
+		fakeClaudeThinkingReplayKVClient: base,
+		aliasKey:                         aliasKey,
+		injected:                         abValue,
+	}
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	// Register session C. The first CAS sees the initial value A; the racey
+	// client simulates a concurrent writer changing it to A+B and returns
+	// false. The function must retry, read A+B, append C, and CAS successfully.
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "sessionC", "msg", "firstC")
+
+	raw, ok := client.values[aliasKey]
+	if !ok {
+		t.Fatal("alias value not found")
+	}
+	var value claudeThinkingReplayAliasHomeValue
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("unmarshal alias value: %v", err)
+	}
+	got := make(map[string]string)
+	for _, s := range value.Sessions {
+		got[s.SessionKey] = s.FirstUserHash
+	}
+	want := map[string]string{
+		"sessionA": "firstA",
+		"sessionB": "firstB",
+		"sessionC": "firstC",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("alias sessions = %v, want %v", got, want)
+	}
+}
+
+func TestResolveClaudeThinkingReplayAliasRejectsTies(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "sessionA", "msg", "firstA")
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "sessionB", "msg", "firstB")
+
+	// Without a first-user bonus the two sessions are tied; refuse the match.
+	msgs := []ClaudeThinkingReplayAliasMessage{{Hash: "msg", Weight: 1}}
+	if _, ok := ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, msgs, ""); ok {
+		t.Fatal("expected no resolve for ambiguous tie")
+	}
+
+	// With a matching first-user hash one session uniquely wins.
+	if s, ok := ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, msgs, "firstA"); !ok || s != "sessionA" {
+		t.Fatalf("resolve with first-user bonus: got %q ok=%v, want sessionA", s, ok)
+	}
+}
+
+func TestResolveClaudeThinkingReplayAliasHomeRejectsTies(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	client := newFakeClaudeThinkingReplayKVClient()
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "sessionA", "msg", "firstA")
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "sessionB", "msg", "firstB")
+
+	msgs := []ClaudeThinkingReplayAliasMessage{{Hash: "msg", Weight: 1}}
+	if _, ok := ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, msgs, ""); ok {
+		t.Fatal("expected no resolve for home ambiguous tie")
+	}
+
+	if s, ok := ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, msgs, "firstA"); !ok || s != "sessionA" {
+		t.Fatalf("home resolve with first-user bonus: got %q ok=%v, want sessionA", s, ok)
 	}
 }
 

@@ -415,12 +415,8 @@ func claudeThinkingReplayUpsertAliasLocked(key, sessionKey, firstUserHash string
 }
 
 func claudeThinkingReplayResolveBestAliasLocked(modelFamily string, messages []ClaudeThinkingReplayAliasMessage, requestFirstUserHash string, now time.Time) (string, bool) {
-	type candidate struct {
-		score  int
-		latest time.Time
-	}
 	const firstUserMatchBonus = 2
-	scores := make(map[string]candidate)
+	scores := make(map[string]int)
 	for _, m := range messages {
 		key := claudeThinkingReplayAliasKey(modelFamily, m.Hash)
 		list, ok := claudeThinkingReplayAliases[key]
@@ -431,26 +427,44 @@ func claudeThinkingReplayResolveBestAliasLocked(modelFamily string, messages []C
 			if now.Sub(entry.timestamp) > ClaudeThinkingReplayCacheTTL {
 				continue
 			}
-			c := scores[entry.sessionKey]
-			c.score += m.Weight
+			scores[entry.sessionKey] += m.Weight
 			if requestFirstUserHash != "" && entry.firstUserHash == requestFirstUserHash {
-				c.score += firstUserMatchBonus
+				scores[entry.sessionKey] += firstUserMatchBonus
 			}
-			if entry.timestamp.After(c.latest) {
-				c.latest = entry.timestamp
-			}
-			scores[entry.sessionKey] = c
 		}
 	}
-	var best string
-	var bestCand candidate
-	for session, c := range scores {
-		if c.score > bestCand.score || (c.score == bestCand.score && c.latest.After(bestCand.latest)) {
+	return claudeThinkingReplayResolveBestAlias(scores)
+}
+
+// claudeThinkingReplayResolveBestAlias returns the session with the highest
+// score. If multiple sessions tie for the highest score the result is
+// ambiguous, so it returns no match rather than risk restoring the wrong
+// conversation.
+func claudeThinkingReplayResolveBestAlias(scores map[string]int) (string, bool) {
+	if len(scores) == 0 {
+		return "", false
+	}
+	maxScore := 0
+	for _, s := range scores {
+		if s > maxScore {
+			maxScore = s
+		}
+	}
+	if maxScore <= 0 {
+		return "", false
+	}
+	best := ""
+	tied := 0
+	for session, s := range scores {
+		if s == maxScore {
 			best = session
-			bestCand = c
+			tied++
 		}
 	}
-	return best, best != ""
+	if tied > 1 {
+		return "", false
+	}
+	return best, true
 }
 
 func purgeExpiredClaudeThinkingReplayAliasesLocked(now time.Time) {
@@ -545,6 +559,50 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
 	now := time.Now()
 
+	// Update the shared alias value atomically with compare-and-swap retries.
+	// Multiple sessionless conversations can register the same message hash
+	// concurrently, so an unconditional KVSet would let the last writer discard
+	// the others.
+	for attempt := 0; attempt < 4; attempt++ {
+		var value claudeThinkingReplayAliasHomeValue
+		raw, found, errGet := client.KVGet(ctx, aliasKey)
+		if errGet != nil {
+			log.Warnf("claude thinking replay alias read failed: %v", errGet)
+			return
+		}
+		if found {
+			if err := json.Unmarshal(raw, &value); err != nil {
+				log.Warnf("claude thinking replay alias unmarshal failed: %v", err)
+				value = claudeThinkingReplayAliasHomeValue{}
+			}
+		}
+		value.Sessions = claudeThinkingReplayAliasHomeValueUpsert(value.Sessions, sessionKey, firstUserHash, now)
+		if len(value.Sessions) > ClaudeThinkingReplayCacheMaxAliasesPerKey {
+			sort.Slice(value.Sessions, func(i, j int) bool {
+				return value.Sessions[i].Timestamp.Before(value.Sessions[j].Timestamp)
+			})
+			value.Sessions = value.Sessions[len(value.Sessions)-ClaudeThinkingReplayCacheMaxAliasesPerKey:]
+		}
+		newRaw, errMarshal := json.Marshal(value)
+		if errMarshal != nil {
+			log.Warnf("claude thinking replay alias marshal failed: %v", errMarshal)
+			return
+		}
+		swapped, errSwap := client.KVCompareAndSwap(ctx, aliasKey, raw, found, newRaw, ClaudeThinkingReplayCacheTTL)
+		if errSwap != nil {
+			log.Warnf("claude thinking replay alias cas failed: %v", errSwap)
+			return
+		}
+		if swapped {
+			break
+		}
+		if attempt == 3 {
+			log.Warnf("claude thinking replay alias cas exhausted after %d attempts", attempt+1)
+			return
+		}
+	}
+
+	// Maintain the per-credential index so old aliases can be evicted.
 	for attempt := 0; attempt < 4; attempt++ {
 		indexRaw, indexFound, errIndex := client.KVGet(ctx, indexKey)
 		if errIndex != nil {
@@ -587,43 +645,11 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 			return
 		}
 	}
-
-	var value claudeThinkingReplayAliasHomeValue
-	raw, found, errGet := client.KVGet(ctx, aliasKey)
-	if errGet != nil {
-		log.Warnf("claude thinking replay alias read failed: %v", errGet)
-		return
-	}
-	if found {
-		if err := json.Unmarshal(raw, &value); err != nil {
-			log.Warnf("claude thinking replay alias unmarshal failed: %v", errGet)
-			value = claudeThinkingReplayAliasHomeValue{}
-		}
-	}
-	value.Sessions = claudeThinkingReplayAliasHomeValueUpsert(value.Sessions, sessionKey, firstUserHash, now)
-	if len(value.Sessions) > ClaudeThinkingReplayCacheMaxAliasesPerKey {
-		sort.Slice(value.Sessions, func(i, j int) bool {
-			return value.Sessions[i].Timestamp.Before(value.Sessions[j].Timestamp)
-		})
-		value.Sessions = value.Sessions[len(value.Sessions)-ClaudeThinkingReplayCacheMaxAliasesPerKey:]
-	}
-	raw, errMarshal := json.Marshal(value)
-	if errMarshal != nil {
-		log.Warnf("claude thinking replay alias marshal failed: %v", errMarshal)
-		return
-	}
-	if _, errSet := client.KVSet(ctx, aliasKey, raw, homekv.KVSetOptions{EX: ClaudeThinkingReplayCacheTTL}); errSet != nil {
-		log.Warnf("claude thinking replay alias set failed: %v", errSet)
-	}
 }
 
 func resolveClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThinkingReplayKVClient, modelFamily string, messages []ClaudeThinkingReplayAliasMessage, requestFirstUserHash string) (string, bool) {
-	type candidate struct {
-		score  int
-		latest time.Time
-	}
 	const firstUserMatchBonus = 2
-	scores := make(map[string]candidate)
+	scores := make(map[string]int)
 	now := time.Now()
 	for _, m := range messages {
 		raw, found, err := client.KVGet(ctx, claudeThinkingReplayAliasKVKey(modelFamily, m.Hash))
@@ -638,26 +664,13 @@ func resolveClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThinki
 			if now.Sub(s.Timestamp) > ClaudeThinkingReplayCacheTTL {
 				continue
 			}
-			c := scores[s.SessionKey]
-			c.score += m.Weight
+			scores[s.SessionKey] += m.Weight
 			if requestFirstUserHash != "" && s.FirstUserHash == requestFirstUserHash {
-				c.score += firstUserMatchBonus
+				scores[s.SessionKey] += firstUserMatchBonus
 			}
-			if s.Timestamp.After(c.latest) {
-				c.latest = s.Timestamp
-			}
-			scores[s.SessionKey] = c
 		}
 	}
-	var best string
-	var bestCand candidate
-	for session, c := range scores {
-		if c.score > bestCand.score || (c.score == bestCand.score && c.latest.After(bestCand.latest)) {
-			best = session
-			bestCand = c
-		}
-	}
-	return best, best != ""
+	return claudeThinkingReplayResolveBestAlias(scores)
 }
 
 func decodeClaudeThinkingReplayAliasIndex(raw []byte) (claudeThinkingReplayAliasIndex, bool) {

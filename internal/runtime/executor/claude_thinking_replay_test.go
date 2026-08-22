@@ -1212,6 +1212,38 @@ func TestRestoreClaudeThinkingReplayContents_SkipsUnsignedLeadingAssistant(t *te
 	}
 }
 
+func TestRestoreClaudeThinkingReplayContents_AnchorsDuplicateSuffixAfterTruncation(t *testing.T) {
+	// Client dropped an older signed turn whose visible content is identical to
+	// the first retained assistant. The retained duplicate must receive the
+	// newer cached thinking/signature, not the older one.
+	body := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"user","content":"continue"},{"role":"assistant","content":[{"type":"text","text":"same"}]},{"role":"user","content":"again"},{"role":"assistant","content":[{"type":"text","text":"different"}]},{"role":"user","content":"final"}]}`)
+	cached := [][]byte{
+		[]byte(`[{"type":"thinking","thinking":"old","signature":"sig-old"},{"type":"text","text":"same"}]`),
+		[]byte(`[{"type":"thinking","thinking":"new","signature":"sig-new"},{"type":"text","text":"same"}]`),
+		[]byte(`[{"type":"thinking","thinking":"other","signature":"sig-other"},{"type":"text","text":"different"}]`),
+	}
+
+	updated, restored := restoreClaudeThinkingReplayContents(body, cached)
+	if !restored {
+		t.Fatal("expected restore")
+	}
+
+	first := gjson.GetBytes(updated, "messages.2.content").Array()
+	if first[0].Get("signature").String() != "sig-new" {
+		t.Fatalf("first retained duplicate matched wrong signature: %s", first[0].Get("signature").String())
+	}
+
+	second := gjson.GetBytes(updated, "messages.4.content").Array()
+	if second[0].Get("signature").String() != "sig-other" {
+		t.Fatalf("second retained assistant matched wrong signature: %s", second[0].Get("signature").String())
+	}
+
+	// The dropped older duplicate must not leak into the retained turns.
+	if first[0].Get("signature").String() == "sig-old" {
+		t.Fatalf("dropped older duplicate leaked into first retained assistant: %s", gjson.GetBytes(updated, "messages").Raw)
+	}
+}
+
 func TestClaudeExecutorCompatThinkingReplayRetainsScopeAfterHistoryCompaction(t *testing.T) {
 	internalcacheClearClaudeThinkingReplay(t)
 

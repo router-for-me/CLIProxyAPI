@@ -237,51 +237,73 @@ func restoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) (
 	}
 	msgList := messages.Array()
 
-	// Anchor the match window to the first assistant message present in the
-	// incoming request. When clients compact or truncate earlier history, cached
-	// turns older than the first echoed assistant message must not be replayed
-	// into a later matching turn.
-	firstAssistant := -1
+	// Collect the assistant messages whose content we may be able to restore.
+	var assistantContents []gjson.Result
+	var assistantMsgIndices []int
 	for i, message := range msgList {
-		if strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "assistant") {
-			firstAssistant = i
-			break
+		if !strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "assistant") {
+			continue
 		}
+		content := message.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		assistantContents = append(assistantContents, content)
+		assistantMsgIndices = append(assistantMsgIndices, i)
 	}
-	if firstAssistant >= 0 {
-		start := claudeThinkingReplayFindStartIndex(msgList[firstAssistant].Get("content"), cachedContents)
+
+	// Anchor the match window to the latest suffix of cached turns that matches
+	// the request's assistant sequence. When clients compact or truncate
+	// earlier history, the remaining sequence is a suffix of the conversation;
+	// duplicate visible content must resolve to the correct retained turn.
+	start := -1
+	if len(assistantContents) > 0 {
+		start = claudeThinkingReplayFindStartIndex(assistantContents, cachedContents)
+	}
+	if start >= 0 {
 		for j := 0; j < start; j++ {
 			consumed[j] = true
 		}
 	}
 
-	for i, message := range msgList {
-		if !strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "assistant") {
-			continue
-		}
-		currentContent := message.Get("content")
-		if !currentContent.IsArray() {
-			continue
-		}
-		for j, cachedContent := range cachedContents {
-			if consumed[j] {
-				continue
+	from := 0
+	if start >= 0 {
+		from = start
+	}
+
+	for ai, i := range assistantMsgIndices {
+		content := assistantContents[ai]
+		matchedJ := -1
+		// When anchored, the aligned cached turn should be at start+ai.
+		if start >= 0 && start+ai < len(cachedContents) {
+			if claudeThinkingReplayContentsMatch(content, gjson.ParseBytes(cachedContents[start+ai])) {
+				matchedJ = start + ai
 			}
-			cached := gjson.ParseBytes(cachedContent)
-			if !claudeThinkingReplayContentsMatch(currentContent, cached) {
-				continue
-			}
-			if !kimiJSONEqual([]byte(currentContent.Raw), cachedContent) {
-				var errSet error
-				updated, errSet = sjson.SetRawBytes(updated, fmt.Sprintf("messages.%d.content", i), cachedContent)
-				if errSet != nil {
-					return body, false
+		}
+		if matchedJ < 0 {
+			for j := from; j < len(cachedContents); j++ {
+				if consumed[j] {
+					continue
 				}
-				restored = true
+				cached := gjson.ParseBytes(cachedContents[j])
+				if claudeThinkingReplayContentsMatch(content, cached) {
+					matchedJ = j
+					break
+				}
 			}
-			consumed[j] = true
-			break
 		}
+		if matchedJ < 0 {
+			continue
+		}
+		if !kimiJSONEqual([]byte(content.Raw), cachedContents[matchedJ]) {
+			var errSet error
+			updated, errSet = sjson.SetRawBytes(updated, fmt.Sprintf("messages.%d.content", i), cachedContents[matchedJ])
+			if errSet != nil {
+				return body, false
+			}
+			restored = true
+		}
+		consumed[matchedJ] = true
 	}
 	return updated, restored
 }
@@ -311,20 +333,45 @@ func claudeThinkingReplayContentsMatch(currentContent, cachedContent gjson.Resul
 	return true
 }
 
-// claudeThinkingReplayFindStartIndex finds the index of the first cached turn
-// that matches the first assistant message present in the request. Cached
-// entries before this index are older than the client's oldest echoed
-// assistant message and must not be replayed into later turns.
-func claudeThinkingReplayFindStartIndex(firstContent gjson.Result, cachedContents [][]byte) int {
-	if !firstContent.IsArray() {
-		return 0
+// claudeThinkingReplayFindStartIndex finds the latest starting index in
+// cachedContents such that the full assistantContents sequence can be matched
+// as a subsequence in order. This anchors the replay window to the retained
+// suffix of the conversation, so duplicate visible assistant turns resolve to
+// the correct cached thinking/signature after compaction or truncation.
+// It returns -1 when no such anchor exists.
+func claudeThinkingReplayFindStartIndex(assistantContents []gjson.Result, cachedContents [][]byte) int {
+	if len(assistantContents) == 0 || len(cachedContents) == 0 {
+		return -1
 	}
-	for j, cachedContent := range cachedContents {
-		if claudeThinkingReplayContentsMatch(firstContent, gjson.ParseBytes(cachedContent)) {
-			return j
+	bestStart := -1
+	bestLen := 0
+	for start := 0; start < len(cachedContents); start++ {
+		j := start
+		prefixLen := 0
+		for i := 0; i < len(assistantContents) && j < len(cachedContents); i++ {
+			matched := false
+			for j < len(cachedContents) {
+				if claudeThinkingReplayContentsMatch(assistantContents[i], gjson.ParseBytes(cachedContents[j])) {
+					matched = true
+					j++
+					break
+				}
+				j++
+			}
+			if !matched {
+				break
+			}
+			prefixLen++
+		}
+		if prefixLen > bestLen || (prefixLen == bestLen && start > bestStart) {
+			bestLen = prefixLen
+			bestStart = start
 		}
 	}
-	return 0
+	if bestLen == 0 {
+		return -1
+	}
+	return bestStart
 }
 
 // claudeThinkingReplayMessageHashes returns a stable weighted hash for each
