@@ -751,6 +751,59 @@ func TestNormalizeAntigravityGeminiFunctionResponseRolesDoesNotCrossEmptyContent
 	}
 }
 
+func TestNormalizeAntigravityGeminiFunctionResponseRolesOrdersMixedResponses(t *testing.T) {
+	// Claude clients answer parallel tool calls in completion order, which can
+	// arrive as a mixed user turn with trailing text.
+	payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"read","args":{"file":"one"}}},{"functionCall":{"id":"call-2","name":"read","args":{"file":"two"}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call-2","name":"read","response":{"result":"two"}}},{"functionResponse":{"id":"call-1","name":"read","response":{"result":"one"}}},{"text":"user follow-up"}]}]}}`)
+	output := normalizeAntigravityGeminiFunctionResponseRoles(payload)
+	if got := gjson.GetBytes(output, "request.contents.1.role").String(); got != "user" {
+		t.Fatalf("mixed functionResponse/user content role = %q, want user; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.contents.1.parts.0.functionResponse.id").String(); got != "call-1" {
+		t.Fatalf("first functionResponse.id = %q, want call-1; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.contents.1.parts.1.functionResponse.id").String(); got != "call-2" {
+		t.Fatalf("second functionResponse.id = %q, want call-2; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.contents.1.parts.2.text").String(); got != "user follow-up" {
+		t.Fatalf("trailing text part moved = %q; output=%s", got, output)
+	}
+	if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(output); errValidate != nil {
+		t.Fatalf("mixed reordered responses are invalid: %v; output=%s", errValidate, output)
+	}
+}
+
+func TestNormalizeAntigravityGeminiFunctionResponseRolesKeepsImagesWithReorderedResponses(t *testing.T) {
+	payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"shot","args":{}}},{"functionCall":{"id":"call-2","name":"shot","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call-2","name":"shot","response":{"result":"two"}}},{"inline_data":{"mime_type":"image/png","data":"two"}},{"functionResponse":{"id":"call-1","name":"shot","response":{"result":"one"}}},{"inline_data":{"mime_type":"image/png","data":"one"}}]}]}}`)
+	output := normalizeAntigravityGeminiFunctionResponseRoles(payload)
+	if got := gjson.GetBytes(output, "request.contents.1.parts.0.functionResponse.id").String(); got != "call-1" {
+		t.Fatalf("first functionResponse.id = %q, want call-1; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.contents.1.parts.1.inline_data.data").String(); got != "one" {
+		t.Fatalf("first image no longer follows its response: %q; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.contents.1.parts.2.functionResponse.id").String(); got != "call-2" {
+		t.Fatalf("second functionResponse.id = %q, want call-2; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "request.contents.1.parts.3.inline_data.data").String(); got != "two" {
+		t.Fatalf("second image no longer follows its response: %q; output=%s", got, output)
+	}
+	if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(output); errValidate != nil {
+		t.Fatalf("reordered responses with images are invalid: %v; output=%s", errValidate, output)
+	}
+}
+
+func TestNormalizeAntigravityGeminiFunctionResponseRolesLeavesUnmatchedMixedResponses(t *testing.T) {
+	payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"read","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call-x","name":"read","response":{"result":"x"}}},{"text":"user follow-up"}]}]}}`)
+	output := normalizeAntigravityGeminiFunctionResponseRoles(payload)
+	if got := gjson.GetBytes(output, "request.contents.1.parts.0.functionResponse.id").String(); got != "call-x" {
+		t.Fatalf("unmatched mixed response was rewritten: %q; output=%s", got, output)
+	}
+	if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(output); errValidate == nil {
+		t.Fatalf("unmatched mixed responses were accepted: %s", output)
+	}
+}
+
 func TestAntigravityExecutor_GeminiTargetPreservesGeminiThinkingCarrier(t *testing.T) {
 	inner := protowire.AppendTag(nil, 1, protowire.BytesType)
 	inner = protowire.AppendBytes(inner, []byte{0x01, 0x0c, 0x39, 0xd6, 0xc7, 0x34})

@@ -93,14 +93,41 @@ func legacyNormalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byt
 			}
 			continue
 		}
-		if hasOtherPart || len(calls) > 0 {
+		if len(calls) > 0 {
 			pending = nil
 			continue
 		}
 
 		if len(pending) == len(responses) {
-			ordered := make([]json.RawMessage, 0, len(responseParts))
+			// Group-aware reorder: each functionResponse part keeps the inline
+			// media parts that directly follow it, standalone parts stay in
+			// place, and only a one-to-one match by id (or name when ids are
+			// absent) rewrites the parts array.
+			type slot struct {
+				group      int // response index, -1 marks a standalone part
+				standalone json.RawMessage
+			}
+			var layout []slot
+			grouped := make([][]json.RawMessage, 0, len(responseParts))
+			openGroup := -1
+			parts.ForEach(func(_, part gjson.Result) bool {
+				raw := json.RawMessage(part.Raw)
+				switch {
+				case part.Get("functionResponse").Exists():
+					grouped = append(grouped, []json.RawMessage{raw})
+					openGroup = len(grouped) - 1
+					layout = append(layout, slot{group: openGroup})
+				case (part.Get("inline_data").Exists() || part.Get("inlineData").Exists()) && !part.Get("functionCall").Exists() && openGroup >= 0:
+					grouped[openGroup] = append(grouped[openGroup], raw)
+				default:
+					openGroup = -1
+					layout = append(layout, slot{group: -1, standalone: raw})
+				}
+				return true
+			})
+			orderedGroups := make([][]json.RawMessage, 0, len(pending))
 			used := make([]bool, len(responses))
+			matchedAll := true
 			for _, call := range pending {
 				matched := -1
 				for responseIndex, response := range responses {
@@ -113,13 +140,23 @@ func legacyNormalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byt
 					}
 				}
 				if matched < 0 {
-					ordered = nil
+					matchedAll = false
 					break
 				}
 				used[matched] = true
-				ordered = append(ordered, responseParts[matched])
+				orderedGroups = append(orderedGroups, grouped[matched])
 			}
-			if len(ordered) == len(responseParts) {
+			if matchedAll {
+				var ordered []json.RawMessage
+				nextGroup := 0
+				for _, s := range layout {
+					if s.group >= 0 {
+						ordered = append(ordered, orderedGroups[nextGroup]...)
+						nextGroup++
+						continue
+					}
+					ordered = append(ordered, s.standalone)
+				}
 				if encoded, errMarshal := json.Marshal(ordered); errMarshal == nil {
 					if updated, errSet := sjson.SetRawBytes(out, fmt.Sprintf("request.contents.%d.parts", contentIndex), encoded); errSet == nil {
 						out = updated
@@ -128,7 +165,9 @@ func legacyNormalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byt
 			}
 		}
 		pending = nil
-		if content.Get("role").String() != "model" {
+		// Only a pure tool-result turn carries the model role; mixed contents
+		// keep their original role.
+		if !hasOtherPart && content.Get("role").String() != "model" {
 			if updated, errSet := sjson.SetBytes(out, fmt.Sprintf("request.contents.%d.role", contentIndex), "model"); errSet == nil {
 				out = updated
 			}
