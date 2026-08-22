@@ -162,12 +162,13 @@ func RestoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) (
 	}
 
 	// Anchor the match window to the latest suffix of cached turns that matches
-	// the request's assistant sequence. When clients compact or truncate
-	// earlier history, the remaining sequence is a suffix of the conversation;
-	// duplicate visible content must resolve to the correct retained turn.
-	start := -1
+	// a suffix of the request's assistant sequence. When clients compact or
+	// truncate earlier history, the remaining sequence is a suffix of the
+	// conversation; duplicate visible content must resolve to the correct
+	// cached thinking/signature.
+	start, off := -1, -1
 	if len(assistantContents) > 0 {
-		start = ClaudeThinkingReplayFindStartIndex(assistantContents, cachedContents)
+		start, off = ClaudeThinkingReplayFindStartIndex(assistantContents, cachedContents)
 	}
 	if start >= 0 {
 		for j := 0; j < start; j++ {
@@ -186,11 +187,18 @@ func RestoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) (
 
 	for ai, i := range assistantMsgIndices {
 		content := assistantContents[ai]
+		// Assistant turns before the anchored request offset are not eligible
+		// for restoration; they intentionally have no cached match in this
+		// window.
+		if start >= 0 && ai < off {
+			continue
+		}
 		matchedJ := -1
-		// When anchored, the aligned cached turn should be at start+ai.
-		if start >= 0 && start+ai < len(cachedContents) {
-			if ClaudeThinkingReplayContentsMatch(content, gjson.ParseBytes(cachedContents[start+ai])) {
-				matchedJ = start + ai
+		// When anchored, the aligned cached turn is at start+(ai-off).
+		if start >= 0 && off >= 0 {
+			j := start + (ai - off)
+			if j < len(cachedContents) && ClaudeThinkingReplayContentsMatch(content, gjson.ParseBytes(cachedContents[j])) {
+				matchedJ = j
 			}
 		}
 		if matchedJ < 0 {
@@ -247,14 +255,13 @@ func ClaudeThinkingReplayContentsMatch(currentContent, cachedContent gjson.Resul
 }
 
 // ClaudeThinkingReplayFindStartIndex finds the latest starting index in
-// cachedContents such that the full assistantContents sequence can be matched
-// as a subsequence in order. This anchors the replay window to the retained
-// suffix of the conversation, so duplicate visible assistant turns resolve to
-// the correct cached thinking/signature after compaction or truncation.
-// It returns -1 when no such anchor exists.
-func ClaudeThinkingReplayFindStartIndex(assistantContents []gjson.Result, cachedContents [][]byte) int {
+// cachedContents such that a suffix of the request's assistant sequence can be
+// matched contiguously. It also returns the request offset where the matched
+// suffix begins, so restoration can skip unsigned leading assistant turns and
+// only restore from the anchor onward. It returns -1, -1 when no anchor exists.
+func ClaudeThinkingReplayFindStartIndex(assistantContents []gjson.Result, cachedContents [][]byte) (int, int) {
 	if len(assistantContents) == 0 || len(cachedContents) == 0 {
-		return -1
+		return -1, -1
 	}
 	maxL := len(assistantContents)
 	if maxL > len(cachedContents) {
@@ -262,7 +269,9 @@ func ClaudeThinkingReplayFindStartIndex(assistantContents []gjson.Result, cached
 	}
 	for l := maxL; l >= 1; l-- {
 		start := len(cachedContents) - l
-		for off := 0; off <= len(assistantContents)-l; off++ {
+		// Iterate offsets from the end of the request so the latest suffix is
+		// preferred and unsigned leading turns do not steal the anchor.
+		for off := len(assistantContents) - l; off >= 0; off-- {
 			matched := true
 			for k := 0; k < l; k++ {
 				if !ClaudeThinkingReplayContentsMatch(assistantContents[off+k], gjson.ParseBytes(cachedContents[start+k])) {
@@ -299,10 +308,10 @@ func ClaudeThinkingReplayFindStartIndex(assistantContents []gjson.Result, cached
 					continue
 				}
 			}
-			return start
+			return start, off
 		}
 	}
-	return -1
+	return -1, -1
 }
 
 // ClaudeThinkingReplayMessageHashes returns a stable weighted hash for each

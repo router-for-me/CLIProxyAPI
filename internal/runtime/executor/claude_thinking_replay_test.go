@@ -63,15 +63,15 @@ func TestClaudeThinkingReplayFindStartIndex_RefusesPartialAnchor(t *testing.T) {
 		[]byte(`[{"type":"text","text":"A-old"}]`),
 		[]byte(`[{"type":"text","text":"A-new"}]`),
 	}
-	if got := helps.ClaudeThinkingReplayFindStartIndex(assistant, cached); got != -1 {
+	if got, _ := helps.ClaudeThinkingReplayFindStartIndex(assistant, cached); got != -1 {
 		t.Fatalf("expected -1 for partial match with unsigned trailing turn, got %d", got)
 	}
 
 	assistantFull := []gjson.Result{
 		gjson.Parse(`[{"type":"text","text":"A-new"}]`),
 	}
-	if got := helps.ClaudeThinkingReplayFindStartIndex(assistantFull, cached); got != 1 {
-		t.Fatalf("expected latest full match start 1, got %d", got)
+	if got, off := helps.ClaudeThinkingReplayFindStartIndex(assistantFull, cached); got != 1 || off != 0 {
+		t.Fatalf("expected latest full match start 1 off 0, got %d %d", got, off)
 	}
 }
 
@@ -84,8 +84,31 @@ func TestClaudeThinkingReplayFindStartIndex_RefusesAmbiguousShorterSuffix(t *tes
 		[]byte(`[{"type":"text","text":"A"}]`),
 		[]byte(`[{"type":"text","text":"A"}]`),
 	}
-	if got := helps.ClaudeThinkingReplayFindStartIndex(assistant, cached); got != -1 {
+	if got, _ := helps.ClaudeThinkingReplayFindStartIndex(assistant, cached); got != -1 {
 		t.Fatalf("expected -1 for ambiguous shorter suffix with duplicate cached visible turn, got %d", got)
+	}
+
+	// A leading unsigned duplicate with the same visible content as a later
+	// retained cached turn must not steal that cached signature. Request
+	// [B-unsigned, B-retained] and cached [A, B] (different visible) gives a
+	// length-1 match only at the latest offset, which should restore only the
+	// retained second turn.
+	body := []byte(`{"messages":[{"role":"user","content":"u"},{"role":"assistant","content":[{"type":"text","text":"B"}]},{"role":"assistant","content":[{"type":"thinking","thinking":"r"},{"type":"text","text":"B"}]},{"role":"user","content":"u2"}]}`)
+	retained := [][]byte{
+		[]byte(`[{"type":"thinking","thinking":"r","signature":"sig1"},{"type":"text","text":"A"}]`),
+		[]byte(`[{"type":"thinking","thinking":"r","signature":"sig2"},{"type":"text","text":"B"}]`),
+	}
+	updated, restored := helps.RestoreClaudeThinkingReplayContents(body, retained)
+	if !restored {
+		t.Fatal("expected restore for retained suffix")
+	}
+	first := gjson.GetBytes(updated, "messages.1.content").Array()
+	second := gjson.GetBytes(updated, "messages.2.content").Array()
+	if first[0].Get("signature").String() != "" {
+		t.Fatalf("first unsigned turn should not receive cached signature: %s", first[0].Get("signature").String())
+	}
+	if second[0].Get("signature").String() != "sig2" {
+		t.Fatalf("second retained turn should receive latest cached signature, got %s", second[0].Get("signature").String())
 	}
 }
 
