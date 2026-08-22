@@ -544,6 +544,23 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 		return true, blockReasonCooldown, auth.Quota.NextRecoverAt
 	}
+	// Auth-level cooldowns (prober, invalid grant, auth-level 429/5xx) must
+	// take precedence over per-model state so a credential-scoped failure
+	// blocks every model even if some model state still appears active.
+	// Do not fold the model-state aggregate stored in auth.Quota into this
+	// gate: a per-model quota recovery window must not extend an auth-level
+	// cooldown to models that are still usable.
+	if auth.authLevelCooldown {
+		unavailable := auth.authLevelUnavailable
+		next := auth.authLevelNextRetryAfter
+		if !unavailable && (auth.Unavailable || !auth.NextRetryAfter.IsZero()) {
+			unavailable = auth.Unavailable
+			next = auth.NextRetryAfter
+		}
+		if blocked, reason, next := availabilityBlock(unavailable, false, next, time.Time{}, now); blocked {
+			return true, reason, next
+		}
+	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
 			modelKey := canonicalModelKey(model)

@@ -117,7 +117,7 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 	quotaErr := &Error{Code: "rate_limit", Message: "quota", HTTPStatus: http.StatusTooManyRequests}
 	auth := &Auth{ID: "auth-level-quota"}
 
-	applyAuthFailureState(auth, quotaErr, nil, now, false)
+	applyAuthFailureState(auth, quotaErr, nil, now, false, false)
 	if auth.Quota.BackoffLevel != 1 {
 		t.Fatalf("expected BackoffLevel 1 after first failure, got %d", auth.Quota.BackoffLevel)
 	}
@@ -127,7 +127,7 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 	}
 
 	// In-window failure keeps the current window and level.
-	applyAuthFailureState(auth, quotaErr, nil, now.Add(100*time.Millisecond), false)
+	applyAuthFailureState(auth, quotaErr, nil, now.Add(100*time.Millisecond), false, false)
 	if auth.Quota.BackoffLevel != 1 {
 		t.Fatalf("expected BackoffLevel to stay 1 for in-window failure, got %d", auth.Quota.BackoffLevel)
 	}
@@ -136,7 +136,7 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 	}
 
 	// A failure after the window expired escalates to the next level.
-	applyAuthFailureState(auth, quotaErr, nil, now.Add(2*time.Second), false)
+	applyAuthFailureState(auth, quotaErr, nil, now.Add(2*time.Second), false, false)
 	if auth.Quota.BackoffLevel != 2 {
 		t.Fatalf("expected BackoffLevel 2 after post-window failure, got %d", auth.Quota.BackoffLevel)
 	}
@@ -146,12 +146,42 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 
 	// A provider supplied retry hint always takes effect, even in-window.
 	retryAfter := 10 * time.Second
-	applyAuthFailureState(auth, quotaErr, &retryAfter, now.Add(3*time.Second), false)
+	applyAuthFailureState(auth, quotaErr, &retryAfter, now.Add(3*time.Second), false, false)
 	if auth.Quota.BackoffLevel != 2 {
 		t.Fatalf("expected BackoffLevel to stay 2 with retry hint, got %d", auth.Quota.BackoffLevel)
 	}
 	if !auth.Quota.NextRecoverAt.Equal(now.Add(13 * time.Second)) {
 		t.Fatalf("expected retry hint window to close at %v, got %v", now.Add(13*time.Second), auth.Quota.NextRecoverAt)
+	}
+}
+
+func TestApplyAuthFailureStateForceCooldownOwnership(t *testing.T) {
+	now := time.Now()
+	retryAfter := 30 * time.Second
+	err := &Error{Code: ErrorCodeForceCooldown, Message: "force cooldown", Retryable: true}
+
+	nonProbe := &Auth{ID: "non-probe"}
+	applyAuthFailureState(nonProbe, err, &retryAfter, now, false, false)
+	if nonProbe.proberCooldown {
+		t.Fatal("non-probe force cooldown marked proberCooldown")
+	}
+	if nonProbe.proberBackoff != 0 {
+		t.Fatalf("non-probe force cooldown set proberBackoff = %d, want 0", nonProbe.proberBackoff)
+	}
+	if !nonProbe.NextRetryAfter.Equal(now.Add(retryAfter)) {
+		t.Fatalf("non-probe NextRetryAfter = %v, want %v", nonProbe.NextRetryAfter, now.Add(retryAfter))
+	}
+
+	probe := &Auth{ID: "probe"}
+	applyAuthFailureState(probe, err, &retryAfter, now, false, true)
+	if !probe.proberCooldown {
+		t.Fatal("probe force cooldown did not mark proberCooldown")
+	}
+	if probe.proberBackoff != 1 {
+		t.Fatalf("probe force cooldown set proberBackoff = %d, want 1", probe.proberBackoff)
+	}
+	if !probe.NextRetryAfter.Equal(now.Add(retryAfter)) {
+		t.Fatalf("probe NextRetryAfter = %v, want %v", probe.NextRetryAfter, now.Add(retryAfter))
 	}
 }
 

@@ -529,6 +529,41 @@ func (h *resultCaptureHook) Results() []Result {
 	return out
 }
 
+func TestMarkResultClearsSourceAuthBeforeHook(t *testing.T) {
+	ctx := context.Background()
+	hook := &resultCaptureHook{}
+	m := NewManager(nil, nil, hook)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key": "secret-key",
+		},
+	}
+	m.mu.Lock()
+	m.auths[auth.ID] = auth
+	m.mu.Unlock()
+
+	m.MarkResult(ctx, Result{
+		AuthID:          auth.ID,
+		Provider:        auth.Provider,
+		Success:         false,
+		SourceAuth:      auth,
+		CredentialScope: true,
+		Error:           &Error{Code: ErrorCodeForceCooldown, Message: "upstream failure", HTTPStatus: http.StatusServiceUnavailable, Retryable: true},
+	})
+
+	results := hook.Results()
+	if len(results) != 1 {
+		t.Fatalf("hook results = %d, want 1", len(results))
+	}
+	if results[0].SourceAuth != nil {
+		t.Fatal("OnResult received non-nil SourceAuth; credential pointer must be cleared before hooks")
+	}
+}
+
 type retryAfterStatusError struct {
 	status     int
 	message    string

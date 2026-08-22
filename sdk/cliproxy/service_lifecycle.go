@@ -36,7 +36,14 @@ func (s *Service) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, runCancel := context.WithCancel(ctx)
+	// Derive the service-wide context once. Shutdown and Home-mode fatal errors
+	// cancel runCancel, so every operation in this run and the final select must
+	// observe runCtx instead of the caller's parent.
+	var runCancel context.CancelFunc
+	ctx, runCancel = context.WithCancel(ctx)
+	if s.coreManager != nil {
+		s.coreManager.SetProberParentContext(ctx)
+	}
 	s.homeMu.Lock()
 	s.runCancel = runCancel
 	s.homeMu.Unlock()
@@ -120,6 +127,20 @@ func (s *Service) Run(ctx context.Context) error {
 	s.syncPluginRuntimeConfig(ctx)
 	if homeEnabled {
 		s.syncPluginModelRuntime(ctx)
+	}
+
+	// Register executors and start the credential health prober only after
+	// websocket gateway and plugin runtime initialization are complete, so all
+	// startup executors are available before the first sweep.
+	if s.coreManager != nil {
+		if !homeEnabled {
+			s.registerAvailableExecutors(coreauth.WithSkipPersist(ctx), executorRegistrationOptions{
+				includeBaseline:   true,
+				forceReplaceAuths: false,
+				auths:             s.coreManager.List(),
+			})
+		}
+		s.coreManager.RestartProber()
 	}
 
 	if s.authManager == nil {
@@ -282,17 +303,26 @@ func (s *Service) Shutdown(ctx context.Context) error {
 
 		// legacy refresh loop removed; only stopping core auth manager below
 
+		// Fully stop the watcher before stopping the prober so no config update can
+		// start a fresh prober while shutdown is in progress.
 		if s.watcherCancel != nil {
 			s.watcherCancel()
-		}
-		if s.coreManager != nil {
-			s.coreManager.StopAutoRefresh()
 		}
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {
 				log.Errorf("failed to stop file watcher: %v", err)
 				shutdownErr = err
 			}
+		}
+		s.homeMu.Lock()
+		runCancel := s.runCancel
+		s.homeMu.Unlock()
+		if runCancel != nil {
+			runCancel()
+		}
+		if s.coreManager != nil {
+			s.coreManager.StopProber()
+			s.coreManager.StopAutoRefresh()
 		}
 		if s.wsGateway != nil {
 			if err := s.wsGateway.Stop(ctx); err != nil {
