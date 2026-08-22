@@ -237,6 +237,50 @@ func TestClaudeThinkingReplayFindStartIndex_RefusesPerTurnDuplicateCandidates(t 
 	}
 }
 
+func TestClaudeThinkingReplayFindStartIndex_RefusesMultipleRetainedCandidates(t *testing.T) {
+	// Cached [A, B] and request [A, B-retained, B-retained-duplicate]: the two
+	// retained B candidates are both viable and both thinking-bearing, so the
+	// per-turn match is ambiguous and must fail closed.
+	assistant := []gjson.Result{
+		gjson.Parse(`[{"type":"thinking","thinking":"ra","signature":"sig-a"},{"type":"text","text":"A"}]`),
+		gjson.Parse(`[{"type":"thinking","thinking":"rb","signature":"sig-b-1"},{"type":"text","text":"B"}]`),
+		gjson.Parse(`[{"type":"thinking","thinking":"rb","signature":"sig-b-2"},{"type":"text","text":"B"}]`),
+	}
+	cached := [][]byte{
+		[]byte(`[{"type":"thinking","thinking":"ra","signature":"sig-a"},{"type":"text","text":"A"}]`),
+		[]byte(`[{"type":"thinking","thinking":"rb","signature":"sig-b"},{"type":"text","text":"B"}]`),
+	}
+	if got, _ := helps.ClaudeThinkingReplayFindStartIndex(assistant, cached); got != -1 {
+		t.Fatalf("expected -1 for multiple retained candidates, got %d", got)
+	}
+}
+
+func TestClaudeThinkingReplayAssistantMessageHash_IgnoresToolProvenance(t *testing.T) {
+	const (
+		modelFamily = "claude:test"
+		callerHash  = "caller"
+	)
+
+	base := []byte(`[{"type":"thinking","thinking":"r","signature":"EgI="},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"README.md"},"signature":"sig-a","thoughtSignature":"tsig-a","extra_content":{"google":{"thought_signature":"esig-a"}}}]`)
+	echo := []byte(`[{"type":"thinking","thinking":"r","signature":"EgI="},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"README.md"},"signature":"sig-b","thoughtSignature":"tsig-b","extra_content":{"google":{"thought_signature":"esig-b"}}}]`)
+
+	h1 := helps.ClaudeThinkingReplayAssistantMessageHash(modelFamily, callerHash, base)
+	h2 := helps.ClaudeThinkingReplayAssistantMessageHash(modelFamily, callerHash, echo)
+	if h1 == "" || h2 == "" {
+		t.Fatal("hash should not be empty")
+	}
+	if h1 != h2 {
+		t.Fatalf("tool-use provenance changed the alias hash: %q vs %q", h1, h2)
+	}
+
+	// A different tool input should still produce a different hash.
+	different := []byte(`[{"type":"thinking","thinking":"r","signature":"EgI="},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"OTHER.md"},"signature":"sig-b","thoughtSignature":"tsig-b"}]`)
+	h3 := helps.ClaudeThinkingReplayAssistantMessageHash(modelFamily, callerHash, different)
+	if h3 == h1 {
+		t.Fatalf("different tool input produced same hash: %s", h3)
+	}
+}
+
 func TestRestoreClaudeThinkingReplayContents_RejectDuplicateRequestSideAnchors(t *testing.T) {
 	// A cached signed turn followed by an uncached unsigned duplicate with the
 	// same visible content must not have its signature injected into the later

@@ -347,24 +347,28 @@ func rightmostSubsequenceMatch(assistantContents []gjson.Result, cachedContents 
 			return nil
 		}
 
-		// Prefer the rightmost retained (thinking-bearing) viable candidate. If
-		// there is more than one retained candidate, or more than one unsigned
-		// candidate and none retained, the per-turn match is ambiguous.
-		selected := -1
+		// Prefer a single retained (thinking-bearing) viable candidate. If more
+		// than one retained candidate exists, or more than one unsigned candidate
+		// and none retained, the per-turn match is ambiguous.
+		var retained []int
 		for _, i := range viable {
 			if ContentHasThinking(assistantContents[i]) {
-				selected = i
-				break
+				retained = append(retained, i)
 			}
 		}
-		if selected < 0 {
-			if len(viable) > 1 {
-				return nil
-			}
-			selected = viable[0]
+		if len(retained) > 1 {
+			return nil
 		}
-		matches[k] = selected
-		limit = selected
+		if len(retained) == 1 {
+			matches[k] = retained[0]
+			limit = retained[0]
+			continue
+		}
+		if len(viable) > 1 {
+			return nil
+		}
+		matches[k] = viable[0]
+		limit = viable[0]
 	}
 	return matches
 }
@@ -427,6 +431,9 @@ func ClaudeThinkingReplayUserMessageHash(modelFamily, callerHash string, msg gjs
 // ClaudeThinkingReplayAssistantMessageHash returns a stable hash for the
 // non-thinking parts of an assistant message.
 func ClaudeThinkingReplayAssistantMessageHash(modelFamily, callerHash string, content []byte) string {
+	// Strip tool-use signature/provenance fields before hashing, so an echoed
+	// tool_use with different provenance still resolves the same alias.
+	content = ClaudeThinkingReplayNormalizeCachedContent(content)
 	root := gjson.ParseBytes(content)
 	if root.Type == gjson.String {
 		normalized, err := json.Marshal([]map[string]string{{"type": "text", "text": root.String()}})
