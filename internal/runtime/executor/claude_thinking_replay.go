@@ -68,6 +68,12 @@ func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyaut
 	}
 }
 
+// claudeThinkingReplayMaxAliasesPerRequest caps how many message hashes are
+// registered as scope aliases for a single request. This prevents long
+// histories from generating unbounded alias registration round trips and
+// evicting useful earlier aliases.
+const claudeThinkingReplayMaxAliasesPerRequest = 64
+
 // prepareClaudeThinkingReplayRequest loads cached assistant content for this
 // request and strips any client-supplied _cliproxy_replay_provenance markers
 // from req.Payload. The actual restore is applied to bodyForUpstream after
@@ -96,7 +102,14 @@ func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.
 	// messages.0 has changed. This is done even when the cache is empty so the
 	// first request in a conversation can be rediscovered after compaction.
 	if scope.fallbackKey {
-		for _, m := range helps.ClaudeThinkingReplayMessageHashes(scope.modelFamily, scope.callerHash, req.Payload) {
+		hashes := helps.ClaudeThinkingReplayMessageHashes(scope.modelFamily, scope.callerHash, req.Payload)
+		if len(hashes) > claudeThinkingReplayMaxAliasesPerRequest {
+			keep := make([]internalcache.ClaudeThinkingReplayAliasMessage, 0, claudeThinkingReplayMaxAliasesPerRequest)
+			keep = append(keep, hashes[0])
+			keep = append(keep, hashes[len(hashes)-claudeThinkingReplayMaxAliasesPerRequest+1:]...)
+			hashes = keep
+		}
+		for _, m := range hashes {
 			internalcache.RegisterClaudeThinkingReplayAlias(ctx, scope.modelFamily, scope.sessionKey, m.Hash, scope.firstUserHash)
 		}
 	}
