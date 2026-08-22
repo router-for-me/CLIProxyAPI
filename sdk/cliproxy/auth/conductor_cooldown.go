@@ -368,7 +368,10 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 			auth.StatusMessage = reason
 		}
 		auth.LastError = cloneError(record.LastError)
-		if (record.LastError != nil && record.LastError.Code == ErrorCodeForceCooldown) || strings.HasPrefix(reason, "prober:") {
+		// Only treat the restored cooldown as prober-owned when the reason is
+		// unambiguously from a probe; ErrorCodeForceCooldown is also used by
+		// request-scoped stop-and-cooldown and embeddable callers.
+		if strings.HasPrefix(reason, "prober:") {
 			auth.proberCooldown = true
 			if auth.proberBackoff < 1 {
 				auth.proberBackoff = 1

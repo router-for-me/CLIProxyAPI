@@ -678,12 +678,18 @@ func proberXAIIsDefaultAPIBaseURL(baseURL string) bool {
 }
 
 // proberProbePathForProvider returns the probe path for the provider.
-// OpenAI-compatible executors use /v1/models. Unknown providers fall back to
-// the configured default; if neither is set, the caller should skip the auth.
+// A custom default-probe-path takes precedence over provider defaults.
+// OpenAI-compatible executors use /v1/models when no custom path is
+// configured; unknown providers fall back to the configured default, and if
+// neither is set the caller should skip the auth.
 func proberProbePathForProvider(provider, configured string) string {
+	configured = strings.TrimSpace(configured)
+	if configured != "" && configured != proberDefaultPath {
+		return configured
+	}
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if provider == "" {
-		return strings.TrimSpace(configured)
+		return configured
 	}
 	if p, ok := proberProviderProbePaths[provider]; ok {
 		return p
@@ -691,10 +697,7 @@ func proberProbePathForProvider(provider, configured string) string {
 	if proberIsOpenAICompatibleProvider(provider) {
 		return "/v1/models"
 	}
-	if configured != "" {
-		return configured
-	}
-	return ""
+	return configured
 }
 
 var proberURLRegex = regexp.MustCompile(`https?://[^ \t\n\r\"'<>]+`)

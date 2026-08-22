@@ -601,6 +601,47 @@ func TestManager_RestoreCooldownStatesRestoresProberOwnership(t *testing.T) {
 	}
 }
 
+func TestManager_RestoreCooldownStatesDoesNotMarkNonProberForceCooldownAsProber(t *testing.T) {
+	nextRetry := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	now := time.Now().UTC().Truncate(time.Second)
+	store := &recordingCooldownStateStore{
+		load: []CooldownStateRecord{
+			{
+				Provider:       "test",
+				AuthID:         "auth-non-prober",
+				Status:         "cooling",
+				NextRetryAfter: nextRetry,
+				Reason:         "stop-and-cooldown",
+				LastError:      &Error{Code: ErrorCodeForceCooldown, Message: "stop-and-cooldown", HTTPStatus: http.StatusServiceUnavailable, Retryable: true},
+				UpdatedAt:      now,
+			},
+		},
+	}
+	manager := NewManager(nil, nil, nil)
+	manager.SetCooldownStateStore(store)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-non-prober", Provider: "test"}); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+
+	if errRestore := manager.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatalf("RestoreCooldownStates() returned error: %v", errRestore)
+	}
+
+	auth, ok := manager.GetByID("auth-non-prober")
+	if !ok || auth == nil {
+		t.Fatal("restored auth was not found")
+	}
+	if auth.proberCooldown {
+		t.Fatal("proberCooldown = true, want false for non-prober force cooldown")
+	}
+	if auth.proberBackoff != 0 {
+		t.Fatalf("proberBackoff = %d, want 0 for non-prober force cooldown", auth.proberBackoff)
+	}
+	if !auth.NextRetryAfter.Equal(nextRetry) {
+		t.Fatalf("NextRetryAfter = %v, want %v", auth.NextRetryAfter, nextRetry)
+	}
+}
+
 func TestManagerResultSaveWaitsForCooldownStoreTransition(t *testing.T) {
 	oldStore := &blockingCooldownStateStore{started: make(chan struct{}), release: make(chan struct{})}
 	newStore := &recordingCooldownStateStore{}

@@ -895,13 +895,16 @@ func TestProberProbePathForProvider(t *testing.T) {
 		configured string
 		want       string
 	}{
-		{"gemini", "/models", "/v1beta/models"},
+		{"gemini", "", "/v1beta/models"},
 		{"Gemini", "", "/v1beta/models"},
-		{"aistudio", "/models", "/v1beta/models"},
-		{"xai", "/models", "/v1/models"},
-		{"kimi", "/models", "/v1/models"},
-		{"openai-compatible-groq", "/models", "/v1/models"},
+		{"aistudio", "", "/v1beta/models"},
+		{"xai", "", "/v1/models"},
+		{"kimi", "", "/v1/models"},
+		{"openai-compatible-groq", "", "/v1/models"},
 		{"openai-compatibility", "", "/v1/models"},
+		{"gemini", "/health", "/health"},
+		{"claude", "/v1/health", "/v1/health"},
+		{"openai-compatible-groq", "/custom", "/custom"},
 		{"test", "/models", "/models"},
 		{"test", "", ""},
 	}
