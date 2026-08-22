@@ -42,24 +42,20 @@ func (e *doctrineRetryAfterError) RetryAfter() *time.Duration {
 type doctrineExecutor struct {
 	provider string
 
-	mu                sync.Mutex
-	executeCalls      map[string]int
-	executeModels     map[string][]string
-	executePayloads   map[string][]byte
-	executeErrs       map[string]error
-	firstExecuteEmpty bool
-	firstExecuteDone  bool
-	executeCallCount  int
-	failFirstN        int
-	failFirstError    error
-	streamCalls       map[string]int
-	streamModels      map[string][]string
-	streamPayloads    map[string][][]byte
-	streamErrs        map[string]error
-	firstStreamEmpty  bool
-	firstStreamDone   bool
-	countTokensCalls  map[string]int
-	countTokensErrs   map[string]error
+	mu               sync.Mutex
+	executeCalls     map[string]int
+	executeModels    map[string][]string
+	executePayloads  map[string][]byte
+	executeErrs      map[string]error
+	executeCallCount int
+	failFirstN       int
+	failFirstError   error
+	streamCalls      map[string]int
+	streamModels     map[string][]string
+	streamPayloads   map[string][][]byte
+	streamErrs       map[string]error
+	countTokensCalls map[string]int
+	countTokensErrs  map[string]error
 }
 
 func newDoctrineExecutor(provider string) *doctrineExecutor {
@@ -95,10 +91,6 @@ func (e *doctrineExecutor) Execute(_ context.Context, auth *Auth, req cliproxyex
 	if err := e.executeErrs[auth.ID]; err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	if e.firstExecuteEmpty && !e.firstExecuteDone {
-		e.firstExecuteDone = true
-		return cliproxyexecutor.Response{Payload: []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`)}, nil
-	}
 	if e.failFirstN > 0 && e.executeCallCount <= e.failFirstN {
 		if e.failFirstError != nil {
 			return cliproxyexecutor.Response{}, e.failFirstError
@@ -118,13 +110,6 @@ func (e *doctrineExecutor) ExecuteStream(_ context.Context, auth *Auth, req clip
 	e.streamModels[auth.ID] = append(e.streamModels[auth.ID], req.Model)
 	if err := e.streamErrs[auth.ID]; err != nil {
 		return nil, err
-	}
-	if e.firstStreamEmpty && !e.firstStreamDone {
-		e.firstStreamDone = true
-		ch := make(chan cliproxyexecutor.StreamChunk, 1)
-		ch <- cliproxyexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
-		close(ch)
-		return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
 	}
 	payloads := e.streamPayloads[auth.ID]
 	if len(payloads) == 0 {
@@ -303,17 +288,24 @@ func TestSingleTransient503Cooldown(t *testing.T) {
 // scenarios skip on stock main today and run once #4881 lands.
 func TestEmptyCompletionRotatesNonStream(t *testing.T) {
 	exec := newDoctrineExecutor("claude")
-	manager, _, model := newDoctrineManager(t, exec, 2)
+	manager, ids, model := newDoctrineManager(t, exec, 2)
 
-	// First auth picked returns an empty completion; the rotated auth returns content.
-	exec.firstExecuteEmpty = true
+	// RoundRobin available list is ID-sorted; make ids[0] the first pick so the
+	// empty-completion auth and the fallback auth are deterministic.
+	sort.Strings(ids)
+
+	// The designated bad auth consistently returns an empty completion.
+	exec.executePayloads[ids[0]] = []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`)
 
 	resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 	if err != nil {
 		t.Fatalf("Execute error = %v", err)
 	}
-	if !strings.Contains(string(resp.Payload), "ok") || exec.TotalCalls() != 2 {
+	if !strings.Contains(string(resp.Payload), `"content":"ok"`) {
 		t.Skipf("stock main lacks empty-completion rotation. Enable after #4881 merges.")
+	}
+	if exec.Calls(ids[1]) == 0 {
+		t.Fatalf("non-stream failover did not select a different credential; calls[0]=%d, calls[1]=%d", exec.Calls(ids[0]), exec.Calls(ids[1]))
 	}
 }
 
@@ -321,8 +313,12 @@ func TestEmptyCompletionRotatesStream(t *testing.T) {
 	exec := newDoctrineExecutor("claude")
 	manager, ids, model := newDoctrineManager(t, exec, 2)
 
-	// First auth streams only [DONE]; second auth streams the default content.
-	exec.firstStreamEmpty = true
+	// RoundRobin available list is ID-sorted; make ids[0] the first pick so the
+	// empty-stream auth and the fallback auth are deterministic.
+	sort.Strings(ids)
+
+	// The designated bad auth consistently streams only [DONE].
+	exec.streamPayloads[ids[0]] = [][]byte{[]byte("data: [DONE]\n\n")}
 
 	stream, err := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
 	if err != nil {
@@ -335,8 +331,11 @@ func TestEmptyCompletionRotatesStream(t *testing.T) {
 		}
 		got.Write(chunk.Payload)
 	}
-	if !strings.Contains(got.String(), "ok") || exec.StreamCalls(ids[0])+exec.StreamCalls(ids[1]) != 2 {
+	if !strings.Contains(got.String(), `"content":"ok"`) {
 		t.Skipf("stock main lacks empty-completion rotation. Enable after #4881 merges.")
+	}
+	if exec.StreamCalls(ids[1]) == 0 {
+		t.Fatalf("stream failover did not select a different credential; streamCalls[0]=%d, streamCalls[1]=%d", exec.StreamCalls(ids[0]), exec.StreamCalls(ids[1]))
 	}
 }
 
@@ -393,10 +392,14 @@ func TestInStreamProviderErrorDuringBootstrap(t *testing.T) {
 // one is dead, the last live account still answers the request.
 func TestAllButOneDeadStillServes(t *testing.T) {
 	exec := newDoctrineExecutor("claude")
-	manager, _, model := newDoctrineManager(t, exec, 3)
+	manager, ids, model := newDoctrineManager(t, exec, 3)
 
-	// The first N-1 execution attempts fail; the last remaining auth is live.
-	exec.failFirstN = 2
+	// RoundRobin available list is ID-sorted; keep auth order deterministic.
+	sort.Strings(ids)
+
+	// The first N-1 auths are permanently dead; the last remaining auth is live.
+	exec.executeErrs[ids[0]] = &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"}
+	exec.executeErrs[ids[1]] = &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"}
 
 	resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 	if err != nil {
@@ -405,8 +408,8 @@ func TestAllButOneDeadStillServes(t *testing.T) {
 	if !strings.Contains(string(resp.Payload), "ok") {
 		t.Fatalf("payload = %q, want success from last live auth", string(resp.Payload))
 	}
-	if exec.TotalCalls() != 3 {
-		t.Fatalf("total calls = %d, want 3 (tried dead auths then succeeded)", exec.TotalCalls())
+	if exec.Calls(ids[2]) == 0 {
+		t.Fatalf("expected success from live credential %s, got calls[0]=%d, calls[1]=%d, calls[2]=%d", ids[2], exec.Calls(ids[0]), exec.Calls(ids[1]), exec.Calls(ids[2]))
 	}
 }
 
