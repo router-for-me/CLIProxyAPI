@@ -1029,6 +1029,123 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_RebindsFullAliasGroupWhenConflictingAuthUnavailable(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+	}
+
+	// Seed the cache so the fallback conversation alias is already bound to an
+	// unavailable auth, while a separate alias shares the same group.
+	seedKey := "claude::conv:existing-session::claude-3"
+	otherAlias := "claude::conv:other-session::claude-3"
+	selector.cache.SetAliases("auth-unavailable", seedKey, otherAlias)
+
+	// Request carries a new prompt_cache_key plus the existing conversation id
+	// as fallback; the new primary key must follow the rebinding winner.
+	payload := []byte(`{"prompt_cache_key":"pck:rebind-test","conversation":{"id":"existing-session"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+
+	available := auths
+	first, err := selector.Pick(context.Background(), "claude", "claude-3", opts, available)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if first.ID == "auth-unavailable" {
+		t.Fatalf("Pick() returned unavailable auth")
+	}
+
+	// The full alias group (including the pre-existing aliases) should now
+	// resolve to the winning auth.
+	for i := 0; i < 5; i++ {
+		got, _ := selector.Pick(context.Background(), "claude", "claude-3", opts, available)
+		if got.ID != first.ID {
+			t.Fatalf("Pick() #%d inconsistent: got %q, want %q", i, got.ID, first.ID)
+		}
+	}
+
+	// A request using the other alias in the same group should also hit the winner.
+	otherPayload := []byte(`{"prompt_cache_key":"pck:other","conversation":{"id":"other-session"}}`)
+	otherOpts := cliproxyexecutor.Options{OriginalRequest: otherPayload}
+	got, _ := selector.Pick(context.Background(), "claude", "claude-3", otherOpts, available)
+	if got.ID != first.ID {
+		t.Fatalf("other alias did not follow winner: got %q, want %q", got.ID, first.ID)
+	}
+}
+
+func TestSessionAffinitySelector_ConcurrentUnavailableAuthRebindDoesNotOverwriteWinner(t *testing.T) {
+	t.Parallel()
+
+	const attempts = 50
+	for i := 0; i < attempts; i++ {
+		func() {
+			fallback := &RoundRobinSelector{}
+			selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+				Fallback: fallback,
+				TTL:      time.Minute,
+			})
+			defer selector.Stop()
+
+			auths := []*Auth{
+				{ID: "auth-a"},
+				{ID: "auth-b"},
+			}
+
+			seedKey := "claude::conv:existing-session::claude-3"
+			selector.cache.SetAliases("auth-unavailable", seedKey)
+
+			payload := []byte(`{"prompt_cache_key":"pck:rebind-test","conversation":{"id":"existing-session"}}`)
+			opts := cliproxyexecutor.Options{OriginalRequest: payload}
+
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			results := make([]string, 2)
+			errs := make([]error, 2)
+			for j := 0; j < 2; j++ {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					<-start
+					a, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+					if err != nil {
+						errs[idx] = err
+						return
+					}
+					if a != nil {
+						results[idx] = a.ID
+					}
+				}(j)
+			}
+			close(start)
+			wg.Wait()
+
+			for _, err := range errs {
+				if err != nil {
+					t.Fatalf("iteration %d: Pick() error = %v", i, err)
+				}
+			}
+			if results[0] == "" || results[1] == "" || results[0] != results[1] {
+				t.Fatalf("iteration %d: concurrent picks diverged: %v", i, results)
+			}
+
+			// Subsequent picks should keep returning the winning auth.
+			got, _ := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+			if got.ID != results[0] {
+				t.Fatalf("iteration %d: follow-up pick returned %q, want %q", i, got.ID, results[0])
+			}
+		}()
+	}
+}
+
 func TestExtractSessionID_ClaudeCodePriorityOverHeader(t *testing.T) {
 	t.Parallel()
 
@@ -1956,6 +2073,112 @@ func TestSessionAffinitySelector_Concurrent(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_ConcurrentCacheMissBindsOneAuth(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}, {ID: "auth-c"}}
+	opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_concurrent-cache-miss"}}`)}
+
+	const goroutines = 64
+	start := make(chan struct{})
+	results := make(chan string, goroutines)
+	errs := make(chan error, goroutines)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			auth, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- auth.ID
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("concurrent cache-miss Pick() error = %v", err)
+	}
+	var expected string
+	for authID := range results {
+		if expected == "" {
+			expected = authID
+		}
+		if authID != expected {
+			t.Fatalf("concurrent cache-miss Pick() returned %q after %q was bound", authID, expected)
+		}
+	}
+	if expected == "" {
+		t.Fatal("concurrent cache-miss Pick() returned no auth")
+	}
+}
+
+func TestSessionCache_SetAliasesIfAllAbsent_HonorsOccupiedAlias(t *testing.T) {
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	cache.SetAliases("auth-a", "shared", "conv-a")
+
+	bound, ok := cache.SetAliasesIfAllAbsent("auth-b", "shared", "conv-b")
+	if ok {
+		t.Fatalf("SetAliasesIfAllAbsent must not succeed when an alias is occupied")
+	}
+	if bound != "auth-a" {
+		t.Fatalf("SetAliasesIfAllAbsent must return existing auth, got %q", bound)
+	}
+	if got, ok := cache.Get("conv-b"); ok {
+		t.Fatalf("conv-b must not be bound, got %q", got)
+	}
+	if got, ok := cache.Get("shared"); !ok || got != "auth-a" {
+		t.Fatalf("shared must remain auth-a, got %q, %v", got, ok)
+	}
+}
+
+func TestSessionCache_SetAliasesIfNoConflict(t *testing.T) {
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	bound, ok := cache.SetAliasesIfNoConflict("auth-a", "k1", "k2")
+	if !ok || bound != "auth-a" {
+		t.Fatalf("SetAliasesIfNoConflict should set all, got %q, %v", bound, ok)
+	}
+	if got, ok := cache.Get("k1"); !ok || got != "auth-a" {
+		t.Fatalf("k1 = %q, %v", got, ok)
+	}
+
+	bound, ok = cache.SetAliasesIfNoConflict("auth-a", "k2", "k3")
+	if !ok || bound != "auth-a" {
+		t.Fatalf("SetAliasesIfNoConflict should attach free alias, got %q, %v", bound, ok)
+	}
+	if got, ok := cache.Get("k3"); !ok || got != "auth-a" {
+		t.Fatalf("k3 should attach to auth-a, got %q, %v", got, ok)
+	}
+
+	cache.SetAliases("auth-b", "k4")
+	bound, ok = cache.SetAliasesIfNoConflict("auth-c", "k4", "k5")
+	if ok {
+		t.Fatalf("SetAliasesIfNoConflict should fail on conflict")
+	}
+	if bound != "auth-b" {
+		t.Fatalf("SetAliasesIfNoConflict should return conflicting auth, got %q", bound)
+	}
+	if got, ok := cache.Get("k5"); ok {
+		t.Fatalf("k5 should not be bound, got %q", got)
+	}
+}
+
 func TestExtractSessionIDNativeSignals(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -2214,6 +2437,67 @@ func TestSessionCache_StopConcurrent(t *testing.T) {
 			}()
 		}
 		wg.Wait()
+	}
+}
+
+func TestReplaceAliasesIfUnchanged_MergesSameAuthGroups(t *testing.T) {
+	t.Parallel()
+
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	// Two separate alias groups bound to the same unavailable auth.
+	cache.SetAliases("auth-unavailable", "claude::conv:group1::claude-3")
+	cache.SetAliases("auth-unavailable", "claude::conv:group2::claude-3")
+
+	coldKeys := []string{
+		"claude::conv:group1::claude-3",
+		"claude::conv:group2::claude-3",
+		"claude::pck:rebind-test::claude-3",
+	}
+
+	rebound, ok := cache.ReplaceAliasesIfUnchanged("auth-unavailable", "auth-a", coldKeys...)
+	if !ok || rebound != "auth-a" {
+		t.Fatalf("ReplaceAliasesIfUnchanged() = %q, %v, want auth-a, true", rebound, ok)
+	}
+
+	for _, key := range coldKeys {
+		if got, exists := cache.Get(key); !exists || got != "auth-a" {
+			t.Fatalf("key %q = %q, %v, want auth-a, true", key, got, exists)
+		}
+	}
+}
+
+func TestReplaceAliasesIfUnchanged_KeepsRequestedAliases(t *testing.T) {
+	t.Parallel()
+
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	// Existing group already has a prompt-cache alias. The new request supplies
+	// a different prompt-cache alias and a new stable alias. The requested
+	// aliases must survive compaction/rebind even though compactSessionAliases
+	// would otherwise keep only the first prompt-cache alias it sees.
+	oldPrompt := "claude::pck:old::claude-3"
+	oldStable := "claude::conv:existing-session::claude-3"
+	cache.SetAliases("auth-unavailable", oldPrompt, oldStable)
+
+	newPrompt := "claude::pck:new::claude-3"
+	newStable := "claude::conv:new-session::claude-3"
+	// The request hits the existing group through oldStable and also supplies
+	// two new aliases that must be preserved during compaction.
+	coldKeys := []string{newPrompt, newStable, oldStable}
+
+	rebound, ok := cache.ReplaceAliasesIfUnchanged("auth-unavailable", "auth-a", coldKeys...)
+	if !ok || rebound != "auth-a" {
+		t.Fatalf("ReplaceAliasesIfUnchanged() = %q, %v, want auth-a, true", rebound, ok)
+	}
+
+	if got, exists := cache.Get(newPrompt); !exists || got != "auth-a" {
+		t.Fatalf("requested prompt-cache alias %q = %q, %v, want auth-a, true", newPrompt, got, exists)
+	}
+	if got, exists := cache.Get(newStable); !exists || got != "auth-a" {
+		t.Fatalf("requested stable alias %q = %q, %v, want auth-a, true", newStable, got, exists)
 	}
 }
 

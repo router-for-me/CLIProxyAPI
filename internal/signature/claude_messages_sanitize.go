@@ -1,6 +1,7 @@
 package signature
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 
@@ -92,7 +93,7 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 			partType := part.Get("type").String()
 			if partType == "tool_use" {
 				if opts.DropToolSignatures {
-					updatedPart, changed := stripClaudeToolUseSignatureFields(part)
+					updatedPart, changed := StripClaudeToolUseSignatureFields(part)
 					if changed {
 						messageModified = true
 						report.DroppedSignatures++
@@ -124,10 +125,68 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 				continue
 			}
 
+			// Replay provenance is added only internally by the executor after the
+			// sanitizer has already run. Any client-supplied marker is untrusted and
+			// must be stripped so it cannot bypass signature validation.
+			if part.Get("_cliproxy_replay_provenance").Exists() {
+				updated, _ := sjson.Delete(part.Raw, "_cliproxy_replay_provenance")
+				part = gjson.Parse(updated)
+				messageModified = true
+			}
+
 			rawSignature := part.Get("signature").String()
 			if opts.PreserveEmptyThinkingBlocks {
-				report.Preserved++
-				keptParts = append(keptParts, part.Raw)
+				// In compat mode the block shape must survive, but the signature still
+				// needs to be normalized, emulated, or stripped to avoid sending an
+				// incompatible or opaque signature to the upstream.
+				decision := DecideSignatureCompatibilityForModel(targetProvider, opts.TargetModel, rawSignature, SignatureBlockKindClaudeThinking)
+				decision.Reason = fmt.Sprintf("messages[%d].content[%d]: %s", i, j, decision.Reason)
+				report.Decisions = append(report.Decisions, decision)
+
+				switch decision.Action {
+				case SignatureActionPreserve:
+					report.Preserved++
+					if decision.NormalizedSignature != "" && decision.NormalizedSignature != rawSignature {
+						updated, _ := sjson.Set(part.Raw, "signature", decision.NormalizedSignature)
+						keptParts = append(keptParts, updated)
+						messageModified = true
+					} else {
+						keptParts = append(keptParts, part.Raw)
+					}
+				case SignatureActionReplaceWithGeminiBypass:
+					report.ReplacedSignatures++
+					updated, _ := sjson.Set(part.Raw, "signature", decision.ReplacementSignature)
+					keptParts = append(keptParts, updated)
+					messageModified = true
+				default:
+					// DropBlock, DropSignature, or NoCompatibleReplacement: keep the
+					// block shape for the compat endpoint. Preserve empty placeholders
+					// with their required signature member, and keep only unprefixed,
+					// non-foreign decodable Claude E/R shapes as a fallback.
+					if isEmptyClaudeThinkingPlaceholder(part) {
+						report.Preserved++
+						keptParts = append(keptParts, part.Raw)
+					} else if targetProvider == SignatureProviderClaude {
+						if replayable, normalized := isClaudeReplayableShortSignature(rawSignature); replayable {
+							report.Preserved++
+							if normalized != rawSignature {
+								updated, _ := sjson.Set(part.Raw, "signature", normalized)
+								keptParts = append(keptParts, updated)
+							} else {
+								keptParts = append(keptParts, part.Raw)
+							}
+						} else {
+							report.DroppedSignatures++
+							updated, _ := sjson.Set(part.Raw, "signature", "")
+							keptParts = append(keptParts, updated)
+						}
+					} else {
+						report.DroppedSignatures++
+						updated, _ := sjson.Set(part.Raw, "signature", "")
+						keptParts = append(keptParts, updated)
+					}
+					messageModified = true
+				}
 				continue
 			}
 			if targetProvider == SignatureProviderClaude && isEmptyClaudeThinkingPlaceholder(part) && !opts.DropEmptyThinkingPlaceholders {
@@ -185,7 +244,11 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 	return output, report
 }
 
-func stripClaudeToolUseSignatureFields(part gjson.Result) (string, bool) {
+// StripClaudeToolUseSignatureFields removes tool-use signature/provenance
+// fields and empty extra_content.google/extra_content wrappers. It is exported
+// so the executor's replay-cache match can normalize cached tool_use parts with
+// the same logic the upstream sanitizer applies.
+func StripClaudeToolUseSignatureFields(part gjson.Result) (string, bool) {
 	updated := part.Raw
 	changed := false
 	for _, sigPath := range claudeToolUseProvenancePaths() {
@@ -277,4 +340,61 @@ func deleteEmptyJSONObjectPath(raw, path string) (string, bool) {
 		return raw, false
 	}
 	return updated, true
+}
+
+// isClaudeReplayableShortSignature is the final compat fallback for thinking
+// blocks. It accepts only the minimal 1-2 byte E-prefixed synthetic shape used
+// by the Claude thinking replay cache (e.g. "EgI="). Anything larger or
+// foreign-prefixed is rejected, so Grok/xAI encrypted_content that happens to
+// base64-encode to 'E' or 'R' is never forwarded.
+//
+// Longer valid Claude signatures are already handled by
+// DecideSignatureCompatibilityForModel before this fallback runs; the detector
+// call here would be redundant and is deliberately avoided for both correctness
+// and cost.
+func isClaudeReplayableShortSignature(rawSignature string) (bool, string) {
+	if provider, payload, ok := SplitSignatureProviderPrefix(rawSignature); ok {
+		if provider != SignatureProviderClaude {
+			return false, ""
+		}
+		if strings.Contains(payload, "#") {
+			// Reject nested or residual provider prefixes (e.g. claude#vendor#...).
+			return false, ""
+		}
+		if ok, normalized := isShortClaudeSyntheticSignature(payload); ok {
+			return true, normalized
+		}
+		return false, ""
+	}
+	if strings.Contains(rawSignature, "#") {
+		// Unrecognized provider prefix (e.g. vendor#...).
+		return false, ""
+	}
+	if ok, normalized := isShortClaudeSyntheticSignature(rawSignature); ok {
+		return true, normalized
+	}
+	return false, ""
+}
+
+// isShortClaudeSyntheticSignature reports whether rawSignature is the minimal
+// 1-2 byte E-prefixed synthetic used by the Claude thinking replay cache.
+// Anything larger is rejected without decoding, so this does not allocate for
+// multi-kilobyte opaque blobs. The returned string is the trimmed, normalized
+// form to avoid forwarding whitespace-padded signatures upstream.
+func isShortClaudeSyntheticSignature(rawSignature string) (bool, string) {
+	sig := strings.TrimSpace(rawSignature)
+	// Valid base64 is a multiple of 4 characters; 4 characters decode to at most
+	// 3 bytes. Only 1-2 byte payloads can be the short synthetic, so anything
+	// longer is rejected before decoding.
+	if len(sig) > 4 {
+		return false, ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(sig)
+	if err != nil || len(decoded) == 0 || len(decoded) > 2 {
+		return false, ""
+	}
+	if decoded[0] != 0x12 {
+		return false, ""
+	}
+	return true, sig
 }

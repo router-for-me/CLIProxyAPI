@@ -889,7 +889,14 @@ func applyClaudeHeadersWithNativeProfile(
 		r.Header.Set("X-Claude-Code-Session-Id", sessionID)
 	} else {
 		var errSessionID error
-		sessionID, errSessionID = helps.CachedSessionIDRequired(r.Context(), apiKey)
+		credential := ""
+		if auth != nil {
+			credential = strings.TrimSpace(auth.Index)
+			if credential == "" {
+				credential = strings.TrimSpace(auth.ID)
+			}
+		}
+		sessionID, errSessionID = helps.CachedSessionIDRequired(r.Context(), apiKey, credential)
 		if errSessionID != nil {
 			return errSessionID
 		}

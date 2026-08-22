@@ -732,8 +732,41 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil {
 		return nil, err
 	}
-	bind(auth.ID)
-	entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+
+	coldKeys := []string{cacheKey}
+	if fallbackKey != "" {
+		coldKeys = append(coldKeys, fallbackKey)
+	}
+	// Cold cache binding: atomically install the binding only when no alias is
+	// already bound to a different auth. Free aliases are attached to the same
+	// auth, so a later turn that retains only the conversation ID stays sticky.
+	boundAuth, ok := s.cache.SetAliasesIfNoConflict(auth.ID, coldKeys...)
+	if ok {
+		entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		return auth, nil
+	}
+	if boundAuth != "" {
+		for _, a := range available {
+			if a.ID == boundAuth {
+				entry.Infof("session-affinity: cache miss, alias already bound to %s | session=%s provider=%s model=%s", a.ID, truncateSessionID(primaryID), provider, model)
+				return a, nil
+			}
+		}
+		// The conflicting auth is no longer available. Rebind the full alias
+		// group to the winning auth only if the group is still bound to the
+		// unavailable auth, so a concurrent caller that already rebound it is not
+		// overwritten by the loser.
+		if reboundAuth, ok := s.cache.ReplaceAliasesIfUnchanged(boundAuth, auth.ID, coldKeys...); ok {
+			entry.Infof("session-affinity: cache miss, conflicting auth unavailable, rebinding group | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		} else if reboundAuth != "" {
+			for _, a := range available {
+				if a.ID == reboundAuth {
+					entry.Infof("session-affinity: cache miss, alias rebound concurrently to %s | session=%s provider=%s model=%s", a.ID, truncateSessionID(primaryID), provider, model)
+					return a, nil
+				}
+			}
+		}
+	}
 	return auth, nil
 }
 
