@@ -3,7 +3,6 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -140,7 +139,7 @@ func kimiThinkingReplayContentIsReplayable(content []byte) bool {
 }
 
 func restoreKimiThinkingReplayContent(body, cachedContent []byte) ([]byte, bool) {
-	cachedParts, cachedOK := kimiNonThinkingContentParts(gjson.ParseBytes(cachedContent))
+	cachedParts, cachedOK := helps.NonThinkingContentParts(gjson.ParseBytes(cachedContent))
 	if !cachedOK {
 		return body, false
 	}
@@ -155,18 +154,18 @@ func restoreKimiThinkingReplayContent(body, cachedContent []byte) ([]byte, bool)
 			continue
 		}
 		currentContent := message.Get("content")
-		if kimiJSONEqual([]byte(currentContent.Raw), cachedContent) {
+		if helps.JSONEqual([]byte(currentContent.Raw), cachedContent) {
 			return body, false
 		}
-		currentParts, currentOK := kimiNonThinkingContentParts(currentContent)
-		if !currentOK || !kimiCanonicalPartsEqual(currentParts, cachedParts) {
+		currentParts, currentOK := helps.NonThinkingContentParts(currentContent)
+		if !currentOK || !helps.CanonicalPartsEqual(currentParts, cachedParts) {
 			continue
 		}
 		// Non-thinking parts already match. If the current content has a
 		// thinking block, restore only when it matches the cached thinking block
 		// ignoring signature, so a sanitized echoed turn gets its cached
 		// provenance back.
-		if kimiContentHasThinking(currentContent) && !kimiThinkingMatchesCachedIgnoringSignature(currentContent, gjson.ParseBytes(cachedContent)) {
+		if helps.ContentHasThinking(currentContent) && !helps.ThinkingMatchesCachedIgnoringSignature(currentContent, gjson.ParseBytes(cachedContent)) {
 			continue
 		}
 		updated, errSet := sjson.SetRawBytes(body, fmt.Sprintf("messages.%d.content", index), cachedContent)
@@ -176,120 +175,6 @@ func restoreKimiThinkingReplayContent(body, cachedContent []byte) ([]byte, bool)
 		return updated, true
 	}
 	return body, false
-}
-
-func kimiContentHasThinking(content gjson.Result) bool {
-	if !content.IsArray() {
-		return false
-	}
-	for _, part := range content.Array() {
-		switch strings.TrimSpace(part.Get("type").String()) {
-		case "thinking", "redacted_thinking":
-			return true
-		}
-	}
-	return false
-}
-
-// kimiThinkingMatchesCachedIgnoringSignature checks that every thinking or
-// redacted_thinking part in current matches the corresponding cached part after
-// removing signature fields. Non-thinking parts are assumed to be equal by the
-// caller (kimiNonThinkingContentParts/kimiCanonicalPartsEqual).
-func kimiThinkingMatchesCachedIgnoringSignature(current, cached gjson.Result) bool {
-	if !current.IsArray() || !cached.IsArray() {
-		return false
-	}
-	currentParts := current.Array()
-	cachedParts := cached.Array()
-	if len(currentParts) != len(cachedParts) {
-		return false
-	}
-	for i, curPart := range currentParts {
-		cachedPart := cachedParts[i]
-		curType := strings.TrimSpace(curPart.Get("type").String())
-		cachedType := strings.TrimSpace(cachedPart.Get("type").String())
-		if curType != cachedType {
-			return false
-		}
-		switch curType {
-		case "thinking", "redacted_thinking":
-			curClean := kimiThinkingPartWithoutSignature(curPart)
-			cachedClean := kimiThinkingPartWithoutSignature(cachedPart)
-			curCanon, ok1 := kimiCanonicalJSON([]byte(curClean))
-			cachedCanon, ok2 := kimiCanonicalJSON([]byte(cachedClean))
-			if !ok1 || !ok2 || !bytes.Equal(curCanon, cachedCanon) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-// kimiThinkingPartWithoutSignature returns a thinking/redacted_thinking part
-// with signature fields removed so two parts can be compared ignoring provenance.
-func kimiThinkingPartWithoutSignature(part gjson.Result) string {
-	updated := part.Raw
-	for _, path := range []string{"signature", "thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-		if gjson.Get(updated, path).Exists() {
-			updated, _ = sjson.Delete(updated, path)
-		}
-	}
-	return updated
-}
-
-func kimiNonThinkingContentParts(content gjson.Result) ([][]byte, bool) {
-	if !content.IsArray() {
-		return nil, false
-	}
-	parts := make([][]byte, 0, len(content.Array()))
-	for _, part := range content.Array() {
-		switch strings.TrimSpace(part.Get("type").String()) {
-		case "thinking", "redacted_thinking":
-			continue
-		case "tool_use":
-			if strings.TrimSpace(part.Get("id").String()) == "" {
-				return nil, false
-			}
-		}
-		canonical, ok := kimiCanonicalJSON([]byte(part.Raw))
-		if !ok {
-			return nil, false
-		}
-		parts = append(parts, canonical)
-	}
-	return parts, true
-}
-
-func kimiCanonicalPartsEqual(left, right [][]byte) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for i := range left {
-		if !bytes.Equal(left[i], right[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func kimiJSONEqual(left, right []byte) bool {
-	canonicalLeft, leftOK := kimiCanonicalJSON(left)
-	canonicalRight, rightOK := kimiCanonicalJSON(right)
-	return leftOK && rightOK && bytes.Equal(canonicalLeft, canonicalRight)
-}
-
-func kimiCanonicalJSON(raw []byte) ([]byte, bool) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value any
-	if errDecode := decoder.Decode(&value); errDecode != nil {
-		return nil, false
-	}
-	canonical, errMarshal := json.Marshal(value)
-	if errMarshal != nil {
-		return nil, false
-	}
-	return canonical, true
 }
 
 type kimiThinkingReplayStreamBlock struct {

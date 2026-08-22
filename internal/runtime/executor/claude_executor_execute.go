@@ -95,7 +95,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// obfuscated with the same words before the replay match/restore runs.
 	_, cloakSettings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
 	if cloaked && len(cloakSettings.sensitiveWords) > 0 && len(replayContents) > 0 {
-		replayContents = obfuscateClaudeThinkingReplayContents(replayContents, cloakSettings.sensitiveWords)
+		replayContents = helps.ObfuscateClaudeThinkingReplayContents(replayContents, cloakSettings.sensitiveWords)
 	}
 	systemPlacementState := captureClaudeCodeSystemPlacement(bodyBeforeCloaking, body, cloaked)
 	// Only the Messages endpoint on Anthropic itself was captured; count_tokens
@@ -177,7 +177,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	bodyForUpstream := body
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel, helps.APIKeyModelIsCompat(req))
 	if len(replayContents) > 0 && replayScope.valid() {
-		bodyForUpstream, replayScope.replayApplied = restoreClaudeThinkingReplayContents(bodyForUpstream, replayContents)
+		bodyForUpstream, replayScope.replayApplied = helps.RestoreClaudeThinkingReplayContents(bodyForUpstream, replayContents)
 	}
 	var oauthToolNamesReverseMap map[string]string
 	if fp.MCPAlias && cloaked {

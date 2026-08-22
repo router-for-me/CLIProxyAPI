@@ -10,6 +10,7 @@ import (
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -64,7 +65,7 @@ func TestRestoreKimiThinkingReplayContentPreservesCompleteAssistantContent(t *te
 		t.Fatal("expected cached thinking content to be restored")
 	}
 	got := gjson.GetBytes(updated, "messages.1.content")
-	if !kimiJSONEqual([]byte(got.Raw), cached) {
+	if !helps.JSONEqual([]byte(got.Raw), cached) {
 		t.Fatalf("restored content = %s, want complete cached content %s", got.Raw, cached)
 	}
 }
@@ -77,7 +78,7 @@ func TestRestoreKimiThinkingReplayContentDoesNotReplaceExistingThinking(t *testi
 	if restored {
 		t.Fatalf("existing thinking must not be replaced: %s", updated)
 	}
-	if !kimiJSONEqual(updated, body) {
+	if !helps.JSONEqual(updated, body) {
 		t.Fatalf("request changed despite existing thinking: got %s want %s", updated, body)
 	}
 }
@@ -202,7 +203,7 @@ func TestKimiExecutorClaudeNonStreamReplaysThinkingAcrossK3VariantSwitch(t *test
 		t.Fatalf("upstream request count = %d, want 2", len(upstreamBodies))
 	}
 	gotContent := gjson.GetBytes(upstreamBodies[1], "messages.1.content")
-	if !kimiJSONEqual([]byte(gotContent.Raw), []byte(cachedContent)) {
+	if !helps.JSONEqual([]byte(gotContent.Raw), []byte(cachedContent)) {
 		t.Fatalf("second upstream assistant content = %s, want %s", gotContent.Raw, cachedContent)
 	}
 	if _, found, errGet := internalcache.GetKimiThinkingReplayRequired(context.Background(), "k3", "execution:nonstream-switch"); errGet != nil || found {
@@ -426,7 +427,7 @@ func TestKimiThinkingReplayUnknownStreamDeltaPreservesPreviousCache(t *testing.T
 	consumeKimiReplayStream(t, wrapKimiThinkingReplayStream(context.Background(), &cliproxyexecutor.StreamResult{Chunks: chunks}, scope))
 
 	got, found, errGet := internalcache.GetKimiThinkingReplayRequired(context.Background(), "k3", sessionKey)
-	if errGet != nil || !found || !kimiJSONEqual(got, cached) {
+	if errGet != nil || !found || !helps.JSONEqual(got, cached) {
 		t.Fatalf("unknown successful delta changed previous cache: got %s, found %v, error %v", got, found, errGet)
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -62,15 +63,29 @@ func TestClaudeThinkingReplayFindStartIndex_RefusesPartialAnchor(t *testing.T) {
 		[]byte(`[{"type":"text","text":"A-old"}]`),
 		[]byte(`[{"type":"text","text":"A-new"}]`),
 	}
-	if got := claudeThinkingReplayFindStartIndex(assistant, cached); got != -1 {
+	if got := helps.ClaudeThinkingReplayFindStartIndex(assistant, cached); got != -1 {
 		t.Fatalf("expected -1 for partial match with unsigned trailing turn, got %d", got)
 	}
 
 	assistantFull := []gjson.Result{
 		gjson.Parse(`[{"type":"text","text":"A-new"}]`),
 	}
-	if got := claudeThinkingReplayFindStartIndex(assistantFull, cached); got != 1 {
+	if got := helps.ClaudeThinkingReplayFindStartIndex(assistantFull, cached); got != 1 {
 		t.Fatalf("expected latest full match start 1, got %d", got)
+	}
+}
+
+func TestClaudeThinkingReplayFindStartIndex_RefusesAmbiguousShorterSuffix(t *testing.T) {
+	assistant := []gjson.Result{
+		gjson.Parse(`[{"type":"text","text":"A"}]`),
+		gjson.Parse(`[{"type":"text","text":"X"}]`),
+	}
+	cached := [][]byte{
+		[]byte(`[{"type":"text","text":"A"}]`),
+		[]byte(`[{"type":"text","text":"A"}]`),
+	}
+	if got := helps.ClaudeThinkingReplayFindStartIndex(assistant, cached); got != -1 {
+		t.Fatalf("expected -1 for ambiguous shorter suffix with duplicate cached visible turn, got %d", got)
 	}
 }
 
@@ -79,14 +94,14 @@ func TestClaudeThinkingReplayCallerHash_IgnoresWhitespaceOnlyHeaders(t *testing.
 	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
 	req := cliproxyexecutor.Request{Payload: payload}
 
-	withWhitespace := claudeThinkingReplayCallerHash(auth, req, cliproxyexecutor.Options{
+	withWhitespace := helps.ClaudeThinkingReplayCallerHash(auth, req, cliproxyexecutor.Options{
 		Headers: http.Header{
 			"User-Agent":        []string{"client/1.0"},
 			"X-App":             []string{"   "},
 			"X-Codex-Client-Id": []string{"\t\n"},
 		},
 	})
-	withoutWhitespace := claudeThinkingReplayCallerHash(auth, req, cliproxyexecutor.Options{
+	withoutWhitespace := helps.ClaudeThinkingReplayCallerHash(auth, req, cliproxyexecutor.Options{
 		Headers: http.Header{
 			"User-Agent": []string{"client/1.0"},
 		},
@@ -1240,7 +1255,7 @@ func TestRestoreClaudeThinkingReplayContents_MatchesDuplicateTurnsInChronologica
 		[]byte(`[{"type":"thinking","thinking":"second","signature":"sig-2"},{"type":"text","text":"same"}]`),
 	}
 
-	updated, restored := restoreClaudeThinkingReplayContents(body, cached)
+	updated, restored := helps.RestoreClaudeThinkingReplayContents(body, cached)
 	if !restored {
 		t.Fatal("expected restore")
 	}
@@ -1334,7 +1349,7 @@ func TestRestoreClaudeThinkingReplayContents_AlignsAfterTruncatedHistory(t *test
 		[]byte(`[{"type":"thinking","thinking":"third","signature":"sig-3"},{"type":"text","text":"third"}]`),
 	}
 
-	updated, restored := restoreClaudeThinkingReplayContents(body, cached)
+	updated, restored := helps.RestoreClaudeThinkingReplayContents(body, cached)
 	if !restored {
 		t.Fatal("expected restore")
 	}
@@ -1366,7 +1381,7 @@ func TestRestoreClaudeThinkingReplayContents_SkipsUnsignedLeadingAssistant(t *te
 		[]byte(`[{"type":"thinking","thinking":"second","signature":"sig-2"},{"type":"text","text":"second"}]`),
 	}
 
-	updated, restored := restoreClaudeThinkingReplayContents(body, cached)
+	updated, restored := helps.RestoreClaudeThinkingReplayContents(body, cached)
 	if !restored {
 		t.Fatal("expected restore")
 	}
@@ -1397,7 +1412,7 @@ func TestRestoreClaudeThinkingReplayContents_AnchorsDuplicateSuffixAfterTruncati
 		[]byte(`[{"type":"thinking","thinking":"other","signature":"sig-other"},{"type":"text","text":"different"}]`),
 	}
 
-	updated, restored := restoreClaudeThinkingReplayContents(body, cached)
+	updated, restored := helps.RestoreClaudeThinkingReplayContents(body, cached)
 	if !restored {
 		t.Fatal("expected restore")
 	}
@@ -1424,7 +1439,7 @@ func TestRestoreClaudeThinkingReplayContents_NormalizesStringShorthand(t *testin
 		[]byte(`[{"type":"thinking","thinking":"reasoning","signature":"sig"},{"type":"text","text":"answer"}]`),
 	}
 
-	updated, restored := restoreClaudeThinkingReplayContents(body, cached)
+	updated, restored := helps.RestoreClaudeThinkingReplayContents(body, cached)
 	if !restored {
 		t.Fatal("expected restore for string shorthand assistant content")
 	}
