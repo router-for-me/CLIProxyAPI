@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -989,4 +990,50 @@ func messageHashFor(i int) string {
 		v /= 26
 	}
 	return string(s)
+}
+
+func TestClaudeThinkingReplayIfExistsLocalAbsenceIsLoaded(t *testing.T) {
+	useFakeClaudeThinkingReplayKVClient(t, nil, false)
+
+	const modelFamily = "claude:auth:model"
+	const sessionKey = "if-exists-local"
+	first := []byte(`[{"type":"thinking","thinking":"first","signature":"sig-1"}]`)
+	second := []byte(`[{"type":"thinking","thinking":"second","signature":"sig-2"}]`)
+
+	_, snap1, found, err := GetClaudeThinkingReplayWithSnapshotIfExists(context.Background(), modelFamily, sessionKey)
+	if err != nil {
+		t.Fatalf("initial IfExists: %v", err)
+	}
+	if found {
+		t.Fatal("initial IfExists should not find replay")
+	}
+	if !snap1.loaded || snap1.found {
+		t.Fatalf("initial IfExists snapshot = loaded %v found %v, want loaded=true found=false", snap1.loaded, snap1.found)
+	}
+
+	_, snap2, found, err := GetClaudeThinkingReplayWithSnapshotIfExists(context.Background(), modelFamily, sessionKey)
+	if err != nil || found {
+		t.Fatalf("second IfExists before replace: found %v, err %v", found, err)
+	}
+	if !snap2.loaded || snap2.found {
+		t.Fatalf("second IfExists snapshot = loaded %v found %v, want loaded=true found=false", snap2.loaded, snap2.found)
+	}
+
+	replaced, err := ReplaceClaudeThinkingReplayIfUnchanged(context.Background(), modelFamily, sessionKey, snap1, first)
+	if err != nil || !replaced {
+		t.Fatalf("first replace = %v, err %v", replaced, err)
+	}
+
+	replaced, err = ReplaceClaudeThinkingReplayIfUnchanged(context.Background(), modelFamily, sessionKey, snap2, second)
+	if err != nil || replaced {
+		t.Fatalf("second replace should lose race, got replaced=%v err=%v", replaced, err)
+	}
+
+	contents, foundFinal, err := GetClaudeThinkingReplayRequired(context.Background(), modelFamily, sessionKey)
+	if err != nil || !foundFinal || len(contents) != 1 {
+		t.Fatalf("final contents = %d, err %v; want one turn", len(contents), err)
+	}
+	if !bytes.Equal(contents[0], first) {
+		t.Fatalf("final contents = %s, want %s", contents[0], first)
+	}
 }

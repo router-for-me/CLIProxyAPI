@@ -206,7 +206,7 @@ func GetClaudeThinkingReplayWithSnapshotIfExists(ctx context.Context, modelFamil
 			claudeThinkingReplayTotalBytes -= claudeThinkingReplayEntryBytes(entry.Contents)
 			delete(claudeThinkingReplayEntries, key)
 		}
-		return nil, ClaudeThinkingReplaySnapshot{loaded: false, found: false}, false, nil
+		return nil, ClaudeThinkingReplaySnapshot{loaded: true, found: false}, false, nil
 	}
 	entry.Timestamp = now
 	claudeThinkingReplayEntries[key] = entry
