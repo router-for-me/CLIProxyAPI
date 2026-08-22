@@ -206,3 +206,16 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
 }
+
+// currentConfig returns the latest runtime config snapshot.
+func (m *Manager) currentConfig() *internalconfig.Config {
+	if m == nil {
+		return nil
+	}
+	if v := m.runtimeConfig.Load(); v != nil {
+		if cfg, ok := v.(*internalconfig.Config); ok {
+			return cfg
+		}
+	}
+	return nil
+}

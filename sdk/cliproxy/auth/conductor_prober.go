@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -299,7 +300,7 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 	}()
 	defer cancel()
 
-	baseURL := proberBaseURLForProvider(auth)
+	baseURL := proberBaseURLForProvider(auth, l.manager.currentConfig())
 	if baseURL == "" {
 		return
 	}
@@ -474,7 +475,7 @@ var proberProviderBaseURLs = map[string]string{
 
 // proberBaseURLForProvider returns the base URL for the probe, using the
 // auth attribute if present and falling back to provider defaults for OAuth.
-func proberBaseURLForProvider(auth *Auth) string {
+func proberBaseURLForProvider(auth *Auth, cfg *internalconfig.Config) string {
 	if auth == nil {
 		return ""
 	}
@@ -486,6 +487,54 @@ func proberBaseURLForProvider(auth *Auth) string {
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	if p, ok := proberProviderBaseURLs[provider]; ok {
 		return p
+	}
+	if cfg != nil {
+		if u := proberOpenAICompatBaseURL(auth, cfg); u != "" {
+			return u
+		}
+	}
+	return ""
+}
+
+// proberOpenAICompatBaseURL resolves a base URL from the configured OpenAI
+// compatibility entries for custom openai-compatible providers that do not
+// carry an explicit base_url attribute.
+func proberOpenAICompatBaseURL(auth *Auth, cfg *internalconfig.Config) string {
+	if auth == nil || cfg == nil {
+		return ""
+	}
+
+	var candidates []string
+	if auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["config_index"]); v != "" {
+			if idx, err := strconv.Atoi(v); err == nil && idx >= 0 && idx < len(cfg.OpenAICompatibility) {
+				c := &cfg.OpenAICompatibility[idx]
+				if !c.Disabled && strings.TrimSpace(c.BaseURL) != "" {
+					return strings.TrimRight(c.BaseURL, "/")
+				}
+			}
+		}
+		if v := strings.TrimSpace(auth.Attributes["compat_name"]); v != "" {
+			candidates = append(candidates, v)
+		}
+		if v := strings.TrimSpace(auth.Attributes["provider_key"]); v != "" {
+			candidates = append(candidates, v)
+		}
+	}
+	if v := strings.TrimSpace(auth.Provider); v != "" {
+		candidates = append(candidates, v)
+	}
+
+	for i := range cfg.OpenAICompatibility {
+		c := &cfg.OpenAICompatibility[i]
+		if c.Disabled || strings.TrimSpace(c.BaseURL) == "" {
+			continue
+		}
+		for _, cand := range candidates {
+			if cand != "" && (c.Name == cand || c.Name == strings.ToLower(cand)) {
+				return strings.TrimRight(c.BaseURL, "/")
+			}
+		}
 	}
 	return ""
 }
