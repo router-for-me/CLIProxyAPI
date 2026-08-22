@@ -24,6 +24,7 @@ type ClaudeExecutor struct {
 	cfg                     *config.Config
 	requestLogProvider      string
 	upstreamModelNormalizer func(string) string
+	cacheControlDisabled    bool
 	oauthProfileFetcher     claudeOAuthProfileFetcher
 }
 
