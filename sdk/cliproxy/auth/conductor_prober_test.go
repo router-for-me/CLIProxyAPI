@@ -1292,3 +1292,37 @@ func TestProberRestartGoroutineDoesNotSurviveParentCancel(t *testing.T) {
 		t.Fatalf("prober calls = %d, want 1 after canceled parent restart", exec.calls.Load())
 	}
 }
+
+func TestProberCapsMaxConcurrency(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "test"}
+	m.RegisterExecutor(exec)
+
+	for i := 0; i < 2; i++ {
+		auth := &Auth{
+			ID:       fmt.Sprintf("a%d", i),
+			Provider: "test",
+			Status:   StatusActive,
+			Attributes: map[string]string{
+				"base_url": "https://example.com",
+			},
+		}
+		if _, err := m.Register(ctx, auth); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+	}
+
+	cfg := internalconfig.CredentialProberConfig{
+		Enabled:            true,
+		MaxConcurrency:     1 << 30,
+		RateLimitPerMinute: 1000,
+	}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(200 * time.Millisecond)
+
+	if exec.calls.Load() != 2 {
+		t.Fatalf("prober calls = %d, want 2", exec.calls.Load())
+	}
+}

@@ -21,6 +21,7 @@ import (
 const (
 	proberCheckInterval         = 60 * time.Second
 	proberMaxConcurrency        = 4
+	proberMaxConcurrencyCap     = 1024
 	proberRatePerMinute         = 60
 	proberMaxRateLimitPerMinute = 60_000_000
 	proberDefaultPath           = "/models"
@@ -205,6 +206,12 @@ func (l *authProberLoop) sweep(ctx context.Context) {
 	concurrency := l.cfg.MaxConcurrency
 	if concurrency <= 0 {
 		concurrency = proberMaxConcurrency
+	}
+	if concurrency > proberMaxConcurrencyCap {
+		concurrency = proberMaxConcurrencyCap
+	}
+	if concurrency > len(auths) {
+		concurrency = len(auths)
 	}
 
 	ratePerMinute := l.cfg.RateLimitPerMinute

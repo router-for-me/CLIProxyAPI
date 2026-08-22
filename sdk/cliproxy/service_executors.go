@@ -238,6 +238,24 @@ func (s *Service) registerExecutorsForAuths(auths []*coreauth.Auth, forceReplace
 	}
 }
 
+func (s *Service) bindExecutor(providerKey string, forceReplace bool, make func() coreauth.ProviderExecutor) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	providerKey = strings.ToLower(strings.TrimSpace(providerKey))
+	if providerKey == "" {
+		return
+	}
+	if !forceReplace {
+		if _, has := s.coreManager.Executor(providerKey); has {
+			return
+		}
+	}
+	if make != nil {
+		s.coreManager.RegisterExecutor(make())
+	}
+}
+
 func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	if s == nil || s.coreManager == nil || a == nil {
 		return
@@ -246,16 +264,9 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
-		if !forceReplace {
-			existingExecutor, hasExecutor := s.coreManager.Executor("codex")
-			if hasExecutor {
-				_, isCodexAutoExecutor := existingExecutor.(*executor.CodexAutoExecutor)
-				if isCodexAutoExecutor {
-					return
-				}
-			}
-		}
-		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(cfg))
+		s.bindExecutor("codex", forceReplace, func() coreauth.ProviderExecutor {
+			return executor.NewCodexAutoExecutor(cfg)
+		})
 		return
 	}
 	// Skip disabled auth entries when (re)binding executors.
@@ -276,28 +287,46 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	}
 	switch strings.ToLower(a.Provider) {
 	case constant.Gemini:
-		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(cfg))
+		s.bindExecutor("gemini", forceReplace, func() coreauth.ProviderExecutor {
+			return executor.NewGeminiExecutor(cfg)
+		})
 	case constant.GeminiInteractions:
-		s.coreManager.RegisterExecutor(executor.NewGeminiInteractionsExecutor(cfg))
+		s.bindExecutor("gemini-interactions", forceReplace, func() coreauth.ProviderExecutor {
+			return executor.NewGeminiInteractionsExecutor(cfg)
+		})
 	case "vertex":
-		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(cfg))
+		s.bindExecutor("vertex", forceReplace, func() coreauth.ProviderExecutor {
+			return executor.NewGeminiVertexExecutor(cfg)
+		})
 	case "aistudio":
 		if s.wsGateway != nil {
-			s.coreManager.RegisterExecutor(executor.NewAIStudioExecutor(cfg, a.ID, s.wsGateway))
+			s.bindExecutor("aistudio", forceReplace, func() coreauth.ProviderExecutor {
+				return executor.NewAIStudioExecutor(cfg, a.ID, s.wsGateway)
+			})
 		}
 		return
 	case "antigravity":
-		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(cfg))
+		s.bindExecutor("antigravity", forceReplace, func() coreauth.ProviderExecutor {
+			return executor.NewAntigravityExecutor(cfg)
+		})
 	case "claude":
-		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
+		s.bindExecutor("claude", forceReplace, func() coreauth.ProviderExecutor {
+			return executor.NewClaudeExecutor(cfg)
+		})
 	case "kimi":
-		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(cfg))
+		s.bindExecutor("kimi", forceReplace, func() coreauth.ProviderExecutor {
+			return executor.NewKimiExecutor(cfg)
+		})
 	case "xai":
 		if !forceReplace {
 			existingExecutor, hasExecutor := s.coreManager.Executor("xai")
 			if hasExecutor {
-				existingXAIAutoExecutor, isXAIAutoExecutor := existingExecutor.(*executor.XAIAutoExecutor)
-				if isXAIAutoExecutor && existingXAIAutoExecutor.UsesConfig(cfg) {
+				_, isXAIAutoExecutor := existingExecutor.(*executor.XAIAutoExecutor)
+				if !isXAIAutoExecutor {
+					return
+				}
+				existingXAIAutoExecutor := existingExecutor.(*executor.XAIAutoExecutor)
+				if existingXAIAutoExecutor.UsesConfig(cfg) {
 					return
 				}
 			}

@@ -179,6 +179,38 @@ func TestRegisterExecutorForAuth_OpenAICompatUsesNamespacedProviderKey(t *testin
 	}
 }
 
+type customXAIExecutor struct{ serviceTestPluginExecutor }
+
+func (customXAIExecutor) Identifier() string { return "xai" }
+
+func TestRegisterAvailableExecutorsPreservesCallerProvidedExecutors(t *testing.T) {
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+
+	customExec := customXAIExecutor{}
+	service.coreManager.RegisterExecutor(customExec)
+
+	auth := &coreauth.Auth{
+		ID:       "xai-caller",
+		Provider: "xai",
+		Status:   coreauth.StatusActive,
+	}
+	service.coreManager.Register(context.Background(), auth)
+
+	service.registerAvailableExecutors(context.Background(), executorRegistrationOptions{
+		includeBaseline:   true,
+		forceReplaceAuths: false,
+		auths:             service.coreManager.List(),
+	})
+
+	existing, ok := service.coreManager.Executor("xai")
+	if !ok || existing != customExec {
+		t.Fatal("caller-provided xai executor should not be replaced at startup")
+	}
+}
+
 func openAICompatKimiAuth() *coreauth.Auth {
 	return &coreauth.Auth{
 		ID:       "compat-kimi",

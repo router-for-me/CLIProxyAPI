@@ -94,7 +94,7 @@ func (s *Service) Run(ctx context.Context) error {
 		auths := s.coreManager.List()
 		s.registerAvailableExecutors(coreauth.WithSkipPersist(ctx), executorRegistrationOptions{
 			includeBaseline:   true,
-			forceReplaceAuths: true,
+			forceReplaceAuths: false,
 			auths:             auths,
 		})
 		s.coreManager.RestartProber()
