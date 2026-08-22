@@ -195,6 +195,48 @@ func TestClaudeThinkingReplayFindStartIndex_RefusesAmbiguousFullSuffix(t *testin
 	}
 }
 
+func TestClaudeThinkingReplayFindStartIndex_RefusesPerTurnDuplicateCandidates(t *testing.T) {
+	// Cached [A, B] and request [A, B, B-unsigned-duplicate]: the two unsigned
+	// candidates for cached B are both viable because the preceding cached A can
+	// fit before either. This is per-turn sequence ambiguity and must fail closed.
+	assistant := []gjson.Result{
+		gjson.Parse(`[{"type":"text","text":"A"}]`),
+		gjson.Parse(`[{"type":"text","text":"B"}]`),
+		gjson.Parse(`[{"type":"text","text":"B"}]`),
+	}
+	cached := [][]byte{
+		[]byte(`[{"type":"thinking","thinking":"ra","signature":"sig-a"},{"type":"text","text":"A"}]`),
+		[]byte(`[{"type":"thinking","thinking":"rb","signature":"sig-b"},{"type":"text","text":"B"}]`),
+	}
+	if got, _ := helps.ClaudeThinkingReplayFindStartIndex(assistant, cached); got != -1 {
+		t.Fatalf("expected -1 for per-turn duplicate candidates, got %d", got)
+	}
+
+	// A retained B disambiguates the duplicate unsigned B: the matcher should
+	// still pick the retained one and not fail.
+	body := []byte(`{"messages":[{"role":"user","content":"u"},{"role":"assistant","content":[{"type":"text","text":"A"}]},{"role":"assistant","content":[{"type":"text","text":"B"}]},{"role":"assistant","content":[{"type":"thinking","thinking":"rb","signature":"sig-b"},{"type":"text","text":"B"}]},{"role":"user","content":"u2"}]}`)
+	retained := [][]byte{
+		[]byte(`[{"type":"thinking","thinking":"ra","signature":"sig-a"},{"type":"text","text":"A"}]`),
+		[]byte(`[{"type":"thinking","thinking":"rb","signature":"sig-b"},{"type":"text","text":"B"}]`),
+	}
+	updated, restored := helps.RestoreClaudeThinkingReplayContents(body, retained)
+	if !restored {
+		t.Fatal("expected restore when retained B disambiguates duplicate")
+	}
+	a := gjson.GetBytes(updated, "messages.1.content").Array()
+	b := gjson.GetBytes(updated, "messages.3.content").Array()
+	duplicate := gjson.GetBytes(updated, "messages.2.content").Array()
+	if a[0].Get("signature").String() != "sig-a" {
+		t.Fatalf("A should keep sig-a, got %s", a[0].Get("signature").String())
+	}
+	if b[0].Get("signature").String() != "sig-b" {
+		t.Fatalf("retained B should keep sig-b, got %s", b[0].Get("signature").String())
+	}
+	if duplicate[0].Get("signature").String() != "" {
+		t.Fatalf("earlier unsigned duplicate B should not receive signature: %s", duplicate[0].Get("signature").String())
+	}
+}
+
 func TestRestoreClaudeThinkingReplayContents_RejectDuplicateRequestSideAnchors(t *testing.T) {
 	// A cached signed turn followed by an uncached unsigned duplicate with the
 	// same visible content must not have its signature injected into the later
