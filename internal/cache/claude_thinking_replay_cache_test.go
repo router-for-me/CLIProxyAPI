@@ -15,17 +15,21 @@ import (
 )
 
 type fakeClaudeThinkingReplayKVClient struct {
-	values  map[string][]byte
-	sets    int
-	dels    int
-	getErr  error
-	setErr  error
-	delErr  error
-	swapErr error
+	values    map[string][]byte
+	sets      int
+	dels      int
+	getErr    error
+	setErr    error
+	delErr    error
+	swapErr   error
+	swapsTTLs map[string]time.Duration
 }
 
 func newFakeClaudeThinkingReplayKVClient() *fakeClaudeThinkingReplayKVClient {
-	return &fakeClaudeThinkingReplayKVClient{values: make(map[string][]byte)}
+	return &fakeClaudeThinkingReplayKVClient{
+		values:    make(map[string][]byte),
+		swapsTTLs: make(map[string]time.Duration),
+	}
 }
 
 func (c *fakeClaudeThinkingReplayKVClient) KVGet(_ context.Context, key string) ([]byte, bool, error) {
@@ -60,7 +64,7 @@ func (c *fakeClaudeThinkingReplayKVClient) KVDel(_ context.Context, keys ...stri
 	return n, nil
 }
 
-func (c *fakeClaudeThinkingReplayKVClient) KVCompareAndSwap(_ context.Context, key string, expected []byte, _ bool, newValue []byte, _ time.Duration) (bool, error) {
+func (c *fakeClaudeThinkingReplayKVClient) KVCompareAndSwap(_ context.Context, key string, expected []byte, _ bool, newValue []byte, ttl time.Duration) (bool, error) {
 	if c.swapErr != nil {
 		return false, c.swapErr
 	}
@@ -68,11 +72,13 @@ func (c *fakeClaudeThinkingReplayKVClient) KVCompareAndSwap(_ context.Context, k
 	if !ok && expected == nil {
 		c.values[key] = append([]byte(nil), newValue...)
 		c.sets++
+		c.swapsTTLs[key] = ttl
 		return true, nil
 	}
 	if ok && string(current) == string(expected) {
 		c.values[key] = append([]byte(nil), newValue...)
 		c.sets++
+		c.swapsTTLs[key] = ttl
 		return true, nil
 	}
 	return false, nil
@@ -1051,6 +1057,69 @@ func messageHashFor(i int) string {
 		v /= 26
 	}
 	return string(s)
+}
+
+func TestClaudeThinkingReplayAliasHomeEvictedTombstoneHasShortTTL(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	client := newFakeClaudeThinkingReplayKVClient()
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+
+	max := ClaudeThinkingReplayCacheMaxAliasesPerCredential
+	for i := 0; i < max+10; i++ {
+		RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHashFor(i), "first")
+	}
+
+	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
+	index, _ := decodeClaudeThinkingReplayAliasIndex(client.values[indexKey])
+	if len(index.Aliases) > max {
+		t.Fatalf("credential alias cap exceeded: %d > %d", len(index.Aliases), max)
+	}
+
+	evictedKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHashFor(0))
+	if ttl, ok := client.swapsTTLs[evictedKey]; !ok || ttl != claudeThinkingReplayAliasTombstoneTTL {
+		t.Fatalf("evicted alias tombstone ttl = %v, want %v", ttl, claudeThinkingReplayAliasTombstoneTTL)
+	}
+
+	newKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHashFor(max+9))
+	if ttl, ok := client.swapsTTLs[newKey]; !ok || ttl != ClaudeThinkingReplayCacheTTL {
+		t.Fatalf("new alias value ttl = %v, want %v", ttl, ClaudeThinkingReplayCacheTTL)
+	}
+}
+
+func TestClaudeThinkingReplayAliasHomeRollbackTombstoneHasShortTTL(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
+	messageHash := "new-msg"
+	aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHash)
+
+	base := newFakeClaudeThinkingReplayKVClient()
+	client := &failingIndexClaudeThinkingReplayKVClient{
+		fakeClaudeThinkingReplayKVClient: base,
+		indexKey:                         indexKey,
+	}
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHash, "first")
+
+	raw, ok := client.values[aliasKey]
+	if !ok {
+		t.Fatalf("alias %q was removed; expected a tombstone", aliasKey)
+	}
+	if aliasValueIsLive(raw) {
+		t.Fatalf("alias %q was committed but not indexed; expected rollback", aliasKey)
+	}
+	if ttl, ok := client.swapsTTLs[aliasKey]; !ok || ttl != claudeThinkingReplayAliasTombstoneTTL {
+		t.Fatalf("rollback tombstone ttl = %v, want %v", ttl, claudeThinkingReplayAliasTombstoneTTL)
+	}
 }
 
 func TestClaudeThinkingReplayIfExistsLocalAbsenceIsLoaded(t *testing.T) {

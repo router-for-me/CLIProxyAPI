@@ -59,6 +59,13 @@ const (
 	ClaudeThinkingReplayCacheMaxAliasesPerCredential = 256
 
 	claudeThinkingReplayCacheMaxSerializedBytes = ClaudeThinkingReplayCacheMaxBytesPerSession + 1024
+
+	// claudeThinkingReplayAliasTombstoneTTL is how long an evicted alias
+	// tombstone stays in Home KV. It must be long enough for the eviction
+	// compare-and-swap race window, but short enough that tombstones do not
+	// block legitimate re-registration or bloat physical storage under the
+	// per-credential alias cap.
+	claudeThinkingReplayAliasTombstoneTTL = 5 * time.Second
 )
 
 type claudeThinkingReplayEntry struct {
@@ -813,14 +820,15 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 		if claudeThinkingReplayAliasValueRepopulated(raw, rec.Timestamp) {
 			continue
 		}
-		// Atomically replace the evicted alias value with a tombstone so a
-		// concurrent re-registration after the KVGet cannot be deleted.
+		// Atomically replace the evicted alias value with a short-lived tombstone
+		// so a concurrent re-registration after the KVGet cannot be deleted, but
+		// the tombstone still expires promptly and does not block later reuse.
 		tombstone, errMarshal := json.Marshal(claudeThinkingReplayAliasHomeValue{})
 		if errMarshal != nil {
 			log.Warnf("claude thinking replay alias eviction tombstone marshal failed: %v", errMarshal)
 			continue
 		}
-		swapped, errCAS := client.KVCompareAndSwap(ctx, rec.AliasKey, raw, true, tombstone, ClaudeThinkingReplayCacheTTL)
+		swapped, errCAS := client.KVCompareAndSwap(ctx, rec.AliasKey, raw, true, tombstone, claudeThinkingReplayAliasTombstoneTTL)
 		if errCAS != nil {
 			if errors.Is(errCAS, homekv.ErrCompareAndSwapUnsupported) {
 				if _, errDel := client.KVDel(ctx, rec.AliasKey); errDel != nil {
@@ -885,8 +893,10 @@ func rollBackClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 	// current value still matching the committed value, so a concurrent
 	// re-registration cannot be overwritten.
 	var replacement []byte
+	ttl := claudeThinkingReplayAliasTombstoneTTL
 	if len(previousAliasRaw) > 0 {
 		replacement = append([]byte(nil), previousAliasRaw...)
+		ttl = ClaudeThinkingReplayCacheTTL
 	} else {
 		tombstone, errMarshal := json.Marshal(claudeThinkingReplayAliasHomeValue{})
 		if errMarshal != nil {
@@ -895,7 +905,7 @@ func rollBackClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 		}
 		replacement = tombstone
 	}
-	swapped, errCAS := client.KVCompareAndSwap(ctx, aliasKey, currentRaw, true, replacement, ClaudeThinkingReplayCacheTTL)
+	swapped, errCAS := client.KVCompareAndSwap(ctx, aliasKey, currentRaw, true, replacement, ttl)
 	if errCAS != nil {
 		if errors.Is(errCAS, homekv.ErrCompareAndSwapUnsupported) {
 			// CAS is unavailable; fall back to unconditional delete.
