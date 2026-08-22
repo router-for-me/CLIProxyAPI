@@ -91,6 +91,8 @@ func CleanJSONSchemaForGemini(jsonStr string) string {
 
 // cleanJSONSchema performs the core cleaning operations on the JSON schema.
 func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
+	jsonStr = normalizeMalformedSchemaObjects(jsonStr)
+
 	// Phase 1: Convert and add hints
 	if options.antigravitySemantics {
 		jsonStr = inlineLocalRefs(jsonStr)
@@ -1179,4 +1181,320 @@ func mergeDescriptionRaw(schemaRaw, parentDesc string) string {
 		updated, _ := sjson.SetBytes([]byte(schemaRaw), "description", combined)
 		return string(updated)
 	}
+}
+
+func normalizeMalformedSchemaObjects(jsonStr string) string {
+	var raw any
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		return jsonStr
+	}
+	repaired, changed := normalizeSchemaNode(raw)
+	if !changed {
+		return jsonStr
+	}
+	b, err := json.Marshal(repaired)
+	if err != nil {
+		return jsonStr
+	}
+	return string(b)
+}
+
+var structuralSchemaKeywords = map[string]struct{}{
+	"$comment":              {},
+	"$defs":                 {},
+	"$id":                   {},
+	"$ref":                  {},
+	"$schema":               {},
+	"additionalProperties":  {},
+	"allOf":                 {},
+	"anyOf":                 {},
+	"const":                 {},
+	"contains":              {},
+	"default":               {},
+	"definitions":           {},
+	"dependentRequired":     {},
+	"dependentSchemas":      {},
+	"deprecated":            {},
+	"description":           {},
+	"else":                  {},
+	"enum":                  {},
+	"exclusiveMaximum":      {},
+	"exclusiveMinimum":      {},
+	"format":                {},
+	"if":                    {},
+	"items":                 {},
+	"maxItems":              {},
+	"maxLength":             {},
+	"maxProperties":         {},
+	"maximum":               {},
+	"minItems":              {},
+	"minLength":             {},
+	"minProperties":         {},
+	"minimum":               {},
+	"multipleOf":            {},
+	"not":                   {},
+	"nullable":              {},
+	"oneOf":                 {},
+	"pattern":               {},
+	"patternProperties":     {},
+	"prefixItems":           {},
+	"properties":            {},
+	"propertyNames":         {},
+	"readOnly":              {},
+	"required":              {},
+	"then":                  {},
+	"title":                 {},
+	"type":                  {},
+	"unevaluatedItems":      {},
+	"unevaluatedProperties": {},
+	"uniqueItems":           {},
+	"writeOnly":             {},
+}
+
+func hasStructuralSchemaKeyword(m map[string]any) bool {
+	for k := range m {
+		if _, ok := structuralSchemaKeywords[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeBarePropertyMap(m map[string]any) bool {
+	if len(m) == 0 || hasStructuralSchemaKeyword(m) {
+		return false
+	}
+	for _, val := range m {
+		switch val.(type) {
+		case map[string]any, bool:
+			// looks like a schema definition
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func repairPropertyMap(propMap map[string]any) (map[string]any, []string, bool) {
+	repairedProperties := make(map[string]any, len(propMap))
+	var promotedRequired []string
+	changed := false
+
+	keys := make([]string, 0, len(propMap))
+	for k := range propMap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, propName := range keys {
+		propVal := propMap[propName]
+		if childMap, ok := propVal.(map[string]any); ok {
+			copiedChild := make(map[string]any, len(childMap))
+			for k, v := range childMap {
+				copiedChild[k] = v
+			}
+			if reqBool, hasReq := copiedChild["required"].(bool); hasReq {
+				delete(copiedChild, "required")
+				changed = true
+				if reqBool {
+					promotedRequired = append(promotedRequired, propName)
+				}
+			}
+			repairedChild, childChanged := normalizeSchemaNode(copiedChild)
+			if childChanged {
+				changed = true
+			}
+			repairedProperties[propName] = repairedChild
+		} else {
+			repairedProperties[propName] = propVal
+		}
+	}
+	return repairedProperties, promotedRequired, changed
+}
+
+func mergeRequired(existing any, promoted []string) []string {
+	var result []string
+	if exSlice, ok := existing.([]any); ok {
+		for _, item := range exSlice {
+			if s, ok := item.(string); ok && !contains(result, s) {
+				result = append(result, s)
+			}
+		}
+	}
+	for _, item := range promoted {
+		if !contains(result, item) {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func normalizeSchemaNode(node any) (any, bool) {
+	m, ok := node.(map[string]any)
+	if !ok {
+		return node, false
+	}
+
+	copied := make(map[string]any, len(m))
+	for k, v := range m {
+		copied[k] = v
+	}
+	changed := false
+
+	if props, ok := copied["properties"].(map[string]any); ok {
+		repairedProps := make(map[string]any, len(props))
+		var promotedRequired []string
+		propsChanged := false
+
+		keys := make([]string, 0, len(props))
+		for k := range props {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		for _, propName := range keys {
+			propVal := props[propName]
+			if childMap, isMap := propVal.(map[string]any); isMap {
+				if looksLikeBarePropertyMap(childMap) {
+					nestedProps, nestedReq, _ := repairPropertyMap(childMap)
+					repairedChild := map[string]any{
+						"type":       "object",
+						"properties": nestedProps,
+					}
+					if len(nestedReq) > 0 {
+						repairedChild["required"] = nestedReq
+					}
+					repairedProps[propName] = repairedChild
+					propsChanged = true
+				} else {
+					copiedChild := make(map[string]any, len(childMap))
+					for ck, cv := range childMap {
+						copiedChild[ck] = cv
+					}
+					if reqBool, hasReq := copiedChild["required"].(bool); hasReq {
+						delete(copiedChild, "required")
+						propsChanged = true
+						if reqBool {
+							promotedRequired = append(promotedRequired, propName)
+						}
+					}
+					repairedChild, childChanged := normalizeSchemaNode(copiedChild)
+					if childChanged {
+						propsChanged = true
+					}
+					repairedProps[propName] = repairedChild
+				}
+			} else {
+				repairedProps[propName] = propVal
+			}
+		}
+
+		if propsChanged {
+			copied["properties"] = repairedProps
+			changed = true
+		}
+		if len(promotedRequired) > 0 {
+			mergedReq := mergeRequired(copied["required"], promotedRequired)
+			copied["required"] = mergedReq
+			changed = true
+		}
+	}
+
+	if items, ok := copied["items"]; ok {
+		if itemsMap, isMap := items.(map[string]any); isMap && looksLikeBarePropertyMap(itemsMap) {
+			nestedProps, nestedReq, _ := repairPropertyMap(itemsMap)
+			repairedItems := map[string]any{
+				"type":       "object",
+				"properties": nestedProps,
+			}
+			if len(nestedReq) > 0 {
+				repairedItems["required"] = nestedReq
+			}
+			copied["items"] = repairedItems
+			changed = true
+		} else {
+			repairedItems, itemsChanged := normalizeSchemaNode(items)
+			if itemsChanged {
+				copied["items"] = repairedItems
+				changed = true
+			}
+		}
+	}
+
+	for _, key := range []string{"anyOf", "oneOf", "allOf", "prefixItems"} {
+		if branches, ok := copied[key].([]any); ok {
+			repairedBranches := make([]any, len(branches))
+			branchesChanged := false
+			for i, branch := range branches {
+				if branchMap, isMap := branch.(map[string]any); isMap && looksLikeBarePropertyMap(branchMap) {
+					nestedProps, nestedReq, _ := repairPropertyMap(branchMap)
+					repairedBranch := map[string]any{
+						"type":       "object",
+						"properties": nestedProps,
+					}
+					if len(nestedReq) > 0 {
+						repairedBranch["required"] = nestedReq
+					}
+					repairedBranches[i] = repairedBranch
+					branchesChanged = true
+				} else {
+					repairedBranch, branchChanged := normalizeSchemaNode(branch)
+					repairedBranches[i] = repairedBranch
+					if branchChanged {
+						branchesChanged = true
+					}
+				}
+			}
+			if branchesChanged {
+				copied[key] = repairedBranches
+				changed = true
+			}
+		}
+	}
+
+	for _, key := range []string{"additionalProperties", "contains", "propertyNames", "not", "if", "then", "else"} {
+		if child, ok := copied[key]; ok {
+			repairedChild, childChanged := normalizeSchemaNode(child)
+			if childChanged {
+				copied[key] = repairedChild
+				changed = true
+			}
+		}
+	}
+
+	for _, key := range []string{"$defs", "definitions", "dependentSchemas"} {
+		if defs, ok := copied[key].(map[string]any); ok {
+			repairedDefs := make(map[string]any, len(defs))
+			defsChanged := false
+			for defName, defVal := range defs {
+				if defMap, isMap := defVal.(map[string]any); isMap && looksLikeBarePropertyMap(defMap) {
+					nestedProps, nestedReq, _ := repairPropertyMap(defMap)
+					repairedDef := map[string]any{
+						"type":       "object",
+						"properties": nestedProps,
+					}
+					if len(nestedReq) > 0 {
+						repairedDef["required"] = nestedReq
+					}
+					repairedDefs[defName] = repairedDef
+					defsChanged = true
+				} else {
+					repairedDef, defChanged := normalizeSchemaNode(defVal)
+					repairedDefs[defName] = repairedDef
+					if defChanged {
+						defsChanged = true
+					}
+				}
+			}
+			if defsChanged {
+				copied[key] = repairedDefs
+				changed = true
+			}
+		}
+	}
+
+	if !changed {
+		return m, false
+	}
+	return copied, true
 }

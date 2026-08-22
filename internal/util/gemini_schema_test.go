@@ -1618,3 +1618,113 @@ func TestCleanJSONSchemaKeepsPropertyNamedEncrypted(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanJSONSchemaForAntigravity_BarePropertyMapNormalized(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"data": {
+				"parent": { "type": "string", "required": true },
+				"insert_after": { "type": "string" },
+				"insert_before": { "type": "string" }
+			},
+			"opts": {
+				"opt_fields": { "type": "string" }
+			}
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity": CleanJSONSchemaForAntigravity,
+		"gemini":      CleanJSONSchemaForGemini,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+
+		data := parsed.Get("properties.data")
+		if data.Get("type").String() != "object" {
+			t.Errorf("%s: data.type = %q, want 'object'", cleaner, data.Get("type").String())
+		}
+		if data.Get("properties.parent.type").String() != "string" {
+			t.Errorf("%s: data.properties.parent.type = %q, want 'string'", cleaner, data.Get("properties.parent.type").String())
+		}
+		if data.Get("properties.parent.required").Exists() {
+			t.Errorf("%s: boolean required survived on property definition: %s", cleaner, got)
+		}
+		if data.Get("required.0").String() != "parent" {
+			t.Errorf("%s: parent was not promoted to required array: %s", cleaner, got)
+		}
+
+		opts := parsed.Get("properties.opts")
+		if opts.Get("type").String() != "object" {
+			t.Errorf("%s: opts.type = %q, want 'object'", cleaner, opts.Get("type").String())
+		}
+		if opts.Get("properties.opt_fields.type").String() != "string" {
+			t.Errorf("%s: opts.properties.opt_fields.type = %q, want 'string'", cleaner, opts.Get("properties.opt_fields.type").String())
+		}
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_BooleanRequiredPromoted(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"user_id": { "type": "string", "required": true },
+			"tag": { "type": "string", "required": false },
+			"age": { "type": "integer" }
+		},
+		"required": ["age"]
+	}`
+
+	got := CleanJSONSchemaForAntigravity(input)
+	parsed := gjson.Parse(got)
+
+	if parsed.Get("properties.user_id.required").Exists() {
+		t.Fatalf("boolean required survived in property: %s", got)
+	}
+	if parsed.Get("properties.tag.required").Exists() {
+		t.Fatalf("boolean required:false survived in property: %s", got)
+	}
+
+	reqArray := parsed.Get("required").Array()
+	reqStrings := make([]string, 0, len(reqArray))
+	for _, r := range reqArray {
+		reqStrings = append(reqStrings, r.String())
+	}
+
+	if !contains(reqStrings, "user_id") || !contains(reqStrings, "age") {
+		t.Fatalf("expected required to contain user_id and age, got: %v (raw: %s)", reqStrings, got)
+	}
+	if contains(reqStrings, "tag") {
+		t.Fatalf("tag with required:false was incorrectly added to required: %s", got)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_NestedArrayBarePropertyMap(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"records": {
+				"type": "array",
+				"items": {
+					"id": { "type": "string", "required": true },
+					"name": { "type": "string" }
+				}
+			}
+		}
+	}`
+
+	got := CleanJSONSchemaForAntigravity(input)
+	parsed := gjson.Parse(got)
+
+	items := parsed.Get("properties.records.items")
+	if items.Get("type").String() != "object" {
+		t.Errorf("items.type = %q, want 'object'", items.Get("type").String())
+	}
+	if items.Get("properties.id.type").String() != "string" {
+		t.Errorf("items.properties.id.type = %q, want 'string'", items.Get("properties.id.type").String())
+	}
+	if items.Get("required.0").String() != "id" {
+		t.Errorf("items.required = %s, want ['id']", items.Get("required").Raw)
+	}
+}
