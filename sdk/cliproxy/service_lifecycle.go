@@ -91,13 +91,6 @@ func (s *Service) Run(ctx context.Context) error {
 				log.Warnf("failed to restore cooldown state: %v", errRestoreCooldown)
 			}
 		}
-		auths := s.coreManager.List()
-		s.registerAvailableExecutors(coreauth.WithSkipPersist(ctx), executorRegistrationOptions{
-			includeBaseline:   true,
-			forceReplaceAuths: false,
-			auths:             auths,
-		})
-		s.coreManager.RestartProber()
 	}
 
 	if !homeEnabled {
@@ -127,9 +120,6 @@ func (s *Service) Run(ctx context.Context) error {
 		})
 		// Home mode does not expose in-process Redis RESP usage output; usage is forwarded to home instead.
 		redisqueue.SetEnabled(true)
-		if s.coreManager != nil {
-			s.coreManager.RestartProber()
-		}
 	}
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
@@ -137,6 +127,20 @@ func (s *Service) Run(ctx context.Context) error {
 	s.syncPluginRuntimeConfig(ctx)
 	if homeEnabled {
 		s.syncPluginModelRuntime(ctx)
+	}
+
+	// Register executors and start the credential health prober only after
+	// websocket gateway and plugin runtime initialization are complete, so all
+	// startup executors are available before the first sweep.
+	if s.coreManager != nil {
+		if !homeEnabled {
+			s.registerAvailableExecutors(coreauth.WithSkipPersist(ctx), executorRegistrationOptions{
+				includeBaseline:   true,
+				forceReplaceAuths: false,
+				auths:             s.coreManager.List(),
+			})
+		}
+		s.coreManager.RestartProber()
 	}
 
 	if s.authManager == nil {

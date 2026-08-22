@@ -963,7 +963,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	if result.IsProbe {
-		go m.hook.OnResult(ctx, result)
+		// Detach the hook context from the probe lifetime so async observers
+		// see a usable (non-canceled) context.
+		hookCtx := context.WithoutCancel(ctx)
+		go m.hook.OnResult(hookCtx, result)
 		if result.Error != nil {
 			m.publishErrorEvent(result, authSnapshot)
 		}

@@ -1105,6 +1105,50 @@ func TestProberSetConfigFromCallbackDoesNotDeadlock(t *testing.T) {
 	}
 }
 
+func TestProbeHookReceivesDetachedContext(t *testing.T) {
+	hookCtxErr := make(chan error, 1)
+	hook := &contextCheckingHook{errC: hookCtxErr}
+	m := NewManager(nil, nil, hook)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before MarkResult so the synchronous path would see ctx.Err()
+
+	m.MarkResult(ctx, Result{
+		AuthID:   "a1",
+		Provider: "test",
+		Success:  false,
+		IsProbe:  true,
+		Error: &Error{
+			Code:       ErrorCodeForceCooldown,
+			Message:    "prober: unreachable",
+			HTTPStatus: http.StatusServiceUnavailable,
+		},
+	})
+
+	select {
+	case err := <-hookCtxErr:
+		if err != nil {
+			t.Fatalf("probe hook received canceled context: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("probe hook was not called")
+	}
+}
+
+type contextCheckingHook struct {
+	errC chan error
+}
+
+func (h *contextCheckingHook) OnAuthRegistered(context.Context, *Auth) {}
+func (h *contextCheckingHook) OnAuthUpdated(context.Context, *Auth)    {}
+func (h *contextCheckingHook) OnResult(ctx context.Context, result Result) {
+	if err := ctx.Err(); err != nil {
+		h.errC <- err
+		return
+	}
+	h.errC <- nil
+}
+
 func TestResolveProbeURL(t *testing.T) {
 	cases := []struct {
 		baseURL string
