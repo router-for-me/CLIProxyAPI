@@ -457,8 +457,16 @@ func TestClaudeThinkingReplayAliasHomeRollbackOnIndexFailure(t *testing.T) {
 
 	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHash, "first")
 
-	if _, ok := client.values[aliasKey]; ok {
-		t.Fatalf("alias %q was committed but not indexed; expected rollback", aliasKey)
+	raw, ok := client.values[aliasKey]
+	if !ok {
+		t.Fatalf("alias %q was removed; expected a tombstone", aliasKey)
+	}
+	var value claudeThinkingReplayAliasHomeValue
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("tombstone unmarshal: %v", err)
+	}
+	if len(value.Sessions) != 0 {
+		t.Fatalf("alias %q still has %d sessions after rollback", aliasKey, len(value.Sessions))
 	}
 }
 
@@ -619,8 +627,16 @@ func TestClaudeThinkingReplayAliasHomeRollbackConditionalOnCommittedValue(t *tes
 
 	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHash, "first")
 
-	if _, ok := client.values[aliasKey]; ok {
-		t.Fatalf("alias %q was committed but not indexed; expected rollback conditional on committed value", aliasKey)
+	raw, ok := client.values[aliasKey]
+	if !ok {
+		t.Fatalf("alias %q was removed; expected a tombstone", aliasKey)
+	}
+	var value claudeThinkingReplayAliasHomeValue
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("tombstone unmarshal: %v", err)
+	}
+	if len(value.Sessions) != 0 {
+		t.Fatalf("alias %q still has %d sessions after rollback", aliasKey, len(value.Sessions))
 	}
 }
 
@@ -660,8 +676,57 @@ func TestClaudeThinkingReplayAliasHomeRollBackOnFailedRegistration(t *testing.T)
 
 	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHash, "first")
 
-	if _, ok := client.values[aliasKey]; ok {
-		t.Fatalf("alias %q was left after a failed CAS; expected rollback", aliasKey)
+	// Rollback writes an empty tombstone so the alias resolves to nothing
+	// rather than a stale unindexed orphan.
+	raw, ok := client.values[aliasKey]
+	if !ok {
+		t.Fatalf("alias %q was removed; expected a tombstone", aliasKey)
+	}
+	var value claudeThinkingReplayAliasHomeValue
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("tombstone unmarshal: %v", err)
+	}
+	if len(value.Sessions) != 0 {
+		t.Fatalf("alias %q still has %d sessions after rollback", aliasKey, len(value.Sessions))
+	}
+}
+
+type concurrentAliasClaudeThinkingReplayKVClient struct {
+	*fakeClaudeThinkingReplayKVClient
+	aliasKey string
+	injected []byte
+}
+
+func (c *concurrentAliasClaudeThinkingReplayKVClient) KVCompareAndSwap(ctx context.Context, key string, expected []byte, expectedExists bool, newValue []byte, ttl time.Duration) (bool, error) {
+	if key == c.aliasKey {
+		c.values[key] = append([]byte(nil), c.injected...)
+	}
+	return c.fakeClaudeThinkingReplayKVClient.KVCompareAndSwap(ctx, key, expected, expectedExists, newValue, ttl)
+}
+
+func TestClaudeThinkingReplayAliasHomeRollBackDoesNotDeleteRepopulatedAlias(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	messageHash := "new-msg"
+	aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHash)
+	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
+
+	committed := claudeThinkingReplayAliasHomeValue{Sessions: []claudeThinkingReplayAliasHomeSession{{SessionKey: "session", FirstUserHash: "first", Timestamp: time.Now()}}}
+	committedRaw, _ := json.Marshal(committed)
+	injected := claudeThinkingReplayAliasHomeValue{Sessions: []claudeThinkingReplayAliasHomeSession{{SessionKey: "other", FirstUserHash: "first", Timestamp: time.Now()}}}
+	injectedRaw, _ := json.Marshal(injected)
+
+	base := newFakeClaudeThinkingReplayKVClient()
+	base.values[aliasKey] = append([]byte(nil), committedRaw...)
+	client := &concurrentAliasClaudeThinkingReplayKVClient{fakeClaudeThinkingReplayKVClient: base, aliasKey: aliasKey, injected: injectedRaw}
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedRaw)
+
+	if string(client.values[aliasKey]) != string(injectedRaw) {
+		t.Fatalf("repopulated alias was overwritten during rollback")
 	}
 }
 

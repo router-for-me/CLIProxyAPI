@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -832,8 +833,28 @@ func rollBackClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 		log.Warnf("claude thinking replay alias rollback index check failed: %v", errIndex)
 	}
 
-	if _, errDel := client.KVDel(ctx, aliasKey); errDel != nil {
-		log.Warnf("claude thinking replay alias rollback failed: %v", errDel)
+	// Atomically replace the committed value with an empty tombstone only when
+	// it still matches, so a concurrent re-registration cannot be deleted.
+	tombstone, errMarshal := json.Marshal(claudeThinkingReplayAliasHomeValue{})
+	if errMarshal != nil {
+		log.Warnf("claude thinking replay alias rollback tombstone marshal failed: %v", errMarshal)
+		return
+	}
+	swapped, errCAS := client.KVCompareAndSwap(ctx, aliasKey, currentRaw, true, tombstone, ClaudeThinkingReplayCacheTTL)
+	if errCAS != nil {
+		if errors.Is(errCAS, homekv.ErrCompareAndSwapUnsupported) {
+			// CAS is unavailable; fall back to unconditional delete.
+			if _, errDel := client.KVDel(ctx, aliasKey); errDel != nil {
+				log.Warnf("claude thinking replay alias rollback failed: %v", errDel)
+			}
+			return
+		}
+		log.Warnf("claude thinking replay alias rollback CAS failed: %v", errCAS)
+		return
+	}
+	if !swapped {
+		// The value changed between KVGet and CAS; do not touch it.
+		return
 	}
 }
 
