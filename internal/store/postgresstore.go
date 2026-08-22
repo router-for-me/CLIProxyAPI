@@ -15,6 +15,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usercontrol"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -112,6 +113,14 @@ func (s *PostgresStore) Close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+// UserControlRepository shares the existing connection pool without exposing it to callers.
+func (s *PostgresStore) UserControlRepository() *usercontrol.PostgresRepository {
+	if s == nil {
+		return nil
+	}
+	return usercontrol.NewPostgresRepository(s.db, s.cfg.Schema)
 }
 
 // EnsureSchema creates the required tables (and schema when provided).

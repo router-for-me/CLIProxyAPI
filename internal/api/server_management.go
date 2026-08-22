@@ -23,6 +23,7 @@ func (s *Server) registerManagementRoutes() {
 
 	s.engine.POST("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.PostOAuthCallback)
 	s.engine.GET("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.GetOAuthCallback)
+	s.registerPublicOAuthInviteRoutes()
 
 	mgmt := s.engine.Group("/v0/management")
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
@@ -82,6 +83,19 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
+
+		mgmt.GET("/users", s.mgmt.ListManagedUsers)
+		mgmt.POST("/users", s.mgmt.CreateManagedUser)
+		mgmt.GET("/users/:id", s.mgmt.GetManagedUser)
+		mgmt.PATCH("/users/:id", s.mgmt.UpdateManagedUser)
+		mgmt.DELETE("/users/:id", s.mgmt.DeleteManagedUser)
+		mgmt.GET("/users/:id/api-keys", s.mgmt.ListManagedAPIKeys)
+		mgmt.POST("/users/:id/api-keys", s.mgmt.CreateManagedAPIKey)
+		mgmt.GET("/users/:id/usage", s.mgmt.GetManagedUserUsage)
+		mgmt.DELETE("/managed-api-keys/:id", s.mgmt.RevokeManagedAPIKey)
+		mgmt.GET("/oauth-invites", s.mgmt.ListOAuthInvites)
+		mgmt.POST("/oauth-invites", s.mgmt.CreateOAuthInvite)
+		mgmt.DELETE("/oauth-invites/:id", s.mgmt.RevokeOAuthInvite)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
