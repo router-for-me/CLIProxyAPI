@@ -144,7 +144,9 @@ see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
 ## Usage Statistics
 
-Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:
+CLIProxyAPI includes an optional, disabled-by-default per-key accounting mode for named downstream keys, weekly or monthly request and token limits, model allowlists, and SQLite-backed summaries. See [Per-key usage accounting and limits](docs/per-key-usage.md).
+
+For billing-grade analytics, cost estimation, and external storage, use one of the following dedicated projects:
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 

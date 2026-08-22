@@ -41,6 +41,31 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Optional named downstream keys. These keys are accepted in addition to api-keys.
+# A zero request or token limit means unlimited. allowed-models supports '*' wildcards.
+# api-key-profiles:
+#   - id: "alice"
+#     name: "Alice"
+#     api-key: "sk-cpa-replace-with-a-long-random-secret"
+#     disabled: false
+#     allowed-models:
+#       - "gpt-*"
+#       - "gemini-3.*"
+#     weekly:
+#       requests: 1000
+#       tokens: 5000000
+#     monthly:
+#       requests: 4000
+#       tokens: 20000000
+
+# Persistent per-key accounting and quota enforcement.
+# The database stores only SHA-256 key identifiers, never API key plaintext.
+api-key-usage:
+  enabled: false
+  database-path: "api-key-usage.db"
+  retention-days: 400
+  timezone: "UTC"
+
 # Enable debug logging
 debug: false
 
