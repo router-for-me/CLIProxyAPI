@@ -176,6 +176,10 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 一个原生 macOS 菜单栏应用，让您可以使用 Claude Code & ChatGPT 订阅服务和 AI 编程工具，无需 API 密钥。
 
+### [ModelMoor](https://github.com/Kingfish404/ModelMoor)
+
+一个原生 macOS 菜单栏应用和 CLI，将 CLIProxyAPI 作为受管的本地 sidecar，并把支持的订阅账户、SSH 托管模型和 OpenAI 兼容 API 汇集到一个经过身份验证的端点。
+
 ### [Subtitle Translator](https://github.com/VjayC/SRT-Subtitle-Translator-Validator)
 
 一款跨平台的桌面和 Web 应用程序，可通过 CLIProxyAPI 使用您现有的 LLM 订阅（Gemini、ChatGPT、Claude, etc.）来翻译和验证 SRT 字幕 - 无需 API 密钥。

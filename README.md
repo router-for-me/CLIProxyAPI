@@ -180,6 +180,10 @@ Those projects are based on CLIProxyAPI:
 
 Native macOS menu bar app to use your Claude Code & ChatGPT subscriptions with AI coding tools - no API keys needed
 
+### [ModelMoor](https://github.com/Kingfish404/ModelMoor)
+
+Native macOS menu bar app and CLI that manages CLIProxyAPI as a local sidecar, combining supported subscription accounts with SSH-hosted and OpenAI-compatible APIs behind one authenticated endpoint.
+
 ### [Subtitle Translator](https://github.com/VjayC/SRT-Subtitle-Translator-Validator)
 
 A cross-platform desktop and web app to translate and validate SRT subtitles using your existing LLM subscriptions (Gemini, ChatGPT, Claude, etc.) via CLIProxyAPI - no API keys needed.
