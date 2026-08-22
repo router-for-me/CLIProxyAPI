@@ -246,7 +246,13 @@ func restoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) (
 			continue
 		}
 		content := message.Get("content")
-		if !content.IsArray() {
+		if content.Type == gjson.String {
+			normalized, err := json.Marshal([]map[string]string{{"type": "text", "text": content.String()}})
+			if err != nil {
+				continue
+			}
+			content = gjson.ParseBytes(normalized)
+		} else if !content.IsArray() {
 			continue
 		}
 		assistantContents = append(assistantContents, content)

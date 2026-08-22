@@ -1418,6 +1418,25 @@ func TestRestoreClaudeThinkingReplayContents_AnchorsDuplicateSuffixAfterTruncati
 	}
 }
 
+func TestRestoreClaudeThinkingReplayContents_NormalizesStringShorthand(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":"answer"}]}`)
+	cached := [][]byte{
+		[]byte(`[{"type":"thinking","thinking":"reasoning","signature":"sig"},{"type":"text","text":"answer"}]`),
+	}
+
+	updated, restored := restoreClaudeThinkingReplayContents(body, cached)
+	if !restored {
+		t.Fatal("expected restore for string shorthand assistant content")
+	}
+	content := gjson.GetBytes(updated, "messages.1.content").Array()
+	if content[0].Get("signature").String() != "sig" {
+		t.Fatalf("shorthand content not restored with signature: %s", content[0].Get("signature").String())
+	}
+	if content[1].Get("text").String() != "answer" {
+		t.Fatalf("shorthand text not preserved: %s", content[1].Get("text").String())
+	}
+}
+
 func TestClaudeExecutorCompatThinkingReplayRetainsScopeAfterHistoryCompaction(t *testing.T) {
 	internalcacheClearClaudeThinkingReplay(t)
 
