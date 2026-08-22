@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -748,6 +749,56 @@ func TestGetClaudeThinkingReplayWithSnapshotIfExistsDoesNotReserve(t *testing.T)
 	}
 	if !found || len(contents) != 1 {
 		t.Fatalf("expected cached content, found=%v len=%d", found, len(contents))
+	}
+}
+
+func TestClaudeThinkingReplayAliasBatchEvictCarriesIdentity(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+	ctx := context.Background()
+	useFakeClaudeThinkingReplayKVClient(t, newFakeClaudeThinkingReplayKVClient(), false)
+
+	// Each alias key is ~0.5MiB; 130 aliases exceed the 64MiB cap and force a
+	// 128-entry eviction batch, leaving the two newest entries.
+	const keySize = 1 << 19
+	modelFamily := "claude:" + strings.Repeat("x", keySize) + ":model"
+
+	for i := 0; i < 130; i++ {
+		RegisterClaudeThinkingReplayAlias(ctx, modelFamily, fmt.Sprintf("session-%d", i), messageHashFor(i), "first")
+	}
+
+	if claudeThinkingReplayAliasCount != 2 {
+		t.Fatalf("alias count = %d, want 2", claudeThinkingReplayAliasCount)
+	}
+
+	// The 128-entry batch should have removed the oldest sessions.
+	for _, evicted := range []string{"session-0", "session-1"} {
+		key := claudeThinkingReplayAliasKey(modelFamily, messageHashFor(0))
+		if strings.HasPrefix(evicted, "session-1") {
+			key = claudeThinkingReplayAliasKey(modelFamily, messageHashFor(1))
+		}
+		for _, entry := range claudeThinkingReplayAliases[key] {
+			if entry.sessionKey == evicted {
+				t.Fatalf("evicted session %q still present", evicted)
+			}
+		}
+	}
+	for _, kept := range []string{"session-128", "session-129"} {
+		i := 128
+		if kept == "session-129" {
+			i = 129
+		}
+		key := claudeThinkingReplayAliasKey(modelFamily, messageHashFor(i))
+		found := false
+		for _, entry := range claudeThinkingReplayAliases[key] {
+			if entry.sessionKey == kept {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("kept session %q not found", kept)
+		}
 	}
 }
 

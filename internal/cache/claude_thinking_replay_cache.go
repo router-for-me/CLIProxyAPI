@@ -592,14 +592,15 @@ func purgeExpiredClaudeThinkingReplayAliasesLocked(now time.Time) {
 func enforceClaudeThinkingReplayAliasLimitsLocked() {
 	for claudeThinkingReplayAliasCount > ClaudeThinkingReplayCacheMaxAliases || claudeThinkingReplayAliasBytes > ClaudeThinkingReplayCacheMaxAliasBytes {
 		type candidate struct {
-			key       string
-			index     int
-			timestamp time.Time
+			key           string
+			sessionKey    string
+			firstUserHash string
+			timestamp     time.Time
 		}
 		var candidates []candidate
 		for key, list := range claudeThinkingReplayAliases {
-			for i, entry := range list {
-				candidates = append(candidates, candidate{key: key, index: i, timestamp: entry.timestamp})
+			for _, entry := range list {
+				candidates = append(candidates, candidate{key: key, sessionKey: entry.sessionKey, firstUserHash: entry.firstUserHash, timestamp: entry.timestamp})
 			}
 		}
 		if len(candidates) == 0 {
@@ -615,13 +616,9 @@ func enforceClaudeThinkingReplayAliasLimitsLocked() {
 		for i := 0; i < batch; i++ {
 			c := candidates[i]
 			list := claudeThinkingReplayAliases[c.key]
-			if c.index >= len(list) {
-				continue
-			}
-			sessionKey := list[c.index].sessionKey
 			found := -1
 			for j, e := range list {
-				if e.sessionKey == sessionKey {
+				if e.sessionKey == c.sessionKey {
 					found = j
 					break
 				}
