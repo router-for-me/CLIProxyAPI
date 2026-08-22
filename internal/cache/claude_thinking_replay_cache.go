@@ -622,7 +622,7 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 	}
 
 	// Maintain the per-credential index so old aliases can be evicted.
-	var evicted []string
+	var evicted []claudeThinkingReplayAliasIndexRecord
 	indexUpdated := false
 	for attempt := 0; attempt < 4; attempt++ {
 		indexRaw, indexFound, errIndex := client.KVGet(ctx, indexKey)
@@ -643,7 +643,7 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 				return index.Aliases[i].Timestamp.Before(index.Aliases[j].Timestamp)
 			})
 			for len(index.Aliases) > ClaudeThinkingReplayCacheMaxAliasesPerCredential {
-				evicted = append(evicted, index.Aliases[0].AliasKey)
+				evicted = append(evicted, index.Aliases[0])
 				index.Aliases = index.Aliases[1:]
 			}
 		}
@@ -676,9 +676,10 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 		return
 	}
 
-	// Only delete evicted alias values after the index CAS succeeds and a fresh
-	// read confirms the alias is still absent from the index. A concurrent
-	// worker may have re-registered an evicted alias after our CAS.
+	// Only delete evicted alias values after the index CAS succeeds and both the
+	// index and the alias value itself have been rechecked. A concurrent worker may
+	// have re-registered an evicted alias after our CAS; if the value has a session
+	// newer than the evicted index record we must not delete it.
 	currentIndexRaw, _, errCurrentIndex := client.KVGet(ctx, indexKey)
 	if errCurrentIndex != nil {
 		log.Warnf("claude thinking replay alias index re-read failed: %v", errCurrentIndex)
@@ -689,11 +690,15 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 	for _, a := range currentIndex.Aliases {
 		present[a.AliasKey] = struct{}{}
 	}
-	for _, key := range evicted {
-		if _, ok := present[key]; ok {
+	for _, rec := range evicted {
+		if _, ok := present[rec.AliasKey]; ok {
 			continue
 		}
-		if _, errDel := client.KVDel(ctx, key); errDel != nil {
+		raw, found, errAlias := client.KVGet(ctx, rec.AliasKey)
+		if errAlias == nil && found && claudeThinkingReplayAliasValueRepopulated(raw, rec.Timestamp) {
+			continue
+		}
+		if _, errDel := client.KVDel(ctx, rec.AliasKey); errDel != nil {
 			log.Warnf("claude thinking replay alias eviction failed: %v", errDel)
 		}
 	}
@@ -794,6 +799,24 @@ func claudeThinkingReplayAliasIndexUpsert(records []claudeThinkingReplayAliasInd
 		}
 	}
 	return append(records, claudeThinkingReplayAliasIndexRecord{AliasKey: aliasKey, Timestamp: now})
+}
+
+// claudeThinkingReplayAliasValueRepopulated reports whether an alias value has
+// been refreshed by a concurrent worker after the index record for that alias
+// was evicted. We compare the session timestamps in the value against the
+// evicted index record timestamp; a session newer than the evicted record means
+// a re-registration happened and the alias value must not be deleted.
+func claudeThinkingReplayAliasValueRepopulated(raw []byte, evictedTimestamp time.Time) bool {
+	var value claudeThinkingReplayAliasHomeValue
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false
+	}
+	for _, s := range value.Sessions {
+		if s.Timestamp.After(evictedTimestamp) {
+			return true
+		}
+	}
+	return false
 }
 
 func claudeThinkingReplayAliasHomeValueUpsert(sessions []claudeThinkingReplayAliasHomeSession, sessionKey, firstUserHash string, now time.Time) []claudeThinkingReplayAliasHomeSession {

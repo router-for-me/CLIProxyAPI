@@ -538,6 +538,53 @@ func TestClaudeThinkingReplayAliasHomeEvictionSkipsReaddedAlias(t *testing.T) {
 	}
 }
 
+func TestClaudeThinkingReplayAliasHomeRechecksEvictedAliasValue(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
+
+	client := newFakeClaudeThinkingReplayKVClient()
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	max := ClaudeThinkingReplayCacheMaxAliasesPerCredential
+	now := time.Now()
+	var index claudeThinkingReplayAliasIndex
+	for i := 0; i < max; i++ {
+		aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHashFor(i))
+		index.Aliases = append(index.Aliases, claudeThinkingReplayAliasIndexRecord{
+			AliasKey:  aliasKey,
+			Timestamp: now.Add(-time.Duration(max-i) * time.Second),
+		})
+		value, _ := json.Marshal(claudeThinkingReplayAliasHomeValue{
+			Sessions: []claudeThinkingReplayAliasHomeSession{
+				{SessionKey: "session", FirstUserHash: "first", Timestamp: now},
+			},
+		})
+		client.values[aliasKey] = value
+	}
+	evictedAlias := index.Aliases[0].AliasKey
+	indexBytes, _ := json.Marshal(index)
+	client.values[indexKey] = indexBytes
+
+	// Simulate a concurrent worker refreshing the evicted alias value after the
+	// index record was established but before the eviction pass.
+	refreshed, _ := json.Marshal(claudeThinkingReplayAliasHomeValue{
+		Sessions: []claudeThinkingReplayAliasHomeSession{
+			{SessionKey: "session", FirstUserHash: "first", Timestamp: now.Add(time.Minute)},
+		},
+	})
+	client.values[evictedAlias] = refreshed
+
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHashFor(max), "first")
+
+	if _, ok := client.values[evictedAlias]; !ok {
+		t.Fatalf("evicted alias %q was deleted despite a repopulated value", evictedAlias)
+	}
+}
+
 // indexGetFailingClaudeThinkingReplayKVClient fails KVGet for the index key.
 // This verifies rollback does not depend on an index read succeeding.
 type indexGetFailingClaudeThinkingReplayKVClient struct {
