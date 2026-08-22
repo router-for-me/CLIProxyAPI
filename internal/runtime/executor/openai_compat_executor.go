@@ -1011,9 +1011,10 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 }
 
 type statusErr struct {
-	code       int
-	msg        string
-	retryAfter *time.Duration
+	code               int
+	msg                string
+	retryAfter         *time.Duration
+	transientRateLimit bool
 }
 
 func (e statusErr) Error() string {
@@ -1024,3 +1025,7 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+
+// TransientRateLimit reports whether the upstream 429 was classified as a
+// short-lived rate limit rather than an exhausted quota window.
+func (e statusErr) TransientRateLimit() bool { return e.transientRateLimit }

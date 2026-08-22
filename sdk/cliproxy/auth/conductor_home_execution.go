@@ -258,6 +258,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			result.Error = resultErrorFromError(errExecute)
 			result.RetryAfter = retryAfterFromError(errExecute)
+			result.TransientRateLimit = isTransientRateLimitError(errExecute)
 			if isCredentialScopedError(errExecute) {
 				result.CredentialScope = true
 			}

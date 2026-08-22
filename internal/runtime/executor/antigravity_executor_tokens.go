@@ -164,24 +164,12 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 			continue
 		}
-		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
-		if httpResp.StatusCode == http.StatusTooManyRequests {
-			if retryAfter, parseErr := helps.ParseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
-				sErr.retryAfter = retryAfter
-			}
-		}
-		return cliproxyexecutor.Response{}, sErr
+		return cliproxyexecutor.Response{}, newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 	}
 
 	switch {
 	case lastStatus != 0:
-		sErr := statusErr{code: lastStatus, msg: string(lastBody)}
-		if lastStatus == http.StatusTooManyRequests {
-			if retryAfter, parseErr := helps.ParseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
-				sErr.retryAfter = retryAfter
-			}
-		}
-		return cliproxyexecutor.Response{}, sErr
+		return cliproxyexecutor.Response{}, newAntigravityStatusErr(lastStatus, lastBody)
 	case lastErr != nil:
 		return cliproxyexecutor.Response{}, lastErr
 	default:

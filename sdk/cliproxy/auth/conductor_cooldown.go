@@ -825,15 +825,46 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 429:
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
+							transientCooldownOff := false
 							if !disableCooling {
-								if result.RetryAfter != nil {
+								switch {
+								case result.TransientRateLimit:
+									// A 429 the provider classified as a short-lived rate limit bypasses
+									// the quota ladder entirely: flooring a transient throttle at the
+									// escalating ladder would park a still-usable credential. With no
+									// parseable hint, fall back to the standard transient-error cooldown.
+									if result.RetryAfter != nil {
+										next = now.Add(*result.RetryAfter)
+									} else {
+										next = nextTransientErrorRetryAfter(now)
+									}
+									transientCooldownOff = next.IsZero()
+								case result.RetryAfter != nil && *result.RetryAfter <= 0:
+									// Zero-delay retries keep their hint verbatim: flooring them at the
+									// quota ladder would park a still-usable credential for up to the
+									// full ladder step.
 									next = now.Add(*result.RetryAfter)
-								} else {
+								default:
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
+									if result.RetryAfter != nil {
+										// An exhausted-quota hint can be sub-second even when the quota is gone
+										// for the whole day, so never let it undercut the escalating ladder.
+										if hinted := now.Add(*result.RetryAfter); hinted.After(next) {
+											next = hinted
+										}
+									}
 								}
 								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
 									next = state.Quota.NextRecoverAt
 								}
+							}
+							if transientCooldownOff && !state.Quota.Exceeded {
+								// Transient cooldowns are disabled for this auth: keep the model
+								// available instead of recording a zero-time quota block. A
+								// pre-existing quota block is left untouched.
+								state.Unavailable = false
+								state.NextRetryAfter = time.Time{}
+								break
 							}
 							state.NextRetryAfter = next
 							state.Quota = QuotaState{
@@ -901,7 +932,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 					disableCooling = false
 				}
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling, result.TransientRateLimit)
 			}
 		}
 
@@ -1444,6 +1475,19 @@ func retryAfterFromError(err error) *time.Duration {
 	return &value
 }
 
+// isTransientRateLimitError reports whether the executor classified the failure
+// as a short-lived provider rate limit rather than an exhausted quota window.
+func isTransientRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type transientRateLimitProvider interface {
+		TransientRateLimit() bool
+	}
+	var trp transientRateLimitProvider
+	return errors.As(err, &trp) && trp != nil && trp.TransientRateLimit()
+}
+
 func isCredentialScopedError(err error) bool {
 	if err == nil {
 		return false
@@ -1868,13 +1912,15 @@ func isRequestInvalidError(err error) bool {
 	return false
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool, transientRateLimit bool) {
 	if auth == nil {
 		return
 	}
 	if shouldSkipCredentialCooldown(resultErr) {
 		return
 	}
+	prevUnavailable := auth.Unavailable
+	prevNextRetry := auth.NextRetryAfter
 	defer func() {
 		if disableCooling && auth.NextRetryAfter.IsZero() && auth.Quota.NextRecoverAt.IsZero() {
 			auth.Unavailable = false
@@ -1935,19 +1981,54 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.NextRetryAfter = now.Add(12 * time.Hour)
 		}
 	case 429:
+		prevStatusMessage := auth.StatusMessage
+		prevExceeded, prevReason := auth.Quota.Exceeded, auth.Quota.Reason
 		auth.StatusMessage = "quota exhausted"
 		auth.Quota.Exceeded = true
 		auth.Quota.Reason = "quota"
 		var next time.Time
+		transientCooldownOff := false
 		if !disableCooling {
-			if retryAfter != nil {
+			switch {
+			case transientRateLimit:
+				// A 429 the provider classified as a short-lived rate limit bypasses the
+				// quota ladder entirely: flooring a transient throttle at the escalating
+				// ladder would park a still-usable credential. With no parseable hint,
+				// fall back to the standard transient-error cooldown.
+				if retryAfter != nil {
+					next = now.Add(*retryAfter)
+				} else {
+					next = nextTransientErrorRetryAfter(now)
+				}
+				transientCooldownOff = next.IsZero()
+			case retryAfter != nil && *retryAfter <= 0:
+				// Zero-delay retries keep their hint verbatim: flooring them at the quota
+				// ladder would park a still-usable credential for up to the full ladder step.
 				next = now.Add(*retryAfter)
-			} else {
+			default:
 				next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
+				if retryAfter != nil {
+					// An exhausted-quota hint can be sub-second even when the quota is gone for
+					// the whole day, so never let it undercut the escalating quota ladder.
+					if hinted := now.Add(*retryAfter); hinted.After(next) {
+						next = hinted
+					}
+				}
 			}
 			if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
 				next = auth.Quota.NextRecoverAt
 			}
+		}
+		if transientCooldownOff && !prevExceeded {
+			// Transient cooldowns are disabled: keep the credential available
+			// instead of recording a zero-time quota block. A pre-existing quota
+			// block is left untouched.
+			auth.StatusMessage = prevStatusMessage
+			auth.Quota.Exceeded = prevExceeded
+			auth.Quota.Reason = prevReason
+			auth.Unavailable = prevUnavailable
+			auth.NextRetryAfter = prevNextRetry
+			break
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
