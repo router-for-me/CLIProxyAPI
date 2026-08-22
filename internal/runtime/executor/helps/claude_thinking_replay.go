@@ -293,26 +293,44 @@ func ClaudeThinkingReplayFindStartIndex(assistantContents []gjson.Result, cached
 	return chosen.start, chosen.matches
 }
 
-// rightmostSubsequenceMatch finds the rightmost strictly increasing sequence of
-// request indices such that assistantContents[matches[k]] matches
-// cachedContents[start+k]. It returns nil if no such subsequence exists.
+// rightmostSubsequenceMatch finds a strictly increasing sequence of request
+// indices such that assistantContents[matches[k]] matches cachedContents[start+k].
+// When multiple request turns match the same cached turn, it prefers the one
+// that already carries thinking content. For a single cached turn matched by
+// multiple unsigned request turns, the anchor is ambiguous and the match fails.
 func rightmostSubsequenceMatch(assistantContents []gjson.Result, cachedContents [][]byte, start, l int) []int {
 	matches := make([]int, l)
 	limit := len(assistantContents)
 	for k := l - 1; k >= 0; k-- {
 		cached := gjson.ParseBytes(cachedContents[start+k])
-		found := -1
+		var candidates []int
 		for i := limit - 1; i >= 0; i-- {
 			if ClaudeThinkingReplayContentsMatch(assistantContents[i], cached) {
-				found = i
+				candidates = append(candidates, i)
+			}
+		}
+		if len(candidates) == 0 {
+			return nil
+		}
+
+		// Prefer the rightmost candidate with thinking (a retained turn). If
+		// none are retained and this is the last cached turn (l == 1), multiple
+		// matching unsigned turns make the anchor ambiguous.
+		selected := -1
+		for _, i := range candidates {
+			if ContentHasThinking(assistantContents[i]) {
+				selected = i
 				break
 			}
 		}
-		if found < 0 {
-			return nil
+		if selected < 0 {
+			if l == 1 && len(candidates) > 1 {
+				return nil
+			}
+			selected = candidates[0]
 		}
-		matches[k] = found
-		limit = found
+		matches[k] = selected
+		limit = selected
 	}
 	return matches
 }

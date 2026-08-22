@@ -133,6 +133,26 @@ func TestClaudeThinkingReplayFindStartIndex_RefusesAmbiguousShorterSuffix(t *tes
 	}
 }
 
+func TestRestoreClaudeThinkingReplayContents_RejectDuplicateRequestSideAnchors(t *testing.T) {
+	// A cached signed turn followed by an uncached unsigned duplicate with the
+	// same visible content must not have its signature injected into the later
+	// unsigned turn. The earlier retained turn should keep its signature.
+	body := []byte(`{"messages":[{"role":"user","content":"u"},{"role":"assistant","content":[{"type":"thinking","thinking":"r","signature":"sig"},{"type":"text","text":"A"}]},{"role":"assistant","content":[{"type":"text","text":"A"}]},{"role":"user","content":"u2"}]}`)
+	cached := [][]byte{
+		[]byte(`[{"type":"thinking","thinking":"r","signature":"sig"},{"type":"text","text":"A"}]`),
+	}
+
+	updated, _ := helps.RestoreClaudeThinkingReplayContents(body, cached)
+	first := gjson.GetBytes(updated, "messages.1.content").Array()
+	second := gjson.GetBytes(updated, "messages.2.content").Array()
+	if first[0].Get("signature").String() != "sig" {
+		t.Fatalf("first retained turn should keep cached signature, got %s", first[0].Get("signature").String())
+	}
+	if second[0].Get("signature").String() != "" {
+		t.Fatalf("later unsigned duplicate should not receive cached signature, got %s", second[0].Get("signature").String())
+	}
+}
+
 func TestClaudeThinkingReplayAssistantMessageHash_NormalizesStringShorthand(t *testing.T) {
 	modelFamily := "claude:test"
 	callerHash := "caller"
