@@ -14,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	codexclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -32,7 +33,18 @@ const (
 
 var dataTag = []byte("data:")
 
-func translateCodexRequestPair(from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool, preserveEmptyThinkingBlocks ...bool) ([]byte, []byte) {
+func translateCodexRequestPair(from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool, preserveEmptyThinkingBlocks ...bool) ([]byte, []byte, error) {
+	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
+		if err := codexclaude.ValidateClaudeRequestForCodex(originalPayload); err != nil {
+			return nil, nil, newCodexClaudeValidationError("request", err)
+		}
+		if !bytes.Equal(originalPayload, payload) {
+			if err := codexclaude.ValidateClaudeRequestForCodex(payload); err != nil {
+				return nil, nil, newCodexClaudeValidationError("translated request", err)
+			}
+		}
+	}
+
 	isCompat := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
 	translate := func(raw []byte) []byte {
 		if isCompat && from == sdktranslator.FormatClaude && to == sdktranslator.FormatCodex {
@@ -42,11 +54,22 @@ func translateCodexRequestPair(from, to sdktranslator.Format, model string, orig
 	}
 	if bytes.Equal(originalPayload, payload) {
 		body := translate(payload)
-		return body, body
+		return body, body, nil
 	}
 	originalTranslated := translate(originalPayload)
 	body := translate(payload)
-	return originalTranslated, body
+	return originalTranslated, body, nil
+}
+
+type codexClaudeValidationError struct {
+	statusErr
+}
+
+func (codexClaudeValidationError) IsRequestScoped() bool { return true }
+
+func newCodexClaudeValidationError(label string, err error) error {
+	requestErr := codexClaudeValidationError{statusErr{code: http.StatusBadRequest, msg: err.Error()}}
+	return fmt.Errorf("codex executor: invalid Claude %s: %w", label, requestErr)
 }
 
 // PrepareRequest injects Codex credentials into the outgoing HTTP request.

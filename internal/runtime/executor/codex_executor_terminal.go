@@ -295,6 +295,36 @@ func newCodexStatusErr(statusCode int, body []byte) statusErr {
 	return err
 }
 
+var codexRateLimitResponseHeaders = map[string]struct{}{
+	"Retry-After":                          {},
+	"X-Ratelimit-Limit-Project-Tokens":     {},
+	"X-Ratelimit-Limit-Requests":           {},
+	"X-Ratelimit-Limit-Tokens":             {},
+	"X-Ratelimit-Remaining-Project-Tokens": {},
+	"X-Ratelimit-Remaining-Requests":       {},
+	"X-Ratelimit-Remaining-Tokens":         {},
+	"X-Ratelimit-Reset-Project-Tokens":     {},
+	"X-Ratelimit-Reset-Requests":           {},
+	"X-Ratelimit-Reset-Tokens":             {},
+}
+
+func newCodexStatusErrWithHeaders(statusCode int, body []byte, headers http.Header) statusErrWithHeaders {
+	safe := make(http.Header)
+	for name, values := range headers {
+		canonical := http.CanonicalHeaderKey(name)
+		if _, ok := codexRateLimitResponseHeaders[canonical]; !ok {
+			continue
+		}
+		for _, value := range values {
+			if strings.IndexFunc(value, func(character rune) bool { return character < 32 || character == 127 }) >= 0 {
+				continue
+			}
+			safe.Add(canonical, value)
+		}
+	}
+	return statusErrWithHeaders{statusErr: newCodexStatusErr(statusCode, body), headers: safe}
+}
+
 func classifyCodexStatusError(statusCode int, body []byte) []byte {
 	code, errType, ok := codexStatusErrorClassification(statusCode, body)
 	if !ok {

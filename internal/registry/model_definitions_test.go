@@ -1,6 +1,9 @@
 package registry
 
-import "testing"
+import (
+	"sync"
+	"testing"
+)
 
 func TestGetStaticModelDefinitionsByChannelSupportsGeminiInteractions(t *testing.T) {
 	models := GetStaticModelDefinitionsByChannel("gemini-interactions")
@@ -110,4 +113,62 @@ func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing
 	if got := AntigravityWebSearchModelFor("unknown-model"); got != "" {
 		t.Fatalf("unknown model should not get Antigravity web search model, got %q", got)
 	}
+}
+
+func TestIsClaudeModelIDUsesCurrentCatalog(t *testing.T) {
+	if !IsClaudeModelID("claude-opus-5") {
+		t.Fatal("IsClaudeModelID(claude-opus-5) = false, want true")
+	}
+	for _, id := range []string{"claude-opus-5-lookalike", "Claude-Opus-5", "gpt-4o"} {
+		if IsClaudeModelID(id) {
+			t.Fatalf("IsClaudeModelID(%q) = true, want false", id)
+		}
+	}
+}
+
+func TestModelStoreClaudeModelIDsFollowReplacement(t *testing.T) {
+	store := &modelStore{}
+	store.replaceModels(&staticModelsJSON{Claude: []*ModelInfo{
+		{ID: "claude-first"},
+		{ID: "claude-second"},
+		nil,
+	}})
+	if !store.isClaudeModelID("claude-first") || !store.isClaudeModelID("claude-second") {
+		t.Fatal("initial Claude IDs were not indexed")
+	}
+
+	store.replaceModels(&staticModelsJSON{Claude: []*ModelInfo{{ID: "claude-third"}}})
+	if store.isClaudeModelID("claude-first") {
+		t.Fatal("removed Claude ID remained indexed")
+	}
+	if !store.isClaudeModelID("claude-third") {
+		t.Fatal("replacement Claude ID was not indexed")
+	}
+}
+
+func TestModelStoreClaudeModelIDsConcurrentAccess(t *testing.T) {
+	store := &modelStore{}
+	store.replaceModels(&staticModelsJSON{Claude: []*ModelInfo{{ID: "claude-first"}}})
+
+	const iterations = 500
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			store.replaceModels(&staticModelsJSON{Claude: []*ModelInfo{{ID: "claude-first"}}})
+			store.replaceModels(&staticModelsJSON{Claude: []*ModelInfo{{ID: "claude-second"}}})
+		}
+	}()
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				_ = store.isClaudeModelID("claude-first")
+				_ = store.isClaudeModelID("claude-second")
+			}
+		}()
+	}
+	wg.Wait()
 }
