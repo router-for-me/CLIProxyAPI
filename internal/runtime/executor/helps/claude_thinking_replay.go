@@ -363,7 +363,16 @@ func ClaudeThinkingReplayUserMessageHash(modelFamily, callerHash string, msg gjs
 // ClaudeThinkingReplayAssistantMessageHash returns a stable hash for the
 // non-thinking parts of an assistant message.
 func ClaudeThinkingReplayAssistantMessageHash(modelFamily, callerHash string, content []byte) string {
-	parts, ok := NonThinkingContentParts(gjson.ParseBytes(content))
+	root := gjson.ParseBytes(content)
+	if root.Type == gjson.String {
+		normalized, err := json.Marshal([]map[string]string{{"type": "text", "text": root.String()}})
+		if err != nil {
+			return ""
+		}
+		content = normalized
+		root = gjson.ParseBytes(content)
+	}
+	parts, ok := NonThinkingContentParts(root)
 	if !ok || len(parts) == 0 {
 		return ""
 	}

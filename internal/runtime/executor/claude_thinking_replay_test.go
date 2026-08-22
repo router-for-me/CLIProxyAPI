@@ -89,6 +89,19 @@ func TestClaudeThinkingReplayFindStartIndex_RefusesAmbiguousShorterSuffix(t *tes
 	}
 }
 
+func TestClaudeThinkingReplayAssistantMessageHash_NormalizesStringShorthand(t *testing.T) {
+	modelFamily := "claude:test"
+	callerHash := "caller"
+	strHash := helps.ClaudeThinkingReplayAssistantMessageHash(modelFamily, callerHash, []byte(`"answer"`))
+	arrHash := helps.ClaudeThinkingReplayAssistantMessageHash(modelFamily, callerHash, []byte(`[{"type":"text","text":"answer"}]`))
+	if strHash == "" || arrHash == "" {
+		t.Fatalf("string shorthand or array form produced empty hash")
+	}
+	if strHash != arrHash {
+		t.Fatalf("string shorthand %q must match array form %q", strHash, arrHash)
+	}
+}
+
 func TestClaudeThinkingReplayCallerHash_IgnoresWhitespaceOnlyHeaders(t *testing.T) {
 	auth := &cliproxyauth.Auth{ID: "auth-id"}
 	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
