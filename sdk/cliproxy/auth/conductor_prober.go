@@ -237,7 +237,7 @@ func (l *authProberLoop) snapshotAuths() []*Auth {
 
 func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 	l.manager.mu.RLock()
-	exec := l.manager.executors[auth.Provider]
+	exec := l.manager.executors[executorKeyFromAuth(auth)]
 	l.manager.mu.RUnlock()
 
 	if exec == nil {

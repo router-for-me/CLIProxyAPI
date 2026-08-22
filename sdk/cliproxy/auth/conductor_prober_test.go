@@ -180,6 +180,66 @@ func TestProberLeavesAuthActiveOnSuccess(t *testing.T) {
 	}
 }
 
+func TestProberUsesCanonicalExecutorKey(t *testing.T) {
+	ctx := context.Background()
+	m := NewManager(nil, nil, nil)
+
+	// Executor is registered under the lower-cased canonical key.
+	exec := &proberTestExecutor{provider: "openai", statusCode: http.StatusOK}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "OpenAI",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://example.com",
+		},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+
+	if exec.calls.Load() != 1 {
+		t.Fatalf("prober calls = %d, want 1", exec.calls.Load())
+	}
+}
+
+func TestProberUsesCompatNameExecutorKey(t *testing.T) {
+	ctx := context.Background()
+	m := NewManager(nil, nil, nil)
+
+	exec := &proberTestExecutor{provider: "openai-compatible-custom", statusCode: http.StatusOK}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "openai-compatibility",
+		Label:    "custom",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://example.com",
+		},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+
+	if exec.calls.Load() != 1 {
+		t.Fatalf("prober calls = %d, want 1", exec.calls.Load())
+	}
+}
+
 func TestProberMarksAuthUnavailableOnEmptyResponse(t *testing.T) {
 	ctx := context.Background()
 	m := NewManager(nil, nil, nil)
