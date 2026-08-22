@@ -437,6 +437,11 @@ func claudeThinkingReplayUpsertAliasLocked(key, sessionKey, firstUserHash string
 		}
 	}
 	list = append(list, claudeThinkingReplayAliasEntry{sessionKey: sessionKey, firstUserHash: firstUserHash, timestamp: now})
+	if len(list) == 1 {
+		claudeThinkingReplayAliasBytes += len(key)
+	}
+	claudeThinkingReplayAliasCount++
+	claudeThinkingReplayAliasBytes += len(sessionKey) + len(firstUserHash)
 	if len(list) > ClaudeThinkingReplayCacheMaxAliasesPerKey {
 		oldest := 0
 		for i := 1; i < len(list); i++ {
@@ -449,8 +454,6 @@ func claudeThinkingReplayUpsertAliasLocked(key, sessionKey, firstUserHash string
 		claudeThinkingReplayAliasCount--
 	}
 	claudeThinkingReplayAliases[key] = list
-	claudeThinkingReplayAliasCount++
-	claudeThinkingReplayAliasBytes += len(key) + len(sessionKey) + len(firstUserHash)
 }
 
 func claudeThinkingReplayResolveBestAliasLocked(modelFamily string, messages []ClaudeThinkingReplayAliasMessage, requestFirstUserHash string, now time.Time) (string, bool) {
@@ -513,11 +516,12 @@ func purgeExpiredClaudeThinkingReplayAliasesLocked(now time.Time) {
 			if now.Sub(entry.timestamp) <= ClaudeThinkingReplayCacheTTL {
 				kept = append(kept, entry)
 			} else {
-				claudeThinkingReplayAliasBytes -= len(key) + len(entry.sessionKey) + len(entry.firstUserHash)
+				claudeThinkingReplayAliasBytes -= len(entry.sessionKey) + len(entry.firstUserHash)
 				claudeThinkingReplayAliasCount--
 			}
 		}
 		if len(kept) == 0 {
+			claudeThinkingReplayAliasBytes -= len(key)
 			delete(claudeThinkingReplayAliases, key)
 		} else {
 			claudeThinkingReplayAliases[key] = kept
@@ -552,9 +556,10 @@ func enforceClaudeThinkingReplayAliasLimitsLocked() {
 			c := candidates[i]
 			list := claudeThinkingReplayAliases[c.key]
 			if c.index < len(list) {
-				claudeThinkingReplayAliasBytes -= len(c.key) + len(list[c.index].sessionKey) + len(list[c.index].firstUserHash)
+				claudeThinkingReplayAliasBytes -= len(list[c.index].sessionKey) + len(list[c.index].firstUserHash)
 				list = append(list[:c.index], list[c.index+1:]...)
 				if len(list) == 0 {
+					claudeThinkingReplayAliasBytes -= len(c.key)
 					delete(claudeThinkingReplayAliases, c.key)
 				} else {
 					claudeThinkingReplayAliases[c.key] = list
