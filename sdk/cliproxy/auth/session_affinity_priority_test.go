@@ -75,22 +75,42 @@ func TestManagerSessionAffinityPreservesBindingAcrossHigherPriorityRecovery(t *t
 				return auth
 			}
 
-			if got := pick(opts); got.ID != highID {
-				t.Fatalf("cold binding = %q, want high priority %q", got.ID, highID)
+			highAuth := pick(opts)
+			if highAuth.ID != highID {
+				t.Fatalf("cold binding = %q, want high priority %q", highAuth.ID, highID)
 			}
+			manager.MarkResult(ctx, Result{
+				AuthID:   highAuth.ID,
+				Provider: highAuth.Provider,
+				Model:    model,
+				Success:  true,
+				Options:  opts,
+			})
 
 			manager.MarkResult(ctx, Result{
-				AuthID:   highID,
-				Provider: provider,
+				AuthID:   highAuth.ID,
+				Provider: highAuth.Provider,
 				Model:    model,
 				Success:  false,
 				Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
+				Options:  opts,
 			})
-			if got := pick(opts); got.ID != lowID {
-				t.Fatalf("failover binding = %q, want %q", got.ID, lowID)
+			lowAuth := pick(opts)
+			if lowAuth.ID != lowID {
+				t.Fatalf("failover binding = %q, want %q", lowAuth.ID, lowID)
 			}
+			manager.MarkResult(ctx, Result{
+				AuthID:   lowAuth.ID,
+				Provider: lowAuth.Provider,
+				Model:    model,
+				Success:  true,
+				Options:  opts,
+			})
 
 			expireSessionAffinityPriorityModelCooldown(t, manager, highID, model)
+			// The affinity namespace fix makes the mixed selection path bind and read
+			// under the canonical pool key, so the lowID binding is retained across
+			// higher-priority recovery in both the single- and mixed-provider subtests.
 			if got := pick(opts); got.ID != lowID {
 				t.Fatalf("binding after higher-priority recovery = %q, want sticky %q", got.ID, lowID)
 			}
@@ -103,14 +123,16 @@ func TestManagerSessionAffinityPreservesBindingAcrossHigherPriorityRecovery(t *t
 			}
 
 			manager.MarkResult(ctx, Result{
-				AuthID:   lowID,
-				Provider: provider,
+				AuthID:   lowAuth.ID,
+				Provider: lowAuth.Provider,
 				Model:    model,
 				Success:  false,
 				Error:    &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
+				Options:  opts,
 			})
-			if got := pick(opts); got.ID != highID {
-				t.Fatalf("binding after bound auth became unavailable = %q, want %q", got.ID, highID)
+			got, errPick := testCase.pick(manager, ctx, provider, model, opts)
+			if errPick == nil || got != nil {
+				t.Fatalf("binding after all session auths failed = %v/%v, want no candidate until quarantine expires", got, errPick)
 			}
 		})
 	}

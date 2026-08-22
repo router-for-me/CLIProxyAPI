@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"testing"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -159,6 +160,87 @@ func TestHostExecutePluginExecutorByPluginIDPreservesModel(t *testing.T) {
 	}
 	if gotReq.Model != "client-model" {
 		t.Fatalf("executor request model = %q, want client-model", gotReq.Model)
+	}
+}
+
+func TestHostExecutePluginExecutorRejectsEmptyCompletion(t *testing.T) {
+	executor := &fakeExecutor{
+		identifier: "plugin-provider",
+		execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{Payload: []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`)}, nil
+		},
+	}
+	host := newRouteModelHostWithRecords(capabilityRecord{
+		id: "executor",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			Executor:              executor,
+			ExecutorInputFormats:  []string{"openai"},
+			ExecutorOutputFormats: []string{"openai"},
+		}},
+	})
+
+	_, errExecute := host.ExecutePluginExecutor(context.Background(), "executor", coreexecutor.Request{Model: "client-model", Payload: []byte(`{"model":"client-model"}`)}, coreexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("ExecutePluginExecutor() with empty completion = nil, want retriable error")
+	}
+	var authErr *coreauth.Error
+	if !errors.As(errExecute, &authErr) {
+		t.Fatalf("error = %v (%T), want *coreauth.Error", errExecute, errExecute)
+	}
+	if !authErr.Retryable || authErr.Code != "empty_completion" {
+		t.Fatalf("error = %+v, want retriable empty_completion", authErr)
+	}
+	if authErr.StatusCode() != http.StatusServiceUnavailable {
+		t.Fatalf("error status = %d, want %d", authErr.StatusCode(), http.StatusServiceUnavailable)
+	}
+}
+
+func TestHostExecutePluginExecutorStreamRejectsEmptyCompletion(t *testing.T) {
+	streamChunks := make(chan pluginapi.ExecutorStreamChunk)
+	executor := &fakeExecutor{
+		identifier: "plugin-provider",
+		executeStream: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+			return pluginapi.ExecutorStreamResponse{Chunks: streamChunks}, nil
+		},
+	}
+	host := newRouteModelHostWithRecords(capabilityRecord{
+		id: "executor",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			Executor:              executor,
+			ExecutorInputFormats:  []string{"openai"},
+			ExecutorOutputFormats: []string{"openai"},
+		}},
+	})
+
+	streamResult, errStream := host.ExecutePluginExecutorStream(context.Background(), "executor", coreexecutor.Request{Model: "client-model", Payload: []byte(`{"model":"client-model"}`)}, coreexecutor.Options{})
+	if errStream != nil {
+		t.Fatalf("ExecutePluginExecutorStream() unexpected error = %v", errStream)
+	}
+
+	go func() {
+		streamChunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")}
+		streamChunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: [DONE]\n\n")}
+		close(streamChunks)
+	}()
+
+	var aggregated []byte
+	var emptyErr error
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			emptyErr = chunk.Err
+			break
+		}
+		aggregated = append(aggregated, chunk.Payload...)
+	}
+	if emptyErr == nil {
+		t.Fatalf("stream chunks (%q) closed clean, want empty_completion error", aggregated)
+	}
+	var authErr *coreauth.Error
+	if !errors.As(emptyErr, &authErr) {
+		t.Fatalf("error = %v (%T), want *coreauth.Error", emptyErr, emptyErr)
+	}
+	if !authErr.Retryable || authErr.Code != "empty_completion" {
+		t.Fatalf("error = %+v, want retriable empty_completion", authErr)
 	}
 }
 

@@ -788,7 +788,7 @@ func credentialRetryRoundStateEligible(lastErr *Error, quotaExceeded bool) bool 
 	return isCredentialRetryRoundStatus(statusCodeFromResult(lastErr))
 }
 
-func (m *Manager) closestCooldownWait(providers []string, model string, attempt int, eligibility authSelectionEligibility, pinnedAuthID string, defaultRequestRetry int) (time.Duration, bool) {
+func (m *Manager) closestCooldownWait(providers []string, model string, attempt int, eligibility authSelectionEligibility, pinnedAuthID string, defaultRequestRetry int, excluded map[string]struct{}) (time.Duration, bool) {
 	if m == nil || len(providers) == 0 {
 		return 0, false
 	}
@@ -828,6 +828,9 @@ func (m *Manager) closestCooldownWait(providers []string, model string, attempt 
 		if model != "" && !m.authSupportsRouteModel(registryRef, auth, model) {
 			continue
 		}
+		if _, ok := excluded[auth.ID]; ok {
+			continue
+		}
 		effectiveRetry := effectiveRequestRetryLimit(auth, defaultRequestRetry)
 		if attempt >= effectiveRetry {
 			continue
@@ -855,7 +858,7 @@ func (m *Manager) closestCooldownWait(providers []string, model string, attempt 
 	return minWait, found
 }
 
-func (m *Manager) retryAllowed(attempt int, providers []string, model string, eligibility authSelectionEligibility, pinnedAuthID string, defaultRequestRetry int) bool {
+func (m *Manager) retryAllowed(attempt int, providers []string, model string, eligibility authSelectionEligibility, pinnedAuthID string, defaultRequestRetry int, excluded map[string]struct{}) bool {
 	if m == nil || attempt < 0 || len(providers) == 0 {
 		return false
 	}
@@ -893,6 +896,9 @@ func (m *Manager) retryAllowed(attempt int, providers []string, model string, el
 			continue
 		}
 		if model != "" && !m.authSupportsRouteModel(registryRef, auth, model) {
+			continue
+		}
+		if _, ok := excluded[auth.ID]; ok {
 			continue
 		}
 		effectiveRetry := effectiveRequestRetryLimit(auth, defaultRequestRetry)
@@ -971,10 +977,11 @@ func (m *Manager) shouldRetryAfterErrorWithHomeRetryLimit(ctx context.Context, o
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
-	if !isCredentialRetryRoundStatus(status) || !m.retryAllowed(attempt, providers, model, eligibility, pinnedAuthID, defaultRequestRetry) {
+	excluded := extractExcludedAuthIDs(opts.Metadata)
+	if !isCredentialRetryRoundStatus(status) || !m.retryAllowed(attempt, providers, model, eligibility, pinnedAuthID, defaultRequestRetry, excluded) {
 		return 0, false
 	}
-	wait, found := m.closestCooldownWait(providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry)
+	wait, found := m.closestCooldownWait(providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry, excluded)
 	if found {
 		if wait > 0 && (maxWait <= 0 || wait > maxWait) {
 			return 0, false
@@ -1222,6 +1229,9 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 }
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	if opts.Metadata == nil {
+		opts.Metadata = make(map[string]any)
+	}
 	if m.HomeEnabled() {
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
 		return auth, exec, err
@@ -1539,6 +1549,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 }
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	if opts.Metadata == nil {
+		opts.Metadata = make(map[string]any)
+	}
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}

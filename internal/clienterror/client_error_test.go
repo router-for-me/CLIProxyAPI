@@ -198,6 +198,23 @@ func TestIsRequestFault(t *testing.T) {
 			want:   false,
 		},
 		{
+			// Codex surfaces an invalid or expired API key as 403 with the
+			// authentication_error body. The credential must stay eligible for
+			// rotation, so this is not a request fault.
+			name:   "codex invalid or expired key on 403 is credential failure",
+			status: http.StatusForbidden,
+			err:    errors.New(`{"error":{"message":"invalid or expired token","type":"authentication_error","code":"invalid_api_key"}}`),
+			want:   false,
+		},
+		{
+			// A credential rejection must not be reclassified as a request fault
+			// merely because the same body carries a request-fault-looking code.
+			name:   "authentication body with generic code on 403 is credential failure",
+			status: http.StatusForbidden,
+			err:    errors.New(`{"error":{"code":"invalid_request_error","message":"Authentication Fails, Your api key: ****heck is invalid","param":null,"type":"authentication_error"}}`),
+			want:   false,
+		},
+		{
 			name:   "deepseek insufficient balance is payment failure",
 			status: http.StatusPaymentRequired,
 			err:    errors.New(`{"error":{"message":"Insufficient Balance","type":"unknown_error","param":null,"code":"invalid_request_error"}}`),

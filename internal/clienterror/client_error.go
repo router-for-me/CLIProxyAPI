@@ -87,9 +87,12 @@ func IsRequestFault(status int, err error) bool {
 		return false
 	}
 	// DeepSeek reports an invalid API key as 401 with the authentication_error
-	// type alongside the same generic code. Preserve that credential failure
-	// classification without weakening generic request-fault handling.
-	if status == http.StatusUnauthorized && hasAuthenticationErrorBody(err) {
+	// type alongside the same generic code. Other providers also surface an
+	// invalid or expired credential as the authentication_error body on 403.
+	// Preserve that credential failure classification without weakening generic
+	// request-fault handling: a request-fault-looking code on the same body does
+	// not turn a credential rejection into a request fault.
+	if (status == http.StatusUnauthorized || status == http.StatusForbidden) && hasAuthenticationErrorBody(err) {
 		return false
 	}
 	if hasRequestFaultBody(err) {

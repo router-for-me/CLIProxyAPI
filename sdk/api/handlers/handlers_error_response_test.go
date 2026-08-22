@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
@@ -210,6 +211,26 @@ func TestEnrichAuthSelectionError_IgnoresOtherErrors(t *testing.T) {
 	out := enrichAuthSelectionError(in, []string{"claude"}, "claude-sonnet-4-6")
 	if out != in {
 		t.Fatalf("expected original error to be returned unchanged")
+	}
+}
+
+func TestExecutionErrorMessageMapsTrustedProvenance(t *testing.T) {
+	trusted := &coreexecutor.RequestTerminatedError{HTTPStatus: http.StatusTooManyRequests, Body: []byte("trusted"), Trusted: true}
+	got := executionErrorMessage(trusted)
+	if got == nil || !got.DirectResponse || !got.TrustedDirectResponse {
+		t.Fatalf("trusted terminated error = %#v", got)
+	}
+	if got.StatusCode != http.StatusTooManyRequests || string(got.Body) != "trusted" {
+		t.Fatalf("trusted terminated body/status = %#v", got)
+	}
+
+	untrusted := &coreexecutor.RequestTerminatedError{HTTPStatus: http.StatusBadGateway, Body: []byte("upstream")}
+	got = executionErrorMessage(untrusted)
+	if got == nil || !got.DirectResponse || got.TrustedDirectResponse {
+		t.Fatalf("untrusted terminated error = %#v", got)
+	}
+	if got.StatusCode != http.StatusBadGateway || string(got.Body) != "upstream" {
+		t.Fatalf("untrusted terminated body/status = %#v", got)
 	}
 }
 

@@ -265,7 +265,7 @@ func TestHandlerRequestInterceptorTerminatesBeforeAuth(t *testing.T) {
 	if body != nil || headers != nil {
 		t.Fatalf("terminated response body = %q, headers = %#v", body, headers)
 	}
-	if errMsg == nil || !errMsg.DirectResponse || errMsg.StatusCode != http.StatusForbidden {
+	if errMsg == nil || !errMsg.DirectResponse || !errMsg.TrustedDirectResponse || errMsg.StatusCode != http.StatusForbidden {
 		t.Fatalf("termination error = %#v", errMsg)
 	}
 	if string(errMsg.Body) != `{"error":"blocked"}` || errMsg.Headers.Get("X-Policy") != "blocked" {
@@ -312,7 +312,7 @@ func TestHandlerRequestInterceptorTerminatesAfterAuth(t *testing.T) {
 	})
 
 	_, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", model, []byte(`{"model":"`+model+`"}`), "")
-	if errMsg == nil || !errMsg.DirectResponse || errMsg.StatusCode != http.StatusTooManyRequests {
+	if errMsg == nil || !errMsg.DirectResponse || !errMsg.TrustedDirectResponse || errMsg.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("termination error = %#v", errMsg)
 	}
 	if beforeRequestID == "" || afterRequestID != beforeRequestID || completion.RequestID != beforeRequestID {
@@ -358,7 +358,7 @@ func TestHandlerAfterAuthTerminationSkipsCountAndStreamExecutors(t *testing.T) {
 				}
 				errMsg = <-errChan
 			}
-			if errMsg == nil || !errMsg.DirectResponse || errMsg.StatusCode != http.StatusForbidden {
+			if errMsg == nil || !errMsg.DirectResponse || !errMsg.TrustedDirectResponse || errMsg.StatusCode != http.StatusForbidden {
 				t.Fatalf("termination error = %#v", errMsg)
 			}
 			if afterCalls != 1 {
