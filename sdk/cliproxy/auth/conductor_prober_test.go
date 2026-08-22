@@ -35,6 +35,7 @@ type proberTestExecutor struct {
 	blockUntil    chan struct{}
 	mu            sync.Mutex
 	lastURL       string
+	lastHeaders   http.Header
 
 	refreshCalled   atomic.Bool
 	refreshToken    string
@@ -80,6 +81,7 @@ func (e *proberTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *h
 	if req != nil {
 		e.mu.Lock()
 		e.lastURL = req.URL.String()
+		e.lastHeaders = req.Header.Clone()
 		e.mu.Unlock()
 	}
 	if e.manager != nil && e.replaceAuth && auth != nil {
@@ -144,6 +146,42 @@ func TestProberHonorsMetadataBaseURL(t *testing.T) {
 	exec.mu.Unlock()
 	if url != "https://custom.x.ai/v1/models" {
 		t.Fatalf("prober URL = %q, want %q", url, "https://custom.x.ai/v1/models")
+	}
+}
+
+func TestProberSetsAnthropicVersionHeaderForClaude(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "claude"}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "claude",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://api.anthropic.com",
+		},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+
+	if exec.calls.Load() != 1 {
+		t.Fatalf("prober calls = %d, want 1", exec.calls.Load())
+	}
+	exec.mu.Lock()
+	defer exec.mu.Unlock()
+	if exec.lastURL != "https://api.anthropic.com/v1/models" {
+		t.Fatalf("prober URL = %q, want %q", exec.lastURL, "https://api.anthropic.com/v1/models")
+	}
+	if got := exec.lastHeaders.Get("Anthropic-Version"); got != "2023-06-01" {
+		t.Fatalf("Anthropic-Version header = %q, want 2023-06-01", got)
 	}
 }
 

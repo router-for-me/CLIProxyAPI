@@ -339,6 +339,9 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 		if errReq != nil {
 			return
 		}
+		if strings.EqualFold(exec.Identifier(), "claude") {
+			req.Header.Set("Anthropic-Version", "2023-06-01")
+		}
 		resp, errExec = exec.HttpRequest(probeCtx, auth, req)
 		if resp != nil && resp.Body != nil {
 			_, _ = io.CopyN(io.Discard, resp.Body, proberMaxBodyBytes)
