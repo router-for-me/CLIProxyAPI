@@ -45,15 +45,19 @@ func claudeReplayConversationNonce(payload []byte, headers http.Header) string {
 }
 
 // ClaudeThinkingReplayConversationSessionKey returns a stable per-conversation
-// key for sessionless clients when the caller provides a genuine conversation
-// nonce. It mixes the caller identity with the nonce, first message and system
-// prompt so two identical openings with different nonces cannot see each
-// other's replay state. If no nonce is present it returns an empty string,
-// which disables fallback replay.
-func ClaudeThinkingReplayConversationSessionKey(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
-	nonce := claudeReplayConversationNonce(req.Payload, opts.Headers)
-	if nonce == "" {
-		return ""
+// key for sessionless clients. It returns usedNonce=true when an explicit
+// conversation nonce (client_metadata.conversation_id, conversation_id, or
+// X-Conversation-Id) was used. A nonce-based key is derived from stable
+// caller fields only, so it survives history compaction and gives two
+// identical openings with different nonces distinct scopes.
+//
+// When no nonce is present, the key falls back to the first user message and
+// system prompt so replay still works for stateless clients; alias resolution
+// in the executor can then recover the original conversation after history
+// compaction.
+func ClaudeThinkingReplayConversationSessionKey(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (string, bool) {
+	if len(req.Payload) == 0 {
+		return "", false
 	}
 
 	h := sha256.New()
@@ -81,11 +85,17 @@ func ClaudeThinkingReplayConversationSessionKey(auth *cliproxyauth.Auth, req cli
 	hashString(h, headerFirstValue(opts.Headers, "User-Agent"))
 	hashString(h, headerFirstValue(opts.Headers, "X-App"))
 	hashString(h, headerFirstValue(opts.Headers, "X-Codex-Client-Id"))
-	hashString(h, nonce)
 
-	if len(req.Payload) == 0 {
-		return ""
+	nonce := claudeReplayConversationNonce(req.Payload, opts.Headers)
+	if nonce != "" {
+		hashString(h, nonce)
+		return "conversation:" + hex.EncodeToString(h.Sum(nil)[:16]), true
 	}
+
+	// No explicit nonce: fall back to the first user message and system prompt.
+	// Two different callers with the same opening are still separated by the
+	// caller fields above; two conversations from the same caller with the same
+	// opening share a scope. Use a conversation nonce to avoid that.
 	for _, path := range []string{"messages.0", "system"} {
 		part := gjson.GetBytes(req.Payload, path)
 		if !part.Exists() {
@@ -98,7 +108,7 @@ func ClaudeThinkingReplayConversationSessionKey(auth *cliproxyauth.Auth, req cli
 			hashBytes(h, []byte(part.Raw))
 		}
 	}
-	return "conversation:" + hex.EncodeToString(h.Sum(nil)[:16])
+	return "conversation:" + hex.EncodeToString(h.Sum(nil)[:16]), false
 }
 
 // headerFirstValue returns the first non-empty, trimmed value for key from

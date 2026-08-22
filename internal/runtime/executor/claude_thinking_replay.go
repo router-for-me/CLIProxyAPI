@@ -40,12 +40,15 @@ func claudeThinkingReplayEnabled(auth *cliproxyauth.Auth, req cliproxyexecutor.R
 	return strings.TrimSpace(apiKey) != "" && !isClaudeOAuthToken(apiKey)
 }
 
-// A missing session identity or conversation nonce intentionally disables
-// replay instead of sharing hidden reasoning across callers. When the caller
-// provides a conversation nonce (client_metadata.conversation_id,
-// conversation_id body field, or X-Conversation-Id header) but no explicit
-// session, we fall back to a conversation-scoped key that mixes the nonce,
-// caller identity and first message.
+// claudeThinkingReplayScopeFromRequest selects a conversation replay scope.
+// It prefers an explicit execution/session metadata or prompt-cache/window key,
+// then a conversation nonce (client_metadata.conversation_id, conversation_id,
+// or X-Conversation-Id), and finally a content-derived fallback keyed by the
+// first user message and system prompt.
+//
+// When the fallback key is content-derived, history compaction changes
+// messages.0 and can orphan the cache. Resolve the original scope through any
+// remaining message aliases, then continue using that key for this request.
 func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) claudeThinkingReplayScope {
 	modelFamily := claudeThinkingReplayModelFamily(auth, req.Model)
 	callerHash := claudeThinkingReplayCallerHash(auth, req, opts)
@@ -56,8 +59,15 @@ func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyaut
 		sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
 	}
 	if sessionKey == "" {
-		sessionKey = helps.ClaudeThinkingReplayConversationSessionKey(auth, req, opts)
+		var usedNonce bool
+		sessionKey, usedNonce = helps.ClaudeThinkingReplayConversationSessionKey(auth, req, opts)
 		fallback = sessionKey != ""
+		if fallback && !usedNonce {
+			resolvedMessages := claudeThinkingReplayMessageHashes(modelFamily, callerHash, req.Payload)
+			if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, resolvedMessages, firstUserHash); ok {
+				sessionKey = resolved
+			}
+		}
 	}
 	return claudeThinkingReplayScope{
 		modelFamily:   modelFamily,
