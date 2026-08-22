@@ -609,6 +609,9 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 		swapped, errSwap := client.KVCompareAndSwap(ctx, aliasKey, raw, found, newRaw, ClaudeThinkingReplayCacheTTL)
 		if errSwap != nil {
 			log.Warnf("claude thinking replay alias cas failed: %v", errSwap)
+			// The command may have been applied before the error was returned.
+			// Roll back if the alias value still matches the attempted raw.
+			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, newRaw)
 			return
 		}
 		if swapped {

@@ -623,6 +623,47 @@ func TestClaudeThinkingReplayAliasHomeRollbackConditionalOnCommittedValue(t *tes
 	}
 }
 
+// erroredAliasCASClaudeThinkingReplayKVClient simulates an alias CAS that
+// returns an error after the value was already applied, leaving a partial
+// registration that must be rolled back.
+type erroredAliasCASClaudeThinkingReplayKVClient struct {
+	*fakeClaudeThinkingReplayKVClient
+	aliasKey string
+	errored  bool
+}
+
+func (c *erroredAliasCASClaudeThinkingReplayKVClient) KVCompareAndSwap(ctx context.Context, key string, expected []byte, expectedExists bool, newValue []byte, ttl time.Duration) (bool, error) {
+	if key == c.aliasKey && !c.errored {
+		c.errored = true
+		c.values[key] = append([]byte(nil), newValue...)
+		return false, fmt.Errorf("simulated alias CAS error")
+	}
+	return c.fakeClaudeThinkingReplayKVClient.KVCompareAndSwap(ctx, key, expected, expectedExists, newValue, ttl)
+}
+
+func TestClaudeThinkingReplayAliasHomeRollBackOnFailedRegistration(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	messageHash := "new-msg"
+	aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHash)
+
+	base := newFakeClaudeThinkingReplayKVClient()
+	client := &erroredAliasCASClaudeThinkingReplayKVClient{
+		fakeClaudeThinkingReplayKVClient: base,
+		aliasKey:                         aliasKey,
+	}
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHash, "first")
+
+	if _, ok := client.values[aliasKey]; ok {
+		t.Fatalf("alias %q was left after a failed CAS; expected rollback", aliasKey)
+	}
+}
+
 func messageHashFor(i int) string {
 	const chars = "abcdefghijklmnopqrstuvwxyz"
 	s := make([]byte, 0, 8)
