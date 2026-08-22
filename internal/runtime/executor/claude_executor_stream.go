@@ -388,9 +388,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
-			if replayAccum != nil {
-				replayAccum.observe(line)
-			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
@@ -401,6 +398,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				return
 			}
 			line = e.restoreResponseModel(restoredLine, req.Model)
+			if replayAccum != nil {
+				replayAccum.observe(line)
+			}
 			chunks := sdktranslator.TranslateStream(
 				ctx,
 				to,
