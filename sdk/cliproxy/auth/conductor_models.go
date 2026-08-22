@@ -88,6 +88,22 @@ func openAICompatModelPoolKey(auth *Auth, requestedModel string) string {
 	return strings.ToLower(strings.TrimSpace(auth.ID)) + "|" + openAICompatProviderKey(auth) + "|" + strings.ToLower(base)
 }
 
+func apiKeyModelPoolKey(auth *Auth, requestedModel string) string {
+	base := strings.TrimSpace(thinking.ParseSuffix(requestedModel).ModelName)
+	if base == "" {
+		base = strings.TrimSpace(requestedModel)
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	return strings.ToLower(strings.TrimSpace(auth.ID)) + "|" + provider + "|" + strings.ToLower(base)
+}
+
+func modelPoolKey(auth *Auth, requestedModel string) string {
+	if isConfiguredOpenAICompatAuth(auth) {
+		return openAICompatModelPoolKey(auth, requestedModel)
+	}
+	return apiKeyModelPoolKey(auth, requestedModel)
+}
+
 func (m *Manager) nextModelPoolOffset(key string, size int) int {
 	if m == nil || size <= 1 {
 		return 0
@@ -156,6 +172,28 @@ func resolveOpenAICompatUpstreamModelPool(cfg *internalconfig.Config, auth *Auth
 	return resolveModelAliasPoolFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
 }
 
+func (m *Manager) resolveAPIKeyUpstreamModelPool(auth *Auth, requestedModel string) []string {
+	return resolveAPIKeyUpstreamModelPool(m.loadAPIKeyModelRouting().config, auth, requestedModel)
+}
+
+func resolveAPIKeyUpstreamModelPool(cfg *internalconfig.Config, auth *Auth, requestedModel string) []string {
+	if !isConfiguredModelRoutingAuth(auth) {
+		return nil
+	}
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return nil
+	}
+	if cfg == nil {
+		cfg = &internalconfig.Config{}
+	}
+	models := configuredModelAliasEntries(cfg, auth)
+	if len(models) == 0 {
+		return nil
+	}
+	return resolveModelAliasPoolFromConfigModels(requestedModel, models)
+}
+
 func preserveRequestedModelSuffix(requestedModel, resolved string) string {
 	return preserveResolvedModelSuffix(resolved, thinking.ParseSuffix(requestedModel))
 }
@@ -168,11 +206,11 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 	}
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
-	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
+	if pool := m.resolveAPIKeyUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
 		if len(pool) == 1 {
 			return pool
 		}
-		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
+		offset := m.nextModelPoolOffset(modelPoolKey(auth, requestedModel), len(pool))
 		return rotateStrings(pool, offset)
 	}
 	resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
@@ -289,11 +327,11 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 		}
 	}
 	if len(candidates) == 0 {
-		if pool := resolveOpenAICompatUpstreamModelPool(routing.config, auth, upstreamModel); len(pool) > 0 {
+		if pool := resolveAPIKeyUpstreamModelPool(routing.config, auth, upstreamModel); len(pool) > 0 {
 			if len(pool) == 1 {
 				candidates = pool
 			} else {
-				offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, upstreamModel), len(pool))
+				offset := m.nextModelPoolOffset(modelPoolKey(auth, upstreamModel), len(pool))
 				candidates = rotateStrings(pool, offset)
 			}
 		} else {
