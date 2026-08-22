@@ -286,6 +286,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.watcherCancel()
 		}
 		if s.coreManager != nil {
+			s.coreManager.StopProber()
 			s.coreManager.StopAutoRefresh()
 		}
 		if s.watcher != nil {

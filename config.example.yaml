@@ -77,6 +77,16 @@ pprof:
 #   max-string-bytes: 256
 #   staging-retention: 1m
 
+# Optional active credential health prober. Disabled by default.
+# Probes issue a lightweight HTTP request to each credential's base_url
+# and feed failures into the existing cooldown/suspension machinery.
+# credential-prober:
+#   enabled: false
+#   interval: 60s
+#   max-concurrency: 4
+#   rate-limit-per-minute: 60
+#   default-probe-path: "/v1/models"
+
 # Standard dynamic library plugins are trusted in-process code. They are disabled by default.
 # Build Go examples with go build -buildmode=c-shared for the target GOOS/GOARCH.
 # Other languages can implement the same C ABI and JSON method protocol.

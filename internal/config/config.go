@@ -25,6 +25,9 @@ type Config struct {
 	// CredentialInFlight configures credential observation snapshots.
 	CredentialInFlight CredentialInFlightConfig `yaml:"credential-in-flight" json:"credential-in-flight"`
 
+	// CredentialProber configures optional active credential health probing.
+	CredentialProber CredentialProberConfig `yaml:"credential-prober" json:"credential-prober"`
+
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
 

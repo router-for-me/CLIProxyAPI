@@ -153,6 +153,7 @@ func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
 		m.clearHomeRuntimeAuths()
 	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	m.restartProberLocked(cfg)
 	return clearedCooldowns
 }
 
