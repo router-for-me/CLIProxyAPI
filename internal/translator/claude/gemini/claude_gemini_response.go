@@ -6,7 +6,6 @@
 package gemini
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"strings"
@@ -301,13 +300,18 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 	template, _ = sjson.SetBytes(template, "modelVersion", modelName)
 
 	streamingEvents := make([][]byte, 0)
-
-	scanner := bufio.NewScanner(bytes.NewReader(rawJSON))
-	buffer := make([]byte, 52_428_800) // 50MB
-	scanner.Buffer(buffer, 52_428_800)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		// log.Debug(string(line))
+	remaining := rawJSON
+	for len(remaining) > 0 {
+		var line []byte
+		idx := bytes.IndexByte(remaining, '\n')
+		if idx >= 0 {
+			line = remaining[:idx]
+			remaining = remaining[idx+1:]
+		} else {
+			line = remaining
+			remaining = nil
+		}
+		line = bytes.TrimRight(line, "\r")
 		if bytes.HasPrefix(line, dataTag) {
 			jsonData := bytes.TrimSpace(line[5:])
 			streamingEvents = append(streamingEvents, jsonData)
@@ -504,11 +508,7 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 
 	// Set the consolidated parts array
 	if len(consolidatedParts) > 0 {
-		partsJSON := []byte(`[]`)
-		for _, partJSON := range consolidatedParts {
-			partsJSON, _ = sjson.SetRawBytes(partsJSON, "-1", partJSON)
-		}
-		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts", partsJSON)
+		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts", translatorcommon.JoinRawArray(consolidatedParts))
 	}
 
 	// Set usage metadata

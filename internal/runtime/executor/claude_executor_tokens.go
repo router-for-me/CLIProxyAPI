@@ -211,6 +211,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 		body, _ = sjson.DeleteBytes(body, "context_management")
 		body, _ = sjson.DeleteBytes(body, "diagnostics")
 	}
+	// (validateClaudeMidSystemMessageModel check removed — NixLLM does not yet have the upstream helper)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err

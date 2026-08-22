@@ -540,6 +540,14 @@ func isZlibHeader(header []byte) bool {
 	return cmf&0x0f == 8 && cmf>>4 <= 7 && (uint16(cmf)<<8|uint16(flg))%31 == 0
 }
 
+// claudeCredentialUsesOAuth classifies the selected upstream credential. It is the
+// single authority for every decision that has to agree with the OAuth beta
+// profile, including the extended-cache-ttl beta and the matching body cache ttl.
+func claudeCredentialUsesOAuth(auth *cliproxyauth.Auth, apiKey string) bool {
+	hasAPIKeyAttr := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
+	return isClaudeOAuthToken(apiKey) || !hasAPIKeyAttr
+}
+
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, body []byte, cfg *config.Config, incomingHeaders http.Header, confirmedClaudeCode bool, sessionIDs ...string) error {
 	if r == nil {
 		return nil
@@ -556,8 +564,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		hd = cfg.ClaudeHeaderDefaults
 	}
 
-	hasAPIKeyAttr := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
-	oauthToken := isClaudeOAuthToken(apiKey) || !hasAPIKeyAttr
+	oauthToken := claudeCredentialUsesOAuth(auth, apiKey)
 	useAPIKey := !oauthToken
 	isAnthropicBase := isAnthropicUpstreamURL(r.URL)
 	if isAnthropicBase && useAPIKey {
@@ -591,6 +598,8 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 	if confirmedClaudeCode && incomingBetas != "" {
 		baseBetas = incomingBetas
+		// Measured Haiku helper requests already carry the exact credential
+		// beta profile and intentionally omit extended-cache-ttl.
 		if oauthToken {
 			if countTokens {
 				baseBetas = withClaudeCountTokensOAuthBeta(baseBetas)
@@ -1486,6 +1495,21 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return "", false, nil
 	}
 
+	canonicalServerPrefix := "mcp__" + server + "__"
+	normalizedName := name
+	suffix := strings.TrimPrefix(name, canonicalServerPrefix)
+	for {
+		strippedSuffix, repeatedServer := strings.CutPrefix(suffix, server+"__")
+		if !repeatedServer {
+			break
+		}
+		suffix = strippedSuffix
+		normalizedName = canonicalServerPrefix + suffix
+		if original, exact := resolver.exact[normalizedName]; exact {
+			return original, true, nil
+		}
+	}
+
 	matchedOriginal := ""
 	matchCount := 0
 	for _, entry := range resolver.aliases {
@@ -1501,20 +1525,29 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: matched multiple declared aliases", name)
 	}
 
-	parts, ok := parseClaudeMCPAlias(name)
-	if ok {
+	parts, validAlias := parseClaudeMCPAlias(normalizedName)
+	if validAlias {
 		for _, entry := range resolver.aliases {
 			if entry.parts.server == parts.server && entry.parts.semantic == parts.semantic {
 				matchedOriginal = entry.original
 				matchCount++
 			}
 		}
-		if matchCount == 1 {
-			return matchedOriginal, true, nil
+	} else {
+		// Keep generated aliases strict while allowing a malformed response tool ID
+		// to recover only when its request-local semantic suffix is unambiguous.
+		for _, entry := range resolver.aliases {
+			if entry.parts.server == server && strings.HasSuffix(normalizedName, "_"+entry.parts.semantic) {
+				matchedOriginal = entry.original
+				matchCount++
+			}
 		}
-		if matchCount > 1 {
-			return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: semantic suffix matches multiple declared tools", name)
-		}
+	}
+	if matchCount == 1 {
+		return matchedOriginal, true, nil
+	}
+	if matchCount > 1 {
+		return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: semantic suffix matches multiple declared tools", name)
 	}
 
 	return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: no unique request-local match", name)
