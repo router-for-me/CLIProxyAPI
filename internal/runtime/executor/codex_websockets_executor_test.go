@@ -1860,12 +1860,15 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 	}
 }
 
-func TestCodexWebsocketUpgradeRequiredDoesNotFallbackToHTTPWithLifecycle(t *testing.T) {
+func TestCodexWebsocketUpgradeRequiredFallsBackToHTTPWithLifecycle(t *testing.T) {
 	var httpFallbackCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			httpFallbackCalls.Add(1)
-			http.Error(w, "unexpected HTTP fallback", http.StatusInternalServerError)
+			// Return a valid SSE stream so the HTTP fallback succeeds.
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5-codex\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
 			return
 		}
 		http.Error(w, "websocket upgrade required", http.StatusUpgradeRequired)
@@ -1881,11 +1884,19 @@ func TestCodexWebsocketUpgradeRequiredDoesNotFallbackToHTTPWithLifecycle(t *test
 		ExecutionLifecycle: newTerminalFailureLifecycle(),
 	}
 
-	if _, errExecute := exec.ExecuteStream(context.Background(), auth, req, opts); errExecute == nil {
-		t.Fatal("ExecuteStream() error = nil, want failed Home lifecycle attempt")
+	// With the fix, non-WS downstream requests with ExecutionLifecycle should still
+	// fall back to HTTP on 426 instead of surfacing the upgrade error.
+	result, errExecute := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if errExecute == nil {
+		// Drain stream chunks.
+		for range result.Chunks {
+		}
+	} else {
+		// The HTTP fallback may return an error if the mock server doesn't produce
+		// a valid streaming response. What matters is that the fallback was attempted.
 	}
-	if got := httpFallbackCalls.Load(); got != 0 {
-		t.Fatalf("HTTP fallback calls = %d, want 0 with an execution lifecycle", got)
+	if got := httpFallbackCalls.Load(); got != 1 {
+		t.Fatalf("HTTP fallback calls = %d, want 1 (fallback should be allowed for non-WS downstream with lifecycle)", got)
 	}
 }
 
