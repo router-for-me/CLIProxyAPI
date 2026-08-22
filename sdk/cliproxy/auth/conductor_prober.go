@@ -287,9 +287,9 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 		return
 	}
 
-	path := strings.TrimSpace(l.cfg.DefaultProbePath)
+	path := proberProbePathForProvider(exec.Identifier(), l.cfg.DefaultProbePath)
 	if path == "" {
-		path = proberDefaultPath
+		return
 	}
 
 	probeURL, errParse := resolveProbeURL(baseURL, path)
@@ -381,6 +381,37 @@ func (l *authProberLoop) proberBackoffFor(level int) time.Duration {
 		d = l.cfg.BackoffBase
 	}
 	return d
+}
+
+// proberProviderProbePaths maps canonical executor identifiers to probe paths
+// that include the provider's API version, since the global /models default is
+// only valid for OpenAI-compatible upstreams that embed the version in base_url.
+var proberProviderProbePaths = map[string]string{
+	"gemini":              "/v1beta/models",
+	"gemini-interactions": "/v1beta/models",
+	"aistudio":            "/v1beta/models",
+	"xai":                 "/v1/models",
+	"kimi":                "/v1/models",
+}
+
+// proberProbePathForProvider returns the probe path for the provider.
+// OpenAI-compatible executors use /v1/models. Unknown providers fall back to
+// the configured default; if neither is set, the caller should skip the auth.
+func proberProbePathForProvider(provider, configured string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return strings.TrimSpace(configured)
+	}
+	if p, ok := proberProviderProbePaths[provider]; ok {
+		return p
+	}
+	if provider == "openai-compatibility" || strings.HasPrefix(provider, "openai-compatible-") {
+		return "/v1/models"
+	}
+	if configured != "" {
+		return configured
+	}
+	return ""
 }
 
 // resolveProbeURL resolves the probe path against baseURL without duplicating

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,6 +31,8 @@ type proberTestExecutor struct {
 	deadlineSet   atomic.Bool
 	ctx           context.Context
 	blockUntil    chan struct{}
+	mu            sync.Mutex
+	lastURL       string
 }
 
 func (e *proberTestExecutor) Identifier() string { return e.provider }
@@ -51,6 +54,11 @@ func (e *proberTestExecutor) CountTokens(context.Context, *Auth, cliproxyexecuto
 func (e *proberTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	e.calls.Add(1)
 	e.ctx = ctx
+	if req != nil {
+		e.mu.Lock()
+		e.lastURL = req.URL.String()
+		e.mu.Unlock()
+	}
 	if _, ok := ctx.Deadline(); ok {
 		e.deadlineSet.Store(true)
 	}
@@ -452,6 +460,39 @@ func TestProberDoesNotStartBeforeParentContext(t *testing.T) {
 	}
 }
 
+func TestProberUsesProviderSpecificProbePath(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "gemini", statusCode: http.StatusOK}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "g1",
+		Provider: "gemini",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://generativelanguage.googleapis.com",
+		},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+	if exec.calls.Load() != 1 {
+		t.Fatalf("prober calls = %d, want 1", exec.calls.Load())
+	}
+	exec.mu.Lock()
+	lastURL := exec.lastURL
+	exec.mu.Unlock()
+	if !strings.Contains(lastURL, "/v1beta/models") {
+		t.Fatalf("probe URL = %q, want /v1beta/models path", lastURL)
+	}
+}
+
 func TestProberBackoffFor(t *testing.T) {
 	l := newAuthProberLoop(nil, internalconfig.CredentialProberConfig{BackoffBase: 30 * time.Second, BackoffMax: 5 * time.Minute})
 	cases := []struct {
@@ -546,6 +587,29 @@ func TestProberBackoffEscalates(t *testing.T) {
 }
 
 func durationPtr(d time.Duration) *time.Duration { return &d }
+
+func TestProberProbePathForProvider(t *testing.T) {
+	cases := []struct {
+		provider   string
+		configured string
+		want       string
+	}{
+		{"gemini", "/models", "/v1beta/models"},
+		{"Gemini", "", "/v1beta/models"},
+		{"aistudio", "/models", "/v1beta/models"},
+		{"xai", "/models", "/v1/models"},
+		{"kimi", "/models", "/v1/models"},
+		{"openai-compatible-groq", "/models", "/v1/models"},
+		{"openai-compatibility", "", "/v1/models"},
+		{"test", "/models", "/models"},
+		{"test", "", ""},
+	}
+	for _, c := range cases {
+		if got := proberProbePathForProvider(c.provider, c.configured); got != c.want {
+			t.Fatalf("proberProbePathForProvider(%q, %q) = %q, want %q", c.provider, c.configured, got, c.want)
+		}
+	}
+}
 
 func TestResolveProbeURL(t *testing.T) {
 	cases := []struct {
