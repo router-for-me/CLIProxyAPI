@@ -664,6 +664,59 @@ func TestClaudeThinkingReplayAliasHomeRollBackOnFailedRegistration(t *testing.T)
 	}
 }
 
+func TestClaudeThinkingReplayAliasEnforcesByteLimitAndLRU(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	ctx := context.Background()
+
+	// The byte limit is large; construct an alias with a very long modelFamily
+	// to push the aggregate size over the cap.
+	large := make([]byte, ClaudeThinkingReplayCacheMaxAliasBytes)
+	for i := range large {
+		large[i] = 'x'
+	}
+	modelFamily := "claude:" + string(large) + ":model"
+
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session-a", "msg", "first")
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session-b", "msg2", "first")
+
+	if claudeThinkingReplayAliasBytes > ClaudeThinkingReplayCacheMaxAliasBytes {
+		t.Fatalf("alias bytes %d still over the %d cap after enforcement", claudeThinkingReplayAliasBytes, ClaudeThinkingReplayCacheMaxAliasBytes)
+	}
+}
+
+func TestClaudeThinkingReplayAliasPerKeyEvictsOldestByTimestamp(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	ctx := context.Background()
+
+	modelFamily := "claude:cred:model"
+	messageHash := "shared-msg"
+
+	// Fill the per-key list with 8 sessions, each with a distinct timestamp.
+	for i := 0; i < ClaudeThinkingReplayCacheMaxAliasesPerKey; i++ {
+		useFakeClaudeThinkingReplayKVClient(t, newFakeClaudeThinkingReplayKVClient(), false)
+		RegisterClaudeThinkingReplayAlias(ctx, modelFamily, fmt.Sprintf("session-%d", i), messageHash, "first")
+	}
+
+	// Refresh the oldest one (session-0) so it becomes newest.
+	useFakeClaudeThinkingReplayKVClient(t, newFakeClaudeThinkingReplayKVClient(), false)
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session-0", messageHash, "first")
+
+	// Add one more. The oldest remaining by timestamp should be session-1.
+	useFakeClaudeThinkingReplayKVClient(t, newFakeClaudeThinkingReplayKVClient(), false)
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session-9", messageHash, "first")
+
+	key := claudeThinkingReplayAliasKey(modelFamily, messageHash)
+	list := claudeThinkingReplayAliases[key]
+	for _, e := range list {
+		if e.sessionKey == "session-1" {
+			t.Fatalf("session-1 should have been evicted as oldest after session-0 refresh")
+		}
+	}
+	if len(list) != ClaudeThinkingReplayCacheMaxAliasesPerKey {
+		t.Fatalf("per-key list len = %d, want %d", len(list), ClaudeThinkingReplayCacheMaxAliasesPerKey)
+	}
+}
+
 func messageHashFor(i int) string {
 	const chars = "abcdefghijklmnopqrstuvwxyz"
 	s := make([]byte, 0, 8)
