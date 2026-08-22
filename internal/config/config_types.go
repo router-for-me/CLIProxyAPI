@@ -476,6 +476,10 @@ type CodexKey struct {
 	// Websockets enables the Responses API websocket transport for this credential.
 	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
 
+	// FallbackCompaction enables local summary-based Responses compaction when
+	// the configured endpoint does not implement /responses/compact.
+	FallbackCompaction bool `yaml:"fallback-compaction,omitempty" json:"fallback-compaction,omitempty"`
+
 	// AlphaSearch allows this Codex API key to serve the Alpha Search endpoint.
 	AlphaSearch bool `yaml:"alpha-search,omitempty" json:"alpha-search,omitempty"`
 
@@ -674,6 +678,10 @@ type OpenAICompatibility struct {
 
 	// SupportPromptCacheKey enables derived prompt_cache_key injection for supported requests.
 	SupportPromptCacheKey bool `yaml:"support-prompt-cache-key,omitempty" json:"support-prompt-cache-key,omitempty"`
+
+	// FallbackCompaction enables local summary-based Responses compaction for providers
+	// that do not implement a native /responses/compact endpoint.
+	FallbackCompaction bool `yaml:"fallback-compaction,omitempty" json:"fallback-compaction,omitempty"`
 
 	// DisableCooling overrides the global cooling policy for this provider when set.
 	// True disables auth/model cooldowns; false explicitly enables them.
