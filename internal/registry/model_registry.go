@@ -918,7 +918,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 	models := make([]map[string]any, 0, len(r.models))
 	var expiresAt time.Time
 
-	for _, registration := range r.models {
+	for modelID, registration := range r.models {
 		available, registrationExpiresAt := modelRegistrationAvailability(registration, now)
 		if !registrationExpiresAt.IsZero() && (expiresAt.IsZero() || registrationExpiresAt.Before(expiresAt)) {
 			expiresAt = registrationExpiresAt
@@ -927,13 +927,96 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 			continue
 		}
 
-		model := r.convertModelToMap(registration.Info, handlerType)
+		model := r.convertModelToMap(r.conservativeModelInfoLocked(modelID, registration), handlerType)
 		if model != nil {
 			models = append(models, model)
 		}
 	}
 
 	return models, expiresAt
+}
+
+// conservativeModelInfoLocked returns model metadata whose token limits are the
+// smallest advertised by any client that can currently serve the model.
+// Registration.Info keeps whichever client registered last — and keeps it even
+// after that client is unregistered — but requests are load balanced across
+// every client serving the model ID, so the published limits must hold for all
+// of them (for example gpt-5.6-terra allows 372000 context tokens on most Codex
+// plans and 921000 on Pro). Catalogs express the same limit under either the
+// OpenAI or the Gemini field name, so both are folded into one value before the
+// minimum is taken; limits left at zero mean "unknown" and are ignored rather
+// than collapsing the result to zero.
+func (r *ModelRegistry) conservativeModelInfoLocked(modelID string, registration *ModelRegistration) *ModelInfo {
+	if registration == nil || modelID == "" {
+		return nil
+	}
+	info := registration.Info
+	if info == nil {
+		return nil
+	}
+
+	var contextLimit, outputLimit int
+	seen := false
+	for clientID, clientInfos := range r.clientModelInfos {
+		clientInfo := clientInfos[modelID]
+		if clientInfo == nil {
+			continue
+		}
+		// Non-quota suspension removes a client from the routable count in
+		// modelRegistrationAvailability, so its limits must not drag the
+		// advertised minimum below what the remaining backends support.
+		if reason, suspended := registration.SuspendedClients[clientID]; suspended && !strings.EqualFold(reason, "quota") {
+			continue
+		}
+		seen = true
+		contextLimit = smallestPositive(contextLimit, firstPositive(clientInfo.ContextLength, clientInfo.InputTokenLimit))
+		outputLimit = smallestPositive(outputLimit, firstPositive(clientInfo.MaxCompletionTokens, clientInfo.OutputTokenLimit))
+	}
+	if !seen {
+		return info
+	}
+
+	// Only the values are normalized; each catalog keeps the field shape it
+	// registered with so the per-handler conversions stay unchanged.
+	conservative := cloneModelInfo(info)
+	if contextLimit > 0 {
+		if conservative.ContextLength > 0 {
+			conservative.ContextLength = contextLimit
+		}
+		if conservative.InputTokenLimit > 0 {
+			conservative.InputTokenLimit = contextLimit
+		}
+	}
+	if outputLimit > 0 {
+		if conservative.MaxCompletionTokens > 0 {
+			conservative.MaxCompletionTokens = outputLimit
+		}
+		if conservative.OutputTokenLimit > 0 {
+			conservative.OutputTokenLimit = outputLimit
+		}
+	}
+	return conservative
+}
+
+// firstPositive returns the first limit that is set, treating a non-positive
+// value as an absent limit.
+func firstPositive(primary, fallback int) int {
+	if primary > 0 {
+		return primary
+	}
+	return fallback
+}
+
+// smallestPositive returns the smaller of two limits, treating a non-positive
+// value as an absent limit.
+func smallestPositive(current, candidate int) int {
+	if candidate <= 0 {
+		return current
+	}
+	if current <= 0 || candidate < current {
+		return candidate
+	}
+	return current
 }
 
 func cloneModelMaps(models []map[string]any) []map[string]any {
@@ -1236,14 +1319,24 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if model.Description != "" {
 			result["description"] = model.Description
 		}
-		if model.ContextLength > 0 {
-			result["context_length"] = model.ContextLength
+		// Gemini-style catalogs carry the same limits under inputTokenLimit and
+		// outputTokenLimit, so fall back to them for the OpenAI field names.
+		contextLength := model.ContextLength
+		if contextLength <= 0 {
+			contextLength = model.InputTokenLimit
+		}
+		if contextLength > 0 {
+			result["context_length"] = contextLength
 		}
 		if model.MaxContextLength > 0 {
 			result["max_context_length"] = model.MaxContextLength
 		}
-		if model.MaxCompletionTokens > 0 {
-			result["max_completion_tokens"] = model.MaxCompletionTokens
+		maxCompletionTokens := model.MaxCompletionTokens
+		if maxCompletionTokens <= 0 {
+			maxCompletionTokens = model.OutputTokenLimit
+		}
+		if maxCompletionTokens > 0 {
+			result["max_completion_tokens"] = maxCompletionTokens
 		}
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)
