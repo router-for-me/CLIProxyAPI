@@ -81,17 +81,10 @@ func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.
 
 	req.Payload = helps.StripClaudeThinkingReplayProvenanceMarkers(req.Payload)
 
-	// No-nonce fallback scopes are content-derived and unbounded: avoid
-	// reserving a Home KV tombstone until a replayable response is cached.
-	var contents [][]byte
-	var snapshot internalcache.ClaudeThinkingReplaySnapshot
-	var found bool
-	var errGet error
-	if scope.fallbackKey {
-		contents, snapshot, found, errGet = internalcache.GetClaudeThinkingReplayWithSnapshotIfExists(ctx, scope.modelFamily, scope.sessionKey)
-	} else {
-		contents, snapshot, found, errGet = internalcache.GetClaudeThinkingReplayWithSnapshotRequired(ctx, scope.modelFamily, scope.sessionKey)
-	}
+	// Both content-derived fallback scopes and caller-controlled nonce scopes can
+	// supply arbitrary openings per request; avoid reserving a Home KV tombstone
+	// until a replayable response is actually cached.
+	contents, snapshot, found, errGet := internalcache.GetClaudeThinkingReplayWithSnapshotIfExists(ctx, scope.modelFamily, scope.sessionKey)
 	scope.snapshot = snapshot
 	scope.cacheReady = errGet == nil
 	if errGet != nil {
