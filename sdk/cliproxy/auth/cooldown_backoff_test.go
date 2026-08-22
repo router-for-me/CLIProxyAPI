@@ -3,8 +3,11 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -306,5 +309,200 @@ func TestJitteredCooldownWaitBounds(t *testing.T) {
 	}
 	if got := jitteredCooldownWait(3, 0); got != 3 {
 		t.Fatalf("expected sub-4ns wait to stay unchanged, got %v", got)
+	}
+}
+
+func TestDisableCoolingRecordsBackoffAndTimestampWhileStayingUsable(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-disable-cooling-records",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":            "codex",
+			"disable_cooling": true,
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "gpt-5"}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
+
+	beforeFail := time.Now().Add(-time.Second)
+	manager.MarkResult(context.Background(), quotaResult(auth.ID, "gpt-5"))
+	afterFail := time.Now().Add(time.Second)
+
+	first, ok := manager.GetByID(auth.ID)
+	if !ok || first == nil || first.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after first failure")
+	}
+	firstState := first.ModelStates["gpt-5"]
+	if firstState.Unavailable {
+		t.Fatalf("expected Unavailable=false when disable_cooling=true, got true")
+	}
+	if firstState.Quota.Exceeded {
+		t.Fatalf("expected Quota.Exceeded=false when disable_cooling=true, got true")
+	}
+	if !firstState.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter to be zero when disable_cooling=true, got %v", firstState.NextRetryAfter)
+	}
+	if !firstState.Quota.NextRecoverAt.IsZero() {
+		t.Fatalf("expected NextRecoverAt to be zero when disable_cooling=true, got %v", firstState.Quota.NextRecoverAt)
+	}
+	if firstState.Quota.BackoffLevel != 1 {
+		t.Fatalf("expected BackoffLevel=1 after first failure, got %d", firstState.Quota.BackoffLevel)
+	}
+	if first.Quota.BackoffLevel != 1 {
+		t.Fatalf("expected auth-level BackoffLevel=1 after first failure, got %d", first.Quota.BackoffLevel)
+	}
+	if firstState.UpdatedAt.Before(beforeFail) || firstState.UpdatedAt.After(afterFail) {
+		t.Fatalf("expected UpdatedAt timestamp to be set near now, got %v", firstState.UpdatedAt)
+	}
+
+	blocked, _, _ := isAuthBlockedForModel(first, "gpt-5", time.Now())
+	if blocked {
+		t.Fatalf("expected credential to stay usable (not blocked) when disable_cooling=true")
+	}
+
+	// Second failure advances the backoff level further
+	manager.MarkResult(context.Background(), quotaResult(auth.ID, "gpt-5"))
+
+	second, ok := manager.GetByID(auth.ID)
+	if !ok || second == nil || second.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after second failure")
+	}
+	secondState := second.ModelStates["gpt-5"]
+	if secondState.Unavailable {
+		t.Fatalf("expected Unavailable=false after second failure, got true")
+	}
+	if secondState.Quota.Exceeded {
+		t.Fatalf("expected Quota.Exceeded=false after second failure, got true")
+	}
+	if secondState.Quota.BackoffLevel != 2 {
+		t.Fatalf("expected BackoffLevel=2 after second failure, got %d", secondState.Quota.BackoffLevel)
+	}
+	if second.Quota.BackoffLevel != 2 {
+		t.Fatalf("expected auth-level BackoffLevel=2 after second failure, got %d", second.Quota.BackoffLevel)
+	}
+
+	blockedSecond, _, _ := isAuthBlockedForModel(second, "gpt-5", time.Now())
+	if blockedSecond {
+		t.Fatalf("expected credential to stay usable after second failure")
+	}
+}
+
+func TestDisableCoolingDisabledKeepsStandardCooldownBehavior(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-normal-cooling",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":            "codex",
+			"disable_cooling": false,
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "gpt-5"}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
+
+	manager.MarkResult(context.Background(), quotaResult(auth.ID, "gpt-5"))
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after failure")
+	}
+	state := updated.ModelStates["gpt-5"]
+	if !state.Unavailable {
+		t.Fatalf("expected Unavailable=true when disable_cooling=false")
+	}
+	if !state.Quota.Exceeded {
+		t.Fatalf("expected Quota.Exceeded=true when disable_cooling=false")
+	}
+	if state.NextRetryAfter.IsZero() || !state.NextRetryAfter.After(time.Now()) {
+		t.Fatalf("expected NextRetryAfter in the future, got %v", state.NextRetryAfter)
+	}
+	if state.Quota.NextRecoverAt.IsZero() || !state.Quota.NextRecoverAt.After(time.Now()) {
+		t.Fatalf("expected NextRecoverAt in the future, got %v", state.Quota.NextRecoverAt)
+	}
+	if state.Quota.BackoffLevel != 1 {
+		t.Fatalf("expected BackoffLevel=1, got %d", state.Quota.BackoffLevel)
+	}
+
+	blocked, _, _ := isAuthBlockedForModel(updated, "gpt-5", time.Now())
+	if !blocked {
+		t.Fatalf("expected credential to be blocked when cooling is enabled")
+	}
+}
+
+type testLogCaptureHook struct {
+	messages []string
+}
+
+func (h *testLogCaptureHook) Levels() []log.Level {
+	return log.AllLevels
+}
+
+func (h *testLogCaptureHook) Fire(entry *log.Entry) error {
+	h.messages = append(h.messages, entry.Message)
+	return nil
+}
+
+func TestMarkResultPerAttemptFailureLogging(t *testing.T) {
+	hook := &testLogCaptureHook{}
+	logger := log.StandardLogger()
+	savedHooks := make(log.LevelHooks)
+	for lvl, hs := range logger.Hooks {
+		savedHooks[lvl] = append([]log.Hook(nil), hs...)
+	}
+	logger.AddHook(hook)
+	t.Cleanup(func() {
+		logger.ReplaceHooks(savedHooks)
+	})
+
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-log-test",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":            "codex",
+			"disable_cooling": true,
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "gpt-5"}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
+
+	manager.MarkResult(context.Background(), quotaResult(auth.ID, "gpt-5"))
+
+	found := false
+	var matchedMsg string
+	for _, msg := range hook.messages {
+		if strings.Contains(msg, "auth-cooldown: attempt failed") && strings.Contains(msg, "auth=auth-log-test") {
+			found = true
+			matchedMsg = msg
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected log line 'auth-cooldown: attempt failed' for auth-log-test, got messages: %v", hook.messages)
+	}
+	if !strings.Contains(matchedMsg, "status=429") ||
+		!strings.Contains(matchedMsg, "class=quota") ||
+		!strings.Contains(matchedMsg, "cooldown=skipped") ||
+		!strings.Contains(matchedMsg, "backoff=1") ||
+		!strings.Contains(matchedMsg, "disable_cooling=true") {
+		t.Fatalf("unexpected log message format: %s", matchedMsg)
 	}
 }
