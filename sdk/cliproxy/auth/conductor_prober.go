@@ -727,12 +727,12 @@ func proberAccessToken(auth *Auth) string {
 	return ""
 }
 
-// proberTryRefreshOn401 attempts to refresh an OAuth credential and returns
-// the current auth if the token changed. It uses the manager's
-// refreshAuthForRequest path so the refresh is serialized per auth and the
-// live pointer is not mutated in place by the executor.
+// proberTryRefreshOn401 attempts to refresh a credential that has refresh
+// material and returns the current auth if the token changed. It uses the
+// manager's refreshAuthForRequest path so the refresh is serialized per auth
+// and the live pointer is not mutated in place by the executor.
 func proberTryRefreshOn401(ctx context.Context, m *Manager, auth *Auth) *Auth {
-	if m == nil || auth == nil {
+	if m == nil || auth == nil || !authHasRefreshCredential(auth) {
 		return nil
 	}
 	before := proberAccessToken(auth)

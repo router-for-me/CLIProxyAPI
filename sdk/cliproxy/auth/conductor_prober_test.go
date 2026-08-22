@@ -1145,6 +1145,42 @@ func TestProberRefreshOn401(t *testing.T) {
 	}
 }
 
+func TestProber401DoesNotRefreshAPIKeyCredential(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{
+		provider:   "test",
+		statusCode: intPtr(http.StatusUnauthorized),
+	}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://example.com",
+			"api_key":  "secret",
+		},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(200 * time.Millisecond)
+
+	if exec.refreshCalled.Load() {
+		t.Fatal("Refresh called for API-key credential with no refresh_token")
+	}
+	updated, _ := m.GetByID(auth.ID)
+	if updated == nil || !updated.Unavailable {
+		t.Fatalf("API-key 401 should force-cool the credential; Unavailable = %v", updated != nil && updated.Unavailable)
+	}
+}
+
 func TestProberDiscardsStaleAuthResult(t *testing.T) {
 	ctx := context.Background()
 	m := newProberManager()
@@ -1379,6 +1415,7 @@ func TestProberRefreshOn401WaitsForRateLimitToken(t *testing.T) {
 		Attributes: map[string]string{
 			"base_url": "https://example.com",
 		},
+		Metadata: map[string]any{"refresh_token": "old-token"},
 	}
 	if _, err := m.Register(ctx, auth); err != nil {
 		t.Fatalf("Register: %v", err)
