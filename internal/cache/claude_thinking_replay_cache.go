@@ -684,12 +684,18 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 	// concurrently, so an unconditional KVSet would let the last writer discard
 	// the others.
 	var committedAliasRaw []byte
+	var previousAliasRaw []byte
 	for attempt := 0; attempt < 4; attempt++ {
 		var value claudeThinkingReplayAliasHomeValue
 		raw, found, errGet := client.KVGet(ctx, aliasKey)
 		if errGet != nil {
 			log.Warnf("claude thinking replay alias read failed: %v", errGet)
 			return
+		}
+		if found {
+			previousAliasRaw = append([]byte(nil), raw...)
+		} else {
+			previousAliasRaw = nil
 		}
 		if found {
 			if err := json.Unmarshal(raw, &value); err != nil {
@@ -714,7 +720,7 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 			log.Warnf("claude thinking replay alias cas failed: %v", errSwap)
 			// The command may have been applied before the error was returned.
 			// Roll back if the alias value still matches the attempted raw.
-			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, newRaw, now)
+			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, newRaw, previousAliasRaw, now)
 			return
 		}
 		if swapped {
@@ -734,7 +740,7 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 		indexRaw, indexFound, errIndex := client.KVGet(ctx, indexKey)
 		if errIndex != nil {
 			log.Warnf("claude thinking replay alias index read failed: %v", errIndex)
-			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw, now)
+			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw, previousAliasRaw, now)
 			return
 		}
 		index, ok := decodeClaudeThinkingReplayAliasIndex(indexRaw)
@@ -756,13 +762,13 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 		indexBytes, errMarshal := json.Marshal(index)
 		if errMarshal != nil {
 			log.Warnf("claude thinking replay alias index marshal failed: %v", errMarshal)
-			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw, now)
+			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw, previousAliasRaw, now)
 			return
 		}
 		swapped, errSwap := client.KVCompareAndSwap(ctx, indexKey, indexRaw, indexFound, indexBytes, ClaudeThinkingReplayCacheTTL)
 		if errSwap != nil {
 			log.Warnf("claude thinking replay alias index cas failed: %v", errSwap)
-			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw, now)
+			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw, previousAliasRaw, now)
 			return
 		}
 		if swapped {
@@ -771,14 +777,14 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 		}
 		if attempt == 3 {
 			log.Warnf("claude thinking replay alias index cas exhausted after %d attempts", attempt+1)
-			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw, now)
+			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw, previousAliasRaw, now)
 			return
 		}
 	}
 
 	if !indexUpdated {
 		// Defensive: should have rolled back above, but ensure no half-registered state.
-		rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw, now)
+		rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw, previousAliasRaw, now)
 		return
 	}
 
@@ -832,14 +838,15 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 	}
 }
 
-// rollBackClaudeThinkingReplayAliasHome removes an alias value that was
-// committed but could not be added to the index, so it does not become an
-// unindexed, uncapped KV entry. The rollback is conditional only on the
+// rollBackClaudeThinkingReplayAliasHome rolls an alias value back to the
+// previous value that existed before an unindexed commit. If there was no
+// previous value, it leaves an empty tombstone so the alias resolves to nothing
+// rather than a stale unindexed orphan. The rollback is conditional on the
 // committed value: if the alias still contains the exact bytes we wrote, it is
 // an orphan and should be removed. The index is consulted only as a best-effort
 // guard when it is readable; a failing index read does not prevent rollback
 // because the failed registration is precisely what produced the orphan.
-func rollBackClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThinkingReplayKVClient, aliasKey, indexKey string, committedAliasRaw []byte, now time.Time) {
+func rollBackClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThinkingReplayKVClient, aliasKey, indexKey string, committedAliasRaw, previousAliasRaw []byte, now time.Time) {
 	if len(committedAliasRaw) == 0 {
 		return
 	}
@@ -872,14 +879,23 @@ func rollBackClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 		log.Warnf("claude thinking replay alias rollback index check failed: %v", errIndex)
 	}
 
-	// Atomically replace the committed value with an empty tombstone only when
-	// it still matches, so a concurrent re-registration cannot be deleted.
-	tombstone, errMarshal := json.Marshal(claudeThinkingReplayAliasHomeValue{})
-	if errMarshal != nil {
-		log.Warnf("claude thinking replay alias rollback tombstone marshal failed: %v", errMarshal)
-		return
+	// Roll the alias value back to the previous value if there was one;
+	// otherwise leave an empty tombstone so the alias resolves to nothing
+	// rather than a stale unindexed orphan. The CAS is conditional on the
+	// current value still matching the committed value, so a concurrent
+	// re-registration cannot be overwritten.
+	var replacement []byte
+	if len(previousAliasRaw) > 0 {
+		replacement = append([]byte(nil), previousAliasRaw...)
+	} else {
+		tombstone, errMarshal := json.Marshal(claudeThinkingReplayAliasHomeValue{})
+		if errMarshal != nil {
+			log.Warnf("claude thinking replay alias rollback tombstone marshal failed: %v", errMarshal)
+			return
+		}
+		replacement = tombstone
 	}
-	swapped, errCAS := client.KVCompareAndSwap(ctx, aliasKey, currentRaw, true, tombstone, ClaudeThinkingReplayCacheTTL)
+	swapped, errCAS := client.KVCompareAndSwap(ctx, aliasKey, currentRaw, true, replacement, ClaudeThinkingReplayCacheTTL)
 	if errCAS != nil {
 		if errors.Is(errCAS, homekv.ErrCompareAndSwapUnsupported) {
 			// CAS is unavailable; fall back to unconditional delete.
