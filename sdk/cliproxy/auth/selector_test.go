@@ -2029,27 +2029,36 @@ func TestSessionCache_SetAliasesIfAllAbsent_HonorsOccupiedAlias(t *testing.T) {
 	}
 }
 
-func TestSessionCache_SetAliasesIfAllAbsent_AttachesFreeAliasToWinner(t *testing.T) {
+func TestSessionCache_SetAliasesIfNoConflict(t *testing.T) {
 	cache := NewSessionCache(time.Minute)
 	defer cache.Stop()
 
-	cache.SetAliases("auth-a", "shared")
+	bound, ok := cache.SetAliasesIfNoConflict("auth-a", "k1", "k2")
+	if !ok || bound != "auth-a" {
+		t.Fatalf("SetAliasesIfNoConflict should set all, got %q, %v", bound, ok)
+	}
+	if got, ok := cache.Get("k1"); !ok || got != "auth-a" {
+		t.Fatalf("k1 = %q, %v", got, ok)
+	}
 
-	bound, ok := cache.SetAliasesIfAllAbsent("auth-b", "shared", "conv-b")
+	bound, ok = cache.SetAliasesIfNoConflict("auth-a", "k2", "k3")
+	if !ok || bound != "auth-a" {
+		t.Fatalf("SetAliasesIfNoConflict should attach free alias, got %q, %v", bound, ok)
+	}
+	if got, ok := cache.Get("k3"); !ok || got != "auth-a" {
+		t.Fatalf("k3 should attach to auth-a, got %q, %v", got, ok)
+	}
+
+	cache.SetAliases("auth-b", "k4")
+	bound, ok = cache.SetAliasesIfNoConflict("auth-c", "k4", "k5")
 	if ok {
-		t.Fatalf("SetAliasesIfAllAbsent must not succeed when an alias is occupied")
+		t.Fatalf("SetAliasesIfNoConflict should fail on conflict")
 	}
-	if bound != "auth-a" {
-		t.Fatalf("SetAliasesIfAllAbsent must return existing auth, got %q", bound)
+	if bound != "auth-b" {
+		t.Fatalf("SetAliasesIfNoConflict should return conflicting auth, got %q", bound)
 	}
-
-	// The caller should attach the free alias to the winning group.
-	cache.SetAliases(bound, "shared", "conv-b")
-	if got, ok := cache.Get("conv-b"); !ok || got != "auth-a" {
-		t.Fatalf("conv-b must be bound to the winning auth, got %q, %v", got, ok)
-	}
-	if got, ok := cache.Get("shared"); !ok || got != "auth-a" {
-		t.Fatalf("shared must remain auth-a, got %q, %v", got, ok)
+	if got, ok := cache.Get("k5"); ok {
+		t.Fatalf("k5 should not be bound, got %q", got)
 	}
 }
 

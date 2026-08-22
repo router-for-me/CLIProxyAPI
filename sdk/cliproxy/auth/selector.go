@@ -737,11 +737,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if fallbackKey != "" {
 		coldKeys = append(coldKeys, fallbackKey)
 	}
-	// Cold cache binding: only install the binding if every alias is absent.
-	// If any alias is already occupied, honor the existing binding and return
-	// its auth. This prevents one shared alias (e.g. prompt_cache_key) from
-	// being split across two different auths.
-	boundAuth, ok := s.cache.SetAliasesIfAllAbsent(auth.ID, coldKeys...)
+	// Cold cache binding: atomically install the binding only when no alias is
+	// already bound to a different auth. Free aliases are attached to the same
+	// auth, so a later turn that retains only the conversation ID stays sticky.
+	boundAuth, ok := s.cache.SetAliasesIfNoConflict(auth.ID, coldKeys...)
 	if ok {
 		entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 		return auth, nil
@@ -749,9 +748,6 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if boundAuth != "" {
 		for _, a := range available {
 			if a.ID == boundAuth {
-				// Attach the still-free aliases to the winning group so a later
-				// turn that retains only the conversation ID stays sticky.
-				s.cache.SetAliases(boundAuth, coldKeys...)
 				entry.Infof("session-affinity: cache miss, alias already bound to %s | session=%s provider=%s model=%s", a.ID, truncateSessionID(primaryID), provider, model)
 				return a, nil
 			}

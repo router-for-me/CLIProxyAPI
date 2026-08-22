@@ -107,7 +107,11 @@ func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.setAliasesUntilLocked(authID, now.Add(c.ttl), sessionIDs...)
+}
 
+func (c *SessionCache) setAliasesUntilLocked(authID string, expiresAt time.Time, sessionIDs ...string) {
+	now := time.Now()
 	aliases := mergeSessionAliases(nil, sessionIDs...)
 	previousGroups := make([]sessionEntry, 0, len(sessionIDs))
 	for _, sessionID := range sessionIDs {
@@ -126,7 +130,7 @@ func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 	if len(aliases) == 0 {
 		return
 	}
-	c.replaceAliasGroupsLocked(authID, now.Add(c.ttl), aliases, previousGroups...)
+	c.replaceAliasGroupsLocked(authID, expiresAt, aliases, previousGroups...)
 }
 
 func (c *SessionCache) replaceAliasGroupsLocked(authID string, expiresAt time.Time, aliases []string, previousGroups ...sessionEntry) {
@@ -292,6 +296,32 @@ func (c *SessionCache) SetAliasesIfAllAbsent(authID string, sessionIDs ...string
 	for _, alias := range aliases {
 		c.entries[alias] = entry
 	}
+	return authID, true
+}
+
+// SetAliasesIfNoConflict atomically binds all sessionIDs to authID. It succeeds
+// when every alias is either absent or already bound to authID, attaching any
+// free aliases to the existing group. If any alias is bound to a different auth,
+// it returns that auth and false without modifying the cache. This combines the
+// occupied-alias check and the attachment under a single lock so a concurrent
+// request cannot bind a free alias to another auth between the two steps.
+func (c *SessionCache) SetAliasesIfNoConflict(authID string, sessionIDs ...string) (string, bool) {
+	if c == nil || authID == "" || len(sessionIDs) == 0 {
+		return "", false
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, sid := range sessionIDs {
+		if sid == "" {
+			continue
+		}
+		if entry, ok := c.entries[sid]; ok && now.Before(entry.expiresAt) && entry.authID != authID {
+			return entry.authID, false
+		}
+	}
+	c.setAliasesUntilLocked(authID, now.Add(c.ttl), sessionIDs...)
 	return authID, true
 }
 
