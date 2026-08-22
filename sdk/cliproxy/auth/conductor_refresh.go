@@ -32,7 +32,12 @@ const (
 	refreshIneffectiveBackoff = 30 * time.Second
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
-	transientErrorCooldown    = time.Minute
+	// transientErrorCooldown is the default for 408/500/502/503/504 transient
+	// errors and the fallback enforced cooldown for request-scoped
+	// stop-and-cooldown / continue-and-cooldown rules. The latter use this
+	// constant directly and do not consult the transient-error-cooldown-seconds
+	// knob.
+	transientErrorCooldown = 10 * time.Second
 )
 
 // StartAutoRefresh launches a background loop that evaluates auth freshness
