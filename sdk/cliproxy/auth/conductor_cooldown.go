@@ -1245,6 +1245,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.Quota.Reason = ""
 	auth.Quota.NextRecoverAt = time.Time{}
 	auth.Quota.BackoffLevel = 0
+	auth.proberBackoff = 0
 	auth.LastError = nil
 	auth.NextRetryAfter = time.Time{}
 	auth.UpdatedAt = now
@@ -1890,6 +1891,14 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		if resultErr.Message != "" {
 			auth.StatusMessage = resultErr.Message
 		}
+	}
+
+	// Prober failures carry an explicit RetryAfter derived from the configured
+	// probe backoff bounds, overriding the generic status-code cooldowns.
+	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && retryAfter != nil {
+		auth.NextRetryAfter = now.Add(*retryAfter)
+		auth.proberBackoff++
+		return
 	}
 	statusCode := statusCodeFromResult(resultErr)
 	if isCloudflareChallengeResultError(resultErr) {

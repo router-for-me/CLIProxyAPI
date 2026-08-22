@@ -43,6 +43,15 @@ func newAuthProberLoop(manager *Manager, cfg internalconfig.CredentialProberConf
 	if strings.TrimSpace(cfg.DefaultProbePath) == "" {
 		cfg.DefaultProbePath = proberDefaultPath
 	}
+	if cfg.BackoffBase <= 0 {
+		cfg.BackoffBase = 30 * time.Second
+	}
+	if cfg.BackoffMax <= 0 {
+		cfg.BackoffMax = 5 * time.Minute
+	}
+	if cfg.BackoffMax < cfg.BackoffBase {
+		cfg.BackoffMax = cfg.BackoffBase
+	}
 	return &authProberLoop{manager: manager, cfg: cfg}
 }
 
@@ -297,6 +306,9 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 	}
 
 	if resultErr == nil {
+		l.manager.mu.Lock()
+		auth.proberBackoff = 0
+		l.manager.mu.Unlock()
 		return
 	}
 
@@ -304,13 +316,36 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 		log.Debugf("credential prober failure for %s: %s", auth.ID, resultErr.Message)
 	}
 
+	l.manager.mu.RLock()
+	level := auth.proberBackoff
+	l.manager.mu.RUnlock()
+	retryAfter := l.proberBackoffFor(level)
+
 	l.manager.MarkResult(probeCtx, Result{
 		AuthID:          auth.ID,
 		Provider:        auth.Provider,
 		Success:         false,
 		CredentialScope: true,
 		Error:           resultErr,
+		RetryAfter:      &retryAfter,
 	})
+}
+
+func (l *authProberLoop) proberBackoffFor(level int) time.Duration {
+	if level < 0 {
+		level = 0
+	}
+	d := l.cfg.BackoffBase
+	for i := 0; i < level; i++ {
+		d *= 2
+		if d >= l.cfg.BackoffMax {
+			return l.cfg.BackoffMax
+		}
+	}
+	if d < l.cfg.BackoffBase {
+		d = l.cfg.BackoffBase
+	}
+	return d
 }
 
 // resolveProbeURL resolves the probe path against baseURL without duplicating

@@ -237,6 +237,101 @@ func TestProberDropsContextDeadline(t *testing.T) {
 	}
 }
 
+func TestProberBackoffFor(t *testing.T) {
+	l := newAuthProberLoop(nil, internalconfig.CredentialProberConfig{BackoffBase: 30 * time.Second, BackoffMax: 5 * time.Minute})
+	cases := []struct {
+		level int
+		want  time.Duration
+	}{
+		{0, 30 * time.Second},
+		{1, 1 * time.Minute},
+		{2, 2 * time.Minute},
+		{3, 4 * time.Minute},
+		{4, 5 * time.Minute},
+		{5, 5 * time.Minute},
+		{10, 5 * time.Minute},
+	}
+	for _, c := range cases {
+		got := l.proberBackoffFor(c.level)
+		if got != c.want {
+			t.Fatalf("proberBackoffFor(%d) = %v, want %v", c.level, got, c.want)
+		}
+	}
+}
+
+func TestProberBackoffOverridesStatusCooldowns(t *testing.T) {
+	ctx := context.Background()
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	max := 5 * time.Minute
+	m.MarkResult(ctx, Result{
+		AuthID:          auth.ID,
+		Provider:        auth.Provider,
+		Success:         false,
+		CredentialScope: true,
+		Error: &Error{
+			Code:       ErrorCodeForceCooldown,
+			Message:    "prober: upstream returned 401",
+			HTTPStatus: http.StatusUnauthorized,
+			Retryable:  true,
+		},
+		RetryAfter: durationPtr(30 * time.Second),
+	})
+
+	m.mu.RLock()
+	updated := m.auths["a1"]
+	m.mu.RUnlock()
+	if updated == nil {
+		t.Fatal("auth disappeared")
+	}
+	if got := time.Until(updated.NextRetryAfter); got > max || got < 0 {
+		t.Fatalf("NextRetryAfter = %v, want <= %v", updated.NextRetryAfter, max)
+	}
+}
+
+func TestProberBackoffEscalates(t *testing.T) {
+	ctx := context.Background()
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{BackoffBase: 30 * time.Second, BackoffMax: 5 * time.Minute}
+	l := newAuthProberLoop(m, cfg)
+
+	for i := 0; i < 6; i++ {
+		d := l.proberBackoffFor(i)
+		m.MarkResult(ctx, Result{
+			AuthID:          auth.ID,
+			Provider:        auth.Provider,
+			Success:         false,
+			CredentialScope: true,
+			Error:           &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusUnauthorized, Retryable: true},
+			RetryAfter:      &d,
+		})
+	}
+
+	m.mu.RLock()
+	updated := m.auths["a1"]
+	m.mu.RUnlock()
+	if updated == nil {
+		t.Fatal("auth disappeared")
+	}
+	if got := time.Until(updated.NextRetryAfter); got > cfg.BackoffMax {
+		t.Fatalf("NextRetryAfter = %v, want <= %v", updated.NextRetryAfter, cfg.BackoffMax)
+	}
+	if updated.proberBackoff != 6 {
+		t.Fatalf("proberBackoff = %d, want 6", updated.proberBackoff)
+	}
+}
+
+func durationPtr(d time.Duration) *time.Duration { return &d }
+
 func TestResolveProbeURL(t *testing.T) {
 	cases := []struct {
 		baseURL string

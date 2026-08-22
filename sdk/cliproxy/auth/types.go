@@ -98,6 +98,10 @@ type Auth struct {
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
+
+	// proberBackoff counts consecutive probe failures for the exponential
+	// prober backoff ladder. It is not persisted.
+	proberBackoff int `json:"-"`
 }
 
 const (
