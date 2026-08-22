@@ -95,6 +95,10 @@ func (m *Manager) startProberUnlocked(parent context.Context, cfg internalconfig
 	}
 	m.mu.RUnlock()
 
+	if parent == nil || parent.Err() != nil {
+		return
+	}
+
 	ctx, cancel := context.WithCancel(parent)
 	loop := newAuthProberLoop(m, cfg)
 
@@ -144,22 +148,25 @@ func (m *Manager) restartProberLocked() {
 	if m == nil {
 		return
 	}
+	m.mu.RLock()
+	parent := m.proberParent
+	m.mu.RUnlock()
+	if parent == nil || parent.Err() != nil {
+		// No lifecycle parent or the service has shut down; do not start or
+		// restart a prober.
+		return
+	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	}
 	m.proberLifecycleMu.Lock()
 	defer m.proberLifecycleMu.Unlock()
-	if !cfg.CredentialProber.Enabled {
-		m.stopProberUnlocked()
+	if parent.Err() != nil {
 		return
 	}
-	m.mu.RLock()
-	parent := m.proberParent
-	m.mu.RUnlock()
-	if parent == nil {
-		// Service has not yet installed the lifecycle context; do not start
-		// a detached prober during build/initialization.
+	if !cfg.CredentialProber.Enabled {
+		m.stopProberUnlocked()
 		return
 	}
 	m.stopProberUnlocked()
@@ -372,20 +379,11 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 			break
 		}
 
-		refreshed := proberTryRefreshOn401(probeCtx, exec, auth)
-		if refreshed == nil {
+		if refreshed := proberTryRefreshOn401(probeCtx, l.manager, auth); refreshed != nil {
+			auth = refreshed
+		} else {
 			break
 		}
-		if _, errRegister := l.manager.Register(probeCtx, refreshed); errRegister != nil {
-			break
-		}
-		l.manager.mu.RLock()
-		current := l.manager.auths[auth.ID]
-		l.manager.mu.RUnlock()
-		if current == nil {
-			return
-		}
-		auth = current
 	}
 
 	if resultErr == nil {
@@ -469,7 +467,6 @@ var proberProviderBaseURLs = map[string]string{
 	"xai":                  "https://api.x.ai/v1",
 	"kimi":                 "https://api.kimi.com/coding",
 	"claude":               "https://api.anthropic.com",
-	"codex":                "https://api.openai.com/v1",
 	"openai-compatibility": "https://api.openai.com/v1",
 }
 
@@ -485,13 +482,13 @@ func proberBaseURLForProvider(auth *Auth, cfg *internalconfig.Config) string {
 		}
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-	if p, ok := proberProviderBaseURLs[provider]; ok {
-		return p
-	}
 	if cfg != nil {
 		if u := proberOpenAICompatBaseURL(auth, cfg); u != "" {
 			return u
 		}
+	}
+	if p, ok := proberProviderBaseURLs[provider]; ok {
+		return p
 	}
 	return ""
 }
@@ -593,22 +590,26 @@ func proberAccessToken(auth *Auth) string {
 }
 
 // proberTryRefreshOn401 attempts to refresh an OAuth credential and returns
-// the refreshed auth if the token changed. It returns nil if no refresh token
-// is available or the refresh did not produce a new token.
-func proberTryRefreshOn401(ctx context.Context, exec ProviderExecutor, auth *Auth) *Auth {
-	if exec == nil || auth == nil {
+// the current auth if the token changed. It uses the manager's
+// refreshAuthForRequest path so the refresh is serialized per auth and the
+// live pointer is not mutated in place by the executor.
+func proberTryRefreshOn401(ctx context.Context, m *Manager, auth *Auth) *Auth {
+	if m == nil || auth == nil {
 		return nil
 	}
 	before := proberAccessToken(auth)
-	refreshed, err := exec.Refresh(ctx, auth)
-	if err != nil || refreshed == nil {
+	_, _ = m.refreshAuthForRequest(ctx, auth.ID, before)
+
+	m.mu.RLock()
+	current := m.auths[auth.ID]
+	m.mu.RUnlock()
+	if current == nil {
 		return nil
 	}
-	after := proberAccessToken(refreshed)
-	if before == after {
+	if proberAccessToken(current) == before {
 		return nil
 	}
-	return refreshed
+	return current
 }
 
 // resolveProbeURL resolves the probe path against baseURL without duplicating

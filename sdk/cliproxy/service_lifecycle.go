@@ -36,10 +36,10 @@ func (s *Service) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	runCtx, runCancel := context.WithCancel(ctx)
 	if s.coreManager != nil {
-		s.coreManager.SetProberParentContext(ctx)
+		s.coreManager.SetProberParentContext(runCtx)
 	}
-	ctx, runCancel := context.WithCancel(ctx)
 	s.homeMu.Lock()
 	s.runCancel = runCancel
 	s.homeMu.Unlock()
@@ -305,6 +305,12 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				log.Errorf("failed to stop file watcher: %v", err)
 				shutdownErr = err
 			}
+		}
+		s.homeMu.Lock()
+		runCancel := s.runCancel
+		s.homeMu.Unlock()
+		if runCancel != nil {
+			runCancel()
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopProber()

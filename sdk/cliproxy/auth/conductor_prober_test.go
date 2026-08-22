@@ -36,11 +36,12 @@ type proberTestExecutor struct {
 	mu            sync.Mutex
 	lastURL       string
 
-	refreshCalled atomic.Bool
-	refreshToken  string
-	refreshStatus int
-	manager       *Manager
-	replaceAuth   bool
+	refreshCalled   atomic.Bool
+	refreshToken    string
+	refreshStatus   int
+	manager         *Manager
+	replaceAuth     bool
+	lastRefreshAuth *Auth
 }
 
 func (e *proberTestExecutor) Identifier() string { return e.provider }
@@ -54,10 +55,13 @@ func (e *proberTestExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecu
 }
 
 func (e *proberTestExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	e.refreshCalled.Store(true)
+	e.mu.Lock()
+	e.lastRefreshAuth = auth
+	e.mu.Unlock()
 	if e.refreshToken == "" {
 		return nil, nil
 	}
-	e.refreshCalled.Store(true)
 	refreshed := auth.Clone()
 	if refreshed.Metadata == nil {
 		refreshed.Metadata = map[string]any{}
@@ -1032,5 +1036,152 @@ func TestResolveProbeURL(t *testing.T) {
 		if got != c.want {
 			t.Fatalf("resolveProbeURL(%q, %q) = %q, want %q", c.baseURL, c.path, got, c.want)
 		}
+	}
+}
+
+func TestProberSkipsCodexWithoutBaseURL(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "codex"}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{ID: "a1", Provider: "codex", Status: StatusActive}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+	if exec.calls.Load() != 0 {
+		t.Fatalf("prober calls = %d, want 0 for codex without base_url", exec.calls.Load())
+	}
+}
+
+func TestProberUsesOpenAICompatBaseURL(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "openai-compatible-my-comp"}
+	m.RegisterExecutor(exec)
+
+	cfg := &internalconfig.Config{
+		CredentialProber: internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000},
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{Name: "my-comp", BaseURL: "https://custom.example.com"},
+		},
+	}
+	m.SetConfig(cfg)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "openai-compatibility",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"compat_name": "my-comp",
+		},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	if exec.calls.Load() != 1 {
+		t.Fatalf("prober calls = %d, want 1", exec.calls.Load())
+	}
+	exec.mu.Lock()
+	url := exec.lastURL
+	exec.mu.Unlock()
+	if url != "https://custom.example.com/v1/models" {
+		t.Fatalf("prober URL = %q, want %q", url, "https://custom.example.com/v1/models")
+	}
+}
+
+func TestProberRefreshOn401DoesNotPassLiveAuthPointer(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{
+		provider:      "test",
+		statusCode:    intPtr(http.StatusUnauthorized),
+		refreshToken:  "new-token",
+		refreshStatus: http.StatusOK,
+	}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://example.com",
+		},
+		Metadata: map[string]any{"refresh_token": "old-token"},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(200 * time.Millisecond)
+
+	if !exec.refreshCalled.Load() {
+		t.Fatal("Refresh not called on 401")
+	}
+	exec.mu.Lock()
+	lastRefreshAuth := exec.lastRefreshAuth
+	exec.mu.Unlock()
+	if lastRefreshAuth == auth {
+		t.Fatal("Refresh received live auth pointer, want a clone")
+	}
+	updated, _ := m.GetByID(auth.ID)
+	if updated == nil || updated.Unavailable {
+		t.Fatalf("auth should recover after refresh; Unavailable = %v", updated.Unavailable)
+	}
+}
+
+func TestProberRestartGoroutineDoesNotSurviveParentCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "test", statusCode: intPtr(http.StatusOK)}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://example.com",
+		},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	m.SetProberParentContext(ctx)
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+	if exec.calls.Load() != 1 {
+		t.Fatalf("prober calls = %d, want 1 before parent cancel", exec.calls.Load())
+	}
+
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+	m.StopProber()
+
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+	time.Sleep(100 * time.Millisecond)
+
+	m.mu.RLock()
+	loop := m.proberLoop
+	m.mu.RUnlock()
+	if loop != nil {
+		t.Fatal("prober restarted after parent context was canceled")
+	}
+	if exec.calls.Load() != 1 {
+		t.Fatalf("prober calls = %d, want 1 after canceled parent restart", exec.calls.Load())
 	}
 }
