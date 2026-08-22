@@ -517,11 +517,16 @@ func proberBaseURLForProvider(auth *Auth, cfg *internalconfig.Config) string {
 	return ""
 }
 
+func proberIsOpenAICompatibleProvider(provider string) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	return provider == "openai-compatibility" || strings.HasPrefix(provider, "openai-compatible-")
+}
+
 // proberOpenAICompatBaseURL resolves a base URL from the configured OpenAI
 // compatibility entries for custom openai-compatible providers that do not
 // carry an explicit base_url attribute.
 func proberOpenAICompatBaseURL(auth *Auth, cfg *internalconfig.Config) string {
-	if auth == nil || cfg == nil {
+	if auth == nil || cfg == nil || !proberIsOpenAICompatibleProvider(auth.Provider) {
 		return ""
 	}
 
@@ -571,7 +576,7 @@ func proberProbePathForProvider(provider, configured string) string {
 	if p, ok := proberProviderProbePaths[provider]; ok {
 		return p
 	}
-	if provider == "openai-compatibility" || strings.HasPrefix(provider, "openai-compatible-") {
+	if proberIsOpenAICompatibleProvider(provider) {
 		return "/v1/models"
 	}
 	if configured != "" {

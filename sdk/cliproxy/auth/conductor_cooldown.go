@@ -962,6 +962,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, modelKey, suspendReason)
 	}
 
+	// SourceAuth is used internally for stale-auth detection; do not propagate
+	// the live credential pointer (and its secrets) to hooks or selectors.
+	result.SourceAuth = nil
+
 	if result.IsProbe {
 		// Detach the hook context from the probe lifetime so async observers
 		// see a usable (non-canceled) context.
@@ -1005,6 +1009,7 @@ func (m *Manager) reportHomeResult(ctx context.Context, result Result, auth *Aut
 	if auth != nil {
 		snapshot = auth.Clone()
 	}
+	result.SourceAuth = nil
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, snapshot)
 }
@@ -1029,6 +1034,7 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
 	}
 	m.mu.Unlock()
 
+	result.SourceAuth = nil
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, authSnapshot)
 }

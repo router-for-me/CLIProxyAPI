@@ -1018,6 +1018,31 @@ func TestProberBaseURLCaseInsensitiveOpenAICompatName(t *testing.T) {
 	}
 }
 
+func TestProberBaseURLIgnoresOpenAICompatIndexForNativeProvider(t *testing.T) {
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name:    "native-looking",
+				BaseURL: "https://compat.example.com/v1",
+			},
+		},
+	}
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"config_index": "0",
+		},
+	}
+	if got := proberBaseURLForProvider(auth, cfg); got != "https://api.anthropic.com" {
+		t.Fatalf("proberBaseURLForProvider() = %q, want %q", got, "https://api.anthropic.com")
+	}
+	if got := proberOpenAICompatBaseURL(auth, cfg); got != "" {
+		t.Fatalf("proberOpenAICompatBaseURL() = %q, want empty", got)
+	}
+}
+
 func TestProberRefreshOn401(t *testing.T) {
 	ctx := context.Background()
 	m := newProberManager()

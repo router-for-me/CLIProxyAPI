@@ -61,6 +61,7 @@ type Result struct {
 	IsProbe bool
 	// SourceAuth is the auth pointer used at request time; MarkResult discards
 	// the result if the manager has replaced the auth with a newer copy before the update.
+	// It is cleared before the result is passed to hooks or selectors.
 	SourceAuth *Auth
 	// Error describes the failure when Success is false.
 	Error *Error
