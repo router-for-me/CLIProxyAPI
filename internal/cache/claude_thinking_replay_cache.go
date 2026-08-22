@@ -389,8 +389,25 @@ func claudeThinkingReplayAliasKVKey(modelFamily, messageHash string) string {
 	return "cpa:claude:thinking-replay-alias:" + homekv.HashKeyPart(strings.TrimSpace(modelFamily)) + ":" + homekv.HashKeyPart(strings.TrimSpace(messageHash))
 }
 
+// claudeThinkingReplayCredentialHash extracts the stable credential hash embedded
+// in a modelFamily string ("claude:<hash>:<baseModel>"). The alias index is keyed
+// by credential so the per-credential cap applies across all model names a caller
+// may use.
+func claudeThinkingReplayCredentialHash(modelFamily string) string {
+	const prefix = "claude:"
+	if !strings.HasPrefix(modelFamily, prefix) {
+		return modelFamily
+	}
+	rest := modelFamily[len(prefix):]
+	if i := strings.IndexByte(rest, ':'); i > 0 {
+		return rest[:i]
+	}
+	return modelFamily
+}
+
 func claudeThinkingReplayAliasIndexKVKey(modelFamily string) string {
-	return "cpa:claude:thinking-replay-alias-index:" + homekv.HashKeyPart(strings.TrimSpace(modelFamily))
+	credentialHash := claudeThinkingReplayCredentialHash(modelFamily)
+	return "cpa:claude:thinking-replay-alias-index:" + homekv.HashKeyPart(strings.TrimSpace(credentialHash))
 }
 
 func claudeThinkingReplayUpsertAliasLocked(key, sessionKey, firstUserHash string, now time.Time) {
@@ -615,16 +632,14 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 		}
 		index.Aliases = purgeExpiredClaudeThinkingReplayAliasIndex(index.Aliases, now)
 		index.Aliases = claudeThinkingReplayAliasIndexUpsert(index.Aliases, aliasKey, now)
+		var evicted []string
 		if len(index.Aliases) > ClaudeThinkingReplayCacheMaxAliasesPerCredential {
 			sort.Slice(index.Aliases, func(i, j int) bool {
 				return index.Aliases[i].Timestamp.Before(index.Aliases[j].Timestamp)
 			})
 			for len(index.Aliases) > ClaudeThinkingReplayCacheMaxAliasesPerCredential {
-				oldest := index.Aliases[0]
+				evicted = append(evicted, index.Aliases[0].AliasKey)
 				index.Aliases = index.Aliases[1:]
-				if _, errDel := client.KVDel(ctx, oldest.AliasKey); errDel != nil {
-					log.Warnf("claude thinking replay alias eviction failed: %v", errDel)
-				}
 			}
 		}
 		indexBytes, errMarshal := json.Marshal(index)
@@ -638,6 +653,15 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 			return
 		}
 		if swapped {
+			// Only delete evicted alias values after the index CAS succeeds.
+			// A concurrent worker may have refreshed an alias between our read
+			// and the CAS; deleting before the CAS could erase a still-indexed
+			// alias and break compacted continuations.
+			for _, key := range evicted {
+				if _, errDel := client.KVDel(ctx, key); errDel != nil {
+					log.Warnf("claude thinking replay alias eviction failed: %v", errDel)
+				}
+			}
 			break
 		}
 		if attempt == 3 {

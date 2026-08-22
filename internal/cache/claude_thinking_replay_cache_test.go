@@ -329,6 +329,113 @@ func TestResolveClaudeThinkingReplayAliasHomeRejectsTies(t *testing.T) {
 	}
 }
 
+func TestClaudeThinkingReplayAliasHomeCappedAcrossModelsPerCredential(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	client := newFakeClaudeThinkingReplayKVClient()
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	ctx := context.Background()
+	const credentialHash = "deadbeef"
+	modelA := "claude:" + credentialHash + ":modelA"
+	modelB := "claude:" + credentialHash + ":modelB"
+
+	// Both model families should map to the same credential-scoped index.
+	indexKey := claudeThinkingReplayAliasIndexKVKey(modelA)
+	if indexKey != claudeThinkingReplayAliasIndexKVKey(modelB) {
+		t.Fatalf("index key not shared across models for same credential: %q vs %q", indexKey, claudeThinkingReplayAliasIndexKVKey(modelB))
+	}
+
+	max := ClaudeThinkingReplayCacheMaxAliasesPerCredential
+	for i := 0; i < max+10; i++ {
+		mf := modelA
+		if i%2 == 1 {
+			mf = modelB
+		}
+		RegisterClaudeThinkingReplayAlias(ctx, mf, "session", messageHashFor(i), "first")
+	}
+
+	index, _ := decodeClaudeThinkingReplayAliasIndex(client.values[indexKey])
+	if len(index.Aliases) > max {
+		t.Fatalf("credential alias cap exceeded across models: %d > %d", len(index.Aliases), max)
+	}
+
+	live := 0
+	for k := range client.values {
+		if k != indexKey {
+			live++
+		}
+	}
+	if live > max+1 {
+		t.Fatalf("too many live alias keys across models: %d", live)
+	}
+}
+
+// failingIndexClaudeThinkingReplayKVClient fails every KVCompareAndSwap on the
+// index key, simulating a stale read that makes the index CAS lose. It verifies
+// that evicted alias values are NOT deleted before a successful index CAS.
+type failingIndexClaudeThinkingReplayKVClient struct {
+	*fakeClaudeThinkingReplayKVClient
+	indexKey string
+	mu       sync.Mutex
+}
+
+func (c *failingIndexClaudeThinkingReplayKVClient) KVCompareAndSwap(ctx context.Context, key string, expected []byte, expectedExists bool, newValue []byte, ttl time.Duration) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if key == c.indexKey {
+		return false, nil
+	}
+	return c.fakeClaudeThinkingReplayKVClient.KVCompareAndSwap(ctx, key, expected, expectedExists, newValue, ttl)
+}
+
+func TestClaudeThinkingReplayAliasHomeEvictionIsAtomicWithIndexCAS(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
+
+	base := newFakeClaudeThinkingReplayKVClient()
+	client := &failingIndexClaudeThinkingReplayKVClient{
+		fakeClaudeThinkingReplayKVClient: base,
+		indexKey:                         indexKey,
+	}
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	// Pre-populate the index to the cap and create the matching alias values.
+	max := ClaudeThinkingReplayCacheMaxAliasesPerCredential
+	var index claudeThinkingReplayAliasIndex
+	now := time.Now()
+	for i := 0; i < max; i++ {
+		aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHashFor(i))
+		index.Aliases = append(index.Aliases, claudeThinkingReplayAliasIndexRecord{
+			AliasKey:  aliasKey,
+			Timestamp: now.Add(-time.Duration(max-i) * time.Second),
+		})
+		value, _ := json.Marshal(claudeThinkingReplayAliasHomeValue{
+			Sessions: []claudeThinkingReplayAliasHomeSession{
+				{SessionKey: "session", FirstUserHash: "first", Timestamp: now},
+			},
+		})
+		client.values[aliasKey] = value
+	}
+	indexBytes, _ := json.Marshal(index)
+	client.values[indexKey] = indexBytes
+
+	oldestAliasKey := index.Aliases[0].AliasKey
+
+	// The next registration will try to evict the oldest, but the index CAS is
+	// forced to fail. The evicted alias value must NOT be deleted.
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHashFor(max), "first")
+
+	if _, ok := client.values[oldestAliasKey]; !ok {
+		t.Fatalf("oldest alias %q deleted before successful index CAS", oldestAliasKey)
+	}
+}
+
 func messageHashFor(i int) string {
 	const chars = "abcdefghijklmnopqrstuvwxyz"
 	s := make([]byte, 0, 8)
