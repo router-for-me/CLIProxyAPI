@@ -36,9 +36,13 @@ func (s *Service) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	runCtx, runCancel := context.WithCancel(ctx)
+	// Derive the service-wide context once. Shutdown and Home-mode fatal errors
+	// cancel runCancel, so every operation in this run and the final select must
+	// observe runCtx instead of the caller's parent.
+	var runCancel context.CancelFunc
+	ctx, runCancel = context.WithCancel(ctx)
 	if s.coreManager != nil {
-		s.coreManager.SetProberParentContext(runCtx)
+		s.coreManager.SetProberParentContext(ctx)
 	}
 	s.homeMu.Lock()
 	s.runCancel = runCancel

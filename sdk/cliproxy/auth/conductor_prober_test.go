@@ -1141,6 +1141,53 @@ func TestProberRefreshOn401DoesNotPassLiveAuthPointer(t *testing.T) {
 	}
 }
 
+func TestProberReResolvesExecutorAfterAuthReplacement(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	oldExec := &proberTestExecutor{provider: "test"}
+	newExec := &proberTestExecutor{provider: "new"}
+	m.RegisterExecutor(oldExec)
+	m.RegisterExecutor(newExec)
+
+	oldAuth := &Auth{
+		ID:       "a1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://old.example.com",
+		},
+	}
+	if _, err := m.Register(ctx, oldAuth); err != nil {
+		t.Fatalf("Register old auth: %v", err)
+	}
+
+	newAuth := oldAuth.Clone()
+	newAuth.Provider = "new"
+	newAuth.Attributes = map[string]string{
+		"base_url": "https://new.example.com",
+	}
+	if _, err := m.Register(ctx, newAuth); err != nil {
+		t.Fatalf("Register replacement auth: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	loop := newAuthProberLoop(m, cfg)
+	loop.probe(ctx, oldAuth)
+
+	if oldExec.calls.Load() != 0 {
+		t.Fatalf("old exec calls = %d, want 0", oldExec.calls.Load())
+	}
+	if newExec.calls.Load() != 1 {
+		t.Fatalf("new exec calls = %d, want 1", newExec.calls.Load())
+	}
+	newExec.mu.Lock()
+	url := newExec.lastURL
+	newExec.mu.Unlock()
+	if url != "https://new.example.com/models" {
+		t.Fatalf("prober URL = %q, want %q", url, "https://new.example.com/models")
+	}
+}
+
 func TestProberRestartGoroutineDoesNotSurviveParentCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := newProberManager()

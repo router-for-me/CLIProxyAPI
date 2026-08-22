@@ -276,21 +276,19 @@ func (l *authProberLoop) snapshotAuths() []*Auth {
 }
 
 func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
+	// Re-fetch the auth and resolve its executor under the manager lock in one
+	// step. snapshotAuths may have returned a pointer that was replaced by an
+	// auto-refresh or watcher update while this probe was waiting in the
+	// rate-limit queue, and the replacement may use a different executor key.
 	l.manager.mu.RLock()
+	auth = l.manager.auths[auth.ID]
 	exec := l.manager.executors[executorKeyFromAuth(auth)]
 	l.manager.mu.RUnlock()
 
-	if exec == nil {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
 		return
 	}
-
-	// Re-fetch the auth under the manager lock. snapshotAuths may have
-	// returned a pointer that was replaced by an auto-refresh or watcher
-	// update while this probe was waiting in the rate-limit queue.
-	l.manager.mu.RLock()
-	auth = l.manager.auths[auth.ID]
-	l.manager.mu.RUnlock()
-	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+	if exec == nil {
 		return
 	}
 
