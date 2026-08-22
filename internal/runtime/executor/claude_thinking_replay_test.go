@@ -152,6 +152,49 @@ func TestClaudeThinkingReplayFindStartIndex_RefusesAmbiguousShorterSuffix(t *tes
 	}
 }
 
+func TestClaudeThinkingReplayFindStartIndex_RefusesAmbiguousFullSuffix(t *testing.T) {
+	// A full-suffix request that matches multiple cached blocks of the same
+	// length must fail closed so the wrong cached signature is not restored.
+	assistant := []gjson.Result{
+		gjson.Parse(`[{"type":"text","text":"A"}]`),
+	}
+	cached := [][]byte{
+		[]byte(`[{"type":"thinking","thinking":"old","signature":"sig-old"},{"type":"text","text":"A"}]`),
+		[]byte(`[{"type":"thinking","thinking":"new","signature":"sig-new"},{"type":"text","text":"A"}]`),
+	}
+	if got, _ := helps.ClaudeThinkingReplayFindStartIndex(assistant, cached); got != -1 {
+		t.Fatalf("expected -1 for full-suffix match with duplicate cached visible turns, got %d", got)
+	}
+
+	// A full-suffix multi-turn request that matches more than one cached
+	// length-l block is also ambiguous.
+	assistant2 := []gjson.Result{
+		gjson.Parse(`[{"type":"text","text":"A"}]`),
+		gjson.Parse(`[{"type":"text","text":"B"}]`),
+	}
+	cached2 := [][]byte{
+		[]byte(`[{"type":"thinking","thinking":"old","signature":"sig-old-a"},{"type":"text","text":"A"}]`),
+		[]byte(`[{"type":"text","text":"B"}]`),
+		[]byte(`[{"type":"thinking","thinking":"new","signature":"sig-new-a"},{"type":"text","text":"A"}]`),
+		[]byte(`[{"type":"text","text":"B"}]`),
+	}
+	if got, _ := helps.ClaudeThinkingReplayFindStartIndex(assistant2, cached2); got != -1 {
+		t.Fatalf("expected -1 for full-suffix multi-turn match with duplicate cached blocks, got %d", got)
+	}
+
+	// An unambiguous full-suffix single match should still succeed.
+	assistant3 := []gjson.Result{
+		gjson.Parse(`[{"type":"text","text":"B"}]`),
+	}
+	cached3 := [][]byte{
+		[]byte(`[{"type":"text","text":"A"}]`),
+		[]byte(`[{"type":"thinking","thinking":"r","signature":"sig-b"},{"type":"text","text":"B"}]`),
+	}
+	if got, _ := helps.ClaudeThinkingReplayFindStartIndex(assistant3, cached3); got != 1 {
+		t.Fatalf("expected start 1 for unambiguous full-suffix, got %d", got)
+	}
+}
+
 func TestRestoreClaudeThinkingReplayContents_RejectDuplicateRequestSideAnchors(t *testing.T) {
 	// A cached signed turn followed by an uncached unsigned duplicate with the
 	// same visible content must not have its signature injected into the later

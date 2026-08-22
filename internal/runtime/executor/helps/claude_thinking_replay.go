@@ -268,26 +268,24 @@ func ClaudeThinkingReplayFindStartIndex(assistantContents []gjson.Result, cached
 	}
 	chosen := candidates[best]
 
-	// A partial match that leaves trailing request turns unmatched is ambiguous
-	// when another cached block of the same length matches the same request
-	// positions. Suffix-of-request matches are not rejected this way.
-	lastMatch := chosen.matches[len(chosen.matches)-1]
-	if lastMatch < len(assistantContents)-1 {
-		l := len(chosen.matches)
-		for d := 0; d <= len(cachedContents)-l; d++ {
-			if d == chosen.start {
-				continue
+	// A cached suffix match is ambiguous when another cached block of the same
+	// length matches the same request positions. The check applies to both
+	// partial and full suffix-of-request matches so duplicate cached turns do not
+	// cause the wrong signature to be restored.
+	l := len(chosen.matches)
+	for d := 0; d <= len(cachedContents)-l; d++ {
+		if d == chosen.start {
+			continue
+		}
+		otherMatched := true
+		for k := 0; k < l; k++ {
+			if !ClaudeThinkingReplayContentsMatch(assistantContents[chosen.matches[k]], gjson.ParseBytes(cachedContents[d+k])) {
+				otherMatched = false
+				break
 			}
-			otherMatched := true
-			for k := 0; k < l; k++ {
-				if !ClaudeThinkingReplayContentsMatch(assistantContents[chosen.matches[k]], gjson.ParseBytes(cachedContents[d+k])) {
-					otherMatched = false
-					break
-				}
-			}
-			if otherMatched {
-				return -1, nil
-			}
+		}
+		if otherMatched {
+			return -1, nil
 		}
 	}
 	return chosen.start, chosen.matches
