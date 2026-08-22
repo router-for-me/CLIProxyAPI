@@ -1327,6 +1327,52 @@ func TestProberCapsMaxConcurrency(t *testing.T) {
 	}
 }
 
+func TestProberNotBlockedByModelOnlyCooldown(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "test"}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://example.com",
+		},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	m.MarkResult(ctx, Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Success:  false,
+		Model:    "missing-model",
+		Error: &Error{
+			Code:       "rate_limit",
+			Message:    "model rate limited",
+			HTTPStatus: http.StatusTooManyRequests,
+			Retryable:  true,
+		},
+	})
+
+	updated, _ := m.GetByID(auth.ID)
+	if updated == nil || !updated.Unavailable {
+		t.Fatal("expected aggregate Unavailable after model-only failure")
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+
+	if exec.calls.Load() != 1 {
+		t.Fatalf("prober calls = %d, want 1 for model-only cooldown", exec.calls.Load())
+	}
+}
+
 func TestProberHonorsAuthLevelCooldown(t *testing.T) {
 	ctx := context.Background()
 	m := newProberManager()

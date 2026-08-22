@@ -274,9 +274,8 @@ func (l *authProberLoop) snapshotAuths() []*Auth {
 		if auth.Disabled || auth.Status == StatusDisabled {
 			continue
 		}
-		if auth.Unavailable && auth.NextRetryAfter.After(now) {
-			continue
-		}
+		// Only credential-scoped auth-level cooldown blocks probes. Model-only
+		// cooldowns must not suppress the credential-wide health check.
 		if auth.authLevelUnavailable && auth.authLevelNextRetryAfter.After(now) {
 			continue
 		}
