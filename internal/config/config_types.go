@@ -181,6 +181,12 @@ type CodexConfig struct {
 	// ModelLevelCooling scopes Codex usage_limit_reached quota cooldowns to the requested model
 	// rather than cooling down the entire credential across all sibling models.
 	ModelLevelCooling bool `yaml:"model-level-cooling" json:"model-level-cooling"`
+	// UpstreamRequestCompression compresses Codex /responses and /responses/compact upstream
+	// request bodies sent to the official ChatGPT backend. Accepted values: "zstd" (the
+	// content coding the official Codex CLI sends), "gzip", or empty/"off" for identity
+	// bodies. Codex conversations are resent in full on every turn, so this cuts upstream
+	// egress several-fold at a small CPU cost.
+	UpstreamRequestCompression string `yaml:"upstream-request-compression" json:"upstream-request-compression"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
 	LiveMediaRelay CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
 }
