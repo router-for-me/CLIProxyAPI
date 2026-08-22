@@ -255,6 +255,14 @@ codex:
   # normalizes encrypted agent_message content for Codex, and converts agent_message input
   # into standard user messages for non-Codex upstream protocols.
   optimize-multi-agent-v2: false
+  # Compress the request body sent to the official ChatGPT Codex backend (chatgpt.com)
+  # for /responses and /responses/compact. "zstd" is the content coding the official
+  # Codex CLI sends (level 3); "gzip" is also accepted upstream; empty or "off" sends
+  # identity bodies. Custom codex-api-key base URLs are never compressed. Bodies under
+  # 1 KiB and bodies that would not shrink are sent as-is. Codex clients resend the
+  # whole conversation every turn, so JSON-heavy requests shrink several-fold; useful
+  # when upstream egress is metered.
+  upstream-request-compression: ""
   # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
   # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
   live-media-relay:

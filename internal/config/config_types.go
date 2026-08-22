@@ -158,6 +158,12 @@ type CodexConfig struct {
 	StreamBootstrapBuffering bool `yaml:"stream-bootstrap-buffering" json:"stream-bootstrap-buffering"`
 	// OptimizeMultiAgentV2 optimizes official Codex multi-agent requests.
 	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
+	// UpstreamRequestCompression compresses Codex /responses and /responses/compact upstream
+	// request bodies sent to the official ChatGPT backend. Accepted values: "zstd" (the
+	// content coding the official Codex CLI sends), "gzip", or empty/"off" for identity
+	// bodies. Codex conversations are resent in full on every turn, so this cuts upstream
+	// egress several-fold at a small CPU cost.
+	UpstreamRequestCompression string `yaml:"upstream-request-compression" json:"upstream-request-compression"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
 	LiveMediaRelay CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
 }
