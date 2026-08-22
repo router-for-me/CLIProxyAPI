@@ -441,9 +441,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if upstreamCompleted {
 			commitClaudeDiagnostics(diagnosticsState, upstreamMessageID)
 		}
-		if replayAccum != nil && upstreamCompleted {
+		if replayAccum != nil {
 			if content, completed := replayAccum.content(); completed {
 				cacheClaudeThinkingReplayContent(ctx, replayScope, content)
+			} else if replayAccum.upstreamError && replayScope.replayApplied {
+				clearClaudeThinkingReplayContent(ctx, replayScope)
 			}
 		}
 	}()
