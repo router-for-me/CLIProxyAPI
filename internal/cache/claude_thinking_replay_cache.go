@@ -555,17 +555,29 @@ func enforceClaudeThinkingReplayAliasLimitsLocked() {
 		for i := 0; i < batch; i++ {
 			c := candidates[i]
 			list := claudeThinkingReplayAliases[c.key]
-			if c.index < len(list) {
-				claudeThinkingReplayAliasBytes -= len(list[c.index].sessionKey) + len(list[c.index].firstUserHash)
-				list = append(list[:c.index], list[c.index+1:]...)
-				if len(list) == 0 {
-					claudeThinkingReplayAliasBytes -= len(c.key)
-					delete(claudeThinkingReplayAliases, c.key)
-				} else {
-					claudeThinkingReplayAliases[c.key] = list
-				}
-				claudeThinkingReplayAliasCount--
+			if c.index >= len(list) {
+				continue
 			}
+			sessionKey := list[c.index].sessionKey
+			found := -1
+			for j, e := range list {
+				if e.sessionKey == sessionKey {
+					found = j
+					break
+				}
+			}
+			if found < 0 {
+				continue
+			}
+			claudeThinkingReplayAliasBytes -= len(list[found].sessionKey) + len(list[found].firstUserHash)
+			list = append(list[:found], list[found+1:]...)
+			if len(list) == 0 {
+				claudeThinkingReplayAliasBytes -= len(c.key)
+				delete(claudeThinkingReplayAliases, c.key)
+			} else {
+				claudeThinkingReplayAliases[c.key] = list
+			}
+			claudeThinkingReplayAliasCount--
 		}
 	}
 }
