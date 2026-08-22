@@ -10,6 +10,7 @@ import (
 	"time"
 
 	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 type userIDCacheEntry struct {
@@ -49,30 +50,31 @@ func purgeExpiredUserIDs() {
 	userIDCacheMu.Unlock()
 }
 
-func userIDCacheKey(apiKey string) string {
-	sum := sha256.Sum256([]byte(apiKey))
+func userIDCacheKey(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
 	return hex.EncodeToString(sum[:])
 }
 
-func CachedUserID(apiKey string) string {
-	value, errValue := CachedUserIDRequired(context.Background(), apiKey)
+func CachedUserID(apiKey string, auth *cliproxyauth.Auth) string {
+	value, errValue := CachedUserIDRequired(context.Background(), apiKey, auth)
 	if errValue == nil && value != "" {
 		return value
 	}
-	return generateFakeUserID()
+	return generateFakeUserID(apiKey, auth)
 }
 
-// CachedUserIDRequired returns a stable fake user ID per apiKey for request-time paths.
-func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
+// CachedUserIDRequired returns a stable fake user ID per credential for request-time paths.
+func CachedUserIDRequired(ctx context.Context, apiKey string, auth *cliproxyauth.Auth) (string, error) {
+	seed := claudeCredentialSeed(apiKey, auth)
 	newUserID := func() (string, error) {
-		sessionID, errSessionID := CachedSessionIDRequired(ctx, apiKey)
+		sessionID, errSessionID := CachedSessionIDRequired(ctx, apiKey, auth)
 		if errSessionID != nil {
 			return "", errSessionID
 		}
-		return generateFakeUserIDWithSessionID(sessionID), nil
+		return generateDeterministicFakeUserID(seed, sessionID), nil
 	}
 
-	if apiKey == "" {
+	if seed == "anonymous" {
 		return newUserID()
 	}
 	client, homeMode, errClient := currentClaudeIDKVClient()
@@ -80,7 +82,7 @@ func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
 		if errClient != nil {
 			return "", errClient
 		}
-		key := claudeUserIDKVKey(apiKey)
+		key := claudeUserIDKVKey(seed)
 		raw, found, errGet := client.KVGet(ctx, key)
 		if errGet != nil {
 			return "", errGet
@@ -110,7 +112,7 @@ func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
 
 	userIDCacheCleanupOnce.Do(startUserIDCacheCleanup)
 
-	key := userIDCacheKey(apiKey)
+	key := userIDCacheKey(seed)
 	now := time.Now()
 
 	userIDCacheMu.RLock()
@@ -145,6 +147,6 @@ func CachedUserIDRequired(ctx context.Context, apiKey string) (string, error) {
 	return entry.value, nil
 }
 
-func claudeUserIDKVKey(apiKey string) string {
-	return "cpa:claude:user-id:" + homekv.HashKeyPart(apiKey)
+func claudeUserIDKVKey(seed string) string {
+	return "cpa:claude:user-id:" + homekv.HashKeyPart(seed)
 }
