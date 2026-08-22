@@ -157,14 +157,16 @@ func (m *Manager) restartProberLocked() {
 		// restart a prober.
 		return
 	}
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	if cfg == nil {
-		cfg = &internalconfig.Config{}
-	}
 	m.proberLifecycleMu.Lock()
 	defer m.proberLifecycleMu.Unlock()
 	if parent.Err() != nil {
 		return
+	}
+	// Snapshot the runtime config only after acquiring the lifecycle lock so
+	// concurrent SetConfig restarts see the most recently applied configuration.
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		cfg = &internalconfig.Config{}
 	}
 	if !cfg.CredentialProber.Enabled {
 		m.stopProberUnlocked()
@@ -254,7 +256,7 @@ func (l *authProberLoop) sweep(ctx context.Context) {
 		go func(a *Auth) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			l.probe(ctx, a)
+			l.probeWithLimiter(ctx, a, ticker.C)
 		}(auth)
 	}
 
@@ -285,6 +287,10 @@ func (l *authProberLoop) snapshotAuths() []*Auth {
 }
 
 func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
+	l.probeWithLimiter(parent, auth, nil)
+}
+
+func (l *authProberLoop) probeWithLimiter(parent context.Context, auth *Auth, limiter <-chan time.Time) {
 	// Re-fetch the auth and resolve its executor under the manager lock in one
 	// step. snapshotAuths may have returned a pointer that was replaced by an
 	// auto-refresh or watcher update while this probe was waiting in the
@@ -335,6 +341,15 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 		resultErr *Error
 	)
 	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 && limiter != nil {
+			// A refreshed OAuth credential retry is a second probe request; consume
+			// another rate-limit token instead of doubling the request rate.
+			select {
+			case <-probeCtx.Done():
+				return
+			case <-limiter:
+			}
+		}
 		req, errReq := http.NewRequestWithContext(probeCtx, http.MethodGet, probeURL, nil)
 		if errReq != nil {
 			return

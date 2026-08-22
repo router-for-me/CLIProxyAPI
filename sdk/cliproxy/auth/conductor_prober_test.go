@@ -26,6 +26,7 @@ func newProberManager() *Manager {
 type proberTestExecutor struct {
 	provider      string
 	statusCode    *int
+	statusSeq     []int
 	body          string
 	err           error
 	calls         atomic.Int32
@@ -98,7 +99,10 @@ func (e *proberTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *h
 	}
 	e.mu.Lock()
 	status := 0
-	if e.statusCode != nil {
+	callIdx := int(e.calls.Load() - 1)
+	if callIdx >= 0 && callIdx < len(e.statusSeq) {
+		status = e.statusSeq[callIdx]
+	} else if e.statusCode != nil {
 		status = *e.statusCode
 	}
 	if status <= 0 {
@@ -1269,6 +1273,117 @@ func TestProberUsesOpenAICompatBaseURL(t *testing.T) {
 	exec.mu.Unlock()
 	if url != "https://custom.example.com/v1/models" {
 		t.Fatalf("prober URL = %q, want %q", url, "https://custom.example.com/v1/models")
+	}
+}
+
+func TestProberRefreshOn401WaitsForRateLimitToken(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{
+		provider:     "test",
+		statusSeq:    []int{http.StatusUnauthorized, http.StatusOK},
+		refreshToken: "new-token",
+	}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://example.com",
+		},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	loop := newAuthProberLoop(m, cfg)
+
+	limiter := make(chan time.Time)
+	done := make(chan struct{})
+	go func() {
+		loop.probeWithLimiter(ctx, auth, limiter)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if got := exec.calls.Load(); got != 1 {
+		t.Fatalf("prober calls before retry = %d, want 1", got)
+	}
+
+	select {
+	case <-done:
+		t.Fatal("probe finished before retry token was provided")
+	default:
+	}
+
+	limiter <- time.Now()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("probe did not complete after retry token")
+	}
+
+	if got := exec.calls.Load(); got != 2 {
+		t.Fatalf("prober calls = %d, want 2", got)
+	}
+	if !exec.refreshCalled.Load() {
+		t.Fatal("Refresh not called on 401")
+	}
+}
+
+func TestRestartProberReadsConfigAfterLifecycleLock(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "test"}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://example.com",
+		},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	enabled := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	disabled := internalconfig.CredentialProberConfig{Enabled: false}
+
+	m.SetProberParentContext(ctx)
+	m.SetConfig(&internalconfig.Config{CredentialProber: enabled})
+	time.Sleep(100 * time.Millisecond)
+
+	m.mu.RLock()
+	runningBefore := m.proberLoop != nil
+	m.mu.RUnlock()
+	if !runningBefore {
+		t.Fatal("prober should be running with enabled config")
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); m.SetConfig(&internalconfig.Config{CredentialProber: enabled}) }()
+		go func() { defer wg.Done(); m.RestartProber() }()
+	}
+	wg.Wait()
+
+	m.SetConfig(&internalconfig.Config{CredentialProber: disabled})
+	m.RestartProber()
+	time.Sleep(100 * time.Millisecond)
+
+	m.mu.RLock()
+	runningAfter := m.proberLoop != nil
+	m.mu.RUnlock()
+	if runningAfter {
+		t.Fatal("prober should be stopped with disabled config")
 	}
 }
 

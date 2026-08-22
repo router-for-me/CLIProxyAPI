@@ -730,6 +730,54 @@ func TestIsAuthBlockedForModel_AuthLevelNotOverriddenByModelAggregate(t *testing
 	}
 }
 
+func TestIsAuthBlockedForModel_AuthLevelProbeNotExtendedByModelQuota(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	model := "test-model"
+	auth := &Auth{
+		ID:                      "a",
+		Provider:                "test",
+		Status:                  StatusActive,
+		Unavailable:             false,
+		NextRetryAfter:          time.Time{},
+		authLevelCooldown:       true,
+		authLevelUnavailable:    true,
+		authLevelNextRetryAfter: now.Add(time.Minute),
+		Quota: QuotaState{
+			Exceeded:      true,
+			Reason:        "quota",
+			NextRecoverAt: now.Add(time.Hour),
+		},
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:      StatusActive,
+				Unavailable: false,
+			},
+			"other-model": {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(time.Hour),
+				Quota: QuotaState{
+					Exceeded:      true,
+					NextRecoverAt: now.Add(time.Hour),
+				},
+			},
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, model, now)
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
+	}
+	if reason != blockReasonOther {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonOther)
+	}
+	if !next.Equal(auth.authLevelNextRetryAfter) {
+		t.Fatalf("next = %v, want %v", next, auth.authLevelNextRetryAfter)
+	}
+}
+
 func TestIsAuthBlockedForModel_ThinkingSuffixStatesBlockCanonicalModel(t *testing.T) {
 	t.Parallel()
 
