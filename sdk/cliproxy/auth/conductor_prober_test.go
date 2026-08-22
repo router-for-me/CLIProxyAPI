@@ -380,6 +380,44 @@ func TestProberRestartDuringStopIsBlocked(t *testing.T) {
 	<-startDone
 }
 
+func TestSetConfigDoesNotDeadlockWithFailingProbe(t *testing.T) {
+	ctx := context.Background()
+	m := NewManager(nil, nil, nil)
+	m.SetCooldownStateStore(&recordingCooldownStateStore{})
+
+	block := make(chan struct{})
+	exec := &proberTestExecutor{provider: "test", err: fmt.Errorf("upstream unreachable"), blockUntil: block}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	for exec.calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+		close(done)
+	}()
+
+	// Give SetConfig time to reach the restart, then let the probe finish.
+	time.Sleep(50 * time.Millisecond)
+	close(block)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SetConfig deadlocked with failing probe")
+	}
+}
+
 func TestProberBackoffFor(t *testing.T) {
 	l := newAuthProberLoop(nil, internalconfig.CredentialProberConfig{BackoffBase: 30 * time.Second, BackoffMax: 5 * time.Minute})
 	cases := []struct {

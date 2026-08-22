@@ -124,9 +124,13 @@ func (m *Manager) stopProberUnlocked() {
 	m.proberWg.Wait()
 }
 
-func (m *Manager) restartProberLocked(cfg *internalconfig.Config) {
-	if m == nil || cfg == nil {
+func (m *Manager) restartProberLocked() {
+	if m == nil {
 		return
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		cfg = &internalconfig.Config{}
 	}
 	m.proberLifecycleMu.Lock()
 	defer m.proberLifecycleMu.Unlock()
