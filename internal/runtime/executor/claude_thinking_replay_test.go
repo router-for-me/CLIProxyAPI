@@ -1779,6 +1779,68 @@ func internalcacheClearClaudeThinkingReplay(t *testing.T) {
 	t.Cleanup(internalcache.ClearClaudeThinkingReplayCache)
 }
 
+func TestCacheClaudeThinkingReplayContent_DoesNotRegisterAliasOnFailedCacheWrite(t *testing.T) {
+	internalcacheClearClaudeThinkingReplay(t)
+
+	ctx := context.Background()
+	const (
+		modelFamily   = "claude:test"
+		sessionKey    = "session-failed-alias"
+		callerHash    = "caller"
+		firstUserHash = "first"
+	)
+
+	content1 := []byte(`[{"type":"thinking","thinking":"r1","signature":"EgI="},{"type":"text","text":"answer one"}]`)
+	content2 := []byte(`[{"type":"thinking","thinking":"r2","signature":"EgI="},{"type":"text","text":"answer two"}]`)
+	hash1 := helps.ClaudeThinkingReplayAssistantMessageHash(modelFamily, callerHash, content1)
+	hash2 := helps.ClaudeThinkingReplayAssistantMessageHash(modelFamily, callerHash, content2)
+
+	_, snapshot, found, errGet := internalcache.GetClaudeThinkingReplayWithSnapshotIfExists(ctx, modelFamily, sessionKey)
+	if errGet != nil {
+		t.Fatalf("initial cache read: %v", errGet)
+	}
+	if found {
+		t.Fatal("initial cache should be empty")
+	}
+
+	scope := claudeThinkingReplayScope{
+		modelFamily:   modelFamily,
+		sessionKey:    sessionKey,
+		snapshot:      snapshot,
+		cacheReady:    true,
+		fallbackKey:   true,
+		callerHash:    callerHash,
+		firstUserHash: firstUserHash,
+	}
+
+	cacheClaudeThinkingReplayContent(ctx, scope, content1)
+	if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, []internalcache.ClaudeThinkingReplayAliasMessage{{Hash: hash1, Weight: 1}}, firstUserHash); !ok || resolved != sessionKey {
+		t.Fatalf("first successful write should publish alias: ok=%v resolved=%q", ok, resolved)
+	}
+
+	// Re-using the same scope.snapshot after the first write is stale; the next
+	// cache write must fail CAS and the second response alias must not be
+	// published to a missing/failed replay record.
+	cacheClaudeThinkingReplayContent(ctx, scope, content2)
+	if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, []internalcache.ClaudeThinkingReplayAliasMessage{{Hash: hash2, Weight: 1}}, firstUserHash); ok {
+		t.Fatalf("second alias should not be published after failed cache write, got %q", resolved)
+	}
+
+	// A fresh snapshot after the successful first write should allow the third
+	// response to be cached and its alias published.
+	_, snapshot2, _, errGet2 := internalcache.GetClaudeThinkingReplayWithSnapshotIfExists(ctx, modelFamily, sessionKey)
+	if errGet2 != nil {
+		t.Fatalf("fresh cache read: %v", errGet2)
+	}
+	scope.snapshot = snapshot2
+	content3 := []byte(`[{"type":"thinking","thinking":"r3","signature":"EgI="},{"type":"text","text":"answer three"}]`)
+	hash3 := helps.ClaudeThinkingReplayAssistantMessageHash(modelFamily, callerHash, content3)
+	cacheClaudeThinkingReplayContent(ctx, scope, content3)
+	if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, []internalcache.ClaudeThinkingReplayAliasMessage{{Hash: hash3, Weight: 1}}, firstUserHash); !ok || resolved != sessionKey {
+		t.Fatalf("fresh-snapshot write should publish alias: ok=%v resolved=%q", ok, resolved)
+	}
+}
+
 func TestClaudeExecutorCompatThinkingReplayCrossFormatStream(t *testing.T) {
 	internalcacheClearClaudeThinkingReplay(t)
 

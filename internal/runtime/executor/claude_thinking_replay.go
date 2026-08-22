@@ -156,13 +156,13 @@ func cacheClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingR
 	// Only append turns that carry signed thinking; prior replay state is retained
 	// for the next request that echoes an earlier assistant message.
 	if helps.ClaudeThinkingReplayContentIsReplayable(content) {
-		if _, errReplace := internalcache.ReplaceClaudeThinkingReplayIfUnchanged(ctx, scope.modelFamily, scope.sessionKey, scope.snapshot, content); errReplace != nil {
+		replaced, errReplace := internalcache.ReplaceClaudeThinkingReplayIfUnchanged(ctx, scope.modelFamily, scope.sessionKey, scope.snapshot, content)
+		if errReplace != nil {
 			log.Warnf("claude compatible thinking replay cache replace failed: %v", errReplace)
-		}
-		// Register the client-visible assistant shape as an alias so a later
-		// compacted request that leads with this assistant can resolve the
-		// original conversation scope.
-		if scope.fallbackKey {
+		} else if replaced && scope.fallbackKey {
+			// Register the client-visible assistant shape as an alias only after a
+			// successful cache write, so aliases do not point at a missing or
+			// failed replay record.
 			if h := helps.ClaudeThinkingReplayAssistantMessageHash(scope.modelFamily, scope.callerHash, content); h != "" {
 				internalcache.RegisterClaudeThinkingReplayAlias(ctx, scope.modelFamily, scope.sessionKey, h, scope.firstUserHash)
 			}
