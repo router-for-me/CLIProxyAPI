@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"strings"
@@ -299,8 +300,13 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 		return "", fmt.Errorf("marshal request body: %w", errMarshal)
 	}
 
-	maxAttempts := 5
+	maxAttempts := 3
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			// Random 3-6 second jitter delay between onboarding polling attempts
+			jitter := time.Duration(3000+rand.Intn(3000)) * time.Millisecond
+			time.Sleep(jitter)
+		}
 		log.Debugf("Polling attempt %d/%d", attempt, maxAttempts)
 
 		reqCtx := ctx
@@ -358,7 +364,6 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 				return "", fmt.Errorf("no project_id in response")
 			}
 
-			time.Sleep(2 * time.Second)
 			continue
 		}
 
