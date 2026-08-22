@@ -270,6 +270,10 @@ func restoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) (
 	from := 0
 	if start >= 0 {
 		from = start
+	} else {
+		// No cached suffix matches a contiguous block; refuse partial fallback
+		// that could pair a retained turn with the wrong hidden signature.
+		from = len(cachedContents)
 	}
 
 	for ai, i := range assistantMsgIndices {
@@ -344,30 +348,26 @@ func claudeThinkingReplayFindStartIndex(assistantContents []gjson.Result, cached
 	if len(assistantContents) == 0 || len(cachedContents) == 0 {
 		return -1
 	}
-	bestStart := -1
-	for start := 0; start < len(cachedContents); start++ {
-		j := start
-		prefixLen := 0
-		for i := 0; i < len(assistantContents) && j < len(cachedContents); i++ {
-			matched := false
-			for j < len(cachedContents) {
-				if claudeThinkingReplayContentsMatch(assistantContents[i], gjson.ParseBytes(cachedContents[j])) {
-					matched = true
-					j++
+	maxL := len(assistantContents)
+	if maxL > len(cachedContents) {
+		maxL = len(cachedContents)
+	}
+	for l := maxL; l >= 1; l-- {
+		start := len(cachedContents) - l
+		for off := 0; off <= len(assistantContents)-l; off++ {
+			matched := true
+			for k := 0; k < l; k++ {
+				if !claudeThinkingReplayContentsMatch(assistantContents[off+k], gjson.ParseBytes(cachedContents[start+k])) {
+					matched = false
 					break
 				}
-				j++
 			}
-			if !matched {
-				break
+			if matched {
+				return start
 			}
-			prefixLen++
-		}
-		if prefixLen == len(assistantContents) && start > bestStart {
-			bestStart = start
 		}
 	}
-	return bestStart
+	return -1
 }
 
 // claudeThinkingReplayMessageHashes returns a stable weighted hash for each
