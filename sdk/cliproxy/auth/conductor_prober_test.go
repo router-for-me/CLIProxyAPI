@@ -21,6 +21,8 @@ type proberTestExecutor struct {
 	err           error
 	calls         atomic.Int32
 	respondStatus int
+	deadlineSet   atomic.Bool
+	ctx           context.Context
 }
 
 func (e *proberTestExecutor) Identifier() string { return e.provider }
@@ -39,8 +41,12 @@ func (e *proberTestExecutor) CountTokens(context.Context, *Auth, cliproxyexecuto
 	return cliproxyexecutor.Response{}, nil
 }
 
-func (e *proberTestExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+func (e *proberTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	e.calls.Add(1)
+	e.ctx = ctx
+	if _, ok := ctx.Deadline(); ok {
+		e.deadlineSet.Store(true)
+	}
 	if e.err != nil {
 		return nil, e.err
 	}
@@ -195,6 +201,39 @@ func TestProberMarksAuthUnavailableOnEmptyResponse(t *testing.T) {
 	}
 	if !updated.Unavailable {
 		t.Fatalf("auth.Unavailable = %v, want true", updated.Unavailable)
+	}
+}
+
+func TestProberDropsContextDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
+	defer cancel()
+
+	m := NewManager(nil, nil, nil)
+	exec := &proberTestExecutor{provider: "test", statusCode: http.StatusOK}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+
+	time.Sleep(100 * time.Millisecond)
+
+	m.StopProber()
+
+	if exec.calls.Load() == 0 {
+		t.Fatal("prober did not call executor")
+	}
+	if exec.deadlineSet.Load() {
+		t.Fatal("prober passed a context with a deadline to the executor")
+	}
+	if exec.ctx != nil {
+		if _, ok := exec.ctx.Deadline(); ok {
+			t.Fatal("prober passed a context with a deadline to the executor")
+		}
 	}
 }
 

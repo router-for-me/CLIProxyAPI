@@ -199,6 +199,19 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 		return
 	}
 
+	// The prober must not carry a whole-request deadline into response
+	// processing. Drop any inherited deadline while still allowing the parent
+	// cancellation to stop the probe.
+	probeCtx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	go func() {
+		select {
+		case <-parent.Done():
+			cancel()
+		case <-probeCtx.Done():
+		}
+	}()
+	defer cancel()
+
 	baseURL := ""
 	if auth.Attributes != nil {
 		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
@@ -217,12 +230,12 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 		return
 	}
 
-	req, errReq := http.NewRequestWithContext(parent, http.MethodGet, probeURL, nil)
+	req, errReq := http.NewRequestWithContext(probeCtx, http.MethodGet, probeURL, nil)
 	if errReq != nil {
 		return
 	}
 
-	resp, errExec := exec.HttpRequest(parent, auth, req)
+	resp, errExec := exec.HttpRequest(probeCtx, auth, req)
 	var bodyBytes int64
 	if resp != nil && resp.Body != nil {
 		bodyBytes, _ = io.CopyN(io.Discard, resp.Body, proberMaxBodyBytes)
@@ -268,7 +281,7 @@ func (l *authProberLoop) probe(parent context.Context, auth *Auth) {
 		log.Debugf("credential prober failure for %s: %s", auth.ID, resultErr.Message)
 	}
 
-	l.manager.MarkResult(parent, Result{
+	l.manager.MarkResult(probeCtx, Result{
 		AuthID:          auth.ID,
 		Provider:        auth.Provider,
 		Success:         false,
