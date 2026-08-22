@@ -153,6 +153,66 @@ func GetClaudeThinkingReplayRequired(ctx context.Context, modelFamily, sessionKe
 	return contents, found, errGet
 }
 
+// GetClaudeThinkingReplayWithSnapshotIfExists reads replay state without reserving a tombstone.
+// Use this for no-nonce fallback scopes so Home KV is only populated when a replayable
+// response is actually cached.
+func GetClaudeThinkingReplayWithSnapshotIfExists(ctx context.Context, modelFamily, sessionKey string) ([][]byte, ClaudeThinkingReplaySnapshot, bool, error) {
+	key := claudeThinkingReplayCacheKey(modelFamily, sessionKey)
+	if key == "" {
+		return nil, ClaudeThinkingReplaySnapshot{}, false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client, homeMode, errClient := currentClaudeThinkingReplayKVClient()
+	if homeMode {
+		if errClient != nil {
+			return nil, ClaudeThinkingReplaySnapshot{}, false, errClient
+		}
+		kvKey := claudeThinkingReplayKVKey(modelFamily, sessionKey)
+		raw, found, errRead := client.KVGet(ctx, kvKey)
+		if errRead != nil {
+			return nil, ClaudeThinkingReplaySnapshot{}, false, errRead
+		}
+		if !found {
+			return nil, ClaudeThinkingReplaySnapshot{loaded: false, found: false}, false, nil
+		}
+		snapshot := ClaudeThinkingReplaySnapshot{raw: append([]byte(nil), raw...), loaded: true, found: true}
+		contents, generation, deleted, okDecode := decodeClaudeThinkingReplayHomeValue(raw)
+		if !okDecode {
+			return nil, snapshot, false, fmt.Errorf("invalid Claude thinking replay content")
+		}
+		snapshot.generation = generation
+		if _, errExpire := client.KVExpire(ctx, kvKey, ClaudeThinkingReplayCacheTTL); errExpire != nil {
+			log.Warnf("home kv Claude thinking replay expire failed: %v", errExpire)
+		}
+		if deleted {
+			return nil, snapshot, false, nil
+		}
+		return cloneClaudeThinkingReplayContents(contents), snapshot, len(contents) > 0, nil
+	}
+
+	cacheCleanupOnce.Do(startCacheCleanup)
+	now := time.Now()
+	claudeThinkingReplayMu.Lock()
+	defer claudeThinkingReplayMu.Unlock()
+	entry, ok := claudeThinkingReplayEntries[key]
+	if !ok || now.Sub(entry.Timestamp) > ClaudeThinkingReplayCacheTTL {
+		if ok {
+			claudeThinkingReplayTotalBytes -= claudeThinkingReplayEntryBytes(entry.Contents)
+			delete(claudeThinkingReplayEntries, key)
+		}
+		return nil, ClaudeThinkingReplaySnapshot{loaded: false, found: false}, false, nil
+	}
+	entry.Timestamp = now
+	claudeThinkingReplayEntries[key] = entry
+	snapshot := ClaudeThinkingReplaySnapshot{generation: entry.Generation, loaded: true, found: true}
+	if entry.Deleted {
+		return nil, snapshot, false, nil
+	}
+	return cloneClaudeThinkingReplayContents(entry.Contents), snapshot, len(entry.Contents) > 0, nil
+}
+
 // GetClaudeThinkingReplayWithSnapshotRequired retrieves replay content and the exact cache state read.
 func GetClaudeThinkingReplayWithSnapshotRequired(ctx context.Context, modelFamily, sessionKey string) ([][]byte, ClaudeThinkingReplaySnapshot, bool, error) {
 	key := claudeThinkingReplayCacheKey(modelFamily, sessionKey)

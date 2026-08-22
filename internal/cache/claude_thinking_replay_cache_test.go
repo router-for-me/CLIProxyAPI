@@ -717,6 +717,40 @@ func TestClaudeThinkingReplayAliasPerKeyEvictsOldestByTimestamp(t *testing.T) {
 	}
 }
 
+func TestGetClaudeThinkingReplayWithSnapshotIfExistsDoesNotReserve(t *testing.T) {
+	client := newFakeClaudeThinkingReplayKVClient()
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	const sessionKey = "no-nonce-fallback"
+
+	_, _, found, err := GetClaudeThinkingReplayWithSnapshotIfExists(ctx, modelFamily, sessionKey)
+	if err != nil {
+		t.Fatalf("GetIfExists error: %v", err)
+	}
+	if found {
+		t.Fatal("expected no existing replay state")
+	}
+	if client.sets != 0 {
+		t.Fatalf("GetIfExists reserved a tombstone: sets=%d", client.sets)
+	}
+
+	// A subsequent cache write should then be able to set the value.
+	content := []byte(`[{"type":"thinking","thinking":"reason","signature":"EgI="}]`)
+	if !CacheClaudeThinkingReplayBestEffort(ctx, modelFamily, sessionKey, content) {
+		t.Fatal("CacheClaudeThinkingReplayBestEffort failed")
+	}
+
+	contents, _, found, err := GetClaudeThinkingReplayWithSnapshotIfExists(ctx, modelFamily, sessionKey)
+	if err != nil {
+		t.Fatalf("GetIfExists after cache error: %v", err)
+	}
+	if !found || len(contents) != 1 {
+		t.Fatalf("expected cached content, found=%v len=%d", found, len(contents))
+	}
+}
+
 func messageHashFor(i int) string {
 	const chars = "abcdefghijklmnopqrstuvwxyz"
 	s := make([]byte, 0, 8)
