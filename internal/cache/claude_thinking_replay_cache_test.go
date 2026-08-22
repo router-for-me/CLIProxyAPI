@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -534,6 +535,44 @@ func TestClaudeThinkingReplayAliasHomeEvictionSkipsReaddedAlias(t *testing.T) {
 
 	if _, ok := client.values[client.evicted]; !ok {
 		t.Fatalf("evicted alias %q was deleted while re-added to index", client.evicted)
+	}
+}
+
+// indexGetFailingClaudeThinkingReplayKVClient fails KVGet for the index key.
+// This verifies rollback does not depend on an index read succeeding.
+type indexGetFailingClaudeThinkingReplayKVClient struct {
+	*fakeClaudeThinkingReplayKVClient
+	indexKey string
+}
+
+func (c *indexGetFailingClaudeThinkingReplayKVClient) KVGet(ctx context.Context, key string) ([]byte, bool, error) {
+	if key == c.indexKey {
+		return nil, false, fmt.Errorf("simulated index read failure")
+	}
+	return c.fakeClaudeThinkingReplayKVClient.KVGet(ctx, key)
+}
+
+func TestClaudeThinkingReplayAliasHomeRollbackConditionalOnCommittedValue(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
+	messageHash := "new-msg"
+	aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHash)
+
+	base := newFakeClaudeThinkingReplayKVClient()
+	client := &indexGetFailingClaudeThinkingReplayKVClient{
+		fakeClaudeThinkingReplayKVClient: base,
+		indexKey:                         indexKey,
+	}
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session", messageHash, "first")
+
+	if _, ok := client.values[aliasKey]; ok {
+		t.Fatalf("alias %q was committed but not indexed; expected rollback conditional on committed value", aliasKey)
 	}
 }
 

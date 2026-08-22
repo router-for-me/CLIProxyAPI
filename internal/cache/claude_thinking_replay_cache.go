@@ -701,8 +701,11 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 
 // rollBackClaudeThinkingReplayAliasHome removes an alias value that was
 // committed but could not be added to the index, so it does not become an
-// unindexed, uncapped KV entry. The rollback only deletes the value when no
-// other worker has modified it and the alias is not currently indexed.
+// unindexed, uncapped KV entry. The rollback is conditional only on the
+// committed value: if the alias still contains the exact bytes we wrote, it is
+// an orphan and should be removed. The index is consulted only as a best-effort
+// guard when it is readable; a failing index read does not prevent rollback
+// because the failed registration is precisely what produced the orphan.
 func rollBackClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThinkingReplayKVClient, aliasKey, indexKey string, committedAliasRaw []byte) {
 	if len(committedAliasRaw) == 0 {
 		return
@@ -714,16 +717,23 @@ func rollBackClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 	if !bytes.Equal(currentRaw, committedAliasRaw) {
 		return
 	}
+
+	// If we can confirm the alias is live in the index, another worker must
+	// have made it durable; leave it alone. If the index is unreadable, the
+	// value match is the authoritative condition.
 	indexRaw, _, errIndex := client.KVGet(ctx, indexKey)
-	if errIndex != nil {
-		return
-	}
-	index, _ := decodeClaudeThinkingReplayAliasIndex(indexRaw)
-	for _, a := range index.Aliases {
-		if a.AliasKey == aliasKey {
-			return
+	if errIndex == nil {
+		if index, ok := decodeClaudeThinkingReplayAliasIndex(indexRaw); ok {
+			for _, a := range index.Aliases {
+				if a.AliasKey == aliasKey {
+					return
+				}
+			}
 		}
+	} else {
+		log.Warnf("claude thinking replay alias rollback index check failed: %v", errIndex)
 	}
+
 	if _, errDel := client.KVDel(ctx, aliasKey); errDel != nil {
 		log.Warnf("claude thinking replay alias rollback failed: %v", errDel)
 	}
