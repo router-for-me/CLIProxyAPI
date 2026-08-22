@@ -115,7 +115,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		m.persistCooldownStatesLocked(context.Background())
 	}
 	m.configCooldownMu.Unlock()
-	m.restartProberLocked()
+	go m.restartProberLocked()
 }
 
 // SetConfigSnapshot updates only in-memory configuration state. It reports whether
@@ -127,7 +127,7 @@ func (m *Manager) SetConfigSnapshot(cfg *internalconfig.Config) bool {
 	m.configCooldownMu.Lock()
 	changed := m.setConfigSnapshotLocked(cfg)
 	m.configCooldownMu.Unlock()
-	m.restartProberLocked()
+	go m.restartProberLocked()
 	return changed
 }
 

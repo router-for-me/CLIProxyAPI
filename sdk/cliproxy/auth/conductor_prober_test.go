@@ -867,7 +867,10 @@ func TestProberClampsRateLimit(t *testing.T) {
 		MaxConcurrency:     1,
 		RateLimitPerMinute: 100_000_000_000,
 	}})
+	time.Sleep(50 * time.Millisecond)
+	m.mu.RLock()
 	l := m.proberLoop
+	m.mu.RUnlock()
 	if l == nil {
 		t.Fatal("prober not started")
 	}
@@ -939,6 +942,69 @@ func TestProberDiscardsStaleAuthResult(t *testing.T) {
 	}
 	if updated.Unavailable {
 		t.Fatalf("stale probe result should be discarded; Unavailable = %v", updated.Unavailable)
+	}
+}
+
+type proberCallbackHook struct {
+	didCall int32
+	manager *Manager
+	cfg     internalconfig.CredentialProberConfig
+}
+
+func (h *proberCallbackHook) OnAuthRegistered(ctx context.Context, auth *Auth) {
+	atomic.AddInt32(&h.didCall, 1)
+	h.manager.SetConfig(&internalconfig.Config{CredentialProber: h.cfg})
+}
+
+func (h *proberCallbackHook) OnAuthUpdated(ctx context.Context, auth *Auth) {}
+func (h *proberCallbackHook) OnResult(ctx context.Context, result Result) {
+	if !result.Success {
+		h.manager.SetConfig(&internalconfig.Config{CredentialProber: h.cfg})
+	}
+}
+
+func TestProberSetConfigFromCallbackDoesNotDeadlock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	cfg := internalconfig.CredentialProberConfig{Enabled: true, Interval: time.Hour, MaxConcurrency: 1, RateLimitPerMinute: 1000}
+	h := &proberCallbackHook{cfg: cfg}
+	m := NewManager(nil, nil, h)
+	h.manager = m
+	m.SetProberParentContext(ctx)
+
+	exec := &proberTestExecutor{
+		provider:      "test",
+		statusCode:    intPtr(http.StatusUnauthorized),
+		refreshToken:  "new-token",
+		refreshStatus: http.StatusOK,
+	}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "test",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://example.com",
+		},
+		Metadata: map[string]any{"refresh_token": "old-token"},
+	}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.SetConfig(&internalconfig.Config{CredentialProber: cfg})
+		time.Sleep(100 * time.Millisecond)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("deadlock: prober callback blocked on SetConfig/RestartProber")
 	}
 }
 
