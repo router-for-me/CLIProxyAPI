@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -501,12 +502,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				}
 				continue
 			}
-			m.MarkResult(execCtx, result)
 			if isEmptyCompletionPayload(resp.Payload) {
-				result.Success = false
-				result.Error = errEmptyCompletion
-				m.MarkResult(execCtx, result)
-				lastErr = errEmptyCompletion
+				lastErr = m.markEmptyCompletion(execCtx, &result)
 				tracker.Record(auth, errEmptyCompletion)
 				persistExcludedAuthForRetry(m, auth, errEmptyCompletion, retryRound, defaultRequestRetry, excluded)
 				if homeMode {
@@ -514,6 +511,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				}
 				continue
 			}
+			m.MarkResult(execCtx, result)
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)
 			return resp, nil
@@ -711,12 +709,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				}
 				continue
 			}
-			m.MarkResult(execCtx, result)
 			if isEmptyCompletionPayload(resp.Payload) {
-				result.Success = false
-				result.Error = errEmptyCompletion
-				m.MarkResult(execCtx, result)
-				lastErr = errEmptyCompletion
+				lastErr = m.markEmptyCompletion(execCtx, &result)
 				tracker.Record(auth, errEmptyCompletion)
 				persistExcludedAuthForRetry(m, auth, errEmptyCompletion, retryRound, defaultRequestRetry, excluded)
 				if homeMode {
@@ -724,6 +718,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				}
 				continue
 			}
+			m.MarkResult(execCtx, result)
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)
 			return resp, nil
@@ -1725,11 +1720,24 @@ func formatAuthIdentity(auth *Auth, provider string) string {
 	}
 }
 
+var (
+	logSecretAPIKeyPattern  = regexp.MustCompile(`(?i)\bsk-[A-Za-z0-9_-]{8,}`)
+	logSecretBearerPattern  = regexp.MustCompile(`(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{4,}`)
+	logSecretLabeledPattern = regexp.MustCompile(`(?i)((?:api[_-]?key|access[_-]?token|secret)\s*[=:]\s*)([^\s"&,;}]+)`)
+)
+
+func redactSecretsForLog(msg string) string {
+	msg = logSecretAPIKeyPattern.ReplaceAllString(msg, "[REDACTED]")
+	msg = logSecretBearerPattern.ReplaceAllString(msg, "$1 [REDACTED]")
+	msg = logSecretLabeledPattern.ReplaceAllString(msg, "${1}[REDACTED]")
+	return msg
+}
+
 func summarizeErrorForLog(err error) string {
 	if err == nil {
 		return ""
 	}
-	msg := strings.TrimSpace(err.Error())
+	msg := redactSecretsForLog(strings.TrimSpace(err.Error()))
 	const maxRunes = 300
 	runes := []rune(msg)
 	if len(runes) > maxRunes {

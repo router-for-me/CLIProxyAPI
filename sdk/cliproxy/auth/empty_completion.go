@@ -636,9 +636,10 @@ type interactionsExtraContent struct {
 	} `json:"google"`
 }
 
-// hasSignature reports whether the step carries a reasoning signature. A step
-// that only carries a signature is still a meaningful upstream answer: dropping
-// it makes the turn look empty and costs the signature on the next request.
+// hasSignature reports whether the step carries a reasoning signature.
+// A signature without text, a tool-call, or positive completion tokens is not
+// content: treating it as live would keep a dead Gemini/Claude credential in
+// the pool.
 func (s *interactionsStep) hasSignature() bool {
 	if s == nil {
 		return false
@@ -673,19 +674,11 @@ func (c *interactionsContent) hasMeaningfulContent() bool {
 	if c == nil {
 		return false
 	}
-	if strings.TrimSpace(c.Text) != "" ||
+	return strings.TrimSpace(c.Text) != "" ||
 		strings.TrimSpace(c.Data) != "" ||
 		strings.TrimSpace(c.FileURI) != "" ||
 		strings.TrimSpace(c.FileUri) != "" ||
-		strings.TrimSpace(c.URL) != "" {
-		return true
-	}
-	if strings.TrimSpace(c.Signature) != "" ||
-		strings.TrimSpace(c.ThoughtSignature) != "" ||
-		strings.TrimSpace(c.ThoughtSignatureCamel) != "" {
-		return true
-	}
-	return false
+		strings.TrimSpace(c.URL) != ""
 }
 
 type interactionsDelta struct {
@@ -941,9 +934,8 @@ func (a *emptyCompletionAccum) evalClaude(data []byte) bool {
 				a.hasContent = true
 			}
 		case "signature_delta":
-			if strings.TrimSpace(chunk.Delta.Signature) != "" {
-				a.hasContent = true
-			}
+			// A lonely signature is not visible content and does not spend
+			// completion tokens; do not treat it as a live completion.
 		case "citations_delta":
 			if nonEmptyJSONPayload(chunk.Delta.Citation) {
 				a.hasContent = true
@@ -953,7 +945,7 @@ func (a *emptyCompletionAccum) evalClaude(data []byte) bool {
 				a.hasToolCalls = true
 			}
 		default:
-			if strings.TrimSpace(chunk.Delta.Text) != "" || strings.TrimSpace(chunk.Delta.Thinking) != "" || strings.TrimSpace(chunk.Delta.Signature) != "" || nonEmptyJSONPayload(chunk.Delta.Citation) {
+			if strings.TrimSpace(chunk.Delta.Text) != "" || strings.TrimSpace(chunk.Delta.Thinking) != "" || nonEmptyJSONPayload(chunk.Delta.Citation) {
 				a.hasContent = true
 			}
 		}
@@ -1241,8 +1233,8 @@ func (a *emptyCompletionAccum) evalClaudeBlocks(blocks []claudeContentBlock) {
 			a.hasToolCalls = true
 			continue
 		}
-		if b.Type == "thinking" || b.Type == "redacted_thinking" || b.Type == "reasoning" || strings.TrimSpace(b.Thinking) != "" || strings.TrimSpace(b.Signature) != "" || strings.TrimSpace(b.Data) != "" {
-			if strings.TrimSpace(b.Thinking) != "" || strings.TrimSpace(b.Signature) != "" || strings.TrimSpace(b.Data) != "" {
+		if b.Type == "thinking" || b.Type == "redacted_thinking" || b.Type == "reasoning" || strings.TrimSpace(b.Thinking) != "" || strings.TrimSpace(b.Data) != "" {
+			if strings.TrimSpace(b.Thinking) != "" || strings.TrimSpace(b.Data) != "" {
 				a.hasContent = true
 			}
 			continue
@@ -1395,9 +1387,6 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 				if strings.TrimSpace(part.Text) != "" {
 					a.hasContent = true
 				}
-				if strings.TrimSpace(part.ThoughtSignature) != "" || strings.TrimSpace(part.Thought_Signature) != "" {
-					a.hasContent = true
-				}
 			}
 		}
 	}
@@ -1528,11 +1517,6 @@ func (a *emptyCompletionAccum) evalInteractions(data []byte) bool {
 		if chunk.Delta.Content != nil && chunk.Delta.Content.hasMeaningfulContent() {
 			a.hasContent = true
 		}
-		if strings.TrimSpace(chunk.Delta.Signature) != "" ||
-			strings.TrimSpace(chunk.Delta.ThoughtSignature) != "" ||
-			strings.TrimSpace(chunk.Delta.ThoughtSignatureCamel) != "" {
-			a.hasContent = true
-		}
 		if strings.TrimSpace(chunk.Delta.Name) != "" || hasMeaningfulInteractionsArguments(chunk.Delta.Arguments) {
 			a.hasToolCalls = true
 		}
@@ -1581,9 +1565,6 @@ func (a *emptyCompletionAccum) evalInteractionsSteps(steps []interactionsStep) {
 			if nonEmptyJSONPayload(step.Result) {
 				a.hasContent = true
 			}
-		}
-		if step.hasSignature() {
-			a.hasContent = true
 		}
 		for _, content := range step.Content {
 			if content.hasMeaningfulContent() {
@@ -1708,6 +1689,9 @@ func (s *streamBootstrapState) processLine(line []byte) {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 {
 		if len(s.dataLines) > 0 && classifyJSONBuffer(bytes.Join(s.dataLines, []byte("\n"))) == jsonBufIncomplete {
+			// Pretty-printed raw JSON may contain blank lines; keep them in the
+			// buffer and do not treat them as an SSE event boundary.
+			s.dataLines = append(s.dataLines, []byte(""))
 			return
 		}
 		s.flushData()
@@ -2193,6 +2177,10 @@ func (d *streamPayloadErrorDetector) Observe(chunk []byte) *Error {
 		line := bytes.TrimSpace(d.pending[:newline])
 		d.pending = d.pending[newline+1:]
 		if len(line) == 0 {
+			if len(d.dataLines) > 0 && classifyJSONBuffer(bytes.Join(d.dataLines, []byte("\n"))) == jsonBufIncomplete {
+				d.dataLines = append(d.dataLines, []byte(""))
+				continue
+			}
 			d.flushData()
 			if d.err != nil {
 				return d.err

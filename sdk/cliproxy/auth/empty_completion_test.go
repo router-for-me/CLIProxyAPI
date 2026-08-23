@@ -1476,6 +1476,21 @@ func TestStreamPayloadErrorDetectorBuffersPrettyPrintedJSONFrame(t *testing.T) {
 	}
 }
 
+func TestStreamPayloadErrorDetectorBuffersPrettyPrintedJSONFrameWithBlankLine(t *testing.T) {
+	var d streamPayloadErrorDetector
+	frame := "{\n\n  \"error\": {\n\n    \"message\": \"quota exceeded\",\n    \"code\": 429\n  }\n}\n"
+	if streamErr := d.Observe([]byte(frame)); streamErr != nil && !strings.Contains(streamErr.Message, "quota exceeded") {
+		t.Fatalf("payload detector Observe error = %q", streamErr.Message)
+	}
+	streamErr := d.Finish()
+	if streamErr == nil {
+		t.Fatal("payload detector did not surface a provider error carried by a pretty-printed raw JSON frame with a blank line")
+	}
+	if !strings.Contains(streamErr.Message, "quota exceeded") {
+		t.Fatalf("payload detector stream error message = %q, want it to carry the provider message", streamErr.Message)
+	}
+}
+
 func TestStreamBootstrapDetector(t *testing.T) {
 	var detector StreamBootstrapDetector
 	if detector.Observe([]byte("data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n")) {
@@ -1620,6 +1635,22 @@ func TestExecuteEmptyCompletionRotatesAuth(t *testing.T) {
 	executor := &emptyCompletionTestExecutor{
 		executePayloads: map[string][]byte{},
 		executeCalls:    map[string]int{},
+	}
+	manager, ids, model, capture := newEmptyCompletionTestManager(t, executor)
+
+	resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	assertRotatesToContent(t, ids, executor.firstExecute, string(resp.Payload), "real", capture)
+}
+
+func TestExecuteSignatureOnlyRotatesAuth(t *testing.T) {
+	executor := &emptyCompletionTestExecutor{
+		executePayloads: map[string][]byte{},
+		executeCalls:    map[string]int{},
+		emptyPayload:    []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"sig_only"}]},"finishReason":"STOP"}]}`),
+		contentPayload:  []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"real"}]},"finishReason":"STOP"}]}`),
 	}
 	manager, ids, model, capture := newEmptyCompletionTestManager(t, executor)
 
@@ -2173,14 +2204,21 @@ func assertRotatesToContent(t *testing.T, ids []string, emptyFirst, gotPayload, 
 		other = ids[1]
 	}
 	var emptyRecorded bool
+	var emptySucceeded bool
 	var otherSucceeded bool
 	for _, r := range capture.Results() {
 		if r.AuthID == emptyFirst && !r.Success {
 			emptyRecorded = true
 		}
+		if r.AuthID == emptyFirst && r.Success {
+			emptySucceeded = true
+		}
 		if r.AuthID == other && r.Success {
 			otherSucceeded = true
 		}
+	}
+	if emptySucceeded {
+		t.Fatalf("empty auth %q was recorded as success before the empty-completion failure; results=%v", emptyFirst, capture.Results())
 	}
 	if !emptyRecorded {
 		t.Fatalf("empty auth %q was not recorded as a failure result; results=%v", emptyFirst, capture.Results())
@@ -3050,10 +3088,10 @@ func TestReadStreamBootstrapErrorHandling(t *testing.T) {
 }
 
 func TestClaudeSignatureDeltaEmptyCompletion(t *testing.T) {
-	t.Run("thinking content_block_start followed by signature_delta with signature is not empty", func(t *testing.T) {
+	t.Run("thinking content_block_start followed by signature_delta with signature is empty", func(t *testing.T) {
 		payload := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3\",\"usage\":{\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_encrypted_carrier_payload\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
-		if IsEmptyCompletionPayload(payload) {
-			t.Fatal("IsEmptyCompletionPayload() = true for thinking stream with non-empty signature_delta, want false")
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for thinking stream with only signature_delta and 0 tokens, want true")
 		}
 	})
 
@@ -3194,17 +3232,17 @@ func TestMultiValueJSONMixedUnknownEmptyCompletion(t *testing.T) {
 }
 
 func TestGeminiThoughtSignatureEmptyCompletion(t *testing.T) {
-	t.Run("gemini STOP with thoughtSignature and omitted candidatesTokenCount is not empty", func(t *testing.T) {
+	t.Run("gemini STOP with thoughtSignature and omitted candidatesTokenCount is empty", func(t *testing.T) {
 		payload := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"sig_gemini_thought_123"}]},"finishReason":"STOP"}]}`)
-		if IsEmptyCompletionPayload(payload) {
-			t.Fatal("IsEmptyCompletionPayload() = true for non-empty thoughtSignature with omitted token count, want false")
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for thoughtSignature-only with omitted token count, want true")
 		}
 	})
 
-	t.Run("gemini STOP with thought_signature and omitted candidatesTokenCount is not empty", func(t *testing.T) {
+	t.Run("gemini STOP with thought_signature and omitted candidatesTokenCount is empty", func(t *testing.T) {
 		payload := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thought_signature":"sig_gemini_thought_123"}]},"finishReason":"STOP"}]}`)
-		if IsEmptyCompletionPayload(payload) {
-			t.Fatal("IsEmptyCompletionPayload() = true for non-empty thought_signature with omitted token count, want false")
+		if !IsEmptyCompletionPayload(payload) {
+			t.Fatal("IsEmptyCompletionPayload() = false for thought_signature-only with omitted token count, want true")
 		}
 	})
 
@@ -5111,7 +5149,7 @@ func TestReadStreamBootstrapInteractionsNestedFailureSurfacesProviderError(t *te
 	}
 }
 
-func TestStreamBootstrapDetectorInteractionsSignatureOnlyIsNotEmpty(t *testing.T) {
+func TestStreamBootstrapDetectorInteractionsSignatureOnlyIsEmpty(t *testing.T) {
 	createdChunk := []byte("event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",\"object\":\"interaction\",\"status\":\"in_progress\"}}\n\n")
 	completedChunk := []byte("event: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"int_1\",\"status\":\"completed\",\"usage\":{\"output_tokens\":0}}}\n\n")
 
@@ -5156,11 +5194,11 @@ func TestStreamBootstrapDetectorInteractionsSignatureOnlyIsNotEmpty(t *testing.T
 			detector.Observe([]byte(tc.payload))
 			detector.Observe(completedChunk)
 
-			if detector.IsTerminalEmpty() {
-				t.Fatalf("IsTerminalEmpty() = true for a signature-carrying interaction, want false; signature would be dropped and the turn retried: %s", tc.payload)
+			if !detector.IsTerminalEmpty() {
+				t.Fatalf("IsTerminalEmpty() = false for a signature-only interaction, want true: %s", tc.payload)
 			}
-			if !detector.HasMeaningfulOutput() {
-				t.Fatalf("HasMeaningfulOutput() = false for a signature-carrying interaction, want true: %s", tc.payload)
+			if detector.HasMeaningfulOutput() {
+				t.Fatalf("HasMeaningfulOutput() = true for a signature-only interaction, want false: %s", tc.payload)
 			}
 		})
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -2667,12 +2668,44 @@ func TestIsCredentialScopedError_InvalidAPIKey(t *testing.T) {
 		t.Fatalf("expected isCredentialScopedError(invalidKey401) = true, got false")
 	}
 
+	invalidAPIKeyCode := &Error{
+		HTTPStatus: http.StatusUnauthorized,
+		Code:       "invalid_api_key",
+		Message:    "Invalid token",
+	}
+	if !isCredentialScopedError(invalidAPIKeyCode) {
+		t.Fatalf("expected isCredentialScopedError(invalid_api_key code) = true, got false")
+	}
+
+	invalidAPIKeyBody := &Error{
+		HTTPStatus: http.StatusForbidden,
+		Message:    `{"error":{"code":"invalid_api_key","message":"Invalid token"}}`,
+	}
+	if !isCredentialScopedError(invalidAPIKeyBody) {
+		t.Fatalf("expected isCredentialScopedError(invalid_api_key body) = true, got false")
+	}
+
 	normal400 := &Error{
 		HTTPStatus: http.StatusBadRequest,
 		Message:    `invalid argument: field "prompt" cannot be empty`,
 	}
 	if isCredentialScopedError(normal400) {
 		t.Fatalf("expected isCredentialScopedError(normal400) = false, got true")
+	}
+}
+
+func TestSummarizeErrorForLogRedactsSecrets(t *testing.T) {
+	got := summarizeErrorForLog(errors.New("Incorrect API key provided: sk-live-secret"))
+	if strings.Contains(got, "sk-live-secret") {
+		t.Fatalf("summarizeErrorForLog leaked API key: %q", got)
+	}
+	if !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("summarizeErrorForLog = %q, want [REDACTED]", got)
+	}
+
+	got = summarizeErrorForLog(errors.New("authorization failed: Bearer abcdefghijklmnop"))
+	if strings.Contains(got, "abcdefghijklmnop") {
+		t.Fatalf("summarizeErrorForLog leaked bearer token: %q", got)
 	}
 }
 

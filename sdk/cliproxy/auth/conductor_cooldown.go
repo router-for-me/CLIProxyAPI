@@ -1625,7 +1625,9 @@ func isInvalidGrantResultError(err *Error) bool {
 // classification would wrongly stop credential rotation on a dead key.
 func isInvalidAPIKeyErrorMessage(message string) bool {
 	lowered := strings.ToLower(message)
-	return strings.Contains(lowered, "api key not valid") || strings.Contains(lowered, "api_key_invalid")
+	return strings.Contains(lowered, "api key not valid") ||
+		strings.Contains(lowered, "api_key_invalid") ||
+		strings.Contains(lowered, "invalid_api_key")
 }
 
 func isInvalidAPIKeyError(err error) bool {
