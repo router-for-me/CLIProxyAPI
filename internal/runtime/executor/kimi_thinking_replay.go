@@ -10,6 +10,7 @@ import (
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	innersignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -194,7 +195,8 @@ func restoreKimiThinkingReplayContent(body, cachedContent []byte) ([]byte, bool)
 	}
 
 	idx := matches[0]
-	updated, errSet := sjson.SetRawBytes(body, fmt.Sprintf("messages.%d.content", idx), cachedContent)
+	provenanced := helps.WithClaudeThinkingReplayProvenance(cachedContent, innersignature.KimiReplayProvenance)
+	updated, errSet := sjson.SetRawBytes(body, fmt.Sprintf("messages.%d.content", idx), provenanced)
 	if errSet != nil {
 		return body, false
 	}

@@ -174,6 +174,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel, helps.APIKeyModelIsCompat(req))
 	if len(replayContents) > 0 && replayScope.valid() {
 		bodyForUpstream, replayScope.replayApplied = helps.RestoreClaudeThinkingReplayContents(bodyForUpstream, replayContents)
+		bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel, helps.APIKeyModelIsCompat(req))
 	}
 	var oauthToolNamesReverseMap map[string]string
 	if fp.MCPAlias && cloaked {

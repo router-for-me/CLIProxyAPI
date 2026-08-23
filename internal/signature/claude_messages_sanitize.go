@@ -8,6 +8,11 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const (
+	ClaudeReplayProvenance = "claude-replay"
+	KimiReplayProvenance   = "kimi-replay"
+)
+
 type ClaudeMessagesSignatureSanitizeOptions struct {
 	TargetProvider                SignatureProvider
 	TargetModel                   string
@@ -26,6 +31,14 @@ type SignatureSanitizeReport struct {
 	DroppedSignatures  int
 	ReplacedSignatures int
 	Decisions          []SignatureCompatibilityDecision
+}
+
+func isTrustedReplayProvenance(provenance gjson.Result) bool {
+	if !provenance.Exists() || provenance.Type != gjson.String {
+		return false
+	}
+	v := provenance.String()
+	return v == ClaudeReplayProvenance || v == KimiReplayProvenance
 }
 
 // SanitizeClaudeMessagesSignaturesForModel removes or preserves Claude
@@ -124,10 +137,20 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 				continue
 			}
 
-			// Replay provenance is added only internally by the executor after the
-			// sanitizer has already run. Any client-supplied marker is untrusted and
-			// must be stripped so it cannot bypass signature validation.
-			if part.Get("_cliproxy_replay_provenance").Exists() {
+			// Replay provenance is only trusted when it carries an internal
+			// string value set by the replay helpers. Client-supplied markers
+			// (booleans or arbitrary values) must be stripped so they cannot
+			// bypass signature validation. A trusted marker lets cache-born
+			// signatures survive without falling back to length or shape checks.
+			provenance := part.Get("_cliproxy_replay_provenance")
+			if provenance.Exists() {
+				if isTrustedReplayProvenance(provenance) {
+					report.Preserved++
+					updated, _ := sjson.Delete(part.Raw, "_cliproxy_replay_provenance")
+					keptParts = append(keptParts, updated)
+					messageModified = true
+					continue
+				}
 				updated, _ := sjson.Delete(part.Raw, "_cliproxy_replay_provenance")
 				part = gjson.Parse(updated)
 				messageModified = true

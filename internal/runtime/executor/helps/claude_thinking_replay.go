@@ -128,6 +128,32 @@ func StripClaudeThinkingReplayProvenanceMarkers(payload []byte) []byte {
 	return updated
 }
 
+// WithClaudeThinkingReplayProvenance marks every thinking part in a cached
+// assistant content array with the given provenance value. The sanitizer
+// recognizes these internal markers and preserves cache-born signatures.
+func WithClaudeThinkingReplayProvenance(content []byte, provenance string) []byte {
+	root := gjson.ParseBytes(content)
+	if !root.IsArray() {
+		return content
+	}
+	parts := root.Array()
+	outParts := make([]string, len(parts))
+	modified := false
+	for i, part := range parts {
+		if strings.TrimSpace(part.Get("type").String()) != "thinking" {
+			outParts[i] = part.Raw
+			continue
+		}
+		updated, _ := sjson.Set(part.Raw, "_cliproxy_replay_provenance", provenance)
+		outParts[i] = updated
+		modified = true
+	}
+	if !modified {
+		return content
+	}
+	return []byte("[" + strings.Join(outParts, ",") + "]")
+}
+
 // RestoreClaudeThinkingReplayContents replaces visible assistant content in the
 // request body with cached normalized content when the visible parts match.
 func RestoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) ([]byte, bool) {
@@ -187,7 +213,8 @@ func RestoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) (
 		}
 		if !JSONEqual([]byte(content.Raw), cachedContents[j]) {
 			var errSet error
-			updated, errSet = sjson.SetRawBytes(updated, fmt.Sprintf("messages.%d.content", i), cachedContents[j])
+			provenanced := WithClaudeThinkingReplayProvenance(cachedContents[j], signature.ClaudeReplayProvenance)
+			updated, errSet = sjson.SetRawBytes(updated, fmt.Sprintf("messages.%d.content", i), provenanced)
 			if errSet != nil {
 				return body, false
 			}

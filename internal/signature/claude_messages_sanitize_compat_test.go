@@ -110,6 +110,38 @@ func TestSanitizeClaudeMessagesForClaudeUpstreamStripsClientReplayProvenanceMark
 	}
 }
 
+func TestSanitizeClaudeMessagesForClaudeUpstreamPreservesClaudeReplayCacheShortSignatureInCompatMode(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"EgI=","_cliproxy_replay_provenance":"` + ClaudeReplayProvenance + `"}]}]}`)
+
+	withCompat, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4", true)
+	part := gjson.GetBytes(withCompat, "messages.0.content.0")
+	if part.Get("type").String() != "thinking" {
+		t.Fatalf("compat sanitizer dropped the thinking block: %s", withCompat)
+	}
+	if part.Get("_cliproxy_replay_provenance").Exists() {
+		t.Fatalf("compat sanitizer did not strip trusted replay provenance marker: %s", withCompat)
+	}
+	if got := part.Get("signature").String(); got != "EgI=" {
+		t.Fatalf("compat sanitizer dropped cache-born Claude replay signature %q, want EgI=", got)
+	}
+}
+
+func TestSanitizeClaudeMessagesForClaudeUpstreamPreservesKimiReplayCacheSignatureInCompatMode(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"opaque-kimi-replay-sig","_cliproxy_replay_provenance":"` + KimiReplayProvenance + `"}]}]}`)
+
+	withCompat, _ := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-sonnet-4", true)
+	part := gjson.GetBytes(withCompat, "messages.0.content.0")
+	if part.Get("type").String() != "thinking" {
+		t.Fatalf("compat sanitizer dropped the thinking block: %s", withCompat)
+	}
+	if part.Get("_cliproxy_replay_provenance").Exists() {
+		t.Fatalf("compat sanitizer did not strip trusted replay provenance marker: %s", withCompat)
+	}
+	if got := part.Get("signature").String(); got != "opaque-kimi-replay-sig" {
+		t.Fatalf("compat sanitizer dropped cache-born Kimi replay signature %q, want opaque-kimi-replay-sig", got)
+	}
+}
+
 func TestSanitizeClaudeMessagesForClaudeUpstreamStripsOpaqueThinkingSignatureInCompatMode(t *testing.T) {
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"opaque-deepseek-id"}]}]}`)
 

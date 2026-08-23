@@ -11,6 +11,7 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	innersignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -65,8 +66,9 @@ func TestRestoreKimiThinkingReplayContentPreservesCompleteAssistantContent(t *te
 		t.Fatal("expected cached thinking content to be restored")
 	}
 	got := gjson.GetBytes(updated, "messages.1.content")
-	if !helps.JSONEqual([]byte(got.Raw), cached) {
-		t.Fatalf("restored content = %s, want complete cached content %s", got.Raw, cached)
+	want := helps.WithClaudeThinkingReplayProvenance(cached, innersignature.KimiReplayProvenance)
+	if !helps.JSONEqual([]byte(got.Raw), want) {
+		t.Fatalf("restored content = %s, want complete cached content %s", got.Raw, want)
 	}
 }
 
