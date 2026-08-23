@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 
+	"github.com/google/uuid"
+
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -51,14 +53,13 @@ func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyaut
 	if sessionKey == "" {
 		var usedNonce bool
 		sessionKey, usedNonce = helps.ClaudeThinkingReplayConversationSessionKey(auth, req, opts)
-		if sessionKey != "" && !usedNonce {
-			// No explicit conversation identity. Do not let the same caller's
-			// identical openings share a replay scope, because two independent
-			// conversations would race the same snapshot and corrupt suffix
-			// matching. Stateless clients must provide a nonce to use replay.
-			sessionKey = ""
+		if sessionKey != "" {
+			// Stateless clients without an explicit conversation nonce use
+			// a content-derived seed key. The real session is resolved through
+			// message aliases below, and a new isolated session is allocated
+			// on first-request cache misses so identical openings do not race.
+			fallback = !usedNonce
 		}
-		fallback = false
 	}
 	return claudeThinkingReplayScope{
 		modelFamily:   modelFamily,
@@ -101,6 +102,18 @@ func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.
 	scope := claudeThinkingReplayScopeFromRequest(ctx, auth, req, opts)
 	if !scope.valid() {
 		return req, scope, nil, false
+	}
+
+	if scope.fallbackKey {
+		// Content-derived scopes are shared seeds across identical openings. Resolve
+		// the actual conversation from message aliases, or allocate a fresh isolated
+		// session on first requests so concurrent openings do not race the same cache.
+		messages := capClaudeThinkingReplayAliasMessages(helps.ClaudeThinkingReplayMessageHashes(scope.modelFamily, scope.callerHash, req.Payload))
+		if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(ctx, scope.modelFamily, messages, scope.firstUserHash); ok {
+			scope.sessionKey = resolved
+		} else {
+			scope.sessionKey = "fb:" + uuid.NewString()
+		}
 	}
 
 	// Caller-controlled nonce scopes supply arbitrary openings per request; avoid

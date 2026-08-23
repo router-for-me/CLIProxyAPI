@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -161,8 +162,23 @@ func restoreKimiThinkingReplayContent(body, cachedContent []byte) ([]byte, bool)
 			continue
 		}
 		currentContent := message.Get("content")
+		if currentContent.Type == gjson.String {
+			normalized, err := json.Marshal([]map[string]string{{"type": "text", "text": currentContent.String()}})
+			if err != nil {
+				continue
+			}
+			currentContent = gjson.ParseBytes(normalized)
+		}
 		if helps.JSONEqual([]byte(currentContent.Raw), cachedContent) {
-			return body, false
+			// Exact cache hit: the client kept the complete cached block. Mark it as
+			// applied trusted replay so the downstream Claude compat sanitizer does not
+			// strip the Kimi signature.
+			provenanced := helps.WithClaudeThinkingReplayProvenance(cachedContent, innersignature.KimiReplayProvenance)
+			updated, errSet := sjson.SetRawBytes(body, fmt.Sprintf("messages.%d.content", index), provenanced)
+			if errSet != nil {
+				return body, false
+			}
+			return updated, true
 		}
 		currentParts, currentOK := helps.NonThinkingContentParts(currentContent)
 		if !currentOK || !helps.CanonicalPartsEqual(currentParts, cachedParts) {

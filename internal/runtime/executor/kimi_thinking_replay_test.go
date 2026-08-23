@@ -518,6 +518,38 @@ func TestKimiThinkingReplayUnknownStreamDeltaPreservesPreviousCache(t *testing.T
 	}
 }
 
+func TestRestoreKimiThinkingReplayContentMarksExactHit(t *testing.T) {
+	cached := []byte(`[{"type":"thinking","thinking":"cached","signature":"kimi-signature"},{"type":"text","text":"OK"}]`)
+	body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"cached","signature":"kimi-signature"},{"type":"text","text":"OK"}]}]}`)
+
+	updated, restored := restoreKimiThinkingReplayContent(body, cached)
+	if !restored {
+		t.Fatal("exact cache hit must be restored and marked trusted")
+	}
+
+	got := gjson.GetBytes(updated, "messages.0.content")
+	want := helps.WithClaudeThinkingReplayProvenance(cached, innersignature.KimiReplayProvenance)
+	if !helps.JSONEqual([]byte(got.Raw), want) {
+		t.Fatalf("exact cache hit did not get provenance marker: got %s, want %s", got.Raw, want)
+	}
+}
+
+func TestRestoreKimiThinkingReplayContentNormalizesStringShorthand(t *testing.T) {
+	cached := []byte(`[{"type":"thinking","thinking":"cached","signature":"kimi-signature"},{"type":"text","text":"answer"}]`)
+	body := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"answer"}]}`)
+
+	updated, restored := restoreKimiThinkingReplayContent(body, cached)
+	if !restored {
+		t.Fatal("string shorthand assistant content should match cached text part")
+	}
+
+	got := gjson.GetBytes(updated, "messages.1.content")
+	want := helps.WithClaudeThinkingReplayProvenance(cached, innersignature.KimiReplayProvenance)
+	if !helps.JSONEqual([]byte(got.Raw), want) {
+		t.Fatalf("string shorthand did not restore to provenanced cache: got %s, want %s", got.Raw, want)
+	}
+}
+
 func consumeKimiReplayStream(t *testing.T, result *cliproxyexecutor.StreamResult) {
 	t.Helper()
 	if result == nil {

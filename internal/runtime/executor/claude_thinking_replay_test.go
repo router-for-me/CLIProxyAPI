@@ -37,7 +37,7 @@ func claudeReplayPayloadWithConversationID(payload []byte, conversationID string
 
 const claudeReplayResolvedModelInfoKey = "cliproxy.resolved_api_key_model_info"
 
-func TestClaudeThinkingReplayScopeFromRequest_DisablesReplayWithoutNonce(t *testing.T) {
+func TestClaudeThinkingReplayScopeFromRequest_UsesFallbackWithoutNonce(t *testing.T) {
 	auth := &cliproxyauth.Auth{ID: "auth-id"}
 
 	noncePayload := []byte(`{"messages":[{"role":"user","content":"hello"}],"client_metadata":{"conversation_id":"conv-1"}}`)
@@ -50,8 +50,8 @@ func TestClaudeThinkingReplayScopeFromRequest_DisablesReplayWithoutNonce(t *test
 	contentPayload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
 	contentReq := cliproxyexecutor.Request{Model: "claude-3-opus", Payload: contentPayload}
 	content := claudeThinkingReplayScopeFromRequest(context.Background(), auth, contentReq, cliproxyexecutor.Options{})
-	if content.valid() || content.fallbackKey || content.sessionKey != "" {
-		t.Fatalf("no-nonce scope must be disabled: %+v", content)
+	if !content.valid() || !content.fallbackKey || content.sessionKey == "" {
+		t.Fatalf("no-nonce scope must be valid and a fallback: %+v", content)
 	}
 }
 
