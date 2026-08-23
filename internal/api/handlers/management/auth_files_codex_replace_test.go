@@ -473,6 +473,9 @@ func TestSaveCodexOAuthRecordUpdatesRuntimeAuthMetadata(t *testing.T) {
 	if !ok || got == nil {
 		t.Fatal("runtime auth missing after replace")
 	}
+	if record.Metadata["access_token"] != "new-access" {
+		t.Errorf("persist record access_token = %v, want new-access", record.Metadata["access_token"])
+	}
 	if got.Metadata["access_token"] != "new-access" {
 		t.Errorf("runtime access_token = %v, want new-access", got.Metadata["access_token"])
 	}

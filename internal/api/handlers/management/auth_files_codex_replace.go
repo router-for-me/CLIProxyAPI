@@ -143,24 +143,33 @@ func applyCodexReplacementToRuntimeAuth(existing, record *coreauth.Auth) {
 	if existing.Metadata == nil {
 		existing.Metadata = make(map[string]any)
 	}
-	if storage, ok := record.Storage.(*codex.CodexTokenStorage); ok && storage != nil {
-		existing.Metadata["access_token"] = storage.AccessToken
-		existing.Metadata["refresh_token"] = storage.RefreshToken
-		existing.Metadata["id_token"] = storage.IDToken
-		existing.Metadata["expired"] = storage.Expire
-		existing.Metadata["last_refresh"] = storage.LastRefresh
-		existing.Metadata["email"] = storage.Email
-		existing.Metadata["account_id"] = storage.AccountID
-		existing.Metadata["type"] = "codex"
-	}
 	for key, value := range record.Metadata {
 		existing.Metadata[key] = value
 	}
+	applyCodexTokenStorageToMetadata(existing.Metadata, record.Storage)
 	applyCodexPlanTypeFromIDToken(existing)
 	existing.Disabled = false
 	existing.Status = coreauth.StatusActive
 	existing.StatusMessage = ""
 	existing.Unavailable = false
+}
+
+func applyCodexTokenStorageToMetadata(metadata map[string]any, storage any) {
+	if metadata == nil {
+		return
+	}
+	codexStorage, ok := storage.(*codex.CodexTokenStorage)
+	if !ok || codexStorage == nil {
+		return
+	}
+	metadata["access_token"] = codexStorage.AccessToken
+	metadata["refresh_token"] = codexStorage.RefreshToken
+	metadata["id_token"] = codexStorage.IDToken
+	metadata["expired"] = codexStorage.Expire
+	metadata["last_refresh"] = codexStorage.LastRefresh
+	metadata["email"] = codexStorage.Email
+	metadata["account_id"] = codexStorage.AccountID
+	metadata["type"] = "codex"
 }
 
 func applyCodexPlanTypeFromIDToken(auth *coreauth.Auth) {
@@ -208,6 +217,7 @@ func prepareCodexOAuthRecordForSave(record *coreauth.Auth, writeName string) {
 	record.Metadata["status"] = ""
 	record.Metadata["status_message"] = ""
 	record.Metadata["unavailable"] = false
+	applyCodexTokenStorageToMetadata(record.Metadata, record.Storage)
 	applyCodexPlanTypeFromIDToken(record)
 	if setter, ok := record.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 		setter.SetMetadata(record.Metadata)
