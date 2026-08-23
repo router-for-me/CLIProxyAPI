@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/githubapi"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -53,8 +54,7 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "request_create_failed", "message": err.Error()})
 		return
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", latestReleaseUserAgent)
+	githubapi.ApplyRequestHeaders(req, latestReleaseUserAgent)
 
 	resp, err := client.Do(req)
 	if err != nil {

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/githubapi"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/httpfetch"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -346,14 +347,7 @@ func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL strin
 		releaseURL = defaultManagementReleaseURL
 	}
 
-	headers := map[string]string{
-		"Accept":     "application/vnd.github+json",
-		"User-Agent": httpUserAgent,
-	}
-	gitURL := strings.ToLower(strings.TrimSpace(os.Getenv("GITSTORE_GIT_URL")))
-	if tok := strings.TrimSpace(os.Getenv("GITSTORE_GIT_TOKEN")); tok != "" && strings.Contains(gitURL, "github.com") {
-		headers["Authorization"] = "Bearer " + tok
-	}
+	headers := githubapi.RequestHeaders(httpUserAgent)
 
 	data, err := httpfetch.GetBytes(ctx, client, releaseURL, headers, 0)
 	if err != nil {
