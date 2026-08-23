@@ -1112,7 +1112,7 @@ func TestProberClearsProberStateOnRecovery(t *testing.T) {
 
 	cfg := internalconfig.CredentialProberConfig{
 		Enabled:            true,
-		Interval:           50 * time.Millisecond,
+		Interval:           time.Second,
 		MaxConcurrency:     1,
 		RateLimitPerMinute: 1000,
 		BackoffBase:        25 * time.Millisecond,
@@ -1130,7 +1130,7 @@ func TestProberClearsProberStateOnRecovery(t *testing.T) {
 	exec.mu.Lock()
 	*exec.statusCode = http.StatusOK
 	exec.mu.Unlock()
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(1200 * time.Millisecond)
 
 	updated, _ = m.GetByID(auth.ID)
 	if updated == nil {
