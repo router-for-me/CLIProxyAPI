@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
@@ -249,6 +250,9 @@ func codexFileName(email, plan, accountID string) string {
 
 func writeCodexJSON(t *testing.T, dir, name string, content map[string]any) {
 	t.Helper()
+	if errMkdir := os.MkdirAll(dir, 0o700); errMkdir != nil {
+		t.Fatalf("mkdir %s: %v", dir, errMkdir)
+	}
 	raw, err := json.Marshal(content)
 	if err != nil {
 		t.Fatalf("marshal %s: %v", name, err)
@@ -290,6 +294,91 @@ func jsonFileNames(t *testing.T, dir string) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func TestSaveCodexOAuthRecordKeepsNestedRelativePath(t *testing.T) {
+	authDir := t.TempDir()
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	nestedName := filepath.ToSlash(filepath.Join("team", "codex-user@example.com-free.json"))
+	writeCodexJSON(t, filepath.Join(authDir, "team"), "codex-user@example.com-free.json", map[string]any{
+		"type":       "codex",
+		"email":      "user@example.com",
+		"account_id": testCodexAccountID,
+		"note":       "nested",
+		"disabled":   true,
+	})
+
+	record := newCodexRecord("user@example.com", testCodexAccountID, "pro", "new-access", "new-refresh")
+	if _, errSave := h.saveCodexOAuthRecord(context.Background(), record, ""); errSave != nil {
+		t.Fatalf("saveCodexOAuthRecord: %v", errSave)
+	}
+
+	if _, errStat := os.Stat(filepath.Join(authDir, filepath.FromSlash(nestedName))); errStat != nil {
+		t.Fatalf("expected nested file %s: %v", nestedName, errStat)
+	}
+	rootNames := jsonFileNames(t, authDir)
+	for _, name := range rootNames {
+		if strings.HasSuffix(name, ".json") && !strings.Contains(name, string(filepath.Separator)) && name != "team" {
+			// jsonFileNames only lists top-level json files
+			t.Fatalf("unexpected root auth file %s", name)
+		}
+	}
+	saved := readJSONMap(t, filepath.Join(authDir, filepath.FromSlash(nestedName)))
+	if saved["access_token"] != "new-access" {
+		t.Errorf("access_token = %v, want new-access", saved["access_token"])
+	}
+	if saved["note"] != "nested" {
+		t.Errorf("note = %v, want nested", saved["note"])
+	}
+}
+
+func TestSaveCodexOAuthRecordConcurrentReplaceKeepsOneFile(t *testing.T) {
+	authDir := t.TempDir()
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	freeName := codexFileName("user@example.com", "free", testCodexAccountID)
+	proName := codexFileName("user@example.com", "pro", testCodexAccountID)
+	writeCodexJSON(t, authDir, freeName, map[string]any{
+		"type":       "codex",
+		"email":      "user@example.com",
+		"account_id": testCodexAccountID,
+		"note":       "free-row",
+	})
+	writeCodexJSON(t, authDir, proName, map[string]any{
+		"type":       "codex",
+		"email":      "user@example.com",
+		"account_id": testCodexAccountID,
+		"note":       "pro-row",
+	})
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, errSave := h.saveCodexOAuthRecord(context.Background(), newCodexRecord("user@example.com", testCodexAccountID, "pro", "from-free", "refresh-free"), freeName)
+		errCh <- errSave
+	}()
+	go func() {
+		defer wg.Done()
+		_, errSave := h.saveCodexOAuthRecord(context.Background(), newCodexRecord("user@example.com", testCodexAccountID, "pro", "from-pro", "refresh-pro"), proName)
+		errCh <- errSave
+	}()
+	wg.Wait()
+	close(errCh)
+	for errSave := range errCh {
+		if errSave != nil {
+			t.Fatalf("saveCodexOAuthRecord: %v", errSave)
+		}
+	}
+
+	got := jsonFileNames(t, authDir)
+	if len(got) != 1 {
+		t.Fatalf("auth files = %v, want exactly one remaining file", got)
+	}
+	saved := readJSONMap(t, filepath.Join(authDir, got[0]))
+	if saved["access_token"] != "from-free" && saved["access_token"] != "from-pro" {
+		t.Errorf("access_token = %v, want one of the concurrent saves", saved["access_token"])
+	}
 }
 
 func TestSaveCodexOAuthRecordListErrorDoesNotCreateFile(t *testing.T) {

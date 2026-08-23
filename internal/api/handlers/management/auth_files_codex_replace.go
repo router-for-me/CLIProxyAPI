@@ -5,11 +5,17 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
+
+// serializes list+save+delete so two concurrent OAuth completions for the same
+// account_id cannot each keep the other's file and then delete both.
+var codexOAuthReplaceMu sync.Mutex
 
 var oauthRuntimeMetadataKeys = []string{
 	"disabled",
@@ -45,10 +51,10 @@ func (h *Handler) saveCodexOAuthRecord(ctx context.Context, record *coreauth.Aut
 		canonicalName = strings.TrimSpace(record.ID)
 	}
 	accountID := codexAccountIDFromRecord(record)
-	replaceHint = filepath.Base(strings.TrimSpace(replaceHint))
-	if isUnsafeAuthFileName(replaceHint) {
-		replaceHint = ""
-	}
+	replaceHint = sanitizeCodexAuthRelPath(replaceHint)
+
+	codexOAuthReplaceMu.Lock()
+	defer codexOAuthReplaceMu.Unlock()
 
 	siblings, errList := h.listCodexFilesByAccountID(ctx, accountID)
 	if errList != nil {
@@ -72,7 +78,7 @@ func (h *Handler) saveCodexOAuthRecord(ctx context.Context, record *coreauth.Aut
 		if name == "" || name == writeName {
 			continue
 		}
-		if _, _, errDelete := h.deleteAuthFileByName(ctx, name); errDelete != nil {
+		if errDelete := h.deleteCodexAuthRel(ctx, name); errDelete != nil {
 			log.WithError(errDelete).WithField("file", name).Warn("failed to remove replaced Codex auth file")
 		}
 	}
@@ -136,8 +142,8 @@ func (h *Handler) listCodexFilesByAccountID(ctx context.Context, accountID strin
 		if id == "" || id != accountID {
 			continue
 		}
-		name := authRecordFileName(auth)
-		if name == "" || isUnsafeAuthFileName(name) {
+		name := authRecordFileName(auth, h.cfg)
+		if name == "" || isUnsafeCodexAuthRelPath(name) {
 			continue
 		}
 		out = append(out, codexAuthFileRef{
@@ -164,15 +170,75 @@ func isCodexAuthPayload(payload map[string]any) bool {
 	return strings.EqualFold(strings.TrimSpace(jsonString(payload["type"])), "codex")
 }
 
-func authRecordFileName(auth *coreauth.Auth) string {
+func authRecordFileName(auth *coreauth.Auth, cfg *config.Config) string {
 	if auth == nil {
 		return ""
 	}
-	name := filepath.Base(strings.TrimSpace(auth.FileName))
-	if name != "" && name != "." && name != string(filepath.Separator) {
-		return name
+	name := strings.TrimSpace(auth.FileName)
+	if name == "" {
+		name = strings.TrimSpace(auth.ID)
 	}
-	return filepath.Base(strings.TrimSpace(auth.ID))
+	name = filepath.ToSlash(name)
+	if name == "" || name == "." {
+		return ""
+	}
+	authDir := ""
+	if cfg != nil {
+		authDir = strings.TrimSpace(cfg.AuthDir)
+	}
+	if authDir != "" && filepath.IsAbs(filepath.FromSlash(name)) {
+		if rel, errRel := filepath.Rel(authDir, filepath.FromSlash(name)); errRel == nil {
+			name = filepath.ToSlash(rel)
+		}
+	}
+	return sanitizeCodexAuthRelPath(name)
+}
+
+func sanitizeCodexAuthRelPath(name string) string {
+	name = filepath.ToSlash(strings.TrimSpace(name))
+	if name == "" {
+		return ""
+	}
+	if isUnsafeCodexAuthRelPath(name) {
+		return ""
+	}
+	return filepath.ToSlash(filepath.Clean(name))
+}
+
+func isUnsafeCodexAuthRelPath(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return true
+	}
+	from := filepath.FromSlash(name)
+	if filepath.IsAbs(from) || filepath.VolumeName(from) != "" {
+		return true
+	}
+	clean := filepath.ToSlash(filepath.Clean(from))
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return true
+	}
+	return false
+}
+
+func (h *Handler) deleteCodexAuthRel(ctx context.Context, relName string) error {
+	relName = sanitizeCodexAuthRelPath(relName)
+	if relName == "" {
+		return fmt.Errorf("invalid auth path")
+	}
+	store := h.tokenStoreWithBaseDir()
+	if store == nil {
+		return fmt.Errorf("token store unavailable")
+	}
+	path := filepath.FromSlash(relName)
+	if h.cfg != nil && strings.TrimSpace(h.cfg.AuthDir) != "" && !filepath.IsAbs(path) {
+		path = filepath.Join(h.cfg.AuthDir, path)
+	}
+	if errDelete := store.Delete(ctx, path); errDelete != nil {
+		return errDelete
+	}
+	h.removeAuthsForPath(ctx, path, relName)
+	return nil
 }
 
 func authPayloadAccountID(payload map[string]any) string {
