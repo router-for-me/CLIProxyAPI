@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -89,9 +90,77 @@ func (h *Handler) saveCodexOAuthRecord(ctx context.Context, record *coreauth.Aut
 	if deleteErr != nil {
 		return savedPath, deleteErr
 	}
+	// Nested files are ignored by the auth-dir watcher; update in-memory tokens explicitly.
+	h.refreshRuntimeAuthAfterReplace(ctx, record, writeName)
 	// Tokens on the kept file rotated; close retained websockets so they re-handshake.
 	h.closeCodexSessionsForRel(writeName)
 	return savedPath, nil
+}
+
+func (h *Handler) refreshRuntimeAuthAfterReplace(ctx context.Context, record *coreauth.Auth, writeName string) {
+	if h == nil || h.authManager == nil || record == nil {
+		return
+	}
+	writeName = sanitizeCodexAuthRelPath(writeName)
+	if writeName == "" {
+		return
+	}
+	path := h.resolveCodexAuthPath(writeName)
+	now := time.Now()
+	updated := false
+	for _, id := range h.authIDsForCodexPath(path, writeName) {
+		existing, ok := h.authManager.GetByID(id)
+		if !ok || existing == nil {
+			continue
+		}
+		applyCodexReplacementToRuntimeAuth(existing, record)
+		existing.UpdatedAt = now
+		if _, errUpdate := h.authManager.Update(ctx, existing); errUpdate != nil {
+			log.WithError(errUpdate).WithField("id", id).Warn("failed to update runtime auth after Codex OAuth replace")
+			continue
+		}
+		updated = true
+	}
+	if updated {
+		return
+	}
+	record.ID = writeName
+	record.FileName = writeName
+	if record.Attributes == nil {
+		record.Attributes = make(map[string]string)
+	}
+	record.Attributes["path"] = path
+	record.Disabled = false
+	record.Status = coreauth.StatusActive
+	if _, errRegister := h.authManager.Register(ctx, record); errRegister != nil {
+		log.WithError(errRegister).WithField("id", writeName).Warn("failed to register runtime auth after Codex OAuth replace")
+	}
+}
+
+func applyCodexReplacementToRuntimeAuth(existing, record *coreauth.Auth) {
+	if existing == nil || record == nil {
+		return
+	}
+	if existing.Metadata == nil {
+		existing.Metadata = make(map[string]any)
+	}
+	if storage, ok := record.Storage.(*codex.CodexTokenStorage); ok && storage != nil {
+		existing.Metadata["access_token"] = storage.AccessToken
+		existing.Metadata["refresh_token"] = storage.RefreshToken
+		existing.Metadata["id_token"] = storage.IDToken
+		existing.Metadata["expired"] = storage.Expire
+		existing.Metadata["last_refresh"] = storage.LastRefresh
+		existing.Metadata["email"] = storage.Email
+		existing.Metadata["account_id"] = storage.AccountID
+		existing.Metadata["type"] = "codex"
+	}
+	for key, value := range record.Metadata {
+		existing.Metadata[key] = value
+	}
+	existing.Disabled = false
+	existing.Status = coreauth.StatusActive
+	existing.StatusMessage = ""
+	existing.Unavailable = false
 }
 
 func prepareCodexOAuthRecordForSave(record *coreauth.Auth, writeName string) {

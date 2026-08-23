@@ -417,6 +417,51 @@ func TestSaveCodexOAuthRecordRemovesNestedSibling(t *testing.T) {
 	}
 }
 
+func TestSaveCodexOAuthRecordUpdatesRuntimeAuthMetadata(t *testing.T) {
+	authDir := t.TempDir()
+	nestedRel := filepath.ToSlash(filepath.Join("team", "codex-user.json"))
+	nestedPath := filepath.Join(authDir, filepath.FromSlash(nestedRel))
+	writeCodexJSON(t, filepath.Dir(nestedPath), filepath.Base(nestedPath), map[string]any{
+		"type":         "codex",
+		"account_id":   testCodexAccountID,
+		"access_token": "old-access",
+		"note":         "nested",
+	})
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       nestedRel,
+		FileName: nestedRel,
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path": nestedPath,
+		},
+		Metadata: map[string]any{
+			"type":         "codex",
+			"account_id":   testCodexAccountID,
+			"access_token": "old-access",
+		},
+	}); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	record := newCodexRecord("user@example.com", testCodexAccountID, "pro", "new-access", "new-refresh")
+	if _, errSave := h.saveCodexOAuthRecord(context.Background(), record, nestedRel); errSave != nil {
+		t.Fatalf("saveCodexOAuthRecord: %v", errSave)
+	}
+
+	got, ok := manager.GetByID(nestedRel)
+	if !ok || got == nil {
+		t.Fatal("runtime auth missing after replace")
+	}
+	if got.Metadata["access_token"] != "new-access" {
+		t.Errorf("runtime access_token = %v, want new-access", got.Metadata["access_token"])
+	}
+	if got.Disabled {
+		t.Error("runtime auth still disabled")
+	}
+}
+
 func TestSaveCodexOAuthRecordSiblingDeleteFailureIsReturned(t *testing.T) {
 	authDir := t.TempDir()
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
