@@ -312,6 +312,40 @@ func TestWrapStreamEmptyCompletionStopsAtTerminalEmptyMarkersWithoutChannelClose
 	}
 }
 
+func TestDiscardStreamChunksExitsOnContextCancel(t *testing.T) {
+	src := make(chan coreexecutor.StreamChunk)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := discardStreamChunks(ctx, src)
+
+	select {
+	case <-done:
+		t.Fatal("drain finished too early")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("discardStreamChunks goroutine did not exit on context cancellation")
+	}
+}
+
+func TestDiscardStreamChunksExitsOnOpenUnclosedChannel(t *testing.T) {
+	previous := streamDrainTimeout
+	streamDrainTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { streamDrainTimeout = previous })
+
+	src := make(chan coreexecutor.StreamChunk)
+	done := discardStreamChunks(context.Background(), src)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("discardStreamChunks goroutine did not exit on timeout for open unclosed channel")
+	}
+}
+
 func TestWrapStreamEmptyCompletionDrainsSourceAfterTerminalEmpty(t *testing.T) {
 	src := make(chan coreexecutor.StreamChunk)
 	producerDone := make(chan struct{})

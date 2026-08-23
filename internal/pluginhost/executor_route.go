@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -239,12 +240,12 @@ func wrapStreamEmptyCompletion(ctx context.Context, streamResult *coreexecutor.S
 				}
 			}
 			if streamErr := detector.StreamError(); streamErr != nil {
-				discardStreamChunks(src)
+				discardStreamChunks(ctx, src)
 				_ = forward(coreexecutor.StreamChunk{Err: streamErr})
 				return
 			}
 			if detector.IsTerminalEmpty() {
-				discardStreamChunks(src)
+				discardStreamChunks(ctx, src)
 				_ = forward(coreexecutor.StreamChunk{Err: coreauth.EmptyCompletionError()})
 				return
 			}
@@ -253,14 +254,42 @@ func wrapStreamEmptyCompletion(ctx context.Context, streamResult *coreexecutor.S
 	return &coreexecutor.StreamResult{Chunks: wrapped, Headers: streamResult.Headers}
 }
 
-func discardStreamChunks(ch <-chan coreexecutor.StreamChunk) {
+var streamDrainTimeout = 5 * time.Second
+
+func discardStreamChunks(ctx context.Context, ch <-chan coreexecutor.StreamChunk) <-chan struct{} {
+	done := make(chan struct{})
 	if ch == nil {
-		return
+		close(done)
+		return done
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	go func() {
-		for range ch {
+		defer close(done)
+		timer := time.NewTimer(streamDrainTimeout)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				return
+			case _, ok := <-ch:
+				if !ok {
+					return
+				}
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(streamDrainTimeout)
+			}
 		}
 	}()
+	return done
 }
 
 func streamChunkPayload(chunks []coreexecutor.StreamChunk) []byte {
