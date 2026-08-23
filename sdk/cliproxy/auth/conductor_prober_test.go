@@ -495,6 +495,108 @@ func TestProberAcceptsNoContentResponse(t *testing.T) {
 	}
 }
 
+func TestProberSkipsUnsupportedMethodResponses(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "405 status", status: http.StatusMethodNotAllowed},
+		{name: "501 status", status: http.StatusNotImplemented},
+		{name: "method not allowed body", status: http.StatusBadRequest, body: "method not allowed"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			m := newProberManager()
+			exec := &proberTestExecutor{provider: "test", statusCode: intPtr(tc.status), body: tc.body}
+			m.RegisterExecutor(exec)
+
+			auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+			if _, err := m.Register(ctx, auth); err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+
+			loop := newAuthProberLoop(m, internalconfig.CredentialProberConfig{})
+			loop.probe(ctx, auth)
+
+			updated, _ := m.GetByID(auth.ID)
+			if updated == nil {
+				t.Fatal("auth disappeared")
+			}
+			if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+				t.Fatalf("unsupported probe response should be ignored; Unavailable=%v NextRetryAfter=%v", updated.Unavailable, updated.NextRetryAfter)
+			}
+		})
+	}
+}
+
+func TestProberSkipsNotFoundOnTemplatePath(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "test", statusCode: intPtr(http.StatusNotFound)}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{ID: "a1", Provider: "test", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	loop := newAuthProberLoop(m, internalconfig.CredentialProberConfig{})
+	loop.probe(ctx, auth)
+
+	updated, _ := m.GetByID(auth.ID)
+	if updated == nil {
+		t.Fatal("auth disappeared")
+	}
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("template probe 404 should be ignored; Unavailable=%v NextRetryAfter=%v", updated.Unavailable, updated.NextRetryAfter)
+	}
+}
+
+func TestProberMarksNotFoundOnProviderPath(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "claude", statusCode: intPtr(http.StatusNotFound)}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{ID: "a1", Provider: "claude", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	loop := newAuthProberLoop(m, internalconfig.CredentialProberConfig{})
+	loop.probe(ctx, auth)
+
+	updated, _ := m.GetByID(auth.ID)
+	if updated == nil {
+		t.Fatal("auth disappeared")
+	}
+	if !updated.Unavailable || updated.NextRetryAfter.IsZero() {
+		t.Fatalf("provider probe 404 should force cooldown; Unavailable=%v NextRetryAfter=%v", updated.Unavailable, updated.NextRetryAfter)
+	}
+}
+
+func TestProberSkipsVertexDefaultPath(t *testing.T) {
+	ctx := context.Background()
+	m := newProberManager()
+	exec := &proberTestExecutor{provider: "vertex", statusCode: intPtr(http.StatusOK)}
+	m.RegisterExecutor(exec)
+
+	auth := &Auth{ID: "a1", Provider: "vertex", Status: StatusActive, Attributes: map[string]string{"base_url": "https://example.com"}}
+	if _, err := m.Register(ctx, auth); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	loop := newAuthProberLoop(m, internalconfig.CredentialProberConfig{})
+	loop.probe(ctx, auth)
+
+	if got := exec.calls.Load(); got != 0 {
+		t.Fatalf("Vertex default probe calls = %d, want 0", got)
+	}
+}
+
 func TestProberDropsContextDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
 	defer cancel()
@@ -898,6 +1000,8 @@ func TestProberProbePathForProvider(t *testing.T) {
 		{"gemini", "", "/v1beta/models"},
 		{"Gemini", "", "/v1beta/models"},
 		{"aistudio", "", "/v1beta/models"},
+		{"vertex", "", ""},
+		{"vertex", "/health", "/health"},
 		{"xai", "", "/v1/models"},
 		{"kimi", "", "/v1/models"},
 		{"openai-compatible-groq", "", "/v1/models"},
@@ -1080,6 +1184,9 @@ func TestProberClampsMinimumInterval(t *testing.T) {
 	}
 	if l.cfg.Interval != proberMinInterval {
 		t.Fatalf("Interval = %v, want %v", l.cfg.Interval, proberMinInterval)
+	}
+	if l.cfg.Interval < time.Second {
+		t.Fatalf("Interval = %v, want at least one second", l.cfg.Interval)
 	}
 }
 

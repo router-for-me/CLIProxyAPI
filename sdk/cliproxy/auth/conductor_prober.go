@@ -21,7 +21,7 @@ import (
 
 const (
 	proberCheckInterval         = 60 * time.Second
-	proberMinInterval           = 5 * time.Millisecond
+	proberMinInterval           = 1 * time.Second
 	proberMaxConcurrency        = 4
 	proberMaxConcurrencyCap     = 1024
 	proberRatePerMinute         = 60
@@ -344,6 +344,7 @@ func (l *authProberLoop) probeWithLimiter(parent context.Context, auth *Auth, li
 
 	var (
 		resp      *http.Response
+		probeBody []byte
 		errExec   error
 		resultErr *Error
 	)
@@ -368,8 +369,9 @@ func (l *authProberLoop) probeWithLimiter(parent context.Context, auth *Auth, li
 			}
 		}
 		resp, errExec = exec.HttpRequest(probeCtx, auth, req)
+		probeBody = nil
 		if resp != nil && resp.Body != nil {
-			_, _ = io.CopyN(io.Discard, resp.Body, proberMaxBodyBytes)
+			probeBody, _ = io.ReadAll(io.LimitReader(resp.Body, proberMaxBodyBytes))
 			_ = resp.Body.Close()
 		}
 
@@ -392,6 +394,11 @@ func (l *authProberLoop) probeWithLimiter(parent context.Context, auth *Auth, li
 				HTTPStatus: http.StatusServiceUnavailable,
 				Retryable:  true,
 			}
+		} else if proberUnsupportedMethod(resp, probeBody) ||
+			(resp.StatusCode == http.StatusNotFound && path == proberDefaultPath) {
+			// A generic probe endpoint may not exist for this provider. An
+			// unsupported method or template /models 404 is not credential failure.
+			return
 		} else if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			resultErr = &Error{
 				Code:       ErrorCodeForceCooldown,
@@ -478,6 +485,9 @@ var proberProviderProbePaths = map[string]string{
 	"gemini":              "/v1beta/models",
 	"gemini-interactions": "/v1beta/models",
 	"aistudio":            "/v1beta/models",
+	// Vertex uses model-specific :generateContent routes and has no generic
+	// GET /models endpoint for the prober.
+	"vertex": "",
 	"xai":                 "/v1/models",
 	"kimi":                "/v1/models",
 	"claude":              "/v1/models",
@@ -703,6 +713,20 @@ func proberProbePathForProvider(provider, configured string) string {
 }
 
 var proberURLRegex = regexp.MustCompile(`https?://[^ \t\n\r\"'<>]+`)
+
+func proberUnsupportedMethod(resp *http.Response, body []byte) bool {
+	if resp == nil {
+		return false
+	}
+	if resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
+		return true
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(resp.Status), "method not allowed") ||
+		strings.Contains(strings.ToLower(string(body)), "method not allowed")
+}
 
 // redactProbeError removes userinfo and query parameters from any URL that
 // appears in a transport error, so tokens in query strings are not logged or
