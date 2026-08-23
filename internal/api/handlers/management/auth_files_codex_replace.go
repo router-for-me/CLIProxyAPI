@@ -76,6 +76,9 @@ func (h *Handler) saveCodexOAuthRecord(ctx context.Context, record *coreauth.Aut
 	if errSave != nil {
 		return savedPath, errSave
 	}
+	// Nested files are ignored by the auth-dir watcher; refresh runtime before sibling cleanup.
+	h.refreshRuntimeAuthAfterReplace(ctx, record, writeName)
+	h.closeCodexSessionsForRel(writeName)
 
 	var deleteErr error
 	for _, name := range remove {
@@ -90,10 +93,6 @@ func (h *Handler) saveCodexOAuthRecord(ctx context.Context, record *coreauth.Aut
 	if deleteErr != nil {
 		return savedPath, deleteErr
 	}
-	// Nested files are ignored by the auth-dir watcher; update in-memory tokens explicitly.
-	h.refreshRuntimeAuthAfterReplace(ctx, record, writeName)
-	// Tokens on the kept file rotated; close retained websockets so they re-handshake.
-	h.closeCodexSessionsForRel(writeName)
 	return savedPath, nil
 }
 
@@ -157,10 +156,42 @@ func applyCodexReplacementToRuntimeAuth(existing, record *coreauth.Auth) {
 	for key, value := range record.Metadata {
 		existing.Metadata[key] = value
 	}
+	applyCodexPlanTypeFromIDToken(existing)
 	existing.Disabled = false
 	existing.Status = coreauth.StatusActive
 	existing.StatusMessage = ""
 	existing.Unavailable = false
+}
+
+func applyCodexPlanTypeFromIDToken(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	idToken := ""
+	if auth.Metadata != nil {
+		idToken, _ = auth.Metadata["id_token"].(string)
+	}
+	if strings.TrimSpace(idToken) == "" {
+		if storage, ok := auth.Storage.(*codex.CodexTokenStorage); ok && storage != nil {
+			idToken = storage.IDToken
+		}
+	}
+	idToken = strings.TrimSpace(idToken)
+	if idToken == "" {
+		return
+	}
+	claims, errParse := codex.ParseJWTToken(idToken)
+	if errParse != nil || claims == nil {
+		return
+	}
+	planType := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+	if planType == "" {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["plan_type"] = planType
 }
 
 func prepareCodexOAuthRecordForSave(record *coreauth.Auth, writeName string) {
@@ -177,6 +208,7 @@ func prepareCodexOAuthRecordForSave(record *coreauth.Auth, writeName string) {
 	record.Metadata["status"] = ""
 	record.Metadata["status_message"] = ""
 	record.Metadata["unavailable"] = false
+	applyCodexPlanTypeFromIDToken(record)
 	if setter, ok := record.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 		setter.SetMetadata(record.Metadata)
 	}

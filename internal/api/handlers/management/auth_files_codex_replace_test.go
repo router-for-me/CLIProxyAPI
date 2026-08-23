@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -216,6 +217,20 @@ func TestSaveCodexOAuthRecordClearsDisabledOnSameFilename(t *testing.T) {
 	if saved["note"] != "keep" {
 		t.Errorf("note = %v, want keep", saved["note"])
 	}
+}
+
+func fakeCodexIDToken(planType string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	payload, err := json.Marshal(map[string]any{
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": testCodexAccountID,
+			"chatgpt_plan_type":  planType,
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + "."
 }
 
 func newCodexRecord(email, accountID, plan, access, refresh string) *coreauth.Auth {
@@ -433,7 +448,8 @@ func TestSaveCodexOAuthRecordUpdatesRuntimeAuthMetadata(t *testing.T) {
 		FileName: nestedRel,
 		Provider: "codex",
 		Attributes: map[string]string{
-			"path": nestedPath,
+			"path":      nestedPath,
+			"plan_type": "free",
 		},
 		Metadata: map[string]any{
 			"type":         "codex",
@@ -446,6 +462,9 @@ func TestSaveCodexOAuthRecordUpdatesRuntimeAuthMetadata(t *testing.T) {
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
 
 	record := newCodexRecord("user@example.com", testCodexAccountID, "pro", "new-access", "new-refresh")
+	if storage, ok := record.Storage.(*codex.CodexTokenStorage); ok {
+		storage.IDToken = fakeCodexIDToken("pro")
+	}
 	if _, errSave := h.saveCodexOAuthRecord(context.Background(), record, nestedRel); errSave != nil {
 		t.Fatalf("saveCodexOAuthRecord: %v", errSave)
 	}
@@ -456,6 +475,9 @@ func TestSaveCodexOAuthRecordUpdatesRuntimeAuthMetadata(t *testing.T) {
 	}
 	if got.Metadata["access_token"] != "new-access" {
 		t.Errorf("runtime access_token = %v, want new-access", got.Metadata["access_token"])
+	}
+	if got.Attributes["plan_type"] != "pro" {
+		t.Errorf("runtime plan_type = %q, want pro", got.Attributes["plan_type"])
 	}
 	if got.Disabled {
 		t.Error("runtime auth still disabled")
