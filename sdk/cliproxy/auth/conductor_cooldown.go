@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -1410,7 +1411,39 @@ func resultErrorFromError(err error) *Error {
 			resultErr.Code = connectionLifecycleErrorCode
 		}
 	}
-	return resultErr
+	// Do not persist or propagate credentials that may be echoed in an
+	// in-band stream error. sanitizeErrorTextFields redacts every string
+	// field of the cloned result while the classification above already used
+	// the original err.
+	return sanitizeErrorTextFields(resultErr).(*Error)
+}
+
+// sanitizeErrorTextFields redacts secrets from every exported string field of the
+// inner *Error. It mutates the value in place when err is an *Error (or wraps
+// one), preserving the original error pointer so callers that compare identity
+// still work. All untrusted upstream error parsing should return through this.
+func sanitizeErrorTextFields(err error) error {
+	if err == nil {
+		return nil
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return err
+	}
+	v := reflect.ValueOf(authErr).Elem()
+	t := v.Type()
+	for i := 0; i < v.NumField(); i++ {
+		field := t.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		fv := v.Field(i)
+		if fv.Kind() == reflect.String {
+			s := fv.String()
+			fv.SetString(redactSecretsForLog(s))
+		}
+	}
+	return err
 }
 
 // shouldSkipCredentialCooldown reports failures that must not mark auth/model cooling.
@@ -1516,7 +1549,7 @@ func refreshErrorFromError(err error) *Error {
 		authErr.Code = "unauthorized"
 		authErr.Retryable = false
 	}
-	return authErr
+	return sanitizeErrorTextFields(authErr).(*Error)
 }
 
 func retryAfterFromError(err error) *time.Duration {

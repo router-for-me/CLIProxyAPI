@@ -195,14 +195,28 @@ func TestWrapStreamEmptyCompletionPreservesContentBeforeUpstreamError(t *testing
 	}
 }
 
-func TestWrapStreamEmptyCompletionPreservesNilResults(t *testing.T) {
-	if got := wrapStreamEmptyCompletion(context.Background(), nil); got != nil {
-		t.Fatalf("wrapStreamEmptyCompletion(nil) = %#v, want nil", got)
-	}
-
-	result := &coreexecutor.StreamResult{Headers: http.Header{"X-Test": []string{"value"}}}
-	if got := wrapStreamEmptyCompletion(context.Background(), result); got != result {
-		t.Fatalf("wrapStreamEmptyCompletion(nil chunks) = %#v, want original result", got)
+func TestWrapStreamEmptyCompletionRejectsNilSource(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result *coreexecutor.StreamResult
+	}{
+		{"nil result", nil},
+		{"nil chunks", &coreexecutor.StreamResult{Headers: http.Header{"X-Test": []string{"value"}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := wrapStreamEmptyCompletion(context.Background(), tc.result)
+			if got == nil || got.Chunks == nil {
+				t.Fatalf("wrapStreamEmptyCompletion(%s) = %#v, want stream with error chunk", tc.name, got)
+			}
+			chunk, ok := <-got.Chunks
+			if !ok || chunk.Err == nil {
+				t.Fatalf("wrapStreamEmptyCompletion(%s) emitted chunk %v, want error", tc.name, chunk)
+			}
+			var authErr *coreauth.Error
+			if !errors.As(chunk.Err, &authErr) || authErr.Code != "empty_stream" || !authErr.Retryable {
+				t.Fatalf("error = %v, want retriable empty_stream", chunk.Err)
+			}
+		})
 	}
 }
 

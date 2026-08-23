@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -352,8 +353,8 @@ func TestStreamConnectTimeout_ConfigAndMetadata(t *testing.T) {
 }
 
 // httpTTFTStreamExecutor makes an HTTP request using the default client so the
-// conductor's httptrace.ClientTrace fires GotConn as soon as the connection is
-// obtained.
+// conductor's httptrace.ClientTrace fires GotFirstResponseByte when the
+// upstream begins responding.
 type httpTTFTStreamExecutor struct {
 	baseURL string
 }
@@ -399,13 +400,12 @@ func (*httpTTFTStreamExecutor) HttpRequest(context.Context, *Auth, *http.Request
 	return nil, nil
 }
 
-// TestStreamFirstChunkTimeout_StoppedAtConnection verifies that the TTFT timer
-// is stopped when the HTTP transport reports a connection, before response
-// headers are written. A slow-responding server that waits longer than the TTFT
-// window should not trigger a timeout.
-func TestStreamFirstChunkTimeout_StoppedAtConnection(t *testing.T) {
+// TestStreamFirstChunkTimeout_BudgetsSlowHeaders verifies that the TTFT timer
+// is not stopped at connection (or a CONNECT tunnel) and still fires when the
+// upstream takes longer than the budget to produce the first response byte.
+func TestStreamFirstChunkTimeout_BudgetsSlowHeaders(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\n\n")
@@ -433,35 +433,12 @@ func TestStreamFirstChunkTimeout_StoppedAtConnection(t *testing.T) {
 		},
 	}
 
-	start := time.Now()
-	stream, errStream := m.ExecuteStream(context.Background(), []string{"http-ttft"}, cliproxyexecutor.Request{Model: model}, opts)
-	elapsed := time.Since(start)
-	if errStream != nil {
-		t.Fatalf("ExecuteStream error = %v, want stream after delayed headers", errStream)
+	_, errStream := m.ExecuteStream(context.Background(), []string{"http-ttft"}, cliproxyexecutor.Request{Model: model}, opts)
+	if errStream == nil {
+		t.Fatal("ExecuteStream() = nil, want TTFT timeout when first byte exceeds budget")
 	}
-	if elapsed < 100*time.Millisecond {
-		t.Fatalf("stream returned too quickly (%v), want at least 100ms of delayed headers", elapsed)
-	}
-
-	done := make(chan struct{})
-	var got string
-	go func() {
-		defer close(done)
-		for chunk := range stream.Chunks {
-			if chunk.Err != nil {
-				t.Errorf("chunk error = %v", chunk.Err)
-				return
-			}
-			got = string(chunk.Payload)
-		}
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out reading stream chunks")
-	}
-
-	if !strings.Contains(got, "hello") {
-		t.Fatalf("stream payload does not contain expected content: %q", got)
+	var authErr *Error
+	if !errors.As(errStream, &authErr) || authErr.Code != "stream_first_chunk_timeout" {
+		t.Fatalf("ExecuteStream error = %v, want TTFT timeout", errStream)
 	}
 }

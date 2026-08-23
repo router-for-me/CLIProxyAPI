@@ -118,7 +118,18 @@ func (h *Host) ExecutePluginExecutorStream(ctx context.Context, pluginID string,
 // appears or the stream closes; unrecognized streams remain pass-through.
 func wrapStreamEmptyCompletion(ctx context.Context, streamResult *coreexecutor.StreamResult, requestPayloads ...[]byte) *coreexecutor.StreamResult {
 	if streamResult == nil || streamResult.Chunks == nil {
-		return streamResult
+		errChunks := make(chan coreexecutor.StreamChunk, 1)
+		errChunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{
+			Code:      "empty_stream",
+			Message:   "upstream stream has no source",
+			Retryable: true,
+		}}
+		close(errChunks)
+		wrapped := &coreexecutor.StreamResult{Chunks: errChunks}
+		if streamResult != nil {
+			wrapped.Headers = streamResult.Headers
+		}
+		return wrapped
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -266,7 +277,14 @@ func (h *Host) CountPluginExecutor(ctx context.Context, pluginID string, req cor
 	if errAdapter != nil {
 		return coreexecutor.Response{}, errAdapter
 	}
-	return adapter.CountTokens(ctx, (*coreauth.Auth)(nil), req, opts)
+	resp, err := adapter.CountTokens(ctx, (*coreauth.Auth)(nil), req, opts)
+	if err != nil {
+		return coreexecutor.Response{}, err
+	}
+	if coreauth.IsEmptyCompletionPayload(resp.Payload) {
+		return coreexecutor.Response{}, coreauth.EmptyCompletionError()
+	}
+	return resp, nil
 }
 
 func (h *Host) executorAdapterForPlugin(pluginID string) (*executorAdapter, error) {

@@ -206,6 +206,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
 			if chunk.Err != nil && !failed {
 				failed = true
+				chunk.Err = sanitizeErrorTextFields(chunk.Err)
 				entry := logEntryWithRequestID(ctx)
 				warnLogUpstreamFailure(ctx, entry, provider, resultModel, auth, time.Since(streamStart), chunk.Err)
 				rerr := resultErrorFromError(chunk.Err)
@@ -217,6 +218,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			if !failed && len(chunk.Payload) > 0 {
 				if streamErr := errorDetector.Observe(chunk.Payload); streamErr != nil {
 					failed = true
+					streamErr = sanitizeErrorTextFields(streamErr).(*Error)
 					entry := logEntryWithRequestID(ctx)
 					warnLogUpstreamFailure(ctx, entry, provider, resultModel, auth, time.Since(streamStart), streamErr)
 					rerr := resultErrorFromError(streamErr)
@@ -283,6 +285,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		if !failed {
 			if streamErr := errorDetector.Finish(); streamErr != nil {
 				failed = true
+				streamErr = sanitizeErrorTextFields(streamErr).(*Error)
 				entry := logEntryWithRequestID(ctx)
 				warnLogUpstreamFailure(ctx, entry, provider, resultModel, auth, time.Since(streamStart), streamErr)
 				rerr := resultErrorFromError(streamErr)
@@ -336,9 +339,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		// Arm the TTFT timer only after local interception and request
 		// preparation: the budget measures upstream responsiveness, so a slow
 		// after-auth interceptor must not cancel the attempt before any
-		// upstream request was even made. The timer is stopped as soon as the
-		// HTTP transport reports a connection is obtained (GotConn), which is
-		// before response headers for standard net/http clients.
+		// upstream request was even made. The timer is stopped when the first
+		// response byte arrives (GotFirstResponseByte), after the actual upstream
+		// begins responding; this keeps a CONNECT tunnel or slow accept inside
+		// the budget instead of treating the proxy connection as success.
 		armTTFT := func() {
 			attemptMu.Lock()
 			if timer != nil {
@@ -370,7 +374,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					currentCancel()
 				})
 				trace := &httptrace.ClientTrace{
-					GotConn: func(httptrace.GotConnInfo) {
+					GotFirstResponseByte: func() {
 						stopTTFT()
 					},
 				}
@@ -490,6 +494,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				discardStreamChunks(streamResult.Chunks)
 			}
 			errStream = checkTTFTErr(errStream)
+			errStream = sanitizeErrorTextFields(errStream)
 			rerr := resultErrorFromError(errStream)
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: execOpts}
@@ -596,6 +601,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			stopTTFT()
 			cancelAttempt()
 			bootstrapErr = checkTTFTErr(bootstrapErr)
+			bootstrapErr = sanitizeErrorTextFields(bootstrapErr)
 			action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.runtimeConfigSnapshot())
 			if okAction {
 				rerr := resultErrorFromError(bootstrapErr)

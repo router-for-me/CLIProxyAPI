@@ -4163,15 +4163,19 @@ func TestEmptyCompletion_OpenAIImageGenerationResult(t *testing.T) {
 }
 
 func TestEmptyCompletion_OpenAIFinishReasonStopWithoutDoneIsTerminalEmpty(t *testing.T) {
-	// Case 1: Single choice finish_reason="stop" without [DONE] is terminal empty.
+	// Case 1: Single choice finish_reason="stop" without [DONE] is terminal, but
+	// the bootstrap must not judge it empty until the final usage frame arrives.
 	var detector StreamBootstrapDetector
 	stopChunk := []byte("data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
 	got := detector.Observe(stopChunk)
 	if got {
 		t.Fatalf("Observe(stopChunk) = %v, want false", got)
 	}
-	if !detector.IsTerminalEmpty() {
-		t.Fatal("IsTerminalEmpty() = false, want true for OpenAI finish_reason:stop without [DONE]")
+	if detector.IsTerminalEmpty() {
+		t.Fatal("IsTerminalEmpty() = true, want false until usage arrives")
+	}
+	if !detector.Finish() {
+		t.Fatal("Finish() = false, want true for OpenAI finish_reason:stop without usage")
 	}
 
 	// Case 2: Multi-choice with partial finish_reason (choice 0 "stop", choice 1 nil) is NOT terminal yet.
@@ -4236,8 +4240,11 @@ func TestEmptyCompletion_OpenAIFinishReasonStopWithoutDoneIsTerminalEmpty(t *tes
 	if detectorMultiEarly.Observe(frameChoice1Finish) {
 		t.Fatal("Observe(frameChoice1Finish) = true, want false")
 	}
-	if !detectorMultiEarly.IsTerminalEmpty() {
-		t.Fatal("IsTerminalEmpty() = false when all n=2 choices finished empty, want true")
+	if detectorMultiEarly.IsTerminalEmpty() {
+		t.Fatal("IsTerminalEmpty() = true when all n=2 choices finished empty, want false until usage")
+	}
+	if !detectorMultiEarly.Finish() {
+		t.Fatal("Finish() = false when all n=2 choices finished empty, want true")
 	}
 }
 
@@ -5212,5 +5219,14 @@ func TestStreamBootstrapDetectorInteractionsWithoutSignatureStaysEmpty(t *testin
 
 	if !detector.IsTerminalEmpty() {
 		t.Fatal("IsTerminalEmpty() = false for a genuinely empty interaction, want true")
+	}
+}
+
+func TestEmptyCompletionNullPayload(t *testing.T) {
+	if !IsEmptyCompletionPayload([]byte("null")) {
+		t.Fatal("IsEmptyCompletionPayload(null) = false, want true")
+	}
+	if !IsEmptyCompletionPayload([]byte("  null  ")) {
+		t.Fatal("IsEmptyCompletionPayload(whitespace null) = false, want true")
 	}
 }

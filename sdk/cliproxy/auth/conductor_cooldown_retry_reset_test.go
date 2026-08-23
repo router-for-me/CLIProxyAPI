@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -333,4 +334,24 @@ func TestCooldownRetryPreservesConfigDisabledCoolingExclusions(t *testing.T) {
 			t.Fatalf("expected cooling-enabled auth to run twice (initial + post-cooldown retry), got %d", got)
 		}
 	})
+}
+
+func TestResultErrorFromErrorRedactsSecrets(t *testing.T) {
+	leaky := &Error{Code: "sk-xyz1234567890", Message: "Bearer sk-abc123def456", HTTPStatus: http.StatusUnauthorized}
+	result := resultErrorFromError(leaky)
+	if result == nil {
+		t.Fatal("resultErrorFromError returned nil")
+	}
+	if strings.Contains(result.Message, "sk-abc123def456") {
+		t.Fatalf("result error message = %q, want secret redacted", result.Message)
+	}
+	if !strings.Contains(result.Message, "REDACTED") {
+		t.Fatalf("result error message = %q, want [REDACTED] placeholder", result.Message)
+	}
+	if strings.Contains(result.Code, "sk-xyz1234567890") {
+		t.Fatalf("result error code = %q, want secret redacted", result.Code)
+	}
+	if !strings.Contains(result.Code, "REDACTED") {
+		t.Fatalf("result error code = %q, want [REDACTED] placeholder", result.Code)
+	}
 }

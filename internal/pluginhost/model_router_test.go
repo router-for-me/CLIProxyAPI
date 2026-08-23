@@ -244,6 +244,81 @@ func TestHostExecutePluginExecutorStreamRejectsEmptyCompletion(t *testing.T) {
 	}
 }
 
+func TestHostCountPluginExecutorRejectsEmptyCompletion(t *testing.T) {
+	executor := &fakeExecutor{
+		identifier: "plugin-provider",
+		countTokens: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{Payload: []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`)}, nil
+		},
+	}
+	host := newRouteModelHostWithRecords(capabilityRecord{
+		id: "executor",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			Executor:              executor,
+			ExecutorInputFormats:  []string{"openai"},
+			ExecutorOutputFormats: []string{"openai"},
+		}},
+	})
+
+	_, errCount := host.CountPluginExecutor(context.Background(), "executor", coreexecutor.Request{Model: "client-model", Payload: []byte(`{"model":"client-model"}`)}, coreexecutor.Options{})
+	if errCount == nil {
+		t.Fatal("CountPluginExecutor() with empty completion = nil, want retriable error")
+	}
+	var authErr *coreauth.Error
+	if !errors.As(errCount, &authErr) {
+		t.Fatalf("error = %v (%T), want *coreauth.Error", errCount, errCount)
+	}
+	if !authErr.Retryable || authErr.Code != "empty_completion" {
+		t.Fatalf("error = %+v, want retriable empty_completion", authErr)
+	}
+	if authErr.StatusCode() != http.StatusServiceUnavailable {
+		t.Fatalf("error status = %d, want %d", authErr.StatusCode(), http.StatusServiceUnavailable)
+	}
+}
+
+func TestHostExecutePluginExecutorStreamRejectsNilChunks(t *testing.T) {
+	executor := &fakeExecutor{
+		identifier: "plugin-provider",
+		executeStream: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+			return pluginapi.ExecutorStreamResponse{Chunks: nil}, nil
+		},
+	}
+	host := newRouteModelHostWithRecords(capabilityRecord{
+		id: "executor",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			Executor:              executor,
+			ExecutorInputFormats:  []string{"openai"},
+			ExecutorOutputFormats: []string{"openai"},
+		}},
+	})
+
+	streamResult, errStream := host.ExecutePluginExecutorStream(context.Background(), "executor", coreexecutor.Request{Model: "client-model", Payload: []byte(`{"model":"client-model"}`)}, coreexecutor.Options{})
+	if errStream != nil {
+		t.Fatalf("ExecutePluginExecutorStream() unexpected error = %v", errStream)
+	}
+	if streamResult == nil || streamResult.Chunks == nil {
+		t.Fatal("ExecutePluginExecutorStream() returned nil stream with no source")
+	}
+
+	var emptyErr error
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			emptyErr = chunk.Err
+			break
+		}
+	}
+	if emptyErr == nil {
+		t.Fatal("stream closed clean, want empty_stream error")
+	}
+	var authErr *coreauth.Error
+	if !errors.As(emptyErr, &authErr) {
+		t.Fatalf("error = %v (%T), want *coreauth.Error", emptyErr, emptyErr)
+	}
+	if authErr.Code != "empty_stream" || !authErr.Retryable {
+		t.Fatalf("error = %+v, want retriable empty_stream", authErr)
+	}
+}
+
 func TestHostRouteModelDefaultsHandledRouterToOwnExecutor(t *testing.T) {
 	host := newRouteModelHostWithRecords(capabilityRecord{
 		id: "router",

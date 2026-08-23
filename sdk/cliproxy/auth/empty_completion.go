@@ -1872,6 +1872,11 @@ func (s *streamBootstrapState) isEmptyCompletion() bool {
 }
 
 func (s *streamBootstrapState) isTerminalEmpty() bool {
+	if s.acc.openAITerminal && !s.acc.sawUsage {
+		// OpenAI streams may emit finish_reason=stop before the final usage
+		// frame; do not judge the stream empty until usage arrives.
+		return false
+	}
 	return (s.sawDone || s.acc.geminiTerminal || s.acc.claudeTerminal || s.acc.openAITerminal || s.acc.interactionsTerminal) && s.acc.empty()
 }
 
@@ -2127,7 +2132,9 @@ func parseStreamErrorFromEnvelope(data []byte, envelope streamErrorEnvelope) *Er
 		err.Retryable = true
 	}
 
-	return err
+	// Sanitize every text field before the parsed upstream error reaches
+	// logging, result recording, or the output stream.
+	return sanitizeErrorTextFields(err).(*Error)
 }
 
 func evalProviderError(data []byte, sseEvent string) *Error {
@@ -2431,11 +2438,11 @@ func couldBeSSEPrefix(payload []byte) bool {
 // a single non-stream JSON response) represents an empty completion.
 func isEmptyCompletionPayload(payload []byte) bool {
 	trimmed := bytes.TrimSpace(payload)
-	if len(trimmed) == 0 {
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		// A zero-length or whitespace-only body on an HTTP success is the
 		// canonical empty completion: without this, Execute and plugin
 		// executors returned it as a successful response and never rotated
-		// credentials.
+		// credentials. A literal JSON null is equally empty.
 		return true
 	}
 
