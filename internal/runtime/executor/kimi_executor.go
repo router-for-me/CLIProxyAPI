@@ -99,7 +99,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if from.String() == "claude" {
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 		preparedReq, replayScope := prepareKimiThinkingReplayRequest(ctx, req, opts)
-		if replayScope.replayApplied {
+		if replayScope.replayApplied && !helps.APIKeyModelIsCompat(preparedReq) {
 			preparedReq.Payload, _ = innersignature.SanitizeClaudeMessagesForClaudeUpstream(preparedReq.Payload, preparedReq.Model)
 		}
 		claudeResp, errExecute := e.ClaudeExecutor.Execute(ctx, auth, preparedReq, opts)
@@ -224,7 +224,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if from.String() == "claude" {
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 		preparedReq, replayScope := prepareKimiThinkingReplayRequest(ctx, req, opts)
-		if replayScope.replayApplied {
+		if replayScope.replayApplied && !helps.APIKeyModelIsCompat(preparedReq) {
 			preparedReq.Payload, _ = innersignature.SanitizeClaudeMessagesForClaudeUpstream(preparedReq.Payload, preparedReq.Model)
 		}
 		claudeResult, errExecute := e.ClaudeExecutor.ExecuteStream(ctx, auth, preparedReq, opts)

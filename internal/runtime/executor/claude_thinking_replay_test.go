@@ -37,21 +37,38 @@ func claudeReplayPayloadWithConversationID(payload []byte, conversationID string
 
 const claudeReplayResolvedModelInfoKey = "cliproxy.resolved_api_key_model_info"
 
-func TestClaudeThinkingReplayScopeFromRequest_FallbackKeyOnlyForContent(t *testing.T) {
+func TestClaudeThinkingReplayScopeFromRequest_DisablesReplayWithoutNonce(t *testing.T) {
 	auth := &cliproxyauth.Auth{ID: "auth-id"}
 
 	noncePayload := []byte(`{"messages":[{"role":"user","content":"hello"}],"client_metadata":{"conversation_id":"conv-1"}}`)
 	withNonceReq := cliproxyexecutor.Request{Model: "claude-3-opus", Payload: noncePayload}
 	withNonce := claudeThinkingReplayScopeFromRequest(context.Background(), auth, withNonceReq, cliproxyexecutor.Options{})
-	if withNonce.fallbackKey {
-		t.Fatalf("fallbackKey must be false when a conversation nonce is used")
+	if !withNonce.valid() || withNonce.fallbackKey {
+		t.Fatalf("nonce-based scope must be valid and not a fallback: %+v", withNonce)
 	}
 
 	contentPayload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
 	contentReq := cliproxyexecutor.Request{Model: "claude-3-opus", Payload: contentPayload}
 	content := claudeThinkingReplayScopeFromRequest(context.Background(), auth, contentReq, cliproxyexecutor.Options{})
-	if !content.fallbackKey {
-		t.Fatalf("fallbackKey must be true for a content-derived fallback scope")
+	if content.valid() || content.fallbackKey || content.sessionKey != "" {
+		t.Fatalf("no-nonce scope must be disabled: %+v", content)
+	}
+}
+
+func TestPrepareClaudeThinkingReplayRequestStripsClientProvenanceMarker(t *testing.T) {
+	internalcacheClearClaudeThinkingReplay(t)
+
+	auth := claudeReplayTestAuth("http://example.com")
+	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"client","signature":"bad","_cliproxy_replay_provenance":"claude-replay"}]},{"role":"user","content":"next"}],"client_metadata":{"conversation_id":"conv-prepare-strip"}}`)
+	req, opts := claudeReplayTestRequest(payload, "prepare-strip", true, sdktranslator.FormatClaude)
+
+	preparedReq, _, _, _ := prepareClaudeThinkingReplayRequest(context.Background(), auth, req, opts)
+
+	if gjson.GetBytes(preparedReq.Payload, "messages.0.content.0._cliproxy_replay_provenance").Exists() {
+		t.Fatalf("prepare did not strip client provenance marker: %s", preparedReq.Payload)
+	}
+	if gjson.GetBytes(preparedReq.Payload, "messages.0.content.0.signature").String() != "bad" {
+		t.Fatalf("prepare should leave the caller body untouched except for the marker: %s", preparedReq.Payload)
 	}
 }
 
@@ -1761,59 +1778,6 @@ func TestClaudeExecutorCompatThinkingReplayRetainsScopeAfterHistoryCompaction(t 
 	assistant := gjson.GetBytes(requestBodies[1], "messages.0.content").Array()
 	if assistant[0].Get("signature").String() != "EgI=" {
 		t.Fatalf("compacted request did not resolve the original replay scope: %s", gjson.GetBytes(requestBodies[1], "messages.0.content").Raw)
-	}
-}
-
-func TestClaudeExecutorCompatThinkingReplayRetainsNoNonceScopeAfterHistoryCompaction(t *testing.T) {
-	internalcacheClearClaudeThinkingReplay(t)
-
-	var mu sync.Mutex
-	var requestBodies [][]byte
-	callCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, errRead := io.ReadAll(r.Body)
-		if errRead != nil {
-			t.Errorf("read request body: %v", errRead)
-			return
-		}
-		mu.Lock()
-		requestBodies = append(requestBodies, bytes.Clone(body))
-		callCount++
-		call := callCount
-		mu.Unlock()
-
-		w.Header().Set("Content-Type", "application/json")
-		if call == 1 {
-			_, _ = w.Write([]byte(`{"id":"msg-1","type":"message","role":"assistant","model":"claude-synthetic-4772","content":[{"type":"thinking","thinking":"provider reasoning","signature":"EgI="},{"type":"text","text":"compact answer"}],"stop_reason":"end_turn"}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"id":"msg-2","type":"message","role":"assistant","model":"claude-synthetic-4772","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`))
-	}))
-	defer server.Close()
-
-	auth := claudeReplayTestAuth(server.URL)
-	executor := NewClaudeExecutor(nil)
-
-	firstPayload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
-	firstRequest, firstOptions := claudeReplayTestRequest(firstPayload, "", true, sdktranslator.FormatClaude)
-	if _, errExecute := executor.Execute(context.Background(), auth, firstRequest, firstOptions); errExecute != nil {
-		t.Fatalf("first Execute() error: %v", errExecute)
-	}
-
-	compactedPayload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"text","text":"compact answer"}]},{"role":"user","content":"next"}]}`)
-	compactedRequest, compactedOptions := claudeReplayTestRequest(compactedPayload, "", true, sdktranslator.FormatClaude)
-	if _, errExecute := executor.Execute(context.Background(), auth, compactedRequest, compactedOptions); errExecute != nil {
-		t.Fatalf("compacted Execute() error: %v", errExecute)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(requestBodies) != 2 {
-		t.Fatalf("upstream request count = %d, want 2", len(requestBodies))
-	}
-	assistant := gjson.GetBytes(requestBodies[1], "messages.0.content").Array()
-	if assistant[0].Get("signature").String() != "EgI=" {
-		t.Fatalf("compacted request did not resolve the no-nonce replay scope: %s", gjson.GetBytes(requestBodies[1], "messages.0.content").Raw)
 	}
 }
 

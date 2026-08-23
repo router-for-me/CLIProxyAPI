@@ -51,13 +51,14 @@ func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyaut
 	if sessionKey == "" {
 		var usedNonce bool
 		sessionKey, usedNonce = helps.ClaudeThinkingReplayConversationSessionKey(auth, req, opts)
-		fallback = sessionKey != "" && !usedNonce
-		if fallback {
-			resolvedMessages := capClaudeThinkingReplayAliasMessages(helps.ClaudeThinkingReplayMessageHashes(modelFamily, callerHash, req.Payload))
-			if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(ctx, modelFamily, resolvedMessages, firstUserHash); ok {
-				sessionKey = resolved
-			}
+		if sessionKey != "" && !usedNonce {
+			// No explicit conversation identity. Do not let the same caller's
+			// identical openings share a replay scope, because two independent
+			// conversations would race the same snapshot and corrupt suffix
+			// matching. Stateless clients must provide a nonce to use replay.
+			sessionKey = ""
 		}
+		fallback = false
 	}
 	return claudeThinkingReplayScope{
 		modelFamily:   modelFamily,
@@ -86,39 +87,33 @@ func capClaudeThinkingReplayAliasMessages(hashes []internalcache.ClaudeThinkingR
 
 // prepareClaudeThinkingReplayRequest loads cached assistant content for this
 // request and strips any client-supplied _cliproxy_replay_provenance markers
-// from req.Payload. The actual restore is applied to bodyForUpstream after
-// signature sanitization and before MCP tool-name remapping, so cache-provenanced
-// signatures bypass the sanitizer while matching against the caller-facing body.
-func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (claudeThinkingReplayScope, [][]byte, bool) {
-	scope := claudeThinkingReplayScopeFromRequest(ctx, auth, req, opts)
-	if !scope.valid() {
-		return scope, nil, false
-	}
-
+// from req.Payload. The caller must use the returned Request because the
+// payload has been cleaned; the actual restore is applied to bodyForUpstream
+// after signature sanitization and before MCP tool-name remapping, so
+// cache-provenanced signatures bypass the sanitizer while matching against the
+// caller-facing body.
+func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, claudeThinkingReplayScope, [][]byte, bool) {
+	// Strip any client-supplied provenance marker before using the payload for
+	// scope computation or cache matching. The returned Request is the only one
+	// that should be used downstream.
 	req.Payload = helps.StripClaudeThinkingReplayProvenanceMarkers(req.Payload)
 
-	// Both content-derived fallback scopes and caller-controlled nonce scopes can
-	// supply arbitrary openings per request; avoid reserving a Home KV tombstone
-	// until a replayable response is actually cached.
+	scope := claudeThinkingReplayScopeFromRequest(ctx, auth, req, opts)
+	if !scope.valid() {
+		return req, scope, nil, false
+	}
+
+	// Caller-controlled nonce scopes supply arbitrary openings per request; avoid
+	// reserving a Home KV tombstone until a replayable response is actually cached.
 	contents, snapshot, found, errGet := internalcache.GetClaudeThinkingReplayWithSnapshotIfExists(ctx, scope.modelFamily, scope.sessionKey)
 	scope.snapshot = snapshot
 	scope.cacheReady = errGet == nil
 	if errGet != nil {
 		log.Warnf("claude compatible thinking replay cache read failed: %v", errGet)
-		return scope, nil, false
-	}
-	// Register the messages in this payload as aliases for this conversation
-	// scope, so later compacted requests can resolve the same scope even when
-	// messages.0 has changed. This is done even when the cache is empty so the
-	// first request in a conversation can be rediscovered after compaction.
-	if scope.fallbackKey {
-		hashes := capClaudeThinkingReplayAliasMessages(helps.ClaudeThinkingReplayMessageHashes(scope.modelFamily, scope.callerHash, req.Payload))
-		for _, m := range hashes {
-			internalcache.RegisterClaudeThinkingReplayAlias(ctx, scope.modelFamily, scope.sessionKey, m.Hash, scope.firstUserHash)
-		}
+		return req, scope, nil, false
 	}
 	if !found {
-		return scope, nil, false
+		return req, scope, nil, false
 	}
 	// Normalize cached tool_use parts to match the shape the sanitizer will apply
 	// to the upstream body, so an echo'd tool_use with provenance fields does not
@@ -127,7 +122,7 @@ func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.
 	for i, content := range contents {
 		normalized[i] = helps.ClaudeThinkingReplayNormalizeCachedContent(content)
 	}
-	return scope, normalized, true
+	return req, scope, normalized, true
 }
 
 func cacheClaudeThinkingReplayResponse(ctx context.Context, scope claudeThinkingReplayScope, response []byte) {

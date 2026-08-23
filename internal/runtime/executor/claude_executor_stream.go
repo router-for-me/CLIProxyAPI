@@ -19,6 +19,14 @@ import (
 )
 
 func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	// For native Claude execution, strip any client-supplied provenance marker
+	// from the raw payload before translation. Kimi and other delegators set
+	// their own trusted marker after their own replay preparation, so they must
+	// not be stripped here.
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+		req.Payload = helps.StripClaudeThinkingReplayProvenanceMarkers(req.Payload)
+	}
+
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
@@ -48,7 +56,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	var replayScope claudeThinkingReplayScope
 	var replayContents [][]byte
 	if claudeThinkingReplayEnabled(auth, req, opts) {
-		replayScope, replayContents, _ = prepareClaudeThinkingReplayRequest(ctx, auth, req, opts)
+		req, replayScope, replayContents, _ = prepareClaudeThinkingReplayRequest(ctx, auth, req, opts)
 	}
 	var replayAccum *kimiThinkingReplayStreamAccumulator
 	if replayScope.valid() && responseFormat != to {

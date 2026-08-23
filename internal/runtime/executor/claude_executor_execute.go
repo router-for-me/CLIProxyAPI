@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -17,6 +18,14 @@ import (
 )
 
 func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	// For native Claude execution, strip any client-supplied provenance marker
+	// from the raw payload before translation. Kimi and other delegators set
+	// their own trusted marker after their own replay preparation, so they must
+	// not be stripped here.
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+		req.Payload = helps.StripClaudeThinkingReplayProvenanceMarkers(req.Payload)
+	}
+
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
@@ -42,7 +51,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	var replayScope claudeThinkingReplayScope
 	var replayContents [][]byte
 	if claudeThinkingReplayEnabled(auth, req, opts) {
-		replayScope, replayContents, _ = prepareClaudeThinkingReplayRequest(ctx, auth, req, opts)
+		req, replayScope, replayContents, _ = prepareClaudeThinkingReplayRequest(ctx, auth, req, opts)
 	}
 	defer func() {
 		if err != nil && replayScope.replayApplied && shouldClearKimiThinkingReplayAfterError(err) {

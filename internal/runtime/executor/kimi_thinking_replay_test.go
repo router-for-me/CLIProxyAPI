@@ -23,6 +23,24 @@ type kimiLocalBadRequestError struct{}
 func (kimiLocalBadRequestError) Error() string   { return "local validation failed" }
 func (kimiLocalBadRequestError) StatusCode() int { return http.StatusBadRequest }
 
+func TestPrepareKimiThinkingReplayRequestStripsClientProvenanceMarker(t *testing.T) {
+	internalcache.ClearKimiThinkingReplayCache()
+	t.Cleanup(internalcache.ClearKimiThinkingReplayCache)
+
+	payload := []byte(`{"model":"kimi-k3","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"client","signature":"bad","_cliproxy_replay_provenance":"kimi-replay"}]},{"role":"user","content":"next"}]}`)
+	req := cliproxyexecutor.Request{Model: "kimi-k3", Payload: payload}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+
+	preparedReq, _ := prepareKimiThinkingReplayRequest(context.Background(), req, opts)
+
+	if gjson.GetBytes(preparedReq.Payload, "messages.0.content.0._cliproxy_replay_provenance").Exists() {
+		t.Fatalf("prepareKimi did not strip client provenance marker: %s", preparedReq.Payload)
+	}
+	if gjson.GetBytes(preparedReq.Payload, "messages.0.content.0.signature").String() != "bad" {
+		t.Fatalf("prepareKimi should leave the caller body untouched except for the marker: %s", preparedReq.Payload)
+	}
+}
+
 func TestKimiThinkingReplayModelFamily(t *testing.T) {
 	cases := []struct {
 		model string

@@ -55,6 +55,11 @@ func kimiThinkingReplayScopeFromRequest(ctx context.Context, req cliproxyexecuto
 }
 
 func prepareKimiThinkingReplayRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, kimiThinkingReplayScope) {
+	// Strip any client-supplied provenance marker before using the payload for
+	// scope computation or cache matching. The returned Request is the only one
+	// that should be used downstream.
+	req.Payload = helps.StripClaudeThinkingReplayProvenanceMarkers(req.Payload)
+
 	scope := kimiThinkingReplayScopeFromRequest(ctx, req, opts)
 	if !scope.valid() {
 		return req, scope

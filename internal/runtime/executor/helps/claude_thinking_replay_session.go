@@ -53,10 +53,9 @@ func claudeReplayConversationNonce(payload []byte, headers http.Header) string {
 // caller fields only, so it survives history compaction and gives two
 // identical openings with different nonces distinct scopes.
 //
-// When no nonce is present, the key falls back to the first user message and
-// system prompt so replay still works for stateless clients; alias resolution
-// in the executor can then recover the original conversation after history
-// compaction.
+// When no nonce is present, the key is empty. Two identical openings from the
+// same caller would share a snapshot and race each other, so replay is disabled
+// for stateless clients that do not provide a stable conversation identity.
 func ClaudeThinkingReplayConversationSessionKey(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (string, bool) {
 	if len(req.Payload) == 0 {
 		return "", false
