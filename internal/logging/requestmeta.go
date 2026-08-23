@@ -84,6 +84,17 @@ func WithResponseHeadersHolder(ctx context.Context) context.Context {
 	return context.WithValue(ctx, responseHeadersKey{}, &responseHeadersHolder{})
 }
 
+// WithFreshResponseHeadersHolder starts an isolated upstream response attempt.
+// Unlike WithResponseHeadersHolder, it always shadows any holder inherited from
+// the parent request so a later retry cannot observe headers from an earlier
+// credential or model attempt.
+func WithFreshResponseHeadersHolder(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, responseHeadersKey{}, &responseHeadersHolder{})
+}
+
 func SetResponseStatus(ctx context.Context, status int) {
 	if ctx == nil || status <= 0 {
 		return
@@ -106,6 +117,30 @@ func SetResponseHeaders(ctx context.Context, headers http.Header) {
 	holder.mu.Lock()
 	defer holder.mu.Unlock()
 	holder.headers = cloneHTTPHeader(headers)
+}
+
+// MergeResponseHeaders adds headers observed after the initial HTTP response,
+// such as quota metadata delivered in a websocket event.
+func MergeResponseHeaders(ctx context.Context, headers http.Header) {
+	if ctx == nil || len(headers) == 0 {
+		return
+	}
+	holder, ok := ctx.Value(responseHeadersKey{}).(*responseHeadersHolder)
+	if !ok || holder == nil {
+		return
+	}
+	holder.mu.Lock()
+	defer holder.mu.Unlock()
+	if holder.headers == nil {
+		holder.headers = make(http.Header, len(headers))
+	}
+	for key, values := range headers {
+		canonicalKey := http.CanonicalHeaderKey(key)
+		if canonicalKey == "" {
+			continue
+		}
+		holder.headers[canonicalKey] = append([]string(nil), values...)
+	}
 }
 
 func GetResponseStatus(ctx context.Context) int {
