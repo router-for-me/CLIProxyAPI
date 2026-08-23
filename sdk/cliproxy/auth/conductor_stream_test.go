@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -96,5 +97,39 @@ func TestStreamErrorRedactsQuotedJSONSecretInRecord(t *testing.T) {
 	}
 	if !strings.Contains(stored.LastError.Message, "REDACTED") {
 		t.Fatalf("auth.LastError.Message did not redact secret: %q", stored.LastError.Message)
+	}
+}
+
+func TestDiscardStreamChunksExitsOnContextCancel(t *testing.T) {
+	src := make(chan cliproxyexecutor.StreamChunk)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := discardStreamChunks(ctx, src)
+
+	select {
+	case <-done:
+		t.Fatal("drain finished too early")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("discardStreamChunks goroutine did not exit on context cancellation")
+	}
+}
+
+func TestDiscardStreamChunksExitsOnOpenUnclosedChannel(t *testing.T) {
+	previous := streamDrainTimeout
+	streamDrainTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { streamDrainTimeout = previous })
+
+	src := make(chan cliproxyexecutor.StreamChunk)
+	done := discardStreamChunks(context.Background(), src)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("discardStreamChunks goroutine did not exit on timeout for open unclosed channel")
 	}
 }
