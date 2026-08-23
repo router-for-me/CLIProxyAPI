@@ -1206,6 +1206,70 @@ func TestClaudeThinkingReplayAliasHomeEvictionDoesNotDeleteLiveFallback(t *testi
 	}
 }
 
+func TestClaudeThinkingReplayAliasHomeCrossModelEvictionDeletesCorrectRecord(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	ctx := context.Background()
+	const modelA = "claude:cred:modelA"
+	const modelB = "claude:cred:modelB"
+	const sessionA = "fb:session-A"
+
+	client := newFakeClaudeThinkingReplayKVClient()
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	// Seed a replay record and alias under model A.
+	CacheClaudeThinkingReplayBestEffort(ctx, modelA, sessionA, []byte(`[{"type":"text","text":"x"}]`))
+	RegisterClaudeThinkingReplayAlias(ctx, modelA, sessionA, "msgA", "first")
+
+	// Fill the per-credential alias cap with model B aliases. The credential
+	// hash is "cred" for both, so the index is shared.
+	max := ClaudeThinkingReplayCacheMaxAliasesPerCredential
+	for i := 0; i < max-1; i++ {
+		RegisterClaudeThinkingReplayAlias(ctx, modelB, fmt.Sprintf("sessionB-%d", i), messageHashFor(i), "first")
+	}
+
+	// Evict the model A alias from the shared per-credential index. Seed the
+	// model B replay record first so it can be verified after eviction.
+	CacheClaudeThinkingReplayBestEffort(ctx, modelB, "sessionB-new", []byte(`[{"type":"text","text":"y"}]`))
+	RegisterClaudeThinkingReplayAlias(ctx, modelB, "sessionB-new", messageHashFor(max-1), "first")
+
+	// The model A alias value should be tombstoned.
+	aliasAKey := claudeThinkingReplayAliasKVKey(modelA, "msgA")
+	raw, found := client.values[aliasAKey]
+	if !found || claudeThinkingReplayAliasValueRepopulated(raw, time.Time{}) {
+		t.Fatalf("model A alias was not evicted")
+	}
+
+	// The model A replay record must be deleted using model A, not model B.
+	replayAKey := claudeThinkingReplayKVKey(modelA, sessionA)
+	if _, ok := client.values[replayAKey]; ok {
+		t.Fatalf("model A replay record %q was not deleted", replayAKey)
+	}
+
+	// Model B records should still exist.
+	replayBKey := claudeThinkingReplayKVKey(modelB, "sessionB-new")
+	if _, ok := client.values[replayBKey]; !ok {
+		t.Fatalf("model B replay record %q missing", replayBKey)
+	}
+
+	// The fallback index should not reference the deleted model A session.
+	indexKey := claudeThinkingReplayFallbackIndexKVKey(modelA)
+	raw, found = client.values[indexKey]
+	if !found {
+		t.Fatalf("fallback index missing")
+	}
+	var index claudeThinkingReplayFallbackIndex
+	if err := json.Unmarshal(raw, &index); err != nil {
+		t.Fatalf("fallback index unmarshal failed: %v", err)
+	}
+	for _, s := range index.Sessions {
+		if s.SessionKey == sessionA {
+			t.Fatalf("fallback index still references deleted model A session")
+		}
+	}
+}
+
 func TestClaudeThinkingReplayAliasHomeEvictedTombstoneHasShortTTL(t *testing.T) {
 	ClearClaudeThinkingReplayCache()
 	defer ClearClaudeThinkingReplayCache()

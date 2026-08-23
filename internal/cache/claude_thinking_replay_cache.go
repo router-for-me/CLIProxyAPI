@@ -696,13 +696,15 @@ type claudeThinkingReplayFallbackIndex struct {
 }
 
 type claudeThinkingReplayFallbackSession struct {
-	SessionKey string    `json:"session_key"`
-	Aliases    []string  `json:"aliases"`
-	Timestamp  time.Time `json:"timestamp"`
+	SessionKey  string    `json:"session_key"`
+	Aliases     []string  `json:"aliases"`
+	ModelFamily string    `json:"model_family"`
+	Timestamp   time.Time `json:"timestamp"`
 }
 
 type claudeThinkingReplayFallbackRefChange struct {
 	sessionKey  string
+	modelFamily string
 	addAlias    string
 	removeAlias string
 }
@@ -775,7 +777,7 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 			committedAliasRaw = newRaw
 			fallbackChanges = fallbackChanges[:0]
 			if isFallback {
-				fallbackChanges = append(fallbackChanges, claudeThinkingReplayFallbackRefChange{sessionKey: sessionKey, addAlias: aliasKey})
+				fallbackChanges = append(fallbackChanges, claudeThinkingReplayFallbackRefChange{sessionKey: sessionKey, modelFamily: modelFamily, addAlias: aliasKey})
 			}
 			for _, s := range perAliasEvicted {
 				if strings.HasPrefix(s.SessionKey, fallbackPrefix) {
@@ -1119,23 +1121,27 @@ func claudeThinkingReplayFallbackIndexHasAlias(s claudeThinkingReplayFallbackSes
 	return false
 }
 
-func claudeThinkingReplayFallbackIndexAddAlias(sessions []claudeThinkingReplayFallbackSession, sessionKey, aliasKey string, now time.Time) []claudeThinkingReplayFallbackSession {
+func claudeThinkingReplayFallbackIndexAddAlias(sessions []claudeThinkingReplayFallbackSession, sessionKey, aliasKey, modelFamily string, now time.Time) []claudeThinkingReplayFallbackSession {
 	i := claudeThinkingReplayFallbackIndexFind(sessions, sessionKey)
 	if i < 0 {
-		return append(sessions, claudeThinkingReplayFallbackSession{SessionKey: sessionKey, Aliases: []string{aliasKey}, Timestamp: now})
+		return append(sessions, claudeThinkingReplayFallbackSession{SessionKey: sessionKey, Aliases: []string{aliasKey}, ModelFamily: modelFamily, Timestamp: now})
 	}
 	sessions[i].Timestamp = now
 	if !claudeThinkingReplayFallbackIndexHasAlias(sessions[i], aliasKey) {
 		sessions[i].Aliases = append(sessions[i].Aliases, aliasKey)
 	}
+	if sessions[i].ModelFamily == "" && modelFamily != "" {
+		sessions[i].ModelFamily = modelFamily
+	}
 	return sessions
 }
 
-func claudeThinkingReplayFallbackIndexRemoveAlias(sessions []claudeThinkingReplayFallbackSession, sessionKey, aliasKey string) ([]claudeThinkingReplayFallbackSession, bool) {
+func claudeThinkingReplayFallbackIndexRemoveAlias(sessions []claudeThinkingReplayFallbackSession, sessionKey, aliasKey string) (newSessions []claudeThinkingReplayFallbackSession, empty bool, modelFamily string) {
 	i := claudeThinkingReplayFallbackIndexFind(sessions, sessionKey)
 	if i < 0 {
-		return sessions, false
+		return sessions, false, ""
 	}
+	modelFamily = sessions[i].ModelFamily
 	aliases := sessions[i].Aliases[:0]
 	for _, a := range sessions[i].Aliases {
 		if a != aliasKey {
@@ -1143,7 +1149,7 @@ func claudeThinkingReplayFallbackIndexRemoveAlias(sessions []claudeThinkingRepla
 		}
 	}
 	sessions[i].Aliases = aliases
-	return sessions, len(sessions[i].Aliases) == 0
+	return sessions, len(sessions[i].Aliases) == 0, modelFamily
 }
 
 func purgeExpiredClaudeThinkingReplayFallbackSessions(sessions []claudeThinkingReplayFallbackSession, now time.Time) []claudeThinkingReplayFallbackSession {
@@ -1173,15 +1179,19 @@ func applyClaudeThinkingReplayFallbackIndexChanges(ctx context.Context, client k
 		index, _ := decodeClaudeThinkingReplayFallbackIndex(raw)
 		index.Sessions = purgeExpiredClaudeThinkingReplayFallbackSessions(index.Sessions, now)
 
-		var toDelete []string
+		var toDelete []struct {
+			sessionKey  string
+			modelFamily string
+		}
 		for _, ch := range changes {
 			if ch.addAlias != "" {
-				index.Sessions = claudeThinkingReplayFallbackIndexAddAlias(index.Sessions, ch.sessionKey, ch.addAlias, now)
+				index.Sessions = claudeThinkingReplayFallbackIndexAddAlias(index.Sessions, ch.sessionKey, ch.addAlias, ch.modelFamily, now)
 			} else if ch.removeAlias != "" {
 				var empty bool
-				index.Sessions, empty = claudeThinkingReplayFallbackIndexRemoveAlias(index.Sessions, ch.sessionKey, ch.removeAlias)
+				var modelFamily string
+				index.Sessions, empty, modelFamily = claudeThinkingReplayFallbackIndexRemoveAlias(index.Sessions, ch.sessionKey, ch.removeAlias)
 				if empty {
-					toDelete = append(toDelete, ch.sessionKey)
+					toDelete = append(toDelete, struct{ sessionKey, modelFamily string }{ch.sessionKey, modelFamily})
 					idx := claudeThinkingReplayFallbackIndexFind(index.Sessions, ch.sessionKey)
 					if idx >= 0 {
 						index.Sessions = append(index.Sessions[:idx], index.Sessions[idx+1:]...)
@@ -1197,7 +1207,7 @@ func applyClaudeThinkingReplayFallbackIndexChanges(ctx context.Context, client k
 				return index.Sessions[i].Timestamp.Before(index.Sessions[j].Timestamp)
 			})
 			for len(index.Sessions) > ClaudeThinkingReplayCacheMaxFallbackSessions && len(index.Sessions[0].Aliases) == 0 {
-				toDelete = append(toDelete, index.Sessions[0].SessionKey)
+				toDelete = append(toDelete, struct{ sessionKey, modelFamily string }{index.Sessions[0].SessionKey, index.Sessions[0].ModelFamily})
 				index.Sessions = index.Sessions[1:]
 			}
 		}
@@ -1236,8 +1246,8 @@ func applyClaudeThinkingReplayFallbackIndexChanges(ctx context.Context, client k
 	}
 }
 
-func deleteClaudeThinkingReplayFallbackRecordsIfUnreferenced(ctx context.Context, client kimiThinkingReplayKVClient, modelFamily string, sessionKeys []string) {
-	if len(sessionKeys) == 0 {
+func deleteClaudeThinkingReplayFallbackRecordsIfUnreferenced(ctx context.Context, client kimiThinkingReplayKVClient, modelFamily string, toDelete []struct{ sessionKey, modelFamily string }) {
+	if len(toDelete) == 0 {
 		return
 	}
 	key := claudeThinkingReplayFallbackIndexKVKey(modelFamily)
@@ -1253,11 +1263,11 @@ func deleteClaudeThinkingReplayFallbackRecordsIfUnreferenced(ctx context.Context
 			stillReferenced[s.SessionKey] = true
 		}
 	}
-	for _, sessionKey := range sessionKeys {
-		if stillReferenced[sessionKey] {
+	for _, rec := range toDelete {
+		if stillReferenced[rec.sessionKey] {
 			continue
 		}
-		if _, errDel := client.KVDel(ctx, claudeThinkingReplayKVKey(modelFamily, sessionKey)); errDel != nil {
+		if _, errDel := client.KVDel(ctx, claudeThinkingReplayKVKey(rec.modelFamily, rec.sessionKey)); errDel != nil {
 			log.Warnf("claude thinking replay fallback record delete failed: %v", errDel)
 		}
 	}
