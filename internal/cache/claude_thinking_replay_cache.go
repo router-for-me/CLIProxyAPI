@@ -885,21 +885,31 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 		tombstone, errMarshal := json.Marshal(claudeThinkingReplayAliasHomeValue{})
 		if errMarshal != nil {
 			log.Warnf("claude thinking replay alias eviction tombstone marshal failed: %v", errMarshal)
+			delete(evictedAliasSessions, rec.AliasKey)
 			continue
 		}
+		evictedAlias := false
 		swapped, errCAS := client.KVCompareAndSwap(ctx, rec.AliasKey, raw, true, tombstone, claudeThinkingReplayAliasTombstoneTTL)
 		if errCAS != nil {
 			if errors.Is(errCAS, homekv.ErrCompareAndSwapUnsupported) {
 				if _, errDel := client.KVDel(ctx, rec.AliasKey); errDel != nil {
 					log.Warnf("claude thinking replay alias eviction failed: %v", errDel)
+					delete(evictedAliasSessions, rec.AliasKey)
+					continue
 				}
+				evictedAlias = true
+			} else {
+				log.Warnf("claude thinking replay alias eviction cas failed: %v", errCAS)
+				delete(evictedAliasSessions, rec.AliasKey)
 				continue
 			}
-			log.Warnf("claude thinking replay alias eviction cas failed: %v", errCAS)
-			continue
+		} else if swapped {
+			evictedAlias = true
 		}
-		if !swapped {
-			// The value changed; leave it for the next index update.
+		if !evictedAlias {
+			// The value changed; leave it for the next index update and do not
+			// remove fallback references for a live alias.
+			delete(evictedAliasSessions, rec.AliasKey)
 			continue
 		}
 	}

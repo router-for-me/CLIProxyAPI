@@ -1101,6 +1101,111 @@ func messageHashFor(i int) string {
 	return string(s)
 }
 
+type raceyTombstoneClaudeThinkingReplayKVClient struct {
+	*fakeClaudeThinkingReplayKVClient
+	evictAliasKey string
+	liveValue     []byte
+	failed        bool
+	mu            sync.Mutex
+}
+
+func (c *raceyTombstoneClaudeThinkingReplayKVClient) KVCompareAndSwap(_ context.Context, key string, expected []byte, expectedExists bool, newValue []byte, ttl time.Duration) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if key == c.evictAliasKey && !c.failed {
+		var v claudeThinkingReplayAliasHomeValue
+		if json.Unmarshal(newValue, &v) == nil && len(v.Sessions) == 0 {
+			c.values[key] = append([]byte(nil), c.liveValue...)
+			c.sets++
+			c.failed = true
+			return false, nil
+		}
+	}
+	return c.fakeClaudeThinkingReplayKVClient.KVCompareAndSwap(context.Background(), key, expected, expectedExists, newValue, ttl)
+}
+
+func TestClaudeThinkingReplayAliasHomeEvictionDoesNotDeleteLiveFallback(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+
+	evictAliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHashFor(0))
+	liveValue, err := json.Marshal(claudeThinkingReplayAliasHomeValue{
+		Sessions: []claudeThinkingReplayAliasHomeSession{
+			{SessionKey: "fb:session-0", FirstUserHash: "first0", Timestamp: time.Now().Add(time.Second)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("live value marshal failed: %v", err)
+	}
+
+	fake := newFakeClaudeThinkingReplayKVClient()
+	client := &raceyTombstoneClaudeThinkingReplayKVClient{
+		fakeClaudeThinkingReplayKVClient: fake,
+		evictAliasKey:                    evictAliasKey,
+		liveValue:                        liveValue,
+	}
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	// Seed the replay record and the first alias.
+	CacheClaudeThinkingReplayBestEffort(ctx, modelFamily, "fb:session-0", []byte(`[{"type":"text","text":"x"}]`))
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "fb:session-0", messageHashFor(0), "first0")
+
+	// Fill the per-credential alias cap so the next registration evicts the first alias.
+	max := ClaudeThinkingReplayCacheMaxAliasesPerCredential
+	for i := 1; i < max; i++ {
+		RegisterClaudeThinkingReplayAlias(ctx, modelFamily, fmt.Sprintf("session-%d", i), messageHashFor(i), "first")
+	}
+
+	// Trigger eviction. The racey client fails the tombstone CAS and injects
+	// a live re-registered alias value for the evicted alias.
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "session-new", messageHashFor(max), "first")
+
+	// The evicted alias must still be live.
+	raw, found := client.values[evictAliasKey]
+	if !found || !claudeThinkingReplayAliasValueRepopulated(raw, time.Time{}) {
+		t.Fatalf("evicted alias was deleted instead of preserved")
+	}
+	var value claudeThinkingReplayAliasHomeValue
+	if err := json.Unmarshal(raw, &value); err != nil || len(value.Sessions) == 0 || value.Sessions[0].SessionKey != "fb:session-0" {
+		t.Fatalf("evicted alias has unexpected content: %s", raw)
+	}
+
+	// The fallback replay record must not have been deleted.
+	replayKey := claudeThinkingReplayKVKey(modelFamily, "fb:session-0")
+	if _, ok := client.values[replayKey]; !ok {
+		t.Fatalf("live replay record %q was deleted", replayKey)
+	}
+
+	// The fallback index must still record the alias reference.
+	indexKey := claudeThinkingReplayFallbackIndexKVKey(modelFamily)
+	raw, found = client.values[indexKey]
+	if !found {
+		t.Fatalf("fallback index missing")
+	}
+	var index claudeThinkingReplayFallbackIndex
+	if err := json.Unmarshal(raw, &index); err != nil {
+		t.Fatalf("fallback index unmarshal failed: %v", err)
+	}
+	foundRef := false
+	for _, s := range index.Sessions {
+		if s.SessionKey != "fb:session-0" {
+			continue
+		}
+		for _, a := range s.Aliases {
+			if a == evictAliasKey {
+				foundRef = true
+				break
+			}
+		}
+	}
+	if !foundRef {
+		t.Fatalf("fallback index lost live alias reference")
+	}
+}
+
 func TestClaudeThinkingReplayAliasHomeEvictedTombstoneHasShortTTL(t *testing.T) {
 	ClearClaudeThinkingReplayCache()
 	defer ClearClaudeThinkingReplayCache()
