@@ -2,9 +2,7 @@ package management
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -30,6 +28,7 @@ type codexAuthFileRef struct {
 	Name      string
 	AccountID string
 	Disabled  bool
+	Metadata  map[string]any
 }
 
 // saveCodexOAuthRecord persists a Codex OAuth credential. If this ChatGPT
@@ -51,12 +50,15 @@ func (h *Handler) saveCodexOAuthRecord(ctx context.Context, record *coreauth.Aut
 		replaceHint = ""
 	}
 
-	siblings := h.listCodexFilesByAccountID(accountID)
+	siblings, errList := h.listCodexFilesByAccountID(ctx, accountID)
+	if errList != nil {
+		return "", errList
+	}
 	keep, remove := pickCodexKeepAndRemove(siblings, canonicalName, replaceHint)
 	writeName := canonicalName
 	if keep != "" {
 		writeName = keep
-		h.mergeAuthFileMetadataFrom(record, keep)
+		mergeCodexOperatorMetadata(record, metadataForCodexRef(siblings, keep))
 	}
 
 	prepareCodexOAuthRecordForSave(record, writeName)
@@ -112,58 +114,65 @@ func codexAccountIDFromRecord(record *coreauth.Auth) string {
 	return strings.TrimSpace(id)
 }
 
-func (h *Handler) listCodexFilesByAccountID(accountID string) []codexAuthFileRef {
+func (h *Handler) listCodexFilesByAccountID(ctx context.Context, accountID string) ([]codexAuthFileRef, error) {
 	accountID = strings.TrimSpace(accountID)
-	if accountID == "" || h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" {
-		return nil
+	if accountID == "" || h == nil {
+		return nil, nil
 	}
-	entries, err := os.ReadDir(h.cfg.AuthDir)
+	store := h.tokenStoreWithBaseDir()
+	if store == nil {
+		return nil, fmt.Errorf("token store unavailable")
+	}
+	auths, err := store.List(ctx)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("list existing Codex auth records: %w", err)
 	}
 	var out []codexAuthFileRef
-	for _, entry := range entries {
-		if entry.IsDir() {
+	for _, auth := range auths {
+		if auth == nil || !isCodexAuthRecord(auth) {
 			continue
 		}
-		name := entry.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".json") || strings.HasPrefix(name, ".") {
-			continue
-		}
-		raw, errRead := os.ReadFile(filepath.Join(h.cfg.AuthDir, name))
-		if errRead != nil || len(raw) == 0 {
-			continue
-		}
-		var payload map[string]any
-		if errJSON := json.Unmarshal(raw, &payload); errJSON != nil {
-			continue
-		}
-		if !isCodexAuthPayload(payload) {
-			continue
-		}
-		id := authPayloadAccountID(payload)
+		id := authPayloadAccountID(auth.Metadata)
 		if id == "" || id != accountID {
+			continue
+		}
+		name := authRecordFileName(auth)
+		if name == "" || isUnsafeAuthFileName(name) {
 			continue
 		}
 		out = append(out, codexAuthFileRef{
 			Name:      name,
 			AccountID: id,
-			Disabled:  truthyJSON(payload["disabled"]),
+			Disabled:  auth.Disabled || truthyJSON(auth.Metadata["disabled"]),
+			Metadata:  cloneMetadataMap(auth.Metadata),
 		})
 	}
-	return out
+	return out, nil
+}
+
+func isCodexAuthRecord(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return true
+	}
+	return isCodexAuthPayload(auth.Metadata)
 }
 
 func isCodexAuthPayload(payload map[string]any) bool {
-	if payload == nil {
-		return false
+	return strings.EqualFold(strings.TrimSpace(jsonString(payload["type"])), "codex")
+}
+
+func authRecordFileName(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
 	}
-	switch strings.ToLower(strings.TrimSpace(jsonString(payload["type"]))) {
-	case "", "codex":
-		return true
-	default:
-		return false
+	name := filepath.Base(strings.TrimSpace(auth.FileName))
+	if name != "" && name != "." && name != string(filepath.Separator) {
+		return name
 	}
+	return filepath.Base(strings.TrimSpace(auth.ID))
 }
 
 func authPayloadAccountID(payload map[string]any) string {
@@ -234,20 +243,33 @@ func pickCodexKeepAndRemove(siblings []codexAuthFileRef, canonicalName, replaceH
 	return keep, remove
 }
 
-func (h *Handler) mergeAuthFileMetadataFrom(record *coreauth.Auth, fileName string) {
-	if h == nil || record == nil || h.cfg == nil || isUnsafeAuthFileName(fileName) {
+func metadataForCodexRef(siblings []codexAuthFileRef, name string) map[string]any {
+	for _, sibling := range siblings {
+		if sibling.Name == name {
+			return sibling.Metadata
+		}
+	}
+	return nil
+}
+
+func mergeCodexOperatorMetadata(record *coreauth.Auth, existingMap map[string]any) {
+	if record == nil || len(existingMap) == 0 {
 		return
 	}
-	raw, errRead := os.ReadFile(filepath.Join(h.cfg.AuthDir, filepath.Base(fileName)))
-	if errRead != nil || len(raw) == 0 {
-		return
-	}
-	var existingMap map[string]any
-	if errJSON := json.Unmarshal(raw, &existingMap); errJSON != nil || len(existingMap) == 0 {
-		return
-	}
+	cloned := cloneMetadataMap(existingMap)
 	for _, key := range oauthRuntimeMetadataKeys {
-		delete(existingMap, key)
+		delete(cloned, key)
 	}
-	coreauth.MergeExistingAuthMetadata(record, existingMap)
+	coreauth.MergeExistingAuthMetadata(record, cloned)
+}
+
+func cloneMetadataMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }

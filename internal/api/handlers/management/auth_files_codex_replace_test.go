@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
@@ -288,6 +290,82 @@ func jsonFileNames(t *testing.T, dir string) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func TestSaveCodexOAuthRecordListErrorDoesNotCreateFile(t *testing.T) {
+	authDir := t.TempDir()
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	h.tokenStore = overlayListStore{Store: h.tokenStoreWithBaseDir(), listErr: fmt.Errorf("store list failed")}
+
+	record := newCodexRecord("user@example.com", testCodexAccountID, "pro", "new-access", "new-refresh")
+	if _, errSave := h.saveCodexOAuthRecord(context.Background(), record, ""); errSave == nil {
+		t.Fatal("expected list error, got nil")
+	} else if !strings.Contains(errSave.Error(), "store list failed") {
+		t.Fatalf("error = %v, want store list failed", errSave)
+	}
+	if names := jsonFileNames(t, authDir); len(names) != 0 {
+		t.Fatalf("auth files = %v, want none after list failure", names)
+	}
+}
+
+func TestSaveCodexOAuthRecordUsesStoreListNotDiskScan(t *testing.T) {
+	authDir := t.TempDir()
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	base := h.tokenStoreWithBaseDir()
+	keepName := "codex-store-keep.json"
+	h.tokenStore = overlayListStore{
+		Store: base,
+		list: []*coreauth.Auth{{
+			ID:       keepName,
+			Provider: "codex",
+			FileName: keepName,
+			Metadata: map[string]any{
+				"type":       "codex",
+				"account_id": testCodexAccountID,
+				"note":       "from-store",
+				"priority":   float64(7),
+			},
+		}},
+	}
+
+	record := newCodexRecord("user@example.com", testCodexAccountID, "pro", "new-access", "new-refresh")
+	if _, errSave := h.saveCodexOAuthRecord(context.Background(), record, ""); errSave != nil {
+		t.Fatalf("saveCodexOAuthRecord: %v", errSave)
+	}
+
+	got := jsonFileNames(t, authDir)
+	if !stringSlicesEqual(got, []string{keepName}) {
+		t.Fatalf("auth files = %v, want [%s]", got, keepName)
+	}
+	saved := readJSONMap(t, filepath.Join(authDir, keepName))
+	if saved["note"] != "from-store" {
+		t.Errorf("note = %v, want from-store", saved["note"])
+	}
+	if saved["priority"] != float64(7) {
+		t.Errorf("priority = %v, want 7", saved["priority"])
+	}
+	if saved["access_token"] != "new-access" {
+		t.Errorf("access_token = %v, want new-access", saved["access_token"])
+	}
+}
+
+type overlayListStore struct {
+	coreauth.Store
+	list    []*coreauth.Auth
+	listErr error
+}
+
+func (s overlayListStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	if s.list != nil {
+		return s.list, nil
+	}
+	if s.Store == nil {
+		return nil, nil
+	}
+	return s.Store.List(ctx)
 }
 
 func stringSlicesEqual(a, b []string) bool {
