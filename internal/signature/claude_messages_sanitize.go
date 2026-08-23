@@ -92,7 +92,7 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 			partType := part.Get("type").String()
 			if partType == "tool_use" {
 				if opts.DropToolSignatures {
-					updatedPart, changed := stripClaudeToolUseSignatureFields(part)
+					updatedPart, changed := StripClaudeToolUseSignatureFields(part)
 					if changed {
 						messageModified = true
 						report.DroppedSignatures++
@@ -122,6 +122,15 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 			if partType != "thinking" {
 				keptParts = append(keptParts, part.Raw)
 				continue
+			}
+
+			// Replay provenance is added only internally by the executor after the
+			// sanitizer has already run. Any client-supplied marker is untrusted and
+			// must be stripped so it cannot bypass signature validation.
+			if part.Get("_cliproxy_replay_provenance").Exists() {
+				updated, _ := sjson.Delete(part.Raw, "_cliproxy_replay_provenance")
+				part = gjson.Parse(updated)
+				messageModified = true
 			}
 
 			rawSignature := part.Get("signature").String()
@@ -219,7 +228,11 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 	return output, report
 }
 
-func stripClaudeToolUseSignatureFields(part gjson.Result) (string, bool) {
+// StripClaudeToolUseSignatureFields removes tool-use signature/provenance
+// fields and empty extra_content.google/extra_content wrappers. It is exported
+// so the executor's replay-cache match can normalize cached tool_use parts with
+// the same logic the upstream sanitizer applies.
+func StripClaudeToolUseSignatureFields(part gjson.Result) (string, bool) {
 	updated := part.Raw
 	changed := false
 	for _, sigPath := range claudeToolUseProvenancePaths() {
