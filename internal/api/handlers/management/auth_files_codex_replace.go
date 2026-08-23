@@ -76,13 +76,18 @@ func (h *Handler) saveCodexOAuthRecord(ctx context.Context, record *coreauth.Aut
 		return savedPath, errSave
 	}
 
+	var deleteErr error
 	for _, name := range remove {
 		if name == "" || name == writeName {
 			continue
 		}
 		if errDelete := h.deleteCodexAuthRel(ctx, name); errDelete != nil {
-			log.WithError(errDelete).WithField("file", name).Warn("failed to remove replaced Codex auth file")
+			log.WithError(errDelete).WithField("file", name).Error("failed to remove replaced Codex auth file")
+			deleteErr = fmt.Errorf("saved %s but failed to remove %s: %w", writeName, name, errDelete)
 		}
+	}
+	if deleteErr != nil {
+		return savedPath, deleteErr
 	}
 	return savedPath, nil
 }

@@ -417,6 +417,32 @@ func TestSaveCodexOAuthRecordRemovesNestedSibling(t *testing.T) {
 	}
 }
 
+func TestSaveCodexOAuthRecordSiblingDeleteFailureIsReturned(t *testing.T) {
+	authDir := t.TempDir()
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	freeName := codexFileName("user@example.com", "free", testCodexAccountID)
+	proName := codexFileName("user@example.com", "pro", testCodexAccountID)
+	writeCodexJSON(t, authDir, freeName, map[string]any{
+		"type":       "codex",
+		"account_id": testCodexAccountID,
+		"note":       "keep",
+	})
+	writeCodexJSON(t, authDir, proName, map[string]any{
+		"type":       "codex",
+		"account_id": testCodexAccountID,
+	})
+	h.tokenStore = overlayListStore{
+		Store:     h.tokenStoreWithBaseDir(),
+		deleteErr: fmt.Errorf("remote delete failed"),
+	}
+
+	record := newCodexRecord("user@example.com", testCodexAccountID, "pro", "new-access", "new-refresh")
+	_, errSave := h.saveCodexOAuthRecord(context.Background(), record, freeName)
+	if errSave == nil || !strings.Contains(errSave.Error(), "remote delete failed") {
+		t.Fatalf("error = %v, want remote delete failed", errSave)
+	}
+}
+
 func TestSaveCodexOAuthRecordListErrorDoesNotCreateFile(t *testing.T) {
 	authDir := t.TempDir()
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
@@ -476,8 +502,9 @@ func TestSaveCodexOAuthRecordUsesStoreListNotDiskScan(t *testing.T) {
 
 type overlayListStore struct {
 	coreauth.Store
-	list    []*coreauth.Auth
-	listErr error
+	list      []*coreauth.Auth
+	listErr   error
+	deleteErr error
 }
 
 func (s overlayListStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
@@ -491,6 +518,16 @@ func (s overlayListStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
 		return nil, nil
 	}
 	return s.Store.List(ctx)
+}
+
+func (s overlayListStore) Delete(ctx context.Context, id string) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	if s.Store == nil {
+		return nil
+	}
+	return s.Store.Delete(ctx, id)
 }
 
 func stringSlicesEqual(a, b []string) bool {
