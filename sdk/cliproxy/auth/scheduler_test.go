@@ -624,6 +624,183 @@ func TestManager_PickNextMixed_UsesWeightedProviderRotationBeforeCredentialRotat
 	}
 }
 
+func TestManager_PickNextMixed_CompoundRoutingKeySelectsMatchingAuth(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["claude"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{
+		ID:       "claude-row-42",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"provider_key": "claude:42",
+		},
+	}); errRegister != nil {
+		t.Fatalf("Register(claude-row-42) error = %v", errRegister)
+	}
+
+	got, _, provider, errPick := manager.pickNextMixed(
+		context.Background(), []string{"claude:42"}, "", cliproxyexecutor.Options{}, nil,
+	)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if got == nil || got.ID != "claude-row-42" {
+		t.Fatalf("pickNextMixed() auth = %#v, want claude-row-42", got)
+	}
+	if provider != "claude" {
+		t.Fatalf("pickNextMixed() provider = %q, want claude", provider)
+	}
+}
+
+func TestManager_PickNext_CompoundRoutingKeySelectsMatchingAuth(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["claude"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{
+		ID:       "claude-row-42",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"provider_key": "claude:42",
+		},
+	}); errRegister != nil {
+		t.Fatalf("Register(claude-row-42) error = %v", errRegister)
+	}
+
+	got, _, errPick := manager.pickNext(
+		context.Background(), "claude:42", "", cliproxyexecutor.Options{}, nil,
+	)
+	if errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+	if got == nil || got.ID != "claude-row-42" {
+		t.Fatalf("pickNext() auth = %#v, want claude-row-42", got)
+	}
+}
+
+func TestManager_PickNextMixed_CompoundRoutingKeysHonorRouteStrategyOrder(t *testing.T) {
+	for _, strategy := range []string{"priority", "failover"} {
+		t.Run(strategy, func(t *testing.T) {
+			manager := NewManager(nil, &RoundRobinSelector{}, nil)
+			manager.executors["claude"] = schedulerTestExecutor{}
+			manager.executors["gemini"] = schedulerTestExecutor{}
+			for _, auth := range []*Auth{
+				{ID: "a-gemini-row", Provider: "gemini", Attributes: map[string]string{"provider_key": "gemini:7"}},
+				{ID: "z-claude-row", Provider: "claude", Attributes: map[string]string{"provider_key": "claude:42"}},
+			} {
+				if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+					t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+				}
+			}
+
+			opts := cliproxyexecutor.Options{Metadata: map[string]any{
+				cliproxyexecutor.RouteStrategyMetadataKey: strategy,
+			}}
+			got, _, provider, errPick := manager.pickNextMixed(
+				context.Background(), []string{"claude:42", "gemini:7"}, "", opts, nil,
+			)
+			if errPick != nil {
+				t.Fatalf("pickNextMixed() error = %v", errPick)
+			}
+			if got == nil || got.ID != "z-claude-row" {
+				t.Fatalf("pickNextMixed() auth = %#v, want z-claude-row", got)
+			}
+			if provider != "claude" {
+				t.Fatalf("pickNextMixed() provider = %q, want claude", provider)
+			}
+		})
+	}
+}
+
+func TestManager_PickNextMixed_CompoundStrategyPreservesColonInOpenAICompatKey(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	providerKey := "openai-compatible-foo:bar"
+	manager.executors[providerKey] = schedulerTestExecutor{provider: providerKey}
+	if _, errRegister := manager.Register(context.Background(), &Auth{
+		ID:       "compat-colon-row",
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"provider_key": providerKey,
+			"compat_name":  "foo:bar",
+		},
+	}); errRegister != nil {
+		t.Fatalf("Register(compat-colon-row) error = %v", errRegister)
+	}
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.RouteStrategyMetadataKey: "priority",
+	}}
+	got, _, provider, errPick := manager.pickNextMixed(
+		context.Background(), []string{"claude:42", providerKey}, "", opts, nil,
+	)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if got == nil || got.ID != "compat-colon-row" {
+		t.Fatalf("pickNextMixed() auth = %#v, want compat-colon-row", got)
+	}
+	if provider != providerKey {
+		t.Fatalf("pickNextMixed() provider = %q, want %q", provider, providerKey)
+	}
+}
+
+func TestManager_PickNextMixed_CompoundLookingPluginKeyRemainsExact(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	providerKey := "claude:plugin"
+	manager.executors[providerKey] = schedulerTestExecutor{provider: providerKey}
+	if _, errRegister := manager.Register(context.Background(), &Auth{
+		ID:       "plugin-claude",
+		Provider: providerKey,
+	}); errRegister != nil {
+		t.Fatalf("Register(plugin-claude) error = %v", errRegister)
+	}
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.RouteStrategyMetadataKey: "priority",
+	}}
+	got, _, provider, errPick := manager.pickNextMixed(
+		context.Background(), []string{providerKey}, "", opts, nil,
+	)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if got == nil || got.ID != "plugin-claude" {
+		t.Fatalf("pickNextMixed() auth = %#v, want plugin-claude", got)
+	}
+	if provider != providerKey {
+		t.Fatalf("pickNextMixed() provider = %q, want %q", provider, providerKey)
+	}
+}
+
+func TestManager_PickNextMixed_NumericLookingPluginKeyRemainsExact(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	providerKey := "claude:123"
+	manager.executors[providerKey] = schedulerTestExecutor{provider: providerKey}
+	if _, errRegister := manager.Register(context.Background(), &Auth{
+		ID:       "plugin-claude-numeric",
+		Provider: providerKey,
+	}); errRegister != nil {
+		t.Fatalf("Register(plugin-claude-numeric) error = %v", errRegister)
+	}
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.RouteStrategyMetadataKey: "priority",
+	}}
+	got, _, provider, errPick := manager.pickNextMixed(
+		context.Background(), []string{providerKey}, "", opts, nil,
+	)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if got == nil || got.ID != "plugin-claude-numeric" {
+		t.Fatalf("pickNextMixed() auth = %#v, want plugin-claude-numeric", got)
+	}
+	if provider != providerKey {
+		t.Fatalf("pickNextMixed() provider = %q, want %q", provider, providerKey)
+	}
+}
+
 func TestManager_PickNextMixed_DisallowFreeAuthSkipsCodexFreePlan(t *testing.T) {
 	t.Parallel()
 

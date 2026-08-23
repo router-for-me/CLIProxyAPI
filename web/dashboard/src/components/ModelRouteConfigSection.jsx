@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { getModelProviders, listUpstreamProviders } from '../api/client.js';
+import { providerKeyIsLive } from './modelRouteProvider.js';
 
 // ModelRouteConfigSection — shared per-model routing configuration UI.
 //
@@ -331,7 +332,7 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
             )}
             {choices.map((choice) => {
               const on = selected.includes(choice.key);
-              const isLive = liveLoaded && liveProviders.includes(choice.key);
+              const isLive = liveLoaded && providerKeyIsLive(choice.key, liveProviders);
               const priority = on ? priorityFor(choice.key) : 0;
               const rank = on ? ranks[choice.key] : -1;
               // The display label prefers the upstream row's stored identity

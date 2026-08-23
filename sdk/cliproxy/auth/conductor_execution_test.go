@@ -1,8 +1,12 @@
 package auth
 
 import (
+	"context"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 // TestRoutingKeyFromAuth covers the new routing-key helper that lets the
@@ -78,6 +82,54 @@ func TestRoutingKeyFromAuth(t *testing.T) {
 	}
 }
 
+func TestManagerLiveProviderKeysForModelIncludesCurrentCompoundAuthKey(t *testing.T) {
+	model := "live-provider-key-model"
+	authID := "live-provider-key-auth"
+	registry.GetGlobalRegistry().RegisterClient(authID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	if _, errRegister := manager.Register(context.Background(), &Auth{
+		ID:       authID,
+		Provider: "claude",
+		Attributes: map[string]string{
+			"provider_key": "claude:42",
+		},
+	}); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	got := manager.LiveProviderKeysForModel(model)
+	if !slices.Contains(got, "claude:42") {
+		t.Fatalf("LiveProviderKeysForModel() = %v, want claude:42", got)
+	}
+}
+
+func TestManagerLiveProviderKeysForModelDoesNotInferUnsupportedCompoundAuth(t *testing.T) {
+	model := "live-provider-key-oauth-model"
+	oauthID := "live-provider-key-oauth-auth"
+	apiKeyID := "live-provider-key-api-auth"
+	registry.GetGlobalRegistry().RegisterClient(oauthID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(oauthID) })
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	for _, auth := range []*Auth{
+		{ID: oauthID, Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth"}},
+		{ID: apiKeyID, Provider: "claude", Attributes: map[string]string{"provider_key": "claude:42", "auth_kind": "api_key"}},
+	} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	got := manager.LiveProviderKeysForModel(model)
+	if slices.Contains(got, "claude:42") {
+		t.Fatalf("LiveProviderKeysForModel() = %v, must not infer unsupported claude:42", got)
+	}
+	if !slices.Contains(got, "claude") {
+		t.Fatalf("LiveProviderKeysForModel() = %v, want bare OAuth claude", got)
+	}
+}
+
 // TestExecutorKeyFromRoutingKey confirms the conductor can translate a
 // routing pin like "claude:42" back into the "claude" channel key the
 // executor manager registers executors under.
@@ -91,6 +143,11 @@ func TestExecutorKeyFromRoutingKey(t *testing.T) {
 		{"compound claude key", "claude:42", "claude"},
 		{"compound gemini key with whitespace", "  GEMINI:7  ", "gemini"},
 		{"compound vertex key", "vertex:11", "vertex"},
+		{"compound interactions key", "gemini-interactions:5", "gemini-interactions"},
+		{"colon in openai-compat provider name is preserved", "openai-compatible-foo:bar", "openai-compatible-foo:bar"},
+		{"colon in custom provider key is preserved", "custom:row", "custom:row"},
+		{"nonnumeric built-in prefix is preserved", "claude:plugin", "claude:plugin"},
+		{"zero built-in row id is preserved", "claude:0", "claude:0"},
 		{"bare channel key passes through", "claude", "claude"},
 		{"empty input returns", "", ""},
 		{"only-colon input returns empty (no channel prefix)", ":", ""},
@@ -151,6 +208,15 @@ func TestAuthMatchesProvider(t *testing.T) {
 			},
 			p:    "claude",
 			want: true,
+		},
+		{
+			name: "bare pin does not wildcard a nonnumeric built-in-looking key",
+			auth: &Auth{
+				Provider:   "claude",
+				Attributes: map[string]string{"provider_key": "claude:plugin"},
+			},
+			p:    "claude",
+			want: false,
 		},
 		{
 			name: "bare pin for one channel does not match another channel's auth",

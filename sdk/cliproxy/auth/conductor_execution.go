@@ -1207,8 +1207,8 @@ func routingKeyHasChannelPrefix(auth *Auth, channel string) bool {
 		return false
 	}
 	rk := routingKeyFromAuth(auth)
-	prefix := strings.ToLower(strings.TrimSpace(channel)) + ":"
-	return strings.HasPrefix(rk, prefix)
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	return channel != "" && executorKeyFromRoutingKey(rk) == channel
 }
 
 // authMatchesProvider reports whether the given auth is eligible to serve
@@ -1249,8 +1249,8 @@ func authMatchesProvider(auth *Auth, provider string) bool {
 	// provider matches the auth's executor key. The auth is eligible under
 	// either of two wildcard cases:
 	//   (a) the auth has no per-row provider_key attribute (legacy),
-	//   (b) the auth is a per-row compound key for this channel.
-	return !strings.Contains(rk, ":") || strings.HasPrefix(rk, provider+":")
+	//   (b) the auth is a canonical per-row compound key for this channel.
+	return !strings.Contains(rk, ":") || executorKeyFromRoutingKey(rk) == provider
 }
 
 // authMatchesAnyProvider reports whether the auth is eligible to serve
@@ -1268,13 +1268,12 @@ func authMatchesAnyProvider(auth *Auth, providerSet map[string]struct{}) bool {
 	return false
 }
 
-// executorKeyFromRoutingKey returns the bare channel identifier the
-// executor manager should use to find the executor for the given routing
-// key. Compound keys like "claude:42" lose the ":42" suffix; bare keys
-// pass through unchanged. This lets the conductor translate a route's
-// "claude:42" routing pin into the correct "claude" executor lookup.
-// Malformed input (a leading colon, or just ":") yields empty so the
-// caller falls back to the standard "executor_not_found" error path.
+// executorKeyFromRoutingKey returns the executor identifier for a routing
+// key. Only built-in API-key channel prefixes use the compound
+// "<channel>:<rowID>" form; provider names for OpenAI-compat and plugins may
+// legitimately contain a colon and must remain intact. Malformed input (a
+// leading colon, or just ":") yields empty so callers use their normal
+// "executor_not_found" path.
 func executorKeyFromRoutingKey(provider string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if provider == "" {
@@ -1287,7 +1286,27 @@ func executorKeyFromRoutingKey(provider string) string {
 		}
 		return provider
 	}
-	return provider[:i]
+	channel := provider[:i]
+	suffix := provider[i+1:]
+	switch channel {
+	case "claude", "codex", "gemini", "gemini-interactions", "vertex", "xai":
+		if isPositiveRowIDSuffix(suffix) {
+			return channel
+		}
+	}
+	return provider
+}
+
+func isPositiveRowIDSuffix(value string) bool {
+	if value == "" || value[0] == '0' {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // logEntryWithRequestID returns a logrus entry with request_id field if available in context.

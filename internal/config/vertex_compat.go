@@ -49,8 +49,8 @@ type VertexCompatKey struct {
 	// UpstreamProviderID, when non-zero, carries the stable database id of
 	// the upstream_providers row this entry was rendered from. See
 	// ClaudeKey (in config_types.go) for the full rationale; this field is
-	// populated by the upstreamsync renderer and ignored when zero.
-	UpstreamProviderID int64 `yaml:"-" json:"-"`
+	// populated by the upstreamsync renderer and omitted when zero.
+	UpstreamProviderID int64 `yaml:"upstream-provider-id,omitempty" json:"-"`
 }
 
 func (k VertexCompatKey) GetAPIKey() string   { return k.APIKey }

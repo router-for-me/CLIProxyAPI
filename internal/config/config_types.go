@@ -449,7 +449,7 @@ type ClaudeKey struct {
 	// back to the bare "claude" routing key and groups the auth together
 	// with every other bare-key Claude entry. Operators should not set
 	// this field manually — the upstreamsync renderer populates it.
-	UpstreamProviderID int64 `yaml:"-" json:"-"`
+	UpstreamProviderID int64 `yaml:"upstream-provider-id,omitempty" json:"-"`
 }
 
 func (k ClaudeKey) GetAPIKey() string { return k.APIKey }
@@ -545,8 +545,8 @@ type CodexKey struct {
 	// per-model routing picker can address this row individually instead
 	// of collapsing it onto every other Codex API key. See ClaudeKey for
 	// the full rationale; this field is populated by the upstreamsync
-	// renderer and ignored when zero (legacy YAML-only configs).
-	UpstreamProviderID int64 `yaml:"-" json:"-"`
+	// renderer and omitted when zero (legacy YAML-only configs).
+	UpstreamProviderID int64 `yaml:"upstream-provider-id,omitempty" json:"-"`
 }
 
 func (k CodexKey) GetAPIKey() string { return k.APIKey }
@@ -640,8 +640,8 @@ type GeminiKey struct {
 	// UpstreamProviderID, when non-zero, carries the stable database id of
 	// the upstream_providers row this entry was rendered from. See
 	// ClaudeKey for the full rationale; this field is populated by the
-	// upstreamsync renderer and ignored when zero.
-	UpstreamProviderID int64 `yaml:"-" json:"-"`
+	// upstreamsync renderer and omitted when zero.
+	UpstreamProviderID int64 `yaml:"upstream-provider-id,omitempty" json:"-"`
 }
 
 func (k GeminiKey) GetAPIKey() string { return k.APIKey }

@@ -740,6 +740,58 @@ func (m *Manager) normalizeProviders(providers []string) []string {
 	return result
 }
 
+// LiveProviderKeysForModel returns provider keys that currently register the
+// requested model. The registry normally contains the authoritative provider
+// list, but adding each matching auth's routing key repairs a short transition
+// window where an auth was re-rendered with a per-row provider_key before its
+// registry client was re-registered. This also keeps bare OAuth/legacy keys
+// distinct from compound built-in API-key row keys.
+func (m *Manager) LiveProviderKeysForModel(model string) []string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+
+	providers := registry.GetGlobalRegistry().GetModelProviders(model)
+	seen := make(map[string]struct{}, len(providers))
+	out := make([]string, 0, len(providers))
+	add := func(provider string) {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider == "" {
+			return
+		}
+		if _, exists := seen[provider]; exists {
+			return
+		}
+		seen[provider] = struct{}{}
+		out = append(out, provider)
+	}
+	for _, provider := range providers {
+		add(provider)
+	}
+	if m == nil {
+		return out
+	}
+
+	m.mu.RLock()
+	auths := make([]*Auth, 0, len(m.auths))
+	for _, auth := range m.auths {
+		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+			continue
+		}
+		auths = append(auths, auth.Clone())
+	}
+	m.mu.RUnlock()
+	registryRef := registry.GetGlobalRegistry()
+	for _, auth := range auths {
+		if auth == nil || !registryRef.ClientSupportsModel(auth.ID, model) {
+			continue
+		}
+		add(routingKeyFromAuth(auth))
+	}
+	return out
+}
+
 // AvailableProviders returns the set of provider keys that currently have at least one
 // registered auth record that is not disabled. It is a best-effort snapshot for routing
 // decisions and does not account for per-model cooldowns or transient runtime availability.
@@ -1052,6 +1104,59 @@ func (m *Manager) Executor(provider string) (ProviderExecutor, bool) {
 	return executor, true
 }
 
+// executorForRoutingKey resolves an exact provider executor before translating
+// a built-in compound row key to its bare channel. Exact lookup is required
+// for plugin and OpenAI-compatible identifiers that may contain colons (for
+// example, "claude:123" or "foo:bar").
+func (m *Manager) executorForRoutingKey(provider string) (ProviderExecutor, bool) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return nil, false
+	}
+	if executor, okExecutor := m.Executor(provider); okExecutor {
+		return executor, true
+	}
+	executorKey := executorKeyFromRoutingKey(provider)
+	if executorKey == provider {
+		return nil, false
+	}
+	return m.Executor(executorKey)
+}
+
+// executorForRoutingKeyLocked is the lock-held variant of
+// executorForRoutingKey. Callers must hold m.mu for reading or writing.
+func (m *Manager) executorForRoutingKeyLocked(provider string) (ProviderExecutor, bool) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return nil, false
+	}
+	lookup := func(key string) (ProviderExecutor, bool) {
+		executor, okExecutor := m.executors[key]
+		return executor, okExecutor && executor != nil
+	}
+	if executor, okExecutor := lookup(provider); okExecutor {
+		return executor, true
+	}
+	executorKey := executorKeyFromRoutingKey(provider)
+	if executorKey == provider {
+		return nil, false
+	}
+	return lookup(executorKey)
+}
+
+func (m *Manager) isCompoundRoutingKey(provider string) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return false
+	}
+	// A registered exact executor identifies a literal provider key, not a
+	// built-in row key. This disambiguates plugin IDs such as "claude:123".
+	if _, okExecutor := m.Executor(provider); okExecutor {
+		return false
+	}
+	return executorKeyFromRoutingKey(provider) != provider
+}
+
 // CloseExecutionSession asks all registered executors to release the supplied execution session.
 func (m *Manager) CloseExecutionSession(sessionID string) {
 	sessionID = strings.TrimSpace(sessionID)
@@ -1127,7 +1232,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	m.mu.RLock()
 	selector := m.selector
 	pluginScheduler := m.pluginScheduler
-	executor, okExecutor := m.executors[executorKeyFromRoutingKey(provider)]
+	executor, okExecutor := m.executorForRoutingKeyLocked(provider)
 	if !okExecutor {
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
@@ -1372,11 +1477,14 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
+	if m.isCompoundRoutingKey(provider) {
+		return m.pickNextLegacy(ctx, provider, model, opts, tried)
+	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	if strings.TrimSpace(model) != "" {
 		m.mu.RLock()
 		for _, candidate := range m.auths {
-			if candidate == nil || executorKeyFromAuth(candidate) != provider || candidate.Disabled {
+			if candidate == nil || !authMatchesProvider(candidate, provider) || candidate.Disabled {
 				continue
 			}
 			if !eligibility.allows(candidate) {
@@ -1392,7 +1500,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		}
 		m.mu.RUnlock()
 	}
-	executor, okExecutor := m.Executor(executorKeyFromRoutingKey(provider))
+	executor, okExecutor := m.executorForRoutingKey(provider)
 	if !okExecutor {
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
@@ -1524,12 +1632,60 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	return authCopy, executor, providerKey, nil
 }
 
+func (m *Manager) pickNextMixedCompoundRoute(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	var lastRetryableErr error
+	for _, provider := range providers {
+		providerKey := strings.ToLower(strings.TrimSpace(provider))
+		if providerKey == "" {
+			continue
+		}
+		auth, selectedExecutor, errPick := m.pickNextLegacy(ctx, providerKey, model, opts, tried)
+		if errPick != nil {
+			var authErr *Error
+			if shouldRetrySchedulerPick(errPick) || (errors.As(errPick, &authErr) && authErr != nil && authErr.Code == "executor_not_found") {
+				lastRetryableErr = errPick
+				continue
+			}
+			return nil, nil, "", errPick
+		}
+		if auth == nil {
+			continue
+		}
+		if selectedExecutor == nil {
+			continue
+		}
+		return auth, selectedExecutor, executorKeyFromAuth(auth), nil
+	}
+	if lastRetryableErr != nil {
+		return nil, nil, "", lastRetryableErr
+	}
+	return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
 
 	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+	}
+	compoundRoute := false
+	for _, provider := range providers {
+		if m.isCompoundRoutingKey(provider) {
+			compoundRoute = true
+			break
+		}
+	}
+	if compoundRoute {
+		// The scheduler indexes auths by bare executor channel, so it cannot
+		// distinguish two compound rows on the same channel. For an explicit
+		// per-model priority/failover route, try the already priority-ordered
+		// route keys one at a time; pickNextLegacy retains exact row matching.
+		routeStrategy := routeStrategyFromMetadata(opts.Metadata)
+		if routeStrategy == schedulerStrategyFillFirst || routeStrategy == schedulerStrategyRoundRobin {
+			return m.pickNextMixedCompoundRoute(ctx, providers, model, opts, tried)
+		}
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 
@@ -1543,7 +1699,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		if _, seen := seenProviders[providerKey]; seen {
 			continue
 		}
-		if _, okExecutor := m.Executor(providerKey); !okExecutor {
+		if _, okExecutor := m.executorForRoutingKey(providerKey); !okExecutor {
 			continue
 		}
 		seenProviders[providerKey] = struct{}{}
@@ -1605,7 +1761,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			tried[selected.ID] = struct{}{}
 			continue
 		}
-		executor, okExecutor := m.Executor(providerKey)
+		executor, okExecutor := m.executorForRoutingKey(providerKey)
 		if !okExecutor {
 			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}

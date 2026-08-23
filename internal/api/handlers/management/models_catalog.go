@@ -294,7 +294,13 @@ func (h *Handler) GetModelProviders(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "id query parameter is required"}})
 		return
 	}
+	h.mu.Lock()
+	authManager := h.authManager
+	h.mu.Unlock()
 	providers := registry.GetGlobalRegistry().GetModelProviders(modelID)
+	if authManager != nil {
+		providers = authManager.LiveProviderKeysForModel(modelID)
+	}
 	if providers == nil {
 		providers = []string{}
 	}

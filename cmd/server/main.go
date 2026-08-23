@@ -832,6 +832,15 @@ func main() {
 			}
 		}
 		seedCancel()
+		// Re-render the runtime artifacts from the normalized table on every
+		// startup. This keeps persisted row identities (for example
+		// claude:94) in the config before the service synthesizes API-key auths
+		// and registers their model capabilities.
+		if renderedCfg, applyErr := applyPersistedUpstreamProviders(context.Background(), pgUpstreamProviders, cfg, configFilePath, cfg.AuthDir); applyErr != nil {
+			log.WithError(applyErr).Warn("failed to apply persisted upstream providers at startup")
+		} else if renderedCfg != nil {
+			cfg = renderedCfg
+		}
 		// Expose the PG stores + policy service to the API server so the
 		// policy middleware and PG management routes are activated.
 		serverOptions = append(serverOptions, api.WithPolicyService(policySvc, &api.PgStoreHandles{
