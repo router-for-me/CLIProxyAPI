@@ -206,13 +206,13 @@ func GetClaudeThinkingReplayWithSnapshotIfExists(ctx context.Context, modelFamil
 			return nil, snapshot, false, fmt.Errorf("invalid Claude thinking replay content")
 		}
 		snapshot.generation = generation
-		if !deleted {
-			if _, errExpire := client.KVExpire(ctx, kvKey, ClaudeThinkingReplayCacheTTL); errExpire != nil {
-				log.Warnf("home kv Claude thinking replay expire failed: %v", errExpire)
-			}
-			return cloneClaudeThinkingReplayContents(contents), snapshot, len(contents) > 0, nil
+		if _, errExpire := client.KVExpire(ctx, kvKey, ClaudeThinkingReplayCacheTTL); errExpire != nil {
+			log.Warnf("home kv Claude thinking replay expire failed: %v", errExpire)
 		}
-		return nil, snapshot, false, nil
+		if deleted {
+			return nil, snapshot, false, nil
+		}
+		return cloneClaudeThinkingReplayContents(contents), snapshot, len(contents) > 0, nil
 	}
 
 	cacheCleanupOnce.Do(startCacheCleanup)
@@ -261,13 +261,13 @@ func GetClaudeThinkingReplayWithSnapshotRequired(ctx context.Context, modelFamil
 			return nil, snapshot, false, fmt.Errorf("invalid Claude thinking replay content")
 		}
 		snapshot.generation = generation
-		if !deleted {
-			if _, errExpire := client.KVExpire(ctx, kvKey, ClaudeThinkingReplayCacheTTL); errExpire != nil {
-				log.Warnf("home kv Claude thinking replay expire failed: %v", errExpire)
-			}
-			return cloneClaudeThinkingReplayContents(contents), snapshot, len(contents) > 0, nil
+		if _, errExpire := client.KVExpire(ctx, kvKey, ClaudeThinkingReplayCacheTTL); errExpire != nil {
+			log.Warnf("home kv Claude thinking replay expire failed: %v", errExpire)
 		}
-		return nil, snapshot, false, nil
+		if deleted {
+			return nil, snapshot, false, nil
+		}
+		return cloneClaudeThinkingReplayContents(contents), snapshot, len(contents) > 0, nil
 	}
 
 	cacheCleanupOnce.Do(startCacheCleanup)
@@ -373,7 +373,7 @@ func DeleteClaudeThinkingReplayIfUnchanged(ctx context.Context, modelFamily, ses
 		if errMarshal != nil {
 			return false, errMarshal
 		}
-		return client.KVCompareAndSwap(ctx, claudeThinkingReplayKVKey(modelFamily, sessionKey), snapshot.raw, snapshot.found, tombstone, claudeThinkingReplayTombstoneTTL)
+		return client.KVCompareAndSwap(ctx, claudeThinkingReplayKVKey(modelFamily, sessionKey), snapshot.raw, snapshot.found, tombstone, ClaudeThinkingReplayCacheTTL)
 	}
 
 	claudeThinkingReplayMu.Lock()
@@ -1176,12 +1176,7 @@ func applyClaudeThinkingReplayFallbackIndexChanges(ctx context.Context, client k
 		return
 	}
 	key := claudeThinkingReplayFallbackIndexKVKey(modelFamily)
-	const maxCASAttempts = 32
-	for attempt := 0; attempt < maxCASAttempts; attempt++ {
-		if errContext := ctx.Err(); errContext != nil {
-			log.Warnf("claude thinking replay fallback index stopped: %v", errContext)
-			return
-		}
+	for attempt := 0; attempt < 4; attempt++ {
 		raw, found, errGet := client.KVGet(ctx, key)
 		if errGet != nil {
 			log.Warnf("claude thinking replay fallback index read failed: %v", errGet)
@@ -1278,7 +1273,7 @@ func applyClaudeThinkingReplayFallbackIndexChanges(ctx context.Context, client k
 			return
 		}
 		if !swapped {
-			if attempt == maxCASAttempts-1 {
+			if attempt == 3 {
 				log.Warnf("claude thinking replay fallback index cas exhausted after %d attempts", attempt+1)
 			}
 			rollbackClaudeThinkingReplayRecordTombstones(ctx, client, tombstones)
@@ -1288,8 +1283,6 @@ func applyClaudeThinkingReplayFallbackIndexChanges(ctx context.Context, client k
 		// Index committed and the records are tombstoned; nothing more to do.
 		return
 	}
-
-	log.Warnf("claude thinking replay fallback index could not be updated after %d attempts; session may be untracked", maxCASAttempts)
 }
 
 // claudeThinkingReplayPendingDeletion tracks a replay record that has been
