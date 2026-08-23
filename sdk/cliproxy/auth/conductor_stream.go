@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -323,15 +324,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		var timedOut atomic.Bool
 		var attemptMu sync.Mutex
 		var attemptSeq uint64
-
-		stopTTFT := func() {
-			if timer != nil {
-				timer.Stop()
-			}
-			attemptMu.Lock()
-			attemptSeq++
-			attemptMu.Unlock()
-		}
+		var stopTTFT func()
 
 		checkTTFTErr := func(err error) error {
 			if timedOut.Load() {
@@ -339,6 +332,53 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			return err
 		}
+
+		// Arm the TTFT timer only after local interception and request
+		// preparation: the budget measures upstream responsiveness, so a slow
+		// after-auth interceptor must not cancel the attempt before any
+		// upstream request was even made. The timer is stopped as soon as the
+		// HTTP transport reports a connection is obtained (GotConn), which is
+		// before response headers for standard net/http clients.
+		armTTFT := func() {
+			attemptMu.Lock()
+			if timer != nil {
+				timer.Stop()
+				timer = nil
+			}
+			var once sync.Once
+			stopTTFT = func() {
+				once.Do(func() {
+					attemptMu.Lock()
+					if timer != nil {
+						timer.Stop()
+						timer = nil
+					}
+					attemptSeq++
+					attemptMu.Unlock()
+				})
+			}
+			if ttftTimeout > 0 {
+				currentSeq := attemptSeq
+				currentCancel := cancelAttempt
+				timer = time.AfterFunc(ttftTimeout, func() {
+					attemptMu.Lock()
+					defer attemptMu.Unlock()
+					if currentSeq != attemptSeq {
+						return
+					}
+					timedOut.Store(true)
+					currentCancel()
+				})
+				trace := &httptrace.ClientTrace{
+					GotConn: func(httptrace.GotConnInfo) {
+						stopTTFT()
+					},
+				}
+				attemptCtx = httptrace.WithClientTrace(attemptCtx, trace)
+			}
+			attemptMu.Unlock()
+		}
+		stopTTFT = func() {}
 
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
@@ -361,25 +401,6 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			stopTTFT()
 			cancelAttempt()
 			return nil, errCtx
-		}
-		// Arm the TTFT timer only after local interception and request
-		// preparation: the budget measures upstream responsiveness, so a slow
-		// after-auth interceptor must not cancel the attempt before any
-		// upstream request was even made.
-		armTTFT := func() {
-			if ttftTimeout > 0 {
-				currentSeq := attemptSeq
-				currentCancel := cancelAttempt
-				timer = time.AfterFunc(ttftTimeout, func() {
-					attemptMu.Lock()
-					defer attemptMu.Unlock()
-					if currentSeq != attemptSeq {
-						return
-					}
-					timedOut.Store(true)
-					currentCancel()
-				})
-			}
 		}
 		armTTFT()
 		// The unauthorized-refresh retries below re-execute behind a credential

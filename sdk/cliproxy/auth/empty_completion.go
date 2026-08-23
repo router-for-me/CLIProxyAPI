@@ -70,6 +70,16 @@ var errEmptyCompletion = &Error{
 	HTTPStatus: http.StatusServiceUnavailable,
 }
 
+// errEmptyCount indicates the upstream returned an empty count response. It is
+// retriable so the conductor marks the auth as failed, cools it down, and
+// rotates to the next auth/model.
+var errEmptyCount = &Error{
+	Code:       "empty_count",
+	Message:    "upstream returned an empty count response",
+	Retryable:  true,
+	HTTPStatus: http.StatusServiceUnavailable,
+}
+
 // maxStreamBootstrapBytes bounds how much metadata a stream can accumulate
 // before the conductor conservatively forwards it. Empty-completion detection
 // must never create an unbounded pre-output buffer.

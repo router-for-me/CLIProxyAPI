@@ -2,7 +2,10 @@ package auth
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -345,5 +348,120 @@ func TestStreamConnectTimeout_ConfigAndMetadata(t *testing.T) {
 	}
 	if got := m.streamFirstChunkTimeout(optsBoth); got != 90*time.Millisecond {
 		t.Fatalf("stream_connect_timeout_ms metadata precedence = %v, want 90ms", got)
+	}
+}
+
+// httpTTFTStreamExecutor makes an HTTP request using the default client so the
+// conductor's httptrace.ClientTrace fires GotConn as soon as the connection is
+// obtained.
+type httpTTFTStreamExecutor struct {
+	baseURL string
+}
+
+func (*httpTTFTStreamExecutor) Identifier() string { return "http-ttft" }
+
+func (*httpTTFTStreamExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not implemented"}
+}
+
+func (e *httpTTFTStreamExecutor) ExecuteStream(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	httpClient := &http.Client{}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, e.baseURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	ch := make(chan cliproxyexecutor.StreamChunk, 1)
+	ch <- cliproxyexecutor.StreamChunk{Payload: body}
+	close(ch)
+	return &cliproxyexecutor.StreamResult{Chunks: ch, Headers: resp.Header}, nil
+}
+
+func (*httpTTFTStreamExecutor) Refresh(context.Context, *Auth) (*Auth, error) { return nil, nil }
+
+func (*httpTTFTStreamExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
+}
+
+func (*httpTTFTStreamExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+// TestStreamFirstChunkTimeout_StoppedAtConnection verifies that the TTFT timer
+// is stopped when the HTTP transport reports a connection, before response
+// headers are written. A slow-responding server that waits longer than the TTFT
+// window should not trigger a timeout.
+func TestStreamFirstChunkTimeout_StoppedAtConnection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\n\n")
+	}))
+	defer server.Close()
+
+	const model = "ttft-http-model"
+	auth := &Auth{ID: "http-ttft-auth", Provider: "http-ttft", Status: StatusActive}
+
+	exec := &httpTTFTStreamExecutor{baseURL: server.URL}
+	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(exec)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "http-ttft", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			"stream_first_chunk_timeout_ms": 50,
+		},
+	}
+
+	start := time.Now()
+	stream, errStream := m.ExecuteStream(context.Background(), []string{"http-ttft"}, cliproxyexecutor.Request{Model: model}, opts)
+	elapsed := time.Since(start)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream error = %v, want stream after delayed headers", errStream)
+	}
+	if elapsed < 100*time.Millisecond {
+		t.Fatalf("stream returned too quickly (%v), want at least 100ms of delayed headers", elapsed)
+	}
+
+	done := make(chan struct{})
+	var got string
+	go func() {
+		defer close(done)
+		for chunk := range stream.Chunks {
+			if chunk.Err != nil {
+				t.Errorf("chunk error = %v", chunk.Err)
+				return
+			}
+			got = string(chunk.Payload)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out reading stream chunks")
+	}
+
+	if !strings.Contains(got, "hello") {
+		t.Fatalf("stream payload does not contain expected content: %q", got)
 	}
 }

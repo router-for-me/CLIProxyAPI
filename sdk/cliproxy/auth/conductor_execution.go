@@ -1723,7 +1723,7 @@ func formatAuthIdentity(auth *Auth, provider string) string {
 var (
 	logSecretAPIKeyPattern  = regexp.MustCompile(`(?i)\bsk-[A-Za-z0-9_-]{8,}`)
 	logSecretBearerPattern  = regexp.MustCompile(`(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{4,}`)
-	logSecretLabeledPattern = regexp.MustCompile(`(?i)((?:api[_-]?key|access[_-]?token|secret)\s*[=:]\s*)([^\s"&,;}]+)`)
+	logSecretLabeledPattern = regexp.MustCompile(`(?i)((?:"?(?:api[_-]?key|access[_-]?token|token|authorization|secret)"?)\s*[=:]\s*"?)([^\s"&,;}]+)`)
 )
 
 func redactSecretsForLog(msg string) string {

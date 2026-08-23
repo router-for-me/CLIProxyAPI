@@ -2709,6 +2709,54 @@ func TestSummarizeErrorForLogRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestRedactSecretsForLog_QuotedJSON(t *testing.T) {
+	tests := []struct {
+		name  string
+		in    string
+		leaks []string
+	}{
+		{
+			name:  "apiKey with non-sk secret",
+			in:    `{"apiKey":"AIza-secret"}`,
+			leaks: []string{"AIza-secret"},
+		},
+		{
+			name:  "token key",
+			in:    `{"token":"foo"}`,
+			leaks: []string{"foo"},
+		},
+		{
+			name:  "authorization key with quoted value",
+			in:    `{"authorization":"AIza-secret"}`,
+			leaks: []string{"AIza-secret"},
+		},
+		{
+			name:  "api-key with unquoted key",
+			in:    `api-key:AIza-secret`,
+			leaks: []string{"AIza-secret"},
+		},
+		{
+			name:  "sk prefix still redacted",
+			in:    `sk-live-secret`,
+			leaks: []string{"sk-live-secret"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactSecretsForLog(tc.in)
+			for _, leak := range tc.leaks {
+				if strings.Contains(got, leak) {
+					t.Fatalf("redacted = %q, contains %q", got, leak)
+				}
+			}
+			if !strings.Contains(got, "[REDACTED]") {
+				t.Fatalf("redacted = %q, want [REDACTED]", got)
+			}
+		})
+	}
+}
+
 func TestManagerExecute_InvalidAPIKeyStopsModelPoolRetries(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	cfg := &internalconfig.Config{

@@ -278,12 +278,16 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, Success: errExecute == nil, Options: execOpts}
 			if errExecute == nil {
-				if !countTokens && isEmptyCompletionPayload(response.Payload) {
+				if isEmptyCompletionPayload(response.Payload) {
 					result.Success = false
-					result.Error = errEmptyCompletion
+					if countTokens {
+						result.Error = errEmptyCount
+					} else {
+						result.Error = errEmptyCompletion
+					}
 					m.reportHomeResult(execCtx, result, preparedAuth)
-					tracker.Record(preparedAuth, errEmptyCompletion)
-					lastErr = errEmptyCompletion
+					tracker.Record(preparedAuth, result.Error)
+					lastErr = result.Error
 					break
 				}
 				m.reportHomeResult(execCtx, result, preparedAuth)
