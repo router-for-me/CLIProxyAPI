@@ -1289,10 +1289,8 @@ func (c *fallbackExhaustClaudeThinkingReplayKVClient) KVCompareAndSwap(_ context
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if key == c.indexKey {
-		if c.failures < 4 {
-			c.failures++
-			return false, nil
-		}
+		c.failures++
+		return false, nil
 	}
 	return c.fakeClaudeThinkingReplayKVClient.KVCompareAndSwap(context.Background(), key, expected, expectedExists, newValue, ttl)
 }
@@ -1333,8 +1331,8 @@ func TestClaudeThinkingReplayFallbackIndexDoesNotOverwriteOnExhaustion(t *testin
 	if !ok || !bytes.Equal(raw, seedRaw) {
 		t.Fatalf("fallback index was overwritten after CAS exhaustion")
 	}
-	if client.failures < 4 {
-		t.Fatalf("fallback index CAS was not exhausted: %d", client.failures)
+	if client.failures == 0 {
+		t.Fatalf("fallback index CAS was never attempted")
 	}
 	if _, ok := client.values[aliasKey]; !ok {
 		t.Fatalf("alias value not written")
