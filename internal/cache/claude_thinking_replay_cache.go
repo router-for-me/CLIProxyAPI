@@ -1233,14 +1233,23 @@ func applyClaudeThinkingReplayFallbackIndexChanges(ctx context.Context, client k
 		if !swapped {
 			if attempt == 3 {
 				log.Warnf("claude thinking replay fallback index cas exhausted after %d attempts", attempt+1)
-				return
+				// The fallback index is only a tracking structure: the alias and
+				// replay record are already committed. Set it unconditionally so
+				// the session can be cleaned up later, rather than leaving an
+				// untracked record that bypasses the storage cap.
+				if _, errSet := client.KVSet(ctx, key, newRaw, homekv.KVSetOptions{EX: ClaudeThinkingReplayCacheTTL}); errSet != nil {
+					log.Warnf("claude thinking replay fallback index exhausted set failed: %v", errSet)
+					return
+				}
+				swapped = true
+			} else {
+				continue
 			}
-			continue
 		}
 
-		// Two-phase deletion: re-read the index after the CAS and only delete
-		// replay records whose session no longer appears in it. This avoids
-		// erasing a record that a concurrent worker has just re-referenced.
+		// Two-phase deletion: re-read the index after the CAS/set and only
+		// delete replay records whose session no longer appears in it. This
+		// avoids erasing a record that a concurrent worker has just re-referenced.
 		deleteClaudeThinkingReplayFallbackRecordsIfUnreferenced(ctx, client, modelFamily, toDelete)
 		return
 	}

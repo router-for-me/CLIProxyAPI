@@ -810,6 +810,73 @@ func TestClaudeExecutorCompatThinkingReplayClearsAfterUpstreamBadRequest(t *test
 	}
 }
 
+func claudeReplayThinkingStreamWithModel() string {
+	return "event: message_start\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-synthetic-4772\",\"content\":[]}}\n\n" +
+		"event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"provider reasoning\"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"EgI=\"}}\n\n" +
+		"event: content_block_stop\n" +
+		"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+		"event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"Read\",\"input\":{}}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}\n\n" +
+		"event: content_block_stop\n" +
+		"data: {\"type\":\"content_block_stop\",\"index\":1}\n\n" +
+		"event: message_delta\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n" +
+		"event: message_stop\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+}
+
+func TestClaudeExecutorCompatThinkingReplayClearsAfterUpstreamSSEError(t *testing.T) {
+	internalcacheClearClaudeThinkingReplay(t)
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if callCount == 1 {
+			_, _ = w.Write([]byte(claudeReplayThinkingStreamWithModel()))
+			return
+		}
+		_, _ = w.Write([]byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"invalid thinking signature\"}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(nil)
+	auth := claudeReplayTestAuth(server.URL)
+
+	firstPayload := claudeReplayPayloadWithConversationID([]byte(`{"messages":[{"role":"user","content":"inspect"}]}`), "sse-error-replay")
+	firstRequest, firstOptions := claudeReplayTestRequest(firstPayload, "sse-error-replay", true, sdktranslator.FormatClaude)
+	firstOptions.ResponseFormat = sdktranslator.FormatOpenAIResponse
+	if _, errExecute := executor.Execute(context.Background(), auth, firstRequest, firstOptions); errExecute != nil {
+		t.Fatalf("first Execute() error = %v", errExecute)
+	}
+
+	scope := claudeThinkingReplayScopeFromRequest(context.Background(), auth, firstRequest, firstOptions)
+	_, found, errGet := internalcache.GetClaudeThinkingReplayRequired(context.Background(), scope.modelFamily, scope.sessionKey)
+	if errGet != nil || !found {
+		t.Fatalf("first turn replay not cached: found %v, err %v", found, errGet)
+	}
+
+	secondPayload := claudeReplayPayloadWithConversationID([]byte(`{"messages":[{"role":"user","content":"inspect"},{"role":"assistant","content":[{"type":"thinking","thinking":"provider reasoning","signature":"EgI="},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"README.md"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}]}`), "sse-error-replay")
+	secondRequest, secondOptions := claudeReplayTestRequest(secondPayload, "sse-error-replay", true, sdktranslator.FormatClaude)
+	secondOptions.ResponseFormat = sdktranslator.FormatOpenAIResponse
+	if _, errExecute := executor.Execute(context.Background(), auth, secondRequest, secondOptions); errExecute == nil {
+		t.Fatal("second Execute() error = nil, want upstream SSE error")
+	}
+
+	_, found, errGet = internalcache.GetClaudeThinkingReplayRequired(context.Background(), scope.modelFamily, scope.sessionKey)
+	if errGet != nil || found {
+		t.Fatalf("replay after upstream SSE error = found %v, err %v; want cleared state", found, errGet)
+	}
+}
+
 func TestClaudeExecutorCompatThinkingReplayRestoresMultipleOmittedBlocks(t *testing.T) {
 	internalcacheClearClaudeThinkingReplay(t)
 

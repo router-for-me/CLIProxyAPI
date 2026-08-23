@@ -313,6 +313,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if upstreamStream {
 		if errValidate := validateClaudeStreamingResponse(data); errValidate != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errValidate)
+			// An upstream SSE error event invalidates the applied replay state:
+			// the next turn must not inherit a stale thinking signature.
+			if replayScope.replayApplied {
+				clearClaudeThinkingReplayContent(ctx, replayScope)
+			}
 			return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errValidate)
 		}
 		commitClaudeDiagnostics(diagnosticsState, claudeMessageIDFromSSE(data))

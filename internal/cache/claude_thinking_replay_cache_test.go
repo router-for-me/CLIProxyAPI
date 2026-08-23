@@ -1270,6 +1270,72 @@ func TestClaudeThinkingReplayAliasHomeCrossModelEvictionDeletesCorrectRecord(t *
 	}
 }
 
+type fallbackExhaustClaudeThinkingReplayKVClient struct {
+	*fakeClaudeThinkingReplayKVClient
+	indexKey string
+	failures int
+	mu       sync.Mutex
+}
+
+func (c *fallbackExhaustClaudeThinkingReplayKVClient) KVCompareAndSwap(_ context.Context, key string, expected []byte, expectedExists bool, newValue []byte, ttl time.Duration) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if key == c.indexKey {
+		if c.failures < 4 {
+			c.failures++
+			return false, nil
+		}
+	}
+	return c.fakeClaudeThinkingReplayKVClient.KVCompareAndSwap(context.Background(), key, expected, expectedExists, newValue, ttl)
+}
+
+func TestClaudeThinkingReplayFallbackIndexTracksAfterCASExhaustion(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	indexKey := claudeThinkingReplayFallbackIndexKVKey(modelFamily)
+
+	fake := newFakeClaudeThinkingReplayKVClient()
+	client := &fallbackExhaustClaudeThinkingReplayKVClient{
+		fakeClaudeThinkingReplayKVClient: fake,
+		indexKey:                         indexKey,
+	}
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	CacheClaudeThinkingReplayBestEffort(ctx, modelFamily, "fb:session", []byte(`[{"type":"text","text":"x"}]`))
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "fb:session", messageHashFor(0), "first")
+
+	raw, found := client.values[indexKey]
+	if !found {
+		t.Fatalf("fallback index not written after CAS exhaustion")
+	}
+	var index claudeThinkingReplayFallbackIndex
+	if err := json.Unmarshal(raw, &index); err != nil {
+		t.Fatalf("fallback index unmarshal failed: %v", err)
+	}
+	aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHashFor(0))
+	foundRef := false
+	for _, s := range index.Sessions {
+		if s.SessionKey != "fb:session" {
+			continue
+		}
+		for _, a := range s.Aliases {
+			if a == aliasKey {
+				foundRef = true
+				break
+			}
+		}
+	}
+	if !foundRef {
+		t.Fatalf("fallback index does not track the session after CAS exhaustion")
+	}
+	if client.failures < 4 {
+		t.Fatalf("fallback index CAS was not exhausted: %d", client.failures)
+	}
+}
+
 func TestClaudeThinkingReplayAliasHomeEvictedTombstoneHasShortTTL(t *testing.T) {
 	ClearClaudeThinkingReplayCache()
 	defer ClearClaudeThinkingReplayCache()
