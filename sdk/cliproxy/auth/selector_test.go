@@ -1956,6 +1956,60 @@ func TestSessionAffinitySelector_Concurrent(t *testing.T) {
 	}
 }
 
+func TestSessionCache_SetAliasesIfAllAbsent_HonorsOccupiedAlias(t *testing.T) {
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	cache.SetAliases("auth-a", "shared", "conv-a")
+
+	bound, ok := cache.SetAliasesIfAllAbsent("auth-b", "shared", "conv-b")
+	if ok {
+		t.Fatalf("SetAliasesIfAllAbsent must not succeed when an alias is occupied")
+	}
+	if bound != "auth-a" {
+		t.Fatalf("SetAliasesIfAllAbsent must return existing auth, got %q", bound)
+	}
+	if got, ok := cache.Get("conv-b"); ok {
+		t.Fatalf("conv-b must not be bound, got %q", got)
+	}
+	if got, ok := cache.Get("shared"); !ok || got != "auth-a" {
+		t.Fatalf("shared must remain auth-a, got %q, %v", got, ok)
+	}
+}
+
+func TestSessionCache_SetAliasesIfNoConflict(t *testing.T) {
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	bound, ok := cache.SetAliasesIfNoConflict("auth-a", "k1", "k2")
+	if !ok || bound != "auth-a" {
+		t.Fatalf("SetAliasesIfNoConflict should set all, got %q, %v", bound, ok)
+	}
+	if got, ok := cache.Get("k1"); !ok || got != "auth-a" {
+		t.Fatalf("k1 = %q, %v", got, ok)
+	}
+
+	bound, ok = cache.SetAliasesIfNoConflict("auth-a", "k2", "k3")
+	if !ok || bound != "auth-a" {
+		t.Fatalf("SetAliasesIfNoConflict should attach free alias, got %q, %v", bound, ok)
+	}
+	if got, ok := cache.Get("k3"); !ok || got != "auth-a" {
+		t.Fatalf("k3 should attach to auth-a, got %q, %v", got, ok)
+	}
+
+	cache.SetAliases("auth-b", "k4")
+	bound, ok = cache.SetAliasesIfNoConflict("auth-c", "k4", "k5")
+	if ok {
+		t.Fatalf("SetAliasesIfNoConflict should fail on conflict")
+	}
+	if bound != "auth-b" {
+		t.Fatalf("SetAliasesIfNoConflict should return conflicting auth, got %q", bound)
+	}
+	if got, ok := cache.Get("k5"); ok {
+		t.Fatalf("k5 should not be bound, got %q", got)
+	}
+}
+
 func TestExtractSessionIDNativeSignals(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -2214,6 +2268,67 @@ func TestSessionCache_StopConcurrent(t *testing.T) {
 			}()
 		}
 		wg.Wait()
+	}
+}
+
+func TestReplaceAliasesIfUnchanged_MergesSameAuthGroups(t *testing.T) {
+	t.Parallel()
+
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	// Two separate alias groups bound to the same unavailable auth.
+	cache.SetAliases("auth-unavailable", "claude::conv:group1::claude-3")
+	cache.SetAliases("auth-unavailable", "claude::conv:group2::claude-3")
+
+	coldKeys := []string{
+		"claude::conv:group1::claude-3",
+		"claude::conv:group2::claude-3",
+		"claude::pck:rebind-test::claude-3",
+	}
+
+	rebound, ok := cache.ReplaceAliasesIfUnchanged("auth-unavailable", "auth-a", coldKeys...)
+	if !ok || rebound != "auth-a" {
+		t.Fatalf("ReplaceAliasesIfUnchanged() = %q, %v, want auth-a, true", rebound, ok)
+	}
+
+	for _, key := range coldKeys {
+		if got, exists := cache.Get(key); !exists || got != "auth-a" {
+			t.Fatalf("key %q = %q, %v, want auth-a, true", key, got, exists)
+		}
+	}
+}
+
+func TestReplaceAliasesIfUnchanged_KeepsRequestedAliases(t *testing.T) {
+	t.Parallel()
+
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	// Existing group already has a prompt-cache alias. The new request supplies
+	// a different prompt-cache alias and a new stable alias. The requested
+	// aliases must survive compaction/rebind even though compactSessionAliases
+	// would otherwise keep only the first prompt-cache alias it sees.
+	oldPrompt := "claude::pck:old::claude-3"
+	oldStable := "claude::conv:existing-session::claude-3"
+	cache.SetAliases("auth-unavailable", oldPrompt, oldStable)
+
+	newPrompt := "claude::pck:new::claude-3"
+	newStable := "claude::conv:new-session::claude-3"
+	// The request hits the existing group through oldStable and also supplies
+	// two new aliases that must be preserved during compaction.
+	coldKeys := []string{newPrompt, newStable, oldStable}
+
+	rebound, ok := cache.ReplaceAliasesIfUnchanged("auth-unavailable", "auth-a", coldKeys...)
+	if !ok || rebound != "auth-a" {
+		t.Fatalf("ReplaceAliasesIfUnchanged() = %q, %v, want auth-a, true", rebound, ok)
+	}
+
+	if got, exists := cache.Get(newPrompt); !exists || got != "auth-a" {
+		t.Fatalf("requested prompt-cache alias %q = %q, %v, want auth-a, true", newPrompt, got, exists)
+	}
+	if got, exists := cache.Get(newStable); !exists || got != "auth-a" {
+		t.Fatalf("requested stable alias %q = %q, %v, want auth-a, true", newStable, got, exists)
 	}
 }
 
