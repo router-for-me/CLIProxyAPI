@@ -72,15 +72,15 @@ func TestSanitizeClaudeMessagesForClaudeUpstreamNormalizesWhitespacePaddedShortS
 	if part.Get("type").String() != "thinking" || !part.Get("signature").Exists() {
 		t.Fatalf("compat sanitizer dropped the thinking block: %s", withCompat)
 	}
-	if got := part.Get("signature").String(); got != "EgI=" {
-		t.Fatalf("compat sanitizer forwarded whitespace-padded short signature %q, want %q", got, "EgI=")
+	if got := part.Get("signature").String(); got != "" {
+		t.Fatalf("compat sanitizer forwarded short signature %q, want empty signature", got)
 	}
 }
 
 func TestSanitizeClaudeMessagesForClaudeUpstreamRejectsGrokOpaqueERInCompatMode(t *testing.T) {
 	// Grok/xAI encrypted_content is uniformly distributed and can base64-encode
 	// to a string starting with 'E' or 'R', but it is not a valid Claude
-	// thinking signature and must not pass the short-signature fallback.
+	// thinking signature and must be cleared before forwarding.
 	grokLike := bytes.Repeat([]byte{0x12, 0xff, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33}, 4)
 	sig := base64.StdEncoding.EncodeToString(grokLike)
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"` + sig + `"}]}]}`)

@@ -144,6 +144,8 @@ type HomeDispatchSelection struct {
 	authMu           sync.RWMutex
 	scope            *executionregistry.Scope
 	accountedModel   string
+	requestRetry     int
+	hasRequestRetry  bool
 	resources        *executionResources
 	attemptCancels   *attemptCancels
 	once             sync.Once

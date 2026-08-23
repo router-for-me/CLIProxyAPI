@@ -36,12 +36,17 @@ func TestRequestRetryOverride(t *testing.T) {
 
 	auth = &Auth{Metadata: map[string]any{"request-retry": 2}}
 	if got, ok := auth.RequestRetryOverride(); !ok || got != 2 {
-		t.Fatalf("request-retry=2 override = (%d, %t), want (2, true)", got, ok)
+		t.Fatalf("legacy request-retry=2 override = (%d, %t), want (2, true)", got, ok)
 	}
 
 	auth = &Auth{Metadata: map[string]any{"request-retry": -2}}
 	if got, ok := auth.RequestRetryOverride(); ok || got != 0 {
-		t.Fatalf("request-retry=-2 override = (%d, %t), want (0, false)", got, ok)
+		t.Fatalf("legacy request-retry=-2 override = (%d, %t), want (0, false)", got, ok)
+	}
+
+	auth = &Auth{Metadata: map[string]any{"request_retry": 0, "request-retry": 2}}
+	if got, ok := auth.RequestRetryOverride(); !ok || got != 0 {
+		t.Fatalf("canonical request_retry precedence = (%d, %t), want (0, true)", got, ok)
 	}
 
 	auth = &Auth{Metadata: map[string]any{"request_retry": "0"}}

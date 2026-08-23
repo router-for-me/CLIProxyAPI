@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,12 +49,12 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return resp, unwrapRequestStopError(errHome)
 	}
 
-	_, maxRetryCredentials, maxWait := m.retrySettings()
+	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, attempt, defaultRequestRetry)
 		if errExec == nil {
 			return resp, nil
 		}
@@ -61,7 +62,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			return cliproxyexecutor.Response{}, unwrapRequestStopError(errExec)
 		}
 		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterErrorWithHomeRetryLimit(ctx, opts, errExec, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry)
 		if !shouldRetry {
 			break
 		}
@@ -95,12 +96,12 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		return resp, unwrapRequestStopError(errHome)
 	}
 
-	_, maxRetryCredentials, maxWait := m.retrySettings()
+	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, attempt, defaultRequestRetry)
 		if errExec == nil {
 			return resp, nil
 		}
@@ -108,7 +109,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 			return cliproxyexecutor.Response{}, unwrapRequestStopError(errExec)
 		}
 		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterErrorWithHomeRetryLimit(ctx, opts, errExec, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry)
 		if !shouldRetry {
 			break
 		}
@@ -136,26 +137,47 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
-	_, maxRetryCredentials, maxWait := m.retrySettings()
+	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
+	homeRetryLimit := -1
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
-	for attempt := 0; ; attempt++ {
-		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+	attempt := 0
+	retryRoundPending := false
+	retryRoundWaited := false
+	for {
+		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, &homeRetryLimit, attempt, defaultRequestRetry)
 		if errStream == nil {
 			return result, nil
 		}
+		if m.HomeEnabled() && retryRoundPending {
+			if wait, okWait := pendingHomeRetryRoundDelay(errStream, maxWait, &homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == ""); okWait && m.homeRetryAllowed(attempt-1, homeRetryLimit) {
+				if retryRoundWaited {
+					return nil, errStream
+				}
+				if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
+					return nil, errWait
+				}
+				retryRoundWaited = true
+				continue
+			}
+		}
+		retryRoundPending = false
+		retryRoundWaited = false
 		if isRequestTerminatedError(errStream) || isRequestStopError(errStream) {
 			return nil, unwrapRequestStopError(errStream)
 		}
 		lastErr = errStream
-		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, retryModel, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterErrorWithHomeRetryLimit(ctx, opts, errStream, attempt, normalized, retryModel, maxWait, homeRetryLimit, defaultRequestRetry)
 		if !shouldRetry {
 			break
 		}
 		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
 			return nil, errWait
 		}
+		attempt++
+		retryRoundPending = m.HomeEnabled()
+		retryRoundWaited = false
 	}
 	if lastErr != nil {
 		lastErr = unwrapRequestStopError(lastErr)
@@ -168,7 +190,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 		var bootstrapErr *streamBootstrapError
 		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
-			return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
+			return streamErrorResult(bootstrapErr.Headers(), lastErr), nil
 		}
 		return nil, lastErr
 	}
@@ -278,7 +300,7 @@ func mergeRequestHeaders(current, updates http.Header, clear []string) http.Head
 	return out
 }
 
-func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
+func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, retryRound int, defaultRequestRetry int) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -288,10 +310,15 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
+	if !homeMode {
+		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
+			tried[authID] = struct{}{}
+		}
+	}
 	attempted := make(map[string]struct{})
 	var lastErr error
 	for {
-		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -299,7 +326,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		pickOpts := opts
 		if homeMode {
-			pickOpts = withHomeAuthCount(opts, homeAuthCount)
+			pickOpts = withHomeRetryRound(pickOpts, retryRound)
+			pickOpts = withHomeAuthCount(pickOpts, homeAuthCount)
+			pickOpts = withHomeExcludedAuthIDs(pickOpts, tried)
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
@@ -445,7 +474,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 }
 
-func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
+func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, retryRound int, defaultRequestRetry int) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -455,10 +484,15 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
+	if !homeMode {
+		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
+			tried[authID] = struct{}{}
+		}
+	}
 	attempted := make(map[string]struct{})
 	var lastErr error
 	for {
-		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -466,7 +500,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		pickOpts := opts
 		if homeMode {
-			pickOpts = withHomeAuthCount(opts, homeAuthCount)
+			pickOpts = withHomeRetryRound(pickOpts, retryRound)
+			pickOpts = withHomeAuthCount(pickOpts, homeAuthCount)
+			pickOpts = withHomeExcludedAuthIDs(pickOpts, tried)
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
@@ -616,7 +652,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	}
 }
 
-func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, homeRetryLimit *int, retryRound int, defaultRequestRetry int) (*cliproxyexecutor.StreamResult, error) {
 	if len(providers) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -627,19 +663,35 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
+	if !homeMode {
+		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
+			tried[authID] = struct{}{}
+		}
+	}
+	homeExcludedAuthIDs := make(map[string]struct{})
+	homeSameAuthRetries := make(map[string]int)
+	lastHomeAuthID := ""
+	homeSameAuthRetryPending := false
 	attempted := make(map[string]struct{})
 	unauthorizedRefreshTried := make(map[string]struct{})
 	var lastErr error
+	var roundTiming homeRetryRoundTiming
 	for {
-		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+		allowSameAuthRetry := homeMode && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
+		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !allowSameAuthRetry {
 			if lastErr != nil {
+				if homeMode {
+					return nil, markHomeRetryRoundExhausted(lastErr, roundTiming.RetryAfter(), true)
+				}
 				return nil, lastErr
 			}
 			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
 		pickOpts := opts
 		if homeMode {
-			pickOpts = withHomeAuthCount(opts, homeAuthCount)
+			pickOpts = withHomeRetryRound(pickOpts, retryRound)
+			pickOpts = withHomeAuthCount(pickOpts, homeAuthCount)
+			pickOpts = withHomeExcludedAuthIDs(pickOpts, homeExcludedAuthIDs)
 		}
 
 		var selection *HomeDispatchSelection
@@ -658,7 +710,15 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			auth, executor, provider, errPick = m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		}
 		if errPick != nil {
+			var homeCooldown *homeDispatchRetryAfterError
+			if homeMode && lastErr != nil && errors.As(errPick, &homeCooldown) && homeCooldown != nil {
+				observeHomeCooldownRetryLimit(homeCooldown, homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == "")
+				return nil, markHomeRetryRoundExhausted(lastErr, homeCooldown.RetryAfter(), false)
+			}
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
+				if homeMode {
+					return nil, markHomeRetryRoundExhausted(lastErr, roundTiming.RetryAfter(), isHomeNextRoundImmediatelyAvailable(errPick))
+				}
 				return nil, lastErr
 			}
 			return nil, errPick
@@ -669,13 +729,56 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
+		if homeMode {
+			m.observeHomeRetryLimit(auth, selection, homeRetryLimit)
+		}
+		if selection != nil && allowSameAuthRetry && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && auth.ID != lastHomeAuthID {
+			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "max_retry_credentials"); errEnd != nil {
+				return nil, errEnd
+			}
+			if lastErr != nil {
+				return nil, markHomeRetryRoundExhausted(lastErr, roundTiming.RetryAfter(), true)
+			}
+			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
+		if homeMode && lastHomeAuthID != "" && auth.ID != lastHomeAuthID {
+			homeSameAuthRetryPending = false
+		}
 		if selection != nil {
-			if _, refreshedAlready := unauthorizedRefreshTried[auth.ID]; refreshedAlready {
-				selection.End("repeated_refresh_auth")
-				if lastErr != nil {
-					return nil, lastErr
+			// A legacy Home may ignore excluded_auth_ids and return the same
+			// credential again. Reject credentials explicitly excluded from this
+			// round while retaining the explicit same-auth retry path, which
+			// intentionally leaves the credential out of homeExcludedAuthIDs.
+			if _, alreadyTried := tried[auth.ID]; alreadyTried {
+				if _, excluded := homeExcludedAuthIDs[auth.ID]; excluded {
+					if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "repeated_excluded_auth"); errEnd != nil {
+						return nil, errEnd
+					}
+					if lastErr != nil {
+						return nil, markHomeRetryRoundExhausted(lastErr, roundTiming.RetryAfter(), false)
+					}
+					return nil, repeatedHomeAuthError()
+				} else {
+					homeSameAuthRetries[auth.ID]++
+					if homeSameAuthRetries[auth.ID] > 1 {
+						// A fresh Home selection may retry the same auth once for
+						// connection lifecycle or authorization recovery. Repeated
+						// failures must still rotate away from this credential.
+						homeExcludedAuthIDs[auth.ID] = struct{}{}
+						if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "repeated_same_auth"); errEnd != nil {
+							return nil, errEnd
+						}
+						continue
+					}
 				}
-				return nil, repeatedHomeAuthError()
+			}
+			if _, refreshedAlready := unauthorizedRefreshTried[auth.ID]; refreshedAlready {
+				homeExcludedAuthIDs[auth.ID] = struct{}{}
+				homeSameAuthRetryPending = false
+				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "repeated_refresh_auth"); errEnd != nil {
+					return nil, errEnd
+				}
+				continue
 			}
 		}
 
@@ -712,6 +815,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		if len(models) == 0 {
 			if selection != nil {
+				homeExcludedAuthIDs[auth.ID] = struct{}{}
+				lastHomeAuthID = auth.ID
+				homeSameAuthRetryPending = false
 				releaseAttempt()
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "no_execution_models"); errEnd != nil {
 					return nil, errEnd
@@ -727,6 +833,17 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		}
 		if errPrepare != nil {
+			if selection != nil {
+				excludeAuth := shouldExcludeHomeAuthAfterStreamError(execCtx, auth, errPrepare)
+				if _, refreshedAlready := unauthorizedRefreshTried[auth.ID]; refreshedAlready || homeSameAuthRetries[auth.ID] > 0 {
+					excludeAuth = true
+				}
+				if excludeAuth {
+					homeExcludedAuthIDs[auth.ID] = struct{}{}
+				}
+				lastHomeAuthID = auth.ID
+				homeSameAuthRetryPending = !excludeAuth
+			}
 			if selection == nil {
 				if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errPrepare); errCancel != nil {
 					return nil, errCancel
@@ -740,6 +857,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				m.MarkResult(execCtx, result)
 			}
 			lastErr = errPrepare
+			if homeMode {
+				roundTiming.Observe(lastErr)
+			}
 			if selection != nil {
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "prepare_failed"); errEnd != nil {
 					return nil, errEnd
@@ -763,6 +883,17 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil, unauthorizedRefreshTried)
 		if errStream != nil {
 			if selection != nil {
+				excludeAuth := shouldExcludeHomeAuthAfterStreamError(execCtx, auth, errStream)
+				if _, refreshedAlready := unauthorizedRefreshTried[auth.ID]; refreshedAlready || homeSameAuthRetries[auth.ID] > 0 {
+					excludeAuth = true
+				}
+				if excludeAuth {
+					homeExcludedAuthIDs[auth.ID] = struct{}{}
+				}
+				lastHomeAuthID = auth.ID
+				homeSameAuthRetryPending = !excludeAuth
+			}
+			if selection != nil {
 				releaseAttempt()
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "stream_start_failed"); errEnd != nil {
 					return nil, errEnd
@@ -778,6 +909,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				}
 				lastErr = errStream
 				if homeMode {
+					roundTiming.Observe(lastErr)
+				}
+				if homeMode {
 					homeAuthCount++
 				}
 				continue
@@ -786,6 +920,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errStream
 			}
 			lastErr = errStream
+			if homeMode {
+				roundTiming.Observe(lastErr)
+			}
 			if homeMode {
 				homeAuthCount++
 			}
@@ -799,6 +936,19 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		return streamResult, nil
 	}
+}
+
+func shouldExcludeHomeAuthAfterStreamError(ctx context.Context, auth *Auth, err error) bool {
+	if err == nil || isConnectionLifecycleError(err) {
+		return false
+	}
+	// A 426 during a downstream websocket attempt is a transport fallback
+	// signal. OAuth authorization failures may also recover after a refresh.
+	// Both paths may retry the same credential once.
+	if cliproxyexecutor.DownstreamWebsocket(ctx) && statusCodeFromError(err) == http.StatusUpgradeRequired {
+		return false
+	}
+	return !isUnauthorizedError(err) || auth == nil || auth.AuthKind() != AuthKindOAuth
 }
 
 func cloneRequestMetadata(src map[string]any) map[string]any {
@@ -872,6 +1022,48 @@ func withHomeAuthCount(opts cliproxyexecutor.Options, count int) cliproxyexecuto
 	return opts
 }
 
+func withHomeRetryRound(opts cliproxyexecutor.Options, retryRound int) cliproxyexecutor.Options {
+	meta := make(map[string]any, len(opts.Metadata)+1)
+	for key, value := range opts.Metadata {
+		meta[key] = value
+	}
+	if retryRound > 0 {
+		meta[homeRetryRoundMetadataKey] = retryRound
+	} else {
+		delete(meta, homeRetryRoundMetadataKey)
+	}
+	opts.Metadata = meta
+	return opts
+}
+
+func withHomeExcludedAuthIDs(opts cliproxyexecutor.Options, tried map[string]struct{}) cliproxyexecutor.Options {
+	meta := make(map[string]any, len(opts.Metadata)+1)
+	for key, value := range opts.Metadata {
+		meta[key] = value
+	}
+	excluded := make(map[string]struct{})
+	for _, authID := range homeExcludedAuthIDsFromMetadata(meta) {
+		excluded[authID] = struct{}{}
+	}
+	for authID := range tried {
+		if authID = strings.TrimSpace(authID); authID != "" {
+			excluded[authID] = struct{}{}
+		}
+	}
+	if len(excluded) == 0 {
+		delete(meta, ExcludedAuthIDsMetadataKey)
+	} else {
+		ids := make([]string, 0, len(excluded))
+		for authID := range excluded {
+			ids = append(ids, authID)
+		}
+		sort.Strings(ids)
+		meta[ExcludedAuthIDsMetadataKey] = ids
+	}
+	opts.Metadata = meta
+	return opts
+}
+
 func homeAuthCountFromMetadata(meta map[string]any) int {
 	if len(meta) == 0 {
 		return 1
@@ -891,6 +1083,56 @@ func homeAuthCountFromMetadata(meta map[string]any) int {
 		}
 	}
 	return 1
+}
+
+func homeExcludedAuthIDsFromMetadata(meta map[string]any) []string {
+	if len(meta) == 0 {
+		return nil
+	}
+	raw, ok := meta[ExcludedAuthIDsMetadataKey]
+	if !ok {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	ids := make([]string, 0)
+	appendID := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, exists := seen[value]; exists {
+			return
+		}
+		seen[value] = struct{}{}
+		ids = append(ids, value)
+	}
+	switch values := raw.(type) {
+	case []string:
+		for _, value := range values {
+			appendID(value)
+		}
+	case []any:
+		for _, value := range values {
+			if text, okText := value.(string); okText {
+				appendID(text)
+			}
+		}
+	case map[string]struct{}:
+		for value := range values {
+			appendID(value)
+		}
+	case map[string]bool:
+		for value, enabled := range values {
+			if enabled {
+				appendID(value)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func hasRequestedModelMetadata(meta map[string]any) bool {

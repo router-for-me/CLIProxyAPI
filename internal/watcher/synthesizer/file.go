@@ -81,6 +81,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
 		return nil, nil
 	}
+	coreauth.NormalizeCredentialMetadata(metadata)
 	if errWeight := coreauth.ValidateAuthWeight(&coreauth.Auth{Metadata: metadata}); errWeight != nil {
 		return nil, fmt.Errorf("invalid weight in %s: %w", filepath.Base(fullPath), errWeight)
 	}
@@ -108,6 +109,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 				if auth == nil {
 					continue
 				}
+				coreauth.NormalizeCredentialMetadata(auth.Metadata)
 				if len(auths) > 1 {
 					coreauth.MarkPluginVirtualAuth(auth, fullPath, index)
 				}
@@ -269,7 +271,7 @@ func compactPluginAuths(auths []*coreauth.Auth) []*coreauth.Auth {
 }
 
 // extractOAuthModelAliasesFromMetadata reads per-account model aliases from OAuth JSON metadata.
-// Supports both "model_aliases" and "model-aliases" keys.
+// "model_aliases" is canonical; "model-aliases" remains a legacy alias.
 func extractOAuthModelAliasesFromMetadata(metadata map[string]any) []config.OAuthModelAlias {
 	if metadata == nil {
 		return nil
@@ -299,12 +301,11 @@ func extractOAuthModelAliasesFromMetadata(metadata map[string]any) []config.OAut
 }
 
 // extractExcludedModelsFromMetadata reads per-account excluded models from the OAuth JSON metadata.
-// Supports both "excluded_models" and "excluded-models" keys, and accepts both []string and []interface{}.
+// "excluded_models" is canonical; "excluded-models" remains a legacy alias.
 func extractExcludedModelsFromMetadata(metadata map[string]any) []string {
 	if metadata == nil {
 		return nil
 	}
-	// Try both key formats
 	raw, ok := metadata["excluded_models"]
 	if !ok {
 		raw, ok = metadata["excluded-models"]

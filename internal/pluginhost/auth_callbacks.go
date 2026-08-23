@@ -317,6 +317,7 @@ func (h *Host) buildAuthFromFileData(path string, data []byte) (*coreauth.Auth, 
 	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
 		return nil, fmt.Errorf("invalid auth file: %w", errUnmarshal)
 	}
+	coreauth.NormalizeCredentialMetadata(metadata)
 	provider, _ := metadata["type"].(string)
 	if strings.TrimSpace(provider) == "" {
 		provider = "unknown"

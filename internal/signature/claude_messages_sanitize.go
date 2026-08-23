@@ -1,7 +1,6 @@
 package signature
 
 import (
-	"encoding/base64"
 	"fmt"
 	"strings"
 
@@ -160,26 +159,11 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 					messageModified = true
 				default:
 					// DropBlock, DropSignature, or NoCompatibleReplacement: keep the
-					// block shape for the compat endpoint. Preserve empty placeholders
-					// with their required signature member, and keep only unprefixed,
-					// non-foreign decodable Claude E/R shapes as a fallback.
+					// block shape for the compat endpoint and preserve empty placeholders
+					// with their required signature member.
 					if isEmptyClaudeThinkingPlaceholder(part) {
 						report.Preserved++
 						keptParts = append(keptParts, part.Raw)
-					} else if targetProvider == SignatureProviderClaude {
-						if replayable, normalized := isClaudeReplayableShortSignature(rawSignature); replayable {
-							report.Preserved++
-							if normalized != rawSignature {
-								updated, _ := sjson.Set(part.Raw, "signature", normalized)
-								keptParts = append(keptParts, updated)
-							} else {
-								keptParts = append(keptParts, part.Raw)
-							}
-						} else {
-							report.DroppedSignatures++
-							updated, _ := sjson.Set(part.Raw, "signature", "")
-							keptParts = append(keptParts, updated)
-						}
 					} else {
 						report.DroppedSignatures++
 						updated, _ := sjson.Set(part.Raw, "signature", "")
@@ -340,61 +324,4 @@ func deleteEmptyJSONObjectPath(raw, path string) (string, bool) {
 		return raw, false
 	}
 	return updated, true
-}
-
-// isClaudeReplayableShortSignature is the final compat fallback for thinking
-// blocks. It accepts only the minimal 1-2 byte E-prefixed synthetic shape used
-// by the Claude thinking replay cache (e.g. "EgI="). Anything larger or
-// foreign-prefixed is rejected, so Grok/xAI encrypted_content that happens to
-// base64-encode to 'E' or 'R' is never forwarded.
-//
-// Longer valid Claude signatures are already handled by
-// DecideSignatureCompatibilityForModel before this fallback runs; the detector
-// call here would be redundant and is deliberately avoided for both correctness
-// and cost.
-func isClaudeReplayableShortSignature(rawSignature string) (bool, string) {
-	if provider, payload, ok := SplitSignatureProviderPrefix(rawSignature); ok {
-		if provider != SignatureProviderClaude {
-			return false, ""
-		}
-		if strings.Contains(payload, "#") {
-			// Reject nested or residual provider prefixes (e.g. claude#vendor#...).
-			return false, ""
-		}
-		if ok, normalized := isShortClaudeSyntheticSignature(payload); ok {
-			return true, normalized
-		}
-		return false, ""
-	}
-	if strings.Contains(rawSignature, "#") {
-		// Unrecognized provider prefix (e.g. vendor#...).
-		return false, ""
-	}
-	if ok, normalized := isShortClaudeSyntheticSignature(rawSignature); ok {
-		return true, normalized
-	}
-	return false, ""
-}
-
-// isShortClaudeSyntheticSignature reports whether rawSignature is the minimal
-// 1-2 byte E-prefixed synthetic used by the Claude thinking replay cache.
-// Anything larger is rejected without decoding, so this does not allocate for
-// multi-kilobyte opaque blobs. The returned string is the trimmed, normalized
-// form to avoid forwarding whitespace-padded signatures upstream.
-func isShortClaudeSyntheticSignature(rawSignature string) (bool, string) {
-	sig := strings.TrimSpace(rawSignature)
-	// Valid base64 is a multiple of 4 characters; 4 characters decode to at most
-	// 3 bytes. Only 1-2 byte payloads can be the short synthetic, so anything
-	// longer is rejected before decoding.
-	if len(sig) > 4 {
-		return false, ""
-	}
-	decoded, err := base64.StdEncoding.DecodeString(sig)
-	if err != nil || len(decoded) == 0 || len(decoded) > 2 {
-		return false, ""
-	}
-	if decoded[0] != 0x12 {
-		return false, ""
-	}
-	return true, sig
 }

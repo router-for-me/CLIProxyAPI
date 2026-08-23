@@ -1618,3 +1618,617 @@ func TestCleanJSONSchemaKeepsPropertyNamedEncrypted(t *testing.T) {
 		}
 	}
 }
+
+// TestCleanJSONSchema_BarePropertyMapNormalized covers Issue #5178:
+// MCP tools (e.g. Asana) emit bare property maps missing type:object and properties wrappers,
+// plus boolean required: true on child properties.
+func TestCleanJSONSchema_BarePropertyMapNormalized(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"data": {
+				"parent": { "type": "string", "required": true },
+				"insert_after": { "type": "string" },
+				"insert_before": { "type": "string" }
+			},
+			"opts": {
+				"opt_fields": { "type": "string" }
+			}
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"antigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"gemini":              CleanJSONSchemaForGemini,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+
+		// data must be normalized into an object schema with properties
+		if parsed.Get("properties.data.type").String() != "object" {
+			t.Errorf("%s: properties.data.type = %q, want object; got schema: %s", cleaner, parsed.Get("properties.data.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.parent.type").String() != "string" {
+			t.Errorf("%s: properties.data.properties.parent.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.data.properties.parent.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.insert_after.type").String() != "string" {
+			t.Errorf("%s: properties.data.properties.insert_after.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.data.properties.insert_after.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.insert_before.type").String() != "string" {
+			t.Errorf("%s: properties.data.properties.insert_before.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.data.properties.insert_before.type").String(), got)
+		}
+		// parent required: true must be promoted to data.required array
+		var dataReq []string
+		for _, r := range parsed.Get("properties.data.required").Array() {
+			dataReq = append(dataReq, r.String())
+		}
+		if !contains(dataReq, "parent") {
+			t.Errorf("%s: properties.data.required = %v, want 'parent' included; got schema: %s", cleaner, dataReq, got)
+		}
+		// boolean required on parent node must be stripped
+		if parsed.Get("properties.data.properties.parent.required").Exists() {
+			t.Errorf("%s: properties.data.properties.parent.required survived; got schema: %s", cleaner, got)
+		}
+
+		// opts must also be normalized into an object schema
+		if parsed.Get("properties.opts.type").String() != "object" {
+			t.Errorf("%s: properties.opts.type = %q, want object; got schema: %s", cleaner, parsed.Get("properties.opts.type").String(), got)
+		}
+		if parsed.Get("properties.opts.properties.opt_fields.type").String() != "string" {
+			t.Errorf("%s: properties.opts.properties.opt_fields.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.opts.properties.opt_fields.type").String(), got)
+		}
+	}
+}
+
+// TestCleanJSONSchema_NestedBarePropertyMap tests recursive normalization of multi-level bare property maps.
+func TestCleanJSONSchema_NestedBarePropertyMap(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"data": {
+				"workspace": { "type": "string", "required": true },
+				"task": {
+					"name": { "type": "string", "required": true },
+					"notes": { "type": "string" }
+				}
+			}
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"gemini":              CleanJSONSchemaForGemini,
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+
+		if parsed.Get("properties.data.type").String() != "object" {
+			t.Errorf("%s: properties.data.type = %q, want object; got schema: %s", cleaner, parsed.Get("properties.data.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.workspace.type").String() != "string" {
+			t.Errorf("%s: properties.data.properties.workspace.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.data.properties.workspace.type").String(), got)
+		}
+
+		// Nested task should also be normalized to an object
+		if parsed.Get("properties.data.properties.task.type").String() != "object" {
+			t.Errorf("%s: properties.data.properties.task.type = %q, want object; got schema: %s", cleaner, parsed.Get("properties.data.properties.task.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.task.properties.name.type").String() != "string" {
+			t.Errorf("%s: properties.data.properties.task.properties.name.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.data.properties.task.properties.name.type").String(), got)
+		}
+
+		// Required promotion at both levels
+		var dataReq []string
+		for _, r := range parsed.Get("properties.data.required").Array() {
+			dataReq = append(dataReq, r.String())
+		}
+		if !contains(dataReq, "workspace") {
+			t.Errorf("%s: properties.data.required = %v, want 'workspace'; got schema: %s", cleaner, dataReq, got)
+		}
+
+		var taskReq []string
+		for _, r := range parsed.Get("properties.data.properties.task.required").Array() {
+			taskReq = append(taskReq, r.String())
+		}
+		if !contains(taskReq, "name") {
+			t.Errorf("%s: properties.data.properties.task.required = %v, want 'name'; got schema: %s", cleaner, taskReq, got)
+		}
+	}
+}
+
+// TestCleanJSONSchema_BarePropertyMapWithKeywordNames tests that bare property maps with fields
+// named like schema keywords (title, description, format, type) are correctly normalized.
+func TestCleanJSONSchema_BarePropertyMapWithKeywordNames(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"data": {
+				"title": { "type": "string", "required": true },
+				"description": { "type": "string" },
+				"format": { "type": "string" },
+				"type": { "type": "string" }
+			}
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"gemini":              CleanJSONSchemaForGemini,
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+
+		if parsed.Get("properties.data.type").String() != "object" {
+			t.Errorf("%s: properties.data.type = %q, want object; got schema: %s", cleaner, parsed.Get("properties.data.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.title.type").String() != "string" {
+			t.Errorf("%s: properties.data.properties.title.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.data.properties.title.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.description.type").String() != "string" {
+			t.Errorf("%s: properties.data.properties.description.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.data.properties.description.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.type.type").String() != "string" {
+			t.Errorf("%s: properties.data.properties.type.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.data.properties.type.type").String(), got)
+		}
+
+		var dataReq []string
+		for _, r := range parsed.Get("properties.data.required").Array() {
+			dataReq = append(dataReq, r.String())
+		}
+		if !contains(dataReq, "title") {
+			t.Errorf("%s: properties.data.required = %v, want 'title'; got schema: %s", cleaner, dataReq, got)
+		}
+	}
+}
+
+// TestCleanJSONSchema_ArrayItemsBarePropertyMap tests bare property map normalization inside array items.
+func TestCleanJSONSchema_ArrayItemsBarePropertyMap(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"tasks": {
+				"type": "array",
+				"items": {
+					"id": { "type": "string", "required": true },
+					"label": { "type": "string" }
+				}
+			}
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"gemini":              CleanJSONSchemaForGemini,
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+
+		if parsed.Get("properties.tasks.items.type").String() != "object" {
+			t.Errorf("%s: properties.tasks.items.type = %q, want object; got schema: %s", cleaner, parsed.Get("properties.tasks.items.type").String(), got)
+		}
+		if parsed.Get("properties.tasks.items.properties.id.type").String() != "string" {
+			t.Errorf("%s: properties.tasks.items.properties.id.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.tasks.items.properties.id.type").String(), got)
+		}
+		var itemsReq []string
+		for _, r := range parsed.Get("properties.tasks.items.required").Array() {
+			itemsReq = append(itemsReq, r.String())
+		}
+		if !contains(itemsReq, "id") {
+			t.Errorf("%s: properties.tasks.items.required = %v, want 'id'; got schema: %s", cleaner, itemsReq, got)
+		}
+	}
+}
+
+// TestCleanJSONSchema_BooleanRequiredPromoted tests that boolean required: true is promoted
+// and boolean required: false is stripped without being added to the required array.
+func TestCleanJSONSchema_BooleanRequiredPromoted(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"existing": { "type": "string" },
+			"name": { "type": "string", "required": true },
+			"age": { "type": "integer", "required": false },
+			"tag": { "type": "string" }
+		},
+		"required": ["existing"]
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"gemini":              CleanJSONSchemaForGemini,
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+
+		var req []string
+		for _, r := range parsed.Get("required").Array() {
+			req = append(req, r.String())
+		}
+
+		if !contains(req, "existing") || !contains(req, "name") {
+			t.Errorf("%s: required = %v, want both 'existing' and 'name'; got schema: %s", cleaner, req, got)
+		}
+		if contains(req, "age") || contains(req, "tag") {
+			t.Errorf("%s: required = %v, should not contain 'age' or 'tag'; got schema: %s", cleaner, req, got)
+		}
+
+		if parsed.Get("properties.name.required").Exists() {
+			t.Errorf("%s: properties.name.required survived; got schema: %s", cleaner, got)
+		}
+		if parsed.Get("properties.age.required").Exists() {
+			t.Errorf("%s: properties.age.required survived; got schema: %s", cleaner, got)
+		}
+	}
+}
+
+// TestCleanJSONSchema_PreservesLargeNumberPrecision tests that numbers are not corrupted by float64 precision loss.
+func TestCleanJSONSchema_PreservesLargeNumberPrecision(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"big_int": {
+				"type": "integer",
+				"minimum": 9007199254740993
+			},
+			"bare_child": {
+				"sub": { "type": "string" }
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravityResponse(input)
+	// minimum is moved to description hint
+	if !strings.Contains(result, "9007199254740993") {
+		t.Errorf("large integer precision was lost: %s", result)
+	}
+}
+
+// TestCleanJSONSchema_BarePropertyMapWithRequestAndToolsNames tests that property names like
+// "request", "tools", "headers", "messages" inside bare property maps are correctly normalized.
+func TestCleanJSONSchema_BarePropertyMapWithRequestAndToolsNames(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"data": {
+				"request": {
+					"method": { "type": "string", "required": true },
+					"url": { "type": "string" }
+				},
+				"headers": {
+					"authorization": { "type": "string" }
+				},
+				"tools": {
+					"name": { "type": "string" }
+				}
+			}
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"gemini":              CleanJSONSchemaForGemini,
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+
+		if parsed.Get("properties.data.type").String() != "object" {
+			t.Errorf("%s: properties.data.type = %q, want object; got schema: %s", cleaner, parsed.Get("properties.data.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.headers.type").String() != "object" {
+			t.Errorf("%s: properties.data.properties.headers.type = %q, want object; got schema: %s", cleaner, parsed.Get("properties.data.properties.headers.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.tools.type").String() != "object" {
+			t.Errorf("%s: properties.data.properties.tools.type = %q, want object; got schema: %s", cleaner, parsed.Get("properties.data.properties.tools.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.request.type").String() != "object" {
+			t.Errorf("%s: properties.data.properties.request.type = %q, want object; got schema: %s", cleaner, parsed.Get("properties.data.properties.request.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.request.properties.method.type").String() != "string" {
+			t.Errorf("%s: properties.data.properties.request.properties.method.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.data.properties.request.properties.method.type").String(), got)
+		}
+		var reqReq []string
+		for _, r := range parsed.Get("properties.data.properties.request.required").Array() {
+			reqReq = append(reqReq, r.String())
+		}
+		if !contains(reqReq, "method") {
+			t.Errorf("%s: request.required = %v, want 'method'; got schema: %s", cleaner, reqReq, got)
+		}
+	}
+}
+
+// TestCleanJSONSchema_BarePropertyMapWithSiblingDescription tests bare property maps with sibling
+// annotations (e.g. description, title, required) alongside child property definitions.
+func TestCleanJSONSchema_BarePropertyMapWithSiblingDescription(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"data": {
+				"description": "Task payload",
+				"parent": { "type": "string", "required": true },
+				"insert_after": { "type": "string" }
+			}
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"gemini":              CleanJSONSchemaForGemini,
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+
+		if parsed.Get("properties.data.type").String() != "object" {
+			t.Errorf("%s: properties.data.type = %q, want object; got schema: %s", cleaner, parsed.Get("properties.data.type").String(), got)
+		}
+		if parsed.Get("properties.data.description").String() != "Task payload" {
+			t.Errorf("%s: properties.data.description = %q, want 'Task payload'; got schema: %s", cleaner, parsed.Get("properties.data.description").String(), got)
+		}
+		if parsed.Get("properties.data.properties.parent.type").String() != "string" {
+			t.Errorf("%s: properties.data.properties.parent.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.data.properties.parent.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.insert_after.type").String() != "string" {
+			t.Errorf("%s: properties.data.properties.insert_after.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.data.properties.insert_after.type").String(), got)
+		}
+		var dataReq []string
+		for _, r := range parsed.Get("properties.data.required").Array() {
+			dataReq = append(dataReq, r.String())
+		}
+		if !contains(dataReq, "parent") {
+			t.Errorf("%s: properties.data.required = %v, want 'parent'; got schema: %s", cleaner, dataReq, got)
+		}
+	}
+}
+
+// TestCleanJSONSchema_SingleKeySchemaWrapper tests that cleanNestedSchema wrapper {"schema": ...}
+// is unwrapped, normalized, and placeholder is properly placed without root pollution.
+func TestCleanJSONSchema_SingleKeySchemaWrapper(t *testing.T) {
+	inner := `{
+		"type": "object",
+		"properties": {
+			"data": {
+				"parent": { "type": "string", "required": true }
+			}
+		}
+	}`
+	wrapped := `{"schema": ` + inner + `}`
+
+	result := CleanJSONSchemaForAntigravityTool(wrapped, true)
+	parsed := gjson.Parse(result)
+
+	if !parsed.Get("schema").Exists() {
+		t.Fatalf("wrapper key 'schema' was lost: %s", result)
+	}
+	if parsed.Get("schema.properties.data.type").String() != "object" {
+		t.Errorf("schema.properties.data.type = %q, want object; got: %s", parsed.Get("schema.properties.data.type").String(), result)
+	}
+	if parsed.Get("schema.properties.data.properties.parent.type").String() != "string" {
+		t.Errorf("schema.properties.data.properties.parent.type = %q, want string; got: %s", parsed.Get("schema.properties.data.properties.parent.type").String(), result)
+	}
+	var dataReq []string
+	for _, r := range parsed.Get("schema.properties.data.required").Array() {
+		dataReq = append(dataReq, r.String())
+	}
+	if !contains(dataReq, "parent") {
+		t.Errorf("schema.properties.data.required = %v, want 'parent'; got: %s", dataReq, result)
+	}
+}
+
+// TestCleanJSONSchema_BarePropertyMapWithExplicitTypeObject tests that nodes declaring
+// type: "object" but omitting properties wrapper are correctly normalized.
+func TestCleanJSONSchema_BarePropertyMapWithExplicitTypeObject(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"data": {
+				"type": "object",
+				"parent": { "type": "string", "required": true },
+				"insert_after": { "type": "string" }
+			}
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"gemini":              CleanJSONSchemaForGemini,
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+
+		if parsed.Get("properties.data.type").String() != "object" {
+			t.Errorf("%s: properties.data.type = %q, want object; got schema: %s", cleaner, parsed.Get("properties.data.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.parent.type").String() != "string" {
+			t.Errorf("%s: properties.data.properties.parent.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.data.properties.parent.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.insert_after.type").String() != "string" {
+			t.Errorf("%s: properties.data.properties.insert_after.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.data.properties.insert_after.type").String(), got)
+		}
+		var dataReq []string
+		for _, r := range parsed.Get("properties.data.required").Array() {
+			dataReq = append(dataReq, r.String())
+		}
+		if !contains(dataReq, "parent") {
+			t.Errorf("%s: properties.data.required = %v, want 'parent'; got schema: %s", cleaner, dataReq, got)
+		}
+	}
+}
+
+// TestCleanJSONSchema_BarePropertyMapWithNullable tests bare property maps with nullable: true.
+func TestCleanJSONSchema_BarePropertyMapWithNullable(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"data": {
+				"nullable": true,
+				"description": "Task payload",
+				"parent": { "type": "string" }
+			}
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"gemini":              CleanJSONSchemaForGemini,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+
+		if parsed.Get("properties.data.type").String() != "object" {
+			t.Errorf("%s: properties.data.type = %q, want object; got schema: %s", cleaner, parsed.Get("properties.data.type").String(), got)
+		}
+		if parsed.Get("properties.data.properties.parent.type").String() != "string" {
+			t.Errorf("%s: properties.data.properties.parent.type = %q, want string; got schema: %s", cleaner, parsed.Get("properties.data.properties.parent.type").String(), got)
+		}
+	}
+}
+
+// TestCleanJSONSchema_PreservesHTMLCharactersWithoutEscaping tests that < > & in descriptions
+// are not converted into HTML entities (\u003c, \u003e, \u0026).
+func TestCleanJSONSchema_PreservesHTMLCharactersWithoutEscaping(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"data": {
+				"description": "Uses <tag> & symbols > threshold",
+				"parent": { "type": "string" }
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravityResponse(input)
+	if strings.Contains(result, `\u003c`) || strings.Contains(result, `\u003e`) || strings.Contains(result, `\u0026`) {
+		t.Errorf("HTML characters were escaped: %s", result)
+	}
+	if !strings.Contains(result, "<tag>") || !strings.Contains(result, "& symbols >") {
+		t.Errorf("Original description with HTML characters was corrupted: %s", result)
+	}
+}
+
+// TestCleanJSONSchema_VendorExtensionOnEnumNotWrappedIntoProperties tests that vendor extensions
+// on non-object types (e.g. x-google-enum-descriptions on a string enum) are not wrapped into properties.
+func TestCleanJSONSchema_VendorExtensionOnEnumNotWrappedIntoProperties(t *testing.T) {
+	input := `{
+		"type": "string",
+		"enum": ["FOO", "BAR"],
+		"x-google-enum-descriptions": {
+			"FOO": "Foo option",
+			"BAR": "Bar option"
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"gemini":              CleanJSONSchemaForGemini,
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+
+		if parsed.Get("properties").Exists() {
+			t.Errorf("%s: string enum gained unexpected properties: %s", cleaner, got)
+		}
+		if parsed.Get("type").String() != "string" {
+			t.Errorf("%s: string type corrupted: %s", cleaner, got)
+		}
+	}
+}
+
+// TestCleanJSONSchema_ObjectDefaultNotWrappedIntoProperties tests that object-typed default
+// is not wrapped into properties as an orphan bare property.
+func TestCleanJSONSchema_ObjectDefaultNotWrappedIntoProperties(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"settings": {
+				"type": "object",
+				"default": { "theme": "dark", "lang": "en" }
+			}
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"gemini":              CleanJSONSchemaForGemini,
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+
+		// settings must not gain properties.default.properties.theme
+		if parsed.Get("properties.settings.properties.default").Exists() {
+			t.Errorf("%s: default was converted to property: %s", cleaner, got)
+		}
+	}
+}
+
+// TestCleanJSONSchema_MixedPropertiesAndOrphanBareProperty tests that orphan bare property maps
+// alongside an existing properties object are collected into properties.
+func TestCleanJSONSchema_MixedPropertiesAndOrphanBareProperty(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"foo": { "type": "string" }
+		},
+		"bar": {
+			"type": "integer",
+			"required": true
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"gemini":              CleanJSONSchemaForGemini,
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+
+		if parsed.Get("properties.foo.type").String() != "string" {
+			t.Errorf("%s: foo corrupted: %s", cleaner, got)
+		}
+		if parsed.Get("properties.bar.type").String() != "integer" {
+			t.Errorf("%s: orphan bar was not moved to properties: %s", cleaner, got)
+		}
+		var req []string
+		for _, r := range parsed.Get("required").Array() {
+			req = append(req, r.String())
+		}
+		if !contains(req, "bar") {
+			t.Errorf("%s: bar required not promoted: %s", cleaner, got)
+		}
+		if parsed.Get("bar").Exists() {
+			t.Errorf("%s: top-level bar survived: %s", cleaner, got)
+		}
+	}
+}
+
+// TestCleanJSONSchema_PreservesAdditionalPropertiesObjectSchema tests that a standalone
+// additionalProperties schema is recognized as a structural keyword and not wrapped as a property.
+func TestCleanJSONSchema_PreservesAdditionalPropertiesObjectSchema(t *testing.T) {
+	input := `{
+		"additionalProperties": {
+			"type": "string"
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"gemini":              CleanJSONSchemaForGemini,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+		// Should not be wrapped as properties.additionalProperties
+		if parsed.Get("properties.additionalProperties").Exists() {
+			t.Errorf("%s: additionalProperties was wrapped into properties: %s", cleaner, got)
+		}
+	}
+}

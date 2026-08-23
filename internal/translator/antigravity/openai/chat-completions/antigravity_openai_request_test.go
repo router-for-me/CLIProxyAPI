@@ -492,3 +492,42 @@ func TestConvertOpenAIRequestToAntigravity_MaxCompletionTokens(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertOpenAIRequestToAntigravityPreservesToolResponseAsString(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"messages": [
+			{
+				"role": "user",
+				"content": "read file"
+			},
+			{
+				"role": "assistant",
+				"tool_calls": [{
+					"id": "call_1",
+					"type": "function",
+					"function": {"name": "read_file", "arguments": "{\"path\":\"config.json\"}"}
+				}]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_1",
+				"content": "{\"key\":\"value\",\"items\":[1,2,3]}"
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	contents := gjson.GetBytes(result, "request.contents").Array()
+	if len(contents) < 3 {
+		t.Fatalf("expected at least 3 contents, got %d. Output: %s", len(contents), result)
+	}
+	frResult := contents[2].Get("parts.0.functionResponse.response.result")
+	if frResult.Type != gjson.String {
+		t.Fatalf("expected functionResponse.response.result to be string, got type %s (raw: %s)", frResult.Type, frResult.Raw)
+	}
+	expected := `{"key":"value","items":[1,2,3]}`
+	if got := frResult.String(); got != expected {
+		t.Fatalf("expected %q, got %q", expected, got)
+	}
+}
