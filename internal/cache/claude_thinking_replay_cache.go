@@ -59,10 +59,10 @@ const (
 	ClaudeThinkingReplayCacheMaxAliasesPerCredential = 256
 
 	// ClaudeThinkingReplayCacheMaxFallbackSessions bounds how many fallback
-	// (fb:<uuid>) replay records a single credential can keep in Home KV. It
-	// mirrors the alias credential cap, because each active conversation needs
-	// at most one fallback session.
-	ClaudeThinkingReplayCacheMaxFallbackSessions = 256
+	// (fb:<uuid>) replay records a single credential can keep in Home KV. A
+	// session can be referenced by every alias key, so the maximum distinct
+	// fallback sessions is bounded by the product of the alias caps.
+	ClaudeThinkingReplayCacheMaxFallbackSessions = ClaudeThinkingReplayCacheMaxAliasesPerCredential * ClaudeThinkingReplayCacheMaxAliasesPerKey
 
 	claudeThinkingReplayCacheMaxSerializedBytes = ClaudeThinkingReplayCacheMaxBytesPerSession + 1024
 
@@ -1218,12 +1218,38 @@ func applyClaudeThinkingReplayFallbackIndexChanges(ctx context.Context, client k
 			continue
 		}
 
-		for _, sessionKey := range toDelete {
-			if _, errDel := client.KVDel(ctx, claudeThinkingReplayKVKey(modelFamily, sessionKey)); errDel != nil {
-				log.Warnf("claude thinking replay fallback record delete failed: %v", errDel)
-			}
-		}
+		// Two-phase deletion: re-read the index after the CAS and only delete
+		// replay records whose session no longer appears in it. This avoids
+		// erasing a record that a concurrent worker has just re-referenced.
+		deleteClaudeThinkingReplayFallbackRecordsIfUnreferenced(ctx, client, modelFamily, toDelete)
 		return
+	}
+}
+
+func deleteClaudeThinkingReplayFallbackRecordsIfUnreferenced(ctx context.Context, client kimiThinkingReplayKVClient, modelFamily string, sessionKeys []string) {
+	if len(sessionKeys) == 0 {
+		return
+	}
+	key := claudeThinkingReplayFallbackIndexKVKey(modelFamily)
+	raw, _, errGet := client.KVGet(ctx, key)
+	if errGet != nil {
+		log.Warnf("claude thinking replay fallback index re-read failed: %v", errGet)
+		return
+	}
+	index, _ := decodeClaudeThinkingReplayFallbackIndex(raw)
+	stillReferenced := make(map[string]bool, len(index.Sessions))
+	for _, s := range index.Sessions {
+		if len(s.Aliases) > 0 {
+			stillReferenced[s.SessionKey] = true
+		}
+	}
+	for _, sessionKey := range sessionKeys {
+		if stillReferenced[sessionKey] {
+			continue
+		}
+		if _, errDel := client.KVDel(ctx, claudeThinkingReplayKVKey(modelFamily, sessionKey)); errDel != nil {
+			log.Warnf("claude thinking replay fallback record delete failed: %v", errDel)
+		}
 	}
 }
 
