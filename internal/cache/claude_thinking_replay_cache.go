@@ -72,6 +72,12 @@ const (
 	// block legitimate re-registration or bloat physical storage under the
 	// per-credential alias cap.
 	claudeThinkingReplayAliasTombstoneTTL = 5 * time.Second
+
+	// claudeThinkingReplayTombstoneTTL is how long a deleted replay record
+	// tombstone stays in Home KV. A short TTL prevents evicted records from
+	// accumulating under the fallback-session cap while still giving a
+	// concurrent Replace/Cache enough time to cancel the tombstone.
+	claudeThinkingReplayTombstoneTTL = 5 * time.Second
 )
 
 type claudeThinkingReplayEntry struct {
@@ -1324,7 +1330,7 @@ func tombstoneClaudeThinkingReplayRecordForDeletion(ctx context.Context, client 
 		return pending, false, errMarshal
 	}
 
-	swapped, errSwap := client.KVCompareAndSwap(ctx, key, raw, true, tombstone, ClaudeThinkingReplayCacheTTL)
+	swapped, errSwap := client.KVCompareAndSwap(ctx, key, raw, true, tombstone, claudeThinkingReplayTombstoneTTL)
 	if errSwap != nil {
 		return pending, false, errSwap
 	}
