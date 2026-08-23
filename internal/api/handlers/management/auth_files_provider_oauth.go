@@ -228,6 +228,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 	RegisterOAuthSession(state, "codex")
 
+	replaceHint := strings.TrimSpace(c.Query("replace"))
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
 	if isWebUI {
@@ -324,7 +325,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
 			return
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		savedPath, errSave := h.saveCodexOAuthRecord(ctx, record, replaceHint)
 		if errSave != nil {
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
