@@ -381,6 +381,42 @@ func TestSaveCodexOAuthRecordConcurrentReplaceKeepsOneFile(t *testing.T) {
 	}
 }
 
+func TestSaveCodexOAuthRecordRemovesNestedSibling(t *testing.T) {
+	authDir := t.TempDir()
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	keepRel := filepath.ToSlash(filepath.Join("team", "codex-keep.json"))
+	dropRel := filepath.ToSlash(filepath.Join("team", "codex-drop.json"))
+	writeCodexJSON(t, filepath.Join(authDir, "team"), "codex-keep.json", map[string]any{
+		"type":       "codex",
+		"account_id": testCodexAccountID,
+		"note":       "keep-nested",
+		"disabled":   true,
+	})
+	writeCodexJSON(t, filepath.Join(authDir, "team"), "codex-drop.json", map[string]any{
+		"type":       "codex",
+		"account_id": testCodexAccountID,
+		"note":       "drop-nested",
+	})
+
+	record := newCodexRecord("user@example.com", testCodexAccountID, "pro", "new-access", "new-refresh")
+	if _, errSave := h.saveCodexOAuthRecord(context.Background(), record, keepRel); errSave != nil {
+		t.Fatalf("saveCodexOAuthRecord: %v", errSave)
+	}
+	if _, errStat := os.Stat(filepath.Join(authDir, filepath.FromSlash(keepRel))); errStat != nil {
+		t.Fatalf("keep file missing: %v", errStat)
+	}
+	if _, errStat := os.Stat(filepath.Join(authDir, filepath.FromSlash(dropRel))); !os.IsNotExist(errStat) {
+		t.Fatalf("drop sibling still present: %v", errStat)
+	}
+	saved := readJSONMap(t, filepath.Join(authDir, filepath.FromSlash(keepRel)))
+	if saved["note"] != "keep-nested" {
+		t.Errorf("note = %v, want keep-nested", saved["note"])
+	}
+	if saved["access_token"] != "new-access" {
+		t.Errorf("access_token = %v, want new-access", saved["access_token"])
+	}
+}
+
 func TestSaveCodexOAuthRecordListErrorDoesNotCreateFile(t *testing.T) {
 	authDir := t.TempDir()
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)

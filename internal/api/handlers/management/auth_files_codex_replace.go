@@ -9,6 +9,8 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -234,11 +236,51 @@ func (h *Handler) deleteCodexAuthRel(ctx context.Context, relName string) error 
 	if h.cfg != nil && strings.TrimSpace(h.cfg.AuthDir) != "" && !filepath.IsAbs(path) {
 		path = filepath.Join(h.cfg.AuthDir, path)
 	}
+	ids := h.authIDsForCodexPath(path, relName)
 	if errDelete := store.Delete(ctx, path); errDelete != nil {
 		return errDelete
 	}
 	h.removeAuthsForPath(ctx, path, relName)
+	// Nested files are not seen by the auth-dir watcher, so unregister runtime
+	// state here instead of waiting for applyCoreAuthRemoval.
+	for _, id := range ids {
+		registry.GetGlobalRegistry().UnregisterClient(id)
+		executor.CloseCodexWebsocketSessionsForAuthID(id, "oauth_replaced")
+	}
 	return nil
+}
+
+func (h *Handler) authIDsForCodexPath(path, relName string) []string {
+	seen := make(map[string]struct{})
+	var ids []string
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if h != nil && h.authManager != nil {
+		for _, auth := range h.authManager.List() {
+			if auth == nil {
+				continue
+			}
+			if sameAuthFilePath(authAttribute(auth, "path"), path) ||
+				sameAuthFilePath(authAttribute(auth, coreauth.AttributeVirtualSource), path) ||
+				filepath.ToSlash(strings.TrimSpace(auth.FileName)) == relName ||
+				filepath.ToSlash(strings.TrimSpace(auth.ID)) == relName {
+				add(auth.ID)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		add(relName)
+	}
+	return ids
 }
 
 func authPayloadAccountID(payload map[string]any) string {
