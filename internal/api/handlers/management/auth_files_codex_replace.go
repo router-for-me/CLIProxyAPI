@@ -89,6 +89,8 @@ func (h *Handler) saveCodexOAuthRecord(ctx context.Context, record *coreauth.Aut
 	if deleteErr != nil {
 		return savedPath, deleteErr
 	}
+	// Tokens on the kept file rotated; close retained websockets so they re-handshake.
+	h.closeCodexSessionsForRel(writeName)
 	return savedPath, nil
 }
 
@@ -228,6 +230,25 @@ func isUnsafeCodexAuthRelPath(name string) bool {
 	return false
 }
 
+func (h *Handler) resolveCodexAuthPath(relName string) string {
+	path := filepath.FromSlash(relName)
+	if h != nil && h.cfg != nil && strings.TrimSpace(h.cfg.AuthDir) != "" && !filepath.IsAbs(path) {
+		path = filepath.Join(h.cfg.AuthDir, path)
+	}
+	return path
+}
+
+func (h *Handler) closeCodexSessionsForRel(relName string) {
+	relName = sanitizeCodexAuthRelPath(relName)
+	if relName == "" {
+		return
+	}
+	path := h.resolveCodexAuthPath(relName)
+	for _, id := range h.authIDsForCodexPath(path, relName) {
+		executor.CloseCodexWebsocketSessionsForAuthID(id, "oauth_replaced")
+	}
+}
+
 func (h *Handler) deleteCodexAuthRel(ctx context.Context, relName string) error {
 	relName = sanitizeCodexAuthRelPath(relName)
 	if relName == "" {
@@ -237,10 +258,7 @@ func (h *Handler) deleteCodexAuthRel(ctx context.Context, relName string) error 
 	if store == nil {
 		return fmt.Errorf("token store unavailable")
 	}
-	path := filepath.FromSlash(relName)
-	if h.cfg != nil && strings.TrimSpace(h.cfg.AuthDir) != "" && !filepath.IsAbs(path) {
-		path = filepath.Join(h.cfg.AuthDir, path)
-	}
+	path := h.resolveCodexAuthPath(relName)
 	ids := h.authIDsForCodexPath(path, relName)
 	if errDelete := store.Delete(ctx, path); errDelete != nil {
 		return errDelete
