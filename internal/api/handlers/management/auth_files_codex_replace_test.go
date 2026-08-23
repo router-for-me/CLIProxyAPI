@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -487,6 +488,128 @@ func TestSaveCodexOAuthRecordUpdatesRuntimeAuthMetadata(t *testing.T) {
 	}
 }
 
+func TestSaveCodexOAuthRecordKeepsNestedRuntimeSettingsAfterPersistSync(t *testing.T) {
+	authDir := t.TempDir()
+	nestedRel := filepath.ToSlash(filepath.Join("team", "codex-user.json"))
+	nestedPath := filepath.Join(authDir, filepath.FromSlash(nestedRel))
+	writeCodexJSON(t, filepath.Dir(nestedPath), filepath.Base(nestedPath), map[string]any{
+		"type":            "codex",
+		"account_id":      testCodexAccountID,
+		"access_token":    "old-access",
+		"note":            "nested",
+		"priority":        float64(60),
+		"proxy_url":       "socks5://10.80.1.61:2083",
+		"prefix":          "team",
+		"excluded_models": []any{"gpt-4"},
+	})
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       nestedRel,
+		FileName: nestedRel,
+		Provider: "codex",
+		Prefix:   "team",
+		ProxyURL: "socks5://10.80.1.61:2083",
+		Label:    "user@example.com",
+		Attributes: map[string]string{
+			"path":            nestedPath,
+			"plan_type":       "free",
+			"priority":        "60",
+			"note":            "nested",
+			"excluded_models": "gpt-4",
+		},
+		Metadata: map[string]any{
+			"type":         "codex",
+			"account_id":   testCodexAccountID,
+			"access_token": "old-access",
+			"note":         "nested",
+			"priority":     float64(60),
+			"proxy_url":    "socks5://10.80.1.61:2083",
+			"prefix":       "team",
+		},
+	}); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.postAuthPersistHook = func(ctx context.Context, auth *coreauth.Auth) error {
+		if _, ok := manager.GetByID(auth.ID); ok {
+			_, errUpdate := manager.Update(ctx, auth)
+			return errUpdate
+		}
+		_, errRegister := manager.Register(ctx, auth)
+		return errRegister
+	}
+
+	record := newCodexRecord("user@example.com", testCodexAccountID, "pro", "new-access", "new-refresh")
+	if storage, ok := record.Storage.(*codex.CodexTokenStorage); ok {
+		storage.IDToken = fakeCodexIDToken("pro")
+	}
+	if _, errSave := h.saveCodexOAuthRecord(context.Background(), record, nestedRel); errSave != nil {
+		t.Fatalf("saveCodexOAuthRecord: %v", errSave)
+	}
+
+	got, ok := manager.GetByID(nestedRel)
+	if !ok || got == nil {
+		t.Fatal("runtime auth missing after replace")
+	}
+	if got.Prefix != "team" {
+		t.Errorf("prefix = %q, want team", got.Prefix)
+	}
+	if got.ProxyURL != "socks5://10.80.1.61:2083" {
+		t.Errorf("proxy_url = %q", got.ProxyURL)
+	}
+	if got.Attributes["priority"] != "60" {
+		t.Errorf("priority = %q, want 60", got.Attributes["priority"])
+	}
+	if got.Attributes["note"] != "nested" {
+		t.Errorf("note = %q, want nested", got.Attributes["note"])
+	}
+	if got.Attributes["excluded_models"] != "gpt-4" {
+		t.Errorf("excluded_models = %q, want gpt-4", got.Attributes["excluded_models"])
+	}
+	if got.Attributes["plan_type"] != "pro" {
+		t.Errorf("plan_type = %q, want pro", got.Attributes["plan_type"])
+	}
+	if got.Metadata["access_token"] != "new-access" {
+		t.Errorf("access_token = %v, want new-access", got.Metadata["access_token"])
+	}
+}
+
+func TestSaveCodexOAuthRecordSkipsSaveWhenSessionCancelledDuringList(t *testing.T) {
+	authDir := t.TempDir()
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	h.tokenStore = overlayListStore{
+		Store: h.tokenStoreWithBaseDir(),
+		beforeList: func() {
+			close(started)
+			<-release
+		},
+	}
+	state := "codex-cancel-during-list"
+	RegisterOAuthSession(state, "codex")
+	t.Cleanup(func() { CancelOAuthSession(state) })
+
+	record := newCodexRecord("user@example.com", testCodexAccountID, "pro", "new-access", "new-refresh")
+	errCh := make(chan error, 1)
+	go func() {
+		_, errSave := h.saveCodexOAuthRecord(withOAuthSaveSession(context.Background(), state, "codex"), record, "")
+		errCh <- errSave
+	}()
+	<-started
+	if !CancelOAuthSession(state) {
+		t.Fatal("expected pending session to cancel")
+	}
+	close(release)
+	errSave := <-errCh
+	if !errors.Is(errSave, errOAuthSessionNotPending) {
+		t.Fatalf("error = %v, want %v", errSave, errOAuthSessionNotPending)
+	}
+	if names := jsonFileNames(t, authDir); len(names) != 0 {
+		t.Fatalf("auth files = %v, want none after cancelled save", names)
+	}
+}
+
 func TestSaveCodexOAuthRecordSiblingDeleteFailureIsReturned(t *testing.T) {
 	authDir := t.TempDir()
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
@@ -572,12 +695,16 @@ func TestSaveCodexOAuthRecordUsesStoreListNotDiskScan(t *testing.T) {
 
 type overlayListStore struct {
 	coreauth.Store
-	list      []*coreauth.Auth
-	listErr   error
-	deleteErr error
+	list       []*coreauth.Auth
+	listErr    error
+	deleteErr  error
+	beforeList func()
 }
 
 func (s overlayListStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
+	if s.beforeList != nil {
+		s.beforeList()
+	}
 	if s.listErr != nil {
 		return nil, s.listErr
 	}

@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -303,6 +304,36 @@ func IsOAuthSessionPending(state, provider string) bool {
 // is no longer pending (cancelled, completed, errored, or expired).
 // Call immediately before persisting credentials so a cancel that races with token
 // exchange or metadata fetch cannot save credentials for a cancelled flow.
+
+type oauthSaveSessionKey struct{}
+
+type oauthSaveSession struct {
+	state    string
+	provider string
+}
+
+func withOAuthSaveSession(ctx context.Context, state, provider string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	state = strings.TrimSpace(state)
+	provider = strings.TrimSpace(provider)
+	if state == "" || provider == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, oauthSaveSessionKey{}, oauthSaveSession{state: state, provider: provider})
+}
+
+func guardOAuthSaveSession(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	session, ok := ctx.Value(oauthSaveSessionKey{}).(oauthSaveSession)
+	if !ok || strings.TrimSpace(session.state) == "" {
+		return nil
+	}
+	return guardOAuthSessionPendingForSave(session.state, session.provider)
+}
 func guardOAuthSessionPendingForSave(state, provider string) error {
 	if IsOAuthSessionPending(state, provider) {
 		return nil

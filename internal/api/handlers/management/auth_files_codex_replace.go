@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +59,9 @@ func (h *Handler) saveCodexOAuthRecord(ctx context.Context, record *coreauth.Aut
 
 	codexOAuthReplaceMu.Lock()
 	defer codexOAuthReplaceMu.Unlock()
+	if errGuard := guardOAuthSaveSession(ctx); errGuard != nil {
+		return "", errGuard
+	}
 
 	siblings, errList := h.listCodexFilesByAccountID(ctx, accountID)
 	if errList != nil {
@@ -71,6 +75,10 @@ func (h *Handler) saveCodexOAuthRecord(ctx context.Context, record *coreauth.Aut
 	}
 
 	prepareCodexOAuthRecordForSave(record, writeName)
+	h.preserveCodexRuntimeSettings(record, writeName)
+	if errGuard := guardOAuthSaveSession(ctx); errGuard != nil {
+		return "", errGuard
+	}
 
 	savedPath, errSave := h.saveTokenRecord(ctx, record)
 	if errSave != nil {
@@ -143,6 +151,16 @@ func applyCodexReplacementToRuntimeAuth(existing, record *coreauth.Auth) {
 	if existing.Metadata == nil {
 		existing.Metadata = make(map[string]any)
 	}
+	if strings.TrimSpace(existing.Prefix) == "" {
+		existing.Prefix = record.Prefix
+	}
+	if strings.TrimSpace(existing.ProxyURL) == "" {
+		existing.ProxyURL = record.ProxyURL
+	}
+	if strings.TrimSpace(existing.Label) == "" {
+		existing.Label = record.Label
+	}
+	existing.Attributes = mergeAuthAttributes(existing.Attributes, record.Attributes)
 	for key, value := range record.Metadata {
 		existing.Metadata[key] = value
 	}
@@ -152,6 +170,117 @@ func applyCodexReplacementToRuntimeAuth(existing, record *coreauth.Auth) {
 	existing.Status = coreauth.StatusActive
 	existing.StatusMessage = ""
 	existing.Unavailable = false
+}
+
+func (h *Handler) preserveCodexRuntimeSettings(record *coreauth.Auth, writeName string) {
+	if record == nil {
+		return
+	}
+	path := ""
+	if h != nil {
+		path = h.resolveCodexAuthPath(writeName)
+	}
+	var existing *coreauth.Auth
+	if h != nil && h.authManager != nil {
+		for _, id := range h.authIDsForCodexPath(path, writeName) {
+			got, ok := h.authManager.GetByID(id)
+			if ok && got != nil {
+				existing = got
+				break
+			}
+		}
+	}
+	if existing != nil {
+		if strings.TrimSpace(record.Prefix) == "" {
+			record.Prefix = existing.Prefix
+		}
+		if strings.TrimSpace(record.ProxyURL) == "" {
+			record.ProxyURL = existing.ProxyURL
+		}
+		if strings.TrimSpace(record.Label) == "" {
+			record.Label = existing.Label
+		}
+		record.Attributes = mergeAuthAttributes(existing.Attributes, record.Attributes)
+	}
+	applyCodexRuntimeFieldsFromMetadata(record, path)
+}
+
+func mergeAuthAttributes(base, overlay map[string]string) map[string]string {
+	if len(base) == 0 && len(overlay) == 0 {
+		return overlay
+	}
+	out := make(map[string]string, len(base)+len(overlay))
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range overlay {
+		if strings.TrimSpace(value) != "" {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func applyCodexRuntimeFieldsFromMetadata(record *coreauth.Auth, path string) {
+	if record == nil {
+		return
+	}
+	if record.Attributes == nil {
+		record.Attributes = make(map[string]string)
+	}
+	if path != "" {
+		if strings.TrimSpace(record.Attributes[coreauth.AttributePath]) == "" {
+			record.Attributes[coreauth.AttributePath] = path
+		}
+		if strings.TrimSpace(record.Attributes[coreauth.AttributeSource]) == "" {
+			record.Attributes[coreauth.AttributeSource] = path
+		}
+		if strings.TrimSpace(record.Attributes[coreauth.AttributeSourceBackend]) == "" {
+			record.Attributes[coreauth.AttributeSourceBackend] = coreauth.AuthSourceFile
+		}
+	}
+	if record.Metadata == nil {
+		return
+	}
+	if strings.TrimSpace(record.ProxyURL) == "" {
+		if proxyURL, ok := record.Metadata["proxy_url"].(string); ok {
+			record.ProxyURL = strings.TrimSpace(proxyURL)
+		}
+	}
+	if strings.TrimSpace(record.Prefix) == "" {
+		if prefix, ok := record.Metadata["prefix"].(string); ok {
+			trimmed := strings.Trim(strings.TrimSpace(prefix), "/")
+			if trimmed != "" && !strings.Contains(trimmed, "/") {
+				record.Prefix = trimmed
+			}
+		}
+	}
+	if strings.TrimSpace(record.Label) == "" {
+		if email, ok := record.Metadata["email"].(string); ok {
+			if trimmed := strings.TrimSpace(email); trimmed != "" {
+				record.Label = trimmed
+			}
+		}
+	}
+	if strings.TrimSpace(record.Attributes["priority"]) == "" {
+		switch value := record.Metadata["priority"].(type) {
+		case float64:
+			record.Attributes["priority"] = strconv.Itoa(int(value))
+		case string:
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				record.Attributes["priority"] = trimmed
+			}
+		}
+	}
+	if strings.TrimSpace(record.Attributes["note"]) == "" {
+		if note, ok := record.Metadata["note"].(string); ok {
+			if trimmed := strings.TrimSpace(note); trimmed != "" {
+				record.Attributes["note"] = trimmed
+			}
+		}
+	}
+	coreauth.ApplyCustomHeadersFromMetadata(record)
+	_ = coreauth.ApplyAuthWeightMetadata(record, record.Metadata)
 }
 
 func applyCodexTokenStorageToMetadata(metadata map[string]any, storage any) {
