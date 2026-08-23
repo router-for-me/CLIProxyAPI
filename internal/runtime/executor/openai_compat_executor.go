@@ -108,10 +108,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
 	if isResponses {
-		to = sdktranslator.FromString("openai-response")
-		if from == sdktranslator.FormatClaude {
-			to = sdktranslator.FormatCodex
-		}
+		to = openAICompatResponsesTarget(from)
 		if opts.Alt == "responses/compact" {
 			endpoint = "/responses/compact"
 		} else {
@@ -349,10 +346,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
 	if isResponses {
-		to = sdktranslator.FromString("openai-response")
-		if from == sdktranslator.FormatClaude {
-			to = sdktranslator.FormatCodex
-		}
+		to = openAICompatResponsesTarget(from)
 		if opts.Alt == "responses/compact" {
 			endpoint = "/responses/compact"
 		} else {
@@ -751,7 +745,7 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
 	if isResponses {
-		to = sdktranslator.FromString("openai-response")
+		to = openAICompatResponsesTarget(from)
 	}
 	isCompat := helps.APIKeyModelIsCompat(req)
 	translated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false, isCompat)
@@ -784,6 +778,13 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	}
 	translatedUsage := sdktranslator.TranslateTokenCount(ctx, to, responseFormat, count, usageJSON)
 	return cliproxyexecutor.Response{Payload: translatedUsage}, nil
+}
+
+func openAICompatResponsesTarget(from sdktranslator.Format) sdktranslator.Format {
+	if from == sdktranslator.FormatOpenAIResponse {
+		return sdktranslator.FormatOpenAIResponse
+	}
+	return sdktranslator.FormatCodex
 }
 
 // Refresh is a no-op for API-key based compatibility providers.
