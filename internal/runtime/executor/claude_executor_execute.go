@@ -40,8 +40,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("claude")
 	var replayScope claudeThinkingReplayScope
+	var replayContents [][]byte
 	if claudeThinkingReplayEnabled(auth, req, opts) {
-		req, replayScope = prepareClaudeThinkingReplayRequest(ctx, auth, req, opts)
+		replayScope, replayContents, _ = prepareClaudeThinkingReplayRequest(ctx, auth, req, opts)
 	}
 	defer func() {
 		if err != nil && replayScope.replayApplied && shouldClearKimiThinkingReplayAfterError(err) {
@@ -89,6 +90,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	)
 	if err != nil {
 		return resp, err
+	}
+	// If cloaking obfuscated the upstream body, cached assistant content must be
+	// obfuscated with the same words before the replay match/restore runs.
+	_, cloakSettings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
+	if cloaked && len(cloakSettings.sensitiveWords) > 0 && len(replayContents) > 0 {
+		replayContents = helps.ObfuscateClaudeThinkingReplayContents(replayContents, cloakSettings.sensitiveWords)
 	}
 	systemPlacementState := captureClaudeCodeSystemPlacement(bodyBeforeCloaking, body, cloaked)
 	// Only the Messages endpoint on Anthropic itself was captured; count_tokens
@@ -164,12 +171,15 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
 	bodyForUpstream := body
+	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel, helps.APIKeyModelIsCompat(req))
+	if len(replayContents) > 0 && replayScope.valid() {
+		bodyForUpstream, replayScope.replayApplied = helps.RestoreClaudeThinkingReplayContents(bodyForUpstream, replayContents)
+	}
 	var oauthToolNamesReverseMap map[string]string
 	if fp.MCPAlias && cloaked {
 		mcpAliases := resolveClaudeMCPAliasOptions(ctx)
 		bodyForUpstream, oauthToolNamesReverseMap = prepareClaudeOAuthToolNamesForUpstream(bodyForUpstream, mcpAliases)
 	}
-	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel, helps.APIKeyModelIsCompat(req))
 	if fp.ApplyCLIIdentity {
 		bodyForUpstream, err = applyClaudeCLIIdentity(bodyForUpstream, auth, apiKey, url, claudeSessionID, fp.SynthesizeIdentity)
 		if err != nil {
