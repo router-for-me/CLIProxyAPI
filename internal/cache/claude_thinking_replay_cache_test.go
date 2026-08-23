@@ -201,6 +201,48 @@ func TestClaudeThinkingReplayAliasHomeCappedPerCredential(t *testing.T) {
 	}
 }
 
+func TestClaudeThinkingReplayFallbackIndexDeletesOrphanRecords(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	client := newFakeClaudeThinkingReplayKVClient()
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+
+	// Seed a replay record for each fallback session so orphan detection can
+	// observe real keys.
+	max := ClaudeThinkingReplayCacheMaxAliasesPerCredential
+	for i := 0; i < max+10; i++ {
+		session := fmt.Sprintf("fb:session-%d", i)
+		CacheClaudeThinkingReplayBestEffort(ctx, modelFamily, session, []byte(`[{"type":"text","text":"x"}]`))
+		RegisterClaudeThinkingReplayAlias(ctx, modelFamily, session, messageHashFor(i), "first")
+	}
+
+	// The per-credential alias cap should have evicted the oldest aliases and
+	// the fallback index should have deleted their orphaned replay records.
+	replays := 0
+	for k := range client.values {
+		if strings.HasPrefix(k, "cpa:claude:thinking-replay:") {
+			replays++
+		}
+	}
+	fallbackCap := ClaudeThinkingReplayCacheMaxFallbackSessions
+	if replays > fallbackCap {
+		t.Fatalf("fallback replay records not bounded: %d > %d", replays, fallbackCap)
+	}
+
+	// The fallback index should list only sessions still referenced by aliases.
+	indexKey := claudeThinkingReplayFallbackIndexKVKey(modelFamily)
+	index, _ := decodeClaudeThinkingReplayFallbackIndex(client.values[indexKey])
+	for _, s := range index.Sessions {
+		if len(s.Aliases) == 0 {
+			t.Fatalf("fallback index contains unreferenced session %q", s.SessionKey)
+		}
+	}
+}
+
 func TestClaudeThinkingReplayAliasHomeMultiSessionResolve(t *testing.T) {
 	ClearClaudeThinkingReplayCache()
 	defer ClearClaudeThinkingReplayCache()

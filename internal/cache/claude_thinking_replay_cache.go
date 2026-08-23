@@ -58,6 +58,12 @@ const (
 	// size limit.
 	ClaudeThinkingReplayCacheMaxAliasesPerCredential = 256
 
+	// ClaudeThinkingReplayCacheMaxFallbackSessions bounds how many fallback
+	// (fb:<uuid>) replay records a single credential can keep in Home KV. It
+	// mirrors the alias credential cap, because each active conversation needs
+	// at most one fallback session.
+	ClaudeThinkingReplayCacheMaxFallbackSessions = 256
+
 	claudeThinkingReplayCacheMaxSerializedBytes = ClaudeThinkingReplayCacheMaxBytesPerSession + 1024
 
 	// claudeThinkingReplayAliasTombstoneTTL is how long an evicted alias
@@ -681,10 +687,34 @@ type claudeThinkingReplayAliasHomeSession struct {
 	Timestamp     time.Time `json:"timestamp"`
 }
 
+// claudeThinkingReplayFallbackIndex and claudeThinkingReplayFallbackSession
+// track which fallback (fb:<uuid>) replay records are still referenced by at
+// least one alias. When a fallback session is no longer referenced by any
+// alias, its replay key can be deleted to prevent unbounded Home KV growth.
+type claudeThinkingReplayFallbackIndex struct {
+	Sessions []claudeThinkingReplayFallbackSession `json:"sessions"`
+}
+
+type claudeThinkingReplayFallbackSession struct {
+	SessionKey string    `json:"session_key"`
+	Aliases    []string  `json:"aliases"`
+	Timestamp  time.Time `json:"timestamp"`
+}
+
+type claudeThinkingReplayFallbackRefChange struct {
+	sessionKey  string
+	addAlias    string
+	removeAlias string
+}
+
 func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThinkingReplayKVClient, modelFamily, sessionKey, messageHash, firstUserHash string) {
 	aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHash)
 	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
 	now := time.Now()
+
+	fallbackChanges := make([]claudeThinkingReplayFallbackRefChange, 0, ClaudeThinkingReplayCacheMaxAliasesPerKey+1)
+	fallbackPrefix := "fb:"
+	isFallback := strings.HasPrefix(sessionKey, fallbackPrefix)
 
 	// Update the shared alias value atomically with compare-and-swap retries.
 	// Multiple sessionless conversations can register the same message hash
@@ -710,11 +740,22 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 				value = claudeThinkingReplayAliasHomeValue{}
 			}
 		}
+		oldSessions := value.Sessions
 		value.Sessions = claudeThinkingReplayAliasHomeValueUpsert(value.Sessions, sessionKey, firstUserHash, now)
+		var perAliasEvicted []claudeThinkingReplayAliasHomeSession
 		if len(value.Sessions) > ClaudeThinkingReplayCacheMaxAliasesPerKey {
 			sort.Slice(value.Sessions, func(i, j int) bool {
 				return value.Sessions[i].Timestamp.Before(value.Sessions[j].Timestamp)
 			})
+			keep := make(map[string]struct{}, ClaudeThinkingReplayCacheMaxAliasesPerKey)
+			for _, s := range value.Sessions[len(value.Sessions)-ClaudeThinkingReplayCacheMaxAliasesPerKey:] {
+				keep[s.SessionKey] = struct{}{}
+			}
+			for _, s := range oldSessions {
+				if _, ok := keep[s.SessionKey]; !ok {
+					perAliasEvicted = append(perAliasEvicted, s)
+				}
+			}
 			value.Sessions = value.Sessions[len(value.Sessions)-ClaudeThinkingReplayCacheMaxAliasesPerKey:]
 		}
 		newRaw, errMarshal := json.Marshal(value)
@@ -732,6 +773,15 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 		}
 		if swapped {
 			committedAliasRaw = newRaw
+			fallbackChanges = fallbackChanges[:0]
+			if isFallback {
+				fallbackChanges = append(fallbackChanges, claudeThinkingReplayFallbackRefChange{sessionKey: sessionKey, addAlias: aliasKey})
+			}
+			for _, s := range perAliasEvicted {
+				if strings.HasPrefix(s.SessionKey, fallbackPrefix) {
+					fallbackChanges = append(fallbackChanges, claudeThinkingReplayFallbackRefChange{sessionKey: s.SessionKey, removeAlias: aliasKey})
+				}
+			}
 			break
 		}
 		if attempt == 3 {
@@ -809,6 +859,7 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 	for _, a := range currentIndex.Aliases {
 		present[a.AliasKey] = struct{}{}
 	}
+	evictedAliasSessions := make(map[string][]string)
 	for _, rec := range evicted {
 		if _, ok := present[rec.AliasKey]; ok {
 			continue
@@ -819,6 +870,14 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 		}
 		if claudeThinkingReplayAliasValueRepopulated(raw, rec.Timestamp) {
 			continue
+		}
+		var aliasValue claudeThinkingReplayAliasHomeValue
+		if err := json.Unmarshal(raw, &aliasValue); err == nil {
+			for _, s := range aliasValue.Sessions {
+				if strings.HasPrefix(s.SessionKey, fallbackPrefix) {
+					evictedAliasSessions[rec.AliasKey] = append(evictedAliasSessions[rec.AliasKey], s.SessionKey)
+				}
+			}
 		}
 		// Atomically replace the evicted alias value with a short-lived tombstone
 		// so a concurrent re-registration after the KVGet cannot be deleted, but
@@ -844,6 +903,13 @@ func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThink
 			continue
 		}
 	}
+	for aliasKey, sessions := range evictedAliasSessions {
+		for _, sessionKey := range sessions {
+			fallbackChanges = append(fallbackChanges, claudeThinkingReplayFallbackRefChange{sessionKey: sessionKey, removeAlias: aliasKey})
+		}
+	}
+
+	applyClaudeThinkingReplayFallbackIndexChanges(ctx, client, modelFamily, now, fallbackChanges)
 }
 
 // rollBackClaudeThinkingReplayAliasHome rolls an alias value back to the
@@ -1007,6 +1073,158 @@ func claudeThinkingReplayAliasHomeValueUpsert(sessions []claudeThinkingReplayAli
 		}
 	}
 	return append(sessions, claudeThinkingReplayAliasHomeSession{SessionKey: sessionKey, FirstUserHash: firstUserHash, Timestamp: now})
+}
+
+func claudeThinkingReplayFallbackIndexKVKey(modelFamily string) string {
+	credentialHash := claudeThinkingReplayCredentialHash(modelFamily)
+	return "cpa:claude:thinking-replay-fallback-index:" + homekv.HashKeyPart(strings.TrimSpace(credentialHash))
+}
+
+func decodeClaudeThinkingReplayFallbackIndex(raw []byte) (claudeThinkingReplayFallbackIndex, bool) {
+	if len(raw) == 0 {
+		return claudeThinkingReplayFallbackIndex{}, true
+	}
+	var index claudeThinkingReplayFallbackIndex
+	if err := json.Unmarshal(raw, &index); err != nil {
+		return claudeThinkingReplayFallbackIndex{}, false
+	}
+	return index, true
+}
+
+func claudeThinkingReplayFallbackIndexFind(sessions []claudeThinkingReplayFallbackSession, sessionKey string) int {
+	for i := range sessions {
+		if sessions[i].SessionKey == sessionKey {
+			return i
+		}
+	}
+	return -1
+}
+
+func claudeThinkingReplayFallbackIndexHasAlias(s claudeThinkingReplayFallbackSession, aliasKey string) bool {
+	for _, a := range s.Aliases {
+		if a == aliasKey {
+			return true
+		}
+	}
+	return false
+}
+
+func claudeThinkingReplayFallbackIndexAddAlias(sessions []claudeThinkingReplayFallbackSession, sessionKey, aliasKey string, now time.Time) []claudeThinkingReplayFallbackSession {
+	i := claudeThinkingReplayFallbackIndexFind(sessions, sessionKey)
+	if i < 0 {
+		return append(sessions, claudeThinkingReplayFallbackSession{SessionKey: sessionKey, Aliases: []string{aliasKey}, Timestamp: now})
+	}
+	sessions[i].Timestamp = now
+	if !claudeThinkingReplayFallbackIndexHasAlias(sessions[i], aliasKey) {
+		sessions[i].Aliases = append(sessions[i].Aliases, aliasKey)
+	}
+	return sessions
+}
+
+func claudeThinkingReplayFallbackIndexRemoveAlias(sessions []claudeThinkingReplayFallbackSession, sessionKey, aliasKey string) ([]claudeThinkingReplayFallbackSession, bool) {
+	i := claudeThinkingReplayFallbackIndexFind(sessions, sessionKey)
+	if i < 0 {
+		return sessions, false
+	}
+	aliases := sessions[i].Aliases[:0]
+	for _, a := range sessions[i].Aliases {
+		if a != aliasKey {
+			aliases = append(aliases, a)
+		}
+	}
+	sessions[i].Aliases = aliases
+	return sessions, len(sessions[i].Aliases) == 0
+}
+
+func purgeExpiredClaudeThinkingReplayFallbackSessions(sessions []claudeThinkingReplayFallbackSession, now time.Time) []claudeThinkingReplayFallbackSession {
+	kept := sessions[:0]
+	for _, s := range sessions {
+		if now.Sub(s.Timestamp) <= ClaudeThinkingReplayCacheTTL {
+			kept = append(kept, s)
+		}
+	}
+	return kept
+}
+
+// applyClaudeThinkingReplayFallbackIndexUpdates updates the per-credential
+// fallback session index and deletes replay records for unreferenced fallback
+// sessions. It runs in a CAS loop so concurrent updates do not lose references.
+func applyClaudeThinkingReplayFallbackIndexChanges(ctx context.Context, client kimiThinkingReplayKVClient, modelFamily string, now time.Time, changes []claudeThinkingReplayFallbackRefChange) {
+	if len(changes) == 0 {
+		return
+	}
+	key := claudeThinkingReplayFallbackIndexKVKey(modelFamily)
+	for attempt := 0; attempt < 4; attempt++ {
+		raw, found, errGet := client.KVGet(ctx, key)
+		if errGet != nil {
+			log.Warnf("claude thinking replay fallback index read failed: %v", errGet)
+			return
+		}
+		index, _ := decodeClaudeThinkingReplayFallbackIndex(raw)
+		index.Sessions = purgeExpiredClaudeThinkingReplayFallbackSessions(index.Sessions, now)
+
+		var toDelete []string
+		for _, ch := range changes {
+			if ch.addAlias != "" {
+				index.Sessions = claudeThinkingReplayFallbackIndexAddAlias(index.Sessions, ch.sessionKey, ch.addAlias, now)
+			} else if ch.removeAlias != "" {
+				var empty bool
+				index.Sessions, empty = claudeThinkingReplayFallbackIndexRemoveAlias(index.Sessions, ch.sessionKey, ch.removeAlias)
+				if empty {
+					toDelete = append(toDelete, ch.sessionKey)
+					idx := claudeThinkingReplayFallbackIndexFind(index.Sessions, ch.sessionKey)
+					if idx >= 0 {
+						index.Sessions = append(index.Sessions[:idx], index.Sessions[idx+1:]...)
+					}
+				}
+			}
+		}
+
+		// Enforce the fallback session cap by deleting the oldest sessions that
+		// are no longer referenced by any alias. Active sessions are never removed.
+		if len(index.Sessions) > ClaudeThinkingReplayCacheMaxFallbackSessions {
+			sort.Slice(index.Sessions, func(i, j int) bool {
+				return index.Sessions[i].Timestamp.Before(index.Sessions[j].Timestamp)
+			})
+			for len(index.Sessions) > ClaudeThinkingReplayCacheMaxFallbackSessions && len(index.Sessions[0].Aliases) == 0 {
+				toDelete = append(toDelete, index.Sessions[0].SessionKey)
+				index.Sessions = index.Sessions[1:]
+			}
+		}
+
+		newRaw, errMarshal := json.Marshal(index)
+		if errMarshal != nil {
+			log.Warnf("claude thinking replay fallback index marshal failed: %v", errMarshal)
+			return
+		}
+		swapped, errSwap := client.KVCompareAndSwap(ctx, key, raw, found, newRaw, ClaudeThinkingReplayCacheTTL)
+		if errSwap != nil {
+			if errors.Is(errSwap, homekv.ErrCompareAndSwapUnsupported) {
+				if _, errSet := client.KVSet(ctx, key, newRaw, homekv.KVSetOptions{EX: ClaudeThinkingReplayCacheTTL}); errSet != nil {
+					log.Warnf("claude thinking replay fallback index set failed: %v", errSet)
+					return
+				}
+				swapped = true
+			} else {
+				log.Warnf("claude thinking replay fallback index cas failed: %v", errSwap)
+				return
+			}
+		}
+		if !swapped {
+			if attempt == 3 {
+				log.Warnf("claude thinking replay fallback index cas exhausted after %d attempts", attempt+1)
+				return
+			}
+			continue
+		}
+
+		for _, sessionKey := range toDelete {
+			if _, errDel := client.KVDel(ctx, claudeThinkingReplayKVKey(modelFamily, sessionKey)); errDel != nil {
+				log.Warnf("claude thinking replay fallback record delete failed: %v", errDel)
+			}
+		}
+		return
+	}
 }
 
 func readOrReserveClaudeThinkingReplayHomeValue(ctx context.Context, client kimiThinkingReplayKVClient, key string) ([]byte, error) {
