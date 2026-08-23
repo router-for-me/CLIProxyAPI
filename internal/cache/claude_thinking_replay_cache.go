@@ -1162,8 +1162,8 @@ func purgeExpiredClaudeThinkingReplayFallbackSessions(sessions []claudeThinkingR
 	return kept
 }
 
-// applyClaudeThinkingReplayFallbackIndexUpdates updates the per-credential
-// fallback session index and deletes replay records for unreferenced fallback
+// applyClaudeThinkingReplayFallbackIndexChanges updates the per-credential
+// fallback session index and tombstones replay records for unreferenced fallback
 // sessions. It runs in a CAS loop so concurrent updates do not lose references.
 func applyClaudeThinkingReplayFallbackIndexChanges(ctx context.Context, client kimiThinkingReplayKVClient, modelFamily string, now time.Time, changes []claudeThinkingReplayFallbackRefChange) {
 	if len(changes) == 0 {
@@ -1188,10 +1188,10 @@ func applyClaudeThinkingReplayFallbackIndexChanges(ctx context.Context, client k
 				index.Sessions = claudeThinkingReplayFallbackIndexAddAlias(index.Sessions, ch.sessionKey, ch.addAlias, ch.modelFamily, now)
 			} else if ch.removeAlias != "" {
 				var empty bool
-				var modelFamily string
-				index.Sessions, empty, modelFamily = claudeThinkingReplayFallbackIndexRemoveAlias(index.Sessions, ch.sessionKey, ch.removeAlias)
+				var sessionModel string
+				index.Sessions, empty, sessionModel = claudeThinkingReplayFallbackIndexRemoveAlias(index.Sessions, ch.sessionKey, ch.removeAlias)
 				if empty {
-					toDelete = append(toDelete, struct{ sessionKey, modelFamily string }{ch.sessionKey, modelFamily})
+					toDelete = append(toDelete, struct{ sessionKey, modelFamily string }{ch.sessionKey, sessionModel})
 					idx := claudeThinkingReplayFallbackIndexFind(index.Sessions, ch.sessionKey)
 					if idx >= 0 {
 						index.Sessions = append(index.Sessions[:idx], index.Sessions[idx+1:]...)
@@ -1217,67 +1217,143 @@ func applyClaudeThinkingReplayFallbackIndexChanges(ctx context.Context, client k
 			log.Warnf("claude thinking replay fallback index marshal failed: %v", errMarshal)
 			return
 		}
-		swapped, errSwap := client.KVCompareAndSwap(ctx, key, raw, found, newRaw, ClaudeThinkingReplayCacheTTL)
-		if errSwap != nil {
-			if errors.Is(errSwap, homekv.ErrCompareAndSwapUnsupported) {
-				if _, errSet := client.KVSet(ctx, key, newRaw, homekv.KVSetOptions{EX: ClaudeThinkingReplayCacheTTL}); errSet != nil {
-					log.Warnf("claude thinking replay fallback index set failed: %v", errSet)
+
+		// Two-phase deletion: tombstone replay records before the index CAS. A
+		// concurrent Replace or Cache can cancel a tombstone by overwriting it.
+		// If the index CAS fails, the tombstones are rolled back to the original
+		// records so live continuation state is not erased.
+		var tombstones []claudeThinkingReplayPendingDeletion
+		var tombstoneOK = true
+		for _, rec := range toDelete {
+			pending, ok, err := tombstoneClaudeThinkingReplayRecordForDeletion(ctx, client, rec.modelFamily, rec.sessionKey)
+			if err != nil {
+				if errors.Is(err, homekv.ErrCompareAndSwapUnsupported) {
+					// CAS is unavailable: use the old unconditional index set and
+					// record delete path. Any tombstones already written are also
+					// removed by the KVDel loop.
+					if _, errSet := client.KVSet(ctx, key, newRaw, homekv.KVSetOptions{EX: ClaudeThinkingReplayCacheTTL}); errSet != nil {
+						log.Warnf("claude thinking replay fallback index set failed: %v", errSet)
+						return
+					}
+					for _, d := range toDelete {
+						if _, errDel := client.KVDel(ctx, claudeThinkingReplayKVKey(d.modelFamily, d.sessionKey)); errDel != nil {
+							log.Warnf("claude thinking replay fallback record delete failed: %v", errDel)
+						}
+					}
 					return
 				}
-				swapped = true
-			} else {
-				log.Warnf("claude thinking replay fallback index cas failed: %v", errSwap)
-				return
+				rollbackClaudeThinkingReplayRecordTombstones(ctx, client, tombstones)
+				log.Warnf("claude thinking replay fallback record tombstone failed: %v", err)
+				tombstoneOK = false
+				break
 			}
+			if !ok {
+				rollbackClaudeThinkingReplayRecordTombstones(ctx, client, tombstones)
+				tombstoneOK = false
+				break
+			}
+			if pending.found {
+				tombstones = append(tombstones, pending)
+			}
+		}
+		if !tombstoneOK {
+			continue
+		}
+
+		swapped, errSwap := client.KVCompareAndSwap(ctx, key, raw, found, newRaw, ClaudeThinkingReplayCacheTTL)
+		if errSwap != nil {
+			rollbackClaudeThinkingReplayRecordTombstones(ctx, client, tombstones)
+			log.Warnf("claude thinking replay fallback index cas failed: %v", errSwap)
+			return
 		}
 		if !swapped {
 			if attempt == 3 {
 				log.Warnf("claude thinking replay fallback index cas exhausted after %d attempts", attempt+1)
-				// The fallback index is only a tracking structure: the alias and
-				// replay record are already committed. Set it unconditionally so
-				// the session can be cleaned up later, rather than leaving an
-				// untracked record that bypasses the storage cap.
-				if _, errSet := client.KVSet(ctx, key, newRaw, homekv.KVSetOptions{EX: ClaudeThinkingReplayCacheTTL}); errSet != nil {
-					log.Warnf("claude thinking replay fallback index exhausted set failed: %v", errSet)
-					return
-				}
-				swapped = true
-			} else {
-				continue
 			}
+			rollbackClaudeThinkingReplayRecordTombstones(ctx, client, tombstones)
+			continue
 		}
 
-		// Two-phase deletion: re-read the index after the CAS/set and only
-		// delete replay records whose session no longer appears in it. This
-		// avoids erasing a record that a concurrent worker has just re-referenced.
-		deleteClaudeThinkingReplayFallbackRecordsIfUnreferenced(ctx, client, modelFamily, toDelete)
+		// Index committed and the records are tombstoned; nothing more to do.
 		return
 	}
 }
 
-func deleteClaudeThinkingReplayFallbackRecordsIfUnreferenced(ctx context.Context, client kimiThinkingReplayKVClient, modelFamily string, toDelete []struct{ sessionKey, modelFamily string }) {
-	if len(toDelete) == 0 {
-		return
+// claudeThinkingReplayPendingDeletion tracks a replay record that has been
+// tombstoned in preparation for fallback index removal, so the original value
+// can be restored if the index CAS fails.
+type claudeThinkingReplayPendingDeletion struct {
+	sessionKey  string
+	modelFamily string
+	original    []byte
+	tombstone   []byte
+	found       bool
+}
+
+// tombstoneClaudeThinkingReplayRecordForDeletion replaces a live replay record
+// with a deleted tombstone using a CAS. A concurrent Cache or Replace will see
+// the tombstone and overwrite it, canceling the deletion. The caller must use
+// rollbackClaudeThinkingReplayRecordTombstones if it decides not to delete.
+func tombstoneClaudeThinkingReplayRecordForDeletion(ctx context.Context, client kimiThinkingReplayKVClient, modelFamily, sessionKey string) (claudeThinkingReplayPendingDeletion, bool, error) {
+	var pending claudeThinkingReplayPendingDeletion
+	pending.sessionKey = sessionKey
+	pending.modelFamily = modelFamily
+
+	key := claudeThinkingReplayKVKey(modelFamily, sessionKey)
+	if key == "" {
+		return pending, true, nil
 	}
-	key := claudeThinkingReplayFallbackIndexKVKey(modelFamily)
-	raw, _, errGet := client.KVGet(ctx, key)
+
+	raw, found, errGet := client.KVGet(ctx, key)
 	if errGet != nil {
-		log.Warnf("claude thinking replay fallback index re-read failed: %v", errGet)
-		return
+		return pending, false, errGet
 	}
-	index, _ := decodeClaudeThinkingReplayFallbackIndex(raw)
-	stillReferenced := make(map[string]bool, len(index.Sessions))
-	for _, s := range index.Sessions {
-		if len(s.Aliases) > 0 {
-			stillReferenced[s.SessionKey] = true
-		}
+	if !found {
+		return pending, true, nil
 	}
-	for _, rec := range toDelete {
-		if stillReferenced[rec.sessionKey] {
+
+	// If the record is already a tombstone, or is invalid, leave it alone.
+	_, _, deleted, okDecode := decodeClaudeThinkingReplayHomeValue(raw)
+	if !okDecode || deleted {
+		return pending, true, nil
+	}
+
+	generation := uuid.NewString()
+	tombstone, errMarshal := marshalClaudeThinkingReplayHomeValue(generation, true, nil)
+	if errMarshal != nil {
+		return pending, false, errMarshal
+	}
+
+	swapped, errSwap := client.KVCompareAndSwap(ctx, key, raw, true, tombstone, ClaudeThinkingReplayCacheTTL)
+	if errSwap != nil {
+		return pending, false, errSwap
+	}
+	if !swapped {
+		return pending, false, nil
+	}
+
+	pending.original = raw
+	pending.tombstone = tombstone
+	pending.found = true
+	return pending, true, nil
+}
+
+// rollbackClaudeThinkingReplayRecordTombstones restores the original replay
+// record values for tombstones that have not yet been overwritten by a
+// concurrent writer. It is best-effort: a failed CAS means the record is now
+// live again and must not be restored to a stale value.
+func rollbackClaudeThinkingReplayRecordTombstones(ctx context.Context, client kimiThinkingReplayKVClient, tombstones []claudeThinkingReplayPendingDeletion) {
+	for _, p := range tombstones {
+		key := claudeThinkingReplayKVKey(p.modelFamily, p.sessionKey)
+		if key == "" || len(p.tombstone) == 0 {
 			continue
 		}
-		if _, errDel := client.KVDel(ctx, claudeThinkingReplayKVKey(rec.modelFamily, rec.sessionKey)); errDel != nil {
-			log.Warnf("claude thinking replay fallback record delete failed: %v", errDel)
+		if len(p.original) == 0 {
+			// The record was absent when we started; nothing to restore.
+			continue
+		}
+		if _, err := client.KVCompareAndSwap(ctx, key, p.tombstone, true, p.original, ClaudeThinkingReplayCacheTTL); err != nil {
+			log.Warnf("claude thinking replay record tombstone rollback failed: %v", err)
 		}
 	}
 }

@@ -1241,10 +1241,18 @@ func TestClaudeThinkingReplayAliasHomeCrossModelEvictionDeletesCorrectRecord(t *
 		t.Fatalf("model A alias was not evicted")
 	}
 
-	// The model A replay record must be deleted using model A, not model B.
+	// The model A replay record must be tombstoned using model A, not model B.
 	replayAKey := claudeThinkingReplayKVKey(modelA, sessionA)
-	if _, ok := client.values[replayAKey]; ok {
-		t.Fatalf("model A replay record %q was not deleted", replayAKey)
+	raw, ok := client.values[replayAKey]
+	if !ok {
+		t.Fatalf("model A replay record %q missing; expected a tombstone", replayAKey)
+	}
+	_, _, deleted, okDecode := decodeClaudeThinkingReplayHomeValue(raw)
+	if !okDecode || !deleted {
+		t.Fatalf("model A replay record %q was not tombstoned", replayAKey)
+	}
+	if _, _, found, _ := GetClaudeThinkingReplayWithSnapshotIfExists(ctx, modelA, sessionA); found {
+		t.Fatalf("model A replay record %q is still replayable", replayAKey)
 	}
 
 	// Model B records should still exist.
@@ -1289,13 +1297,14 @@ func (c *fallbackExhaustClaudeThinkingReplayKVClient) KVCompareAndSwap(_ context
 	return c.fakeClaudeThinkingReplayKVClient.KVCompareAndSwap(context.Background(), key, expected, expectedExists, newValue, ttl)
 }
 
-func TestClaudeThinkingReplayFallbackIndexTracksAfterCASExhaustion(t *testing.T) {
+func TestClaudeThinkingReplayFallbackIndexDoesNotOverwriteOnExhaustion(t *testing.T) {
 	ClearClaudeThinkingReplayCache()
 	defer ClearClaudeThinkingReplayCache()
 
 	ctx := context.Background()
 	const modelFamily = "claude:test"
 	indexKey := claudeThinkingReplayFallbackIndexKVKey(modelFamily)
+	aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHashFor(0))
 
 	fake := newFakeClaudeThinkingReplayKVClient()
 	client := &fallbackExhaustClaudeThinkingReplayKVClient{
@@ -1304,35 +1313,75 @@ func TestClaudeThinkingReplayFallbackIndexTracksAfterCASExhaustion(t *testing.T)
 	}
 	useFakeClaudeThinkingReplayKVClient(t, client, true)
 
+	// Seed a stale fallback index that must survive CAS exhaustion without
+	// being overwritten by a stale value.
+	seed := claudeThinkingReplayFallbackIndex{
+		Sessions: []claudeThinkingReplayFallbackSession{{
+			SessionKey:  "fb:stale",
+			Aliases:     []string{claudeThinkingReplayAliasKVKey(modelFamily, "other")},
+			ModelFamily: modelFamily,
+			Timestamp:   time.Now(),
+		}},
+	}
+	seedRaw, _ := json.Marshal(seed)
+	client.values[indexKey] = seedRaw
+
 	CacheClaudeThinkingReplayBestEffort(ctx, modelFamily, "fb:session", []byte(`[{"type":"text","text":"x"}]`))
 	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "fb:session", messageHashFor(0), "first")
 
-	raw, found := client.values[indexKey]
-	if !found {
-		t.Fatalf("fallback index not written after CAS exhaustion")
-	}
-	var index claudeThinkingReplayFallbackIndex
-	if err := json.Unmarshal(raw, &index); err != nil {
-		t.Fatalf("fallback index unmarshal failed: %v", err)
-	}
-	aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHashFor(0))
-	foundRef := false
-	for _, s := range index.Sessions {
-		if s.SessionKey != "fb:session" {
-			continue
-		}
-		for _, a := range s.Aliases {
-			if a == aliasKey {
-				foundRef = true
-				break
-			}
-		}
-	}
-	if !foundRef {
-		t.Fatalf("fallback index does not track the session after CAS exhaustion")
+	raw, ok := client.values[indexKey]
+	if !ok || !bytes.Equal(raw, seedRaw) {
+		t.Fatalf("fallback index was overwritten after CAS exhaustion")
 	}
 	if client.failures < 4 {
 		t.Fatalf("fallback index CAS was not exhausted: %d", client.failures)
+	}
+	if _, ok := client.values[aliasKey]; !ok {
+		t.Fatalf("alias value not written")
+	}
+}
+
+type failingFallbackIndexClaudeThinkingReplayKVClient struct {
+	*fakeClaudeThinkingReplayKVClient
+	indexKey string
+}
+
+func (c *failingFallbackIndexClaudeThinkingReplayKVClient) KVCompareAndSwap(ctx context.Context, key string, expected []byte, expectedExists bool, newValue []byte, ttl time.Duration) (bool, error) {
+	if key == c.indexKey {
+		return false, nil
+	}
+	return c.fakeClaudeThinkingReplayKVClient.KVCompareAndSwap(ctx, key, expected, expectedExists, newValue, ttl)
+}
+
+func TestClaudeThinkingReplayFallbackRecordTombstoneRollsBackOnIndexFailure(t *testing.T) {
+	ClearClaudeThinkingReplayCache()
+	defer ClearClaudeThinkingReplayCache()
+
+	ctx := context.Background()
+	const modelFamily = "claude:test"
+	fallbackIndexKey := claudeThinkingReplayFallbackIndexKVKey(modelFamily)
+
+	base := newFakeClaudeThinkingReplayKVClient()
+	client := &failingFallbackIndexClaudeThinkingReplayKVClient{
+		fakeClaudeThinkingReplayKVClient: base,
+		indexKey:                         fallbackIndexKey,
+	}
+	useFakeClaudeThinkingReplayKVClient(t, client, true)
+
+	CacheClaudeThinkingReplayBestEffort(ctx, modelFamily, "fb:session", []byte(`[{"type":"text","text":"x"}]`))
+	RegisterClaudeThinkingReplayAlias(ctx, modelFamily, "fb:session", "msg", "first")
+
+	// Fill the per-credential alias cap to evict the first alias.
+	max := ClaudeThinkingReplayCacheMaxAliasesPerCredential
+	for i := 0; i < max; i++ {
+		session := fmt.Sprintf("fb:session-%d", i)
+		CacheClaudeThinkingReplayBestEffort(ctx, modelFamily, session, []byte(`[{"type":"text","text":"x"}]`))
+		RegisterClaudeThinkingReplayAlias(ctx, modelFamily, session, messageHashFor(i+1), "first")
+	}
+
+	// The fallback index CAS always fails; the tombstone must be rolled back.
+	if _, _, found, _ := GetClaudeThinkingReplayWithSnapshotIfExists(ctx, modelFamily, "fb:session"); !found {
+		t.Fatalf("record was not restored after failed fallback index CAS")
 	}
 }
 
