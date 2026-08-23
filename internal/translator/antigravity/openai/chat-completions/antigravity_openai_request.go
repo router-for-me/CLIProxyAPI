@@ -160,7 +160,8 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			if role == "tool" {
 				toolCallID := m.Get("tool_call_id").String()
 				if toolCallID != "" {
-					toolResponses[toolCallID] = m.Get("content").String()
+					c := m.Get("content")
+					toolResponses[toolCallID] = c.Raw
 				}
 			}
 		}
@@ -300,9 +301,14 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							if response == "" {
 								response = "{}"
 							}
-							// Keep it as a string instead of parsing it into JSON.
-							// Parsing it as JSON, similar to reading a JSON file with readFile, may trigger an upstream 400 error.
-							part, _ = sjson.SetBytes(part, "functionResponse.response.result", response)
+							if response != "null" {
+								parsed := gjson.Parse(response)
+								if parsed.Type == gjson.JSON {
+									part, _ = sjson.SetRawBytes(part, "functionResponse.response.result", []byte(parsed.Raw))
+								} else {
+									part, _ = sjson.SetBytes(part, "functionResponse.response.result", response)
+								}
+							}
 							responseParts = append(responseParts, part)
 						}
 					}

@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -120,8 +119,7 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 						}
 						part := []byte(`{"text":"","thought":true,"thoughtSignature":""}`)
 						part, _ = sjson.SetBytes(part, "text", contentResult.Get("thinking").String())
-						signature := sigcompat.GeminiReplaySignatureOrBypass(contentResult.Get("signature").String(), sigcompat.SignatureBlockKindGeminiModelPart)
-						part, _ = sjson.SetBytes(part, "thoughtSignature", signature)
+						part, _ = sjson.SetBytes(part, "thoughtSignature", contentResult.Get("signature").String())
 						partItems = append(partItems, part)
 
 					case "tool_use":

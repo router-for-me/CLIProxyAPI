@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"encoding/json"
 	"strings"
 
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
@@ -871,10 +872,12 @@ func buildOpenAIResponsesFunctionResponseParts(item gjson.Result, functionNamesB
 		if str == "" || str == "null" {
 			return [][]byte{functionResponse}
 		}
-		// Keep it as a string instead of parsing it into JSON.
-		// Parsing it as JSON, similar to reading a JSON file with readFile, may trigger an upstream 400 error.
-		functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", str)
-		return [][]byte{functionResponse}
+		if parsed := gjson.Parse(str); (parsed.IsArray() || parsed.IsObject()) && json.Valid([]byte(str)) {
+			outputResult = parsed
+		} else {
+			functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", str)
+			return [][]byte{functionResponse}
+		}
 	}
 
 	var imageParts [][]byte
