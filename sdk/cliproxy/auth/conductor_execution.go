@@ -710,9 +710,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				continue
 			}
 			if isEmptyCompletionPayload(resp.Payload) {
-				lastErr = m.markEmptyCompletion(execCtx, &result)
-				tracker.Record(auth, errEmptyCompletion)
-				persistExcludedAuthForRetry(m, auth, errEmptyCompletion, retryRound, defaultRequestRetry, excluded)
+				lastErr = m.markEmptyCount(execCtx, &result)
+				tracker.Record(auth, errEmptyCount)
+				persistExcludedAuthForRetry(m, auth, errEmptyCount, retryRound, defaultRequestRetry, excluded)
 				if homeMode {
 					homeAuthCount++
 				}

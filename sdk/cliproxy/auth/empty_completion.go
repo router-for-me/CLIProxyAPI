@@ -2587,3 +2587,13 @@ func (m *Manager) markEmptyCompletion(ctx context.Context, result *Result) error
 	m.MarkResult(ctx, *result)
 	return errEmptyCompletion
 }
+
+// markEmptyCount records a failed retriable empty count-tokens result and
+// returns the error to propagate. It is the count analogue of markEmptyCompletion
+// and uses errEmptyCount so count failures have a consistent code everywhere.
+func (m *Manager) markEmptyCount(ctx context.Context, result *Result) error {
+	result.Success = false
+	result.Error = errEmptyCount
+	m.MarkResult(ctx, *result)
+	return errEmptyCount
+}

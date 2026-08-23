@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -353,8 +352,8 @@ func TestStreamConnectTimeout_ConfigAndMetadata(t *testing.T) {
 }
 
 // httpTTFTStreamExecutor makes an HTTP request using the default client so the
-// conductor's httptrace.ClientTrace fires GotFirstResponseByte when the
-// upstream begins responding.
+// conductor's httptrace.ClientTrace fires GotConn when the upstream connection
+// is established.
 type httpTTFTStreamExecutor struct {
 	baseURL string
 }
@@ -400,10 +399,10 @@ func (*httpTTFTStreamExecutor) HttpRequest(context.Context, *Auth, *http.Request
 	return nil, nil
 }
 
-// TestStreamFirstChunkTimeout_BudgetsSlowHeaders verifies that the TTFT timer
-// is not stopped at connection (or a CONNECT tunnel) and still fires when the
-// upstream takes longer than the budget to produce the first response byte.
-func TestStreamFirstChunkTimeout_BudgetsSlowHeaders(t *testing.T) {
+// TestStreamFirstChunkTimeout_SlowHeadersAfterConnectNotTimedOut verifies that
+// the TTFT timer stops at connection establishment, so a slow upstream that
+// sleeps before writing response headers does not trigger a timeout.
+func TestStreamFirstChunkTimeout_SlowHeadersAfterConnectNotTimedOut(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(100 * time.Millisecond)
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -433,12 +432,16 @@ func TestStreamFirstChunkTimeout_BudgetsSlowHeaders(t *testing.T) {
 		},
 	}
 
-	_, errStream := m.ExecuteStream(context.Background(), []string{"http-ttft"}, cliproxyexecutor.Request{Model: model}, opts)
-	if errStream == nil {
-		t.Fatal("ExecuteStream() = nil, want TTFT timeout when first byte exceeds budget")
+	stream, errStream := m.ExecuteStream(context.Background(), []string{"http-ttft"}, cliproxyexecutor.Request{Model: model}, opts)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() = %v, want no timeout for slow headers after connect", errStream)
 	}
-	var authErr *Error
-	if !errors.As(errStream, &authErr) || authErr.Code != "stream_first_chunk_timeout" {
-		t.Fatalf("ExecuteStream error = %v, want TTFT timeout", errStream)
+	if stream == nil || stream.Chunks == nil {
+		t.Fatal("ExecuteStream() returned nil stream")
+	}
+	for chunk := range stream.Chunks {
+		if !strings.Contains(string(chunk.Payload), "hello") {
+			t.Fatalf("unexpected chunk payload: %q", chunk.Payload)
+		}
 	}
 }

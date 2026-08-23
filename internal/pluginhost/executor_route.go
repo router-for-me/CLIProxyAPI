@@ -282,7 +282,7 @@ func (h *Host) CountPluginExecutor(ctx context.Context, pluginID string, req cor
 		return coreexecutor.Response{}, err
 	}
 	if coreauth.IsEmptyCompletionPayload(resp.Payload) {
-		return coreexecutor.Response{}, coreauth.EmptyCompletionError()
+		return coreexecutor.Response{}, coreauth.EmptyCountError()
 	}
 	return resp, nil
 }

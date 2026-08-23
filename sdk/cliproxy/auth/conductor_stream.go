@@ -337,12 +337,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 
 		// Arm the TTFT timer only after local interception and request
-		// preparation: the budget measures upstream responsiveness, so a slow
+		// preparation: the budget measures connection establishment, so a slow
 		// after-auth interceptor must not cancel the attempt before any
-		// upstream request was even made. The timer is stopped when the first
-		// response byte arrives (GotFirstResponseByte), after the actual upstream
-		// begins responding; this keeps a CONNECT tunnel or slow accept inside
-		// the budget instead of treating the proxy connection as success.
+		// upstream request was even made. AGENTS.md:58 permits timeouts only
+		// until the upstream connection is established, including CONNECT/TLS
+		// setup for HTTPS proxying, so the timer stops at GotConn.
 		armTTFT := func() {
 			attemptMu.Lock()
 			if timer != nil {
@@ -374,7 +373,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					currentCancel()
 				})
 				trace := &httptrace.ClientTrace{
-					GotFirstResponseByte: func() {
+					GotConn: func(connInfo httptrace.GotConnInfo) {
 						stopTTFT()
 					},
 				}
