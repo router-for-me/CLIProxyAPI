@@ -534,6 +534,22 @@ func TestRestoreKimiThinkingReplayContentMarksExactHit(t *testing.T) {
 	}
 }
 
+func TestRestoreKimiThinkingReplayContentRejectsMultipleExactHits(t *testing.T) {
+	cached := []byte(`[{"type":"thinking","thinking":"cached","signature":"kimi-signature"},{"type":"text","text":"OK"}]`)
+	body := []byte(`{"messages":[
+		{"role":"assistant","content":[{"type":"thinking","thinking":"cached","signature":"kimi-signature"},{"type":"text","text":"OK"}]},
+		{"role":"assistant","content":[{"type":"thinking","thinking":"cached","signature":"kimi-signature"},{"type":"text","text":"OK"}]}
+	]}`)
+
+	updated, restored := restoreKimiThinkingReplayContent(body, cached)
+	if restored {
+		t.Fatalf("multiple exact matches must fail closed, got restored body: %s", updated)
+	}
+	if !helps.JSONEqual(updated, body) {
+		t.Fatalf("request body changed with multiple exact matches: %s", updated)
+	}
+}
+
 func TestRestoreKimiThinkingReplayContentNormalizesStringShorthand(t *testing.T) {
 	cached := []byte(`[{"type":"thinking","thinking":"cached","signature":"kimi-signature"},{"type":"text","text":"answer"}]`)
 	body := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"answer"}]}`)
