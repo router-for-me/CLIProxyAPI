@@ -272,7 +272,7 @@ func TestManager_ShouldRetryAfterError_IgnoresRequestIneligibleOverrides(t *test
 				}
 			}
 
-			wait, shouldRetry := manager.shouldRetryAfterErrorWithHomeRetryLimit(test.ctx, test.opts, &Error{HTTPStatus: http.StatusBadGateway, Message: "retryable failure"}, 0, []string{"codex"}, model, 0, -1, 0)
+			wait, shouldRetry := manager.shouldRetryAfterErrorWithHomeRetryLimit(test.ctx, test.opts, &Error{HTTPStatus: http.StatusBadGateway, Message: "retryable failure"}, 0, []string{"codex"}, model, 0, -1, 0, nil)
 			if shouldRetry || wait != 0 {
 				t.Fatalf("request-ineligible override retry = (%v, %t), want (0, false)", wait, shouldRetry)
 			}

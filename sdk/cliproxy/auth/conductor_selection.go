@@ -918,7 +918,7 @@ func (m *Manager) retryAllowed(attempt int, providers []string, model string, el
 
 func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []string, model string, maxWait time.Duration) (time.Duration, bool) {
 	defaultRequestRetry, _, _ := m.retrySettings()
-	return m.shouldRetryAfterErrorWithHomeRetryLimit(context.Background(), cliproxyexecutor.Options{}, err, attempt, providers, model, maxWait, -1, defaultRequestRetry)
+	return m.shouldRetryAfterErrorWithHomeRetryLimit(context.Background(), cliproxyexecutor.Options{}, err, attempt, providers, model, maxWait, -1, defaultRequestRetry, nil)
 }
 
 // maxWait limits only positive cooldown waits between credential retry rounds.
@@ -926,7 +926,7 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 // credential failover or an additional round that request-retry permits to start
 // immediately. If every eligible credential still needs a positive cooldown,
 // retry stops without waiting.
-func (m *Manager) shouldRetryAfterErrorWithHomeRetryLimit(ctx context.Context, opts cliproxyexecutor.Options, err error, attempt int, providers []string, model string, maxWait time.Duration, homeRetryLimit int, defaultRequestRetry int) (time.Duration, bool) {
+func (m *Manager) shouldRetryAfterErrorWithHomeRetryLimit(ctx context.Context, opts cliproxyexecutor.Options, err error, attempt int, providers []string, model string, maxWait time.Duration, homeRetryLimit int, defaultRequestRetry int, excluded map[string]struct{}) (time.Duration, bool) {
 	if err == nil {
 		return 0, false
 	}
@@ -977,11 +977,16 @@ func (m *Manager) shouldRetryAfterErrorWithHomeRetryLimit(ctx context.Context, o
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
-	excluded := extractExcludedAuthIDs(opts.Metadata)
-	if !isCredentialRetryRoundStatus(status) || !m.retryAllowed(attempt, providers, model, eligibility, pinnedAuthID, defaultRequestRetry, excluded) {
+	merged := extractExcludedAuthIDs(opts.Metadata)
+	for authID := range excluded {
+		if authID = strings.TrimSpace(authID); authID != "" {
+			merged[authID] = struct{}{}
+		}
+	}
+	if !isCredentialRetryRoundStatus(status) || !m.retryAllowed(attempt, providers, model, eligibility, pinnedAuthID, defaultRequestRetry, merged) {
 		return 0, false
 	}
-	wait, found := m.closestCooldownWait(providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry, excluded)
+	wait, found := m.closestCooldownWait(providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry, merged)
 	if found {
 		if wait > 0 && (maxWait <= 0 || wait > maxWait) {
 			return 0, false

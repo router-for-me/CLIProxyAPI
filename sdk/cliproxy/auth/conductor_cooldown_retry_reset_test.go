@@ -216,6 +216,26 @@ func TestCooldownRetryPreservesCallerExclusions(t *testing.T) {
 	}
 }
 
+func TestShouldRetrySkipsWaitWhenSingleAuthIsExcluded(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetRetryConfig(3, 5*time.Second, 0)
+	auth := &Auth{ID: "auth-excluded", Provider: "gemini", Status: StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "gemini", []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	manager.RefreshSchedulerEntry(auth.ID)
+
+	excluded := map[string]struct{}{auth.ID: {}}
+	err := &retryableRateLimitError{status: http.StatusTooManyRequests, retryAfter: 50 * time.Millisecond}
+	wait, shouldRetry := manager.shouldRetryAfterErrorWithHomeRetryLimit(context.Background(), cliproxyexecutor.Options{}, err, 0, []string{"gemini"}, "test-model", 5*time.Second, -1, 3, excluded)
+	if shouldRetry || wait != 0 {
+		t.Fatalf("shouldRetryAfterErrorWithHomeRetryLimit() = (%v, %t), want (0, false) when the only auth is excluded", wait, shouldRetry)
+	}
+}
+
 func TestCooldownRetryPreservesConfigDisabledCoolingExclusions(t *testing.T) {
 	t.Run("global config disable cooling retains exclusion on retry", func(t *testing.T) {
 		manager := NewManager(nil, nil, nil)
