@@ -77,6 +77,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	oldModelCount := countOpenAIModels(oldEntry.Models)
 	newModelCount := countOpenAIModels(newEntry.Models)
 	details := make([]string, 0, 3)
+	if oldEntry.Protocol != newEntry.Protocol {
+		details = append(details, fmt.Sprintf("protocol %s -> %s", oldEntry.Protocol, newEntry.Protocol))
+	}
 	if oldEntry.Disabled != newEntry.Disabled {
 		details = append(details, fmt.Sprintf("disabled %t -> %t", oldEntry.Disabled, newEntry.Disabled))
 	}
@@ -164,6 +167,9 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	}
 	if v := strings.TrimSpace(entry.BaseURL); v != "" {
 		parts = append(parts, "base="+v)
+	}
+	if v := strings.TrimSpace(entry.Protocol); v != "" {
+		parts = append(parts, "protocol="+strings.ToLower(v))
 	}
 
 	models := make([]string, 0, len(entry.Models))
