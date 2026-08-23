@@ -80,6 +80,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
+		mgmt.GET("/api-key-credential-groups", s.mgmt.GetAPIKeyCredentialGroups)
+		mgmt.PUT("/api-key-credential-groups", s.mgmt.PutAPIKeyCredentialGroups)
+		mgmt.PATCH("/api-key-credential-groups", s.mgmt.PatchAPIKeyCredentialGroups)
+		mgmt.DELETE("/api-key-credential-groups", s.mgmt.DeleteAPIKeyCredentialGroups)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
 

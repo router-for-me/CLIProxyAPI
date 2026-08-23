@@ -50,6 +50,10 @@ type SDKConfig struct {
 
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+	// APIKeyCredentialGroups optionally restricts each downstream API key to named
+	// credential groups. Keys omitted from this map retain unrestricted legacy behavior;
+	// keys explicitly mapped to an empty list cannot select any credential.
+	APIKeyCredentialGroups map[string][]string `yaml:"api-key-credential-groups,omitempty" json:"api-key-credential-groups,omitempty"`
 
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).

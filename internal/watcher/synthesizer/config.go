@@ -32,6 +32,12 @@ func addWeightToAttrs(weight *int, attrs map[string]string) {
 	attrs[coreauth.AttributeWeight] = strconv.Itoa(normalized)
 }
 
+func addCredentialGroupToAttrs(group string, attrs map[string]string) {
+	if group = strings.TrimSpace(group); group != "" {
+		attrs["credential_group"] = group
+	}
+}
+
 // Synthesize generates Auth entries from config API keys.
 func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
 	out := make([]*coreauth.Auth, 0, 32)
@@ -103,6 +109,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 			attrs["priority"] = strconv.Itoa(entry.Priority)
 		}
 		addWeightToAttrs(entry.Weight, attrs)
+		addCredentialGroupToAttrs(entry.CredentialGroup, attrs)
 		if base != "" {
 			attrs["base_url"] = base
 		}
@@ -165,6 +172,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			attrs["priority"] = strconv.Itoa(ck.Priority)
 		}
 		addWeightToAttrs(ck.Weight, attrs)
+		addCredentialGroupToAttrs(ck.CredentialGroup, attrs)
 		if base != "" {
 			attrs["base_url"] = base
 		}
@@ -242,6 +250,7 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 			attrs["priority"] = strconv.Itoa(entry.Priority)
 		}
 		addWeightToAttrs(entry.Weight, attrs)
+		addCredentialGroupToAttrs(entry.CredentialGroup, attrs)
 		if baseURL != "" {
 			attrs["base_url"] = baseURL
 		}
@@ -322,6 +331,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
 			addWeightToAttrs(entry.Weight, attrs)
+			addCredentialGroupToAttrs(entry.CredentialGroup, attrs)
 			if key != "" {
 				attrs["api_key"] = key
 			}
@@ -418,6 +428,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			attrs["priority"] = strconv.Itoa(compat.Priority)
 		}
 		addWeightToAttrs(compat.Weight, attrs)
+		addCredentialGroupToAttrs(compat.CredentialGroup, attrs)
 		if key != "" {
 			attrs["api_key"] = key
 		}
