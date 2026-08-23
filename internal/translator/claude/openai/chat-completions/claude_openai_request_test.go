@@ -768,3 +768,79 @@ func TestConvertOpenAIRequestToClaude_MaxTokensAndMaxCompletionTokens(t *testing
 		})
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_PreservesCallerSuppliedMetadataUserID(t *testing.T) {
+	testCases := []struct {
+		name     string
+		rawJSON  string
+		expected string
+	}{
+		{
+			name:     "plain string",
+			rawJSON:  `{"model":"claude-test","metadata":{"user_id":"custom-user-123"},"messages":[{"role":"user","content":"hello"}]}`,
+			expected: "custom-user-123",
+		},
+		{
+			name:     "special characters and json string",
+			rawJSON:  `{"model":"claude-test","metadata":{"user_id":"foo\"bar\nbaz\\qux"},"messages":[{"role":"user","content":"hello"}]}`,
+			expected: "foo\"bar\nbaz\\qux",
+		},
+		{
+			name:     "claude code json format",
+			rawJSON:  `{"model":"claude-test","metadata":{"user_id":"{\"device_id\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"session_id\":\"11111111-2222-4333-8444-555555555555\"}"},"messages":[{"role":"user","content":"hello"}]}`,
+			expected: `{"device_id":"0000000000000000000000000000000000000000000000000000000000000000","session_id":"11111111-2222-4333-8444-555555555555"}`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := ConvertOpenAIRequestToClaude("claude-test", []byte(tc.rawJSON), false)
+			if !gjson.ValidBytes(out) {
+				t.Fatalf("output is invalid json: %s", string(out))
+			}
+			got := gjson.GetBytes(out, "metadata.user_id").String()
+			if got != tc.expected {
+				t.Fatalf("metadata.user_id = %q, want %q", got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_PreservesOpenAIUserField(t *testing.T) {
+	raw := []byte(`{"model":"claude-test","user":"openai-user-456","messages":[{"role":"user","content":"hello"}]}`)
+	out := ConvertOpenAIRequestToClaude("claude-test", raw, false)
+	if !gjson.ValidBytes(out) {
+		t.Fatalf("output is invalid json: %s", string(out))
+	}
+	got := gjson.GetBytes(out, "metadata.user_id").String()
+	if got != "openai-user-456" {
+		t.Fatalf("metadata.user_id = %q, want %q", got, "openai-user-456")
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_DifferentSessionsProduceDifferentUserIDs(t *testing.T) {
+	a := []byte(`{"model":"claude-test","prompt_cache_key":"session-a","messages":[{"role":"user","content":"hello"}]}`)
+	b := []byte(`{"model":"claude-test","prompt_cache_key":"session-b","messages":[{"role":"user","content":"hello"}]}`)
+	outA := ConvertOpenAIRequestToClaude("claude-test", a, false)
+	outB := ConvertOpenAIRequestToClaude("claude-test", b, false)
+	idA := gjson.GetBytes(outA, "metadata.user_id").String()
+	idB := gjson.GetBytes(outB, "metadata.user_id").String()
+	if idA == idB {
+		t.Fatalf("different prompt_cache_key produced identical metadata.user_id: %q", idA)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_DeterministicWithoutSessionKey(t *testing.T) {
+	first := []byte(`{"model":"claude-test","messages":[{"role":"user","content":"stable first message"}]}`)
+	second := []byte(`{"model":"claude-test","messages":[{"role":"user","content":"stable first message"},{"role":"assistant","content":"hi"},{"role":"user","content":"second message"}]}`)
+	outFirst := ConvertOpenAIRequestToClaude("claude-test", first, false)
+	outSecond := ConvertOpenAIRequestToClaude("claude-test", second, false)
+	idFirst := gjson.GetBytes(outFirst, "metadata.user_id").String()
+	idSecond := gjson.GetBytes(outSecond, "metadata.user_id").String()
+	if idFirst == "" || idFirst == "unknown" {
+		t.Fatalf("expected non-empty derived user_id, got %q", idFirst)
+	}
+	if idFirst != idSecond {
+		t.Fatalf("turn growth changed derived user_id: %q vs %q", idFirst, idSecond)
+	}
+}

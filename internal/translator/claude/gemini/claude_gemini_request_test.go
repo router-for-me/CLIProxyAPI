@@ -253,3 +253,67 @@ func TestConvertGeminiRequestToClaude_DeterministicToolIDs(t *testing.T) {
 		t.Fatalf("expected second tool pair to have id %q, got call=%q, resp=%q", wantID2, gotCall2, gotResp2)
 	}
 }
+
+func TestConvertGeminiRequestToClaude_PreservesCallerSuppliedMetadataUserID(t *testing.T) {
+	testCases := []struct {
+		name     string
+		rawJSON  string
+		expected string
+	}{
+		{
+			name:     "plain string",
+			rawJSON:  `{"model":"claude-test","metadata":{"user_id":"custom-gemini-user-123"},"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`,
+			expected: "custom-gemini-user-123",
+		},
+		{
+			name:     "special characters and json string",
+			rawJSON:  `{"model":"claude-test","metadata":{"user_id":"foo\"bar\nbaz\\qux"},"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`,
+			expected: "foo\"bar\nbaz\\qux",
+		},
+		{
+			name:     "claude code json format",
+			rawJSON:  `{"model":"claude-test","metadata":{"user_id":"{\"device_id\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"session_id\":\"11111111-2222-4333-8444-555555555555\"}"},"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`,
+			expected: `{"device_id":"0000000000000000000000000000000000000000000000000000000000000000","session_id":"11111111-2222-4333-8444-555555555555"}`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := ConvertGeminiRequestToClaude("claude-test", []byte(tc.rawJSON), false)
+			if !gjson.ValidBytes(out) {
+				t.Fatalf("output is invalid json: %s", string(out))
+			}
+			got := gjson.GetBytes(out, "metadata.user_id").String()
+			if got != tc.expected {
+				t.Fatalf("metadata.user_id = %q, want %q", got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestConvertGeminiRequestToClaude_DifferentSessionsProduceDifferentUserIDs(t *testing.T) {
+	a := []byte(`{"model":"claude-test","prompt_cache_key":"gemini-session-a","contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
+	b := []byte(`{"model":"claude-test","prompt_cache_key":"gemini-session-b","contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
+	outA := ConvertGeminiRequestToClaude("claude-test", a, false)
+	outB := ConvertGeminiRequestToClaude("claude-test", b, false)
+	idA := gjson.GetBytes(outA, "metadata.user_id").String()
+	idB := gjson.GetBytes(outB, "metadata.user_id").String()
+	if idA == idB {
+		t.Fatalf("different prompt_cache_key produced identical metadata.user_id: %q", idA)
+	}
+}
+
+func TestConvertGeminiRequestToClaude_DefaultRoleDifferentContentProducesDifferentUserIDs(t *testing.T) {
+	a := []byte(`{"contents":[{"parts":[{"text":"first prompt"}]}]}`)
+	b := []byte(`{"contents":[{"parts":[{"text":"second prompt"}]}]}`)
+	outA := ConvertGeminiRequestToClaude("claude-test", a, false)
+	outB := ConvertGeminiRequestToClaude("claude-test", b, false)
+	idA := gjson.GetBytes(outA, "metadata.user_id").String()
+	idB := gjson.GetBytes(outB, "metadata.user_id").String()
+	if idA == "" || idB == "" || idA == "unknown" || idB == "unknown" {
+		t.Fatalf("expected valid derived user_id without role, got idA=%q idB=%q", idA, idB)
+	}
+	if idA == idB {
+		t.Fatalf("different prompt texts without role produced identical metadata.user_id: %q", idA)
+	}
+}
