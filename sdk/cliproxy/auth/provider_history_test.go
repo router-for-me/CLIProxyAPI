@@ -61,6 +61,45 @@ func TestNormalizeProviderBoundResponseHistoryDropsForeignCompaction(t *testing.
 	}
 }
 
+func TestNormalizeProviderBoundResponseHistoryPreservesCustomToolPairs(t *testing.T) {
+	body := []byte(`{
+		"input":[
+			{"type":"message","role":"user","content":"continue"},
+			{"type":"custom_tool_call","id":"foreign_call","call_id":"call_1","name":"shell","input":"pwd"},
+			{"type":"custom_tool_call_output","id":"foreign_output","call_id":"call_1","output":"/tmp"}
+		]
+	}`)
+
+	got, err := normalizeProviderBoundResponseHistory(body)
+	if err != nil {
+		t.Fatalf("normalizeProviderBoundResponseHistory() error = %v", err)
+	}
+	if !got.Changed || got.StrippedFields != 2 {
+		t.Fatalf("normalization metadata = %#v", got)
+	}
+	if gjson.GetBytes(got.Body, "input.1.id").Exists() || gjson.GetBytes(got.Body, "input.2.id").Exists() {
+		t.Fatalf("provider-bound custom tool identity survived: %s", got.Body)
+	}
+	if value := gjson.GetBytes(got.Body, "input.1.call_id").String(); value != "call_1" {
+		t.Fatalf("custom tool call_id = %q, want call_1", value)
+	}
+}
+
+func TestNormalizeProviderBoundResponseHistoryPreservesLargeJSONNumbers(t *testing.T) {
+	body := []byte(`{
+		"metadata":{"exact_integer":9007199254740993},
+		"input":[{"type":"message","id":"foreign_message","role":"user","content":"continue"}]
+	}`)
+
+	got, err := normalizeProviderBoundResponseHistory(body)
+	if err != nil {
+		t.Fatalf("normalizeProviderBoundResponseHistory() error = %v", err)
+	}
+	if !bytes.Contains(got.Body, []byte(`9007199254740993`)) {
+		t.Fatalf("large integer lost precision: %s", got.Body)
+	}
+}
+
 func TestNormalizeProviderBoundResponseHistoryRejectsUnsafeReplay(t *testing.T) {
 	tests := []struct {
 		name   string

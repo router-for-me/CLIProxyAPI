@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -43,7 +44,12 @@ func normalizeProviderBoundResponseHistory(body []byte) (providerHistoryNormaliz
 	}
 
 	var request map[string]any
-	if err := json.Unmarshal(body, &request); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(&request); err != nil {
+		return providerHistoryNormalization{}, &providerHistoryError{reason: "invalid_json"}
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return providerHistoryNormalization{}, &providerHistoryError{reason: "invalid_json"}
 	}
 	input, exists := request["input"]
@@ -74,7 +80,7 @@ func normalizeProviderBoundResponseHistory(body []byte) (providerHistoryNormaliz
 			}
 		}
 		switch itemType {
-		case "message", "reasoning", "function_call", "function_call_output":
+		case "message", "reasoning", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output":
 		case "compaction":
 			sawCompaction = true
 			result.Changed = true
@@ -149,29 +155,45 @@ func hasSemanticHistoryValue(value any) bool {
 }
 
 func providerHistoryToolPairError(items []any) string {
-	calls := make(map[string]int)
-	outputs := make(map[string]int)
+	type toolPair struct {
+		family string
+		callID string
+	}
+	calls := make(map[toolPair]int)
+	outputs := make(map[toolPair]int)
 	for _, rawItem := range items {
 		item, _ := rawItem.(map[string]any)
 		itemType, _ := item["type"].(string)
-		if itemType != "function_call" && itemType != "function_call_output" {
+		family := ""
+		isCall := false
+		switch itemType {
+		case "function_call":
+			family, isCall = "function", true
+		case "function_call_output":
+			family = "function"
+		case "custom_tool_call":
+			family, isCall = "custom", true
+		case "custom_tool_call_output":
+			family = "custom"
+		default:
 			continue
 		}
 		callID, _ := item["call_id"].(string)
 		if strings.TrimSpace(callID) == "" {
 			return "missing_call_id"
 		}
-		if itemType == "function_call" {
-			calls[callID]++
+		pair := toolPair{family: family, callID: callID}
+		if isCall {
+			calls[pair]++
 		} else {
-			outputs[callID]++
+			outputs[pair]++
 		}
 	}
 	if len(calls) != len(outputs) {
 		return "unpaired_tool_history"
 	}
-	for callID, count := range calls {
-		if count != 1 || outputs[callID] != 1 {
+	for pair, count := range calls {
+		if count != 1 || outputs[pair] != 1 {
 			return "unpaired_tool_history"
 		}
 	}

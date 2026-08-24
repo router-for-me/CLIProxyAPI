@@ -91,6 +91,67 @@ func TestResponsesSSELifecycleRejectsOverlappingExplicitItems(t *testing.T) {
 	}
 }
 
+func TestResponsesSSELifecycleAllowsParallelExplicitToolItems(t *testing.T) {
+	state := &responsesSSELifecycleState{}
+	chunks := []string{
+		`event: response.output_item.added` + "\n" + `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc1","type":"function_call","call_id":"call1","name":"read","arguments":""}}` + "\n\n",
+		`event: response.output_item.added` + "\n" + `data: {"type":"response.output_item.added","output_index":1,"item":{"id":"fc2","type":"function_call","call_id":"call2","name":"write","arguments":""}}` + "\n\n",
+		`event: response.output_item.done` + "\n" + `data: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc2","type":"function_call","call_id":"call2","name":"write","arguments":"{}"}}` + "\n\n",
+		`event: response.output_item.done` + "\n" + `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc1","type":"function_call","call_id":"call1","name":"read","arguments":"{}"}}` + "\n\n",
+		`event: response.completed` + "\n" + `data: {"type":"response.completed","response":{"id":"resp1","status":"completed"}}` + "\n\n",
+	}
+
+	var output []byte
+	for _, chunk := range chunks {
+		normalized, err := state.AddChunk([]byte(chunk))
+		if err != nil {
+			t.Fatalf("AddChunk() error = %v", err)
+		}
+		output = append(output, normalized...)
+	}
+	if err := state.Finish(); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	events := responsesSSETestEvents(t, output)
+	if len(events) != 5 {
+		t.Fatalf("event count = %d, want 5; output=%s", len(events), output)
+	}
+	for _, itemID := range []string{"fc1", "fc2"} {
+		if !state.closedContains(itemID) {
+			t.Fatalf("tool item %s was not closed", itemID)
+		}
+	}
+}
+
+func TestResponsesSSELifecyclePreservesAndGeneratesEventFields(t *testing.T) {
+	state := &responsesSSELifecycleState{}
+	chunks := []string{
+		`event: provider.output.delta` + "\n" + `data: {"type":"response.output_text.delta","item_id":"m1","output_index":0,"delta":"answer"}` + "\n\n",
+		`data: {"type":"response.completed","response":{"id":"resp1","status":"completed"}}` + "\n\n",
+	}
+
+	var output []byte
+	for _, chunk := range chunks {
+		normalized, err := state.AddChunk([]byte(chunk))
+		if err != nil {
+			t.Fatalf("AddChunk() error = %v", err)
+		}
+		output = append(output, normalized...)
+	}
+	if err := state.Finish(); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	want := []string{
+		"response.output_item.added",
+		"provider.output.delta",
+		"response.output_item.done",
+		"response.completed",
+	}
+	if got := responsesSSETestEventNames(output); !equalStrings(got, want) {
+		t.Fatalf("event fields = %#v, want %#v; output=%s", got, want, output)
+	}
+}
+
 func TestResponsesSSELifecycleRejectsCleanCloseWithoutTerminalEvent(t *testing.T) {
 	state := &responsesSSELifecycleState{}
 	chunk := []byte(`data: {"type":"response.output_text.delta","item_id":"m1","output_index":0,"delta":"partial"}` + "\n\n")
@@ -146,4 +207,27 @@ func responsesSSETestEvents(t *testing.T, stream []byte) []map[string]any {
 		events = append(events, event)
 	}
 	return events
+}
+
+func responsesSSETestEventNames(stream []byte) []string {
+	frames := bytes.Split(stream, []byte("\n\n"))
+	names := make([]string, 0, len(frames))
+	for _, frame := range frames {
+		if name := responsesSSEEventName(frame); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }

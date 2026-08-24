@@ -35,10 +35,12 @@ type responsesSSEActiveItem struct {
 // omit item start/end events around reasoning or text deltas. Ambiguous overlap
 // fails closed instead of guessing which item owns a delta.
 type responsesSSELifecycleState struct {
-	pending     []byte
-	active      *responsesSSEActiveItem
-	closed      map[string]struct{}
-	sawTerminal bool
+	pending               []byte
+	active                *responsesSSEActiveItem
+	activeExplicit        map[string]*responsesSSEActiveItem
+	activeExplicitByIndex map[string]string
+	closed                map[string]struct{}
+	sawTerminal           bool
 }
 
 func responsesSSELifecycleEnabled(metadata map[string]any) bool {
@@ -101,6 +103,9 @@ func (s *responsesSSELifecycleState) Finish() error {
 	if s.active != nil {
 		return fmt.Errorf("responses SSE lifecycle stream ended with active item %s", s.active.id)
 	}
+	if len(s.activeExplicit) != 0 {
+		return fmt.Errorf("responses SSE lifecycle stream ended with %d active explicit items", len(s.activeExplicit))
+	}
 	if !s.sawTerminal {
 		return fmt.Errorf("responses SSE lifecycle stream ended before a terminal response event")
 	}
@@ -122,10 +127,20 @@ func (s *responsesSSELifecycleState) normalizeFrame(frame []byte) ([]byte, error
 		return nil, err
 	}
 	var output []byte
-	for _, normalized := range events {
+	originalEventName := responsesSSEEventName(frame)
+	for index, normalized := range events {
 		data, errMarshal := json.Marshal(normalized)
 		if errMarshal != nil {
 			return nil, fmt.Errorf("encode normalized Responses SSE event: %w", errMarshal)
+		}
+		eventName, _ := normalized["type"].(string)
+		if index == len(events)-1 && originalEventName != "" {
+			eventName = originalEventName
+		}
+		if eventName != "" {
+			output = append(output, []byte("event: ")...)
+			output = append(output, eventName...)
+			output = append(output, '\n')
 		}
 		output = append(output, []byte("data: ")...)
 		output = append(output, data...)
@@ -146,6 +161,9 @@ func (s *responsesSSELifecycleState) normalizeEvent(event map[string]any) ([]map
 		if err != nil {
 			return nil, err
 		}
+		if err = s.rejectActiveExplicitItems(); err != nil {
+			return nil, err
+		}
 		s.sawTerminal = true
 		return append(out, event), nil
 	case "response.incomplete":
@@ -153,10 +171,15 @@ func (s *responsesSSELifecycleState) normalizeEvent(event map[string]any) ([]map
 		if err != nil {
 			return nil, err
 		}
+		if err = s.rejectActiveExplicitItems(); err != nil {
+			return nil, err
+		}
 		s.sawTerminal = true
 		return append(out, event), nil
 	case "response.failed":
 		s.active = nil
+		s.activeExplicit = nil
+		s.activeExplicitByIndex = nil
 		s.sawTerminal = true
 		return []map[string]any{event}, nil
 	}
@@ -177,6 +200,15 @@ func (s *responsesSSELifecycleState) onItemAdded(event map[string]any) ([]map[st
 	if s.closedContains(itemID) {
 		return nil, nil
 	}
+	if !responsesSSESemanticItemType(itemType) {
+		return s.onExplicitItemAdded(event, item, itemID, itemType)
+	}
+	if explicit := s.activeExplicit[itemID]; explicit != nil {
+		return nil, fmt.Errorf("conflicting active Responses output item %s", itemID)
+	}
+	if existingID := s.activeExplicitByIndex[responsesSSEOutputIndexKey(event["output_index"])]; existingID != "" {
+		return nil, fmt.Errorf("Responses output index %v is active for both %s and %s", event["output_index"], existingID, itemID)
+	}
 	if s.active != nil {
 		if s.active.id == itemID && s.active.itemType == itemType {
 			return nil, nil
@@ -188,15 +220,24 @@ func (s *responsesSSELifecycleState) onItemAdded(event map[string]any) ([]map[st
 }
 
 func (s *responsesSSELifecycleState) onItemDone(event map[string]any) ([]map[string]any, error) {
-	_, itemID, itemType, ok := responsesSSEItem(event)
+	item, itemID, itemType, ok := responsesSSEItem(event)
 	if !ok {
 		return nil, fmt.Errorf("invalid response.output_item.done event")
 	}
 	if s.closedContains(itemID) {
 		return nil, nil
 	}
+	if !responsesSSESemanticItemType(itemType) {
+		return s.onExplicitItemDone(event, item, itemID, itemType)
+	}
 	var output []map[string]any
 	if s.active == nil {
+		if explicit := s.activeExplicit[itemID]; explicit != nil {
+			return nil, fmt.Errorf("conflicting active Responses output item %s", itemID)
+		}
+		if existingID := s.activeExplicitByIndex[responsesSSEOutputIndexKey(event["output_index"])]; existingID != "" {
+			return nil, fmt.Errorf("Responses output index %v is active for both %s and %s", event["output_index"], existingID, itemID)
+		}
 		s.active = responsesSSEActiveFromItem(responsesSSEEmptyItem(itemType, itemID), event["output_index"])
 		output = append(output, responsesSSEAddedEvent(s.active))
 	}
@@ -233,6 +274,12 @@ func (s *responsesSSELifecycleState) onDelta(event map[string]any, requiredType 
 		}
 		if itemID == "" {
 			itemID = fmt.Sprintf("normalized_%s_%v", requiredType, outputIndex)
+		}
+		if explicit := s.activeExplicit[itemID]; explicit != nil {
+			return nil, fmt.Errorf("conflicting active Responses output item %s", itemID)
+		}
+		if existingID := s.activeExplicitByIndex[responsesSSEOutputIndexKey(outputIndex)]; existingID != "" {
+			return nil, fmt.Errorf("Responses output index %v is active for both %s and %s", outputIndex, existingID, itemID)
 		}
 		s.active = responsesSSEActiveFromItem(responsesSSEEmptyItem(requiredType, itemID), outputIndex)
 		output = append(output, responsesSSEAddedEvent(s.active))
@@ -274,6 +321,73 @@ func (s *responsesSSELifecycleState) closeActive(status string) ([]map[string]an
 	}
 	s.markClosed(active.id)
 	s.active = nil
+	return []map[string]any{event}, nil
+}
+
+func (s *responsesSSELifecycleState) rejectActiveExplicitItems() error {
+	if len(s.activeExplicit) == 0 {
+		return nil
+	}
+	return fmt.Errorf("cannot synthesize completion with %d active explicit Responses items", len(s.activeExplicit))
+}
+
+func (s *responsesSSELifecycleState) onExplicitItemAdded(event, item map[string]any, itemID, itemType string) ([]map[string]any, error) {
+	outputIndex := event["output_index"]
+	if existing := s.activeExplicit[itemID]; existing != nil {
+		if existing.itemType == itemType && responsesSSEOutputIndexKey(existing.outputIndex) == responsesSSEOutputIndexKey(outputIndex) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("conflicting active Responses output item %s", itemID)
+	}
+	if s.active != nil {
+		if s.active.id == itemID {
+			return nil, fmt.Errorf("conflicting active Responses output item %s", itemID)
+		}
+		if responsesSSEOutputIndexKey(s.active.outputIndex) == responsesSSEOutputIndexKey(outputIndex) {
+			return nil, fmt.Errorf("Responses output index %v is active for both %s and %s", outputIndex, s.active.id, itemID)
+		}
+	}
+	indexKey := responsesSSEOutputIndexKey(outputIndex)
+	if existingID := s.activeExplicitByIndex[indexKey]; indexKey != "" && existingID != "" && existingID != itemID {
+		return nil, fmt.Errorf("Responses output index %v is active for both %s and %s", outputIndex, existingID, itemID)
+	}
+	if s.activeExplicit == nil {
+		s.activeExplicit = make(map[string]*responsesSSEActiveItem)
+	}
+	if s.activeExplicitByIndex == nil {
+		s.activeExplicitByIndex = make(map[string]string)
+	}
+	s.activeExplicit[itemID] = responsesSSEActiveFromItem(item, outputIndex)
+	if indexKey != "" {
+		s.activeExplicitByIndex[indexKey] = itemID
+	}
+	return []map[string]any{event}, nil
+}
+
+func (s *responsesSSELifecycleState) onExplicitItemDone(event, item map[string]any, itemID, itemType string) ([]map[string]any, error) {
+	active := s.activeExplicit[itemID]
+	if active == nil {
+		if s.active != nil {
+			if s.active.id == itemID {
+				return nil, fmt.Errorf("conflicting active Responses output item %s", itemID)
+			}
+			if responsesSSEOutputIndexKey(s.active.outputIndex) == responsesSSEOutputIndexKey(event["output_index"]) {
+				return nil, fmt.Errorf("Responses output index %v is active for both %s and %s", event["output_index"], s.active.id, itemID)
+			}
+		}
+		if existingID := s.activeExplicitByIndex[responsesSSEOutputIndexKey(event["output_index"])]; existingID != "" {
+			return nil, fmt.Errorf("Responses output index %v is active for both %s and %s", event["output_index"], existingID, itemID)
+		}
+		active = responsesSSEActiveFromItem(item, event["output_index"])
+		s.markClosed(itemID)
+		return []map[string]any{responsesSSEAddedEvent(active), event}, nil
+	}
+	if active.itemType != itemType || responsesSSEOutputIndexKey(active.outputIndex) != responsesSSEOutputIndexKey(event["output_index"]) {
+		return nil, fmt.Errorf("response.output_item.done does not match active item %s", itemID)
+	}
+	delete(s.activeExplicit, itemID)
+	delete(s.activeExplicitByIndex, responsesSSEOutputIndexKey(active.outputIndex))
+	s.markClosed(itemID)
 	return []map[string]any{event}, nil
 }
 
@@ -361,6 +475,26 @@ func responsesSSEAddedEvent(active *responsesSSEActiveItem) map[string]any {
 		"output_index": active.outputIndex,
 		"item":         responsesSSEEmptyItem(active.itemType, active.id),
 	}
+}
+
+func responsesSSESemanticItemType(itemType string) bool {
+	return itemType == "reasoning" || itemType == "message"
+}
+
+func responsesSSEOutputIndexKey(outputIndex any) string {
+	if outputIndex == nil {
+		return ""
+	}
+	return fmt.Sprintf("%T:%v", outputIndex, outputIndex)
+}
+
+func responsesSSEEventName(frame []byte) string {
+	for _, line := range bytes.Split(frame, []byte("\n")) {
+		if bytes.HasPrefix(line, []byte("event:")) {
+			return strings.TrimSpace(string(line[len("event:"):]))
+		}
+	}
+	return ""
 }
 
 func (s *responsesSSELifecycleState) closedContains(itemID string) bool {
