@@ -17,6 +17,7 @@ const (
 	AttributeAuthKind         = "auth_kind"
 	AttributeCodexAlphaSearch = "codex_alpha_search"
 	AttributeConfigIndex      = "config_index"
+	AttributeEntryProviderKey = "entry_provider_key"
 	AttributePath             = "path"
 	AttributeRuntimeOnly      = "runtime_only"
 	AttributeSource           = "source"

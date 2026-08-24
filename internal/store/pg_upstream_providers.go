@@ -88,6 +88,7 @@ type UpstreamProviderAPIKey struct {
 	ID         int64  `json:"id,omitempty"`
 	ProviderID int64  `json:"provider_id,omitempty"`
 	APIKey     string `json:"api_key"`
+	Name       string `json:"name,omitempty"`
 	ProxyURL   string `json:"proxy_url,omitempty"`
 	SortOrder  int    `json:"sort_order,omitempty"`
 }

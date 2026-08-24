@@ -728,6 +728,12 @@ type OpenAICompatibilityAPIKey struct {
 	// APIKey is the authentication key for accessing the external API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Name is the optional identity for this API key entry.
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+
+	// UpstreamProviderEntryID is the persisted child-row ID for this API key entry.
+	UpstreamProviderEntryID int64 `yaml:"upstream-provider-entry-id,omitempty" json:"-"`
+
 	// Weight controls proportional selection under weighted-round-robin.
 	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
 	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
