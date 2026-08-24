@@ -2612,6 +2612,45 @@ func TestXAIExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testing
 	}
 }
 
+func TestXAIExecutorCompactKeepsPreviousResponseID(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_compact","output":[{"type":"compaction","encrypted_content":"opaque-out"}]}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "xai-token",
+		},
+	}
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.6",
+		Payload: []byte(`{"model":"grok-4.6","previous_response_id":"resp-up","input":[{"type":"compaction_trigger"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Alt:          "responses/compact",
+	})
+	if err != nil {
+		t.Fatalf("Execute compact error: %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "previous_response_id").String(); got != "resp-up" {
+		t.Fatalf("previous_response_id = %q, want resp-up; body=%s", got, gotBody)
+	}
+	if xaiInputHasItemType(gotBody, "compaction_trigger") {
+		t.Fatalf("compaction_trigger reached xai compact body: %s", gotBody)
+	}
+}
+
 func TestXAIExecutorOmitsUnsupportedReasoningEffort(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

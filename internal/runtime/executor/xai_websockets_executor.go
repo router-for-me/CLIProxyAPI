@@ -865,21 +865,23 @@ func (e *XAIWebsocketsExecutor) executeCompactionTriggerFromWebsocketContext(ctx
 	if idMapper == nil || idMapper.state == nil {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "xai websocket compaction context is unavailable"}
 	}
-	transcriptInput := idMapper.state.snapshotTranscriptInput()
-	if len(transcriptInput) == 0 {
-		return nil, statusErr{code: http.StatusBadRequest, msg: "xai websocket compaction context is empty"}
+	upstreamPreviousID := strings.TrimSpace(idMapper.upstreamPreviousID)
+	source, errSource := resolveXAIWebsocketCompactionSource(idMapper.state.snapshotTranscriptInput(), req.Payload, upstreamPreviousID)
+	if errSource != nil {
+		return nil, errSource
 	}
 	authID := ""
 	if auth != nil {
 		authID = auth.ID
 	}
 	log.Infof(
-		"xai websockets: compact fallback session=%s auth=%s input_items=%d",
+		"xai websockets: compact fallback session=%s auth=%s input_items=%d keep_previous_response_id=%t",
 		xaiExecutionSessionID(req, opts),
 		strings.TrimSpace(authID),
-		len(gjson.ParseBytes(transcriptInput).Array()),
+		len(gjson.ParseBytes(source.input).Array()),
+		source.keepPreviousResponseID,
 	)
-	compactPayload, err := buildXAIWebsocketCompactionPayload(req.Payload, transcriptInput)
+	compactPayload, err := buildXAIWebsocketCompactionPayloadFromSource(req.Payload, source, upstreamPreviousID)
 	if err != nil {
 		return nil, err
 	}
@@ -935,23 +937,6 @@ func validateXAIWebsocketCompactionResponse(data []byte) (string, []byte, error)
 	}
 	normalizedResponseID := xaiCompactionResponseID(data)
 	return normalizedResponseID, xaiCompactionOutputItem(data, normalizedResponseID), nil
-}
-
-func buildXAIWebsocketCompactionPayload(payload []byte, transcriptInput []byte) ([]byte, error) {
-	if len(payload) == 0 {
-		payload = []byte(`{}`)
-	}
-	if len(transcriptInput) == 0 {
-		transcriptInput = []byte("[]")
-	}
-	out := bytes.Clone(payload)
-	var err error
-	out, err = sjson.SetRawBytes(out, "input", transcriptInput)
-	if err != nil {
-		return nil, err
-	}
-	out, _ = sjson.DeleteBytes(out, "previous_response_id")
-	return out, nil
 }
 
 func xaiWebsocketGenerateFalse(payload []byte) bool {
