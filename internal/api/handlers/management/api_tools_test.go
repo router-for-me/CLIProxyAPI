@@ -315,3 +315,38 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
 	}
 }
+
+func TestResolveOpenAICompatAPIKeyProxyURLFallsBackToProviderProxy(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.OpenAICompatibility = []config.OpenAICompatibility{{
+		Name:    "provider",
+		ProxyURL: "http://provider-proxy.example.com:8080",
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{{
+			APIKey: "key",
+		}},
+	}}
+	auth := &coreauth.Auth{Provider: "openai-compatibility"}
+
+	got := resolveOpenAICompatAPIKeyProxyURL(cfg, auth, "key", "", "provider")
+	if got != "http://provider-proxy.example.com:8080" {
+		t.Fatalf("proxy = %q, want provider proxy", got)
+	}
+}
+
+func TestResolveOpenAICompatAPIKeyProxyURLPrefersEntryProxy(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.OpenAICompatibility = []config.OpenAICompatibility{{
+		Name:    "provider",
+		ProxyURL: "http://provider-proxy.example.com:8080",
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{{
+			APIKey:   "key",
+			ProxyURL: "http://entry-proxy.example.com:8080",
+		}},
+	}}
+	auth := &coreauth.Auth{Provider: "openai-compatibility"}
+
+	got := resolveOpenAICompatAPIKeyProxyURL(cfg, auth, "key", "", "provider")
+	if got != "http://entry-proxy.example.com:8080" {
+		t.Fatalf("proxy = %q, want entry proxy", got)
+	}
+}

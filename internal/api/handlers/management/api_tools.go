@@ -643,10 +643,13 @@ func resolveOpenAICompatAPIKeyProxyURL(cfg *config.Config, auth *coreauth.Auth, 
 				for j := range compat.APIKeyEntries {
 					entry := &compat.APIKeyEntries[j]
 					if strings.EqualFold(strings.TrimSpace(entry.APIKey), apiKey) {
-						return strings.TrimSpace(entry.ProxyURL)
+						if proxyURL := strings.TrimSpace(entry.ProxyURL); proxyURL != "" {
+							return proxyURL
+						}
+						return strings.TrimSpace(compat.ProxyURL)
 					}
 				}
-				return ""
+				return strings.TrimSpace(compat.ProxyURL)
 			}
 		}
 	}
