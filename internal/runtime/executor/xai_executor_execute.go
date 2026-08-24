@@ -149,7 +149,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	prepared.body, _ = sjson.DeleteBytes(prepared.body, "stream")
 	prepared.body, _ = sjson.DeleteBytes(prepared.body, "tools")
 	// Compact deletes tools after prepareResponsesRequestTo, which can now keep
-	// image_generation and rewrite its forced choice to allowed_tools on grok-4.6+.
+	// image_generation and rewrite its forced choice to "required" on grok-4.6+.
 	// Drop the leftover selection so compact does not send tool_choice without tools.
 	prepared.body = normalizeXAIToolChoiceForTools(prepared.body)
 	for _, field := range []string{"max_output_tokens", "temperature", "top_p", "top_k", "stop"} {

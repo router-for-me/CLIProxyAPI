@@ -344,6 +344,10 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	entry["success"] = auth.Success
 	entry["failed"] = auth.Failed
 	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
+	entry["quota"] = quotaObservationPayloadForProvider(auth.Provider, auth.Quota)
+	if modelQuotas := modelQuotaObservationPayload(auth.Provider, auth.ModelStates); len(modelQuotas) > 0 {
+		entry["model_quotas"] = modelQuotas
+	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
 	}
@@ -439,6 +443,46 @@ func authFileRequestRetryFromJSON(data []byte) (int, bool) {
 		return 0, false
 	}
 	return (&coreauth.Auth{Metadata: metadata}).RequestRetryOverride()
+}
+
+// quotaObservationPayload exposes only passive provider observations. Cooldown
+// fields are intentionally excluded so this management response cannot be
+// mistaken for scheduler state or influence scheduling behavior.
+func quotaObservationPayloadForProvider(provider string, quota coreauth.QuotaState) gin.H {
+	if !coreauth.ProviderSupportsQuotaObservation(provider) {
+		return quotaObservationPayload(coreauth.QuotaState{})
+	}
+	return quotaObservationPayload(quota)
+}
+
+func quotaObservationPayload(quota coreauth.QuotaState) gin.H {
+	observed := gin.H{}
+	if !quota.ObservedAt.IsZero() {
+		observed["observed_at"] = quota.ObservedAt
+	}
+	signals := make(map[string]string, len(quota.Signals))
+	for key, value := range quota.Signals {
+		signals[key] = value
+	}
+	observed["signals"] = signals
+	return observed
+}
+
+func modelQuotaObservationPayload(provider string, states map[string]*coreauth.ModelState) gin.H {
+	if !coreauth.ProviderSupportsQuotaObservation(provider) {
+		return gin.H{}
+	}
+	observations := gin.H{}
+	for model, state := range states {
+		if state == nil {
+			continue
+		}
+		if state.Quota.ObservedAt.IsZero() && len(state.Quota.Signals) == 0 {
+			continue
+		}
+		observations[model] = quotaObservationPayloadForProvider(provider, state.Quota)
+	}
+	return observations
 }
 
 func authWeightValue(auth *coreauth.Auth) (int64, bool) {

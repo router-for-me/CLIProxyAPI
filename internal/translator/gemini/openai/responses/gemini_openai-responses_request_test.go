@@ -1158,17 +1158,12 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputVariations(t *t
 		output := ConvertOpenAIResponsesRequestToGemini("gemini-3.7-flash-high", []byte(inputJSON), false)
 		userContent := gjson.GetBytes(output, "contents.1")
 		parts := userContent.Get("parts").Array()
-		if len(parts) != 2 {
-			t.Fatalf("expected 2 parts, got %d; raw: %s", len(parts), userContent.Raw)
+		if len(parts) != 1 {
+			t.Fatalf("expected 1 part, got %d; raw: %s", len(parts), userContent.Raw)
 		}
-		if got := parts[0].Get("functionResponse.response.result").String(); got != "done" {
-			t.Fatalf("expected result 'done', got %q", got)
-		}
-		if got := parts[1].Get("inline_data.mime_type").String(); got != "image/jpeg" {
-			t.Fatalf("expected mime_type 'image/jpeg', got %q", got)
-		}
-		if got := parts[1].Get("inline_data.data").String(); got != "/9j/4AAQSkZJRg==" {
-			t.Fatalf("expected image data '/9j/4AAQSkZJRg==', got %q", got)
+		expectedResult := `[{"type":"input_text","text":"done"},{"type":"input_image","image_url":"data:image/jpeg;base64,/9j/4AAQSkZJRg=="}]`
+		if got := parts[0].Get("functionResponse.response.result").String(); got != expectedResult {
+			t.Fatalf("expected result %q, got %q", expectedResult, got)
 		}
 	})
 
@@ -1245,7 +1240,11 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputVariations(t *t
 				{
 					"type": "function_call_output",
 					"call_id": "call_1",
-					"output": "{\"ok\":true,\"caption\":\"hero\",\"image_url\":\"https://example.com/hero.png\"}"
+					"output": {
+						"ok": true,
+						"caption": "hero",
+						"image_url": "https://example.com/hero.png"
+					}
 				}
 			]
 		}`
@@ -1295,7 +1294,7 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputVariations(t *t
 		}
 	})
 
-	t.Run("stringified single-element object array preserved as raw JSON", func(t *testing.T) {
+	t.Run("stringified single-element object array preserved as string", func(t *testing.T) {
 		inputJSON := `{
 			"model": "gemini-3.7-flash-high",
 			"input": [
@@ -1318,9 +1317,8 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputVariations(t *t
 		if len(parts) != 1 {
 			t.Fatalf("expected 1 part, got %d; raw: %s", len(parts), userContent.Raw)
 		}
-		resultArr := parts[0].Get("functionResponse.response.result").Array()
-		if len(resultArr) != 1 || resultArr[0].Get("id").Int() != 1 {
-			t.Fatalf("expected result to be [{\"id\":1}], got %s", parts[0].Get("functionResponse.response.result").Raw)
+		if got := parts[0].Get("functionResponse.response.result").String(); got != `[{"id":1}]` {
+			t.Fatalf("expected result to be %q, got %q", `[{"id":1}]`, got)
 		}
 	})
 

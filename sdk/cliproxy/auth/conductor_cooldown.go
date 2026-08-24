@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -389,7 +390,8 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		auth.Unavailable = true
 		auth.Status = StatusError
 		auth.NextRetryAfter = record.NextRetryAfter
-		auth.Quota = quota
+		applyCooldownFields(&auth.Quota, quota)
+		auth.Quota = mergeQuotaObservation(auth.Quota, quota)
 		auth.UpdatedAt = updatedAt
 		if reason != "" {
 			auth.StatusMessage = reason
@@ -420,7 +422,7 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
 		auth.Unavailable = false
 		auth.NextRetryAfter = time.Time{}
-		auth.Quota = QuotaState{}
+		applyCooldownFields(&auth.Quota, QuotaState{})
 		auth.UpdatedAt = now
 		changed = true
 	}
@@ -431,7 +433,7 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() {
 			state.Unavailable = false
 			state.NextRetryAfter = time.Time{}
-			state.Quota = QuotaState{}
+			applyCooldownFields(&state.Quota, QuotaState{})
 			state.UpdatedAt = now
 			changed = true
 		}
@@ -691,7 +693,7 @@ func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bo
 		Status:         "cooling",
 		NextRetryAfter: auth.NextRetryAfter,
 		Reason:         cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError),
-		Quota:          auth.Quota,
+		Quota:          cooldownFieldsOf(auth.Quota),
 		LastError:      cloneError(auth.LastError),
 		UpdatedAt:      auth.UpdatedAt,
 	}, true
@@ -710,7 +712,7 @@ func modelCooldownStateRecord(auth *Auth, model string, state *ModelState, now t
 		Status:         "cooling",
 		NextRetryAfter: state.NextRetryAfter,
 		Reason:         cooldownReason(state.StatusMessage, state.Quota, state.LastError),
-		Quota:          state.Quota,
+		Quota:          cooldownFieldsOf(state.Quota),
 		LastError:      cloneError(state.LastError),
 		UpdatedAt:      state.UpdatedAt,
 	}, true
@@ -752,6 +754,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
+		responseHeaders := internallogging.GetResponseHeaders(ctx)
+		modelState := existingModelState(auth, modelKey)
 		var cooldownRecordsBefore []CooldownStateRecord
 		trackCooldownState := m.cooldownStore != nil
 		if trackCooldownState {
@@ -769,6 +773,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				// Retain active credential-scoped cooldown
 			} else if modelKey != "" {
 				state := ensureModelState(auth, modelKey)
+				modelState = state
 				resetModelState(state, now)
 				updateAggregatedAvailability(auth, now)
 				if !hasModelError(auth, now) {
@@ -790,6 +795,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						disableCooling = false
 					}
 					state := ensureModelState(auth, modelKey)
+					modelState = state
 					state.Unavailable = true
 					state.Status = StatusError
 					state.UpdatedAt = now
@@ -813,12 +819,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						if auth.LastError != nil {
 							auth.StatusMessage = "cloudflare challenge"
 						}
-						state.Quota = QuotaState{
+						applyCooldownFields(&state.Quota, QuotaState{
 							Exceeded:      true,
 							Reason:        "cloudflare challenge",
 							NextRecoverAt: next,
 							BackoffLevel:  backoffLevel,
-						}
+						})
 					} else if isInvalidGrantResultError(result.Error) {
 						if disableCooling {
 							state.NextRetryAfter = time.Time{}
@@ -912,12 +918,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								}
 							}
 							state.NextRetryAfter = next
-							state.Quota = QuotaState{
+							applyCooldownFields(&state.Quota, QuotaState{
 								Exceeded:      true,
 								Reason:        "quota",
 								NextRecoverAt: next,
 								BackoffLevel:  backoffLevel,
-							}
+							})
 							if !disableCooling {
 								suspendReason = "quota"
 								shouldSuspendModel = true
@@ -933,12 +939,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 											otherNext = otherState.Quota.NextRecoverAt
 										}
 										otherState.NextRetryAfter = otherNext
-										otherState.Quota = QuotaState{
+										applyCooldownFields(&otherState.Quota, QuotaState{
 											Exceeded:      true,
 											Reason:        "credential_quota",
 											NextRecoverAt: otherNext,
 											BackoffLevel:  backoffLevel,
-										}
+										})
 									}
 								}
 								auth.Unavailable = true
@@ -978,6 +984,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					disableCooling = false
 				}
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+			}
+		}
+
+		if !result.SkipQuotaObservation {
+			auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
+			if modelState != nil {
+				modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
 			}
 		}
 
@@ -1088,6 +1101,14 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
 	m.publishErrorEvent(result, authSnapshot)
 }
 
+func existingModelState(auth *Auth, model string) *ModelState {
+	model = canonicalModelKey(model)
+	if auth == nil || model == "" {
+		return nil
+	}
+	return auth.ModelStates[model]
+}
+
 func ensureModelState(auth *Auth, model string) *ModelState {
 	model = canonicalModelKey(model)
 	if auth == nil || model == "" {
@@ -1160,6 +1181,8 @@ func mergeModelState(target, source *ModelState) *ModelState {
 		},
 		UpdatedAt: target.UpdatedAt,
 	}
+	merged.Quota = mergeQuotaObservation(merged.Quota, fallback.Quota)
+	merged.Quota = mergeQuotaObservation(merged.Quota, preferred.Quota)
 	if source.NextRetryAfter.After(merged.NextRetryAfter) {
 		merged.NextRetryAfter = source.NextRetryAfter
 	}
@@ -1199,7 +1222,7 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.StatusMessage = ""
 	state.NextRetryAfter = time.Time{}
 	state.LastError = nil
-	state.Quota = QuotaState{}
+	applyCooldownFields(&state.Quota, QuotaState{})
 	state.UpdatedAt = now
 }
 
@@ -1305,7 +1328,7 @@ func clearAggregatedAvailability(auth *Auth) {
 	}
 	auth.Unavailable = false
 	auth.NextRetryAfter = time.Time{}
-	auth.Quota = QuotaState{}
+	applyCooldownFields(&auth.Quota, QuotaState{})
 }
 
 func hasModelError(auth *Auth, now time.Time) bool {
@@ -2058,12 +2081,12 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if isCloudflareChallengeResultError(resultErr) {
 		auth.StatusMessage = "cloudflare challenge"
 		next, backoffLevel := nextCloudflareCooldown(auth.Quota.BackoffLevel, disableCooling, now)
-		auth.Quota = QuotaState{
+		applyCooldownFields(&auth.Quota, QuotaState{
 			Exceeded:      true,
 			Reason:        "cloudflare challenge",
 			NextRecoverAt: next,
 			BackoffLevel:  backoffLevel,
-		}
+		})
 		auth.NextRetryAfter = next
 		return
 	}
