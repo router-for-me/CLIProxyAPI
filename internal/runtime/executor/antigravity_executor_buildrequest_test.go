@@ -3,12 +3,14 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
@@ -284,6 +286,158 @@ func TestAntigravityBuildRequest_RejectsMissingProjectID(t *testing.T) {
 	}
 }
 
+func TestAntigravityBuildRequest_CapsMaxOutputTokensWithSchemaSanitization(t *testing.T) {
+	clientID := "test-client-antigravity-cap"
+	modelName := "gemini-test-cap-64-model"
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(clientID, "antigravity", []*registry.ModelInfo{
+		{
+			ID:                  modelName,
+			MaxCompletionTokens: 64,
+		},
+	})
+	t.Cleanup(func() {
+		reg.UnregisterClient(clientID)
+	})
+
+	body := buildRequestBodyFromRawPayload(t, modelName, []byte(`{
+		"request": {
+			"generationConfig": {
+				"maxOutputTokens": 128
+			},
+			"tools": [
+				{
+					"function_declarations": [
+						{
+							"name": "test_tool",
+							"parametersJsonSchema": {
+								"type": "object",
+								"properties": {
+									"query": {"type": "string"}
+								}
+							}
+						}
+					]
+				}
+			]
+		}
+	}`))
+
+	generationConfig := extractGenerationConfig(t, body)
+	if got, ok := generationConfig["maxOutputTokens"].(float64); !ok || got != 64 {
+		t.Fatalf("maxOutputTokens = %v, want 64", generationConfig["maxOutputTokens"])
+	}
+}
+
+func TestAntigravityBuildRequest_CapsMaxOutputTokensWithoutSchemaSanitization(t *testing.T) {
+	clientID := "test-client-antigravity-cap-table"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(clientID, "antigravity", []*registry.ModelInfo{
+		{ID: "cap-max-completion-100", MaxCompletionTokens: 100},
+		{ID: "cap-output-limit-200", OutputTokenLimit: 200},
+		{ID: "cap-both-300-500", OutputTokenLimit: 300, MaxCompletionTokens: 500},
+	})
+	t.Cleanup(func() {
+		reg.UnregisterClient(clientID)
+	})
+
+	tests := []struct {
+		name      string
+		modelName string
+		value     string
+		want      float64
+	}{
+		{name: "above max completion tokens", modelName: "cap-max-completion-100", value: "500", want: 100},
+		{name: "below limit", modelName: "cap-max-completion-100", value: "50", want: 50},
+		{name: "at limit", modelName: "cap-max-completion-100", value: "100", want: 100},
+		{name: "very large integer", modelName: "cap-max-completion-100", value: "18446744073709551615", want: 100},
+		{name: "output token limit only", modelName: "cap-output-limit-200", value: "500", want: 200},
+		{name: "output token limit preferred", modelName: "cap-both-300-500", value: "400", want: 300},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := []byte(`{"request":{"generationConfig":{"maxOutputTokens":` + tt.value + `}}}`)
+			body := buildRequestBodyFromRawPayload(t, tt.modelName, payload)
+			generationConfig := extractGenerationConfig(t, body)
+			if got, ok := generationConfig["maxOutputTokens"].(float64); !ok || got != tt.want {
+				t.Errorf("maxOutputTokens = %v, want %v", generationConfig["maxOutputTokens"], tt.want)
+			}
+		})
+	}
+}
+
+func TestAntigravityBuildRequest_CapsClaudeThinkingBudget(t *testing.T) {
+	clientID := "test-client-antigravity-claude-cap"
+	modelName := "claude-test-cap-64-model"
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(clientID, "antigravity", []*registry.ModelInfo{
+		{
+			ID:                  modelName,
+			MaxCompletionTokens: 64,
+			Thinking: &registry.ThinkingSupport{
+				Min: 8,
+				Max: 64,
+			},
+		},
+	})
+	t.Cleanup(func() {
+		reg.UnregisterClient(clientID)
+	})
+
+	tests := []struct {
+		name         string
+		maxOut       int
+		budget       int
+		wantMax      float64
+		wantBudget   float64
+		wantNoConfig bool
+	}{
+		{name: "caps budget below capped output", maxOut: 128, budget: 64, wantMax: 64, wantBudget: 63},
+		{name: "preserves valid lower budget", maxOut: 128, budget: 32, wantMax: 64, wantBudget: 32},
+		{name: "removes config below minimum", maxOut: 8, budget: 8, wantMax: 8, wantNoConfig: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := fmt.Sprintf(`{"request":{"generationConfig":{"maxOutputTokens":%d,"thinkingConfig":{"thinkingBudget":%d}}}}`, tt.maxOut, tt.budget)
+			body := buildRequestBodyFromRawPayload(t, modelName, []byte(payload))
+			generationConfig := extractGenerationConfig(t, body)
+			if got, ok := generationConfig["maxOutputTokens"].(float64); !ok || got != tt.wantMax {
+				t.Errorf("maxOutputTokens = %v, want %v", generationConfig["maxOutputTokens"], tt.wantMax)
+			}
+			tc, ok := generationConfig["thinkingConfig"].(map[string]any)
+			if tt.wantNoConfig {
+				if ok && tc != nil {
+					t.Errorf("thinkingConfig should be removed, got %v", tc)
+				}
+			} else {
+				if !ok || tc == nil {
+					t.Fatalf("thinkingConfig missing or invalid type")
+				}
+				if got, ok := tc["thinkingBudget"].(float64); !ok || got != tt.wantBudget {
+					t.Errorf("thinkingBudget = %v, want %v", tc["thinkingBudget"], tt.wantBudget)
+				}
+			}
+		})
+	}
+}
+
+func extractGenerationConfig(t *testing.T, body map[string]any) map[string]any {
+	t.Helper()
+	request, ok := body["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("request missing or invalid type")
+	}
+	generationConfig, ok := request["generationConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("generationConfig missing or invalid type")
+	}
+	return generationConfig
+}
+
 func assertNonSchemaRequestPreserved(t *testing.T, body map[string]any) {
 	t.Helper()
 
@@ -315,10 +469,12 @@ func assertNonSchemaRequestPreserved(t *testing.T, body map[string]any) {
 		t.Fatalf("x-extra should be preserved outside schema cleanup path, got=%v", nonSchema["x-extra"])
 	}
 
-	if generationConfig, ok := request["generationConfig"].(map[string]any); ok {
-		if _, ok := generationConfig["maxOutputTokens"]; ok {
-			t.Fatalf("maxOutputTokens should still be removed for non-Claude requests")
-		}
+	generationConfig, ok := request["generationConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("generationConfig missing or invalid type")
+	}
+	if got, ok := generationConfig["maxOutputTokens"].(float64); !ok || got != 128 {
+		t.Fatalf("maxOutputTokens = %v, want 128", generationConfig["maxOutputTokens"])
 	}
 }
 
