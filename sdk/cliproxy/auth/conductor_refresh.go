@@ -83,6 +83,9 @@ func (m *Manager) StopAutoRefresh() {
 	if stoppable, ok := m.selector.(StoppableSelector); ok {
 		stoppable.Stop()
 	}
+	if m.providerHistoryScopes != nil {
+		m.providerHistoryScopes.Stop()
+	}
 }
 
 func (m *Manager) queueRefreshReschedule(authID string) {

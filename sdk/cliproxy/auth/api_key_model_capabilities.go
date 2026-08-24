@@ -113,6 +113,15 @@ func attachResolvedAPIKeyModelInfo(routing *apiKeyModelRoutingSnapshot, req clip
 	return req
 }
 
+func withSelectedModelCompatibility(opts cliproxyexecutor.Options, req cliproxyexecutor.Request) cliproxyexecutor.Options {
+	metadata := opts.EnsureMetadata()
+	delete(metadata, cliproxyexecutor.SelectedModelCompatibilityMetadataKey)
+	if modelInfo, ok := ResolvedAPIKeyModelInfo(req); ok && modelInfo != nil {
+		metadata[cliproxyexecutor.SelectedModelCompatibilityMetadataKey] = modelInfo.IsCompat
+	}
+	return opts
+}
+
 func lookupAPIKeyModelCapability(routing *apiKeyModelRoutingSnapshot, auth *Auth, routeModel, upstreamModel string) (*registry.ModelInfo, bool) {
 	if !isConfiguredModelRoutingAuth(auth) || routing == nil {
 		return nil, false
