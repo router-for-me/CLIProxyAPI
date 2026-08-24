@@ -362,6 +362,14 @@ type antigravityContentEdit struct {
 	replacement []byte
 }
 
+// antigravityFunctionRef identifies a tool call or response by id, falling
+// back to the function name when the id is absent, mirroring the pairing
+// rules of the Gemini history validator.
+type antigravityFunctionRef struct {
+	id   string
+	name string
+}
+
 // normalizeAntigravityGeminiFunctionResponseRoles edits each response turn in
 // isolation, then splices all changed turns into the request with one body copy.
 // Applying SJSON once per field made large histories scale with history size
@@ -372,13 +380,9 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 	if !contents.IsArray() {
 		return rawJSON
 	}
-	type functionRef struct {
-		id   string
-		name string
-	}
 
 	edits := make([]antigravityContentEdit, 0)
-	var pending []functionRef
+	var pending []antigravityFunctionRef
 	validOffsets := true
 	contents.ForEach(func(contentIndex, content gjson.Result) bool {
 		parts := content.Get("parts")
@@ -387,18 +391,16 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 			return true
 		}
 
-		var calls, responses []functionRef
-		var responseParts []json.RawMessage
+		var calls, responses []antigravityFunctionRef
 		partCount := 0
 		hasOtherPart := false
 		parts.ForEach(func(_, part gjson.Result) bool {
 			partCount++
 			switch {
 			case part.Get("functionCall").Exists():
-				calls = append(calls, functionRef{id: part.Get("functionCall.id").String(), name: part.Get("functionCall.name").String()})
+				calls = append(calls, antigravityFunctionRef{id: part.Get("functionCall.id").String(), name: part.Get("functionCall.name").String()})
 			case part.Get("functionResponse").Exists():
-				responses = append(responses, functionRef{id: part.Get("functionResponse.id").String(), name: part.Get("functionResponse.name").String()})
-				responseParts = append(responseParts, json.RawMessage(part.Raw))
+				responses = append(responses, antigravityFunctionRef{id: part.Get("functionResponse.id").String(), name: part.Get("functionResponse.name").String()})
 			default:
 				hasOtherPart = true
 			}
@@ -418,35 +420,24 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 			}
 			return true
 		}
-		if hasOtherPart || len(calls) > 0 {
+		if len(calls) > 0 {
+			// functionCall and functionResponse parts interleaved in one
+			// content are an invalid shape that pairing validation rejects;
+			// leave it untouched instead of guessing a repair.
 			pending = nil
 			return true
 		}
 
+		// Claude clients may emit tool_result blocks in completion order while
+		// Gemini pairs calls and responses positionally, so reorder the
+		// functionResponse groups (each keeping its trailing image parts) into
+		// call order. Other parts keep their relative positions, and contents
+		// whose responses cannot be matched one-to-one stay untouched so the
+		// pairing validation can surface the real problem.
 		var contentJSON []byte
 		contentChanged := false
 		if len(pending) == len(responses) {
-			ordered := make([]json.RawMessage, 0, len(responseParts))
-			used := make([]bool, len(responses))
-			for _, call := range pending {
-				matched := -1
-				for responseIndex, response := range responses {
-					if used[responseIndex] {
-						continue
-					}
-					if (call.id != "" && response.id == call.id) || (call.id == "" && call.name != "" && response.name == call.name) {
-						matched = responseIndex
-						break
-					}
-				}
-				if matched < 0 {
-					ordered = nil
-					break
-				}
-				used[matched] = true
-				ordered = append(ordered, responseParts[matched])
-			}
-			if len(ordered) == len(responseParts) {
+			if ordered, orderedOK := orderAntigravityFunctionResponseGroups(parts, responses, pending); orderedOK {
 				encoded, errMarshal := json.Marshal(ordered)
 				if errMarshal == nil && !bytes.Equal(encoded, []byte(parts.Raw)) {
 					contentJSON = []byte(content.Raw)
@@ -458,7 +449,9 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 			}
 		}
 		pending = nil
-		if content.Get("role").String() != "model" {
+		// Only a pure tool-result turn carries the model role on Antigravity;
+		// mixed contents keep their original role.
+		if !hasOtherPart && content.Get("role").String() != "model" {
 			if contentJSON == nil {
 				contentJSON = []byte(content.Raw)
 			}
@@ -511,6 +504,85 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 		cursor = edit.end
 	}
 	return append(out, rawJSON[cursor:]...)
+}
+
+// orderAntigravityFunctionResponseGroups returns the parts of a tool-result
+// content with its functionResponse parts reordered to line up with pending,
+// keeping every other part in its original relative position. Each response
+// stays grouped with the inline media parts that directly follow it so tool
+// output images remain attached to the call they answer. It reports false when
+// the responses cannot be matched one-to-one with pending by id, or by name
+// when ids are absent; callers then leave the content untouched and let the
+// pairing validation surface the mismatch.
+func orderAntigravityFunctionResponseGroups(parts gjson.Result, responses, pending []antigravityFunctionRef) ([]json.RawMessage, bool) {
+	type layoutSlot struct {
+		isGroup bool
+		part    json.RawMessage
+	}
+	var (
+		groups  [][]json.RawMessage
+		layout  []layoutSlot
+		openIdx = -1
+	)
+	parts.ForEach(func(_, part gjson.Result) bool {
+		raw := json.RawMessage(part.Raw)
+		switch {
+		case part.Get("functionResponse").Exists():
+			groups = append(groups, []json.RawMessage{raw})
+			openIdx = len(groups) - 1
+			layout = append(layout, layoutSlot{isGroup: true})
+		case isAntigravityInlineMediaPart(part) && openIdx >= 0:
+			groups[openIdx] = append(groups[openIdx], raw)
+		default:
+			openIdx = -1
+			layout = append(layout, layoutSlot{part: raw})
+		}
+		return true
+	})
+	if len(groups) != len(responses) || len(groups) != len(pending) {
+		return nil, false
+	}
+
+	orderedGroups := make([][]json.RawMessage, len(pending))
+	used := make([]bool, len(groups))
+	for callIndex, call := range pending {
+		matched := -1
+		for groupIndex, response := range responses {
+			if used[groupIndex] {
+				continue
+			}
+			if (call.id != "" && response.id == call.id) || (call.id == "" && call.name != "" && response.name == call.name) {
+				matched = groupIndex
+				break
+			}
+		}
+		if matched < 0 {
+			return nil, false
+		}
+		used[matched] = true
+		orderedGroups[callIndex] = groups[matched]
+	}
+
+	ordered := make([]json.RawMessage, 0, len(layout))
+	nextGroup := 0
+	for _, slot := range layout {
+		if slot.isGroup {
+			ordered = append(ordered, orderedGroups[nextGroup]...)
+			nextGroup++
+			continue
+		}
+		ordered = append(ordered, slot.part)
+	}
+	return ordered, true
+}
+
+// isAntigravityInlineMediaPart reports whether a part only carries inline
+// media, the shape the translator emits for tool-output images.
+func isAntigravityInlineMediaPart(part gjson.Result) bool {
+	if part.Get("functionCall").Exists() || part.Get("functionResponse").Exists() {
+		return false
+	}
+	return part.Get("inline_data").Exists() || part.Get("inlineData").Exists()
 }
 
 // applyAntigravityContentEditsWithSJSON preserves the legacy path semantics if
