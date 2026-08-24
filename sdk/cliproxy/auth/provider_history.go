@@ -12,17 +12,18 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
-const targetCompactionProtocol = "remote_compaction_v2"
+const (
+	providerHistoryTaintedPrefix      = "tainted:"
+	providerHistoryTaintedMetadataKey = "provider_history_tainted"
+)
 
 var providerBoundHistoryFields = [...]string{"id", "encrypted_content", "provider_item_id"}
 
 type providerHistoryNormalization struct {
-	Body                     []byte
-	Changed                  bool
-	RequiresTargetCompaction bool
-	TargetCompactionProtocol string
-	DroppedItems             int
-	StrippedFields           int
+	Body           []byte
+	Changed        bool
+	DroppedItems   int
+	StrippedFields int
 }
 
 type providerHistoryError struct {
@@ -66,8 +67,6 @@ func normalizeProviderBoundResponseHistory(body []byte) (providerHistoryNormaliz
 	}
 
 	normalized := make([]any, 0, len(items))
-	sawCompaction := false
-	neutralBeforeCompaction := false
 	for _, rawItem := range items {
 		item, okItem := rawItem.(map[string]any)
 		if !okItem {
@@ -82,12 +81,7 @@ func normalizeProviderBoundResponseHistory(body []byte) (providerHistoryNormaliz
 		switch itemType {
 		case "message", "reasoning", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output":
 		case "compaction":
-			sawCompaction = true
-			result.Changed = true
-			result.RequiresTargetCompaction = true
-			result.TargetCompactionProtocol = targetCompactionProtocol
-			result.DroppedItems++
-			continue
+			return providerHistoryNormalization{}, &providerHistoryError{reason: "foreign_compaction_requires_rehydration"}
 		default:
 			return providerHistoryNormalization{}, &providerHistoryError{reason: "unsupported_history_item"}
 		}
@@ -104,13 +98,7 @@ func normalizeProviderBoundResponseHistory(body []byte) (providerHistoryNormaliz
 			result.DroppedItems++
 			continue
 		}
-		if !sawCompaction {
-			neutralBeforeCompaction = true
-		}
 		normalized = append(normalized, item)
-	}
-	if sawCompaction && !neutralBeforeCompaction {
-		return providerHistoryNormalization{}, &providerHistoryError{reason: "foreign_compaction_requires_rehydration"}
 	}
 
 	if reason := providerHistoryToolPairError(normalized); reason != "" {
@@ -217,6 +205,33 @@ func selectedProviderHistoryScope(provider string, opts cliproxyexecutor.Options
 	return providerHistoryScope(provider, authID)
 }
 
+func providerHistoryScopeState(value string) (scope string, tainted bool) {
+	if strings.HasPrefix(value, providerHistoryTaintedPrefix) {
+		return strings.TrimPrefix(value, providerHistoryTaintedPrefix), true
+	}
+	return value, false
+}
+
+func markProviderHistoryTainted(opts cliproxyexecutor.Options) cliproxyexecutor.Options {
+	metadata := make(map[string]any, len(opts.Metadata)+1)
+	for key, value := range opts.Metadata {
+		metadata[key] = value
+	}
+	metadata[providerHistoryTaintedMetadataKey] = true
+	opts.Metadata = metadata
+	return opts
+}
+
+func providerHistoryUsesPreviousResponse(body []byte) bool {
+	var request struct {
+		PreviousResponseID string `json:"previous_response_id"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return false
+	}
+	return strings.TrimSpace(request.PreviousResponseID) != ""
+}
+
 func (m *Manager) normalizeProviderHistoryAttempt(provider string, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
 	if m == nil || m.providerHistoryScopes == nil || (opts.SourceFormat != sdktranslator.FormatOpenAIResponse && opts.SourceFormat != sdktranslator.FormatCodex) {
 		return req, opts, nil
@@ -236,11 +251,18 @@ func (m *Manager) normalizeProviderHistoryAttempt(provider string, auth *Auth, r
 		return req, opts, nil
 	}
 
-	sourceScope, found := m.providerHistoryScopes.GetAndRefresh(primaryID)
+	sourceState, found := m.providerHistoryScopes.GetAndRefresh(primaryID)
 	if !found && fallbackID != "" {
-		sourceScope, found = m.providerHistoryScopes.GetAndRefresh(fallbackID)
+		sourceState, found = m.providerHistoryScopes.GetAndRefresh(fallbackID)
 	}
-	if !found || sourceScope == targetScope {
+	sourceScope, tainted := providerHistoryScopeState(sourceState)
+	if !found || (!tainted && sourceScope == targetScope) {
+		return req, opts, nil
+	}
+	if tainted && sourceScope == targetScope && providerHistoryUsesPreviousResponse(req.Payload) {
+		// Native incremental requests are already pinned to the selected
+		// credential. Only full-history replays can carry the older mixed
+		// transcript that requires continued projection.
 		return req, opts, nil
 	}
 
@@ -251,6 +273,7 @@ func (m *Manager) normalizeProviderHistoryAttempt(provider string, auth *Auth, r
 	if normalized.Changed {
 		req.Payload = bytes.Clone(normalized.Body)
 		opts.OriginalRequest = bytes.Clone(normalized.Body)
+		opts = markProviderHistoryTainted(opts)
 	}
 	return req, opts, nil
 }
@@ -276,6 +299,9 @@ func (m *Manager) rememberProviderHistoryScope(result Result) {
 	primaryID, fallbackID := extractSessionIDs(result.Options.Headers, result.Options.OriginalRequest, result.Options.Metadata)
 	if primaryID == "" && fallbackID == "" {
 		return
+	}
+	if tainted, _ := result.Options.Metadata[providerHistoryTaintedMetadataKey].(bool); tainted {
+		scope = providerHistoryTaintedPrefix + scope
 	}
 	m.providerHistoryScopes.SetAliases(scope, primaryID, fallbackID)
 }

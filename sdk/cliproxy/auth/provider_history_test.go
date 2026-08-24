@@ -37,7 +37,7 @@ func TestNormalizeProviderBoundResponseHistoryPreservesSemanticReasoning(t *test
 	}
 }
 
-func TestNormalizeProviderBoundResponseHistoryDropsForeignCompaction(t *testing.T) {
+func TestNormalizeProviderBoundResponseHistoryRejectsForeignCompactionWithNeutralPrefix(t *testing.T) {
 	body := []byte(`{
 		"input":[
 			{"type":"message","role":"user","content":"history before compaction"},
@@ -46,18 +46,10 @@ func TestNormalizeProviderBoundResponseHistoryDropsForeignCompaction(t *testing.
 		]
 	}`)
 
-	got, err := normalizeProviderBoundResponseHistory(body)
-	if err != nil {
-		t.Fatalf("normalizeProviderBoundResponseHistory() error = %v", err)
-	}
-	if !got.RequiresTargetCompaction || got.TargetCompactionProtocol != "remote_compaction_v2" {
-		t.Fatalf("target compaction metadata = %#v", got)
-	}
-	if value := gjson.GetBytes(got.Body, "input.#").Int(); value != 2 {
-		t.Fatalf("input length = %d, want 2; body=%s", value, got.Body)
-	}
-	if value := gjson.GetBytes(got.Body, "input.0.type").String(); value != "message" {
-		t.Fatalf("remaining item type = %q, want message", value)
+	_, err := normalizeProviderBoundResponseHistory(body)
+	var historyErr *providerHistoryError
+	if !errors.As(err, &historyErr) || historyErr.reason != "foreign_compaction_requires_rehydration" {
+		t.Fatalf("error = %v, want providerHistoryError(foreign_compaction_requires_rehydration)", err)
 	}
 }
 
@@ -185,6 +177,90 @@ func TestManagerNormalizesHistoryOnlyWhenSessionChangesUpstreamScope(t *testing.
 	}
 	if !bytes.Equal(crossReq.Payload, crossOpts.OriginalRequest) {
 		t.Fatalf("translated payload and OriginalRequest diverged")
+	}
+}
+
+func TestManagerContinuesNormalizingTaintedHistoryAfterCredentialHandoff(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	t.Cleanup(manager.StopAutoRefresh)
+
+	firstBody := []byte(`{
+		"prompt_cache_key":"thread-mixed",
+		"input":[
+			{"type":"reasoning","id":"reasoning_from_a","encrypted_content":"opaque-a","summary":[{"type":"summary_text","text":"plan-a"}]},
+			{"type":"message","role":"user","content":"continue"}
+		]
+	}`)
+	manager.rememberProviderHistoryScope(Result{
+		AuthID:   "codex-a",
+		Provider: "codex",
+		Success:  true,
+		Options: cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FormatOpenAIResponse,
+			OriginalRequest: bytes.Clone(firstBody),
+		},
+	})
+
+	firstOptions := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: bytes.Clone(firstBody),
+		Metadata:        map[string]any{cliproxyexecutor.SelectedAuthMetadataKey: "codex-b"},
+	}
+	firstReq, firstResultOptions, errFirst := manager.applyRequestAfterAuthInterceptor(nil, nil, &Auth{ID: "codex-b", Provider: "codex"}, "codex", cliproxyexecutor.Request{Payload: bytes.Clone(firstBody)}, firstOptions, "gpt-5.6")
+	if errFirst != nil {
+		t.Fatalf("first handoff error = %v", errFirst)
+	}
+	if gjson.GetBytes(firstReq.Payload, "input.0.id").Exists() {
+		t.Fatalf("first handoff identity survived: %s", firstReq.Payload)
+	}
+	manager.rememberProviderHistoryScope(Result{
+		AuthID:   "codex-b",
+		Provider: "codex",
+		Success:  true,
+		Options:  firstResultOptions,
+	})
+
+	secondBody := []byte(`{
+		"prompt_cache_key":"thread-mixed",
+		"input":[
+			{"type":"reasoning","id":"reasoning_from_a","encrypted_content":"opaque-a","summary":[{"type":"summary_text","text":"plan-a"}]},
+			{"type":"message","role":"user","content":"continue"},
+			{"type":"reasoning","id":"reasoning_from_b","encrypted_content":"opaque-b","summary":[{"type":"summary_text","text":"plan-b"}]},
+			{"type":"message","role":"user","content":"continue again"}
+		]
+	}`)
+	secondOptions := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: bytes.Clone(secondBody),
+		Metadata:        map[string]any{cliproxyexecutor.SelectedAuthMetadataKey: "codex-b"},
+	}
+	secondReq, _, errSecond := manager.applyRequestAfterAuthInterceptor(nil, nil, &Auth{ID: "codex-b", Provider: "codex"}, "codex", cliproxyexecutor.Request{Payload: bytes.Clone(secondBody)}, secondOptions, "gpt-5.6")
+	if errSecond != nil {
+		t.Fatalf("second same-scope request error = %v", errSecond)
+	}
+	if gjson.GetBytes(secondReq.Payload, "input.0.id").Exists() || gjson.GetBytes(secondReq.Payload, "input.2.id").Exists() {
+		t.Fatalf("mixed provider identity survived: %s", secondReq.Payload)
+	}
+}
+
+func TestManagerLeavesTaintedSameScopeIncrementalRequestUnchanged(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	t.Cleanup(manager.StopAutoRefresh)
+
+	body := []byte(`{"prompt_cache_key":"thread-incremental","previous_response_id":"resp-b","input":[{"type":"message","id":"msg-new","role":"user","content":"continue"}]}`)
+	manager.providerHistoryScopes.SetAliases(providerHistoryTaintedPrefix+providerHistoryScope("codex", "codex-b"), "pck:thread-incremental")
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: bytes.Clone(body),
+		Metadata:        map[string]any{cliproxyexecutor.SelectedAuthMetadataKey: "codex-b"},
+	}
+
+	got, _, err := manager.applyRequestAfterAuthInterceptor(nil, nil, &Auth{ID: "codex-b", Provider: "codex"}, "codex", cliproxyexecutor.Request{Payload: bytes.Clone(body)}, opts, "gpt-5.6")
+	if err != nil {
+		t.Fatalf("incremental same-scope request error = %v", err)
+	}
+	if !bytes.Equal(got.Payload, body) {
+		t.Fatalf("incremental same-scope request changed:\n%s", got.Payload)
 	}
 }
 

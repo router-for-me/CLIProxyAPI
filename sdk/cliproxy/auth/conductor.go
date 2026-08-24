@@ -167,7 +167,9 @@ type Manager struct {
 	refreshLocks sync.Map
 
 	// providerHistoryScopes remembers which upstream credential last committed a
-	// session so provider-bound Responses items are neutralized only on handoff.
+	// session and whether a full-history handoff remains mixed. Mixed transcripts
+	// stay projected on later full-history turns until the client sends a neutral
+	// replacement; native same-credential incremental requests remain untouched.
 	providerHistoryScopes *SessionCache
 }
 
