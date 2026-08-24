@@ -15,14 +15,15 @@ func TestResolveXAIWebsocketCompactionSource(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		transcript     []byte
-		payload        []byte
-		upstreamPrev   string
-		wantInput      string
-		wantKeepPrev   bool
-		wantErr        string
-		wantStatusCode int
+		name                 string
+		transcript           []byte
+		payload              []byte
+		upstreamPrev         string
+		sessionTargetChanged bool
+		wantInput            string
+		wantKeepPrev         bool
+		wantErr              string
+		wantStatusCode       int
 	}{
 		{
 			name:         "recorded transcript wins over payload and previous_response_id",
@@ -63,12 +64,27 @@ func TestResolveXAIWebsocketCompactionSource(t *testing.T) {
 			wantInput:    `[]`,
 			wantKeepPrev: true,
 		},
+		{
+			name:                 "session target change drops previous_response_id when only the trigger remains",
+			payload:              []byte(`{"previous_response_id":"resp-stale","input":[{"type":"compaction_trigger"}]}`),
+			upstreamPrev:         "resp-mapped",
+			sessionTargetChanged: true,
+			wantErr:              "xai websocket compaction context is empty",
+			wantStatusCode:       http.StatusBadRequest,
+		},
+		{
+			name:                 "session target change still uses payload items and drops previous_response_id",
+			payload:              []byte(`{"previous_response_id":"resp-stale","input":[{"type":"message","id":"msg-1"},{"type":"compaction_trigger"}]}`),
+			upstreamPrev:         "resp-mapped",
+			sessionTargetChanged: true,
+			wantInput:            `[{"type":"message","id":"msg-1"}]`,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := resolveXAIWebsocketCompactionSource(tt.transcript, tt.payload, tt.upstreamPrev)
+			got, err := resolveXAIWebsocketCompactionSource(tt.transcript, tt.payload, tt.upstreamPrev, tt.sessionTargetChanged)
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("error = nil, want %q", tt.wantErr)
@@ -184,35 +200,41 @@ func TestResolveXAIWebsocketCompactionSourceCRAP(t *testing.T) {
 
 	// CRAP(m) = comp(m)^2 * (1 - cov(m))^3 + comp(m).
 	// Branch coverage below is 1.0, so CRAP equals cyclomatic complexity.
-	const complexity = 4
+	const complexity = 5
 	covered := map[string]bool{
 		"transcript":        false,
 		"payload_items":     false,
 		"previous_response": false,
 		"empty_error":       false,
+		"stale_previous":    false,
 	}
 
-	if _, err := resolveXAIWebsocketCompactionSource([]byte(`[{"id":"t"}]`), []byte(`{}`), ""); err != nil {
+	if _, err := resolveXAIWebsocketCompactionSource([]byte(`[{"id":"t"}]`), []byte(`{}`), "", false); err != nil {
 		t.Fatalf("transcript branch error = %v", err)
 	}
 	covered["transcript"] = true
 
-	got, err := resolveXAIWebsocketCompactionSource(nil, []byte(`{"input":[{"type":"message","id":"m"},{"type":"compaction_trigger"}]}`), "resp")
+	got, err := resolveXAIWebsocketCompactionSource(nil, []byte(`{"input":[{"type":"message","id":"m"},{"type":"compaction_trigger"}]}`), "resp", false)
 	if err != nil || string(got.input) != `[{"type":"message","id":"m"}]` {
 		t.Fatalf("payload_items branch = %+v, %v", got, err)
 	}
 	covered["payload_items"] = true
 
-	got, err = resolveXAIWebsocketCompactionSource(nil, []byte(`{"previous_response_id":"resp-1","input":[{"type":"compaction_trigger"}]}`), "")
+	got, err = resolveXAIWebsocketCompactionSource(nil, []byte(`{"previous_response_id":"resp-1","input":[{"type":"compaction_trigger"}]}`), "", false)
 	if err != nil || !got.keepPreviousResponseID {
 		t.Fatalf("previous_response branch = %+v, %v", got, err)
 	}
 	covered["previous_response"] = true
 
-	if _, err = resolveXAIWebsocketCompactionSource(nil, []byte(`{"input":[{"type":"compaction_trigger"}]}`), ""); err == nil {
+	if _, err = resolveXAIWebsocketCompactionSource(nil, []byte(`{"input":[{"type":"compaction_trigger"}]}`), "", false); err == nil {
 		t.Fatal("empty_error branch: error = nil")
 	}
 	covered["empty_error"] = true
+
+	if _, err = resolveXAIWebsocketCompactionSource(nil, []byte(`{"previous_response_id":"resp-stale","input":[{"type":"compaction_trigger"}]}`), "resp-mapped", true); err == nil {
+		t.Fatal("stale_previous branch: error = nil")
+	}
+	covered["stale_previous"] = true
 
 	for name, ok := range covered {
 		if !ok {
@@ -230,18 +252,20 @@ func TestResolveXAIWebsocketCompactionSourceCRAP(t *testing.T) {
 func TestResolveXAIWebsocketCompactionSourceMutationsKilled(t *testing.T) {
 	t.Parallel()
 
-	type impl func(transcript []byte, payload []byte, upstreamPrev string) (xaiWebsocketCompactionSource, error)
+	type impl func(transcript []byte, payload []byte, upstreamPrev string, sessionTargetChanged bool) (xaiWebsocketCompactionSource, error)
 
 	cases := []struct {
-		transcript   []byte
-		payload      []byte
-		upstreamPrev string
+		transcript           []byte
+		payload              []byte
+		upstreamPrev         string
+		sessionTargetChanged bool
 	}{
 		{transcript: []byte(`[{"id":"t"}]`), payload: []byte(`{"previous_response_id":"resp","input":[{"type":"message","id":"p"},{"type":"compaction_trigger"}]}`)},
 		{payload: []byte(`{"previous_response_id":"resp","input":[{"type":"message","id":"p"},{"type":"compaction_trigger"}]}`)},
 		{payload: []byte(`{"previous_response_id":"resp","input":[{"type":"compaction_trigger"}]}`)},
 		{payload: []byte(`{"input":[{"type":"compaction_trigger"}]}`), upstreamPrev: "resp-mapped"},
 		{payload: []byte(`{"input":[{"type":"compaction_trigger"}]}`)},
+		{payload: []byte(`{"previous_response_id":"resp-stale","input":[{"type":"compaction_trigger"}]}`), sessionTargetChanged: true},
 	}
 
 	same := func(a xaiWebsocketCompactionSource, aErr error, b xaiWebsocketCompactionSource, bErr error) bool {
@@ -260,7 +284,8 @@ func TestResolveXAIWebsocketCompactionSourceMutationsKilled(t *testing.T) {
 	}{
 		{
 			name: "skip recorded transcript",
-			fn: func(transcript []byte, payload []byte, upstreamPrev string) (xaiWebsocketCompactionSource, error) {
+			fn: func(transcript []byte, payload []byte, upstreamPrev string, sessionTargetChanged bool) (xaiWebsocketCompactionSource, error) {
+				_ = sessionTargetChanged
 				remaining := compactionPayloadInputWithoutTrigger(payload)
 				if len(remaining) > 0 {
 					return xaiWebsocketCompactionSource{input: remaining}, nil
@@ -277,7 +302,8 @@ func TestResolveXAIWebsocketCompactionSourceMutationsKilled(t *testing.T) {
 		},
 		{
 			name: "skip payload items",
-			fn: func(transcript []byte, payload []byte, upstreamPrev string) (xaiWebsocketCompactionSource, error) {
+			fn: func(transcript []byte, payload []byte, upstreamPrev string, sessionTargetChanged bool) (xaiWebsocketCompactionSource, error) {
+				_ = sessionTargetChanged
 				if len(transcript) > 0 {
 					return xaiWebsocketCompactionSource{input: transcript}, nil
 				}
@@ -293,7 +319,8 @@ func TestResolveXAIWebsocketCompactionSourceMutationsKilled(t *testing.T) {
 		},
 		{
 			name: "skip previous_response_id",
-			fn: func(transcript []byte, payload []byte, upstreamPrev string) (xaiWebsocketCompactionSource, error) {
+			fn: func(transcript []byte, payload []byte, upstreamPrev string, sessionTargetChanged bool) (xaiWebsocketCompactionSource, error) {
+				_ = sessionTargetChanged
 				if len(transcript) > 0 {
 					return xaiWebsocketCompactionSource{input: transcript}, nil
 				}
@@ -306,7 +333,8 @@ func TestResolveXAIWebsocketCompactionSourceMutationsKilled(t *testing.T) {
 		},
 		{
 			name: "treat empty previous_response_id as set",
-			fn: func(transcript []byte, payload []byte, upstreamPrev string) (xaiWebsocketCompactionSource, error) {
+			fn: func(transcript []byte, payload []byte, upstreamPrev string, sessionTargetChanged bool) (xaiWebsocketCompactionSource, error) {
+				_ = sessionTargetChanged
 				if len(transcript) > 0 {
 					return xaiWebsocketCompactionSource{input: transcript}, nil
 				}
@@ -319,9 +347,31 @@ func TestResolveXAIWebsocketCompactionSourceMutationsKilled(t *testing.T) {
 		},
 		{
 			name: "treat payload items as empty",
-			fn: func(transcript []byte, payload []byte, upstreamPrev string) (xaiWebsocketCompactionSource, error) {
+			fn: func(transcript []byte, payload []byte, upstreamPrev string, sessionTargetChanged bool) (xaiWebsocketCompactionSource, error) {
+				_ = sessionTargetChanged
 				if len(transcript) > 0 {
 					return xaiWebsocketCompactionSource{input: transcript}, nil
+				}
+				previousID := strings.TrimSpace(upstreamPrev)
+				if previousID == "" {
+					previousID = strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
+				}
+				if previousID == "" {
+					return xaiWebsocketCompactionSource{}, statusErr{code: http.StatusBadRequest, msg: "xai websocket compaction context is empty"}
+				}
+				return xaiWebsocketCompactionSource{input: []byte("[]"), keepPreviousResponseID: true}, nil
+			},
+		},
+		{
+			name: "ignore session target change",
+			fn: func(transcript []byte, payload []byte, upstreamPrev string, sessionTargetChanged bool) (xaiWebsocketCompactionSource, error) {
+				_ = sessionTargetChanged
+				if len(transcript) > 0 {
+					return xaiWebsocketCompactionSource{input: transcript}, nil
+				}
+				remaining := compactionPayloadInputWithoutTrigger(payload)
+				if len(remaining) > 0 {
+					return xaiWebsocketCompactionSource{input: remaining}, nil
 				}
 				previousID := strings.TrimSpace(upstreamPrev)
 				if previousID == "" {
@@ -340,8 +390,8 @@ func TestResolveXAIWebsocketCompactionSourceMutationsKilled(t *testing.T) {
 			t.Parallel()
 			killed := false
 			for _, tc := range cases {
-				want, wantErr := resolveXAIWebsocketCompactionSource(tc.transcript, tc.payload, tc.upstreamPrev)
-				got, gotErr := mutant.fn(tc.transcript, tc.payload, tc.upstreamPrev)
+				want, wantErr := resolveXAIWebsocketCompactionSource(tc.transcript, tc.payload, tc.upstreamPrev, tc.sessionTargetChanged)
+				got, gotErr := mutant.fn(tc.transcript, tc.payload, tc.upstreamPrev, tc.sessionTargetChanged)
 				if !same(got, gotErr, want, wantErr) {
 					killed = true
 					break
