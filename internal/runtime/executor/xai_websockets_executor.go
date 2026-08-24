@@ -998,13 +998,18 @@ func (e *XAIWebsocketsExecutor) executeCompactionTriggerFromWebsocketContext(ctx
 	idMapper.state.replaceTranscriptWithItems(compactionItem)
 	idMapper.state.mapDownstreamToUpstream(responseID, "")
 
-	// Compact HTTP already used the upstream previous_response_id. Put the
-	// downstream id back before synthesizing SSE so the client never sees the
-	// remapped identifier.
+	// Compact HTTP may have used a remapped upstream previous_response_id.
+	// Only put the downstream id on synthetic SSE when this compact actually
+	// chained from that conversation. Independent payload-item compacts, and
+	// auth/URL switches, must not advertise a stale previous_response_id.
 	if prepared != nil {
-		downstreamPrev := strings.TrimSpace(idMapper.downstreamPreviousID)
-		if downstreamPrev != "" {
-			prepared.body, _ = sjson.SetBytes(prepared.body, "previous_response_id", downstreamPrev)
+		if source.keepPreviousResponseID {
+			downstreamPrev := strings.TrimSpace(idMapper.downstreamPreviousID)
+			if downstreamPrev != "" {
+				prepared.body, _ = sjson.SetBytes(prepared.body, "previous_response_id", downstreamPrev)
+			} else {
+				prepared.body, _ = sjson.DeleteBytes(prepared.body, "previous_response_id")
+			}
 		} else {
 			prepared.body, _ = sjson.DeleteBytes(prepared.body, "previous_response_id")
 		}
