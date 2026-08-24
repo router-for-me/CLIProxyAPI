@@ -122,10 +122,16 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		}
 		// Enrich before auth preparation so prepare-stage usage records observe the client request.
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+		selectedAuth := auth
+		resolvedAuth, errResolve := m.resolveEgressProxy(execCtx, selection.Provider, routeModel, "execute", auth)
+		if errResolve != nil {
+			releaseAttempt()
+			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "egress_proxy_failed"); errEnd != nil {
+				return cliproxyexecutor.Response{}, errEnd
+			}
+			return cliproxyexecutor.Response{}, errResolve
 		}
+		execCtx = m.egressProxyContext(execCtx, resolvedAuth)
 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
 		if aliasResult.ForceMapping && responseAlias != "" {
 			aliasResult.OriginalAlias = responseAlias
@@ -144,6 +150,11 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			continue
 		}
 		preparedAuth, errPrepare := m.prepareHomeRequestAuth(execCtx, selection.Executor, selection)
+		preparedAuth = applyEgressProxyOverride(preparedAuth, selectedAuth, resolvedAuth)
+		execCtx = m.egressProxyContext(execCtx, preparedAuth)
+		if errPrepare == nil {
+			m.replaceHomeSelectionAuth(selection, preparedAuth)
+		}
 		if errPrepare != nil {
 			m.reportHomeResult(execCtx, Result{AuthID: auth.ID, Provider: selection.Provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: opts}, auth)
 			releaseAttempt()

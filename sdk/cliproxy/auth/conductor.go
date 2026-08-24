@@ -75,6 +75,11 @@ type pluginSchedulerState interface {
 	HasScheduler() bool
 }
 
+// EgressProxyResolver resolves request-scoped outbound proxy behavior after credential selection.
+type EgressProxyResolver interface {
+	ResolveEgressProxy(context.Context, pluginapi.EgressProxyRequest) (pluginapi.EgressProxyResponse, bool, error)
+}
+
 // StoppableSelector is an optional interface for selectors that hold resources.
 // Selectors that implement this interface will have Stop called during shutdown.
 type StoppableSelector interface {
@@ -119,6 +124,8 @@ type Manager struct {
 	scheduler                 *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
+	// egressProxyResolver runs after credential selection to select request-scoped proxy behavior.
+	egressProxyResolver EgressProxyResolver
 	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.
 	homeRuntimeAuths map[string]map[string]*Auth
 	// homeRuntimeAuthOwners prevents a stale selection from clearing a replacement auth.

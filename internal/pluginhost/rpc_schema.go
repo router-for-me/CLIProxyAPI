@@ -26,6 +26,7 @@ type rpcCapabilities struct {
 	FrontendAuthProviderExclusive bool                         `json:"frontend_auth_provider_exclusive"`
 	Scheduler                     bool                         `json:"scheduler"`
 	ModelRouter                   bool                         `json:"model_router"`
+	EgressProxyResolver           bool                         `json:"egress_proxy_resolver"`
 	Executor                      bool                         `json:"executor"`
 	ExecutorModelScope            pluginapi.ExecutorModelScope `json:"executor_model_scope"`
 	ExecutorInputFormats          []string                     `json:"executor_input_formats,omitempty"`
@@ -137,6 +138,7 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 		FrontendAuthProviderExclusive: caps.FrontendAuthProvider != nil && caps.FrontendAuthProviderExclusive,
 		Scheduler:                     caps.Scheduler != nil,
 		ModelRouter:                   caps.ModelRouter != nil,
+		EgressProxyResolver:           caps.EgressProxyResolver != nil,
 		Executor:                      caps.Executor != nil,
 		ExecutorModelScope:            normalizedExecutorModelScope(caps),
 		ExecutorInputFormats:          append([]string(nil), caps.ExecutorInputFormats...),

@@ -1326,16 +1326,17 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			return cliproxyexecutor.Response{}, false, nil
 		}
 		creditsCtx := WithAntigravityCredits(ctx)
-		if rt := m.roundTripperFor(c.auth); rt != nil {
-			creditsCtx = context.WithValue(creditsCtx, roundTripperContextKey{}, rt)
-			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
-		}
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
 		if errPrepare != nil {
 			continue
 		}
+		preparedAuth, errPrepare = m.resolveEgressProxy(creditsCtx, c.provider, routeModel, "execute", preparedAuth)
+		if errPrepare != nil {
+			return cliproxyexecutor.Response{}, false, errPrepare
+		}
+		creditsCtx = m.egressProxyContext(creditsCtx, preparedAuth)
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
 		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(c.auth, routeModel)
@@ -1388,15 +1389,16 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 			return nil, false, nil
 		}
 		creditsCtx := WithAntigravityCredits(ctx)
-		if rt := m.roundTripperFor(c.auth); rt != nil {
-			creditsCtx = context.WithValue(creditsCtx, roundTripperContextKey{}, rt)
-			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
-		}
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
 		if errPrepare != nil {
 			continue
 		}
+		preparedAuth, errPrepare = m.resolveEgressProxy(creditsCtx, c.provider, routeModel, "stream", preparedAuth)
+		if errPrepare != nil {
+			return nil, false, errPrepare
+		}
+		creditsCtx = m.egressProxyContext(creditsCtx, preparedAuth)
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
 		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(c.auth, routeModel)

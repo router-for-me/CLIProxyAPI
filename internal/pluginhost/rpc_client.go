@@ -101,6 +101,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	if resp.Capabilities.ModelRouter {
 		plugin.Capabilities.ModelRouter = adapter
 	}
+	if resp.Capabilities.EgressProxyResolver {
+		plugin.Capabilities.EgressProxyResolver = adapter
+	}
 	if resp.Capabilities.Executor {
 		plugin.Capabilities.Executor = rpcProviderExecutor{rpcPluginAdapter: adapter}
 	}
@@ -377,6 +380,10 @@ func (a *rpcPluginAdapter) RouteModel(ctx context.Context, req pluginapi.ModelRo
 		ModelRouteRequest: req,
 		HostCallbackID:    callbackID,
 	})
+}
+
+func (a *rpcPluginAdapter) ResolveEgressProxy(ctx context.Context, req pluginapi.EgressProxyRequest) (pluginapi.EgressProxyResponse, error) {
+	return callPlugin[pluginapi.EgressProxyResponse](ctx, a.client, pluginabi.MethodEgressProxyResolve, req)
 }
 
 func callPluginIdentifier(client pluginClient, method string) string {

@@ -26,6 +26,16 @@ func (m *Manager) SetPluginScheduler(scheduler PluginScheduler) {
 	m.mu.Unlock()
 }
 
+// SetEgressProxyResolver configures the request-scoped outbound proxy resolver.
+func (m *Manager) SetEgressProxyResolver(resolver EgressProxyResolver) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.egressProxyResolver = resolver
+	m.mu.Unlock()
+}
+
 func (m *Manager) hasPluginScheduler() bool {
 	if m == nil {
 		return false

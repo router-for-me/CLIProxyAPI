@@ -10,7 +10,8 @@ const (
 	// Version 3 omits OriginalRequest/RequestBody on payload stream chunks
 	// (ChunkIndex >= 0); those fields remain on StreamChunkHeaderInitIndex only.
 	// Plugins that still need per-chunk request bodies should keep schema_version < 3.
-	SchemaVersion uint32 = 3
+	// Version 4 adds the egress proxy resolver capability.
+	SchemaVersion uint32 = 4
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
@@ -38,6 +39,8 @@ const (
 	MethodSchedulerPick = "scheduler.pick"
 	// MethodModelRoute asks a router plugin to select a plugin executor for a matching request.
 	MethodModelRoute = "model.route"
+	// MethodEgressProxyResolve asks a plugin to select proxy behavior for one outbound operation.
+	MethodEgressProxyResolve = "egress_proxy.resolve"
 
 	MethodExecutorIdentifier    = "executor.identifier"
 	MethodExecutorExecute       = "executor.execute"

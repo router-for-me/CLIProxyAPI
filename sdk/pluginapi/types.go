@@ -85,6 +85,8 @@ type Capabilities struct {
 	// ModelRouter routes matching requests to a plugin executor, the router's own executor,
 	// or a built-in provider before model-to-provider resolution and auth selection.
 	ModelRouter ModelRouter
+	// EgressProxyResolver selects request-scoped outbound proxy behavior after credential selection.
+	EgressProxyResolver EgressProxyResolver
 	// Executor sends requests to an upstream provider or local backend.
 	Executor ProviderExecutor
 	// ExecutorModelScope declares whether Executor serves static models, OAuth auth models, or both.
@@ -580,6 +582,59 @@ type ModelRouteResponse struct {
 	TargetModel string
 	// Reason is an optional diagnostic reason for the route decision.
 	Reason string
+}
+
+// EgressProxyMode specifies how an egress proxy resolver handles one outbound operation.
+type EgressProxyMode string
+
+const (
+	// EgressProxyModeInherit keeps the configured auth-level and global proxy behavior.
+	EgressProxyModeInherit EgressProxyMode = "inherit"
+	// EgressProxyModeDirect bypasses configured proxies for this operation.
+	EgressProxyModeDirect EgressProxyMode = "direct"
+	// EgressProxyModeProxy uses the resolver-provided proxy URL for this operation.
+	EgressProxyModeProxy EgressProxyMode = "proxy"
+)
+
+// EgressProxyAuth identifies the selected credential without exposing credential secrets.
+type EgressProxyAuth struct {
+	// ID is the stable credential identifier.
+	ID string `json:"id"`
+	// Index is the stable runtime credential index.
+	Index string `json:"index"`
+	// Provider is the credential provider key.
+	Provider string `json:"provider"`
+	// Label is the user-facing credential label.
+	Label string `json:"label"`
+	// Email is the credential email when available.
+	Email string `json:"email"`
+}
+
+// EgressProxyRequest describes one outbound operation after credential selection.
+type EgressProxyRequest struct {
+	// Provider is the selected upstream provider key.
+	Provider string `json:"provider"`
+	// Model is the selected upstream model when applicable.
+	Model string `json:"model,omitempty"`
+	// Operation identifies the outbound operation, such as execute, stream, refresh, or websocket.
+	Operation string `json:"operation"`
+	// Auth identifies the selected credential. It contains no tokens, API keys, or metadata.
+	Auth EgressProxyAuth `json:"auth"`
+}
+
+// EgressProxyResponse returns the resolver decision for one outbound operation.
+type EgressProxyResponse struct {
+	// Handled reports whether the plugin made a proxy decision. False preserves existing behavior.
+	Handled bool `json:"handled"`
+	// Mode is inherit, direct, or proxy when Handled is true.
+	Mode EgressProxyMode `json:"mode,omitempty"`
+	// ProxyURL is used only when Mode is proxy. The host never persists or logs this value.
+	ProxyURL string `json:"proxy_url,omitempty"`
+}
+
+// EgressProxyResolver chooses request-scoped outbound proxy behavior after credential selection.
+type EgressProxyResolver interface {
+	ResolveEgressProxy(context.Context, EgressProxyRequest) (EgressProxyResponse, error)
 }
 
 // ProviderExecutor handles model execution, streaming, HTTP bridging, and token counting.

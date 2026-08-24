@@ -529,7 +529,11 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	}
 
 	cloned := auth.Clone()
-	updated, err := exec.Refresh(ctx, cloned)
+	refreshCtx, resolvedAuth, errResolve := m.resolveEgressProxyContext(ctx, auth.Provider, "", "refresh", cloned)
+	if errResolve != nil {
+		return nil, errResolve
+	}
+	updated, err := exec.Refresh(refreshCtx, resolvedAuth)
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
 		return nil, err
@@ -563,8 +567,10 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		return nil, err
 	}
 	if updated == nil {
-		updated = cloned
+		updated = resolvedAuth
 	}
+	// The resolver override applies only to this refresh attempt and must never be persisted.
+	updated.ProxyURL = auth.ProxyURL
 	// Preserve runtime created by the executor during Refresh.
 	// If executor didn't set one, fall back to the previous runtime.
 	if updated.Runtime == nil {

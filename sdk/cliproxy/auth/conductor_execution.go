@@ -349,6 +349,12 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		selectedAuth := auth
+		resolvedAuth, errResolve := m.resolveEgressProxy(execCtx, provider, routeModel, "execute", auth)
+		if errResolve != nil {
+			return cliproxyexecutor.Response{}, errResolve
+		}
+		execCtx = m.egressProxyContext(execCtx, resolvedAuth)
 
 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
 		if len(models) == 0 {
@@ -366,6 +372,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			lastErr = errPrepare
 			continue
 		}
+		auth = applyEgressProxyOverride(auth, selectedAuth, resolvedAuth)
+		execCtx = m.egressProxyContext(execCtx, auth)
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
@@ -523,6 +531,12 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		selectedAuth := auth
+		resolvedAuth, errResolve := m.resolveEgressProxy(execCtx, provider, routeModel, "execute", auth)
+		if errResolve != nil {
+			return cliproxyexecutor.Response{}, errResolve
+		}
+		execCtx = m.egressProxyContext(execCtx, resolvedAuth)
 
 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
 		if len(models) == 0 {
@@ -540,6 +554,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			lastErr = errPrepare
 			continue
 		}
+		auth = applyEgressProxyOverride(auth, selectedAuth, resolvedAuth)
+		execCtx = m.egressProxyContext(execCtx, auth)
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
@@ -803,12 +819,20 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errBind
 			}
 		}
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
 		// Enrich before auth preparation so prepare-stage usage records observe the client request.
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		selectedAuth := auth
+		resolvedAuth, errResolve := m.resolveEgressProxy(execCtx, provider, routeModel, egressProxyOperationForContext(execCtx, true), auth)
+		if errResolve != nil {
+			if selection != nil {
+				releaseAttempt()
+				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "egress_proxy_failed"); errEnd != nil {
+					return nil, errEnd
+				}
+			}
+			return nil, errResolve
+		}
+		execCtx = m.egressProxyContext(execCtx, resolvedAuth)
 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
 		if selection != nil && aliasResult.ForceMapping && responseAlias != "" {
 			aliasResult.OriginalAlias = responseAlias
@@ -831,6 +855,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			auth, errPrepare = m.prepareHomeRequestAuth(execCtx, executor, selection)
 		} else {
 			auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
+		}
+		auth = applyEgressProxyOverride(auth, selectedAuth, resolvedAuth)
+		execCtx = m.egressProxyContext(execCtx, auth)
+		if selection != nil {
+			m.replaceHomeSelectionAuth(selection, auth)
 		}
 		if errPrepare != nil {
 			if selection != nil {
@@ -1699,5 +1728,9 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	if exec == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
-	return exec.HttpRequest(ctx, auth, req)
+	execCtx, resolvedAuth, errResolve := m.resolveEgressProxyHTTPRequest(ctx, auth, req)
+	if errResolve != nil {
+		return nil, errResolve
+	}
+	return exec.HttpRequest(execCtx, resolvedAuth, req)
 }
