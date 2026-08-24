@@ -110,6 +110,32 @@ func TestCleanupExpiredQuotasInvalidatesAvailableModelsCache(t *testing.T) {
 	}
 }
 
+func TestCooldownWritesIgnoreUnregisteredClient(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("removed-client", "openai", []*ModelInfo{{ID: "m1"}})
+	r.RegisterClient("active-client", "openai", []*ModelInfo{{ID: "m1"}})
+	r.UnregisterClient("removed-client")
+
+	r.SetModelQuotaExceeded("removed-client", "m1")
+	r.SuspendClientModel("removed-client", "m1", "quota")
+
+	if count := r.GetModelCount("m1"); count != 1 {
+		t.Fatalf("model count after stale cooldown writes = %d, want 1", count)
+	}
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	registration := r.models["m1"]
+	if registration == nil {
+		t.Fatal("model registration was removed unexpectedly")
+	}
+	if _, ok := registration.QuotaExceededClients["removed-client"]; ok {
+		t.Fatal("quota state was restored for an unregistered client")
+	}
+	if _, ok := registration.SuspendedClients["removed-client"]; ok {
+		t.Fatal("suspension was restored for an unregistered client")
+	}
+}
+
 func TestGetAvailableModelsReturnsClonedSupportedParameters(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "openai", []*ModelInfo{{
