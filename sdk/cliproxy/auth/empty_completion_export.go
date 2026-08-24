@@ -163,3 +163,47 @@ func (d *StreamBootstrapDetector) IsTerminalEmpty() bool {
 	}
 	return d.state.isTerminalEmpty()
 }
+
+// RedactSecrets redacts credential-shaped values using the same recognition
+// set as conductor logging and *Error sanitization. Plugin stream wrappers
+// must apply it before emitting an error-path payload to a caller.
+func RedactSecrets(s string) string {
+	return redactSecretsForLog(s)
+}
+
+// SanitizeError redacts every exported string field of an *Error. It is the
+// exported form of sanitizeErrorTextFields so pluginhost uses the same
+// mechanism as wrapStreamResult rather than a second copy.
+func SanitizeError(err error) error {
+	return sanitizeErrorTextFields(err)
+}
+
+// StreamPayloadErrorDetector incrementally detects in-band provider errors in
+// stream bytes after bootstrap has already forwarded meaningful output.
+type StreamPayloadErrorDetector struct {
+	state streamPayloadErrorDetector
+}
+
+// Observe records a stream fragment and returns a sanitized in-band error
+// when one has been detected. A nil return is not a successful completion.
+func (d *StreamPayloadErrorDetector) Observe(payload []byte) error {
+	if d == nil {
+		return nil
+	}
+	if err := d.state.Observe(payload); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Finish flushes a trailing unterminated fragment and returns a sanitized
+// in-band error when one is present.
+func (d *StreamPayloadErrorDetector) Finish() error {
+	if d == nil {
+		return nil
+	}
+	if err := d.state.Finish(); err != nil {
+		return err
+	}
+	return nil
+}

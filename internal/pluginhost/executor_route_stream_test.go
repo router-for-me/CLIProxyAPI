@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -381,5 +382,34 @@ func TestWrapStreamEmptyCompletionDrainsSourceAfterTerminalEmpty(t *testing.T) {
 		// Success: producer unblocked because src was drained
 	case <-time.After(time.Second):
 		t.Fatal("producer remained blocked after terminal empty return; source was not drained")
+	}
+}
+
+// TestWrapStreamEmptyCompletionRedactsInBandErrorPayload is the pluginhost twin of
+// P1-A: after meaningful output the wrapper forwards remaining payloads, including
+// in-band provider errors, without going through wrapStreamResult.
+func TestWrapStreamEmptyCompletionRedactsInBandErrorPayload(t *testing.T) {
+	const secret = "sk-live-plugin-secret"
+	src := make(chan coreexecutor.StreamChunk, 2)
+	src <- coreexecutor.StreamChunk{Payload: []byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n")}
+	src <- coreexecutor.StreamChunk{Payload: []byte(`data: {"error":{"message":"Incorrect API key provided: ` + secret + `","type":"invalid_request_error"}}` + "\n\n")}
+	close(src)
+
+	wrapped := wrapStreamEmptyCompletion(context.Background(), &coreexecutor.StreamResult{Chunks: src})
+	var payloads []string
+	for chunk := range wrapped.Chunks {
+		if len(chunk.Payload) > 0 {
+			payloads = append(payloads, string(chunk.Payload))
+		}
+	}
+	joined := strings.Join(payloads, "")
+	if strings.Contains(joined, secret) {
+		t.Fatalf("plugin stream payload leaks in-band credential: %q", joined)
+	}
+	if !strings.Contains(joined, "hello") {
+		t.Fatalf("meaningful content was dropped: %q", joined)
+	}
+	if !strings.Contains(joined, "REDACTED") {
+		t.Fatalf("in-band error payload was not redacted: %q", joined)
 	}
 }

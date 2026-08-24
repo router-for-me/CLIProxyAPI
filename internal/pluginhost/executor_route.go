@@ -148,7 +148,20 @@ func wrapStreamEmptyCompletion(ctx context.Context, streamResult *coreexecutor.S
 			}
 		}
 		forwarding := false
+		var payloadErrors coreauth.StreamPayloadErrorDetector
 		forward := func(chunk coreexecutor.StreamChunk) bool {
+			if chunk.Err != nil {
+				chunk.Err = coreauth.SanitizeError(chunk.Err)
+			}
+			errorPath := chunk.Err != nil || detector.StreamError() != nil
+			if len(chunk.Payload) > 0 {
+				if err := payloadErrors.Observe(chunk.Payload); err != nil {
+					errorPath = true
+				}
+				if errorPath {
+					chunk.Payload = []byte(coreauth.RedactSecrets(string(chunk.Payload)))
+				}
+			}
 			select {
 			case <-ctx.Done():
 				return false

@@ -137,7 +137,7 @@ func (e *streamBootstrapError) Headers() http.Header {
 
 func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamResult {
 	ch := make(chan cliproxyexecutor.StreamChunk, 1)
-	ch <- cliproxyexecutor.StreamChunk{Err: err}
+	ch <- cliproxyexecutor.StreamChunk{Err: sanitizeErrorTextFields(err)}
 	close(ch)
 	return &cliproxyexecutor.StreamResult{
 		Headers: cloneHTTPHeader(headers),
@@ -243,23 +243,28 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				applyRequestScopedActionToResult(action, okAction, &result)
 				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 			}
-			if !failed && len(chunk.Payload) > 0 {
-				if streamErr := errorDetector.Observe(chunk.Payload); streamErr != nil {
-					failed = true
-					streamErr = sanitizeErrorTextFields(streamErr).(*Error)
-					entry := logEntryWithRequestID(ctx)
-					warnLogUpstreamFailure(ctx, entry, provider, resultModel, auth, time.Since(streamStart), streamErr)
-					rerr := resultErrorFromError(streamErr)
-					action, okAction := matchRequestScopedErrorAction(auth, streamErr, m.runtimeConfigSnapshot())
-					result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: opts}
-					applyRequestScopedActionToResult(action, okAction, &result)
-					m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			if len(chunk.Payload) > 0 {
+				if !failed {
+					if streamErr := errorDetector.Observe(chunk.Payload); streamErr != nil {
+						failed = true
+						streamErr = sanitizeErrorTextFields(streamErr).(*Error)
+						entry := logEntryWithRequestID(ctx)
+						warnLogUpstreamFailure(ctx, entry, provider, resultModel, auth, time.Since(streamStart), streamErr)
+						rerr := resultErrorFromError(streamErr)
+						action, okAction := matchRequestScopedErrorAction(auth, streamErr, m.runtimeConfigSnapshot())
+						result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr, Options: opts}
+						applyRequestScopedActionToResult(action, okAction, &result)
+						m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+					}
 				}
 			}
 			if !forward {
 				return false
 			}
 			if chunk.Err != nil {
+				if failed {
+					chunk.Payload = redactStreamPayload(chunk.Payload)
+				}
 				if ctx == nil {
 					out <- chunk
 					return true
@@ -278,6 +283,9 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			payload := rewriteForceMappedStreamChunk(rewriter, chunk.Payload)
 			if len(payload) == 0 {
 				return true
+			}
+			if failed {
+				payload = redactStreamPayload(payload)
 			}
 			chunk.Payload = payload
 			if ctx == nil {

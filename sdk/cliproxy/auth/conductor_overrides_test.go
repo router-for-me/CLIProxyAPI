@@ -2740,6 +2740,21 @@ func TestRedactSecretsForLog_QuotedJSON(t *testing.T) {
 			in:    `sk-live-secret`,
 			leaks: []string{"sk-live-secret"},
 		},
+		{
+			name:  "prose API key with xAI prefix",
+			in:    "Incorrect API key provided: xai-live-secret",
+			leaks: []string{"xai-live-secret"},
+		},
+		{
+			name:  "prose API key with unlabeled value",
+			in:    "Incorrect API key provided: naked-secret-value12",
+			leaks: []string{"naked-secret-value12"},
+		},
+		{
+			name:  "groq prefix without label",
+			in:    "invalid key gsk_live-secret-value",
+			leaks: []string{"gsk_live-secret-value"},
+		},
 	}
 
 	for _, tc := range tests {
