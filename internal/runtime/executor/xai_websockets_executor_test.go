@@ -1829,10 +1829,12 @@ func TestXAIWebsocketsCompactionTriggerKeepsPreviousResponseIDWhenTranscriptEmpt
 	if err != nil {
 		t.Fatalf("ExecuteStream() error = %v", err)
 	}
+	var streamed bytes.Buffer
 	for chunk := range result.Chunks {
 		if chunk.Err != nil {
 			t.Fatalf("stream chunk error = %v", chunk.Err)
 		}
+		streamed.Write(chunk.Payload)
 	}
 	select {
 	case payload := <-capturedCompactPayload:
@@ -1848,6 +1850,13 @@ func TestXAIWebsocketsCompactionTriggerKeepsPreviousResponseIDWhenTranscriptEmpt
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for compact HTTP payload")
+	}
+	downstream := streamed.String()
+	if strings.Contains(downstream, `"previous_response_id":"resp-up"`) {
+		t.Fatalf("downstream SSE leaked upstream previous_response_id: %s", downstream)
+	}
+	if !strings.Contains(downstream, `"previous_response_id":"resp-down"`) {
+		t.Fatalf("downstream SSE missing mapped previous_response_id resp-down: %s", downstream)
 	}
 }
 

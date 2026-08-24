@@ -998,6 +998,18 @@ func (e *XAIWebsocketsExecutor) executeCompactionTriggerFromWebsocketContext(ctx
 	idMapper.state.replaceTranscriptWithItems(compactionItem)
 	idMapper.state.mapDownstreamToUpstream(responseID, "")
 
+	// Compact HTTP already used the upstream previous_response_id. Put the
+	// downstream id back before synthesizing SSE so the client never sees the
+	// remapped identifier.
+	if prepared != nil {
+		downstreamPrev := strings.TrimSpace(idMapper.downstreamPreviousID)
+		if downstreamPrev != "" {
+			prepared.body, _ = sjson.SetBytes(prepared.body, "previous_response_id", downstreamPrev)
+		} else {
+			prepared.body, _ = sjson.DeleteBytes(prepared.body, "previous_response_id")
+		}
+	}
+
 	headers = headers.Clone()
 	if headers == nil {
 		headers = make(http.Header)
