@@ -211,13 +211,18 @@ attemptLoop:
 					}
 				}
 				if antigravityShouldRetrySoftRateLimit(httpResp.StatusCode, bodyBytes) {
-					if attempt+1 < attempts {
+					if attempt+1 < attempts && attempt+1 < antigravitySoftRateLimitMaxAttempts {
 						delay := antigravitySoftRateLimitDelay(attempt)
 						log.Debugf("antigravity executor: soft rate limit for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return resp, errWait
 						}
 						continue attemptLoop
+					}
+					if errMark := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), antigravitySoftRateLimitExhaustedCooldown); errMark != nil {
+						log.Debugf("antigravity executor: failed to record soft cooldown for model %s: %v", baseModel, errMark)
+					} else {
+						log.Debugf("antigravity executor: soft rate limit exhausted for model %s, recorded %s cooldown to switch auth", baseModel, antigravitySoftRateLimitExhaustedCooldown)
 					}
 				}
 				if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {
@@ -453,13 +458,18 @@ attemptLoop:
 					}
 				}
 				if antigravityShouldRetrySoftRateLimit(httpResp.StatusCode, bodyBytes) {
-					if attempt+1 < attempts {
+					if attempt+1 < attempts && attempt+1 < antigravitySoftRateLimitMaxAttempts {
 						delay := antigravitySoftRateLimitDelay(attempt)
 						log.Debugf("antigravity executor: soft rate limit for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return resp, errWait
 						}
 						continue attemptLoop
+					}
+					if errMark := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), antigravitySoftRateLimitExhaustedCooldown); errMark != nil {
+						log.Debugf("antigravity executor: failed to record soft cooldown for model %s: %v", baseModel, errMark)
+					} else {
+						log.Debugf("antigravity executor: soft rate limit exhausted for model %s, recorded %s cooldown to switch auth", baseModel, antigravitySoftRateLimitExhaustedCooldown)
 					}
 				}
 				if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {
