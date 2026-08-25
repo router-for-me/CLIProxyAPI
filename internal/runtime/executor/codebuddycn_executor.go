@@ -49,6 +49,7 @@ type CodeBuddyCNExecutor struct {
 // NewCodeBuddyCNExecutor constructs a CodeBuddy CN executor.
 func NewCodeBuddyCNExecutor(cfg *config.Config) *CodeBuddyCNExecutor {
 	e := NewOpenAICompatExecutor(constant.CodeBuddyCN, cfg)
+	e.httpClientFactory = helps.NewCodeBuddyCNHTTPClient
 	e.outgoingTransforms = applyCodeBuddyCNOutgoingTransforms
 	return &CodeBuddyCNExecutor{
 		OpenAICompatExecutor: e,
@@ -238,7 +239,7 @@ func applyCodeBuddyCNReasoning(body []byte) []byte {
 
 // agentSystemPromptPattern matches CLI agent system prompts that CodeBuddy's
 // content filter rejects as sensitive content.
-var agentSystemPromptPattern = regexp.MustCompile(`(?i)you are claude code|claude\.?code.+official.+cli|anthropic.+official.+cli|you are (?:cursor|windsurf|cline|aider|continue|copilot|cody)|you are an? (?:ai )?(?:coding |code )?agent|cc_entrypoint\s*=\s*(?:cli|vscode|jetbrains|gui)|claude\.?code.+issues|give feedback.+claude\.?code|you are .{0,30}(?:powerful )?ai agent|orchestration capabilities|OhMyOpenCode|<agent-identity>|<Role>|<Behavior_Instructions>`)
+var agentSystemPromptPattern = regexp.MustCompile(`(?i)you are claude code|claude\.?code.+official.+cli|anthropic.+official.+cli|you are (?:cursor|windsurf|cline|aider|continue|copilot|cody)|you are an? (?:ai )?(?:coding |code )?agent|cc_entrypoint\s*=\s*(?:cli|vscode|jetbrains|gui)|claude\.?code.+issues|give feedback.+claude\.?code|you are .{0,30}(?:powerful )?ai agent|orchestration capabilities|OhMyOpenCode|<agent-identity>|<Role>|<Behavior_Instructions>|you are an expert coding assistant|coding agent harness|operating inside pi\b`)
 
 // neutralSystemPrompt replaces detected agent system prompts.
 const neutralSystemPrompt = "You are a helpful AI assistant that helps with software engineering tasks."

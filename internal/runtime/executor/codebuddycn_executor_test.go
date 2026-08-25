@@ -132,6 +132,16 @@ func TestApplyCodeBuddyCNAgentSystemPrompt(t *testing.T) {
 			body:     `{"messages":[{"role":"system","content":"Summarize this text."}]}`,
 			wantMsgs: false,
 		},
+		{
+			name:     "top-level pi agent system replaced",
+			body:     `{"system":"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files."}`,
+			wantRepl: true,
+		},
+		{
+			name:     "messages pi agent system replaced",
+			body:     `{"messages":[{"role":"system","content":"You are an expert coding assistant operating inside pi, a coding agent harness"}]}`,
+			wantMsgs: true,
+		},
 	}
 
 	for _, tt := range tests {
