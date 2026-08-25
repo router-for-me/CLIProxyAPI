@@ -229,13 +229,6 @@ func (s *Service) wsOnConnected(channelID string) {
 	if !strings.HasPrefix(strings.ToLower(channelID), "aistudio-") {
 		return
 	}
-	if s.coreManager != nil {
-		if existing, ok := s.coreManager.GetByID(channelID); ok && existing != nil {
-			if !existing.Disabled && existing.Status == coreauth.StatusActive {
-				return
-			}
-		}
-	}
 	now := time.Now().UTC()
 	auth := &coreauth.Auth{
 		ID:         channelID,  // keep channel identifier as ID
