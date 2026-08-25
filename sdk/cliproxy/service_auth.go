@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"time"
 
@@ -197,7 +198,21 @@ func (s *Service) ensureWebsocketGateway() {
 		return
 	}
 	opts := wsrelay.Options{
-		Path:           "/v1/ws",
+		Path: "/v1/ws",
+		// Accept an optional stable provider name from the websocket client via the
+		// "provider_name" query parameter. With a stable name, reconnects replace the
+		// previous session of the same provider instead of registering a new random
+		// aistudio-XXXX provider on every browser restart, keeping provider and usage
+		// statistics attached to one identity. The "aistudio-" prefix is enforced here
+		// because wsOnConnected only registers channels carrying it. An empty name
+		// falls back to the manager's random name (previous behavior).
+		ProviderFactory: func(r *http.Request) (string, error) {
+			name := strings.TrimSpace(r.URL.Query().Get("provider_name"))
+			if name != "" && !strings.HasPrefix(strings.ToLower(name), "aistudio-") {
+				name = "aistudio-" + name
+			}
+			return name, nil
+		},
 		OnConnected:    s.wsOnConnected,
 		OnDisconnected: s.wsOnDisconnected,
 		LogDebugf:      log.Debugf,
