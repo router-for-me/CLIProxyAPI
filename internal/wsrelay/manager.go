@@ -185,11 +185,13 @@ func (m *Manager) handleSessionClosed(s *session, cause error) {
 	m.sessMutex.Lock()
 	if cur, ok := m.sessions[key]; ok && cur == s {
 		delete(m.sessions, key)
+	} else if ok {
+		cause = errors.New("replaced by new connection")
 	}
-	m.sessMutex.Unlock()
 	if m.onDisconnected != nil {
 		m.onDisconnected(s.provider, cause)
 	}
+	m.sessMutex.Unlock()
 }
 
 func randomProviderName() string {
