@@ -275,6 +275,11 @@ Native macOS SwiftUI dashboard for AI subscriptions and coding proxies. It manag
 
 Run multiple native-feeling Claude Code commands, each powered by a different model (Codex, GLM, Kimi, Gemini, Grok, MiniMax, DeepSeek, Cursor, Copilot, Claude). Every dialect launches the real Claude Code interface with its own isolated config, history, ports, and an embedded CLIProxyAPI instance linked through the Go SDK — no separate proxy install. macOS only. Learn more at [claude-dialects.cc](https://claude-dialects.cc/).
 
+### [AoyoRouter](https://github.com/yawaflua/aoyorouter)
+
+Management layer and web dashboard for CLIProxyAPI. Adds centralized provider configuration, API-key management with per-key quotas and usage logs, provider/model access restrictions, and OAuth/API-key credential storage — all controlled through a web UI.
+Runs CLIProxyAPI as its routing core, exposing a single gateway for Codex, Claude Code, Grok, Antigravity, Kimi, OpenCode, Cline, Cursor, and any OpenAI-compatible provider. Includes effort presets, WARP proxy support, quota displays, and usage tracking out of the box.
+
 > [!NOTE]  
 > If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
 
