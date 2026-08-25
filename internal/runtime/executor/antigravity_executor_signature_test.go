@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -522,6 +523,99 @@ func TestAntigravityStreamDoesNotPrependLeadingUserForClaudeTarget(t *testing.T)
 				t.Fatalf("first Claude model turn = %q, want prior answer; body=%s", got, body)
 			}
 		})
+	}
+}
+
+func TestAntigravityRequestPathsDoNotFallbackEndpoints(t *testing.T) {
+	type upstreamCall struct {
+		host string
+		path string
+	}
+	routes := []struct {
+		name     string
+		kind     string
+		model    string
+		wantPath string
+	}{
+		{name: "generate non-stream", kind: "execute", model: "gemini-3.6-flash-high", wantPath: antigravityGeneratePath},
+		{name: "Claude non-stream", kind: "execute", model: "claude-sonnet-4-6", wantPath: antigravityStreamPath},
+		{name: "generate stream", kind: "stream", model: "gemini-3.6-flash-high", wantPath: antigravityStreamPath},
+		{name: "count tokens", kind: "count", model: "gemini-3.6-flash-high", wantPath: antigravityCountTokensPath},
+	}
+	failures := []struct {
+		name      string
+		transport bool
+	}{
+		{name: "HTTP 429"},
+		{name: "transport error", transport: true},
+	}
+
+	for _, route := range routes {
+		for _, failure := range failures {
+			t.Run(route.name+"/"+failure.name, func(t *testing.T) {
+				calls := make([]upstreamCall, 0, 1)
+				transportErr := errors.New("daily endpoint unavailable")
+				ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					calls = append(calls, upstreamCall{host: req.URL.Host, path: req.URL.Path})
+					if failure.transport {
+						return nil, transportErr
+					}
+					return &http.Response{
+						StatusCode: http.StatusTooManyRequests,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`)),
+					}, nil
+				}))
+				auth := &cliproxyauth.Auth{Metadata: map[string]any{
+					"access_token": "token",
+					"expired":      time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+					"project_id":   "project-1",
+				}}
+				req := cliproxyexecutor.Request{
+					Model:   route.model,
+					Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`),
+				}
+				opts := cliproxyexecutor.Options{
+					SourceFormat:   sdktranslator.FormatGemini,
+					ResponseFormat: sdktranslator.FormatGemini,
+				}
+				executor := NewAntigravityExecutor(&config.Config{})
+
+				var errRequest error
+				switch route.kind {
+				case "execute":
+					_, errRequest = executor.Execute(ctx, auth, req, opts)
+				case "stream":
+					_, errRequest = executor.ExecuteStream(ctx, auth, req, opts)
+				case "count":
+					_, errRequest = executor.CountTokens(ctx, auth, req, opts)
+				default:
+					t.Fatalf("unknown route kind %q", route.kind)
+				}
+				if errRequest == nil {
+					t.Fatal("request error = nil, want original upstream error")
+				}
+				if failure.transport {
+					if !errors.Is(errRequest, transportErr) {
+						t.Fatalf("request error = %v, want transport error", errRequest)
+					}
+				} else {
+					status, ok := errRequest.(interface{ StatusCode() int })
+					if !ok || status.StatusCode() != http.StatusTooManyRequests {
+						t.Fatalf("request error = %v, want status 429", errRequest)
+					}
+				}
+				if len(calls) != 1 {
+					t.Fatalf("upstream calls = %v, want exactly one daily endpoint request", calls)
+				}
+				if got, want := calls[0].host, resolveHost(antigravityBaseURLDaily); got != want {
+					t.Fatalf("upstream host = %q, want %q", got, want)
+				}
+				if got := calls[0].path; got != route.wantPath {
+					t.Fatalf("upstream path = %q, want %q", got, route.wantPath)
+				}
+			})
+		}
 	}
 }
 

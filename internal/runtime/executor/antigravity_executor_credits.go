@@ -525,55 +525,8 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 		return
 	}
 }
-func antigravityShouldRetryNoCapacity(statusCode int, body []byte) bool {
-	if statusCode != http.StatusServiceUnavailable {
-		return false
-	}
-	if len(body) == 0 {
-		return false
-	}
-	msg := strings.ToLower(string(body))
-	return strings.Contains(msg, "no capacity available")
-}
-
-func antigravityShouldRetryTransientResourceExhausted429(statusCode int, body []byte) bool {
-	if statusCode != http.StatusTooManyRequests {
-		return false
-	}
-	if len(body) == 0 {
-		return false
-	}
-	if classifyAntigravity429(body) != antigravity429Unknown {
-		return false
-	}
-	status := strings.TrimSpace(gjson.GetBytes(body, "error.status").String())
-	if !strings.EqualFold(status, "RESOURCE_EXHAUSTED") {
-		return false
-	}
-	msg := strings.ToLower(string(body))
-	return strings.Contains(msg, "resource has been exhausted")
-}
-
-func antigravityShouldRetrySoftRateLimit(statusCode int, body []byte) bool {
-	if statusCode != http.StatusTooManyRequests {
-		return false
-	}
-	return decideAntigravity429(body).kind == antigravity429DecisionSoftRetry
-}
-
 func antigravityShouldBypassShortCooldown(ctx context.Context, cfg *config.Config) bool {
 	return cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(cfg)
-}
-
-func antigravitySoftRateLimitDelay(attempt int) time.Duration {
-	if attempt < 0 {
-		attempt = 0
-	}
-	base := time.Duration(attempt+1) * 500 * time.Millisecond
-	if base > 3*time.Second {
-		base = 3 * time.Second
-	}
-	return base
 }
 
 func antigravityShortCooldownKey(auth *cliproxyauth.Auth, modelName string) string {
@@ -729,47 +682,4 @@ func homeKVUnavailableStatusErr(cause error) statusErr {
 		return statusErr{code: http.StatusServiceUnavailable, msg: "home kv store unavailable"}
 	}
 	return statusErr{code: http.StatusServiceUnavailable, msg: fmt.Sprintf("home kv store unavailable: %v", cause)}
-}
-
-func antigravityNoCapacityRetryDelay(attempt int) time.Duration {
-	if attempt < 0 {
-		attempt = 0
-	}
-	delay := time.Duration(attempt+1) * 250 * time.Millisecond
-	if delay > 2*time.Second {
-		delay = 2 * time.Second
-	}
-	return delay
-}
-
-func antigravityTransient429RetryDelay(attempt int) time.Duration {
-	if attempt < 0 {
-		attempt = 0
-	}
-	delay := time.Duration(attempt+1) * 100 * time.Millisecond
-	if delay > 500*time.Millisecond {
-		delay = 500 * time.Millisecond
-	}
-	return delay
-}
-
-func antigravityInstantRetryDelay(wait time.Duration) time.Duration {
-	if wait <= 0 {
-		return 0
-	}
-	return wait + 800*time.Millisecond
-}
-
-func antigravityWait(ctx context.Context, wait time.Duration) error {
-	if wait <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
