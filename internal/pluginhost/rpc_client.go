@@ -333,12 +333,17 @@ func marshalRPCEnvelope(result json.RawMessage) ([]byte, error) {
 	return json.Marshal(pluginabi.Envelope{OK: true, Result: result})
 }
 
-func marshalRPCError(code, message string) []byte {
+func marshalRPCError(code, message string, status ...int) []byte {
+	httpStatus := 0
+	if len(status) > 0 {
+		httpStatus = status[0]
+	}
 	raw, _ := json.Marshal(pluginabi.Envelope{
 		OK: false,
 		Error: &pluginabi.Error{
-			Code:    code,
-			Message: message,
+			Code:       code,
+			Message:    message,
+			HTTPStatus: httpStatus,
 		},
 	})
 	return raw

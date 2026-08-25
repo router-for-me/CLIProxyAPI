@@ -291,6 +291,13 @@ func (h *Host) callHostModelExecute(ctx context.Context, request []byte) ([]byte
 	})
 }
 
+func statusCodeFromError(err error) int {
+	if statusProvider, ok := err.(interface{ StatusCode() int }); ok {
+		return statusProvider.StatusCode()
+	}
+	return 0
+}
+
 func modelExecutionRequestFromPlugin(req pluginapi.HostModelExecutionRequest, skipPluginID string) handlers.ModelExecutionRequest {
 	return handlers.ModelExecutionRequest{
 		EntryProtocol:           req.EntryProtocol,
@@ -310,13 +317,36 @@ func modelExecutionError(errMsg *interfaces.ErrorMessage) error {
 	if errMsg == nil {
 		return nil
 	}
+	if errMsg.StatusCode > 0 {
+		return modelExecutionStatusError{cause: errMsg.Error, status: errMsg.StatusCode}
+	}
 	if errMsg.Error != nil {
 		return errMsg.Error
 	}
-	if errMsg.StatusCode > 0 {
-		return fmt.Errorf("model execution failed with status %d", errMsg.StatusCode)
-	}
 	return fmt.Errorf("model execution failed")
+}
+
+type modelExecutionStatusError struct {
+	cause  error
+	status int
+}
+
+func (err modelExecutionStatusError) Error() string {
+	if err.cause != nil {
+		return err.cause.Error()
+	}
+	if err.status > 0 {
+		return fmt.Sprintf("model execution failed with status %d", err.status)
+	}
+	return "model execution failed"
+}
+
+func (err modelExecutionStatusError) Unwrap() error {
+	return err.cause
+}
+
+func (err modelExecutionStatusError) StatusCode() int {
+	return err.status
 }
 
 func (h *Host) callHostLog(ctx context.Context, request []byte) ([]byte, error) {
