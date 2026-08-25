@@ -560,6 +560,84 @@ func TestConfigSynthesizer_OpenAICompat_UsesNamespacedProviderKey(t *testing.T) 
 	}
 }
 
+func TestConfigSynthesizer_OpenAICompat_ExactEntryProviderKeys(t *testing.T) {
+	const secret = "super-secret-api-key"
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:    "  Example Provider  ",
+				BaseURL: "https://compat.example.com/v1",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{Name: "  Team-A  ", APIKey: secret},
+					{UpstreamProviderEntryID: 42, APIKey: "persisted-key"},
+					{Name: "", APIKey: "config-only-key"},
+					{Name: "  MALFORMED NAME  ", APIKey: "malformed-name-key"},
+				},
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 4 {
+		t.Fatalf("expected 4 auths, got %d", len(auths))
+	}
+
+	const providerKey = "openai-compatible-example provider"
+	wantEntryKeys := []string{
+		providerKey + ":team-a",
+		providerKey + ":key-42",
+		"",
+		providerKey + ":malformed name",
+	}
+	for i, auth := range auths {
+		if got := auth.Provider; got != providerKey {
+			t.Errorf("auth[%d].Provider = %q, want %q", i, got, providerKey)
+		}
+		if got := auth.Attributes["provider_key"]; got != providerKey {
+			t.Errorf("auth[%d].provider_key = %q, want %q", i, got, providerKey)
+		}
+		entryKey, hasEntryKey := auth.Attributes[coreauth.AttributeEntryProviderKey]
+		if wantEntryKeys[i] == "" {
+			if hasEntryKey {
+				t.Errorf("auth[%d].entry_provider_key = %q, want attribute to be absent", i, entryKey)
+			}
+		} else if entryKey != wantEntryKeys[i] {
+			t.Errorf("auth[%d].entry_provider_key = %q, want %q", i, entryKey, wantEntryKeys[i])
+		}
+		if got := auth.Attributes["compat_name"]; got != "  Example Provider  " {
+			t.Errorf("auth[%d].compat_name = %q, want original provider name", i, got)
+		}
+		if got := auth.Attributes["base_url"]; got != "https://compat.example.com/v1" {
+			t.Errorf("auth[%d].base_url = %q, want configured base URL", i, got)
+		}
+		if got := auth.Attributes["config_index"]; got != "0" {
+			t.Errorf("auth[%d].config_index = %q, want 0", i, got)
+		}
+	}
+
+	for i, auth := range auths {
+		identity := auth.Attributes[coreauth.AttributeEntryProviderKey]
+		for field, value := range map[string]string{
+			"auth ID":      auth.ID,
+			"provider":     auth.Provider,
+			"label":        auth.Label,
+			"provider_key": auth.Attributes["provider_key"],
+			"entry key":    identity,
+			"source":       auth.Attributes["source"],
+		} {
+			if strings.Contains(value, secret) {
+				t.Errorf("auth[%d] %s contains API key secret", i, field)
+			}
+		}
+	}
+}
+
 func TestConfigSynthesizer_VertexCompat(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

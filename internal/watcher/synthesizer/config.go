@@ -53,6 +53,20 @@ func addUpstreamProviderKey(attrs map[string]string, channel string, rowID int64
 	attrs["provider_key"] = channel + ":" + strconv.FormatInt(rowID, 10)
 }
 
+func addOpenAICompatEntryProviderKey(attrs map[string]string, providerKey string, entry config.OpenAICompatibilityAPIKey) {
+	if attrs == nil || providerKey == "" {
+		return
+	}
+	identity := strings.ToLower(strings.TrimSpace(entry.Name))
+	if identity == "" && entry.UpstreamProviderEntryID > 0 {
+		identity = "key-" + strconv.FormatInt(entry.UpstreamProviderEntryID, 10)
+	}
+	if identity == "" {
+		return
+	}
+	attrs[coreauth.AttributeEntryProviderKey] = providerKey + ":" + identity
+}
+
 // Synthesize generates Auth entries from config API keys.
 func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
 	out := make([]*coreauth.Auth, 0, 32)
@@ -335,6 +349,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			addOpenAICompatEntryProviderKey(attrs, internalProviderKey, *entry)
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   internalProviderKey,
