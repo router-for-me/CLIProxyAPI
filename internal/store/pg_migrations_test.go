@@ -19,10 +19,9 @@ func ensureMigrated(t *testing.T, pg *PostgresStore) {
 	}
 }
 
-// TestMigrateIdempotent is currently a light no-op check: in Task 2 Migrate was
-// a no-op, so running it twice only exercises the initialized guard. The real
-// DDL idempotency assertions (the usage_events indexes) live in
-// TestMigrateCreatesUsageIndexes.
+// TestMigrateIdempotent verifies that running every registered migration twice
+// remains a no-op after the first successful run. The concrete DDL assertions
+// live in TestMigrateCreatesUsageIndexes and TestMigrateUpstreamProviderEntryIdentity.
 func TestMigrateIdempotent(t *testing.T) {
 	pg := newTestPostgresStore(t, "test_migrate")
 	defer pg.Close()
@@ -69,4 +68,46 @@ func TestMigrateCreatesUsageIndexes(t *testing.T) {
 	// proving the DDL is idempotent.
 	ensureMigrated(t, pg)
 	assertIndexes()
+}
+
+func TestMigrateUpstreamProviderEntryIdentity(t *testing.T) {
+	pg := newTestPostgresStore(t, "test_migrate_upstream_entry_identity")
+	defer pg.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := pg.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	if err := pg.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if err := pg.Migrate(ctx); err != nil {
+		t.Fatalf("second Migrate: %v", err)
+	}
+
+	var columnType string
+	if err := pg.DB().QueryRowContext(ctx, `
+		SELECT data_type
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2 AND column_name = 'name'
+	`, pg.cfg.Schema, pg.cfg.UpstreamProviderEntriesTable).Scan(&columnType); err != nil {
+		t.Fatalf("query entry name column: %v", err)
+	}
+	if columnType != "text" {
+		t.Fatalf("entry name column type = %q, want text", columnType)
+	}
+
+	var indexCount int
+	if err := pg.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM pg_indexes
+		WHERE schemaname = $1 AND tablename = $2
+		  AND indexname = 'idx_upstream_provider_entries_provider_name'
+	`, pg.cfg.Schema, pg.cfg.UpstreamProviderEntriesTable).Scan(&indexCount); err != nil {
+		t.Fatalf("query entry name index: %v", err)
+	}
+	if indexCount != 1 {
+		t.Fatalf("entry name unique index count = %d, want 1", indexCount)
+	}
 }

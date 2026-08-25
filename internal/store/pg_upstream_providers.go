@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -212,9 +214,11 @@ func (s *pgUpstreamProviderStore) Create(ctx context.Context, p UpstreamProvider
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store: upstream providers store not initialized")
 	}
-	if err := validateUpstreamProvider(p); err != nil {
+	normalized, err := normalizeUpstreamProvider(p)
+	if err != nil {
 		return nil, err
 	}
+	p = normalized
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("postgres store: begin tx: %w", err)
@@ -285,9 +289,11 @@ func (s *pgUpstreamProviderStore) Update(ctx context.Context, p UpstreamProvider
 	if p.ID == 0 {
 		return nil, fmt.Errorf("postgres store: upstream provider id required for update")
 	}
-	if err := validateUpstreamProvider(p); err != nil {
+	normalized, err := normalizeUpstreamProvider(p)
+	if err != nil {
 		return nil, err
 	}
+	p = normalized
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("postgres store: begin tx: %w", err)
@@ -483,7 +489,7 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 
 	// API-key entries (openai-compatibility only).
 	aRows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, provider_id, api_key, proxy_url, sort_order
+		SELECT id, provider_id, api_key, name, proxy_url, sort_order
 		FROM %s WHERE provider_id = $1 ORDER BY sort_order, id
 	`, s.entries), p.ID)
 	if err != nil {
@@ -491,10 +497,13 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 	}
 	for aRows.Next() {
 		var e UpstreamProviderAPIKey
-		var proxyURL sql.NullString
-		if err = aRows.Scan(&e.ID, &e.ProviderID, &e.APIKey, &proxyURL, &e.SortOrder); err != nil {
+		var entryName, proxyURL sql.NullString
+		if err = aRows.Scan(&e.ID, &e.ProviderID, &e.APIKey, &entryName, &proxyURL, &e.SortOrder); err != nil {
 			aRows.Close()
 			return fmt.Errorf("postgres store: scan upstream provider api key entry: %w", err)
+		}
+		if entryName.Valid {
+			e.Name = entryName.String
 		}
 		if proxyURL.Valid {
 			e.ProxyURL = proxyURL.String
@@ -580,9 +589,9 @@ func (s *pgUpstreamProviderStore) replaceChildrenTx(ctx context.Context, tx *sql
 			sortOrder = i
 		}
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-			INSERT INTO %s (provider_id, api_key, proxy_url, sort_order)
-			VALUES ($1,$2,$3,$4)
-		`, s.entries), providerID, e.APIKey, nullableString(e.ProxyURL), sortOrder,
+			INSERT INTO %s (provider_id, api_key, name, proxy_url, sort_order)
+			VALUES ($1,$2,$3,$4,$5)
+		`, s.entries), providerID, e.APIKey, nullableString(e.Name), nullableString(e.ProxyURL), sortOrder,
 		); err != nil {
 			return fmt.Errorf("postgres store: insert upstream provider api key entry: %w", err)
 		}
@@ -590,22 +599,91 @@ func (s *pgUpstreamProviderStore) replaceChildrenTx(ctx context.Context, tx *sql
 	return nil
 }
 
-// validateUpstreamProvider enforces required fields.
+var (
+	upstreamProviderEntryNamePattern     = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+	upstreamProviderEntryReservedPattern = regexp.MustCompile(`^key-[0-9]+$`)
+)
+
+// validateUpstreamProvider enforces required fields and entry identity rules.
+// Entry API keys are never included in validation errors.
 func validateUpstreamProvider(p UpstreamProvider) error {
+	_, err := normalizeUpstreamProvider(p)
+	return err
+}
+
+// normalizeUpstreamProvider returns a copy of p with API-key entry values
+// trimmed and names normalized. The caller's slices remain untouched so
+// validation does not unexpectedly rewrite caller-owned secret material.
+func normalizeUpstreamProvider(p UpstreamProvider) (UpstreamProvider, error) {
 	if p.ProviderType == "" {
-		return fmt.Errorf("postgres store: upstream provider provider_type is required")
+		return UpstreamProvider{}, fmt.Errorf("postgres store: upstream provider provider_type is required")
 	}
+
 	for _, m := range p.Models {
 		if m.Name == "" {
-			return fmt.Errorf("postgres store: upstream provider model name is required")
+			return UpstreamProvider{}, fmt.Errorf("postgres store: upstream provider model name is required")
 		}
 	}
-	for _, e := range p.APIKeyEntries {
-		if e.APIKey == "" {
-			return fmt.Errorf("postgres store: upstream provider api key entry api_key is required")
+
+	normalized := p
+	if p.APIKeyEntries != nil {
+		normalized.APIKeyEntries = make([]UpstreamProviderAPIKey, len(p.APIKeyEntries))
+		copy(normalized.APIKeyEntries, p.APIKeyEntries)
+	}
+	seenNames := make(map[string]struct{}, len(normalized.APIKeyEntries))
+	seenIDs := make(map[int64]struct{}, len(normalized.APIKeyEntries))
+	for i := range normalized.APIKeyEntries {
+		entry := &normalized.APIKeyEntries[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		if entry.APIKey == "" {
+			return UpstreamProvider{}, fmt.Errorf("postgres store: upstream provider api key entry api_key is required")
+		}
+
+		name, ok := normalizeUpstreamProviderEntryName(entry.Name)
+		if !ok {
+			if upstreamProviderEntryReservedPattern.MatchString(name) {
+				return UpstreamProvider{}, fmt.Errorf("postgres store: upstream provider api key entry name is reserved")
+			}
+			return UpstreamProvider{}, fmt.Errorf("postgres store: upstream provider api key entry name has invalid syntax")
+		}
+		entry.Name = name
+		if name != "" {
+			if _, exists := seenNames[name]; exists {
+				return UpstreamProvider{}, fmt.Errorf("postgres store: duplicate upstream provider api key entry name")
+			}
+			seenNames[name] = struct{}{}
+		}
+
+		if entry.ID < 0 {
+			return UpstreamProvider{}, fmt.Errorf("postgres store: upstream provider api key entry id must be positive")
+		}
+		if entry.ID > 0 {
+			if _, exists := seenIDs[entry.ID]; exists {
+				return UpstreamProvider{}, fmt.Errorf("postgres store: duplicate upstream provider api key entry id")
+			}
+			seenIDs[entry.ID] = struct{}{}
 		}
 	}
-	return nil
+	return normalized, nil
+}
+
+// normalizeUpstreamProviderEntryName trims and lowercases an optional entry
+// name, then checks the slug and reserved-name rules. The normalized value is
+// returned even when validation fails so callers can classify the error
+// without exposing any API-key material.
+func normalizeUpstreamProviderEntryName(name string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if normalized == "" {
+		return "", true
+	}
+	if !upstreamProviderEntryNamePattern.MatchString(normalized) {
+		return normalized, false
+	}
+	if upstreamProviderEntryReservedPattern.MatchString(normalized) {
+		return normalized, false
+	}
+	return normalized, true
 }
 
 // scanUpstreamProvider scans one row of upstream_providers (excluding

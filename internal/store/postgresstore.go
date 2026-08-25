@@ -689,6 +689,23 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 		}
 	}
 
+	// upstream_provider_api_key_entries identity migration. Existing rows may
+	// predate the nullable name column; keep this separate from EnsureSchema so
+	// old installations are upgraded on startup.
+	upstreamEntriesTable := s.fullTableName(s.cfg.UpstreamProviderEntriesTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS name TEXT`, upstreamEntriesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: migrate upstream provider entries name column: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_upstream_provider_entries_provider_name
+		 ON %s(provider_id, lower(name))
+		 WHERE name IS NOT NULL AND btrim(name) <> ''`, upstreamEntriesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: migrate upstream provider entries name index: %w", err)
+	}
+
 	// usage_stat_day is the pre-aggregated daily rollup of usage_events. It folds
 	// per-request rows into per-(day, user, api_key, model, provider, source)
 	// counters so daily aggregate queries (LiteLLM /spend/users, per-model/API-key
@@ -1613,6 +1630,7 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			id          BIGSERIAL PRIMARY KEY,
 			provider_id BIGINT NOT NULL REFERENCES %s(id) ON DELETE CASCADE,
 			api_key     TEXT NOT NULL,
+			name        TEXT,
 			proxy_url   TEXT,
 			sort_order  INTEGER NOT NULL DEFAULT 0
 		)
