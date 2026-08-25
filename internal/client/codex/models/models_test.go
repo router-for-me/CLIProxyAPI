@@ -225,6 +225,30 @@ func TestCodexClientModelsResponse_RequiresTemplateAndCodexProvidersForSearchToo
 	}
 }
 
+func TestCodexClientModelsResponse_UsesCompactToolMetadataForClaudeModels(t *testing.T) {
+	models := []map[string]any{
+		{"id": "claude-opus-5", "type": "claude"},
+		{"id": "claude-sonnet-5", "type": "claude"},
+		{"id": "claude-fable-5", "type": "claude"},
+	}
+	resp := BuildResponse(models, func(string) []string { return []string{"claude"} }, false)
+
+	for _, model := range resp["models"].([]map[string]any) {
+		if got := stringModelValue(model, "tool_mode"); got != "code_mode_only" {
+			t.Errorf("%s tool_mode = %q, want code_mode_only", stringModelValue(model, "slug"), got)
+		}
+		if got, _ := model["use_responses_lite"].(bool); !got {
+			t.Errorf("%s use_responses_lite = false, want true", stringModelValue(model, "slug"))
+		}
+		if got, _ := model["include_skills_usage_instructions"].(bool); got {
+			t.Errorf("%s include_skills_usage_instructions = true, want false", stringModelValue(model, "slug"))
+		}
+		if got := intModelValue(model, "auto_compact_token_limit"); got != 850000 {
+			t.Errorf("%s auto_compact_token_limit = %d, want 850000", stringModelValue(model, "slug"), got)
+		}
+	}
+}
+
 func TestCodexClientModelsResponse_PreservesUltraReasoningEffort(t *testing.T) {
 	resp := BuildResponse([]map[string]any{{"id": "gpt-5.6-sol"}}, nil, false)
 	models, ok := resp["models"].([]map[string]any)

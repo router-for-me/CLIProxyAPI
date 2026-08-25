@@ -12,6 +12,10 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const compactCodeModeExecDescription = `Run raw JavaScript in a V8 isolate to call nested tools through the global tools object; do not pass JSON or Markdown fences.
+Use ALL_TOOLS to discover tool names and descriptions, then call await tools.<name>(arguments).
+Return results with text(), image(), audio(), or generatedImage(). Other helpers: store(), load(), notify(), setTimeout(), clearTimeout(), exit(), and yield_control().`
+
 // ConvertOpenAIResponsesRequestToClaude transforms an OpenAI Responses API request
 // into a Claude Messages API request using only gjson/sjson for JSON handling.
 // It supports:
@@ -731,7 +735,11 @@ func convertResponsesToolDescriptorToClaude(descriptor responsesToolDescriptor) 
 	case "function":
 		return convertResponsesFunctionToolToClaude(descriptor.tool, overrideName)
 	case "custom":
-		return convertResponsesCustomToolToClaude(descriptor.tool, overrideName)
+		tool, ok := convertResponsesCustomToolToClaude(descriptor.tool, overrideName)
+		if ok && descriptor.namespace == "functions" && descriptor.childName == "exec" {
+			tool, _ = sjson.SetBytes(tool, "description", compactCodeModeExecDescription)
+		}
+		return tool, ok
 	case "web_search":
 		return convertResponsesWebSearchToolToClaude(descriptor.tool)
 	default:

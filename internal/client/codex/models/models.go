@@ -231,12 +231,14 @@ func applyCodexClientSearchToolSupport(entry map[string]any, id string, template
 
 func applyCodexClientModelMetadata(entry map[string]any, id string, model map[string]any, optimizeMultiAgentV2 bool) {
 	info := registry.LookupModelInfo(id)
+	isClaudeModel := strings.EqualFold(stringModelValue(model, "type"), "claude")
 
 	displayName := stringModelValue(model, "display_name")
 	description := stringModelValue(model, "description")
 	contextWindow := intModelValue(model, "context_length")
 
 	if info != nil {
+		isClaudeModel = isClaudeModel || strings.EqualFold(info.Type, "claude")
 		if info.DisplayName != "" {
 			displayName = info.DisplayName
 		}
@@ -271,6 +273,12 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	entry["display_name"] = displayName
 	entry["description"] = description
 	entry["prefer_websockets"] = false
+	if isClaudeModel {
+		entry["tool_mode"] = "code_mode_only"
+		entry["use_responses_lite"] = true
+		entry["include_skills_usage_instructions"] = false
+		entry["auto_compact_token_limit"] = 850000
+	}
 	if optimizeMultiAgentV2 {
 		entry["multi_agent_version"] = "v2"
 	}

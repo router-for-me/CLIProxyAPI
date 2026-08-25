@@ -685,6 +685,32 @@ func TestConvertOpenAIResponsesRequestToClaude_MergesAdditionalToolsAndPrefersTo
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_CompactsCodeModeExecDescription(t *testing.T) {
+	oversizedDescription := "Run JavaScript.\n" + strings.Repeat("nested tool schema ", 1000)
+	raw := []byte(fmt.Sprintf(`{
+		"model":"claude-test",
+		"input":[{"type":"additional_tools","tools":[{"type":"namespace","name":"functions","tools":[
+			{"type":"custom","name":"exec","description":%q},
+			{"type":"function","name":"wait","description":"wait","parameters":{"type":"object","properties":{}}}
+		]}]}]
+	}`, oversizedDescription))
+
+	root := gjson.ParseBytes(ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false))
+	if got := root.Get("tools.#").Int(); got != 2 {
+		t.Fatalf("tools count = %d, want exec and wait; output=%s", got, root.Raw)
+	}
+	description := root.Get(`tools.#(name=="functions__exec").description`).String()
+	if len(description) >= len(oversizedDescription) {
+		t.Fatalf("exec description was not compacted: got %d bytes, original %d", len(description), len(oversizedDescription))
+	}
+	if !strings.Contains(description, "ALL_TOOLS") {
+		t.Fatalf("compact exec description does not explain tool discovery: %q", description)
+	}
+	if !root.Get(`tools.#(name=="functions__wait")`).Exists() {
+		t.Fatal("sibling code-mode tool was dropped")
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_DeduplicatesExpandedToolNames(t *testing.T) {
 	raw := []byte(`{
 		"model":"claude-test",
