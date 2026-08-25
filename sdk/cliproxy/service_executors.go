@@ -332,6 +332,11 @@ func (s *Service) registerOpenAICompatProviderExecutor(providerKey string, auth 
 	if providerKey == "" {
 		providerKey = "openai-compatibility"
 	}
+	if providerKey == "gmi" || providerKey == "openai-compatible-gmi" {
+		gmiExecutor := executor.NewGMIAudioExecutor(providerKey, cfg)
+		s.coreManager.RegisterExecutor(gmiExecutor)
+		return
+	}
 	compatExecutor := executor.NewOpenAICompatExecutor(providerKey, cfg)
 	nextExecutor := s.wrapOpenAICompatIfPluginAuth(compatExecutor, auth, cfg)
 	if !forceReplace {
