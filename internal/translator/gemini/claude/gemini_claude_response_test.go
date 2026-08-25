@@ -202,3 +202,78 @@ func TestConvertGeminiResponseToClaudeNonStream_TrailingSignatureOnlyPart(t *tes
 		t.Fatalf("unexpected text block: %s", textBlock.Raw)
 	}
 }
+
+// Gemini's promptTokenCount is the TOTAL prompt including the cached part;
+// Claude's input_tokens excludes cache (cache_read_input_tokens is separate).
+// Mirror antigravity_claude_response.go so downstream Claude-format consumers
+// (Open WebUI quota metering) don't bill cached reads at full input price.
+func TestConvertGeminiResponseToClaude_SplitsCachedInputTokens(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	finishChunk := []byte(`{
+		"candidates": [{
+			"content": {"parts": [{"text": "answer"}]},
+			"finishReason": "STOP"
+		}],
+		"usageMetadata": {
+			"promptTokenCount": 100,
+			"candidatesTokenCount": 7,
+			"cachedContentTokenCount": 91,
+			"totalTokenCount": 107
+		},
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-test", requestJSON, requestJSON, finishChunk, &param), nil)
+	outputText := string(output)
+
+	var delta gjson.Result
+	for _, line := range strings.Split(outputText, "\n") {
+		if strings.HasPrefix(line, "data: ") {
+			if ev := gjson.Parse(line[len("data: "):]); ev.Get("type").String() == "message_delta" {
+				delta = ev.Get("usage")
+				break
+			}
+		}
+	}
+	if !delta.Exists() {
+		t.Fatalf("expected a message_delta with usage, got: %s", outputText)
+	}
+	if got := delta.Get("input_tokens").Int(); got != 9 {
+		t.Fatalf("input_tokens must exclude the cached part (100-91), got %d: %s", got, outputText)
+	}
+	if got := delta.Get("cache_read_input_tokens").Int(); got != 91 {
+		t.Fatalf("cache_read_input_tokens must carry the cached part, got %d: %s", got, outputText)
+	}
+}
+
+func TestConvertGeminiResponseToClaudeNonStream_SplitsCachedInputTokens(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":"hi"}]}`)
+	geminiResponse := []byte(`{
+		"candidates": [{
+			"content": {"parts": [{"text": "answer"}]},
+			"finishReason": "STOP"
+		}],
+		"usageMetadata": {
+			"promptTokenCount": 100,
+			"candidatesTokenCount": 7,
+			"cachedContentTokenCount": 91,
+			"totalTokenCount": 107
+		},
+		"modelVersion": "gemini-test",
+		"responseId": "resp-test"
+	}`)
+
+	ctx := context.Background()
+	output := ConvertGeminiResponseToClaudeNonStream(ctx, "gemini-test", requestJSON, requestJSON, geminiResponse, nil)
+	outputJSON := gjson.ParseBytes(output)
+
+	if got := outputJSON.Get("usage.input_tokens").Int(); got != 9 {
+		t.Fatalf("input_tokens must exclude the cached part (100-91), got %d: %s", got, string(output))
+	}
+	if got := outputJSON.Get("usage.cache_read_input_tokens").Int(); got != 91 {
+		t.Fatalf("cache_read_input_tokens must carry the cached part, got %d: %s", got, string(output))
+	}
+}
