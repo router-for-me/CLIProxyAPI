@@ -182,8 +182,10 @@ func openAICompatFromProvider(p store.UpstreamProvider) config.OpenAICompatibili
 	}
 	for _, e := range p.APIKeyEntries {
 		k.APIKeyEntries = append(k.APIKeyEntries, config.OpenAICompatibilityAPIKey{
-			APIKey:   e.APIKey,
-			ProxyURL: e.ProxyURL,
+			APIKey:                  e.APIKey,
+			Name:                    e.Name,
+			UpstreamProviderEntryID: e.ID,
+			ProxyURL:                e.ProxyURL,
 		})
 	}
 	for _, m := range p.Models {

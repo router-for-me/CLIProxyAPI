@@ -56,7 +56,15 @@ func (h *Handler) upstreamProviderErrorResponse(c *gin.Context, err error) {
 		return
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "duplicate key") || strings.Contains(msg, "unique constraint") {
+	lowerMsg := strings.ToLower(msg)
+	if strings.Contains(lowerMsg, "duplicate upstream provider api key entry name") ||
+		strings.Contains(lowerMsg, "upstream_provider_entries_provider_name") {
+		c.JSON(http.StatusConflict, gin.H{"error": gin.H{
+			"type": "conflict", "message": "an API key entry with that name already exists for this upstream provider",
+		}})
+		return
+	}
+	if strings.Contains(lowerMsg, "duplicate key") || strings.Contains(lowerMsg, "unique constraint") {
 		c.JSON(http.StatusConflict, gin.H{"error": gin.H{
 			"type": "conflict", "message": "an upstream provider with that (provider_type, file_name) already exists",
 		}})
@@ -124,9 +132,15 @@ func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 			Thinking:         m.Thinking,
 		})
 	}
-	// Convert api-key entry requests to store structs.
+	// Convert api-key entry requests to store structs. The entry id is
+	// round-tripped so the PG store can preserve the persisted child row.
+	// Name and api_key are passed through unchanged; the store normalizes
+	// them and rejects duplicates/identity conflicts without leaking any
+	// secret material.
 	for _, e := range body.APIKeyEntries {
 		p.APIKeyEntries = append(p.APIKeyEntries, store.UpstreamProviderAPIKey{
+			ID:       e.ID,
+			Name:     e.Name,
 			APIKey:   e.APIKey,
 			ProxyURL: e.ProxyURL,
 		})
@@ -137,7 +151,10 @@ func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 // ListUpstreamProviders handles GET /v0/management/upstream-providers.
 //
 // Returns every normalized upstream provider row with its child collections
-// (models, headers, excluded_models, api_key_entries) joined in.
+// (models, headers, excluded_models, api_key_entries) joined in. Each
+// api_key_entries element is the persisted child row including its id and
+// name, so the dashboard can round-trip entry identity without re-deriving
+// it from array position.
 func (h *Handler) ListUpstreamProviders(c *gin.Context) {
 	srcs, ok := h.upstreamProvidersStore(c)
 	if !ok {
@@ -226,7 +243,9 @@ func (h *Handler) CreateUpstreamProvider(c *gin.Context) {
 
 // UpdateUpstreamProvider handles PUT /v0/management/upstream-providers/:id.
 //
-// Body: upstreamProviderReq. All mutable fields are replaced. After update
+// Body: upstreamProviderReq. All mutable fields are replaced; API-key child
+// rows are synchronized by the submitted id (existing ids are updated in
+// place, omitted ids are deleted, and zero ids are inserted). After update
 // the artifacts are re-rendered and the clients reloaded. When the upstream
 // name/identifier changed, persisted models_catalog rows are repointed from
 // the old name to the new name so the Models Catalog does not keep a phantom

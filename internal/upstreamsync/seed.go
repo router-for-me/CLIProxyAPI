@@ -230,6 +230,7 @@ func providerFromOpenAICompat(k config.OpenAICompatibility) store.UpstreamProvid
 	}
 	for _, e := range k.APIKeyEntries {
 		p.APIKeyEntries = append(p.APIKeyEntries, store.UpstreamProviderAPIKey{
+			Name:     e.Name,
 			APIKey:   e.APIKey,
 			ProxyURL: e.ProxyURL,
 		})

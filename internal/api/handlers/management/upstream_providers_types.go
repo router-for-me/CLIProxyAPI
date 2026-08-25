@@ -5,8 +5,10 @@ import "time"
 // upstreamProviderReq is the JSON body for POST/PUT
 // /v0/management/upstream-providers. It mirrors store.UpstreamProvider; the
 // id/timestamps are ignored on write (set by the DB). Child collections
-// (models, headers, excluded_models, api_key_entries) are replaced wholesale
-// on update.
+// (models, headers, excluded_models) are replaced wholesale on update. The
+// api_key_entries collection is synchronized by stable child-row id (see
+// upstream_providers.go) so callers must round-trip the entry id to preserve
+// row identity across edits.
 type upstreamProviderReq struct {
 	ProviderType            string         `json:"provider_type"`
 	Name                    string         `json:"name,omitempty"`
@@ -55,6 +57,8 @@ type upstreamProviderModelReq struct {
 }
 
 type upstreamProviderEntryReq struct {
+	ID       int64  `json:"id,omitempty"`
+	Name     string `json:"name,omitempty"`
 	APIKey   string `json:"api_key"`
 	ProxyURL string `json:"proxy_url,omitempty"`
 }
