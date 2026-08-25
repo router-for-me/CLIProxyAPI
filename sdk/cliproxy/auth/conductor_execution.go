@@ -453,6 +453,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				}
 				continue
 			}
+			if isEmptyCompletionPayload(resp.Payload) {
+				lastErr = m.markEmptyCompletion(execCtx, &result)
+				if homeMode {
+					homeAuthCount++
+				}
+				continue
+			}
 			m.MarkResult(execCtx, result)
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)
