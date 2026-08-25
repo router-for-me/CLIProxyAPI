@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -485,6 +486,85 @@ func TestSaveCodexOAuthRecordUpdatesRuntimeAuthMetadata(t *testing.T) {
 	}
 	if got.Disabled {
 		t.Error("runtime auth still disabled")
+	}
+}
+
+func TestSaveCodexOAuthRecordClearsRuntimeCooldownOnReplace(t *testing.T) {
+	authDir := t.TempDir()
+	nestedRel := filepath.ToSlash(filepath.Join("team", "codex-user.json"))
+	nestedPath := filepath.Join(authDir, filepath.FromSlash(nestedRel))
+	writeCodexJSON(t, filepath.Dir(nestedPath), filepath.Base(nestedPath), map[string]any{
+		"type":         "codex",
+		"account_id":   testCodexAccountID,
+		"access_token": "old-access",
+	})
+	recoverAt := time.Now().Add(time.Hour)
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+		ID:             nestedRel,
+		FileName:       nestedRel,
+		Provider:       "codex",
+		Status:         coreauth.StatusError,
+		Unavailable:    true,
+		NextRetryAfter: recoverAt,
+		Quota: coreauth.QuotaState{
+			Exceeded:      true,
+			Reason:        "credential_quota",
+			NextRecoverAt: recoverAt,
+		},
+		ModelStates: map[string]*coreauth.ModelState{
+			"gpt-5": {
+				Status:         coreauth.StatusError,
+				Unavailable:    true,
+				NextRetryAfter: recoverAt,
+				LastError:      &coreauth.Error{Message: "quota"},
+				Quota: coreauth.QuotaState{
+					Exceeded:      true,
+					Reason:        "credential_quota",
+					NextRecoverAt: recoverAt,
+				},
+			},
+		},
+		Attributes: map[string]string{
+			"path":      nestedPath,
+			"plan_type": "free",
+		},
+		Metadata: map[string]any{
+			"type":         "codex",
+			"account_id":   testCodexAccountID,
+			"access_token": "old-access",
+		},
+	}); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	record := newCodexRecord("user@example.com", testCodexAccountID, "pro", "new-access", "new-refresh")
+	if storage, ok := record.Storage.(*codex.CodexTokenStorage); ok {
+		storage.IDToken = fakeCodexIDToken("pro")
+	}
+	if _, errSave := h.saveCodexOAuthRecord(context.Background(), record, nestedRel); errSave != nil {
+		t.Fatalf("saveCodexOAuthRecord: %v", errSave)
+	}
+
+	got, ok := manager.GetByID(nestedRel)
+	if !ok || got == nil {
+		t.Fatal("runtime auth missing after replace")
+	}
+	if got.Status != coreauth.StatusActive {
+		t.Errorf("status = %q, want %q", got.Status, coreauth.StatusActive)
+	}
+	if got.Unavailable {
+		t.Error("runtime auth still unavailable")
+	}
+	if !got.NextRetryAfter.IsZero() {
+		t.Errorf("NextRetryAfter = %v, want zero", got.NextRetryAfter)
+	}
+	if got.Quota.Exceeded || got.Quota.Reason != "" {
+		t.Errorf("quota = %+v, want cleared", got.Quota)
+	}
+	if len(got.ModelStates) > 0 {
+		t.Errorf("ModelStates = %+v, want empty", got.ModelStates)
 	}
 }
 

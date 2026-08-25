@@ -122,8 +122,10 @@ func (h *Handler) refreshRuntimeAuthAfterReplace(ctx context.Context, record *co
 		}
 		applyCodexReplacementToRuntimeAuth(existing, record)
 		existing.UpdatedAt = now
-		if _, errUpdate := h.authManager.Update(ctx, existing); errUpdate != nil {
-			log.WithError(errUpdate).WithField("id", id).Warn("failed to update runtime auth after Codex OAuth replace")
+		// Register overwrites the same ID. Update copies ModelStates and an active
+		// credential_quota cooldown from the live entry when those fields are empty.
+		if _, errRegister := h.authManager.Register(ctx, existing); errRegister != nil {
+			log.WithError(errRegister).WithField("id", id).Warn("failed to update runtime auth after Codex OAuth replace")
 			continue
 		}
 		updated = true
@@ -170,6 +172,10 @@ func applyCodexReplacementToRuntimeAuth(existing, record *coreauth.Auth) {
 	existing.Status = coreauth.StatusActive
 	existing.StatusMessage = ""
 	existing.Unavailable = false
+	existing.NextRetryAfter = time.Time{}
+	existing.LastError = nil
+	existing.Quota = coreauth.QuotaState{}
+	existing.ModelStates = nil
 }
 
 func (h *Handler) preserveCodexRuntimeSettings(record *coreauth.Auth, writeName string) {
