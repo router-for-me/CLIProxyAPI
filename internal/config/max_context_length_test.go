@@ -84,3 +84,30 @@ openai-compatibility:
 		})
 	}
 }
+
+func TestOpenAICompatibilityMaxOutputTokensConfigDecoding(t *testing.T) {
+	const yamlConfig = `openai-compatibility:
+  - models:
+      - name: compat-upstream
+        max-output-tokens: 64000
+`
+	const jsonConfig = `{"openai-compatibility":[{"models":[{"name":"compat-upstream","max-output-tokens":64000}]}]}`
+
+	for _, testCase := range []struct {
+		name   string
+		decode func(*Config) error
+	}{
+		{name: "YAML", decode: func(cfg *Config) error { return yaml.Unmarshal([]byte(yamlConfig), cfg) }},
+		{name: "JSON", decode: func(cfg *Config) error { return json.Unmarshal([]byte(jsonConfig), cfg) }},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var cfg Config
+			if err := testCase.decode(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.OpenAICompatibility[0].Models[0].MaxOutputTokens; got != 64000 {
+				t.Fatalf("max-output-tokens = %d, want 64000", got)
+			}
+		})
+	}
+}
