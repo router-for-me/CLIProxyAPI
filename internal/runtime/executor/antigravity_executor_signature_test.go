@@ -255,6 +255,64 @@ func TestAntigravityStreamObfuscatesSensitiveSystemInstruction(t *testing.T) {
 	}
 }
 
+func TestAntigravityStreamDoesNotEmitSyntheticTerminalOnReadError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return
+		}
+		_, _ = io.WriteString(w, `data: {"response":{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}}`+"\n")
+		flusher.Flush()
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			return
+		}
+		conn, _, errHijack := hijacker.Hijack()
+		if errHijack == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer server.Close()
+
+	executor := NewAntigravityExecutor(&config.Config{
+		Antigravity:  config.AntigravityConfig{},
+		RequestRetry: 1,
+	})
+	result, errExecute := executor.ExecuteStream(context.Background(), &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"access_token": "token-123",
+			"expired":      time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+			"project_id":   "project-1",
+		},
+		Attributes: map[string]string{"base_url": server.URL},
+	}, cliproxyexecutor.Request{
+		Model:   "gemini-3.7-flash",
+		Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatGemini,
+		ResponseFormat: sdktranslator.FormatGemini,
+		Stream:         true,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+
+	var streamErr error
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+			continue
+		}
+		if finishReason := gjson.GetBytes(chunk.Payload, "candidates.0.finishReason").String(); finishReason == "STOP" {
+			t.Fatalf("read error must not emit synthetic STOP: %s", chunk.Payload)
+		}
+	}
+	if streamErr == nil {
+		t.Fatal("expected stream read error")
+	}
+}
+
 func TestAntigravityStreamPrependsLeadingUserForGemini(t *testing.T) {
 	assertLeadingFunctionHistory := func(t *testing.T, body []byte) {
 		t.Helper()
