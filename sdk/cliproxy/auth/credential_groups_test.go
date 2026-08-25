@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"testing"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
@@ -119,5 +121,33 @@ func TestManagerSelectAuthKeepsResidentialCredentialGroupsIsolated(t *testing.T)
 				t.Fatalf("SelectAuth() = %#v, want auth %q", selected, test.wantAuthID)
 			}
 		})
+	}
+}
+
+func TestPickNextViaHomeSkipsCredentialOutsideAuthorizedGroups(t *testing.T) {
+	dispatcher := &authKindHomeDispatcher{auths: []Auth{
+		{ID: "credential-b", Provider: "test", Attributes: map[string]string{"credential_group": "team-b"}},
+		{ID: "credential-a", Provider: "test", Attributes: map[string]string{"credential_group": "team-a"}},
+	}}
+	oldCurrentHomeDispatcher := currentHomeDispatcher
+	currentHomeDispatcher = func() homeAuthDispatcher { return dispatcher }
+	t.Cleanup(func() { currentHomeDispatcher = oldCurrentHomeDispatcher })
+
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.SetHomeExecutionRegistry(executionregistry.New())
+	manager.RegisterExecutor(schedulerTestExecutor{})
+
+	selected, _, _, errSelect := manager.pickNextViaHome(context.Background(), "model", cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.CredentialGroupsMetadataKey: []string{"team-a"},
+	}}, nil)
+	if errSelect != nil {
+		t.Fatalf("pickNextViaHome() error = %v", errSelect)
+	}
+	if selected == nil || selected.ID != "credential-a" {
+		t.Fatalf("pickNextViaHome() auth = %#v, want credential-a", selected)
+	}
+	if got := dispatcher.counts; len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Fatalf("Home auth counts = %v, want [1 2]", got)
 	}
 }
