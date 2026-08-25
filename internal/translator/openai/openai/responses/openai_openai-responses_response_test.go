@@ -1349,3 +1349,35 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Reasonin
 		})
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_MapsReasoningTokens(t *testing.T) {
+	t.Parallel()
+
+	request := []byte(`{"model":"m","input":"hi"}`)
+	tests := []struct {
+		name  string
+		usage string
+		want  int64
+	}{
+		{
+			name:  "chat completions shape",
+			usage: `{"prompt_tokens":38,"completion_tokens":95,"total_tokens":133,"completion_tokens_details":{"reasoning_tokens":88}}`,
+			want:  88,
+		},
+		{
+			name:  "responses shape wins when both present",
+			usage: `{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"output_tokens_details":{"reasoning_tokens":5},"completion_tokens_details":{"reasoning_tokens":9}}`,
+			want:  5,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"0.05"},"finish_reason":"stop"}],"usage":` + tt.usage + `}`)
+			out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "m", request, request, raw, nil)
+			got := gjson.GetBytes(out, "usage.output_tokens_details.reasoning_tokens")
+			if !got.Exists() || got.Int() != tt.want {
+				t.Fatalf("reasoning_tokens = %v, want %d; usage=%s", got.Raw, tt.want, gjson.GetBytes(out, "usage").Raw)
+			}
+		})
+	}
+}
