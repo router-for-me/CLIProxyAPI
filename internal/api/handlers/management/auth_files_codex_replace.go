@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -506,17 +507,21 @@ func (h *Handler) deleteCodexAuthRel(ctx context.Context, relName string) error 
 	}
 	path := h.resolveCodexAuthPath(relName)
 	ids := h.authIDsForCodexPath(path, relName)
-	if errDelete := store.Delete(ctx, path); errDelete != nil {
-		return errDelete
+	errDelete := store.Delete(ctx, path)
+	// Object/postgres/git delete the local file before the remote call. If that
+	// remote call fails, the file is already gone and the watcher will not see a
+	// nested path, so drop runtime state anyway.
+	if errDelete != nil {
+		if _, errStat := os.Stat(path); errStat == nil {
+			return errDelete
+		}
 	}
 	h.removeAuthsForPath(ctx, path, relName)
-	// Nested files are not seen by the auth-dir watcher, so unregister runtime
-	// state here instead of waiting for applyCoreAuthRemoval.
 	for _, id := range ids {
 		registry.GetGlobalRegistry().UnregisterClient(id)
 		executor.CloseCodexWebsocketSessionsForAuthID(id, "oauth_replaced")
 	}
-	return nil
+	return errDelete
 }
 
 func (h *Handler) authIDsForCodexPath(path, relName string) []string {

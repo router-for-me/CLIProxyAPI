@@ -716,6 +716,51 @@ func TestSaveCodexOAuthRecordSiblingDeleteFailureIsReturned(t *testing.T) {
 	}
 }
 
+func TestSaveCodexOAuthRecordRemovesRuntimeWhenSiblingFileAlreadyGone(t *testing.T) {
+	authDir := t.TempDir()
+	keepRel := filepath.ToSlash(filepath.Join("team", "codex-keep.json"))
+	dropRel := filepath.ToSlash(filepath.Join("team", "codex-drop.json"))
+	dropPath := filepath.Join(authDir, filepath.FromSlash(dropRel))
+	writeCodexJSON(t, filepath.Join(authDir, "team"), "codex-keep.json", map[string]any{
+		"type":       "codex",
+		"account_id": testCodexAccountID,
+		"note":       "keep-nested",
+	})
+	writeCodexJSON(t, filepath.Join(authDir, "team"), "codex-drop.json", map[string]any{
+		"type":       "codex",
+		"account_id": testCodexAccountID,
+	})
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       dropRel,
+		FileName: dropRel,
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path": dropPath,
+		},
+	}); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = overlayListStore{
+		Store:              h.tokenStoreWithBaseDir(),
+		deleteErr:          fmt.Errorf("remote delete failed"),
+		deleteLocalThenErr: true,
+	}
+
+	record := newCodexRecord("user@example.com", testCodexAccountID, "pro", "new-access", "new-refresh")
+	_, errSave := h.saveCodexOAuthRecord(context.Background(), record, keepRel)
+	if errSave == nil || !strings.Contains(errSave.Error(), "remote delete failed") {
+		t.Fatalf("error = %v, want remote delete failed", errSave)
+	}
+	if _, errStat := os.Stat(dropPath); !os.IsNotExist(errStat) {
+		t.Fatalf("drop sibling still present: %v", errStat)
+	}
+	if _, ok := manager.GetByID(dropRel); ok {
+		t.Fatal("runtime auth for deleted sibling still registered")
+	}
+}
+
 func TestSaveCodexOAuthRecordListErrorDoesNotCreateFile(t *testing.T) {
 	authDir := t.TempDir()
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
@@ -775,10 +820,11 @@ func TestSaveCodexOAuthRecordUsesStoreListNotDiskScan(t *testing.T) {
 
 type overlayListStore struct {
 	coreauth.Store
-	list       []*coreauth.Auth
-	listErr    error
-	deleteErr  error
-	beforeList func()
+	list               []*coreauth.Auth
+	listErr            error
+	deleteErr          error
+	deleteLocalThenErr bool
+	beforeList         func()
 }
 
 func (s overlayListStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
@@ -799,6 +845,9 @@ func (s overlayListStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
 
 func (s overlayListStore) Delete(ctx context.Context, id string) error {
 	if s.deleteErr != nil {
+		if s.deleteLocalThenErr && s.Store != nil {
+			_ = s.Store.Delete(ctx, id)
+		}
 		return s.deleteErr
 	}
 	if s.Store == nil {
