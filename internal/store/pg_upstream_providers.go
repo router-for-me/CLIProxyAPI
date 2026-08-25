@@ -517,10 +517,12 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 	return nil
 }
 
-// replaceChildrenTx wipes and re-inserts all child rows for providerID within
-// the given transaction, mirroring the in-memory collections on p.
+// replaceChildrenTx replaces the non-entry child rows and synchronizes API-key
+// entries for providerID within the given transaction, mirroring the in-memory
+// collections on p.
 func (s *pgUpstreamProviderStore) replaceChildrenTx(ctx context.Context, tx *sql.Tx, providerID int64, p *UpstreamProvider) error {
-	// Delete existing children.
+	// Delete existing non-entry children. API-key entries are synchronized below
+	// so their persisted IDs can be retained across updates.
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE provider_id = $1`, s.models), providerID); err != nil {
 		return fmt.Errorf("postgres store: clear upstream provider models: %w", err)
 	}
@@ -529,9 +531,6 @@ func (s *pgUpstreamProviderStore) replaceChildrenTx(ctx context.Context, tx *sql
 	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE provider_id = $1`, s.excluded), providerID); err != nil {
 		return fmt.Errorf("postgres store: clear upstream provider excluded models: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE provider_id = $1`, s.entries), providerID); err != nil {
-		return fmt.Errorf("postgres store: clear upstream provider api key entries: %w", err)
 	}
 
 	// Insert models.
@@ -582,21 +581,156 @@ func (s *pgUpstreamProviderStore) replaceChildrenTx(ctx context.Context, tx *sql
 		}
 	}
 
-	// Insert api-key entries.
-	for i, e := range p.APIKeyEntries {
-		sortOrder := e.SortOrder
+	// Synchronize API-key entries by stable child ID. This is deliberately done
+	// after all non-entry child writes: any validation or SQL error rolls back the
+	// whole parent/children transaction.
+	if err := s.syncAPIKeyEntriesTx(ctx, tx, providerID, p); err != nil {
+		return err
+	}
+	return nil
+}
+
+// syncAPIKeyEntriesTx synchronizes the API-key child rows for providerID. A
+// positive incoming ID must already belong to providerID; zero means insert a
+// new row. The caller must hold the surrounding parent transaction.
+func (s *pgUpstreamProviderStore) syncAPIKeyEntriesTx(ctx context.Context, tx *sql.Tx, providerID int64, p *UpstreamProvider) error {
+	current, err := s.listAPIKeyEntryIDsTx(ctx, tx, providerID)
+	if err != nil {
+		return err
+	}
+
+	seenIncoming := make(map[int64]struct{}, len(p.APIKeyEntries))
+	for _, entry := range p.APIKeyEntries {
+		if entry.ID < 0 {
+			return fmt.Errorf("postgres store: upstream provider api key entry id must be positive")
+		}
+		if entry.ID == 0 {
+			continue
+		}
+		if _, duplicate := seenIncoming[entry.ID]; duplicate {
+			return fmt.Errorf("postgres store: duplicate upstream provider api key entry id %d", entry.ID)
+		}
+		seenIncoming[entry.ID] = struct{}{}
+		if _, belongs := current[entry.ID]; belongs {
+			continue
+		}
+
+		ownerID, found, errLookup := s.lookupAPIKeyEntryProviderTx(ctx, tx, entry.ID)
+		if errLookup != nil {
+			return errLookup
+		}
+		if !found {
+			return fmt.Errorf("postgres store: upstream provider api key entry id %d not found", entry.ID)
+		}
+		return fmt.Errorf("postgres store: upstream provider api key entry id %d belongs to upstream provider %d, not %d", entry.ID, ownerID, providerID)
+	}
+
+	// Delete omitted rows only after every positive incoming ID has been
+	// validated. Restricting the DELETE by provider_id is an additional guard
+	// against ever touching another provider's child row.
+	for id := range current {
+		if _, retained := seenIncoming[id]; retained {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+			`DELETE FROM %s WHERE provider_id = $1 AND id = $2`, s.entries,
+		), providerID, id); err != nil {
+			return fmt.Errorf("postgres store: delete omitted upstream provider api key entry: %w", err)
+		}
+	}
+
+	// Clear names on retained rows before applying the new values. PostgreSQL's
+	// immediate unique index otherwise rejects a valid name swap (for example,
+	// alpha -> beta and beta -> alpha) when rows are updated sequentially.
+	for id := range seenIncoming {
+		if _, exists := current[id]; !exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+			`UPDATE %s SET name = NULL WHERE provider_id = $1 AND id = $2`, s.entries,
+		), providerID, id); err != nil {
+			return fmt.Errorf("postgres store: clear upstream provider api key entry name: %w", err)
+		}
+	}
+
+	var out []UpstreamProviderAPIKey
+	if p.APIKeyEntries != nil {
+		out = make([]UpstreamProviderAPIKey, len(p.APIKeyEntries))
+	}
+	for i, entry := range p.APIKeyEntries {
+		sortOrder := entry.SortOrder
 		if sortOrder == 0 {
 			sortOrder = i
 		}
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-			INSERT INTO %s (provider_id, api_key, name, proxy_url, sort_order)
-			VALUES ($1,$2,$3,$4,$5)
-		`, s.entries), providerID, e.APIKey, nullableString(e.Name), nullableString(e.ProxyURL), sortOrder,
-		); err != nil {
-			return fmt.Errorf("postgres store: insert upstream provider api key entry: %w", err)
+		entry.ProviderID = providerID
+		entry.SortOrder = sortOrder
+		if entry.ID == 0 {
+			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+				INSERT INTO %s (provider_id, api_key, name, proxy_url, sort_order)
+				VALUES ($1,$2,$3,$4,$5)
+				RETURNING id
+			`, s.entries), providerID, entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), sortOrder).Scan(&entry.ID); err != nil {
+				return fmt.Errorf("postgres store: insert upstream provider api key entry: %w", err)
+			}
+		} else {
+			var persistedID int64
+			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+				UPDATE %s
+				SET api_key = $1, name = $2, proxy_url = $3, sort_order = $4
+				WHERE id = $5 AND provider_id = $6
+				RETURNING id
+			`, s.entries), entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), sortOrder, entry.ID, providerID).Scan(&persistedID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("postgres store: upstream provider api key entry id %d is missing from upstream provider %d", entry.ID, providerID)
+				}
+				return fmt.Errorf("postgres store: update upstream provider api key entry %d: %w", entry.ID, err)
+			}
+			entry.ID = persistedID
 		}
+		out[i] = entry
 	}
+	p.APIKeyEntries = out
 	return nil
+}
+
+// listAPIKeyEntryIDsTx locks and returns the existing child IDs for a provider.
+func (s *pgUpstreamProviderStore) listAPIKeyEntryIDsTx(ctx context.Context, tx *sql.Tx, providerID int64) (map[int64]struct{}, error) {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+		`SELECT id FROM %s WHERE provider_id = $1 FOR UPDATE`, s.entries,
+	), providerID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: list upstream provider api key entries: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	ids := make(map[int64]struct{})
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("postgres store: scan upstream provider api key entry id: %w", err)
+		}
+		ids[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres store: iterate upstream provider api key entry ids: %w", err)
+	}
+	return ids, nil
+}
+
+// lookupAPIKeyEntryProviderTx finds the owner of an incoming positive child ID.
+// It intentionally returns only the provider ID and never reads the secret.
+func (s *pgUpstreamProviderStore) lookupAPIKeyEntryProviderTx(ctx context.Context, tx *sql.Tx, entryID int64) (int64, bool, error) {
+	var ownerID int64
+	err := tx.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT provider_id FROM %s WHERE id = $1 FOR UPDATE`, s.entries,
+	), entryID).Scan(&ownerID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("postgres store: find upstream provider api key entry %d: %w", entryID, err)
+	}
+	return ownerID, true, nil
 }
 
 var (
