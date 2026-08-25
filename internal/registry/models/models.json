@@ -3932,5 +3932,55 @@
       "context_length": 200000,
       "max_completion_tokens": 32768
     }
+  ],
+  "cursor": [
+    {
+      "id": "cursor-claude-sonnet-4-5",
+      "object": "model",
+      "created": 1759104000,
+      "owned_by": "cursor",
+      "type": "cursor",
+      "display_name": "Cursor Claude 4.5 Sonnet",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": ["text", "image"],
+      "supportedOutputModalities": ["text"]
+    },
+    {
+      "id": "cursor-claude-opus-4",
+      "object": "model",
+      "created": 1746316800,
+      "owned_by": "cursor",
+      "type": "cursor",
+      "display_name": "Cursor Claude 4 Opus",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": ["text", "image"],
+      "supportedOutputModalities": ["text"]
+    },
+    {
+      "id": "cursor-gpt-5",
+      "object": "model",
+      "created": 1767225600,
+      "owned_by": "cursor",
+      "type": "cursor",
+      "display_name": "Cursor GPT-5",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": ["text", "image", "audio"],
+      "supportedOutputModalities": ["text"]
+    },
+    {
+      "id": "cursor-gpt-5-mini",
+      "object": "model",
+      "created": 1767225600,
+      "owned_by": "cursor",
+      "type": "cursor",
+      "display_name": "Cursor GPT-5 Mini",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": ["text", "image"],
+      "supportedOutputModalities": ["text"]
+    }
   ]
 }
