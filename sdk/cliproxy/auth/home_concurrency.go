@@ -237,6 +237,17 @@ func decodeHomeDispatchError(raw []byte) error {
 	switch strings.ToLower(code) {
 	case "model_not_found":
 		result.HTTPStatus = http.StatusNotFound
+	case "model_cooldown":
+		result.HTTPStatus = http.StatusTooManyRequests
+		cooldownErr := &homeDispatchRetryAfterError{cause: result}
+		if detail.RetryAfterMS > 0 {
+			cooldownErr.retryAfter = time.Duration(detail.RetryAfterMS) * time.Millisecond
+		}
+		if detail.RequestRetry != nil && *detail.RequestRetry >= 0 {
+			cooldownErr.requestRetry = *detail.RequestRetry
+			cooldownErr.hasRequestRetry = true
+		}
+		return cooldownErr
 	case "authentication_error", "unauthorized", "no_credentials", "invalid_credential":
 		result.HTTPStatus = http.StatusUnauthorized
 	case "credential_concurrency_exceeded", "credential_model_concurrency_exceeded":
@@ -263,13 +274,30 @@ func verifyAccountedHomeConcurrencyIdentity(tuple homeConcurrencyTuple, auth *Au
 	return nil
 }
 
-// SafeResponseHeaders returns trusted response headers only for CPA's concrete Home busy error.
+// SafeResponseHeaders returns trusted response headers only for concrete
+// Home-generated retry errors.
 func SafeResponseHeaders(err error) http.Header {
 	var busy *HomeConcurrencyBusyError
-	if !errors.As(err, &busy) || busy == nil {
+	if errors.As(err, &busy) && busy != nil {
+		return busy.SafeResponseHeaders()
+	}
+	var exhausted *homeRetryRoundExhaustedError
+	if errors.As(err, &exhausted) && exhausted != nil {
+		retryAfter := exhausted.RetryAfter()
+		if retryAfter == nil {
+			return nil
+		}
+		return safeRetryAfterHeader(*retryAfter)
+	}
+	var cooldown *homeDispatchRetryAfterError
+	if !errors.As(err, &cooldown) || cooldown == nil {
 		return nil
 	}
-	return busy.SafeResponseHeaders()
+	retryAfter := cooldown.RetryAfter()
+	if retryAfter == nil {
+		return nil
+	}
+	return safeRetryAfterHeader(*retryAfter)
 }
 
 func safeRetryAfterHeader(retryAfter time.Duration) http.Header {

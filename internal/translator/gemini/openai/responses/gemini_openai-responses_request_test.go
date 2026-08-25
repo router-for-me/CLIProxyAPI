@@ -1158,17 +1158,12 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputVariations(t *t
 		output := ConvertOpenAIResponsesRequestToGemini("gemini-3.7-flash-high", []byte(inputJSON), false)
 		userContent := gjson.GetBytes(output, "contents.1")
 		parts := userContent.Get("parts").Array()
-		if len(parts) != 2 {
-			t.Fatalf("expected 2 parts, got %d; raw: %s", len(parts), userContent.Raw)
+		if len(parts) != 1 {
+			t.Fatalf("expected 1 part, got %d; raw: %s", len(parts), userContent.Raw)
 		}
-		if got := parts[0].Get("functionResponse.response.result").String(); got != "done" {
-			t.Fatalf("expected result 'done', got %q", got)
-		}
-		if got := parts[1].Get("inline_data.mime_type").String(); got != "image/jpeg" {
-			t.Fatalf("expected mime_type 'image/jpeg', got %q", got)
-		}
-		if got := parts[1].Get("inline_data.data").String(); got != "/9j/4AAQSkZJRg==" {
-			t.Fatalf("expected image data '/9j/4AAQSkZJRg==', got %q", got)
+		expectedResult := `[{"type":"input_text","text":"done"},{"type":"input_image","image_url":"data:image/jpeg;base64,/9j/4AAQSkZJRg=="}]`
+		if got := parts[0].Get("functionResponse.response.result").String(); got != expectedResult {
+			t.Fatalf("expected result %q, got %q", expectedResult, got)
 		}
 	})
 
@@ -1245,7 +1240,11 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputVariations(t *t
 				{
 					"type": "function_call_output",
 					"call_id": "call_1",
-					"output": "{\"ok\":true,\"caption\":\"hero\",\"image_url\":\"https://example.com/hero.png\"}"
+					"output": {
+						"ok": true,
+						"caption": "hero",
+						"image_url": "https://example.com/hero.png"
+					}
 				}
 			]
 		}`
@@ -1295,7 +1294,7 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputVariations(t *t
 		}
 	})
 
-	t.Run("stringified single-element object array preserved as raw JSON", func(t *testing.T) {
+	t.Run("stringified single-element object array preserved as string", func(t *testing.T) {
 		inputJSON := `{
 			"model": "gemini-3.7-flash-high",
 			"input": [
@@ -1318,9 +1317,8 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputVariations(t *t
 		if len(parts) != 1 {
 			t.Fatalf("expected 1 part, got %d; raw: %s", len(parts), userContent.Raw)
 		}
-		resultArr := parts[0].Get("functionResponse.response.result").Array()
-		if len(resultArr) != 1 || resultArr[0].Get("id").Int() != 1 {
-			t.Fatalf("expected result to be [{\"id\":1}], got %s", parts[0].Get("functionResponse.response.result").Raw)
+		if got := parts[0].Get("functionResponse.response.result").String(); got != `[{"id":1}]` {
+			t.Fatalf("expected result to be %q, got %q", `[{"id":1}]`, got)
 		}
 	})
 
@@ -1356,4 +1354,206 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputVariations(t *t
 			t.Fatalf("expected data 'iVBORw0KGgoAAAANSUhEUg==', got %q", got)
 		}
 	})
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_AdditionalToolsNamespaceAndCustom(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "additional_tools",
+				"role": "developer",
+				"tools": [
+					{
+						"type": "namespace",
+						"name": "functions",
+						"tools": [
+							{
+								"type": "custom",
+								"name": "exec",
+								"description": "Execute a command"
+							},
+							{
+								"type": "function",
+								"name": "continuity_probe",
+								"description": "Return a continuity probe",
+								"parameters": {
+									"type": "object",
+									"properties": {
+										"value": {"type": "string"}
+									},
+									"required": ["value"]
+								}
+							}
+						]
+					}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "input_text",
+						"text": "Run probe"
+					}
+				]
+			}
+		],
+		"tool_choice": {
+			"type": "function",
+			"name": "continuity_probe",
+			"namespace": "functions"
+		}
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	decls := gjson.GetBytes(output, "tools.0.functionDeclarations").Array()
+	if len(decls) != 2 {
+		t.Fatalf("expected 2 functionDeclarations, got %d; raw: %s", len(decls), output)
+	}
+
+	execDecl := decls[0]
+	if got := execDecl.Get("name").String(); got != "functions__exec" {
+		t.Fatalf("decl 0 name = %q, want functions__exec", got)
+	}
+	if got := execDecl.Get("parametersJsonSchema.properties.input.type").String(); got != "string" {
+		t.Fatalf("decl 0 custom input schema missing: %s", execDecl.Raw)
+	}
+
+	probeDecl := decls[1]
+	if got := probeDecl.Get("name").String(); got != "functions__continuity_probe" {
+		t.Fatalf("decl 1 name = %q, want functions__continuity_probe", got)
+	}
+
+	mode := gjson.GetBytes(output, "toolConfig.functionCallingConfig.mode").String()
+	if mode != "ANY" {
+		t.Fatalf("toolConfig mode = %q, want ANY", mode)
+	}
+	allowed := gjson.GetBytes(output, "toolConfig.functionCallingConfig.allowedFunctionNames.0").String()
+	if allowed != "functions__continuity_probe" {
+		t.Fatalf("allowedFunctionNames = %q, want functions__continuity_probe", allowed)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_ReplaysCustomToolCallAndOutput(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "namespace",
+						"name": "functions",
+						"tools": [
+							{"type": "custom", "name": "exec"}
+						]
+					}
+				]
+			},
+			{
+				"type": "custom_tool_call",
+				"call_id": "call_1",
+				"name": "exec",
+				"namespace": "functions",
+				"input": "pwd"
+			},
+			{
+				"type": "custom_tool_call_output",
+				"call_id": "call_1",
+				"output": "/workspace"
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) < 2 {
+		t.Fatalf("expected at least 2 contents, got %d; raw: %s", len(contents), output)
+	}
+
+	callPart := contents[0].Get("parts.0.functionCall")
+	if !callPart.Exists() {
+		t.Fatalf("missing functionCall in content 0: %s", contents[0].Raw)
+	}
+	if got := callPart.Get("name").String(); got != "functions__exec" {
+		t.Fatalf("functionCall name = %q, want functions__exec", got)
+	}
+	if got := callPart.Get("args.input").String(); got != "pwd" {
+		t.Fatalf("functionCall args.input = %q, want pwd", got)
+	}
+
+	respPart := contents[1].Get("parts.0.functionResponse")
+	if !respPart.Exists() {
+		t.Fatalf("missing functionResponse in content 1: %s", contents[1].Raw)
+	}
+	if got := respPart.Get("name").String(); got != "functions__exec" {
+		t.Fatalf("functionResponse name = %q, want functions__exec", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_TwoTurnCustomToolRoundtripWithReasoning(t *testing.T) {
+	// Turn 2 request: includes reasoning carrier before custom_tool_call, then custom_tool_call_output
+	inputJSON := `{
+		"model": "gemini-3.6-flash-high",
+		"input": [
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "namespace",
+						"name": "functions",
+						"tools": [
+							{"type": "custom", "name": "exec"}
+						]
+					}
+				]
+			},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Run pwd"}]},
+			{"type": "reasoning", "encrypted_content": "` + testResponsesGeminiThoughtSignature + `", "summary": [{"type": "summary_text", "text": "executing pwd"}]},
+			{
+				"type": "custom_tool_call",
+				"call_id": "call_1",
+				"name": "exec",
+				"namespace": "functions",
+				"input": "pwd"
+			},
+			{
+				"type": "custom_tool_call_output",
+				"call_id": "call_1",
+				"output": "/workspace"
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", []byte(inputJSON), false)
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 contents (user, model, user), got %d; raw: %s", len(contents), output)
+	}
+
+	modelParts := contents[1].Get("parts").Array()
+	if len(modelParts) != 2 {
+		t.Fatalf("expected 2 parts in model content (thought + functionCall), got %d; raw: %s", len(modelParts), contents[1].Raw)
+	}
+	if !modelParts[0].Get("thought").Bool() || modelParts[0].Get("text").String() != "executing pwd" {
+		t.Fatalf("expected thought part with 'executing pwd', got: %s", modelParts[0].Raw)
+	}
+	if modelParts[1].Get("functionCall.name").String() != "functions__exec" {
+		t.Fatalf("expected functionCall name 'functions__exec', got: %s", modelParts[1].Raw)
+	}
+	if modelParts[1].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature {
+		t.Fatalf("expected thoughtSignature on functionCall, got: %s", modelParts[1].Raw)
+	}
+
+	userRespParts := contents[2].Get("parts").Array()
+	if len(userRespParts) != 1 {
+		t.Fatalf("expected 1 part in user tool response, got %d; raw: %s", len(userRespParts), contents[2].Raw)
+	}
+	if userRespParts[0].Get("functionResponse.name").String() != "functions__exec" {
+		t.Fatalf("expected functionResponse name 'functions__exec', got: %s", userRespParts[0].Raw)
+	}
+	if userRespParts[0].Get("functionResponse.response.result").String() != "/workspace" {
+		t.Fatalf("expected functionResponse result '/workspace', got: %s", userRespParts[0].Raw)
+	}
 }

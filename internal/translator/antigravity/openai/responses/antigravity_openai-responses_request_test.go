@@ -355,3 +355,49 @@ func TestConvertOpenAIResponsesRequestToAntigravity_AttachesParallelToolImagesTo
 		t.Fatalf("call_b image = %q, want BBB. Output: %s", got["call_b"], out)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToAntigravity_PreservesAdditionalToolsAndToolConfig(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"input": [
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "namespace",
+						"name": "functions",
+						"tools": [
+							{"type": "custom", "name": "exec", "description": "Execute a command"},
+							{"type": "function", "name": "continuity_probe", "description": "Probe", "parameters": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}}
+						]
+					}
+				]
+			},
+			{"role": "user", "content": [{"type": "input_text", "text": "test"}]}
+		],
+		"tool_choice": {
+			"type": "function",
+			"name": "continuity_probe",
+			"namespace": "functions"
+		}
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	if !gjson.ValidBytes(out) {
+		t.Fatalf("invalid JSON output: %s", out)
+	}
+
+	decls := gjson.GetBytes(out, "request.tools.0.functionDeclarations").Array()
+	if len(decls) != 2 {
+		t.Fatalf("expected 2 functionDeclarations in request.tools, got %d; raw: %s", len(decls), out)
+	}
+
+	mode := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String()
+	if mode != "ANY" {
+		t.Fatalf("mode = %q, want ANY", mode)
+	}
+	allowed := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames.0").String()
+	if allowed != "functions__continuity_probe" {
+		t.Fatalf("allowedFunctionNames.0 = %q, want functions__continuity_probe", allowed)
+	}
+}

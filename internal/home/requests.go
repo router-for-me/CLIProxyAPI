@@ -10,6 +10,9 @@ type authDispatchRequest struct {
 	SessionID           string            `json:"session_id,omitempty"`
 	Headers             map[string]string `json:"headers,omitempty"`
 	CredentialPolicy    string            `json:"credential_policy,omitempty"`
+	RetryRound          *int              `json:"retry_round,omitempty"`
+	ExcludedAuthIDs     *[]string         `json:"excluded_auth_ids,omitempty"`
+	PinnedAuthID        string            `json:"pinned_auth_id,omitempty"`
 }
 
 type modelsRequest struct {

@@ -1641,6 +1641,83 @@ func TestApplyCodexHeadersDefaultsToCodexCloaking(t *testing.T) {
 	}
 }
 
+func TestApplyCodexHeaders_EmptyAPIKey_OmitsAuthorizationAndOAuthHeaders(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"auth_kind": "apikey",
+			"base_url":  "https://custom-codex.example.com",
+		},
+		Metadata: map[string]any{
+			"account_id": "acc-12345",
+		},
+	}
+	cfg := &config.Config{
+		Codex: config.CodexConfig{
+			DisableCodexCloaking: true,
+		},
+		CodexHeaderDefaults: config.CodexHeaderDefaults{
+			UserAgent: "oauth-default-ua",
+		},
+	}
+	applyCodexHeaders(req, auth, "", false, cfg)
+
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty for empty API key", got)
+	}
+	if got := req.Header.Get("Chatgpt-Account-Id"); got != "" {
+		t.Fatalf("Chatgpt-Account-Id = %q, want empty for API key auth_kind", got)
+	}
+	if got := req.Header.Get("Originator"); got != "" {
+		t.Fatalf("Originator = %q, want empty for API key auth_kind when client originator omitted", got)
+	}
+	if got := req.Header.Get("User-Agent"); got == "oauth-default-ua" {
+		t.Fatalf("User-Agent unexpectedly used OAuth default UA %q for API key auth_kind", got)
+	}
+}
+
+func TestApplyCodexWebsocketHeaders_EmptyAPIKey_OmitsAuthorizationAndOAuthHeaders(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"auth_kind": "apikey",
+			"base_url":  "https://custom-codex.example.com",
+		},
+		Metadata: map[string]any{
+			"account_id": "acc-ws-123",
+		},
+	}
+	cfg := &config.Config{
+		Codex: config.CodexConfig{
+			DisableCodexCloaking: true,
+		},
+		CodexHeaderDefaults: config.CodexHeaderDefaults{
+			UserAgent:    "oauth-default-ua",
+			BetaFeatures: "oauth-beta",
+		},
+	}
+	headers := applyCodexWebsocketHeaders(context.Background(), nil, auth, "", cfg)
+	if got := headers.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty for empty API key", got)
+	}
+	if got := headers.Get("ChatGPT-Account-ID"); got != "" {
+		t.Fatalf("ChatGPT-Account-ID = %q, want empty for API key auth_kind", got)
+	}
+	if got := headers.Get("Originator"); got != "" {
+		t.Fatalf("Originator = %q, want empty for API key auth_kind", got)
+	}
+	if got := headers.Get("x-codex-beta-features"); got != "" {
+		t.Fatalf("x-codex-beta-features = %q, want empty for API key auth_kind", got)
+	}
+	if got := headers.Get("User-Agent"); got == "oauth-default-ua" {
+		t.Fatalf("User-Agent unexpectedly used OAuth default UA %q for API key auth_kind", got)
+	}
+}
+
 func TestApplyModelHeaderOverridesFromModelConfig(t *testing.T) {
 	const wantUA = "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)"
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)

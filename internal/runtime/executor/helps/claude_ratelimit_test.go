@@ -113,6 +113,58 @@ func TestParseClaudeRateLimitReset_AllCases(t *testing.T) {
 		}
 	})
 
+	t.Run("fable-only rejection with 7d_oi reset and retry-after uses retry-after only", func(t *testing.T) {
+		h := make(http.Header)
+		h.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+		h.Set("Anthropic-Ratelimit-Unified-5h-Status", "allowed")
+		h.Set("Anthropic-Ratelimit-Unified-7d-Status", "allowed")
+		h.Set("Anthropic-Ratelimit-Unified-7d_oi-Status", "rejected")
+		h.Set("Anthropic-Ratelimit-Unified-7d_oi-Reset", strconv.FormatInt(now.Add(7*24*time.Hour).Unix(), 10))
+		h.Set("Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(now.Add(7*24*time.Hour).Unix(), 10))
+		h.Set("Retry-After", "60")
+
+		got := parseClaudeRateLimitResetWithFuzz(h, now, 0, 0)
+		if got == nil {
+			t.Fatal("expected non-nil RetryAfter")
+		}
+		if *got != 60*time.Second {
+			t.Fatalf("expected 60s from Retry-After, got %v", *got)
+		}
+	})
+
+	t.Run("fable-only rejection with 7d_oi reset only returns nil for exponential backoff", func(t *testing.T) {
+		h := make(http.Header)
+		h.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+		h.Set("Anthropic-Ratelimit-Unified-5h-Status", "allowed")
+		h.Set("Anthropic-Ratelimit-Unified-7d-Status", "allowed")
+		h.Set("Anthropic-Ratelimit-Unified-7d_oi-Status", "rejected")
+		h.Set("Anthropic-Ratelimit-Unified-7d_oi-Reset", strconv.FormatInt(now.Add(7*24*time.Hour).Unix(), 10))
+		h.Set("Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(now.Add(7*24*time.Hour).Unix(), 10))
+
+		got := ParseClaudeRateLimitReset(h, now)
+		if got != nil {
+			t.Fatalf("expected nil for fable-only rejection without retry-after, got %v", *got)
+		}
+	})
+
+	t.Run("non-fable combined rejection with 7d_oi reset keeps longer duration", func(t *testing.T) {
+		h := make(http.Header)
+		h.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+		h.Set("Anthropic-Ratelimit-Unified-5h-Status", "rejected")
+		h.Set("Anthropic-Ratelimit-Unified-5h-Reset", strconv.FormatInt(now.Add(5*time.Hour).Unix(), 10))
+		h.Set("Anthropic-Ratelimit-Unified-7d-Status", "allowed")
+		h.Set("Anthropic-Ratelimit-Unified-7d_oi-Status", "rejected")
+		h.Set("Anthropic-Ratelimit-Unified-7d_oi-Reset", strconv.FormatInt(now.Add(7*24*time.Hour).Unix(), 10))
+
+		got := parseClaudeRateLimitResetWithFuzz(h, now, 0, 0)
+		if got == nil {
+			t.Fatal("expected non-nil RetryAfter")
+		}
+		if *got < 7*24*time.Hour-5*time.Second || *got > 7*24*time.Hour+5*time.Second {
+			t.Fatalf("expected ~7d, got %v", *got)
+		}
+	})
+
 	t.Run("past timestamp returns nil", func(t *testing.T) {
 		h := make(http.Header)
 		h.Set("Anthropic-Ratelimit-Unified-5h-Status", "rejected")

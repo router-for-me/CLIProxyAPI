@@ -610,8 +610,14 @@ func isZlibHeader(header []byte) bool {
 // single authority for every decision that has to agree with the OAuth beta
 // profile, including the extended-cache-ttl beta and the matching body cache ttl.
 func claudeCredentialUsesOAuth(auth *cliproxyauth.Auth, apiKey string) bool {
+	if isClaudeOAuthToken(apiKey) {
+		return true
+	}
+	if auth != nil && auth.AuthKind() == cliproxyauth.AuthKindAPIKey {
+		return false
+	}
 	hasAPIKeyAttr := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
-	return isClaudeOAuthToken(apiKey) || !hasAPIKeyAttr
+	return !hasAPIKeyAttr
 }
 
 func copyClaudeCallerFingerprintHeaders(dst, src http.Header) {
@@ -692,11 +698,17 @@ func applyClaudeHeadersWithNativeProfile(
 	preserveCallerFingerprint := !applyCLIFingerprint && !confirmedClaudeCode
 	useOAuthBetas := fp.UseOAuthBetas
 	isAnthropicBase := isAnthropicUpstreamURL(r.URL)
-	if isAnthropicBase && useAPIKey {
-		r.Header.Del("Authorization")
-		r.Header.Set("x-api-key", apiKey)
+	if strings.TrimSpace(apiKey) != "" {
+		if isAnthropicBase && useAPIKey {
+			r.Header.Del("Authorization")
+			r.Header.Set("x-api-key", apiKey)
+		} else {
+			r.Header.Del("x-api-key")
+			r.Header.Set("Authorization", "Bearer "+apiKey)
+		}
 	} else {
-		r.Header.Set("Authorization", "Bearer "+apiKey)
+		r.Header.Del("Authorization")
+		r.Header.Del("x-api-key")
 	}
 	r.Header.Set("Content-Type", "application/json")
 

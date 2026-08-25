@@ -87,17 +87,19 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 	for i := range entries {
 		entry := entries[i]
 		key := strings.TrimSpace(entry.APIKey)
-		if key == "" {
+		base := strings.TrimSpace(entry.BaseURL)
+		if key == "" && base == "" {
 			continue
 		}
 		prefix := strings.TrimSpace(entry.Prefix)
-		base := strings.TrimSpace(entry.BaseURL)
 		proxyURL := strings.TrimSpace(entry.ProxyURL)
-		id, token := idGen.Next(idKind, key, base)
+		id, token := idGen.Next(idKind, key, base, proxyURL, prefix, config.FormatSortedHeaders(entry.Headers))
 		attrs := map[string]string{
 			"source":       fmt.Sprintf("config:%s[%s]", sourceName, token),
-			"api_key":      key,
 			"config_index": strconv.Itoa(i),
+		}
+		if key != "" {
+			attrs["api_key"] = key
 		}
 		metadata := map[string]any{}
 		if entry.DisableCooling != nil {
@@ -147,16 +149,19 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 	for i := range cfg.ClaudeKey {
 		ck := cfg.ClaudeKey[i]
 		key := strings.TrimSpace(ck.APIKey)
-		if key == "" {
+		base := strings.TrimSpace(ck.BaseURL)
+		if key == "" && base == "" {
 			continue
 		}
 		prefix := strings.TrimSpace(ck.Prefix)
-		base := strings.TrimSpace(ck.BaseURL)
-		id, token := idGen.Next("claude:apikey", key, base)
+		proxyURL := strings.TrimSpace(ck.ProxyURL)
+		id, token := idGen.Next("claude:apikey", key, base, proxyURL, prefix, config.FormatSortedHeaders(ck.Headers))
 		attrs := map[string]string{
 			"source":       fmt.Sprintf("config:claude[%s]", token),
-			"api_key":      key,
 			"config_index": strconv.Itoa(i),
+		}
+		if key != "" {
+			attrs["api_key"] = key
 		}
 		metadata := map[string]any{}
 		if ck.DisableCooling != nil {
@@ -181,7 +186,6 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
-		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "claude",
@@ -281,16 +285,19 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 	for i := range entries {
 		entry := entries[i]
 		key := strings.TrimSpace(entry.APIKey)
-		if key == "" {
+		baseURL := strings.TrimSpace(entry.BaseURL)
+		if key == "" && baseURL == "" {
 			continue
 		}
 		prefix := strings.TrimSpace(entry.Prefix)
-		baseURL := strings.TrimSpace(entry.BaseURL)
-		id, token := idGen.Next(provider+":apikey", key, baseURL)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		id, token := idGen.Next(provider+":apikey", key, baseURL, proxyURL, prefix, config.FormatSortedHeaders(entry.Headers))
 		attrs := map[string]string{
 			"source":       fmt.Sprintf("config:%s[%s]", provider, token),
-			"api_key":      key,
 			"config_index": strconv.Itoa(i),
+		}
+		if key != "" {
+			attrs["api_key"] = key
 		}
 		metadata := map[string]any{}
 		if entry.DisableCooling != nil {

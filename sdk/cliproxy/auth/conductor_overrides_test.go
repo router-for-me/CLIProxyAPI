@@ -36,9 +36,12 @@ func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testi
 				Unavailable:    true,
 				Status:         StatusError,
 				NextRetryAfter: next,
+				LastError:      &Error{HTTPStatus: http.StatusInternalServerError, Message: "upstream unavailable"},
 			},
 		},
 	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
 	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
 	}
@@ -83,6 +86,255 @@ func TestManager_ShouldRetryAfterError_SkipsWrappedHomeConcurrencyBusy(t *testin
 	}
 }
 
+func TestManager_ShouldRetryAfterError_RetriesLocalRoundWithoutCooldown(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(1, 0, 0)
+	model := "gpt-retry-without-cooldown-" + uuid.NewString()
+	registry.GetGlobalRegistry().RegisterClient("retry-auth", "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient("retry-auth") })
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: "retry-auth", Provider: "codex"}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusBadGateway} {
+		wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: status, Message: "retryable failure"}, 0, []string{"codex"}, model, 0)
+		if !shouldRetry || wait != 0 {
+			t.Fatalf("status %d retry = (%v, %t), want (0, true)", status, wait, shouldRetry)
+		}
+		if _, shouldRetry = m.shouldRetryAfterError(&Error{HTTPStatus: status, Message: "retryable failure"}, 1, []string{"codex"}, model, 0); shouldRetry {
+			t.Fatalf("status %d retried after the configured additional round", status)
+		}
+	}
+}
+
+func TestManager_ShouldRetryAfterError_DoesNotWaitWhenAnotherCredentialIsAvailable(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(1, time.Minute, 1)
+	model := "retry-available-credential-" + uuid.NewString()
+	next := time.Now().Add(30 * time.Second)
+	auths := []*Auth{
+		{
+			ID:       "cooling-" + uuid.NewString(),
+			Provider: "codex",
+			ModelStates: map[string]*ModelState{
+				model: {Unavailable: true, Status: StatusError, NextRetryAfter: next},
+			},
+		},
+		{ID: "available-" + uuid.NewString(), Provider: "codex"},
+	}
+	for _, auth := range auths {
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+		if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+
+	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, 0, []string{"codex"}, model, time.Minute)
+	if !shouldRetry || wait != 0 {
+		t.Fatalf("retry with available credential = (%v, %t), want immediate retry", wait, shouldRetry)
+	}
+}
+
+func TestManager_ShouldRetryAfterError_IgnoresUnrelatedModelOverride(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 0)
+	targetModel := "retry-target-" + uuid.NewString()
+	unrelatedModel := "retry-unrelated-" + uuid.NewString()
+	registryRef := registry.GetGlobalRegistry()
+	registryRef.RegisterClient("target-auth", "codex", []*registry.ModelInfo{{ID: targetModel}})
+	registryRef.RegisterClient("unrelated-auth", "codex", []*registry.ModelInfo{{ID: unrelatedModel}})
+	t.Cleanup(func() {
+		registryRef.UnregisterClient("target-auth")
+		registryRef.UnregisterClient("unrelated-auth")
+	})
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: "target-auth", Provider: "codex", Metadata: map[string]any{"request_retry": 0}}); errRegister != nil {
+		t.Fatalf("register target auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: "unrelated-auth", Provider: "codex", Metadata: map[string]any{"request_retry": 2}}); errRegister != nil {
+		t.Fatalf("register unrelated auth: %v", errRegister)
+	}
+
+	if wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: http.StatusBadGateway, Message: "retryable failure"}, 0, []string{"codex"}, targetModel, 0); shouldRetry || wait != 0 {
+		t.Fatalf("unrelated model override retry = (%v, %t), want (0, false)", wait, shouldRetry)
+	}
+}
+
+func TestManager_ShouldRetryAfterError_IgnoresDisabledRetryOverride(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 0)
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: "active-auth", Provider: "codex", Metadata: map[string]any{"request_retry": 0}}); errRegister != nil {
+		t.Fatalf("register active auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: "disabled-auth", Provider: "codex", Disabled: true, Metadata: map[string]any{"request_retry": 2}}); errRegister != nil {
+		t.Fatalf("register disabled auth: %v", errRegister)
+	}
+
+	if wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: http.StatusBadGateway, Message: "retryable failure"}, 0, []string{"codex"}, "", 0); shouldRetry || wait != 0 {
+		t.Fatalf("disabled override retry = (%v, %t), want (0, false)", wait, shouldRetry)
+	}
+}
+
+func TestManager_ShouldRetryAfterError_IgnoresNonRoundCooldownOverrides(t *testing.T) {
+	tests := []struct {
+		name  string
+		state *ModelState
+	}{
+		{name: "model disabled", state: &ModelState{Status: StatusDisabled}},
+		{name: "unauthorized", state: &ModelState{Status: StatusError, Unavailable: true, LastError: &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"}}},
+		{name: "payment required", state: &ModelState{Status: StatusError, Unavailable: true, LastError: &Error{HTTPStatus: http.StatusPaymentRequired, Message: "payment required"}}},
+		{name: "not found", state: &ModelState{Status: StatusError, Unavailable: true, LastError: &Error{HTTPStatus: http.StatusNotFound, Message: "not found"}}},
+		{name: "model unsupported", state: &ModelState{Status: StatusError, Unavailable: true, LastError: &Error{HTTPStatus: http.StatusBadRequest, Message: "model not supported"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			manager.SetRetryConfig(0, time.Minute, 0)
+			model := "retry-non-round-" + uuid.NewString()
+			if test.state.Status != StatusDisabled {
+				test.state.NextRetryAfter = time.Now().Add(time.Minute)
+			}
+			auths := []*Auth{
+				{ID: "retry-round-eligible-" + uuid.NewString(), Provider: "codex", Metadata: map[string]any{"request_retry": 0}},
+				{
+					ID:          "retry-round-ineligible-" + uuid.NewString(),
+					Provider:    "codex",
+					Metadata:    map[string]any{"request_retry": 2},
+					ModelStates: map[string]*ModelState{model: test.state},
+				},
+			}
+			for _, auth := range auths {
+				registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+				if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+					t.Fatalf("register %s: %v", auth.ID, errRegister)
+				}
+			}
+
+			if wait, shouldRetry := manager.shouldRetryAfterError(&Error{HTTPStatus: http.StatusBadGateway, Message: "upstream unavailable"}, 0, []string{"codex"}, model, time.Minute); shouldRetry || wait != 0 {
+				t.Fatalf("non-round cooldown override retry = (%v, %t), want (0, false)", wait, shouldRetry)
+			}
+		})
+	}
+}
+
+func TestManager_ShouldRetryAfterError_IgnoresRequestIneligibleOverrides(t *testing.T) {
+	tests := []struct {
+		name       string
+		ctx        context.Context
+		opts       cliproxyexecutor.Options
+		eligible   *Auth
+		ineligible *Auth
+	}{
+		{
+			name: "credential policy",
+			ctx:  withCredentialPolicy(context.Background(), CredentialPolicyCodexAlphaSearchV1),
+			eligible: &Auth{
+				ID:         "retry-policy-eligible",
+				Provider:   "codex",
+				Attributes: map[string]string{"auth_kind": "oauth"},
+				Metadata:   map[string]any{"request_retry": 0},
+			},
+			ineligible: &Auth{
+				ID:         "retry-policy-ineligible",
+				Provider:   "codex",
+				Attributes: map[string]string{"api_key": "ordinary"},
+				Metadata:   map[string]any{"request_retry": 2},
+			},
+		},
+		{
+			name: "pinned credential",
+			ctx:  context.Background(),
+			opts: cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: "retry-pinned-eligible"}},
+			eligible: &Auth{
+				ID:       "retry-pinned-eligible",
+				Provider: "codex",
+				Metadata: map[string]any{"request_retry": 0},
+			},
+			ineligible: &Auth{
+				ID:       "retry-pinned-ineligible",
+				Provider: "codex",
+				Metadata: map[string]any{"request_retry": 2},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			manager.SetRetryConfig(0, 0, 0)
+			model := "retry-eligibility-" + uuid.NewString()
+			for _, auth := range []*Auth{test.eligible, test.ineligible} {
+				registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+				if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+					t.Fatalf("register %s: %v", auth.ID, errRegister)
+				}
+			}
+
+			wait, shouldRetry := manager.shouldRetryAfterErrorWithHomeRetryLimit(test.ctx, test.opts, &Error{HTTPStatus: http.StatusBadGateway, Message: "retryable failure"}, 0, []string{"codex"}, model, 0, -1, 0)
+			if shouldRetry || wait != 0 {
+				t.Fatalf("request-ineligible override retry = (%v, %t), want (0, false)", wait, shouldRetry)
+			}
+		})
+	}
+}
+
+func TestManager_RequestRetryRunsAdditionalLocalRoundWithoutCooldown(t *testing.T) {
+	previousDisableCooling := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previousDisableCooling) })
+
+	tests := []struct {
+		name    string
+		execute func(*Manager, cliproxyexecutor.Request) error
+	}{
+		{
+			name: "nonstream",
+			execute: func(m *Manager, req cliproxyexecutor.Request) error {
+				_, errExecute := m.Execute(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{})
+				return errExecute
+			},
+		},
+		{
+			name: "count tokens",
+			execute: func(m *Manager, req cliproxyexecutor.Request) error {
+				_, errExecute := m.ExecuteCount(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{})
+				return errExecute
+			},
+		},
+		{
+			name: "stream",
+			execute: func(m *Manager, req cliproxyexecutor.Request) error {
+				_, errExecute := m.ExecuteStream(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{Stream: true})
+				return errExecute
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			m.SetRetryConfig(1, 0, 0)
+			executor := &credentialRetryLimitExecutor{id: "claude"}
+			m.RegisterExecutor(executor)
+			authID := uuid.NewString()
+			model := "retry-model-" + authID
+			auth := &Auth{ID: authID, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}
+			registry.GetGlobalRegistry().RegisterClient(authID, "claude", []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			if errExecute := tc.execute(m, cliproxyexecutor.Request{Model: model}); errExecute == nil || statusCodeFromError(errExecute) != http.StatusInternalServerError {
+				t.Fatalf("execute error = %v, want status 500", errExecute)
+			}
+			if got := executor.Calls(); got != 2 {
+				t.Fatalf("executor calls = %d, want initial round plus one additional round", got)
+			}
+		})
+	}
+}
+
 func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.SetRetryConfig(3, 30*time.Second, 0)
@@ -112,6 +364,8 @@ func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing
 			},
 		},
 	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: upstreamModel}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
 	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
 	}

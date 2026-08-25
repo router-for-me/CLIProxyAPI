@@ -1259,3 +1259,93 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FinishRe
 		t.Fatalf("output.0.status = %q, want incomplete; out=%s", got, out)
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_ReasoningFallback(t *testing.T) {
+	tests := []struct {
+		name          string
+		rawJSON       string
+		requestJSON   string
+		wantReasoning bool
+		wantText      string
+	}{
+		{
+			name:          "reasoning_content field present",
+			rawJSON:       `{"id":"chatcmpl_rc","object":"chat.completion","created":1773896263,"model":"o3-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning_content":"thought from reasoning_content"},"finish_reason":"stop"}]}`,
+			wantReasoning: true,
+			wantText:      "thought from reasoning_content",
+		},
+		{
+			name:          "reasoning fallback field present",
+			rawJSON:       `{"id":"chatcmpl_r","object":"chat.completion","created":1773896263,"model":"o3-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning":"thought from reasoning"},"finish_reason":"stop"}]}`,
+			wantReasoning: true,
+			wantText:      "thought from reasoning",
+		},
+		{
+			name:          "both reasoning_content and reasoning present (reasoning_content priority)",
+			rawJSON:       `{"id":"chatcmpl_both","object":"chat.completion","created":1773896263,"model":"o3-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning_content":"priority thought","reasoning":"ignored thought"},"finish_reason":"stop"}]}`,
+			wantReasoning: true,
+			wantText:      "priority thought",
+		},
+		{
+			name:          "empty reasoning_content falls back to reasoning",
+			rawJSON:       `{"id":"chatcmpl_empty_rc","object":"chat.completion","created":1773896263,"model":"o3-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning_content":"","reasoning":"fallback thought"},"finish_reason":"stop"}]}`,
+			wantReasoning: true,
+			wantText:      "fallback thought",
+		},
+		{
+			name:          "neither field present without request reasoning",
+			rawJSON:       `{"id":"chatcmpl_none","object":"chat.completion","created":1773896263,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`,
+			wantReasoning: false,
+		},
+		{
+			name:          "neither field present with request reasoning produces empty summary",
+			rawJSON:       `{"id":"chatcmpl_req_only","object":"chat.completion","created":1773896263,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`,
+			requestJSON:   `{"model":"gpt-4o","reasoning":{"effort":"medium"}}`,
+			wantReasoning: true,
+			wantText:      "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var reqBytes []byte
+			if tt.requestJSON != "" {
+				reqBytes = []byte(tt.requestJSON)
+			}
+			out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "o3-mini", reqBytes, reqBytes, []byte(tt.rawJSON), nil)
+			data := gjson.ParseBytes(out)
+
+			var reasoningItem gjson.Result
+			found := false
+			data.Get("output").ForEach(func(_, item gjson.Result) bool {
+				if item.Get("type").String() == "reasoning" {
+					found = true
+					reasoningItem = item
+					return false
+				}
+				return true
+			})
+
+			if tt.wantReasoning != found {
+				t.Fatalf("reasoning found = %v, want %v; out=%s", found, tt.wantReasoning, out)
+			}
+
+			if tt.wantReasoning {
+				if tt.wantText != "" {
+					gotText := reasoningItem.Get("summary.0.text").String()
+					if gotText != tt.wantText {
+						t.Fatalf("summary.0.text = %q, want %q; out=%s", gotText, tt.wantText, out)
+					}
+					gotType := reasoningItem.Get("summary.0.type").String()
+					if gotType != "summary_text" {
+						t.Fatalf("summary.0.type = %q, want summary_text; out=%s", gotType, out)
+					}
+				} else {
+					if len(reasoningItem.Get("summary").Array()) != 0 {
+						t.Fatalf("summary = %s, want empty array; out=%s", reasoningItem.Get("summary").Raw, out)
+					}
+				}
+			}
+		})
+	}
+}

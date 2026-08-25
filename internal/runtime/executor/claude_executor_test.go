@@ -740,6 +740,55 @@ func TestApplyClaudeHeaders_UsesOAuthAuthorizationAndBrowserFingerprint(t *testi
 	}
 }
 
+func TestApplyClaudeHeaders_EmptyAPIKey_OmitsAuthHeaders(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "claude",
+		Attributes: map[string]string{
+			"auth_kind":           "apikey",
+			"base_url":            "https://custom-claude.example.com",
+			"header:Custom-Token": "custom-secret",
+		},
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://custom-claude.example.com/v1/messages", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	// Preset preexisting client headers to ensure they get stripped for empty API key
+	req.Header.Set("Authorization", "Bearer preexisting-bearer")
+	req.Header.Set("x-api-key", "preexisting-key")
+
+	if errHeaders := applyClaudeHeaders(req, auth, "", false, nil, nil, &config.Config{}, nil, false); errHeaders != nil {
+		t.Fatalf("applyClaudeHeaders() error = %v", errHeaders)
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty for empty API key", got)
+	}
+	if got := req.Header.Get("x-api-key"); got != "" {
+		t.Fatalf("x-api-key = %q, want empty for empty API key", got)
+	}
+	if got := req.Header.Get("Custom-Token"); got != "custom-secret" {
+		t.Fatalf("Custom-Token = %q, want custom-secret", got)
+	}
+
+	// Also verify PrepareRequest
+	req2, _ := http.NewRequest(http.MethodPost, "https://custom-claude.example.com/v1/messages", nil)
+	req2.Header.Set("Authorization", "Bearer preexisting-bearer")
+	req2.Header.Set("x-api-key", "preexisting-key")
+	exec := &ClaudeExecutor{}
+	if errPrep := exec.PrepareRequest(req2, auth); errPrep != nil {
+		t.Fatalf("PrepareRequest() error = %v", errPrep)
+	}
+	if got := req2.Header.Get("Authorization"); got != "" {
+		t.Fatalf("PrepareRequest Authorization = %q, want empty", got)
+	}
+	if got := req2.Header.Get("x-api-key"); got != "" {
+		t.Fatalf("PrepareRequest x-api-key = %q, want empty", got)
+	}
+	if got := req2.Header.Get("Custom-Token"); got != "custom-secret" {
+		t.Fatalf("PrepareRequest Custom-Token = %q, want custom-secret", got)
+	}
+}
+
 func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode220CLIFingerprint(t *testing.T) {
 	var seenBody []byte
 	var seenHeaders http.Header

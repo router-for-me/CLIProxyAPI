@@ -525,26 +525,6 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 		return
 	}
 }
-func antigravityRetryAttempts(auth *cliproxyauth.Auth, cfg *config.Config) int {
-	retry := 0
-	if cfg != nil {
-		retry = cfg.RequestRetry
-	}
-	if auth != nil {
-		if override, ok := auth.RequestRetryOverride(); ok {
-			retry = override
-		}
-	}
-	if retry < 0 {
-		retry = 0
-	}
-	attempts := retry + 1
-	if attempts < 1 {
-		return 1
-	}
-	return attempts
-}
-
 func antigravityShouldRetryNoCapacity(statusCode int, body []byte) bool {
 	if statusCode != http.StatusServiceUnavailable {
 		return false
