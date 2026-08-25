@@ -38,8 +38,11 @@ type Service struct {
 	// configRuntimeMu orders side-effecting runtime application after config commits.
 	configRuntimeMu        sync.Mutex
 	executorRegistrationMu sync.Mutex
-	configSequence         uint64
-	appliedRoutingState    *routingRuntimeState
+	// xaiModels caches the last successful account-level OAuth model discovery.
+	xaiModelsMu         sync.Mutex
+	xaiModels           map[string]xaiModelCacheEntry
+	configSequence      uint64
+	appliedRoutingState *routingRuntimeState
 
 	// configPath is the path to the configuration file.
 	configPath string
