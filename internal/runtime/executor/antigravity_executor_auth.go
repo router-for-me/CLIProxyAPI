@@ -183,6 +183,8 @@ func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth
 			if retryAfter, parseErr := helps.ParseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 				sErr.retryAfter = retryAfter
 			}
+			// oauth2.googleapis.com 429 is a token-endpoint throttle, not model quota.
+			sErr.transientRateLimit = true
 		}
 		return nil, sErr
 	}
