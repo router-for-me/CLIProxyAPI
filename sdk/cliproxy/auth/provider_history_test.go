@@ -264,6 +264,25 @@ func TestManagerLeavesTaintedSameScopeIncrementalRequestUnchanged(t *testing.T) 
 	}
 }
 
+func TestManagerRejectsForeignPreviousResponseContinuation(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	t.Cleanup(manager.StopAutoRefresh)
+
+	body := []byte(`{"prompt_cache_key":"thread-foreign-incremental","previous_response_id":"resp-a","input":[{"type":"message","role":"user","content":"continue"}]}`)
+	manager.providerHistoryScopes.SetAliases(providerHistoryScope("codex", "codex-a"), "pck:thread-foreign-incremental")
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: bytes.Clone(body),
+		Metadata:        map[string]any{cliproxyexecutor.SelectedAuthMetadataKey: "codex-b"},
+	}
+
+	_, _, err := manager.applyRequestAfterAuthInterceptor(nil, nil, &Auth{ID: "codex-b", Provider: "codex"}, "codex", cliproxyexecutor.Request{Payload: bytes.Clone(body)}, opts, "gpt-5.6")
+	var historyErr *providerHistoryError
+	if !errors.As(err, &historyErr) || historyErr.reason != "foreign_previous_response_requires_rehydration" {
+		t.Fatalf("error = %v, want providerHistoryError(foreign_previous_response_requires_rehydration)", err)
+	}
+}
+
 func TestManagerRemembersScopeAfterCommittedStreamFailure(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	t.Cleanup(manager.StopAutoRefresh)

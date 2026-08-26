@@ -40,6 +40,7 @@ type responsesSSELifecycleState struct {
 	activeExplicit        map[string]*responsesSSEActiveItem
 	activeExplicitByIndex map[string]string
 	closed                map[string]struct{}
+	nextSequenceNumber    int64
 	sawTerminal           bool
 }
 
@@ -129,6 +130,8 @@ func (s *responsesSSELifecycleState) normalizeFrame(frame []byte) ([]byte, error
 	var output []byte
 	originalEventName := responsesSSEEventName(frame)
 	for index, normalized := range events {
+		normalized["sequence_number"] = s.nextSequenceNumber
+		s.nextSequenceNumber++
 		data, errMarshal := json.Marshal(normalized)
 		if errMarshal != nil {
 			return nil, fmt.Errorf("encode normalized Responses SSE event: %w", errMarshal)
@@ -156,7 +159,7 @@ func (s *responsesSSELifecycleState) normalizeEvent(event map[string]any) ([]map
 		return s.onItemAdded(event)
 	case "response.output_item.done":
 		return s.onItemDone(event)
-	case "response.completed":
+	case "response.completed", "response.done":
 		out, err := s.closeActive("completed")
 		if err != nil {
 			return nil, err
@@ -176,7 +179,7 @@ func (s *responsesSSELifecycleState) normalizeEvent(event map[string]any) ([]map
 		}
 		s.sawTerminal = true
 		return append(out, event), nil
-	case "response.failed":
+	case "response.failed", "response.error", "error":
 		s.active = nil
 		s.activeExplicit = nil
 		s.activeExplicitByIndex = nil

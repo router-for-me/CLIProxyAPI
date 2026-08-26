@@ -152,6 +152,59 @@ func TestResponsesSSELifecyclePreservesAndGeneratesEventFields(t *testing.T) {
 	}
 }
 
+func TestResponsesSSELifecycleRenumbersSynthesizedEvents(t *testing.T) {
+	state := &responsesSSELifecycleState{}
+	chunks := []string{
+		`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp1","status":"in_progress"}}` + "\n\n",
+		`data: {"type":"response.output_text.delta","sequence_number":1,"item_id":"m1","output_index":0,"delta":"answer"}` + "\n\n",
+		`data: {"type":"response.completed","sequence_number":2,"response":{"id":"resp1","status":"completed"}}` + "\n\n",
+	}
+
+	var output []byte
+	for _, chunk := range chunks {
+		normalized, err := state.AddChunk([]byte(chunk))
+		if err != nil {
+			t.Fatalf("AddChunk() error = %v", err)
+		}
+		output = append(output, normalized...)
+	}
+	if err := state.Finish(); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	events := responsesSSETestEvents(t, output)
+	for index, event := range events {
+		if got := int(event["sequence_number"].(float64)); got != index {
+			t.Fatalf("event[%d].sequence_number = %d, want %d; output=%s", index, got, index, output)
+		}
+	}
+}
+
+func TestResponsesSSELifecycleRecognizesAllTerminalEvents(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventType string
+	}{
+		{name: "done", eventType: "response.done"},
+		{name: "response error", eventType: "response.error"},
+		{name: "top-level error", eventType: "error"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &responsesSSELifecycleState{}
+			if _, err := state.AddChunk([]byte(`data: {"type":"response.output_text.delta","item_id":"m1","output_index":0,"delta":"partial"}` + "\n\n")); err != nil {
+				t.Fatalf("delta AddChunk() error = %v", err)
+			}
+			if _, err := state.AddChunk([]byte(`data: {"type":"` + tt.eventType + `"}` + "\n\n")); err != nil {
+				t.Fatalf("terminal AddChunk() error = %v", err)
+			}
+			if err := state.Finish(); err != nil {
+				t.Fatalf("Finish() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestResponsesSSELifecycleRejectsCleanCloseWithoutTerminalEvent(t *testing.T) {
 	state := &responsesSSELifecycleState{}
 	chunk := []byte(`data: {"type":"response.output_text.delta","item_id":"m1","output_index":0,"delta":"partial"}` + "\n\n")

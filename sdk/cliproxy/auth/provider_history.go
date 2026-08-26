@@ -265,6 +265,9 @@ func (m *Manager) normalizeProviderHistoryAttempt(provider string, auth *Auth, r
 		// transcript that requires continued projection.
 		return req, opts, nil
 	}
+	if sourceScope != targetScope && providerHistoryUsesPreviousResponse(req.Payload) {
+		return req, opts, &providerHistoryError{reason: "foreign_previous_response_requires_rehydration"}
+	}
 
 	normalized, err := normalizeProviderBoundResponseHistory(req.Payload)
 	if err != nil {
