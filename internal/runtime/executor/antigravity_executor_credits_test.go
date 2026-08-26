@@ -225,6 +225,79 @@ func TestClassifyAntigravity429(t *testing.T) {
 	})
 }
 
+func TestNewAntigravityStatusErrMarksTransientRateLimit(t *testing.T) {
+	rateLimited := []byte(`{
+		"error": {
+			"code": 429,
+			"message": "You have exhausted your capacity on this model. Your quota will reset after 0s.",
+			"status": "RESOURCE_EXHAUSTED",
+			"details": [
+				{
+					"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+					"reason": "RATE_LIMIT_EXCEEDED",
+					"domain": "cloudcode-pa.googleapis.com"
+				},
+				{
+					"@type": "type.googleapis.com/google.rpc.RetryInfo",
+					"retryDelay": "0.479417207s"
+				}
+			]
+		}
+	}`)
+	transient := newAntigravityStatusErr(http.StatusTooManyRequests, rateLimited)
+	if !transient.TransientRateLimit() {
+		t.Fatal("expected a RATE_LIMIT_EXCEEDED 429 with a sub-second hint to be marked transient")
+	}
+	if transient.RetryAfter() == nil {
+		t.Fatal("expected the provider retry hint to be preserved on a transient rate limit")
+	}
+
+	exhausted := []byte(`{
+		"error": {
+			"code": 429,
+			"status": "RESOURCE_EXHAUSTED",
+			"details": [
+				{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "QUOTA_EXHAUSTED"},
+				{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "0.479417207s"}
+			]
+		}
+	}`)
+	quotaErr := newAntigravityStatusErr(http.StatusTooManyRequests, exhausted)
+	if quotaErr.TransientRateLimit() {
+		t.Fatal("expected a QUOTA_EXHAUSTED 429 not to be marked transient")
+	}
+	if quotaErr.RetryAfter() == nil {
+		t.Fatal("expected the provider retry hint to be preserved on an exhausted quota")
+	}
+
+	if soft := newAntigravityStatusErr(http.StatusTooManyRequests, []byte(`{"error":{"message":"too many requests"}}`)); soft.TransientRateLimit() {
+		t.Fatal("expected an unclassified 429 to stay on the escalating cooldown ladder")
+	}
+
+	// A reasoned RATE_LIMIT_EXCEEDED without a RetryInfo hint is still a
+	// short-lived throttle, not an exhausted quota.
+	noHint := []byte(`{
+		"error": {
+			"code": 429,
+			"status": "RESOURCE_EXHAUSTED",
+			"details": [
+				{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "RATE_LIMIT_EXCEEDED", "domain": "cloudcode-pa.googleapis.com"}
+			]
+		}
+	}`)
+	noHintErr := newAntigravityStatusErr(http.StatusTooManyRequests, noHint)
+	if !noHintErr.TransientRateLimit() {
+		t.Fatal("expected a RATE_LIMIT_EXCEEDED 429 without RetryInfo to be marked transient")
+	}
+	if noHintErr.RetryAfter() != nil {
+		t.Fatal("expected no retry hint when Google omits RetryInfo")
+	}
+
+	if nonRateLimit := newAntigravityStatusErr(http.StatusServiceUnavailable, rateLimited); nonRateLimit.TransientRateLimit() {
+		t.Fatal("expected a non-429 status not to be marked transient")
+	}
+}
+
 func TestInjectEnabledCreditTypes(t *testing.T) {
 	body := []byte(`{"model":"claude-sonnet-4-6","request":{}}`)
 	got := injectEnabledCreditTypes(body)
@@ -732,5 +805,49 @@ func TestParseMetaFloat(t *testing.T) {
 				t.Fatalf("parseMetaFloat() = %f, want %f", got, tt.wantVal)
 			}
 		})
+	}
+}
+
+func TestAntigravityCountTokensClassifiesTransient429(t *testing.T) {
+	body := `{
+		"error": {
+			"code": 429,
+			"status": "RESOURCE_EXHAUSTED",
+			"details": [
+				{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "RATE_LIMIT_EXCEEDED"},
+				{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "0.479417207s"}
+			]
+		}
+	}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	exec := NewAntigravityExecutor(&config.Config{RequestRetry: 1})
+	_, errCount := exec.CountTokens(context.Background(), testAntigravityAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "gemini-3.6-flash-high",
+		Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatGemini,
+		ResponseFormat: sdktranslator.FormatGemini,
+	})
+	if errCount == nil {
+		t.Fatal("expected CountTokens to fail on an upstream 429")
+	}
+
+	var classified interface{ TransientRateLimit() bool }
+	if !errors.As(errCount, &classified) {
+		t.Fatalf("CountTokens error carries no 429 classification: %T", errCount)
+	}
+	if !classified.TransientRateLimit() {
+		t.Fatal("expected a RATE_LIMIT_EXCEEDED token-count 429 to be marked transient")
+	}
+
+	var hinted interface{ RetryAfter() *time.Duration }
+	if !errors.As(errCount, &hinted) || hinted.RetryAfter() == nil {
+		t.Fatal("expected the provider retry hint to survive the token-count path")
 	}
 }

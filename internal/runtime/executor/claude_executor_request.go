@@ -304,7 +304,10 @@ func classifyClaudeUpstreamError(statusCode int, headers http.Header, body []byt
 		if claudeBodyIndicatesFastModeCredits(body) {
 			return claudeEntitlementError{err}
 		}
-		// Ordinary model-level Claude 429 (not a unified 5h/7d rejection)
+		// Ordinary model-level Claude 429 (not a unified 5h/7d rejection): a
+		// transient throttle, so the conductor rotates instead of escalating
+		// BackoffLevel as if quota were exhausted.
+		err.transientRateLimit = true
 		return claudeRateLimitError{statusErr: err, credentialScoped: false}
 	}
 	return err

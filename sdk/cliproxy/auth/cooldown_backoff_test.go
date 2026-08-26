@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -117,7 +119,7 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 	quotaErr := &Error{Code: "rate_limit", Message: "quota", HTTPStatus: http.StatusTooManyRequests}
 	auth := &Auth{ID: "auth-level-quota"}
 
-	applyAuthFailureState(auth, quotaErr, nil, now, false)
+	applyAuthFailureState(auth, quotaErr, nil, now, false, false)
 	if auth.Quota.BackoffLevel != 1 {
 		t.Fatalf("expected BackoffLevel 1 after first failure, got %d", auth.Quota.BackoffLevel)
 	}
@@ -127,7 +129,7 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 	}
 
 	// In-window failure keeps the current window and level.
-	applyAuthFailureState(auth, quotaErr, nil, now.Add(100*time.Millisecond), false)
+	applyAuthFailureState(auth, quotaErr, nil, now.Add(100*time.Millisecond), false, false)
 	if auth.Quota.BackoffLevel != 1 {
 		t.Fatalf("expected BackoffLevel to stay 1 for in-window failure, got %d", auth.Quota.BackoffLevel)
 	}
@@ -136,7 +138,7 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 	}
 
 	// A failure after the window expired escalates to the next level.
-	applyAuthFailureState(auth, quotaErr, nil, now.Add(2*time.Second), false)
+	applyAuthFailureState(auth, quotaErr, nil, now.Add(2*time.Second), false, false)
 	if auth.Quota.BackoffLevel != 2 {
 		t.Fatalf("expected BackoffLevel 2 after post-window failure, got %d", auth.Quota.BackoffLevel)
 	}
@@ -146,7 +148,7 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 
 	// A provider supplied retry hint always takes effect, even in-window.
 	retryAfter := 10 * time.Second
-	applyAuthFailureState(auth, quotaErr, &retryAfter, now.Add(3*time.Second), false)
+	applyAuthFailureState(auth, quotaErr, &retryAfter, now.Add(3*time.Second), false, false)
 	if auth.Quota.BackoffLevel != 2 {
 		t.Fatalf("expected BackoffLevel to stay 2 with retry hint, got %d", auth.Quota.BackoffLevel)
 	}
@@ -306,5 +308,267 @@ func TestJitteredCooldownWaitBounds(t *testing.T) {
 	}
 	if got := jitteredCooldownWait(3, 0); got != 3 {
 		t.Fatalf("expected sub-4ns wait to stay unchanged, got %v", got)
+	}
+}
+
+// Gemini and Antigravity answer an exhausted daily quota with a RetryInfo hint of
+// well under a second (see internal/runtime/executor/helps/json_retry_helpers.go).
+// Honouring such a hint verbatim returned dead credentials to the pool a few hundred
+// milliseconds later and pinned the backoff ladder at its current level forever, so
+// every request kept walking the whole exhausted pool before failing.
+const observedExhaustedQuotaHint = 479417207 * time.Nanosecond
+
+func TestMarkResultSubSecondQuotaHintStillEscalates(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	expired := time.Now().Add(-time.Second)
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-quota-subsecond-hint",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex"},
+		ModelStates: map[string]*ModelState{
+			"gpt-5": {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: expired,
+				Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: expired, BackoffLevel: 3},
+			},
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	hint := observedExhaustedQuotaHint
+	result := quotaResult(auth.ID, "gpt-5")
+	result.RetryAfter = &hint
+
+	before := time.Now()
+	manager.MarkResult(context.Background(), result)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after failure")
+	}
+	state := updated.ModelStates["gpt-5"]
+	if state.Quota.BackoffLevel != 4 {
+		t.Fatalf("expected BackoffLevel 4 after hinted post-window failure, got %d", state.Quota.BackoffLevel)
+	}
+	if !state.Quota.NextRecoverAt.After(before.Add(hint)) {
+		t.Fatalf("sub-second hint was not floored: window closes at %v, the hint alone would close it at %v", state.Quota.NextRecoverAt, before.Add(hint))
+	}
+	if got := state.Quota.NextRecoverAt.Sub(before); got < 8*quotaBackoffBase {
+		t.Fatalf("expected at least the level-3 ladder step (%v), got %v", 8*quotaBackoffBase, got)
+	}
+}
+
+func TestApplyAuthFailureStateSubSecondQuotaHintStillEscalates(t *testing.T) {
+	now := time.Now()
+	quotaErr := &Error{Code: "rate_limit", Message: "quota", HTTPStatus: http.StatusTooManyRequests}
+	hint := observedExhaustedQuotaHint
+	auth := &Auth{ID: "auth-subsecond-hint"}
+
+	applyAuthFailureState(auth, quotaErr, &hint, now, false, false)
+	if auth.Quota.BackoffLevel != 1 {
+		t.Fatalf("expected BackoffLevel 1 after the first hinted failure, got %d", auth.Quota.BackoffLevel)
+	}
+	if !auth.Quota.NextRecoverAt.Equal(now.Add(quotaBackoffBase)) {
+		t.Fatalf("expected the sub-second hint to be floored at %v, got %v", now.Add(quotaBackoffBase), auth.Quota.NextRecoverAt)
+	}
+
+	// A later failure, once the first window has closed, must climb the ladder even
+	// though the provider keeps repeating the same sub-second hint.
+	after := now.Add(20 * time.Second)
+	applyAuthFailureState(auth, quotaErr, &hint, after, false, false)
+	if auth.Quota.BackoffLevel != 2 {
+		t.Fatalf("expected BackoffLevel 2 after the repeated hinted failure, got %d", auth.Quota.BackoffLevel)
+	}
+	if !auth.Quota.NextRecoverAt.Equal(after.Add(2 * quotaBackoffBase)) {
+		t.Fatalf("expected the escalated window to close at %v, got %v", after.Add(2*quotaBackoffBase), auth.Quota.NextRecoverAt)
+	}
+}
+
+func TestMarkResultZeroRetryAfterDoesNotApplyLadderFloor(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-zero-retry-after",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex"},
+		ModelStates: map[string]*ModelState{
+			"gpt-5": {
+				Status: StatusActive,
+				Quota:  QuotaState{BackoffLevel: 0},
+			},
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	zeroHint := time.Duration(0)
+	result := quotaResult(auth.ID, "gpt-5")
+	result.RetryAfter = &zeroHint
+	result.TransientRateLimit = true
+
+	now := time.Now()
+	manager.MarkResult(context.Background(), result)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after failure")
+	}
+	state := updated.ModelStates["gpt-5"]
+	if state.Quota.BackoffLevel != 0 {
+		t.Fatalf("expected BackoffLevel to remain 0 for zero RetryAfter, got %d", state.Quota.BackoffLevel)
+	}
+	if state.Quota.NextRecoverAt.After(now.Add(500 * time.Millisecond)) {
+		t.Fatalf("zero RetryAfter was given ladder floor: NextRecoverAt=%v, want <= %v", state.Quota.NextRecoverAt, now)
+	}
+}
+
+func TestApplyAuthFailureStateZeroRetryAfterDoesNotApplyLadderFloor(t *testing.T) {
+	now := time.Now()
+	err := &Error{Code: "rate_limit", Message: "websocket_connection_limit_reached", HTTPStatus: http.StatusTooManyRequests}
+	zeroHint := time.Duration(0)
+	auth := &Auth{ID: "auth-zero-hint"}
+
+	applyAuthFailureState(auth, err, &zeroHint, now, false, true)
+	if auth.Quota.BackoffLevel != 0 {
+		t.Fatalf("expected BackoffLevel 0 for zero RetryAfter, got %d", auth.Quota.BackoffLevel)
+	}
+	if auth.Quota.NextRecoverAt.After(now) {
+		t.Fatalf("expected zero RetryAfter not to receive ladder floor, NextRecoverAt=%v, want %v", auth.Quota.NextRecoverAt, now)
+	}
+	if auth.NextRetryAfter.After(now) {
+		t.Fatalf("expected NextRetryAfter not to receive ladder floor, NextRetryAfter=%v, want %v", auth.NextRetryAfter, now)
+	}
+}
+
+func TestMarkResultTransientRateLimitFloorsProviderHint(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-transient-rate-limit",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex"},
+		ModelStates: map[string]*ModelState{
+			"gpt-5": {
+				Status: StatusActive,
+				Quota:  QuotaState{BackoffLevel: 0},
+			},
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	hint := observedExhaustedQuotaHint
+	result := quotaResult(auth.ID, "gpt-5")
+	result.RetryAfter = &hint
+	result.TransientRateLimit = true
+
+	before := time.Now()
+	manager.MarkResult(context.Background(), result)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after failure")
+	}
+	state := updated.ModelStates["gpt-5"]
+	if state.Quota.BackoffLevel != 0 {
+		t.Fatalf("expected BackoffLevel to stay 0 for a transient rate limit, got %d", state.Quota.BackoffLevel)
+	}
+	if got := state.Quota.NextRecoverAt.Sub(before); got < transientRateLimitMinimum {
+		t.Fatalf("sub-second transient hint was not floored: got %v, want at least %v", got, transientRateLimitMinimum)
+	}
+}
+
+func TestApplyAuthFailureStateTransientRateLimitFloorsProviderHint(t *testing.T) {
+	now := time.Now()
+	rateLimitErr := &Error{Code: "rate_limit", Message: "RATE_LIMIT_EXCEEDED", HTTPStatus: http.StatusTooManyRequests}
+	hint := observedExhaustedQuotaHint
+
+	transient := &Auth{ID: "auth-transient-hint"}
+	applyAuthFailureState(transient, rateLimitErr, &hint, now, false, true)
+	if transient.Quota.BackoffLevel != 0 {
+		t.Fatalf("expected BackoffLevel to stay 0 for a transient rate limit, got %d", transient.Quota.BackoffLevel)
+	}
+	if !transient.Quota.NextRecoverAt.Equal(now.Add(transientRateLimitMinimum)) {
+		t.Fatalf("expected the sub-second transient hint to be floored at %v, got %v", now.Add(transientRateLimitMinimum), transient.Quota.NextRecoverAt)
+	}
+	if !transient.NextRetryAfter.Equal(now.Add(transientRateLimitMinimum)) {
+		t.Fatalf("expected NextRetryAfter to use the transient floor at %v, got %v", now.Add(transientRateLimitMinimum), transient.NextRetryAfter)
+	}
+
+	longHint := 2 * transientRateLimitMinimum
+	longHintAuth := &Auth{ID: "auth-transient-long-hint"}
+	applyAuthFailureState(longHintAuth, rateLimitErr, &longHint, now, false, true)
+	if !longHintAuth.Quota.NextRecoverAt.Equal(now.Add(longHint)) {
+		t.Fatalf("expected a longer transient hint to extend cooldown to %v, got %v", now.Add(longHint), longHintAuth.Quota.NextRecoverAt)
+	}
+
+	// The same sub-second hint on an exhausted quota must still use the ladder.
+	exhausted := &Auth{ID: "auth-exhausted-hint"}
+	applyAuthFailureState(exhausted, rateLimitErr, &hint, now, false, false)
+	if exhausted.Quota.BackoffLevel != 1 {
+		t.Fatalf("expected BackoffLevel 1 for an exhausted-quota failure, got %d", exhausted.Quota.BackoffLevel)
+	}
+	if !exhausted.Quota.NextRecoverAt.Equal(now.Add(quotaBackoffBase)) {
+		t.Fatalf("expected the exhausted-quota hint to stay floored at %v, got %v", now.Add(quotaBackoffBase), exhausted.Quota.NextRecoverAt)
+	}
+}
+
+func TestApplyAuthFailureStateTransientRateLimitDoesNotEscalate(t *testing.T) {
+	previousTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(previousTransient) })
+
+	now := time.Now()
+	rateLimitErr := &Error{Code: "rate_limit", Message: "RATE_LIMIT_EXCEEDED", HTTPStatus: http.StatusTooManyRequests}
+	auth := &Auth{ID: "auth-transient-repeat"}
+
+	applyAuthFailureState(auth, rateLimitErr, nil, now, false, true)
+	if auth.Quota.BackoffLevel != 0 {
+		t.Fatalf("expected BackoffLevel 0 after the first transient rate limit, got %d", auth.Quota.BackoffLevel)
+	}
+	firstRecover := auth.Quota.NextRecoverAt
+	if !firstRecover.Equal(now.Add(transientRateLimitMinimum)) {
+		t.Fatalf("expected first transient cooldown to close at %v, got %v", now.Add(transientRateLimitMinimum), firstRecover)
+	}
+
+	after := firstRecover.Add(time.Second)
+	applyAuthFailureState(auth, rateLimitErr, nil, after, false, true)
+	if auth.Quota.BackoffLevel != 0 {
+		t.Fatalf("expected repeated transient rate limit not to advance BackoffLevel, got %d", auth.Quota.BackoffLevel)
+	}
+	if want := after.Add(transientRateLimitMinimum); !auth.Quota.NextRecoverAt.Equal(want) {
+		t.Fatalf("expected repeated transient cooldown to close at %v, got %v", want, auth.Quota.NextRecoverAt)
+	}
+}
+
+type classifiedRateLimitError struct {
+	transient bool
+}
+
+func (e classifiedRateLimitError) Error() string            { return "429 rate limited" }
+func (e classifiedRateLimitError) StatusCode() int          { return http.StatusTooManyRequests }
+func (e classifiedRateLimitError) TransientRateLimit() bool { return e.transient }
+
+func TestIsTransientRateLimitErrorDetectsWrappedProviderClassification(t *testing.T) {
+	if isTransientRateLimitError(nil) {
+		t.Fatal("expected a nil error not to be transient")
+	}
+	if isTransientRateLimitError(errors.New("boom")) {
+		t.Fatal("expected an unclassified error not to be transient")
+	}
+	if isTransientRateLimitError(classifiedRateLimitError{}) {
+		t.Fatal("expected an exhausted-quota classification not to be transient")
+	}
+	if !isTransientRateLimitError(fmt.Errorf("upstream: %w", classifiedRateLimitError{transient: true})) {
+		t.Fatal("expected a wrapped transient rate limit classification to be detected")
 	}
 }
