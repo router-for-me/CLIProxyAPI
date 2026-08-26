@@ -159,9 +159,14 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		if authKind == coreauth.AuthKindOAuth {
 			discovered, errDiscover := s.xaiModelsForAuth(ctx, a)
 			if errDiscover != nil {
-				return
+				if ctx.Err() != nil {
+					return
+				}
+				// Discovery failures must not fall back to the static catalog.
+				models = nil
+			} else {
+				models = discovered
 			}
-			models = discovered
 		}
 		models = applyExcludedModels(models, excluded)
 	default:
