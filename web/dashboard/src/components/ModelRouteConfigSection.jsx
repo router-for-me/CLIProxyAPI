@@ -1,6 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { getModelProviders, listUpstreamProviders } from '../api/client.js';
-import { providerKeyIsLive } from './modelRouteProvider.js';
+import {
+  providerKeyIsLive,
+  expandAllProvidersToChoices,
+  mergeLiveWithChoices,
+} from './modelRouteProvider.js';
 
 // ModelRouteConfigSection — shared per-model routing configuration UI.
 //
@@ -128,32 +132,23 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
         const res = await listUpstreamProviders();
         const rows = Array.isArray(res?.providers) ? res.providers : [];
         const byKey = new Map();
-        const keys = [];
         for (const r of rows) {
           if (!r || r.disabled) continue;
           const key = typeof r.provider_key === 'string' ? r.provider_key.trim() : '';
           if (!key) continue;
-          keys.push(key);
           // Each upstream row now maps to a unique routing key (e.g.
           // "claude:42"), so two rows of the same channel no longer collapse
-          // onto one chip. Last writer wins on the display label — if two
-          // rows somehow share a routing key (e.g. a legacy bare key
-          // alongside a compound one), the picker keeps the first one and
-          // the count column below tells the operator the number of rows.
-          const existing = byKey.get(key);
-          if (existing) {
-            existing.count += 1;
-          } else {
-            byKey.set(key, {
-              key,
-              row: r,
-              label: upstreamDisplayLabel(r),
-              providerType: r.provider_type || '',
-              count: 1,
-            });
-          }
+          // onto one chip. The picker expands each row through the shared
+          // helper to surface both provider-level and OpenAI entry routes.
+          byKey.set(key, {
+            key,
+            row: r,
+            label: upstreamDisplayLabel(r),
+            providerType: r.provider_type || '',
+            count: 1,
+          });
         }
-        keys.sort((a, b) => a.localeCompare(b));
+        const keys = [...byKey.keys()].sort((a, b) => a.localeCompare(b));
         if (!cancelled) {
           setUpstreamByKey(byKey);
           setAllProviderKeys(keys);
@@ -180,37 +175,21 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
   );
 
   const choices = useMemo(() => {
-    const seen = new Set();
-    const out = [];
     // Live keys first so the operator sees the actually-serving providers
     // up top; configured-only keys follow. Each choice carries its routing
     // key (the value that gets saved into route.providers) plus display
-    // metadata from the upstream row when one exists.
-    for (const p of liveProviders || []) {
-      const key = String(p || '').trim();
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      const upstream = upstreamByKey.get(key);
-      out.push({
-        key,
-        label: upstream ? upstream.label : key,
-        providerType: upstream ? upstream.providerType : '',
-        count: upstream ? upstream.count : 0,
-      });
+    // metadata from the upstream row when one exists. The shared helper
+    // expands each management row into provider-level + entry-level choices,
+    // so OpenAI Compatibility providers expose one chip per entry as well
+    // as the pool-level route.
+    const upstreamRows = [...(upstreamByKey.values() || [])].map((entry) => entry.row);
+    const configured = expandAllProvidersToChoices(upstreamRows);
+    const upstreamByKeyForMerge = new Map();
+    for (const entry of upstreamByKey.values()) {
+      upstreamByKeyForMerge.set(entry.key, entry);
     }
-    for (const key of allProviderKeys || []) {
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      const upstream = upstreamByKey.get(key);
-      out.push({
-        key,
-        label: upstream ? upstream.label : key,
-        providerType: upstream ? upstream.providerType : '',
-        count: upstream ? upstream.count : 0,
-      });
-    }
-    return out;
-  }, [liveProviders, allProviderKeys, upstreamByKey]);
+    return mergeLiveWithChoices(liveProviders || [], configured, upstreamByKeyForMerge);
+  }, [liveProviders, upstreamByKey]);
 
   // True while either provider list is still loading.
   const loading = liveProviders === null && allProviderKeys === null;
@@ -342,18 +321,19 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
               const labelText = choice.label || choice.key;
               const typeText = upstreamTypeLabel(choice.providerType);
               const countSuffix = choice.count > 1 ? ` ×${choice.count}` : '';
+              const levelTag = choice.level === 'entry' ? 'Entry pin' : 'Provider pool';
               return (
                 <tr
                   key={choice.key}
                   className={`row-link ${on ? 'row--selected' : ''}`}
                   onClick={() => toggleProvider(choice.key)}
-                  title={`${choice.key}${typeText ? ` · ${typeText}` : ''}${countSuffix}\n${isLive ? 'Live provider (currently serving this model)' : 'Configured upstream (no live auth right now)'}${on && strategyActive ? `\nRank ${rank + 1} · priority ${priority}` : ''}`}
+                  title={`${levelTag}: ${choice.key}${typeText ? ` · ${typeText}` : ''}${countSuffix}\n${isLive ? 'Live provider (currently serving this model)' : 'Configured upstream (no live auth right now)'}${on && strategyActive ? `\nRank ${rank + 1} · priority ${priority}` : ''}`}
                 >
                   <td>
                     <div className="cell-stack">
                       <span className="cell-stack__main mono">{labelText}{isLive ? '' : ' *'}</span>
                       <span className="dim" style={{ fontSize: 11 }}>
-                        <code>{choice.key}</code>{typeText ? ` · ${typeText}` : ''}{countSuffix}
+                        <code>{choice.key}</code>{choice.level === 'entry' ? ' · entry' : ''}{typeText ? ` · ${typeText}` : ''}{countSuffix}
                       </span>
                     </div>
                   </td>

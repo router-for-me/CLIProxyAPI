@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { getModelProviders, listUpstreamProviders } from '../api/client.js';
+import { expandAllProvidersToChoices } from './modelRouteProvider.js';
 import ModelRouteConfigSection from './ModelRouteConfigSection.jsx';
 
 // ModelRoutesEditor — reusable per-model upstream routing editor.
@@ -64,11 +65,10 @@ export default function ModelRoutesEditor({ allowedModels, routes, onChange }) {
       try {
         const res = await listUpstreamProviders();
         const rows = Array.isArray(res?.providers) ? res.providers : [];
-        const keys = rows
-          .filter((r) => !r.disabled)
-          .map((r) => (typeof r.provider_key === 'string' ? r.provider_key : ''))
-          .filter((k) => k)
-          .sort((a, b) => a.localeCompare(b));
+        // Expand every management row into one choice per routing key so the
+        // shared helper's provider-level + entry-level semantics carry through
+        // to the bulk editor view too.
+        const keys = expandAllProvidersToChoices(rows).map((c) => c.key);
         if (!cancelled) setAllUpstreamProviderKeys(keys);
       } catch {
         if (!cancelled) setAllUpstreamProviderKeys([]);
