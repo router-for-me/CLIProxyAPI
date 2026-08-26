@@ -6,7 +6,7 @@ import "context"
 
 type configCompletionWatcher struct{}
 
-func newConfigCompletionWatcher(string) (*configCompletionWatcher, error) {
+func newConfigCompletionWatcher(...string) (configCompletion, error) {
 	return nil, nil
 }
 

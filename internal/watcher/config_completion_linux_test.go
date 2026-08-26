@@ -29,7 +29,7 @@ func TestConfigCompletionOverflowReconcilesAndEnablesFallback(t *testing.T) {
 
 	buf := make([]byte, unix.SizeofInotifyEvent)
 	binary.NativeEndian.PutUint32(buf[4:8], unix.IN_Q_OVERFLOW)
-	completion := &configCompletionWatcher{base: filepath.Base(configPath)}
+	completion := &configCompletionWatcher{targets: []completionTarget{{base: filepath.Base(configPath), wd: 0}}}
 	err := completion.handleEvents(buf, func() { t.Fatal("overflow invoked normal completion callback") })
 	if err == nil {
 		t.Fatal("overflow was not reported as unavailable")
@@ -85,6 +85,129 @@ func TestStartCapturesConfigChangedAfterNativeAdmission(t *testing.T) {
 			}
 		case <-deadline:
 			t.Fatal("native admission change was not observed")
+		}
+	}
+}
+
+func TestConfigWatcherReloadsSymlinkTargetInPlace(t *testing.T) {
+	linkDir := t.TempDir()
+	targetDir := t.TempDir()
+	authDir := filepath.Join(linkDir, "auth")
+	if err := os.Mkdir(authDir, 0o755); err != nil {
+		t.Fatalf("create auth dir: %v", err)
+	}
+	targetPath := filepath.Join(targetDir, "real-config.yaml")
+	linkPath := filepath.Join(linkDir, "config.yaml")
+	writeTarget := func(port int) {
+		t.Helper()
+		if err := os.WriteFile(targetPath, []byte(fmt.Sprintf("port: %d\nauth-dir: %s\n", port, authDir)), 0o644); err != nil {
+			t.Fatalf("write target config: %v", err)
+		}
+	}
+	writeTarget(7001)
+	if err := os.Symlink(targetPath, linkPath); err != nil {
+		t.Fatalf("create config symlink: %v", err)
+	}
+
+	reloads := make(chan int, 2)
+	w, err := NewWatcher(linkPath, authDir, func(cfg *config.Config) { reloads <- cfg.Port })
+	if err != nil {
+		t.Fatalf("create watcher: %v", err)
+	}
+	w.SetConfig(&config.Config{Port: 7001, AuthDir: authDir})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err = w.Start(ctx); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+	select {
+	case <-reloads:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for initial callback")
+	}
+
+	f, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatalf("open target config: %v", err)
+	}
+	if _, err = f.WriteString("port: 7002\nauth-dir:"); err != nil {
+		t.Fatalf("write target prefix: %v", err)
+	}
+	select {
+	case port := <-reloads:
+		_ = f.Close()
+		t.Fatalf("reloaded symlink target port %d before close", port)
+	case <-time.After(2 * configReloadDebounce):
+	}
+	if _, err = f.WriteString(" " + authDir + "\n"); err != nil {
+		_ = f.Close()
+		t.Fatalf("write target suffix: %v", err)
+	}
+	if err = f.Close(); err != nil {
+		t.Fatalf("close target config: %v", err)
+	}
+	select {
+	case port := <-reloads:
+		if port != 7002 {
+			t.Fatalf("symlink target loaded port %d, want 7002", port)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("symlink target in-place write was not reloaded")
+	}
+}
+
+func TestConfigWatcherReloadsSymlinkTargetAtomicReplacements(t *testing.T) {
+	linkDir := t.TempDir()
+	targetDir := t.TempDir()
+	authDir := filepath.Join(linkDir, "auth")
+	if err := os.Mkdir(authDir, 0o755); err != nil {
+		t.Fatalf("create auth dir: %v", err)
+	}
+	targetPath := filepath.Join(targetDir, "real-config.yaml")
+	linkPath := filepath.Join(linkDir, "config.yaml")
+	writeConfig := func(path string, port int) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("port: %d\nauth-dir: %s\n", port, authDir)), 0o644); err != nil {
+			t.Fatalf("write target config: %v", err)
+		}
+	}
+	writeConfig(targetPath, 7101)
+	if err := os.Symlink(targetPath, linkPath); err != nil {
+		t.Fatalf("create config symlink: %v", err)
+	}
+
+	reloads := make(chan int, 4)
+	w, err := NewWatcher(linkPath, authDir, func(cfg *config.Config) { reloads <- cfg.Port })
+	if err != nil {
+		t.Fatalf("create watcher: %v", err)
+	}
+	w.SetConfig(&config.Config{Port: 7101, AuthDir: authDir})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err = w.Start(ctx); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+	select {
+	case <-reloads:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for initial callback")
+	}
+
+	for _, port := range []int{7102, 7103} {
+		tmp := filepath.Join(targetDir, fmt.Sprintf(".real-config-%d.tmp", port))
+		writeConfig(tmp, port)
+		if err = os.Rename(tmp, targetPath); err != nil {
+			t.Fatalf("replace target config: %v", err)
+		}
+		select {
+		case got := <-reloads:
+			if got != port {
+				t.Fatalf("symlink target loaded port %d, want %d", got, port)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("symlink target replacement %d was not reloaded", port)
 		}
 	}
 }

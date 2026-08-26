@@ -27,6 +27,18 @@ func matchProvider(provider string, targets []string) (string, bool) {
 	return p, false
 }
 
+func resolveConfigTargets(configPath string) []string {
+	path, err := filepath.Abs(configPath)
+	if err != nil {
+		path = filepath.Clean(configPath)
+	}
+	targets := []string{path}
+	if resolved, errEval := filepath.EvalSymlinks(path); errEval == nil && resolved != path {
+		targets = append(targets, resolved)
+	}
+	return targets
+}
+
 func (w *Watcher) start(ctx context.Context) error {
 	var fallbackSnapshot []byte
 	if w.completion != nil {
@@ -58,15 +70,24 @@ func (w *Watcher) start(ctx context.Context) error {
 		log.Errorf("failed to access config file %s: %v", w.configPath, errStatConfig)
 		return errStatConfig
 	}
-	configDir := filepath.Dir(w.configPath)
-	if errAddConfig := w.watcher.Add(configDir); errAddConfig != nil {
-		closeCompletionOnError()
-		log.Errorf("failed to watch config directory %s: %v", configDir, errAddConfig)
-		return errAddConfig
+	watchedDirs := make(map[string]struct{}, len(w.configTargets)+1)
+	for _, target := range w.configTargets {
+		configDir := filepath.Dir(target)
+		normalizedDir := w.normalizeAuthPath(configDir)
+		if _, watched := watchedDirs[normalizedDir]; watched {
+			continue
+		}
+		if errAddConfig := w.watcher.Add(configDir); errAddConfig != nil {
+			closeCompletionOnError()
+			log.Errorf("failed to watch config directory %s: %v", configDir, errAddConfig)
+			return errAddConfig
+		}
+		watchedDirs[normalizedDir] = struct{}{}
+		log.Debugf("watching config directory: %s", configDir)
 	}
-	log.Debugf("watching config directory: %s", configDir)
 
-	if w.normalizeAuthPath(configDir) != w.normalizeAuthPath(w.authDir) {
+	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
+	if _, watched := watchedDirs[normalizedAuthDir]; !watched {
 		if errAddAuthDir := w.watcher.Add(w.authDir); errAddAuthDir != nil {
 			closeCompletionOnError()
 			log.Errorf("failed to watch auth directory %s: %v", w.authDir, errAddAuthDir)
@@ -112,9 +133,18 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	// Filter only relevant events: config file or auth-dir JSON files.
 	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
 	normalizedName := w.normalizeAuthPath(event.Name)
-	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
+	configTargets := w.configTargets
+	if len(configTargets) == 0 {
+		configTargets = []string{w.configPath}
+	}
+	isConfigEvent := false
+	for _, target := range configTargets {
+		if normalizedName == w.normalizeAuthPath(target) {
+			isConfigEvent = event.Op&configOps != 0
+			break
+		}
+	}
 	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
-	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 	isAuthJSON := filepath.Dir(normalizedName) == normalizedAuthDir && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON {

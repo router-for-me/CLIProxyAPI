@@ -32,6 +32,7 @@ type authDirProvider interface {
 // Watcher manages file watching for configuration and authentication files
 type Watcher struct {
 	configPath        string
+	configTargets     []string
 	authDir           string
 	config            *config.Config
 	clientsMutex      sync.RWMutex
@@ -101,13 +102,15 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 	if errNewWatcher != nil {
 		return nil, errNewWatcher
 	}
-	completionWatcher, errCompletionWatcher := newConfigCompletionWatcher(configPath)
+	configTargets := resolveConfigTargets(configPath)
+	completionWatcher, errCompletionWatcher := newConfigCompletionWatcher(configTargets...)
 	if errCompletionWatcher != nil {
 		_ = watcher.Close()
 		return nil, errCompletionWatcher
 	}
 	w := &Watcher{
 		configPath:      configPath,
+		configTargets:   configTargets,
 		authDir:         authDir,
 		reloadCallback:  reloadCallback,
 		watcher:         watcher,
