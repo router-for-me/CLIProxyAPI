@@ -52,7 +52,10 @@ func TestExecuteStreamFloorsTransientRateLimitHint(t *testing.T) {
 	if state.Quota.BackoffLevel != 0 {
 		t.Fatalf("expected BackoffLevel to stay 0 for a transient rate limit, got %d", state.Quota.BackoffLevel)
 	}
-	if got := state.Quota.NextRecoverAt.Sub(before); got < transientRateLimitMinimum {
+	if state.Quota.Exceeded {
+		t.Fatal("transient stream 429 must not set Quota.Exceeded")
+	}
+	if got := state.NextRetryAfter.Sub(before); got < transientRateLimitMinimum {
 		t.Fatalf("sub-second transient stream hint was not floored: got %v, want at least %v", got, transientRateLimitMinimum)
 	}
 }
@@ -103,7 +106,10 @@ func TestExecuteStreamFloorsLateTransientRateLimitHint(t *testing.T) {
 	if state.Quota.BackoffLevel != 0 {
 		t.Fatalf("expected BackoffLevel to stay 0 for a late transient rate limit, got %d", state.Quota.BackoffLevel)
 	}
-	if got := state.Quota.NextRecoverAt.Sub(before); got < transientRateLimitMinimum {
+	if state.Quota.Exceeded {
+		t.Fatal("late transient stream 429 must not set Quota.Exceeded")
+	}
+	if got := state.NextRetryAfter.Sub(before); got < transientRateLimitMinimum {
 		t.Fatalf("sub-second late stream hint was not floored: got %v, want at least %v", got, transientRateLimitMinimum)
 	}
 }

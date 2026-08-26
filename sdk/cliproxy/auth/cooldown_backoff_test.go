@@ -542,7 +542,10 @@ func TestMarkResultTransientRateLimitFloorsProviderHint(t *testing.T) {
 	if state.Quota.BackoffLevel != 0 {
 		t.Fatalf("expected BackoffLevel to stay 0 for a transient rate limit, got %d", state.Quota.BackoffLevel)
 	}
-	if got := state.Quota.NextRecoverAt.Sub(before); got < transientRateLimitMinimum {
+	if state.Quota.Exceeded {
+		t.Fatal("transient 429 must not set Quota.Exceeded")
+	}
+	if got := state.NextRetryAfter.Sub(before); got < transientRateLimitMinimum {
 		t.Fatalf("sub-second transient hint was not floored: got %v, want at least %v", got, transientRateLimitMinimum)
 	}
 }
@@ -557,8 +560,11 @@ func TestApplyAuthFailureStateTransientRateLimitFloorsProviderHint(t *testing.T)
 	if transient.Quota.BackoffLevel != 0 {
 		t.Fatalf("expected BackoffLevel to stay 0 for a transient rate limit, got %d", transient.Quota.BackoffLevel)
 	}
-	if !transient.Quota.NextRecoverAt.Equal(now.Add(transientRateLimitMinimum)) {
-		t.Fatalf("expected the sub-second transient hint to be floored at %v, got %v", now.Add(transientRateLimitMinimum), transient.Quota.NextRecoverAt)
+	if transient.Quota.Exceeded {
+		t.Fatal("transient 429 must not set Quota.Exceeded")
+	}
+	if !transient.Quota.NextRecoverAt.IsZero() {
+		t.Fatalf("transient 429 must not write Quota.NextRecoverAt, got %v", transient.Quota.NextRecoverAt)
 	}
 	if !transient.NextRetryAfter.Equal(now.Add(transientRateLimitMinimum)) {
 		t.Fatalf("expected NextRetryAfter to use the transient floor at %v, got %v", now.Add(transientRateLimitMinimum), transient.NextRetryAfter)
@@ -567,8 +573,8 @@ func TestApplyAuthFailureStateTransientRateLimitFloorsProviderHint(t *testing.T)
 	longHint := 2 * transientRateLimitMinimum
 	longHintAuth := &Auth{ID: "auth-transient-long-hint"}
 	applyAuthFailureState(longHintAuth, rateLimitErr, &longHint, now, false, true)
-	if !longHintAuth.Quota.NextRecoverAt.Equal(now.Add(longHint)) {
-		t.Fatalf("expected a longer transient hint to extend cooldown to %v, got %v", now.Add(longHint), longHintAuth.Quota.NextRecoverAt)
+	if !longHintAuth.NextRetryAfter.Equal(now.Add(longHint)) {
+		t.Fatalf("expected a longer transient hint to extend cooldown to %v, got %v", now.Add(longHint), longHintAuth.NextRetryAfter)
 	}
 
 	// The same sub-second hint on an exhausted quota must still use the ladder.
@@ -595,7 +601,10 @@ func TestApplyAuthFailureStateTransientRateLimitDoesNotEscalate(t *testing.T) {
 	if auth.Quota.BackoffLevel != 0 {
 		t.Fatalf("expected BackoffLevel 0 after the first transient rate limit, got %d", auth.Quota.BackoffLevel)
 	}
-	firstRecover := auth.Quota.NextRecoverAt
+	if auth.Quota.Exceeded {
+		t.Fatal("transient 429 must not set Quota.Exceeded")
+	}
+	firstRecover := auth.NextRetryAfter
 	if !firstRecover.Equal(now.Add(transientRateLimitMinimum)) {
 		t.Fatalf("expected first transient cooldown to close at %v, got %v", now.Add(transientRateLimitMinimum), firstRecover)
 	}
@@ -605,8 +614,8 @@ func TestApplyAuthFailureStateTransientRateLimitDoesNotEscalate(t *testing.T) {
 	if auth.Quota.BackoffLevel != 0 {
 		t.Fatalf("expected repeated transient rate limit not to advance BackoffLevel, got %d", auth.Quota.BackoffLevel)
 	}
-	if want := after.Add(transientRateLimitMinimum); !auth.Quota.NextRecoverAt.Equal(want) {
-		t.Fatalf("expected repeated transient cooldown to close at %v, got %v", want, auth.Quota.NextRecoverAt)
+	if want := after.Add(transientRateLimitMinimum); !auth.NextRetryAfter.Equal(want) {
+		t.Fatalf("expected repeated transient cooldown to close at %v, got %v", want, auth.NextRetryAfter)
 	}
 }
 
@@ -630,5 +639,164 @@ func TestIsTransientRateLimitErrorDetectsWrappedProviderClassification(t *testin
 	}
 	if !isTransientRateLimitError(fmt.Errorf("upstream: %w", classifiedRateLimitError{transient: true})) {
 		t.Fatal("expected a wrapped transient rate limit classification to be detected")
+	}
+}
+
+func TestMarkResultTransientRateLimitDoesNotSetQuotaExceeded(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	manager := NewManager(nil, nil, nil)
+	authID := "auth-transient-no-quota-marker"
+	model := "gpt-5-transient-no-quota-marker"
+	auth := &Auth{
+		ID:       authID,
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex"},
+		ModelStates: map[string]*ModelState{
+			model: {Status: StatusActive, Quota: QuotaState{BackoffLevel: 0}},
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	hint := observedExhaustedQuotaHint
+	result := quotaResult(authID, model)
+	result.RetryAfter = &hint
+	result.TransientRateLimit = true
+
+	before := time.Now()
+	manager.MarkResult(context.Background(), result)
+
+	updated, ok := manager.GetByID(authID)
+	if !ok || updated == nil || updated.ModelStates[model] == nil {
+		t.Fatalf("expected model state after failure")
+	}
+	state := updated.ModelStates[model]
+	if state.Quota.Exceeded {
+		t.Fatal("transient 429 must not set Quota.Exceeded")
+	}
+	if state.Quota.Reason == "quota" {
+		t.Fatalf("transient 429 must not set Reason %q", state.Quota.Reason)
+	}
+	if !state.Quota.NextRecoverAt.IsZero() {
+		t.Fatalf("transient 429 must not write Quota.NextRecoverAt, got %v", state.Quota.NextRecoverAt)
+	}
+	if got := state.NextRetryAfter.Sub(before); got < transientRateLimitMinimum {
+		t.Fatalf("expected NextRetryAfter at least the transient floor %v, got %v", transientRateLimitMinimum, got)
+	}
+
+	reg.ResumeClientModel(authID, model)
+	if count := reg.GetModelCount(model); count != 1 {
+		t.Fatalf("SetModelQuotaExceeded recorded a transient 429: GetModelCount=%d, want 1", count)
+	}
+}
+
+func TestMarkResultQuotaAfterTransientUsesLadderFloor(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-quota-after-transient",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex"},
+		ModelStates: map[string]*ModelState{
+			"gpt-5": {Status: StatusActive, Quota: QuotaState{BackoffLevel: 0}},
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	hint := observedExhaustedQuotaHint
+	transient := quotaResult(auth.ID, "gpt-5")
+	transient.RetryAfter = &hint
+	transient.TransientRateLimit = true
+	manager.MarkResult(context.Background(), transient)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after transient failure")
+	}
+	transientDeadline := updated.ModelStates["gpt-5"].NextRetryAfter
+	if !transientDeadline.After(time.Now()) {
+		t.Fatal("expected an unexpired transient NextRetryAfter before the quota 429")
+	}
+
+	inside := time.Now()
+	manager.MarkResult(context.Background(), quotaResult(auth.ID, "gpt-5"))
+
+	updated, ok = manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after quota failure")
+	}
+	state := updated.ModelStates["gpt-5"]
+	if !state.Quota.Exceeded || state.Quota.Reason != "quota" {
+		t.Fatalf("expected the quota 429 to record exhausted quota, got exceeded=%v reason=%q", state.Quota.Exceeded, state.Quota.Reason)
+	}
+	if state.Quota.BackoffLevel != 1 {
+		t.Fatalf("quota path reused the transient window: BackoffLevel=%d, want 1", state.Quota.BackoffLevel)
+	}
+	got := state.Quota.NextRecoverAt.Sub(inside)
+	if got < quotaBackoffBase-50*time.Millisecond {
+		t.Fatalf("expected at least the first ladder step (%v), got %v", quotaBackoffBase, got)
+	}
+	if got >= transientRateLimitMinimum-time.Second {
+		t.Fatalf("quota path reused the transient window: quota window %v, transient floor %v", got, transientRateLimitMinimum)
+	}
+	if state.NextRetryAfter.Before(transientDeadline) {
+		t.Fatalf("quota path dropped the unexpired transient NextRetryAfter: got %v, want at least %v", state.NextRetryAfter, transientDeadline)
+	}
+}
+
+func TestApplyAuthFailureStateTransientRateLimitDoesNotSetQuotaExceeded(t *testing.T) {
+	now := time.Now()
+	rateLimitErr := &Error{Code: "rate_limit", Message: "RATE_LIMIT_EXCEEDED", HTTPStatus: http.StatusTooManyRequests}
+	hint := observedExhaustedQuotaHint
+	auth := &Auth{ID: "auth-transient-no-quota"}
+	applyAuthFailureState(auth, rateLimitErr, &hint, now, false, true)
+
+	if auth.Quota.Exceeded {
+		t.Fatal("transient 429 must not set Quota.Exceeded")
+	}
+	if auth.Quota.Reason == "quota" {
+		t.Fatalf("transient 429 must not set Reason %q", auth.Quota.Reason)
+	}
+	if !auth.Quota.NextRecoverAt.IsZero() {
+		t.Fatalf("transient 429 must not write Quota.NextRecoverAt, got %v", auth.Quota.NextRecoverAt)
+	}
+	if !auth.NextRetryAfter.Equal(now.Add(transientRateLimitMinimum)) {
+		t.Fatalf("expected NextRetryAfter at the transient floor %v, got %v", now.Add(transientRateLimitMinimum), auth.NextRetryAfter)
+	}
+}
+
+func TestApplyAuthFailureStateQuotaAfterTransientUsesLadderFloor(t *testing.T) {
+	now := time.Now()
+	rateLimitErr := &Error{Code: "rate_limit", Message: "RATE_LIMIT_EXCEEDED", HTTPStatus: http.StatusTooManyRequests}
+	hint := observedExhaustedQuotaHint
+	auth := &Auth{ID: "auth-quota-after-transient-level"}
+	applyAuthFailureState(auth, rateLimitErr, &hint, now, false, true)
+	if auth.Quota.Exceeded {
+		t.Fatal("transient 429 must not set Quota.Exceeded")
+	}
+	transientDeadline := auth.NextRetryAfter
+
+	inside := now.Add(time.Second)
+	applyAuthFailureState(auth, rateLimitErr, nil, inside, false, false)
+	if !auth.Quota.Exceeded || auth.Quota.Reason != "quota" {
+		t.Fatalf("expected the quota 429 to record exhausted quota, got exceeded=%v reason=%q", auth.Quota.Exceeded, auth.Quota.Reason)
+	}
+	if auth.Quota.BackoffLevel != 1 {
+		t.Fatalf("quota path reused the transient window: BackoffLevel=%d, want 1", auth.Quota.BackoffLevel)
+	}
+	if want := inside.Add(quotaBackoffBase); !auth.Quota.NextRecoverAt.Equal(want) {
+		t.Fatalf("expected quota ladder floor at %v, got %v", want, auth.Quota.NextRecoverAt)
+	}
+	if !auth.NextRetryAfter.Equal(transientDeadline) {
+		t.Fatalf("quota path dropped the unexpired transient NextRetryAfter: got %v, want %v", auth.NextRetryAfter, transientDeadline)
 	}
 }

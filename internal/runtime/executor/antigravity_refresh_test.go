@@ -286,10 +286,13 @@ func TestAntigravityRefresh429IsTransientRateLimit(t *testing.T) {
 	if state.Quota.BackoffLevel != 0 {
 		t.Fatalf("expected BackoffLevel 0 on the transient refresh-429 path, got %d", state.Quota.BackoffLevel)
 	}
+	if state.Quota.Exceeded {
+		t.Fatal("transient refresh 429 must not set Quota.Exceeded")
+	}
 	// Quota first step is 1s; transient floor is 10s. A 479ms hint on the quota
 	// ladder would recover in ~1s and increment BackoffLevel.
-	if got := state.Quota.NextRecoverAt.Sub(now); got < 9*time.Second {
-		t.Fatalf("refresh 429 took the quota ladder: NextRecoverAt delta %v, want at least the 10s transient floor", got)
+	if got := state.NextRetryAfter.Sub(now); got < 9*time.Second {
+		t.Fatalf("refresh 429 took the quota ladder: NextRetryAfter delta %v, want at least the 10s transient floor", got)
 	}
 
 	manager.MarkResult(context.Background(), result)

@@ -836,11 +836,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
 							transientCooldownOff := false
+							transientCooldown := false
 							if !disableCooling {
 								switch {
 								case result.TransientRateLimit && result.RetryAfter != nil && *result.RetryAfter <= 0:
 									// A deliberate zero-delay hint requests rotation without waiting.
 									next = now.Add(*result.RetryAfter)
+									transientCooldown = true
 								case result.TransientRateLimit:
 									// Keep short-lived throttles out of the exhausted-quota window, but
 									// never let a tiny hint repeatedly select the same credential.
@@ -850,6 +852,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									} else {
 										next, backoffLevel = transientRateLimitCooldownAfterFailure(state.Quota, result.RetryAfter, now)
 									}
+									transientCooldown = true
 								default:
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
 									if result.RetryAfter != nil {
@@ -874,7 +877,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								state.NextRetryAfter = prevNextRetry
 								break
 							}
-							state.NextRetryAfter = next
+							nextRetry := next
+							if !transientCooldown && state.NextRetryAfter.After(nextRetry) {
+								nextRetry = state.NextRetryAfter
+							}
+							state.NextRetryAfter = nextRetry
+							if transientCooldown {
+								break
+							}
 							applyCooldownFields(&state.Quota, QuotaState{
 								Exceeded:      true,
 								Reason:        "quota",
@@ -2008,9 +2018,6 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	case 429:
 		prevStatusMessage := auth.StatusMessage
 		prevExceeded, prevReason := auth.Quota.Exceeded, auth.Quota.Reason
-		auth.StatusMessage = "quota exhausted"
-		auth.Quota.Exceeded = true
-		auth.Quota.Reason = "quota"
 		var next time.Time
 		transientCooldownOff := false
 		if !disableCooling {
@@ -2025,7 +2032,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 					next = time.Time{}
 					transientCooldownOff = true
 				} else {
-					next, auth.Quota.BackoffLevel = transientRateLimitCooldownAfterFailure(auth.Quota, retryAfter, now)
+					next, _ = transientRateLimitCooldownAfterFailure(auth.Quota, retryAfter, now)
 				}
 			default:
 				next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
@@ -2052,8 +2059,18 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.NextRetryAfter = prevNextRetry
 			break
 		}
+		nextRetry := next
+		if !transientRateLimit && auth.NextRetryAfter.After(nextRetry) {
+			nextRetry = auth.NextRetryAfter
+		}
+		auth.NextRetryAfter = nextRetry
+		if transientRateLimit {
+			break
+		}
+		auth.StatusMessage = "quota exhausted"
+		auth.Quota.Exceeded = true
+		auth.Quota.Reason = "quota"
 		auth.Quota.NextRecoverAt = next
-		auth.NextRetryAfter = next
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
 		auth.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)

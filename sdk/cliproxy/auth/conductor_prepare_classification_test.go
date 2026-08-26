@@ -82,8 +82,11 @@ func TestPrepareErrorPropagatesTransientRateLimit(t *testing.T) {
 			if state.Quota.BackoffLevel != 0 {
 				t.Fatalf("expected BackoffLevel 0 on the transient prepare-429 path, got %d", state.Quota.BackoffLevel)
 			}
-			if gotWindow := state.Quota.NextRecoverAt.Sub(before); gotWindow < transientRateLimitMinimum {
-				t.Fatalf("prepare 429 took the quota ladder: NextRecoverAt delta %v, want at least the 10s transient floor", gotWindow)
+			if state.Quota.Exceeded {
+				t.Fatal("transient prepare 429 must not set Quota.Exceeded")
+			}
+			if gotWindow := state.NextRetryAfter.Sub(before); gotWindow < transientRateLimitMinimum {
+				t.Fatalf("prepare 429 took the quota ladder: NextRetryAfter delta %v, want at least the 10s transient floor", gotWindow)
 			}
 		})
 	}
