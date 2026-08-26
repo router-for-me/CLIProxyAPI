@@ -67,7 +67,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	// Get all available models
 	allModels := h.Models()
 
-	// Filter to only include the 4 required fields: id, object, created, owned_by
+	// Filter to only include the 4 required fields: id, object, created, owned_by.
 	filteredModels := make([]map[string]any, len(allModels))
 	for i, model := range allModels {
 		filteredModel := map[string]any{
@@ -85,6 +85,8 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			filteredModel["owned_by"] = ownedBy
 		}
 
+		appendCommandCodeContextFields(filteredModel, model)
+
 		filteredModels[i] = filteredModel
 	}
 
@@ -92,6 +94,26 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 		"object": "list",
 		"data":   filteredModels,
 	})
+}
+
+// appendCommandCodeContextFields copies optional context-window metadata from
+// a registry model payload into the filtered response entry, but ONLY for
+// Command Code models (owned_by == "commandcode"). The registry carries
+// ContextLength for commandcode models from the official provider catalog
+// (api.commandcode.ai), while the generic 4-field filter above drops it —
+// leaving clients (e.g. Hermes) unable to resolve the real context window
+// and falling back to conservative defaults like 256K for 1M-window models.
+// Scoped to commandcode so other channels' listing shape stays unchanged;
+// generalizing this passthrough is an upstream design decision.
+func appendCommandCodeContextFields(dst, src map[string]any) {
+	if ownedBy, _ := src["owned_by"].(string); ownedBy != "commandcode" {
+		return
+	}
+	for _, field := range []string{"context_length", "max_context_length", "max_completion_tokens"} {
+		if v, ok := src[field].(int); ok && v > 0 {
+			dst[field] = v
+		}
+	}
 }
 
 // ChatCompletions handles the /v1/chat/completions endpoint.
