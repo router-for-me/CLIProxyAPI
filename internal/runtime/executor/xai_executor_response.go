@@ -398,6 +398,33 @@ func xaiSchemaTypeIsObjectOnly(schemaType gjson.Result) bool {
 	return true
 }
 
+// xaiIsCodexAppNamespace reports whether a Responses namespace is the Codex app
+// tool surface. Desktop 0.150+ exposes it as mcp__codex_app instead of codex_app.
+func xaiIsCodexAppNamespace(namespaceName string) bool {
+	name := strings.ToLower(strings.TrimSpace(namespaceName))
+	if name == "" {
+		return false
+	}
+	return name == xaiCodexAppNamespaceName || strings.HasSuffix(name, "__"+xaiCodexAppNamespaceName)
+}
+
+// xaiIsCodexAppAutomationUpdate 识别 Codex Desktop 的 automation_update。
+// 旧客户端 namespace 是 codex_app；0.150+ 变成 mcp__codex_app。拍扁后名字是
+// codex_app__automation_update 或 mcp__codex_app__automation_update。
+// 只按精确旧名匹配会把新 schema 原样发给 Grok，触发 400 invalid-argument。
+func xaiIsCodexAppAutomationUpdate(toolName, namespaceName string) bool {
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" {
+		return false
+	}
+	flattenedName := xaiCodexAppNamespaceName + "__" + xaiAutomationUpdateToolName
+	lowerName := strings.ToLower(toolName)
+	if strings.EqualFold(toolName, flattenedName) || strings.HasSuffix(lowerName, "__"+flattenedName) {
+		return true
+	}
+	return strings.EqualFold(toolName, xaiAutomationUpdateToolName) && xaiIsCodexAppNamespace(namespaceName)
+}
+
 // xaiFunctionParametersNeedSimplification reports whether a function tool, or
 // a custom tool normalized to a function, has a schema that xAI cannot accept.
 func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
@@ -409,10 +436,7 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 	}
 
 	toolName := strings.TrimSpace(tool.Get("name").String())
-	qualifiedAutomationName := xaiCodexAppNamespaceName + "__" + xaiAutomationUpdateToolName
-	if isFunction && (strings.EqualFold(toolName, qualifiedAutomationName) ||
-		(strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
-			strings.EqualFold(toolName, xaiAutomationUpdateToolName))) {
+	if isFunction && xaiIsCodexAppAutomationUpdate(toolName, namespaceName) {
 		return true
 	}
 
@@ -423,7 +447,9 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 			continue
 		}
 		for _, branch := range union.Array() {
-			if !xaiSchemaTypeIsObjectOnly(branch.Get("type")) {
+			// $ref 分支即使标了 type=object，展开后仍可能含 non-object union，
+			// Grok 会按 invalid_client_tool_schema / invalid-argument 直接拒绝。
+			if branch.Get("$ref").Exists() || !xaiSchemaTypeIsObjectOnly(branch.Get("type")) {
 				return true
 			}
 		}

@@ -3673,46 +3673,70 @@ func TestXAIExecutorExecuteVideosUsesNativeEndpointFromRequestPath(t *testing.T)
 }
 
 func TestNormalizeXAITools_SimplifiesCodexAppAutomationUpdateSchema(t *testing.T) {
-	// Large oneOf+$ref schema mimicking Codex Desktop codex_app.automation_update.
-	params := `{"type":"object","oneOf":[{"properties":{"mode":{"type":"string"}}}],"$defs":{"a":{"type":"string"}},"x":"` + strings.Repeat("y", 1600) + `"}`
-	body := []byte(`{"model":"grok-4.5","tools":[{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"automation_update","description":"sched","strict":true,"parameters":` + params + `}]},{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`)
-	out := normalizeXAITools(body)
+	// Large oneOf+$ref schema mimicking Codex Desktop automation_update.
+	params := `{"type":"object","oneOf":[{"$ref":"#/$defs/a","type":"object"}],"$defs":{"a":{"type":"object","oneOf":[{"type":"object"},{"type":"null"}]}},"x":"` + strings.Repeat("y", 1600) + `"}`
+	tests := []struct {
+		name         string
+		body         []byte
+		wantAutoName string
+	}{
+		{
+			name:         "codex_app namespace",
+			wantAutoName: "codex_app__automation_update",
+			body:         []byte(`{"model":"grok-4.5","tools":[{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"automation_update","description":"sched","strict":true,"parameters":` + params + `}]},{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`),
+		},
+		{
+			name:         "mcp__codex_app namespace",
+			wantAutoName: "mcp__codex_app__automation_update",
+			body:         []byte(`{"model":"grok-4.6","tools":[{"type":"namespace","name":"mcp__codex_app","tools":[{"type":"function","name":"automation_update","description":"sched","strict":true,"parameters":` + params + `}]},{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`),
+		},
+		{
+			name:         "flattened mcp__codex_app name",
+			wantAutoName: "mcp__codex_app__automation_update",
+			body:         []byte(`{"model":"grok-4.6","tools":[{"type":"function","name":"mcp__codex_app__automation_update","description":"sched","strict":true,"parameters":` + params + `},{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`),
+		},
+	}
 
-	tools := gjson.GetBytes(out, "tools")
-	if !tools.IsArray() {
-		t.Fatalf("tools missing: %s", string(out))
-	}
-	foundAuto := false
-	foundExec := false
-	for _, tool := range tools.Array() {
-		switch tool.Get("name").String() {
-		case "codex_app__automation_update":
-			foundAuto = true
-			paramsRaw := tool.Get("parameters").Raw
-			if strings.Contains(paramsRaw, `"oneOf"`) || strings.Contains(paramsRaw, `"$defs"`) {
-				t.Fatalf("automation_update parameters were not simplified: %s", paramsRaw)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := normalizeXAITools(tt.body)
+			tools := gjson.GetBytes(out, "tools")
+			if !tools.IsArray() {
+				t.Fatalf("tools missing: %s", string(out))
 			}
-			if tool.Get("parameters.type").String() != "object" {
-				t.Fatalf("automation_update parameters.type = %q, want object", tool.Get("parameters.type").String())
+			foundAuto := false
+			foundExec := false
+			for _, tool := range tools.Array() {
+				switch tool.Get("name").String() {
+				case tt.wantAutoName:
+					foundAuto = true
+					paramsRaw := tool.Get("parameters").Raw
+					if strings.Contains(paramsRaw, `"oneOf"`) || strings.Contains(paramsRaw, `"$defs"`) || strings.Contains(paramsRaw, `"$ref"`) {
+						t.Fatalf("automation_update parameters were not simplified: %s", paramsRaw)
+					}
+					if tool.Get("parameters.type").String() != "object" {
+						t.Fatalf("automation_update parameters.type = %q, want object", tool.Get("parameters.type").String())
+					}
+					if tool.Get("parameters.additionalProperties").Type != gjson.True {
+						t.Fatalf("automation_update parameters should allow additionalProperties: %s", paramsRaw)
+					}
+					if tool.Get("strict").Type != gjson.False {
+						t.Fatalf("automation_update strict = %s, want false", tool.Get("strict").Raw)
+					}
+				case "exec_command":
+					foundExec = true
+					if got := tool.Get("parameters.properties.cmd.type").String(); got != "string" {
+						t.Fatalf("exec_command schema should be preserved, got %q in %s", got, tool.Raw)
+					}
+				}
 			}
-			if tool.Get("parameters.additionalProperties").Type != gjson.True {
-				t.Fatalf("automation_update parameters should allow additionalProperties: %s", paramsRaw)
+			if !foundAuto {
+				t.Fatalf("automation_update tool missing after normalize: %s", string(out))
 			}
-			if tool.Get("strict").Type != gjson.False {
-				t.Fatalf("automation_update strict = %s, want false", tool.Get("strict").Raw)
+			if !foundExec {
+				t.Fatalf("exec_command tool missing after normalize: %s", string(out))
 			}
-		case "exec_command":
-			foundExec = true
-			if got := tool.Get("parameters.properties.cmd.type").String(); got != "string" {
-				t.Fatalf("exec_command schema should be preserved, got %q in %s", got, tool.Raw)
-			}
-		}
-	}
-	if !foundAuto {
-		t.Fatalf("automation_update tool missing after normalize: %s", string(out))
-	}
-	if !foundExec {
-		t.Fatalf("exec_command tool missing after normalize: %s", string(out))
+		})
 	}
 }
 
@@ -4060,6 +4084,17 @@ func TestXAIFunctionParametersNeedSimplification(t *testing.T) {
 	flattened := gjson.Parse(`{"type":"function","name":"codex_app__automation_update","parameters":{"type":"object"}}`)
 	if !xaiFunctionParametersNeedSimplification(flattened, "") {
 		t.Fatal("flattened codex_app__automation_update should need simplification")
+	}
+	if !xaiFunctionParametersNeedSimplification(auto, "mcp__codex_app") {
+		t.Fatal("mcp__codex_app.automation_update should need simplification")
+	}
+	mcpFlattened := gjson.Parse(`{"type":"function","name":"mcp__codex_app__automation_update","parameters":{"type":"object"}}`)
+	if !xaiFunctionParametersNeedSimplification(mcpFlattened, "") {
+		t.Fatal("flattened mcp__codex_app__automation_update should need simplification")
+	}
+	refUnion := gjson.Parse(`{"type":"function","name":"lookup","parameters":{"type":"object","oneOf":[{"$ref":"#/$defs/a","type":"object"}],"$defs":{"a":{"type":"object"}}}}`)
+	if !xaiFunctionParametersNeedSimplification(refUnion, "") {
+		t.Fatal("root oneOf branch with $ref should need simplification")
 	}
 	custom := gjson.Parse(`{"type":"custom","name":"automation_update","parameters":{"type":"object"}}`)
 	if xaiFunctionParametersNeedSimplification(custom, "codex_app") {

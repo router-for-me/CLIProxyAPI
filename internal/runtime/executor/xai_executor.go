@@ -27,9 +27,11 @@ const (
 	xaiToolSearchType          = "tool_search"
 	xaiWebSearchToolType       = "web_search"
 	xaiXSearchToolType         = "x_search"
-	// Codex Desktop injects codex_app.automation_update with a large oneOf+$ref
-	// schema. xAI's free/build Responses path accepts the HTTP request but never
-	// emits SSE when that schema is present, so Desktop hangs on "thinking".
+	// Codex Desktop injects automation_update under the codex_app namespace, and
+	// 0.150+ wraps the same surface as mcp__codex_app. The schema is a large
+	// oneOf+$ref union. xAI's free/build Responses path accepts the HTTP request
+	// but never emits SSE when that schema is present, so Desktop hangs on
+	// "thinking"; Grok CLI chat-proxy instead returns 400 invalid-argument.
 	xaiCodexAppNamespaceName    = "codex_app"
 	xaiAutomationUpdateToolName = "automation_update"
 	// Permissive placeholder schema: keeps the tool callable without the hang.
