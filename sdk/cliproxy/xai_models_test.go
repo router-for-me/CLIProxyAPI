@@ -204,6 +204,33 @@ func TestMergeXAIModelsReasoningMetadata(t *testing.T) {
 	}
 }
 
+func TestRefreshXAIRegistrationDoesNotRediscoverUnchangedAuth(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = w.Write([]byte(`{"data":[{"id":"refresh-model"}]}`))
+	}))
+	defer server.Close()
+
+	auth := &coreauth.Auth{ID: "xai-refresh-dedup-test", Provider: "xai", Attributes: map[string]string{
+		"auth_kind": coreauth.AuthKindOAuth, "base_url": server.URL + "/v1", "access_token": "token",
+	}}
+	manager := coreauth.NewManager(nil, nil, nil)
+	registered, errRegister := manager.Register(context.Background(), auth)
+	if errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	service := &Service{coreManager: manager}
+	reg := registry.GetGlobalRegistry()
+	defer reg.UnregisterClient(auth.ID)
+	if !service.refreshModelRegistrationForAuthWithContext(context.Background(), registered, nil) {
+		t.Fatal("refreshModelRegistrationForAuthWithContext() = false")
+	}
+	if requests != 1 {
+		t.Fatalf("upstream requests = %d, want 1 for unchanged refresh snapshot", requests)
+	}
+}
+
 func TestResolveXAIModelsRoute(t *testing.T) {
 	tests := []struct {
 		name string

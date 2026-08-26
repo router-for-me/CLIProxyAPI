@@ -333,12 +333,15 @@ func (s *Service) refreshModelRegistrationForAuthWithContext(ctx context.Context
 		s.coreManager.RefreshSchedulerEntry(current.ID)
 		return false
 	}
+	reuseXAIRegistration := sameXAIModelRegistrationInputs(current, latest)
 
 	// Re-apply the latest auth snapshot so concurrent auth updates cannot leave
-	// stale model registrations behind. This may duplicate registration work when
-	// no auth fields changed, but keeps the refresh path simple and correct.
+	// stale model registrations behind. Avoid repeating account model discovery
+	// when the latest snapshot has the same xAI OAuth registration inputs.
 	s.ensureExecutorsForAuthWithContext(ctx, latest, false)
-	s.registerModelsForAuthWithCache(ctx, latest, compatCache)
+	if !reuseXAIRegistration {
+		s.registerModelsForAuthWithCache(ctx, latest, compatCache)
+	}
 	if ctx.Err() != nil {
 		return false
 	}

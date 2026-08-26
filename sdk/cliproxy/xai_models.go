@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -179,6 +180,27 @@ func xaiUsingAPIForModels(auth *coreauth.Auth) bool {
 	}
 	authKind := strings.ToLower(strings.TrimSpace(auth.AuthKind()))
 	return authKind != coreauth.AuthKindOAuth
+}
+
+func sameXAIModelRegistrationInputs(current, latest *coreauth.Auth) bool {
+	if current == nil || latest == nil || current.ID == "" || current.ID != latest.ID {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(current.Provider), "xai") || current.AuthKind() != coreauth.AuthKindOAuth || latest.AuthKind() != coreauth.AuthKindOAuth {
+		return false
+	}
+	if current.Prefix != latest.Prefix || current.Disabled != latest.Disabled || current.ProxyURL != latest.ProxyURL {
+		return false
+	}
+	if !reflect.DeepEqual(current.Attributes, latest.Attributes) {
+		return false
+	}
+	for _, key := range []string{"access_token", "api_key", "base_url"} {
+		if xaiAuthString(current, key) != xaiAuthString(latest, key) {
+			return false
+		}
+	}
+	return xaiUsingAPIForModels(current) == xaiUsingAPIForModels(latest)
 }
 
 func xaiAuthString(auth *coreauth.Auth, keys ...string) string {
