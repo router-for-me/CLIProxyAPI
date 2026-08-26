@@ -49,6 +49,7 @@ func parseCodexWebsocketError(payload []byte) (error, bool) {
 	} else if isCodexWebsocketConnectionLimitError(payload) {
 		retryAfter := time.Duration(0)
 		statusError.retryAfter = &retryAfter
+		statusError.transientRateLimit = true
 	}
 	return statusErrWithHeaders{
 		statusErr: statusError,
