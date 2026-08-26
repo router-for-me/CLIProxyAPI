@@ -1791,7 +1791,11 @@ function renderInput(field, form, update, isEdit, providerType) {
           displayName: 'display name (optional)',
         }} />;
     case 'api_key_entries':
-      return <APIKeyEntriesEditor entries={value || []} onChange={(v) => update(field.name, v)} />;
+      return <APIKeyEntriesEditor
+        entries={value || []}
+        onChange={(v) => update(field.name, v)}
+        error={showError ? errors[field.name] : ''}
+      />;
     case 'text':
     default:
       return <input id={id} type="text" value={value || ''} onChange={(e) => update(field.name, e.target.value)}
@@ -3105,30 +3109,135 @@ function ImportOAuthProviderModal({ existingProviderKeys = new Set(), onClose, o
 }
 
 // APIKeyEntriesEditor — multi-row editor for openai-compatibility
-// api-key-entries. Each row is a PasswordInput + proxy URL input.
-function APIKeyEntriesEditor({ entries, onChange }) {
+// api-key-entries. Each row carries an optional normalised identity (also
+// known as the entry provider key), a masked API key, and an optional proxy
+// URL. The persisted child-row id is round-tripped so the backend can update
+// rows in place rather than deleting and reinserting them.
+function APIKeyEntriesEditor({ entries, onChange, error = '' }) {
   const safe = Array.isArray(entries) ? entries : [];
   function update(idx, patch) {
     onChange(safe.map((e, i) => (i === idx ? { ...e, ...patch } : e)));
   }
-  function add() { onChange([...safe, { api_key: '', proxy_url: '' }]); }
+  function add() {
+    onChange([...safe, { api_key: '', proxy_url: '', name: '', id: 0 }]);
+  }
   function remove(idx) { onChange(safe.filter((_, i) => i !== idx)); }
+
+  // Entry identity rules mirror the backend's normalizeUpstreamProviderEntryName.
+  // Errors are surfaced inline, never include the secret, and the raw API key
+  // is never used as a label or placeholder.
+  const errors = useMemo(() => validateAPIKeyEntries(safe), [safe]);
+
+  function rowKey(e, idx) {
+    const id = Number(e && e.id) || 0;
+    return id > 0 ? `entry-${id}` : `entry-new-${idx}`;
+  }
 
   return (
     <div className="list-editor">
       {safe.length === 0 && <div className="list-editor__empty">No API key entries. Click "+ Add key".</div>}
-      {safe.map((e, idx) => (
-        <div className="list-editor__row" key={idx}>
-          <PasswordInput value={e.api_key} onChange={(v) => update(idx, { api_key: v })} placeholder="api key" />
-          <input type="text" value={e.proxy_url || ''} onChange={(ev) => update(idx, { proxy_url: ev.target.value })}
-            placeholder="proxy url (optional)" spellCheck={false} />
-          <button type="button" className="list-editor__remove" onClick={() => remove(idx)}
-            aria-label="Remove entry" title="Remove">×</button>
-        </div>
-      ))}
+      {error && (
+        <div className="error-banner" role="alert" style={{ marginTop: 4 }}>{error}</div>
+      )}
+      {errors.__global && (
+        <div className="error-banner" role="alert" style={{ marginTop: 4 }}>{errors.__global}</div>
+      )}
+      {safe.map((e, idx) => {
+        const id = Number(e && e.id) || 0;
+        const rowErr = errors[idx] || {};
+        const hint = id > 0
+          ? `Persisted as entry #${id}. ${idHintForIdentity(e)}`
+          : 'Blank identity will become key-<id> after save.';
+        return (
+          <div className="list-editor__rowgroup" key={rowKey(e, idx)}>
+            <div className="list-editor__row">
+              <input
+                type="text"
+                value={e.name || ''}
+                onChange={(ev) => update(idx, { name: ev.target.value })}
+                placeholder="identity (optional, e.g. team-a)"
+                spellCheck={false}
+                aria-label="API key entry identity"
+                aria-invalid={!!rowErr.name}
+                data-testid={`api-key-entry-name-${idx}`}
+              />
+              <PasswordInput
+                value={e.api_key}
+                onChange={(v) => update(idx, { api_key: v })}
+                placeholder="api key"
+              />
+              <input
+                type="text"
+                value={e.proxy_url || ''}
+                onChange={(ev) => update(idx, { proxy_url: ev.target.value })}
+                placeholder="proxy url (optional)"
+                spellCheck={false}
+                aria-label="API key entry proxy URL"
+              />
+              <button
+                type="button"
+                className="list-editor__remove"
+                onClick={() => remove(idx)}
+                aria-label="Remove entry"
+                title="Remove"
+              >×</button>
+            </div>
+            <div className="list-editor__rowhint muted" style={{ fontSize: 11 }}>
+              {hint}
+            </div>
+            {rowErr.name && (
+              <div className="form__error" role="alert">{rowErr.name}</div>
+            )}
+          </div>
+        );
+      })}
       <button type="button" className="list-editor__add" onClick={add}>+ Add key</button>
     </div>
   );
+}
+
+// validateAPIKeyEntries enforces the same rules the backend's
+// normalizeUpstreamProviderEntryName applies, plus the duplicate-name check
+// across the provider's entries. Returns a map keyed by entry index plus a
+// __global bucket for cross-entry messages.
+function validateAPIKeyEntries(entries) {
+  const out = {};
+  const seenNames = new Map(); // normalised name → first occurrence idx
+  for (let i = 0; i < entries.length; i += 1) {
+    const e = entries[i] || {};
+    const errs = {};
+    const raw = typeof e.name === 'string' ? e.name : '';
+    const trimmed = raw.trim();
+    const normalised = trimmed.toLowerCase();
+    if (trimmed !== '') {
+      if (!/^[a-z0-9][a-z0-9_-]*$/i.test(trimmed)) {
+        errs.name = 'Identity may only contain letters, digits, "_" and "-". It must start with a letter or digit.';
+      } else if (/^key-[0-9]+$/.test(normalised)) {
+        errs.name = `"${trimmed}" is reserved for auto-generated identities. Use a different value or leave blank.`;
+      } else if (seenNames.has(normalised)) {
+        const firstIdx = seenNames.get(normalised);
+        errs.name = firstIdx === i
+          ? 'Duplicate identity detected.'
+          : `Duplicate identity. Entry ${firstIdx + 1} already uses "${trimmed}".`;
+      }
+    }
+    if (Object.keys(errs).length > 0) out[i] = errs;
+    if (trimmed !== '' && !errs.name) {
+      seenNames.set(normalised, i);
+    }
+  }
+  return out;
+}
+
+// idHintForIdentity renders the row's eventual route identity for the hint
+// line. Existing rows use the server-returned id; fresh rows omit the hint.
+function idHintForIdentity(e) {
+  const id = Number(e && e.id) || 0;
+  const normalised = typeof e.name === 'string' ? e.name.trim().toLowerCase() : '';
+  const valid = normalised && /^[a-z0-9][a-z0-9_-]*$/.test(normalised) && !/^key-[0-9]+$/.test(normalised);
+  if (valid) return `Route identity: ${normalised}.`;
+  if (id > 0) return `Route identity: key-${id}.`;
+  return 'Blank identity will become key-<id> after save.';
 }
 
 // ============================================================================
@@ -3189,9 +3298,13 @@ function buildForm(providerType, initial, carryOver) {
     base.headers = Object.entries(src.headers).map(([key, value]) => ({ key, value: String(value) }));
   }
 
-  // Hydrate openai-compat api_key_entries.
+  // Hydrate openai-compat api_key_entries. Round-trip the persisted child-row
+  // id and the server-normalised name so subsequent saves update in place
+  // rather than deleting and reinserting the row.
   if (Array.isArray(src.api_key_entries)) {
     base.api_key_entries = src.api_key_entries.map((e) => ({
+      id: Number(e.id) || 0,
+      name: e.name || '',
       api_key: e.api_key || '',
       proxy_url: e.proxy_url || '',
     }));
@@ -3267,9 +3380,22 @@ function buildPayload(form, providerType) {
     }
   } else if (openai) {
     payload.name = (form.name || '').trim();
+    // api_key_entries round-trip the persisted child-row id and the optional
+    // normalised identity. The id is only sent when it is a positive integer;
+    // new rows omit it so the backend treats them as inserts.
     payload.api_key_entries = (form.api_key_entries || [])
       .filter((e) => e.api_key && e.api_key.trim())
-      .map((e) => ({ api_key: e.api_key.trim(), proxy_url: (e.proxy_url || '').trim() }));
+      .map((e) => {
+        const entry = {
+          api_key: e.api_key.trim(),
+          proxy_url: (e.proxy_url || '').trim(),
+        };
+        const id = Number(e.id) || 0;
+        if (id > 0) entry.id = id;
+        const name = typeof e.name === 'string' ? e.name.trim().toLowerCase() : '';
+        if (name) entry.name = name;
+        return entry;
+      });
   } else {
     // API-key providers. The Identifier field maps to the generic `name`
     // column (lower-cased by the proxy into the routing provider key).
@@ -3333,6 +3459,14 @@ function validate(form, schema, providerType, siblingNames, isEdit) {
       if (!isEdit || occurrences > 1) {
         errors.name = `Another provider already uses the name "${name}".`;
       }
+    }
+    // API-key entry identity validation mirrors the backend's
+    // normalizeUpstreamProviderEntryName so the Save button cannot submit
+    // a payload the server would reject.
+    const entryErrors = validateAPIKeyEntries(form.api_key_entries || []);
+    const dupCount = Object.keys(entryErrors).length;
+    if (dupCount > 0) {
+      errors.api_key_entries = `${dupCount} API key entr${dupCount === 1 ? 'y has' : 'ies have'} an identity problem. See inline messages below.`;
     }
   }
   return errors;
