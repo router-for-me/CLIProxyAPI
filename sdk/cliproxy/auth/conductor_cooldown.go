@@ -864,11 +864,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									next = state.Quota.NextRecoverAt
 								}
 							}
-							if transientCooldownOff && !state.Quota.Exceeded {
+							if transientCooldownOff && !(state.Quota.Exceeded && state.Quota.NextRecoverAt.After(now)) {
 								// Transient cooldowns are disabled for this auth: keep the model
 								// available instead of recording a zero-time quota block. Restore
 								// any pre-existing non-quota cooldown (401/403/404/5xx) instead of
-								// clearing it; a pre-existing quota block is left untouched above.
+								// clearing it. An active (unexpired) quota window still vetoes skip;
+								// an Exceeded flag whose NextRecoverAt is already past does not.
 								state.Unavailable = prevUnavailable
 								state.NextRetryAfter = prevNextRetry
 								break
@@ -2040,10 +2041,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 				next = auth.Quota.NextRecoverAt
 			}
 		}
-		if transientCooldownOff && !prevExceeded {
+		if transientCooldownOff && !(prevExceeded && auth.Quota.NextRecoverAt.After(now)) {
 			// Transient cooldowns are disabled: keep the credential available
-			// instead of recording a zero-time quota block. A pre-existing quota
-			// block is left untouched.
+			// instead of recording a zero-time quota block. An active (unexpired)
+			// quota window still vetoes skip; an expired Exceeded record does not.
 			auth.StatusMessage = prevStatusMessage
 			auth.Quota.Exceeded = prevExceeded
 			auth.Quota.Reason = prevReason
