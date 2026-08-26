@@ -55,7 +55,7 @@ func (s *responsesSSELifecycleState) AddChunk(chunk []byte) ([]byte, error) {
 	}
 	chunk = bytes.ReplaceAll(chunk, []byte("\r\n"), []byte("\n"))
 	chunk = bytes.ReplaceAll(chunk, []byte("\r"), []byte("\n"))
-	if len(s.pending) > 0 && !bytes.HasSuffix(s.pending, []byte("\n")) && !bytes.HasPrefix(chunk, []byte("\n")) {
+	if len(s.pending) > 0 && !bytes.HasSuffix(s.pending, []byte("\n")) && !bytes.HasPrefix(chunk, []byte("\n")) && responsesSSEChunkStartsField(chunk) {
 		s.pending = append(s.pending, '\n')
 	}
 	s.pending = append(s.pending, chunk...)
@@ -166,6 +166,8 @@ func (s *responsesSSELifecycleState) normalizeEvent(event map[string]any) ([]map
 		return s.onItemAdded(event)
 	case "response.output_item.done":
 		return s.onItemDone(event)
+	case "response.content_part.added":
+		return s.onContentPartAdded(event)
 	case "response.completed", "response.done":
 		out, err := s.closeActive("completed")
 		if err != nil {
@@ -200,6 +202,19 @@ func (s *responsesSSELifecycleState) normalizeEvent(event map[string]any) ([]map
 		return s.onDelta(event, "message")
 	}
 	return []map[string]any{event}, nil
+}
+
+func (s *responsesSSELifecycleState) onContentPartAdded(event map[string]any) ([]map[string]any, error) {
+	part, _ := event["part"].(map[string]any)
+	partType, _ := part["type"].(string)
+	switch partType {
+	case "output_text", "refusal":
+		return s.onDelta(event, "message")
+	case "reasoning_text", "summary_text":
+		return s.onDelta(event, "reasoning")
+	default:
+		return []map[string]any{event}, nil
+	}
 }
 
 func (s *responsesSSELifecycleState) onItemAdded(event map[string]any) ([]map[string]any, error) {
@@ -505,6 +520,16 @@ func responsesSSEEventName(frame []byte) string {
 		}
 	}
 	return ""
+}
+
+func responsesSSEChunkStartsField(chunk []byte) bool {
+	firstLine, _, _ := bytes.Cut(chunk, []byte("\n"))
+	firstLine = bytes.TrimSpace(firstLine)
+	return bytes.HasPrefix(firstLine, []byte("data:")) ||
+		bytes.HasPrefix(firstLine, []byte("event:")) ||
+		bytes.HasPrefix(firstLine, []byte("id:")) ||
+		bytes.HasPrefix(firstLine, []byte("retry:")) ||
+		bytes.HasPrefix(firstLine, []byte(":"))
 }
 
 func responsesSSEForwardedFields(frame []byte) [][]byte {

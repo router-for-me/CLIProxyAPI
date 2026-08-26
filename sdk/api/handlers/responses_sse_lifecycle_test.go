@@ -159,6 +159,74 @@ func TestResponsesSSELifecyclePreservesAndGeneratesEventFields(t *testing.T) {
 	}
 }
 
+func TestResponsesSSELifecyclePreservesSplitSSEFields(t *testing.T) {
+	state := &responsesSSELifecycleState{}
+	chunks := []string{
+		"event: response.",
+		"completed",
+		"id: provider-event-",
+		"42",
+		"retry: 15",
+		"00",
+		`data: {"type":"response.completed","response":{"id":"resp1","status":"completed"}}` + "\n\n",
+	}
+
+	var output []byte
+	for _, chunk := range chunks {
+		normalized, err := state.AddChunk([]byte(chunk))
+		if err != nil {
+			t.Fatalf("AddChunk() error = %v", err)
+		}
+		output = append(output, normalized...)
+	}
+	if err := state.Finish(); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	if got := responsesSSETestEventNames(output); !equalStrings(got, []string{"response.completed"}) {
+		t.Fatalf("event fields = %#v, want response.completed; output=%s", got, output)
+	}
+	if !bytes.Contains(output, []byte("id: provider-event-42")) || !bytes.Contains(output, []byte("retry: 1500")) {
+		t.Fatalf("split SSE fields were not preserved: %s", output)
+	}
+}
+
+func TestResponsesSSELifecycleSynthesizesMessageBeforeContentPart(t *testing.T) {
+	state := &responsesSSELifecycleState{}
+	chunks := []string{
+		`data: {"type":"response.content_part.added","item_id":"m1","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}` + "\n\n",
+		`data: {"type":"response.output_text.delta","item_id":"m1","output_index":0,"content_index":0,"delta":"answer"}` + "\n\n",
+		`data: {"type":"response.completed","response":{"id":"resp1","status":"completed"}}` + "\n\n",
+	}
+
+	var output []byte
+	for _, chunk := range chunks {
+		normalized, err := state.AddChunk([]byte(chunk))
+		if err != nil {
+			t.Fatalf("AddChunk() error = %v", err)
+		}
+		output = append(output, normalized...)
+	}
+	if err := state.Finish(); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	events := responsesSSETestEvents(t, output)
+	wantTypes := []string{
+		"response.output_item.added",
+		"response.content_part.added",
+		"response.output_text.delta",
+		"response.output_item.done",
+		"response.completed",
+	}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("event count = %d, want %d; output=%s", len(events), len(wantTypes), output)
+	}
+	for index, wantType := range wantTypes {
+		if gotType, _ := events[index]["type"].(string); gotType != wantType {
+			t.Fatalf("event[%d].type = %q, want %q; output=%s", index, gotType, wantType, output)
+		}
+	}
+}
+
 func TestResponsesSSELifecycleRenumbersSynthesizedEvents(t *testing.T) {
 	state := &responsesSSELifecycleState{}
 	chunks := []string{
