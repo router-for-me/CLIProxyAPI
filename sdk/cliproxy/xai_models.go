@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -22,7 +23,7 @@ const (
 	xaiCLIModelsTokenAuthHeader = "X-XAI-Token-Auth"
 	xaiCLIModelsTokenAuthValue  = "xai-grok-cli"
 	xaiCLIModelsVersionHeader   = "x-grok-client-version"
-	xaiCLIModelsVersionValue    = "0.2.120"
+	xaiCLIModelsVersionValue    = runtimeexecutor.XAIClientVersionValue
 )
 
 type xaiModelsResponse struct {
