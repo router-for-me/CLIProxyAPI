@@ -408,10 +408,12 @@ func xaiIsCodexAppNamespace(namespaceName string) bool {
 	return name == xaiCodexAppNamespaceName || strings.HasSuffix(name, "__"+xaiCodexAppNamespaceName)
 }
 
-// xaiIsCodexAppAutomationUpdate 识别 Codex Desktop 的 automation_update。
-// 旧客户端 namespace 是 codex_app；0.150+ 变成 mcp__codex_app。拍扁后名字是
-// codex_app__automation_update 或 mcp__codex_app__automation_update。
-// 只按精确旧名匹配会把新 schema 原样发给 Grok，触发 400 invalid-argument。
+// xaiIsCodexAppAutomationUpdate reports whether a function tool is Codex
+// Desktop automation_update. Older clients use the codex_app namespace;
+// 0.150+ wraps it as mcp__codex_app. Flattened names are
+// codex_app__automation_update or mcp__codex_app__automation_update.
+// Matching only the old exact name forwards the new schema to Grok
+// unchanged and triggers 400 invalid-argument.
 func xaiIsCodexAppAutomationUpdate(toolName, namespaceName string) bool {
 	toolName = strings.TrimSpace(toolName)
 	if toolName == "" {
@@ -447,8 +449,9 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 			continue
 		}
 		for _, branch := range union.Array() {
-			// $ref 分支即使标了 type=object，展开后仍可能含 non-object union，
-			// Grok 会按 invalid_client_tool_schema / invalid-argument 直接拒绝。
+			// A $ref branch can still resolve to a non-object union even when
+			// it also declares type=object. Grok rejects those with
+			// invalid_client_tool_schema / invalid-argument.
 			if branch.Get("$ref").Exists() || !xaiSchemaTypeIsObjectOnly(branch.Get("type")) {
 				return true
 			}
