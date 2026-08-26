@@ -34,7 +34,6 @@ type utlsRoundTripper struct {
 
 	lifecycleMu          sync.Mutex
 	draining             bool
-	activeResponses      int
 	closeIdleConnections func()
 }
 
@@ -230,9 +229,6 @@ func (t *utlsRoundTripper) trackResponse(resp *http.Response) *http.Response {
 		return resp
 	}
 
-	t.lifecycleMu.Lock()
-	t.activeResponses++
-	t.lifecycleMu.Unlock()
 	resp.Body = &utlsResponseBody{
 		ReadCloser: resp.Body,
 		release:    t.releaseResponse,
@@ -242,10 +238,7 @@ func (t *utlsRoundTripper) trackResponse(resp *http.Response) *http.Response {
 
 func (t *utlsRoundTripper) releaseResponse() {
 	t.lifecycleMu.Lock()
-	if t.activeResponses > 0 {
-		t.activeResponses--
-	}
-	shouldClose := t.draining && t.activeResponses == 0
+	shouldClose := t.draining
 	t.lifecycleMu.Unlock()
 	if shouldClose {
 		t.CloseIdleConnections()
@@ -254,7 +247,7 @@ func (t *utlsRoundTripper) releaseResponse() {
 
 func (t *utlsRoundTripper) closeIdleIfDraining() {
 	t.lifecycleMu.Lock()
-	shouldClose := t.draining && t.activeResponses == 0
+	shouldClose := t.draining
 	t.lifecycleMu.Unlock()
 	if shouldClose {
 		t.CloseIdleConnections()
