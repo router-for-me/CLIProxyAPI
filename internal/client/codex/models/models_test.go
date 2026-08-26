@@ -226,7 +226,7 @@ func TestCodexClientModelsResponse_RequiresTemplateAndCodexProvidersForSearchToo
 }
 
 func TestCodexClientModelsResponse_PreservesUltraReasoningEffort(t *testing.T) {
-	resp := BuildResponse([]map[string]any{{"id": "gpt-5.6-sol"}}, nil, false)
+	resp := BuildResponseForClient([]map[string]any{{"id": "gpt-5.6-sol"}}, nil, false, "0.149.1")
 	models, ok := resp["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
@@ -255,6 +255,46 @@ func TestCodexClientModelsResponse_PreservesUltraReasoningEffort(t *testing.T) {
 	}
 
 	t.Fatalf("supported_reasoning_levels = %#v, want ultra", levels)
+}
+
+func TestCodexClientModelsResponse_FiltersAdvancedReasoningForLegacyClient(t *testing.T) {
+	resp := BuildResponseForClient([]map[string]any{{"id": "gpt-5.6-sol"}}, nil, false, "0.137.0")
+	models, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
+	}
+
+	var sol map[string]any
+	for _, entry := range models {
+		if stringModelValue(entry, "slug") == "gpt-5.6-sol" {
+			sol = entry
+			break
+		}
+	}
+	if sol == nil {
+		t.Fatal("expected codex client entry for gpt-5.6-sol")
+	}
+
+	rawLevels, ok := sol["supported_reasoning_levels"].([]any)
+	if !ok {
+		t.Fatalf("supported_reasoning_levels = %T, want []any", sol["supported_reasoning_levels"])
+	}
+	want := []string{"low", "medium", "high", "xhigh"}
+	if len(rawLevels) != len(want) {
+		t.Fatalf("supported_reasoning_levels length = %d, want %d: %#v", len(rawLevels), len(want), rawLevels)
+	}
+	for index, rawLevel := range rawLevels {
+		level, ok := rawLevel.(map[string]any)
+		if !ok {
+			t.Fatalf("supported_reasoning_levels[%d] = %#v, want object", index, rawLevel)
+		}
+		if got := stringModelValue(level, "effort"); got != want[index] {
+			t.Fatalf("supported_reasoning_levels[%d].effort = %q, want %q", index, got, want[index])
+		}
+	}
+	if got := stringModelValue(sol, "default_reasoning_level"); got != "low" {
+		t.Fatalf("default_reasoning_level = %q, want low", got)
+	}
 }
 
 func TestLoadCodexClientModelTemplatesRefreshesOnRevision(t *testing.T) {

@@ -4,6 +4,7 @@ package models
 import (
 	"encoding/json"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -37,14 +38,32 @@ var codexClientAllowedReasoningLevels = map[string]struct{}{
 	"ultra":   {},
 }
 
+const (
+	// Codex clients before 0.144.0 reject max and ultra while parsing the
+	// complete model catalog.
+	codexClientAdvancedReasoningMinMajor = 0
+	codexClientAdvancedReasoningMinMinor = 144
+	codexClientAdvancedReasoningMinPatch = 0
+)
+
 // BuildResponse builds a Codex client model response from available models.
 func BuildResponse(availableModels []map[string]any, providersForModel ProvidersForModelFunc, optimizeMultiAgentV2 bool) map[string]any {
+	return buildCodexClientModelsResponse(availableModels, providersForModel, optimizeMultiAgentV2, "", false)
+}
+
+// BuildResponseForClient builds a Codex client model response compatible with
+// the requested Codex client version.
+func BuildResponseForClient(availableModels []map[string]any, providersForModel ProvidersForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) map[string]any {
+	return buildCodexClientModelsResponse(availableModels, providersForModel, optimizeMultiAgentV2, clientVersion, true)
+}
+
+func buildCodexClientModelsResponse(availableModels []map[string]any, providersForModel ProvidersForModelFunc, optimizeMultiAgentV2 bool, clientVersion string, filterForClient bool) map[string]any {
 	return map[string]any{
-		"models": buildCodexClientModels(availableModels, providersForModel, optimizeMultiAgentV2),
+		"models": buildCodexClientModels(availableModels, providersForModel, optimizeMultiAgentV2, clientVersion, filterForClient),
 	}
 }
 
-func buildCodexClientModels(models []map[string]any, providersForModel ProvidersForModelFunc, optimizeMultiAgentV2 bool) []map[string]any {
+func buildCodexClientModels(models []map[string]any, providersForModel ProvidersForModelFunc, optimizeMultiAgentV2 bool, clientVersion string, filterForClient bool) []map[string]any {
 	templates, defaultTemplate, err := loadCodexClientModelTemplates()
 	if err != nil || defaultTemplate == nil {
 		return nil
@@ -64,6 +83,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 			applyCodexClientMaxTokens(entry, model)
 			applyCodexClientSearchToolSupport(entry, id, true, providersForModel)
 			sanitizeCodexClientReasoningMetadata(entry)
+			filterCodexClientReasoningMetadata(entry, clientVersion, filterForClient)
 			applyCodexClientVisibilityOverride(entry, id)
 			if optimizeMultiAgentV2 {
 				entry["multi_agent_version"] = "v2"
@@ -77,6 +97,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 		applyCodexClientMaxTokens(entry, model)
 		applyCodexClientSearchToolSupport(entry, id, false, providersForModel)
 		sanitizeCodexClientReasoningMetadata(entry)
+		filterCodexClientReasoningMetadata(entry, clientVersion, filterForClient)
 		applyCodexClientVisibilityOverride(entry, id)
 		result = append(result, entry)
 	}
@@ -402,6 +423,78 @@ func sanitizeCodexClientReasoningMetadata(entry map[string]any) {
 
 	entry["supported_reasoning_levels"] = levels
 	entry["default_reasoning_level"] = defaultLevel
+}
+
+func filterCodexClientReasoningMetadata(entry map[string]any, clientVersion string, filterForClient bool) {
+	if !filterForClient || codexClientSupportsAdvancedReasoning(clientVersion) {
+		return
+	}
+
+	rawLevels, ok := entry["supported_reasoning_levels"].([]any)
+	if !ok {
+		return
+	}
+
+	levels := make([]any, 0, len(rawLevels))
+	allowedDefaults := make(map[string]struct{}, len(rawLevels))
+	for _, rawLevelEntry := range rawLevels {
+		levelEntry, ok := rawLevelEntry.(map[string]any)
+		if !ok {
+			continue
+		}
+		level := stringModelValue(levelEntry, "effort")
+		if level == "max" || level == "ultra" {
+			continue
+		}
+		levels = append(levels, levelEntry)
+		allowedDefaults[level] = struct{}{}
+	}
+
+	if len(levels) == 0 {
+		delete(entry, "supported_reasoning_levels")
+		delete(entry, "default_reasoning_level")
+		return
+	}
+
+	defaultLevel := stringModelValue(entry, "default_reasoning_level")
+	if _, ok := allowedDefaults[defaultLevel]; !ok {
+		defaultLevel = stringModelValue(levels[0].(map[string]any), "effort")
+	}
+	entry["supported_reasoning_levels"] = levels
+	entry["default_reasoning_level"] = defaultLevel
+}
+
+func codexClientSupportsAdvancedReasoning(clientVersion string) bool {
+	major, minor, patch, ok := parseCodexClientVersion(clientVersion)
+	if !ok {
+		return false
+	}
+	if major != codexClientAdvancedReasoningMinMajor {
+		return major > codexClientAdvancedReasoningMinMajor
+	}
+	if minor != codexClientAdvancedReasoningMinMinor {
+		return minor > codexClientAdvancedReasoningMinMinor
+	}
+	return patch >= codexClientAdvancedReasoningMinPatch
+}
+
+func parseCodexClientVersion(raw string) (int, int, int, bool) {
+	parts := strings.Split(strings.TrimPrefix(strings.TrimSpace(raw), "v"), ".")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, 0, 0, false
+	}
+	values := [3]int{}
+	for index, part := range parts {
+		if part == "" {
+			return 0, 0, 0, false
+		}
+		value, err := strconv.Atoi(part)
+		if err != nil || value < 0 {
+			return 0, 0, 0, false
+		}
+		values[index] = value
+	}
+	return values[0], values[1], values[2], true
 }
 
 func normalizeCodexClientReasoningLevel(rawLevel string) string {
