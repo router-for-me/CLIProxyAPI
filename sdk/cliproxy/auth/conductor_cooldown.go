@@ -838,7 +838,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							transientCooldownOff := false
 							if !disableCooling {
 								switch {
-								case result.RetryAfter != nil && *result.RetryAfter <= 0:
+								case result.TransientRateLimit && result.RetryAfter != nil && *result.RetryAfter <= 0:
 									// A deliberate zero-delay hint requests rotation without waiting.
 									next = now.Add(*result.RetryAfter)
 								case result.TransientRateLimit:
@@ -2014,7 +2014,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		transientCooldownOff := false
 		if !disableCooling {
 			switch {
-			case retryAfter != nil && *retryAfter <= 0:
+			case transientRateLimit && retryAfter != nil && *retryAfter <= 0:
 				// A deliberate zero-delay hint requests rotation without waiting.
 				next = now.Add(*retryAfter)
 			case transientRateLimit:

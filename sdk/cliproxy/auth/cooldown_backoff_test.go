@@ -447,6 +447,66 @@ func TestApplyAuthFailureStateZeroRetryAfterDoesNotApplyLadderFloor(t *testing.T
 	}
 }
 
+func TestMarkResultZeroRetryAfterExhaustedQuotaUsesLadderFloor(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-zero-retry-after-exhausted",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex"},
+		ModelStates: map[string]*ModelState{
+			"gpt-5": {
+				Status: StatusActive,
+				Quota:  QuotaState{BackoffLevel: 0},
+			},
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	zeroHint := time.Duration(0)
+	result := quotaResult(auth.ID, "gpt-5")
+	result.RetryAfter = &zeroHint
+
+	before := time.Now()
+	manager.MarkResult(context.Background(), result)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after failure")
+	}
+	state := updated.ModelStates["gpt-5"]
+	if state.Quota.BackoffLevel != 1 {
+		t.Fatalf("expected BackoffLevel 1 after exhausted-quota 429 with 0s hint, got %d", state.Quota.BackoffLevel)
+	}
+	if !state.Quota.NextRecoverAt.After(before) {
+		t.Fatalf("0s exhausted-quota hint bypassed the ladder: NextRecoverAt=%v, want after %v", state.Quota.NextRecoverAt, before)
+	}
+	if got := state.Quota.NextRecoverAt.Sub(before); got < quotaBackoffBase {
+		t.Fatalf("expected at least the first ladder step (%v), got %v", quotaBackoffBase, got)
+	}
+}
+
+func TestApplyAuthFailureStateZeroRetryAfterExhaustedQuotaUsesLadderFloor(t *testing.T) {
+	now := time.Now()
+	quotaErr := &Error{Code: "rate_limit", Message: "quota", HTTPStatus: http.StatusTooManyRequests}
+	zeroHint := time.Duration(0)
+	auth := &Auth{ID: "auth-zero-hint-exhausted"}
+
+	applyAuthFailureState(auth, quotaErr, &zeroHint, now, false, false)
+	if auth.Quota.BackoffLevel != 1 {
+		t.Fatalf("expected BackoffLevel 1 after exhausted-quota 429 with 0s hint, got %d", auth.Quota.BackoffLevel)
+	}
+	if !auth.Quota.NextRecoverAt.Equal(now.Add(quotaBackoffBase)) {
+		t.Fatalf("expected 0s exhausted-quota hint to be floored at %v, got %v", now.Add(quotaBackoffBase), auth.Quota.NextRecoverAt)
+	}
+	if !auth.NextRetryAfter.Equal(now.Add(quotaBackoffBase)) {
+		t.Fatalf("expected NextRetryAfter to use the ladder floor at %v, got %v", now.Add(quotaBackoffBase), auth.NextRetryAfter)
+	}
+}
+
 func TestMarkResultTransientRateLimitFloorsProviderHint(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 
