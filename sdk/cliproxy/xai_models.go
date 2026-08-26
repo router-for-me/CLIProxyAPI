@@ -2,23 +2,21 @@ package cliproxy
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
-	xaiModelsCacheTTL           = 10 * time.Minute
 	xaiModelsMaxResponseBytes   = int64(4 << 20)
 	xaiCLIModelsTokenAuthHeader = "X-XAI-Token-Auth"
 	xaiCLIModelsTokenAuthValue  = "xai-grok-cli"
@@ -26,16 +24,9 @@ const (
 	xaiCLIModelsVersionValue    = "0.2.93"
 )
 
-type xaiModelCacheEntry struct {
-	models      []*registry.ModelInfo
-	tokenDigest [sha256.Size]byte
-	routeKey    string
-	fetchedAt   time.Time
-}
-
 type xaiModelsResponse struct {
-	Data   []xaiRemoteModel `json:"data"`
-	Models []xaiRemoteModel `json:"models"`
+	Data   *[]xaiRemoteModel `json:"data"`
+	Models *[]xaiRemoteModel `json:"models"`
 }
 
 type xaiRemoteModel struct {
@@ -49,7 +40,7 @@ type xaiRemoteModel struct {
 	ContextWindow       int               `json:"context_window"`
 	ContextLength       int               `json:"context_length"`
 	MaxCompletionTokens int               `json:"max_completion_tokens"`
-	SupportsReasoning   bool              `json:"supports_reasoning_effort"`
+	SupportsReasoning   *bool             `json:"supports_reasoning_effort"`
 	ReasoningEffort     string            `json:"reasoning_effort"`
 	ReasoningEfforts    []xaiRemoteEffort `json:"reasoning_efforts"`
 }
@@ -67,38 +58,16 @@ func (s *Service) xaiModelsForAuth(ctx context.Context, auth *coreauth.Auth) ([]
 	if token == "" {
 		return nil, fmt.Errorf("xai models: access token is missing")
 	}
-	digest := sha256.Sum256([]byte(token))
 	baseURL, cli := resolveXAIModelsRoute(s, auth)
-	routeKey := baseURL + "\x00" + strconv.FormatBool(cli)
-
-	s.xaiModelsMu.Lock()
-	if entry, ok := s.xaiModels[auth.ID]; ok && entry.tokenDigest == digest && entry.routeKey == routeKey && time.Since(entry.fetchedAt) < xaiModelsCacheTTL {
-		models := cloneXAIModelInfos(entry.models)
-		s.xaiModelsMu.Unlock()
-		return models, nil
-	}
-	var stale []*registry.ModelInfo
-	if entry, ok := s.xaiModels[auth.ID]; ok && entry.tokenDigest == digest && entry.routeKey == routeKey {
-		stale = cloneXAIModelInfos(entry.models)
-	}
-	s.xaiModelsMu.Unlock()
-
 	models, errFetch := fetchXAIModels(ctx, s, auth, token, baseURL, cli)
 	if errFetch != nil {
-		if len(stale) > 0 {
-			log.Warnf("xai models: discovery failed for auth %s, using last successful result: %v", auth.ID, errFetch)
-			return stale, nil
+		if ctx.Err() != nil {
+			return nil, errFetch
 		}
-		return nil, errFetch
+		log.Warnf("xai models: discovery failed for auth %s: %v", auth.ID, errFetch)
+		GlobalModelRegistry().UnregisterClient(auth.ID)
 	}
-
-	s.xaiModelsMu.Lock()
-	if s.xaiModels == nil {
-		s.xaiModels = make(map[string]xaiModelCacheEntry)
-	}
-	s.xaiModels[auth.ID] = xaiModelCacheEntry{models: cloneXAIModelInfos(models), tokenDigest: digest, routeKey: routeKey, fetchedAt: time.Now()}
-	s.xaiModelsMu.Unlock()
-	return models, nil
+	return models, errFetch
 }
 
 func fetchXAIModels(ctx context.Context, s *Service, auth *coreauth.Auth, token, baseURL string, cli bool) ([]*registry.ModelInfo, error) {
@@ -114,6 +83,9 @@ func fetchXAIModels(ctx context.Context, s *Service, auth *coreauth.Auth, token,
 	if cli {
 		req.Header.Set(xaiCLIModelsTokenAuthHeader, xaiCLIModelsTokenAuthValue)
 		req.Header.Set(xaiCLIModelsVersionHeader, xaiCLIModelsVersionValue)
+	}
+	if auth != nil {
+		util.ApplyCustomHeadersFromAttrs(req, auth.Attributes)
 	}
 
 	client := &http.Client{}
@@ -158,12 +130,14 @@ func fetchXAIModels(ctx context.Context, s *Service, auth *coreauth.Auth, token,
 	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil {
 		return nil, fmt.Errorf("xai models: parse response: %w", errUnmarshal)
 	}
-	remote := payload.Data
-	if len(remote) == 0 {
-		remote = payload.Models
-	}
-	if len(remote) == 0 {
-		return nil, fmt.Errorf("xai models: response contains no models")
+	var remote []xaiRemoteModel
+	switch {
+	case payload.Data != nil:
+		remote = *payload.Data
+	case payload.Models != nil:
+		remote = *payload.Models
+	default:
+		return nil, fmt.Errorf("xai models: response missing data/models field")
 	}
 	return mergeXAIModels(remote, registry.GetXAIModels()), nil
 }
@@ -283,7 +257,7 @@ func mergeXAIModels(remote []xaiRemoteModel, catalog []*registry.ModelInfo) []*r
 		if len(levels) > 0 {
 			model.Thinking = &registry.ThinkingSupport{Levels: levels}
 		}
-		if !item.SupportsReasoning && len(levels) == 0 {
+		if item.SupportsReasoning != nil && !*item.SupportsReasoning {
 			model.Thinking = nil
 		}
 		result = append(result, model)
@@ -292,7 +266,12 @@ func mergeXAIModels(remote []xaiRemoteModel, catalog []*registry.ModelInfo) []*r
 }
 
 func mergeXAIModelMetadata(static, remote *registry.ModelInfo) *registry.ModelInfo {
-	merged := cloneXAIModelInfos([]*registry.ModelInfo{static})[0]
+	merged := *static
+	if static.Thinking != nil {
+		thinking := *static.Thinking
+		thinking.Levels = append([]string(nil), static.Thinking.Levels...)
+		merged.Thinking = &thinking
+	}
 	if remote.ID != "" {
 		merged.ID = remote.ID
 	}
@@ -323,24 +302,7 @@ func mergeXAIModelMetadata(static, remote *registry.ModelInfo) *registry.ModelIn
 	if remote.MaxCompletionTokens != 0 {
 		merged.MaxCompletionTokens = remote.MaxCompletionTokens
 	}
-	return merged
-}
-
-func cloneXAIModelInfos(models []*registry.ModelInfo) []*registry.ModelInfo {
-	result := make([]*registry.ModelInfo, 0, len(models))
-	for _, model := range models {
-		if model == nil {
-			continue
-		}
-		clone := *model
-		if model.Thinking != nil {
-			thinking := *model.Thinking
-			thinking.Levels = append([]string(nil), model.Thinking.Levels...)
-			clone.Thinking = &thinking
-		}
-		result = append(result, &clone)
-	}
-	return result
+	return &merged
 }
 
 func summarizeXAIModelError(body []byte) string {

@@ -52,6 +52,41 @@ func TestXAIModelsForAuthUsesAccountCatalogAndStaticMetadata(t *testing.T) {
 	}
 }
 
+func TestXAIModelsForAuthAppliesCustomHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Gateway custom-token" {
+			t.Fatalf("authorization = %q, want custom override", got)
+		}
+		if got := r.Header.Get("X-Gateway-Tenant"); got != "tenant-123" {
+			t.Fatalf("X-Gateway-Tenant = %q, want tenant-123", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"grok-4.6"}]}`))
+	}))
+	defer server.Close()
+
+	service := &Service{}
+	auth := &coreauth.Auth{
+		ID:       "xai-model-discovery-custom-headers-test",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"auth_kind":               coreauth.AuthKindOAuth,
+			"base_url":                server.URL + "/v1",
+			"access_token":            "test-access-token",
+			"header:Authorization":    "Gateway custom-token",
+			"header:X-Gateway-Tenant": "tenant-123",
+		},
+	}
+
+	models, err := service.xaiModelsForAuth(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("xaiModelsForAuth() error = %v", err)
+	}
+	if len(models) != 1 || models[0].ID != "grok-4.6" {
+		t.Fatalf("models = %#v, want grok-4.6", models)
+	}
+}
+
 func TestRegisterModelsForAuthUsesDiscoveredOAuthModels(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"data":[{"id":"account-only-model"}]}`))
@@ -78,16 +113,11 @@ func TestRegisterModelsForAuthUsesDiscoveredOAuthModels(t *testing.T) {
 	}
 }
 
-func TestXAIModelsForAuthUsesLastSuccessfulResultOnTemporaryFailure(t *testing.T) {
+func TestXAIModelsForAuthAlwaysFetches(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
-		if requests == 1 {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"data":[{"id":"grok-4.6"}]}`))
-			return
-		}
-		http.Error(w, "temporary failure", http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"data":[{"id":"grok-4.6"}]}`))
 	}))
 	defer server.Close()
 
@@ -101,18 +131,76 @@ func TestXAIModelsForAuthUsesLastSuccessfulResultOnTemporaryFailure(t *testing.T
 			"access_token": "test-access-token",
 		},
 	}
-	first, err := service.xaiModelsForAuth(context.Background(), auth)
-	if err != nil || len(first) != 1 {
-		t.Fatalf("first discovery = %#v, %v", first, err)
+	for i := 0; i < 2; i++ {
+		models, err := service.xaiModelsForAuth(context.Background(), auth)
+		if err != nil || len(models) != 1 || models[0].ID != "grok-4.6" {
+			t.Fatalf("discovery %d = %#v, %v", i+1, models, err)
+		}
 	}
-	service.xaiModelsMu.Lock()
-	entry := service.xaiModels[auth.ID]
-	entry.fetchedAt = entry.fetchedAt.Add(-xaiModelsCacheTTL)
-	service.xaiModels[auth.ID] = entry
-	service.xaiModelsMu.Unlock()
-	second, err := service.xaiModelsForAuth(context.Background(), auth)
-	if err != nil || len(second) != 1 || second[0].ID != "grok-4.6" {
-		t.Fatalf("cached discovery = %#v, %v", second, err)
+	if requests != 2 {
+		t.Fatalf("upstream requests = %d, want 2", requests)
+	}
+}
+
+func TestRegisterModelsForAuthUnregistersOnDiscoveryFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "temporary failure", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	service := &Service{}
+	auth := &coreauth.Auth{ID: "xai-register-failure-test", Provider: "xai", Attributes: map[string]string{
+		"auth_kind": coreauth.AuthKindOAuth, "base_url": server.URL + "/v1", "access_token": "test-access-token",
+	}}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "xai", []*registry.ModelInfo{{ID: "old-model"}})
+	defer reg.UnregisterClient(auth.ID)
+	service.registerModelsForAuth(context.Background(), auth)
+	if got := reg.GetModelsForClient(auth.ID); len(got) != 0 {
+		t.Fatalf("registered models after failure = %#v, want empty", got)
+	}
+}
+
+func TestXAIModelsResponseEmptyAndMissingFields(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{name: "explicit empty data", body: `{"data":[]}`},
+		{name: "explicit empty models", body: `{"models":[]}`},
+		{name: "missing fields", body: `{}`, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(tc.body)) }))
+			defer server.Close()
+			auth := &coreauth.Auth{ID: tc.name, Provider: "xai", Attributes: map[string]string{"auth_kind": coreauth.AuthKindOAuth, "base_url": server.URL + "/v1", "access_token": "token"}}
+			models, err := (&Service{}).xaiModelsForAuth(context.Background(), auth)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected protocol error")
+			}
+			if !tc.wantErr && (err != nil || len(models) != 0) {
+				t.Fatalf("models=%#v err=%v", models, err)
+			}
+		})
+	}
+}
+
+func TestMergeXAIModelsReasoningMetadata(t *testing.T) {
+	static := []*registry.ModelInfo{{ID: "grok", Thinking: &registry.ThinkingSupport{Levels: []string{"low", "high"}}}}
+	missing := mergeXAIModels([]xaiRemoteModel{{ID: "grok"}}, static)
+	if missing[0].Thinking == nil || len(missing[0].Thinking.Levels) != 2 {
+		t.Fatalf("missing reasoning metadata = %#v, want static thinking preserved", missing[0].Thinking)
+	}
+	falseValue := false
+	cleared := mergeXAIModels([]xaiRemoteModel{{ID: "grok", SupportsReasoning: &falseValue}}, static)
+	if cleared[0].Thinking != nil {
+		t.Fatalf("explicit false reasoning metadata = %#v, want cleared", cleared[0].Thinking)
+	}
+	trueValue := true
+	overridden := mergeXAIModels([]xaiRemoteModel{{ID: "grok", SupportsReasoning: &trueValue, ReasoningEfforts: []xaiRemoteEffort{{Value: "minimal"}, {Value: "max"}}}}, static)
+	if overridden[0].Thinking == nil || len(overridden[0].Thinking.Levels) != 2 || overridden[0].Thinking.Levels[0] != "minimal" {
+		t.Fatalf("remote reasoning levels = %#v, want remote levels", overridden[0].Thinking)
 	}
 }
 

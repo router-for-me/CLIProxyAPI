@@ -11,7 +11,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	log "github.com/sirupsen/logrus"
 )
 
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
@@ -160,11 +159,6 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		if authKind == coreauth.AuthKindOAuth {
 			discovered, errDiscover := s.xaiModelsForAuth(ctx, a)
 			if errDiscover != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				log.Warnf("xai models: no usable account catalog for auth %s: %v", a.ID, errDiscover)
-				GlobalModelRegistry().UnregisterClient(a.ID)
 				return
 			}
 			models = discovered
