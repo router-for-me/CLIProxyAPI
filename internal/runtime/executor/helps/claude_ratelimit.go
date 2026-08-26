@@ -39,8 +39,19 @@ func ClaudeHeadersIndicateUnifiedRateLimitRejection(headers http.Header) bool {
 	return !isFableOnlyRejection(status5h, status7d, status7dOI)
 }
 
+// isSharedWindowAllowed reports whether a shared-window status still permits the request.
+// Anthropic reports "allowed_warning" once utilization passes the surpassed threshold
+// advertised in Anthropic-Ratelimit-Unified-<window>-Surpassed-Threshold (0.75 in practice).
+// That status still permits the request, so it must be treated the same as "allowed" when
+// deciding whether a shared window caused a rejection. Comparing against the "allowed"
+// literal alone misclassifies a Fable-only rejection as credential-scoped for every account
+// past the threshold, which benches the whole credential instead of just the Fable model.
+func isSharedWindowAllowed(status string) bool {
+	return status == "allowed" || status == "allowed_warning"
+}
+
 func isFableOnlyRejection(status5h, status7d, status7dOI string) bool {
-	return status5h == "allowed" && status7d == "allowed" && status7dOI == "rejected"
+	return isSharedWindowAllowed(status5h) && isSharedWindowAllowed(status7d) && status7dOI == "rejected"
 }
 
 // ParseClaudeRateLimitReset inspects Anthropic response headers for shared and Fable-specific
@@ -117,7 +128,7 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 
 	// 5. Unified reset header:
 	unifiedRejected := !fableOnlyRejection && (unifiedStatus == "rejected" || status5h == "rejected" || status7d == "rejected" || status7dOI == "rejected" ||
-		(unifiedStatus == "" && status5h != "allowed" && status7d != "allowed"))
+		(unifiedStatus == "" && !isSharedWindowAllowed(status5h) && !isSharedWindowAllowed(status7d)))
 
 	if unifiedRejected {
 		if raw := getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-Reset"); raw != "" {
