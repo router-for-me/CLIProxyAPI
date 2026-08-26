@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,6 +31,31 @@ type utlsRoundTripper struct {
 	sessionCache tls.ClientSessionCache
 	transport    *http2.Transport
 	tlsConfig    func(string, tls.ClientSessionCache) *tls.Config
+
+	lifecycleMu          sync.Mutex
+	draining             bool
+	activeResponses      int
+	closeIdleConnections func()
+}
+
+type utlsResponseBody struct {
+	io.ReadCloser
+	release func()
+	once    sync.Once
+}
+
+func (b *utlsResponseBody) Read(payload []byte) (int, error) {
+	read, errRead := b.ReadCloser.Read(payload)
+	if errRead != nil {
+		b.once.Do(b.release)
+	}
+	return read, errRead
+}
+
+func (b *utlsResponseBody) Close() error {
+	errClose := b.ReadCloser.Close()
+	b.once.Do(b.release)
+	return errClose
 }
 
 const (
@@ -40,6 +66,10 @@ const (
 var chatGPTRoundTripperCache = internalcache.NewBoundedLRU[string, http.RoundTripper](
 	chatGPTRoundTripperCacheCapacity,
 	func(_ string, roundTripper http.RoundTripper) {
+		if transport, ok := roundTripper.(interface{ closeWhenIdle() }); ok {
+			transport.closeWhenIdle()
+			return
+		}
 		if transport, ok := roundTripper.(interface{ CloseIdleConnections() }); ok {
 			transport.CloseIdleConnections()
 		}
@@ -75,6 +105,7 @@ func newUtlsRoundTripperWithDialer(
 		tlsConfig:    tlsConfig,
 	}
 	roundTripper.transport = &http2.Transport{DialTLSContext: roundTripper.dialTLSContext}
+	roundTripper.closeIdleConnections = roundTripper.transport.CloseIdleConnections
 	return roundTripper
 }
 
@@ -155,7 +186,10 @@ func (t *utlsRoundTripper) dialTLSContext(ctx context.Context, network, addr str
 
 func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.transport.RoundTrip(req)
-	if err == nil || !isRetryableUtlsConnectionError(err) {
+	if err == nil {
+		return t.trackResponse(resp), nil
+	}
+	if !isRetryableUtlsConnectionError(err) {
 		return resp, err
 	}
 	retryReq, ok := replayableUtlsRequest(req)
@@ -166,12 +200,65 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	// A connection-level failure before response headers may leave a stale
 	// pooled connection behind. Close idle entries and make one immediate retry;
 	// never replay a request whose HTTP semantics or body are not replay-safe.
-	t.transport.CloseIdleConnections()
-	return t.transport.RoundTrip(retryReq)
+	t.CloseIdleConnections()
+	retryResp, errRetry := t.transport.RoundTrip(retryReq)
+	if errRetry != nil {
+		return retryResp, errRetry
+	}
+	return t.trackResponse(retryResp), nil
 }
 
 func (t *utlsRoundTripper) CloseIdleConnections() {
-	t.transport.CloseIdleConnections()
+	if t.closeIdleConnections != nil {
+		t.closeIdleConnections()
+	}
+}
+
+// closeWhenIdle retires an evicted transport without interrupting active
+// streams. Existing clients may still hold the round tripper; every response
+// they finish after eviction closes any connection that has become idle.
+func (t *utlsRoundTripper) closeWhenIdle() {
+	t.lifecycleMu.Lock()
+	t.draining = true
+	t.lifecycleMu.Unlock()
+	t.CloseIdleConnections()
+}
+
+func (t *utlsRoundTripper) trackResponse(resp *http.Response) *http.Response {
+	if resp == nil || resp.Body == nil || resp.Body == http.NoBody {
+		t.closeIdleIfDraining()
+		return resp
+	}
+
+	t.lifecycleMu.Lock()
+	t.activeResponses++
+	t.lifecycleMu.Unlock()
+	resp.Body = &utlsResponseBody{
+		ReadCloser: resp.Body,
+		release:    t.releaseResponse,
+	}
+	return resp
+}
+
+func (t *utlsRoundTripper) releaseResponse() {
+	t.lifecycleMu.Lock()
+	if t.activeResponses > 0 {
+		t.activeResponses--
+	}
+	shouldClose := t.draining && t.activeResponses == 0
+	t.lifecycleMu.Unlock()
+	if shouldClose {
+		t.CloseIdleConnections()
+	}
+}
+
+func (t *utlsRoundTripper) closeIdleIfDraining() {
+	t.lifecycleMu.Lock()
+	shouldClose := t.draining && t.activeResponses == 0
+	t.lifecycleMu.Unlock()
+	if shouldClose {
+		t.CloseIdleConnections()
+	}
 }
 
 func isRetryableUtlsConnectionError(err error) bool {

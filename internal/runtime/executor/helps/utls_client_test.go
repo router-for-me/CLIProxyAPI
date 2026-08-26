@@ -348,6 +348,45 @@ func TestCachedChatGPTRoundTripperBoundsProxyCardinality(t *testing.T) {
 	}
 }
 
+func TestUtlsRoundTripperClosesEvictedConnectionsAfterResponsesDrain(t *testing.T) {
+	var closeCalls atomic.Int32
+	roundTripper := &utlsRoundTripper{
+		closeIdleConnections: func() {
+			closeCalls.Add(1)
+		},
+	}
+	resp := roundTripper.trackResponse(&http.Response{
+		Body: io.NopCloser(strings.NewReader("stream")),
+	})
+
+	roundTripper.closeWhenIdle()
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("close calls at eviction = %d, want 1", got)
+	}
+	if _, errRead := io.ReadAll(resp.Body); errRead != nil {
+		t.Fatal(errRead)
+	}
+	if got := closeCalls.Load(); got != 2 {
+		t.Fatalf("close calls after active response drained = %d, want 2", got)
+	}
+	if errClose := resp.Body.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	if got := closeCalls.Load(); got != 2 {
+		t.Fatalf("close calls after repeated release = %d, want 2", got)
+	}
+
+	laterResp := roundTripper.trackResponse(&http.Response{
+		Body: io.NopCloser(strings.NewReader("later")),
+	})
+	if errClose := laterResp.Body.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	if got := closeCalls.Load(); got != 3 {
+		t.Fatalf("close calls after post-eviction response = %d, want 3", got)
+	}
+}
+
 func TestClaudeCodeTLSClientHelloCapture(t *testing.T) {
 	proxyURL := os.Getenv("CPA_TLS_FP_PROXY")
 	if proxyURL == "" {
