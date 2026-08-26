@@ -47,15 +47,18 @@ const (
 	xaiTokenAuthValue           = "xai-grok-cli"
 	xaiClientVersionHeader      = "x-grok-client-version"
 	// Keep in sync with the current Grok CLI client version that chat-proxy expects.
-	xaiClientVersionValue = "0.2.120"
-	// XAIClientVersionValue is shared with account model discovery requests.
-	XAIClientVersionValue         = xaiClientVersionValue
+	xaiClientVersionValue         = "0.2.120"
 	xaiClientIdentifierHeader     = "x-grok-client-identifier"
 	xaiClientIdentifierValue      = "grok-shell"
 	xaiAuthenticateResponseHeader = "x-authenticateresponse"
 	xaiAuthenticateResponseValue  = "authenticate-response"
 	// xaiUsingAPIAttr enables the official API path for non-media HTTP chat.
 	xaiUsingAPIAttr = "using_api"
+)
+
+const (
+	// XAIClientVersionValue is shared with account model discovery requests.
+	XAIClientVersionValue = xaiClientVersionValue
 )
 
 // xaiXSearchToolJSON is the native X Search tool injected when enabled by config.
