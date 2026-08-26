@@ -49,3 +49,13 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 	p.mu.Unlock()
 	return transport
 }
+
+// torRoundTripperProvider returns a Tor SOCKS5 transport for all auths.
+type torRoundTripperProvider struct {
+	transport *http.Transport
+}
+
+// RoundTripperFor implements coreauth.RoundTripperProvider.
+func (p *torRoundTripperProvider) RoundTripperFor(_ *coreauth.Auth) http.RoundTripper {
+	return p.transport
+}
