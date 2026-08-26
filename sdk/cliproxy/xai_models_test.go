@@ -53,6 +53,28 @@ func TestXAIModelsForAuthUsesAccountCatalogAndStaticMetadata(t *testing.T) {
 	}
 }
 
+func TestFetchXAIModelsSendsCLIIdentityHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for header, want := range map[string]string{
+			xaiCLIModelsTokenAuthHeader:    xaiCLIModelsTokenAuthValue,
+			xaiCLIModelsVersionHeader:      xaiCLIModelsVersionValue,
+			"User-Agent":                   xaiCLIModelsUserAgent,
+			xaiCLIModelsIdentifierHeader:   xaiCLIModelsIdentifierValue,
+			xaiCLIModelsAuthResponseHeader: xaiCLIModelsAuthResponseValue,
+		} {
+			if got := r.Header.Get(header); got != want {
+				t.Errorf("%s = %q, want %q", header, got, want)
+			}
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"cli-model"}]}`))
+	}))
+	defer server.Close()
+	auth := &coreauth.Auth{ID: "xai-cli-headers-test", Provider: "xai", Attributes: map[string]string{"access_token": "token"}}
+	if _, err := fetchXAIModels(context.Background(), &Service{}, auth, "token", server.URL+"/v1", true); err != nil {
+		t.Fatalf("fetchXAIModels() error = %v", err)
+	}
+}
+
 func TestXAIModelsForAuthAppliesCustomHeaders(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Gateway custom-token" {

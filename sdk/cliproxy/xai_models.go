@@ -19,11 +19,16 @@ import (
 )
 
 const (
-	xaiModelsMaxResponseBytes   = int64(4 << 20)
-	xaiCLIModelsTokenAuthHeader = "X-XAI-Token-Auth"
-	xaiCLIModelsTokenAuthValue  = "xai-grok-cli"
-	xaiCLIModelsVersionHeader   = "x-grok-client-version"
-	xaiCLIModelsVersionValue    = runtimeexecutor.XAIClientVersionValue
+	xaiModelsMaxResponseBytes      = int64(4 << 20)
+	xaiCLIModelsTokenAuthHeader    = "X-XAI-Token-Auth"
+	xaiCLIModelsTokenAuthValue     = "xai-grok-cli"
+	xaiCLIModelsVersionHeader      = "x-grok-client-version"
+	xaiCLIModelsVersionValue       = runtimeexecutor.XAIClientVersionValue
+	xaiCLIModelsUserAgent          = "xai-grok-workspace/" + xaiCLIModelsVersionValue
+	xaiCLIModelsIdentifierHeader   = "x-grok-client-identifier"
+	xaiCLIModelsIdentifierValue    = "grok-shell"
+	xaiCLIModelsAuthResponseHeader = "x-authenticateresponse"
+	xaiCLIModelsAuthResponseValue  = "authenticate-response"
 )
 
 type xaiModelsResponse struct {
@@ -85,6 +90,9 @@ func fetchXAIModels(ctx context.Context, s *Service, auth *coreauth.Auth, token,
 	if cli {
 		req.Header.Set(xaiCLIModelsTokenAuthHeader, xaiCLIModelsTokenAuthValue)
 		req.Header.Set(xaiCLIModelsVersionHeader, xaiCLIModelsVersionValue)
+		req.Header.Set("User-Agent", xaiCLIModelsUserAgent)
+		req.Header.Set(xaiCLIModelsIdentifierHeader, xaiCLIModelsIdentifierValue)
+		req.Header.Set(xaiCLIModelsAuthResponseHeader, xaiCLIModelsAuthResponseValue)
 	}
 	if auth != nil {
 		util.ApplyCustomHeadersFromAttrs(req, auth.Attributes)
