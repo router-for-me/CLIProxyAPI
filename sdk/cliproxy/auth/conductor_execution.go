@@ -367,6 +367,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				return cliproxyexecutor.Response{}, errCancel
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts}
+			result.RetryAfter = retryAfterFromError(errPrepare)
+			result.TransientRateLimit = isTransientRateLimitError(errPrepare)
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
 			continue
@@ -548,6 +550,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				return cliproxyexecutor.Response{}, errCancel
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts, SkipQuotaObservation: true}
+			result.RetryAfter = retryAfterFromError(errPrepare)
+			result.TransientRateLimit = isTransientRateLimitError(errPrepare)
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
 			continue
@@ -869,6 +873,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				}
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts}
+			result.RetryAfter = retryAfterFromError(errPrepare)
+			result.TransientRateLimit = isTransientRateLimitError(errPrepare)
 			if selection != nil {
 				m.reportHomeResult(execCtx, result, auth)
 				releaseAttempt()
