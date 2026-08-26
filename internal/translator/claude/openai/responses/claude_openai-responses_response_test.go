@@ -232,8 +232,10 @@ func TestConvertClaudeResponseToOpenAIResponses_AggregatesTextBlocksUntilMessage
 		}
 	}
 
-	if counts["response.output_item.added"] != 1 {
-		t.Fatalf("response.output_item.added count = %d, want 1", counts["response.output_item.added"])
+	// message + web_search_call: the search surfaces as its own item, while the
+	// text around it still aggregates into a single message.
+	if counts["response.output_item.added"] != 2 {
+		t.Fatalf("response.output_item.added count = %d, want 2", counts["response.output_item.added"])
 	}
 	if counts["response.content_part.added"] != 1 {
 		t.Fatalf("response.content_part.added count = %d, want 1", counts["response.content_part.added"])
@@ -244,8 +246,8 @@ func TestConvertClaudeResponseToOpenAIResponses_AggregatesTextBlocksUntilMessage
 	if counts["response.content_part.done"] != 1 {
 		t.Fatalf("response.content_part.done count = %d, want 1", counts["response.content_part.done"])
 	}
-	if counts["response.output_item.done"] != 1 {
-		t.Fatalf("response.output_item.done count = %d, want 1", counts["response.output_item.done"])
+	if counts["response.output_item.done"] != 2 {
+		t.Fatalf("response.output_item.done count = %d, want 2", counts["response.output_item.done"])
 	}
 	if counts["response.function_call_arguments.delta"] != 0 {
 		t.Fatalf("response.function_call_arguments.delta count = %d, want 0", counts["response.function_call_arguments.delta"])
@@ -392,24 +394,26 @@ func TestConvertClaudeResponseToOpenAIResponses_UsesContiguousIndicesForReasonin
 		case event == "response.output_item.added" || event == "response.output_item.done":
 			itemType = data.Get("item.type").String()
 			switch itemType {
-			case "reasoning":
+			case "web_search_call":
 				wantIndex = 0
-			case "message":
+			case "reasoning":
 				wantIndex = 1
-			case "function_call":
+			case "message":
 				wantIndex = 2
+			case "function_call":
+				wantIndex = 3
 			default:
 				continue
 			}
 		case strings.HasPrefix(event, "response.reasoning_"):
 			itemType = "reasoning"
-			wantIndex = 0
+			wantIndex = 1
 		case strings.HasPrefix(event, "response.output_text.") || strings.HasPrefix(event, "response.content_part."):
 			itemType = "message"
-			wantIndex = 1
+			wantIndex = 2
 		case strings.HasPrefix(event, "response.function_call_arguments."):
 			itemType = "function_call"
-			wantIndex = 2
+			wantIndex = 3
 		case event == "response.completed":
 			completed = data
 			continue
@@ -431,17 +435,17 @@ func TestConvertClaudeResponseToOpenAIResponses_UsesContiguousIndicesForReasonin
 			t.Fatalf("no indexed %s events observed", itemType)
 		}
 	}
-	if got := completed.Get("response.output.#").Int(); got != 3 {
-		t.Fatalf("completed output count = %d, want 3", got)
+	if got := completed.Get("response.output.#").Int(); got != 4 {
+		t.Fatalf("completed output count = %d, want 4", got)
 	}
-	for index, wantType := range []string{"reasoning", "message", "function_call"} {
+	for index, wantType := range []string{"web_search_call", "reasoning", "message", "function_call"} {
 		if got := completed.Get(fmt.Sprintf("response.output.%d.type", index)).String(); got != wantType {
 			t.Fatalf("completed output[%d].type = %q, want %q", index, got, wantType)
 		}
 	}
 }
 
-func TestConvertClaudeResponseToOpenAIResponses_HiddenServerToolsDoNotCreateOutputIndexGaps(t *testing.T) {
+func TestConvertClaudeResponseToOpenAIResponses_ServerToolsSurfaceWithoutOutputIndexGaps(t *testing.T) {
 	chunks := [][]byte{
 		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
 		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
@@ -490,8 +494,9 @@ func TestConvertClaudeResponseToOpenAIResponses_HiddenServerToolsDoNotCreateOutp
 		case event == "response.output_item.added" && data.Get("item.type").String() == "function_call",
 			event == "response.output_item.done" && data.Get("item.type").String() == "function_call",
 			strings.HasPrefix(event, "response.function_call_arguments."):
-			if got := data.Get("output_index").Int(); got != 1 {
-				t.Fatalf("%s output_index = %d, want 1", event, got)
+			// index 1 is the web_search_call standing for the server-side search
+			if got := data.Get("output_index").Int(); got != 2 {
+				t.Fatalf("%s output_index = %d, want 2", event, got)
 			}
 		case event == "response.completed":
 			completed = data
@@ -504,14 +509,13 @@ func TestConvertClaudeResponseToOpenAIResponses_HiddenServerToolsDoNotCreateOutp
 	if got := outputTextDone.Get("text").String(); got != "Searching. Found it." {
 		t.Fatalf("aggregated message text = %q, want %q", got, "Searching. Found it.")
 	}
-	if got := completed.Get("response.output.#").Int(); got != 2 {
-		t.Fatalf("completed output count = %d, want 2", got)
+	if got := completed.Get("response.output.#").Int(); got != 3 {
+		t.Fatalf("completed output count = %d, want 3", got)
 	}
-	if got := completed.Get("response.output.0.type").String(); got != "message" {
-		t.Fatalf("completed output[0].type = %q, want message", got)
-	}
-	if got := completed.Get("response.output.1.type").String(); got != "function_call" {
-		t.Fatalf("completed output[1].type = %q, want function_call", got)
+	for index, wantType := range []string{"message", "web_search_call", "function_call"} {
+		if got := completed.Get(fmt.Sprintf("response.output.%d.type", index)).String(); got != wantType {
+			t.Fatalf("completed output[%d].type = %q, want %q", index, got, wantType)
+		}
 	}
 }
 
