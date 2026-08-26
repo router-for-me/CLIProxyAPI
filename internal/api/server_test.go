@@ -1851,7 +1851,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 			DisplayName:   "Custom Codex Model",
 			Description:   "Custom model from registry",
 			ContextLength: 123456,
-			Thinking:      &registry.ThinkingSupport{Levels: []string{"none", "minimal", "low", "medium", "unsupported", "high", "xhigh"}},
+			Thinking:      &registry.ThinkingSupport{Levels: []string{"none", "minimal", "low", "medium", "unsupported", "high", "xhigh", "max", "ultra"}},
 		},
 		{ID: "grok-imagine-image-quality", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "gpt-image-2", Object: "model", OwnedBy: "openai", Type: "openai"},
@@ -1867,7 +1867,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 
 	server := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.137.0", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
 	req.Header.Set("User-Agent", "claude-cli/1.0")
 
