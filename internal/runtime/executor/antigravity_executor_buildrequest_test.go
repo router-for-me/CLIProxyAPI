@@ -13,6 +13,34 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
+func TestResolveAntigravityRequestBaseURL(t *testing.T) {
+	t.Run("default uses daily endpoint", func(t *testing.T) {
+		if got := resolveAntigravityRequestBaseURL(&cliproxyauth.Auth{}); got != antigravityBaseURLDaily {
+			t.Fatalf("base URL = %q, want %q", got, antigravityBaseURLDaily)
+		}
+	})
+
+	t.Run("custom attribute endpoint remains supported", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": "https://enterprise.example.com/"}}
+		if got := resolveAntigravityRequestBaseURL(auth); got != "https://enterprise.example.com" {
+			t.Fatalf("base URL = %q, want custom endpoint", got)
+		}
+	})
+
+	t.Run("custom auth file endpoint remains supported", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{Metadata: map[string]any{"base_url": "https://enterprise.example.com/"}}
+		if got := resolveAntigravityRequestBaseURL(auth); got != "https://enterprise.example.com" {
+			t.Fatalf("base URL = %q, want custom auth file endpoint", got)
+		}
+	})
+}
+
+func TestAntigravityLoadCodeAssistBaseURLRemainsProdByDefault(t *testing.T) {
+	if got := antigravityLoadCodeAssistBaseURL(&cliproxyauth.Auth{}); got != antigravityBaseURLProd {
+		t.Fatalf("loadCodeAssist base URL = %q, want %q", got, antigravityBaseURLProd)
+	}
+}
+
 func TestAntigravityBuildRequest_SanitizesGeminiToolSchema(t *testing.T) {
 	body := buildRequestBodyFromPayload(t, "gemini-2.5-pro")
 

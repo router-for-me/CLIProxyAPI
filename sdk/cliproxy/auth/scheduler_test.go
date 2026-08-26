@@ -554,6 +554,37 @@ func TestSchedulerPick_MixedProvidersResetsCreditsWhenWeightsChange(t *testing.T
 	}
 }
 
+func TestSchedulerPickMixed_RetryTriedFilterPreservesSmoothWeightedDistribution(t *testing.T) {
+	t.Parallel()
+
+	authA := &Auth{ID: "auth-a", Provider: "provider-a"}
+	authB := &Auth{ID: "auth-b", Provider: "provider-b"}
+	authC := &Auth{ID: "auth-c", Provider: "provider-c"}
+	authD := &Auth{ID: "auth-d", Provider: "provider-d"}
+	auths := []*Auth{authA, authB, authC, authD}
+
+	scheduler := newSchedulerForTest(&WeightedRoundRobinSelector{}, auths...)
+	providers := []string{"provider-a", "provider-b", "provider-c", "provider-d"}
+
+	// Simulate retries where auth-a failed and is in the tried filter:
+	// Verify that retry picks rotate smoothly across auth-b, auth-c, auth-d without alphabetical bias towards auth-b.
+	retryCounts := make(map[string]int)
+	tried := map[string]struct{}{"auth-a": {}}
+	for index := 0; index < 30; index++ {
+		picked, _, errPick := scheduler.pickMixed(context.Background(), providers, "", cliproxyexecutor.Options{}, tried)
+		if errPick != nil {
+			t.Fatalf("pickMixed(tried) error = %v", errPick)
+		}
+		retryCounts[picked.ID]++
+	}
+
+	for _, authID := range []string{"auth-b", "auth-c", "auth-d"} {
+		if retryCounts[authID] != 10 {
+			t.Fatalf("auth %q retry picks = %d, want 10 (even distribution without alphabetical bias, counts=%#v)", authID, retryCounts[authID], retryCounts)
+		}
+	}
+}
+
 func TestSchedulerPick_MixedProvidersPrefersHighestPriorityTier(t *testing.T) {
 	t.Parallel()
 

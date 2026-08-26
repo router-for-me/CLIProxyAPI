@@ -36,6 +36,14 @@ type releaseInfo struct {
 	Name    string `json:"name"`
 }
 
+func setLatestReleaseRequestHeaders(req *http.Request) {
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", latestReleaseUserAgent)
+	if token := util.ResolveGitHubToken(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
 // GetLatestVersion returns the latest release version from GitHub without downloading assets.
 func (h *Handler) GetLatestVersion(c *gin.Context) {
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -53,8 +61,7 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "request_create_failed", "message": err.Error()})
 		return
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", latestReleaseUserAgent)
+	setLatestReleaseRequestHeaders(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
