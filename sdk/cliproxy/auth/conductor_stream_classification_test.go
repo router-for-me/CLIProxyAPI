@@ -56,3 +56,54 @@ func TestExecuteStreamFloorsTransientRateLimitHint(t *testing.T) {
 		t.Fatalf("sub-second transient stream hint was not floored: got %v, want at least %v", got, transientRateLimitMinimum)
 	}
 }
+
+// TestExecuteStreamFloorsLateTransientRateLimitHint covers wrapStreamResult:
+// a classified 429 after the first payload must not take the quota ladder.
+func TestExecuteStreamFloorsLateTransientRateLimitHint(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	hint := time.Duration(observedExhaustedQuotaHint)
+	executor := &claudeCancellationTestExecutor{
+		streamFn: func(context.Context, *Auth) (*cliproxyexecutor.StreamResult, error) {
+			ch := make(chan cliproxyexecutor.StreamChunk, 2)
+			ch <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.created"}`)}
+			ch <- cliproxyexecutor.StreamChunk{Err: streamTransientRateLimitError{retryAfter: hint}}
+			close(ch)
+			return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+		},
+	}
+	manager, auth, model := newClaudeCancellationTestManager(t, executor, nil)
+
+	before := time.Now()
+	result, errStream := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+	if errStream != nil {
+		t.Fatalf("expected a committed stream after the first payload, got error: %v", errStream)
+	}
+	if result == nil {
+		t.Fatal("expected a committed stream result")
+	}
+	var sawErr bool
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			sawErr = true
+		}
+	}
+	if !sawErr {
+		t.Fatal("expected the classified 429 to arrive after the first payload")
+	}
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("GetByID(%q) did not return auth", auth.ID)
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state for %q after the late stream failure", model)
+	}
+	if state.Quota.BackoffLevel != 0 {
+		t.Fatalf("expected BackoffLevel to stay 0 for a late transient rate limit, got %d", state.Quota.BackoffLevel)
+	}
+	if got := state.Quota.NextRecoverAt.Sub(before); got < transientRateLimitMinimum {
+		t.Fatalf("sub-second late stream hint was not floored: got %v, want at least %v", got, transientRateLimitMinimum)
+	}
+}
