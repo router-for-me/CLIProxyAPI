@@ -204,6 +204,26 @@ func TestMergeXAIModelsReasoningMetadata(t *testing.T) {
 	}
 }
 
+func TestMergeXAIModelsPreservesStaticNamesWhenRemoteOmitsName(t *testing.T) {
+	models := mergeXAIModels([]xaiRemoteModel{{ID: "grok-4.6"}}, []*registry.ModelInfo{{
+		ID: "grok-4.6", Name: "Grok 4.6", DisplayName: "Grok 4.6",
+	}})
+	if len(models) != 1 || models[0].Name != "Grok 4.6" || models[0].DisplayName != "Grok 4.6" {
+		t.Fatalf("merged names = %#v, want static names preserved", models)
+	}
+}
+
+func TestSameXAIModelRegistrationInputsRequiresLatestXAIProvider(t *testing.T) {
+	current := &coreauth.Auth{ID: "same-inputs-test", Provider: "xai", Attributes: map[string]string{
+		"auth_kind": coreauth.AuthKindOAuth, "access_token": "token",
+	}}
+	latest := current.Clone()
+	latest.Provider = "claude"
+	if sameXAIModelRegistrationInputs(current, latest) {
+		t.Fatal("sameXAIModelRegistrationInputs() = true for non-xAI latest provider")
+	}
+}
+
 func TestRefreshXAIRegistrationDoesNotRediscoverUnchangedAuth(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

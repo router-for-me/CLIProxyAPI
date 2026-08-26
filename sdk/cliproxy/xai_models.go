@@ -186,7 +186,7 @@ func sameXAIModelRegistrationInputs(current, latest *coreauth.Auth) bool {
 	if current == nil || latest == nil || current.ID == "" || current.ID != latest.ID {
 		return false
 	}
-	if !strings.EqualFold(strings.TrimSpace(current.Provider), "xai") || current.AuthKind() != coreauth.AuthKindOAuth || latest.AuthKind() != coreauth.AuthKindOAuth {
+	if !strings.EqualFold(strings.TrimSpace(current.Provider), "xai") || !strings.EqualFold(strings.TrimSpace(latest.Provider), "xai") || current.AuthKind() != coreauth.AuthKindOAuth || latest.AuthKind() != coreauth.AuthKindOAuth {
 		return false
 	}
 	if current.Prefix != latest.Prefix || current.Disabled != latest.Disabled || current.ProxyURL != latest.ProxyURL {
@@ -251,17 +251,17 @@ func mergeXAIModels(remote []xaiRemoteModel, catalog []*registry.ModelInfo) []*r
 		if model.OwnedBy == "" {
 			model.OwnedBy = "xAI"
 		}
-		if model.DisplayName == "" {
-			model.DisplayName = id
-		}
-		if model.Name == "" {
-			model.Name = id
-		}
 		if model.ContextLength == 0 {
 			model.ContextLength = item.ContextLength
 		}
 		if static := byID[key]; static != nil {
 			model = mergeXAIModelMetadata(static, model)
+		}
+		if model.DisplayName == "" {
+			model.DisplayName = id
+		}
+		if model.Name == "" {
+			model.Name = id
 		}
 		levels := make([]string, 0, len(item.ReasoningEfforts))
 		for _, effort := range item.ReasoningEfforts {
