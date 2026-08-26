@@ -38,6 +38,11 @@ type Watcher struct {
 	authRescanMu      sync.Mutex
 	configReloadMu    sync.Mutex
 	configReloadTimer *time.Timer
+	reloadRunMu       sync.Mutex
+	reloadTestHook    func()
+	startTestHook     func()
+	completion        configCompletion
+	completionActive  atomic.Bool
 	serverUpdateMu    sync.Mutex
 	serverUpdateTimer *time.Timer
 	serverUpdateLast  time.Time
@@ -62,6 +67,7 @@ type Watcher struct {
 	pendingOrder      []string
 	dispatchCancel    context.CancelFunc
 	storePersister    storePersister
+	persistConfigWG   sync.WaitGroup
 	pluginAuthParser  synthesizer.PluginAuthParser
 	mirroredAuthDir   string
 	oldConfigYaml     []byte
@@ -111,11 +117,17 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 	if errNewWatcher != nil {
 		return nil, errNewWatcher
 	}
+	completionWatcher, errCompletionWatcher := newConfigCompletionWatcher(configPath)
+	if errCompletionWatcher != nil {
+		_ = watcher.Close()
+		return nil, errCompletionWatcher
+	}
 	w := &Watcher{
 		configPath:      configPath,
 		authDir:         authDir,
 		reloadCallback:  reloadCallback,
 		watcher:         watcher,
+		completion:      completionWatcher,
 		lastAuthHashes:  make(map[string]string),
 		fileAuthsByPath: make(map[string]map[string]*coreauth.Auth),
 	}
@@ -146,7 +158,18 @@ func (w *Watcher) Stop() error {
 	w.stopDispatch()
 	w.stopConfigReloadTimer()
 	w.stopServerUpdateTimer()
-	return w.watcher.Close()
+	var completionErr error
+	if w.completion != nil {
+		completionErr = w.completion.Close()
+	}
+	watchErr := w.watcher.Close()
+	w.reloadRunMu.Lock()
+	w.reloadRunMu.Unlock()
+	w.persistConfigWG.Wait()
+	if completionErr != nil {
+		return completionErr
+	}
+	return watchErr
 }
 
 // SetConfig updates the current configuration

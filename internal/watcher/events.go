@@ -3,6 +3,7 @@
 package watcher
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -27,17 +28,60 @@ func matchProvider(provider string, targets []string) (string, bool) {
 }
 
 func (w *Watcher) start(ctx context.Context) error {
-	if errAddConfig := w.watcher.Add(w.configPath); errAddConfig != nil {
-		log.Errorf("failed to watch config file %s: %v", w.configPath, errAddConfig)
+	var fallbackSnapshot []byte
+	if w.completion != nil {
+		if errStartCompletion := w.completion.Start(ctx, w.notifyConfigComplete, w.configCompletionUnavailable, func() {
+			w.completionActive.Store(true)
+		}); errStartCompletion != nil {
+			w.completionActive.Store(false)
+			log.WithError(errStartCompletion).Warn("config completion watcher unavailable at startup; using fsnotify debounce fallback")
+			_ = w.completion.Close()
+			w.completion = nil
+			fallbackSnapshot, errStartCompletion = os.ReadFile(w.configPath)
+			if errStartCompletion != nil {
+				log.Errorf("failed to access config file %s: %v", w.configPath, errStartCompletion)
+				return errStartCompletion
+			}
+		}
+	}
+	closeCompletionOnError := func() {
+		w.completionActive.Store(false)
+		if w.completion != nil {
+			_ = w.completion.Close()
+		}
+	}
+	if w.startTestHook != nil {
+		w.startTestHook()
+	}
+	if _, errStatConfig := os.Stat(w.configPath); errStatConfig != nil {
+		closeCompletionOnError()
+		log.Errorf("failed to access config file %s: %v", w.configPath, errStatConfig)
+		return errStatConfig
+	}
+	configDir := filepath.Dir(w.configPath)
+	if errAddConfig := w.watcher.Add(configDir); errAddConfig != nil {
+		closeCompletionOnError()
+		log.Errorf("failed to watch config directory %s: %v", configDir, errAddConfig)
 		return errAddConfig
 	}
-	log.Debugf("watching config file: %s", w.configPath)
+	log.Debugf("watching config directory: %s", configDir)
 
-	if errAddAuthDir := w.watcher.Add(w.authDir); errAddAuthDir != nil {
-		log.Errorf("failed to watch auth directory %s: %v", w.authDir, errAddAuthDir)
-		return errAddAuthDir
+	if w.normalizeAuthPath(configDir) != w.normalizeAuthPath(w.authDir) {
+		if errAddAuthDir := w.watcher.Add(w.authDir); errAddAuthDir != nil {
+			closeCompletionOnError()
+			log.Errorf("failed to watch auth directory %s: %v", w.authDir, errAddAuthDir)
+			return errAddAuthDir
+		}
 	}
 	log.Debugf("watching auth directory: %s", w.authDir)
+
+	if fallbackSnapshot != nil {
+		if currentConfig, errReadCurrent := os.ReadFile(w.configPath); errReadCurrent != nil {
+			log.WithError(errReadCurrent).Error("failed to reconcile config after fallback watcher admission")
+		} else if !bytes.Equal(fallbackSnapshot, currentConfig) {
+			w.scheduleConfigReload()
+		}
+	}
 
 	go w.processEvents(ctx)
 
@@ -81,10 +125,13 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	now := time.Now()
 	log.Debugf("file system event detected: %s %s", event.Op.String(), event.Name)
 
-	// Handle config file changes
+	// Handle config file changes. Linux uses native close/move completion events;
+	// other platforms retain fsnotify's quiet-window fallback.
 	if isConfigEvent {
 		log.Debugf("config file change details - operation: %s, timestamp: %s", event.Op.String(), now.Format("2006-01-02 15:04:05.000"))
-		w.scheduleConfigReload()
+		if !w.completionActive.Load() {
+			w.scheduleConfigReload()
+		}
 		return
 	}
 

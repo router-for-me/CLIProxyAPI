@@ -89,12 +89,26 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 	if err != nil {
 		return err
 	}
-	var root yaml.Node
-	if err = yaml.Unmarshal(data, &root); err != nil {
+	data, err = updateNestedScalarBytes(data, path, value)
+	if err != nil {
 		return err
 	}
+	f, err := os.Create(configFile)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	_, err = f.Write(data)
+	return err
+}
+
+func updateNestedScalarBytes(data []byte, path []string, value string) ([]byte, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, err
+	}
 	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return fmt.Errorf("invalid yaml document structure")
+		return nil, fmt.Errorf("invalid yaml document structure")
 	}
 	node := root.Content[0]
 	// descend mapping nodes following path
@@ -114,24 +128,17 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 			node = next
 		}
 	}
-	f, err := os.Create(configFile)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
-	if err = enc.Encode(&root); err != nil {
+	if err := enc.Encode(&root); err != nil {
 		_ = enc.Close()
-		return err
+		return nil, err
 	}
-	if err = enc.Close(); err != nil {
-		return err
+	if err := enc.Close(); err != nil {
+		return nil, err
 	}
-	data = NormalizeCommentIndentation(buf.Bytes())
-	_, err = f.Write(data)
-	return err
+	return NormalizeCommentIndentation(buf.Bytes()), nil
 }
 
 // NormalizeCommentIndentation removes indentation from standalone YAML comment lines to keep them left aligned.
