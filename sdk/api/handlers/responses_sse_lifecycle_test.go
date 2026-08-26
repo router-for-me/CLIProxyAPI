@@ -126,7 +126,7 @@ func TestResponsesSSELifecycleAllowsParallelExplicitToolItems(t *testing.T) {
 func TestResponsesSSELifecyclePreservesAndGeneratesEventFields(t *testing.T) {
 	state := &responsesSSELifecycleState{}
 	chunks := []string{
-		`event: provider.output.delta` + "\n" + `data: {"type":"response.output_text.delta","item_id":"m1","output_index":0,"delta":"answer"}` + "\n\n",
+		`id: provider-event-42` + "\n" + `retry: 1500` + "\n" + `event: provider.output.delta` + "\n" + `data: {"type":"response.output_text.delta","item_id":"m1","output_index":0,"delta":"answer"}` + "\n\n",
 		`data: {"type":"response.completed","response":{"id":"resp1","status":"completed"}}` + "\n\n",
 	}
 
@@ -149,6 +149,13 @@ func TestResponsesSSELifecyclePreservesAndGeneratesEventFields(t *testing.T) {
 	}
 	if got := responsesSSETestEventNames(output); !equalStrings(got, want) {
 		t.Fatalf("event fields = %#v, want %#v; output=%s", got, want, output)
+	}
+	frames := bytes.Split(output, []byte("\n\n"))
+	if bytes.Contains(frames[0], []byte("id:")) || bytes.Contains(frames[0], []byte("retry:")) {
+		t.Fatalf("synthesized event copied reconnection fields: %s", frames[0])
+	}
+	if !bytes.Contains(frames[1], []byte("id: provider-event-42")) || !bytes.Contains(frames[1], []byte("retry: 1500")) {
+		t.Fatalf("forwarded event lost reconnection fields: %s", frames[1])
 	}
 }
 

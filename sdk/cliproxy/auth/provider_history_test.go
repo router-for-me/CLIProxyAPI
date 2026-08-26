@@ -118,6 +118,16 @@ func TestNormalizeProviderBoundResponseHistoryRejectsUnsafeReplay(t *testing.T) 
 			body:   `{"input":[{"type":"computer_call","id":"foreign"}]}`,
 			reason: "unsupported_history_item",
 		},
+		{
+			name:   "credential-bound input file",
+			body:   `{"input":[{"type":"message","role":"user","content":[{"type":"input_file","file_id":"file_a"}]}]}`,
+			reason: "foreign_file_reference_requires_rehydration",
+		},
+		{
+			name:   "credential-bound input image",
+			body:   `{"input":[{"type":"message","role":"user","content":[{"type":"input_image","file_id":"file_image_a"}]}]}`,
+			reason: "foreign_file_reference_requires_rehydration",
+		},
 	}
 
 	for _, tt := range tests {
@@ -280,6 +290,37 @@ func TestManagerRejectsForeignPreviousResponseContinuation(t *testing.T) {
 	var historyErr *providerHistoryError
 	if !errors.As(err, &historyErr) || historyErr.reason != "foreign_previous_response_requires_rehydration" {
 		t.Fatalf("error = %v, want providerHistoryError(foreign_previous_response_requires_rehydration)", err)
+	}
+}
+
+func TestManagerRejectsForeignConversationContinuation(t *testing.T) {
+	tests := []struct {
+		name         string
+		conversation string
+	}{
+		{name: "string", conversation: `"conversation-a"`},
+		{name: "object", conversation: `{"id":"conversation-a"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			t.Cleanup(manager.StopAutoRefresh)
+
+			body := []byte(`{"prompt_cache_key":"thread-foreign-conversation","conversation":` + tt.conversation + `,"input":[{"type":"message","role":"user","content":"continue"}]}`)
+			manager.providerHistoryScopes.SetAliases(providerHistoryScope("codex", "codex-a"), "pck:thread-foreign-conversation")
+			opts := cliproxyexecutor.Options{
+				SourceFormat:    sdktranslator.FormatOpenAIResponse,
+				OriginalRequest: bytes.Clone(body),
+				Metadata:        map[string]any{cliproxyexecutor.SelectedAuthMetadataKey: "codex-b"},
+			}
+
+			_, _, err := manager.applyRequestAfterAuthInterceptor(nil, nil, &Auth{ID: "codex-b", Provider: "codex"}, "codex", cliproxyexecutor.Request{Payload: bytes.Clone(body)}, opts, "gpt-5.6")
+			var historyErr *providerHistoryError
+			if !errors.As(err, &historyErr) || historyErr.reason != "foreign_conversation_requires_rehydration" {
+				t.Fatalf("error = %v, want providerHistoryError(foreign_conversation_requires_rehydration)", err)
+			}
+		})
 	}
 }
 

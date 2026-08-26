@@ -129,6 +129,7 @@ func (s *responsesSSELifecycleState) normalizeFrame(frame []byte) ([]byte, error
 	}
 	var output []byte
 	originalEventName := responsesSSEEventName(frame)
+	originalForwardedFields := responsesSSEForwardedFields(frame)
 	for index, normalized := range events {
 		normalized["sequence_number"] = s.nextSequenceNumber
 		s.nextSequenceNumber++
@@ -139,6 +140,12 @@ func (s *responsesSSELifecycleState) normalizeFrame(frame []byte) ([]byte, error
 		eventName, _ := normalized["type"].(string)
 		if index == len(events)-1 && originalEventName != "" {
 			eventName = originalEventName
+		}
+		if index == len(events)-1 {
+			for _, field := range originalForwardedFields {
+				output = append(output, field...)
+				output = append(output, '\n')
+			}
 		}
 		if eventName != "" {
 			output = append(output, []byte("event: ")...)
@@ -498,6 +505,16 @@ func responsesSSEEventName(frame []byte) string {
 		}
 	}
 	return ""
+}
+
+func responsesSSEForwardedFields(frame []byte) [][]byte {
+	var fields [][]byte
+	for _, line := range bytes.Split(frame, []byte("\n")) {
+		if bytes.HasPrefix(line, []byte("id:")) || bytes.HasPrefix(line, []byte("retry:")) {
+			fields = append(fields, bytes.Clone(line))
+		}
+	}
+	return fields
 }
 
 func (s *responsesSSELifecycleState) closedContains(itemID string) bool {

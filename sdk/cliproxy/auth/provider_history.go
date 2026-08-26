@@ -78,6 +78,9 @@ func normalizeProviderBoundResponseHistory(body []byte) (providerHistoryNormaliz
 				itemType = "message"
 			}
 		}
+		if providerHistoryHasCredentialBoundFileReference(item) {
+			return providerHistoryNormalization{}, &providerHistoryError{reason: "foreign_file_reference_requires_rehydration"}
+		}
 		switch itemType {
 		case "message", "reasoning", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output":
 		case "compaction":
@@ -138,6 +141,39 @@ func hasSemanticHistoryValue(value any) bool {
 		}
 	default:
 		return value != nil
+	}
+	return false
+}
+
+func providerHistoryHasCredentialBoundFileReference(value any) bool {
+	return providerHistoryHasCredentialBoundFileReferenceInContext(value, false)
+}
+
+func providerHistoryHasCredentialBoundFileReferenceInContext(value any, fileContext bool) bool {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			if providerHistoryHasCredentialBoundFileReferenceInContext(item, fileContext) {
+				return true
+			}
+		}
+	case map[string]any:
+		itemType, _ := typed["type"].(string)
+		switch strings.ToLower(strings.TrimSpace(itemType)) {
+		case "file", "image", "image_url", "input_file", "input_image":
+			fileContext = true
+		}
+		if fileContext {
+			if fileID, _ := typed["file_id"].(string); strings.TrimSpace(fileID) != "" {
+				return true
+			}
+		}
+		for key, item := range typed {
+			childFileContext := fileContext || key == "file" || key == "image_url"
+			if providerHistoryHasCredentialBoundFileReferenceInContext(item, childFileContext) {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -232,6 +268,31 @@ func providerHistoryUsesPreviousResponse(body []byte) bool {
 	return strings.TrimSpace(request.PreviousResponseID) != ""
 }
 
+func providerHistoryUsesConversation(body []byte) bool {
+	var request struct {
+		Conversation   json.RawMessage `json:"conversation"`
+		ConversationID string          `json:"conversation_id"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return false
+	}
+	if strings.TrimSpace(request.ConversationID) != "" {
+		return true
+	}
+	rawConversation := bytes.TrimSpace(request.Conversation)
+	if len(rawConversation) == 0 || bytes.Equal(rawConversation, []byte("null")) {
+		return false
+	}
+	var conversationID string
+	if err := json.Unmarshal(rawConversation, &conversationID); err == nil {
+		return strings.TrimSpace(conversationID) != ""
+	}
+	var conversation struct {
+		ID string `json:"id"`
+	}
+	return json.Unmarshal(rawConversation, &conversation) == nil && strings.TrimSpace(conversation.ID) != ""
+}
+
 func (m *Manager) normalizeProviderHistoryAttempt(provider string, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
 	if m == nil || m.providerHistoryScopes == nil || (opts.SourceFormat != sdktranslator.FormatOpenAIResponse && opts.SourceFormat != sdktranslator.FormatCodex) {
 		return req, opts, nil
@@ -267,6 +328,9 @@ func (m *Manager) normalizeProviderHistoryAttempt(provider string, auth *Auth, r
 	}
 	if sourceScope != targetScope && providerHistoryUsesPreviousResponse(req.Payload) {
 		return req, opts, &providerHistoryError{reason: "foreign_previous_response_requires_rehydration"}
+	}
+	if sourceScope != targetScope && providerHistoryUsesConversation(req.Payload) {
+		return req, opts, &providerHistoryError{reason: "foreign_conversation_requires_rehydration"}
 	}
 
 	normalized, err := normalizeProviderBoundResponseHistory(req.Payload)
