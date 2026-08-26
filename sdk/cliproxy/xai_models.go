@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -22,7 +23,7 @@ const (
 	xaiCLIModelsTokenAuthHeader = "X-XAI-Token-Auth"
 	xaiCLIModelsTokenAuthValue  = "xai-grok-cli"
 	xaiCLIModelsVersionHeader   = "x-grok-client-version"
-	xaiCLIModelsVersionValue    = "0.2.93"
+	xaiCLIModelsVersionValue    = runtimeexecutor.XAIClientVersionValue
 )
 
 type xaiModelsResponse struct {
@@ -124,7 +125,7 @@ func fetchXAIModels(ctx context.Context, s *Service, auth *coreauth.Auth, token,
 		return nil, fmt.Errorf("xai models: response exceeds %d bytes", xaiModelsMaxResponseBytes)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("xai models: upstream returned status %d: %s", resp.StatusCode, summarizeXAIModelError(body))
+		return nil, fmt.Errorf("xai models: upstream returned status %d", resp.StatusCode)
 	}
 
 	var payload xaiModelsResponse
@@ -325,13 +326,4 @@ func mergeXAIModelMetadata(static, remote *registry.ModelInfo) *registry.ModelIn
 		merged.MaxCompletionTokens = remote.MaxCompletionTokens
 	}
 	return &merged
-}
-
-func summarizeXAIModelError(body []byte) string {
-	const maxErrorBytes = 512
-	body = []byte(strings.TrimSpace(string(body)))
-	if len(body) > maxErrorBytes {
-		body = body[:maxErrorBytes]
-	}
-	return string(body)
 }

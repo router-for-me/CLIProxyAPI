@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -84,6 +85,20 @@ func TestXAIModelsForAuthAppliesCustomHeaders(t *testing.T) {
 	}
 	if len(models) != 1 || models[0].ID != "grok-4.6" {
 		t.Fatalf("models = %#v, want grok-4.6", models)
+	}
+}
+
+func TestXAIModelsErrorOmitsUpstreamBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "echoed-access-token-secret", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	auth := &coreauth.Auth{ID: "xai-error-body-test", Provider: "xai", Attributes: map[string]string{
+		"auth_kind": coreauth.AuthKindOAuth, "base_url": server.URL + "/v1", "access_token": "token",
+	}}
+	_, err := (&Service{}).xaiModelsForAuth(context.Background(), auth)
+	if err == nil || strings.Contains(err.Error(), "echoed-access-token-secret") {
+		t.Fatalf("error = %v, want status-only error without upstream body", err)
 	}
 }
 
