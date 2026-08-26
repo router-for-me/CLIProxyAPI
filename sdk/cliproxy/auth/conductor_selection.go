@@ -788,6 +788,14 @@ func (m *Manager) LiveProviderKeysForModel(model string) []string {
 			continue
 		}
 		add(routingKeyFromAuth(auth))
+		// For OpenAI-compat entries, also surface the entry-level key so the
+		// picker can show each named entry (or each persisted "key-<id>" row)
+		// as its own live row. Built-in channels never set this attribute.
+		if auth.Attributes != nil {
+			if entryKey := strings.ToLower(strings.TrimSpace(auth.Attributes[AttributeEntryProviderKey])); entryKey != "" {
+				add(entryKey)
+			}
+		}
 	}
 	return out
 }

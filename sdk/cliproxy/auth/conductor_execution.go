@@ -1242,6 +1242,14 @@ func authMatchesProvider(auth *Auth, provider string) bool {
 	if rk == provider {
 		return true
 	}
+	// Entry-level match for OpenAI-compat entries. Built-in channels never set
+	// this attribute, so this branch cannot accidentally broaden a built-in
+	// channel match to a different provider.
+	if auth.Attributes != nil {
+		if entryKey := strings.ToLower(strings.TrimSpace(auth.Attributes[AttributeEntryProviderKey])); entryKey != "" && entryKey == provider {
+			return true
+		}
+	}
 	exec := executorKeyFromAuth(auth)
 	if provider != exec {
 		return false

@@ -326,3 +326,102 @@ func TestAuthMatchesProviderCaseInsensitive(t *testing.T) {
 
 // helper used by some sub-tests above to keep assertions readable.
 var _ = strings.TrimSpace
+
+// TestAuthMatchesProviderOpenAIEntryKey pins down the entry-level routing
+// branch introduced for OpenAI-compat entries: an exact entry-level pin must
+// match the auth that carries that entry_provider_key, but the same auth must
+// NOT match a built-in channel pin, and a built-in auth must NOT match an
+// OpenAI entry-level pin either.
+func TestAuthMatchesProviderOpenAIEntryKey(t *testing.T) {
+	t.Parallel()
+
+	openAICompat := &Auth{
+		Provider: "openai-compatible-foo",
+		Attributes: map[string]string{
+			"provider_key":            "openai-compatible-foo",
+			AttributeEntryProviderKey: "openai-compatible-foo:bar",
+		},
+	}
+	if !authMatchesProvider(openAICompat, "openai-compatible-foo:bar") {
+		t.Fatal(`entry pin "openai-compatible-foo:bar" must match OpenAI-compat auth carrying that entry_provider_key`)
+	}
+	if !authMatchesProvider(openAICompat, "OPENAI-COMPATIBLE-FOO:BAR") {
+		t.Fatal("entry pin must match case-insensitively")
+	}
+	if authMatchesProvider(openAICompat, "claude") {
+		t.Fatal(`OpenAI-compat auth must NOT match a built-in "claude" pin`)
+	}
+	if authMatchesProvider(openAICompat, "claude:42") {
+		t.Fatal(`OpenAI-compat auth must NOT match a built-in compound pin`)
+	}
+
+	// Built-in auth must not be considered "live" for an OpenAI entry-level pin.
+	claudeAuth := &Auth{
+		Provider: "claude",
+		Attributes: map[string]string{
+			"provider_key": "claude:42",
+		},
+	}
+	if authMatchesProvider(claudeAuth, "openai-compatible-foo:bar") {
+		t.Fatal(`built-in claude auth must NOT match an OpenAI entry pin`)
+	}
+
+	// Persisted but unnamed row fallback "key-<id>" form.
+	persisted := &Auth{
+		Provider: "openai-compatible-foo",
+		Attributes: map[string]string{
+			"provider_key":            "openai-compatible-foo",
+			AttributeEntryProviderKey: "openai-compatible-foo:key-17",
+		},
+	}
+	if !authMatchesProvider(persisted, "openai-compatible-foo:key-17") {
+		t.Fatal(`"openai-compatible-foo:key-17" must match an OpenAI-compat auth carrying that fallback entry_provider_key`)
+	}
+}
+
+// TestManagerLiveProviderKeysForModelIncludesOpenAIEntryKey confirms the
+// picker exposes named/persisted OpenAI-compat entries as their own live
+// rows (in addition to the provider-level row) so operators can pin a model
+// to one specific entry.
+func TestManagerLiveProviderKeysForModelIncludesOpenAIEntryKey(t *testing.T) {
+	model := "live-provider-entry-model"
+	entryAuthID := "live-provider-entry-auth"
+	providerOnlyAuthID := "live-provider-only-auth"
+	registry.GetGlobalRegistry().RegisterClient(entryAuthID, "openai-compatible-foo:bar", []*registry.ModelInfo{{ID: model}})
+	registry.GetGlobalRegistry().RegisterClient(providerOnlyAuthID, "openai-compatible-foo", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(entryAuthID)
+		registry.GetGlobalRegistry().UnregisterClient(providerOnlyAuthID)
+	})
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	for _, auth := range []*Auth{
+		{
+			ID:       entryAuthID,
+			Provider: "openai-compatible-foo",
+			Attributes: map[string]string{
+				"provider_key":            "openai-compatible-foo",
+				AttributeEntryProviderKey: "openai-compatible-foo:bar",
+			},
+		},
+		{
+			ID:       providerOnlyAuthID,
+			Provider: "openai-compatible-foo",
+			Attributes: map[string]string{
+				"provider_key": "openai-compatible-foo",
+			},
+		},
+	} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	got := manager.LiveProviderKeysForModel(model)
+	if !slices.Contains(got, "openai-compatible-foo:bar") {
+		t.Fatalf("LiveProviderKeysForModel() = %v, want entry pin \"openai-compatible-foo:bar\"", got)
+	}
+	if !slices.Contains(got, "openai-compatible-foo") {
+		t.Fatalf("LiveProviderKeysForModel() = %v, want provider-level pin \"openai-compatible-foo\"", got)
+	}
+}

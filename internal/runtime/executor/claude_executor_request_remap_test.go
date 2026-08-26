@@ -360,5 +360,3 @@ func FuzzRemapOAuthToolNamesWithBatchedEditsMatchesLegacy(f *testing.F) {
 		}
 	})
 }
-
-

@@ -448,13 +448,21 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 	// sdk/cliproxy/auth/conductor_execution.go). Built-in api-key channels
 	// store a per-row compound key on the auth's `provider_key` attribute
 	// (e.g. "claude:42") so each upstream row gets its own live-status
-	// entry in the picker; honour it here when present. Falls back to the
-	// caller-supplied providerKey (e.g. for OpenAI-compat and OAuth,
-	// which already encode their identity in the providerKey arg) and to
-	// the bare auth.Provider as a last resort.
+	// entry in the picker; honour it here when present. OpenAI-compat
+	// entries additionally carry an `entry_provider_key` attribute
+	// (e.g. "openai-compatible-<provider>:<name>" or
+	// "openai-compatible-<provider>:key-<id>") so each named/persisted
+	// entry gets its own live row in the picker — prefer that over the
+	// provider-level key when set, and only fall back to provider_key
+	// (which equals the executor key for OpenAI-compat) for unnamed
+	// config-only entries. Falls back to the caller-supplied providerKey
+	// (e.g. for OAuth, which already encodes its identity in the
+	// providerKey arg) and to the bare auth.Provider as a last resort.
 	registryKey := providerKey
 	if a.Attributes != nil {
-		if k := strings.TrimSpace(a.Attributes["provider_key"]); k != "" {
+		if k := strings.TrimSpace(a.Attributes[coreauth.AttributeEntryProviderKey]); k != "" {
+			registryKey = strings.ToLower(k)
+		} else if k := strings.TrimSpace(a.Attributes["provider_key"]); k != "" {
 			registryKey = strings.ToLower(k)
 		}
 	}
