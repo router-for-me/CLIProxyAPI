@@ -764,6 +764,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 					state := ensureModelState(auth, modelKey)
 					modelState = state
+					prevUnavailable := state.Unavailable
+					prevNextRetry := state.NextRetryAfter
 					state.Unavailable = true
 					state.Status = StatusError
 					state.UpdatedAt = now
@@ -864,10 +866,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							}
 							if transientCooldownOff && !state.Quota.Exceeded {
 								// Transient cooldowns are disabled for this auth: keep the model
-								// available instead of recording a zero-time quota block. A
-								// pre-existing quota block is left untouched.
-								state.Unavailable = false
-								state.NextRetryAfter = time.Time{}
+								// available instead of recording a zero-time quota block. Restore
+								// any pre-existing non-quota cooldown (401/403/404/5xx) instead of
+								// clearing it; a pre-existing quota block is left untouched above.
+								state.Unavailable = prevUnavailable
+								state.NextRetryAfter = prevNextRetry
 								break
 							}
 							state.NextRetryAfter = next

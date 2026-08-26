@@ -1167,6 +1167,72 @@ func TestManager_MarkResult_Transient429WithoutHintRespectsDisabledCooldown(t *t
 	}
 }
 
+// A hintless transient 429 with cooldowns disabled must not wipe a more
+// serious pre-existing model cooldown (401/403/404/5xx). The auth-level
+// path already restores prevUnavailable/prevNextRetry; the per-model
+// path must do the same.
+func TestManager_MarkResult_Transient429DisabledPreservesExistingModelCooldown(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(-1)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevQuota)
+		transientErrorCooldownSeconds.Store(prevTransient)
+	})
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-transient-429-preserve-model", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-preserve-cooldown"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusForbidden, Message: "forbidden"},
+	})
+
+	afterForbidden, okForbidden := m.GetByID(auth.ID)
+	if !okForbidden || afterForbidden == nil || afterForbidden.ModelStates[model] == nil {
+		t.Fatal("expected model state after 403")
+	}
+	forbiddenDeadline := afterForbidden.ModelStates[model].NextRetryAfter
+	if forbiddenDeadline.IsZero() {
+		t.Fatal("expected 403 to schedule a model cooldown")
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:             auth.ID,
+		Provider:           auth.Provider,
+		Model:              model,
+		Success:            false,
+		Error:              &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+		TransientRateLimit: true,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("auth %s missing after transient 429", auth.ID)
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected per-model state for %s", model)
+	}
+	if !state.Unavailable {
+		t.Fatal("expected the existing 403 cooldown to keep the model unavailable")
+	}
+	if !state.NextRetryAfter.Equal(forbiddenDeadline) {
+		t.Fatalf("hintless transient 429 wiped the 403 deadline: got %v, want %v", state.NextRetryAfter, forbiddenDeadline)
+	}
+	if state.Quota.Exceeded {
+		t.Fatal("expected the 403 cooldown not to be rewritten as quota exhausted")
+	}
+}
+
 // Same as TestManager_MarkResult_Transient429WithoutHintRespectsDisabledCooldown
 // but for an auth-level Result (empty Model), which drives applyAuthFailureState
 // instead of the per-model branch: the credential must stay available.
