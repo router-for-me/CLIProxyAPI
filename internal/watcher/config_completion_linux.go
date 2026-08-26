@@ -14,9 +14,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+type completionTarget struct {
+	dir  string
+	base string
+	wd   int32
+}
+
 type configCompletionWatcher struct {
-	dir      string
-	base     string
+	targets  []completionTarget
 	fd       int
 	done     chan struct{}
 	cancel   context.CancelFunc
@@ -26,16 +31,25 @@ type configCompletionWatcher struct {
 	closeErr error
 }
 
-func newConfigCompletionWatcher(configPath string) (*configCompletionWatcher, error) {
-	path, err := filepath.Abs(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("resolve config path: %w", err)
+func newConfigCompletionWatcher(configPaths ...string) (configCompletion, error) {
+	targets := make([]completionTarget, 0, len(configPaths))
+	seen := make(map[completionTarget]struct{}, len(configPaths))
+	for _, configPath := range configPaths {
+		path, err := filepath.Abs(configPath)
+		if err != nil {
+			return nil, fmt.Errorf("resolve config path: %w", err)
+		}
+		target := completionTarget{dir: filepath.Dir(path), base: filepath.Base(path)}
+		if _, ok := seen[target]; ok {
+			continue
+		}
+		seen[target] = struct{}{}
+		targets = append(targets, target)
 	}
 	return &configCompletionWatcher{
-		dir:  filepath.Dir(path),
-		base: filepath.Base(path),
-		fd:   -1,
-		done: make(chan struct{}),
+		targets: targets,
+		fd:      -1,
+		done:    make(chan struct{}),
 	}, nil
 }
 
@@ -44,9 +58,13 @@ func (w *configCompletionWatcher) Start(ctx context.Context, complete func(), un
 	if err != nil {
 		return fmt.Errorf("create config completion watcher: %w", err)
 	}
-	if _, err = unix.InotifyAddWatch(fd, w.dir, unix.IN_CLOSE_WRITE|unix.IN_MOVED_TO); err != nil {
-		_ = unix.Close(fd)
-		return fmt.Errorf("watch config completion in %s: %w", w.dir, err)
+	for i := range w.targets {
+		wd, errWatch := unix.InotifyAddWatch(fd, w.targets[i].dir, unix.IN_CLOSE_WRITE|unix.IN_MOVED_TO)
+		if errWatch != nil {
+			_ = unix.Close(fd)
+			return fmt.Errorf("watch config completion in %s: %w", w.targets[i].dir, errWatch)
+		}
+		w.targets[i].wd = int32(wd)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 
@@ -154,6 +172,7 @@ func (w *configCompletionWatcher) handleEvents(buf []byte, complete func()) erro
 	for offset := 0; offset+unix.SizeofInotifyEvent <= len(buf); {
 		raw := buf[offset:]
 		mask := binary.NativeEndian.Uint32(raw[4:8])
+		wd := int32(binary.NativeEndian.Uint32(raw[0:4]))
 		nameLen := int(binary.NativeEndian.Uint32(raw[12:16]))
 		eventLen := unix.SizeofInotifyEvent + nameLen
 		if eventLen > len(buf)-offset {
@@ -170,11 +189,20 @@ func (w *configCompletionWatcher) handleEvents(buf []byte, complete func()) erro
 			for len(name) > 0 && name[len(name)-1] == 0 {
 				name = name[:len(name)-1]
 			}
-			if string(name) == w.base && mask&(unix.IN_CLOSE_WRITE|unix.IN_MOVED_TO) != 0 {
+			if mask&(unix.IN_CLOSE_WRITE|unix.IN_MOVED_TO) != 0 && w.matchesTarget(wd, string(name)) {
 				complete()
 			}
 		}
 		offset += eventLen
 	}
 	return nil
+}
+
+func (w *configCompletionWatcher) matchesTarget(wd int32, name string) bool {
+	for _, target := range w.targets {
+		if target.wd == wd && target.base == name {
+			return true
+		}
+	}
+	return false
 }
