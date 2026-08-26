@@ -35,16 +35,17 @@ type rpcThinkingApplier struct {
 	*rpcPluginAdapter
 }
 
-type rpcPluginError struct {
+type rpcError struct {
+	Code       string
 	message    string
 	statusCode int
 }
 
-func (e rpcPluginError) Error() string {
+func (e rpcError) Error() string {
 	return e.message
 }
 
-func (e rpcPluginError) StatusCode() int {
+func (e rpcError) StatusCode() int {
 	return e.statusCode
 }
 
@@ -307,10 +308,11 @@ func decodeEnvelopeResult[T any](envelope pluginabi.Envelope) (T, error) {
 			if message == "" {
 				message = "plugin call failed"
 			}
-			if envelope.Error.HTTPStatus > 0 {
-				return zero, rpcPluginError{message: message, statusCode: envelope.Error.HTTPStatus}
+			return zero, rpcError{
+				Code:       strings.TrimSpace(envelope.Error.Code),
+				message:    message,
+				statusCode: envelope.Error.HTTPStatus,
 			}
-			return zero, fmt.Errorf("%s", message)
 		}
 		return zero, fmt.Errorf("plugin call failed")
 	}

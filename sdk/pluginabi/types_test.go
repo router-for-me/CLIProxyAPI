@@ -36,6 +36,9 @@ func TestMethodNamesAreStable(t *testing.T) {
 	if MethodPluginRegister != "plugin.register" {
 		t.Fatalf("MethodPluginRegister = %q", MethodPluginRegister)
 	}
+	if MethodPluginQuiesce != "plugin.quiesce" {
+		t.Fatalf("MethodPluginQuiesce = %q", MethodPluginQuiesce)
+	}
 	if MethodRequestInterceptBefore != "request.intercept_before" {
 		t.Fatalf("MethodRequestInterceptBefore = %q", MethodRequestInterceptBefore)
 	}

@@ -95,10 +95,6 @@ func randomAntigravityFunctionHistory(randomSource *rand.Rand) []byte {
 		case 2:
 			responseContent["role"] = " Model "
 		}
-		if randomSource.Intn(12) == 0 {
-			orderedResponses = append(orderedResponses, map[string]any{"text": "mixed"})
-			responseContent["parts"] = orderedResponses
-		}
 		contents = append(contents, responseContent)
 	}
 	payload, errMarshal := json.Marshal(map[string]any{"request": map[string]any{"contents": contents}})

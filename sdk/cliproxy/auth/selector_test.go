@@ -275,6 +275,62 @@ func TestWeightedRoundRobinSelectorPick_DefaultWeightIsOne(t *testing.T) {
 	}
 }
 
+func TestWeightedRoundRobinSelectorPick_SubsetFilteringDoesNotResetAccumulatorOrFavorFirstAlphabetical(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	authB := &Auth{ID: "auth-b"}
+	authC := &Auth{ID: "auth-c"}
+	authD := &Auth{ID: "auth-d"}
+	subsetPool := []*Auth{authB, authC, authD} // auth-a excluded (e.g. tried or cooling)
+
+	// Simulate repeated failover calls where auth-a is excluded:
+	// Verify that auth-b, auth-c, auth-d are picked evenly (10 each) rather than auth-b taking 100% of picks.
+	retryCounts := make(map[string]int)
+	for index := 0; index < 30; index++ {
+		got, errPick := selector.Pick(context.Background(), "provider", "model", cliproxyexecutor.Options{}, subsetPool)
+		if errPick != nil {
+			t.Fatalf("Pick(subset) error = %v", errPick)
+		}
+		retryCounts[got.ID]++
+	}
+
+	for _, authID := range []string{"auth-b", "auth-c", "auth-d"} {
+		if retryCounts[authID] != 10 {
+			t.Fatalf("auth %q retry picks = %d, want 10 (even distribution without alphabetical bias, counts=%#v)", authID, retryCounts[authID], retryCounts)
+		}
+	}
+}
+
+func TestSmoothWeightedStatePrepare_KeepsCreditsForTransientSubsetsAndBoundsGrowth(t *testing.T) {
+	t.Parallel()
+
+	state := &smoothWeightedState{}
+	state.prepare(map[string]int64{"a": 1, "b": 1})
+	state.current["a"] = -2
+	state.current["b"] = 1
+
+	// A shrinking candidate set must not discard credits.
+	state.prepare(map[string]int64{"b": 1})
+	if state.current["a"] != -2 || state.current["b"] != 1 {
+		t.Fatalf("credits after subset prepare = %#v, want a:-2 b:1", state.current)
+	}
+
+	// A real weight change resets credits.
+	state.prepare(map[string]int64{"b": 5})
+	if len(state.current) != 0 {
+		t.Fatalf("credits after weight change = %#v, want empty", state.current)
+	}
+
+	// Long-lived churn must stay bounded instead of leaking one entry per removed credential.
+	for index := 0; index < maxSmoothWeightedStateEntries*3; index++ {
+		state.prepare(map[string]int64{fmt.Sprintf("churn-%d", index): 5})
+	}
+	if len(state.current) > maxSmoothWeightedStateEntries || len(state.weights) > maxSmoothWeightedStateEntries {
+		t.Fatalf("state grew unbounded: current=%d weights=%d, want <= %d", len(state.current), len(state.weights), maxSmoothWeightedStateEntries)
+	}
+}
+
 func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 	t.Parallel()
 
@@ -663,6 +719,108 @@ func TestRoundRobinSelectorPick_ThinkingSuffixSharesCursor(t *testing.T) {
 	}
 }
 
+func TestRoundRobinSelectorPick_ResumesRotationAcrossRetryExclusions(t *testing.T) {
+	t.Parallel()
+
+	ids := []string{"aaa", "bbb", "ccc", "ddd", "eee"}
+	auths := make([]*Auth, 0, len(ids))
+	for _, id := range ids {
+		auths = append(auths, &Auth{ID: id})
+	}
+
+	// Every request burns three attempts, so each attempt must consume the next slot of one
+	// shared rotation. Re-seating the rotation on the shrunken candidate slice would starve
+	// the head of the tier and hammer its tail.
+	selector := &RoundRobinSelector{}
+	const requests = 50
+	firstAttempt := make(map[string]int)
+	allAttempts := make(map[string]int)
+	for index := 0; index < requests; index++ {
+		tried := make(map[string]struct{})
+		for attempt := 0; attempt < 3; attempt++ {
+			candidates := make([]*Auth, 0, len(auths))
+			for _, auth := range auths {
+				if _, used := tried[auth.ID]; !used {
+					candidates = append(candidates, auth)
+				}
+			}
+			got, errPick := selector.Pick(context.Background(), "gemini", "model", cliproxyexecutor.Options{}, candidates)
+			if errPick != nil {
+				t.Fatalf("Pick() request %d attempt %d error = %v", index, attempt, errPick)
+			}
+			if attempt == 0 {
+				firstAttempt[got.ID]++
+			}
+			allAttempts[got.ID]++
+			tried[got.ID] = struct{}{}
+		}
+	}
+
+	for _, id := range ids {
+		if firstAttempt[id] != requests/len(ids) {
+			t.Fatalf("auth %q first attempts = %d, want %d (counts=%#v)", id, firstAttempt[id], requests/len(ids), firstAttempt)
+		}
+		if allAttempts[id] != requests*3/len(ids) {
+			t.Fatalf("auth %q total attempts = %d, want %d (counts=%#v)", id, allAttempts[id], requests*3/len(ids), allAttempts)
+		}
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_KeepsWeightRatiosWhenCandidatesAreExcluded(t *testing.T) {
+	t.Parallel()
+
+	// auth-a is excluded exactly as a retry or cooldown would exclude it. The survivors must
+	// keep their configured 3:1 ratio instead of collapsing onto the first candidate.
+	selector := &WeightedRoundRobinSelector{}
+	authA := &Auth{ID: "auth-a", Attributes: map[string]string{AttributeWeight: "5"}}
+	authB := &Auth{ID: "auth-b", Attributes: map[string]string{AttributeWeight: "3"}}
+	authC := &Auth{ID: "auth-c", Attributes: map[string]string{AttributeWeight: "1"}}
+
+	fullPool := []*Auth{authA, authB, authC}
+	for index := 0; index < 9; index++ {
+		if _, errPick := selector.Pick(context.Background(), "codex", "model", cliproxyexecutor.Options{}, fullPool); errPick != nil {
+			t.Fatalf("Pick(full) #%d error = %v", index, errPick)
+		}
+	}
+
+	survivors := []*Auth{authB, authC}
+	counts := make(map[string]int)
+	for index := 0; index < 400; index++ {
+		got, errPick := selector.Pick(context.Background(), "codex", "model", cliproxyexecutor.Options{}, survivors)
+		if errPick != nil {
+			t.Fatalf("Pick(survivors) #%d error = %v", index, errPick)
+		}
+		counts[got.ID]++
+	}
+	if counts["auth-b"] != 300 || counts["auth-c"] != 100 {
+		t.Fatalf("survivor picks = %#v, want auth-b:300 auth-c:100 (3:1)", counts)
+	}
+}
+
+func TestSuccessorIndex_WrapsAndSkipsFilteredCandidates(t *testing.T) {
+	t.Parallel()
+
+	available := []*Auth{{ID: "aaa"}, {ID: "ccc"}, {ID: "eee"}}
+	tests := []struct {
+		name   string
+		lastID string
+		want   int
+	}{
+		{name: "no previous pick starts at head", lastID: "", want: 0},
+		{name: "resumes after previous pick", lastID: "aaa", want: 1},
+		{name: "resumes after filtered-out pick", lastID: "bbb", want: 1},
+		{name: "wraps at the end of the ring", lastID: "eee", want: 0},
+		{name: "wraps for removed trailing pick", lastID: "zzz", want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := successorIndex(available, tt.lastID); got != tt.want {
+				t.Fatalf("successorIndex(%q) = %d, want %d", tt.lastID, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRoundRobinSelectorPick_CursorKeyCap(t *testing.T) {
 	t.Parallel()
 
@@ -676,14 +834,14 @@ func TestRoundRobinSelectorPick_CursorKeyCap(t *testing.T) {
 	selector.mu.Lock()
 	defer selector.mu.Unlock()
 
-	if selector.cursors == nil {
-		t.Fatalf("selector.cursors = nil")
+	if selector.lastPicked == nil {
+		t.Fatalf("selector.lastPicked = nil")
 	}
-	if len(selector.cursors) != 1 {
-		t.Fatalf("len(selector.cursors) = %d, want %d", len(selector.cursors), 1)
+	if len(selector.lastPicked) != 1 {
+		t.Fatalf("len(selector.lastPicked) = %d, want %d", len(selector.lastPicked), 1)
 	}
-	if _, ok := selector.cursors["gemini:m3"]; !ok {
-		t.Fatalf("selector.cursors missing key %q", "gemini:m3")
+	if _, ok := selector.lastPicked["gemini:m3"]; !ok {
+		t.Fatalf("selector.lastPicked missing key %q", "gemini:m3")
 	}
 }
 

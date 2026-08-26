@@ -18,6 +18,7 @@ const (
 
 const (
 	MethodPluginRegister    = "plugin.register"
+	MethodPluginQuiesce     = "plugin.quiesce"
 	MethodPluginReconfigure = "plugin.reconfigure"
 	MethodPluginShutdown    = "plugin.shutdown"
 
