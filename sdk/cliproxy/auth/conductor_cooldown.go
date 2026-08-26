@@ -25,6 +25,8 @@ var quotaCooldownDisabled atomic.Bool
 
 var transientErrorCooldownSeconds atomic.Int64
 
+const minimumQuotaRetryAfter = 30 * time.Second
+
 // SetQuotaCooldownDisabled toggles auth/model cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
@@ -832,14 +834,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
 							if !disableCooling {
-								if result.RetryAfter != nil {
-									next = now.Add(*result.RetryAfter)
-								} else {
-									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
-								}
-								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
-									next = state.Quota.NextRecoverAt
-								}
+								next, backoffLevel = quotaCooldownAfterRetryHint(state.Quota, result.RetryAfter, now)
 							}
 							state.NextRetryAfter = next
 							applyCooldownFields(&state.Quota, QuotaState{
@@ -1963,14 +1958,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.Quota.Reason = "quota"
 		var next time.Time
 		if !disableCooling {
-			if retryAfter != nil {
-				next = now.Add(*retryAfter)
-			} else {
-				next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
-			}
-			if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
-				next = auth.Quota.NextRecoverAt
-			}
+			next, auth.Quota.BackoffLevel = quotaCooldownAfterRetryHint(auth.Quota, retryAfter, now)
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
@@ -1989,6 +1977,21 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.NextRetryAfter = now.Add(transientErrorCooldown)
 		auth.Unavailable = true
 	}
+}
+
+func quotaCooldownAfterRetryHint(quota QuotaState, retryAfter *time.Duration, now time.Time) (time.Time, int) {
+	if retryAfter == nil {
+		return quotaCooldownAfterFailure(quota, now)
+	}
+	cooldown := *retryAfter
+	if cooldown < minimumQuotaRetryAfter {
+		cooldown = minimumQuotaRetryAfter
+	}
+	next := now.Add(cooldown)
+	if quota.Exceeded && quota.NextRecoverAt.After(next) {
+		next = quota.NextRecoverAt
+	}
+	return next, quota.BackoffLevel
 }
 
 // quotaCooldownAfterFailure returns the recovery deadline and backoff level for
