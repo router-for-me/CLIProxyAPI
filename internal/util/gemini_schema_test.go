@@ -2232,3 +2232,66 @@ func TestCleanJSONSchema_PreservesAdditionalPropertiesObjectSchema(t *testing.T)
 		}
 	}
 }
+
+// TestCleanJSONSchemaForAntigravityResponse_AnyOfRequiredOnlyBranches tests issue 5219 #2:
+// anyOf with required-only branches should not overwrite the parent object's type and properties.
+func TestCleanJSONSchemaForAntigravityResponse_AnyOfRequiredOnlyBranches(t *testing.T) {
+	input := `{
+		"type": "object",
+		"anyOf": [
+			{"required": ["left"]},
+			{"required": ["right"]}
+		],
+		"properties": {
+			"left": {"type": "integer"},
+			"right": {"type": "integer"}
+		},
+		"additionalProperties": false
+	}`
+
+	got := CleanJSONSchemaForAntigravityResponse(input)
+	parsed := gjson.Parse(got)
+
+	if parsed.Get("type").String() != "object" {
+		t.Fatalf("type = %q, want object; cleaned: %s", parsed.Get("type").String(), got)
+	}
+	if !parsed.Get("properties.left").Exists() || !parsed.Get("properties.right").Exists() {
+		t.Fatalf("properties were wiped out; cleaned: %s", got)
+	}
+	if parsed.Get("anyOf").Exists() {
+		t.Fatalf("anyOf was not removed; cleaned: %s", got)
+	}
+}
+
+// TestCleanJSONSchemaForAntigravityResponse_ContainsKeywordStripped tests issue 5219 #3:
+// contains keyword in array schemas should be stripped and moved to description hint.
+func TestCleanJSONSchemaForAntigravityResponse_ContainsKeywordStripped(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"tags": {
+				"type": "array",
+				"items": {"type": "string"},
+				"contains": {"enum": ["x"]}
+			}
+		},
+		"required": ["tags"],
+		"additionalProperties": false
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"gemini":              CleanJSONSchemaForGemini,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+		if parsed.Get("properties.tags.contains").Exists() {
+			t.Errorf("%s: contains keyword was not removed: %s", cleaner, got)
+		}
+		desc := parsed.Get("properties.tags.description").String()
+		if !strings.Contains(desc, "contains") {
+			t.Errorf("%s: contains description hint missing: %s", cleaner, got)
+		}
+	}
+}

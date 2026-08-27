@@ -2283,6 +2283,49 @@ func TestUsageAdapterPreservesExplicitGenerateFalse(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterDetachesContext(t *testing.T) {
+	var receivedCtx context.Context
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		receivedCtx = ctx
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-detach",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-detach",
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	adapter.HandleUsage(canceledCtx, coreusage.Record{
+		Provider: "provider",
+		Model:    "gpt-5.4",
+	})
+	if receivedCtx == nil {
+		t.Fatal("plugin did not receive context")
+	}
+	if errCtx := receivedCtx.Err(); errCtx != nil {
+		t.Fatalf("expected detached context without error, got ctx.Err() = %v", errCtx)
+	}
+
+	receivedCtx = nil
+	adapter.HandleUsage(nil, coreusage.Record{
+		Provider: "provider",
+		Model:    "gpt-5.4",
+	})
+	if receivedCtx == nil {
+		t.Fatal("plugin did not receive context for nil input")
+	}
+	if errCtx := receivedCtx.Err(); errCtx != nil {
+		t.Fatalf("expected non-nil context without error for nil input, got ctx.Err() = %v", errCtx)
+	}
+}
+
 func TestUsageManagerRegisterNamedReplacesWithoutDuplicateDispatch(t *testing.T) {
 	manager := coreusage.NewManager(0)
 	defer manager.Stop()

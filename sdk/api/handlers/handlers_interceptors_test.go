@@ -21,11 +21,12 @@ import (
 )
 
 type handlerInterceptorTestHost struct {
-	interceptRequestBeforeAuth func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
-	interceptRequestAfterAuth  func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
-	interceptResponse          func(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
-	interceptStreamChunk       func(context.Context, pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse
-	completeRequest            func(context.Context, pluginapi.RequestCompletion)
+	interceptRequestBeforeAuth    func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
+	interceptRequestAfterAuth     func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
+	interceptResponse             func(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
+	interceptStreamChunk          func(context.Context, pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse
+	observeWebSocketResponseEvent func(context.Context, pluginapi.WebSocketResponseEvent)
+	completeRequest               func(context.Context, pluginapi.RequestCompletion)
 	// includeStreamChunkRequestBodies simulates legacy schema_version < 3 plugins.
 	includeStreamChunkRequestBodies bool
 }
@@ -89,6 +90,12 @@ func (h *handlerInterceptorTestHost) InterceptStreamChunk(ctx context.Context, r
 func (h *handlerInterceptorTestHost) CompleteRequest(ctx context.Context, completion pluginapi.RequestCompletion) {
 	if h != nil && h.completeRequest != nil {
 		h.completeRequest(ctx, completion)
+	}
+}
+
+func (h *handlerInterceptorTestHost) ObserveWebSocketResponseEvent(ctx context.Context, event pluginapi.WebSocketResponseEvent) {
+	if h != nil && h.observeWebSocketResponseEvent != nil {
+		h.observeWebSocketResponseEvent(ctx, event)
 	}
 }
 
@@ -1479,5 +1486,49 @@ func TestHandlerResponseInterceptorSeesRawHeadersWhenPassthroughDisabled(t *test
 	}
 	if headers.Get("X-Upstream") != "" {
 		t.Fatalf("headers leaked raw upstream header with passthrough disabled: %#v", headers)
+	}
+}
+
+func TestHandlerWebSocketResponseObserverForwardsToPluginHost(t *testing.T) {
+	model := "handler-ws-observer-model"
+	var observed []pluginapi.WebSocketResponseEvent
+	executor := &interceptorCaptureExecutor{
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			if opts.WebSocketResponseObserver != nil {
+				opts.WebSocketResponseObserver(ctx, coreexecutor.WebSocketResponseEvent{
+					SourceFormat: opts.SourceFormat.String(),
+					Model:        req.Model,
+					Provider:     "codex",
+					AuthID:       "auth-test",
+					EventType:    "codex.rate_limits",
+					Payload:      []byte(`{"type":"codex.rate_limits"}`),
+				})
+			}
+			return coreexecutor.Response{Payload: []byte(`{"id":"resp-1"}`)}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, nil)
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		observeWebSocketResponseEvent: func(ctx context.Context, event pluginapi.WebSocketResponseEvent) {
+			observed = append(observed, event)
+		},
+	})
+
+	_, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %+v", errMsg)
+	}
+
+	if len(observed) != 1 {
+		t.Fatalf("observed %d events, want 1", len(observed))
+	}
+	if observed[0].EventType != "codex.rate_limits" {
+		t.Fatalf("EventType = %q, want codex.rate_limits", observed[0].EventType)
+	}
+	if observed[0].AuthID != "auth-test" {
+		t.Fatalf("AuthID = %q, want auth-test", observed[0].AuthID)
+	}
+	if observed[0].RequestID == "" {
+		t.Fatal("RequestID is empty, want populated request ID")
 	}
 }

@@ -2145,3 +2145,164 @@ func TestCodexWebsocketLifecycleBindFailureReleasesSessionRequestLock(t *testing
 		t.Fatal("lifecycle bind failure left the session request lock held")
 	}
 }
+
+func TestCodexWebsocketsExecuteObservesWebSocketResponseEvents(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade websocket: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Fatalf("read upstream websocket message: %v", errRead)
+		}
+
+		rateLimitMsg := []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":42}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, rateLimitMsg); errWrite != nil {
+			t.Fatalf("write rate limit websocket message: %v", errWrite)
+		}
+
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Fatalf("write completed websocket message: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-codex-1",
+		Label:    "codex-account",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":   "sk-test",
+			"base_url":  server.URL,
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{
+			"email": "user@example.com",
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol",
+		Payload: []byte(`{"model":"gpt-5.6-sol","input":[{"role":"user","content":"hello"}]}`),
+	}
+
+	var observedEvents []cliproxyexecutor.WebSocketResponseEvent
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("codex"),
+		Metadata: map[string]any{
+			"request_id": "test-req-codex",
+		},
+		WebSocketResponseObserver: func(_ context.Context, ev cliproxyexecutor.WebSocketResponseEvent) {
+			observedEvents = append(observedEvents, ev)
+		},
+	}
+
+	if _, err := exec.Execute(context.Background(), auth, req, opts); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if len(observedEvents) < 2 {
+		t.Fatalf("observed %d events, want at least 2", len(observedEvents))
+	}
+
+	rateLimitEvent := observedEvents[0]
+	if rateLimitEvent.RequestID != "test-req-codex" {
+		t.Fatalf("RequestID = %q, want test-req-codex", rateLimitEvent.RequestID)
+	}
+	if rateLimitEvent.AuthID != "auth-codex-1" || rateLimitEvent.AuthLabel != "codex-account" {
+		t.Fatalf("Auth = (%q, %q), want (auth-codex-1, codex-account)", rateLimitEvent.AuthID, rateLimitEvent.AuthLabel)
+	}
+	if rateLimitEvent.EventType != "codex.rate_limits" {
+		t.Fatalf("EventType = %q, want codex.rate_limits", rateLimitEvent.EventType)
+	}
+	if !bytes.Contains(rateLimitEvent.Payload, []byte(`"used_percent":42`)) {
+		t.Fatalf("Payload = %s, want used_percent 42", rateLimitEvent.Payload)
+	}
+}
+
+func TestCodexWebsocketsExecuteStreamObservesWebSocketResponseEvents(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade websocket: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Fatalf("read upstream websocket message: %v", errRead)
+		}
+
+		rateLimitMsg := []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":75}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, rateLimitMsg); errWrite != nil {
+			t.Fatalf("write rate limit websocket message: %v", errWrite)
+		}
+
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Fatalf("write completed websocket message: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-stream-1",
+		Label:    "codex-stream-account",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":   "sk-test",
+			"base_url":  server.URL,
+			"auth_kind": "oauth",
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol",
+		Payload: []byte(`{"model":"gpt-5.6-sol","input":[{"role":"user","content":"hello"}]}`),
+	}
+
+	var observedEvents []cliproxyexecutor.WebSocketResponseEvent
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("codex"),
+		Metadata: map[string]any{
+			"request_id": "test-req-stream",
+		},
+		WebSocketResponseObserver: func(_ context.Context, ev cliproxyexecutor.WebSocketResponseEvent) {
+			observedEvents = append(observedEvents, ev)
+		},
+	}
+
+	streamResult, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	// Drain stream
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+	}
+
+	if len(observedEvents) < 2 {
+		t.Fatalf("observed %d events, want at least 2", len(observedEvents))
+	}
+
+	rateLimitEvent := observedEvents[0]
+	if rateLimitEvent.RequestID != "test-req-stream" {
+		t.Fatalf("RequestID = %q, want test-req-stream", rateLimitEvent.RequestID)
+	}
+	if rateLimitEvent.AuthID != "auth-stream-1" || rateLimitEvent.AuthLabel != "codex-stream-account" {
+		t.Fatalf("Auth = (%q, %q), want (auth-stream-1, codex-stream-account)", rateLimitEvent.AuthID, rateLimitEvent.AuthLabel)
+	}
+	if rateLimitEvent.EventType != "codex.rate_limits" {
+		t.Fatalf("EventType = %q, want codex.rate_limits", rateLimitEvent.EventType)
+	}
+	if !bytes.Contains(rateLimitEvent.Payload, []byte(`"used_percent":75`)) {
+		t.Fatalf("Payload = %s, want used_percent 75", rateLimitEvent.Payload)
+	}
+}

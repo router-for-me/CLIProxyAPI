@@ -11,6 +11,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 )
 
 type rpcPluginAdapter struct {
@@ -132,6 +133,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	if resp.Capabilities.StreamChunkInterceptor {
 		plugin.Capabilities.StreamChunkInterceptor = adapter
 	}
+	if resp.Capabilities.WebSocketResponseObserver {
+		plugin.Capabilities.WebSocketResponseObserver = adapter
+	}
 	if resp.Capabilities.ThinkingApplier {
 		plugin.Capabilities.ThinkingApplier = rpcThinkingApplier{rpcPluginAdapter: adapter}
 	}
@@ -210,6 +214,9 @@ func sanitizePluginRequest(request any) any {
 	case pluginapi.StreamChunkInterceptRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
+	case pluginapi.WebSocketResponseEvent:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
 	case rpcRequestInterceptRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
@@ -223,6 +230,9 @@ func sanitizePluginRequest(request any) any {
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case rpcStreamChunkInterceptRequest:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
+	case rpcWebSocketResponseEvent:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case pluginapi.ExecutorHTTPRequest:
@@ -529,6 +539,16 @@ func (a *rpcPluginAdapter) InterceptStreamChunk(ctx context.Context, req plugina
 	})
 }
 
+func (a *rpcPluginAdapter) ObserveWebSocketResponseEvent(ctx context.Context, event pluginapi.WebSocketResponseEvent) error {
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	_, errCall := callPlugin[rpcEmptyResponse](ctx, a.client, pluginabi.MethodWebSocketResponseEvent, rpcWebSocketResponseEvent{
+		WebSocketResponseEvent: event,
+		HostCallbackID:         callbackID,
+	})
+	return errCall
+}
+
 func (a rpcThinkingApplier) ApplyThinking(ctx context.Context, req pluginapi.ThinkingApplyRequest) (pluginapi.PayloadResponse, error) {
 	callbackID, closeCallback := a.openHostCallbackContext(ctx)
 	defer closeCallback()
@@ -539,7 +559,9 @@ func (a rpcThinkingApplier) ApplyThinking(ctx context.Context, req pluginapi.Thi
 }
 
 func (a *rpcPluginAdapter) HandleUsage(ctx context.Context, record pluginapi.UsageRecord) {
-	_, _ = callPlugin[rpcEmptyResponse](ctx, a.client, pluginabi.MethodUsageHandle, record)
+	if _, errCall := callPlugin[rpcEmptyResponse](ctx, a.client, pluginabi.MethodUsageHandle, record); errCall != nil {
+		log.Debugf("pluginhost: usage.handle to %s failed: %v", a.id, errCall)
+	}
 }
 
 func (a *rpcPluginAdapter) RegisterCommandLine(ctx context.Context, req pluginapi.CommandLineRegistrationRequest) (pluginapi.CommandLineRegistrationResponse, error) {

@@ -10,10 +10,14 @@ const (
 	// Version 3 omits OriginalRequest/RequestBody on payload stream chunks
 	// (ChunkIndex >= 0); those fields remain on StreamChunkHeaderInitIndex only.
 	// Plugins that still need per-chunk request bodies should keep schema_version < 3.
-	SchemaVersion uint32 = 3
+	// Version 4 adds upstream WebSocket response event observation.
+	SchemaVersion uint32 = 4
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
+	// SchemaVersionWebSocketResponseObserver is the first schema version that supports
+	// upstream WebSocket response event observation.
+	SchemaVersionWebSocketResponseObserver uint32 = 4
 )
 
 const (
@@ -57,6 +61,8 @@ const (
 	MethodResponseNormalizeAfter       = "response.normalize_after"
 	MethodResponseInterceptAfter       = "response.intercept_after"
 	MethodResponseInterceptStreamChunk = "response.intercept_stream_chunk"
+
+	MethodWebSocketResponseEvent = "websocket.response_event"
 
 	MethodThinkingIdentifier = "thinking.identifier"
 	MethodThinkingApply      = "thinking.apply"

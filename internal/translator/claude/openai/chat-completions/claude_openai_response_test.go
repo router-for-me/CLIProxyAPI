@@ -380,3 +380,63 @@ func TestConvertClaudeResponseToOpenAI_RedactedThinkingIgnored(t *testing.T) {
 		t.Fatalf("stream content = %q, want %q", streamContent, "Visible reply.")
 	}
 }
+
+func TestConvertClaudeResponseToOpenAI_StreamToolCallIndexIsZeroBased(t *testing.T) {
+	events := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-opus-4-6","usage":{"input_tokens":15,"output_tokens":1}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Thinking..."}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather"}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\": \"Paris\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_2","name":"get_time"}}`),
+		[]byte(`data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Tokyo\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":2}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":25}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	ctx := context.Background()
+	var param any
+	type toolCallInfo struct {
+		Index     int64
+		ID        string
+		Name      string
+		Arguments string
+	}
+	var streamedCalls []toolCallInfo
+
+	for _, ev := range events {
+		chunks := ConvertClaudeResponseToOpenAI(ctx, "claude-opus-4-6", nil, nil, ev, &param)
+		for _, chunk := range chunks {
+			tc := gjson.GetBytes(chunk, "choices.0.delta.tool_calls.0")
+			if tc.Exists() {
+				streamedCalls = append(streamedCalls, toolCallInfo{
+					Index:     tc.Get("index").Int(),
+					ID:        tc.Get("id").String(),
+					Name:      tc.Get("function.name").String(),
+					Arguments: tc.Get("function.arguments").String(),
+				})
+			}
+		}
+	}
+
+	if len(streamedCalls) != 2 {
+		t.Fatalf("expected 2 streamed tool calls, got %d", len(streamedCalls))
+	}
+
+	if streamedCalls[0].Index != 0 {
+		t.Errorf("tool call toolu_1 index = %d, want 0", streamedCalls[0].Index)
+	}
+	if streamedCalls[0].ID != "toolu_1" || streamedCalls[0].Name != "get_weather" || streamedCalls[0].Arguments != `{"city": "Paris"}` {
+		t.Errorf("tool call toolu_1 payload mismatch: %+v", streamedCalls[0])
+	}
+
+	if streamedCalls[1].Index != 1 {
+		t.Errorf("tool call toolu_2 index = %d, want 1", streamedCalls[1].Index)
+	}
+	if streamedCalls[1].ID != "toolu_2" || streamedCalls[1].Name != "get_time" || streamedCalls[1].Arguments != `{"city":"Tokyo"}` {
+		t.Errorf("tool call toolu_2 payload mismatch: %+v", streamedCalls[1])
+	}
+}

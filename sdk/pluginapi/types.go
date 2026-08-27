@@ -112,6 +112,8 @@ type Capabilities struct {
 	ResponseInterceptor ResponseInterceptor
 	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
 	StreamChunkInterceptor StreamChunkInterceptor
+	// WebSocketResponseObserver receives upstream WebSocket response events during execution.
+	WebSocketResponseObserver WebSocketResponseObserver
 	// ThinkingApplier applies validated thinking configuration to provider payloads.
 	ThinkingApplier ThinkingApplier
 	// UsagePlugin receives completed usage records.
@@ -949,6 +951,11 @@ type StreamChunkInterceptor interface {
 	InterceptStreamChunk(context.Context, StreamChunkInterceptRequest) (StreamChunkInterceptResponse, error)
 }
 
+// WebSocketResponseObserver observes upstream WebSocket response events received during execution.
+type WebSocketResponseObserver interface {
+	ObserveWebSocketResponseEvent(context.Context, WebSocketResponseEvent) error
+}
+
 // StreamChunkHeaderInitIndex marks the header-only stream initialization interceptor call.
 const StreamChunkHeaderInitIndex = -1
 
@@ -1121,6 +1128,22 @@ type StreamChunkInterceptResponse struct {
 	// DropChunk skips delivery of the current payload chunk and prevents it from entering HistoryChunks.
 	// Header updates returned with DropChunk still apply to the interceptor chain state.
 	DropChunk bool
+}
+
+// WebSocketResponseEvent describes an upstream WebSocket response event received during execution.
+type WebSocketResponseEvent struct {
+	RequestID      string
+	TraceID        string
+	SourceFormat   string
+	Model          string
+	RequestedModel string
+	Provider       string
+	AuthID         string
+	AuthLabel      string
+	AuthType       string
+	EventType      string
+	Payload        []byte
+	Metadata       map[string]any
 }
 
 // PayloadResponse returns a transformed raw payload.

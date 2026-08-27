@@ -581,6 +581,13 @@ func mergeStringSlices(existing, promoted []string) []string {
 	return res
 }
 
+// InlineLocalRefs resolves JSON Pointer references against the original schema before definition
+// containers are stripped. Each expansion receives its own copy, sibling keywords override the
+// referenced definition, and cycles terminate as a typed hint instead of recursing forever.
+func InlineLocalRefs(jsonStr string) string {
+	return inlineLocalRefs(jsonStr)
+}
+
 // inlineLocalRefs resolves JSON Pointer references against the original schema before definition
 // containers are stripped. Each expansion receives its own copy, sibling keywords override the
 // referenced definition, and cycles terminate as a typed hint instead of recursing forever.
@@ -821,7 +828,7 @@ func addAdditionalPropertiesHints(jsonStr string) string {
 
 var unsupportedConstraints = []string{
 	"minLength", "maxLength", "exclusiveMinimum", "exclusiveMaximum",
-	"pattern", "minItems", "maxItems", "uniqueItems", "format",
+	"pattern", "minItems", "maxItems", "uniqueItems", "contains", "format",
 	"default", "examples", // Claude rejects these in VALIDATED mode
 }
 
@@ -839,11 +846,15 @@ func moveConstraintsToDescription(jsonStr string, options jsonSchemaCleanOptions
 	for _, key := range constraints {
 		for _, p := range pathsByField[key] {
 			val := gjson.Get(jsonStr, p)
-			if !val.Exists() || val.IsObject() || val.IsArray() {
+			if !val.Exists() {
 				continue
 			}
 			parentPath := trimSuffix(p, "."+key)
 			if isPropertyDefinition(parentPath) {
+				continue
+			}
+			if val.IsObject() || val.IsArray() {
+				jsonStr = appendHint(jsonStr, parentPath, fmt.Sprintf("%s: %s", key, val.Raw))
 				continue
 			}
 			jsonStr = appendHint(jsonStr, parentPath, fmt.Sprintf("%s: %s", key, val.String()))
@@ -982,9 +993,39 @@ func flattenAnyOfOneOf(jsonStr string) string {
 			}
 
 			parentPath := trimSuffix(p, "."+key)
-			parentDesc := gjson.Get(jsonStr, descriptionPath(parentPath)).String()
+			parent := gjson.Get(jsonStr, parentPath)
+			if parentPath == "" {
+				parent = gjson.Parse(jsonStr)
+			}
 
 			items := arr.Array()
+
+			// If the parent already defines properties (e.g. an object schema with anyOf/oneOf constraints),
+			// do not replace the parent with a single branch. Instead, merge any branch properties
+			// into the parent and delete the union keyword.
+			if parentProps := parent.Get("properties"); parentProps.IsObject() {
+				hasNull := false
+				for _, item := range items {
+					if item.Get("type").String() == "null" {
+						hasNull = true
+					}
+					if branchProps := item.Get("properties"); branchProps.IsObject() {
+						branchProps.ForEach(func(propKey, propVal gjson.Result) bool {
+							destPath := joinPath(parentPath, "properties."+escapeGJSONPathKey(propKey.String()))
+							jsonStr = mergeMissingSchemaAtPath(jsonStr, destPath, propVal)
+							return true
+						})
+					}
+				}
+				if hasNull {
+					updated, _ := sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "nullable"), true)
+					jsonStr = string(updated)
+				}
+				jsonStr, _ = sjson.Delete(jsonStr, p)
+				continue
+			}
+
+			parentDesc := gjson.Get(jsonStr, descriptionPath(parentPath)).String()
 			bestIdx, allTypes := selectBest(items)
 			selected := items[bestIdx].Raw
 			hasNull := false
@@ -1027,8 +1068,10 @@ func selectBest(items []gjson.Result) (bestIdx int, types []string) {
 			score, t = 2, orDefault(t, "array")
 		case t != "" && t != "null":
 			score = 1
+		case t == "null":
+			score, t = 0, "null"
 		default:
-			t = orDefault(t, "null")
+			score, t = 0, ""
 		}
 
 		if t != "" {
@@ -1205,7 +1248,11 @@ func cleanupRequiredFields(jsonStr string) string {
 
 		req := gjson.Get(jsonStr, p)
 		props := gjson.Get(jsonStr, propsPath)
-		if !req.IsArray() || !props.IsObject() {
+		if !req.IsArray() {
+			continue
+		}
+		if !props.IsObject() {
+			jsonStr, _ = sjson.Delete(jsonStr, p)
 			continue
 		}
 

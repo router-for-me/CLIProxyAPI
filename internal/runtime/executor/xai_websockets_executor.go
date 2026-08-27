@@ -699,6 +699,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
+		namespaceRestorer := newXAINamespaceRestorer(prepared.namespaceTools)
 		recordedTranscript := false
 		for {
 			if ctx != nil && ctx.Err() != nil {
@@ -745,6 +746,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			}
 			reporter.MarkFirstResponseByte()
 			helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
+			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 
 			if wsErr, ok := parseXAIWebsocketError(payload); ok {
 				terminateReason = "upstream_error"
@@ -759,7 +761,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			}
 
 			for _, payload := range xaiNormalizeReasoningSummaryDataEvents(payload) {
-				payload = restoreXAINamespaceToolCalls(payload, prepared.namespaceTools)
+				payload = namespaceRestorer.restore(payload)
 				payload = responseFilter.apply(payload)
 				if len(payload) == 0 {
 					continue

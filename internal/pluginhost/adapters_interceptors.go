@@ -72,6 +72,20 @@ func (h *Host) callStreamChunkInterceptor(ctx context.Context, record capability
 	return resp, true
 }
 
+func (h *Host) callWebSocketResponseObserver(ctx context.Context, record capabilityRecord, observer pluginapi.WebSocketResponseObserver, event pluginapi.WebSocketResponseEvent) {
+	if h == nil || observer == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.fusePlugin(record.id, "WebSocketResponseObserver.ObserveWebSocketResponseEvent", recovered)
+		}
+	}()
+	if errObserve := observer.ObserveWebSocketResponseEvent(ctx, event); errObserve != nil {
+		log.Warnf("pluginhost: websocket response observer %s failed: %v", record.id, errObserve)
+	}
+}
+
 func (h *Host) InterceptRequestBeforeAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
 	return h.InterceptRequestBeforeAuthExcept(ctx, req, "")
 }
@@ -129,6 +143,47 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 // CompleteRequest schedules terminal notifications without blocking response delivery.
 func (h *Host) CompleteRequest(ctx context.Context, completion pluginapi.RequestCompletion) {
 	h.CompleteRequestExcept(ctx, completion, "")
+}
+
+func (h *Host) HasWebSocketResponseObservers() bool {
+	if h == nil {
+		return false
+	}
+	for _, record := range h.activeRecords() {
+		if h.isPluginFused(record.id) {
+			continue
+		}
+		if record.plugin.Capabilities.WebSocketResponseObserver != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Host) ObserveWebSocketResponseEvent(ctx context.Context, event pluginapi.WebSocketResponseEvent) {
+	h.ObserveWebSocketResponseEventExcept(ctx, event, "")
+}
+
+func (h *Host) ObserveWebSocketResponseEventExcept(ctx context.Context, event pluginapi.WebSocketResponseEvent, skipPluginID string) {
+	if h == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	} else {
+		ctx = context.WithoutCancel(ctx)
+	}
+	skipPluginID = strings.TrimSpace(skipPluginID)
+	for _, record := range h.activeRecords() {
+		observer := record.plugin.Capabilities.WebSocketResponseObserver
+		if h.isPluginFused(record.id) || observer == nil || record.id == skipPluginID || !h.recordCurrent(record) {
+			continue
+		}
+		next := event
+		next.Payload = bytes.Clone(event.Payload)
+		next.Metadata = cloneInterceptorMetadata(event.Metadata)
+		h.callWebSocketResponseObserver(ctx, record, observer, next)
+	}
 }
 
 // CompleteRequestExcept notifies lifecycle plugins except the plugin that initiated a nested host execution.

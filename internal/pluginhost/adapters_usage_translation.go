@@ -136,6 +136,11 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	if plugin == nil {
 		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	} else {
+		ctx = context.WithoutCancel(ctx)
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "UsagePlugin.HandleUsage", recovered)
