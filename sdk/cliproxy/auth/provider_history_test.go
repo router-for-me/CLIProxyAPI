@@ -77,6 +77,41 @@ func TestNormalizeProviderBoundResponseHistoryPreservesCustomToolPairs(t *testin
 	}
 }
 
+func TestNormalizeProviderBoundResponseHistoryPreservesAdditionalTools(t *testing.T) {
+	body := []byte(`{
+		"input":[
+			{"type":"reasoning","id":"foreign_reasoning","encrypted_content":"opaque","summary":[{"type":"summary_text","text":"use the available tools"}]},
+			{"type":"message","id":"foreign_message","role":"user","content":[{"type":"input_text","text":"continue"}]},
+			{"type":"additional_tools","id":"foreign_tools","tools":[
+				{"type":"namespace","name":"functions","description":"Local functions","tools":[{"name":"view_image","description":"View an image","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}]},
+				{"type":"namespace","name":"collaboration","description":"Team coordination","tools":[{"name":"send_message","description":"Send a message","input_schema":{"type":"object","properties":{"target":{"type":"string"},"message":{"type":"string"}},"required":["target","message"]}}]}
+			]}
+		]
+	}`)
+
+	got, err := normalizeProviderBoundResponseHistory(body)
+	if err != nil {
+		t.Fatalf("normalizeProviderBoundResponseHistory() error = %v", err)
+	}
+	if !got.Changed || got.StrippedFields != 4 || got.DroppedItems != 0 {
+		t.Fatalf("normalization metadata = %#v", got)
+	}
+	if value := gjson.GetBytes(got.Body, "input.2.tools.0.name").String(); value != "functions" {
+		t.Fatalf("first namespace = %q, want functions", value)
+	}
+	if value := gjson.GetBytes(got.Body, "input.2.tools.0.tools.0.input_schema.properties.path.type").String(); value != "string" {
+		t.Fatalf("tool schema path type = %q, want string", value)
+	}
+	if value := gjson.GetBytes(got.Body, "input.2.tools.1.name").String(); value != "collaboration" {
+		t.Fatalf("second namespace = %q, want collaboration", value)
+	}
+	for _, path := range []string{"input.0.id", "input.0.encrypted_content", "input.1.id", "input.2.id"} {
+		if gjson.GetBytes(got.Body, path).Exists() {
+			t.Fatalf("provider-bound field %s survived: %s", path, got.Body)
+		}
+	}
+}
+
 func TestNormalizeProviderBoundResponseHistoryPreservesLargeJSONNumbers(t *testing.T) {
 	body := []byte(`{
 		"metadata":{"exact_integer":9007199254740993},

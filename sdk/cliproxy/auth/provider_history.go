@@ -82,7 +82,7 @@ func normalizeProviderBoundResponseHistory(body []byte) (providerHistoryNormaliz
 			return providerHistoryNormalization{}, &providerHistoryError{reason: "foreign_file_reference_requires_rehydration"}
 		}
 		switch itemType {
-		case "message", "reasoning", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output":
+		case "message", "reasoning", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "additional_tools":
 		case "compaction":
 			return providerHistoryNormalization{}, &providerHistoryError{reason: "foreign_compaction_requires_rehydration"}
 		default:
