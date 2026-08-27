@@ -1117,6 +1117,25 @@ func TestConvertAntigravityResponseToClaude_TrailingFunctionCarrierRoundTrip(t *
 	}
 }
 
+func TestConvertAntigravityResponseToClaudeStream_TrailingFunctionCarrierRoundTrip(t *testing.T) {
+	nativeSignature := testGeminiEPrefixSignature(t)
+	requestJSON := []byte(`{"model":"gemini-3.6-flash-high","tools":[{"name":"run_command","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}] }`)
+	chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"native-call-1","name":"run_command","args":{"command":"true"}}}]}}],"modelVersion":"gemini-3.6-flash","responseId":"tool-trailing-carrier"}}`)
+	chunk2 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + nativeSignature + `"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"tool-trailing-carrier"}}`)
+
+	var param any
+	var output []byte
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.6-flash-high", requestJSON, requestJSON, chunk1, &param), nil)...)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.6-flash-high", requestJSON, requestJSON, chunk2, &param), nil)...)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.6-flash-high", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+
+	outputText := string(output)
+	wantCarrier := encodeGeminiClaudeCarrierSignature(nativeSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierFunction)
+	if !strings.Contains(outputText, `"type":"signature_delta","signature":"`+wantCarrier+`"`) {
+		t.Fatalf("missing trailing function carrier in stream: %s", outputText)
+	}
+}
+
 func TestConvertAntigravityResponseToClaude_DirectionalTextCarriersRoundTrip(t *testing.T) {
 	signature := testGeminiEPrefixSignature(t)
 	requestJSON := []byte(`{"model":"gemini-3.6-flash-high"}`)

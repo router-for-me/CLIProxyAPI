@@ -206,7 +206,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 			appendThinkingSignature(signature, direction, targetKind)
 			return false
 		}
-		if direction == geminiClaudeCarrierPrevious {
+		if direction == geminiClaudeCarrierPrevious && targetKind == geminiClaudeCarrierText {
 			cache.CacheSignatureBestEffort(ctx, modelName, "", signature)
 			return false
 		}
