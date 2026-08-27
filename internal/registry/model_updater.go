@@ -69,6 +69,7 @@ func init() {
 	if err := loadModelsFromBytes(embeddedModelsJSON, "embed"); err != nil {
 		log.Warnf("registry: failed to parse embedded models.json (embedded catalog may be incomplete or invalid; continuing startup and will rely on remote model refresh): %v", err)
 	}
+	maybeImportCodexCache()
 }
 
 // StartModelsUpdater starts a background updater that fetches models
@@ -128,6 +129,7 @@ func tryRefreshModels(ctx context.Context, label string) {
 	modelsCatalogStore.mu.Lock()
 	modelsCatalogStore.data = parsed
 	modelsCatalogStore.mu.Unlock()
+	maybeImportCodexCache()
 
 	if len(changed) == 0 {
 		log.Infof("%s completed from %s, no changes detected", label, url)
