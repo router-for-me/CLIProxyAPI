@@ -132,9 +132,8 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			// after stays net/http's — CONNECT with its headers and hooks, the bound on
 			// that exchange, the target handshake and its own ALPN. Taking any of it over
 			// would mean reimplementing it, and then owning every guard it already has.
-			baseDialContext := transport.DialContext
 			transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialProxyTLS(ctx, network, addr, baseDialContext, transport, setting.URL)
+				return dialProxyTLS(ctx, network, addr, transport, setting.URL)
 			}
 		}
 		return transport, setting.Mode, nil
@@ -146,17 +145,12 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 // dialProxyTLS makes the TLS connection to an HTTPS proxy, pinning that leg's ALPN to
 // http/1.1 so the CONNECT net/http writes next lands on an HTTP/1.1 connection.
 //
-// TLSClientConfig and TLSHandshakeTimeout are read here rather than captured up front:
-// net/http documents that it ignores both once DialTLSContext is set, so honouring them
-// falls to this function, and callers set them after the transport is built.
-func dialProxyTLS(ctx context.Context, network, addr string,
-	baseDialContext func(context.Context, string, string) (net.Conn, error),
-	transport *http.Transport, proxyURL *url.URL) (net.Conn, error) {
-	dial := baseDialContext
-	if dial == nil {
-		dial = (&net.Dialer{}).DialContext
-	}
-	conn, errDial := dial(ctx, network, addr)
+// Every hook it needs is read from the transport at dial time, never captured when the
+// transport is built: callers install them afterwards, and on this path they have no
+// other way in — every first hop goes to the proxy, so this function is the only thing
+// that dials at all.
+func dialProxyTLS(ctx context.Context, network, addr string, transport *http.Transport, proxyURL *url.URL) (net.Conn, error) {
+	conn, errDial := dialProxyTCP(ctx, transport, network, addr)
 	if errDial != nil {
 		return nil, errDial
 	}
@@ -175,6 +169,19 @@ func dialProxyTLS(ctx context.Context, network, addr string,
 		return nil, fmt.Errorf("HTTPS proxy TLS handshake failed: %w", errHandshake)
 	}
 	return tlsConn, nil
+}
+
+// dialProxyTCP mirrors net/http's Transport.dial, down to the order it consults the
+// hooks, so a caller that installs custom routing, a local bind or a test dialer keeps
+// reaching the proxy through it.
+func dialProxyTCP(ctx context.Context, transport *http.Transport, network, addr string) (net.Conn, error) {
+	if transport.DialContext != nil {
+		return transport.DialContext(ctx, network, addr)
+	}
+	if transport.Dial != nil {
+		return transport.Dial(network, addr)
+	}
+	return (&net.Dialer{}).DialContext(ctx, network, addr)
 }
 
 // BuildDialer constructs a proxy dialer for settings that operate at the connection layer.

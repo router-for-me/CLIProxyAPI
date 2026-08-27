@@ -942,3 +942,134 @@ func TestProxyTLSConfig(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildHTTPTransportHTTPSProxyUsesLateDialHooks pins that the transport's dial hooks
+// are read when the connection is made, not when the transport is built. On this path
+// they have no other way in: every first hop goes to the proxy, so the TLS dial hook is
+// the only thing that dials at all, and freezing them would silence a caller's custom
+// routing, local bind or test dialer without a word.
+func TestBuildHTTPTransportHTTPSProxyUsesLateDialHooks(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		install func(transport *http.Transport, dialed *atomic.Int32)
+	}{
+		{
+			name: "DialContext",
+			install: func(transport *http.Transport, dialed *atomic.Int32) {
+				transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+					dialed.Add(1)
+					return (&net.Dialer{}).DialContext(ctx, network, addr)
+				}
+			},
+		},
+		{
+			// Deprecated, but net/http still falls back to it, so this path must too.
+			name: "Dial",
+			install: func(transport *http.Transport, dialed *atomic.Int32) {
+				transport.DialContext = nil
+				transport.Dial = func(network, addr string) (net.Conn, error) {
+					dialed.Add(1)
+					return net.Dial(network, addr)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if _, errWrite := io.WriteString(w, "pong"); errWrite != nil {
+					t.Errorf("target write failed: %v", errWrite)
+				}
+			}))
+			defer target.Close()
+
+			proxyServer := httptest.NewUnstartedServer(http.HandlerFunc(connectTunnelHandler(t)))
+			proxyServer.EnableHTTP2 = true
+			proxyServer.TLS = &tls.Config{NextProtos: []string{"h2", "http/1.1"}}
+			proxyServer.StartTLS()
+			defer proxyServer.Close()
+
+			proxyURL, errParseProxy := url.Parse(proxyServer.URL)
+			if errParseProxy != nil {
+				t.Fatalf("url.Parse returned error: %v", errParseProxy)
+			}
+			transport, _, errBuild := BuildHTTPTransport("https://" + proxyURL.Host)
+			if errBuild != nil {
+				t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+			}
+			proxyClientTransport, ok := proxyServer.Client().Transport.(*http.Transport)
+			if !ok {
+				t.Fatal("httptest proxy client transport is not an *http.Transport")
+			}
+			transport.TLSClientConfig = proxyClientTransport.TLSClientConfig.Clone()
+			defer transport.CloseIdleConnections()
+
+			// Installed after the transport is built — the whole point.
+			var dialed atomic.Int32
+			tt.install(transport, &dialed)
+
+			response, errGet := (&http.Client{Transport: transport, Timeout: 10 * time.Second}).Get(target.URL)
+			if errGet != nil {
+				t.Fatalf("request through HTTPS proxy failed: %v", errGet)
+			}
+			defer func() {
+				if errClose := response.Body.Close(); errClose != nil {
+					t.Errorf("response.Body.Close returned error: %v", errClose)
+				}
+			}()
+			if _, errRead := io.ReadAll(response.Body); errRead != nil {
+				t.Fatalf("io.ReadAll returned error: %v", errRead)
+			}
+
+			if dialed.Load() == 0 {
+				t.Fatalf("the caller's %s was never used to reach the proxy", tt.name)
+			}
+		})
+	}
+}
+
+// connectTunnelHandler is a minimal CONNECT proxy: read the request, splice the
+// connection to the requested target.
+func connectTunnelHandler(t *testing.T) func(http.ResponseWriter, *http.Request) {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "expected CONNECT", http.StatusMethodNotAllowed)
+			return
+		}
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "connection is not hijackable", http.StatusInternalServerError)
+			return
+		}
+		upstreamConn, errDial := net.Dial("tcp", r.Host)
+		if errDial != nil {
+			http.Error(w, "dial upstream failed", http.StatusBadGateway)
+			return
+		}
+		clientConn, buffered, errHijack := hijacker.Hijack()
+		if errHijack != nil {
+			_ = upstreamConn.Close()
+			return
+		}
+		if _, errWrite := io.WriteString(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n"); errWrite != nil {
+			_ = upstreamConn.Close()
+			_ = clientConn.Close()
+			return
+		}
+		go func() {
+			defer func() { _ = upstreamConn.Close() }()
+			_, _ = io.Copy(upstreamConn, buffered)
+		}()
+		go func() {
+			defer func() { _ = clientConn.Close() }()
+			_, _ = io.Copy(clientConn, upstreamConn)
+		}()
+	}
+}
