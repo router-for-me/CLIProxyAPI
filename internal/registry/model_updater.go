@@ -142,7 +142,7 @@ func tryRefreshModels(ctx context.Context, label string) {
 // along with the URL it was fetched from. Returns (nil, "") if all fetches fail.
 func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 	client := &http.Client{Timeout: modelsFetchTimeout}
-	for _, url := range modelsURLs {
+	for _, url := range resolveRemoteURLs("CPA_REMOTE_MODELS_URL", modelsURLs) {
 		reqCtx, cancel := context.WithTimeout(ctx, modelsFetchTimeout)
 		req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
 		if err != nil {
