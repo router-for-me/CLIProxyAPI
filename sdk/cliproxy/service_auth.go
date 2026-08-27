@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"time"
 
@@ -197,7 +198,34 @@ func (s *Service) ensureWebsocketGateway() {
 		return
 	}
 	opts := wsrelay.Options{
-		Path:           "/v1/ws",
+		Path: "/v1/ws",
+		ProviderFactory: func(r *http.Request) (string, error) {
+			name := strings.TrimSpace(r.URL.Query().Get("aistudio_name"))
+			if name == "" {
+				return "", nil
+			}
+			// Normalize to match frontend wscpamain logic:
+			// name.toLowerCase().replace(/[^a-z0-9]/g, '-').substring(0, 32)
+			normalized := strings.ToLower(name)
+			var builder strings.Builder
+			for _, r := range normalized {
+				if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+					builder.WriteRune(r)
+				} else {
+					builder.WriteRune('-')
+				}
+			}
+			finalName := builder.String()
+			if len(finalName) > 32 {
+				finalName = finalName[:32]
+			}
+
+			// Ensure prefix to stay compatible with wsOnConnected filter
+			if !strings.HasPrefix(finalName, "aistudio-") {
+				finalName = "aistudio-" + finalName
+			}
+			return finalName, nil
+		},
 		OnConnected:    s.wsOnConnected,
 		OnDisconnected: s.wsOnDisconnected,
 		LogDebugf:      log.Debugf,
