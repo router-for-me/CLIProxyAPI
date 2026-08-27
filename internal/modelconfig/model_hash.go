@@ -41,6 +41,21 @@ func ComputeVertexCompatModelsHash(models []config.VertexCompatModel) string {
 	return hashJoined(keys)
 }
 
+// ComputeKimiModelsHash returns a stable hash for Kimi API-key model aliases.
+func ComputeKimiModelsHash(models []config.KimiModel) string {
+	keys := modelRoutingKeys(func(out func(key string)) {
+		for _, model := range models {
+			name := strings.TrimSpace(model.Name)
+			alias := strings.TrimSpace(model.Alias)
+			if name == "" && alias == "" {
+				continue
+			}
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + thinkingHashSuffix(model.Thinking))
+		}
+	})
+	return hashJoined(keys)
+}
+
 // ComputeClaudeModelsHash returns a stable hash for Claude model aliases.
 func ComputeClaudeModelsHash(models []config.ClaudeModel) string {
 	keys := modelRoutingKeys(func(out func(key string)) {

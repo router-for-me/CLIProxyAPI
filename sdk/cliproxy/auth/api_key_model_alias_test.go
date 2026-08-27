@@ -87,6 +87,70 @@ func TestLookupAPIKeyUpstreamModel_InteractionsKey(t *testing.T) {
 	}
 }
 
+func TestLookupAPIKeyUpstreamModel_Kimi(t *testing.T) {
+	cfg := &internalconfig.Config{
+		KimiKey: []internalconfig.KimiKey{
+			{
+				APIKey:  "sk-shared",
+				Service: internalconfig.KimiServiceOpenPlatform,
+				Region:  internalconfig.KimiRegionDomestic,
+				Models:  []internalconfig.KimiModel{{Name: "k3", Alias: "office-k3"}},
+			},
+			{
+				APIKey:  "sk-shared",
+				Service: internalconfig.KimiServiceCodingPlan,
+				Models:  []internalconfig.KimiModel{{Name: "kimi-for-coding", Alias: "code-k3"}},
+			},
+		},
+	}
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+	ctx := context.Background()
+	_, _ = mgr.Register(ctx, &Auth{
+		ID:       "kimi-open",
+		Provider: "kimi",
+		Attributes: map[string]string{
+			AttributeAuthKind:    AuthKindAPIKey,
+			AttributeAPIKey:      "sk-shared",
+			"service":            internalconfig.KimiServiceOpenPlatform,
+			"region":             internalconfig.KimiRegionDomestic,
+			AttributeConfigIndex: "0",
+			AttributeSource:      "config:kimi[0]",
+		},
+	})
+	_, _ = mgr.Register(ctx, &Auth{
+		ID:       "kimi-code",
+		Provider: "kimi",
+		Attributes: map[string]string{
+			AttributeAuthKind:    AuthKindAPIKey,
+			AttributeAPIKey:      "sk-shared",
+			"service":            internalconfig.KimiServiceCodingPlan,
+			AttributeConfigIndex: "1",
+			AttributeSource:      "config:kimi[1]",
+		},
+	})
+
+	if got := mgr.lookupAPIKeyUpstreamModel("kimi-open", "office-k3"); got != "k3" {
+		t.Fatalf("open-platform alias = %q, want k3", got)
+	}
+	if got := mgr.lookupAPIKeyUpstreamModel("kimi-code", "code-k3"); got != "kimi-for-coding" {
+		t.Fatalf("coding-plan alias = %q, want kimi-for-coding", got)
+	}
+	if got := mgr.applyAPIKeyModelAlias(&Auth{
+		ID:       "kimi-open",
+		Provider: "kimi",
+		Attributes: map[string]string{
+			AttributeAuthKind:    AuthKindAPIKey,
+			AttributeAPIKey:      "sk-shared",
+			"service":            internalconfig.KimiServiceOpenPlatform,
+			"region":             internalconfig.KimiRegionDomestic,
+			AttributeConfigIndex: "0",
+		},
+	}, "office-k3"); got != "k3" {
+		t.Fatalf("applyAPIKeyModelAlias() = %q, want k3", got)
+	}
+}
+
 func TestAPIKeyModelAlias_ConfigHotReload(t *testing.T) {
 	cfg := &internalconfig.Config{
 		GeminiKey: []internalconfig.GeminiKey{

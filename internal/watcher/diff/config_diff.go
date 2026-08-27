@@ -372,6 +372,50 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 
+	if len(oldCfg.KimiKey) != len(newCfg.KimiKey) {
+		changes = append(changes, fmt.Sprintf("kimi-api-key count: %d -> %d", len(oldCfg.KimiKey), len(newCfg.KimiKey)))
+	} else {
+		for i := range oldCfg.KimiKey {
+			o := oldCfg.KimiKey[i]
+			n := newCfg.KimiKey[i]
+			if strings.TrimSpace(o.Service) != strings.TrimSpace(n.Service) {
+				changes = append(changes, fmt.Sprintf("kimi[%d].service: %s -> %s", i, strings.TrimSpace(o.Service), strings.TrimSpace(n.Service)))
+			}
+			if strings.TrimSpace(o.Region) != strings.TrimSpace(n.Region) {
+				changes = append(changes, fmt.Sprintf("kimi[%d].region: %s -> %s", i, strings.TrimSpace(o.Region), strings.TrimSpace(n.Region)))
+			}
+			if strings.TrimSpace(o.Name) != strings.TrimSpace(n.Name) {
+				changes = append(changes, fmt.Sprintf("kimi[%d].name: %s -> %s", i, strings.TrimSpace(o.Name), strings.TrimSpace(n.Name)))
+			}
+			if o.Priority != n.Priority {
+				changes = append(changes, fmt.Sprintf("kimi[%d].priority: %d -> %d", i, o.Priority, n.Priority))
+			}
+			changes = appendOptionalBoolChange(changes, fmt.Sprintf("kimi[%d].disable-cooling", i), o.DisableCooling, n.DisableCooling)
+			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
+				changes = append(changes, fmt.Sprintf("kimi[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
+			}
+			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
+				changes = append(changes, fmt.Sprintf("kimi[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
+			}
+			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
+				changes = append(changes, fmt.Sprintf("kimi[%d].api-key: updated", i))
+			}
+			if !equalStringMap(o.Headers, n.Headers) {
+				changes = append(changes, fmt.Sprintf("kimi[%d].headers: updated", i))
+			}
+			oldModels := SummarizeKimiModels(o.Models)
+			newModels := SummarizeKimiModels(n.Models)
+			if oldModels.hash != newModels.hash {
+				changes = append(changes, fmt.Sprintf("kimi[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count))
+			}
+			oldExcluded := SummarizeExcludedModels(o.ExcludedModels)
+			newExcluded := SummarizeExcludedModels(n.ExcludedModels)
+			if oldExcluded.hash != newExcluded.hash {
+				changes = append(changes, fmt.Sprintf("kimi[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
+			}
+		}
+	}
+
 	if entries, _ := DiffOAuthExcludedModelChanges(oldCfg.OAuthExcludedModels, newCfg.OAuthExcludedModels); len(entries) > 0 {
 		changes = append(changes, entries...)
 	}

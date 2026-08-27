@@ -160,3 +160,40 @@ func TestToggleConfigAPIKeyExcludedAll_EmptyKeyWithBaseURL(t *testing.T) {
 		t.Fatalf("gemini excluded-models = %#v, want [*]", cfg.GeminiKey[0].ExcludedModels)
 	}
 }
+
+func TestToggleConfigAPIKeyExcludedAll_Kimi(t *testing.T) {
+	cfg := &config.Config{
+		KimiKey: []config.KimiKey{{
+			APIKey:  "sk-kimi",
+			Service: config.KimiServiceCodingPlan,
+		}},
+	}
+	idGen := synthesizer.NewStableIDGenerator()
+	authID, _ := idGen.Next("kimi:apikey", config.KimiAPIKeyIdentityParts(cfg.KimiKey[0])...)
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "kimi",
+		Attributes: map[string]string{
+			"auth_kind": "apikey",
+			"api_key":   "sk-kimi",
+			"service":   config.KimiServiceCodingPlan,
+			"source":    "config:kimi[abc]",
+		},
+	}
+
+	handled, errToggle := toggleConfigAPIKeyExcludedAll(cfg, auth, true)
+	if errToggle != nil || !handled {
+		t.Fatalf("toggle disable: handled=%v err=%v", handled, errToggle)
+	}
+	if len(cfg.KimiKey[0].ExcludedModels) != 1 || cfg.KimiKey[0].ExcludedModels[0] != "*" {
+		t.Fatalf("excluded-models = %#v, want [*]", cfg.KimiKey[0].ExcludedModels)
+	}
+
+	handled, errToggle = toggleConfigAPIKeyExcludedAll(cfg, auth, false)
+	if errToggle != nil || !handled {
+		t.Fatalf("toggle enable: handled=%v err=%v", handled, errToggle)
+	}
+	if len(cfg.KimiKey[0].ExcludedModels) != 0 {
+		t.Fatalf("excluded-models = %#v, want empty", cfg.KimiKey[0].ExcludedModels)
+	}
+}

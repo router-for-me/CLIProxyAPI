@@ -62,6 +62,12 @@ func TestBuildConfigChangeDetailsIncludesAllCoolingOverrides(t *testing.T) {
 			newCfg: &config.Config{VertexCompatAPIKey: []config.VertexCompatKey{{APIKey: "vertex-key", DisableCooling: &enabled}}},
 			want:   "vertex[0].disable-cooling: inherit -> false",
 		},
+		{
+			name:   "kimi inherit to true",
+			oldCfg: &config.Config{KimiKey: []config.KimiKey{{APIKey: "kimi-key", Service: config.KimiServiceCodingPlan}}},
+			newCfg: &config.Config{KimiKey: []config.KimiKey{{APIKey: "kimi-key", Service: config.KimiServiceCodingPlan, DisableCooling: &disabled}}},
+			want:   "kimi[0].disable-cooling: inherit -> true",
+		},
 	}
 
 	for _, tc := range tests {

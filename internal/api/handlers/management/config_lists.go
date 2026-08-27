@@ -1769,6 +1769,254 @@ func (h *Handler) DeleteXAIKey(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
 }
 
+func (h *Handler) GetKimiKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"kimi-api-key": h.kimiKeysWithAuthIndex()})
+}
+
+func (h *Handler) PutKimiKeys(c *gin.Context) {
+	data, errRead := c.GetRawData()
+	if errRead != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.KimiKey
+	if errUnmarshal := json.Unmarshal(data, &arr); errUnmarshal != nil {
+		var obj struct {
+			Items []config.KimiKey `json:"items"`
+		}
+		if errObject := json.Unmarshal(data, &obj); errObject != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	for i := range arr {
+		if rejectInvalidCredentialWeight(c, fmt.Sprintf("kimi-api-key[%d].weight", i), arr[i].Weight) {
+			return
+		}
+		config.NormalizeKimiKey(&arr[i])
+		if errValidate := config.ValidateKimiKey(arr[i]); errValidate != nil {
+			c.JSON(400, gin.H{"error": fmt.Sprintf("kimi-api-key[%d]: %v", i, errValidate)})
+			return
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cfg.KimiKey = arr
+	h.persistLocked(c)
+}
+
+func (h *Handler) PatchKimiKey(c *gin.Context) {
+	type kimiKeyPatch struct {
+		APIKey         *string             `json:"api-key"`
+		Service        *string             `json:"service"`
+		Region         *string             `json:"region"`
+		Name           *string             `json:"name"`
+		Priority       *int                `json:"priority"`
+		Weight         json.RawMessage     `json:"weight"`
+		Prefix         *string             `json:"prefix"`
+		ProxyURL       *string             `json:"proxy-url"`
+		Models         *[]config.KimiModel `json:"models"`
+		Headers        *map[string]string  `json:"headers"`
+		ExcludedModels *[]string           `json:"excluded-models"`
+		DisableCooling json.RawMessage     `json:"disable-cooling"`
+	}
+	var body struct {
+		Index *int          `json:"index"`
+		Match *string       `json:"match"`
+		Value *kimiKeyPatch `json:"value"`
+	}
+	if errBind := c.ShouldBindJSON(&body); errBind != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.KimiKey) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != nil {
+		match := strings.TrimSpace(*body.Match)
+		matchCount := 0
+		for i := range h.cfg.KimiKey {
+			if h.cfg.KimiKey[i].APIKey == match {
+				matchCount++
+				if targetIndex == -1 {
+					targetIndex = i
+				}
+			}
+		}
+		if matchCount > 1 {
+			c.JSON(400, gin.H{"error": "multiple items match api-key; use index"})
+			return
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+
+	entry := h.cfg.KimiKey[targetIndex]
+	if body.Value.APIKey != nil {
+		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Service != nil {
+		entry.Service = strings.TrimSpace(*body.Value.Service)
+	}
+	if body.Value.Region != nil {
+		entry.Region = strings.TrimSpace(*body.Value.Region)
+	}
+	if body.Value.Name != nil {
+		entry.Name = strings.TrimSpace(*body.Value.Name)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
+	}
+	if len(body.Value.Weight) > 0 {
+		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
+		if errWeight != nil {
+			c.JSON(400, gin.H{"error": errWeight.Error()})
+			return
+		}
+		entry.Weight = weight
+	}
+	if body.Value.Prefix != nil {
+		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.ProxyURL != nil {
+		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+	}
+	if body.Value.Models != nil {
+		entry.Models = append([]config.KimiModel(nil), (*body.Value.Models)...)
+	}
+	if body.Value.Headers != nil {
+		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+	}
+	if body.Value.ExcludedModels != nil {
+		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if !applyDisableCoolingPatch(c, body.Value.DisableCooling, &entry.DisableCooling) {
+		return
+	}
+	config.NormalizeKimiKey(&entry)
+	if errValidate := config.ValidateKimiKey(entry); errValidate != nil {
+		c.JSON(400, gin.H{"error": errValidate.Error()})
+		return
+	}
+	h.cfg.KimiKey[targetIndex] = entry
+	h.cfg.SanitizeKimiKeys()
+	h.persistLocked(c)
+}
+
+func (h *Handler) DeleteKimiKey(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, errScan := fmt.Sscanf(idxStr, "%d", &idx)
+		if errScan == nil && idx >= 0 && idx < len(h.cfg.KimiKey) {
+			entry := h.cfg.KimiKey[idx]
+			if apiKey := strings.TrimSpace(c.Query("api-key")); apiKey != "" {
+				if !strings.EqualFold(strings.TrimSpace(entry.APIKey), apiKey) {
+					c.JSON(400, gin.H{"error": "index does not match api-key"})
+					return
+				}
+				if service := strings.TrimSpace(c.Query("service")); service != "" &&
+					!strings.EqualFold(strings.TrimSpace(entry.Service), service) {
+					c.JSON(400, gin.H{"error": "index does not match service"})
+					return
+				}
+				if region := strings.TrimSpace(c.Query("region")); region != "" &&
+					!strings.EqualFold(strings.TrimSpace(entry.Region), region) {
+					c.JSON(400, gin.H{"error": "index does not match region"})
+					return
+				}
+				if prefix, ok := c.GetQuery("prefix"); ok &&
+					!strings.EqualFold(strings.TrimSpace(entry.Prefix), strings.TrimSpace(prefix)) {
+					c.JSON(400, gin.H{"error": "index does not match prefix"})
+					return
+				}
+				if proxyURL, ok := c.GetQuery("proxy-url"); ok &&
+					!strings.EqualFold(strings.TrimSpace(entry.ProxyURL), strings.TrimSpace(proxyURL)) {
+					c.JSON(400, gin.H{"error": "index does not match proxy-url"})
+					return
+				}
+			}
+			h.cfg.KimiKey = append(h.cfg.KimiKey[:idx], h.cfg.KimiKey[idx+1:]...)
+			h.cfg.SanitizeKimiKeys()
+			h.persistLocked(c)
+			return
+		}
+	}
+	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
+		service := strings.TrimSpace(c.Query("service"))
+		region := strings.TrimSpace(c.Query("region"))
+		if strings.EqualFold(service, config.KimiServiceOpenPlatform) && region == "" {
+			c.JSON(400, gin.H{"error": "open-platform delete requires region"})
+			return
+		}
+		if service != "" || region != "" {
+			prefix, hasPrefix := c.GetQuery("prefix")
+			proxyURL, hasProxyURL := c.GetQuery("proxy-url")
+			matchIndexes := make([]int, 0, 1)
+			for i := range h.cfg.KimiKey {
+				entry := h.cfg.KimiKey[i]
+				if strings.TrimSpace(entry.APIKey) != val {
+					continue
+				}
+				if service != "" && !strings.EqualFold(strings.TrimSpace(entry.Service), service) {
+					continue
+				}
+				if region != "" && !strings.EqualFold(strings.TrimSpace(entry.Region), region) {
+					continue
+				}
+				if hasPrefix && !strings.EqualFold(strings.TrimSpace(entry.Prefix), strings.TrimSpace(prefix)) {
+					continue
+				}
+				if hasProxyURL && !strings.EqualFold(strings.TrimSpace(entry.ProxyURL), strings.TrimSpace(proxyURL)) {
+					continue
+				}
+				matchIndexes = append(matchIndexes, i)
+			}
+			if len(matchIndexes) > 1 {
+				c.JSON(400, gin.H{"error": "multiple items match; use index"})
+				return
+			}
+			if len(matchIndexes) == 1 {
+				idx := matchIndexes[0]
+				h.cfg.KimiKey = append(h.cfg.KimiKey[:idx], h.cfg.KimiKey[idx+1:]...)
+			}
+			h.cfg.SanitizeKimiKeys()
+			h.persistLocked(c)
+			return
+		}
+
+		matchIndex := -1
+		matchCount := 0
+		for i := range h.cfg.KimiKey {
+			if strings.TrimSpace(h.cfg.KimiKey[i].APIKey) == val {
+				matchCount++
+				if matchIndex == -1 {
+					matchIndex = i
+				}
+			}
+		}
+		if matchCount > 1 {
+			c.JSON(400, gin.H{"error": "multiple items match api-key; service is required"})
+			return
+		}
+		if matchIndex != -1 {
+			h.cfg.KimiKey = append(h.cfg.KimiKey[:matchIndex], h.cfg.KimiKey[matchIndex+1:]...)
+		}
+		h.cfg.SanitizeKimiKeys()
+		h.persistLocked(c)
+		return
+	}
+	c.JSON(400, gin.H{"error": "missing api-key or index"})
+}
+
 func applyDisableCoolingPatch(c *gin.Context, raw json.RawMessage, target **bool) bool {
 	if len(raw) == 0 {
 		return true

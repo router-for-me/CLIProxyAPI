@@ -194,6 +194,40 @@ func (cfg *Config) SanitizeXAIKeys() {
 	}
 }
 
+// SanitizeKimiKeys keeps Kimi API key entries that have an API key and a valid service.
+func (cfg *Config) SanitizeKimiKeys() {
+	if cfg == nil || len(cfg.KimiKey) == 0 {
+		return
+	}
+	out := make([]KimiKey, 0, len(cfg.KimiKey))
+	for i := range cfg.KimiKey {
+		entry := cfg.KimiKey[i]
+		NormalizeKimiKey(&entry)
+		if errValidate := ValidateKimiKey(entry); errValidate != nil {
+			continue
+		}
+		out = append(out, entry)
+	}
+	cfg.KimiKey = out
+}
+
+func sanitizeKimiModels(models []KimiModel) []KimiModel {
+	if len(models) == 0 {
+		return models
+	}
+	out := make([]KimiModel, 0, len(models))
+	for i := range models {
+		entry := models[i]
+		entry.Name = strings.TrimSpace(entry.Name)
+		entry.Alias = strings.TrimSpace(entry.Alias)
+		if entry.Name == "" {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 	if len(entries) == 0 {
 		return entries

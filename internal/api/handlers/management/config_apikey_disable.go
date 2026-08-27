@@ -127,6 +127,17 @@ func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disa
 			return true, nil
 		}
 	}
+	for i := range cfg.KimiKey {
+		entry := &cfg.KimiKey[i]
+		if strings.TrimSpace(entry.APIKey) == "" {
+			continue
+		}
+		id, _ := idGen.Next("kimi:apikey", config.KimiAPIKeyIdentityParts(*entry)...)
+		if id == authID {
+			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
+			return true, nil
+		}
+	}
 
 	return false, nil
 }

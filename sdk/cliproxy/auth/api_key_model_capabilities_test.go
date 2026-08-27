@@ -216,6 +216,58 @@ func TestAttachResolvedAPIKeyModelInfoBindsUnknownConfiguredCapability(t *testin
 	}
 }
 
+func TestAttachResolvedAPIKeyModelInfoUsesSelectedKimiCredential(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{KimiKey: []internalconfig.KimiKey{
+		{
+			APIKey:  "sk-shared",
+			Service: internalconfig.KimiServiceOpenPlatform,
+			Region:  internalconfig.KimiRegionDomestic,
+			Models: []internalconfig.KimiModel{{
+				Name: "k3", Alias: "office-k3",
+				Thinking: &registry.ThinkingSupport{Levels: []string{"high"}},
+			}},
+		},
+		{
+			APIKey:  "sk-shared",
+			Service: internalconfig.KimiServiceCodingPlan,
+			Models: []internalconfig.KimiModel{{
+				Name: "k3", Alias: "office-k3",
+				Thinking: &registry.ThinkingSupport{Levels: []string{"low"}},
+			}},
+		},
+	}})
+
+	authOpen := &Auth{
+		ID:       "kimi-open",
+		Provider: "kimi",
+		Attributes: map[string]string{
+			AttributeAuthKind:    AuthKindAPIKey,
+			AttributeAPIKey:      "sk-shared",
+			"service":            internalconfig.KimiServiceOpenPlatform,
+			"region":             internalconfig.KimiRegionDomestic,
+			AttributeConfigIndex: "0",
+			AttributeSource:      "config:kimi[0]",
+		},
+	}
+	authCode := &Auth{
+		ID:       "kimi-code",
+		Provider: "kimi",
+		Attributes: map[string]string{
+			AttributeAuthKind:    AuthKindAPIKey,
+			AttributeAPIKey:      "sk-shared",
+			"service":            internalconfig.KimiServiceCodingPlan,
+			AttributeConfigIndex: "1",
+			AttributeSource:      "config:kimi[1]",
+		},
+	}
+	registerCapabilityTestAuth(t, manager, authOpen)
+	registerCapabilityTestAuth(t, manager, authCode)
+
+	assertResolvedThinkingLevels(t, manager.attachResolvedAPIKeyModelInfo(cliproxyexecutor.Request{}, authOpen, "office-k3", "k3"), "high")
+	assertResolvedThinkingLevels(t, manager.attachResolvedAPIKeyModelInfo(cliproxyexecutor.Request{}, authCode, "office-k3", "k3"), "low")
+}
+
 func registerCapabilityTestAuth(t *testing.T, manager *Manager, auth *Auth) {
 	t.Helper()
 	registered, errRegister := manager.Register(t.Context(), auth)

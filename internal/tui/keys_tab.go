@@ -21,6 +21,7 @@ type keysTabModel struct {
 	claude       []map[string]any
 	codex        []map[string]any
 	xai          []map[string]any
+	kimi         []map[string]any
 	vertex       []map[string]any
 	openai       []map[string]any
 	err          error
@@ -45,6 +46,7 @@ type keysDataMsg struct {
 	claude       []map[string]any
 	codex        []map[string]any
 	xai          []map[string]any
+	kimi         []map[string]any
 	vertex       []map[string]any
 	openai       []map[string]any
 	err          error
@@ -83,6 +85,7 @@ func (m keysTabModel) fetchKeys() tea.Msg {
 	result.claude, _ = m.client.GetClaudeKeys()
 	result.codex, _ = m.client.GetCodexKeys()
 	result.xai, _ = m.client.GetXAIKeys()
+	result.kimi, _ = m.client.GetKimiKeys()
 	result.vertex, _ = m.client.GetVertexKeys()
 	result.openai, _ = m.client.GetOpenAICompat()
 	return result
@@ -104,6 +107,7 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 			m.claude = msg.claude
 			m.codex = msg.codex
 			m.xai = msg.xai
+			m.kimi = msg.kimi
 			m.vertex = msg.vertex
 			m.openai = msg.openai
 			if m.cursor >= len(m.keys) {
@@ -352,6 +356,7 @@ func (m keysTabModel) renderContent() string {
 	renderProviderKeys(&sb, "Claude API Keys", m.claude)
 	renderProviderKeys(&sb, "Codex API Keys", m.codex)
 	renderProviderKeys(&sb, "xAI API Keys", m.xai)
+	renderKimiKeys(&sb, m.kimi)
 	renderProviderKeys(&sb, "Vertex API Keys", m.vertex)
 
 	if len(m.openai) > 0 {
@@ -383,6 +388,36 @@ func (m keysTabModel) renderContent() string {
 func renderSection(sb *strings.Builder, title string, count int) {
 	header := fmt.Sprintf("%s (%d)", title, count)
 	sb.WriteString(tableHeaderStyle.Render("  " + header))
+	sb.WriteString("\n")
+}
+
+func renderKimiKeys(sb *strings.Builder, keys []map[string]any) {
+	if len(keys) == 0 {
+		return
+	}
+	renderSection(sb, "Kimi API Keys", len(keys))
+	for i, key := range keys {
+		apiKey := getString(key, "api-key")
+		name := getString(key, "name")
+		service := getString(key, "service")
+		region := getString(key, "region")
+		prefix := getString(key, "prefix")
+		info := maskKey(apiKey)
+		if name != "" {
+			info = name + " " + info
+		}
+		if service != "" {
+			detail := service
+			if region != "" {
+				detail += "/" + region
+			}
+			info += " (" + detail + ")"
+		}
+		if prefix != "" {
+			info += " (prefix: " + prefix + ")"
+		}
+		sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, info))
+	}
 	sb.WriteString("\n")
 }
 

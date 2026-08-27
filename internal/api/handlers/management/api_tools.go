@@ -610,6 +610,17 @@ func proxyURLFromAPIKeyConfig(cfg *config.Config, auth *coreauth.Auth) string {
 		if entry := resolveAPIKeyConfig(cfg.XAIKey, auth); entry != nil {
 			return strings.TrimSpace(entry.ProxyURL)
 		}
+	case "kimi":
+		apiKey, service, region, index := "", "", "", ""
+		if attrs != nil {
+			apiKey = attrs["api_key"]
+			service = attrs["service"]
+			region = attrs["region"]
+			index = attrs["config_index"]
+		}
+		if entry := config.MatchKimiKey(cfg.KimiKey, apiKey, service, region, auth.Prefix, auth.ProxyURL, config.FormatSortedHeaders(config.HeadersFromAuthAttrs(attrs)), index); entry != nil {
+			return strings.TrimSpace(entry.ProxyURL)
+		}
 	}
 	return ""
 }

@@ -462,6 +462,30 @@ nonstream-keepalive-interval: 0
 #       - "grok-4.1"             # exclude specific models (exact match)
 #       - "grok-3-*"             # wildcard matching prefix
 
+# Kimi API keys
+# Native Kimi executor. service selects Open Platform or Coding Plan.
+# Open Platform uses region (domestic | international). One key serves OpenAI and Claude inbound.
+# API keys use the models listed here. Omit models to use the built-in catalog
+# for that service (Open Platform excludes kimi-for-coding / k2.7-code IDs).
+# OAuth Kimi files use the full built-in catalog.
+# kimi-api-key:
+#   - api-key: "sk-..."
+#     service: open-platform    # or coding-plan
+#     region: domestic          # open-platform: domestic | international
+#     name: "optional display name"
+#     priority: 0 # optional: higher values are preferred; defaults to 0
+#     weight: 1 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
+#     prefix: "kimi" # optional: require calls like "kimi/k3" to target this credential
+#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     models:
+#       - name: "k3"                 # upstream model name
+#         alias: "kimi-k3"           # optional client alias
+#         thinking:                  # optional thinking capability for this model
+#           levels: ["low", "high", "max"]
+
 # Claude API keys
 # claude-api-key:
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
