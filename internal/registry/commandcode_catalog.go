@@ -65,6 +65,76 @@ var commandCodeCatalog = &commandCodeCatalogStore{}
 
 var commandCodeUpdaterOnce sync.Once
 
+// commandCodeOfficialSpellings maps a lowercase model id to its official
+// catalog spelling. The /alpha/generate gateway matches model ids strictly
+// against the official catalog spelling (verified 2026-08-27: lowercase or
+// uppercased variants of camel-case ids such as "qwen/qwen3.8-flash" are
+// rejected with 403 FORBIDDEN "Model/provider not recognized"), while local
+// model registrations remain lowercase for wire compatibility. Entries are
+// recorded whenever a catalog is parsed (remote catalog, CLI markdown, or
+// builtin bootstrap).
+var (
+	commandCodeSpellingMu        sync.RWMutex
+	commandCodeOfficialSpellings = make(map[string]string)
+)
+
+// registerCommandCodeOfficialSpelling records the official spelling for a
+// catalog model id so upstream requests can be rewritten. Later duplicates
+// sharing the same lowercase key keep the first recorded spelling.
+func registerCommandCodeOfficialSpelling(officialID string) {
+	trimmed := strings.TrimSpace(officialID)
+	if trimmed == "" {
+		return
+	}
+	key := strings.ToLower(trimmed)
+	commandCodeSpellingMu.Lock()
+	defer commandCodeSpellingMu.Unlock()
+	if _, exists := commandCodeOfficialSpellings[key]; !exists {
+		commandCodeOfficialSpellings[key] = trimmed
+	}
+}
+
+// CommandCodeUpstreamModelID resolves the model id the Command Code gateway
+// expects. Local registry ids are lowercase; upstream requires the official
+// catalog spelling, so known ids are rewritten to their recorded spelling.
+// Unknown or already-canonical ids pass through unchanged. Callers must pass
+// a base model id (thinking suffixes, if any, must be stripped beforehand —
+// the executor layer already routes suffix-free ids here).
+func CommandCodeUpstreamModelID(modelID string) string {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return ""
+	}
+	key := strings.ToLower(trimmed)
+	commandCodeSpellingMu.RLock()
+	defer commandCodeSpellingMu.RUnlock()
+	if official, ok := commandCodeOfficialSpellings[key]; ok {
+		return official
+	}
+	return trimmed
+}
+
+// SetCommandCodeOfficialSpellingsForTest replaces the spelling table and
+// returns a restore function. Test-only seam, mirroring
+// SetCommandCodeCLIAuthPathFnForTest in the synthesizer package.
+func SetCommandCodeOfficialSpellingsForTest(spellings map[string]string) func() {
+	commandCodeSpellingMu.Lock()
+	original := make(map[string]string, len(commandCodeOfficialSpellings))
+	for k, v := range commandCodeOfficialSpellings {
+		original[k] = v
+	}
+	commandCodeOfficialSpellings = make(map[string]string, len(spellings))
+	for k, v := range spellings {
+		commandCodeOfficialSpellings[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
+	}
+	commandCodeSpellingMu.Unlock()
+	return func() {
+		commandCodeSpellingMu.Lock()
+		commandCodeOfficialSpellings = original
+		commandCodeSpellingMu.Unlock()
+	}
+}
+
 // StartCommandCodeModelsUpdater starts a background updater that reads the
 // Command Code CLI catalog immediately and then refreshes it periodically.
 // Safe to call multiple times; only one updater will run. Discovery failure
@@ -264,6 +334,10 @@ func fetchCommandCodeRemoteCatalogHTTP(ctx context.Context) ([]*ModelInfo, strin
 		if id == "" || strings.Contains(id, " ") {
 			continue
 		}
+		// Record the official spelling before canonicalizing: the
+		// /alpha/generate gateway matches ids strictly against the official
+		// catalog spelling, while local registrations stay lowercase.
+		registerCommandCodeOfficialSpelling(id)
 		// Normalize to the same lowercase canonical form the CLI accepts; the
 		// upstream CLI itself canonicalizes model ids case-insensitively.
 		id = strings.ToLower(id)
@@ -456,6 +530,9 @@ func parseCommandCodeModelsMarkdown(data []byte) []*ModelInfo {
 		if strings.Trim(id, "-: ") == "" {
 			continue
 		}
+		// Record the official spelling before canonicalizing (see the remote
+		// catalog fetcher for why the upstream gateway needs it).
+		registerCommandCodeOfficialSpelling(id)
 		// Normalize to the lowercase canonical form the CLI accepts.
 		id = strings.ToLower(id)
 		if _, dup := seen[id]; dup {

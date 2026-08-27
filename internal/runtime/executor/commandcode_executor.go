@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -230,7 +231,11 @@ func (e *CommandCodeExecutor) Execute(ctx context.Context, a *cliproxyauth.Auth,
 
 	payload := req.Payload
 	if opts.SourceFormat == sdktranslator.FormatOpenAI || opts.SourceFormat == "" {
-		payload = helps.ConvertOpenAIToCommandCodeRequest(req.Model, req.Payload, false)
+		// The gateway matches model ids strictly against the official catalog
+		// spelling, while local registrations are lowercase; rewrite before
+		// building the upstream envelope.
+		upstreamModel := registry.CommandCodeUpstreamModelID(req.Model)
+		payload = helps.ConvertOpenAIToCommandCodeRequest(upstreamModel, req.Payload, false)
 	}
 
 	httpReq, errNew := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
@@ -285,7 +290,9 @@ func (e *CommandCodeExecutor) ExecuteStream(ctx context.Context, a *cliproxyauth
 
 	payload := req.Payload
 	if opts.SourceFormat == sdktranslator.FormatOpenAI || opts.SourceFormat == "" {
-		payload = helps.ConvertOpenAIToCommandCodeRequest(req.Model, req.Payload, true)
+		// Same upstream spelling rewrite as the non-streaming path.
+		upstreamModel := registry.CommandCodeUpstreamModelID(req.Model)
+		payload = helps.ConvertOpenAIToCommandCodeRequest(upstreamModel, req.Payload, true)
 	}
 
 	httpReq, errNew := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
