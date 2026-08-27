@@ -144,6 +144,9 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 					tlsConfig:           transport.TLSClientConfig,
 					tlsHandshakeTimeout: transport.TLSHandshakeTimeout,
 					connectTimeout:      defaultProxyConnectTimeout,
+					connectHeader:       transport.ProxyConnectHeader,
+					getConnectHeader:    transport.GetProxyConnectHeader,
+					onConnectResponse:   transport.OnProxyConnectResponse,
 				}
 				return dialer.DialContext(ctx, network, addr)
 			}
@@ -198,6 +201,38 @@ type httpConnectDialer struct {
 	tlsHandshakeTimeout time.Duration
 	// connectTimeout bounds the CONNECT exchange. Zero means no bound.
 	connectTimeout time.Duration
+	// The three knobs http.Transport documents for the CONNECT request it would have
+	// made itself. Performing the CONNECT here puts them out of its reach, so a caller
+	// that set them on the transport — an enterprise proxy demanding extra headers, a
+	// callback vetting the response — would otherwise lose them without a word.
+	// Semantics follow net/http's dialConn exactly; see connectRequestHeader.
+	connectHeader     http.Header
+	getConnectHeader  func(ctx context.Context, proxyURL *url.URL, target string) (http.Header, error)
+	onConnectResponse func(ctx context.Context, proxyURL *url.URL, connectReq *http.Request, connectRes *http.Response) error
+}
+
+// connectRequestHeader assembles the CONNECT headers the way net/http does:
+// GetProxyConnectHeader wins over ProxyConnectHeader, and the proxy URL's own
+// credentials are applied last — onto a copy, so a header the caller still owns is
+// never mutated.
+func (d *httpConnectDialer) connectRequestHeader(ctx context.Context, target string) (http.Header, error) {
+	header := d.connectHeader
+	if d.getConnectHeader != nil {
+		var errHeader error
+		header, errHeader = d.getConnectHeader(ctx, d.proxyURL, target)
+		if errHeader != nil {
+			return nil, errHeader
+		}
+	}
+	if header == nil {
+		header = make(http.Header)
+	} else {
+		header = header.Clone()
+	}
+	if d.proxyURL.User != nil {
+		header.Set("Proxy-Authorization", proxyAuthorization(d.proxyURL.User))
+	}
+	return header, nil
 }
 
 // defaultProxyConnectTimeout bounds the CONNECT exchange with the proxy. net/http applies
@@ -302,15 +337,19 @@ func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr strin
 		}
 	}
 
+	header, errHeader := d.connectRequestHeader(ctx, addr)
+	if errHeader != nil {
+		if errClose := conn.Close(); errClose != nil {
+			return nil, fmt.Errorf("build CONNECT header failed: %w; close failed: %v", errHeader, errClose)
+		}
+		return nil, fmt.Errorf("build CONNECT header failed: %w", errHeader)
+	}
 	req := (&http.Request{
 		Method: http.MethodConnect,
 		URL:    &url.URL{Host: addr},
 		Host:   addr,
-		Header: make(http.Header),
+		Header: header,
 	}).WithContext(ctx)
-	if d.proxyURL.User != nil {
-		req.Header.Set("Proxy-Authorization", proxyAuthorization(d.proxyURL.User))
-	}
 	if errWrite := req.Write(conn); errWrite != nil {
 		errWrite = preferContextError(ctx, errWrite)
 		if errClose := conn.Close(); errClose != nil {
@@ -328,6 +367,20 @@ func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr strin
 		}
 		return nil, fmt.Errorf("read CONNECT response failed: %w", errRead)
 	}
+	// Before the status check, as net/http does: the hook is the caller's chance to
+	// judge a response this code would otherwise accept or reject on status alone.
+	if d.onConnectResponse != nil {
+		if errHook := d.onConnectResponse(ctx, d.proxyURL, req, resp); errHook != nil {
+			if resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			if errClose := conn.Close(); errClose != nil {
+				return nil, fmt.Errorf("OnProxyConnectResponse rejected the CONNECT response: %w; close failed: %v", errHook, errClose)
+			}
+			return nil, fmt.Errorf("OnProxyConnectResponse rejected the CONNECT response: %w", errHook)
+		}
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		if resp.Body != nil {
 			_ = resp.Body.Close()

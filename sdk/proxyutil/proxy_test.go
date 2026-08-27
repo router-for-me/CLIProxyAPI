@@ -748,3 +748,182 @@ func TestBuildDialerHTTPProxyClearsCONNECTDeadline(t *testing.T) {
 		t.Fatalf("tunnelled payload = %q, want ping", string(buf))
 	}
 }
+
+// TestBuildHTTPTransportHTTPSProxyHonoursCONNECTHooks pins the three knobs http.Transport
+// documents for the CONNECT request. Doing the CONNECT ourselves puts them out of its
+// reach, so they only keep working as long as this dialer carries them.
+func TestBuildHTTPTransportHTTPSProxyHonoursCONNECTHooks(t *testing.T) {
+	t.Parallel()
+
+	type observed struct {
+		tenant string
+		trace  string
+		auth   string
+	}
+	seen := make(chan observed, 1)
+
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, errWrite := io.WriteString(w, "pong"); errWrite != nil {
+			t.Errorf("target write failed: %v", errWrite)
+		}
+	}))
+	defer target.Close()
+
+	proxyServer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "expected CONNECT", http.StatusMethodNotAllowed)
+			return
+		}
+		seen <- observed{
+			tenant: r.Header.Get("X-Tenant"),
+			trace:  r.Header.Get("X-Trace"),
+			auth:   r.Header.Get("Proxy-Authorization"),
+		}
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "connection is not hijackable", http.StatusInternalServerError)
+			return
+		}
+		upstreamConn, errDial := net.Dial("tcp", r.Host)
+		if errDial != nil {
+			http.Error(w, "dial upstream failed", http.StatusBadGateway)
+			return
+		}
+		clientConn, buffered, errHijack := hijacker.Hijack()
+		if errHijack != nil {
+			_ = upstreamConn.Close()
+			return
+		}
+		if _, errWrite := io.WriteString(clientConn, "HTTP/1.1 200 Connection Established\r\nX-Proxy-Note: hello\r\n\r\n"); errWrite != nil {
+			_ = upstreamConn.Close()
+			_ = clientConn.Close()
+			return
+		}
+		go func() {
+			defer func() { _ = upstreamConn.Close() }()
+			_, _ = io.Copy(upstreamConn, buffered)
+		}()
+		go func() {
+			defer func() { _ = clientConn.Close() }()
+			_, _ = io.Copy(clientConn, upstreamConn)
+		}()
+	}))
+	proxyServer.EnableHTTP2 = true
+	proxyServer.TLS = &tls.Config{NextProtos: []string{"h2", "http/1.1"}}
+	proxyServer.StartTLS()
+	defer proxyServer.Close()
+
+	proxyURL, errParseProxy := url.Parse(proxyServer.URL)
+	if errParseProxy != nil {
+		t.Fatalf("url.Parse returned error: %v", errParseProxy)
+	}
+
+	transport, _, errBuild := BuildHTTPTransport("https://user:pass@" + proxyURL.Host)
+	if errBuild != nil {
+		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+	}
+	proxyClientTransport, ok := proxyServer.Client().Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("httptest proxy client transport is not an *http.Transport")
+	}
+	transport.TLSClientConfig = proxyClientTransport.TLSClientConfig.Clone()
+	defer transport.CloseIdleConnections()
+
+	// Kept by the caller, so the dialer must not write Proxy-Authorization into it.
+	callerHeader := http.Header{"X-Tenant": []string{"acme"}}
+	transport.ProxyConnectHeader = callerHeader
+	transport.GetProxyConnectHeader = func(_ context.Context, _ *url.URL, connectTarget string) (http.Header, error) {
+		// Takes precedence over ProxyConnectHeader, so X-Tenant must NOT arrive.
+		return http.Header{"X-Trace": []string{connectTarget}}, nil
+	}
+	var hookResponseNote string
+	transport.OnProxyConnectResponse = func(_ context.Context, _ *url.URL, _ *http.Request, connectRes *http.Response) error {
+		hookResponseNote = connectRes.Header.Get("X-Proxy-Note")
+		return nil
+	}
+
+	response, errGet := (&http.Client{Transport: transport, Timeout: 10 * time.Second}).Get(target.URL)
+	if errGet != nil {
+		t.Fatalf("request through HTTPS proxy failed: %v", errGet)
+	}
+	defer func() {
+		if errClose := response.Body.Close(); errClose != nil {
+			t.Errorf("response.Body.Close returned error: %v", errClose)
+		}
+	}()
+	if _, errRead := io.ReadAll(response.Body); errRead != nil {
+		t.Fatalf("io.ReadAll returned error: %v", errRead)
+	}
+
+	var got observed
+	select {
+	case got = <-seen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy never saw a CONNECT request")
+	}
+
+	targetHost := strings.TrimPrefix(target.URL, "https://")
+	if got.trace != targetHost {
+		t.Fatalf("X-Trace = %q, want %q — GetProxyConnectHeader was not applied", got.trace, targetHost)
+	}
+	if got.tenant != "" {
+		t.Fatalf("X-Tenant = %q, want empty — GetProxyConnectHeader must win over ProxyConnectHeader", got.tenant)
+	}
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("user:pass"))
+	if got.auth != wantAuth {
+		t.Fatalf("Proxy-Authorization = %q, want %q", got.auth, wantAuth)
+	}
+	if hookResponseNote != "hello" {
+		t.Fatalf("OnProxyConnectResponse saw X-Proxy-Note %q, want hello", hookResponseNote)
+	}
+	if len(callerHeader) != 1 || callerHeader.Get("X-Tenant") != "acme" {
+		t.Fatalf("caller header was mutated: %v", callerHeader)
+	}
+}
+
+// TestBuildHTTPTransportHTTPSProxyOnConnectResponseRejects pins the other half of the
+// hook: it runs before the status check, so it can refuse a CONNECT this code would
+// otherwise have accepted.
+func TestBuildHTTPTransportHTTPSProxyOnConnectResponseRejects(t *testing.T) {
+	t.Parallel()
+
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen returned error: %v", errListen)
+	}
+	defer func() { _ = listener.Close() }()
+	go func() {
+		conn, errAccept := listener.Accept()
+		if errAccept != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if _, errRead := http.ReadRequest(bufio.NewReader(conn)); errRead != nil {
+			return
+		}
+		_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		<-time.After(time.Second)
+	}()
+
+	proxyURL, errParse := url.Parse("http://" + listener.Addr().String())
+	if errParse != nil {
+		t.Fatalf("url.Parse returned error: %v", errParse)
+	}
+	rejected := errors.New("proxy response rejected by policy")
+	dialer := &httpConnectDialer{
+		proxyURL:       proxyURL,
+		dialer:         proxy.Direct,
+		connectTimeout: defaultProxyConnectTimeout,
+		onConnectResponse: func(_ context.Context, _ *url.URL, _ *http.Request, _ *http.Response) error {
+			return rejected
+		},
+	}
+
+	conn, errDial := dialer.DialContext(context.Background(), "tcp", "target.example.com:443")
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if !errors.Is(errDial, rejected) {
+		t.Fatalf("error = %v, want it to wrap the hook's error", errDial)
+	}
+}
