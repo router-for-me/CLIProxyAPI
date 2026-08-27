@@ -150,6 +150,81 @@ func TestPollForTokenAuthorizationPendingKeepsInterval(t *testing.T) {
 	})
 }
 
+func TestPollWaitDurationCapsAtDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now()
+		tests := []struct {
+			name     string
+			interval time.Duration
+			deadline time.Time
+			want     time.Duration
+		}{
+			{name: "interval shorter than remaining", interval: 10 * time.Second, deadline: now.Add(30 * time.Second), want: 10 * time.Second},
+			{name: "interval longer than remaining", interval: 10 * time.Second, deadline: now.Add(3 * time.Second), want: 3 * time.Second},
+			{name: "already expired", interval: 10 * time.Second, deadline: now.Add(-time.Second), want: 0},
+			{name: "deadline now", interval: 10 * time.Second, deadline: now, want: 0},
+		}
+		for _, tt := range tests {
+			got := pollWaitDuration(tt.interval, tt.deadline)
+			if got != tt.want {
+				t.Fatalf("%s: pollWaitDuration() = %s, want %s", tt.name, got, tt.want)
+			}
+		}
+	})
+}
+
+func TestPollForTokenSlowDownDoesNotSleepPastDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var pollTimes []time.Time
+		client := &DeviceFlowClient{httpClient: &http.Client{Transport: kimiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			pollTimes = append(pollTimes, time.Now())
+			return oauthJSONResponse(req, `{"error":"slow_down"}`), nil
+		})}}
+
+		start := time.Now()
+		_, errPoll := client.PollForToken(context.Background(), &DeviceCodeResponse{
+			DeviceCode: "device-1",
+			ExpiresIn:  8, // first wait 5s; slow_down would otherwise reset for 10s
+			Interval:   5,
+		})
+		if errPoll == nil || !strings.Contains(errPoll.Error(), "device code expired") {
+			t.Fatalf("error = %v, want device code expired", errPoll)
+		}
+		if elapsed := time.Since(start); elapsed != 8*time.Second {
+			t.Fatalf("elapsed = %s, want 8s (deadline), not the uncapped 15s wait", elapsed)
+		}
+		if len(pollTimes) != 2 {
+			t.Fatalf("poll count = %d, want 2 (wake at deadline, then expire)", len(pollTimes))
+		}
+	})
+}
+
+func TestPollForTokenFirstWaitCappedToDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var calls int
+		client := &DeviceFlowClient{httpClient: &http.Client{Transport: kimiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			return oauthJSONResponse(req, `{"error":"authorization_pending"}`), nil
+		})}}
+
+		start := time.Now()
+		_, errPoll := client.PollForToken(context.Background(), &DeviceCodeResponse{
+			DeviceCode: "device-1",
+			ExpiresIn:  3,
+			Interval:   5,
+		})
+		if errPoll == nil || !strings.Contains(errPoll.Error(), "device code expired") {
+			t.Fatalf("error = %v, want device code expired", errPoll)
+		}
+		if elapsed := time.Since(start); elapsed != 3*time.Second {
+			t.Fatalf("elapsed = %s, want 3s (deadline), not the 5s first interval", elapsed)
+		}
+		if calls != 1 {
+			t.Fatalf("poll count = %d, want 1", calls)
+		}
+	})
+}
+
 func TestPollForTokenNilDeviceCode(t *testing.T) {
 	client := &DeviceFlowClient{httpClient: &http.Client{}}
 	_, errPoll := client.PollForToken(context.Background(), nil)

@@ -238,8 +238,13 @@ func (c *DeviceFlowClient) PollForToken(ctx context.Context, deviceCode *DeviceC
 		}
 	}
 
+	wait := pollWaitDuration(interval, deadline)
+	if wait <= 0 {
+		return nil, fmt.Errorf("kimi: device code expired")
+	}
+
 	// Use a timer (not a fixed ticker) so RFC 8628 slow_down can lengthen the wait.
-	timer := time.NewTimer(interval)
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 
 	for {
@@ -259,9 +264,26 @@ func (c *DeviceFlowClient) PollForToken(ctx context.Context, deviceCode *DeviceC
 				return nil, pollErr
 			}
 			interval = nextInterval
-			timer.Reset(interval)
+			wait = pollWaitDuration(interval, deadline)
+			if wait <= 0 {
+				return nil, fmt.Errorf("kimi: device code expired")
+			}
+			timer.Reset(wait)
 		}
 	}
+}
+
+// pollWaitDuration caps the next poll wait at the remaining authorization deadline.
+// A non-positive remaining duration means the deadline has already passed.
+func pollWaitDuration(interval time.Duration, deadline time.Time) time.Duration {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0
+	}
+	if interval > remaining {
+		return remaining
+	}
+	return interval
 }
 
 // increasePollInterval implements RFC 8628 §3.5: each slow_down MUST increase
