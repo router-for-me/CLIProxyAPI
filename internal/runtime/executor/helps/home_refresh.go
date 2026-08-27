@@ -14,11 +14,15 @@ import (
 )
 
 type homeStatusErr struct {
-	code int
-	msg  string
+	code     int
+	msg      string
+	upstream bool
 }
 
 func (e homeStatusErr) Error() string {
+	if e.upstream {
+		return e.msg
+	}
 	if e.msg != "" {
 		return e.msg
 	}
@@ -26,6 +30,15 @@ func (e homeStatusErr) Error() string {
 }
 
 func (e homeStatusErr) StatusCode() int { return e.code }
+
+func (e homeStatusErr) DirectResponse() bool { return e.upstream }
+
+func (e homeStatusErr) ResponseBody() []byte {
+	if !e.upstream {
+		return nil
+	}
+	return []byte(e.msg)
+}
 
 type homeErrorEnvelope struct {
 	Error *homeErrorDetail `json:"error"`
@@ -37,9 +50,15 @@ type homeRefreshAuthEnvelope struct {
 }
 
 type homeErrorDetail struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
-	Code    string `json:"code,omitempty"`
+	Type     string                `json:"type"`
+	Message  string                `json:"message"`
+	Code     string                `json:"code,omitempty"`
+	Upstream *homeUpstreamResponse `json:"upstream,omitempty"`
+}
+
+type homeUpstreamResponse struct {
+	Status int    `json:"status"`
+	Body   []byte `json:"body"`
 }
 
 type homeRefreshClient interface {
@@ -88,6 +107,13 @@ func RefreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 
 	var env homeErrorEnvelope
 	if errUnmarshal := json.Unmarshal(raw, &env); errUnmarshal == nil && env.Error != nil {
+		if env.Error.Upstream != nil {
+			return nil, true, homeStatusErr{
+				code:     env.Error.Upstream.Status,
+				msg:      string(env.Error.Upstream.Body),
+				upstream: true,
+			}
+		}
 		code := strings.TrimSpace(env.Error.Type)
 		if code == "" {
 			code = strings.TrimSpace(env.Error.Code)

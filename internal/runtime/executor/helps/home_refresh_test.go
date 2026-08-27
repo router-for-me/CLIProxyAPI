@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -60,7 +61,7 @@ func TestRefreshAuthViaHomePreservesContextErrors(t *testing.T) {
 	}
 }
 
-func TestRefreshAuthViaHomeMapsTransportFailureToRedacted503(t *testing.T) {
+func TestRefreshAuthViaHomeMapsTransportFailureToGeneric503(t *testing.T) {
 	client := &fakeHomeRefreshClient{err: errors.New("dial failed with provider-secret")}
 	oldCurrentHomeRefreshClient := currentHomeRefreshClient
 	currentHomeRefreshClient = func() homeRefreshClient { return client }
@@ -71,14 +72,21 @@ func TestRefreshAuthViaHomeMapsTransportFailureToRedacted503(t *testing.T) {
 	_, handled, errRefresh := RefreshAuthViaHome(context.Background(), cfg, auth)
 	statusErr, okStatus := errRefresh.(interface{ StatusCode() int })
 	if !handled || !okStatus || statusErr.StatusCode() != http.StatusServiceUnavailable {
-		t.Fatalf("RefreshAuthViaHome() = handled %v err %v, want redacted 503", handled, errRefresh)
+		t.Fatalf("RefreshAuthViaHome() = handled %v err %v, want generic 503", handled, errRefresh)
 	}
 	if strings.Contains(errRefresh.Error(), "provider-secret") {
-		t.Fatalf("refresh error leaked transport detail: %v", errRefresh)
+		t.Fatalf("refresh error included transport detail: %v", errRefresh)
+	}
+	direct, okDirect := errRefresh.(interface {
+		DirectResponse() bool
+		ResponseBody() []byte
+	})
+	if !okDirect || direct.DirectResponse() {
+		t.Fatalf("transport error direct response = %v/%v, want false", okDirect, direct)
 	}
 }
 
-func TestRefreshAuthViaHomeRedactsLegacyErrorEnvelope(t *testing.T) {
+func TestRefreshAuthViaHomeUsesGenericMessageForLegacyErrorEnvelope(t *testing.T) {
 	client := &fakeHomeRefreshClient{raw: []byte(`{"error":{"type":"error","message":"provider response: refresh_token=provider-secret"}}`)}
 	oldCurrentHomeRefreshClient := currentHomeRefreshClient
 	currentHomeRefreshClient = func() homeRefreshClient { return client }
@@ -89,10 +97,125 @@ func TestRefreshAuthViaHomeRedactsLegacyErrorEnvelope(t *testing.T) {
 	_, handled, errRefresh := RefreshAuthViaHome(context.Background(), cfg, auth)
 	statusErr, okStatus := errRefresh.(interface{ StatusCode() int })
 	if !handled || !okStatus || statusErr.StatusCode() != http.StatusServiceUnavailable {
-		t.Fatalf("RefreshAuthViaHome() = handled %v err %v, want redacted 503", handled, errRefresh)
+		t.Fatalf("RefreshAuthViaHome() = handled %v err %v, want generic 503", handled, errRefresh)
 	}
 	if strings.Contains(errRefresh.Error(), "provider-secret") {
-		t.Fatalf("refresh error leaked legacy Home detail: %v", errRefresh)
+		t.Fatalf("refresh error included legacy Home detail: %v", errRefresh)
+	}
+}
+
+func TestRefreshAuthViaHomePreservesUpstreamStatusAndBodyExactly(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   []byte
+	}{
+		{name: "json", status: http.StatusBadRequest, body: []byte(`{"error":"invalid_request"}`)},
+		{name: "access token expired", status: http.StatusUnauthorized, body: []byte(`{"error":{"message":"access token expired"}}`)},
+		{name: "text", status: http.StatusBadGateway, body: []byte("provider unavailable")},
+		{name: "multiline", status: http.StatusTooManyRequests, body: []byte("first line\r\nsecond line\n")},
+		{name: "empty", status: http.StatusUnauthorized, body: []byte{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, errMarshal := json.Marshal(homeErrorEnvelope{Error: &homeErrorDetail{
+				Type:    "refresh_temporarily_unavailable",
+				Message: "credential refresh temporarily unavailable",
+				Upstream: &homeUpstreamResponse{
+					Status: tt.status,
+					Body:   tt.body,
+				},
+			}})
+			if errMarshal != nil {
+				t.Fatalf("marshal Home error envelope: %v", errMarshal)
+			}
+			client := &fakeHomeRefreshClient{raw: raw}
+			oldCurrentHomeRefreshClient := currentHomeRefreshClient
+			currentHomeRefreshClient = func() homeRefreshClient { return client }
+			t.Cleanup(func() { currentHomeRefreshClient = oldCurrentHomeRefreshClient })
+
+			cfg := &config.Config{Home: config.HomeConfig{Enabled: true}}
+			auth := &cliproxyauth.Auth{ID: "home-auth", Index: "home-auth", Provider: "codex"}
+			_, handled, errRefresh := RefreshAuthViaHome(context.Background(), cfg, auth)
+			statusErr, okStatus := errRefresh.(interface{ StatusCode() int })
+			if !handled || !okStatus || statusErr.StatusCode() != tt.status {
+				t.Fatalf("RefreshAuthViaHome() = handled %v err %v status %v, want true/%d", handled, errRefresh, okStatus, tt.status)
+			}
+			if got := []byte(errRefresh.Error()); !bytes.Equal(got, tt.body) {
+				t.Fatalf("refresh body = %q, want exact body %q", got, tt.body)
+			}
+			direct, okDirect := errRefresh.(interface {
+				DirectResponse() bool
+				ResponseBody() []byte
+			})
+			if !okDirect || !direct.DirectResponse() {
+				t.Fatalf("upstream error direct response = %v/%v, want true", okDirect, direct)
+			}
+			if got := direct.ResponseBody(); !bytes.Equal(got, tt.body) {
+				t.Fatalf("direct response body = %q, want exact body %q", got, tt.body)
+			}
+		})
+	}
+}
+
+func TestRefreshAuthViaHomeUsesGenericMessageForLegacyProviderDiagnostics(t *testing.T) {
+	tests := []struct {
+		name       string
+		provider   string
+		raw        []byte
+		wantStatus int
+		wantError  string
+	}{
+		{
+			name:       "transient transport diagnostic",
+			provider:   "antigravity",
+			raw:        []byte(`{"error":{"type":"refresh_temporarily_unavailable","message":"antigravity refresh: Post https://oauth.example/token?access_token=provider-secret: connection refused"}}`),
+			wantStatus: http.StatusServiceUnavailable,
+			wantError:  "credential refresh temporarily unavailable",
+		},
+		{
+			name:       "terminal legacy diagnostic",
+			provider:   "codex",
+			raw:        []byte(`{"error":{"type":"authentication_error","message":"codex refresh: invalid_grant refresh_token=provider-secret"}}`),
+			wantStatus: http.StatusUnauthorized,
+			wantError:  "credential unauthorized",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &fakeHomeRefreshClient{raw: tt.raw}
+			oldCurrentHomeRefreshClient := currentHomeRefreshClient
+			currentHomeRefreshClient = func() homeRefreshClient { return client }
+			t.Cleanup(func() { currentHomeRefreshClient = oldCurrentHomeRefreshClient })
+
+			cfg := &config.Config{Home: config.HomeConfig{Enabled: true}}
+			auth := &cliproxyauth.Auth{ID: "home-auth", Index: "home-auth", Provider: tt.provider}
+			_, handled, errRefresh := RefreshAuthViaHome(context.Background(), cfg, auth)
+			statusErr, okStatus := errRefresh.(interface{ StatusCode() int })
+			if !handled || !okStatus || statusErr.StatusCode() != tt.wantStatus {
+				t.Fatalf("RefreshAuthViaHome() = handled %v err %v, want status %d", handled, errRefresh, tt.wantStatus)
+			}
+			if got := errRefresh.Error(); got != tt.wantError {
+				t.Fatalf("client refresh error = %q, want %q", got, tt.wantError)
+			}
+			if strings.Contains(errRefresh.Error(), "provider-secret") {
+				t.Fatalf("legacy refresh error leaked provider detail: %v", errRefresh)
+			}
+		})
+	}
+}
+
+func TestRefreshAuthViaHomeRejectsUnmarkedRefreshMessage(t *testing.T) {
+	client := &fakeHomeRefreshClient{raw: []byte(`{"error":{"type":"refresh_temporarily_unavailable","message":"database unavailable: provider-secret"}}`)}
+	oldCurrentHomeRefreshClient := currentHomeRefreshClient
+	currentHomeRefreshClient = func() homeRefreshClient { return client }
+	t.Cleanup(func() { currentHomeRefreshClient = oldCurrentHomeRefreshClient })
+
+	cfg := &config.Config{Home: config.HomeConfig{Enabled: true}}
+	auth := &cliproxyauth.Auth{ID: "home-auth", Index: "home-auth", Provider: "antigravity"}
+	_, _, errRefresh := RefreshAuthViaHome(context.Background(), cfg, auth)
+	if got, want := errRefresh.Error(), "credential refresh temporarily unavailable"; got != want {
+		t.Fatalf("refresh error = %q, want %q", got, want)
 	}
 }
 

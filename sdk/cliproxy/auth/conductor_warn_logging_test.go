@@ -33,6 +33,76 @@ func setupTestLoggerHook(t *testing.T) *logtest.Hook {
 	return hook
 }
 
+type statusErrorLogTestError struct {
+	message    string
+	statusCode int
+}
+
+func (e statusErrorLogTestError) Error() string { return e.message }
+
+func (e statusErrorLogTestError) StatusCode() int { return e.statusCode }
+
+func TestWarnLogUpstreamFailureIncludesStructuredStatusCodeAndSafeDiagnostic(t *testing.T) {
+	hook := setupTestLoggerHook(t)
+	diagnostic := `  antigravity refresh: upstream request failed with status 400 error="invalid_request" error_description="Malformed request, retry & inspect"  `
+
+	warnLogUpstreamFailure(
+		context.Background(),
+		nil,
+		"antigravity",
+		"gemini-3.7-flash-high",
+		&Auth{ID: "auth-1", Provider: "antigravity"},
+		83*time.Millisecond,
+		statusErrorLogTestError{message: diagnostic, statusCode: http.StatusServiceUnavailable},
+	)
+
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream execution failed") {
+			if !strings.HasPrefix(entry.Message, "503 |          83ms | upstream execution failed: provider=antigravity") || strings.Contains(entry.Message, "status=503") || !strings.HasSuffix(entry.Message, "err="+strings.TrimSpace(diagnostic)) {
+				t.Fatalf("unexpected Warn log content: %s", entry.Message)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected upstream failure Warn log, got logs: %#v", hook.AllEntries())
+}
+
+func TestHomeCredentialBoundaryWarnLogUsesSafeDiagnostic(t *testing.T) {
+	diagnostic := "antigravity refresh: access token expired access_token=provider-secret\nforged log line"
+	upstreamErr := statusErrorLogTestError{
+		message:    diagnostic,
+		statusCode: http.StatusServiceUnavailable,
+	}
+	hook := setupTestLoggerHook(t)
+	auth := &Auth{ID: "auth-1", Provider: "antigravity"}
+	executor := &requestPrepareExecutor{prepareErr: upstreamErr}
+	selection := &HomeDispatchSelection{Auth: auth, Executor: executor, Provider: "antigravity"}
+	_, errPrepare := NewManager(nil, nil, nil).prepareHomeRequestAuth(context.Background(), executor, selection)
+	if errPrepare == nil || errPrepare.Error() != diagnostic {
+		t.Fatalf("operation error = %v, want original error %q", errPrepare, diagnostic)
+	}
+
+	matches := 0
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.WarnLevel || !strings.HasPrefix(entry.Message, "Home credential operation failed: err=") {
+			continue
+		}
+		matches++
+		if !strings.Contains(entry.Message, "access token expired") {
+			t.Fatalf("Warn log lost access-token-expired diagnostic: %q", entry.Message)
+		}
+		if strings.Contains(entry.Message, "provider-secret") || strings.ContainsAny(entry.Message, "\r\n") {
+			t.Fatalf("Warn log included unsafe provider detail: %q", entry.Message)
+		}
+		if entry.Data["operation"] != "request_auth_preparation" || entry.Data["provider"] != "antigravity" || entry.Data["status"] != http.StatusServiceUnavailable {
+			t.Fatalf("Warn log fields = %#v, want operation=request_auth_preparation provider=antigravity status=503", entry.Data)
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("matching Warn logs = %d, want 1; logs=%#v", matches, hook.AllEntries())
+	}
+}
+
 func TestWarnLogOnAuthUnavailable_SingleProvider(t *testing.T) {
 	previousCooldown := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

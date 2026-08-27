@@ -155,7 +155,6 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			roundTiming.Observe(lastErr)
 			continue
 		}
-		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
 			execCtx = newUpstreamAttemptContext(execCtx)
 			resultModel := m.stateModelForExecution(preparedAuth, routeModel, upstreamModel, pooled)
@@ -214,44 +213,13 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			startHomeExec := time.Now()
 			response, errExecute = execute()
 			durationHomeExec := time.Since(startHomeExec)
-			refreshAuth := preparedAuth
 			if countTokens {
-				if observedAuth, fingerprint := getEffectiveAuth(); isUnauthorizedError(errExecute) {
-					m.reportHomeUnauthorized(execCtx, preparedAuth, selection.Provider, resultModel, fingerprint)
-					if observedAuth != nil {
-						refreshAuth = observedAuth
-					}
+				if _, fingerprint := getEffectiveAuth(); isUnauthorizedError(errExecute) {
+					m.reportHomeUnauthorized(execCtx, preparedAuth, selection.Provider, resultModel, fingerprint, extractErrorBody(errExecute))
 				}
 			}
 			if errExecute != nil {
-				refreshCtx := newUpstreamAttemptContext(execCtx)
-				if refreshed, okRefresh, errRefresh := m.tryRefreshExecutionAuthAfterUnauthorized(refreshCtx, selection.Executor, refreshAuth, errExecute, didRefreshOnUnauthorized, true); errRefresh != nil {
-					errExecute = errRefresh
-					warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeExec, errExecute)
-				} else if okRefresh {
-					preparedAuth = refreshed
-					m.replaceHomeSelectionAuth(selection, preparedAuth)
-					didRefreshOnUnauthorized = true
-					publishSelectedAuthMetadata(opts.Metadata, preparedAuth)
-					setEffectiveAuth(preparedAuth)
-					execCtx = newUpstreamAttemptContext(execCtx)
-					executorCtx = execCtx
-					if countTokens {
-						executorCtx = withAccessTokenFingerprintObserver(execCtx, setEffectiveAuth)
-					}
-					startHomeRetry := time.Now()
-					response, errExecute = execute()
-					durationHomeRetry := time.Since(startHomeRetry)
-					if errExecute != nil {
-						warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeRetry, errExecute)
-						if countTokens && isUnauthorizedError(errExecute) {
-							_, fingerprint := getEffectiveAuth()
-							m.reportHomeUnauthorized(execCtx, preparedAuth, selection.Provider, resultModel, fingerprint)
-						}
-					}
-				} else {
-					warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeExec, errExecute)
-				}
+				warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeExec, errExecute)
 			}
 			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, Success: errExecute == nil, Options: execOpts}
 			if errExecute == nil {

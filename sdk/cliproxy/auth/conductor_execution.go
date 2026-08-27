@@ -685,7 +685,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	lastHomeAuthID := ""
 	homeSameAuthRetryPending := false
 	attempted := make(map[string]struct{})
-	unauthorizedRefreshTried := make(map[string]struct{})
 	var lastErr error
 	var roundTiming homeRetryRoundTiming
 	for {
@@ -784,14 +783,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					}
 				}
 			}
-			if _, refreshedAlready := unauthorizedRefreshTried[auth.ID]; refreshedAlready {
-				homeExcludedAuthIDs[auth.ID] = struct{}{}
-				homeSameAuthRetryPending = false
-				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "repeated_refresh_auth"); errEnd != nil {
-					return nil, errEnd
-				}
-				continue
-			}
 		}
 
 		entry := logEntryWithRequestID(ctx)
@@ -848,7 +839,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if errPrepare != nil {
 			if selection != nil {
 				excludeAuth := shouldExcludeHomeAuthAfterStreamError(execCtx, auth, errPrepare)
-				if _, refreshedAlready := unauthorizedRefreshTried[auth.ID]; refreshedAlready || homeSameAuthRetries[auth.ID] > 0 {
+				if homeSameAuthRetries[auth.ID] > 0 {
 					excludeAuth = true
 				}
 				if excludeAuth {
@@ -893,11 +884,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			models = models[:1]
 			pooled = false
 		}
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil, unauthorizedRefreshTried)
+		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
 		if errStream != nil {
 			if selection != nil {
 				excludeAuth := shouldExcludeHomeAuthAfterStreamError(execCtx, auth, errStream)
-				if _, refreshedAlready := unauthorizedRefreshTried[auth.ID]; refreshedAlready || homeSameAuthRetries[auth.ID] > 0 {
+				if homeSameAuthRetries[auth.ID] > 0 {
 					excludeAuth = true
 				}
 				if excludeAuth {
@@ -951,17 +942,16 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	}
 }
 
-func shouldExcludeHomeAuthAfterStreamError(ctx context.Context, auth *Auth, err error) bool {
+func shouldExcludeHomeAuthAfterStreamError(ctx context.Context, _ *Auth, err error) bool {
 	if err == nil || isConnectionLifecycleError(err) {
 		return false
 	}
 	// A 426 during a downstream websocket attempt is a transport fallback
-	// signal. OAuth authorization failures may also recover after a refresh.
-	// Both paths may retry the same credential once.
+	// signal and may retry the same credential once.
 	if cliproxyexecutor.DownstreamWebsocket(ctx) && statusCodeFromError(err) == http.StatusUpgradeRequired {
 		return false
 	}
-	return !isUnauthorizedError(err) || auth == nil || auth.AuthKind() != AuthKindOAuth
+	return true
 }
 
 func cloneRequestMetadata(src map[string]any) map[string]any {
@@ -1175,7 +1165,12 @@ func (m *Manager) prepareHomeRequestAuth(ctx context.Context, executor ProviderE
 	if selection == nil {
 		return nil, nil
 	}
-	return m.prepareHomeAuthSnapshot(ctx, executor, selection.CloneAuth())
+	auth := selection.CloneAuth()
+	prepared, errPrepare := m.prepareHomeAuthSnapshot(ctx, executor, auth)
+	if errPrepare != nil {
+		warnLogHomeCredentialFailure(ctx, "request_auth_preparation", selection.Provider, auth, errPrepare)
+	}
+	return prepared, errPrepare
 }
 
 func (m *Manager) prepareHomeAuthSnapshot(ctx context.Context, executor ProviderExecutor, auth *Auth) (*Auth, error) {
@@ -1577,17 +1572,23 @@ func formatAuthIdentity(auth *Auth, provider string) string {
 	}
 }
 
-func summarizeErrorForLog(err error) string {
+func warnLogHomeCredentialFailure(ctx context.Context, operation, provider string, auth *Auth, err error) {
 	if err == nil {
-		return ""
+		return
 	}
-	msg := strings.TrimSpace(err.Error())
-	const maxRunes = 300
-	runes := []rune(msg)
-	if len(runes) > maxRunes {
-		return string(runes[:maxRunes]) + "..."
+	provider = strings.TrimSpace(provider)
+	if provider == "" && auth != nil {
+		provider = strings.TrimSpace(auth.Provider)
 	}
-	return msg
+	fields := log.Fields{
+		"auth":      formatAuthIdentity(auth, provider),
+		"operation": operation,
+		"provider":  provider,
+	}
+	if statusCode := statusCodeFromError(err); statusCode != 0 {
+		fields["status"] = statusCode
+	}
+	logEntryWithRequestID(ctx).WithFields(fields).Warnf("Home credential operation failed: err=%s", logging.SafeDiagnosticForLog(err.Error()))
 }
 
 func warnLogUpstreamFailure(ctx context.Context, entry *log.Entry, provider, model string, auth *Auth, duration time.Duration, err error) {
@@ -1611,8 +1612,13 @@ func warnLogUpstreamFailure(ctx context.Context, entry *log.Entry, provider, mod
 		}
 	}
 	authIdent := formatAuthIdentity(auth, provider)
-	errSummary := summarizeErrorForLog(err)
-	entry.Warnf("upstream execution failed: provider=%s model=%s auth=%s duration=%s err=%s", provider, model, authIdent, duration.Round(time.Millisecond), errSummary)
+	errSummary := logging.SafeDiagnosticForLog(err.Error())
+	duration = duration.Round(time.Millisecond)
+	if statusCode := statusCodeFromError(err); statusCode != 0 {
+		entry.Warnf("%3d | %13v | upstream execution failed: provider=%s model=%s auth=%s err=%s", statusCode, duration, provider, model, authIdent, errSummary)
+		return
+	}
+	entry.Warnf("upstream execution failed: provider=%s model=%s auth=%s duration=%s err=%s", provider, model, authIdent, duration, errSummary)
 }
 
 // InjectCredentials delegates per-provider HTTP request preparation when supported.

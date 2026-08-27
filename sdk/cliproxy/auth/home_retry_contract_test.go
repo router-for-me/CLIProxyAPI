@@ -971,7 +971,7 @@ func TestHomeRetryRoundUsesRemoteCooldownWhenAttemptedErrorHasNoTiming(t *testin
 	}
 }
 
-func TestHomeStreamOAuthUnauthorizedRotatesAfterRefreshRetry(t *testing.T) {
+func TestHomeStreamOAuthUnauthorizedRotatesWithoutRefreshRetry(t *testing.T) {
 	dispatcher := &retryContractHomeDispatcher{
 		authIDs: []string{"home-retry-a", "home-retry-b"},
 		metadata: map[string]any{
@@ -995,8 +995,8 @@ func TestHomeStreamOAuthUnauthorizedRotatesAfterRefreshRetry(t *testing.T) {
 	}
 	for range result.Chunks {
 	}
-	if got := executor.Calls(); len(got) != 3 || got[0] != "home-retry-a" || got[1] != "home-retry-a" || got[2] != "home-retry-b" {
-		t.Fatalf("executor calls = %v, want [home-retry-a home-retry-a home-retry-b]", got)
+	if got := executor.Calls(); len(got) != 2 || got[0] != "home-retry-a" || got[1] != "home-retry-b" {
+		t.Fatalf("executor calls = %v, want [home-retry-a home-retry-b]", got)
 	}
 	excluded := dispatcher.Excluded()
 	if len(excluded) != 2 || len(excluded[0]) != 0 || len(excluded[1]) != 1 || excluded[1][0] != "home-retry-a" {
