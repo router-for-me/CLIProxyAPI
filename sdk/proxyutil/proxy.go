@@ -143,6 +143,7 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 					dialer:              baseDialer,
 					tlsConfig:           transport.TLSClientConfig,
 					tlsHandshakeTimeout: transport.TLSHandshakeTimeout,
+					connectTimeout:      defaultProxyConnectTimeout,
 				}
 				return dialer.DialContext(ctx, network, addr)
 			}
@@ -169,7 +170,11 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 		return proxy.Direct, setting.Mode, nil
 	case ModeProxy:
 		if setting.URL.Scheme == "http" || setting.URL.Scheme == "https" {
-			return &httpConnectDialer{proxyURL: setting.URL, dialer: proxy.Direct}, setting.Mode, nil
+			return &httpConnectDialer{
+				proxyURL:       setting.URL,
+				dialer:         proxy.Direct,
+				connectTimeout: defaultProxyConnectTimeout,
+			}, setting.Mode, nil
 		}
 		dialer, errDialer := proxy.FromURL(setting.URL, proxy.Direct)
 		if errDialer != nil {
@@ -191,15 +196,16 @@ type httpConnectDialer struct {
 	// the tunnel here takes it out of reach of http.Transport.TLSHandshakeTimeout,
 	// so callers that rely on that bound must pass it through. Zero means no bound.
 	tlsHandshakeTimeout time.Duration
+	// connectTimeout bounds the CONNECT exchange. Zero means no bound.
+	connectTimeout time.Duration
 }
 
-// proxyConnectTimeout bounds the CONNECT exchange with the proxy. net/http applies the
-// same one-minute bound in dialConn, for the same reason: a proxy that takes the
-// connection and then stops replying would otherwise hold the caller — and leak the
-// goroutine reading the response — until the request context is canceled, and most
-// callers here pass a context that never is. Taking over proxy setup means taking over
-// this guard too. A var, not a const, so tests need not wait a minute for it.
-var proxyConnectTimeout = time.Minute
+// defaultProxyConnectTimeout bounds the CONNECT exchange with the proxy. net/http applies
+// the same one-minute bound in dialConn, for the same reason: a proxy that takes the
+// connection and then stops replying would otherwise hold the caller until the request
+// context is canceled, and most callers here pass a context that never is. Taking over
+// proxy setup means taking over this guard too.
+const defaultProxyConnectTimeout = time.Minute
 
 // contextDialerFunc adapts a net.Dialer-style dial function to proxy.Dialer so an
 // existing transport's dialer, timeouts included, can carry the proxy connection.
@@ -282,33 +288,31 @@ func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr strin
 		conn = tlsConn
 	}
 
-	// Covers the write as well as the read: a proxy that stops draining blocks req.Write
-	// just as thoroughly as one that never answers. Closing the connection is what
-	// unblocks either of them, so the deadline has to reach the connection, not the request.
-	connectCtx, cancelConnect := context.WithTimeout(ctx, proxyConnectTimeout)
-	defer cancelConnect()
-	connectCancelDone := make(chan struct{})
-	stopConnectCancel := context.AfterFunc(connectCtx, func() {
-		_ = conn.Close()
-		close(connectCancelDone)
-	})
-	defer func() {
-		if !stopConnectCancel() {
-			<-connectCancelDone
+	// A socket deadline rather than a second context watcher: cancellation of ctx is
+	// already covered above, and the only thing left to bound is the proxy going quiet
+	// while ctx never ends. The netpoller enforces this one with no timer, goroutine or
+	// channel of its own, and it covers the write as well as the read — a proxy that
+	// stops draining blocks req.Write just as thoroughly as one that never answers.
+	if d.connectTimeout > 0 {
+		if errDeadline := conn.SetDeadline(time.Now().Add(d.connectTimeout)); errDeadline != nil {
+			if errClose := conn.Close(); errClose != nil {
+				return nil, fmt.Errorf("set CONNECT deadline failed: %w; close failed: %v", errDeadline, errClose)
+			}
+			return nil, fmt.Errorf("set CONNECT deadline failed: %w", errDeadline)
 		}
-	}()
+	}
 
 	req := (&http.Request{
 		Method: http.MethodConnect,
 		URL:    &url.URL{Host: addr},
 		Host:   addr,
 		Header: make(http.Header),
-	}).WithContext(connectCtx)
+	}).WithContext(ctx)
 	if d.proxyURL.User != nil {
 		req.Header.Set("Proxy-Authorization", proxyAuthorization(d.proxyURL.User))
 	}
 	if errWrite := req.Write(conn); errWrite != nil {
-		errWrite = preferContextError(connectCtx, errWrite)
+		errWrite = preferContextError(ctx, errWrite)
 		if errClose := conn.Close(); errClose != nil {
 			return nil, fmt.Errorf("write CONNECT request failed: %w; close failed: %v", errWrite, errClose)
 		}
@@ -318,7 +322,7 @@ func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr strin
 	reader := bufio.NewReader(conn)
 	resp, errRead := http.ReadResponse(reader, req)
 	if errRead != nil {
-		errRead = preferContextError(connectCtx, errRead)
+		errRead = preferContextError(ctx, errRead)
 		if errClose := conn.Close(); errClose != nil {
 			return nil, fmt.Errorf("read CONNECT response failed: %w; close failed: %v", errRead, errClose)
 		}
@@ -332,6 +336,17 @@ func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr strin
 			return nil, fmt.Errorf("proxy CONNECT returned status %s; close failed: %v", resp.Status, errClose)
 		}
 		return nil, fmt.Errorf("proxy CONNECT returned status %s", resp.Status)
+	}
+
+	// The deadline belongs to CONNECT, not to the tunnel. Leaving it on would cut the
+	// caller's own request short at whatever was left of the minute.
+	if d.connectTimeout > 0 {
+		if errDeadline := conn.SetDeadline(time.Time{}); errDeadline != nil {
+			if errClose := conn.Close(); errClose != nil {
+				return nil, fmt.Errorf("clear CONNECT deadline failed: %w; close failed: %v", errDeadline, errClose)
+			}
+			return nil, fmt.Errorf("clear CONNECT deadline failed: %w", errDeadline)
+		}
 	}
 
 	if errContext := ctx.Err(); errContext != nil {

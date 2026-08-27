@@ -12,10 +12,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 func mustDefaultTransport(t *testing.T) *http.Transport {
@@ -583,11 +586,7 @@ func TestBuildHTTPTransportHTTPSProxyBoundsTLSHandshake(t *testing.T) {
 // dialConn: a proxy that takes the connection and then never answers CONNECT must not
 // hold a caller whose context has no deadline.
 func TestBuildDialerHTTPProxyBoundsCONNECTResponse(t *testing.T) {
-	// Not parallel: it swaps the package-level bound, the same way net/http's own tests
-	// drive testHookProxyConnectTimeout.
-	original := proxyConnectTimeout
-	proxyConnectTimeout = 200 * time.Millisecond
-	defer func() { proxyConnectTimeout = original }()
+	t.Parallel()
 
 	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
 	if errListen != nil {
@@ -598,33 +597,39 @@ func TestBuildDialerHTTPProxyBoundsCONNECTResponse(t *testing.T) {
 			t.Errorf("listener.Close returned error: %v", errClose)
 		}
 	}()
+	accepted := make(chan net.Conn, 1)
 	go func() {
 		conn, errAccept := listener.Accept()
 		if errAccept != nil {
 			return
 		}
-		defer func() { _ = conn.Close() }()
+		accepted <- conn
 		// Read the CONNECT request, then go quiet — never write a response.
-		if _, errRead := http.ReadRequest(bufio.NewReader(conn)); errRead != nil {
-			return
+		_, _ = http.ReadRequest(bufio.NewReader(conn))
+	}()
+	defer func() {
+		select {
+		case conn := <-accepted:
+			_ = conn.Close()
+		default:
 		}
-		<-time.After(30 * time.Second)
 	}()
 
-	dialer, _, errBuild := BuildDialer("http://" + listener.Addr().String())
-	if errBuild != nil {
-		t.Fatalf("BuildDialer returned error: %v", errBuild)
+	proxyURL, errParse := url.Parse("http://" + listener.Addr().String())
+	if errParse != nil {
+		t.Fatalf("url.Parse returned error: %v", errParse)
 	}
-	contextDialer, ok := dialer.(interface {
-		DialContext(context.Context, string, string) (net.Conn, error)
-	})
-	if !ok {
-		t.Fatal("HTTP CONNECT dialer does not support context cancellation")
+	// Built directly rather than via BuildDialer: the bound is a field, so the test can
+	// carry a short one instead of waiting out the production minute.
+	dialer := &httpConnectDialer{
+		proxyURL:       proxyURL,
+		dialer:         proxy.Direct,
+		connectTimeout: 200 * time.Millisecond,
 	}
 
 	dialDone := make(chan error, 1)
 	go func() {
-		conn, errDial := contextDialer.DialContext(context.Background(), "tcp", "target.example.com:443")
+		conn, errDial := dialer.DialContext(context.Background(), "tcp", "target.example.com:443")
 		if conn != nil {
 			_ = conn.Close()
 		}
@@ -636,10 +641,110 @@ func TestBuildDialerHTTPProxyBoundsCONNECTResponse(t *testing.T) {
 		if errDial == nil {
 			t.Fatal("dial through a silent proxy returned nil error")
 		}
-		if !errors.Is(errDial, context.DeadlineExceeded) {
-			t.Fatalf("error = %v, want it to wrap context.DeadlineExceeded", errDial)
+		if !errors.Is(errDial, os.ErrDeadlineExceeded) {
+			t.Fatalf("error = %v, want it to wrap os.ErrDeadlineExceeded", errDial)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("dial through a silent proxy was not bounded by proxyConnectTimeout")
+		t.Fatal("dial through a silent proxy was not bounded by connectTimeout")
+	}
+}
+
+// TestBuildDialerHTTPProxyCarriesCONNECTTimeout keeps the wiring honest: the guard above
+// is only worth anything if the constructor actually installs it.
+func TestBuildDialerHTTPProxyCarriesCONNECTTimeout(t *testing.T) {
+	t.Parallel()
+
+	dialer, _, errBuild := BuildDialer("http://proxy.example.com:8080")
+	if errBuild != nil {
+		t.Fatalf("BuildDialer returned error: %v", errBuild)
+	}
+	connectDialer, ok := dialer.(*httpConnectDialer)
+	if !ok {
+		t.Fatalf("dialer is %T, want *httpConnectDialer", dialer)
+	}
+	if connectDialer.connectTimeout != defaultProxyConnectTimeout {
+		t.Fatalf("connectTimeout = %v, want %v", connectDialer.connectTimeout, defaultProxyConnectTimeout)
+	}
+}
+
+// TestBuildDialerHTTPProxyClearsCONNECTDeadline guards the failure mode that would be
+// worst in production and quietest in review: the CONNECT deadline is set on the socket
+// the caller goes on to use, so failing to clear it would cut real traffic off at
+// whatever was left of the bound, mid-stream and with no proxy involved.
+func TestBuildDialerHTTPProxyClearsCONNECTDeadline(t *testing.T) {
+	t.Parallel()
+
+	const connectTimeout = 200 * time.Millisecond
+
+	target, errTarget := net.Listen("tcp", "127.0.0.1:0")
+	if errTarget != nil {
+		t.Fatalf("net.Listen returned error: %v", errTarget)
+	}
+	defer func() { _ = target.Close() }()
+	go func() {
+		conn, errAccept := target.Accept()
+		if errAccept != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = io.Copy(conn, conn)
+	}()
+
+	proxyListener, errProxy := net.Listen("tcp", "127.0.0.1:0")
+	if errProxy != nil {
+		t.Fatalf("net.Listen returned error: %v", errProxy)
+	}
+	defer func() { _ = proxyListener.Close() }()
+	go func() {
+		clientConn, errAccept := proxyListener.Accept()
+		if errAccept != nil {
+			return
+		}
+		defer func() { _ = clientConn.Close() }()
+		request, errRead := http.ReadRequest(bufio.NewReader(clientConn))
+		if errRead != nil {
+			return
+		}
+		upstreamConn, errDial := net.Dial("tcp", request.Host)
+		if errDial != nil {
+			return
+		}
+		defer func() { _ = upstreamConn.Close() }()
+		if _, errWrite := io.WriteString(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n"); errWrite != nil {
+			return
+		}
+		go func() { _, _ = io.Copy(upstreamConn, clientConn) }()
+		_, _ = io.Copy(clientConn, upstreamConn)
+	}()
+
+	proxyURL, errParse := url.Parse("http://" + proxyListener.Addr().String())
+	if errParse != nil {
+		t.Fatalf("url.Parse returned error: %v", errParse)
+	}
+	dialer := &httpConnectDialer{
+		proxyURL:       proxyURL,
+		dialer:         proxy.Direct,
+		connectTimeout: connectTimeout,
+	}
+
+	conn, errDial := dialer.DialContext(context.Background(), "tcp", target.Addr().String())
+	if errDial != nil {
+		t.Fatalf("dialer.DialContext returned error: %v", errDial)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Idle past the bound, then use the tunnel. A deadline left over from CONNECT
+	// expires here and turns this into an i/o timeout.
+	<-time.After(2 * connectTimeout)
+
+	if _, errWrite := conn.Write([]byte("ping")); errWrite != nil {
+		t.Fatalf("write after the CONNECT bound elapsed failed: %v", errWrite)
+	}
+	buf := make([]byte, 4)
+	if _, errRead := io.ReadFull(conn, buf); errRead != nil {
+		t.Fatalf("read after the CONNECT bound elapsed failed: %v", errRead)
+	}
+	if string(buf) != "ping" {
+		t.Fatalf("tunnelled payload = %q, want ping", string(buf))
 	}
 }
