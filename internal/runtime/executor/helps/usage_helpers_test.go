@@ -719,6 +719,27 @@ func TestFailFromErrorsMapsContextStatuses(t *testing.T) {
 	}
 }
 
+func TestStreamUsageBufferPublishFailure(t *testing.T) {
+	var buffer StreamUsageBuffer
+	buffer.Observe(usage.Detail{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}, true)
+
+	reporter := &UsageReporter{
+		provider: "openai",
+		model:    "gpt-5.4",
+	}
+
+	record := reporter.buildRecord(buffer.detail, true, failFromErrors(context.Canceled))
+	if !record.Failed {
+		t.Fatal("expected record to be marked failed")
+	}
+	if record.Fail.StatusCode != clienterror.StatusClientClosedRequest {
+		t.Fatalf("Fail.StatusCode = %d, want %d", record.Fail.StatusCode, clienterror.StatusClientClosedRequest)
+	}
+	if record.Detail.TotalTokens != 15 {
+		t.Fatalf("Detail.TotalTokens = %d, want 15", record.Detail.TotalTokens)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

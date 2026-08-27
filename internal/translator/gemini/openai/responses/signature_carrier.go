@@ -78,7 +78,7 @@ func compatibleGeminiResponsesCarrierSignature(rawSignature, targetKind string) 
 
 func geminiResponsesCarrierSemanticTarget(item gjson.Result) string {
 	switch item.Get("type").String() {
-	case "function_call":
+	case "function_call", "custom_tool_call":
 		return geminiResponsesCarrierFunction
 	case "reasoning":
 		if strings.TrimSpace(item.Get("summary.0.text").String()) != "" {

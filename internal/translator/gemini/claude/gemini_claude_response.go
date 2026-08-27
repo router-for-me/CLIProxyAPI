@@ -264,8 +264,16 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 
 			thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
 			candidatesTokenCount := usageResult.Get("candidatesTokenCount").Int()
+			cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
+			promptTokenCount := usageResult.Get("promptTokenCount").Int() - cachedTokenCount
+			if promptTokenCount < 0 {
+				promptTokenCount = 0
+			}
 			template, _ = sjson.SetBytes(template, "usage.output_tokens", candidatesTokenCount+thoughtsTokenCount)
-			template, _ = sjson.SetBytes(template, "usage.input_tokens", usageResult.Get("promptTokenCount").Int())
+			template, _ = sjson.SetBytes(template, "usage.input_tokens", promptTokenCount)
+			if cachedTokenCount > 0 {
+				template, _ = sjson.SetBytes(template, "usage.cache_read_input_tokens", cachedTokenCount)
+			}
 
 			appendEvent("message_delta", string(template))
 			(*param).(*Params).HasFinalEvents = true
@@ -296,14 +304,22 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 	out, _ = sjson.SetBytes(out, "id", root.Get("responseId").String())
 	out, _ = sjson.SetBytes(out, "model", root.Get("modelVersion").String())
 
-	inputTokens := root.Get("usageMetadata.promptTokenCount").Int()
+	cachedTokens := root.Get("usageMetadata.cachedContentTokenCount").Int()
+	inputTokens := root.Get("usageMetadata.promptTokenCount").Int() - cachedTokens
+	if inputTokens < 0 {
+		inputTokens = 0
+	}
 	outputTokens := root.Get("usageMetadata.candidatesTokenCount").Int() + root.Get("usageMetadata.thoughtsTokenCount").Int()
 	out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
 	out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
+	if cachedTokens > 0 {
+		out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", cachedTokens)
+	}
 
 	parts := root.Get("candidates.0.content.parts")
 	textBuilder := strings.Builder{}
 	thinkingBuilder := strings.Builder{}
+	var thinkingSignature string
 	toolIDCounter := 0
 	hasToolCall := false
 	var blocks [][]byte
@@ -319,19 +335,39 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 	}
 
 	flushThinking := func() {
-		if thinkingBuilder.Len() == 0 {
+		if thinkingBuilder.Len() == 0 && thinkingSignature == "" {
 			return
 		}
 		block := []byte(`{"type":"thinking","thinking":""}`)
 		block, _ = sjson.SetBytes(block, "thinking", thinkingBuilder.String())
+		if thinkingSignature != "" {
+			block, _ = sjson.SetBytes(block, "signature", thinkingSignature)
+		}
 		blocks = append(blocks, block)
 		thinkingBuilder.Reset()
+		thinkingSignature = ""
 	}
 
 	if parts.IsArray() {
 		for _, part := range parts.Array() {
-			if text := part.Get("text"); text.Exists() && text.String() != "" {
-				if part.Get("thought").Bool() {
+			thoughtSignatureResult := part.Get("thoughtSignature")
+			if !thoughtSignatureResult.Exists() {
+				thoughtSignatureResult = part.Get("thought_signature")
+			}
+			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
+			if hasThoughtSignature {
+				thinkingSignature = thoughtSignatureResult.String()
+			}
+
+			text := part.Get("text")
+			functionCall := part.Get("functionCall")
+
+			if hasThoughtSignature && (!text.Exists() || text.String() == "") && !functionCall.Exists() {
+				continue
+			}
+
+			if text.Exists() && text.String() != "" {
+				if part.Get("thought").Bool() || hasThoughtSignature {
 					flushText()
 					thinkingBuilder.WriteString(text.String())
 					continue
@@ -341,7 +377,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 				continue
 			}
 
-			if functionCall := part.Get("functionCall"); functionCall.Exists() {
+			if functionCall.Exists() {
 				flushThinking()
 				flushText()
 				hasToolCall = true

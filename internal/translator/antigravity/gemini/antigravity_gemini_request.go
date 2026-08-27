@@ -639,6 +639,74 @@ type FunctionCallGroup struct {
 	CallNames       []string // ordered function call names for backfilling empty response names
 }
 
+func normalizeAntigravityInlineDataPart(part gjson.Result) ([]byte, bool) {
+	inline := part.Get("inlineData")
+	if !inline.Exists() {
+		inline = part.Get("inline_data")
+	}
+	if !inline.Exists() {
+		return nil, false
+	}
+	data := inline.Get("data").String()
+	if data == "" {
+		return nil, false
+	}
+	mimeType := inline.Get("mimeType").String()
+	if mimeType == "" {
+		mimeType = inline.Get("mime_type").String()
+	}
+	if mimeType == "" {
+		// Cloud Code Assist ignores inlineData without mimeType.
+		mimeType = "image/png"
+	}
+	out := []byte(`{"inlineData":{"mimeType":"","data":""}}`)
+	out, _ = sjson.SetBytes(out, "inlineData.mimeType", mimeType)
+	out, _ = sjson.SetBytes(out, "inlineData.data", data)
+	return out, true
+}
+
+func attachInlineDataToFunctionResponse(response gjson.Result, images [][]byte) gjson.Result {
+	if len(images) == 0 {
+		return response
+	}
+	target := []byte(response.Raw)
+	for _, img := range images {
+		target, _ = sjson.SetRawBytes(target, "functionResponse.parts.-1", img)
+	}
+	return gjson.ParseBytes(target)
+}
+
+// collectFunctionResponsesWithSiblingInlineData keeps functionResponse parts and
+// moves sibling inline_data/inlineData onto the nearest preceding functionResponse.
+// Leading images before the first functionResponse attach to that first response.
+func collectFunctionResponsesWithSiblingInlineData(parts gjson.Result) []gjson.Result {
+	responses := make([]gjson.Result, 0)
+	leadingImages := make([][]byte, 0)
+	current := -1
+	parts.ForEach(func(_, part gjson.Result) bool {
+		if part.Get("functionResponse").Exists() {
+			responses = append(responses, part)
+			current = len(responses) - 1
+			if len(leadingImages) > 0 {
+				responses[current] = attachInlineDataToFunctionResponse(responses[current], leadingImages)
+				leadingImages = nil
+			}
+			return true
+		}
+		imagePart, ok := normalizeAntigravityInlineDataPart(part)
+		if !ok {
+			return true
+		}
+		if current >= 0 {
+			responses[current] = attachInlineDataToFunctionResponse(responses[current], [][]byte{imagePart})
+			return true
+		}
+		leadingImages = append(leadingImages, imagePart)
+		return true
+	})
+	return responses
+}
+
 // parseFunctionResponseRaw attempts to normalize a function response part into a JSON object string.
 // Falls back to a minimal "functionResponse" object when parsing fails.
 // fallbackName is used when the response's own name is empty.
@@ -749,14 +817,8 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 		role := value.Get("role").String()
 		parts := value.Get("parts")
 
-		// Check if this content has function responses
-		var responsePartsInThisContent []gjson.Result
-		parts.ForEach(func(_, part gjson.Result) bool {
-			if part.Get("functionResponse").Exists() {
-				responsePartsInThisContent = append(responsePartsInThisContent, part)
-			}
-			return true
-		})
+		// Collect function responses and attach sibling inlineData to the nearest one.
+		responsePartsInThisContent := collectFunctionResponsesWithSiblingInlineData(parts)
 
 		// If this content has function responses, collect them
 		if len(responsePartsInThisContent) > 0 {

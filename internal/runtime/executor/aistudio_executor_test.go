@@ -39,6 +39,18 @@ func TestAIStudioTranslateRequestPreservesSummaryFromOriginalRequest(t *testing.
 	}
 }
 
+func TestAIStudioTranslateRequestPrependsLeadingUserForIssue4959ResponsesHistory(t *testing.T) {
+	executor := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
+	_, body, err := executor.translateRequest(context.Background(), cliproxyexecutor.Request{
+		Model:   "gemini-3.7-flash-high",
+		Payload: issue4959ResponsesModelFirstPayload(),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}, false)
+	if err != nil {
+		t.Fatalf("translateRequest() error = %v", err)
+	}
+	assertIssue4959LeadingUserContents(t, gjson.GetBytes(body.payload, "contents").Array())
+}
+
 func TestAIStudioExecutorExecuteStartsTTFTBeforeRelayWait(t *testing.T) {
 	const authID = "aistudio-ttft-auth"
 	delay := 40 * time.Millisecond

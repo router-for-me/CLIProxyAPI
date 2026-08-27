@@ -141,16 +141,27 @@ force-model-prefix: false
 # Default is false (disabled).
 passthrough-headers: false
 
-# Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
-# Individual API-key entries can override this via request-retry. OAuth/token JSON files can override via request_retry.
-# 0 disables retries for that credential; omit the field or set a negative value to keep this global setting.
+# Number of additional credential retry rounds after the first round exhausts
+# its eligible credentials. Round 0 is the initial round; round r only admits
+# credentials whose effective request-retry is at least r. Explicit non-negative
+# credential/provider overrides take precedence; omitted or negative overrides
+# inherit this global value, and explicit 0 only admits round 0. New CPA nodes
+# send retry_round=0 for the initial round and increment it for additional rounds;
+# legacy dispatch methods omit the field and keep old semantics.
+# Additional rounds apply to HTTP 403, 408, 429, 500, 502, 503, and 504 failures.
+# Individual credential/provider overrides take precedence; 0 disables additional
+# rounds, while an omitted or negative override inherits this global setting.
 request-retry: 3
 
-# Maximum number of different credentials to try for one failed request.
-# Set to 0 to keep legacy behavior (try all available credentials).
+# Maximum number of different credentials to try in each credential retry round
+# after per-credential round filtering. Set to 0 to try all available
+# credentials. Credentials skipped by this cap still age with the global round,
+# so the cap does not guarantee a fixed number of actual retries per credential.
 max-retry-credentials: 0
 
-# Maximum wait time in seconds for a cooled-down credential before triggering a retry.
+# Maximum cooldown wait in seconds between retry rounds.
+# Set to 0 or below to never wait for credential cooldown.
+# Retry rounds that need no wait remain controlled by request-retry.
 max-retry-interval: 30
 
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
@@ -228,6 +239,17 @@ codex:
   identity-confuse: false
   # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
   disable-codex-cloaking: false
+  # Hold back the initial handshake events (response.created, response.in_progress and the
+  # websocket metadata frames) until the upstream emits its first generated event.
+  # Why: the upstream smuggles `server_is_overloaded` rejections *inside* an HTTP 200 stream,
+  # right after those handshake events, instead of returning 503 on the wire. Buffering them
+  # keeps the downstream response headers uncommitted long enough to transparently retry on
+  # another credential. Only overload/rate-limit rejections trigger failover; every other
+  # terminal failure is still delivered in-stream exactly as before.
+  # Trade-off: response headers are delayed until generation starts, which can trip client or
+  # reverse-proxy read timeouts (e.g. nginx proxy_read_timeout) on long reasoning requests.
+  # Default: false
+  stream-bootstrap-buffering: false
   # When true, optimize Codex Desktop, codex-tui, and codex_cli_rs requests for multi-agent v2.
   # This refreshes Codex spawn_agent model details, removes message parameter encryption,
   # normalizes encrypted agent_message content for Codex, and converts agent_message input
@@ -298,7 +320,7 @@ nonstream-keepalive-interval: 0
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
 #     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
-#     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
+#     request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400        # HTTP status code to match
 #         match:             # optional: string contains matching
@@ -340,7 +362,7 @@ nonstream-keepalive-interval: 0
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "native" # optional: require calls like "native/gemini-3-pro-preview" to target this credential
 #     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
-#     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
+#     request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
 #         match:
@@ -370,7 +392,7 @@ nonstream-keepalive-interval: 0
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
-#     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
+#     request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
 #         match:
@@ -412,7 +434,7 @@ nonstream-keepalive-interval: 0
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "xai" # optional: require calls like "xai/grok-4.5" to target this credential
 #     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
-#     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
+#     request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
 #         match:
@@ -447,7 +469,7 @@ nonstream-keepalive-interval: 0
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
 #     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
-#     request-retry: 3 # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
+#     request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
 #         match:
@@ -525,7 +547,7 @@ nonstream-keepalive-interval: 0
 #     # on any other gateway (including Kimi) still sends the billing block, but without cch,
 #     # so a per-request hash cannot bust that gateway's prompt cache. api.anthropic.com
 #     # strips the block itself (0 tokens, no cache impact). Kimi drops the whole block by
-#     # default and keeps it, unsigned, after an explicit fingerprint-profile opt-in.
+#     # default and keeps it, unsigned, after an explicit fingerprint opt-in.
 #     # A real Claude OAuth credential always signs, on every upstream: a downstream Claude
 #     # Code pointed at CPA cannot produce that value itself.
 #     #
@@ -536,15 +558,16 @@ nonstream-keepalive-interval: 0
 #     #     cloak:
 #     #       mode: "always"   # recommended when upstream rejects non-CLI clients
 #     #
-#     # Delegated Anthropic Messages OAuth files (Kimi, etc.) use the same field in the
-#     # auth JSON. Refresh keeps it. Example:
+#     # Delegated Anthropic Messages OAuth files (Kimi, etc.) use "fingerprint_profile"
+#     # in the auth JSON. Refresh keeps it. Example:
 #     #   {
 #     #     "type": "kimi",
 #     #     "access_token": "...",
 #     #     "refresh_token": "...",
-#     #     "fingerprint-profile": "claude-code-cli"
+#     #     "fingerprint_profile": "claude-code-cli"
 #     #   }
-#     # fingerprint-profile: "claude-code-cli" # optional: default is empty (caller-owned); uncomment to opt into Claude Code CLI Messages fingerprinting
+#     #   Legacy "fingerprint-profile" credentials remain supported and are normalized at load time.
+#     # fingerprint-profile: "claude-code-cli" # optional claude-api-key provider field; default is empty (caller-owned); uncomment to opt in
 #     experimental-cch-signing: false # deprecated compatibility field; CCH is generated automatically
 #                                     # for real Claude OAuth on any upstream, and for claude-code-cli profiles
 #                                     # only on api.anthropic.com; Vertex keeps provider-native signing
@@ -592,7 +615,7 @@ nonstream-keepalive-interval: 0
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
 #     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
 #     disable-cooling: false # optional provider override: true disables cooling, false enables it; omit to inherit global
-#     request-retry: 3 # optional: per-provider override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
+#     request-retry: 3 # optional per-provider override; 0 disables additional rounds; omit or set < 0 to inherit global
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
 #         match:
@@ -642,7 +665,7 @@ nonstream-keepalive-interval: 0
 #     weight: 5                                    # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test"                              # optional: require calls like "test/vertex-pro" to target this credential
 #     disable-cooling: false                       # optional override: true disables cooling, false enables it; omit to inherit global
-#     request-retry: 3                             # optional: per-auth override of the global request-retry; 0 disables retries; omit or set < 0 to use the global value
+#     request-retry: 3                             # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
 #     base-url: "https://example.com/api"         # optional, e.g. https://zenmux.ai/api; falls back to Google Vertex when omitted
 #     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
 #     # proxy-url: "direct" # optional: explicit direct connect for this credential
@@ -675,13 +698,14 @@ nonstream-keepalive-interval: 0
 #   fork: true                  # keep the upstream model and also expose the alias as a separate client-visible model
 #   display-name: "Model Name" # override the human-readable name shown in model catalogs
 #   force-mapping: true         # rewrite upstream response model fields back to the client-visible alias (example below uses antigravity only)
-# Per-auth OAuth aliases can also be stored in an OAuth auth JSON file as "model-aliases".
+# Per-auth OAuth aliases can also be stored in an OAuth auth JSON file as "model_aliases".
+# Legacy "model-aliases" credentials remain supported and are normalized at load time.
 # They apply only to that selected auth and take precedence over global aliases for the same client-visible alias.
 # Example auth JSON:
 # {
 #   "type": "codex",
 #   "email": "user@example.com",
-#   "model-aliases": [
+#   "model_aliases": [
 #     {"name": "gpt-5.3-codex-spark", "alias": "gpt-5.5"},
 #     {"name": "gpt-5.3-codex-spark", "alias": "gpt-5.4"}
 #   ]
@@ -731,6 +755,48 @@ nonstream-keepalive-interval: 0
 #     - "kimi-k2-thinking"
 #   xai:
 #     - "grok-3-mini"
+
+# OAuth provider request-scoped error rules (custom error classification for OAuth credentials)
+# oauth-request-scoped-errors:
+#   vertex:
+#     - status: 400
+#       match:
+#         - "maximum_context_length"
+#         - "context_length_exceeded"
+#       match-regexr:
+#         - "maximum_context_length$"
+#         - "^context_length_exceeded"
+#       action: "stop" # options: "stop", "stop-and-cooldown", "continue", "continue-and-cooldown"
+#   aistudio:
+#     - status: 400
+#       match:
+#         - "invalid_argument"
+#       action: "stop"
+#   antigravity:
+#     - status: 500
+#       match:
+#         - "internal_server_error"
+#       action: "stop-and-cooldown"
+#   claude:
+#     - status: 400
+#       match:
+#         - "prompt is too long"
+#       action: "stop"
+#   codex:
+#     - status: 400
+#       match:
+#         - "context_window_exceeded"
+#       action: "stop"
+#   kimi:
+#     - status: 400
+#       match:
+#         - "length_limit"
+#       action: "stop"
+#   xai:
+#     - status: 400
+#       match:
+#         - "max_tokens_exceeded"
+#       action: "stop"
 
 # Optional payload configuration
 # payload:

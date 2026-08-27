@@ -19,7 +19,11 @@ import (
 )
 
 const (
-	homeAuthCountMetadataKey = "__cliproxy_home_auth_count"
+	homeAuthCountMetadataKey  = "__cliproxy_home_auth_count"
+	homeRetryRoundMetadataKey = "request_retry_round"
+	// ExcludedAuthIDsMetadataKey stores credential IDs already attempted in the
+	// current request retry round.
+	ExcludedAuthIDsMetadataKey = "excluded_auth_ids"
 	// CloseAllExecutionSessionsID asks an executor to release all active execution sessions.
 	// Executors that do not support this marker may ignore it.
 	CloseAllExecutionSessionsID = "__all_execution_sessions__"
@@ -120,6 +124,139 @@ type homeErrorDetail struct {
 	Code         string `json:"code,omitempty"`
 	Retryable    bool   `json:"retryable,omitempty"`
 	RetryAfterMS int64  `json:"retry_after_ms,omitempty"`
+	RequestRetry *int   `json:"request_retry,omitempty"`
+}
+
+type homeDispatchRetryAfterError struct {
+	cause           *Error
+	retryAfter      time.Duration
+	requestRetry    int
+	hasRequestRetry bool
+}
+
+// homeRetryRoundExhaustedError marks a terminal error produced after the
+// current Home credential round has been exhausted. The wrapped error retains
+// its status and retry-after metadata for the outer request retry policy.
+type homeRetryRoundExhaustedError struct {
+	cause         error
+	retryAfter    time.Duration
+	hasRetryAfter bool
+	retryNow      bool
+}
+
+func (e *homeRetryRoundExhaustedError) Error() string {
+	if e == nil || e.cause == nil {
+		return ""
+	}
+	return e.cause.Error()
+}
+
+func (e *homeRetryRoundExhaustedError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *homeRetryRoundExhaustedError) RetryAfter() *time.Duration {
+	if e == nil || !e.hasRetryAfter {
+		return nil
+	}
+	value := e.retryAfter
+	return &value
+}
+
+func markHomeRetryRoundExhausted(err error, retryAfter *time.Duration, retryNow bool) error {
+	if err == nil {
+		return nil
+	}
+	marked := &homeRetryRoundExhaustedError{cause: err, retryNow: retryNow}
+	if retryAfter != nil {
+		marked.retryAfter = *retryAfter
+		marked.hasRetryAfter = true
+	}
+	return marked
+}
+
+func isHomeRetryRoundExhausted(err error) bool {
+	if err == nil {
+		return false
+	}
+	var marker *homeRetryRoundExhaustedError
+	return errors.As(err, &marker) && marker != nil
+}
+
+type homeRetryRoundTiming struct {
+	retryAfter time.Duration
+	immediate  bool
+	invalid    bool
+}
+
+func (t *homeRetryRoundTiming) Observe(err error) {
+	if t == nil || err == nil || t.immediate || t.invalid {
+		return
+	}
+	retryAfter := retryAfterFromError(err)
+	if retryAfter == nil {
+		return
+	}
+	if *retryAfter == 0 {
+		t.retryAfter = 0
+		t.immediate = true
+		return
+	}
+	if *retryAfter < 0 {
+		t.retryAfter = *retryAfter
+		t.invalid = true
+		return
+	}
+	if t.retryAfter <= 0 || *retryAfter < t.retryAfter {
+		t.retryAfter = *retryAfter
+	}
+}
+
+func (t *homeRetryRoundTiming) RetryAfter() *time.Duration {
+	if t == nil || t.immediate || (!t.invalid && t.retryAfter <= 0) {
+		return nil
+	}
+	value := t.retryAfter
+	return &value
+}
+
+func (e *homeDispatchRetryAfterError) Error() string {
+	if e == nil || e.cause == nil {
+		return ""
+	}
+	return e.cause.Error()
+}
+
+func (e *homeDispatchRetryAfterError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *homeDispatchRetryAfterError) StatusCode() int {
+	if e == nil || e.cause == nil {
+		return 0
+	}
+	return e.cause.HTTPStatus
+}
+
+func (e *homeDispatchRetryAfterError) RetryAfter() *time.Duration {
+	if e == nil || e.retryAfter <= 0 {
+		return nil
+	}
+	value := e.retryAfter
+	return &value
+}
+
+func (e *homeDispatchRetryAfterError) RequestRetryLimit() (int, bool) {
+	if e == nil || !e.hasRequestRetry {
+		return 0, false
+	}
+	return e.requestRetry, true
 }
 
 const (
@@ -159,6 +296,30 @@ func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick er
 	}
 }
 
+func isHomeNextRoundImmediatelyAvailable(err error) bool {
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(authErr.Code), "auth_unavailable")
+}
+
+func pendingHomeRetryRoundDelay(err error, maxWait time.Duration, retryLimit *int, acceptRemoteRetryLimit bool) (time.Duration, bool) {
+	if err == nil || isHomeRetryRoundExhausted(err) {
+		return 0, false
+	}
+	var homeCooldown *homeDispatchRetryAfterError
+	if !errors.As(err, &homeCooldown) || homeCooldown == nil {
+		return 0, false
+	}
+	observeHomeCooldownRetryLimit(homeCooldown, retryLimit, acceptRemoteRetryLimit)
+	retryAfter := homeCooldown.RetryAfter()
+	if retryAfter == nil || *retryAfter <= 0 || maxWait <= 0 || *retryAfter > maxWait {
+		return 0, false
+	}
+	return *retryAfter, true
+}
+
 func homeAuthAlreadyTried(tried map[string]struct{}, authID string) bool {
 	authID = strings.TrimSpace(authID)
 	if authID == "" || len(tried) == 0 {
@@ -181,6 +342,7 @@ type homeAuthDispatchResponse struct {
 	Provider      string `json:"provider"`
 	AuthIndex     string `json:"auth_index"`
 	UserAPIKey    string `json:"user_api_key"`
+	RequestRetry  *int   `json:"request_retry,omitempty"`
 	ForceMapping  bool   `json:"force_mapping"`
 	OriginalAlias string `json:"original_alias"`
 	Auth          Auth   `json:"auth"`
@@ -192,8 +354,24 @@ type homeAuthDispatcher interface {
 	AbortAmbiguousDispatch()
 }
 
+type homeDispatchConstraintsDispatcher interface {
+	RPopAuthWithConstraints(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int, excludedAuthIDs []string, pinnedAuthID string) ([]byte, error)
+}
+
+type homeDispatchRetryRoundConstraintsDispatcher interface {
+	RPopAuthWithRetryRoundConstraints(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int, retryRound int, excludedAuthIDs []string, pinnedAuthID string) ([]byte, error)
+}
+
 type homeCredentialPolicyDispatcher interface {
 	RPopAuthWithPolicy(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int, credentialPolicy string) ([]byte, error)
+}
+
+type homeCredentialPolicyConstraintsDispatcher interface {
+	RPopAuthWithPolicyAndConstraints(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int, credentialPolicy string, excludedAuthIDs []string, pinnedAuthID string) ([]byte, error)
+}
+
+type homeCredentialPolicyRetryRoundConstraintsDispatcher interface {
+	RPopAuthWithPolicyAndRetryRoundConstraints(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int, credentialPolicy string, retryRound int, excludedAuthIDs []string, pinnedAuthID string) ([]byte, error)
 }
 
 var currentHomeDispatcher = func() homeAuthDispatcher {
@@ -325,7 +503,7 @@ func (m *Manager) lockHomeWebsocketSession(ctx context.Context, opts cliproxyexe
 	return mutex.Unlock
 }
 
-func (m *Manager) retainedHomeSessionSelection(ctx context.Context, opts cliproxyexecutor.Options, model string) (*HomeDispatchSelection, bool, error) {
+func (m *Manager) retainedHomeSessionSelection(ctx context.Context, opts cliproxyexecutor.Options, model string, excludedAuthIDs map[string]struct{}) (*HomeDispatchSelection, bool, error) {
 	if m == nil || !cliproxyexecutor.DownstreamWebsocket(ctx) {
 		return nil, false, nil
 	}
@@ -338,7 +516,7 @@ func (m *Manager) retainedHomeSessionSelection(ctx context.Context, opts cliprox
 	routeModel, validRouteModel := validCanonicalHomeConcurrencyModelKey(model)
 	var retained *HomeDispatchSelection
 	var ended []*HomeDispatchSelection
-	fallbackAttempt := homeAuthCountFromMetadata(opts.Metadata) > 1
+	fallbackAttempt := homeAuthCountFromMetadata(opts.Metadata) > 1 || homeRetryRoundFromMetadata(opts.Metadata) > 0
 	m.mu.Lock()
 	selections := m.homeSessionSelections[sessionID]
 	for key, selection := range selections {
@@ -348,7 +526,8 @@ func (m *Manager) retainedHomeSessionSelection(ctx context.Context, opts cliprox
 		}
 		matchesCredential := credentialID == "" || key.credentialID == credentialID
 		matchesRoute := validRouteModel && key.routeModel == routeModel
-		if !fallbackAttempt && matchesCredential && selection.Active() && matchesRoute && retained == nil {
+		_, excluded := excludedAuthIDs[strings.TrimSpace(key.credentialID)]
+		if !fallbackAttempt && !excluded && matchesCredential && selection.Active() && matchesRoute && retained == nil {
 			retained = selection
 			continue
 		}
@@ -711,7 +890,7 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	selection, errSelection := m.pickHomeDispatchSelection(ctx, model, opts)
+	selection, errSelection := m.pickHomeDispatchSelection(ctx, model, withHomeExcludedAuthIDs(opts, tried))
 	if errSelection != nil {
 		return nil, nil, "", errSelection
 	}
@@ -739,7 +918,14 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	if requestedModel == "" {
 		requestedModel = requestedModelFromMetadata(opts.Metadata, model)
 	}
-	retained, retainedOK, errRetained := m.retainedHomeSessionSelection(ctx, opts, requestedModel)
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	retryRound := homeRetryRoundFromMetadata(opts.Metadata)
+	excludedAuthIDList := homeExcludedAuthIDsFromMetadata(opts.Metadata)
+	excludedAuthIDs := make(map[string]struct{}, len(excludedAuthIDList))
+	for _, authID := range excludedAuthIDList {
+		excludedAuthIDs[authID] = struct{}{}
+	}
+	retained, retainedOK, errRetained := m.retainedHomeSessionSelection(ctx, opts, requestedModel, excludedAuthIDs)
 	if errRetained != nil {
 		return nil, errRetained
 	}
@@ -747,8 +933,8 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		return retained, nil
 	}
 	if sessionID := homeExecutionSessionIDFromMetadata(opts.Metadata); sessionID != "" {
-		if credentialID := pinnedAuthIDFromMetadata(opts.Metadata); credentialID != "" {
-			if errEnd := m.endMismatchedHomeSessionSelections(ctx, sessionID, credentialID, requestedModel, true); errEnd != nil {
+		if pinnedAuthID != "" {
+			if errEnd := m.endMismatchedHomeSessionSelections(ctx, sessionID, pinnedAuthID, requestedModel, true); errEnd != nil {
 				return nil, errEnd
 			}
 		}
@@ -763,6 +949,11 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	if !client.HeartbeatOK() {
 		return nil, &Error{Code: "home_unavailable", Message: "home control center unavailable", HTTPStatus: http.StatusServiceUnavailable}
 	}
+	if pinnedAuthID != "" {
+		if _, excluded := excludedAuthIDs[pinnedAuthID]; excluded {
+			return nil, &Error{Code: "auth_not_found", Message: "pinned auth is unavailable in the current retry round", HTTPStatus: http.StatusServiceUnavailable}
+		}
+	}
 	pending, errBegin := registry.BeginDispatch()
 	if errBegin != nil {
 		return nil, &Error{Code: "home_unavailable", Message: "home execution registry unavailable", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
@@ -774,9 +965,21 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	var raw []byte
 	var errRPop error
 	if credentialPolicy == "" {
-		raw, errRPop = client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata))
+		if retryRoundClient, okRetryRound := client.(homeDispatchRetryRoundConstraintsDispatcher); okRetryRound {
+			raw, errRPop = retryRoundClient.RPopAuthWithRetryRoundConstraints(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), retryRound, excludedAuthIDList, pinnedAuthID)
+		} else if constrainedClient, okConstraints := client.(homeDispatchConstraintsDispatcher); okConstraints {
+			raw, errRPop = constrainedClient.RPopAuthWithConstraints(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), excludedAuthIDList, pinnedAuthID)
+		} else {
+			raw, errRPop = client.RPopAuth(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata))
+		}
+	} else if retryRoundPolicyClient, okRetryRound := client.(homeCredentialPolicyRetryRoundConstraintsDispatcher); okRetryRound {
+		raw, errRPop = retryRoundPolicyClient.RPopAuthWithPolicyAndRetryRoundConstraints(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), credentialPolicy, retryRound, excludedAuthIDList, pinnedAuthID)
 	} else if policyClient, okPolicy := client.(homeCredentialPolicyDispatcher); okPolicy {
-		raw, errRPop = policyClient.RPopAuthWithPolicy(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), credentialPolicy)
+		if constrainedClient, okConstraints := client.(homeCredentialPolicyConstraintsDispatcher); okConstraints {
+			raw, errRPop = constrainedClient.RPopAuthWithPolicyAndConstraints(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), credentialPolicy, excludedAuthIDList, pinnedAuthID)
+		} else {
+			raw, errRPop = policyClient.RPopAuthWithPolicy(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), credentialPolicy)
+		}
 	} else {
 		pending.End()
 		return nil, &Error{Code: "home_unavailable", Message: "home dispatcher does not support credential policies", HTTPStatus: http.StatusServiceUnavailable}
@@ -887,6 +1090,10 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		endScope()
 		return nil, &Error{Code: "invalid_auth", Message: "home returned auth without id", HTTPStatus: http.StatusBadGateway}
 	}
+	if pinnedAuthID != "" && strings.TrimSpace(auth.ID) != pinnedAuthID {
+		endScope()
+		return nil, &Error{Code: "auth_not_found", Message: "home returned an auth that does not match the pinned credential", HTTPStatus: http.StatusServiceUnavailable}
+	}
 	if errIdentity := verifyAccountedHomeConcurrencyIdentity(envelope.Tuple, &auth, dispatch.AuthIndex); errIdentity != nil {
 		endScope()
 		return nil, errIdentity
@@ -935,6 +1142,10 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		endScope()
 		return nil, &Error{Code: "home_unavailable", Message: "home execution registry unavailable", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
 	}
+	if pinnedAuthID == "" && dispatch.RequestRetry != nil && *dispatch.RequestRetry >= 0 {
+		selection.requestRetry = *dispatch.RequestRetry
+		selection.hasRequestRetry = true
+	}
 	if envelope.Present {
 		selection.accountedModel = envelope.Tuple.Model
 	}
@@ -945,6 +1156,27 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		}
 	}
 	return selection, nil
+}
+
+func homeRetryRoundFromMetadata(metadata map[string]any) int {
+	if metadata == nil {
+		return 0
+	}
+	switch value := metadata[homeRetryRoundMetadataKey].(type) {
+	case int:
+		if value > 0 {
+			return value
+		}
+	case int64:
+		if value > 0 {
+			return int(value)
+		}
+	case float64:
+		if value > 0 && value == float64(int(value)) {
+			return int(value)
+		}
+	}
+	return 0
 }
 
 func requestedModelFromMetadata(metadata map[string]any, fallback string) string {

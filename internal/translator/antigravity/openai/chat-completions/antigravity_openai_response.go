@@ -25,8 +25,13 @@ import (
 type convertCliResponseToOpenAIChatParams struct {
 	UnixTimestamp        int64
 	FunctionIndex        int
+	SawResponse          bool   // Tracks whether any upstream response chunk was seen
 	SawToolCall          bool   // Tracks if any tool call was seen in the entire stream
+	SawFinishReason      bool   // Tracks whether finish_reason has been emitted
 	UpstreamFinishReason string // Caches the upstream finish reason for final chunk
+	ModelVersion         string
+	ResponseID           string
+	PendingUsageMetadata []byte
 	SanitizedNameMap     map[string]string
 }
 
@@ -48,19 +53,45 @@ var functionCallIDCounter uint64
 // Returns:
 //   - [][]byte: A slice of OpenAI-compatible JSON responses
 func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
-	if *param == nil {
-		*param = &convertCliResponseToOpenAIChatParams{
-			UnixTimestamp:    0,
-			FunctionIndex:    0,
-			SanitizedNameMap: util.DisambiguatedToolNameMap(originalRequestRawJSON),
+	params, ok := (*param).(*convertCliResponseToOpenAIChatParams)
+	if !ok {
+		params = &convertCliResponseToOpenAIChatParams{
+			UnixTimestamp: 0,
+			FunctionIndex: 0,
 		}
+		*param = params
 	}
-	if (*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap == nil {
-		(*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap = util.DisambiguatedToolNameMap(originalRequestRawJSON)
+	if params.SanitizedNameMap == nil {
+		params.SanitizedNameMap = util.DisambiguatedToolNameMap(originalRequestRawJSON)
 	}
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
+		// Never finalize a stream that produced no response at all: an empty
+		// upstream body must stay detectable as a failure rather than be reported
+		// as a successful empty completion.
+		if params.SawResponse && !params.SawFinishReason {
+			params.SawFinishReason = true
+			finishReason, nativeFinishReason := resolveOpenAIFinishReason(params)
+			template := []byte(`{"id":"","object":"chat.completion.chunk","created":0,"model":"model","choices":[{"index":0,"delta":{},"finish_reason":"stop","native_finish_reason":"stop"}]}`)
+			template, _ = sjson.SetBytes(template, "created", params.UnixTimestamp)
+			if params.ModelVersion != "" {
+				template, _ = sjson.SetBytes(template, "model", params.ModelVersion)
+			}
+			if params.ResponseID != "" {
+				template, _ = sjson.SetBytes(template, "id", params.ResponseID)
+			}
+			if len(params.PendingUsageMetadata) > 0 {
+				template = setOpenAIUsageMetadata(template, gjson.ParseBytes(params.PendingUsageMetadata))
+			}
+			template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
+			template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", nativeFinishReason)
+			return [][]byte{template}
+		}
 		return [][]byte{}
+	}
+
+	if !params.SawResponse {
+		params.SawResponse = hasAntigravityResponsePayload(rawJSON)
 	}
 
 	// Initialize the OpenAI SSE template.
@@ -68,51 +99,42 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 
 	// Extract and set the model version.
 	if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
-		template, _ = sjson.SetBytes(template, "model", modelVersionResult.String())
+		params.ModelVersion = modelVersionResult.String()
+		template, _ = sjson.SetBytes(template, "model", params.ModelVersion)
 	}
 
 	// Extract and set the creation timestamp.
 	if createTimeResult := gjson.GetBytes(rawJSON, "response.createTime"); createTimeResult.Exists() {
 		t, err := time.Parse(time.RFC3339Nano, createTimeResult.String())
 		if err == nil {
-			(*param).(*convertCliResponseToOpenAIChatParams).UnixTimestamp = t.Unix()
+			params.UnixTimestamp = t.Unix()
 		}
-		template, _ = sjson.SetBytes(template, "created", (*param).(*convertCliResponseToOpenAIChatParams).UnixTimestamp)
+		template, _ = sjson.SetBytes(template, "created", params.UnixTimestamp)
 	} else {
-		template, _ = sjson.SetBytes(template, "created", (*param).(*convertCliResponseToOpenAIChatParams).UnixTimestamp)
+		template, _ = sjson.SetBytes(template, "created", params.UnixTimestamp)
 	}
 
 	// Extract and set the response ID.
 	if responseIDResult := gjson.GetBytes(rawJSON, "response.responseId"); responseIDResult.Exists() {
-		template, _ = sjson.SetBytes(template, "id", responseIDResult.String())
+		params.ResponseID = responseIDResult.String()
+		template, _ = sjson.SetBytes(template, "id", params.ResponseID)
 	}
 
 	// Cache the finish reason - do NOT set it in output yet (will be set on final chunk)
 	if finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
-		(*param).(*convertCliResponseToOpenAIChatParams).UpstreamFinishReason = strings.ToUpper(finishReasonResult.String())
+		params.UpstreamFinishReason = strings.ToUpper(finishReasonResult.String())
 	}
 
-	// Extract and set usage metadata (token counts).
-	if usageResult := gjson.GetBytes(rawJSON, "response.usageMetadata"); usageResult.Exists() {
-		cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
-		template, _ = sjson.SetBytes(template, "usage.completion_tokens", usageResult.Get("candidatesTokenCount").Int())
-		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
-			template, _ = sjson.SetBytes(template, "usage.total_tokens", totalTokenCountResult.Int())
+	// Extract and set usage metadata (token counts). FilterSSEUsageMetadata renames
+	// non-terminal usage to cpaUsageMetadata, so retain the latest copy for [DONE]
+	// instead of treating an intermediate chunk as terminal.
+	usageResult := gjson.GetBytes(rawJSON, "response.usageMetadata")
+	if !usageResult.Exists() {
+		if pendingUsage := gjson.GetBytes(rawJSON, "response.cpaUsageMetadata"); pendingUsage.Exists() {
+			params.PendingUsageMetadata = append(params.PendingUsageMetadata[:0], pendingUsage.Raw...)
 		}
-		promptTokenCount := usageResult.Get("promptTokenCount").Int()
-		thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
-		template, _ = sjson.SetBytes(template, "usage.prompt_tokens", promptTokenCount)
-		if thoughtsTokenCount > 0 {
-			template, _ = sjson.SetBytes(template, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
-		}
-		// Include cached token count if present (indicates prompt caching is working)
-		if cachedTokenCount > 0 {
-			var err error
-			template, err = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount)
-			if err != nil {
-				log.Warnf("antigravity openai response: failed to set cached_tokens: %v", err)
-			}
-		}
+	} else {
+		template = setOpenAIUsageMetadata(template, usageResult)
 	}
 
 	// Process the main content part of the response.
@@ -199,28 +221,88 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		}
 	}
 
-	// Determine finish_reason only on the final chunk (has both finishReason and usage metadata)
-	params := (*param).(*convertCliResponseToOpenAIChatParams)
-	upstreamFinishReason := params.UpstreamFinishReason
-	sawToolCall := params.SawToolCall
-
-	usageExists := gjson.GetBytes(rawJSON, "response.usageMetadata").Exists()
-	isFinalChunk := upstreamFinishReason != "" && usageExists
+	// Determine finish_reason only on the final chunk, which upstream marks with
+	// both finishReason and usage metadata. A usage-carrying chunk without
+	// finishReason must not be treated as terminal: upstream can split the two
+	// across chunks and keep streaming afterwards, and finalizing early would make
+	// strict clients drop the remaining content. When upstream never sends
+	// finishReason at all, the [DONE] branch synthesizes the terminal chunk.
+	usageMetadata := gjson.GetBytes(rawJSON, "response.usageMetadata")
+	isFinalChunk := params.UpstreamFinishReason != "" && usageMetadata.Exists()
 
 	if isFinalChunk {
-		var finishReason string
-		if sawToolCall {
-			finishReason = "tool_calls"
-		} else if upstreamFinishReason == "MAX_TOKENS" {
-			finishReason = "max_tokens"
-		} else {
-			finishReason = "stop"
-		}
+		finishReason, nativeFinishReason := resolveOpenAIFinishReason(params)
 		template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
-		template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", strings.ToLower(upstreamFinishReason))
+		template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", nativeFinishReason)
+		params.SawFinishReason = true
 	}
 
 	return [][]byte{template}
+}
+
+// hasAntigravityResponsePayload reports whether a chunk carries actual generated
+// content or token accounting. Presence alone is not enough: an envelope such as
+// `{}`, `{"response":{}}` or `{"response":{"candidates":[]}}` must not count as a
+// started stream, otherwise a keepalive or malformed event would be enough to
+// finalize a stream that produced nothing.
+func hasAntigravityResponsePayload(rawJSON []byte) bool {
+	for _, path := range []string{"response.candidates", "candidates"} {
+		if candidates := gjson.GetBytes(rawJSON, path); candidates.IsArray() && len(candidates.Array()) > 0 {
+			return true
+		}
+	}
+	// FilterSSEUsageMetadata renames non-terminal usage to cpaUsageMetadata before
+	// the translator sees it, so both spellings must be accepted.
+	for _, path := range []string{
+		"response.usageMetadata", "response.cpaUsageMetadata",
+		"usageMetadata", "cpaUsageMetadata",
+	} {
+		if usage := gjson.GetBytes(rawJSON, path); usage.IsObject() && len(usage.Map()) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveOpenAIFinishReason maps the cached upstream state to the OpenAI
+// finish_reason and native_finish_reason pair. Both the terminal upstream chunk
+// and the synthesized [DONE] chunk must agree on this mapping.
+func resolveOpenAIFinishReason(params *convertCliResponseToOpenAIChatParams) (finishReason, nativeFinishReason string) {
+	switch {
+	case params.SawToolCall:
+		finishReason = "tool_calls"
+	case params.UpstreamFinishReason == "MAX_TOKENS":
+		finishReason = "max_tokens"
+	default:
+		finishReason = "stop"
+	}
+	nativeFinishReason = "stop"
+	if params.UpstreamFinishReason != "" {
+		nativeFinishReason = strings.ToLower(params.UpstreamFinishReason)
+	}
+	return finishReason, nativeFinishReason
+}
+
+func setOpenAIUsageMetadata(template []byte, usageResult gjson.Result) []byte {
+	cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
+	template, _ = sjson.SetBytes(template, "usage.completion_tokens", usageResult.Get("candidatesTokenCount").Int())
+	if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
+		template, _ = sjson.SetBytes(template, "usage.total_tokens", totalTokenCountResult.Int())
+	}
+	promptTokenCount := usageResult.Get("promptTokenCount").Int()
+	thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
+	template, _ = sjson.SetBytes(template, "usage.prompt_tokens", promptTokenCount)
+	if thoughtsTokenCount > 0 {
+		template, _ = sjson.SetBytes(template, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
+	}
+	if cachedTokenCount > 0 {
+		var err error
+		template, err = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount)
+		if err != nil {
+			log.Warnf("antigravity openai response: failed to set cached_tokens: %v", err)
+		}
+	}
+	return template
 }
 
 // ConvertAntigravityResponseToOpenAINonStream converts a non-streaming Antigravity response to a non-streaming OpenAI response.

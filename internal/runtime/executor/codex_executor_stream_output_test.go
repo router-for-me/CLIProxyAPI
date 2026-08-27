@@ -576,6 +576,13 @@ func TestCodexTerminalFailureErrClassifiesStatus(t *testing.T) {
 			event:      `{"type":"response.failed","response":{"error":{"type":"upstream_error","code":"unknown","message":"Upstream failed."}}}`,
 			wantStatus: http.StatusBadGateway,
 		},
+		// Overload rejections keep falling through to 502 here. The 503 restoration is scoped to
+		// the opt-in bootstrap buffering path so this shared mapping stays unchanged.
+		{
+			name:       "overload stays a bad gateway without buffering",
+			event:      `{"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`,
+			wantStatus: http.StatusBadGateway,
+		},
 	}
 
 	for _, tc := range tests {

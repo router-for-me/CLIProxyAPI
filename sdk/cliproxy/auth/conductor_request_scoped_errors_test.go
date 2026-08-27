@@ -1183,6 +1183,23 @@ func (e wrappedResponseBodyError) ResponseBody() []byte {
 	return e.body
 }
 
+func TestExtractRequestScopedErrorRulesSupportsLegacyMetadataKey(t *testing.T) {
+	auth := &Auth{Metadata: map[string]any{
+		"request-scoped-errors": []any{
+			map[string]any{
+				"status": float64(429),
+				"match":  []any{"legacy-rate-limit"},
+				"action": "stop",
+			},
+		},
+	}}
+
+	rules := extractRequestScopedErrorRules(auth, nil)
+	if len(rules) != 1 || rules[0].Status != 429 || rules[0].Action != "stop" {
+		t.Fatalf("legacy request-scoped-errors rules = %#v", rules)
+	}
+}
+
 func TestRequestScopedErrors_ResponseBodyProvider_MatchesUnderlyingPayload(t *testing.T) {
 	previous := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

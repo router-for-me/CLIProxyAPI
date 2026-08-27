@@ -132,7 +132,7 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 }
 
-func TestFileSynthesizer_Synthesize_KimiFingerprintProfile(t *testing.T) {
+func TestFileSynthesizer_Synthesize_LegacyKimiFingerprintProfile(t *testing.T) {
 	tempDir := t.TempDir()
 	authData := map[string]any{
 		"type":                "kimi",
@@ -166,8 +166,11 @@ func TestFileSynthesizer_Synthesize_KimiFingerprintProfile(t *testing.T) {
 	if got := auths[0].Attributes["fingerprint_profile"]; got != "claude-code-cli" {
 		t.Fatalf("attributes fingerprint_profile = %q, want claude-code-cli", got)
 	}
-	if got, _ := auths[0].Metadata["fingerprint-profile"].(string); got != "claude-code-cli" {
-		t.Fatalf("metadata fingerprint-profile = %q, want claude-code-cli", got)
+	if got, _ := auths[0].Metadata["fingerprint_profile"].(string); got != "claude-code-cli" {
+		t.Fatalf("metadata fingerprint_profile = %q, want claude-code-cli", got)
+	}
+	if _, exists := auths[0].Metadata["fingerprint-profile"]; exists {
+		t.Fatalf("legacy fingerprint-profile was not normalized: %#v", auths[0].Metadata)
 	}
 }
 
@@ -678,7 +681,7 @@ func TestFileSynthesizer_Synthesize_OAuthModelAliases(t *testing.T) {
 	authData := map[string]any{
 		"type":  "codex",
 		"email": "codex@example.com",
-		"model-aliases": []map[string]any{
+		"model_aliases": []map[string]any{
 			{"name": " gpt-5.3-codex-spark ", "alias": " gpt-5.5 "},
 			{"name": "gpt-5.3-codex-spark", "alias": "gpt-5.4", "fork": true},
 			{"name": "gpt-5.3-codex-spark", "alias": "gpt-5.5"},

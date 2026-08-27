@@ -70,6 +70,8 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	}
 	if strings.TrimSpace(token) != "" {
 		headers.Set("Authorization", "Bearer "+token)
+	} else {
+		headers.Del("Authorization")
 	}
 
 	var ginHeaders http.Header
@@ -158,10 +160,16 @@ func codexSessionHeaderValue(headers http.Header) string {
 }
 
 func codexAuthUsesAPIKey(auth *cliproxyauth.Auth) bool {
-	if auth == nil || auth.Attributes == nil {
+	if auth == nil {
 		return false
 	}
-	return strings.TrimSpace(auth.Attributes["api_key"]) != ""
+	if auth.AuthKind() == cliproxyauth.AuthKindAPIKey {
+		return true
+	}
+	if auth.Attributes != nil {
+		return strings.TrimSpace(auth.Attributes["api_key"]) != ""
+	}
+	return false
 }
 
 func ensureHeaderCasePreserved(target http.Header, source http.Header, key, configValue, fallbackValue string) {
@@ -270,13 +278,8 @@ func deleteHeaderCaseInsensitive(headers http.Header, key string) {
 }
 
 func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, string) {
-	if cfg == nil || auth == nil {
+	if cfg == nil || auth == nil || codexAuthUsesAPIKey(auth) {
 		return "", ""
-	}
-	if auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			return "", ""
-		}
 	}
 	return strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent), strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
 }

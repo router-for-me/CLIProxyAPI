@@ -492,7 +492,15 @@ type lifecycleRetryDispatcher struct {
 }
 
 func (d *lifecycleRetryDispatcher) HeartbeatOK() bool { return true }
-func (d *lifecycleRetryDispatcher) RPopAuth(_ context.Context, _ string, _ string, _ http.Header, _ int) ([]byte, error) {
+func (d *lifecycleRetryDispatcher) RPopAuth(ctx context.Context, model string, sessionID string, headers http.Header, count int) ([]byte, error) {
+	return d.RPopAuthWithConstraints(ctx, model, sessionID, headers, count, nil, "")
+}
+func (d *lifecycleRetryDispatcher) RPopAuthWithConstraints(_ context.Context, _ string, _ string, _ http.Header, _ int, excludedAuthIDs []string, _ string) ([]byte, error) {
+	for _, authID := range excludedAuthIDs {
+		if authID == "home-auth" {
+			return nil, home.ErrAuthNotFound
+		}
+	}
 	if d.calls.Add(1) == 2 && d.executor.first != nil {
 		d.firstEndedBeforeRedispatch.Store(!d.executor.first.Active() && d.executor.firstCtx.Err() != nil)
 	}
@@ -535,6 +543,7 @@ func TestHomeStreamLifecycleFailureEndsBeforeFreshDispatch(t *testing.T) {
 	registry := executionregistry.New()
 	manager := NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.SetRetryConfig(0, time.Second, 1)
 	manager.PublishHomeDispatch(dispatcher, registry, 1)
 	manager.RegisterExecutor(executor)
 	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
@@ -580,15 +589,54 @@ func TestHomeSelectionCancellationPreventsExecute(t *testing.T) {
 	}
 }
 
-type retryingHomeStreamExecutor struct {
+type freshHomeStreamSelectionDispatcher struct {
 	calls atomic.Int32
+}
+
+func (*freshHomeStreamSelectionDispatcher) HeartbeatOK() bool { return true }
+
+func (d *freshHomeStreamSelectionDispatcher) RPopAuth(ctx context.Context, model string, sessionID string, headers http.Header, count int) ([]byte, error) {
+	return d.RPopAuthWithConstraints(ctx, model, sessionID, headers, count, nil, "")
+}
+
+func (d *freshHomeStreamSelectionDispatcher) RPopAuthWithConstraints(_ context.Context, _ string, _ string, _ http.Header, _ int, excludedAuthIDs []string, _ string) ([]byte, error) {
+	d.calls.Add(1)
+	excluded := make(map[string]struct{}, len(excludedAuthIDs))
+	for _, authID := range excludedAuthIDs {
+		excluded[authID] = struct{}{}
+	}
+	for _, authID := range []string{"home-auth-a", "home-auth-b"} {
+		if _, okExcluded := excluded[authID]; okExcluded {
+			continue
+		}
+		return json.Marshal(homeAuthDispatchResponse{Auth: Auth{
+			ID:       authID,
+			Provider: "home-execution",
+			Status:   StatusActive,
+			Attributes: map[string]string{
+				AttributeAuthKind: AuthKindAPIKey,
+			},
+		}})
+	}
+	return nil, home.ErrAuthNotFound
+}
+
+func (*freshHomeStreamSelectionDispatcher) AbortAmbiguousDispatch() {}
+
+type retryingHomeStreamExecutor struct {
+	mu      sync.Mutex
+	calls   atomic.Int32
+	authIDs []string
 }
 
 func (*retryingHomeStreamExecutor) Identifier() string { return "home-execution" }
 func (*retryingHomeStreamExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, nil
 }
-func (e *retryingHomeStreamExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (e *retryingHomeStreamExecutor) ExecuteStream(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.authIDs = append(e.authIDs, auth.ID)
+	e.mu.Unlock()
 	if e.calls.Add(1) == 1 {
 		return nil, &Error{HTTPStatus: http.StatusUnauthorized, Message: "expired"}
 	}
@@ -607,10 +655,17 @@ func (*retryingHomeStreamExecutor) HttpRequest(context.Context, *Auth, *http.Req
 	return nil, nil
 }
 
+func (e *retryingHomeStreamExecutor) AuthIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.authIDs...)
+}
+
 func TestHomeStreamRetryUsesFreshSelection(t *testing.T) {
-	dispatcher := &retainingHomeExecutionDispatcher{}
+	dispatcher := &freshHomeStreamSelectionDispatcher{}
 	manager := NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.SetRetryConfig(0, time.Second, 2)
 	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
 	executor := &retryingHomeStreamExecutor{}
 	manager.RegisterExecutor(executor)
@@ -623,6 +678,9 @@ func TestHomeStreamRetryUsesFreshSelection(t *testing.T) {
 	}
 	if got := dispatcher.calls.Load(); got != 2 {
 		t.Fatalf("Home RPOP calls = %d, want 2 for retrying stream invocations", got)
+	}
+	if got := executor.AuthIDs(); len(got) != 2 || got[0] != "home-auth-a" || got[1] != "home-auth-b" {
+		t.Fatalf("executor auth IDs = %v, want [home-auth-a home-auth-b]", got)
 	}
 }
 

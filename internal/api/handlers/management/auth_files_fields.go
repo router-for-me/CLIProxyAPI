@@ -169,6 +169,7 @@ func setSourceAuthFileDisabled(path string, disabled bool) error {
 	if metadata == nil {
 		metadata = make(map[string]any)
 	}
+	coreauth.NormalizeCredentialMetadata(metadata)
 	metadata["disabled"] = disabled
 	raw, errMarshal := json.Marshal(metadata)
 	if errMarshal != nil {
@@ -230,6 +231,22 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		return
 	}
 	delete(req, "name")
+	var errNormalize error
+	req, errNormalize = normalizeAuthFilePatchFields(req)
+	if errNormalize != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errNormalize.Error()})
+		return
+	}
+	requestRetryPatch, errRequestRetry := decodeAuthFileRequestRetryPatch(req)
+	if errRequestRetry != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errRequestRetry.Error()})
+		return
+	}
+	for key := range req {
+		if strings.TrimSpace(key) == "request_retry" {
+			delete(req, key)
+		}
+	}
 
 	ctx := c.Request.Context()
 
@@ -255,6 +272,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": errPluginVirtualAuth.Error()})
 		return
 	}
+	coreauth.NormalizeCredentialMetadata(targetAuth.Metadata)
 
 	changed := false
 	touchedRoots := make(map[string]struct{}, len(req))
@@ -302,6 +320,17 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		}
 		changed = true
 	}
+	if requestRetryPatch.Set {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		if requestRetryPatch.Value == nil {
+			delete(targetAuth.Metadata, "request_retry")
+		} else {
+			targetAuth.Metadata["request_retry"] = *requestRetryPatch.Value
+		}
+		changed = true
+	}
 	if changed {
 		syncAuthFileMetadataFields(targetAuth, touchedRoots)
 	}
@@ -329,6 +358,84 @@ func decodeAuthFileFieldValue(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	return value, nil
+}
+
+type authFileRequestRetryPatch struct {
+	Set   bool
+	Value *int
+}
+
+func normalizeAuthFilePatchFields(fields map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	normalized := make(map[string]json.RawMessage, len(fields))
+	originalNames := make(map[string]string, len(fields))
+	canonicalNames := make(map[string]bool, len(fields))
+	for key, value := range fields {
+		parts := strings.Split(strings.TrimSpace(key), ".")
+		for index := range parts {
+			parts[index] = strings.TrimSpace(parts[index])
+		}
+		originalRoot := parts[0]
+		parts[0] = coreauth.CanonicalCredentialMetadataKey(originalRoot)
+		canonicalPath := strings.Join(parts, ".")
+		if original, exists := originalNames[canonicalPath]; exists {
+			currentCanonical := originalRoot == parts[0]
+			if canonicalNames[canonicalPath] != currentCanonical {
+				if currentCanonical {
+					normalized[canonicalPath] = value
+					originalNames[canonicalPath] = key
+					canonicalNames[canonicalPath] = true
+				}
+				continue
+			}
+			return nil, fmt.Errorf("auth file fields %q and %q refer to the same field", original, key)
+		}
+		normalized[canonicalPath] = value
+		originalNames[canonicalPath] = key
+		canonicalNames[canonicalPath] = originalRoot == parts[0]
+	}
+	return normalized, nil
+}
+
+func decodeAuthFileRequestRetryPatch(fields map[string]json.RawMessage) (authFileRequestRetryPatch, error) {
+	var raw json.RawMessage
+	found := false
+	for key, value := range fields {
+		fieldPath := strings.TrimSpace(key)
+		fieldRoot := rootAuthFileField(fieldPath)
+		if fieldRoot == "request_retry" && fieldPath != fieldRoot {
+			return authFileRequestRetryPatch{}, fmt.Errorf("request_retry does not support nested fields")
+		}
+		if fieldPath == "request_retry" {
+			found = true
+			raw = value
+		}
+	}
+	if !found {
+		return authFileRequestRetryPatch{}, nil
+	}
+	value, errDecode := decodeAuthFileFieldValue(raw)
+	if errDecode != nil {
+		return authFileRequestRetryPatch{}, fmt.Errorf("request_retry must be an integer or null")
+	}
+	if value == nil {
+		return authFileRequestRetryPatch{Set: true}, nil
+	}
+	number, okNumber := value.(json.Number)
+	if !okNumber {
+		return authFileRequestRetryPatch{}, fmt.Errorf("request_retry must be an integer or null")
+	}
+	parsed, errInt := number.Int64()
+	if errInt != nil {
+		return authFileRequestRetryPatch{}, fmt.Errorf("request_retry must be an integer or null")
+	}
+	normalized := int(parsed)
+	if int64(normalized) != parsed {
+		return authFileRequestRetryPatch{}, fmt.Errorf("request_retry must be an integer or null")
+	}
+	if normalized < 0 {
+		return authFileRequestRetryPatch{Set: true}, nil
+	}
+	return authFileRequestRetryPatch{Set: true, Value: &normalized}, nil
 }
 
 func rootAuthFileField(path string) string {
