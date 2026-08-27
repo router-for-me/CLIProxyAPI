@@ -927,3 +927,48 @@ func TestBuildHTTPTransportHTTPSProxyOnConnectResponseRejects(t *testing.T) {
 		t.Fatalf("error = %v, want it to wrap the hook's error", errDial)
 	}
 }
+
+func TestProxyTLSConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		base           *tls.Config
+		wantServerName string
+	}{
+		{name: "nil base", base: nil, wantServerName: "proxy.example.com"},
+		{name: "empty ServerName is filled", base: &tls.Config{}, wantServerName: "proxy.example.com"},
+		{
+			// A proxy reached at an address its certificate does not carry: net/http lets
+			// a caller-set ServerName stand, and so must this.
+			name:           "caller ServerName is kept",
+			base:           &tls.Config{ServerName: "proxy.internal"},
+			wantServerName: "proxy.internal",
+		},
+		{
+			// The ALPN pin is the fix, not a default — a caller asking for h2 on the
+			// proxy leg is asking for the bug back.
+			name:           "caller NextProtos is overridden",
+			base:           &tls.Config{NextProtos: []string{"h2"}},
+			wantServerName: "proxy.example.com",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := proxyTLSConfig(tt.base, "proxy.example.com")
+			if cfg.ServerName != tt.wantServerName {
+				t.Fatalf("ServerName = %q, want %q", cfg.ServerName, tt.wantServerName)
+			}
+			if len(cfg.NextProtos) != 1 || cfg.NextProtos[0] != "http/1.1" {
+				t.Fatalf("NextProtos = %v, want [http/1.1]", cfg.NextProtos)
+			}
+			if tt.base != nil && len(tt.base.NextProtos) > 0 && tt.base.NextProtos[0] != "h2" {
+				t.Fatal("the caller's config was mutated")
+			}
+		})
+	}
+}

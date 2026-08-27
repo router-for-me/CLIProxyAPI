@@ -270,14 +270,19 @@ func (d *httpConnectDialer) Dial(network, addr string) (net.Conn, error) {
 }
 
 // proxyTLSConfig derives the TLS settings for the connection to an HTTPS proxy.
-// ALPN is pinned to http/1.1 because CONNECT is written as an HTTP/1.1 request:
-// letting the proxy select h2 would put an HTTP/1.1 request on an HTTP/2 connection.
 func proxyTLSConfig(base *tls.Config, serverName string) *tls.Config {
 	cfg := base.Clone()
 	if cfg == nil {
 		cfg = &tls.Config{}
 	}
-	cfg.ServerName = serverName
+	// Filled in only when the caller left it empty, as net/http's addTLS does. A proxy
+	// reached at an address its certificate does not carry is the caller's to name.
+	if cfg.ServerName == "" {
+		cfg.ServerName = serverName
+	}
+	// ALPN, by contrast, is pinned unconditionally, and must stay that way: it is the fix.
+	// CONNECT is written as an HTTP/1.1 request, so a proxy allowed to select h2 receives
+	// one on an HTTP/2 connection and drops the whole thing.
 	cfg.NextProtos = []string{"http/1.1"}
 	return cfg
 }
