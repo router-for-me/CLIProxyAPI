@@ -526,3 +526,54 @@ func TestBuildHTTPTransportHTTPSProxyTunnelsThroughH2CapableProxy(t *testing.T) 
 		t.Fatal("CONNECT was sent over an h2 connection; ALPN must stay on http/1.1 for the proxy leg")
 	}
 }
+
+// TestBuildHTTPTransportHTTPSProxyBoundsTLSHandshake guards the proxy-setup timeouts that
+// move out of http.Transport's reach once the tunnel is established inside DialContext:
+// a proxy that accepts the TCP connection and then stalls must not hang the caller.
+func TestBuildHTTPTransportHTTPSProxyBoundsTLSHandshake(t *testing.T) {
+	t.Parallel()
+
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen returned error: %v", errListen)
+	}
+	defer func() {
+		if errClose := listener.Close(); errClose != nil {
+			t.Errorf("listener.Close returned error: %v", errClose)
+		}
+	}()
+	go func() {
+		conn, errAccept := listener.Accept()
+		if errAccept != nil {
+			return
+		}
+		// Accept and stall: never complete the TLS handshake.
+		<-time.After(30 * time.Second)
+		_ = conn.Close()
+	}()
+
+	transport, _, errBuild := BuildHTTPTransport("https://" + listener.Addr().String())
+	if errBuild != nil {
+		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+	}
+	transport.TLSHandshakeTimeout = 200 * time.Millisecond
+	defer transport.CloseIdleConnections()
+
+	dialDone := make(chan error, 1)
+	go func() {
+		conn, errDial := transport.DialContext(context.Background(), "tcp", "target.example.com:443")
+		if conn != nil {
+			_ = conn.Close()
+		}
+		dialDone <- errDial
+	}()
+
+	select {
+	case errDial := <-dialDone:
+		if errDial == nil {
+			t.Fatal("dial through a stalled HTTPS proxy returned nil error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dial through a stalled HTTPS proxy was not bounded by TLSHandshakeTimeout")
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"golang.org/x/net/proxy"
 )
@@ -126,14 +127,22 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			// picks h2 sees a bogus HTTP/2 preface and drops the connection, which
 			// surfaces to callers as "unexpected EOF". Tunnel through the CONNECT
 			// dialer instead; protocol negotiation with the target is untouched.
+			// Reuse the cloned transport's own dialer so the connection to the proxy
+			// keeps its TCP dial timeout and keep-alive settings; read it before it
+			// is overwritten below.
+			baseDialer := proxy.Dialer(proxy.Direct)
+			if dialContext := transport.DialContext; dialContext != nil {
+				baseDialer = contextDialerFunc(dialContext)
+			}
 			transport.Proxy = nil
 			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 				// Built per dial: TLSClientConfig is still nil here and gets populated
 				// later, both by callers and by Go's own HTTP/2 setup.
 				dialer := &httpConnectDialer{
-					proxyURL:  setting.URL,
-					dialer:    proxy.Direct,
-					tlsConfig: transport.TLSClientConfig,
+					proxyURL:            setting.URL,
+					dialer:              baseDialer,
+					tlsConfig:           transport.TLSClientConfig,
+					tlsHandshakeTimeout: transport.TLSHandshakeTimeout,
 				}
 				return dialer.DialContext(ctx, network, addr)
 			}
@@ -178,6 +187,22 @@ type httpConnectDialer struct {
 	// tlsConfig carries caller-supplied TLS settings (roots, client certs) for the
 	// handshake with an HTTPS proxy. Nil means defaults.
 	tlsConfig *tls.Config
+	// tlsHandshakeTimeout bounds the TLS handshake with an HTTPS proxy. Setting up
+	// the tunnel here takes it out of reach of http.Transport.TLSHandshakeTimeout,
+	// so callers that rely on that bound must pass it through. Zero means no bound.
+	tlsHandshakeTimeout time.Duration
+}
+
+// contextDialerFunc adapts a net.Dialer-style dial function to proxy.Dialer so an
+// existing transport's dialer, timeouts included, can carry the proxy connection.
+type contextDialerFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
+func (f contextDialerFunc) Dial(network, addr string) (net.Conn, error) {
+	return f(context.Background(), network, addr)
+}
+
+func (f contextDialerFunc) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return f(ctx, network, addr)
 }
 
 func (d *httpConnectDialer) Dial(network, addr string) (net.Conn, error) {
@@ -223,7 +248,13 @@ func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr strin
 	}()
 	if d.proxyURL.Scheme == "https" {
 		tlsConn := tls.Client(conn, proxyTLSConfig(d.tlsConfig, d.proxyURL.Hostname()))
-		if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+		handshakeCtx := ctx
+		if d.tlsHandshakeTimeout > 0 {
+			var cancelHandshake context.CancelFunc
+			handshakeCtx, cancelHandshake = context.WithTimeout(ctx, d.tlsHandshakeTimeout)
+			defer cancelHandshake()
+		}
+		if errHandshake := tlsConn.HandshakeContext(handshakeCtx); errHandshake != nil {
 			if errClose := conn.Close(); errClose != nil {
 				return nil, fmt.Errorf("HTTPS proxy TLS handshake failed: %w; close failed: %v", errHandshake, errClose)
 			}
