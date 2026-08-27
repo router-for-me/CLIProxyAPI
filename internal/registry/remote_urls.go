@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"net/url"
 	"os"
 	"strings"
 )
@@ -31,4 +32,27 @@ func resolveRemoteURLs(envKey string, defaults []string) []string {
 		}
 	}
 	return append(custom, defaults...)
+}
+
+// isHTTPSource reports whether a source entry must be fetched over HTTP(S).
+// Everything else is treated as a filesystem path so users can point the
+// overrides at purely local files without any hosting setup.
+func isHTTPSource(source string) bool {
+	l := strings.ToLower(strings.TrimSpace(source))
+	return strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://")
+}
+
+// readLocalCatalog loads raw catalog bytes from a filesystem path entry.
+// Accepts plain paths relative to the process working directory as well as
+// file:// URIs on every platform.
+func readLocalCatalog(source string) ([]byte, error) {
+	p := strings.TrimSpace(source)
+	if len(p) >= 7 && strings.EqualFold(p[:7], "file://") {
+		u, err := url.Parse(p)
+		if err != nil {
+			return nil, err
+		}
+		p = u.Path
+	}
+	return os.ReadFile(p)
 }
