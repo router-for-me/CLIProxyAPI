@@ -404,7 +404,7 @@ func TestParseErrorDoesNotExposeProxyCredentials(t *testing.T) {
 	}
 }
 
-func TestBuildHTTPTransportHTTPSProxyUsesCONNECTDialer(t *testing.T) {
+func TestBuildHTTPTransportHTTPSProxyKeepsNetHTTPInCharge(t *testing.T) {
 	t.Parallel()
 
 	transport, mode, errBuild := BuildHTTPTransport("https://proxy.example.com:8443")
@@ -417,11 +417,27 @@ func TestBuildHTTPTransportHTTPSProxyUsesCONNECTDialer(t *testing.T) {
 	if transport == nil {
 		t.Fatal("expected transport, got nil")
 	}
-	if transport.Proxy != nil {
-		t.Fatal("expected HTTPS proxy transport to bypass http proxy function")
+
+	// Proxy must stay set: it is what keeps CONNECT — and its headers, hooks and
+	// bounds — net/http's job rather than ours.
+	if transport.Proxy == nil {
+		t.Fatal("expected HTTPS proxy transport to keep net/http's proxy function")
 	}
-	if transport.DialContext == nil {
-		t.Fatal("expected HTTPS proxy transport to have custom DialContext")
+	req, errRequest := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if errRequest != nil {
+		t.Fatalf("http.NewRequest returned error: %v", errRequest)
+	}
+	proxyURL, errProxy := transport.Proxy(req)
+	if errProxy != nil {
+		t.Fatalf("transport.Proxy returned error: %v", errProxy)
+	}
+	if proxyURL == nil || proxyURL.String() != "https://proxy.example.com:8443" {
+		t.Fatalf("proxy URL = %v, want https://proxy.example.com:8443", proxyURL)
+	}
+
+	// The one thing we do take over: how the connection to the proxy is made.
+	if transport.DialTLSContext == nil {
+		t.Fatal("expected HTTPS proxy transport to dial the proxy leg itself")
 	}
 }
 
@@ -556,7 +572,8 @@ func TestBuildHTTPTransportHTTPSProxyBoundsTLSHandshake(t *testing.T) {
 		_ = conn.Close()
 	}()
 
-	transport, _, errBuild := BuildHTTPTransport("https://" + listener.Addr().String())
+	listenerAddr := listener.Addr().String()
+	transport, _, errBuild := BuildHTTPTransport("https://" + listenerAddr)
 	if errBuild != nil {
 		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
 	}
@@ -565,7 +582,7 @@ func TestBuildHTTPTransportHTTPSProxyBoundsTLSHandshake(t *testing.T) {
 
 	dialDone := make(chan error, 1)
 	go func() {
-		conn, errDial := transport.DialContext(context.Background(), "tcp", "target.example.com:443")
+		conn, errDial := transport.DialTLSContext(context.Background(), "tcp", listenerAddr)
 		if conn != nil {
 			_ = conn.Close()
 		}
@@ -878,53 +895,6 @@ func TestBuildHTTPTransportHTTPSProxyHonoursCONNECTHooks(t *testing.T) {
 	}
 	if len(callerHeader) != 1 || callerHeader.Get("X-Tenant") != "acme" {
 		t.Fatalf("caller header was mutated: %v", callerHeader)
-	}
-}
-
-// TestBuildHTTPTransportHTTPSProxyOnConnectResponseRejects pins the other half of the
-// hook: it runs before the status check, so it can refuse a CONNECT this code would
-// otherwise have accepted.
-func TestBuildHTTPTransportHTTPSProxyOnConnectResponseRejects(t *testing.T) {
-	t.Parallel()
-
-	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
-	if errListen != nil {
-		t.Fatalf("net.Listen returned error: %v", errListen)
-	}
-	defer func() { _ = listener.Close() }()
-	go func() {
-		conn, errAccept := listener.Accept()
-		if errAccept != nil {
-			return
-		}
-		defer func() { _ = conn.Close() }()
-		if _, errRead := http.ReadRequest(bufio.NewReader(conn)); errRead != nil {
-			return
-		}
-		_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-		<-time.After(time.Second)
-	}()
-
-	proxyURL, errParse := url.Parse("http://" + listener.Addr().String())
-	if errParse != nil {
-		t.Fatalf("url.Parse returned error: %v", errParse)
-	}
-	rejected := errors.New("proxy response rejected by policy")
-	dialer := &httpConnectDialer{
-		proxyURL:       proxyURL,
-		dialer:         proxy.Direct,
-		connectTimeout: defaultProxyConnectTimeout,
-		onConnectResponse: func(_ context.Context, _ *url.URL, _ *http.Request, _ *http.Response) error {
-			return rejected
-		},
-	}
-
-	conn, errDial := dialer.DialContext(context.Background(), "tcp", "target.example.com:443")
-	if conn != nil {
-		_ = conn.Close()
-	}
-	if !errors.Is(errDial, rejected) {
-		t.Fatalf("error = %v, want it to wrap the hook's error", errDial)
 	}
 }
 

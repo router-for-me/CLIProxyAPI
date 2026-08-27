@@ -119,44 +119,62 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			return transport, setting.Mode, nil
 		}
 		transport := cloneDefaultTransport()
-		if setting.URL.Scheme == "https" {
-			// http.Transport cannot be used to reach an HTTPS proxy: it hands the
-			// transport-wide TLSClientConfig — whose NextProtos gain "h2" as soon as
-			// HTTP/2 is configured — to the handshake with the proxy itself, and then
-			// writes an HTTP/1.1 CONNECT over whatever ALPN selected. A proxy that
-			// picks h2 sees a bogus HTTP/2 preface and drops the connection, which
-			// surfaces to callers as "unexpected EOF". Tunnel through the CONNECT
-			// dialer instead; protocol negotiation with the target is untouched.
-			// Reuse the cloned transport's own dialer so the connection to the proxy
-			// keeps its TCP dial timeout and keep-alive settings; read it before it
-			// is overwritten below.
-			baseDialer := proxy.Dialer(proxy.Direct)
-			if dialContext := transport.DialContext; dialContext != nil {
-				baseDialer = contextDialerFunc(dialContext)
-			}
-			transport.Proxy = nil
-			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				// Built per dial: TLSClientConfig is still nil here and gets populated
-				// later, both by callers and by Go's own HTTP/2 setup.
-				dialer := &httpConnectDialer{
-					proxyURL:            setting.URL,
-					dialer:              baseDialer,
-					tlsConfig:           transport.TLSClientConfig,
-					tlsHandshakeTimeout: transport.TLSHandshakeTimeout,
-					connectTimeout:      defaultProxyConnectTimeout,
-					connectHeader:       transport.ProxyConnectHeader,
-					getConnectHeader:    transport.GetProxyConnectHeader,
-					onConnectResponse:   transport.OnProxyConnectResponse,
-				}
-				return dialer.DialContext(ctx, network, addr)
-			}
-			return transport, setting.Mode, nil
-		}
 		transport.Proxy = http.ProxyURL(setting.URL)
+		if setting.URL.Scheme == "https" {
+			// Only the connection *to the proxy* is ours. net/http hands the
+			// transport-wide TLSClientConfig — whose NextProtos gain "h2" as soon as
+			// HTTP/2 is configured — to that handshake, then writes an HTTP/1.1 CONNECT
+			// over whatever ALPN selected; a proxy that picks h2 sees a bogus HTTP/2
+			// preface and drops the connection ("unexpected EOF").
+			//
+			// DialTLSContext is the seam for exactly that: with Proxy set, net/http calls
+			// it for the first hop, which is the proxy (connectMethod.addr()). Everything
+			// after stays net/http's — CONNECT with its headers and hooks, the bound on
+			// that exchange, the target handshake and its own ALPN. Taking any of it over
+			// would mean reimplementing it, and then owning every guard it already has.
+			baseDialContext := transport.DialContext
+			transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return dialProxyTLS(ctx, network, addr, baseDialContext, transport, setting.URL)
+			}
+		}
 		return transport, setting.Mode, nil
 	default:
 		return nil, setting.Mode, nil
 	}
+}
+
+// dialProxyTLS makes the TLS connection to an HTTPS proxy, pinning that leg's ALPN to
+// http/1.1 so the CONNECT net/http writes next lands on an HTTP/1.1 connection.
+//
+// TLSClientConfig and TLSHandshakeTimeout are read here rather than captured up front:
+// net/http documents that it ignores both once DialTLSContext is set, so honouring them
+// falls to this function, and callers set them after the transport is built.
+func dialProxyTLS(ctx context.Context, network, addr string,
+	baseDialContext func(context.Context, string, string) (net.Conn, error),
+	transport *http.Transport, proxyURL *url.URL) (net.Conn, error) {
+	dial := baseDialContext
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	conn, errDial := dial(ctx, network, addr)
+	if errDial != nil {
+		return nil, errDial
+	}
+
+	handshakeCtx := ctx
+	if timeout := transport.TLSHandshakeTimeout; timeout > 0 {
+		var cancelHandshake context.CancelFunc
+		handshakeCtx, cancelHandshake = context.WithTimeout(ctx, timeout)
+		defer cancelHandshake()
+	}
+	tlsConn := tls.Client(conn, proxyTLSConfig(transport.TLSClientConfig, proxyURL.Hostname()))
+	if errHandshake := tlsConn.HandshakeContext(handshakeCtx); errHandshake != nil {
+		if errClose := conn.Close(); errClose != nil {
+			return nil, fmt.Errorf("HTTPS proxy TLS handshake failed: %w; close failed: %v", errHandshake, errClose)
+		}
+		return nil, fmt.Errorf("HTTPS proxy TLS handshake failed: %w", errHandshake)
+	}
+	return tlsConn, nil
 }
 
 // BuildDialer constructs a proxy dialer for settings that operate at the connection layer.
@@ -189,102 +207,24 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 	}
 }
 
-type httpConnectDialer struct {
-	proxyURL *url.URL
-	dialer   proxy.Dialer
-	// tlsConfig carries caller-supplied TLS settings (roots, client certs) for the
-	// handshake with an HTTPS proxy. Nil means defaults.
-	tlsConfig *tls.Config
-	// tlsHandshakeTimeout bounds the TLS handshake with an HTTPS proxy. Setting up
-	// the tunnel here takes it out of reach of http.Transport.TLSHandshakeTimeout,
-	// so callers that rely on that bound must pass it through. Zero means no bound.
-	tlsHandshakeTimeout time.Duration
-	// connectTimeout bounds the CONNECT exchange. Zero means no bound.
-	connectTimeout time.Duration
-	// The three knobs http.Transport documents for the CONNECT request it would have
-	// made itself. Performing the CONNECT here puts them out of its reach, so a caller
-	// that set them on the transport — an enterprise proxy demanding extra headers, a
-	// callback vetting the response — would otherwise lose them without a word.
-	// Semantics follow net/http's dialConn exactly; see connectRequestHeader.
-	connectHeader     http.Header
-	getConnectHeader  func(ctx context.Context, proxyURL *url.URL, target string) (http.Header, error)
-	onConnectResponse func(ctx context.Context, proxyURL *url.URL, connectReq *http.Request, connectRes *http.Response) error
-}
-
-// connectRequestHeader assembles the CONNECT headers the way net/http does:
-// GetProxyConnectHeader wins over ProxyConnectHeader, and the proxy URL's own
-// credentials are applied last — onto a copy, so a header the caller still owns is
-// never mutated.
-func (d *httpConnectDialer) connectRequestHeader(ctx context.Context, target string) (http.Header, error) {
-	header := d.connectHeader
-	if d.getConnectHeader != nil {
-		var errHeader error
-		header, errHeader = d.getConnectHeader(ctx, d.proxyURL, target)
-		if errHeader != nil {
-			return nil, errHeader
-		}
-	}
-	if header == nil {
-		header = make(http.Header)
-	} else {
-		header = header.Clone()
-	}
-	if d.proxyURL.User != nil {
-		header.Set("Proxy-Authorization", proxyAuthorization(d.proxyURL.User))
-	}
-	return header, nil
-}
-
 // defaultProxyConnectTimeout bounds the CONNECT exchange with the proxy. net/http applies
 // the same one-minute bound in dialConn, for the same reason: a proxy that takes the
 // connection and then stops replying would otherwise hold the caller until the request
-// context is canceled, and most callers here pass a context that never is. Taking over
-// proxy setup means taking over this guard too.
+// context is canceled, and callers on this path pass contexts that never are.
 const defaultProxyConnectTimeout = time.Minute
 
-// contextDialerFunc adapts a net.Dialer-style dial function to proxy.Dialer so an
-// existing transport's dialer, timeouts included, can carry the proxy connection.
-type contextDialerFunc func(ctx context.Context, network, addr string) (net.Conn, error)
-
-func (f contextDialerFunc) Dial(network, addr string) (net.Conn, error) {
-	return f(context.Background(), network, addr)
-}
-
-func (f contextDialerFunc) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	return f(ctx, network, addr)
-}
-
-// preferContextError reports the deadline rather than what closing the connection
-// produced. The bound above takes effect by closing the connection, so the I/O error
-// the caller would otherwise see is "use of closed network connection" — true, and
-// useless for telling a slow proxy apart from a broken one.
-func preferContextError(ctx context.Context, err error) error {
-	if errContext := ctx.Err(); errContext != nil {
-		return errContext
-	}
-	return err
+type httpConnectDialer struct {
+	proxyURL *url.URL
+	dialer   proxy.Dialer
+	// connectTimeout bounds the CONNECT exchange, the way net/http bounds its own in
+	// dialConn: a proxy that takes the connection and then stops replying would
+	// otherwise hold the caller until the context is canceled, and callers here pass
+	// contexts that never are. Zero means no bound.
+	connectTimeout time.Duration
 }
 
 func (d *httpConnectDialer) Dial(network, addr string) (net.Conn, error) {
 	return d.DialContext(context.Background(), network, addr)
-}
-
-// proxyTLSConfig derives the TLS settings for the connection to an HTTPS proxy.
-func proxyTLSConfig(base *tls.Config, serverName string) *tls.Config {
-	cfg := base.Clone()
-	if cfg == nil {
-		cfg = &tls.Config{}
-	}
-	// Filled in only when the caller left it empty, as net/http's addTLS does. A proxy
-	// reached at an address its certificate does not carry is the caller's to name.
-	if cfg.ServerName == "" {
-		cfg.ServerName = serverName
-	}
-	// ALPN, by contrast, is pinned unconditionally, and must stay that way: it is the fix.
-	// CONNECT is written as an HTTP/1.1 request, so a proxy allowed to select h2 receives
-	// one on an HTTP/2 connection and drops the whole thing.
-	cfg.NextProtos = []string{"http/1.1"}
-	return cfg
 }
 
 func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -312,14 +252,8 @@ func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr strin
 		}
 	}()
 	if d.proxyURL.Scheme == "https" {
-		tlsConn := tls.Client(conn, proxyTLSConfig(d.tlsConfig, d.proxyURL.Hostname()))
-		handshakeCtx := ctx
-		if d.tlsHandshakeTimeout > 0 {
-			var cancelHandshake context.CancelFunc
-			handshakeCtx, cancelHandshake = context.WithTimeout(ctx, d.tlsHandshakeTimeout)
-			defer cancelHandshake()
-		}
-		if errHandshake := tlsConn.HandshakeContext(handshakeCtx); errHandshake != nil {
+		tlsConn := tls.Client(conn, proxyTLSConfig(nil, d.proxyURL.Hostname()))
+		if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
 			if errClose := conn.Close(); errClose != nil {
 				return nil, fmt.Errorf("HTTPS proxy TLS handshake failed: %w; close failed: %v", errHandshake, errClose)
 			}
@@ -342,19 +276,15 @@ func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr strin
 		}
 	}
 
-	header, errHeader := d.connectRequestHeader(ctx, addr)
-	if errHeader != nil {
-		if errClose := conn.Close(); errClose != nil {
-			return nil, fmt.Errorf("build CONNECT header failed: %w; close failed: %v", errHeader, errClose)
-		}
-		return nil, fmt.Errorf("build CONNECT header failed: %w", errHeader)
-	}
 	req := (&http.Request{
 		Method: http.MethodConnect,
 		URL:    &url.URL{Host: addr},
 		Host:   addr,
-		Header: header,
+		Header: make(http.Header),
 	}).WithContext(ctx)
+	if d.proxyURL.User != nil {
+		req.Header.Set("Proxy-Authorization", proxyAuthorization(d.proxyURL.User))
+	}
 	if errWrite := req.Write(conn); errWrite != nil {
 		errWrite = preferContextError(ctx, errWrite)
 		if errClose := conn.Close(); errClose != nil {
@@ -372,20 +302,6 @@ func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr strin
 		}
 		return nil, fmt.Errorf("read CONNECT response failed: %w", errRead)
 	}
-	// Before the status check, as net/http does: the hook is the caller's chance to
-	// judge a response this code would otherwise accept or reject on status alone.
-	if d.onConnectResponse != nil {
-		if errHook := d.onConnectResponse(ctx, d.proxyURL, req, resp); errHook != nil {
-			if resp.Body != nil {
-				_ = resp.Body.Close()
-			}
-			if errClose := conn.Close(); errClose != nil {
-				return nil, fmt.Errorf("OnProxyConnectResponse rejected the CONNECT response: %w; close failed: %v", errHook, errClose)
-			}
-			return nil, fmt.Errorf("OnProxyConnectResponse rejected the CONNECT response: %w", errHook)
-		}
-	}
-
 	if resp.StatusCode != http.StatusOK {
 		if resp.Body != nil {
 			_ = resp.Body.Close()
@@ -457,6 +373,35 @@ func Redact(raw string) string {
 		redacted.User = url.User("redacted")
 	}
 	return redacted.String()
+}
+
+// proxyTLSConfig derives the TLS settings for the connection to an HTTPS proxy.
+func proxyTLSConfig(base *tls.Config, serverName string) *tls.Config {
+	cfg := base.Clone()
+	if cfg == nil {
+		cfg = &tls.Config{}
+	}
+	// Filled in only when the caller left it empty, as net/http's addTLS does. A proxy
+	// reached at an address its certificate does not carry is the caller's to name.
+	if cfg.ServerName == "" {
+		cfg.ServerName = serverName
+	}
+	// ALPN, by contrast, is pinned unconditionally, and must stay that way: it is the fix.
+	// CONNECT is written as an HTTP/1.1 request, so a proxy allowed to select h2 receives
+	// one on an HTTP/2 connection and drops the whole thing.
+	cfg.NextProtos = []string{"http/1.1"}
+	return cfg
+}
+
+// preferContextError reports the cancellation rather than what closing the connection
+// produced. The dialer unblocks a stuck read by closing the connection, so the I/O error
+// a caller would otherwise see is "use of closed network connection" — true, and useless
+// for telling a canceled request apart from a broken proxy.
+func preferContextError(ctx context.Context, err error) error {
+	if errContext := ctx.Err(); errContext != nil {
+		return errContext
+	}
+	return err
 }
 
 type bufferedConn struct {
