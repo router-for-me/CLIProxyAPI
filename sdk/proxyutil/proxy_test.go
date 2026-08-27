@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -575,5 +576,70 @@ func TestBuildHTTPTransportHTTPSProxyBoundsTLSHandshake(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("dial through a stalled HTTPS proxy was not bounded by TLSHandshakeTimeout")
+	}
+}
+
+// TestBuildDialerHTTPProxyBoundsCONNECTResponse pins the guard net/http applies in
+// dialConn: a proxy that takes the connection and then never answers CONNECT must not
+// hold a caller whose context has no deadline.
+func TestBuildDialerHTTPProxyBoundsCONNECTResponse(t *testing.T) {
+	// Not parallel: it swaps the package-level bound, the same way net/http's own tests
+	// drive testHookProxyConnectTimeout.
+	original := proxyConnectTimeout
+	proxyConnectTimeout = 200 * time.Millisecond
+	defer func() { proxyConnectTimeout = original }()
+
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen returned error: %v", errListen)
+	}
+	defer func() {
+		if errClose := listener.Close(); errClose != nil {
+			t.Errorf("listener.Close returned error: %v", errClose)
+		}
+	}()
+	go func() {
+		conn, errAccept := listener.Accept()
+		if errAccept != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		// Read the CONNECT request, then go quiet — never write a response.
+		if _, errRead := http.ReadRequest(bufio.NewReader(conn)); errRead != nil {
+			return
+		}
+		<-time.After(30 * time.Second)
+	}()
+
+	dialer, _, errBuild := BuildDialer("http://" + listener.Addr().String())
+	if errBuild != nil {
+		t.Fatalf("BuildDialer returned error: %v", errBuild)
+	}
+	contextDialer, ok := dialer.(interface {
+		DialContext(context.Context, string, string) (net.Conn, error)
+	})
+	if !ok {
+		t.Fatal("HTTP CONNECT dialer does not support context cancellation")
+	}
+
+	dialDone := make(chan error, 1)
+	go func() {
+		conn, errDial := contextDialer.DialContext(context.Background(), "tcp", "target.example.com:443")
+		if conn != nil {
+			_ = conn.Close()
+		}
+		dialDone <- errDial
+	}()
+
+	select {
+	case errDial := <-dialDone:
+		if errDial == nil {
+			t.Fatal("dial through a silent proxy returned nil error")
+		}
+		if !errors.Is(errDial, context.DeadlineExceeded) {
+			t.Fatalf("error = %v, want it to wrap context.DeadlineExceeded", errDial)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dial through a silent proxy was not bounded by proxyConnectTimeout")
 	}
 }
