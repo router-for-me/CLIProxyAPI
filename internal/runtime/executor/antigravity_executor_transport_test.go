@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -556,5 +558,100 @@ func TestAntigravityProxiedRequestsReuseOneConnection(t *testing.T) {
 	mu.Unlock()
 	if distinct != 1 {
 		t.Fatalf("expected %d requests to share one connection, got %d connections", requests, distinct)
+	}
+}
+
+// TestAntigravityProxiedTransportKeepsProxyDialerBound pins why the proxied transport is
+// built in place rather than cloned. A transport from proxyutil.BuildHTTPTransport
+// carries a proxy dial hook bound to the transport it was built for, and
+// http.Transport.Clone copies that hook as a plain function value — a clone keeps
+// consulting the original, which here would be discarded immediately. TLS settings
+// applied to what this function returns would then silently miss the connection to the
+// proxy, which is the one leg that has to trust the proxy's certificate.
+func TestAntigravityProxiedTransportKeepsProxyDialerBound(t *testing.T) {
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	proxyServer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "expected CONNECT", http.StatusMethodNotAllowed)
+			return
+		}
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "connection is not hijackable", http.StatusInternalServerError)
+			return
+		}
+		upstreamConn, errDial := net.Dial("tcp", r.Host)
+		if errDial != nil {
+			http.Error(w, "dial upstream failed", http.StatusBadGateway)
+			return
+		}
+		clientConn, buffered, errHijack := hijacker.Hijack()
+		if errHijack != nil {
+			_ = upstreamConn.Close()
+			return
+		}
+		if _, errWrite := io.WriteString(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n"); errWrite != nil {
+			_ = upstreamConn.Close()
+			_ = clientConn.Close()
+			return
+		}
+		go func() {
+			defer func() { _ = upstreamConn.Close() }()
+			_, _ = io.Copy(upstreamConn, buffered)
+		}()
+		go func() {
+			defer func() { _ = clientConn.Close() }()
+			_, _ = io.Copy(clientConn, upstreamConn)
+		}()
+	}))
+	// An h2-offering proxy, the shape that made the ALPN pin necessary in the first place.
+	proxyServer.EnableHTTP2 = true
+	proxyServer.TLS = &tls.Config{NextProtos: []string{"h2", "http/1.1"}}
+	proxyServer.StartTLS()
+	defer proxyServer.Close()
+
+	proxyURL, errParse := url.Parse(proxyServer.URL)
+	if errParse != nil {
+		t.Fatalf("url.Parse() error = %v", errParse)
+	}
+	auth := antigravityAuthWithIDAndProxy("antigravity-proxy-dialer-binding", "https://"+proxyURL.Host)
+	transport := antigravityProxiedHTTP11Transport(auth, auth.ProxyURL)
+	if transport == nil {
+		t.Fatal("antigravityProxiedHTTP11Transport() returned nil")
+	}
+	defer transport.CloseIdleConnections()
+
+	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+
+	// Neither leg can verify the httptest certificate yet, so this must fail. It also
+	// proves the request really does go through the proxy rather than around it.
+	if resp, errGet := client.Get(target.URL); errGet == nil {
+		_ = resp.Body.Close()
+		t.Fatal("request succeeded before the proxy's certificate was trusted")
+	}
+
+	// Trust it — on the transport this function handed back. A hook bound elsewhere
+	// would never see this, and the request would keep failing.
+	proxyClientTransport, ok := proxyServer.Client().Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("httptest proxy client transport is not an *http.Transport")
+	}
+	transport.TLSClientConfig.RootCAs = proxyClientTransport.TLSClientConfig.RootCAs
+
+	resp, errGet := client.Get(target.URL)
+	if errGet != nil {
+		t.Fatalf("request through the proxy failed after trusting its certificate: %v", errGet)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			t.Errorf("resp.Body.Close() error = %v", errClose)
+		}
+	}()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 }

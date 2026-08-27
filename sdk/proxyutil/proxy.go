@@ -88,6 +88,13 @@ func NewDirectTransport() *http.Transport {
 }
 
 // BuildHTTPTransport constructs an HTTP transport for the provided proxy setting.
+//
+// For an https:// proxy the returned transport carries a DialTLSContext bound to itself,
+// so use it as returned. http.Transport.Clone copies that hook as a function value: a
+// clone keeps consulting the original for the connection to the proxy, and TLS or dial
+// settings changed on the clone never reach that leg. The hook's signature offers no way
+// to learn which transport is calling it, so build a second transport rather than
+// cloning one.
 func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 	setting, errParse := Parse(raw)
 	if errParse != nil {

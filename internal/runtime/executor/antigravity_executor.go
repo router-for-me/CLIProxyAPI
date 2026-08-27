@@ -140,8 +140,19 @@ func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
 	if base == nil {
 		return nil
 	}
+	return forceHTTP11(base.Clone())
+}
 
-	clone := base.Clone()
+// forceHTTP11 applies the same settings in place, for a transport this package just
+// built and nobody else holds. Cloning such a transport is not free of meaning: a
+// transport from proxyutil.BuildHTTPTransport carries a proxy dial hook bound to itself,
+// and http.Transport.Clone copies that hook as a function value — the clone would keep
+// consulting the original that is about to be discarded.
+func forceHTTP11(clone *http.Transport) *http.Transport {
+	if clone == nil {
+		return nil
+	}
+
 	clone.ForceAttemptHTTP2 = false
 	// Wipe TLSNextProto to prevent implicit HTTP/2 upgrade.
 	clone.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
@@ -227,7 +238,8 @@ func antigravityProxiedHTTP11Transport(auth *cliproxyauth.Auth, proxyURL string)
 		if base == nil {
 			return nil, fmt.Errorf("antigravity executor: proxy setting produced no transport")
 		}
-		return cloneTransportWithHTTP11(base), nil
+		// In place, not cloned: base was built two lines up and has no other owner.
+		return forceHTTP11(base), nil
 	})
 	if errGet != nil {
 		// The caller falls back to NewProxyAwareHTTPClient, which reports the failure
