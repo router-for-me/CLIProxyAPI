@@ -118,6 +118,27 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			return transport, setting.Mode, nil
 		}
 		transport := cloneDefaultTransport()
+		if setting.URL.Scheme == "https" {
+			// http.Transport cannot be used to reach an HTTPS proxy: it hands the
+			// transport-wide TLSClientConfig — whose NextProtos gain "h2" as soon as
+			// HTTP/2 is configured — to the handshake with the proxy itself, and then
+			// writes an HTTP/1.1 CONNECT over whatever ALPN selected. A proxy that
+			// picks h2 sees a bogus HTTP/2 preface and drops the connection, which
+			// surfaces to callers as "unexpected EOF". Tunnel through the CONNECT
+			// dialer instead; protocol negotiation with the target is untouched.
+			transport.Proxy = nil
+			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				// Built per dial: TLSClientConfig is still nil here and gets populated
+				// later, both by callers and by Go's own HTTP/2 setup.
+				dialer := &httpConnectDialer{
+					proxyURL:  setting.URL,
+					dialer:    proxy.Direct,
+					tlsConfig: transport.TLSClientConfig,
+				}
+				return dialer.DialContext(ctx, network, addr)
+			}
+			return transport, setting.Mode, nil
+		}
 		transport.Proxy = http.ProxyURL(setting.URL)
 		return transport, setting.Mode, nil
 	default:
@@ -154,10 +175,26 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 type httpConnectDialer struct {
 	proxyURL *url.URL
 	dialer   proxy.Dialer
+	// tlsConfig carries caller-supplied TLS settings (roots, client certs) for the
+	// handshake with an HTTPS proxy. Nil means defaults.
+	tlsConfig *tls.Config
 }
 
 func (d *httpConnectDialer) Dial(network, addr string) (net.Conn, error) {
 	return d.DialContext(context.Background(), network, addr)
+}
+
+// proxyTLSConfig derives the TLS settings for the connection to an HTTPS proxy.
+// ALPN is pinned to http/1.1 because CONNECT is written as an HTTP/1.1 request:
+// letting the proxy select h2 would put an HTTP/1.1 request on an HTTP/2 connection.
+func proxyTLSConfig(base *tls.Config, serverName string) *tls.Config {
+	cfg := base.Clone()
+	if cfg == nil {
+		cfg = &tls.Config{}
+	}
+	cfg.ServerName = serverName
+	cfg.NextProtos = []string{"http/1.1"}
+	return cfg
 }
 
 func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -185,7 +222,7 @@ func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr strin
 		}
 	}()
 	if d.proxyURL.Scheme == "https" {
-		tlsConn := tls.Client(conn, &tls.Config{ServerName: d.proxyURL.Hostname()})
+		tlsConn := tls.Client(conn, proxyTLSConfig(d.tlsConfig, d.proxyURL.Hostname()))
 		if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
 			if errClose := conn.Close(); errClose != nil {
 				return nil, fmt.Errorf("HTTPS proxy TLS handshake failed: %w; close failed: %v", errHandshake, errClose)

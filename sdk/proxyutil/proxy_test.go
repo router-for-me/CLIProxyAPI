@@ -3,12 +3,16 @@ package proxyutil
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -393,5 +397,132 @@ func TestParseErrorDoesNotExposeProxyCredentials(t *testing.T) {
 		strings.Contains(errParse.Error(), "user") ||
 		strings.Contains(errParse.Error(), "secret") {
 		t.Fatalf("parse error exposes proxy credentials: %q", errParse.Error())
+	}
+}
+
+func TestBuildHTTPTransportHTTPSProxyUsesCONNECTDialer(t *testing.T) {
+	t.Parallel()
+
+	transport, mode, errBuild := BuildHTTPTransport("https://proxy.example.com:8443")
+	if errBuild != nil {
+		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+	}
+	if mode != ModeProxy {
+		t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+	}
+	if transport == nil {
+		t.Fatal("expected transport, got nil")
+	}
+	if transport.Proxy != nil {
+		t.Fatal("expected HTTPS proxy transport to bypass http proxy function")
+	}
+	if transport.DialContext == nil {
+		t.Fatal("expected HTTPS proxy transport to have custom DialContext")
+	}
+}
+
+// TestBuildHTTPTransportHTTPSProxyTunnelsThroughH2CapableProxy pins the reason the HTTPS
+// proxy branch cannot use http.Transport.Proxy: Go reuses TLSClientConfig (whose NextProtos
+// carry "h2" once HTTP/2 is configured) for the handshake with the proxy itself, then writes
+// an HTTP/1.1 CONNECT over whatever was negotiated. A proxy that selects h2 receives a
+// malformed stream and drops the connection, surfacing as "unexpected EOF".
+func TestBuildHTTPTransportHTTPSProxyTunnelsThroughH2CapableProxy(t *testing.T) {
+	t.Parallel()
+
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, errWrite := io.WriteString(w, "pong"); errWrite != nil {
+			t.Errorf("target write failed: %v", errWrite)
+		}
+	}))
+	defer target.Close()
+
+	var negotiatedProtocol atomic.Value
+	proxyServer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS != nil {
+			negotiatedProtocol.Store(r.TLS.NegotiatedProtocol)
+		}
+		if r.Method != http.MethodConnect {
+			http.Error(w, "expected CONNECT", http.StatusMethodNotAllowed)
+			return
+		}
+		wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("user:pass"))
+		if r.Header.Get("Proxy-Authorization") != wantAuth {
+			http.Error(w, "missing proxy credentials", http.StatusProxyAuthRequired)
+			return
+		}
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "connection is not hijackable", http.StatusInternalServerError)
+			return
+		}
+		upstreamConn, errDial := net.Dial("tcp", r.Host)
+		if errDial != nil {
+			http.Error(w, "dial upstream failed", http.StatusBadGateway)
+			return
+		}
+		clientConn, buffered, errHijack := hijacker.Hijack()
+		if errHijack != nil {
+			_ = upstreamConn.Close()
+			return
+		}
+		if _, errWrite := io.WriteString(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n"); errWrite != nil {
+			_ = upstreamConn.Close()
+			_ = clientConn.Close()
+			return
+		}
+		go func() {
+			defer func() { _ = upstreamConn.Close() }()
+			_, _ = io.Copy(upstreamConn, buffered)
+		}()
+		go func() {
+			defer func() { _ = clientConn.Close() }()
+			_, _ = io.Copy(clientConn, upstreamConn)
+		}()
+	}))
+	// Mirror a real HTTPS proxy: h2 is offered and preferred, http/1.1 stays available.
+	proxyServer.EnableHTTP2 = true
+	proxyServer.TLS = &tls.Config{NextProtos: []string{"h2", "http/1.1"}}
+	proxyServer.StartTLS()
+	defer proxyServer.Close()
+
+	proxyURL, errParseProxy := url.Parse(proxyServer.URL)
+	if errParseProxy != nil {
+		t.Fatalf("url.Parse returned error: %v", errParseProxy)
+	}
+
+	transport, mode, errBuild := BuildHTTPTransport("https://user:pass@" + proxyURL.Host)
+	if errBuild != nil {
+		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+	}
+	if mode != ModeProxy {
+		t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+	}
+	proxyClientTransport, ok := proxyServer.Client().Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("httptest proxy client transport is not an *http.Transport")
+	}
+	// The httptest servers share one self-signed certificate, so a single pool covers both legs.
+	transport.TLSClientConfig = proxyClientTransport.TLSClientConfig.Clone()
+	defer transport.CloseIdleConnections()
+
+	response, errGet := (&http.Client{Transport: transport, Timeout: 10 * time.Second}).Get(target.URL)
+	if errGet != nil {
+		t.Fatalf("request through HTTPS proxy failed: %v", errGet)
+	}
+	defer func() {
+		if errClose := response.Body.Close(); errClose != nil {
+			t.Errorf("response.Body.Close returned error: %v", errClose)
+		}
+	}()
+
+	body, errRead := io.ReadAll(response.Body)
+	if errRead != nil {
+		t.Fatalf("io.ReadAll returned error: %v", errRead)
+	}
+	if string(body) != "pong" {
+		t.Fatalf("body = %q, want pong", string(body))
+	}
+	if got, _ := negotiatedProtocol.Load().(string); got == "h2" {
+		t.Fatal("CONNECT was sent over an h2 connection; ALPN must stay on http/1.1 for the proxy leg")
 	}
 }
