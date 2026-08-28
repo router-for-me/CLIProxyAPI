@@ -2,6 +2,13 @@ package registry
 
 import "testing"
 
+func TestGetStaticModelDefinitionsByChannelSupportsGeminiInteractions(t *testing.T) {
+	models := GetStaticModelDefinitionsByChannel("gemini-interactions")
+	if len(models) == 0 {
+		t.Fatal("GetStaticModelDefinitionsByChannel(gemini-interactions) returned no models")
+	}
+}
+
 func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
 	const wantUA = "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)"
 	got := ModelOverrideHeaders("gpt-5.6-luna")
@@ -33,6 +40,19 @@ func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
 	}
 
 	t.Fatalf("Vertex models do not contain %q", releaseID)
+}
+
+func TestWithXAIBuiltinsIncludesImage20(t *testing.T) {
+	models := WithXAIBuiltins(nil)
+	for _, model := range models {
+		if model != nil && model.ID == xaiBuiltinImage20ModelID {
+			if model.Created != 1786060800 {
+				t.Fatalf("created = %d, want 1786060800 (2026-08-07)", model.Created)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected xAI builtin model %s", xaiBuiltinImage20ModelID)
 }
 
 func TestWithXAIBuiltinsIncludesVideo15GAAndPreviewAlias(t *testing.T) {

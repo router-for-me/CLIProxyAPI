@@ -1,7 +1,9 @@
 package pluginhost
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -23,6 +25,8 @@ type loadedPlugin struct {
 	path       string
 	version    string
 	name       string
+	configYAML []byte
+	plugin     pluginapi.Plugin
 	registered bool
 	client     pluginClient
 }
@@ -276,15 +280,40 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			}
 			h.loading[file.ID] = request
 			h.mu.Unlock()
+
+			if replaced != nil {
+				h.callQuiesce(ctx, replaced)
+				if errContext := ctx.Err(); errContext != nil {
+					h.clearLoadingRequest(file.ID, request)
+					_, _, _ = h.rollbackReplacement(replaced, item)
+					return
+				}
+			}
 			h.startPluginLoad(ctx, file, item, request)
 
-			loadResult, completed := h.waitForPluginLoad(ctx, file.ID, request)
+			loadResult, completed := h.waitForPluginLoad(ctx, request)
 			if !completed {
+				if replaced == nil {
+					h.cleanupCanceledPluginLoad(file.ID, request)
+				} else {
+					h.cleanupCanceledPluginLoadAndWait(file.ID, request)
+					_, _, _ = h.rollbackReplacement(replaced, item)
+				}
 				return
 			}
-			if loadResult.err != nil {
-				h.cleanupPluginLoad(file.ID, request, loadResult.loaded)
-				log.Warnf("pluginhost: failed to load plugin %s from %s: %v", file.ID, file.Path, loadResult.err)
+			if loadResult.err != nil || (replaced != nil && !loadResult.initialized) {
+				if replaced == nil {
+					h.cleanupPluginLoad(file.ID, request, loadResult.loaded)
+				} else {
+					h.cleanupPluginLoadAndWait(file.ID, request, loadResult.loaded)
+					if rollbackRecord, rollbackFile, okRollback := h.rollbackReplacement(replaced, item); okRollback {
+						records = append(records, rollbackRecord)
+						loadedFiles = append(loadedFiles, rollbackFile)
+					}
+				}
+				if loadResult.err != nil {
+					log.Warnf("pluginhost: failed to load plugin %s from %s: %v", file.ID, file.Path, loadResult.err)
+				}
 				continue
 			}
 
@@ -292,11 +321,19 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			if h.loading[file.ID] != request {
 				h.mu.Unlock()
 				h.discardLoadedPlugin(loadResult.loaded)
+				if replaced != nil {
+					_, _, _ = h.rollbackReplacement(replaced, item)
+				}
 				return
 			}
 			if errContext := ctx.Err(); errContext != nil {
 				h.mu.Unlock()
-				h.cleanupPluginLoad(file.ID, request, loadResult.loaded)
+				if replaced == nil {
+					h.cleanupPluginLoad(file.ID, request, loadResult.loaded)
+				} else {
+					h.cleanupPluginLoadAndWait(file.ID, request, loadResult.loaded)
+					_, _, _ = h.rollbackReplacement(replaced, item)
+				}
 				return
 			}
 			delete(h.loading, file.ID)
@@ -399,7 +436,7 @@ func (h *Host) startPluginLoad(ctx context.Context, file pluginFile, item runtim
 	}()
 }
 
-func (h *Host) waitForPluginLoad(ctx context.Context, id string, request *pluginLoadRequest) (pluginLoadResult, bool) {
+func (h *Host) waitForPluginLoad(ctx context.Context, request *pluginLoadRequest) (pluginLoadResult, bool) {
 	if h == nil || request == nil || request.result == nil {
 		return pluginLoadResult{}, false
 	}
@@ -410,7 +447,6 @@ func (h *Host) waitForPluginLoad(ctx context.Context, id string, request *plugin
 	case result := <-request.result:
 		return result, true
 	case <-ctx.Done():
-		h.cleanupCanceledPluginLoad(id, request)
 		return pluginLoadResult{}, false
 	}
 }
@@ -433,6 +469,23 @@ func (h *Host) cleanupCanceledPluginLoad(id string, request *pluginLoadRequest) 
 	}()
 }
 
+func (h *Host) cleanupCanceledPluginLoadAndWait(id string, request *pluginLoadRequest) {
+	if h == nil || request == nil || request.result == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.loading[id] != request || request.cleanupStarted {
+		h.mu.Unlock()
+		return
+	}
+	request.cleanupStarted = true
+	h.mu.Unlock()
+
+	result := <-request.result
+	h.discardLoadedPlugin(result.loaded)
+	h.clearLoadingRequest(id, request)
+}
+
 // cleanupPluginLoad retains the matching load token until the client has physically
 // shut down, preventing a replacement ApplyConfig from opening a second client.
 func (h *Host) cleanupPluginLoad(id string, request *pluginLoadRequest, loaded *loadedPlugin) {
@@ -448,6 +501,22 @@ func (h *Host) cleanupPluginLoad(id string, request *pluginLoadRequest, loaded *
 	h.mu.Unlock()
 
 	h.finishPluginLoadCleanup(id, request, loaded)
+}
+
+func (h *Host) cleanupPluginLoadAndWait(id string, request *pluginLoadRequest, loaded *loadedPlugin) {
+	if h == nil || request == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.loading[id] != request || request.cleanupStarted {
+		h.mu.Unlock()
+		return
+	}
+	request.cleanupStarted = true
+	h.mu.Unlock()
+
+	h.discardLoadedPlugin(loaded)
+	h.clearLoadingRequest(id, request)
 }
 
 func (h *Host) finishPluginLoadCleanup(id string, request *pluginLoadRequest, loaded *loadedPlugin) {
@@ -779,6 +848,99 @@ func (h *Host) rebuildActivePluginMapsLocked(records []capabilityRecord) {
 	}
 }
 
+func (h *Host) callQuiesce(ctx context.Context, lp *loadedPlugin) bool {
+	if h == nil || lp == nil || lp.client == nil {
+		return false
+	}
+	errQuiesce, okCall := h.safePluginAction(ctx, lp.id, pluginabi.MethodPluginQuiesce, func() error {
+		_, errCall := callPlugin[rpcEmptyResponse](ctx, lp.client, pluginabi.MethodPluginQuiesce, rpcEmptyResponse{})
+		return errCall
+	})
+	if errQuiesce != nil {
+		logQuiesceError(lp.id, errQuiesce)
+	}
+	return okCall && errQuiesce == nil
+}
+
+func logQuiesceError(id string, errQuiesce error) {
+	entry := log.WithError(errQuiesce).WithField("plugin_id", id)
+	switch {
+	case quiesceUnsupported(errQuiesce):
+		entry.Debug("pluginhost: plugin quiesce unsupported")
+	case errors.Is(errQuiesce, context.Canceled), errors.Is(errQuiesce, context.DeadlineExceeded):
+		entry.Debug("pluginhost: plugin quiesce canceled")
+	default:
+		entry.Warn("pluginhost: plugin quiesce failed")
+	}
+}
+
+func quiesceUnsupported(errQuiesce error) bool {
+	if errQuiesce == nil {
+		return false
+	}
+	var errRPC rpcError
+	if errors.As(errQuiesce, &errRPC) {
+		switch strings.ToLower(strings.TrimSpace(errRPC.Code)) {
+		case "unknown_method", "method_not_found", "unsupported_method":
+			return true
+		}
+	}
+	if errors.Is(errQuiesce, errors.ErrUnsupported) {
+		return true
+	}
+	message := strings.ToLower(strings.TrimSpace(errQuiesce.Error()))
+	for _, indication := range []string{
+		"unknown method",
+		"method not found",
+		"unsupported method",
+		"method unsupported",
+		"method is not supported",
+		"method not supported",
+	} {
+		if strings.Contains(message, indication) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Host) rollbackReplacement(lp *loadedPlugin, item runtimeItemConfig) (capabilityRecord, pluginFile, bool) {
+	if h == nil || lp == nil {
+		return capabilityRecord{}, pluginFile{}, false
+	}
+	h.mu.Lock()
+	configYAML := bytes.Clone(lp.configYAML)
+	previousPlugin := lp.plugin
+	h.mu.Unlock()
+	if len(configYAML) > 0 {
+		item.ConfigYAML = configYAML
+	}
+
+	plugin, okCall := h.callRegister(context.Background(), lp, item)
+	if okCall {
+		h.mu.Lock()
+		delete(h.fused, lp.id)
+		h.mu.Unlock()
+	} else {
+		plugin = previousPlugin
+	}
+	if !validPlugin(plugin) {
+		return capabilityRecord{}, pluginFile{}, false
+	}
+	return capabilityRecord{
+			id:       lp.id,
+			path:     lp.path,
+			version:  lp.version,
+			priority: item.Priority,
+			meta:     plugin.Metadata,
+			plugin:   plugin,
+		}, pluginFile{
+			ID:      lp.id,
+			Path:    lp.path,
+			Version: lp.version,
+		}, true
+}
+
 func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {
 	if lp == nil {
 		return pluginapi.Plugin{}, false
@@ -810,7 +972,35 @@ func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeI
 		log.Warnf("pluginhost: plugin %s returned invalid metadata or no capabilities", lp.id)
 		return pluginapi.Plugin{}, false
 	}
+	plugin.Metadata = clonePluginMetadata(plugin.Metadata)
+	h.mu.Lock()
+	lp.name = strings.TrimSpace(plugin.Metadata.Name)
+	if strings.TrimSpace(lp.version) == "" {
+		lp.version = strings.TrimSpace(plugin.Metadata.Version)
+	}
+	lp.configYAML = bytes.Clone(item.ConfigYAML)
+	lp.plugin = plugin
+	h.mu.Unlock()
 	return plugin, true
+}
+
+func (h *Host) safePluginAction(ctx context.Context, id, method string, fn func() error) (err error, ok bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.fusePlugin(id, method, recovered)
+			err = nil
+			ok = false
+		}
+	}()
+
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err(), false
+		default:
+		}
+	}
+	return fn(), true
 }
 
 func (h *Host) safePluginCall(ctx context.Context, id, method string, fn func() pluginapi.Plugin) (out pluginapi.Plugin, ok bool) {
@@ -862,6 +1052,7 @@ func validPlugin(plugin pluginapi.Plugin) bool {
 		caps.ResponseAfterTranslator != nil ||
 		caps.ResponseInterceptor != nil ||
 		caps.StreamChunkInterceptor != nil ||
+		caps.WebSocketResponseObserver != nil ||
 		caps.ThinkingApplier != nil ||
 		caps.UsagePlugin != nil ||
 		caps.CommandLinePlugin != nil ||

@@ -584,8 +584,9 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		}
 
 		if _, ok := c.Request.URL.Query()["client_version"]; ok {
+			clientVersion := c.Query("client_version")
 			if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
-				s.handleHomeCodexClientModels(c)
+				s.handleHomeCodexClientModels(c, clientVersion)
 				return
 			}
 			openaiHandler.OpenAIModels(c)
@@ -653,7 +654,7 @@ func (s *Server) handleGrokModels(c *gin.Context) {
 
 // handleHomeCodexClientModels builds the Codex client catalog from Home model IDs.
 // Template metadata still comes from the local/remote codex_client_models catalog.
-func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
+func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion string) {
 	entries, ok := s.loadHomeModelEntries(c)
 	if !ok {
 		return
@@ -675,10 +676,13 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
 			model["display_name"] = entry.displayName
 			model["description"] = entry.displayName
 		}
+		if entry.maxCompletionTokens > 0 {
+			model["max_completion_tokens"] = entry.maxCompletionTokens
+		}
 		models = append(models, model)
 	}
 
-	c.JSON(http.StatusOK, codexmodels.BuildResponse(models, nil, s.cfg.Codex.OptimizeMultiAgentV2))
+	c.JSON(http.StatusOK, codexmodels.BuildResponseForClient(models, nil, s.cfg.Codex.OptimizeMultiAgentV2, clientVersion))
 }
 
 func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {

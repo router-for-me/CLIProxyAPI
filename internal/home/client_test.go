@@ -26,7 +26,7 @@ import (
 )
 
 func TestAuthDispatchRequestIncludesCount(t *testing.T) {
-	req := newAuthDispatchRequest("gpt-5.4", "session-1", http.Header{"Authorization": {"Bearer test"}}, 2, "")
+	req := newAuthDispatchRequest("gpt-5.4", "session-1", http.Header{"Authorization": {"Bearer test"}}, 2, "", nil, "")
 
 	raw, err := json.Marshal(&req)
 	if err != nil {
@@ -43,10 +43,13 @@ func TestAuthDispatchRequestIncludesCount(t *testing.T) {
 	if got := int(payload["concurrency_protocol"].(float64)); got != 1 {
 		t.Fatalf("concurrency_protocol = %d, want 1", got)
 	}
+	if _, present := payload["excluded_auth_ids"]; present {
+		t.Fatalf("legacy request unexpectedly included excluded_auth_ids: %#v", payload["excluded_auth_ids"])
+	}
 }
 
 func TestAuthDispatchRequestDefaultsCountToOne(t *testing.T) {
-	req := newAuthDispatchRequest("gpt-5.4", "", nil, 0, "")
+	req := newAuthDispatchRequest("gpt-5.4", "", nil, 0, "", nil, "")
 
 	if req.Count != 1 {
 		t.Fatalf("count = %d, want 1", req.Count)
@@ -57,7 +60,7 @@ func TestAuthDispatchRequestDefaultsCountToOne(t *testing.T) {
 }
 
 func TestAuthDispatchRequestIncludesCredentialPolicy(t *testing.T) {
-	req := newAuthDispatchRequest("gpt-5.4", "", nil, 1, "codex_alpha_search_v1")
+	req := newAuthDispatchRequest("gpt-5.4", "", nil, 1, "codex_alpha_search_v1", nil, "")
 	raw, errMarshal := json.Marshal(&req)
 	if errMarshal != nil {
 		t.Fatalf("marshal auth dispatch request: %v", errMarshal)
@@ -68,6 +71,111 @@ func TestAuthDispatchRequestIncludesCredentialPolicy(t *testing.T) {
 	}
 	if got := payload["credential_policy"]; got != "codex_alpha_search_v1" {
 		t.Fatalf("credential_policy = %#v, want codex_alpha_search_v1", got)
+	}
+}
+
+func TestAuthDispatchRequestIncludesExcludedAuthIDs(t *testing.T) {
+	excludedAuthIDs := []string{"auth-a", "auth-b"}
+	req := newAuthDispatchRequest("gpt-5.4", "", nil, 2, "", &excludedAuthIDs, "")
+	if req.Count != 1 {
+		t.Fatalf("new retry-contract count = %d, want 1 for legacy Home compatibility", req.Count)
+	}
+	raw, errMarshal := json.Marshal(&req)
+	if errMarshal != nil {
+		t.Fatalf("marshal auth dispatch request: %v", errMarshal)
+	}
+	var payload map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal auth dispatch request: %v", errUnmarshal)
+	}
+	got, ok := payload["excluded_auth_ids"].([]any)
+	if !ok || len(got) != 2 || got[0] != "auth-a" || got[1] != "auth-b" {
+		t.Fatalf("excluded_auth_ids = %#v, want [auth-a auth-b]", payload["excluded_auth_ids"])
+	}
+}
+
+func TestAuthDispatchRequestIncludesEmptyExcludedAuthIDs(t *testing.T) {
+	excludedAuthIDs := []string{}
+	req := newAuthDispatchRequest("gpt-5.4", "", nil, 2, "", &excludedAuthIDs, "")
+	if req.Count != 1 {
+		t.Fatalf("new retry-contract count = %d, want 1 for legacy Home compatibility", req.Count)
+	}
+	raw, errMarshal := json.Marshal(&req)
+	if errMarshal != nil {
+		t.Fatalf("marshal auth dispatch request: %v", errMarshal)
+	}
+	var payload map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal auth dispatch request: %v", errUnmarshal)
+	}
+	got, ok := payload["excluded_auth_ids"].([]any)
+	if !ok || len(got) != 0 {
+		t.Fatalf("excluded_auth_ids = %#v, want []", payload["excluded_auth_ids"])
+	}
+}
+
+func TestAuthDispatchRequestIncludesPinnedAuthID(t *testing.T) {
+	excludedAuthIDs := []string{}
+	req := newAuthDispatchRequest("gpt-5.4", "", nil, 2, "", &excludedAuthIDs, " auth-pinned ")
+
+	raw, errMarshal := json.Marshal(&req)
+	if errMarshal != nil {
+		t.Fatalf("marshal auth dispatch request: %v", errMarshal)
+	}
+	var payload map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal auth dispatch request: %v", errUnmarshal)
+	}
+	if got := payload["pinned_auth_id"]; got != "auth-pinned" {
+		t.Fatalf("pinned_auth_id = %#v, want auth-pinned", got)
+	}
+}
+
+func TestAuthDispatchRequestDistinguishesLegacyAndRetryRoundProtocol(t *testing.T) {
+	excludedAuthIDs := []string{"auth-a"}
+	legacy := newAuthDispatchRequest("gpt-5.4", "", nil, 3, "", &excludedAuthIDs, "")
+	legacyRaw, errMarshal := json.Marshal(&legacy)
+	if errMarshal != nil {
+		t.Fatalf("marshal legacy auth dispatch request: %v", errMarshal)
+	}
+	var legacyPayload map[string]any
+	if errUnmarshal := json.Unmarshal(legacyRaw, &legacyPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal legacy auth dispatch request: %v", errUnmarshal)
+	}
+	if _, present := legacyPayload["retry_round"]; present {
+		t.Fatalf("legacy request unexpectedly included retry_round: %#v", legacyPayload["retry_round"])
+	}
+
+	initial := newAuthDispatchRequestWithRetryRound("gpt-5.4", "", nil, 3, "", 0, &excludedAuthIDs, "")
+	initialRaw, errMarshal := json.Marshal(&initial)
+	if errMarshal != nil {
+		t.Fatalf("marshal initial auth dispatch request: %v", errMarshal)
+	}
+	var initialPayload map[string]any
+	if errUnmarshal := json.Unmarshal(initialRaw, &initialPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal initial auth dispatch request: %v", errUnmarshal)
+	}
+	if got := int(initialPayload["retry_round"].(float64)); got != 0 {
+		t.Fatalf("initial retry_round = %d, want explicit 0", got)
+	}
+	if got := int(initialPayload["count"].(float64)); got != 1 {
+		t.Fatalf("initial retry-contract count = %d, want 1", got)
+	}
+
+	additional := newAuthDispatchRequestWithRetryRound("gpt-5.4", "", nil, 3, "", 2, &excludedAuthIDs, "")
+	additionalRaw, errMarshal := json.Marshal(&additional)
+	if errMarshal != nil {
+		t.Fatalf("marshal additional auth dispatch request: %v", errMarshal)
+	}
+	var additionalPayload map[string]any
+	if errUnmarshal := json.Unmarshal(additionalRaw, &additionalPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal additional auth dispatch request: %v", errUnmarshal)
+	}
+	if got := int(additionalPayload["retry_round"].(float64)); got != 2 {
+		t.Fatalf("retry_round = %d, want 2", got)
+	}
+	if got := additionalPayload["excluded_auth_ids"].([]any); len(got) != 1 || got[0] != "auth-a" {
+		t.Fatalf("excluded_auth_ids = %#v, want [auth-a]", additionalPayload["excluded_auth_ids"])
 	}
 }
 

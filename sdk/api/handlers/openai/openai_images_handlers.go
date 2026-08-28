@@ -31,6 +31,7 @@ const (
 	defaultImagesToolModel      = "gpt-image-2"
 	defaultXAIImagesModel       = "grok-imagine-image"
 	xaiImagesQualityModel       = "grok-imagine-image-quality"
+	xaiImages20Model            = "grok-imagine-image-2.0"
 	xaiImagesHandlerType        = "openai-image"
 	xaiImagesDefaultAspectRatio = "1:1"
 	xaiImagesDefaultResolution  = "1k"
@@ -210,10 +211,18 @@ func imagesModelBase(model string) string {
 	return strings.ToLower(strings.TrimSpace(baseModel))
 }
 
+func isXAIImagesBaseModel(baseModel string) bool {
+	switch strings.ToLower(strings.TrimSpace(baseModel)) {
+	case defaultXAIImagesModel, xaiImagesQualityModel, xaiImages20Model:
+		return true
+	default:
+		return false
+	}
+}
+
 func isXAIImagesModel(model string) bool {
 	prefix, baseModel := imagesModelParts(model)
-	baseModel = strings.ToLower(strings.TrimSpace(baseModel))
-	if baseModel != defaultXAIImagesModel && baseModel != xaiImagesQualityModel {
+	if !isXAIImagesBaseModel(baseModel) {
 		return false
 	}
 
@@ -249,7 +258,7 @@ func rejectUnsupportedImagesModel(c *gin.Context, model string) bool {
 
 	c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 		Error: handlers.ErrorDetail{
-			Message: fmt.Sprintf("Model %s is not supported on %s or %s. Use %s, %s, %s, %s, or a configured openai-compatibility image model.", model, imagesGenerationsPath, imagesEditsPath, gptImage15Model, defaultImagesToolModel, defaultXAIImagesModel, xaiImagesQualityModel),
+			Message: fmt.Sprintf("Model %s is not supported on %s or %s. Use %s, %s, %s, %s, %s, or a configured openai-compatibility image model.", model, imagesGenerationsPath, imagesEditsPath, gptImage15Model, defaultImagesToolModel, defaultXAIImagesModel, xaiImagesQualityModel, xaiImages20Model),
 			Type:    "invalid_request_error",
 		},
 	})
@@ -265,10 +274,14 @@ func normalizeImagesResponseFormat(responseFormat string) string {
 
 func canonicalXAIImagesModel(model string) string {
 	baseModel := imagesModelBase(model)
-	if baseModel == xaiImagesQualityModel {
+	switch baseModel {
+	case xaiImagesQualityModel:
 		return xaiImagesQualityModel
+	case xaiImages20Model:
+		return xaiImages20Model
+	default:
+		return defaultXAIImagesModel
 	}
-	return defaultXAIImagesModel
 }
 
 func xaiImagesAspectRatio(raw string, fallback string) string {

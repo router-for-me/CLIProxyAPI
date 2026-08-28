@@ -216,6 +216,15 @@ func copyInteractionsOpenAITopLevel(out []byte, root gjson.Result) []byte {
 	if serviceTier := root.Get("service_tier"); serviceTier.Exists() && serviceTier.Type == gjson.String {
 		out, _ = sjson.SetBytes(out, "service_tier", serviceTier.String())
 	}
+	if previousInteractionID := firstNonEmpty(root.Get("previous_interaction_id").String(), root.Get("previous_response_id").String()); previousInteractionID != "" {
+		out, _ = sjson.SetBytes(out, "previous_response_id", previousInteractionID)
+	}
+	if environmentID := firstNonEmpty(root.Get("environment_id").String(), root.Get("environment.id").String()); environmentID != "" {
+		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
+	}
+	if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
+		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(agentConfig.Raw))
+	}
 	for _, key := range []string{"parallel_tool_calls", "seed", "user"} {
 		if value := root.Get(key); value.Exists() {
 			out, _ = sjson.SetRawBytes(out, key, []byte(value.Raw))

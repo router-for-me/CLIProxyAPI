@@ -265,3 +265,139 @@ func TestConvertOpenAIResponsesRequestToAntigravity_GeminiReasoningUsesNativeTho
 		t.Fatalf("parts[0].thoughtSignature = %q, want preserved Gemini signature. Output: %s", got, out)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToAntigravity_PreservesToolResultImage(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"input": [
+			{"role": "user", "content": [{"type": "input_text", "text": "请帮我读取分析这张图片"}]},
+			{"type": "function_call", "id": "fc_read", "call_id": "call_read_1", "name": "read", "arguments": "{\"path\":\"/path/to/image.png\"}"},
+			{
+				"type": "function_call_output",
+				"call_id": "call_read_1",
+				"output": [
+					{"type": "input_text", "text": "Read image file [image/png]"},
+					{"type": "input_image", "detail": "auto", "image_url": "data:image/png;base64,QUJD"}
+				]
+			}
+		]
+	}`
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	contents := gjson.GetBytes(out, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 contents, got %d. Output: %s", len(contents), out)
+	}
+	funcContent := contents[2]
+	if got := funcContent.Get("role").String(); got != "user" {
+		t.Fatalf("role = %q, want user. Output: %s", got, out)
+	}
+	funcResp := funcContent.Get("parts.0.functionResponse")
+	if !funcResp.Exists() {
+		t.Fatalf("functionResponse should exist. Output: %s", out)
+	}
+	if got := funcResp.Get("id").String(); got != "call_read_1" {
+		t.Fatalf("id = %q, want call_read_1", got)
+	}
+	if got := funcResp.Get("name").String(); got != "read" {
+		t.Fatalf("name = %q, want read", got)
+	}
+	inlineData := funcResp.Get("parts.0.inlineData")
+	if !inlineData.Exists() {
+		t.Fatalf("expected functionResponse.parts.0.inlineData to exist, got: %s", out)
+	}
+	if got := inlineData.Get("mimeType").String(); got != "image/png" {
+		t.Errorf("expected mimeType image/png, got %q", got)
+	}
+	if got := inlineData.Get("data").String(); got != "QUJD" {
+		t.Errorf("expected data QUJD, got %q", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_AttachesParallelToolImagesToNearestResponse(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"input": [
+			{"role": "user", "content": [{"type": "input_text", "text": "read both"}]},
+			{"type": "function_call", "id": "fc_a", "call_id": "call_a", "name": "read", "arguments": "{\"path\":\"/tmp/a.png\"}"},
+			{"type": "function_call", "id": "fc_b", "call_id": "call_b", "name": "read", "arguments": "{\"path\":\"/tmp/b.png\"}"},
+			{
+				"type": "function_call_output",
+				"call_id": "call_a",
+				"output": [
+					{"type": "input_text", "text": "file A"},
+					{"type": "input_image", "image_url": "data:image/png;base64,AAA"}
+				]
+			},
+			{
+				"type": "function_call_output",
+				"call_id": "call_b",
+				"output": [
+					{"type": "input_text", "text": "file B"},
+					{"type": "input_image", "image_url": "data:image/jpeg;base64,BBB"}
+				]
+			}
+		]
+	}`
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	parts := gjson.GetBytes(out, "request.contents.2.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("function parts = %d, want 2. Output: %s", len(parts), out)
+	}
+	got := map[string]string{}
+	for _, part := range parts {
+		fr := part.Get("functionResponse")
+		got[fr.Get("id").String()] = fr.Get("parts.0.inlineData.data").String()
+	}
+	if got["call_a"] != "AAA" {
+		t.Fatalf("call_a image = %q, want AAA. Output: %s", got["call_a"], out)
+	}
+	if got["call_b"] != "BBB" {
+		t.Fatalf("call_b image = %q, want BBB. Output: %s", got["call_b"], out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_PreservesAdditionalToolsAndToolConfig(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"input": [
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "namespace",
+						"name": "functions",
+						"tools": [
+							{"type": "custom", "name": "exec", "description": "Execute a command"},
+							{"type": "function", "name": "continuity_probe", "description": "Probe", "parameters": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}}
+						]
+					}
+				]
+			},
+			{"role": "user", "content": [{"type": "input_text", "text": "test"}]}
+		],
+		"tool_choice": {
+			"type": "function",
+			"name": "continuity_probe",
+			"namespace": "functions"
+		}
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	if !gjson.ValidBytes(out) {
+		t.Fatalf("invalid JSON output: %s", out)
+	}
+
+	decls := gjson.GetBytes(out, "request.tools.0.functionDeclarations").Array()
+	if len(decls) != 2 {
+		t.Fatalf("expected 2 functionDeclarations in request.tools, got %d; raw: %s", len(decls), out)
+	}
+
+	mode := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String()
+	if mode != "ANY" {
+		t.Fatalf("mode = %q, want ANY", mode)
+	}
+	allowed := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames.0").String()
+	if allowed != "functions__continuity_probe" {
+		t.Fatalf("allowedFunctionNames.0 = %q, want functions__continuity_probe", allowed)
+	}
+}

@@ -6,12 +6,12 @@
 package gemini
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"strings"
 	"time"
 
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -117,6 +117,13 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 					}
 					(*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseIDs[idx] = toolID
 				}
+			} else if cb.Get("type").String() == "thinking" {
+				if sig := cb.Get("signature"); sig.Exists() && sig.String() != "" {
+					thinkingPart := []byte(`{"thought":true,"thoughtSignature":""}`)
+					thinkingPart, _ = sjson.SetBytes(thinkingPart, "thoughtSignature", sigcompat.GeminiReplaySignatureOrBypass(sig.String(), sigcompat.SignatureBlockKindGeminiModelPart))
+					template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", thinkingPart)
+					return [][]byte{template}
+				}
 			}
 		}
 		return [][]byte{}
@@ -139,6 +146,12 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 				if text := delta.Get("thinking"); text.Exists() && text.String() != "" {
 					thinkingPart := []byte(`{"thought":true,"text":""}`)
 					thinkingPart, _ = sjson.SetBytes(thinkingPart, "text", text.String())
+					template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", thinkingPart)
+				}
+			case "signature_delta":
+				if sig := delta.Get("signature"); sig.Exists() && sig.String() != "" {
+					thinkingPart := []byte(`{"thought":true,"thoughtSignature":""}`)
+					thinkingPart, _ = sjson.SetBytes(thinkingPart, "thoughtSignature", sigcompat.GeminiReplaySignatureOrBypass(sig.String(), sigcompat.SignatureBlockKindGeminiModelPart))
 					template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", thinkingPart)
 				}
 			case "input_json_delta":
@@ -301,13 +314,18 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 	template, _ = sjson.SetBytes(template, "modelVersion", modelName)
 
 	streamingEvents := make([][]byte, 0)
-
-	scanner := bufio.NewScanner(bytes.NewReader(rawJSON))
-	buffer := make([]byte, 52_428_800) // 50MB
-	scanner.Buffer(buffer, 52_428_800)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		// log.Debug(string(line))
+	remaining := rawJSON
+	for len(remaining) > 0 {
+		var line []byte
+		idx := bytes.IndexByte(remaining, '\n')
+		if idx >= 0 {
+			line = remaining[:idx]
+			remaining = remaining[idx+1:]
+		} else {
+			line = remaining
+			remaining = nil
+		}
+		line = bytes.TrimRight(line, "\r")
 		if bytes.HasPrefix(line, dataTag) {
 			jsonData := bytes.TrimSpace(line[5:])
 			streamingEvents = append(streamingEvents, jsonData)
@@ -372,6 +390,12 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 						}
 						newParam.ToolUseIDs[idx] = toolID
 					}
+				} else if cb.Get("type").String() == "thinking" {
+					if sig := cb.Get("signature"); sig.Exists() && sig.String() != "" {
+						partJSON := []byte(`{"thought":true,"thoughtSignature":""}`)
+						partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", sigcompat.GeminiReplaySignatureOrBypass(sig.String(), sigcompat.SignatureBlockKindGeminiModelPart))
+						allParts = append(allParts, partJSON)
+					}
 				}
 			}
 			continue
@@ -393,6 +417,12 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 					if text := delta.Get("thinking"); text.Exists() && text.String() != "" {
 						partJSON := []byte(`{"thought":true,"text":""}`)
 						partJSON, _ = sjson.SetBytes(partJSON, "text", text.String())
+						allParts = append(allParts, partJSON)
+					}
+				case "signature_delta":
+					if sig := delta.Get("signature"); sig.Exists() && sig.String() != "" {
+						partJSON := []byte(`{"thought":true,"thoughtSignature":""}`)
+						partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", sigcompat.GeminiReplaySignatureOrBypass(sig.String(), sigcompat.SignatureBlockKindGeminiModelPart))
 						allParts = append(allParts, partJSON)
 					}
 				case "input_json_delta":
@@ -504,11 +534,7 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 
 	// Set the consolidated parts array
 	if len(consolidatedParts) > 0 {
-		partsJSON := []byte(`[]`)
-		for _, partJSON := range consolidatedParts {
-			partsJSON, _ = sjson.SetRawBytes(partsJSON, "-1", partJSON)
-		}
-		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts", partsJSON)
+		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts", translatorcommon.JoinRawArray(consolidatedParts))
 	}
 
 	// Set usage metadata
@@ -535,6 +561,7 @@ func consolidateParts(parts [][]byte) [][]byte {
 	var consolidated [][]byte
 	var currentTextPart strings.Builder
 	var currentThoughtPart strings.Builder
+	var currentThoughtSignature string
 	var hasText, hasThought bool
 
 	flushText := func() {
@@ -550,11 +577,15 @@ func consolidateParts(parts [][]byte) [][]byte {
 
 	flushThought := func() {
 		// Flush accumulated thinking content to the consolidated parts array
-		if hasThought && currentThoughtPart.Len() > 0 {
+		if hasThought && (currentThoughtPart.Len() > 0 || currentThoughtSignature != "") {
 			thoughtPartJSON := []byte(`{"thought":true,"text":""}`)
 			thoughtPartJSON, _ = sjson.SetBytes(thoughtPartJSON, "text", currentThoughtPart.String())
+			if currentThoughtSignature != "" {
+				thoughtPartJSON, _ = sjson.SetBytes(thoughtPartJSON, "thoughtSignature", currentThoughtSignature)
+			}
 			consolidated = append(consolidated, thoughtPartJSON)
 			currentThoughtPart.Reset()
+			currentThoughtSignature = ""
 			hasThought = false
 		}
 	}
@@ -576,6 +607,10 @@ func consolidateParts(parts [][]byte) [][]byte {
 
 			if text := part.Get("text"); text.Exists() && text.Type == gjson.String {
 				currentThoughtPart.WriteString(text.String())
+				hasThought = true
+			}
+			if sig := part.Get("thoughtSignature"); sig.Exists() && sig.Type == gjson.String && sig.String() != "" {
+				currentThoughtSignature = sig.String()
 				hasThought = true
 			}
 		} else if text := part.Get("text"); text.Exists() && text.Type == gjson.String {

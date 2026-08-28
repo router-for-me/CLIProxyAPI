@@ -1190,6 +1190,10 @@ func TestNormalizeResponsesWebsocketRequestCreate(t *testing.T) {
 }
 
 func TestNormalizeResponseSubsequentRequestBoundsTranscriptAllocations(t *testing.T) {
+	if raceDetectorEnabled {
+		t.Skip("allocation budgets are not meaningful with race detector instrumentation")
+	}
+
 	makeInput := func(count int, role string) string {
 		var input strings.Builder
 		input.WriteByte('[')
@@ -1230,6 +1234,10 @@ func TestNormalizeResponseSubsequentRequestBoundsTranscriptAllocations(t *testin
 }
 
 func TestResponsesWebsocketFallbackTurnBoundsTranscriptAllocations(t *testing.T) {
+	if raceDetectorEnabled {
+		t.Skip("allocation budgets are not meaningful with race detector instrumentation")
+	}
+
 	makeInput := func(count int, role string) string {
 		var input strings.Builder
 		input.WriteByte('[')
@@ -1268,6 +1276,120 @@ func TestResponsesWebsocketFallbackTurnBoundsTranscriptAllocations(t *testing.T)
 	if allocatedBytes := result.AllocedBytesPerOp(); allocatedBytes > maxAllocatedBytes {
 		t.Fatalf("processing a fallback turn with %d input bytes allocated %d bytes per operation, want at most %d", inputBytes, allocatedBytes, maxAllocatedBytes)
 	}
+}
+
+func TestResponsesWebsocketToolCacheScansDoNotCopyLargePayloads(t *testing.T) {
+	const maxAllocatedBytes = 256 << 10
+	padding := strings.Repeat("x", 4<<20)
+
+	requestPayload := []byte(fmt.Sprintf(
+		`{"input":[{"type":"message","id":"message-1","call_id":"not-a-tool","content":%q},{"type":"function_call","id":"fc-1","call_id":"call-1","name":"lookup","arguments":"{}"},{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"ok"}]}`,
+		padding,
+	))
+	t.Run("request", func(t *testing.T) {
+		result := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for index := 0; index < b.N; index++ {
+				payload, turn := prepareResponsesWebsocketFallbackTurn("large-request-session", requestPayload)
+				runtime.KeepAlive(payload)
+				runtime.KeepAlive(turn)
+			}
+		})
+		t.Logf("request tool-cache scan allocated %d bytes per operation", result.AllocedBytesPerOp())
+		if allocatedBytes := result.AllocedBytesPerOp(); allocatedBytes > maxAllocatedBytes {
+			t.Fatalf("request tool-cache scan allocated %d bytes per operation, want at most %d", allocatedBytes, maxAllocatedBytes)
+		}
+	})
+
+	responsePayload := []byte(fmt.Sprintf(
+		`{"type":"response.completed","response":{"output":[{"type":"message","id":"message-1","content":%q},{"type":"function_call","id":"fc-1","call_id":"call-1","name":"lookup","arguments":"{}"}]}}`,
+		padding,
+	))
+	t.Run("response", func(t *testing.T) {
+		turn := newResponsesWebsocketToolCacheTurn("large-response-session")
+		result := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for index := 0; index < b.N; index++ {
+				turn.recordResponse(responsePayload)
+				runtime.KeepAlive(turn)
+			}
+		})
+		t.Logf("response tool-cache scan allocated %d bytes per operation", result.AllocedBytesPerOp())
+		if allocatedBytes := result.AllocedBytesPerOp(); allocatedBytes > maxAllocatedBytes {
+			t.Fatalf("response tool-cache scan allocated %d bytes per operation, want at most %d", allocatedBytes, maxAllocatedBytes)
+		}
+	})
+}
+
+func TestResponsesWebsocketToolCacheScanPreservesJSONRequestSemantics(t *testing.T) {
+	t.Run("rejects trailing data", func(t *testing.T) {
+		payload := []byte(`{"input":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"lookup","arguments":"{}"}]} trailing`)
+		repaired, turn := prepareResponsesWebsocketFallbackTurn("trailing-data-session", payload)
+		if !bytes.Equal(repaired, payload) {
+			t.Fatalf("repaired payload = %s, want original malformed payload", repaired)
+		}
+		if len(turn.calls) != 0 || len(turn.outputs) != 0 {
+			t.Fatalf("malformed payload recorded calls=%d outputs=%d, want none", len(turn.calls), len(turn.outputs))
+		}
+	})
+
+	t.Run("uses last duplicate input", func(t *testing.T) {
+		payload := []byte(`{"input":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"lookup","arguments":"{}"}],"input":[{"type":"message","id":"message-1","role":"user","content":"hello"}]}`)
+		repaired, turn := prepareResponsesWebsocketFallbackTurn("duplicate-input-session", payload)
+		if !bytes.Equal(repaired, payload) {
+			t.Fatalf("repaired payload = %s, want original payload", repaired)
+		}
+		if len(turn.calls) != 0 || len(turn.outputs) != 0 {
+			t.Fatalf("duplicate input recorded calls=%d outputs=%d from the shadowed value, want none", len(turn.calls), len(turn.outputs))
+		}
+	})
+
+	t.Run("repairs last case-insensitive duplicate input", func(t *testing.T) {
+		payload := []byte(`{"input":[{"type":"message","id":"shadowed","role":"user","content":"ignore"}],"INPUT":[{"type":"function_call_output","id":"fco-1","call_id":"missing-call","output":"orphan"}]}`)
+		repaired, _ := prepareResponsesWebsocketFallbackTurn("duplicate-case-input-session", payload)
+		var request struct {
+			Input []json.RawMessage `json:"input"`
+		}
+		if errUnmarshal := json.Unmarshal(repaired, &request); errUnmarshal != nil {
+			t.Fatalf("unmarshal repaired payload: %v", errUnmarshal)
+		}
+		if len(request.Input) != 0 {
+			t.Fatalf("repaired effective input count = %d, want 0", len(request.Input))
+		}
+	})
+
+	t.Run("repairs last exact duplicate input", func(t *testing.T) {
+		payload := []byte(`{"input":[{"type":"message","id":"shadowed","role":"user","content":"ignore"}],"input":[{"type":"function_call_output","id":"fco-1","call_id":"missing-call","output":"orphan"}]}`)
+		repaired, _ := prepareResponsesWebsocketFallbackTurn("duplicate-exact-input-session", payload)
+		var request struct {
+			Input []json.RawMessage `json:"input"`
+		}
+		if errUnmarshal := json.Unmarshal(repaired, &request); errUnmarshal != nil {
+			t.Fatalf("unmarshal repaired payload: %v", errUnmarshal)
+		}
+		if len(request.Input) != 0 {
+			t.Fatalf("repaired effective input count = %d, want 0", len(request.Input))
+		}
+	})
+
+	t.Run("rejects invalid earlier duplicate input", func(t *testing.T) {
+		payload := []byte(`{"input":{},"input":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"lookup","arguments":"{}"},{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"ok"}]}`)
+		repaired, turn := prepareResponsesWebsocketFallbackTurn("invalid-duplicate-input-session", payload)
+		if !bytes.Equal(repaired, payload) {
+			t.Fatalf("repaired payload = %s, want original payload with invalid duplicate input", repaired)
+		}
+		if len(turn.calls) != 0 || len(turn.outputs) != 0 {
+			t.Fatalf("invalid duplicate input recorded calls=%d outputs=%d, want none", len(turn.calls), len(turn.outputs))
+		}
+	})
+
+	t.Run("uses last duplicate previous response id", func(t *testing.T) {
+		payload := []byte(`{"previous_response_id":"resp-first","previous_response_id":null,"input":[{"type":"function_call_output","id":"fco-1","call_id":"missing-call","output":"orphan"}]}`)
+		repaired, _ := prepareResponsesWebsocketFallbackTurn("duplicate-previous-response-session", payload)
+		if inputCount := gjson.GetBytes(repaired, "input.#").Int(); inputCount != 0 {
+			t.Fatalf("repaired input count = %d, want 0 when the last previous_response_id is null", inputCount)
+		}
+	})
 }
 
 func TestNormalizeResponsesWebsocketRequestCreateWithHistory(t *testing.T) {
@@ -1981,13 +2103,16 @@ func TestResponsesWebsocketToolCacheTurnDoesNotRetainRequestBackingStorage(t *te
 	}
 	copy(payload[len(prefix)+paddingSize:], suffix)
 
-	_, turn := prepareResponsesWebsocketFallbackTurn("backing-storage-session", payload)
+	repaired, turn := prepareResponsesWebsocketFallbackTurn("backing-storage-session", payload)
 	payload = nil
+	repaired = nil
+	runtime.GC()
 	runtime.GC()
 
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
 	runtime.KeepAlive(turn)
+	runtime.KeepAlive(repaired)
 	retainedHeap := int64(after.HeapAlloc) - int64(before.HeapAlloc)
 	if retainedHeap > maxRetainedHeap {
 		t.Fatalf("tool cache turn retained %d bytes after request release, want at most %d", retainedHeap, maxRetainedHeap)
@@ -5578,6 +5703,40 @@ func TestNormalizeSubsequentRequestCompactMergesWhenCompactionReplayUnsupported(
 	for _, item := range input {
 		if item.Get("type").String() == "compaction" || item.Get("type").String() == "compaction_summary" {
 			t.Fatalf("compaction items must be stripped for unsupported downstream fallback: %s", item.Raw)
+		}
+	}
+}
+
+func TestNormalizeSubsequentRequestDropsConsumedCompactionTrigger(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.6-sol","stream":true,"input":[
+		{"type":"message","role":"user","id":"msg-old","content":"old prompt"}
+	]}`)
+	triggerRequest := []byte(`{"type":"response.create","previous_response_id":"resp-before-compact","input":[
+		{"type":"message","role":"user","id":"msg-tool-output","content":"done"},
+		{"type":"compaction_trigger"}
+	]}`)
+
+	_, stateAfterTrigger, errMsg := normalizeResponsesWebsocketRequestWithMode(triggerRequest, lastRequest, nil, false, false)
+	if errMsg != nil {
+		t.Fatalf("normalize trigger request: %v", errMsg.Error)
+	}
+
+	compactionOutput := []byte(`[
+		{"type":"compaction","id":"cmp-1","encrypted_content":"opaque"}
+	]`)
+	replayRequest := []byte(`{"type":"response.create","input":[
+		{"type":"message","role":"developer","id":"msg-new-context","content":"new context"},
+		{"type":"compaction","id":"cmp-1","encrypted_content":"opaque"},
+		{"type":"message","role":"user","id":"msg-next","content":"continue"}
+	]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithMode(replayRequest, stateAfterTrigger, compactionOutput, false, false)
+	if errMsg != nil {
+		t.Fatalf("normalize compact replay: %v", errMsg.Error)
+	}
+	for _, item := range gjson.GetBytes(normalized, "input").Array() {
+		if item.Get("type").String() == "compaction_trigger" {
+			t.Fatalf("consumed compaction_trigger was replayed: %s", normalized)
 		}
 	}
 }

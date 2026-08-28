@@ -85,7 +85,7 @@ type readyBucket struct {
 // readyView holds the selection order for flat round-robin traversal.
 type readyView struct {
 	flat          []*scheduledAuth
-	cursor        int
+	lastPicked    string
 	weightedState smoothWeightedState
 }
 
@@ -93,7 +93,7 @@ type readyView struct {
 type cooldownQueue []*scheduledAuth
 
 type readyViewCursorState struct {
-	cursor        int
+	lastPicked    string
 	weightedState smoothWeightedState
 }
 
@@ -103,7 +103,7 @@ type readyBucketCursorState struct {
 }
 
 func snapshotReadyViewCursors(view readyView) readyViewCursorState {
-	state := readyViewCursorState{cursor: view.cursor}
+	state := readyViewCursorState{lastPicked: view.lastPicked}
 	if len(view.weightedState.current) > 0 {
 		state.weightedState.current = make(map[string]int64, len(view.weightedState.current))
 		for authID, current := range view.weightedState.current {
@@ -123,26 +123,21 @@ func restoreReadyViewCursors(view *readyView, state readyViewCursorState) {
 	if view == nil {
 		return
 	}
-	if len(view.flat) > 0 {
-		view.cursor = normalizeCursor(state.cursor, len(view.flat))
-	}
+	view.lastPicked = state.lastPicked
 	weights := scheduledWeightVector(view.flat)
-	if len(state.weightedState.current) == 0 || !weightVectorsEqual(state.weightedState.weights, weights) {
+	if len(state.weightedState.current) == 0 || weightsConfigChanged(state.weightedState.weights, weights) {
 		return
 	}
-	view.weightedState.current = state.weightedState.current
+	current := make(map[string]int64, len(view.flat))
+	for _, entry := range view.flat {
+		if entry != nil && entry.auth != nil {
+			if val, ok := state.weightedState.current[entry.auth.ID]; ok {
+				current[entry.auth.ID] = val
+			}
+		}
+	}
+	view.weightedState.current = current
 	view.weightedState.weights = weights
-}
-
-func normalizeCursor(cursor, size int) int {
-	if size <= 0 || cursor <= 0 {
-		return 0
-	}
-	cursor = cursor % size
-	if cursor < 0 {
-		cursor += size
-	}
-	return cursor
 }
 
 // newAuthScheduler constructs an empty scheduler configured for the supplied selector strategy.
@@ -1022,20 +1017,35 @@ func (v *readyView) pickRoundRobin(predicate func(*scheduledAuth) bool) *schedul
 	if len(v.flat) == 0 {
 		return nil
 	}
-	start := 0
-	if len(v.flat) > 0 {
-		start = v.cursor % len(v.flat)
-	}
+	start := scheduledSuccessorIndex(v.flat, v.lastPicked)
 	for offset := 0; offset < len(v.flat); offset++ {
 		index := (start + offset) % len(v.flat)
 		entry := v.flat[index]
+		if entry == nil || entry.auth == nil {
+			continue
+		}
 		if predicate != nil && !predicate(entry) {
 			continue
 		}
-		v.cursor = index + 1
+		v.lastPicked = entry.auth.ID
 		return entry
 	}
 	return nil
+}
+
+// scheduledSuccessorIndex returns the index of the first scheduled candidate ordered after
+// lastID, wrapping to the start of the ring. Candidates in readyView arrive sorted by auth ID.
+func scheduledSuccessorIndex(entries []*scheduledAuth, lastID string) int {
+	if lastID == "" {
+		return 0
+	}
+	index := sort.Search(len(entries), func(i int) bool {
+		return entries[i].auth.ID > lastID
+	})
+	if index >= len(entries) {
+		return 0
+	}
+	return index
 }
 
 // pickWeighted returns the next ready entry using smooth weighted round-robin.
@@ -1066,22 +1076,6 @@ func scheduledWeightVectorMatching(entries []*scheduledAuth, predicate func(*sch
 }
 
 func pickSmoothWeightedScheduled(entries []*scheduledAuth, current map[string]int64, predicate func(*scheduledAuth) bool) *scheduledAuth {
-	active := make(map[string]struct{}, len(entries))
-	for _, entry := range entries {
-		if entry == nil || entry.auth == nil || entry.meta == nil || entry.meta.weight <= 0 {
-			continue
-		}
-		if predicate != nil && !predicate(entry) {
-			continue
-		}
-		active[entry.auth.ID] = struct{}{}
-	}
-	for authID := range current {
-		if _, ok := active[authID]; !ok {
-			delete(current, authID)
-		}
-	}
-
 	var picked *scheduledAuth
 	var pickedCurrent int64
 	var totalWeight int64

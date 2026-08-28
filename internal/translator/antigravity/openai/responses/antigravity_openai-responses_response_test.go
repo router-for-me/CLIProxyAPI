@@ -85,3 +85,58 @@ func TestConvertAntigravityResponseToOpenAIResponsesNonStream_PreservesOpenAIToo
 		t.Fatalf("output.0.arguments = %q, want JSON arguments with city Tokyo; output=%s", arguments, output)
 	}
 }
+
+func TestConvertAntigravityResponseToOpenAIResponses_RestoresAdditionalNamespaceCustomToolCall(t *testing.T) {
+	originalRequest := []byte(`{
+		"model": "gemini-3.5-flash-low",
+		"input": [{
+			"type": "additional_tools",
+			"tools": [{
+				"type": "namespace",
+				"name": "functions",
+				"tools": [{"type": "custom", "name": "exec"}]
+			}]
+		}]
+	}`)
+	rawResponse := []byte(`{
+		"response": {
+			"responseId": "antigravity-custom-response",
+			"candidates": [{
+				"content": {
+					"parts": [{
+						"functionCall": {
+							"name": "functions__exec",
+							"args": {"input": "pwd"}
+						}
+					}]
+				},
+				"finishReason": "STOP"
+			}]
+		}
+	}`)
+
+	output := ConvertAntigravityResponseToOpenAIResponsesNonStream(
+		context.Background(),
+		"gemini-3.5-flash-low",
+		originalRequest,
+		nil,
+		rawResponse,
+		nil,
+	)
+
+	if !gjson.ValidBytes(output) {
+		t.Fatalf("invalid JSON output: %s", output)
+	}
+	if got := gjson.GetBytes(output, "output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("output.0.type = %q, want custom_tool_call; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "output.0.name").String(); got != "exec" {
+		t.Fatalf("output.0.name = %q, want exec", got)
+	}
+	if got := gjson.GetBytes(output, "output.0.namespace").String(); got != "functions" {
+		t.Fatalf("output.0.namespace = %q, want functions", got)
+	}
+	if got := gjson.GetBytes(output, "output.0.input").String(); got != "pwd" {
+		t.Fatalf("output.0.input = %q, want pwd", got)
+	}
+}

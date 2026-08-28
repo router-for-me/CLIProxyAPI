@@ -223,3 +223,33 @@ func TestIsRequestFault(t *testing.T) {
 		})
 	}
 }
+
+func TestIsClientCancellation(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		err    error
+		want   bool
+	}{
+		{name: "status 499", status: StatusClientClosedRequest, want: true},
+		{name: "context canceled error", status: 0, err: context.Canceled, want: true},
+		{name: "fmt wrapped context canceled", status: 0, err: fmt.Errorf("read: %w", context.Canceled), want: true},
+		{name: "context canceled string in error", status: 0, err: errors.New("upstream failed: context canceled"), want: true},
+		{name: "client closed request string in error", status: 0, err: errors.New("client closed request"), want: true},
+		{name: "statusCoder with 499", status: 0, err: statusError{status: StatusClientClosedRequest, body: "aborted"}, want: true},
+		{name: "status 200 without error", status: http.StatusOK, err: nil, want: false},
+		{name: "status 400 bad request", status: http.StatusBadRequest, err: errors.New("bad request"), want: false},
+		{name: "status 429 rate limit", status: http.StatusTooManyRequests, err: errors.New("rate limited"), want: false},
+		{name: "status 500 internal error", status: http.StatusInternalServerError, err: errors.New("internal error"), want: false},
+		{name: "plain unrelated error", status: 0, err: errors.New("connection reset by peer"), want: false},
+		{name: "nil error and 0 status", status: 0, err: nil, want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsClientCancellation(tc.status, tc.err); got != tc.want {
+				t.Fatalf("IsClientCancellation(%d, %v) = %t, want %t", tc.status, tc.err, got, tc.want)
+			}
+		})
+	}
+}

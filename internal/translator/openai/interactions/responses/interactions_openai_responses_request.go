@@ -11,15 +11,22 @@ import (
 func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","input":[]}`)
-	out, _ = sjson.SetBytes(out, "model", requestModel(modelName, root))
+	model := requestModel(modelName, root)
+	out, _ = sjson.SetBytes(out, "model", model)
 	if streamValue, ok := requestStreamValue(root, stream); ok {
 		out, _ = sjson.SetBytes(out, "stream", streamValue)
 	}
 	if instructions := root.Get("instructions"); instructions.Exists() {
 		out, _ = sjson.SetBytes(out, "system_instruction", responsesInstructionsText(instructions))
 	}
-	if previousResponseID := root.Get("previous_response_id"); previousResponseID.Exists() && previousResponseID.Type == gjson.String {
-		out, _ = sjson.SetBytes(out, "previous_interaction_id", previousResponseID.String())
+	if previousResponseID := firstNonEmpty(root.Get("previous_response_id").String(), root.Get("previous_interaction_id").String()); previousResponseID != "" {
+		out, _ = sjson.SetBytes(out, "previous_interaction_id", previousResponseID)
+	}
+	if environmentID := firstNonEmpty(root.Get("environment_id").String(), root.Get("environment.id").String()); environmentID != "" {
+		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
+	}
+	if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
+		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(agentConfig.Raw))
 	}
 	if input := root.Get("input"); input.Exists() {
 		out = setResponsesInputOnInteractions(out, input)
@@ -39,6 +46,14 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 	} else if format := root.Get("text.format"); format.Exists() {
 		out, _ = sjson.SetRawBytes(out, "response_format", []byte(format.Raw))
 	}
+	if isAntigravityModel(model) {
+		if maxOutputTokens := firstExisting(root.Get("max_output_tokens"), root.Get("max_tokens"), root.Get("max_completion_tokens")); maxOutputTokens.Exists() && !root.Get("agent_config.max_total_tokens").Exists() {
+			out, _ = sjson.SetBytes(out, "agent_config.max_total_tokens", maxOutputTokens.Int())
+		}
+		for _, knob := range []string{"temperature", "top_p", "top_k", "stop_sequences", "max_output_tokens", "presence_penalty", "frequency_penalty", "candidate_count"} {
+			out, _ = sjson.DeleteBytes(out, "generation_config."+knob)
+		}
+	}
 	return out
 }
 
@@ -52,8 +67,14 @@ func ConvertInteractionsRequestToOpenAIResponses(modelName string, inputRawJSON 
 	if instructions := interactionsSystemInstructionText(root); instructions != "" {
 		out, _ = sjson.SetBytes(out, "instructions", instructions)
 	}
-	if previousInteractionID := root.Get("previous_interaction_id"); previousInteractionID.Exists() && previousInteractionID.Type == gjson.String {
-		out, _ = sjson.SetBytes(out, "previous_response_id", previousInteractionID.String())
+	if previousInteractionID := firstNonEmpty(root.Get("previous_interaction_id").String(), root.Get("previous_response_id").String()); previousInteractionID != "" {
+		out, _ = sjson.SetBytes(out, "previous_response_id", previousInteractionID)
+	}
+	if environmentID := firstNonEmpty(root.Get("environment_id").String(), root.Get("environment.id").String()); environmentID != "" {
+		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
+	}
+	if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
+		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(agentConfig.Raw))
 	}
 	if input := root.Get("input"); input.Exists() {
 		out = setInteractionsInputOnResponses(out, input)
@@ -214,7 +235,7 @@ func responsesInputItemToInteractions(item gjson.Result, functionNamesByCallID m
 		step := []byte(`{"type":"","content":[]}`)
 		step, _ = sjson.SetBytes(step, "type", stepType)
 		if part, ok := responsesContentPartToInteractions(item); ok {
-			step, _ = sjson.SetRawBytes(step, "content.-1", part)
+			step = translatorcommon.SetRawArrayItems(step, "content", [][]byte{part})
 		}
 		return step
 	default:
@@ -676,6 +697,10 @@ func copyOptionalRaw(out *[]byte, path string, value gjson.Result) {
 	if value.Exists() {
 		*out, _ = sjson.SetRawBytes(*out, path, []byte(value.Raw))
 	}
+}
+
+func isAntigravityModel(model string) bool {
+	return strings.Contains(strings.ToLower(model), "antigravity")
 }
 
 func firstExisting(values ...gjson.Result) gjson.Result {

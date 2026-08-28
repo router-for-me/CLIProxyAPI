@@ -665,3 +665,182 @@ func TestConvertOpenAIRequestToClaude_DeveloperMessageCacheControlAppliesToLastB
 		t.Fatalf("system[1].cache_control.type = %q, want ephemeral", got)
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_DeduplicatesToolResults(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"user","content":"Run tools"},
+			{"role":"assistant","tool_calls":[
+				{"id":"call_dup","type":"function","function":{"name":"lookup","arguments":"{}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_dup","content":"first output"},
+			{"role":"assistant","content":"Next step","tool_calls":[
+				{"id":"call_other","type":"function","function":{"name":"search","arguments":"{}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_dup","content":"final output"},
+			{"role":"tool","tool_call_id":"call_other","content":"search output"},
+			{"role":"tool","tool_call_id":"","content":"empty id output"}
+		]
+	}`)
+	out := ConvertOpenAIRequestToClaude("claude-test", inputJSON, false)
+	root := gjson.ParseBytes(out)
+
+	messages := root.Get("messages").Array()
+	if len(messages) < 5 {
+		t.Fatalf("expected at least 5 messages, got %d. Output: %s", len(messages), string(out))
+	}
+
+	// Message 1: assistant tool_use call_dup
+	if got := messages[1].Get("content.0.id").String(); got != "call_dup" {
+		t.Fatalf("messages[1].content.0.id = %q, want call_dup", got)
+	}
+
+	// Message 2: user tool_result for call_dup with final payload, before assistant message 3
+	if got := messages[2].Get("content.0.type").String(); got != "tool_result" {
+		t.Fatalf("messages[2].content.0.type = %q, want tool_result", got)
+	}
+	if got := messages[2].Get("content.0.tool_use_id").String(); got != "call_dup" {
+		t.Fatalf("messages[2].content.0.tool_use_id = %q, want call_dup", got)
+	}
+	if got := messages[2].Get("content.0.content").String(); got != "final output" {
+		t.Fatalf("messages[2].content.0.content = %q, want 'final output'", got)
+	}
+
+	// Message 3: assistant Next step + tool_use call_other
+	if got := messages[3].Get("content.0.text").String(); got != "Next step" {
+		t.Fatalf("messages[3].content.0.text = %q, want 'Next step'", got)
+	}
+	if got := messages[3].Get("content.1.id").String(); got != "call_other" {
+		t.Fatalf("messages[3].content.1.id = %q, want call_other", got)
+	}
+
+	// Message 4: user tool_results for call_other (search output) and empty id output; call_dup should NOT be repeated here
+	msg4Blocks := messages[4].Get("content").Array()
+	if len(msg4Blocks) != 2 {
+		t.Fatalf("expected 2 tool_result blocks in message 4, got %d. Output: %s", len(msg4Blocks), string(out))
+	}
+	if got := msg4Blocks[0].Get("tool_use_id").String(); got != "call_other" {
+		t.Fatalf("msg4Blocks[0].tool_use_id = %q, want call_other", got)
+	}
+	if got := msg4Blocks[0].Get("content").String(); got != "search output" {
+		t.Fatalf("msg4Blocks[0].content = %q, want 'search output'", got)
+	}
+	if got := msg4Blocks[1].Get("content").String(); got != "empty id output" {
+		t.Fatalf("msg4Blocks[1].content = %q, want 'empty id output'", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_MaxTokensAndMaxCompletionTokens(t *testing.T) {
+	tests := []struct {
+		name      string
+		rawJSON   string
+		wantLimit int64
+	}{
+		{
+			name:      "only max_completion_tokens",
+			rawJSON:   `{"messages":[{"role":"user","content":"hi"}],"max_completion_tokens":128000}`,
+			wantLimit: 128000,
+		},
+		{
+			name:      "only max_tokens",
+			rawJSON:   `{"messages":[{"role":"user","content":"hi"}],"max_tokens":4096}`,
+			wantLimit: 4096,
+		},
+		{
+			name:      "both present prefers max_tokens",
+			rawJSON:   `{"messages":[{"role":"user","content":"hi"}],"max_tokens":4096,"max_completion_tokens":128000}`,
+			wantLimit: 4096,
+		},
+		{
+			name:      "neither present uses default template limit",
+			rawJSON:   `{"messages":[{"role":"user","content":"hi"}]}`,
+			wantLimit: 32000,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := ConvertOpenAIRequestToClaude("claude-3-7-sonnet-20250219", []byte(tc.rawJSON), false)
+			got := gjson.GetBytes(out, "max_tokens").Int()
+			if got != tc.wantLimit {
+				t.Fatalf("max_tokens = %d, want %d. Output: %s", got, tc.wantLimit, string(out))
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_PreservesCallerSuppliedMetadataUserID(t *testing.T) {
+	testCases := []struct {
+		name     string
+		rawJSON  string
+		expected string
+	}{
+		{
+			name:     "plain string",
+			rawJSON:  `{"model":"claude-test","metadata":{"user_id":"custom-user-123"},"messages":[{"role":"user","content":"hello"}]}`,
+			expected: "custom-user-123",
+		},
+		{
+			name:     "special characters and json string",
+			rawJSON:  `{"model":"claude-test","metadata":{"user_id":"foo\"bar\nbaz\\qux"},"messages":[{"role":"user","content":"hello"}]}`,
+			expected: "foo\"bar\nbaz\\qux",
+		},
+		{
+			name:     "claude code json format",
+			rawJSON:  `{"model":"claude-test","metadata":{"user_id":"{\"device_id\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"session_id\":\"11111111-2222-4333-8444-555555555555\"}"},"messages":[{"role":"user","content":"hello"}]}`,
+			expected: `{"device_id":"0000000000000000000000000000000000000000000000000000000000000000","session_id":"11111111-2222-4333-8444-555555555555"}`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := ConvertOpenAIRequestToClaude("claude-test", []byte(tc.rawJSON), false)
+			if !gjson.ValidBytes(out) {
+				t.Fatalf("output is invalid json: %s", string(out))
+			}
+			got := gjson.GetBytes(out, "metadata.user_id").String()
+			if got != tc.expected {
+				t.Fatalf("metadata.user_id = %q, want %q", got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_PreservesOpenAIUserField(t *testing.T) {
+	raw := []byte(`{"model":"claude-test","user":"openai-user-456","messages":[{"role":"user","content":"hello"}]}`)
+	out := ConvertOpenAIRequestToClaude("claude-test", raw, false)
+	if !gjson.ValidBytes(out) {
+		t.Fatalf("output is invalid json: %s", string(out))
+	}
+	got := gjson.GetBytes(out, "metadata.user_id").String()
+	if got != "openai-user-456" {
+		t.Fatalf("metadata.user_id = %q, want %q", got, "openai-user-456")
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_DifferentSessionsProduceDifferentUserIDs(t *testing.T) {
+	a := []byte(`{"model":"claude-test","prompt_cache_key":"session-a","messages":[{"role":"user","content":"hello"}]}`)
+	b := []byte(`{"model":"claude-test","prompt_cache_key":"session-b","messages":[{"role":"user","content":"hello"}]}`)
+	outA := ConvertOpenAIRequestToClaude("claude-test", a, false)
+	outB := ConvertOpenAIRequestToClaude("claude-test", b, false)
+	idA := gjson.GetBytes(outA, "metadata.user_id").String()
+	idB := gjson.GetBytes(outB, "metadata.user_id").String()
+	if idA == idB {
+		t.Fatalf("different prompt_cache_key produced identical metadata.user_id: %q", idA)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_DeterministicWithoutSessionKey(t *testing.T) {
+	first := []byte(`{"model":"claude-test","messages":[{"role":"user","content":"stable first message"}]}`)
+	second := []byte(`{"model":"claude-test","messages":[{"role":"user","content":"stable first message"},{"role":"assistant","content":"hi"},{"role":"user","content":"second message"}]}`)
+	outFirst := ConvertOpenAIRequestToClaude("claude-test", first, false)
+	outSecond := ConvertOpenAIRequestToClaude("claude-test", second, false)
+	idFirst := gjson.GetBytes(outFirst, "metadata.user_id").String()
+	idSecond := gjson.GetBytes(outSecond, "metadata.user_id").String()
+	if idFirst == "" || idFirst == "unknown" {
+		t.Fatalf("expected non-empty derived user_id, got %q", idFirst)
+	}
+	if idFirst != idSecond {
+		t.Fatalf("turn growth changed derived user_id: %q vs %q", idFirst, idSecond)
+	}
+}

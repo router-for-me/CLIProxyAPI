@@ -1094,3 +1094,258 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoesNotCompleteRe
 		t.Fatal("test stream did not exercise reasoning output")
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_IncompleteToolStreamDoesNotFinalizeAsCompleted(t *testing.T) {
+	request := []byte(`{"model":"gpt-5.6-terra"}`)
+
+	tests := []struct {
+		name   string
+		chunks []string
+	}{
+		{
+			name: "zero argument bytes without finish reason",
+			chunks: []string{
+				`data: {"id":"resp_interrupted_tool","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-terra","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":""}}]},"finish_reason":null}]}`,
+				`data: [DONE]`,
+			},
+		},
+		{
+			name: "partial json arguments without finish reason",
+			chunks: []string{
+				`data: {"id":"resp_interrupted_partial","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-terra","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":"{\"filePath\":\"foo"}}]},"finish_reason":null}]}`,
+				`data: [DONE]`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			for _, line := range tt.chunks {
+				for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "gpt-5.6-terra", request, request, []byte(line), &param) {
+					event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+					if event == "response.completed" {
+						t.Fatalf("incomplete tool stream was finalized as response.completed: %s", chunk)
+					}
+					if event == "response.output_item.done" {
+						t.Fatalf("incomplete tool stream emitted output_item.done: %s", chunk)
+					}
+					if event == "response.function_call_arguments.done" {
+						t.Fatalf("incomplete tool stream emitted function_call_arguments.done: %s", chunk)
+					}
+					_ = data
+				}
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FinishReasonLengthEmitsIncomplete(t *testing.T) {
+	request := []byte(`{"model":"gpt-5.6-luna"}`)
+	chunks := []string{
+		`data: {"id":"resp_length_tool","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-luna","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_length_tool","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-luna","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var incompleteSeen bool
+	var itemDoneSeen bool
+	for _, line := range chunks {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "gpt-5.6-luna", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event == "response.completed" {
+				t.Fatalf("stream with finish_reason=length was finalized as response.completed: %s", chunk)
+			}
+			if event == "response.output_item.done" {
+				itemDoneSeen = true
+				if got := data.Get("item.status").String(); got != "incomplete" {
+					t.Fatalf("item.status = %q, want incomplete", got)
+				}
+				if got := data.Get("item.arguments").String(); got == "{}" {
+					t.Fatalf("item.arguments synthesized empty object {}, want raw args or empty string")
+				}
+			}
+			if event == "response.incomplete" {
+				incompleteSeen = true
+				if got := data.Get("response.status").String(); got != "incomplete" {
+					t.Fatalf("response.status = %q, want incomplete", got)
+				}
+				if got := data.Get("response.incomplete_details.reason").String(); got != "max_output_tokens" {
+					t.Fatalf("response.incomplete_details.reason = %q, want max_output_tokens", got)
+				}
+				if got := data.Get("response.output.0.status").String(); got != "incomplete" {
+					t.Fatalf("response.output.0.status = %q, want incomplete", got)
+				}
+			}
+		}
+	}
+	if !itemDoneSeen {
+		t.Fatal("expected response.output_item.done event for finish_reason=length")
+	}
+	if !incompleteSeen {
+		t.Fatal("expected response.incomplete event for finish_reason=length")
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FinishReasonContentFilterEmitsIncomplete(t *testing.T) {
+	request := []byte(`{"model":"gpt-5.6-luna"}`)
+	chunks := []string{
+		`data: {"id":"resp_filter_tool","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-luna","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_filter_tool","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-luna","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var incompleteSeen bool
+	var itemDoneSeen bool
+	for _, line := range chunks {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "gpt-5.6-luna", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event == "response.completed" {
+				t.Fatalf("stream with finish_reason=content_filter was finalized as response.completed: %s", chunk)
+			}
+			if event == "response.output_item.done" {
+				itemDoneSeen = true
+				if got := data.Get("item.status").String(); got != "incomplete" {
+					t.Fatalf("item.status = %q, want incomplete", got)
+				}
+			}
+			if event == "response.incomplete" {
+				incompleteSeen = true
+				if got := data.Get("response.status").String(); got != "incomplete" {
+					t.Fatalf("response.status = %q, want incomplete", got)
+				}
+				if got := data.Get("response.incomplete_details.reason").String(); got != "content_filter" {
+					t.Fatalf("response.incomplete_details.reason = %q, want content_filter", got)
+				}
+			}
+		}
+	}
+	if !itemDoneSeen {
+		t.Fatal("expected response.output_item.done event for finish_reason=content_filter")
+	}
+	if !incompleteSeen {
+		t.Fatal("expected response.incomplete event for finish_reason=content_filter")
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FinishReasonLength(t *testing.T) {
+	raw := []byte(`{"id":"chatcmpl_len","object":"chat.completion","created":1773896263,"model":"gpt-5.6","choices":[{"index":0,"message":{"role":"assistant","content":"truncated text"},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-5.6", nil, nil, raw, nil)
+	data := gjson.ParseBytes(out)
+	if got := data.Get("status").String(); got != "incomplete" {
+		t.Fatalf("status = %q, want incomplete; out=%s", got, out)
+	}
+	if got := data.Get("incomplete_details.reason").String(); got != "max_output_tokens" {
+		t.Fatalf("incomplete_details.reason = %q, want max_output_tokens; out=%s", got, out)
+	}
+	if got := data.Get("output.0.status").String(); got != "incomplete" {
+		t.Fatalf("output.0.status = %q, want incomplete; out=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FinishReasonContentFilter(t *testing.T) {
+	raw := []byte(`{"id":"chatcmpl_filter","object":"chat.completion","created":1773896263,"model":"gpt-5.6","choices":[{"index":0,"message":{"role":"assistant","content":"blocked text"},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-5.6", nil, nil, raw, nil)
+	data := gjson.ParseBytes(out)
+	if got := data.Get("status").String(); got != "incomplete" {
+		t.Fatalf("status = %q, want incomplete; out=%s", got, out)
+	}
+	if got := data.Get("incomplete_details.reason").String(); got != "content_filter" {
+		t.Fatalf("incomplete_details.reason = %q, want content_filter; out=%s", got, out)
+	}
+	if got := data.Get("output.0.status").String(); got != "incomplete" {
+		t.Fatalf("output.0.status = %q, want incomplete; out=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_ReasoningFallback(t *testing.T) {
+	tests := []struct {
+		name          string
+		rawJSON       string
+		requestJSON   string
+		wantReasoning bool
+		wantText      string
+	}{
+		{
+			name:          "reasoning_content field present",
+			rawJSON:       `{"id":"chatcmpl_rc","object":"chat.completion","created":1773896263,"model":"o3-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning_content":"thought from reasoning_content"},"finish_reason":"stop"}]}`,
+			wantReasoning: true,
+			wantText:      "thought from reasoning_content",
+		},
+		{
+			name:          "reasoning fallback field present",
+			rawJSON:       `{"id":"chatcmpl_r","object":"chat.completion","created":1773896263,"model":"o3-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning":"thought from reasoning"},"finish_reason":"stop"}]}`,
+			wantReasoning: true,
+			wantText:      "thought from reasoning",
+		},
+		{
+			name:          "both reasoning_content and reasoning present (reasoning_content priority)",
+			rawJSON:       `{"id":"chatcmpl_both","object":"chat.completion","created":1773896263,"model":"o3-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning_content":"priority thought","reasoning":"ignored thought"},"finish_reason":"stop"}]}`,
+			wantReasoning: true,
+			wantText:      "priority thought",
+		},
+		{
+			name:          "empty reasoning_content falls back to reasoning",
+			rawJSON:       `{"id":"chatcmpl_empty_rc","object":"chat.completion","created":1773896263,"model":"o3-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello","reasoning_content":"","reasoning":"fallback thought"},"finish_reason":"stop"}]}`,
+			wantReasoning: true,
+			wantText:      "fallback thought",
+		},
+		{
+			name:          "neither field present without request reasoning",
+			rawJSON:       `{"id":"chatcmpl_none","object":"chat.completion","created":1773896263,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`,
+			wantReasoning: false,
+		},
+		{
+			name:          "neither field present with request reasoning produces empty summary",
+			rawJSON:       `{"id":"chatcmpl_req_only","object":"chat.completion","created":1773896263,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`,
+			requestJSON:   `{"model":"gpt-4o","reasoning":{"effort":"medium"}}`,
+			wantReasoning: true,
+			wantText:      "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var reqBytes []byte
+			if tt.requestJSON != "" {
+				reqBytes = []byte(tt.requestJSON)
+			}
+			out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "o3-mini", reqBytes, reqBytes, []byte(tt.rawJSON), nil)
+			data := gjson.ParseBytes(out)
+
+			var reasoningItem gjson.Result
+			found := false
+			data.Get("output").ForEach(func(_, item gjson.Result) bool {
+				if item.Get("type").String() == "reasoning" {
+					found = true
+					reasoningItem = item
+					return false
+				}
+				return true
+			})
+
+			if tt.wantReasoning != found {
+				t.Fatalf("reasoning found = %v, want %v; out=%s", found, tt.wantReasoning, out)
+			}
+
+			if tt.wantReasoning {
+				if tt.wantText != "" {
+					gotText := reasoningItem.Get("summary.0.text").String()
+					if gotText != tt.wantText {
+						t.Fatalf("summary.0.text = %q, want %q; out=%s", gotText, tt.wantText, out)
+					}
+					gotType := reasoningItem.Get("summary.0.type").String()
+					if gotType != "summary_text" {
+						t.Fatalf("summary.0.type = %q, want summary_text; out=%s", gotType, out)
+					}
+				} else {
+					if len(reasoningItem.Get("summary").Array()) != 0 {
+						t.Fatalf("summary = %s, want empty array; out=%s", reasoningItem.Get("summary").Raw, out)
+					}
+				}
+			}
+		})
+	}
+}

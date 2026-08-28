@@ -174,6 +174,27 @@ type QuotaState struct {
 	NextRecoverAt time.Time `json:"next_recover_at"`
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
 	BackoffLevel int `json:"backoff_level,omitempty"`
+	// ObservedAt is the time the current Signals snapshot was observed.
+	ObservedAt time.Time `json:"observed_at,omitempty"`
+	// Signals stores bounded, provider-specific quota watermark values observed
+	// from upstream response headers or websocket quota events. It is a snapshot
+	// of one upstream response, not an accumulation across responses, so an
+	// expired watermark cannot linger after the response that produced it.
+	// Cooldown transitions must use applyCooldownFields so they cannot replace
+	// this snapshot.
+	Signals map[string]string `json:"signals,omitempty"`
+}
+
+// Clone returns an independent copy of the quota state.
+func (q QuotaState) Clone() QuotaState {
+	copyQuota := q
+	if len(q.Signals) > 0 {
+		copyQuota.Signals = make(map[string]string, len(q.Signals))
+		for key, value := range q.Signals {
+			copyQuota.Signals[key] = value
+		}
+	}
+	return copyQuota
 }
 
 // ModelState captures the execution state for a specific model under an auth entry.
@@ -264,6 +285,7 @@ func (a *Auth) Clone() *Auth {
 		return nil
 	}
 	copyAuth := *a
+	copyAuth.Quota = a.Quota.Clone()
 	if len(a.Attributes) > 0 {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
 		for key, value := range a.Attributes {
@@ -406,6 +428,7 @@ func (m *ModelState) Clone() *ModelState {
 		return nil
 	}
 	copyState := *m
+	copyState.Quota = m.Quota.Clone()
 	if m.LastError != nil {
 		copyState.LastError = &Error{
 			Code:       m.LastError.Code,
@@ -431,28 +454,20 @@ func (a *Auth) ProxyInfo() string {
 	return "via proxy"
 }
 
-// DisableCoolingOverride returns the auth scoped disable_cooling override when present.
+// DisableCoolingOverride returns the auth-scoped disable_cooling override when present.
 // The value is read from metadata key "disable_cooling" (or legacy "disable-cooling").
-//
-// NOTE: This override is intentionally "true-only". When the metadata value is false, it is treated
-// as "not set" so the global disable-cooling flag can still take effect.
+// The second return value distinguishes explicit false from an absent override.
 func (a *Auth) DisableCoolingOverride() (bool, bool) {
 	if a == nil || a.Metadata == nil {
 		return false, false
 	}
 	if val, ok := a.Metadata["disable_cooling"]; ok {
 		if parsed, okParse := parseBoolAny(val); okParse {
-			if !parsed {
-				return false, false
-			}
 			return parsed, true
 		}
 	}
 	if val, ok := a.Metadata["disable-cooling"]; ok {
 		if parsed, okParse := parseBoolAny(val); okParse {
-			if !parsed {
-				return false, false
-			}
 			return parsed, true
 		}
 	}
@@ -476,8 +491,9 @@ func (a *Auth) ToolPrefixDisabled() bool {
 	return false
 }
 
-// RequestRetryOverride returns the auth-file scoped request_retry override when present.
+// RequestRetryOverride returns the auth-scoped request_retry override when present.
 // The value is read from metadata key "request_retry" (or legacy "request-retry").
+// A negative value is treated as unset and falls back to the global request-retry.
 func (a *Auth) RequestRetryOverride() (int, bool) {
 	if a == nil || a.Metadata == nil {
 		return 0, false
@@ -485,7 +501,7 @@ func (a *Auth) RequestRetryOverride() (int, bool) {
 	if val, ok := a.Metadata["request_retry"]; ok {
 		if parsed, okParse := parseIntAny(val); okParse {
 			if parsed < 0 {
-				parsed = 0
+				return 0, false
 			}
 			return parsed, true
 		}
@@ -493,7 +509,7 @@ func (a *Auth) RequestRetryOverride() (int, bool) {
 	if val, ok := a.Metadata["request-retry"]; ok {
 		if parsed, okParse := parseIntAny(val); okParse {
 			if parsed < 0 {
-				parsed = 0
+				return 0, false
 			}
 			return parsed, true
 		}

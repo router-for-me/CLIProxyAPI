@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -379,4 +380,128 @@ func TestCaptureRequestInfoDecodesZstdRequestBodyForLog(t *testing.T) {
 	if !bytes.Equal(restoredBody, compressedBytes) {
 		t.Fatal("request body was not restored with the original compressed bytes")
 	}
+}
+
+func TestRequestLoggingMiddleware_ClientCancellationExclusion(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("499 status does not create error log when request-log is false", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(false, logsDir, "", 10)
+
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/responses", func(c *gin.Context) {
+			c.AbortWithStatus(clienterror.StatusClientClosedRequest)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-4"}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+
+		if resp.Code != clienterror.StatusClientClosedRequest {
+			t.Fatalf("status = %d, want %d", resp.Code, clienterror.StatusClientClosedRequest)
+		}
+
+		entries, errRead := os.ReadDir(logsDir)
+		if errRead != nil {
+			t.Fatalf("read logs dir: %v", errRead)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("expected 0 log files for 499 cancellation in error-only mode, got %d files", len(entries))
+		}
+	})
+
+	t.Run("context canceled does not create error log when request-log is false", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(false, logsDir, "", 10)
+
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/responses", func(c *gin.Context) {
+			// Simulate client closing connection mid-flight
+			ctx, cancel := context.WithCancel(c.Request.Context())
+			cancel()
+			c.Request = c.Request.WithContext(ctx)
+			c.Status(http.StatusOK)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-4"}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+
+		entries, errRead := os.ReadDir(logsDir)
+		if errRead != nil {
+			t.Fatalf("read logs dir: %v", errRead)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("expected 0 log files for canceled context in error-only mode, got %d files", len(entries))
+		}
+	})
+
+	t.Run("400 bad request creates error log when request-log is false", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(false, logsDir, "", 10)
+
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/responses", func(c *gin.Context) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid parameter"})
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"bad":"param"}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", resp.Code, http.StatusBadRequest)
+		}
+
+		entries, errRead := os.ReadDir(logsDir)
+		if errRead != nil {
+			t.Fatalf("read logs dir: %v", errRead)
+		}
+		var errorLogCount int
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
+				errorLogCount++
+			}
+		}
+		if errorLogCount != 1 {
+			t.Fatalf("expected 1 error log file for 400 Bad Request, got %d", errorLogCount)
+		}
+	})
+
+	t.Run("499 status logs standard request when request-log is true", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/responses", func(c *gin.Context) {
+			c.AbortWithStatus(clienterror.StatusClientClosedRequest)
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-4"}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+
+		entries, errRead := os.ReadDir(logsDir)
+		if errRead != nil {
+			t.Fatalf("read logs dir: %v", errRead)
+		}
+		var standardLogCount int
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
+				standardLogCount++
+			}
+		}
+		if standardLogCount != 1 {
+			t.Fatalf("expected 1 standard request log file when request-log=true, got %d", standardLogCount)
+		}
+	})
 }

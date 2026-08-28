@@ -27,7 +27,7 @@ func TestToggleConfigAPIKeyExcludedAll_XAI(t *testing.T) {
 		}},
 	}
 	idGen := synthesizer.NewStableIDGenerator()
-	authID, _ := idGen.Next("xai:apikey", "xai-test", "https://api.x.ai/v1")
+	authID, _ := idGen.Next("xai:apikey", "xai-test", "https://api.x.ai/v1", "", "", "")
 	auth := &coreauth.Auth{
 		ID:       authID,
 		Provider: "xai",
@@ -55,7 +55,7 @@ func TestToggleConfigAPIKeyExcludedAll_Codex(t *testing.T) {
 		}},
 	}
 	idGen := synthesizer.NewStableIDGenerator()
-	authID, _ := idGen.Next("codex:apikey", "sk-test", "https://example.com/v1")
+	authID, _ := idGen.Next("codex:apikey", "sk-test", "https://example.com/v1", "", "", "")
 	auth := &coreauth.Auth{
 		ID:       authID,
 		Provider: "codex",
@@ -80,5 +80,83 @@ func TestToggleConfigAPIKeyExcludedAll_Codex(t *testing.T) {
 	}
 	if len(cfg.CodexKey[0].ExcludedModels) != 0 {
 		t.Fatalf("expected excluded-models cleared, got %#v", cfg.CodexKey[0].ExcludedModels)
+	}
+}
+
+func TestToggleConfigAPIKeyExcludedAll_Vertex_NoBaseURL(t *testing.T) {
+	cfg := &config.Config{
+		VertexCompatAPIKey: []config.VertexCompatKey{{
+			APIKey: "vertex-key-only",
+		}},
+	}
+	idGen := synthesizer.NewStableIDGenerator()
+	authID, _ := idGen.Next("vertex:apikey", "vertex-key-only", "", "")
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "vertex",
+		Attributes: map[string]string{
+			"auth_kind": "apikey",
+			"api_key":   "vertex-key-only",
+			"source":    "config:vertex[xyz]",
+		},
+	}
+
+	handled, errToggle := toggleConfigAPIKeyExcludedAll(cfg, auth, true)
+	if errToggle != nil || !handled {
+		t.Fatalf("toggle disable: handled=%v err=%v", handled, errToggle)
+	}
+	if len(cfg.VertexCompatAPIKey[0].ExcludedModels) != 1 || cfg.VertexCompatAPIKey[0].ExcludedModels[0] != "*" {
+		t.Fatalf("excluded-models = %#v, want [*]", cfg.VertexCompatAPIKey[0].ExcludedModels)
+	}
+}
+
+func TestToggleConfigAPIKeyExcludedAll_EmptyKeyWithBaseURL(t *testing.T) {
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey:  "",
+			BaseURL: "https://custom-claude.example.com",
+		}},
+		GeminiKey: []config.GeminiKey{{
+			APIKey:  "   ",
+			BaseURL: "https://custom-gemini.example.com",
+		}},
+	}
+	idGen := synthesizer.NewStableIDGenerator()
+	claudeID, _ := idGen.Next("claude:apikey", "", "https://custom-claude.example.com", "", "", "")
+	geminiID, _ := idGen.Next("gemini:apikey", "", "https://custom-gemini.example.com", "", "", "")
+
+	claudeAuth := &coreauth.Auth{
+		ID:       claudeID,
+		Provider: "claude",
+		Attributes: map[string]string{
+			"auth_kind": "apikey",
+			"base_url":  "https://custom-claude.example.com",
+			"source":    "config:claude[abc]",
+		},
+	}
+	geminiAuth := &coreauth.Auth{
+		ID:       geminiID,
+		Provider: "gemini",
+		Attributes: map[string]string{
+			"auth_kind": "apikey",
+			"base_url":  "https://custom-gemini.example.com",
+			"source":    "config:gemini[def]",
+		},
+	}
+
+	handled, err := toggleConfigAPIKeyExcludedAll(cfg, claudeAuth, true)
+	if err != nil || !handled {
+		t.Fatalf("toggle claude: handled=%v err=%v", handled, err)
+	}
+	if len(cfg.ClaudeKey[0].ExcludedModels) != 1 || cfg.ClaudeKey[0].ExcludedModels[0] != "*" {
+		t.Fatalf("claude excluded-models = %#v, want [*]", cfg.ClaudeKey[0].ExcludedModels)
+	}
+
+	handled, err = toggleConfigAPIKeyExcludedAll(cfg, geminiAuth, true)
+	if err != nil || !handled {
+		t.Fatalf("toggle gemini: handled=%v err=%v", handled, err)
+	}
+	if len(cfg.GeminiKey[0].ExcludedModels) != 1 || cfg.GeminiKey[0].ExcludedModels[0] != "*" {
+		t.Fatalf("gemini excluded-models = %#v, want [*]", cfg.GeminiKey[0].ExcludedModels)
 	}
 }

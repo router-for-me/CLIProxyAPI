@@ -492,6 +492,7 @@ func mergedStorageJSON(raw []byte, metadata map[string]any, provider string) ([]
 	if provider != "" {
 		out["type"] = provider
 	}
+	coreauth.NormalizeCredentialMetadata(out)
 	if len(out) == 0 {
 		return nil, fmt.Errorf("plugin token storage payload is empty")
 	}

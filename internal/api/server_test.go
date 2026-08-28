@@ -1832,15 +1832,16 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	clientID := "test-client-version-catalog"
 	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
 		{
-			ID:            "gpt-5.5",
-			Object:        "model",
-			Created:       1776902400,
-			OwnedBy:       "openai",
-			Type:          "openai",
-			DisplayName:   "GPT 5.5",
-			Description:   "Frontier model for complex coding, research, and real-world work.",
-			ContextLength: 272000,
-			Thinking:      &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+			ID:                  "gpt-5.5",
+			Object:              "model",
+			Created:             1776902400,
+			OwnedBy:             "openai",
+			Type:                "openai",
+			DisplayName:         "GPT 5.5",
+			Description:         "Frontier model for complex coding, research, and real-world work.",
+			ContextLength:       272000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 		},
 		{
 			ID:            "custom-codex-model-test",
@@ -1855,6 +1856,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		{ID: "grok-imagine-image-quality", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "gpt-image-2", Object: "model", OwnedBy: "openai", Type: "openai"},
 		{ID: "grok-imagine-image", Object: "model", OwnedBy: "xai", Type: "openai"},
+		{ID: "grok-imagine-image-2.0", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-video", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-video-1.5", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-video-1.5-preview", Object: "model", OwnedBy: "xai", Type: "openai"},
@@ -1907,6 +1909,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if _, ok := gpt55["minimal_client_version"]; !ok {
 		t.Fatal("expected minimal_client_version in codex catalog")
 	}
+	if got, _ := gpt55["max_tokens"].(float64); got != 64000 {
+		t.Fatalf("gpt-5.5 max_tokens = %v, want 64000", gpt55["max_tokens"])
+	}
 	serviceTiers, ok := gpt55["service_tiers"].([]any)
 	if !ok || len(serviceTiers) != 1 {
 		t.Fatalf("expected gpt-5.5 priority service tier, got %#v", gpt55["service_tiers"])
@@ -1955,6 +1960,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		"grok-imagine-image-quality":     false,
 		"gpt-image-2":                    false,
 		"grok-imagine-image":             false,
+		"grok-imagine-image-2.0":         false,
 		"grok-imagine-video":             false,
 		"grok-imagine-video-1.5":         false,
 		"grok-imagine-video-1.5-preview": false,
@@ -1972,6 +1978,135 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	for slug, found := range hiddenModels {
 		if !found {
 			t.Fatalf("expected hidden model %s in codex catalog", slug)
+		}
+	}
+}
+
+func TestCodexClientModelsEndpoint_FiltersMaxAndUltraForOlderClientVersion(t *testing.T) {
+	clientID := "codex-client-version-filter-test"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
+		{
+			ID:          "gpt-5.6-sol",
+			Object:      "model",
+			OwnedBy:     "openai",
+			Type:        "openai",
+			DisplayName: "GPT-5.6-Sol",
+		},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	server := newTestServer(t)
+
+	// Older client version 0.137.0 should NOT have max or ultra reasoning levels
+	reqOld := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.137.0", nil)
+	reqOld.Header.Set("Authorization", "Bearer test-key")
+	rrOld := httptest.NewRecorder()
+	server.engine.ServeHTTP(rrOld, reqOld)
+
+	if rrOld.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rrOld.Code, http.StatusOK, rrOld.Body.String())
+	}
+
+	var respOld struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(rrOld.Body.Bytes(), &respOld); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+
+	foundSol := false
+	for _, m := range respOld.Models {
+		if slug, _ := m["slug"].(string); slug == "gpt-5.6-sol" {
+			foundSol = true
+			levels, ok := m["supported_reasoning_levels"].([]any)
+			if !ok {
+				t.Fatalf("expected supported_reasoning_levels for gpt-5.6-sol, got %#v", m["supported_reasoning_levels"])
+			}
+			for _, rawLevel := range levels {
+				level, _ := rawLevel.(map[string]any)
+				effort, _ := level["effort"].(string)
+				if effort == "max" || effort == "ultra" {
+					t.Fatalf("older client 0.137.0 received unsupported reasoning effort %q", effort)
+				}
+			}
+		}
+	}
+	if !foundSol {
+		t.Fatal("expected gpt-5.6-sol in codex catalog")
+	}
+
+	// Newer client version 0.149.1 should preserve max and ultra reasoning levels
+	reqNew := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.149.1", nil)
+	reqNew.Header.Set("Authorization", "Bearer test-key")
+	rrNew := httptest.NewRecorder()
+	server.engine.ServeHTTP(rrNew, reqNew)
+
+	if rrNew.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rrNew.Code, http.StatusOK, rrNew.Body.String())
+	}
+
+	var respNew struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(rrNew.Body.Bytes(), &respNew); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+
+	foundNewUltra := false
+	for _, m := range respNew.Models {
+		if slug, _ := m["slug"].(string); slug == "gpt-5.6-sol" {
+			levels, ok := m["supported_reasoning_levels"].([]any)
+			if !ok {
+				t.Fatalf("expected supported_reasoning_levels for gpt-5.6-sol, got %#v", m["supported_reasoning_levels"])
+			}
+			for _, rawLevel := range levels {
+				level, _ := rawLevel.(map[string]any)
+				if effort, _ := level["effort"].(string); effort == "ultra" {
+					foundNewUltra = true
+				}
+			}
+		}
+	}
+	if !foundNewUltra {
+		t.Fatal("expected ultra reasoning effort for newer client 0.149.1")
+	}
+
+	// Unparseable / empty client versions (e.g. client_version=, client_version=pi) should also preserve max and ultra (unfiltered)
+	for _, unparsedVersion := range []string{"", "pi", "latest"} {
+		path := "/v1/models?client_version=" + unparsedVersion
+		reqUnparsed := httptest.NewRequest(http.MethodGet, path, nil)
+		reqUnparsed.Header.Set("Authorization", "Bearer test-key")
+		rrUnparsed := httptest.NewRecorder()
+		server.engine.ServeHTTP(rrUnparsed, reqUnparsed)
+
+		if rrUnparsed.Code != http.StatusOK {
+			t.Fatalf("path %q status = %d, want %d body=%s", path, rrUnparsed.Code, http.StatusOK, rrUnparsed.Body.String())
+		}
+
+		var respUnparsed struct {
+			Models []map[string]any `json:"models"`
+		}
+		if err := json.Unmarshal(rrUnparsed.Body.Bytes(), &respUnparsed); err != nil {
+			t.Fatalf("path %q parse error: %v", path, err)
+		}
+
+		foundUltra := false
+		for _, m := range respUnparsed.Models {
+			if slug, _ := m["slug"].(string); slug == "gpt-5.6-sol" {
+				levels, _ := m["supported_reasoning_levels"].([]any)
+				for _, rawLevel := range levels {
+					level, _ := rawLevel.(map[string]any)
+					if effort, _ := level["effort"].(string); effort == "ultra" {
+						foundUltra = true
+					}
+				}
+			}
+		}
+		if !foundUltra {
+			t.Fatalf("path %q expected ultra reasoning effort to be preserved for unparsed client_version", path)
 		}
 	}
 }

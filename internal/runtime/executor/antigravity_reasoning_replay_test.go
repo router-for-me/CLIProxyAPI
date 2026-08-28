@@ -1552,7 +1552,7 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresParallelClaudeToolProven
 	const args2 = `{"file_path":"/tmp/b"}`
 	clientID1 := util.GeminiClaudeToolUseID("native-read-1", "Read", args1)
 	clientID2 := util.GeminiClaudeToolUseID("native-read-2", "Read", args2)
-	payload := []byte(`{"sessionId":"sess-parallel-provenance","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + clientID1 + `","name":"Read","args":{"file_path":"/tmp/a","offset":0}}},{"functionCall":{"id":"` + clientID2 + `","name":"Read","args":{"file_path":"/tmp/b","offset":0}}}]},{"role":"user","parts":[{"functionResponse":{"id":"` + clientID2 + `","name":"Read","response":{"result":"b"}}},{"functionResponse":{"id":"` + clientID1 + `","name":"Read","response":{"result":"a"}}}]}]}}`)
+	payload := []byte(`{"sessionId":"sess-parallel-provenance","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + clientID1 + `","name":"Read","args":{"file_path":"/tmp/a","offset":0}}},{"functionCall":{"id":"` + clientID2 + `","name":"Read","args":{"file_path":"/tmp/b","offset":0}}}]},{"role":"user","parts":[{"text":"results follow"},{"functionResponse":{"id":"` + clientID2 + `","name":"Read","response":{"result":"b"}}},{"functionResponse":{"id":"` + clientID1 + `","name":"Read","response":{"result":"a"}}},{"text":"continue"}]}]}}`)
 	items := [][]byte{
 		[]byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"Read","call_id":"native-read-1","args":` + args1 + `,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`),
 		[]byte(`{"type":"function_call_part","contentIndex":0,"partIndex":1,"targetOccurrence":0,"name":"Read","call_id":"native-read-2","args":` + args2 + `}`),
@@ -1576,8 +1576,14 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresParallelClaudeToolProven
 		t.Fatalf("signed/unsigned parallel provenance changed: %s", gjson.GetBytes(out, "request.contents.0").Raw)
 	}
 	responses := gjson.GetBytes(out, "request.contents.1.parts").Array()
-	if len(responses) != 2 || responses[0].Get("functionResponse.id").String() != "native-read-1" || responses[1].Get("functionResponse.id").String() != "native-read-2" {
+	if len(responses) != 4 || responses[0].Get("functionResponse.id").String() != "native-read-1" || responses[1].Get("functionResponse.id").String() != "native-read-2" {
 		t.Fatalf("parallel responses were not normalized to native order: %s", gjson.GetBytes(out, "request.contents.1").Raw)
+	}
+	if responses[2].Get("text").String() != "results follow" || responses[3].Get("text").String() != "continue" {
+		t.Fatalf("mixed user parts were not retained after parallel responses: %s", gjson.GetBytes(out, "request.contents.1").Raw)
+	}
+	if got := gjson.GetBytes(out, "request.contents.1.role").String(); got != "user" {
+		t.Fatalf("mixed response role = %q, want user; output=%s", got, out)
 	}
 	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
 		t.Fatalf("parallel restored history is invalid: %v", errPairing)

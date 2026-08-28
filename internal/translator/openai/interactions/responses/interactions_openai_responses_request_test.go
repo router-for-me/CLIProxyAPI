@@ -295,3 +295,53 @@ func TestConvertInteractionsRequestToOpenAIResponsesPreservesExpressibleFields(t
 		}
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToInteractions_PreservesEnvironmentID(t *testing.T) {
+	out := ConvertOpenAIResponsesRequestToInteractions("gpt-test", []byte(`{"model":"gpt-test","input":"hi","previous_response_id":"resp_123","environment_id":"env_abc456"}`), false)
+	if got := gjson.GetBytes(out, "previous_interaction_id").String(); got != "resp_123" {
+		t.Fatalf("previous_interaction_id = %q, want resp_123. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "environment_id").String(); got != "env_abc456" {
+		t.Fatalf("environment_id = %q, want env_abc456. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertInteractionsRequestToOpenAIResponses_PreservesEnvironmentID(t *testing.T) {
+	out := ConvertInteractionsRequestToOpenAIResponses("gpt-test", []byte(`{"model":"gpt-test","input":"hi","previous_interaction_id":"interaction_123","environment_id":"env_abc456"}`), false)
+	if got := gjson.GetBytes(out, "previous_response_id").String(); got != "interaction_123" {
+		t.Fatalf("previous_response_id = %q, want interaction_123. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "environment_id").String(); got != "env_abc456" {
+		t.Fatalf("environment_id = %q, want env_abc456. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToInteractions_AntigravitySanitizesGenerationConfigAndSetsAgentConfig(t *testing.T) {
+	raw := []byte(`{
+		"model":"antigravity-preview-05-2026",
+		"input":"Search the web",
+		"previous_response_id":"v1_Chd3...",
+		"environment_id":"env_789",
+		"max_output_tokens":2048,
+		"temperature":0.7,
+		"top_p":0.95,
+		"tools":[{"type":"function","name":"web_search","parameters":{"type":"object"}}]
+	}`)
+	out := ConvertOpenAIResponsesRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	if got := gjson.GetBytes(out, "previous_interaction_id").String(); got != "v1_Chd3..." {
+		t.Fatalf("previous_interaction_id = %q, want v1_Chd3.... Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "environment_id").String(); got != "env_789" {
+		t.Fatalf("environment_id = %q, want env_789. Output: %s", got, string(out))
+	}
+	// temperature, top_p, max_output_tokens should be stripped from generation_config for Antigravity models
+	for _, knob := range []string{"temperature", "top_p", "top_k", "stop_sequences", "max_output_tokens"} {
+		if gjson.GetBytes(out, "generation_config."+knob).Exists() {
+			t.Fatalf("generation_config.%s should be stripped for antigravity model. Output: %s", knob, string(out))
+		}
+	}
+	// max_output_tokens should be mapped to agent_config.max_total_tokens
+	if got := gjson.GetBytes(out, "agent_config.max_total_tokens").Int(); got != 2048 {
+		t.Fatalf("agent_config.max_total_tokens = %d, want 2048. Output: %s", got, string(out))
+	}
+}
