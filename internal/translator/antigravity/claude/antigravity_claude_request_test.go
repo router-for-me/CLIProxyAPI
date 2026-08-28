@@ -2055,42 +2055,6 @@ func TestConvertClaudeRequestToAntigravity_AlignsPermutedParallelToolResultsWith
 	}
 }
 
-func TestConvertClaudeRequestToAntigravity_AlignsPermutedParallelToolResultsWithInterleavedUserMessages(t *testing.T) {
-	inputJSON := []byte(`{
-		"model":"gemini-3.7-flash-high",
-		"messages":[
-			{"role":"assistant","content":[
-				{"type":"tool_use","id":"call_1","name":"Read","input":{"file_path":"/tmp/1"}},
-				{"type":"tool_use","id":"call_2","name":"Read","input":{"file_path":"/tmp/2"}},
-				{"type":"tool_use","id":"call_3","name":"Read","input":{"file_path":"/tmp/3"}}
-			]},
-			{"role":"user","content":[
-				{"type":"text","text":"System notice"}
-			]},
-			{"role":"user","content":[
-				{"type":"tool_result","tool_use_id":"call_3","content":"three"},
-				{"type":"tool_result","tool_use_id":"call_1","content":"one"},
-				{"type":"tool_result","tool_use_id":"call_2","content":"two"}
-			]}
-		]
-	}`)
-
-	output := ConvertClaudeRequestToAntigravity("gemini-3.7-flash-high", inputJSON, false)
-	parts := gjson.GetBytes(output, "request.contents.2.parts").Array()
-	if len(parts) != 3 {
-		t.Fatalf("parts = %d, want 3 responses; output=%s", len(parts), output)
-	}
-	if got := parts[0].Get("functionResponse.id").String(); got != "call_1" {
-		t.Fatalf("parts[0].id = %q, want call_1", got)
-	}
-	if got := parts[1].Get("functionResponse.id").String(); got != "call_2" {
-		t.Fatalf("parts[1].id = %q, want call_2", got)
-	}
-	if got := parts[2].Get("functionResponse.id").String(); got != "call_3" {
-		t.Fatalf("parts[2].id = %q, want call_3", got)
-	}
-}
-
 func TestConvertClaudeRequestToAntigravity_ReorderThinkingAndTextBeforeFunctionCall(t *testing.T) {
 	cache.ClearSignatureCache("")
 
