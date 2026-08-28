@@ -44,7 +44,10 @@ func IsGeminiTokenEvent(payload []byte) bool {
 			if len(part.Get("text").String()) > 0 {
 				return true
 			}
-			if len(part.Get("thought").String()) > 0 || len(part.Get("thoughtText").String()) > 0 {
+			if len(part.Get("thoughtText").String()) > 0 {
+				return true
+			}
+			if thought := part.Get("thought"); thought.Type == gjson.String && len(thought.String()) > 0 {
 				return true
 			}
 			if len(part.Get("functionCall.name").String()) > 0 {
