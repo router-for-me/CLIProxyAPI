@@ -425,8 +425,15 @@ func TestExecuteModelStreamStartupError(t *testing.T) {
 	if errMsg.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusInternalServerError)
 	}
-	if errMsg.Error == nil || errMsg.Error.Error() != "startup failed" {
-		t.Fatalf("error = %v, want startup failed", errMsg.Error)
+	startupErrText := ""
+	if errMsg.Error != nil {
+		startupErrText = errMsg.Error.Error()
+	}
+	if !strings.HasPrefix(startupErrText, "startup failed") {
+		t.Fatalf("error = %q, want startup failed prefix", startupErrText)
+	}
+	if !strings.Contains(startupErrText, "attempted routes: [codex:error]") {
+		t.Fatalf("error = %q, want sanitized route summary attempted routes: [codex:error]", startupErrText)
 	}
 	if stream.Chunks != nil {
 		t.Fatal("stream chunks created for startup error")
@@ -611,7 +618,7 @@ func TestExecuteModelStreamKeepsInteractionsProviderForOpenAIEntry(t *testing.T)
 		provider: constant.GeminiInteractions,
 		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 			chunks := make(chan coreexecutor.StreamChunk, 1)
-			chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"id":"chunk_1","object":"chat.completion.chunk","choices":[]}`)}
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"id":"chunk_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"}}]}`)}
 			close(chunks)
 			return &coreexecutor.StreamResult{Chunks: chunks}, nil
 		},

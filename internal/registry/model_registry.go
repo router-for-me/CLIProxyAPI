@@ -736,11 +736,25 @@ func (r *ModelRegistry) ClearModelQuotaExceeded(clientID, modelID string) {
 }
 
 // SuspendClientModel marks a client's model as temporarily unavailable until explicitly resumed.
+// When the client is already suspended for the model, the existing reason is never replaced.
 // Parameters:
 //   - clientID: The client to suspend
 //   - modelID: The model affected by the suspension
 //   - reason: Optional description for observability
 func (r *ModelRegistry) SuspendClientModel(clientID, modelID, reason string) {
+	r.SuspendClientModelReplacingReasons(clientID, modelID, reason)
+}
+
+// SuspendClientModelReplacingReasons marks a client's model as temporarily unavailable. When the
+// client is already suspended for the model, the stored reason is replaced only if the existing
+// reason matches one of replaceable; otherwise the existing (more specific) reason is preserved.
+// Calling it without replaceable reasons is equivalent to SuspendClientModel.
+// Parameters:
+//   - clientID: The client to suspend
+//   - modelID: The model affected by the suspension
+//   - reason: Optional description for observability
+//   - replaceable: Suspension reasons that may be overwritten by reason
+func (r *ModelRegistry) SuspendClientModelReplacingReasons(clientID, modelID, reason string, replaceable ...string) {
 	if clientID == "" || modelID == "" {
 		return
 	}
@@ -755,8 +769,20 @@ func (r *ModelRegistry) SuspendClientModel(clientID, modelID, reason string) {
 	if registration.SuspendedClients == nil {
 		registration.SuspendedClients = make(map[string]string)
 	}
-	if _, already := registration.SuspendedClients[clientID]; already {
-		return
+	if existingReason, already := registration.SuspendedClients[clientID]; already {
+		if existingReason == reason {
+			return
+		}
+		canReplace := false
+		for _, rep := range replaceable {
+			if existingReason == rep {
+				canReplace = true
+				break
+			}
+		}
+		if !canReplace {
+			return
+		}
 	}
 	registration.SuspendedClients[clientID] = reason
 	registration.LastUpdated = time.Now()
@@ -791,6 +817,63 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	registration.LastUpdated = time.Now()
 	r.invalidateAvailableModelsCacheLocked()
 	log.Debugf("Resumed client %s for model %s", clientID, modelID)
+}
+
+// ResumeClientModelIfReason atomically verifies that clientID is suspended for modelID with one
+// of the given reason(s) and, only if so, resumes it (removing the suspension) under a single
+// lock. It reports whether a resume happened. This avoids the TOCTOU of a separate
+// GetClientModelSuspensionReason check followed by ResumeClientModel racing with a newer
+// suspension recorded between the two.
+func (r *ModelRegistry) ResumeClientModelIfReason(clientID, modelID string, resumableReasons ...string) bool {
+	clientID = strings.TrimSpace(clientID)
+	modelID = strings.TrimSpace(modelID)
+	if clientID == "" || modelID == "" {
+		return false
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.ensureAvailableModelsCacheLocked()
+
+	registration, exists := r.models[modelID]
+	if !exists || registration == nil || registration.SuspendedClients == nil {
+		return false
+	}
+	reason, suspended := registration.SuspendedClients[clientID]
+	if !suspended {
+		return false
+	}
+	resumable := false
+	for _, rr := range resumableReasons {
+		if reason == rr {
+			resumable = true
+			break
+		}
+	}
+	if !resumable {
+		return false
+	}
+	delete(registration.SuspendedClients, clientID)
+	registration.LastUpdated = time.Now()
+	r.invalidateAvailableModelsCacheLocked()
+	log.Debugf("Resumed client %s for model %s (reason %s)", clientID, modelID, reason)
+	return true
+}
+
+// GetClientModelSuspensionReason returns the reason a client model was suspended, or empty string if not suspended.
+func (r *ModelRegistry) GetClientModelSuspensionReason(clientID, modelID string) string {
+	clientID = strings.TrimSpace(clientID)
+	modelID = strings.TrimSpace(modelID)
+	if clientID == "" || modelID == "" {
+		return ""
+	}
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	registration, exists := r.models[modelID]
+	if !exists || registration == nil || registration.SuspendedClients == nil {
+		return ""
+	}
+	return registration.SuspendedClients[clientID]
 }
 
 // ClientSupportsModel reports whether the client registered support for modelID.

@@ -237,8 +237,8 @@ func (e *splitResponsesEventStreamExecutor) Execute(context.Context, *coreauth.A
 
 func (e *splitResponsesEventStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	ch := make(chan coreexecutor.StreamChunk, 2)
-	ch <- coreexecutor.StreamChunk{Payload: []byte("event: response.completed")}
-	ch <- coreexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}")}
+	ch <- coreexecutor.StreamChunk{Payload: []byte("event: response.completed\n")}
+	ch <- coreexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}\n\n")}
 	close(ch)
 	return &coreexecutor.StreamResult{Chunks: ch}, nil
 }
@@ -1178,10 +1178,10 @@ func TestExecuteStreamWithAuthManager_AllowsSplitOpenAIResponsesSSEEventLines(t 
 	if len(got) != 2 {
 		t.Fatalf("expected 2 forwarded chunks, got %d: %#v", len(got), got)
 	}
-	if got[0] != "event: response.completed" {
+	if got[0] != "event: response.completed\n" {
 		t.Fatalf("unexpected first chunk: %q", got[0])
 	}
-	expectedData := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}"
+	expectedData := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}\n\n"
 	if got[1] != expectedData {
 		t.Fatalf("unexpected second chunk.\nGot:  %q\nWant: %q", got[1], expectedData)
 	}

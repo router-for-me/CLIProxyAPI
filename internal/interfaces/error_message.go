@@ -21,6 +21,10 @@ type ErrorMessage struct {
 	// DirectResponse reports that Body and Headers were explicitly supplied by a trusted in-process component.
 	DirectResponse bool
 
+	// TrustedDirectResponse reports that a DirectResponse originated from a
+	// trusted local interceptor rather than an untrusted upstream error.
+	TrustedDirectResponse bool
+
 	// Body contains a preformatted downstream response when DirectResponse is true.
 	Body []byte
 
