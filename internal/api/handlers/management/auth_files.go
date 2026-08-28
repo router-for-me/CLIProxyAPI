@@ -1,9 +1,11 @@
 package management
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/htmlsanitize"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -434,7 +437,129 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	if requestRetry, ok := auth.RequestRetryOverride(); ok {
 		entry["request_retry"] = requestRetry
 	}
+	if rawQuota, exists := auth.Metadata[pluginQuotaMetadataKey]; exists {
+		if quota, ok := pluginQuotaMetadata(rawQuota); ok {
+			entry[pluginQuotaMetadataKey] = quota
+		} else {
+			log.WithField("auth_id", auth.ID).Debug("rejected plugin quota metadata")
+		}
+	}
 	return entry
+}
+
+const pluginQuotaMetadataKey = "plugin_quota"
+
+const (
+	maxPluginQuotaBytes       = 16 << 10
+	maxPluginQuotaDepth       = 16
+	maxPluginQuotaNodes       = 2048
+	maxPluginQuotaTextBytes   = 16 << 10
+	maxPluginQuotaStringBytes = 8 << 10
+)
+
+type pluginQuotaBudget struct {
+	nodes     int
+	textBytes int
+}
+
+func pluginQuotaMetadata(raw any) (map[string]any, bool) {
+	payload, ok := raw.(map[string]any)
+	if !ok || len(payload) == 0 || !pluginQuotaJSONValue(payload, 0, &pluginQuotaBudget{}) {
+		return nil, false
+	}
+	encoded, errMarshal := json.Marshal(raw)
+	if errMarshal != nil || len(encoded) > maxPluginQuotaBytes {
+		return nil, false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	var detached map[string]any
+	if errDecode := decoder.Decode(&detached); errDecode != nil {
+		return nil, false
+	}
+	return htmlsanitize.JSONValue(detached).(map[string]any), true
+}
+
+func pluginQuotaJSONValue(value any, depth int, budget *pluginQuotaBudget) bool {
+	if depth > maxPluginQuotaDepth {
+		return false
+	}
+	budget.nodes++
+	if budget.nodes > maxPluginQuotaNodes {
+		return false
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, nested := range typed {
+			if !pluginQuotaKeyAllowed(key) || !pluginQuotaTextWithinBudget(key, budget) || !pluginQuotaJSONValue(nested, depth+1, budget) {
+				return false
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if !pluginQuotaJSONValue(nested, depth+1, budget) {
+				return false
+			}
+		}
+	case string:
+		return pluginQuotaTextWithinBudget(typed, budget)
+	case json.Number:
+		return pluginQuotaTextWithinBudget(typed.String(), budget) && pluginQuotaFiniteNumber(typed.String())
+	case float32:
+		return !math.IsNaN(float64(typed)) && !math.IsInf(float64(typed), 0)
+	case float64:
+		return !math.IsNaN(typed) && !math.IsInf(typed, 0)
+	case nil, bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, uintptr:
+		return true
+	default:
+		return false
+	}
+	return true
+}
+
+func pluginQuotaTextWithinBudget(value string, budget *pluginQuotaBudget) bool {
+	if len(value) > maxPluginQuotaStringBytes {
+		return false
+	}
+	budget.textBytes += len(value)
+	return budget.textBytes <= maxPluginQuotaTextBytes
+}
+
+func pluginQuotaFiniteNumber(value string) bool {
+	if len(value) == 0 || (value[0] != '-' && (value[0] < '0' || value[0] > '9')) || !json.Valid([]byte(value)) {
+		return false
+	}
+	parsed, errParse := strconv.ParseFloat(value, 64)
+	return errParse == nil && !math.IsNaN(parsed) && !math.IsInf(parsed, 0)
+}
+
+// Keys are ASCII-only, compacted by dropping punctuation, then compared with
+// a fixed credential-name denylist. Only three quota token counters are exempt.
+func pluginQuotaKeyAllowed(key string) bool {
+	compact := make([]byte, 0, len(key))
+	for index := 0; index < len(key); index++ {
+		character := key[index]
+		if character >= 0x80 {
+			return false
+		}
+		if character >= 'A' && character <= 'Z' {
+			character += 'a' - 'A'
+		}
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') {
+			compact = append(compact, character)
+		}
+	}
+	normalized := string(compact)
+	if normalized == "tokens" || normalized == "latesttokens" || normalized == "periodtokens" {
+		return true
+	}
+	switch normalized {
+	case "token", "accesstoken", "refreshtoken", "idtoken", "oauthtoken", "bearertoken", "sessiontoken", "portaltoken",
+		"clientsecret", "secret", "secretkey", "password", "passwd", "credential", "credentials", "creds",
+		"authorization", "cookie", "sessioncookie", "apikey", "accesskey", "privatekey":
+		return false
+	}
+	return true
 }
 
 func authFileRequestRetryFromJSON(data []byte) (int, bool) {
