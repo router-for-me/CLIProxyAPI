@@ -569,10 +569,18 @@ func TestConfigSynthesizer_OpenAICompat_ExactEntryProviderKeys(t *testing.T) {
 				Name:    "  Example Provider  ",
 				BaseURL: "https://compat.example.com/v1",
 				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
-					{Name: "  Team-A  ", APIKey: secret},
+					// Persisted row with a mutable name: identity must derive from
+					// the stable UpstreamProviderEntryID, not the name.
+					{Name: "  Team-A  ", UpstreamProviderEntryID: 7, APIKey: secret},
+					// Persisted row without a name: identity from the id.
 					{UpstreamProviderEntryID: 42, APIKey: "persisted-key"},
+					// Legacy YAML entry with no persisted id and no name: no
+					// entry_provider_key emitted (mirrors legacy behaviour).
 					{Name: "", APIKey: "config-only-key"},
-					{Name: "  MALFORMED NAME  ", APIKey: "malformed-name-key"},
+					// Legacy YAML entry with no persisted id but a mutable name:
+					// falls back to the lower-cased name. Operators should migrate
+					// these to persisted rows so renames never invalidate routing.
+					{Name: "  legacy-name  ", APIKey: "legacy-name-key"},
 				},
 			}},
 		},
@@ -590,10 +598,10 @@ func TestConfigSynthesizer_OpenAICompat_ExactEntryProviderKeys(t *testing.T) {
 
 	const providerKey = "openai-compatible-example provider"
 	wantEntryKeys := []string{
-		providerKey + ":team-a",
+		providerKey + ":key-7",
 		providerKey + ":key-42",
 		"",
-		providerKey + ":malformed name",
+		providerKey + ":legacy-name",
 	}
 	for i, auth := range auths {
 		if got := auth.Provider; got != providerKey {

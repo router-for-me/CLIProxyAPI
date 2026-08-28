@@ -60,12 +60,14 @@ test('does not light up an OpenAI provider-level route for a different provider 
 
 // --- generateEntryIdentity -----------------------------------------------
 
-test('generateEntryIdentity returns the normalised name when valid', () => {
-  assert.equal(generateEntryIdentity({ name: 'Team-A', id: 17 }), 'team-a');
+test('generateEntryIdentity prefers the stable id over the mutable name', () => {
+  // Renaming a row would otherwise invalidate any per-model route pin, so the
+  // identity MUST be derived from the persisted row id whenever one exists.
+  assert.equal(generateEntryIdentity({ name: 'Team-A', id: 17 }), 'key-17');
 });
 
-test('generateEntryIdentity falls back to key-<id> when unnamed', () => {
-  assert.equal(generateEntryIdentity({ id: 42 }), 'key-42');
+test('generateEntryIdentity falls back to the normalised name only when no id is set', () => {
+  assert.equal(generateEntryIdentity({ name: 'Team-A' }), 'team-a');
 });
 
 test('generateEntryIdentity treats reserved key-<digits> names as blank', () => {
@@ -109,7 +111,7 @@ test('expandProviderToChoices returns only a provider-level choice for non-OpenA
   }]);
 });
 
-test('expandProviderToChoices yields provider-level + named-entry + persisted-unnamed-entry choices', () => {
+test('expandProviderToChoices yields provider-level + per-entry choices keyed off the stable id', () => {
   const out = expandProviderToChoices({
     provider_type: 'openai-compatibility',
     provider_key: 'openai-compatible-foo',
@@ -121,8 +123,10 @@ test('expandProviderToChoices yields provider-level + named-entry + persisted-un
   });
   const keys = out.map((c) => c.key);
   assert.ok(keys.includes('openai-compatible-foo'), 'provider route present');
-  assert.ok(keys.includes('openai-compatible-foo:team-a'), 'named entry route present');
-  assert.ok(keys.includes('openai-compatible-foo:key-2'), 'unnamed persisted entry route present');
+  // Both entry choices key off the persisted row id; the mutable name must
+  // not influence the routing identity.
+  assert.ok(keys.includes('openai-compatible-foo:key-1'), 'id-keyed entry route present');
+  assert.ok(keys.includes('openai-compatible-foo:key-2'), 'persisted unnamed entry route present');
   // Never expose api_key material anywhere in labels or keys.
   for (const c of out) {
     assert.ok(!c.label.includes('EXAMPLE_KEY_DO_NOT_USE'));
@@ -177,13 +181,12 @@ test('expandAllProvidersToChoices dedupes colliding keys without collapsing dist
   const entryRows = choices.filter((c) => c.level === 'entry');
   assert.equal(providerRows.length, 1, 'provider-level choice is deduped');
   assert.equal(providerRows[0].count, 3, 'count sums entries across rows sharing a key');
-  // Two unique identities (a, b) are published once each; the colliding "a"
-  // identity does not produce a second copy because both rows expose the
-  // same exact route.
-  assert.equal(entryRows.length, 2, 'distinct identities are kept');
+  // Three unique id-keyed identities are published once each; renaming an
+  // entry must not collapse them because the id is the stable source.
+  assert.equal(entryRows.length, 3, 'distinct id-keyed identities are kept');
   assert.deepEqual(
     entryRows.map((c) => c.identity).sort(),
-    ['a', 'b'],
+    ['key-1', 'key-2', 'key-3'],
   );
 });
 

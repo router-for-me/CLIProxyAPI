@@ -40,9 +40,13 @@ export function providerKeyIsLive(providerKey, liveProviders) {
 }
 
 // generateEntryIdentity produces the identity string the runtime uses for an
-// OpenAI Compatibility API-key entry. Named entries normalise to their lower-
-// cased slug; unnamed persisted entries resolve to "key-<id>"; unnamed entries
-// without a persisted ID receive an empty string.
+// OpenAI Compatibility API-key entry. The identity MUST mirror whatever the
+// backend synthesises (see addOpenAICompatEntryProviderKey in the watcher
+// synthesizer): the persisted child-row ID is the only stable source because
+// the operator can rename the row, which would invalidate any per-model route
+// pin keyed off the mutable name. Persisted entries therefore resolve to
+// "key-<id>"; legacy YAML entries without a persisted ID fall back to the
+// lower-cased name slug; entries with neither receive an empty string.
 //
 // Explicit "key-<digits>" names are reserved by the backend as a collision-
 // shield against the generated fallback; the dashboard treats them as a
@@ -50,12 +54,13 @@ export function providerKeyIsLive(providerKey, liveProviders) {
 // value the operator can never actually save.
 export function generateEntryIdentity(entry) {
   if (!entry) return '';
+  const id = Number(entry.id) || 0;
+  if (id > 0) return `key-${id}`;
   const raw = typeof entry.name === 'string' ? entry.name.trim().toLowerCase() : '';
   if (raw && /^[a-z0-9][a-z0-9_-]*$/.test(raw) && !/^key-[0-9]+$/.test(raw)) {
     return raw;
   }
-  const id = Number(entry.id) || 0;
-  return id > 0 ? `key-${id}` : '';
+  return '';
 }
 
 // expandProviderToChoices turns one upstream row into the route choices that

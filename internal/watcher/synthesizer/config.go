@@ -57,9 +57,20 @@ func addOpenAICompatEntryProviderKey(attrs map[string]string, providerKey string
 	if attrs == nil || providerKey == "" {
 		return
 	}
-	identity := strings.ToLower(strings.TrimSpace(entry.Name))
-	if identity == "" && entry.UpstreamProviderEntryID > 0 {
+	// The entry-level routing identity MUST be derived from a value the
+	// operator cannot rename. Using entry.Name here caused the per-model
+	// route picker to silently break when an operator renamed a row: the
+	// synthesised entry_provider_key changed, the persisted route still
+	// referenced the old key, LiveProviderKeysForModel returned only the new
+	// key, intersectProviders produced an empty slice, and the request
+	// panicked on providers[0]. Prefer the stable persisted child-row ID and
+	// fall back to the mutable name only for legacy YAML entries that have
+	// no UpstreamProviderEntryID assigned yet.
+	identity := ""
+	if entry.UpstreamProviderEntryID > 0 {
 		identity = "key-" + strconv.FormatInt(entry.UpstreamProviderEntryID, 10)
+	} else {
+		identity = strings.ToLower(strings.TrimSpace(entry.Name))
 	}
 	if identity == "" {
 		return
