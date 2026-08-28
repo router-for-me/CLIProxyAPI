@@ -1048,6 +1048,401 @@ func TestManager_MarkResult_TransientErrorCooldownDefault(t *testing.T) {
 	}
 }
 
+// A transient 429 without any parseable retry hint must use transient cooldown
+// handling on both the per-model and the credential level, without advancing
+// the quota ladder.
+func TestManager_MarkResult_Transient429WithoutHintUsesTransientFloor(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevQuota)
+		transientErrorCooldownSeconds.Store(prevTransient)
+	})
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-transient-429-nohint", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-transient-429-nohint"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    "rate limited",
+		},
+		TransientRateLimit: true,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("auth %s missing after MarkResult", auth.ID)
+	}
+
+	if updated.Quota.BackoffLevel != 0 {
+		t.Fatalf("expected credential quota ladder level to stay 0 for a transient 429 without hint, got %d", updated.Quota.BackoffLevel)
+	}
+	diff := time.Until(updated.NextRetryAfter)
+	if diff < transientRateLimitMinimum-time.Second || diff > transientRateLimitMinimum+time.Second {
+		t.Fatalf("expected credential NextRetryAfter ~%v transient floor, got %v", transientRateLimitMinimum, diff)
+	}
+
+	state := updated.ModelStates[model]
+	if state == nil || state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected per-model cooldown state for %s, got %+v", model, state)
+	}
+	if state.Quota.BackoffLevel != 0 {
+		t.Fatalf("expected per-model quota ladder level to stay 0, got %d", state.Quota.BackoffLevel)
+	}
+	modelDiff := time.Until(state.NextRetryAfter)
+	if modelDiff < transientRateLimitMinimum-time.Second || modelDiff > transientRateLimitMinimum+time.Second {
+		t.Fatalf("expected per-model NextRetryAfter ~%v transient floor, got %v", transientRateLimitMinimum, modelDiff)
+	}
+}
+
+// With transient cooldowns disabled (transientErrorCooldownSeconds < 0) the
+// transient-429 fallback yields a zero retry time. That zero must not be
+// stored as state: an unavailable/quota-exceeded flag with an empty
+// NextRetryAfter would read as an indefinite block and hide the credential
+// forever.
+func TestManager_MarkResult_Transient429WithoutHintRespectsDisabledCooldown(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(-1)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevQuota)
+		transientErrorCooldownSeconds.Store(prevTransient)
+	})
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-transient-429-disabled", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-transient-429-disabled"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    "rate limited",
+		},
+		TransientRateLimit: true,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("auth %s missing after MarkResult", auth.ID)
+	}
+
+	if !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected credential NextRetryAfter to stay zero with transient cooldowns disabled, got %v", updated.NextRetryAfter)
+	}
+	if updated.Quota.Exceeded {
+		t.Fatal("expected the credential quota state to stay clear with transient cooldowns disabled")
+	}
+
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected per-model state for %s", model)
+	}
+	if state.Unavailable {
+		t.Fatal("expected the model to stay available with transient cooldowns disabled")
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected per-model NextRetryAfter to stay zero, got %v", state.NextRetryAfter)
+	}
+	if state.Quota.Exceeded {
+		t.Fatal("expected the per-model quota state to stay clear with transient cooldowns disabled")
+	}
+}
+
+// An expired quota record keeps Exceeded=true after NextRecoverAt has passed.
+// That stale flag must not veto the skip path: a hintless transient 429 with
+// transient cooldowns disabled must leave the model available and must not
+// record a new quota failure.
+func TestManager_MarkResult_Transient429DisabledTreatsExpiredQuotaAsInactive(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(-1)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevQuota)
+		transientErrorCooldownSeconds.Store(prevTransient)
+	})
+
+	m := NewManager(nil, nil, nil)
+	model := "test-model-expired-quota-skip"
+	expired := time.Now().Add(-time.Minute)
+	auth := &Auth{
+		ID:       "auth-transient-429-expired-quota",
+		Provider: "claude",
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status: StatusActive,
+				Quota:  QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: expired, BackoffLevel: 3},
+			},
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if count := reg.GetModelCount(model); count != 1 {
+		t.Fatalf("expected model count 1 before MarkResult, got %d", count)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:             auth.ID,
+		Provider:           auth.Provider,
+		Model:              model,
+		Success:            false,
+		Error:              &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+		TransientRateLimit: true,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("auth %s missing after MarkResult", auth.ID)
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected per-model state for %s", model)
+	}
+	if state.Unavailable {
+		t.Fatal("expected the model to stay available when the quota deadline has expired")
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected per-model NextRetryAfter to stay zero, got %v", state.NextRetryAfter)
+	}
+	if state.Quota.NextRecoverAt.After(time.Now()) {
+		t.Fatalf("expired quota was replaced with a new window: %v", state.Quota.NextRecoverAt)
+	}
+	if state.Quota.BackoffLevel != 3 {
+		t.Fatalf("expected BackoffLevel to stay 3, got %d", state.Quota.BackoffLevel)
+	}
+	if count := reg.GetModelCount(model); count != 1 {
+		t.Fatalf("expected registry model count 1 (quota failure not recorded), got %d", count)
+	}
+}
+
+// An unexpired quota window must still veto the skip path, so a hintless
+// transient 429 with cooldowns disabled does not shrink or clear it.
+func TestManager_MarkResult_Transient429DisabledKeepsActiveQuota(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(-1)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevQuota)
+		transientErrorCooldownSeconds.Store(prevTransient)
+	})
+
+	m := NewManager(nil, nil, nil)
+	model := "test-model-active-quota-skip"
+	deadline := time.Now().Add(time.Hour)
+	auth := &Auth{
+		ID:       "auth-transient-429-active-quota",
+		Provider: "claude",
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: deadline,
+				Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: deadline, BackoffLevel: 3},
+			},
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:             auth.ID,
+		Provider:           auth.Provider,
+		Model:              model,
+		Success:            false,
+		Error:              &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+		TransientRateLimit: true,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("auth %s missing after MarkResult", auth.ID)
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected per-model state for %s", model)
+	}
+	if !state.Unavailable {
+		t.Fatal("expected the active quota window to keep the model unavailable")
+	}
+	if !state.Quota.Exceeded {
+		t.Fatal("expected the active quota record to remain exceeded")
+	}
+	if !state.Quota.NextRecoverAt.Equal(deadline) {
+		t.Fatalf("active quota deadline changed: got %v, want %v", state.Quota.NextRecoverAt, deadline)
+	}
+	if state.Quota.BackoffLevel != 3 {
+		t.Fatalf("expected BackoffLevel to stay 3, got %d", state.Quota.BackoffLevel)
+	}
+}
+
+// A hintless transient 429 with cooldowns disabled must not wipe a more
+// serious pre-existing model cooldown (401/403/404/5xx). The auth-level
+// path already restores prevUnavailable/prevNextRetry; the per-model
+// path must do the same.
+func TestManager_MarkResult_Transient429DisabledPreservesExistingModelCooldown(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(-1)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevQuota)
+		transientErrorCooldownSeconds.Store(prevTransient)
+	})
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-transient-429-preserve-model", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-preserve-cooldown"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusForbidden, Message: "forbidden"},
+	})
+
+	afterForbidden, okForbidden := m.GetByID(auth.ID)
+	if !okForbidden || afterForbidden == nil || afterForbidden.ModelStates[model] == nil {
+		t.Fatal("expected model state after 403")
+	}
+	forbiddenDeadline := afterForbidden.ModelStates[model].NextRetryAfter
+	if forbiddenDeadline.IsZero() {
+		t.Fatal("expected 403 to schedule a model cooldown")
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:             auth.ID,
+		Provider:           auth.Provider,
+		Model:              model,
+		Success:            false,
+		Error:              &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+		TransientRateLimit: true,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("auth %s missing after transient 429", auth.ID)
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected per-model state for %s", model)
+	}
+	if !state.Unavailable {
+		t.Fatal("expected the existing 403 cooldown to keep the model unavailable")
+	}
+	if !state.NextRetryAfter.Equal(forbiddenDeadline) {
+		t.Fatalf("hintless transient 429 wiped the 403 deadline: got %v, want %v", state.NextRetryAfter, forbiddenDeadline)
+	}
+	if state.Quota.Exceeded {
+		t.Fatal("expected the 403 cooldown not to be rewritten as quota exhausted")
+	}
+}
+
+// Same as TestManager_MarkResult_Transient429WithoutHintRespectsDisabledCooldown
+// but for an auth-level Result (empty Model), which drives applyAuthFailureState
+// instead of the per-model branch: the credential must stay available.
+func TestManager_MarkResult_Transient429WithoutHintRespectsDisabledCooldownAuthLevel(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(-1)
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(prevQuota)
+		transientErrorCooldownSeconds.Store(prevTransient)
+	})
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-transient-429-disabled-authlevel", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Success:  false,
+		Error: &Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    "rate limited",
+		},
+		TransientRateLimit: true,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("auth %s missing after MarkResult", auth.ID)
+	}
+	if updated.Unavailable {
+		t.Fatal("expected the credential to stay available with transient cooldowns disabled")
+	}
+	if !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected credential NextRetryAfter to stay zero with transient cooldowns disabled, got %v", updated.NextRetryAfter)
+	}
+	if updated.Quota.Exceeded {
+		t.Fatal("expected the credential quota state to stay clear with transient cooldowns disabled")
+	}
+}
+
+func TestApplyAuthFailureState_Transient429DisabledTreatsExpiredQuotaAsInactive(t *testing.T) {
+	previousTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(-1)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(previousTransient) })
+
+	now := time.Now()
+	expired := now.Add(-time.Minute)
+	auth := &Auth{
+		ID:    "auth-level-expired-quota-skip",
+		Quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: expired, BackoffLevel: 3},
+	}
+	rateLimitErr := &Error{Code: "rate_limit", Message: "RATE_LIMIT_EXCEEDED", HTTPStatus: http.StatusTooManyRequests}
+	applyAuthFailureState(auth, rateLimitErr, nil, now, false, true)
+
+	if auth.Unavailable {
+		t.Fatal("expected the credential to stay available when the quota deadline has expired")
+	}
+	if !auth.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter to stay zero, got %v", auth.NextRetryAfter)
+	}
+	if auth.Quota.NextRecoverAt.After(now) {
+		t.Fatalf("expired quota was replaced with a new window: %v", auth.Quota.NextRecoverAt)
+	}
+	if auth.Quota.BackoffLevel != 3 {
+		t.Fatalf("expected BackoffLevel to stay 3, got %d", auth.Quota.BackoffLevel)
+	}
+	if auth.StatusMessage == "quota exhausted" {
+		t.Fatal("expected skip path to restore the previous status message")
+	}
+}
+
 func TestManager_MarkResult_TransientErrorCooldownDisabled(t *testing.T) {
 	prevQuota := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

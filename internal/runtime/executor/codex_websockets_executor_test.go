@@ -1529,6 +1529,10 @@ func TestParseCodexWebsocketErrorMarksConnectionLimitRetryable(t *testing.T) {
 	if got := *retryable.RetryAfter(); got != 0 {
 		t.Fatalf("retryAfter = %v, want connection-limit fallback 0", got)
 	}
+	transient, ok := err.(interface{ TransientRateLimit() bool })
+	if !ok || !transient.TransientRateLimit() {
+		t.Fatalf("transientRateLimit = %#v, want true for websocket_connection_limit_reached", err)
+	}
 	withHeaders, ok := err.(interface{ Headers() http.Header })
 	if !ok || withHeaders.Headers().Get("retry-after") != "1" {
 		t.Fatalf("headers = %#v, want retry-after", err)
@@ -1547,6 +1551,9 @@ func TestParseCodexWebsocketErrorUsesUsageLimitRetryMetadata(t *testing.T) {
 	}
 	if got := *retryable.RetryAfter(); got != 7*time.Second {
 		t.Fatalf("retryAfter = %v, want 7s", got)
+	}
+	if transient, ok := err.(interface{ TransientRateLimit() bool }); ok && transient.TransientRateLimit() {
+		t.Fatal("usage_limit_reached classified as transient rate limit")
 	}
 }
 
@@ -1570,9 +1577,87 @@ func TestParseCodexWebsocketErrorPreservesWrappedBodyAndHeaders(t *testing.T) {
 	if !ok || retryable.RetryAfter() == nil {
 		t.Fatalf("expected body.error.code websocket connection limit to be retryable")
 	}
+	transient, ok := err.(interface{ TransientRateLimit() bool })
+	if !ok || !transient.TransientRateLimit() {
+		t.Fatalf("transientRateLimit = %#v, want true for body.error.code websocket_connection_limit_reached", err)
+	}
 	withHeaders, ok := err.(interface{ Headers() http.Header })
 	if !ok || withHeaders.Headers().Get("x-request-id") != "req-1" {
 		t.Fatalf("headers = %#v, want x-request-id", err)
+	}
+}
+
+func TestParseCodexWebsocketErrorConnectionLimitDrivesTransientZeroDelay(t *testing.T) {
+	cliproxyauth.SetQuotaCooldownDisabled(false)
+	t.Cleanup(func() { cliproxyauth.SetQuotaCooldownDisabled(false) })
+
+	parsed, ok := parseCodexWebsocketError([]byte(`{"type":"error","status":429,"error":{"code":"websocket_connection_limit_reached","message":"too many websockets"}}`))
+	if !ok {
+		t.Fatal("expected websocket error")
+	}
+	transient, ok := parsed.(interface{ TransientRateLimit() bool })
+	if !ok || !transient.TransientRateLimit() {
+		t.Fatalf("transientRateLimit = %#v, want true so conductor takes the zero-delay transient path", parsed)
+	}
+	retryable, ok := parsed.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil || *retryable.RetryAfter() != 0 {
+		t.Fatalf("retryAfter = %#v, want 0", parsed)
+	}
+
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-codex-ws-conn-limit",
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex"},
+		ModelStates: map[string]*cliproxyauth.ModelState{
+			"gpt-5": {
+				Status: cliproxyauth.StatusActive,
+				Quota:  cliproxyauth.QuotaState{BackoffLevel: 0},
+			},
+		},
+	}
+	if _, errRegister := manager.Register(cliproxyauth.WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	hint := *retryable.RetryAfter()
+	result := cliproxyauth.Result{
+		AuthID:             auth.ID,
+		Provider:           "codex",
+		Model:              "gpt-5",
+		Success:            false,
+		RetryAfter:         &hint,
+		TransientRateLimit: transient.TransientRateLimit(),
+		Error: &cliproxyauth.Error{
+			Code:       "rate_limit",
+			Message:    parsed.Error(),
+			Retryable:  true,
+			HTTPStatus: http.StatusTooManyRequests,
+		},
+	}
+
+	now := time.Now()
+	manager.MarkResult(context.Background(), result)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after connection-limit failure")
+	}
+	state := updated.ModelStates["gpt-5"]
+	if state.Quota.BackoffLevel != 0 {
+		t.Fatalf("expected BackoffLevel 0 on the zero-delay transient path, got %d", state.Quota.BackoffLevel)
+	}
+	if state.Quota.NextRecoverAt.After(now.Add(500 * time.Millisecond)) {
+		t.Fatalf("connection-limit took the quota ladder: NextRecoverAt=%v, want <= %v", state.Quota.NextRecoverAt, now)
+	}
+
+	manager.MarkResult(context.Background(), result)
+	updated, ok = manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-5"] == nil {
+		t.Fatalf("expected model state after repeated connection-limit failure")
+	}
+	if got := updated.ModelStates["gpt-5"].Quota.BackoffLevel; got != 0 {
+		t.Fatalf("repeated connection-limit advanced quota BackoffLevel to %d", got)
 	}
 }
 

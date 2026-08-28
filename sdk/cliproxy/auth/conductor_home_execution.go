@@ -146,7 +146,10 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		}
 		preparedAuth, errPrepare := m.prepareHomeRequestAuth(execCtx, selection.Executor, selection)
 		if errPrepare != nil {
-			m.reportHomeResult(execCtx, Result{AuthID: auth.ID, Provider: selection.Provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: opts}, auth)
+			result := Result{AuthID: auth.ID, Provider: selection.Provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: opts}
+			result.RetryAfter = retryAfterFromError(errPrepare)
+			result.TransientRateLimit = isTransientRateLimitError(errPrepare)
+			m.reportHomeResult(execCtx, result, auth)
 			releaseAttempt()
 			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "prepare_failed"); errEnd != nil {
 				return cliproxyexecutor.Response{}, errEnd
@@ -266,6 +269,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			result.Error = resultErrorFromError(errExecute)
 			result.RetryAfter = retryAfterFromError(errExecute)
+			result.TransientRateLimit = isTransientRateLimitError(errExecute)
 			if isCredentialScopedError(errExecute) {
 				result.CredentialScope = true
 			}
