@@ -101,8 +101,8 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
-	responseHeaders = preserveCLIProxyUpstreamHeader(responseHeaders, rawResponseHeaders)
 	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), responseProtocol, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
+	responseHeaders = preserveCLIProxyUpstreamHeader(responseHeaders, rawResponseHeaders)
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
 }
