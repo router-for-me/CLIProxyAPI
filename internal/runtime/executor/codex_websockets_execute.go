@@ -283,7 +283,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		if len(payload) == 0 {
 			continue
 		}
-		reporter.MarkFirstResponseByte()
+		observeCodexTokenEvent(reporter, payload)
 		payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
 		helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
 		helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
@@ -315,11 +315,15 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		switch eventType {
 		case "response.output_item.done":
 			collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
-		case "response.completed":
+		case "response.completed", "response.done", "response.incomplete":
 			payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
-			cacheCodexReasoningReplayFromCompleted(replayScope, payload)
+			if eventType != "response.incomplete" {
+				cacheCodexReasoningReplayFromCompleted(replayScope, payload)
+			}
 			if detail, ok := helps.ParseCodexUsage(payload); ok {
 				reporter.Publish(ctx, detail)
+			} else {
+				reporter.EnsurePublished(ctx)
 			}
 			var param any
 			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
