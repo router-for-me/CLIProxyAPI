@@ -640,6 +640,42 @@ func TestUsageReporterTrackHTTPClientRoundTripOnly_DoesNotTriggerOnBodyRead(t *t
 	}
 }
 
+func TestUsageReporterTrackHTTPClientRoundTripOnly_ErrorResponseRecordsFirstPacketFallback(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5.6-luna", nil)
+	client := reporter.TrackHTTPClientRoundTripOnly(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Status:     "429 Too Many Requests",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"rate limit"}}`)),
+				Request:    req,
+			}, nil
+		}),
+	})
+
+	req, errNewRequest := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.invalid/v1/responses", strings.NewReader("{}"))
+	if errNewRequest != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", errNewRequest)
+	}
+	resp, errDo := client.Do(req)
+	if errDo != nil {
+		t.Fatalf("Do() error = %v", errDo)
+	}
+	_, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		t.Fatalf("ReadAll() error = %v", errRead)
+	}
+	_ = resp.Body.Close()
+
+	if reporter.IsTTFTSet() {
+		t.Fatalf("error response read must not set substantive token TTFT")
+	}
+	if !reporter.IsFirstPacketSet() {
+		t.Fatalf("error response read must record first packet set fallback")
+	}
+}
+
 func TestUsageReporterObserveTokenEvent_FastPathNonTokenAndToken(t *testing.T) {
 	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5.6-luna", nil)
 	reporter.StartResponseTTFT()

@@ -139,17 +139,16 @@ func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
 	return r.trackHTTPClient(client, false)
 }
 
-// TrackHTTPClientRoundTripOnly records the TTFT start time upon sending the request,
-// but does not automatically mark TTFT on the first body read byte. This allows
-// protocol-aware streaming executors (like Codex SSE) to mark TTFT explicitly upon
-// receiving the first meaningful token event rather than handshake/metadata frames.
-// Failed responses without any packets received remain zero; if upstream frames were observed,
-// first-packet fallback is reported.
+// TrackHTTPClientRoundTripOnly records the TTFT start time upon sending the request
+// and captures first-packet arrival fallback on initial body reads, while keeping
+// effective TTFT unset. This allows protocol-aware streaming executors (like Codex SSE)
+// to mark effective TTFT explicitly upon receiving substantive token events, while
+// preserving first-packet fallback metrics for non-2xx error bodies or keepalive streams.
 func (r *UsageReporter) TrackHTTPClientRoundTripOnly(client *http.Client) *http.Client {
 	return r.trackHTTPClient(client, true)
 }
 
-func (r *UsageReporter) trackHTTPClient(client *http.Client, skipBody bool) *http.Client {
+func (r *UsageReporter) trackHTTPClient(client *http.Client, packetOnly bool) *http.Client {
 	if r == nil || client == nil {
 		return client
 	}
@@ -159,9 +158,9 @@ func (r *UsageReporter) trackHTTPClient(client *http.Client, skipBody bool) *htt
 		transport = http.DefaultTransport
 	}
 	tracked.Transport = usageTTFTRoundTripper{
-		base:     transport,
-		reporter: r,
-		skipBody: skipBody,
+		base:       transport,
+		reporter:   r,
+		packetOnly: packetOnly,
 	}
 	return &tracked
 }
@@ -175,6 +174,19 @@ func (r *UsageReporter) ObserveResponse(resp *http.Response) {
 		ReadCloser: resp.Body,
 		mark: func() {
 			r.MarkFirstResponseByte()
+		},
+	}
+}
+
+func (r *UsageReporter) ObserveResponsePacketOnly(resp *http.Response) {
+	if r == nil || resp == nil || resp.Body == nil {
+		return
+	}
+	r.StartResponseTTFT()
+	resp.Body = &usageTTFTReadCloser{
+		ReadCloser: resp.Body,
+		mark: func() {
+			r.RecordFirstPacket()
 		},
 	}
 }
@@ -444,9 +456,9 @@ func (r *UsageReporter) ttftDuration() time.Duration {
 }
 
 type usageTTFTRoundTripper struct {
-	base     http.RoundTripper
-	reporter *UsageReporter
-	skipBody bool
+	base       http.RoundTripper
+	reporter   *UsageReporter
+	packetOnly bool
 }
 
 func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -455,7 +467,9 @@ func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	if errRoundTrip != nil {
 		return resp, errRoundTrip
 	}
-	if !t.skipBody {
+	if t.packetOnly {
+		t.reporter.ObserveResponsePacketOnly(resp)
+	} else {
 		t.reporter.ObserveResponse(resp)
 	}
 	return resp, nil
