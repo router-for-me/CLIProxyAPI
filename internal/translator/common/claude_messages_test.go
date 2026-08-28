@@ -132,24 +132,43 @@ func TestAlignClaudeToolResults(t *testing.T) {
 		}
 	})
 
-	t.Run("returns original content when count mismatches", func(t *testing.T) {
+	t.Run("aligns matched results when count is less than toolUseIDs", func(t *testing.T) {
 		input := gjson.Parse(`[
+			{"type":"tool_result","tool_use_id":"call_2","content":"two"},
 			{"type":"tool_result","tool_use_id":"call_1","content":"one"}
 		]`)
-		aligned := AlignClaudeToolResults(input, []string{"call_1", "call_2"})
-		if aligned.Raw != input.Raw {
-			t.Fatalf("aligned = %s, want %s", aligned.Raw, input.Raw)
+		aligned := AlignClaudeToolResults(input, []string{"call_1", "call_2", "call_3"})
+		parts := aligned.Array()
+		if len(parts) != 2 {
+			t.Fatalf("len(parts) = %d, want 2", len(parts))
+		}
+		if parts[0].Get("tool_use_id").String() != "call_1" {
+			t.Fatalf("parts[0].tool_use_id = %q, want call_1", parts[0].Get("tool_use_id").String())
+		}
+		if parts[1].Get("tool_use_id").String() != "call_2" {
+			t.Fatalf("parts[1].tool_use_id = %q, want call_2", parts[1].Get("tool_use_id").String())
 		}
 	})
 
-	t.Run("returns original content when id not found", func(t *testing.T) {
+	t.Run("aligns matched results and appends unknown id", func(t *testing.T) {
 		input := gjson.Parse(`[
 			{"type":"tool_result","tool_use_id":"call_unknown","content":"unknown"},
+			{"type":"tool_result","tool_use_id":"call_2","content":"two"},
 			{"type":"tool_result","tool_use_id":"call_1","content":"one"}
 		]`)
 		aligned := AlignClaudeToolResults(input, []string{"call_1", "call_2"})
-		if aligned.Raw != input.Raw {
-			t.Fatalf("aligned = %s, want %s", aligned.Raw, input.Raw)
+		parts := aligned.Array()
+		if len(parts) != 3 {
+			t.Fatalf("len(parts) = %d, want 3", len(parts))
+		}
+		if parts[0].Get("tool_use_id").String() != "call_1" {
+			t.Fatalf("parts[0].tool_use_id = %q, want call_1", parts[0].Get("tool_use_id").String())
+		}
+		if parts[1].Get("tool_use_id").String() != "call_2" {
+			t.Fatalf("parts[1].tool_use_id = %q, want call_2", parts[1].Get("tool_use_id").String())
+		}
+		if parts[2].Get("tool_use_id").String() != "call_unknown" {
+			t.Fatalf("parts[2].tool_use_id = %q, want call_unknown", parts[2].Get("tool_use_id").String())
 		}
 	})
 

@@ -77,15 +77,15 @@ func (a *ClaudeMessageAccumulator) Messages() [][]byte {
 }
 
 // AlignClaudeToolResults orders tool_result blocks by the preceding tool_use IDs.
-// Other content blocks retain their relative order after the tool results. If a
-// complete one-to-one match is unavailable, the original content is returned.
+// Other content blocks retain their relative order after the tool results. Unmatched
+// tool results are appended after the matched tool results.
 func AlignClaudeToolResults(content gjson.Result, toolUseIDs []string) gjson.Result {
 	if !content.IsArray() || len(toolUseIDs) == 0 {
 		return content
 	}
 
 	parts := content.Array()
-	toolResults := make([]gjson.Result, 0, len(toolUseIDs))
+	toolResults := make([]gjson.Result, 0, len(parts))
 	otherParts := make([]gjson.Result, 0, len(parts))
 	for _, part := range parts {
 		if part.Get("type").String() == "tool_result" {
@@ -94,25 +94,28 @@ func AlignClaudeToolResults(content gjson.Result, toolUseIDs []string) gjson.Res
 		}
 		otherParts = append(otherParts, part)
 	}
-	if len(toolResults) != len(toolUseIDs) {
+	if len(toolResults) == 0 {
 		return content
 	}
 
 	ordered := make([][]byte, 0, len(parts))
 	used := make([]bool, len(toolResults))
 	for _, toolUseID := range toolUseIDs {
-		matched := -1
+		if toolUseID == "" {
+			continue
+		}
 		for resultIndex, toolResult := range toolResults {
-			if !used[resultIndex] && toolUseID != "" && toolResult.Get("tool_use_id").String() == toolUseID {
-				matched = resultIndex
+			if !used[resultIndex] && toolResult.Get("tool_use_id").String() == toolUseID {
+				used[resultIndex] = true
+				ordered = append(ordered, []byte(toolResult.Raw))
 				break
 			}
 		}
-		if matched < 0 {
-			return content
+	}
+	for resultIndex, toolResult := range toolResults {
+		if !used[resultIndex] {
+			ordered = append(ordered, []byte(toolResult.Raw))
 		}
-		used[matched] = true
-		ordered = append(ordered, []byte(toolResults[matched].Raw))
 	}
 	for _, part := range otherParts {
 		ordered = append(ordered, []byte(part.Raw))

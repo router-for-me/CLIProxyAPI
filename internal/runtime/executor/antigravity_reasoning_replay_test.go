@@ -1777,6 +1777,59 @@ func TestDegradeAntigravityClaudeToolProvenanceIDsKeepsParallelShape(t *testing.
 	}
 }
 
+func TestPrepareAntigravityGeminiReasoningReplay_ReordersPermutedParallelToolResponsesWithDegradedIDs(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const model = "gemini-3.7-flash-high"
+	const count = 12
+	calls := make([]string, count)
+	responses := make([]string, count)
+	ids := make([]string, count)
+	for i := 0; i < count; i++ {
+		ids[i] = util.GeminiClaudeToolUseID(fmt.Sprintf("native-%d", i), "Read", `{"file_path":"/tmp/a"}`)
+		sig := ""
+		if i == 0 {
+			sig = `, "thoughtSignature": "skip_thought_signature_validator"`
+		}
+		calls[i] = fmt.Sprintf(`{"functionCall":{"id":"%s","name":"Read","args":{"file_path":"/tmp/a"}}%s}`, ids[i], sig)
+	}
+
+	// Permute responses: reverse order
+	for i := 0; i < count; i++ {
+		permutedIndex := count - 1 - i
+		responses[i] = fmt.Sprintf(`{"functionResponse":{"id":"%s","name":"Read","response":{"result":"ok-%d"}}}`, ids[permutedIndex], permutedIndex)
+	}
+
+	payload := []byte(fmt.Sprintf(`{"sessionId":"sess-permuted","request":{"contents":[{"role":"model","parts":[%s]},{"role":"user","parts":[%s]}]}}`,
+		strings.Join(calls, ","),
+		strings.Join(responses, ","),
+	))
+
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")}
+	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload}, opts, payload)
+	if errPrepare != nil {
+		t.Fatalf("prepareAntigravityGeminiReasoningReplayPayload error: %v", errPrepare)
+	}
+
+	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v\noutput: %s", errPairing, out)
+	}
+
+	outCalls := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	outResponses := gjson.GetBytes(out, "request.contents.1.parts").Array()
+	if len(outCalls) != count || len(outResponses) != count {
+		t.Fatalf("part counts: %d calls, %d responses", len(outCalls), len(outResponses))
+	}
+	for i := 0; i < count; i++ {
+		callID := outCalls[i].Get("functionCall.id").String()
+		respID := outResponses[i].Get("functionResponse.id").String()
+		if callID == "" || respID == "" || callID != respID {
+			t.Fatalf("part %d id mismatch: call %q != resp %q", i, callID, respID)
+		}
+	}
+}
+
 func TestPrepareAntigravityGeminiReasoningReplayStillRejectsBrokenPairing(t *testing.T) {
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)

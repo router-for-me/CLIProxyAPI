@@ -254,7 +254,7 @@ func prepareAntigravityGeminiReasoningReplayPayload(ctx context.Context, modelNa
 		// committed. Degrade those calls instead of killing the conversation.
 		degradedPayload, degradedCount := degradeAntigravityClaudeToolProvenanceIDs(updated)
 		log.Warnf("antigravity executor: replay state missing for %d tool ID(s); rewriting them to synthetic IDs and continuing without reasoning replay for those calls", degradedCount)
-		updated = degradedPayload
+		updated = normalizeAntigravityGeminiFunctionResponseRoles(degradedPayload)
 	}
 	// An identity-only restore drops the cached signature, which can leave a model
 	// turn's first function call unsigned. Gemini rejects that, so re-assert the
