@@ -314,6 +314,15 @@ nonstream-keepalive-interval: 0
 # When false (default), only checks R/E prefix + base64 + first byte 0x12.
 # antigravity-signature-bypass-strict: false
 
+# Per-agent scoping of the upstream prompt_cache_key derived for Claude Code requests.
+# When true (default), every subagent of one Claude Code session gets its own cache
+# partition, so a fan-out of N subagents pays N first-turn cache misses even though they
+# share an identical system prompt and tool block.
+# When false, all agents of one session share a single partition keyed on the session, so a
+# fan-out can read the prefix the root agent already warmed. Reasoning-replay state stays
+# agent-scoped either way.
+# codex-cache-key-per-agent: true
+
 # Gemini API keys
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"
