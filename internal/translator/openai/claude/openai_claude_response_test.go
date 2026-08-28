@@ -103,6 +103,114 @@ func lastStopReason(events []sseEvent) string {
 
 const streamReq = `{"stream":true}`
 
+func TestStreamingTool_OmittedFinishReasonEmitsMessageDeltaOnDone(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"do_it","arguments":"{}"}}]}}]}`,
+	)
+
+	if got := countByType(events, "message_delta"); got != 1 {
+		t.Fatalf("expected one message_delta on [DONE] when finish_reason is omitted, got %d (events=%+v)", got, events)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q (events=%+v)", got, "tool_use", events)
+	}
+	if got := countByType(events, "message_stop"); got != 1 {
+		t.Fatalf("expected one message_stop, got %d (events=%+v)", got, events)
+	}
+	if len(events) == 0 || events[len(events)-1].Type != "message_stop" {
+		t.Fatalf("message_stop must be the last semantic event (events=%+v)", events)
+	}
+	if got := len(toolUseStarts(events)); got != 1 {
+		t.Fatalf("expected one tool_use start, got %d (events=%+v)", got, events)
+	}
+}
+
+func TestStreamingText_OmittedFinishReasonEmitsEndTurnOnDone(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}`,
+	)
+
+	if got := countByType(events, "message_delta"); got != 1 {
+		t.Fatalf("expected one message_delta on [DONE] when finish_reason is omitted, got %d (events=%+v)", got, events)
+	}
+	if got := lastStopReason(events); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want %q (events=%+v)", got, "end_turn", events)
+	}
+	if got := countByType(events, "message_stop"); got != 1 {
+		t.Fatalf("expected one message_stop, got %d (events=%+v)", got, events)
+	}
+}
+
+func TestStreamingTool_UsageWithoutFinishReasonEmitsMessageDelta(t *testing.T) {
+	var paramAny any
+	var emitted [][]byte
+	for _, chunk := range []string{
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"do_it","arguments":"{}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}}`,
+	} {
+		emitted = append(emitted, ConvertOpenAIResponseToClaude(
+			context.Background(),
+			"",
+			[]byte(streamReq),
+			nil,
+			[]byte("data: "+chunk),
+			&paramAny,
+		)...)
+	}
+
+	var events []sseEvent
+	for _, raw := range emitted {
+		s := string(raw)
+		if !strings.HasPrefix(s, "event: ") {
+			continue
+		}
+		nl := strings.Index(s, "\n")
+		if nl < 0 {
+			continue
+		}
+		typ := strings.TrimPrefix(s[:nl], "event: ")
+		rest := s[nl+1:]
+		if !strings.HasPrefix(rest, "data: ") {
+			continue
+		}
+		payload := strings.TrimRight(strings.TrimPrefix(rest, "data: "), "\n")
+		events = append(events, sseEvent{Type: typ, Payload: payload})
+	}
+
+	if got := countByType(events, "message_delta"); got != 1 {
+		t.Fatalf("expected usage chunk to emit message_delta when finish_reason is omitted, got %d (events=%+v)", got, events)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q (events=%+v)", got, "tool_use", events)
+	}
+	var sawUsage bool
+	for _, e := range events {
+		if e.Type != "message_delta" {
+			continue
+		}
+		if gjson.Get(e.Payload, "usage.input_tokens").Int() == 3 && gjson.Get(e.Payload, "usage.output_tokens").Int() == 2 {
+			sawUsage = true
+		}
+	}
+	if !sawUsage {
+		t.Fatalf("expected message_delta to carry usage from the usage chunk (events=%+v)", events)
+	}
+	if got := countByType(events, "message_stop"); got != 1 {
+		t.Fatalf("expected message_stop after usage-chunk message_delta, got %d (events=%+v)", got, events)
+	}
+
+	doneEvents := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"do_it","arguments":"{}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}}`,
+	)
+	if got := countByType(doneEvents, "message_delta"); got != 1 {
+		t.Fatalf("expected exactly one message_delta after [DONE], got %d (events=%+v)", got, doneEvents)
+	}
+	if got := lastStopReason(doneEvents); got != "tool_use" {
+		t.Fatalf("stop_reason after [DONE] = %q, want %q", got, "tool_use")
+	}
+}
+
 func TestStreaming_LateUsageOnlyDoesNotEmitAfterMessageStop(t *testing.T) {
 	events := runStream(t, streamReq,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
