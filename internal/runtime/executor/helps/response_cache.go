@@ -33,10 +33,14 @@ func ResolveResponseCacheSettings(compat *config.OpenAICompatibility) (ResponseC
 	if compat == nil || !compat.ResponseCache.Enabled {
 		return ResponseCacheSettings{}, false
 	}
+	maxEntryBytes := compat.ResponseCache.MaxEntryBytes
+	if maxEntryBytes <= 0 {
+		maxEntryBytes = cache.DefaultResponseCacheMaxEntryBytes
+	}
 	settings := ResponseCacheSettings{
 		TTL:           cache.DefaultResponseCacheTTL,
 		MaxEntries:    compat.ResponseCache.MaxEntries,
-		MaxEntryBytes: compat.ResponseCache.MaxEntryBytes,
+		MaxEntryBytes: maxEntryBytes,
 		Models:        compat.ResponseCache.Models,
 	}
 	if raw := strings.TrimSpace(compat.ResponseCache.TTL); raw != "" {
@@ -75,19 +79,20 @@ func ResponseCacheFor(compat *config.OpenAICompatibility, providerKey string) (*
 }
 
 // ResponseCacheLookup resolves the cache and key for one upstream request.
-// It returns a nil cache when the provider, model, or payload is not cacheable.
+// It returns a nil cache when the provider, model, or payload is not cacheable,
+// along with the effective provider cache settings.
 // variant separates entries that share an upstream payload but need different
 // downstream output, such as two response formats translated from one request.
-func ResponseCacheLookup(compat *config.OpenAICompatibility, providerKey, authID, url, model, variant string, stream bool, payload []byte) (*cache.ResponseCache, string) {
+func ResponseCacheLookup(compat *config.OpenAICompatibility, providerKey, authID, url, model, variant string, stream bool, payload []byte) (*cache.ResponseCache, string, ResponseCacheSettings) {
 	if len(payload) == 0 {
-		return nil, ""
+		return nil, "", ResponseCacheSettings{}
 	}
 	responseCache, settings := ResponseCacheFor(compat, providerKey)
 	if responseCache == nil {
-		return nil, ""
+		return nil, "", ResponseCacheSettings{}
 	}
 	if !cache.ResponseCacheModelAllowed(settings.Models, model) {
-		return nil, ""
+		return nil, "", settings
 	}
 	keyProvider := providerKey
 	if authID != "" {
@@ -96,7 +101,7 @@ func ResponseCacheLookup(compat *config.OpenAICompatibility, providerKey, authID
 	if variant != "" {
 		keyProvider = keyProvider + "|" + variant
 	}
-	return responseCache, cache.ResponseCacheKey(keyProvider, url, model, stream, payload)
+	return responseCache, cache.ResponseCacheKey(keyProvider, url, model, stream, payload), settings
 }
 
 // ResetResponseCaches drops every provider cache. Used by tests.

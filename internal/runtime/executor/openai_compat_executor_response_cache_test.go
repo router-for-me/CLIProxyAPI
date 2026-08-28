@@ -46,6 +46,7 @@ func TestOpenAICompatExecutorResponseCacheServesIdenticalRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		call := upstreamCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Custom-Passthrough", "header-val")
 		_, _ = fmt.Fprintf(w, `{"id":"chatcmpl-%d","object":"chat.completion","model":"claude-opus-5","choices":[{"index":0,"message":{"role":"assistant","content":"answer-%d"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`, call, call)
 	}))
 	defer server.Close()
@@ -63,6 +64,9 @@ func TestOpenAICompatExecutorResponseCacheServesIdenticalRequest(t *testing.T) {
 		t.Fatalf("second Execute error: %v", err)
 	}
 
+	if first.Headers.Get("X-Custom-Passthrough") != "header-val" || second.Headers.Get("X-Custom-Passthrough") != "header-val" {
+		t.Fatalf("expected preserved response headers on cache hit: first=%q, second=%q", first.Headers.Get("X-Custom-Passthrough"), second.Headers.Get("X-Custom-Passthrough"))
+	}
 	if got := upstreamCalls.Load(); got != 1 {
 		t.Fatalf("expected 1 upstream call, got %d", got)
 	}
@@ -124,6 +128,7 @@ func TestOpenAICompatExecutorResponseCacheReplaysStream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamCalls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Custom-Stream-Header", "stream-val")
 		flusher, _ := w.(http.Flusher)
 		frames := []string{
 			`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"claude-opus-5","choices":[{"index":0,"delta":{"role":"assistant","content":"he"}}]}`,
@@ -143,11 +148,12 @@ func TestOpenAICompatExecutorResponseCacheReplaysStream(t *testing.T) {
 	payload := []byte(`{"model":"claude-opus-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai"), Stream: true}
 
-	collect := func() string {
+	collect := func() (string, string) {
 		result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}, opts)
 		if err != nil {
 			t.Fatalf("ExecuteStream error: %v", err)
 		}
+		headerVal := result.Headers.Get("X-Custom-Stream-Header")
 		var builder strings.Builder
 		for chunk := range result.Chunks {
 			if chunk.Err != nil {
@@ -155,11 +161,15 @@ func TestOpenAICompatExecutorResponseCacheReplaysStream(t *testing.T) {
 			}
 			builder.Write(chunk.Payload)
 		}
-		return builder.String()
+		return builder.String(), headerVal
 	}
 
-	live := collect()
-	replayed := collect()
+	live, liveH := collect()
+	replayed, replayedH := collect()
+
+	if liveH != "stream-val" || replayedH != "stream-val" {
+		t.Fatalf("expected stream response headers preserved on hit: live=%q, replay=%q", liveH, replayedH)
+	}
 
 	if got := upstreamCalls.Load(); got != 1 {
 		t.Fatalf("expected 1 upstream stream call, got %d", got)

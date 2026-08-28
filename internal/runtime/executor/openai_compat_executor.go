@@ -157,7 +157,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -167,7 +167,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	// Serve byte-identical repeats from the provider response cache when enabled.
 	// Upstream aggregators without prompt caching bill every retry at full price.
-	responseCache, cacheKey := helps.ResponseCacheLookup(e.resolveCompatConfig(auth), e.Identifier(), authID, url, baseModel, responseFormat.String(), false, translated)
+	responseCache, cacheKey, _ := helps.ResponseCacheLookup(e.resolveCompatConfig(auth), e.Identifier(), authID, url, baseModel, responseFormat.String(), false, translated)
 	if responseCache != nil {
 		if entry, ok := responseCache.Get(cacheKey); ok && !entry.Stream {
 			helps.LogWithRequestID(ctx).Debugf("openai compat executor: response cache hit for model %s", baseModel)
@@ -175,7 +175,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			reporter.EnsurePublished(ctx)
 			var cachedParam any
 			cachedOut := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, entry.Payload, &cachedParam)
-			return cliproxyexecutor.Response{Payload: cachedOut}, nil
+			if responseFormat == sdktranslator.FormatOpenAIResponse {
+				cachedOut = helps.EnsureResponsesUsageDetails(cachedOut)
+			}
+			return cliproxyexecutor.Response{Payload: cachedOut, Headers: entry.Headers.Clone()}, nil
 		}
 	}
 
@@ -218,7 +221,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 	if responseCache != nil {
-		responseCache.Store(cacheKey, body, false)
+		responseCache.Store(cacheKey, body, httpResp.Header, false)
 	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
@@ -226,6 +229,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// Translate response back to source format when needed
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, body, &param)
+	if responseFormat == sdktranslator.FormatOpenAIResponse {
+		out = helps.EnsureResponsesUsageDetails(out)
+	}
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -384,7 +390,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string
@@ -397,11 +403,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// Replay byte-identical streaming repeats from the provider response cache.
 	// Cached frames are the raw upstream SSE payloads, so they flow through the same
 	// translator pipeline that produced the original downstream output.
-	responseCache, cacheKey := helps.ResponseCacheLookup(e.resolveCompatConfig(auth), e.Identifier(), authID, url, baseModel, responseFormat.String(), true, translated)
+	responseCache, cacheKey, cacheSettings := helps.ResponseCacheLookup(e.resolveCompatConfig(auth), e.Identifier(), authID, url, baseModel, responseFormat.String(), true, translated)
 	if responseCache != nil {
 		if entry, ok := responseCache.Get(cacheKey); ok && entry.Stream {
 			helps.LogWithRequestID(ctx).Debugf("openai compat executor: response cache hit for streaming model %s", baseModel)
-			return e.replayCachedStream(ctx, reporter, entry.Payload, to, responseFormat, req, opts, translated, originalPayload), nil
+			return e.replayCachedStream(ctx, reporter, entry.Payload, entry.Headers, to, responseFormat, req, opts, translated, originalPayload), nil
 		}
 	}
 
@@ -454,6 +460,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		var upstreamEvent string
 		var frameData [][]byte
 		var cachedFrames []string
+		var cachedBytes int
+		var cacheOversized bool
+		maxEntryBytes := cacheSettings.MaxEntryBytes
 		defer streamUsage.Publish(ctx, reporter)
 
 		publishStreamError := func(streamErr statusErr, containsPayload bool) {
@@ -509,8 +518,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 
 			streamLine := append([]byte("data: "), dataPayload...)
-			if responseCache != nil {
-				cachedFrames = append(cachedFrames, string(dataPayload))
+			if responseCache != nil && !cacheOversized {
+				cachedBytes += len(dataPayload) + 1
+				if cachedBytes > maxEntryBytes {
+					cacheOversized = true
+					cachedFrames = nil
+				} else {
+					cachedFrames = append(cachedFrames, string(dataPayload))
+				}
 			}
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, streamLine, &param, claudeInputTokens)
 			for i := range chunks {
@@ -597,10 +612,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		// Ensure we record the request if no usage chunk was ever seen.
 		streamUsage.Publish(ctx, reporter)
 		reporter.EnsurePublished(ctx)
-		// Only complete, uninterrupted streams are cacheable; a partial replay would
-		// otherwise be served as if it were a finished response.
-		if responseCache != nil && seenDone && !streamFailed && !streamAborted && errScan == nil && len(cachedFrames) > 0 {
-			responseCache.Store(cacheKey, helps.EncodeCachedStreamFrames(cachedFrames), true)
+		// Only complete, uninterrupted streams within configured size bounds are cacheable;
+		// a partial replay would otherwise be served as if it were a finished response.
+		if responseCache != nil && !cacheOversized && seenDone && !streamFailed && !streamAborted && errScan == nil && len(cachedFrames) > 0 {
+			responseCache.Store(cacheKey, helps.EncodeCachedStreamFrames(cachedFrames), httpResp.Header, true)
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -608,7 +623,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 // replayCachedStream feeds cached upstream SSE frames through the normal
 // translation pipeline so a cache hit is indistinguishable from a live stream.
-func (e *OpenAICompatExecutor) replayCachedStream(ctx context.Context, reporter *helps.UsageReporter, cached []byte, to, responseFormat sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, translated, originalPayload []byte) *cliproxyexecutor.StreamResult {
+func (e *OpenAICompatExecutor) replayCachedStream(ctx context.Context, reporter *helps.UsageReporter, cached []byte, headers http.Header, to, responseFormat sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, translated, originalPayload []byte) *cliproxyexecutor.StreamResult {
 	from := opts.SourceFormat
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
@@ -631,7 +646,7 @@ func (e *OpenAICompatExecutor) replayCachedStream(ctx context.Context, reporter 
 		streamUsage.Publish(ctx, reporter)
 		reporter.EnsurePublished(ctx)
 	}()
-	return &cliproxyexecutor.StreamResult{Chunks: out}
+	return &cliproxyexecutor.StreamResult{Headers: headers.Clone(), Chunks: out}
 }
 
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {

@@ -3,6 +3,7 @@ package cache
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,7 @@ type ResponseCacheStats struct {
 // pipeline that produced the original downstream output.
 type ResponseCacheEntry struct {
 	Payload   []byte
+	Headers   http.Header
 	Stream    bool
 	StoredAt  time.Time
 	expiresAt time.Time
@@ -137,14 +139,18 @@ func (c *ResponseCache) Get(key string) (ResponseCacheEntry, bool) {
 	return entry, true
 }
 
-// Store records a payload for key. Oversized payloads are dropped instead of
-// evicting useful smaller entries.
-func (c *ResponseCache) Store(key string, payload []byte, stream bool) {
+// Store records a payload for key along with upstream response headers.
+// Oversized payloads are dropped instead of evicting useful smaller entries.
+func (c *ResponseCache) Store(key string, payload []byte, headers http.Header, stream bool) {
 	if c == nil || key == "" || len(payload) == 0 || len(payload) > c.maxBytes {
 		return
 	}
 	stored := make([]byte, len(payload))
 	copy(stored, payload)
+	var storedHeaders http.Header
+	if headers != nil {
+		storedHeaders = headers.Clone()
+	}
 	now := time.Now()
 
 	c.mu.Lock()
@@ -153,6 +159,7 @@ func (c *ResponseCache) Store(key string, payload []byte, stream bool) {
 	}
 	c.entries[key] = &responseCacheNode{entry: ResponseCacheEntry{
 		Payload:   stored,
+		Headers:   storedHeaders,
 		Stream:    stream,
 		StoredAt:  now,
 		expiresAt: now.Add(c.ttl),

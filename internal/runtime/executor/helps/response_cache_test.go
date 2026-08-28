@@ -80,12 +80,12 @@ func TestResponseCacheLookupRespectsModelAllowlist(t *testing.T) {
 	}
 	payload := []byte(`{"model":"claude-opus-5"}`)
 
-	c, key := ResponseCacheLookup(compat, "zendigikey", "auth1", "https://x/v1/chat/completions", "claude-opus-5", "openai", false, payload)
+	c, key, _ := ResponseCacheLookup(compat, "zendigikey", "auth1", "https://x/v1/chat/completions", "claude-opus-5", "openai", false, payload)
 	if c == nil || key == "" {
 		t.Fatal("expected allowlisted model to be cacheable")
 	}
 
-	c, _ = ResponseCacheLookup(compat, "zendigikey", "auth1", "https://x/v1/chat/completions", "gpt-5.4-mini", "openai", false, payload)
+	c, _, _ = ResponseCacheLookup(compat, "zendigikey", "auth1", "https://x/v1/chat/completions", "gpt-5.4-mini", "openai", false, payload)
 	if c != nil {
 		t.Fatal("expected non-allowlisted model to skip caching")
 	}
@@ -96,12 +96,12 @@ func TestResponseCacheLookupSkipsWhenDisabledOrEmptyPayload(t *testing.T) {
 	t.Cleanup(ResetResponseCaches)
 
 	enabled := &config.OpenAICompatibility{Name: "zen", ResponseCache: config.ResponseCacheConfig{Enabled: true}}
-	if c, _ := ResponseCacheLookup(enabled, "zendigikey", "auth1", "u", "m", "openai", false, nil); c != nil {
+	if c, _, _ := ResponseCacheLookup(enabled, "zendigikey", "auth1", "u", "m", "openai", false, nil); c != nil {
 		t.Fatal("expected empty payload to skip caching")
 	}
 
 	disabled := &config.OpenAICompatibility{Name: "zen"}
-	if c, _ := ResponseCacheLookup(disabled, "zendigikey", "auth1", "u", "m", "openai", false, []byte(`{}`)); c != nil {
+	if c, _, _ := ResponseCacheLookup(disabled, "zendigikey", "auth1", "u", "m", "openai", false, []byte(`{}`)); c != nil {
 		t.Fatal("expected disabled provider to skip caching")
 	}
 }
@@ -113,13 +113,13 @@ func TestResponseCacheLookupSeparatesAuthAndVariant(t *testing.T) {
 	compat := &config.OpenAICompatibility{Name: "zen", ResponseCache: config.ResponseCacheConfig{Enabled: true}}
 	payload := []byte(`{"a":1}`)
 
-	_, keyAuth1 := ResponseCacheLookup(compat, "zendigikey", "auth1", "u", "m", "openai", false, payload)
-	_, keyAuth2 := ResponseCacheLookup(compat, "zendigikey", "auth2", "u", "m", "openai", false, payload)
+	_, keyAuth1, _ := ResponseCacheLookup(compat, "zendigikey", "auth1", "u", "m", "openai", false, payload)
+	_, keyAuth2, _ := ResponseCacheLookup(compat, "zendigikey", "auth2", "u", "m", "openai", false, payload)
 	if keyAuth1 == keyAuth2 {
 		t.Fatal("expected different credentials to use different cache keys")
 	}
 
-	_, keyClaude := ResponseCacheLookup(compat, "zendigikey", "auth1", "u", "m", "claude", false, payload)
+	_, keyClaude, _ := ResponseCacheLookup(compat, "zendigikey", "auth1", "u", "m", "claude", false, payload)
 	if keyClaude == keyAuth1 {
 		t.Fatal("expected different response formats to use different cache keys")
 	}

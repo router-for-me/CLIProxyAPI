@@ -31,7 +31,7 @@ func TestResponseCacheStoreAndGet(t *testing.T) {
 	if _, ok := c.Get(key); ok {
 		t.Fatal("expected miss on empty cache")
 	}
-	c.Store(key, []byte(`{"ok":true}`), false)
+	c.Store(key, []byte(`{"ok":true}`), nil, false)
 	entry, ok := c.Get(key)
 	if !ok {
 		t.Fatal("expected hit after store")
@@ -53,7 +53,7 @@ func TestResponseCacheStoreCopiesPayload(t *testing.T) {
 	c := NewResponseCache(time.Minute, 4, 1024)
 	key := "k"
 	payload := []byte(`{"ok":true}`)
-	c.Store(key, payload, false)
+	c.Store(key, payload, nil, false)
 	payload[2] = 'X'
 
 	entry, ok := c.Get(key)
@@ -67,7 +67,7 @@ func TestResponseCacheStoreCopiesPayload(t *testing.T) {
 
 func TestResponseCacheRejectsOversizedPayload(t *testing.T) {
 	c := NewResponseCache(time.Minute, 4, 8)
-	c.Store("k", []byte("0123456789"), false)
+	c.Store("k", []byte("0123456789"), nil, false)
 	if _, ok := c.Get("k"); ok {
 		t.Fatal("expected oversized payload to be dropped")
 	}
@@ -78,7 +78,7 @@ func TestResponseCacheRejectsOversizedPayload(t *testing.T) {
 
 func TestResponseCacheExpiresEntries(t *testing.T) {
 	c := NewResponseCache(time.Millisecond, 4, 1024)
-	c.Store("k", []byte("v"), false)
+	c.Store("k", []byte("v"), nil, false)
 	time.Sleep(5 * time.Millisecond)
 	if _, ok := c.Get("k"); ok {
 		t.Fatal("expected expired entry to miss")
@@ -90,9 +90,9 @@ func TestResponseCacheExpiresEntries(t *testing.T) {
 
 func TestResponseCacheEvictsOldestBeyondCapacity(t *testing.T) {
 	c := NewResponseCache(time.Minute, 2, 1024)
-	c.Store("a", []byte("1"), false)
-	c.Store("b", []byte("2"), false)
-	c.Store("c", []byte("3"), false)
+	c.Store("a", []byte("1"), nil, false)
+	c.Store("b", []byte("2"), nil, false)
+	c.Store("c", []byte("3"), nil, false)
 
 	if _, ok := c.Get("a"); ok {
 		t.Fatal("expected oldest entry to be evicted")
@@ -110,12 +110,12 @@ func TestResponseCacheEvictsOldestBeyondCapacity(t *testing.T) {
 
 func TestResponseCacheGetRefreshesRecency(t *testing.T) {
 	c := NewResponseCache(time.Minute, 2, 1024)
-	c.Store("a", []byte("1"), false)
-	c.Store("b", []byte("2"), false)
+	c.Store("a", []byte("1"), nil, false)
+	c.Store("b", []byte("2"), nil, false)
 	if _, ok := c.Get("a"); !ok {
 		t.Fatal("expected a to be cached")
 	}
-	c.Store("c", []byte("3"), false)
+	c.Store("c", []byte("3"), nil, false)
 
 	if _, ok := c.Get("a"); !ok {
 		t.Fatal("expected recently used a to survive eviction")
@@ -127,7 +127,7 @@ func TestResponseCacheGetRefreshesRecency(t *testing.T) {
 
 func TestResponseCachePurge(t *testing.T) {
 	c := NewResponseCache(time.Minute, 4, 1024)
-	c.Store("a", []byte("1"), false)
+	c.Store("a", []byte("1"), nil, false)
 	c.Purge()
 	if _, ok := c.Get("a"); ok {
 		t.Fatal("expected purge to drop entries")
@@ -136,7 +136,7 @@ func TestResponseCachePurge(t *testing.T) {
 
 func TestResponseCacheNilSafe(t *testing.T) {
 	var c *ResponseCache
-	c.Store("a", []byte("1"), false)
+	c.Store("a", []byte("1"), nil, false)
 	if _, ok := c.Get("a"); ok {
 		t.Fatal("expected nil cache to miss")
 	}
