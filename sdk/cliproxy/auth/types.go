@@ -600,12 +600,16 @@ func (a *Auth) AccountInfo() (string, string) {
 	}
 }
 
-// ExpirationTime attempts to extract the credential expiration timestamp from metadata.
-// It inspects common keys such as "expired", "expire", "expires_at", and also
-// nested "token" objects to remain compatible with legacy auth file formats.
+// ExpirationTime attempts to extract the credential expiration timestamp.
+// It prefers the access token JWT exp claim when the token is a JWT, then
+// falls back to metadata keys such as "expired", "expire", "expires_at",
+// including nested "token" objects for legacy auth file formats.
 func (a *Auth) ExpirationTime() (time.Time, bool) {
 	if a == nil {
 		return time.Time{}, false
+	}
+	if exp, ok := jwtExpiry(authAccessToken(a)); ok {
+		return exp, true
 	}
 	if ts, ok := expirationFromMap(a.Metadata); ok {
 		return ts, true

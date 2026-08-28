@@ -349,6 +349,20 @@ func authAccessToken(auth *Auth) string {
 	return authMetadataString(auth, "accessToken")
 }
 
+func accessTokenStillValid(auth *Auth, now time.Time) bool {
+	if auth == nil || authAccessToken(auth) == "" {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	expiry, ok := auth.ExpirationTime()
+	if !ok || expiry.IsZero() {
+		return false
+	}
+	return expiry.After(now)
+}
+
 func authHasRefreshCredential(auth *Auth) bool {
 	if authMetadataString(auth, "refresh_token") != "" {
 		return true
@@ -542,11 +556,18 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
 			current.LastError = refreshErrorFromError(err)
-			if unauthorized {
+			// Proactive refresh is best-effort while the current access token
+			// remains valid. Reactive refresh (failedAccessToken set) still
+			// evicts on unauthorized.
+			keepUsableAccessToken := unauthorized && failedAccessToken == "" && accessTokenStillValid(current, now)
+			if unauthorized && !keepUsableAccessToken {
 				current.NextRefreshAfter = time.Time{}
 				current.Unavailable = true
 				current.Status = StatusError
 				current.StatusMessage = "unauthorized"
+			} else if keepUsableAccessToken {
+				current.NextRefreshAfter = time.Time{}
+				log.Warnf("proactive refresh failed for %s (%s); keeping still-valid access token: %v", current.Provider, current.ID, err)
 			} else {
 				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 			}
