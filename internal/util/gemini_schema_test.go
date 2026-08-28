@@ -1076,6 +1076,7 @@ func TestCleanJSONSchemaForGemini_RemovesGeminiUnsupportedMetadataFields(t *test
 			},
 			"enumDescriptions": {
 				"type": "array",
+				"items": {"type": "string"},
 				"description": "property name should not be removed"
 			}
 		}
@@ -1821,6 +1822,51 @@ func TestCleanJSONSchema_ArrayItemsBarePropertyMap(t *testing.T) {
 		if !contains(itemsReq, "id") {
 			t.Errorf("%s: properties.tasks.items.required = %v, want 'id'; got schema: %s", cleaner, itemsReq, got)
 		}
+	}
+}
+
+// TestCleanJSONSchema_ToolArraysMissingItems covers Issue #5292: Gemini and Antigravity
+// reject tool array schemas that do not declare an items schema.
+func TestCleanJSONSchema_ToolArraysMissingItems(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"params": { "type": "array" },
+			"values": { "type": ["array", "null"], "description": "no items" },
+			"existing": { "type": "array", "items": { "type": "number" } }
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":       CleanJSONSchemaForAntigravity,
+		"antigravityLegacy": func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"gemini":            CleanJSONSchemaForGemini,
+	} {
+		t.Run(cleaner, func(t *testing.T) {
+			got := gjson.Parse(clean(input))
+
+			for _, path := range []string{"properties.params.items.type", "properties.values.items.type"} {
+				if itemType := got.Get(path).String(); itemType != "string" {
+					t.Errorf("%s = %q, want string; got schema: %s", path, itemType, got.Raw)
+				}
+			}
+			if itemType := got.Get("properties.existing.items.type").String(); itemType != "number" {
+				t.Errorf("existing items type = %q, want number; got schema: %s", itemType, got.Raw)
+			}
+
+			rootArray := gjson.Parse(clean(`{"type":"array"}`))
+			if itemType := rootArray.Get("items.type").String(); itemType != "string" {
+				t.Errorf("root items type = %q, want string; got schema: %s", itemType, rootArray.Raw)
+			}
+		})
+	}
+}
+
+func TestCleanJSONSchema_ResponseArrayMissingItemsUnchanged(t *testing.T) {
+	input := `{"type":"object","properties":{"values":{"type":"array"}}}`
+	got := gjson.Parse(CleanJSONSchemaForAntigravityResponse(input))
+	if got.Get("properties.values.items").Exists() {
+		t.Fatalf("response schema gained tool-only items placeholder: %s", got.Raw)
 	}
 }
 
