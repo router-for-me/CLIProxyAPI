@@ -41,3 +41,12 @@ func mustTestSignature(t *testing.T) string {
 	raw, _ := testClaudeResponsesThinkingSignature(t)
 	return raw
 }
+
+func lastClaudeMessageRole(t *testing.T, claudeReq []byte) string {
+	t.Helper()
+	messages := gjson.GetBytes(claudeReq, "messages").Array()
+	if len(messages) == 0 {
+		return ""
+	}
+	return messages[len(messages)-1].Get("role").String()
+}

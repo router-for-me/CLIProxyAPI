@@ -452,7 +452,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	flushPendingMessage()
 	hadMessages := len(messageBlocks) > 0
 	if !preserveEmptyThinkingBlocks {
-		messageBlocks = dropUnsupportedFableAssistantPrefill(modelName, messageBlocks)
+		messageBlocks = dropUnsupportedAssistantPrefill(modelName, messageBlocks)
 	}
 	// Preserve a minimal conversational turn for system-only inputs or when messages became empty
 	// so downstream validation still sees a Claude-shaped request.
@@ -555,11 +555,21 @@ func isResponsesSystemLevelRole(role string) bool {
 	}
 }
 
-// dropUnsupportedFableAssistantPrefill removes a trailing assistant message for
-// Claude Fable models, which reject assistant message prefill.
-func dropUnsupportedFableAssistantPrefill(modelName string, messages [][]byte) [][]byte {
-	normalized := strings.ToLower(strings.TrimSpace(modelName))
-	if !strings.Contains(normalized, "fable") || len(messages) == 0 {
+// assistantPrefillRejectingModels lists the model families that reject a
+// trailing assistant message with "This model does not support assistant
+// message prefill. The conversation must end with a user message." Measured
+// directly against Anthropic: claude-fable-5, claude-opus-5 and
+// claude-sonnet-4-6 reject it, claude-haiku-4-5 accepts it. Thinking budget is
+// not the discriminator; the same trailing shape fails on Opus at every
+// reasoning effort including none. A new family is one entry here.
+var assistantPrefillRejectingModels = []string{"fable", "opus-5", "opus5", "sonnet-4-6", "sonnet4-6"}
+
+// dropUnsupportedAssistantPrefill removes a trailing assistant message for the
+// models that reject assistant message prefill. The Responses API has no
+// prefill concept, so a trailing assistant item is replayed history rather than
+// a directive, and dropping it is lossless for the request that follows.
+func dropUnsupportedAssistantPrefill(modelName string, messages [][]byte) [][]byte {
+	if len(messages) == 0 || !modelRejectsAssistantPrefill(modelName) {
 		return messages
 	}
 	last := gjson.ParseBytes(messages[len(messages)-1])
@@ -567,6 +577,18 @@ func dropUnsupportedFableAssistantPrefill(modelName string, messages [][]byte) [
 		return messages
 	}
 	return messages[:len(messages)-1]
+}
+
+// modelRejectsAssistantPrefill reports whether the model name belongs to a
+// family measured to reject assistant message prefill.
+func modelRejectsAssistantPrefill(modelName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(modelName))
+	for _, family := range assistantPrefillRejectingModels {
+		if strings.Contains(normalized, family) {
+			return true
+		}
+	}
+	return false
 }
 
 // responsesSystemUnsupportedBlock represents a system-level content part that

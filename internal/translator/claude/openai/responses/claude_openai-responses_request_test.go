@@ -1021,7 +1021,9 @@ func TestConvertOpenAIResponsesRequestToClaude_SystemLevelInputsBecomeSeparateSy
 		]
 	}`
 
-	result := ConvertOpenAIResponsesRequestToClaude("claude-opus-5", []byte(inputJSON), false)
+	// The model is one that accepts assistant prefill, so the trailing assistant
+	// message survives and this test keeps measuring system-block routing only.
+	result := ConvertOpenAIResponsesRequestToClaude("claude-haiku-4-5-20251001", []byte(inputJSON), false)
 	root := gjson.ParseBytes(result)
 
 	system := root.Get("system").Array()
