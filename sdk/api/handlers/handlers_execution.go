@@ -161,7 +161,16 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	}
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
-		recordAuthManagerFailure(ctx, providers[0], originalRequestedModel, normalizedModel, err)
+		// providers can be empty when upstream resolution (e.g., an Auto Router
+		// tier pin with no intersecting upstream) leaves the slice nil; in that
+		// case AuthManager returns provider_not_found. Fall back to the routing
+		// decision's provider so we still attribute the pre-execution failure
+		// instead of panicking on providers[0].
+		providerForRecord := routeDecision.Provider
+		if len(providers) > 0 {
+			providerForRecord = providers[0]
+		}
+		recordAuthManagerFailure(ctx, providerForRecord, originalRequestedModel, normalizedModel, err)
 		err = enrichAuthSelectionError(h, ctx, err, providers, normalizedModel)
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
@@ -243,7 +252,14 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	}
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
-		recordAuthManagerFailure(ctx, providers[0], originalRequestedModel, normalizedModel, err)
+		// See executeWithAuthManagerFormats: providers may be empty when an
+		// Auto Router tier pin yields no intersection; fall back to the
+		// routing decision's provider instead of panicking on providers[0].
+		providerForRecord := routeDecision.Provider
+		if len(providers) > 0 {
+			providerForRecord = providers[0]
+		}
+		recordAuthManagerFailure(ctx, providerForRecord, originalRequestedModel, normalizedModel, err)
 		err = enrichAuthSelectionError(h, ctx, err, providers, normalizedModel)
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)

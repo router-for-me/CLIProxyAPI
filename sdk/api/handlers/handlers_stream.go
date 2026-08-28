@@ -312,7 +312,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
-		recordAuthManagerFailure(ctx, providers[0], originalRequestedModel, normalizedModel, err)
+		// See executeWithAuthManagerFormats: providers may be empty when an
+		// Auto Router tier pin yields no intersection; fall back to the
+		// routing decision's provider instead of panicking on providers[0].
+		providerForRecord := routeDecision.Provider
+		if len(providers) > 0 {
+			providerForRecord = providers[0]
+		}
+		recordAuthManagerFailure(ctx, providerForRecord, originalRequestedModel, normalizedModel, err)
 		err = enrichAuthSelectionError(h, ctx, err, providers, normalizedModel)
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
