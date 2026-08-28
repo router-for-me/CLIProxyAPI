@@ -453,6 +453,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	hadMessages := len(messageBlocks) > 0
 	if !preserveEmptyThinkingBlocks {
 		messageBlocks = dropUnsupportedFableAssistantPrefill(modelName, messageBlocks)
+		messageBlocks = dropTrailingThinkingBlocks(messageBlocks)
 	}
 	// Preserve a minimal conversational turn for system-only inputs or when messages became empty
 	// so downstream validation still sees a Claude-shaped request.
@@ -567,6 +568,49 @@ func dropUnsupportedFableAssistantPrefill(modelName string, messages [][]byte) [
 		return messages
 	}
 	return messages[:len(messages)-1]
+}
+
+// dropTrailingThinkingBlocks removes thinking blocks from the end of a trailing
+// assistant message. Anthropic rejects that shape with "The final block in an
+// assistant message cannot be \`thinking\`", and it is reachable whenever a
+// replayed conversation ends on a reasoning item. A thinking block cannot act as
+// prefill, so it carries nothing the request needs and the message is dropped
+// entirely when no other block remains. Only the trailing message is touched;
+// thinking blocks in earlier turns are the replayed chain of thought and stay.
+func dropTrailingThinkingBlocks(messages [][]byte) [][]byte {
+	if len(messages) == 0 {
+		return messages
+	}
+	last := gjson.ParseBytes(messages[len(messages)-1])
+	if !strings.EqualFold(strings.TrimSpace(last.Get("role").String()), "assistant") {
+		return messages
+	}
+	blocks := last.Get("content").Array()
+	if len(blocks) == 0 {
+		return messages
+	}
+	kept := len(blocks)
+	for kept > 0 {
+		blockType := strings.TrimSpace(blocks[kept-1].Get("type").String())
+		if blockType != "thinking" && blockType != "redacted_thinking" {
+			break
+		}
+		kept--
+	}
+	if kept == len(blocks) {
+		return messages
+	}
+	if kept == 0 {
+		return messages[:len(messages)-1]
+	}
+	rebuilt := make([][]byte, 0, kept)
+	for _, block := range blocks[:kept] {
+		rebuilt = append(rebuilt, []byte(block.Raw))
+	}
+	message := []byte(`{"role":"assistant"}`)
+	message = common.SetRawArrayItems(message, "content", rebuilt)
+	messages[len(messages)-1] = message
+	return messages
 }
 
 // responsesSystemUnsupportedBlock represents a system-level content part that
