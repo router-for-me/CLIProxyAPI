@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -444,6 +445,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	transformStreamPayload := func(payload []byte, chunkIndex *int, historyChunks [][]byte) ([]byte, bool, *interfaces.ErrorMessage) {
 		applyStreamHeaderInit()
 		payload = cloneBytes(payload)
+		if strings.TrimSpace(baseStreamHeaders.Get(cliProxyUpstreamHeader)) != "" {
+			payload, _ = rewriteFallbackStreamFrame(payload, originalRequestedModel)
+		}
 		if streamInterceptorsActive {
 			chunkReq := pluginapi.StreamChunkInterceptRequest{
 				RequestID:       lifecycle.requestID(),
