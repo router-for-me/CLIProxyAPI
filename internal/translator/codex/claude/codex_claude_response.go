@@ -160,6 +160,9 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		inputTokens, outputTokens, cachedTokens := extractResponsesUsage(responseData.Get("usage"))
 		template, _ = sjson.SetBytes(template, "usage.input_tokens", inputTokens)
 		template, _ = sjson.SetBytes(template, "usage.output_tokens", outputTokens)
+		// Always emitted, always zero: the Responses API reports no cache-write counter.
+		// See extractResponsesUsage for why this is unmappable rather than unimplemented.
+		template, _ = sjson.SetBytes(template, "usage.cache_creation_input_tokens", 0)
 		if cachedTokens > 0 {
 			template, _ = sjson.SetBytes(template, "usage.cache_read_input_tokens", cachedTokens)
 		}
@@ -364,6 +367,9 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 	inputTokens, outputTokens, cachedTokens := extractResponsesUsage(responseData.Get("usage"))
 	out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
 	out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
+	// Always emitted, always zero: the Responses API reports no cache-write counter.
+	// See extractResponsesUsage for why this is unmappable rather than unimplemented.
+	out, _ = sjson.SetBytes(out, "usage.cache_creation_input_tokens", 0)
 	if cachedTokens > 0 {
 		out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", cachedTokens)
 	}
@@ -794,6 +800,22 @@ func resolveCodexClaudeToolUseName(originalRequestRawJSON []byte, name string) s
 	return name
 }
 
+// extractResponsesUsage maps an OpenAI Responses `usage` object onto the Claude usage
+// triple (input, output, cache-read).
+//
+// KNOWN LIMITATION — cache_creation_input_tokens is unmappable on this API, not merely
+// unimplemented. The Responses usage object carries only input_tokens,
+// input_tokens_details.cached_tokens, output_tokens and
+// output_tokens_details.reasoning_tokens. There is no cache-write counter, because OpenAI
+// prompt caching is implicit and carries no write premium — nothing upstream distinguishes
+// "input tokens that were written to the cache this turn" from "input tokens that simply
+// missed". Anthropic's cache_creation_input_tokens has no counterpart here.
+//
+// Deriving it from the uncached remainder would be wrong twice over: those tokens are
+// already reported in input_tokens, so a cost model summing the fields would double-count
+// them, and they are not billed at a write premium the way Anthropic's are. Callers
+// therefore emit an explicit 0 rather than inventing a number or omitting the field, so a
+// downstream reader sees a known zero instead of a missing key it has to guess about.
 func extractResponsesUsage(usage gjson.Result) (int64, int64, int64) {
 	if !usage.Exists() || usage.Type == gjson.Null {
 		return 0, 0, 0
