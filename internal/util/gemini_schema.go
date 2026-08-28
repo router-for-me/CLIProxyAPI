@@ -414,6 +414,17 @@ func repairSchemaNode(node map[string]any) (map[string]any, bool) {
 		}
 	}
 
+	// 2b. Gemini/Antigravity reject array schemas without "items"
+	// ("...parameters.properties[x].items: missing field"). Some MCP servers emit
+	// a bare {"type":"array"}; inject a permissive string item schema so the
+	// request is accepted instead of failing with HTTP 400.
+	if isArrayDeclaredType(clone["type"]) {
+		if _, hasItems := clone["items"]; !hasItems {
+			clone["items"] = map[string]any{"type": "string"}
+			modified = true
+		}
+	}
+
 	// 3. Recurse into all other standard schema containers
 	if itemsVal, ok := clone["items"].(map[string]any); ok {
 		repairedItems, itemsMod := repairSchemaNode(itemsVal)
@@ -1585,4 +1596,20 @@ func mergeDescriptionRaw(schemaRaw, parentDesc string) string {
 		updated, _ := sjson.SetBytes([]byte(schemaRaw), "description", combined)
 		return string(updated)
 	}
+}
+
+// isArrayDeclaredType reports whether a schema "type" value declares an array,
+// either as the string "array" or as a type list containing "array".
+func isArrayDeclaredType(t any) bool {
+	switch v := t.(type) {
+	case string:
+		return v == "array"
+	case []any:
+		for _, e := range v {
+			if s, ok := e.(string); ok && s == "array" {
+				return true
+			}
+		}
+	}
+	return false
 }

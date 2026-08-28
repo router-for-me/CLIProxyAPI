@@ -1076,6 +1076,7 @@ func TestCleanJSONSchemaForGemini_RemovesGeminiUnsupportedMetadataFields(t *test
 			},
 			"enumDescriptions": {
 				"type": "array",
+				"items": {"type": "string"},
 				"description": "property name should not be removed"
 			}
 		}
