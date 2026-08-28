@@ -268,6 +268,10 @@ VS Code 扩展，可将你的 Claude、ChatGPT/Codex、Antigravity、Grok 和 Ki
 
 运行多个具有原生体验的 Claude Code 命令，每个命令由不同的模型（Codex、GLM、Kimi、Gemini、Grok、MiniMax、DeepSeek、Cursor、Copilot、Claude）驱动。每个命令都会启动真正的 Claude Code 界面，并拥有独立的配置、历史记录、端口，以及通过 Go SDK 连接的嵌入式 CLIProxyAPI 实例，无需单独安装代理。仅支持 macOS。详情请访问 [claude-dialects.cc](https://claude-dialects.cc/)。
 
+### [CLIProxyAPI Codex Server Compaction](https://github.com/sumeirsoni/CLIProxyAPI-Codex-Server-Compaction)
+
+一个持续维护的 CLIProxyAPI 分支，为路由到兼容 GPT/Codex 模型的 Claude Code 会话增加可选的 OpenAI Codex 服务端压缩。它按兼容范围持久化不透明压缩产物以便复用，异常时自动回退到原始请求，并提供安装、安全、维护和回滚文档。OpenAI 压缩产物不能由真正的 Anthropic Claude 模型使用。
+
 > [!NOTE]  
 > 如果你开发了基于 CLIProxyAPI 的项目，请提交一个 PR（拉取请求）将其添加到此列表中。
 
