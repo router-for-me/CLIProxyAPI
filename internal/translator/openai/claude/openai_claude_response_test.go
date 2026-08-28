@@ -516,3 +516,64 @@ func TestStreamingTool_UsageWithoutFinishReasonEmitsMessageDelta(t *testing.T) {
 		t.Fatalf("expected exactly one message_stop, got %d (events=%+v)", got, events)
 	}
 }
+
+func TestStreamingTool_OmittedToolCallIndexPreservesParallelCalls(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[
+			{"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}},
+			{"id":"call_time","type":"function","function":{"name":"get_time","arguments":"{\"tz\":\"UTC\"}"}}
+		]},"finish_reason":"tool_calls"}]}`,
+	)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 2 {
+		t.Fatalf("expected two tool_use starts, got %d (starts=%+v)", len(starts), starts)
+	}
+
+	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_weather" {
+		t.Fatalf("first tool id = %q, want %q", id, "call_weather")
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "get_weather" {
+		t.Fatalf("first tool name = %q, want %q", name, "get_weather")
+	}
+	if id := gjson.Get(starts[1].Payload, "content_block.id").String(); id != "call_time" {
+		t.Fatalf("second tool id = %q, want %q", id, "call_time")
+	}
+	if name := gjson.Get(starts[1].Payload, "content_block.name").String(); name != "get_time" {
+		t.Fatalf("second tool name = %q, want %q", name, "get_time")
+	}
+
+	var deltas []sseEvent
+	for _, e := range events {
+		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
+			deltas = append(deltas, e)
+		}
+	}
+	if len(deltas) != 2 {
+		t.Fatalf("expected two input_json_delta events, got %d (deltas=%+v)", len(deltas), deltas)
+	}
+
+	firstJSON := gjson.Get(deltas[0].Payload, "delta.partial_json").String()
+	secondJSON := gjson.Get(deltas[1].Payload, "delta.partial_json").String()
+
+	if !gjson.Valid(firstJSON) {
+		t.Fatalf("first input_json_delta is not valid JSON: %q", firstJSON)
+	}
+	if !gjson.Valid(secondJSON) {
+		t.Fatalf("second input_json_delta is not valid JSON: %q", secondJSON)
+	}
+
+	if gotCity := gjson.Get(firstJSON, "city").String(); gotCity != "Paris" {
+		t.Fatalf("first tool args city = %q, want %q", gotCity, "Paris")
+	}
+	if gotTz := gjson.Get(secondJSON, "tz").String(); gotTz != "UTC" {
+		t.Fatalf("second tool args tz = %q, want %q", gotTz, "UTC")
+	}
+
+	if got := countByType(events, "content_block_stop"); got != 2 {
+		t.Fatalf("expected two content_block_stop events, got %d", got)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+}

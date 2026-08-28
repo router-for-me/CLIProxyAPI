@@ -232,8 +232,11 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				param.ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
 			}
 
-			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
+			toolCalls.ForEach(func(arrayIndex, toolCall gjson.Result) bool {
 				index := int(toolCall.Get("index").Int())
+				if !toolCall.Get("index").Exists() {
+					index = int(arrayIndex.Int())
+				}
 
 				// Initialize accumulator if needed
 				if _, exists := param.ToolCallsAccumulator[index]; !exists {
