@@ -478,6 +478,7 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	}
 
 	// Peek at the first chunk to determine success or failure before setting headers
@@ -595,6 +596,7 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	}
 
 	// Peek at the first chunk
