@@ -19,6 +19,11 @@ type ClaudeModelsSummary struct {
 	count int
 }
 
+type KimiModelsSummary struct {
+	hash  string
+	count int
+}
+
 type CodexModelsSummary struct {
 	hash  string
 	count int
@@ -49,6 +54,27 @@ func SummarizeGeminiModels(models []config.GeminiModel) GeminiModelsSummary {
 		}
 	})
 	return GeminiModelsSummary{
+		hash:  hashJoined(keys),
+		count: len(keys),
+	}
+}
+
+// SummarizeKimiModels hashes Kimi API-key model aliases for change detection.
+func SummarizeKimiModels(models []config.KimiModel) KimiModelsSummary {
+	if len(models) == 0 {
+		return KimiModelsSummary{}
+	}
+	keys := normalizeModelPairs(func(out func(key string)) {
+		for _, model := range models {
+			name := strings.TrimSpace(model.Name)
+			alias := strings.TrimSpace(model.Alias)
+			if name == "" && alias == "" {
+				continue
+			}
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + thinkingHashSuffix(model.Thinking))
+		}
+	})
+	return KimiModelsSummary{
 		hash:  hashJoined(keys),
 		count: len(keys),
 	}

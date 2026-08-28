@@ -13,7 +13,7 @@ import (
 )
 
 // ConfigSynthesizer generates Auth entries from configuration API keys.
-// It handles Gemini, Interactions, Claude, Codex, xAI, OpenAI-compat, and Vertex-compat providers.
+// It handles Gemini, Interactions, Claude, Codex, xAI, Kimi, OpenAI-compat, and Vertex-compat providers.
 type ConfigSynthesizer struct{}
 
 // NewConfigSynthesizer creates a new ConfigSynthesizer instance.
@@ -52,6 +52,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
 	// xAI API Keys
 	out = append(out, s.synthesizeXAIKeys(ctx)...)
+	// Kimi API Keys
+	out = append(out, s.synthesizeKimiKeys(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
@@ -207,6 +209,70 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 // synthesizeXAIKeys creates Auth entries for xAI API keys.
 func (s *ConfigSynthesizer) synthesizeXAIKeys(ctx *SynthesisContext) []*coreauth.Auth {
 	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.XAIKey, "xai")
+}
+
+func (s *ConfigSynthesizer) synthesizeKimiKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.KimiKey))
+	for i := range cfg.KimiKey {
+		entry := cfg.KimiKey[i]
+		key := strings.TrimSpace(entry.APIKey)
+		if key == "" {
+			continue
+		}
+		service := strings.ToLower(strings.TrimSpace(entry.Service))
+		region := strings.ToLower(strings.TrimSpace(entry.Region))
+		prefix := strings.TrimSpace(entry.Prefix)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		id, token := idGen.Next("kimi:apikey", config.KimiAPIKeyIdentityParts(entry)...)
+		label := strings.TrimSpace(entry.Name)
+		if label == "" {
+			label = "kimi-apikey"
+		}
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:kimi[%s]", token),
+			"config_index": strconv.Itoa(i),
+			"api_key":      key,
+			"service":      service,
+			"base_url":     config.KimiBaseURL(service, region),
+		}
+		if region != "" {
+			attrs["region"] = region
+		}
+		metadata := map[string]any{}
+		if entry.DisableCooling != nil {
+			metadata["disable_cooling"] = *entry.DisableCooling
+		}
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		addWeightToAttrs(entry.Weight, attrs)
+		if hash := diff.ComputeKimiModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(entry.Headers, attrs)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "kimi",
+			Label:      label,
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			Metadata:   metadata,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entries []config.CodexKey, provider string) []*coreauth.Auth {

@@ -23,6 +23,11 @@ func ComputeVertexCompatModelsHash(models []config.VertexCompatModel) string {
 	return modelconfig.ComputeVertexCompatModelsHash(models)
 }
 
+// ComputeKimiModelsHash returns a stable hash for Kimi API-key model aliases.
+func ComputeKimiModelsHash(models []config.KimiModel) string {
+	return modelconfig.ComputeKimiModelsHash(models)
+}
+
 // ComputeClaudeModelsHash returns a stable hash for Claude model aliases.
 func ComputeClaudeModelsHash(models []config.ClaudeModel) string {
 	return modelconfig.ComputeClaudeModelsHash(models)

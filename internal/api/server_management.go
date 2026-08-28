@@ -138,6 +138,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/xai-api-key", s.mgmt.PatchXAIKey)
 		mgmt.DELETE("/xai-api-key", s.mgmt.DeleteXAIKey)
 
+		mgmt.GET("/kimi-api-key", s.mgmt.GetKimiKeys)
+		mgmt.PUT("/kimi-api-key", s.mgmt.PutKimiKeys)
+		mgmt.PATCH("/kimi-api-key", s.mgmt.PatchKimiKey)
+		mgmt.DELETE("/kimi-api-key", s.mgmt.DeleteKimiKey)
+
 		mgmt.GET("/openai-compatibility", s.mgmt.GetOpenAICompat)
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)

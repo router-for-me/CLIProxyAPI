@@ -162,6 +162,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize xAI keys: drop entries without base-url
 	cfg.SanitizeXAIKeys()
 
+	cfg.SanitizeKimiKeys()
+
 	// Sanitize Codex header defaults.
 	cfg.SanitizeCodexHeaderDefaults()
 

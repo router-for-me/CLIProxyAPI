@@ -150,6 +150,33 @@ func TestEnsureIndexUsesCredentialIdentity(t *testing.T) {
 	}
 }
 
+func TestEnsureIndexKeepsDistinctKimiPrefixIdentities(t *testing.T) {
+	a := &Auth{
+		ID:       "kimi-id-a",
+		Provider: "kimi",
+		Prefix:   "a",
+		Attributes: map[string]string{
+			"api_key": "sk-shared",
+			"service": "coding-plan",
+		},
+	}
+	b := &Auth{
+		ID:       "kimi-id-b",
+		Provider: "kimi",
+		Prefix:   "b",
+		Attributes: map[string]string{
+			"api_key": "sk-shared",
+			"service": "coding-plan",
+		},
+	}
+	if a.EnsureIndex() == "" || b.EnsureIndex() == "" {
+		t.Fatal("kimi auth index should not be empty")
+	}
+	if a.EnsureIndex() == b.EnsureIndex() {
+		t.Fatalf("same kimi api-key with different ids shared auth_index %q", a.EnsureIndex())
+	}
+}
+
 func TestEnsureIndexUsesOAuthTypeAndAbsolutePath(t *testing.T) {
 	t.Parallel()
 

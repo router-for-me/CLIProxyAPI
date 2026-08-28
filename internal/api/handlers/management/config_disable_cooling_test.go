@@ -92,6 +92,18 @@ func TestPatchDisableCoolingOverrideForEveryFamily(t *testing.T) {
 			patch: (*Handler).PatchXAIKey,
 			get:   func(cfg *config.Config) *bool { return cfg.XAIKey[0].DisableCooling },
 		},
+		{
+			name: "kimi",
+			setup: func(cfg *config.Config) {
+				cfg.KimiKey = []config.KimiKey{{
+					APIKey:         "key",
+					Service:        config.KimiServiceCodingPlan,
+					DisableCooling: &initial,
+				}}
+			},
+			patch: (*Handler).PatchKimiKey,
+			get:   func(cfg *config.Config) *bool { return cfg.KimiKey[0].DisableCooling },
+		},
 	}
 
 	for _, tc := range tests {

@@ -28,6 +28,11 @@ type xaiKeyWithAuthIndex struct {
 	AuthIndex string `json:"auth-index,omitempty"`
 }
 
+type kimiKeyWithAuthIndex struct {
+	config.KimiKey
+	AuthIndex string `json:"auth-index,omitempty"`
+}
+
 type vertexCompatKeyWithAuthIndex struct {
 	config.VertexCompatKey
 	AuthIndex string `json:"auth-index,omitempty"`
@@ -245,6 +250,36 @@ func (h *Handler) xaiKeysWithAuthIndex() []xaiKeyWithAuthIndex {
 		}
 		out[i] = xaiKeyWithAuthIndex{
 			XAIKey:    entry,
+			AuthIndex: authIndex,
+		}
+	}
+	return out
+}
+
+func (h *Handler) kimiKeysWithAuthIndex() []kimiKeyWithAuthIndex {
+	if h == nil {
+		return nil
+	}
+	liveIndexByID := h.liveAuthIndexByID()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return nil
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	out := make([]kimiKeyWithAuthIndex, len(h.cfg.KimiKey))
+	for i := range h.cfg.KimiKey {
+		entry := h.cfg.KimiKey[i]
+		authIndex := ""
+		key := strings.TrimSpace(entry.APIKey)
+		if key != "" {
+			id, _ := idGen.Next("kimi:apikey", config.KimiAPIKeyIdentityParts(entry)...)
+			authIndex = liveIndexByID[id]
+		}
+		out[i] = kimiKeyWithAuthIndex{
+			KimiKey:   entry,
 			AuthIndex: authIndex,
 		}
 	}

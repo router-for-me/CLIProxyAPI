@@ -413,6 +413,10 @@ func configuredModelAliasEntries(cfg *internalconfig.Config, auth *Auth) []model
 		if entry := resolveXAIAPIKeyConfig(cfg, auth); entry != nil {
 			models = asModelAliasEntries(entry.Models)
 		}
+	case "kimi":
+		if entry := resolveKimiAPIKeyConfig(cfg, auth); entry != nil {
+			models = asModelAliasEntries(entry.Models)
+		}
 	case "vertex":
 		if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
 			models = asModelAliasEntries(entry.Models)
@@ -569,6 +573,10 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			if entry := resolveXAIAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
+		case "kimi":
+			if entry := resolveKimiAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
 		case "vertex":
 			if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
@@ -691,6 +699,8 @@ func (m *Manager) applyAPIKeyModelAliasWithRouting(routing *apiKeyModelRoutingSn
 		upstreamModel = resolveUpstreamModelForCodexAPIKey(cfg, auth, requestedModel)
 	case "xai":
 		upstreamModel = resolveUpstreamModelForXAIAPIKey(cfg, auth, requestedModel)
+	case "kimi":
+		upstreamModel = resolveUpstreamModelForKimiAPIKey(cfg, auth, requestedModel)
 	case "vertex":
 		upstreamModel = resolveUpstreamModelForVertexAPIKey(cfg, auth, requestedModel)
 	default:
@@ -793,6 +803,20 @@ func resolveXAIAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalcon
 	return resolveAPIKeyConfig(cfg.XAIKey, auth)
 }
 
+func resolveKimiAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.KimiKey {
+	if cfg == nil || auth == nil {
+		return nil
+	}
+	apiKey, service, region, index := "", "", "", ""
+	if auth.Attributes != nil {
+		apiKey = auth.Attributes[AttributeAPIKey]
+		service = auth.Attributes["service"]
+		region = auth.Attributes["region"]
+		index = auth.Attributes[AttributeConfigIndex]
+	}
+	return internalconfig.MatchKimiKey(cfg.KimiKey, apiKey, service, region, auth.Prefix, auth.ProxyURL, internalconfig.FormatSortedHeaders(internalconfig.HeadersFromAuthAttrs(auth.Attributes)), index)
+}
+
 func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.VertexCompatKey {
 	if cfg == nil {
 		return nil
@@ -834,6 +858,14 @@ func resolveUpstreamModelForCodexAPIKey(cfg *internalconfig.Config, auth *Auth, 
 
 func resolveUpstreamModelForXAIAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveXAIAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForKimiAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveKimiAPIKeyConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}

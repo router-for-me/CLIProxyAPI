@@ -14,6 +14,7 @@ import (
 	"time"
 
 	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -387,6 +388,25 @@ func (a *Auth) indexSeed() string {
 			apiPrefix = "xai-api-key"
 		case strings.EqualFold(provider, "claude"):
 			apiPrefix = "claude-api-key"
+		case strings.EqualFold(provider, "kimi"):
+			// Use the synthesizer-generated ID so duplicate entries with identical
+			// identity but different models/weights get distinct auth indexes.
+			if id := strings.TrimSpace(a.ID); id != "" {
+				return "id:" + id
+			}
+			service, region := "", ""
+			if a.Attributes != nil {
+				service = a.Attributes["service"]
+				region = a.Attributes["region"]
+			}
+			return internalconfig.KimiIndexSeed(
+				apiKey,
+				service,
+				region,
+				a.Prefix,
+				a.ProxyURL,
+				internalconfig.HeadersFromAuthAttrs(a.Attributes),
+			)
 		}
 	}
 	if apiPrefix != "" {

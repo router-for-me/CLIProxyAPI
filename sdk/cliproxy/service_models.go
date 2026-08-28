@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -142,7 +143,25 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		}
 		models = applyExcludedModels(models, excluded)
 	case "kimi":
-		models = registry.GetKimiModels()
+		service := ""
+		if a.Attributes != nil {
+			service = a.Attributes["service"]
+		}
+		entry := s.resolveConfigKimiKey(a)
+		if entry != nil {
+			if service == "" {
+				service = entry.Service
+			}
+			if len(entry.Models) > 0 {
+				models = buildKimiConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		if len(models) == 0 {
+			models = kimiBuiltInCatalog(service)
+		}
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
@@ -492,6 +511,49 @@ func (s *Service) resolveConfigXAIKey(auth *coreauth.Auth) *config.XAIKey {
 		return nil
 	}
 	return resolveConfigCodexStyleKey(auth, s.cfg.XAIKey, false)
+}
+
+func (s *Service) resolveConfigKimiKey(auth *coreauth.Auth) *config.KimiKey {
+	if auth == nil || s == nil || s.cfg == nil {
+		return nil
+	}
+	apiKey, service, region, index := "", "", "", ""
+	if auth.Attributes != nil {
+		apiKey = auth.Attributes[coreauth.AttributeAPIKey]
+		if strings.TrimSpace(apiKey) == "" {
+			apiKey = auth.Attributes["api_key"]
+		}
+		service = auth.Attributes["service"]
+		region = auth.Attributes["region"]
+		index = auth.Attributes[coreauth.AttributeConfigIndex]
+	}
+	return internalconfig.MatchKimiKey(s.cfg.KimiKey, apiKey, service, region, auth.Prefix, auth.ProxyURL, internalconfig.FormatSortedHeaders(internalconfig.HeadersFromAuthAttrs(auth.Attributes)), index)
+}
+
+func buildKimiConfigModels(entry *config.KimiKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "kimi", "kimi")
+}
+
+func kimiBuiltInCatalog(service string) []*ModelInfo {
+	models := registry.GetKimiModels()
+	if strings.ToLower(strings.TrimSpace(service)) != internalconfig.KimiServiceOpenPlatform {
+		return models
+	}
+	out := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		id := strings.ToLower(strings.TrimSpace(model.ID))
+		if strings.Contains(id, "k2.7-code") || strings.Contains(id, "for-coding") {
+			continue
+		}
+		out = append(out, model)
+	}
+	return out
 }
 
 func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey, validateIndexCredentials bool) *config.CodexKey {

@@ -409,6 +409,95 @@ func TestConfigSynthesizer_XAIKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_KimiKeys(t *testing.T) {
+	weight := 5
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			KimiKey: []config.KimiKey{
+				{
+					APIKey:         "sk-open",
+					Service:        config.KimiServiceOpenPlatform,
+					Region:         config.KimiRegionDomestic,
+					Name:           "desk",
+					Priority:       4,
+					Weight:         &weight,
+					Prefix:         "kimi",
+					ProxyURL:       "http://proxy.local",
+					Headers:        map[string]string{"X-Custom": "value"},
+					DisableCooling: boolPointer(true),
+					Models:         []config.KimiModel{{Name: "k3", Alias: "kimi-k3"}},
+					ExcludedModels: []string{"kimi-k2.5"},
+				},
+				{
+					APIKey:  "sk-code",
+					Service: config.KimiServiceCodingPlan,
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("auth count = %d, want 2", len(auths))
+	}
+	open := auths[0]
+	if open.Provider != "kimi" {
+		t.Fatalf("provider = %q, want kimi", open.Provider)
+	}
+	if open.Label != "desk" {
+		t.Fatalf("label = %q, want desk", open.Label)
+	}
+	if open.Attributes["api_key"] != "sk-open" {
+		t.Fatalf("api_key = %q, want sk-open", open.Attributes["api_key"])
+	}
+	if open.Attributes["service"] != config.KimiServiceOpenPlatform {
+		t.Fatalf("service = %q, want %s", open.Attributes["service"], config.KimiServiceOpenPlatform)
+	}
+	if open.Attributes["region"] != config.KimiRegionDomestic {
+		t.Fatalf("region = %q, want %s", open.Attributes["region"], config.KimiRegionDomestic)
+	}
+	if open.Attributes["base_url"] != "https://api.moonshot.cn" {
+		t.Fatalf("base_url = %q, want https://api.moonshot.cn", open.Attributes["base_url"])
+	}
+	if open.Attributes["header:X-Custom"] != "value" {
+		t.Fatalf("custom header = %q, want value", open.Attributes["header:X-Custom"])
+	}
+	if open.ProxyURL != "http://proxy.local" {
+		t.Fatalf("proxy URL = %q, want http://proxy.local", open.ProxyURL)
+	}
+	if open.Attributes["priority"] != "4" {
+		t.Fatalf("priority = %q, want 4", open.Attributes["priority"])
+	}
+	if open.Metadata["disable_cooling"] != true {
+		t.Fatalf("disable_cooling = %#v, want true", open.Metadata["disable_cooling"])
+	}
+	if open.Attributes["models_hash"] == "" {
+		t.Fatal("models_hash is empty")
+	}
+	code := auths[1]
+	if code.Provider != "kimi" {
+		t.Fatalf("coding-plan provider = %q, want kimi", code.Provider)
+	}
+	if code.Label != "kimi-apikey" {
+		t.Fatalf("coding-plan label = %q, want kimi-apikey", code.Label)
+	}
+	if code.Attributes["api_key"] != "sk-code" {
+		t.Fatalf("coding-plan api_key = %q, want sk-code", code.Attributes["api_key"])
+	}
+	if code.Attributes["service"] != config.KimiServiceCodingPlan {
+		t.Fatalf("coding-plan service = %q, want %s", code.Attributes["service"], config.KimiServiceCodingPlan)
+	}
+	if code.Attributes["base_url"] != "https://api.kimi.com/coding" {
+		t.Fatalf("coding-plan base_url = %q, want https://api.kimi.com/coding", code.Attributes["base_url"])
+	}
+}
+
 func TestConfigSynthesizer_XAIKeys_AllowsEmptyAPIKeyWithBaseURL(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
@@ -966,6 +1055,15 @@ func TestConfigSynthesizer_RejectsInvalidWeightsForAllAPIKeyTypes(t *testing.T) 
 			name:     "xai",
 			cfg:      &config.Config{XAIKey: []config.XAIKey{{APIKey: "key", Weight: &invalidWeight}}},
 			wantPath: "xai-api-key[0].weight",
+		},
+		{
+			name: "kimi",
+			cfg: &config.Config{KimiKey: []config.KimiKey{{
+				APIKey:  "key",
+				Service: config.KimiServiceCodingPlan,
+				Weight:  &invalidWeight,
+			}}},
+			wantPath: "kimi-api-key[0].weight",
 		},
 		{
 			name: "openai compatibility",

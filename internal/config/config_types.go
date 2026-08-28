@@ -556,6 +556,56 @@ type XAIKey = CodexKey
 // XAIModel uses the Codex model mapping structure for xAI models.
 type XAIModel = CodexModel
 
+const (
+	KimiServiceOpenPlatform = "open-platform"
+	KimiServiceCodingPlan   = "coding-plan"
+	KimiRegionDomestic      = "domestic"
+	KimiRegionInternational = "international"
+)
+
+// KimiModel is the per-key model mapping for Kimi API keys.
+type KimiModel struct {
+	Name     string                    `yaml:"name,omitempty" json:"name,omitempty"`
+	Alias    string                    `yaml:"alias,omitempty" json:"alias,omitempty"`
+	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
+}
+
+func (m KimiModel) GetName() string { return m.Name }
+
+func (m KimiModel) GetAlias() string { return m.Alias }
+
+func (m KimiModel) GetDisplayName() string { return "" }
+
+func (m KimiModel) GetForceMapping() bool { return false }
+
+func (m KimiModel) GetIsCompat() bool { return false }
+
+func (m KimiModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
+
+// KimiKey is a native Kimi API key. Hosts are derived from service and region.
+type KimiKey struct {
+	APIKey         string            `yaml:"api-key" json:"api-key"`
+	Service        string            `yaml:"service" json:"service"`
+	Region         string            `yaml:"region,omitempty" json:"region,omitempty"`
+	Name           string            `yaml:"name,omitempty" json:"name,omitempty"`
+	Priority       int               `yaml:"priority,omitempty" json:"priority,omitempty"`
+	Weight         *int              `yaml:"weight,omitempty" json:"weight,omitempty"`
+	Prefix         string            `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+	ProxyURL       string            `yaml:"proxy-url" json:"proxy-url"`
+	Models         []KimiModel       `yaml:"models,omitempty" json:"models,omitempty"`
+	Headers        map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	ExcludedModels []string          `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+	DisableCooling *bool             `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+}
+
+func (k KimiKey) GetAPIKey() string { return k.APIKey }
+
+func (k KimiKey) GetBaseURL() string { return KimiBaseURL(k.Service, k.Region) }
+
+func (k KimiKey) GetPrefix() string { return k.Prefix }
+
+func (k KimiKey) GetProxyURL() string { return k.ProxyURL }
+
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
 type GeminiKey struct {

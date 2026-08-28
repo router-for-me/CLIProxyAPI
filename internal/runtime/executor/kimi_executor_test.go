@@ -703,3 +703,166 @@ func TestNormalizeKimiUpstreamModel(t *testing.T) {
 		}
 	}
 }
+
+func TestKimiExecutorOpenPlatformSwitchesURLs(t *testing.T) {
+	tests := []struct {
+		name      string
+		attrs     map[string]string
+		source    sdktranslator.Format
+		wantURL   string
+		wantXMsh  bool
+		checkXMsh bool
+	}{
+		{
+			name:      "oauth chat completions",
+			source:    sdktranslator.FormatOpenAI,
+			wantURL:   "https://api.kimi.com/coding/v1/chat/completions",
+			wantXMsh:  true,
+			checkXMsh: true,
+		},
+		{
+			name:    "oauth claude messages",
+			source:  sdktranslator.FormatClaude,
+			wantURL: "https://api.kimi.com/coding/v1/messages?beta=true",
+		},
+		{
+			name:      "coding-plan chat completions",
+			attrs:     map[string]string{"service": "coding-plan", "api_key": "sk-code"},
+			source:    sdktranslator.FormatOpenAI,
+			wantURL:   "https://api.kimi.com/coding/v1/chat/completions",
+			wantXMsh:  true,
+			checkXMsh: true,
+		},
+		{
+			name:      "open-platform domestic chat completions",
+			attrs:     map[string]string{"service": "open-platform", "region": "domestic", "api_key": "sk-open"},
+			source:    sdktranslator.FormatOpenAI,
+			wantURL:   "https://api.moonshot.cn/v1/chat/completions",
+			wantXMsh:  false,
+			checkXMsh: true,
+		},
+		{
+			name:      "open-platform international chat completions",
+			attrs:     map[string]string{"service": "open-platform", "region": "international", "api_key": "sk-open"},
+			source:    sdktranslator.FormatOpenAI,
+			wantURL:   "https://api.moonshot.ai/v1/chat/completions",
+			wantXMsh:  false,
+			checkXMsh: true,
+		},
+		{
+			name:    "open-platform domestic claude messages",
+			attrs:   map[string]string{"service": "open-platform", "region": "domestic", "api_key": "sk-open"},
+			source:  sdktranslator.FormatClaude,
+			wantURL: "https://api.moonshot.cn/anthropic/v1/messages?beta=true",
+		},
+		{
+			name:    "open-platform international claude messages",
+			attrs:   map[string]string{"service": "open-platform", "region": "international", "api_key": "sk-open"},
+			source:  sdktranslator.FormatClaude,
+			wantURL: "https://api.moonshot.ai/anthropic/v1/messages?beta=true",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var upstreamRequest *http.Request
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				upstreamRequest = req.Clone(req.Context())
+				upstreamRequest.Header = req.Header.Clone()
+				if tt.source == sdktranslator.FormatClaude {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body: io.NopCloser(strings.NewReader(
+							`{"id":"msg_test","type":"message","role":"assistant","model":"k2.5","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+						)),
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body: io.NopCloser(strings.NewReader(
+						`{"id":"chatcmpl-test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+					)),
+				}, nil
+			}))
+
+			attrs := map[string]string{}
+			for key, value := range tt.attrs {
+				attrs[key] = value
+			}
+			auth := &cliproxyauth.Auth{
+				Attributes: attrs,
+				Metadata:   map[string]any{"access_token": "test-token"},
+			}
+			payload := []byte(`{"model":"kimi-k2.5","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`)
+			_, err := NewKimiExecutor(&config.Config{}).Execute(ctx, auth, cliproxyexecutor.Request{
+				Model:   "kimi-k2.5",
+				Payload: payload,
+			}, cliproxyexecutor.Options{
+				SourceFormat:    tt.source,
+				OriginalRequest: payload,
+			})
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if upstreamRequest == nil {
+				t.Fatal("upstream request was not captured")
+			}
+			if got := upstreamRequest.URL.String(); got != tt.wantURL {
+				t.Fatalf("upstream URL = %q, want %q", got, tt.wantURL)
+			}
+			if tt.checkXMsh {
+				got := upstreamRequest.Header.Get("X-Msh-Platform")
+				if tt.wantXMsh && got == "" {
+					t.Fatal("X-Msh-Platform is empty")
+				}
+				if !tt.wantXMsh && got != "" {
+					t.Fatalf("X-Msh-Platform = %q, want empty", got)
+				}
+			}
+			body, errBody := io.ReadAll(upstreamRequest.Body)
+			if errBody != nil {
+				t.Fatalf("read upstream body: %v", errBody)
+			}
+			gotModel := gjson.GetBytes(body, "model").String()
+			wantModel := "k2.5"
+			if tt.attrs["service"] == "open-platform" {
+				wantModel = "kimi-k2.5"
+			}
+			if gotModel != wantModel {
+				t.Fatalf("upstream model = %q, want %q", gotModel, wantModel)
+			}
+		})
+	}
+}
+
+func TestKimiExecutorOpenPlatformCountTokensUsesMoonshotBase(t *testing.T) {
+	var upstreamRequest *http.Request
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		upstreamRequest = req.Clone(req.Context())
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"input_tokens":42}`)),
+		}, nil
+	}))
+
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"service": "open-platform", "region": "international", "api_key": "sk-open"},
+	}
+	payload := []byte(`{"model":"kimi-k2.5","messages":[{"role":"user","content":"hello"}]}`)
+	_, err := NewKimiExecutor(&config.Config{}).CountTokens(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k2.5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if err != nil {
+		t.Fatalf("CountTokens() error = %v", err)
+	}
+	if upstreamRequest == nil {
+		t.Fatal("upstream request was not captured")
+	}
+	if got := upstreamRequest.URL.String(); got != "https://api.moonshot.ai/anthropic/v1/messages/count_tokens?beta=true" {
+		t.Fatalf("upstream URL = %q, want moonshot count tokens endpoint", got)
+	}
+}

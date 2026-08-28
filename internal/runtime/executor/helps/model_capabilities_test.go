@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	helps "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/claude"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/kimi"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -230,4 +231,35 @@ func TestApplyRequestThinkingUsesSelectedPrefixedAPIKeyModel(t *testing.T) {
 		streamPayload = append(streamPayload, chunk.Payload...)
 	}
 	assertResponse("stream", streamPayload)
+}
+
+func TestApplyRequestThinkingUsesSelectedKimiAPIKeyModel(t *testing.T) {
+	req := cliproxyexecutor.Request{
+		Model:    "k3",
+		Payload:  []byte(`{"model":"k3","messages":[{"role":"user","content":"hi"}]}`),
+		Metadata: map[string]any{},
+	}
+	info := &registry.ModelInfo{
+		ID:       "k3",
+		Type:     "kimi",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"high"}},
+	}
+	req.Metadata["cliproxy.resolved_api_key_model_info"] = info
+	out, err := helps.ApplyRequestThinking(
+		[]byte(`{"model":"k3","messages":[{"role":"user","content":"hi"}]}`),
+		req,
+		cliproxyexecutor.Options{},
+		"openai",
+		"kimi",
+		"kimi",
+	)
+	if err != nil {
+		t.Fatalf("ApplyRequestThinking() error = %v", err)
+	}
+	if len(out) == 0 {
+		t.Fatal("ApplyRequestThinking() returned empty body")
+	}
+	if _, ok := cliproxyauth.ResolvedAPIKeyModelInfo(req); !ok {
+		t.Fatal("selected model info missing from request")
+	}
 }
