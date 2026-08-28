@@ -675,6 +675,10 @@ type OpenAICompatibility struct {
 	// SupportPromptCacheKey enables derived prompt_cache_key injection for supported requests.
 	SupportPromptCacheKey bool `yaml:"support-prompt-cache-key,omitempty" json:"support-prompt-cache-key,omitempty"`
 
+	// ResponseCache caches identical upstream responses for providers that bill every
+	// request at full price and offer no prompt caching of their own.
+	ResponseCache ResponseCacheConfig `yaml:"response-cache,omitempty" json:"response-cache,omitempty"`
+
 	// DisableCooling overrides the global cooling policy for this provider when set.
 	// True disables auth/model cooldowns; false explicitly enables them.
 	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
@@ -685,6 +689,28 @@ type OpenAICompatibility struct {
 
 	// RequestScopedErrors configures custom classification rules for upstream errors.
 	RequestScopedErrors []RequestScopedErrorRule `yaml:"request-scoped-errors,omitempty" json:"request-scoped-errors,omitempty"`
+}
+
+// ResponseCacheConfig configures the upstream response cache for an OpenAI-compatible provider.
+// The cache only serves byte-identical requests, so it never changes the answer a client
+// would have received for a different payload.
+type ResponseCacheConfig struct {
+	// Enabled turns the response cache on for this provider. Default false.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
+	// TTL is how long a cached response stays valid (duration string such as "5m").
+	// Empty or invalid values use the 5m default.
+	TTL string `yaml:"ttl,omitempty" json:"ttl,omitempty"`
+
+	// MaxEntries bounds the number of retained responses. <= 0 uses the default.
+	MaxEntries int `yaml:"max-entries,omitempty" json:"max-entries,omitempty"`
+
+	// MaxEntryBytes bounds the size of a single cached response. <= 0 uses the default.
+	MaxEntryBytes int `yaml:"max-entry-bytes,omitempty" json:"max-entry-bytes,omitempty"`
+
+	// Models optionally restricts caching to these upstream model names.
+	// An empty list caches every model served by this provider.
+	Models []string `yaml:"models,omitempty" json:"models,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
