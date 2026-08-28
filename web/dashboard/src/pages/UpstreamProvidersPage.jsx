@@ -1794,7 +1794,6 @@ function renderInput(field, form, update, isEdit, providerType) {
       return <APIKeyEntriesEditor
         entries={value || []}
         onChange={(v) => update(field.name, v)}
-        error={showError ? errors[field.name] : ''}
       />;
     case 'text':
     default:
