@@ -263,6 +263,10 @@ macOSネイティブのSwiftUI製AIサブスクリプションダッシュボー
 
 ネイティブ同様の操作感を持つ複数のClaude Codeコマンドを実行し、それぞれを異なるモデル（Codex、GLM、Kimi、Gemini、Grok、MiniMax、DeepSeek、Cursor、Copilot、Claude）で動作させます。各コマンドは、独立した設定、履歴、ポート、およびGo SDKで連携した組み込みCLIProxyAPIインスタンスを備えた本物のClaude Codeインターフェースを起動するため、プロキシを別途インストールする必要はありません。macOSのみ対応。詳細は[claude-dialects.cc](https://claude-dialects.cc/)をご覧ください。
 
+### [WebBrain](https://github.com/webbrain-one/webbrain)
+
+CLIProxyAPI のローカル OpenAI 互換エンドポイントをモデルプロバイダーとして利用できるブラウザーエージェントです。EasyCLIProxyAPI を通じて CLIProxyAPI を使用する場合は、WebBrain の独立した[セットアップ、セキュリティ、アカウントリスクのガイド](https://webbrain.one/docs/easy-cli-proxy/)をご覧ください。
+
 > [!NOTE]
 > CLIProxyAPIをベースにプロジェクトを開発した場合は、PRを送ってこのリストに追加してください。
 
