@@ -81,6 +81,7 @@ func main() {
 	var antigravityLogin bool
 	var kimiLogin bool
 	var xaiLogin bool
+	var codexImport string
 	var vertexImport string
 	var vertexImportPrefix string
 	var configPath string
@@ -100,6 +101,7 @@ func main() {
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
+	flag.StringVar(&codexImport, "codex-import", "", "Import credentials from a Codex auth.json file")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
@@ -643,7 +645,10 @@ func main() {
 
 	// Handle different command modes based on the provided flags.
 
-	if vertexImport != "" {
+	if codexImport != "" {
+		// Handle native Codex auth.json import
+		cmd.DoCodexImport(cfg, codexImport)
+	} else if vertexImport != "" {
 		// Handle Vertex service account import
 		cmd.DoVertexImport(cfg, vertexImport, vertexImportPrefix)
 	} else if antigravityLogin {
