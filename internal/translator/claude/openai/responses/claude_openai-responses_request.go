@@ -180,11 +180,14 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		}
 
 		parts := pendingParts
-		if pendingRole == "assistant" && len(pendingToolUseParts) > 0 {
-			combined := make([][]byte, 0, len(pendingParts)+len(pendingToolUseParts))
-			combined = append(combined, pendingParts...)
-			combined = append(combined, pendingToolUseParts...)
-			parts = combined
+		if pendingRole == "assistant" {
+			parts = mergeAdjacentClaudeThinkingBlocks(parts)
+			if len(pendingToolUseParts) > 0 {
+				combined := make([][]byte, 0, len(parts)+len(pendingToolUseParts))
+				combined = append(combined, parts...)
+				combined = append(combined, pendingToolUseParts...)
+				parts = combined
+			}
 		}
 		if len(parts) > 0 {
 			msg := []byte(`{"role":"","content":[]}`)
@@ -567,6 +570,44 @@ func dropUnsupportedFableAssistantPrefill(modelName string, messages [][]byte) [
 		return messages
 	}
 	return messages[:len(messages)-1]
+}
+
+// mergeAdjacentClaudeThinkingBlocks folds a run of adjacent thinking blocks in
+// one assistant message into the first block of that run. Anthropic never emits
+// two adjacent thinking blocks, so a replayed message carrying them reads as
+// tampering and the whole request is rejected with "`thinking` or
+// `redacted_thinking` blocks in the latest assistant message cannot be
+// modified". A Responses conversation reaches that shape on an ordinary turn,
+// because an agent that thinks twice before acting emits two consecutive
+// reasoning items, and the rejection then repeats on every later turn of the
+// same conversation.
+//
+// The run's text is concatenated onto the first block and its signature is
+// kept. Anthropic does not verify thinking text against the signature, which is
+// what makes the merge lossless for the reasoning the model gets to read.
+// redacted_thinking blocks carry opaque data that cannot be concatenated, so
+// they are left untouched and only break a run.
+func mergeAdjacentClaudeThinkingBlocks(parts [][]byte) [][]byte {
+	isThinking := func(part []byte) bool {
+		return gjson.GetBytes(part, "type").String() == "thinking"
+	}
+	merged := make([][]byte, 0, len(parts))
+	for _, part := range parts {
+		if len(merged) == 0 || !isThinking(part) || !isThinking(merged[len(merged)-1]) {
+			merged = append(merged, part)
+			continue
+		}
+		last := len(merged) - 1
+		next := gjson.GetBytes(part, "thinking").String()
+		if next == "" {
+			continue
+		}
+		if prev := gjson.GetBytes(merged[last], "thinking").String(); prev != "" {
+			next = prev + "\n\n" + next
+		}
+		merged[last], _ = sjson.SetBytes(merged[last], "thinking", next)
+	}
+	return merged
 }
 
 // responsesSystemUnsupportedBlock represents a system-level content part that
