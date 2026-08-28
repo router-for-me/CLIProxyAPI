@@ -597,7 +597,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 
 	upstreamHeaders := downstreamHeadersAfterInterceptors(baseStreamHeaders, rawStreamHeaders, passthroughHeadersEnabled)
-	upstreamHeaders = preserveCLIProxyUpstreamHeader(upstreamHeaders, rawStreamHeaders)
+	upstreamHeaders = preserveCLIProxyUpstreamHeader(upstreamHeaders, baseStreamHeaders)
 	if upstreamHeaders == nil && (passthroughHeadersEnabled || streamInterceptorsActive) {
 		upstreamHeaders = make(http.Header)
 	}
