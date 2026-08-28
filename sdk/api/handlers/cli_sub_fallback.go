@@ -156,12 +156,8 @@ func fallbackEligible(err error) bool {
 	if isAuthSelectionUnavailable(err) {
 		return true
 	}
-	switch statusFromError(err) {
-	case http.StatusPaymentRequired, http.StatusTooManyRequests, http.StatusServiceUnavailable:
-		return true
-	default:
-		return false
-	}
+	status := statusFromError(err)
+	return status == http.StatusPaymentRequired || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
 }
 
 var fallbackResponseModelPaths = []string{"model", "modelVersion", "response.model", "response.modelVersion", "message.model", "usage.model"}
