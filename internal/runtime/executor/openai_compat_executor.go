@@ -608,37 +608,43 @@ func (e *OpenAICompatExecutor) executeStreamViaNonStream(ctx context.Context, au
 		Provider: e.Identifier(), AuthID: authID, AuthLabel: authLabel, AuthType: authType, AuthValue: authValue,
 	})
 
+	httpClient := reporter.TrackHTTPClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return nil, err
+	}
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		defer func() {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("openai compat executor: close response body error: %v", errClose)
+			}
+		}()
+		body, _ := io.ReadAll(httpResp.Body)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+		return nil, statusErr{code: httpResp.StatusCode, msg: string(body)}
+	}
+
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		httpClient := reporter.TrackHTTPClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
-		httpResp, errDo := httpClient.Do(httpReq)
-		if errDo != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-			reporter.PublishFailure(ctx, errDo)
+		claudeInputTokens := helps.NewClaudeInputTokenState(opts.SourceFormat, to, responseFormat, originalPayload)
+		var param any
+		bootstrapLine := []byte("data: " + helps.SynthesizeOpenAIStreamBootstrapFrame(req.Model))
+		bootstrapChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bootstrapLine, &param, claudeInputTokens)
+		for i := range bootstrapChunks {
 			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errDo}:
+			case out <- cliproxyexecutor.StreamChunk{Payload: bootstrapChunks[i]}:
 			case <-ctx.Done():
+				return
 			}
-			return
 		}
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
 		}()
-		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-			body, _ := io.ReadAll(httpResp.Body)
-			helps.AppendAPIResponseChunk(ctx, e.cfg, body)
-			streamErr := statusErr{code: httpResp.StatusCode, msg: string(body)}
-			reporter.PublishFailure(ctx, streamErr)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
-			case <-ctx.Done():
-			}
-			return
-		}
 		body, errRead := io.ReadAll(httpResp.Body)
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
@@ -662,8 +668,6 @@ func (e *OpenAICompatExecutor) executeStreamViaNonStream(ctx context.Context, au
 			return
 		}
 
-		claudeInputTokens := helps.NewClaudeInputTokenState(opts.SourceFormat, to, responseFormat, originalPayload)
-		var param any
 		var streamUsage helps.StreamUsageBuffer
 		defer func() {
 			streamUsage.Publish(ctx, reporter)
@@ -682,9 +686,9 @@ func (e *OpenAICompatExecutor) executeStreamViaNonStream(ctx context.Context, au
 			}
 		}
 	}()
-	// Return before connecting/reading so the streaming handler can start its
-	// response and configured keep-alives while the non-stream upstream runs.
-	return &cliproxyexecutor.StreamResult{Chunks: out}, nil
+	// Headers and status are available synchronously, while body buffering runs
+	// behind the stream so the handler can emit keep-alives during generation.
+	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {

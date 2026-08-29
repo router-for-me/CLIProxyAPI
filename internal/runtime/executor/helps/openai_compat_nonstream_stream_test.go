@@ -57,6 +57,13 @@ func decodeFrames(t *testing.T, frames []string) []map[string]any {
 	return out
 }
 
+func TestSynthesizeOpenAIStreamBootstrapFrame(t *testing.T) {
+	frame := SynthesizeOpenAIStreamBootstrapFrame("alias-model")
+	if !strings.Contains(frame, `"role":"assistant"`) || !strings.Contains(frame, `"model":"alias-model"`) {
+		t.Fatalf("invalid bootstrap frame: %s", frame)
+	}
+}
+
 func TestSynthesizeOpenAIStreamFramesToolCalls(t *testing.T) {
 	body := []byte(`{
 		"id":"msg_1","model":"claude-opus-5","created":1700000000,
@@ -112,6 +119,16 @@ func TestSynthesizeOpenAIStreamFramesContentOnly(t *testing.T) {
 	choice := last["choices"].([]any)[0].(map[string]any)
 	if choice["finish_reason"] != "stop" {
 		t.Fatalf("finish_reason = %v, want stop", choice["finish_reason"])
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesPreservesRefusal(t *testing.T) {
+	body := []byte(`{"id":"msg_r","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop",
+		"message":{"role":"assistant","content":null,"refusal":"I cannot help with that."}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	decodeFrames(t, frames)
+	if !strings.Contains(strings.Join(frames, "\n"), `"refusal":"I cannot help with that."`) {
+		t.Fatalf("refusal missing from frames: %v", frames)
 	}
 }
 
