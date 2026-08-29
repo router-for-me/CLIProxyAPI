@@ -12,8 +12,8 @@ import (
 	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -664,9 +664,6 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 	if auth != nil {
 		reporter = helps.NewExecutorUsageReporter(ctx, a, thinking.ParseSuffix(req.Model).ModelName, auth)
 		defer reporter.TrackFailure(ctx, &err)
-		// Mirror native executors: start the clock before invoking the plugin and
-		// record TTFT when the first response payload arrives.
-		reporter.StartResponseTTFT()
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -687,18 +684,21 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 		if effort := thinking.ExtractTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String()); effort != "" {
 			reporter.SetTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String())
 		}
+		// Start TTFT immediately before the plugin call so request translation
+		// is not counted as upstream latency.
+		reporter.StartResponseTTFT()
 	}
 	pluginResp, errExecute := a.executor.Execute(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errExecute != nil {
 		return coreexecutor.Response{}, errExecute
 	}
+	if reporter != nil && len(pluginResp.Payload) > 0 {
+		reporter.ObserveTokenEvent(true)
+	}
 	// Translate before publishing: if host-side translation panics, the recovery
 	// defer must be able to publish a failure instead of a stale success record.
 	translatedPayload := a.translateExecutorResponse(ctx, prepared, pluginResp.Payload, false, nil)
 	if reporter != nil {
-		if len(pluginResp.Payload) > 0 {
-			reporter.ObserveTokenEvent(true)
-		}
 		reporter.Publish(ctx, helps.ParsePluginExecutorResponseUsage(prepared.outputFormat.String(), pluginResp.Payload))
 		reporter.EnsurePublished(ctx)
 	}
@@ -718,9 +718,6 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	if auth != nil {
 		reporter = helps.NewExecutorUsageReporter(ctx, a, thinking.ParseSuffix(req.Model).ModelName, auth)
 		defer reporter.TrackFailure(ctx, &err)
-		// Mirror native executors: start the clock before invoking the plugin
-		// stream and record TTFT when the first payload chunk arrives.
-		reporter.StartResponseTTFT()
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -738,6 +735,9 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 		if effort := thinking.ExtractTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String()); effort != "" {
 			reporter.SetTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String())
 		}
+		// Start TTFT immediately before the plugin stream so request translation
+		// is not counted as upstream latency.
+		reporter.StartResponseTTFT()
 	}
 	pluginResp, errExecuteStream := a.executor.ExecuteStream(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errExecuteStream != nil {
@@ -795,6 +795,35 @@ func pluginUsageIsCompleteFrame(fragment []byte) bool {
 	return false
 }
 
+func observePluginExecutorStreamTokenEvent(protocol string, payload []byte, reporter *helps.UsageReporter) {
+	if reporter == nil || len(payload) == 0 {
+		return
+	}
+	for _, line := range bytes.Split(payload, []byte("\n")) {
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(protocol)) {
+		case sdktranslator.FormatClaude.String():
+			helps.ObserveClaudeTokenEvent(reporter, trimmed)
+		case sdktranslator.FormatGemini.String(), sdktranslator.FormatAntigravity.String():
+			helps.ObserveGeminiTokenEvent(reporter, trimmed)
+		case sdktranslator.FormatOpenAIResponse.String(), sdktranslator.FormatCodex.String():
+			helps.ObserveResponsesTokenEvent(reporter, trimmed)
+		case sdktranslator.FormatOpenAI.String():
+			helps.ObserveChatTokenEvent(reporter, trimmed)
+		default:
+			reporter.RecordFirstPacket()
+		}
+	}
+}
+
+func observePluginExecutorStreamComplete(protocol string, payload []byte, usageBuffer *helps.StreamUsageBuffer, reporter *helps.UsageReporter) {
+	helps.ObservePluginExecutorStreamUsage(protocol, payload, usageBuffer)
+	observePluginExecutorStreamTokenEvent(protocol, payload, reporter)
+}
+
 func wrapPluginExecutorStreamUsage(ctx context.Context, protocol string, in <-chan pluginapi.ExecutorStreamChunk, reporter *helps.UsageReporter) <-chan pluginapi.ExecutorStreamChunk {
 	if reporter == nil {
 		return in
@@ -809,7 +838,7 @@ func wrapPluginExecutorStreamUsage(ctx context.Context, protocol string, in <-ch
 		if len(pending) == 0 {
 			return
 		}
-		helps.ObservePluginExecutorStreamUsage(protocol, pending, &usageBuffer)
+		observePluginExecutorStreamComplete(protocol, pending, &usageBuffer, reporter)
 		pending = nil
 	}
 	consumeUsagePayload := func(payload []byte, errorChunk bool) {
@@ -820,7 +849,7 @@ func wrapPluginExecutorStreamUsage(ctx context.Context, protocol string, in <-ch
 			// Error payloads are not stream framing and must not be joined to
 			// adjacent response fragments.
 			flushPendingUsage()
-			helps.ObservePluginExecutorStreamUsage(protocol, payload, &usageBuffer)
+			observePluginExecutorStreamComplete(protocol, payload, &usageBuffer, reporter)
 			return
 		}
 
@@ -840,25 +869,25 @@ func wrapPluginExecutorStreamUsage(ctx context.Context, protocol string, in <-ch
 		}
 
 		if idx := bytes.LastIndexByte(payload, '\n'); idx >= 0 {
-			helps.ObservePluginExecutorStreamUsage(protocol, payload[:idx+1], &usageBuffer)
+			observePluginExecutorStreamComplete(protocol, payload[:idx+1], &usageBuffer, reporter)
 			if tail := payload[idx+1:]; len(tail) > 0 {
 				if len(tail) <= pluginStreamUsagePendingMax && pluginUsageLooksLikeFrameFragment(tail) {
 					pending = append([]byte(nil), tail...)
 				} else {
-					helps.ObservePluginExecutorStreamUsage(protocol, tail, &usageBuffer)
+					observePluginExecutorStreamComplete(protocol, tail, &usageBuffer, reporter)
 				}
 			}
 			return
 		}
 		if pluginUsageIsCompleteFrame(payload) {
-			helps.ObservePluginExecutorStreamUsage(protocol, payload, &usageBuffer)
+			observePluginExecutorStreamComplete(protocol, payload, &usageBuffer, reporter)
 			return
 		}
 		if len(payload) <= pluginStreamUsagePendingMax && pluginUsageLooksLikeFrameFragment(payload) {
 			pending = append([]byte(nil), payload...)
 			return
 		}
-		helps.ObservePluginExecutorStreamUsage(protocol, payload, &usageBuffer)
+		observePluginExecutorStreamComplete(protocol, payload, &usageBuffer, reporter)
 	}
 
 	var finishOnce sync.Once
@@ -905,9 +934,9 @@ func wrapPluginExecutorStreamUsage(ctx context.Context, protocol string, in <-ch
 					return
 				}
 				if len(chunk.Payload) > 0 {
-					// First payload doubles as the first-packet / TTFT mark;
-					// ObserveTokenEvent is idempotent afterwards.
-					reporter.ObserveTokenEvent(true)
+					// Record first-packet fallback on the raw chunk. Effective
+					// token TTFT is classified from complete frames only.
+					reporter.RecordFirstPacket()
 					consumeUsagePayload(chunk.Payload, chunk.Err != nil)
 				}
 				if firstErr == nil && chunk.Err != nil {

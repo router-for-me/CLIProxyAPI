@@ -581,23 +581,105 @@ func TestExecutorAdapterUsageMetadata(t *testing.T) {
 		requireNormalizedZeroUsageDetail(t, captured.record.Detail)
 		capture.requireNoAdditionalRecords(t)
 	})
+
+	t.Run("request translation delay is excluded from TTFT", func(t *testing.T) {
+		requestID := "req-" + executorUsageTestSuffix(t.Name())
+		capture := registerCaptureExecutorUsagePlugin(t, requestID)
+		fixture := newExecutorUsageFixture(t, &fakeExecutor{
+			identifier: executorUsageTestProvider,
+			execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+				time.Sleep(10 * time.Millisecond)
+				return pluginapi.ExecutorResponse{Payload: []byte(`{"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)}, nil
+			},
+		})
+		fromFormat := sdktranslator.Format("pluginhost-ttft-req-from-" + executorUsageTestSuffix(t.Name()))
+		sdktranslator.Register(fromFormat, sdktranslator.FormatOpenAI, func(_ string, rawJSON []byte, _ bool) []byte {
+			time.Sleep(40 * time.Millisecond)
+			return rawJSON
+		}, sdktranslator.ResponseTransform{})
+
+		ctx := internallogging.WithRequestID(context.Background(), requestID)
+		_, errExecute := fixture.adapter.Execute(ctx, fixture.auth, coreexecutor.Request{
+			Model:   fixture.model,
+			Format:  fromFormat,
+			Payload: []byte(fmt.Sprintf(`{"model":%q}`, fixture.model)),
+		}, coreexecutor.Options{
+			SourceFormat:   fromFormat,
+			ResponseFormat: sdktranslator.FormatOpenAI,
+		})
+		if errExecute != nil {
+			t.Fatalf("adapter.Execute() error = %v", errExecute)
+		}
+		captured := capture.waitRecord(t)
+		requireSuccessfulUsage(t, captured.record)
+		if captured.record.TTFT <= 0 {
+			t.Fatalf("TTFT = %s, want positive duration", captured.record.TTFT)
+		}
+		if captured.record.TTFT >= 40*time.Millisecond {
+			t.Fatalf("TTFT = %s, want request translation delay excluded", captured.record.TTFT)
+		}
+		capture.requireNoAdditionalRecords(t)
+	})
+
+	t.Run("response translation delay is excluded from TTFT", func(t *testing.T) {
+		requestID := "req-" + executorUsageTestSuffix(t.Name())
+		capture := registerCaptureExecutorUsagePlugin(t, requestID)
+		fixture := newExecutorUsageFixture(t, &fakeExecutor{
+			identifier: executorUsageTestProvider,
+			execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+				time.Sleep(10 * time.Millisecond)
+				return pluginapi.ExecutorResponse{Payload: []byte(`{"usage":{"prompt_tokens":5,"completion_tokens":6,"total_tokens":11}}`)}, nil
+			},
+		})
+		outputFormat := sdktranslator.Format("pluginhost-ttft-resp-output-" + executorUsageTestSuffix(t.Name()))
+		requestedFormat := sdktranslator.Format("pluginhost-ttft-resp-requested-" + executorUsageTestSuffix(t.Name()))
+		sdktranslator.Register(requestedFormat, outputFormat, nil, sdktranslator.ResponseTransform{
+			NonStream: func(_ context.Context, _ string, _ []byte, _ []byte, payload []byte, _ *any) []byte {
+				time.Sleep(40 * time.Millisecond)
+				return payload
+			},
+		})
+		fixture.adapter.outputFormats = []sdktranslator.Format{outputFormat}
+
+		ctx := internallogging.WithRequestID(context.Background(), requestID)
+		_, errExecute := fixture.adapter.Execute(ctx, fixture.auth, coreexecutor.Request{
+			Model:   fixture.model,
+			Format:  sdktranslator.FormatOpenAI,
+			Payload: []byte(fmt.Sprintf(`{"model":%q}`, fixture.model)),
+		}, coreexecutor.Options{
+			SourceFormat:   sdktranslator.FormatOpenAI,
+			ResponseFormat: requestedFormat,
+		})
+		if errExecute != nil {
+			t.Fatalf("adapter.Execute() error = %v", errExecute)
+		}
+		captured := capture.waitRecord(t)
+		requireSuccessfulUsage(t, captured.record)
+		if captured.record.TTFT <= 0 {
+			t.Fatalf("TTFT = %s, want positive duration", captured.record.TTFT)
+		}
+		if captured.record.TTFT >= 40*time.Millisecond {
+			t.Fatalf("TTFT = %s, want response translation delay excluded", captured.record.TTFT)
+		}
+		capture.requireNoAdditionalRecords(t)
+	})
 }
 
 func TestExecutorAdapterPublishesStreamUsageThroughAuthManager(t *testing.T) {
 	t.Run("clean close with usage", func(t *testing.T) {
 		requestID := "req-" + executorUsageTestSuffix(t.Name())
 		capture := registerCaptureExecutorUsagePlugin(t, requestID)
-		source := make(chan pluginapi.ExecutorStreamChunk, 3)
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			source <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")}
-			source <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":15,\"completion_tokens\":25,\"total_tokens\":40}}\n\n")}
-			source <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: [DONE]\n\n")}
-			close(source)
-		}()
 		fixture := newExecutorUsageFixture(t, &fakeExecutor{
 			identifier: executorUsageTestProvider,
 			executeStream: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+				source := make(chan pluginapi.ExecutorStreamChunk, 3)
+				go func() {
+					time.Sleep(10 * time.Millisecond)
+					source <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")}
+					source <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":15,\"completion_tokens\":25,\"total_tokens\":40}}\n\n")}
+					source <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: [DONE]\n\n")}
+					close(source)
+				}()
 				return pluginapi.ExecutorStreamResponse{Chunks: source}, nil
 			},
 		})
@@ -1082,6 +1164,132 @@ func TestExecutorAdapterDoesNotRetainOversizedUsageFragment(t *testing.T) {
 	requireSuccessfulUsage(t, captured.record)
 	requireOpenAIUsageDetail(t, captured.record.Detail, 11, 13, 24)
 	capture.requireNoAdditionalRecords(t)
+}
+
+func TestExecutorAdapterStreamTTFTClassification(t *testing.T) {
+	t.Run("claude metadata does not lock token TTFT", func(t *testing.T) {
+		requestID := "req-" + executorUsageTestSuffix(t.Name())
+		capture := registerCaptureExecutorUsagePlugin(t, requestID)
+		fixture := newExecutorUsageFixture(t, &fakeExecutor{
+			identifier: executorUsageTestProvider,
+			executeStream: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+				source := make(chan pluginapi.ExecutorStreamChunk, 4)
+				go func() {
+					source <- pluginapi.ExecutorStreamChunk{Payload: []byte("event: message_start\ndata: {\"type\":\"message_start\"}\n\n")}
+					time.Sleep(20 * time.Millisecond)
+					source <- pluginapi.ExecutorStreamChunk{Payload: []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\n\n")}
+					source <- pluginapi.ExecutorStreamChunk{Payload: []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":4,\"output_tokens\":5}}\n\n")}
+					source <- pluginapi.ExecutorStreamChunk{Payload: []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")}
+					close(source)
+				}()
+				return pluginapi.ExecutorStreamResponse{Chunks: source}, nil
+			},
+		})
+		fixture.adapter.inputFormats = []sdktranslator.Format{sdktranslator.FormatClaude}
+		fixture.adapter.outputFormats = []sdktranslator.Format{sdktranslator.FormatClaude}
+
+		ctx := internallogging.WithRequestID(context.Background(), requestID)
+		result, errExecute := fixture.adapter.ExecuteStream(ctx, fixture.auth, coreexecutor.Request{
+			Model:   fixture.model,
+			Format:  sdktranslator.FormatClaude,
+			Payload: []byte(fmt.Sprintf(`{"model":%q}`, fixture.model)),
+		}, coreexecutor.Options{
+			Stream:         true,
+			SourceFormat:   sdktranslator.FormatClaude,
+			ResponseFormat: sdktranslator.FormatClaude,
+		})
+		if errExecute != nil {
+			t.Fatalf("adapter.ExecuteStream() error = %v", errExecute)
+		}
+		collectExecutorStream(t, result)
+		captured := capture.waitRecord(t)
+		requireSuccessfulUsage(t, captured.record)
+		if captured.record.TTFT < 20*time.Millisecond {
+			t.Fatalf("TTFT = %s, want token event after metadata delay", captured.record.TTFT)
+		}
+		capture.requireNoAdditionalRecords(t)
+	})
+
+	t.Run("responses created does not lock token TTFT", func(t *testing.T) {
+		requestID := "req-" + executorUsageTestSuffix(t.Name())
+		capture := registerCaptureExecutorUsagePlugin(t, requestID)
+		fixture := newExecutorUsageFixture(t, &fakeExecutor{
+			identifier: executorUsageTestProvider,
+			executeStream: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+				source := make(chan pluginapi.ExecutorStreamChunk, 3)
+				go func() {
+					source <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n")}
+					time.Sleep(20 * time.Millisecond)
+					source <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")}
+					source <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":6,\"output_tokens\":7,\"total_tokens\":13}}}\n\n")}
+					close(source)
+				}()
+				return pluginapi.ExecutorStreamResponse{Chunks: source}, nil
+			},
+		})
+		fixture.adapter.inputFormats = []sdktranslator.Format{sdktranslator.FormatOpenAIResponse}
+		fixture.adapter.outputFormats = []sdktranslator.Format{sdktranslator.FormatOpenAIResponse}
+
+		ctx := internallogging.WithRequestID(context.Background(), requestID)
+		result, errExecute := fixture.adapter.ExecuteStream(ctx, fixture.auth, coreexecutor.Request{
+			Model:   fixture.model,
+			Format:  sdktranslator.FormatOpenAIResponse,
+			Payload: []byte(fmt.Sprintf(`{"model":%q}`, fixture.model)),
+		}, coreexecutor.Options{
+			Stream:         true,
+			SourceFormat:   sdktranslator.FormatOpenAIResponse,
+			ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		})
+		if errExecute != nil {
+			t.Fatalf("adapter.ExecuteStream() error = %v", errExecute)
+		}
+		collectExecutorStream(t, result)
+		captured := capture.waitRecord(t)
+		requireSuccessfulUsage(t, captured.record)
+		if captured.record.TTFT < 20*time.Millisecond {
+			t.Fatalf("TTFT = %s, want token event after created-event delay", captured.record.TTFT)
+		}
+		capture.requireNoAdditionalRecords(t)
+	})
+
+	t.Run("split token frame still sets TTFT", func(t *testing.T) {
+		requestID := "req-" + executorUsageTestSuffix(t.Name())
+		capture := registerCaptureExecutorUsagePlugin(t, requestID)
+		first := []byte(`data: {"choices":[{"delta":{"content":"he`)
+		second := []byte(`llo"}}]}` + "\n\n")
+		usagePayload := []byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":10,\"total_tokens\":19}}\n\n")
+		fixture := newExecutorUsageFixture(t, &fakeExecutor{
+			identifier: executorUsageTestProvider,
+			executeStream: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+				source := make(chan pluginapi.ExecutorStreamChunk, 3)
+				go func() {
+					source <- pluginapi.ExecutorStreamChunk{Payload: first}
+					time.Sleep(20 * time.Millisecond)
+					source <- pluginapi.ExecutorStreamChunk{Payload: second}
+					source <- pluginapi.ExecutorStreamChunk{Payload: usagePayload}
+					close(source)
+				}()
+				return pluginapi.ExecutorStreamResponse{Chunks: source}, nil
+			},
+		})
+
+		ctx := internallogging.WithRequestID(context.Background(), requestID)
+		result, errExecute := fixture.executeStream(t, ctx)
+		if errExecute != nil {
+			t.Fatalf("Manager.ExecuteStream() error = %v", errExecute)
+		}
+		chunks := collectExecutorStream(t, result)
+		if len(chunks) != 3 || !bytes.Equal(chunks[0].Payload, first) || !bytes.Equal(chunks[1].Payload, second) {
+			t.Fatalf("stream chunks = %#v, want original split payloads", chunks)
+		}
+		captured := capture.waitRecord(t)
+		requireSuccessfulUsage(t, captured.record)
+		requireOpenAIUsageDetail(t, captured.record.Detail, 9, 10, 19)
+		if captured.record.TTFT < 20*time.Millisecond {
+			t.Fatalf("TTFT = %s, want token event after split frame completed", captured.record.TTFT)
+		}
+		capture.requireNoAdditionalRecords(t)
+	})
 }
 
 func TestExecutorAdapterNilAuthDoesNotPublishUsage(t *testing.T) {
