@@ -141,6 +141,17 @@ func TestSynthesizeOpenAIStreamFramesRejectsUnusableChoices(t *testing.T) {
 	}
 }
 
+func TestSynthesizeOpenAIStreamFramesPreservesAudio(t *testing.T) {
+	body := []byte(`{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":null,"audio":{"id":"audio_1","data":"AAAA","transcript":"hello","expires_at":1}}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	joined := strings.Join(frames, "\n")
+	for _, want := range []string{`"audio":{`, `"transcript":"hello"`, `"data":"AAAA"`} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("audio metadata %s missing: %s", want, joined)
+		}
+	}
+}
+
 func TestSynthesizeOpenAIStreamFramesPreservesAnnotations(t *testing.T) {
 	body := []byte(`{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"content":"cited","annotations":[{"type":"url_citation","url_citation":{"url":"https://example.com","start_index":0,"end_index":5}}]}}]}`)
 	frames := SynthesizeOpenAIStreamFrames(body)

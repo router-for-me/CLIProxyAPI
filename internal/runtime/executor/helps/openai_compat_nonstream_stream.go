@@ -114,6 +114,10 @@ func SynthesizeOpenAIStreamFrames(body []byte) []string {
 			emit(index, delta, gjson.Result{}, logprobs, false)
 			contentEmitted = true
 		}
+		if audio := message.Get("audio"); audio.Exists() && audio.Type != gjson.Null {
+			emit(index, fmt.Sprintf(`{"audio":%s}`, audio.Raw), gjson.Result{}, gjson.Result{}, false)
+			contentEmitted = true
+		}
 		if !contentEmitted && logprobs.Exists() && logprobs.Type != gjson.Null {
 			emit(index, "", gjson.Result{}, logprobs, false)
 		}
@@ -153,6 +157,9 @@ func hasUsableAssistantChoice(choice gjson.Result) bool {
 		if value := message.Get(field); value.Exists() && value.String() != "" {
 			return true
 		}
+	}
+	if audio := message.Get("audio"); audio.Exists() && audio.Type != gjson.Null {
+		return true
 	}
 	if refusal := message.Get("refusal"); refusal.Exists() && refusal.Type != gjson.Null {
 		return true
