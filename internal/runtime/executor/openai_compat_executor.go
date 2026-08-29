@@ -86,8 +86,21 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
+	providerKey := e.providerConfigKey(auth)
+	compat := e.resolveCompatConfig(auth)
+	var authID string
+	if auth != nil {
+		authID = auth.ID
+	}
+	if errRate := e.rateLimiter.Wait(ctx, compat, providerKey, authID); errRate != nil {
+		return nil, errRate
+	}
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	return httpClient.Do(httpReq)
+	httpResp, errDo := httpClient.Do(httpReq)
+	if errDo == nil && httpResp != nil && httpResp.StatusCode == http.StatusTooManyRequests {
+		e.rateLimiter.NoteLimited(compat, providerKey, authID, httpResp.Header)
+	}
+	return httpResp, errDo
 }
 
 func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {

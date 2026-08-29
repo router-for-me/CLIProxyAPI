@@ -109,6 +109,17 @@ func TestNoteProviderRateLimited_IgnoredWhenUnconfigured(t *testing.T) {
 	}
 }
 
+func TestParseRetryAfterPreservesValidZero(t *testing.T) {
+	header := http.Header{}
+	header.Set("Retry-After", "0")
+	if delay, ok := parseRetryAfter(header); !ok || delay != 0 {
+		t.Fatalf("parseRetryAfter zero = %v, %v; want 0, true", delay, ok)
+	}
+	if _, ok := parseRetryAfter(http.Header{}); ok {
+		t.Fatal("missing Retry-After reported as valid")
+	}
+}
+
 func TestNoteProviderRateLimited_CancelledContext(t *testing.T) {
 	registry := NewProviderRateLimitRegistry()
 	cfg := &config.OpenAICompatibility{

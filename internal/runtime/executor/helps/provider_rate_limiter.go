@@ -98,8 +98,8 @@ func (r *ProviderRateLimitRegistry) NoteLimited(compat *config.OpenAICompatibili
 	if key == "" || r == nil {
 		return
 	}
-	pause := parseRetryAfter(header)
-	if pause <= 0 {
+	pause, validRetryAfter := parseRetryAfter(header)
+	if !validRetryAfter {
 		pause = rateLimitWindowFallback
 	}
 	until := time.Now().Add(pause)
@@ -119,24 +119,26 @@ func (r *ProviderRateLimitRegistry) NoteLimited(compat *config.OpenAICompatibili
 	r.mu.Unlock()
 }
 
-func parseRetryAfter(header http.Header) time.Duration {
+func parseRetryAfter(header http.Header) (time.Duration, bool) {
 	if header == nil {
-		return 0
+		return 0, false
 	}
 	raw := strings.TrimSpace(header.Get("Retry-After"))
 	if raw == "" {
-		return 0
+		return 0, false
 	}
 	if seconds, errParse := strconv.Atoi(raw); errParse == nil {
-		if seconds > 0 {
-			return time.Duration(seconds) * time.Second
+		if seconds >= 0 {
+			return time.Duration(seconds) * time.Second, true
 		}
-		return 0
+		return 0, false
 	}
 	if when, errParse := http.ParseTime(raw); errParse == nil {
-		if delay := time.Until(when); delay > 0 {
-			return delay
+		delay := time.Until(when)
+		if delay < 0 {
+			delay = 0
 		}
+		return delay, true
 	}
-	return 0
+	return 0, false
 }
