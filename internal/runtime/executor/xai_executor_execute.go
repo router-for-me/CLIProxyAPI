@@ -84,12 +84,13 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 	responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
+	namespaceRestorer := newXAINamespaceRestorer(prepared.namespaceTools)
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		if !bytes.HasPrefix(line, xaiDataTag) {
 			continue
 		}
 		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
-		eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
+		eventData = namespaceRestorer.restore(eventData)
 		eventData = responseFilter.apply(eventData)
 		if len(eventData) == 0 {
 			continue

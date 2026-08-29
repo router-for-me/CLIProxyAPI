@@ -108,3 +108,56 @@ func TestClaudeMessageAccumulatorPreservesBlockCacheControl(t *testing.T) {
 		t.Fatalf("second block should not have cache_control: %s", string(messages[0]))
 	}
 }
+
+func TestAlignClaudeToolResults(t *testing.T) {
+	t.Run("reorders permuted results and keeps other parts after", func(t *testing.T) {
+		input := gjson.Parse(`[
+			{"type":"tool_result","tool_use_id":"call_2","content":"two"},
+			{"type":"text","text":"extra user text"},
+			{"type":"tool_result","tool_use_id":"call_1","content":"one"}
+		]`)
+		aligned := AlignClaudeToolResults(input, []string{"call_1", "call_2"})
+		parts := aligned.Array()
+		if len(parts) != 3 {
+			t.Fatalf("len(parts) = %d, want 3", len(parts))
+		}
+		if parts[0].Get("tool_use_id").String() != "call_1" {
+			t.Fatalf("parts[0].tool_use_id = %q, want call_1", parts[0].Get("tool_use_id").String())
+		}
+		if parts[1].Get("tool_use_id").String() != "call_2" {
+			t.Fatalf("parts[1].tool_use_id = %q, want call_2", parts[1].Get("tool_use_id").String())
+		}
+		if parts[2].Get("type").String() != "text" || parts[2].Get("text").String() != "extra user text" {
+			t.Fatalf("parts[2] = %s, want extra user text", parts[2].Raw)
+		}
+	})
+
+	t.Run("returns original content when count mismatches", func(t *testing.T) {
+		input := gjson.Parse(`[
+			{"type":"tool_result","tool_use_id":"call_1","content":"one"}
+		]`)
+		aligned := AlignClaudeToolResults(input, []string{"call_1", "call_2"})
+		if aligned.Raw != input.Raw {
+			t.Fatalf("aligned = %s, want %s", aligned.Raw, input.Raw)
+		}
+	})
+
+	t.Run("returns original content when id not found", func(t *testing.T) {
+		input := gjson.Parse(`[
+			{"type":"tool_result","tool_use_id":"call_unknown","content":"unknown"},
+			{"type":"tool_result","tool_use_id":"call_1","content":"one"}
+		]`)
+		aligned := AlignClaudeToolResults(input, []string{"call_1", "call_2"})
+		if aligned.Raw != input.Raw {
+			t.Fatalf("aligned = %s, want %s", aligned.Raw, input.Raw)
+		}
+	})
+
+	t.Run("returns original content for non-array", func(t *testing.T) {
+		input := gjson.Parse(`"text content"`)
+		aligned := AlignClaudeToolResults(input, []string{"call_1"})
+		if aligned.Raw != input.Raw {
+			t.Fatalf("aligned = %s, want %s", aligned.Raw, input.Raw)
+		}
+	})
+}

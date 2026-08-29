@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -858,7 +859,26 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 		return savedPath, errSave
 	}
 	if h.postAuthPersistHook != nil {
-		if errHook := h.postAuthPersistHook(ctx, record); errHook != nil {
+		persistedRecord := record
+		if data, errRead := os.ReadFile(savedPath); errRead == nil && len(data) > 0 {
+			auths, errSynthesize := synthesizer.SynthesizeAuthFile(&synthesizer.SynthesisContext{
+				Config:           h.cfg,
+				AuthDir:          filepath.Dir(savedPath),
+				Now:              time.Now(),
+				IDGenerator:      synthesizer.NewStableIDGenerator(),
+				PluginAuthParser: h.pluginHost,
+			}, savedPath, data)
+			if errSynthesize != nil {
+				return savedPath, fmt.Errorf("synthesize persisted auth failed: %w", errSynthesize)
+			}
+			for _, auth := range auths {
+				if auth != nil && (auth.ID == record.ID || len(auths) == 1) {
+					persistedRecord = auth
+					break
+				}
+			}
+		}
+		if errHook := h.postAuthPersistHook(ctx, persistedRecord); errHook != nil {
 			return savedPath, fmt.Errorf("post-auth persist hook failed: %w", errHook)
 		}
 	}

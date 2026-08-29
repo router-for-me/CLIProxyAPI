@@ -206,6 +206,10 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 			appendThinkingSignature(signature, direction, targetKind)
 			return false
 		}
+		if direction == geminiClaudeCarrierPrevious && targetKind == geminiClaudeCarrierText {
+			cache.CacheSignatureBestEffort(ctx, modelName, "", signature)
+			return false
+		}
 		closeCurrentBlock()
 		startEmptyThinkingBlock()
 		appendCarrierSignature(signature, direction, targetKind)
@@ -686,6 +690,8 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 						thinkingSignatureDirection = geminiClaudeCarrierStandalone
 						thinkingSignatureTargetKind = geminiClaudeCarrierText
 						flushThinking()
+					} else if hasSemanticContent && lastSemanticKind == geminiClaudeCarrierText {
+						cache.CacheSignatureBestEffort(context.Background(), modelName, "", signature)
 					} else if hasSemanticContent {
 						appendSignatureCarrier(signature, geminiClaudeCarrierPrevious, lastSemanticKind)
 					} else {
@@ -708,6 +714,8 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 					if text.Exists() && text.String() != "" {
 						appendSignatureCarrier(signature, geminiClaudeCarrierNext, geminiClaudeCarrierText)
 						visibleSignatureCarrier = true
+					} else if hasSemanticContent && lastSemanticKind == geminiClaudeCarrierText {
+						cache.CacheSignatureBestEffort(context.Background(), modelName, "", signature)
 					} else if hasSemanticContent {
 						appendSignatureCarrier(signature, geminiClaudeCarrierPrevious, lastSemanticKind)
 					} else {

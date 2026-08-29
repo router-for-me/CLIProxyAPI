@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -81,6 +82,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
 		Query:                       modelExecutionQuery(ctx, execOptions.Query),
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
+		WebSocketResponseObserver:   h.webSocketResponseObserver(lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
 	}
 	opts.Metadata = reqMeta
 	var interceptErr *interfaces.ErrorMessage
@@ -145,6 +147,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 		Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
 		Query:                       modelExecutionQuery(ctx, execOptions.Query),
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
+		WebSocketResponseObserver:   h.webSocketResponseObserver(lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
 	}
 	opts.Metadata = reqMeta
 	var interceptErr *interfaces.ErrorMessage
@@ -264,14 +267,15 @@ func (h *BaseAPIHandler) pluginExecutorRequest(ctx context.Context, entryProtoco
 	}
 	req := coreexecutor.Request{Model: modelName, Payload: payload}
 	opts := coreexecutor.Options{
-		Stream:          stream,
-		Alt:             alt,
-		OriginalRequest: rawJSON,
-		SourceFormat:    sdktranslator.FromString(entryProtocol),
-		ResponseFormat:  sdktranslator.FromString(responseProtocol),
-		Headers:         modelExecutionHeaders(ctx, execOptions.Headers),
-		Query:           modelExecutionQuery(ctx, execOptions.Query),
-		Metadata:        reqMeta,
+		Stream:                    stream,
+		Alt:                       alt,
+		OriginalRequest:           rawJSON,
+		SourceFormat:              sdktranslator.FromString(entryProtocol),
+		ResponseFormat:            sdktranslator.FromString(responseProtocol),
+		Headers:                   modelExecutionHeaders(ctx, execOptions.Headers),
+		Query:                     modelExecutionQuery(ctx, execOptions.Query),
+		WebSocketResponseObserver: h.webSocketResponseObserver("", execOptions.SkipInterceptorPluginID),
+		Metadata:                  reqMeta,
 	}
 	return req, opts
 }
@@ -325,6 +329,29 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
 	status := http.StatusInternalServerError
 	if code := clienterror.HTTPStatusFromError(err); code > 0 {
 		status = code
+	}
+	type directResponseError interface {
+		DirectResponse() bool
+		ResponseBody() []byte
+	}
+	var direct directResponseError
+	if errors.As(err, &direct) && direct != nil && direct.DirectResponse() {
+		body := direct.ResponseBody()
+		var headers http.Header
+		if len(body) > 0 {
+			contentType := http.DetectContentType(body)
+			if json.Valid(body) {
+				contentType = "application/json"
+			}
+			headers = http.Header{"Content-Type": []string{contentType}}
+		}
+		return &interfaces.ErrorMessage{
+			StatusCode:     status,
+			Error:          err,
+			DirectResponse: true,
+			Body:           body,
+			Headers:        headers,
+		}
 	}
 	var addon http.Header
 	if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {

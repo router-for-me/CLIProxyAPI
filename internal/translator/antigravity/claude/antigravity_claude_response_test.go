@@ -843,15 +843,11 @@ func TestConvertAntigravityResponseToClaude_DetachedGeminiSignatureAfterVisibleT
 	if !strings.Contains(outputText, `"content_block":{"type":"text","text":""}`) {
 		t.Fatalf("missing visible text block: %s", outputText)
 	}
-	if !strings.Contains(outputText, `"content_block":{"type":"thinking","thinking":""}`) {
-		t.Fatalf("missing detached thinking carrier: %s", outputText)
+	if strings.Contains(outputText, `"content_block":{"type":"thinking"`) {
+		t.Fatalf("trailing thinking carrier must not be emitted after visible text: %s", outputText)
 	}
-	carrierSignature := encodeGeminiClaudeCarrierSignature(validSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierText)
-	if !strings.Contains(outputText, `"type":"signature_delta","signature":"`+carrierSignature+`"`) {
-		t.Fatalf("missing detached Gemini signature: %s", outputText)
-	}
-	if got := strings.Count(outputText, `"type":"content_block_stop"`); got != 2 {
-		t.Fatalf("content block stops = %d, want text + detached thinking; output=%s", got, outputText)
+	if got := strings.Count(outputText, `"type":"content_block_stop"`); got != 1 {
+		t.Fatalf("content block stops = %d, want 1 text stop; output=%s", got, outputText)
 	}
 }
 
@@ -948,13 +944,14 @@ func TestConvertAntigravityResponseToClaudeNonStream_PreviousCarrierDoesNotCross
 	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"A","thoughtSignature":"` + signature1 + `"},{"text":"","thoughtSignature":"` + signature2 + `"},{"text":"B"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"previous-carrier-boundary"}}`)
 
 	output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3.6-flash-high", requestJSON, requestJSON, responseJSON, nil)
-	replayRequest := []byte(`{"model":"gemini-3.6-flash-high","messages":[{"role":"assistant","content":[]}]}`)
-	replayRequest, _ = sjson.SetRawBytes(replayRequest, "messages.0.content", []byte(gjson.GetBytes(output, "content").Raw))
-	replayRequest = StripInvalidGeminiSignatureThinkingBlocks(replayRequest)
-	translated := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", replayRequest, false)
-	parts := gjson.GetBytes(translated, "request.contents.0.parts").Array()
-	if len(parts) != 3 || parts[0].Get("text").String() != "A" || parts[0].Get("thoughtSignature").String() != signature1 || !parts[1].Get("text").Exists() || parts[1].Get("text").String() != "" || parts[1].Get("thoughtSignature").String() != signature2 || parts[2].Get("text").String() != "B" || parts[2].Get("thoughtSignature").String() != "" {
-		t.Fatalf("previous carrier crossed following text: output=%s translated=%s", output, translated)
+	if got := gjson.GetBytes(output, "content.#").Int(); got != 3 {
+		t.Fatalf("content blocks = %d, want leading carrier + 2 text blocks; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "content.1.text").String(); got != "A" {
+		t.Fatalf("first text block = %q; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "content.2.text").String(); got != "B" {
+		t.Fatalf("second text block = %q; output=%s", got, output)
 	}
 }
 
@@ -1032,31 +1029,15 @@ func TestConvertAntigravityResponseToClaude_PreservesConsecutiveDetachedCarriers
 
 	nonStream := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3.6-flash-high", requestJSON, requestJSON, responseJSON, nil)
 	content := gjson.GetBytes(nonStream, "content").Array()
-	wantCarrier1 := encodeGeminiClaudeCarrierSignature(sig1, geminiClaudeCarrierPrevious, geminiClaudeCarrierText)
-	wantCarrier2 := encodeGeminiClaudeCarrierSignature(sig2, geminiClaudeCarrierPrevious, geminiClaudeCarrierText)
-	if len(content) != 3 || content[1].Get("signature").String() != wantCarrier1 || content[2].Get("signature").String() != wantCarrier2 {
-		t.Fatalf("non-stream carriers were merged: %s", nonStream)
-	}
-	replayRequest := []byte(`{"model":"gemini-3.6-flash-high","messages":[{"role":"assistant","content":[]},{"role":"user","content":[{"type":"text","text":"continue"}]}]}`)
-	replayRequest, _ = sjson.SetRawBytes(replayRequest, "messages.0.content", []byte(gjson.GetBytes(nonStream, "content").Raw))
-	replayRequest = StripInvalidGeminiSignatureThinkingBlocks(replayRequest)
-	translated := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", replayRequest, false)
-	parts := gjson.GetBytes(translated, "request.contents.0.parts").Array()
-	if len(parts) != 2 || parts[0].Get("thoughtSignature").String() != sig1 || parts[1].Get("thoughtSignature").String() != sig2 {
-		t.Fatalf("consecutive carriers did not round-trip in order: %s", translated)
-	}
-	if parts[0].Get("text").String() != "visible" || !parts[1].Get("text").Exists() || parts[1].Get("text").String() != "" {
-		t.Fatalf("consecutive carrier targets malformed: %s", translated)
+	if len(content) != 1 || content[0].Get("text").String() != "visible" {
+		t.Fatalf("want 1 visible text block, got: %s", nonStream)
 	}
 
 	var param any
 	stream := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.6-flash-high", requestJSON, requestJSON, responseJSON, &param), nil)
 	streamText := string(stream)
-	if got := strings.Count(streamText, `"content_block":{"type":"thinking"`); got != 2 {
-		t.Fatalf("stream thinking carrier count = %d, want 2; output=%s", got, stream)
-	}
-	if got := strings.Count(streamText, `"type":"signature_delta"`); got != 2 {
-		t.Fatalf("stream signature count = %d, want 2; output=%s", got, stream)
+	if got := strings.Count(streamText, `"content_block":{"type":"thinking"`); got != 0 {
+		t.Fatalf("trailing thinking carrier must not be emitted, got: %s", streamText)
 	}
 }
 
@@ -1097,18 +1078,11 @@ func TestConvertAntigravityResponseToClaudeNonStream_DetachedGeminiSignatureAfte
 	requestJSON := []byte(`{"model":"gemini-3.6-flash-high"}`)
 	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"visible answer"},{"text":"","thoughtSignature":"` + validSignature + `"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"totalTokenCount":15},"modelVersion":"gemini-3.6-flash","responseId":"resp-detached"}}`)
 	output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3.6-flash-high", requestJSON, requestJSON, responseJSON, nil)
-	if got := gjson.GetBytes(output, "content.#").Int(); got != 2 {
-		t.Fatalf("content blocks = %d, want text + detached thinking; output=%s", got, output)
+	if got := gjson.GetBytes(output, "content.#").Int(); got != 1 {
+		t.Fatalf("content blocks = %d, want 1 text block; output=%s", got, output)
 	}
 	if got := gjson.GetBytes(output, "content.0.text").String(); got != "visible answer" {
 		t.Fatalf("visible text = %q; output=%s", got, output)
-	}
-	if got := gjson.GetBytes(output, "content.1.type").String(); got != "thinking" {
-		t.Fatalf("detached block type = %q; output=%s", got, output)
-	}
-	wantCarrier := encodeGeminiClaudeCarrierSignature(validSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierText)
-	if got := gjson.GetBytes(output, "content.1.signature").String(); got != wantCarrier {
-		t.Fatalf("detached signature = %q, want %q; output=%s", got, wantCarrier, output)
 	}
 }
 
@@ -1143,6 +1117,25 @@ func TestConvertAntigravityResponseToClaude_TrailingFunctionCarrierRoundTrip(t *
 	}
 }
 
+func TestConvertAntigravityResponseToClaudeStream_TrailingFunctionCarrierRoundTrip(t *testing.T) {
+	nativeSignature := testGeminiEPrefixSignature(t)
+	requestJSON := []byte(`{"model":"gemini-3.6-flash-high","tools":[{"name":"run_command","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}]}`)
+	chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"native-call-1","name":"run_command","args":{"command":"true"}}}]}}],"modelVersion":"gemini-3.6-flash","responseId":"tool-trailing-carrier"}}`)
+	chunk2 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + nativeSignature + `"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"tool-trailing-carrier"}}`)
+
+	var param any
+	var output []byte
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.6-flash-high", requestJSON, requestJSON, chunk1, &param), nil)...)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.6-flash-high", requestJSON, requestJSON, chunk2, &param), nil)...)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.6-flash-high", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+
+	outputText := string(output)
+	wantCarrier := encodeGeminiClaudeCarrierSignature(nativeSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierFunction)
+	if !strings.Contains(outputText, `"type":"signature_delta","signature":"`+wantCarrier+`"`) {
+		t.Fatalf("missing trailing function carrier in stream: %s", outputText)
+	}
+}
+
 func TestConvertAntigravityResponseToClaude_DirectionalTextCarriersRoundTrip(t *testing.T) {
 	signature := testGeminiEPrefixSignature(t)
 	requestJSON := []byte(`{"model":"gemini-3.6-flash-high"}`)
@@ -1155,7 +1148,6 @@ func TestConvertAntigravityResponseToClaude_DirectionalTextCarriersRoundTrip(t *
 		carrierIndex        int
 	}{
 		{name: "signed first part", parts: `[{"text":"A","thoughtSignature":"` + signature + `"},{"text":"B"}]`, wantFirstSignature: signature, wantDirection: geminiClaudeCarrierNext},
-		{name: "trailing carrier before next part", parts: `[{"text":"A"},{"text":"","thoughtSignature":"` + signature + `"},{"text":"B"}]`, wantFirstSignature: signature, wantDirection: geminiClaudeCarrierPrevious, carrierIndex: 1},
 		{name: "signed second part", parts: `[{"text":"A"},{"text":"B","thoughtSignature":"` + signature + `"}]`, wantSecondSignature: signature, wantDirection: geminiClaudeCarrierNext, carrierIndex: 1},
 	}
 	for _, testCase := range testCases {

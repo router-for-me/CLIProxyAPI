@@ -554,6 +554,285 @@ func TestSchedulerPick_MixedProvidersResetsCreditsWhenWeightsChange(t *testing.T
 	}
 }
 
+func TestSchedulerPickMixed_RetryTriedFilterPreservesSmoothWeightedDistribution(t *testing.T) {
+	t.Parallel()
+
+	authA := &Auth{ID: "auth-a", Provider: "provider-a"}
+	authB := &Auth{ID: "auth-b", Provider: "provider-b"}
+	authC := &Auth{ID: "auth-c", Provider: "provider-c"}
+	authD := &Auth{ID: "auth-d", Provider: "provider-d"}
+	auths := []*Auth{authA, authB, authC, authD}
+
+	scheduler := newSchedulerForTest(&WeightedRoundRobinSelector{}, auths...)
+	providers := []string{"provider-a", "provider-b", "provider-c", "provider-d"}
+
+	// Simulate retries where auth-a failed and is in the tried filter:
+	// Verify that retry picks rotate smoothly across auth-b, auth-c, auth-d without alphabetical bias towards auth-b.
+	retryCounts := make(map[string]int)
+	tried := map[string]struct{}{"auth-a": {}}
+	for index := 0; index < 30; index++ {
+		picked, _, errPick := scheduler.pickMixed(context.Background(), providers, "", cliproxyexecutor.Options{}, tried)
+		if errPick != nil {
+			t.Fatalf("pickMixed(tried) error = %v", errPick)
+		}
+		retryCounts[picked.ID]++
+	}
+
+	for _, authID := range []string{"auth-b", "auth-c", "auth-d"} {
+		if retryCounts[authID] != 10 {
+			t.Fatalf("auth %q retry picks = %d, want 10 (even distribution without alphabetical bias, counts=%#v)", authID, retryCounts[authID], retryCounts)
+		}
+	}
+}
+
+func TestReadyViewRoundRobinPreservesSuccessorAcrossRebuild(t *testing.T) {
+	t.Parallel()
+
+	entry := func(id string) *scheduledAuth {
+		return &scheduledAuth{auth: &Auth{ID: id}}
+	}
+
+	t.Run("a cooling resumes at b", func(t *testing.T) {
+		original := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("B"), entry("C")},
+		}
+		if got := original.pickRoundRobin(nil); got == nil || got.auth.ID != "A" {
+			t.Fatalf("first pick = %v, want A", got)
+		}
+
+		state := snapshotReadyViewCursors(original)
+		rebuilt := readyView{
+			flat: []*scheduledAuth{entry("B"), entry("C")},
+		}
+		restoreReadyViewCursors(&rebuilt, state)
+
+		got := rebuilt.pickRoundRobin(nil)
+		if got == nil || got.auth.ID != "B" {
+			t.Fatalf("pick after A cooldown = %v, want B", got)
+		}
+	})
+
+	t.Run("b cooling resumes at c", func(t *testing.T) {
+		original := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("B"), entry("C")},
+		}
+		// Pick A, then B
+		if got := original.pickRoundRobin(nil); got == nil || got.auth.ID != "A" {
+			t.Fatalf("first pick = %v, want A", got)
+		}
+		if got := original.pickRoundRobin(nil); got == nil || got.auth.ID != "B" {
+			t.Fatalf("second pick = %v, want B", got)
+		}
+
+		state := snapshotReadyViewCursors(original)
+		rebuilt := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("C")},
+		}
+		restoreReadyViewCursors(&rebuilt, state)
+
+		got := rebuilt.pickRoundRobin(nil)
+		if got == nil || got.auth.ID != "C" {
+			t.Fatalf("pick after B cooldown = %v, want C", got)
+		}
+	})
+
+	t.Run("c cooling wraps to a", func(t *testing.T) {
+		original := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("B"), entry("C")},
+		}
+		// Pick A, B, C
+		for _, want := range []string{"A", "B", "C"} {
+			if got := original.pickRoundRobin(nil); got == nil || got.auth.ID != want {
+				t.Fatalf("pick = %v, want %s", got, want)
+			}
+		}
+
+		state := snapshotReadyViewCursors(original)
+		rebuilt := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("B")},
+		}
+		restoreReadyViewCursors(&rebuilt, state)
+
+		got := rebuilt.pickRoundRobin(nil)
+		if got == nil || got.auth.ID != "A" {
+			t.Fatalf("pick after C cooldown = %v, want A", got)
+		}
+	})
+
+	t.Run("recovery preserves successor", func(t *testing.T) {
+		original := readyView{
+			flat: []*scheduledAuth{entry("B"), entry("C")},
+		}
+		if got := original.pickRoundRobin(nil); got == nil || got.auth.ID != "B" {
+			t.Fatalf("first pick = %v, want B", got)
+		}
+
+		state := snapshotReadyViewCursors(original)
+		// A recovered and is prepended back
+		rebuilt := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("B"), entry("C")},
+		}
+		restoreReadyViewCursors(&rebuilt, state)
+
+		got := rebuilt.pickRoundRobin(nil)
+		if got == nil || got.auth.ID != "C" {
+			t.Fatalf("pick after A recovery = %v, want C", got)
+		}
+	})
+
+	t.Run("retry exclusion resumes without rebuild", func(t *testing.T) {
+		view := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("B"), entry("C")},
+		}
+		if got := view.pickRoundRobin(nil); got == nil || got.auth.ID != "A" {
+			t.Fatalf("first pick = %v, want A", got)
+		}
+		got := view.pickRoundRobin(func(candidate *scheduledAuth) bool {
+			return candidate.auth.ID != "B"
+		})
+		if got == nil || got.auth.ID != "C" {
+			t.Fatalf("pick after excluding B = %v, want C", got)
+		}
+	})
+
+	t.Run("multiple cooldown skips to first surviving successor", func(t *testing.T) {
+		original := readyView{
+			flat: []*scheduledAuth{entry("A"), entry("B"), entry("C"), entry("D")},
+		}
+		if got := original.pickRoundRobin(nil); got == nil || got.auth.ID != "A" {
+			t.Fatalf("first pick = %v, want A", got)
+		}
+
+		state := snapshotReadyViewCursors(original)
+		rebuilt := readyView{
+			flat: []*scheduledAuth{entry("C"), entry("D")},
+		}
+		restoreReadyViewCursors(&rebuilt, state)
+
+		got := rebuilt.pickRoundRobin(nil)
+		if got == nil || got.auth.ID != "C" {
+			t.Fatalf("pick after A and B cooldown = %v, want C", got)
+		}
+	})
+}
+
+func TestScheduledSuccessorIndex_WrapsAndSkipsFilteredCandidates(t *testing.T) {
+	t.Parallel()
+
+	entries := []*scheduledAuth{
+		{auth: &Auth{ID: "aaa"}},
+		{auth: &Auth{ID: "ccc"}},
+		{auth: &Auth{ID: "eee"}},
+	}
+	tests := []struct {
+		name   string
+		lastID string
+		want   int
+	}{
+		{name: "no previous pick starts at head", lastID: "", want: 0},
+		{name: "resumes after previous pick", lastID: "aaa", want: 1},
+		{name: "resumes after filtered-out pick", lastID: "bbb", want: 1},
+		{name: "wraps at the end of the ring", lastID: "eee", want: 0},
+		{name: "wraps for removed trailing pick", lastID: "zzz", want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := scheduledSuccessorIndex(entries, tt.lastID); got != tt.want {
+				t.Fatalf("scheduledSuccessorIndex(%q) = %d, want %d", tt.lastID, got, tt.want)
+			}
+		})
+	}
+	if got := scheduledSuccessorIndex(nil, "aaa"); got != 0 {
+		t.Fatalf("scheduledSuccessorIndex(nil, aaa) = %d, want 0", got)
+	}
+}
+
+func TestManagerRoundRobinPreservesSuccessorAcrossCooldown(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	model := "test-successor-model"
+	authIDs := []string{"successor-auth-a", "successor-auth-b", "successor-auth-c"}
+	registerSchedulerModels(t, "gemini", model, authIDs...)
+
+	for _, id := range authIDs {
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", id, errRegister)
+		}
+	}
+
+	got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle #1 error = %v", errPick)
+	}
+	if got == nil || got.ID != "successor-auth-a" {
+		t.Fatalf("pickSingle #1 = %v, want successor-auth-a", got)
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   "successor-auth-a",
+		Provider: "gemini",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: 429, Message: "rate limit"},
+	})
+
+	got, errPick = manager.scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle #2 after successor-auth-a cooldown error = %v", errPick)
+	}
+	if got == nil || got.ID != "successor-auth-b" {
+		t.Fatalf("pickSingle #2 after successor-auth-a cooldown = %v, want successor-auth-b", got)
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   "successor-auth-b",
+		Provider: "gemini",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: 429, Message: "rate limit"},
+	})
+
+	got, errPick = manager.scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle #3 after successor-auth-b cooldown error = %v", errPick)
+	}
+	if got == nil || got.ID != "successor-auth-c" {
+		t.Fatalf("pickSingle #3 after successor-auth-b cooldown = %v, want successor-auth-c", got)
+	}
+}
+
+func TestSchedulerPick_RoundRobinPreservesWebsocketSuccessorAcrossCooldown(t *testing.T) {
+	t.Parallel()
+
+	wsA := &Auth{ID: "codex-ws-a", Provider: "codex", Attributes: map[string]string{"websockets": "true"}}
+	wsB := &Auth{ID: "codex-ws-b", Provider: "codex", Attributes: map[string]string{"websockets": "true"}}
+	wsC := &Auth{ID: "codex-ws-c", Provider: "codex", Attributes: map[string]string{"websockets": "true"}}
+	httpOnly := &Auth{ID: "codex-http", Provider: "codex"}
+	scheduler := newSchedulerForTest(&RoundRobinSelector{}, httpOnly, wsA, wsB, wsC)
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() first error = %v", errPick)
+	}
+	if got == nil || got.ID != "codex-ws-a" {
+		t.Fatalf("pickSingle() first = %v, want codex-ws-a", got)
+	}
+
+	wsA.Unavailable = true
+	wsA.NextRetryAfter = time.Now().Add(time.Hour)
+	scheduler.upsertAuth(wsA)
+
+	got, errPick = scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() after ws-a cooldown error = %v", errPick)
+	}
+	if got == nil || got.ID != "codex-ws-b" {
+		t.Fatalf("pickSingle() after ws-a cooldown = %v, want codex-ws-b", got)
+	}
+}
+
 func TestSchedulerPick_MixedProvidersPrefersHighestPriorityTier(t *testing.T) {
 	t.Parallel()
 

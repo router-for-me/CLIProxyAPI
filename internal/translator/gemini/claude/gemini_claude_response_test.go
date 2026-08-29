@@ -202,3 +202,91 @@ func TestConvertGeminiResponseToClaudeNonStream_TrailingSignatureOnlyPart(t *tes
 		t.Fatalf("unexpected text block: %s", textBlock.Raw)
 	}
 }
+
+func TestConvertGeminiResponseToClaude_UsageWithCachedContentTokenCount(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}]}`)
+	chunk := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"text": "Hello world"}]
+			},
+			"finishReason": "STOP"
+		}],
+		"usageMetadata": {
+			"promptTokenCount": 100,
+			"candidatesTokenCount": 7,
+			"cachedContentTokenCount": 91
+		},
+		"modelVersion": "gemini-2.5-pro",
+		"responseId": "resp-usage-cache"
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-2.5-pro", requestJSON, requestJSON, chunk, &param), nil)
+	outputText := string(output)
+
+	if !strings.Contains(outputText, `"type":"message_delta"`) {
+		t.Fatalf("expected message_delta event in output, got: %s", outputText)
+	}
+
+	foundMessageDelta := false
+	// Find the message_delta event data
+	for _, line := range strings.Split(outputText, "\n") {
+		if strings.HasPrefix(line, "data: ") && strings.Contains(line, `"type":"message_delta"`) {
+			foundMessageDelta = true
+			deltaJSON := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			inputTokens := deltaJSON.Get("usage.input_tokens").Int()
+			if inputTokens != 9 {
+				t.Fatalf("expected usage.input_tokens = 9 (100 - 91), got %d. Payload: %s", inputTokens, line)
+			}
+			cacheReadTokens := deltaJSON.Get("usage.cache_read_input_tokens").Int()
+			if cacheReadTokens != 91 {
+				t.Fatalf("expected usage.cache_read_input_tokens = 91, got %d. Payload: %s", cacheReadTokens, line)
+			}
+			outputTokens := deltaJSON.Get("usage.output_tokens").Int()
+			if outputTokens != 7 {
+				t.Fatalf("expected usage.output_tokens = 7, got %d. Payload: %s", outputTokens, line)
+			}
+		}
+	}
+	if !foundMessageDelta {
+		t.Fatalf("failed to locate parsed message_delta event in payload: %s", outputText)
+	}
+}
+
+func TestConvertGeminiResponseToClaudeNonStream_UsageWithCachedContentTokenCount(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}]}`)
+	geminiResponse := []byte(`{
+		"candidates": [{
+			"content": {
+				"parts": [{"text": "Hello world"}]
+			},
+			"finishReason": "STOP"
+		}],
+		"usageMetadata": {
+			"promptTokenCount": 100,
+			"candidatesTokenCount": 7,
+			"cachedContentTokenCount": 91
+		},
+		"modelVersion": "gemini-2.5-pro",
+		"responseId": "resp-usage-cache-nonstream"
+	}`)
+
+	ctx := context.Background()
+	output := ConvertGeminiResponseToClaudeNonStream(ctx, "gemini-2.5-pro", requestJSON, requestJSON, geminiResponse, nil)
+	outputJSON := gjson.ParseBytes(output)
+
+	inputTokens := outputJSON.Get("usage.input_tokens").Int()
+	if inputTokens != 9 {
+		t.Fatalf("expected usage.input_tokens = 9 (100 - 91), got %d. Output: %s", inputTokens, string(output))
+	}
+	cacheReadTokens := outputJSON.Get("usage.cache_read_input_tokens").Int()
+	if cacheReadTokens != 91 {
+		t.Fatalf("expected usage.cache_read_input_tokens = 91, got %d. Output: %s", cacheReadTokens, string(output))
+	}
+	outputTokens := outputJSON.Get("usage.output_tokens").Int()
+	if outputTokens != 7 {
+		t.Fatalf("expected usage.output_tokens = 7, got %d. Output: %s", outputTokens, string(output))
+	}
+}

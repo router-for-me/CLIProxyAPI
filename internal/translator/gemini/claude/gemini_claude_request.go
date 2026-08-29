@@ -79,12 +79,17 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 	// contents
 	if messagesResult := gjson.GetBytes(rawJSON, "messages"); messagesResult.IsArray() {
 		contentItems := translatorcommon.NewRawArrayItems(messagesResult.Get("#").Int())
+		toolNameByID := make(map[string]string)
+		var pendingToolUseIDs []string
 		messagesResult.ForEach(func(_, messageResult gjson.Result) bool {
 			roleResult := messageResult.Get("role")
 			if roleResult.Type != gjson.String {
 				return true
 			}
-			role := roleResult.String()
+			originalRole := roleResult.String()
+			precedingToolUseIDs := pendingToolUseIDs
+			pendingToolUseIDs = nil
+			role := originalRole
 			if role == "assistant" {
 				role = "model"
 			} else if role == "system" {
@@ -103,6 +108,9 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 				return true
 			}
 			if contentsResult.IsArray() {
+				if originalRole == "user" {
+					contentsResult = translatorcommon.AlignClaudeToolResults(contentsResult, precedingToolUseIDs)
+				}
 				contentsResult.ForEach(func(_, contentResult gjson.Result) bool {
 					switch contentResult.Get("type").String() {
 					case "text":
@@ -126,10 +134,9 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 
 					case "tool_use":
 						functionName := contentResult.Get("name").String()
-						if toolUseID := contentResult.Get("id").String(); toolUseID != "" {
-							if derived := toolNameFromClaudeToolUseID(toolUseID); derived != "" {
-								functionName = derived
-							}
+						toolUseID := contentResult.Get("id").String()
+						if toolUseID != "" && functionName != "" {
+							toolNameByID[toolUseID] = functionName
 						}
 						functionName = util.SanitizeFunctionName(functionName)
 						functionArgs := contentResult.Get("input").String()
@@ -137,9 +144,15 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 						if argsResult.IsObject() && gjson.Valid(functionArgs) {
 							part := []byte(`{"thoughtSignature":"","functionCall":{"name":"","args":{}}}`)
 							part, _ = sjson.SetBytes(part, "thoughtSignature", geminiClaudeThoughtSignature)
+							if toolUseID != "" {
+								part, _ = sjson.SetBytes(part, "functionCall.id", toolUseID)
+							}
 							part, _ = sjson.SetBytes(part, "functionCall.name", functionName)
 							part, _ = sjson.SetRawBytes(part, "functionCall.args", []byte(functionArgs))
 							partItems = append(partItems, part)
+							if originalRole == "assistant" {
+								pendingToolUseIDs = append(pendingToolUseIDs, toolUseID)
+							}
 						}
 
 					case "tool_result":
@@ -147,13 +160,17 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 						if toolCallID == "" {
 							return true
 						}
-						funcName := toolNameFromClaudeToolUseID(toolCallID)
+						funcName := toolNameByID[toolCallID]
+						if funcName == "" {
+							funcName = toolNameFromClaudeToolUseID(toolCallID)
+						}
 						if funcName == "" {
 							funcName = toolCallID
 						}
 						funcName = util.SanitizeFunctionName(funcName)
 						toolResult := util.ConvertClaudeToolResultContent(contentResult.Get("content"))
 						part := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)
+						part, _ = sjson.SetBytes(part, "functionResponse.id", toolCallID)
 						part, _ = sjson.SetBytes(part, "functionResponse.name", funcName)
 						if toolResult.ResultIsRaw {
 							part, _ = sjson.SetRawBytes(part, "functionResponse.response.result", []byte(toolResult.Result))

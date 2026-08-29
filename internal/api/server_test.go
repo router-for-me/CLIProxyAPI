@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -41,6 +42,7 @@ type codexSearchCaptureExecutor struct {
 	statuses     []int
 	refreshCalls int
 	httpCalls    int
+	beforeReturn func()
 }
 
 func (e *codexSearchCaptureExecutor) Identifier() string { return "codex" }
@@ -138,6 +140,9 @@ func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *au
 	if e.httpCalls <= len(e.statuses) && e.statuses[e.httpCalls-1] > 0 {
 		statusCode = e.statuses[e.httpCalls-1]
 	}
+	if e.beforeReturn != nil {
+		e.beforeReturn()
+	}
 	return &http.Response{
 		StatusCode: statusCode,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -148,6 +153,46 @@ func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *au
 type codexSearchHomeDispatcher struct {
 	calls  atomic.Int32
 	policy atomic.Value
+}
+
+type homeUnauthorizedUsageCapture struct {
+	authID  string
+	records chan coreusage.Record
+}
+
+func (p *homeUnauthorizedUsageCapture) HandleUsage(_ context.Context, record coreusage.Record) {
+	if p == nil || record.ExecutorType != "home-result" || record.AuthID != p.authID {
+		return
+	}
+	select {
+	case p.records <- record:
+	default:
+	}
+}
+
+func (p *homeUnauthorizedUsageCapture) wait(t *testing.T) coreusage.Record {
+	t.Helper()
+	select {
+	case record := <-p.records:
+		return record
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Home unauthorized usage record")
+		return coreusage.Record{}
+	}
+}
+
+type noopHomeUnauthorizedUsagePlugin struct{}
+
+func (noopHomeUnauthorizedUsagePlugin) HandleUsage(context.Context, coreusage.Record) {}
+
+func registerHomeUnauthorizedUsageCapture(t *testing.T, name, authID string) *homeUnauthorizedUsageCapture {
+	t.Helper()
+	capture := &homeUnauthorizedUsageCapture{authID: authID, records: make(chan coreusage.Record, 1)}
+	coreusage.RegisterNamedPlugin(name, capture)
+	t.Cleanup(func() {
+		coreusage.RegisterNamedPlugin(name, noopHomeUnauthorizedUsagePlugin{})
+	})
+	return capture
 }
 
 func (*codexSearchHomeDispatcher) HeartbeatOK() bool { return true }
@@ -195,6 +240,24 @@ type trackedSearchResponseBody struct {
 }
 
 func (b *trackedSearchResponseBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
+type errorSearchResponseBody struct {
+	payload []byte
+	read    atomic.Bool
+	closed  atomic.Bool
+}
+
+func (b *errorSearchResponseBody) Read(p []byte) (int, error) {
+	if !b.read.CompareAndSwap(false, true) {
+		return 0, io.EOF
+	}
+	return copy(p, b.payload), io.ErrUnexpectedEOF
+}
+
+func (b *errorSearchResponseBody) Close() error {
 	b.closed.Store(true)
 	return nil
 }
@@ -324,30 +387,136 @@ func TestAuditHomeCodexSearchBodyCloseBeforeRelease(t *testing.T) {
 	}
 }
 
-func TestHomeCodexAlphaSearchRefreshesUnauthorizedSelectionOnce(t *testing.T) {
+func TestHomeCodexAlphaSearchForwardsUnauthorizedResponseWithoutRefresh(t *testing.T) {
+	const upstreamError = `{"error":{"message":"access token expired"}}`
 	server := newTestServer(t)
+	server.cfg.RequestLog = true
 	dispatcher := &codexSearchHomeDispatcher{}
 	server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
 	server.handlers.AuthManager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
-	executor := &codexSearchCaptureExecutor{statuses: []int{http.StatusUnauthorized, http.StatusOK}}
+	executor := &codexSearchCaptureExecutor{
+		statuses:     []int{http.StatusUnauthorized},
+		responseBody: io.NopCloser(strings.NewReader(upstreamError)),
+	}
 	server.handlers.AuthManager.RegisterExecutor(executor)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"id":"home-search-refresh","model":"gpt-5-codex","query":"test"}`))
 	req.Header.Set("Authorization", "Bearer test-key")
 	rr := httptest.NewRecorder()
-	server.engine.ServeHTTP(rr, req)
+	c, _ := gin.CreateTestContext(rr)
+	c.Request = req
+	server.codexAlphaSearch(c)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
 	}
-	if executor.refreshCalls != 1 || executor.httpCalls != 2 {
-		t.Fatalf("refresh/http calls = %d/%d, want 1/2", executor.refreshCalls, executor.httpCalls)
+	if got := rr.Body.String(); got != upstreamError {
+		t.Fatalf("body = %q, want original upstream error %q", got, upstreamError)
 	}
-	if got := executor.request.Header.Get("Authorization"); got != "Bearer refreshed-home-search-token" {
-		t.Fatalf("retry Authorization = %q, want refreshed token", got)
+	if executor.refreshCalls != 0 || executor.httpCalls != 1 {
+		t.Fatalf("refresh/http calls = %d/%d, want 0/1", executor.refreshCalls, executor.httpCalls)
+	}
+	if got := executor.request.Header.Get("Authorization"); got != "Bearer home-search-token" {
+		t.Fatalf("Authorization = %q, want original Home token", got)
 	}
 	if got := dispatcher.calls.Load(); got != 1 {
 		t.Fatalf("Home RPOP calls = %d, want 1", got)
+	}
+	rawAPIResponse, okResponse := c.Get("API_RESPONSE")
+	if !okResponse {
+		t.Fatal("API_RESPONSE was not captured")
+	}
+	apiResponse, _ := rawAPIResponse.([]byte)
+	if !strings.Contains(string(apiResponse), "Status: 401") || !strings.Contains(string(apiResponse), upstreamError) {
+		t.Fatalf("API_RESPONSE = %q, want original upstream 401", apiResponse)
+	}
+}
+
+func TestHomeCodexAlphaSearchReportsUnauthorizedBeforeEarlyReturn(t *testing.T) {
+	const upstreamError = `{"error":{"message":"access token expired"}}`
+	tests := []struct {
+		name         string
+		responseBody func() io.ReadCloser
+		beforeReturn func(*executionregistry.Registry)
+		wantStatus   int
+		wantFailBody string
+	}{
+		{
+			name: "response bind failure",
+			responseBody: func() io.ReadCloser {
+				return &trackedSearchResponseBody{Reader: strings.NewReader(upstreamError)}
+			},
+			beforeReturn: func(registry *executionregistry.Registry) {
+				_ = registry.Close()
+			},
+			wantStatus:   http.StatusServiceUnavailable,
+			wantFailBody: "upstream unauthorized",
+		},
+		{
+			name: "response read failure",
+			responseBody: func() io.ReadCloser {
+				return &errorSearchResponseBody{payload: []byte(upstreamError)}
+			},
+			wantStatus:   http.StatusBadGateway,
+			wantFailBody: upstreamError,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := newTestServer(t)
+			registry := executionregistry.New()
+			server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
+			server.handlers.AuthManager.PublishHomeDispatch(&codexSearchHomeDispatcher{}, registry, 1)
+			executor := &codexSearchCaptureExecutor{
+				statuses:     []int{http.StatusUnauthorized},
+				responseBody: test.responseBody(),
+			}
+			if test.beforeReturn != nil {
+				executor.beforeReturn = func() { test.beforeReturn(registry) }
+			}
+			server.handlers.AuthManager.RegisterExecutor(executor)
+			usageCapture := registerHomeUnauthorizedUsageCapture(t, t.Name(), "home-codex-search")
+
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"model":"gpt-5-codex","query":"test"}`))
+			request.Header.Set("Authorization", "Bearer test-key")
+			server.engine.ServeHTTP(recorder, request)
+
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.wantStatus, recorder.Body.String())
+			}
+			record := usageCapture.wait(t)
+			if record.Fail.StatusCode != http.StatusUnauthorized || record.Fail.Body != test.wantFailBody {
+				t.Fatalf("Home unauthorized failure = status %d body %q, want status 401 body %q", record.Fail.StatusCode, record.Fail.Body, test.wantFailBody)
+			}
+		})
+	}
+}
+
+func TestHomeCodexAlphaSearchRequestLogPreservesBodyReturnedWithReadError(t *testing.T) {
+	const upstreamError = `{"error":{"message":"access token expired"}}`
+	server := newTestServer(t)
+	server.cfg.RequestLog = true
+	server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
+	server.handlers.AuthManager.PublishHomeDispatch(&codexSearchHomeDispatcher{}, executionregistry.New(), 1)
+	server.handlers.AuthManager.RegisterExecutor(&codexSearchCaptureExecutor{
+		statuses:     []int{http.StatusUnauthorized},
+		responseBody: &errorSearchResponseBody{payload: []byte(upstreamError)},
+	})
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"model":"gpt-5-codex","query":"test"}`))
+	server.codexAlphaSearch(c)
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusBadGateway, recorder.Body.String())
+	}
+	rawAPIResponse, okResponse := c.Get("API_RESPONSE")
+	apiResponse, _ := rawAPIResponse.([]byte)
+	if !okResponse || !strings.Contains(string(apiResponse), upstreamError) || !strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
+		t.Fatalf("API_RESPONSE = %q, want upstream body and read error", apiResponse)
 	}
 }
 
@@ -1978,6 +2147,135 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	for slug, found := range hiddenModels {
 		if !found {
 			t.Fatalf("expected hidden model %s in codex catalog", slug)
+		}
+	}
+}
+
+func TestCodexClientModelsEndpoint_FiltersMaxAndUltraForOlderClientVersion(t *testing.T) {
+	clientID := "codex-client-version-filter-test"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
+		{
+			ID:          "gpt-5.6-sol",
+			Object:      "model",
+			OwnedBy:     "openai",
+			Type:        "openai",
+			DisplayName: "GPT-5.6-Sol",
+		},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	server := newTestServer(t)
+
+	// Older client version 0.137.0 should NOT have max or ultra reasoning levels
+	reqOld := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.137.0", nil)
+	reqOld.Header.Set("Authorization", "Bearer test-key")
+	rrOld := httptest.NewRecorder()
+	server.engine.ServeHTTP(rrOld, reqOld)
+
+	if rrOld.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rrOld.Code, http.StatusOK, rrOld.Body.String())
+	}
+
+	var respOld struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(rrOld.Body.Bytes(), &respOld); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+
+	foundSol := false
+	for _, m := range respOld.Models {
+		if slug, _ := m["slug"].(string); slug == "gpt-5.6-sol" {
+			foundSol = true
+			levels, ok := m["supported_reasoning_levels"].([]any)
+			if !ok {
+				t.Fatalf("expected supported_reasoning_levels for gpt-5.6-sol, got %#v", m["supported_reasoning_levels"])
+			}
+			for _, rawLevel := range levels {
+				level, _ := rawLevel.(map[string]any)
+				effort, _ := level["effort"].(string)
+				if effort == "max" || effort == "ultra" {
+					t.Fatalf("older client 0.137.0 received unsupported reasoning effort %q", effort)
+				}
+			}
+		}
+	}
+	if !foundSol {
+		t.Fatal("expected gpt-5.6-sol in codex catalog")
+	}
+
+	// Newer client version 0.149.1 should preserve max and ultra reasoning levels
+	reqNew := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.149.1", nil)
+	reqNew.Header.Set("Authorization", "Bearer test-key")
+	rrNew := httptest.NewRecorder()
+	server.engine.ServeHTTP(rrNew, reqNew)
+
+	if rrNew.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rrNew.Code, http.StatusOK, rrNew.Body.String())
+	}
+
+	var respNew struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(rrNew.Body.Bytes(), &respNew); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+
+	foundNewUltra := false
+	for _, m := range respNew.Models {
+		if slug, _ := m["slug"].(string); slug == "gpt-5.6-sol" {
+			levels, ok := m["supported_reasoning_levels"].([]any)
+			if !ok {
+				t.Fatalf("expected supported_reasoning_levels for gpt-5.6-sol, got %#v", m["supported_reasoning_levels"])
+			}
+			for _, rawLevel := range levels {
+				level, _ := rawLevel.(map[string]any)
+				if effort, _ := level["effort"].(string); effort == "ultra" {
+					foundNewUltra = true
+				}
+			}
+		}
+	}
+	if !foundNewUltra {
+		t.Fatal("expected ultra reasoning effort for newer client 0.149.1")
+	}
+
+	// Unparseable / empty client versions (e.g. client_version=, client_version=pi) should also preserve max and ultra (unfiltered)
+	for _, unparsedVersion := range []string{"", "pi", "latest"} {
+		path := "/v1/models?client_version=" + unparsedVersion
+		reqUnparsed := httptest.NewRequest(http.MethodGet, path, nil)
+		reqUnparsed.Header.Set("Authorization", "Bearer test-key")
+		rrUnparsed := httptest.NewRecorder()
+		server.engine.ServeHTTP(rrUnparsed, reqUnparsed)
+
+		if rrUnparsed.Code != http.StatusOK {
+			t.Fatalf("path %q status = %d, want %d body=%s", path, rrUnparsed.Code, http.StatusOK, rrUnparsed.Body.String())
+		}
+
+		var respUnparsed struct {
+			Models []map[string]any `json:"models"`
+		}
+		if err := json.Unmarshal(rrUnparsed.Body.Bytes(), &respUnparsed); err != nil {
+			t.Fatalf("path %q parse error: %v", path, err)
+		}
+
+		foundUltra := false
+		for _, m := range respUnparsed.Models {
+			if slug, _ := m["slug"].(string); slug == "gpt-5.6-sol" {
+				levels, _ := m["supported_reasoning_levels"].([]any)
+				for _, rawLevel := range levels {
+					level, _ := rawLevel.(map[string]any)
+					if effort, _ := level["effort"].(string); effort == "ultra" {
+						foundUltra = true
+					}
+				}
+			}
+		}
+		if !foundUltra {
+			t.Fatalf("path %q expected ultra reasoning effort to be preserved for unparsed client_version", path)
 		}
 	}
 }

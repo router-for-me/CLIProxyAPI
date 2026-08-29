@@ -27,6 +27,7 @@ const (
 	xaiToolSearchType          = "tool_search"
 	xaiWebSearchToolType       = "web_search"
 	xaiXSearchToolType         = "x_search"
+	xaiMaxTools                = 200
 	// Codex Desktop injects codex_app.automation_update with a large oneOf+$ref
 	// schema. xAI's free/build Responses path accepts the HTTP request but never
 	// emits SSE when that schema is present, so Desktop hangs on "thinking".

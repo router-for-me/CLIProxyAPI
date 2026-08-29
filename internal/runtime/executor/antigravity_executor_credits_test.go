@@ -225,29 +225,6 @@ func TestClassifyAntigravity429(t *testing.T) {
 	})
 }
 
-func TestAntigravityShouldRetryNoCapacity_Standard503(t *testing.T) {
-	body := []byte(`{
-		"error": {
-			"code": 503,
-			"message": "No capacity available for model gemini-3.1-flash-image on the server",
-			"status": "UNAVAILABLE",
-			"details": [
-				{
-					"@type": "type.googleapis.com/google.rpc.ErrorInfo",
-					"reason": "MODEL_CAPACITY_EXHAUSTED",
-					"domain": "cloudcode-pa.googleapis.com",
-					"metadata": {
-						"model": "gemini-3.1-flash-image"
-					}
-				}
-			]
-		}
-	}`)
-	if !antigravityShouldRetryNoCapacity(http.StatusServiceUnavailable, body) {
-		t.Fatal("antigravityShouldRetryNoCapacity() = false, want true")
-	}
-}
-
 func TestInjectEnabledCreditTypes(t *testing.T) {
 	body := []byte(`{"model":"claude-sonnet-4-6","request":{}}`)
 	got := injectEnabledCreditTypes(body)

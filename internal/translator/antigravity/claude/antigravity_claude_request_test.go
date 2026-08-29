@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	log "github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
@@ -2004,6 +2005,53 @@ func TestConvertClaudeRequestToAntigravity_ReorderParallelFunctionCalls(t *testi
 	}
 	if parts[3].Get("functionCall.name").String() != "Read" || parts[3].Get("functionCall.id").String() != "call_2" {
 		t.Errorf("Expected fc2 fourth, got %s", parts[3].Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_AlignsPermutedParallelToolResultsWithMixedText(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"gemini-3.7-flash-high",
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"call_1620603","name":"Read","input":{"file_path":"/tmp/1"}},
+				{"type":"tool_use","id":"call_1620604","name":"Read","input":{"file_path":"/tmp/2"}},
+				{"type":"tool_use","id":"call_1620605","name":"Read","input":{"file_path":"/tmp/3"}},
+				{"type":"tool_use","id":"call_1620606","name":"Read","input":{"file_path":"/tmp/4"}},
+				{"type":"tool_use","id":"call_1620607","name":"Read","input":{"file_path":"/tmp/5"}},
+				{"type":"tool_use","id":"call_1620608","name":"Read","input":{"file_path":"/tmp/6"}}
+			]},
+			{"role":"user","content":[
+				{"type":"text","text":"Tool results follow."},
+				{"type":"tool_result","tool_use_id":"call_1620608","content":"six"},
+				{"type":"tool_result","tool_use_id":"call_1620605","content":"three"},
+				{"type":"tool_result","tool_use_id":"call_1620603","content":"one"},
+				{"type":"text","text":"Continue after reading."},
+				{"type":"tool_result","tool_use_id":"call_1620607","content":"five"},
+				{"type":"tool_result","tool_use_id":"call_1620604","content":"two"},
+				{"type":"tool_result","tool_use_id":"call_1620606","content":"four"}
+			]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3.7-flash-high", inputJSON, false)
+	parts := gjson.GetBytes(output, "request.contents.1.parts").Array()
+	if len(parts) != 8 {
+		t.Fatalf("parts = %d, want six responses followed by two text parts; output=%s", len(parts), output)
+	}
+	for index := 0; index < 6; index++ {
+		wantID := fmt.Sprintf("call_162060%d", index+3)
+		if gotID := parts[index].Get("functionResponse.id").String(); gotID != wantID {
+			t.Fatalf("functionResponse[%d].id = %q, want %q; output=%s", index, gotID, wantID, output)
+		}
+	}
+	if got := parts[6].Get("text").String(); got != "Tool results follow." {
+		t.Fatalf("first trailing text = %q; output=%s", got, output)
+	}
+	if got := parts[7].Get("text").String(); got != "Continue after reading." {
+		t.Fatalf("second trailing text = %q; output=%s", got, output)
+	}
+	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(output); errPairing != nil {
+		t.Fatalf("translated parallel tool history is invalid: %v; output=%s", errPairing, output)
 	}
 }
 
