@@ -22,6 +22,7 @@ import (
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	claudeoutput "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/output"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -80,8 +81,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 		return
 	}
 
-	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
-	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
+	_, rawJSON = canonicalizeClaudeNamespacedRequest(rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -112,15 +112,12 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 		return
 	}
 
-	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
-	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
-
 	c.Header("Content-Type", "application/json")
 
 	alt := h.GetAlt(c)
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 
-	modelName := gjson.GetBytes(rawJSON, "model").String()
+	modelName, rawJSON := canonicalizeClaudeNamespacedRequest(rawJSON)
 
 	resp, upstreamHeaders, errMsg := h.ExecuteCountWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
 	if errMsg != nil {
@@ -133,19 +130,20 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 	cliCancel()
 }
 
-// rewriteClaudeDDModelInBody decodes model IDs of the form claude-fable-5-dd-<reversed>
-// back into the original model name used for routing and upstream requests.
-func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
+// canonicalizeClaudeNamespacedRequest removes the public Anthropic namespace
+// from both the routing model and the working request body. Native Claude model
+// IDs and requests without a model are returned unchanged.
+func canonicalizeClaudeNamespacedRequest(rawJSON []byte) (string, []byte) {
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	resolved := claudemodels.ResolveClaudeModelIDPrefix(modelName)
 	if resolved == modelName {
-		return rawJSON
+		return modelName, rawJSON
 	}
 	updated, errSet := sjson.SetBytes(rawJSON, "model", resolved)
 	if errSet != nil {
-		return rawJSON
+		return modelName, rawJSON
 	}
-	return updated
+	return resolved, updated
 }
 
 // ClaudeModels handles the Claude models listing endpoint.
@@ -154,8 +152,7 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
-	disableCloaking := h.Cfg != nil && h.Cfg.ClaudeCode.DisableCloakingModelList
-	c.JSON(http.StatusOK, claudemodels.BuildResponse(h.Models(), disableCloaking))
+	c.JSON(http.StatusOK, claudemodels.BuildResponse(h.Models()))
 }
 
 // handleNonStreamingResponse handles non-streaming content generation requests for Claude models.
@@ -257,6 +254,7 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 				continue
 			}
 			// Upstream failed immediately. Return proper error status and JSON.
+			logClaudeStreamBootstrapDiagnostic(c, cliCtx, "initial_error", modelName, errMsg)
 			h.WriteErrorResponse(c, errMsg)
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
@@ -267,6 +265,7 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 		case chunk, ok := <-dataChan:
 			if !ok {
 				if errMsg, hasPendingError := handlers.PendingStreamError(errChan); hasPendingError {
+					logClaudeStreamBootstrapDiagnostic(c, cliCtx, "closed_before_first_chunk", modelName, errMsg)
 					h.WriteErrorResponse(c, errMsg)
 					if errMsg != nil {
 						cliCancel(errMsg.Error)
@@ -275,9 +274,10 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 					}
 					return
 				}
-				// Stream closed without data? Send DONE or just headers.
+				// A clean close before a semantic terminal event is a protocol error.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+				_, _ = c.Writer.Write(claudeIncompleteStreamError())
 				flusher.Flush()
 				cliCancel(nil)
 				return
@@ -294,19 +294,25 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 			}
 
 			// Continue streaming the rest
-			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
+			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, claudeStreamChunkTerminal(chunk))
 			return
 		}
 	}
 }
 
-func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, terminalSeen bool) {
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
 			if len(chunk) == 0 {
 				return
 			}
+			terminalSeen = terminalSeen || claudeStreamChunkTerminal(chunk)
 			_, _ = c.Writer.Write(chunk)
+		},
+		WriteDone: func() {
+			if !terminalSeen {
+				_, _ = c.Writer.Write(claudeIncompleteStreamError())
+			}
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			if errMsg == nil {
@@ -322,6 +328,14 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
 		},
 	})
+}
+
+func claudeStreamChunkTerminal(chunk []byte) bool {
+	return claudeoutput.HasTerminalEvent(chunk)
+}
+
+func claudeIncompleteStreamError() []byte {
+	return []byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Upstream stream ended before response.completed.\"}}\n\n")
 }
 
 type claudeErrorDetail struct {

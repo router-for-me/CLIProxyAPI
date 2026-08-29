@@ -602,6 +602,89 @@ func TestConvertClaudeRequestToCodex_PreservesContentOrderAcrossToolAndReasoning
 	}
 }
 
+func TestConvertClaudeRequestToCodex_PreservesToolResultURLImage(t *testing.T) {
+	payload := []byte(`{
+		"model":"claude-opus-5",
+		"max_tokens":1024,
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"toolu_1","content":[
+					{"type":"text","text":"before image"},
+					{"type":"image","source":{"type":"url","url":"https://example.test/image.png"}},
+					{"type":"text","text":"after image"}
+				]},
+				{"type":"text","text":"following turn"}
+			]}
+		]
+	}`)
+	if err := ValidateClaudeRequestForCodex(payload); err != nil {
+		t.Fatalf("ValidateClaudeRequestForCodex() error = %v", err)
+	}
+
+	result := ConvertClaudeRequestToCodex("gpt-5.6-sol", payload, false)
+	inputs := gjson.GetBytes(result, "input").Array()
+	if len(inputs) != 3 {
+		t.Fatalf("got %d input items, want 3. Output: %s", len(inputs), result)
+	}
+	output := inputs[1].Get("output").Array()
+	wantTypes := []string{"input_text", "input_image", "input_text"}
+	if len(output) != len(wantTypes) {
+		t.Fatalf("got %d tool result items, want %d. Output: %s", len(output), len(wantTypes), result)
+	}
+	for i, wantType := range wantTypes {
+		if got := output[i].Get("type").String(); got != wantType {
+			t.Fatalf("output[%d].type = %q, want %q. Output: %s", i, got, wantType, result)
+		}
+	}
+	if got := output[1].Get("image_url").String(); got != "https://example.test/image.png" {
+		t.Fatalf("output[1].image_url = %q, want URL image", got)
+	}
+	if got := inputs[2].Get("content.0.text").String(); got != "following turn" {
+		t.Fatalf("following turn = %q, want following turn", got)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_PreservesNonFileToolResultDocuments(t *testing.T) {
+	payload := []byte(`{
+		"model":"claude-opus-5",
+		"max_tokens":1024,
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[
+				{"type":"document","source":{"type":"text","media_type":"text/plain","data":"plain document"}},
+				{"type":"document","source":{"type":"url","url":"https://example.test/document.pdf"}},
+				{"type":"document","source":{"type":"content","content":[
+					{"type":"text","text":"embedded text"},
+					{"type":"image","source":{"type":"url","url":"https://example.test/image.png"}}
+				]}}
+			]}]}
+		]
+	}`)
+	if err := ValidateClaudeRequestForCodex(payload); err != nil {
+		t.Fatalf("ValidateClaudeRequestForCodex() error = %v", err)
+	}
+
+	result := ConvertClaudeRequestToCodex("gpt-5.6-sol", payload, false)
+	output := gjson.GetBytes(result, "input.1.output").Array()
+	if len(output) != 3 {
+		t.Fatalf("got %d document outputs, want 3. Output: %s", len(output), result)
+	}
+	wantSourceTypes := []string{"text", "url", "content"}
+	for i, wantSourceType := range wantSourceTypes {
+		if got := output[i].Get("type").String(); got != "input_text" {
+			t.Fatalf("output[%d].type = %q, want input_text", i, got)
+		}
+		document := gjson.Parse(output[i].Get("text").String())
+		if got := document.Get("source.type").String(); got != wantSourceType {
+			t.Fatalf("output[%d] source type = %q, want %q", i, got, wantSourceType)
+		}
+	}
+	if got := gjson.Parse(output[2].Get("text").String()).Get("source.content.1.source.url").String(); got != "https://example.test/image.png" {
+		t.Fatalf("nested document image URL = %q", got)
+	}
+}
+
 func TestConvertClaudeRequestToCodex_AssistantGrokSignatureToReasoningItem(t *testing.T) {
 	signature := "HmlYdr2aCAqCYP/m9mr8PS6KOsdMs72FGDigmydR+Jsmuv8KX97yWPlbOwmXJgWn0CbHaCacdQD3+n5EvpgLfPNmafS3kdICBjRuDf4bzHy7uBiUhNVhqPtp/ee1y9q4imPE4LYgD1VZ4J+bp9mTeqA1+nC9Oue58CiNEMV9SVaGenCD+aBnVuSTzQhD32Y+68i6HLJW0Dx6ifaRfb8hxYtA/sPM+/FTvAMW11nRho5a2BBSkpnzfqqAz/e/vGJ77/bygpXM823QA9wL9i0X"
 	payload := []byte(`{"model":"grok-4.5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":""},{"type":"text","text":"answer"}]},{"role":"user","content":"next"}]}`)

@@ -4,23 +4,23 @@ import "testing"
 
 func TestBuildResponse(t *testing.T) {
 	availableModels := []map[string]any{
-		{"id": "claude-z", "display_name": "Zebra", "max_tokens": 64000},
+		{"id": "custom-z", "display_name": "Zebra", "max_tokens": 64000},
 		{"id": "gpt-4o", "display_name": "Alpha"},
-		{"id": "claude-c", "display_name": "Alpha"},
-		{"id": "claude-b", "display_name": "Beta"},
+		{"id": "claude-opus-5", "display_name": "Alpha"},
+		{"id": "gemini-2.5-pro", "display_name": "Beta"},
 	}
 
-	response := BuildResponse(availableModels, false)
+	response := BuildResponse(availableModels)
 	models, ok := response["data"].([]map[string]any)
 	if !ok {
 		t.Fatalf("data type = %T, want []map[string]any", response["data"])
 	}
 
 	wantIDs := []string{
-		"claude-c",
-		"claude-fable-5-dd-o4-tpg",
-		"claude-b",
-		"claude-z",
+		"claude-opus-5",
+		"claude/gpt-4o",
+		"claude/gemini-2.5-pro",
+		"claude/custom-z",
 	}
 	if len(models) != len(wantIDs) {
 		t.Fatalf("len(data) = %d, want %d", len(models), len(wantIDs))
@@ -46,37 +46,13 @@ func TestBuildResponse(t *testing.T) {
 	if got := availableModels[1]["id"]; got != "gpt-4o" {
 		t.Fatalf("BuildResponse mutated input id to %v", got)
 	}
-	if got := availableModels[0]["id"]; got != "claude-z" {
+	if got := availableModels[0]["id"]; got != "custom-z" {
 		t.Fatalf("BuildResponse reordered input: first id = %v", got)
 	}
 }
 
-func TestBuildResponseWithCloakingDisabled(t *testing.T) {
-	availableModels := []map[string]any{
-		{"id": "gpt-4o", "display_name": "GPT-4o"},
-	}
-
-	response := BuildResponse(availableModels, true)
-	models, ok := response["data"].([]map[string]any)
-	if !ok {
-		t.Fatalf("data type = %T, want []map[string]any", response["data"])
-	}
-	if len(models) != 1 {
-		t.Fatalf("len(data) = %d, want 1", len(models))
-	}
-	if got := models[0]["id"]; got != "gpt-4o" {
-		t.Fatalf("data[0].id = %v, want gpt-4o", got)
-	}
-	if got := response["first_id"]; got != "gpt-4o" {
-		t.Fatalf("first_id = %v, want gpt-4o", got)
-	}
-	if got := response["last_id"]; got != "gpt-4o" {
-		t.Fatalf("last_id = %v, want gpt-4o", got)
-	}
-}
-
 func TestBuildResponseEmpty(t *testing.T) {
-	response := BuildResponse(nil, false)
+	response := BuildResponse(nil)
 	models, ok := response["data"].([]map[string]any)
 	if !ok {
 		t.Fatalf("data type = %T, want []map[string]any", response["data"])
@@ -96,11 +72,15 @@ func TestEnsureClaudeModelIDPrefix(t *testing.T) {
 		want string
 	}{
 		{"empty", "", ""},
-		{"already has claude prefix", "claude-sonnet-4-6", "claude-sonnet-4-6"},
-		{"contains claude mid-string is reversed", "my-claude-custom", "claude-fable-5-dd-motsuc-edualc-ym"},
-		{"uppercase Claude prefix is reversed", "Claude-Opus-4", "claude-fable-5-dd-4-supO-edualC"},
-		{"gpt model is reversed", "gpt-4o", "claude-fable-5-dd-o4-tpg"},
-		{"gemini model is reversed", "gemini-2.5-pro", "claude-fable-5-dd-orp-5.2-inimeg"},
+		{"catalog Claude model", "claude-opus-5", "claude-opus-5"},
+		{"catalog Claude model with thinking suffix", "claude-opus-5(high)", "claude-opus-5(high)"},
+		{"Claude lookalike is namespaced", "claude-team/gpt-4o", "claude/claude-team/gpt-4o"},
+		{"already namespaced", "claude/gpt-4o", "claude/gpt-4o"},
+		{"repeated namespace is not extended", "claude/claude/gpt-4o", "claude/claude/gpt-4o"},
+		{"contains claude mid-string is namespaced", "my-claude-custom", "claude/my-claude-custom"},
+		{"uppercase Claude prefix is namespaced", "Claude-Opus-5", "claude/Claude-Opus-5"},
+		{"gpt model is namespaced", "gpt-4o", "claude/gpt-4o"},
+		{"gemini model is namespaced", "gemini-2.5-pro", "claude/gemini-2.5-pro"},
 	}
 
 	for _, tt := range tests {
@@ -119,12 +99,20 @@ func TestResolveClaudeModelIDPrefix(t *testing.T) {
 		want string
 	}{
 		{"empty", "", ""},
-		{"plain claude id unchanged", "claude-sonnet-4-6", "claude-sonnet-4-6"},
-		{"non encoded id unchanged", "gpt-4o", "gpt-4o"},
-		{"encoded gpt model", "claude-fable-5-dd-o4-tpg", "gpt-4o"},
-		{"encoded gemini model", "claude-fable-5-dd-orp-5.2-inimeg", "gemini-2.5-pro"},
-		{"empty encoded body unchanged", "claude-fable-5-dd-", "claude-fable-5-dd-"},
-		{"preserves thinking suffix", "claude-fable-5-dd-o4-tpg(high)", "gpt-4o(high)"},
+		{"catalog Claude model", "claude-opus-5", "claude-opus-5"},
+		{"catalog Claude model with thinking suffix", "claude-opus-5(high)", "claude-opus-5(high)"},
+		{"non namespaced id unchanged", "gpt-4o", "gpt-4o"},
+		{"regular claude prefix unchanged", "claude-team/gpt-4o", "claude-team/gpt-4o"},
+		{"uppercase namespace unchanged", "Claude/gpt-4o", "Claude/gpt-4o"},
+		{"legacy cloaked id is no longer decoded", "claude-fable-5-dd-o4-tpg", "claude-fable-5-dd-o4-tpg"},
+		{"reserved claude credential prefix is consumed", "claude/gpt-4o", "gpt-4o"},
+		{"namespaced gemini model", "claude/gemini-2.5-pro", "gemini-2.5-pro"},
+		{"empty namespace is consumed", "claude/", ""},
+		{"strips every namespace", "claude/claude/claude/gpt-4o", "gpt-4o"},
+		{"stops at wrapped catalog Claude model", "claude/claude-opus-5", "claude-opus-5"},
+		{"stops at repeatedly wrapped catalog Claude model", "claude/claude/claude-opus-5", "claude-opus-5"},
+		{"preserves wrapped native thinking suffix", "claude/claude-opus-5(high)", "claude-opus-5(high)"},
+		{"preserves thinking suffix exactly", "claude/claude/gpt-4o( High )", "gpt-4o( High )"},
 		{"round trip", EnsureClaudeModelIDPrefix("custom-model-x"), "custom-model-x"},
 	}
 

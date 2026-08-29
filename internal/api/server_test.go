@@ -29,6 +29,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/tidwall/gjson"
 )
 
 type codexSearchCaptureExecutor struct {
@@ -1606,7 +1607,7 @@ func TestExampleAPIKeySafeModeShowsWarningAndKeepsManagement(t *testing.T) {
 	})
 
 	t.Run("proxy endpoints are blocked", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req := httptest.NewRequest(http.MethodGet, "/v1/models?limit=1000", nil)
 		rr := httptest.NewRecorder()
 		server.engine.ServeHTTP(rr, req)
 		if rr.Code != http.StatusForbidden {
@@ -1718,22 +1719,47 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 			switch id {
 			case "claude-sonnet-4-6":
 				claudeModel = m
-			case "claude-fable-5-dd-o4-tpg":
+			case "claude/gpt-4o":
 				rewrittenModel = m
-			case "gpt-4o", "claude-gpt-4o":
-				t.Fatalf("expected non-claude model id to be rewritten as claude-fable-5-dd-<reversed>, got %q", id)
+			case "gpt-4o", "claude-gpt-4o", "claude-fable-5-dd-o4-tpg":
+				t.Fatalf("expected translated model id to use the claude/ namespace, got %q", id)
 			}
 		}
 		if claudeModel == nil {
 			t.Fatalf("expected claude-sonnet-4-6 in response, got %s", rr.Body.String())
 		}
 		if rewrittenModel == nil {
-			t.Fatalf("expected claude-fable-5-dd-o4-tpg in response, got %s", rr.Body.String())
+			t.Fatalf("expected claude/gpt-4o in response, got %s", rr.Body.String())
 		}
 		for _, field := range []string{"max_input_tokens", "max_tokens", "display_name"} {
 			if _, ok := claudeModel[field]; !ok {
 				t.Fatalf("expected Claude model to include %q, got %v", field, claudeModel)
 			}
+		}
+	})
+
+	t.Run("claude cli user agent routes gateway discovery to claude format", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models?limit=1000", nil)
+		req.Header.Set("Authorization", "Bearer test-key")
+		req.Header.Set("User-Agent", "claude-cli/2.1.226 (external, cli)")
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if !gjson.Get(rr.Body.String(), "has_more").Exists() {
+			t.Fatalf("expected Claude discovery envelope: %s", rr.Body.String())
+		}
+		found := false
+		for _, model := range gjson.Get(rr.Body.String(), "data").Array() {
+			if model.Get("id").String() == "claude/gpt-4o" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected translated model in Claude discovery: %s", rr.Body.String())
 		}
 	})
 
@@ -1767,7 +1793,7 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 			if id, _ := m["id"].(string); id == "gpt-4o" {
 				foundRawGPT = true
 			}
-			if id, _ := m["id"].(string); id == "claude-gpt-4o" || id == "claude-fable-5-dd-o4-tpg" {
+			if id, _ := m["id"].(string); id == "claude-gpt-4o" || id == "claude/gpt-4o" || id == "claude-fable-5-dd-o4-tpg" {
 				t.Fatalf("did not expect Anthropic id rewrite on OpenAI format models, got %v", m)
 			}
 		}
@@ -1777,11 +1803,11 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 	})
 }
 
-func TestClaudeModelListCloakingConfigHotReload(t *testing.T) {
+func TestClaudeModelListCloakingIsAlwaysEnabled(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
-	clientID := "test-claude-model-list-cloaking-hot-reload"
-	const modelID = "gpt-model-list-hot-reload"
-	modelRegistry.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+	clientID := "test-claude-model-list-cloaking-always-enabled"
+	const modelID = "gpt-model-list-always-cloaked"
+	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{{
 		ID: modelID, Object: "model", OwnedBy: "test", Type: "openai",
 	}})
 	t.Cleanup(func() {
@@ -1789,42 +1815,34 @@ func TestClaudeModelListCloakingConfigHotReload(t *testing.T) {
 	})
 
 	server := newTestServer(t)
-	assertModelID := func(want string) {
-		t.Helper()
-		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-		req.Header.Set("Authorization", "Bearer test-key")
-		req.Header.Set("Anthropic-Version", "2023-06-01")
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Anthropic-Version", "2023-06-01")
 
-		recorder := httptest.NewRecorder()
-		server.engine.ServeHTTP(recorder, req)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-
-		var response struct {
-			Data []struct {
-				ID string `json:"id"`
-			} `json:"data"`
-		}
-		if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
-			t.Fatalf("decode response: %v", errUnmarshal)
-		}
-		for _, model := range response.Data {
-			if model.ID == want {
-				return
-			}
-		}
-		t.Fatalf("model %q not found in response: %s", want, recorder.Body.String())
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
 
-	assertModelID(claudemodels.EnsureClaudeModelIDPrefix(modelID))
-
-	updatedCfg := *server.cfg
-	updatedCfg.SDKConfig = server.cfg.SDKConfig
-	updatedCfg.ClaudeCode.DisableCloakingModelList = true
-	server.UpdateClients(&updatedCfg)
-
-	assertModelID(modelID)
+	var response struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+		t.Fatalf("decode response: %v", errUnmarshal)
+	}
+	want := claudemodels.EnsureClaudeModelIDPrefix(modelID)
+	for _, model := range response.Data {
+		if model.ID == modelID {
+			t.Fatalf("translated model was listed without namespace: %s", recorder.Body.String())
+		}
+		if model.ID == want {
+			return
+		}
+	}
+	t.Fatalf("model %q not found in response: %s", want, recorder.Body.String())
 }
 
 func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {

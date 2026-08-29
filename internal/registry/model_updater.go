@@ -28,8 +28,9 @@ var modelsURLs = []string{
 var embeddedModelsJSON []byte
 
 type modelStore struct {
-	mu   sync.RWMutex
-	data *staticModelsJSON
+	mu             sync.RWMutex
+	data           *staticModelsJSON
+	claudeModelIDs map[string]struct{}
 }
 
 var modelsCatalogStore = &modelStore{}
@@ -125,9 +126,7 @@ func tryRefreshModels(ctx context.Context, label string) {
 	changed := detectChangedProviders(oldData, parsed)
 
 	// Update store with new data regardless.
-	modelsCatalogStore.mu.Lock()
-	modelsCatalogStore.data = parsed
-	modelsCatalogStore.mu.Unlock()
+	modelsCatalogStore.replaceModels(parsed)
 
 	if len(changed) == 0 {
 		log.Infof("%s completed from %s, no changes detected", label, url)
@@ -304,10 +303,33 @@ func loadModelsFromBytes(data []byte, source string) error {
 		return fmt.Errorf("%s: validate models catalog: %w", source, err)
 	}
 
-	modelsCatalogStore.mu.Lock()
-	modelsCatalogStore.data = &parsed
-	modelsCatalogStore.mu.Unlock()
+	modelsCatalogStore.replaceModels(&parsed)
 	return nil
+}
+
+func (s *modelStore) replaceModels(data *staticModelsJSON) {
+	claudeModelIDs := make(map[string]struct{})
+	if data != nil {
+		claudeModelIDs = make(map[string]struct{}, len(data.Claude))
+		for _, model := range data.Claude {
+			if model == nil || model.ID == "" {
+				continue
+			}
+			claudeModelIDs[model.ID] = struct{}{}
+		}
+	}
+
+	s.mu.Lock()
+	s.data = data
+	s.claudeModelIDs = claudeModelIDs
+	s.mu.Unlock()
+}
+
+func (s *modelStore) isClaudeModelID(id string) bool {
+	s.mu.RLock()
+	_, ok := s.claudeModelIDs[id]
+	s.mu.RUnlock()
+	return ok
 }
 
 func getModels() *staticModelsJSON {
