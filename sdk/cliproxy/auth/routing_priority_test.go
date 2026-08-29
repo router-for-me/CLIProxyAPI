@@ -3,11 +3,16 @@ package auth
 import (
 	"context"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
+
+func routePriority(value int) *int {
+	return &value
+}
 
 func TestRoutingPrioritySupportsPreferredRingEntryPoints(t *testing.T) {
 	const (
@@ -86,5 +91,77 @@ func TestRoutingPrioritySupportsPreferredRingEntryPoints(t *testing.T) {
 				t.Fatalf("pick after one traversal = %#v, %v; want exhausted ring", selected, errPick)
 			}
 		})
+	}
+}
+
+func TestRoutingPriorityAppliesToAffinitySchedulerAndFastPath(t *testing.T) {
+	const route = "gpt-5.6-luna"
+	authA := &Auth{
+		ID:         "account-a",
+		Provider:   "codex",
+		Status:     StatusActive,
+		Attributes: map[string]string{"priority": "300"},
+	}
+	authB := &Auth{
+		ID:         "account-b",
+		Provider:   "codex",
+		Status:     StatusActive,
+		Attributes: map[string]string{"priority": "200"},
+	}
+	SetOAuthModelAliasesAttribute(authA, []internalconfig.OAuthModelAlias{{
+		Name: route, Alias: route, RoutingPriority: routePriority(200),
+	}})
+	SetOAuthModelAliasesAttribute(authB, []internalconfig.OAuthModelAlias{{
+		Name: route, Alias: route, RoutingPriority: routePriority(300),
+	}})
+
+	manager := NewManager(nil, nil, nil)
+	if !manager.routeAwareSelectionRequired(authA, route) {
+		t.Fatal("same-name priority override did not require route-aware selection")
+	}
+
+	candidates := schedulerAuthCandidates([]*Auth{authA, authB}, route)
+	if len(candidates) != 2 || candidates[0].Priority != 200 || candidates[1].Priority != 300 {
+		t.Fatalf("scheduler candidates = %+v, want route priorities 200 and 300", candidates)
+	}
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &FillFirstSelector{},
+		TTL:      time.Hour,
+	})
+	defer selector.Stop()
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.DerivedSessionIDMetadataKey: "stable-session",
+	}}
+	selected, errPick := selector.Pick(
+		context.Background(), "codex", route, opts, []*Auth{authA, authB},
+	)
+	if errPick != nil {
+		t.Fatalf("affinity cold pick: %v", errPick)
+	}
+	if selected == nil || selected.ID != authB.ID {
+		t.Fatalf("affinity cold pick = %#v, want route-preferred %q", selected, authB.ID)
+	}
+
+	authB.Unavailable = true
+	selected, errPick = selector.Pick(
+		context.Background(), "codex", route, opts, []*Auth{authA, authB},
+	)
+	if errPick != nil {
+		t.Fatalf("affinity failover pick: %v", errPick)
+	}
+	if selected == nil || selected.ID != authA.ID {
+		t.Fatalf("affinity failover pick = %#v, want %q", selected, authA.ID)
+	}
+
+	authB.Unavailable = false
+	selected, errPick = selector.Pick(
+		context.Background(), "codex", route, opts, []*Auth{authA, authB},
+	)
+	if errPick != nil {
+		t.Fatalf("affinity sticky pick: %v", errPick)
+	}
+	if selected == nil || selected.ID != authA.ID {
+		t.Fatalf("affinity sticky pick = %#v, want existing binding %q", selected, authA.ID)
 	}
 }
