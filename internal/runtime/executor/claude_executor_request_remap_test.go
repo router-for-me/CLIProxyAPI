@@ -2,14 +2,12 @@ package executor
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"maps"
 	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
 
@@ -300,7 +298,13 @@ func TestReverseRemapOAuthToolNamesWithBIP39Aliases(t *testing.T) {
 	}
 }
 
-func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
+// Contract change: an alias that cannot be restored unambiguously used to be a
+// fail-closed, request-scoped error. It now fails OPEN -- the name is forwarded
+// to the client untouched -- because the streaming caller turns any error here
+// into a terminated SSE stream after message_start has already been flushed,
+// which is unretryable and permanently wedges the conversation. The important
+// property is unchanged: an ambiguous name is never guessed at.
+func TestReverseRemapOAuthToolNamesFailsOpenOnUnsafeMangledAliases(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"tool.name"},{"name":"tool/name"}]}`)
 	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "ambiguous-alias-caller"})
 	firstAlias := gjson.GetBytes(remapped, "tools.0.name").String()
@@ -322,46 +326,40 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 		unknownToolID = "bbbbbbbbbbbb"
 	}
 	tests := []struct {
-		name      string
-		alias     string
-		wantError string
+		name  string
+		alias string
 	}{
 		{
-			name:      "ambiguous semantic suffix",
-			alias:     "mcp__" + firstParts.server + "__" + unknownToolID + "_" + firstParts.semantic,
-			wantError: "semantic suffix matches multiple declared tools",
+			name:  "ambiguous semantic suffix",
+			alias: "mcp__" + firstParts.server + "__" + unknownToolID + "_" + firstParts.semantic,
 		},
 		{
-			name:      "ambiguous semantic suffix with malformed tool ID",
-			alias:     "mcp__" + firstParts.server + "__" + unknownToolID[:len(unknownToolID)-1] + "_" + firstParts.semantic,
-			wantError: "semantic suffix matches multiple declared tools",
+			name:  "ambiguous semantic suffix with malformed tool ID",
+			alias: "mcp__" + firstParts.server + "__" + unknownToolID[:len(unknownToolID)-1] + "_" + firstParts.semantic,
 		},
 		{
-			name:      "unrecoverable semantic suffix",
-			alias:     "mcp__" + firstParts.server + "__" + unknownToolID + "_missing_tool",
-			wantError: "no unique request-local match",
+			name:  "unrecoverable semantic suffix",
+			alias: "mcp__" + firstParts.server + "__" + unknownToolID + "_missing_tool",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, test.alias))
-			_, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
-			if errReverse == nil || !strings.Contains(errReverse.Error(), test.wantError) {
-				t.Fatalf("reverseRemapOAuthToolNames() error = %v, want %q", errReverse, test.wantError)
+			restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+			if errReverse != nil {
+				t.Fatalf("reverseRemapOAuthToolNames() error = %v, want fail-open nil", errReverse)
 			}
-			var requestErr cliproxyexecutor.RequestScopedError
-			if !errors.As(errReverse, &requestErr) || !requestErr.IsRequestScoped() {
-				t.Fatalf("reverseRemapOAuthToolNames() error = %T %v, want request-scoped", errReverse, errReverse)
+			if got := gjson.GetBytes(restored, "content.0.name").String(); got != test.alias {
+				t.Fatalf("unrestorable name = %q, want %q forwarded unchanged", got, test.alias)
 			}
 
 			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, test.alias))
-			_, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
-			if errStream == nil || !strings.Contains(errStream.Error(), test.wantError) {
-				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v, want %q", errStream, test.wantError)
+			restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+			if errStream != nil {
+				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v, want fail-open nil", errStream)
 			}
-			requestErr = nil
-			if !errors.As(errStream, &requestErr) || !requestErr.IsRequestScoped() {
-				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %T %v, want request-scoped", errStream, errStream)
+			if !bytes.Equal(restoredLine, line) {
+				t.Fatalf("stream line = %s, want it forwarded unchanged", restoredLine)
 			}
 		})
 	}
@@ -555,35 +553,31 @@ func TestRemapKeepsReverseMapEmptyWhenOnlyCallerMCPToolsArePresent(t *testing.T)
 	}
 }
 
-func TestReverseRemapOAuthToolNamesMarksTrailingMarkupFailureRequestScoped(t *testing.T) {
+// Same contract change as above: an alias with trailing prompt markup glued to
+// it is still never restored, but it is now forwarded verbatim instead of
+// failing the response. The body and the SSE line must both come back
+// byte-identical.
+func TestReverseRemapOAuthToolNamesFailsOpenOnTrailingMarkup(t *testing.T) {
 	const alias = "mcp__hmzqrngkulqv__xuo7jlxlpzee_clear_thinking"
 	malformedAlias := alias + "</parameter>\n<parameter name=\"merge\""
 	reverseMap := map[string]string{alias: "clear_thinking"}
 
 	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, malformedAlias))
 	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
-	if errReverse == nil {
-		t.Fatal("reverseRemapOAuthToolNames() error = nil, want fail-closed alias error")
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v, want fail-open nil", errReverse)
 	}
 	if !bytes.Equal(restored, response) {
 		t.Fatalf("reverseRemapOAuthToolNames() returned modified response: %s", restored)
 	}
-	var requestErr cliproxyexecutor.RequestScopedError
-	if !errors.As(errReverse, &requestErr) || !requestErr.IsRequestScoped() {
-		t.Fatalf("reverseRemapOAuthToolNames() error = %T %v, want request-scoped", errReverse, errReverse)
-	}
 
 	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, malformedAlias))
 	restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
-	if errStream == nil {
-		t.Fatal("reverseRemapOAuthToolNamesFromStreamLine() error = nil, want fail-closed alias error")
+	if errStream != nil {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v, want fail-open nil", errStream)
 	}
 	if !bytes.Equal(restoredLine, line) {
 		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() returned modified line: %s", restoredLine)
-	}
-	requestErr = nil
-	if !errors.As(errStream, &requestErr) || !requestErr.IsRequestScoped() {
-		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %T %v, want request-scoped", errStream, errStream)
 	}
 }
 
