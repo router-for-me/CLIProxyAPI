@@ -1,7 +1,10 @@
 package helps
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -83,7 +86,7 @@ func ResponseCacheFor(compat *config.OpenAICompatibility, providerKey string) (*
 // along with the effective provider cache settings.
 // variant separates entries that share an upstream payload but need different
 // downstream output, such as two response formats translated from one request.
-func ResponseCacheLookup(compat *config.OpenAICompatibility, providerKey, authID, url, model, variant string, stream bool, payload []byte) (*cache.ResponseCache, string, ResponseCacheSettings) {
+func ResponseCacheLookup(compat *config.OpenAICompatibility, providerKey, authID, url, model, variant string, stream bool, headers http.Header, payload []byte) (*cache.ResponseCache, string, ResponseCacheSettings) {
 	if len(payload) == 0 {
 		return nil, "", ResponseCacheSettings{}
 	}
@@ -101,7 +104,7 @@ func ResponseCacheLookup(compat *config.OpenAICompatibility, providerKey, authID
 	if variant != "" {
 		keyProvider = keyProvider + "|" + variant
 	}
-	return responseCache, cache.ResponseCacheKey(keyProvider, url, model, stream, payload), settings
+	return responseCache, cache.ResponseCacheKey(keyProvider, url, model, stream, headers, payload), settings
 }
 
 // ResetResponseCaches drops every provider cache. Used by tests.
@@ -112,30 +115,41 @@ func ResetResponseCaches() {
 	responseCacheProfiles = make(map[string]string)
 }
 
-// cachedStreamFrameSeparator joins cached SSE data frames. Upstream frames are
-// JSON objects or the [DONE] sentinel, so a newline never appears inside one.
-const cachedStreamFrameSeparator = "\n"
-
-// EncodeCachedStreamFrames serializes raw upstream SSE data frames for storage.
+// EncodeCachedStreamFrames serializes raw upstream SSE data frames using a
+// length-prefixed encoding. SSE events may contain pretty-printed JSON joined
+// with newlines, so newline-delimited storage would be ambiguous.
 func EncodeCachedStreamFrames(frames []string) []byte {
 	if len(frames) == 0 {
 		return nil
 	}
-	return []byte(strings.Join(frames, cachedStreamFrameSeparator))
+	var encoded bytes.Buffer
+	for _, frame := range frames {
+		if errWrite := binary.Write(&encoded, binary.BigEndian, uint64(len(frame))); errWrite != nil {
+			return nil
+		}
+		encoded.WriteString(frame)
+	}
+	return encoded.Bytes()
 }
 
-// DecodeCachedStreamFrames restores the raw upstream SSE data frames.
+// DecodeCachedStreamFrames restores length-prefixed upstream SSE data frames.
+// Malformed or truncated payloads are rejected in full to avoid partial replay.
 func DecodeCachedStreamFrames(payload []byte) []string {
 	if len(payload) == 0 {
 		return nil
 	}
-	parts := strings.Split(string(payload), cachedStreamFrameSeparator)
-	frames := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if strings.TrimSpace(part) == "" {
-			continue
+	reader := bytes.NewReader(payload)
+	frames := make([]string, 0)
+	for reader.Len() > 0 {
+		var size uint64
+		if errRead := binary.Read(reader, binary.BigEndian, &size); errRead != nil || size > uint64(reader.Len()) {
+			return nil
 		}
-		frames = append(frames, part)
+		frame := make([]byte, int(size))
+		if _, errRead := reader.Read(frame); errRead != nil {
+			return nil
+		}
+		frames = append(frames, string(frame))
 	}
 	return frames
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -91,10 +92,11 @@ func NewResponseCache(ttl time.Duration, maxEntries, maxEntryBytes int) *Respons
 	}
 }
 
-// ResponseCacheKey builds a stable cache key from the request coordinates and
-// the exact upstream payload. Any byte difference in the payload produces a
-// different key, so no semantically distinct request can ever share an entry.
-func ResponseCacheKey(provider, url, model string, stream bool, payload []byte) string {
+// ResponseCacheKey builds a stable cache key from the request coordinates, the
+// effective upstream headers, and the exact upstream payload. Header names and
+// values are sorted so equivalent maps produce the same key regardless of
+// iteration order. Any difference produces a separate entry.
+func ResponseCacheKey(provider, url, model string, stream bool, headers http.Header, payload []byte) string {
 	hasher := sha256.New()
 	hasher.Write([]byte(provider))
 	hasher.Write([]byte{0})
@@ -106,6 +108,28 @@ func ResponseCacheKey(provider, url, model string, stream bool, payload []byte) 
 		hasher.Write([]byte{1})
 	} else {
 		hasher.Write([]byte{0})
+	}
+	hasher.Write([]byte{0})
+
+	normalizedHeaders := make(map[string][]string, len(headers))
+	for name, values := range headers {
+		lowerName := strings.ToLower(name)
+		normalizedHeaders[lowerName] = append(normalizedHeaders[lowerName], values...)
+	}
+	headerNames := make([]string, 0, len(normalizedHeaders))
+	for name := range normalizedHeaders {
+		headerNames = append(headerNames, name)
+	}
+	sort.Strings(headerNames)
+	for _, name := range headerNames {
+		values := append([]string(nil), normalizedHeaders[name]...)
+		sort.Strings(values)
+		hasher.Write([]byte(name))
+		hasher.Write([]byte{0})
+		for _, value := range values {
+			hasher.Write([]byte(value))
+			hasher.Write([]byte{0})
+		}
 	}
 	hasher.Write([]byte{0})
 	hasher.Write(payload)

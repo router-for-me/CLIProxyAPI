@@ -1,32 +1,48 @@
 package cache
 
 import (
+	"net/http"
 	"testing"
 	"time"
 )
 
 func TestResponseCacheKeyIsSensitiveToEveryField(t *testing.T) {
-	base := ResponseCacheKey("zen", "https://x/v1/chat/completions", "m1", false, []byte(`{"a":1}`))
+	base := ResponseCacheKey("zen", "https://x/v1/chat/completions", "m1", false, nil, []byte(`{"a":1}`))
 	cases := map[string]string{
-		"provider": ResponseCacheKey("other", "https://x/v1/chat/completions", "m1", false, []byte(`{"a":1}`)),
-		"url":      ResponseCacheKey("zen", "https://y/v1/chat/completions", "m1", false, []byte(`{"a":1}`)),
-		"model":    ResponseCacheKey("zen", "https://x/v1/chat/completions", "m2", false, []byte(`{"a":1}`)),
-		"stream":   ResponseCacheKey("zen", "https://x/v1/chat/completions", "m1", true, []byte(`{"a":1}`)),
-		"payload":  ResponseCacheKey("zen", "https://x/v1/chat/completions", "m1", false, []byte(`{"a":2}`)),
+		"provider": ResponseCacheKey("other", "https://x/v1/chat/completions", "m1", false, nil, []byte(`{"a":1}`)),
+		"url":      ResponseCacheKey("zen", "https://y/v1/chat/completions", "m1", false, nil, []byte(`{"a":1}`)),
+		"model":    ResponseCacheKey("zen", "https://x/v1/chat/completions", "m2", false, nil, []byte(`{"a":1}`)),
+		"stream":   ResponseCacheKey("zen", "https://x/v1/chat/completions", "m1", true, nil, []byte(`{"a":1}`)),
+		"payload":  ResponseCacheKey("zen", "https://x/v1/chat/completions", "m1", false, nil, []byte(`{"a":2}`)),
 	}
 	for name, key := range cases {
 		if key == base {
 			t.Fatalf("expected %s change to alter cache key", name)
 		}
 	}
-	if ResponseCacheKey("zen", "u", "m", false, []byte(`{"a":1}`)) != ResponseCacheKey("zen", "u", "m", false, []byte(`{"a":1}`)) {
+	if ResponseCacheKey("zen", "u", "m", false, nil, []byte(`{"a":1}`)) != ResponseCacheKey("zen", "u", "m", false, nil, []byte(`{"a":1}`)) {
 		t.Fatal("expected identical inputs to produce identical keys")
+	}
+}
+
+func TestResponseCacheKeyIncludesHeadersDeterministically(t *testing.T) {
+	payload := []byte(`{"a":1}`)
+	headersA := http.Header{"X-Tenant": {"one"}, "X-Trace": {"b", "a"}}
+	headersB := http.Header{"x-trace": {"a", "b"}, "x-tenant": {"one"}}
+	keyA := ResponseCacheKey("zen", "u", "m", false, headersA, payload)
+	keyB := ResponseCacheKey("zen", "u", "m", false, headersB, payload)
+	if keyA != keyB {
+		t.Fatal("equivalent headers produced different cache keys")
+	}
+	headersB.Set("X-Tenant", "two")
+	if keyA == ResponseCacheKey("zen", "u", "m", false, headersB, payload) {
+		t.Fatal("different tenant headers produced the same cache key")
 	}
 }
 
 func TestResponseCacheStoreAndGet(t *testing.T) {
 	c := NewResponseCache(time.Minute, 4, 1024)
-	key := ResponseCacheKey("zen", "u", "m", false, []byte(`{"a":1}`))
+	key := ResponseCacheKey("zen", "u", "m", false, nil, []byte(`{"a":1}`))
 
 	if _, ok := c.Get(key); ok {
 		t.Fatal("expected miss on empty cache")

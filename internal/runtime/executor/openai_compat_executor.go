@@ -167,12 +167,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	// Serve byte-identical repeats from the provider response cache when enabled.
 	// Upstream aggregators without prompt caching bill every retry at full price.
-	responseCache, cacheKey, _ := helps.ResponseCacheLookup(e.resolveCompatConfig(auth), e.Identifier(), authID, url, baseModel, responseFormat.String(), false, translated)
+	responseCache, cacheKey, _ := helps.ResponseCacheLookup(e.resolveCompatConfig(auth), e.Identifier(), authID, url, baseModel, responseFormat.String(), false, httpReq.Header, translated)
 	if responseCache != nil {
 		if entry, ok := responseCache.Get(cacheKey); ok && !entry.Stream {
 			helps.LogWithRequestID(ctx).Debugf("openai compat executor: response cache hit for model %s", baseModel)
-			reporter.Publish(ctx, helps.ParseOpenAIUsage(entry.Payload))
-			reporter.EnsurePublished(ctx)
 			var cachedParam any
 			cachedOut := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, entry.Payload, &cachedParam)
 			if responseFormat == sdktranslator.FormatOpenAIResponse {
@@ -403,7 +401,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// Replay byte-identical streaming repeats from the provider response cache.
 	// Cached frames are the raw upstream SSE payloads, so they flow through the same
 	// translator pipeline that produced the original downstream output.
-	responseCache, cacheKey, cacheSettings := helps.ResponseCacheLookup(e.resolveCompatConfig(auth), e.Identifier(), authID, url, baseModel, responseFormat.String(), true, translated)
+	responseCache, cacheKey, cacheSettings := helps.ResponseCacheLookup(e.resolveCompatConfig(auth), e.Identifier(), authID, url, baseModel, responseFormat.String(), true, httpReq.Header, translated)
 	if responseCache != nil {
 		if entry, ok := responseCache.Get(cacheKey); ok && entry.Stream {
 			helps.LogWithRequestID(ctx).Debugf("openai compat executor: response cache hit for streaming model %s", baseModel)
@@ -643,8 +641,6 @@ func (e *OpenAICompatExecutor) replayCachedStream(ctx context.Context, reporter 
 				}
 			}
 		}
-		streamUsage.Publish(ctx, reporter)
-		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers.Clone(), Chunks: out}
 }
