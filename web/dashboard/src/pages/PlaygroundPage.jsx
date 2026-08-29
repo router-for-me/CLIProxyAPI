@@ -1,8 +1,14 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getProtocol } from '../playground/protocols.js';
 import { usePlaygroundKey } from '../playground/usePlaygroundKey.js';
 import { usePlaygroundChat, openStream } from '../playground/usePlaygroundChat.js';
 import ModelPicker from '../playground/ModelPicker.jsx';
+import MessageBubble from '../playground/MessageBubble.jsx';
+import UsageFooter from '../playground/UsageFooter.jsx';
+import InspectorDrawer from '../playground/InspectorDrawer.jsx';
+import CooldownBanner from '../playground/CooldownBanner.jsx';
+import { usePlaygroundInspector } from '../playground/usePlaygroundInspector.js';
+import { useCooldownWatch } from '../playground/useCooldownWatch.js';
 import { detectProtocol } from '../playground/detectProtocol.js';
 import { toJsonExport, toMarkdownExport } from '../playground/exportConversation.js';
 
@@ -19,25 +25,19 @@ function authHeaderFor(protocolId, key) {
   }
 }
 
-function MessageBubble({ m }) {
-  const isUser = m.role === 'user';
-  return (
-    <div className={`rounded p-3 ${isUser ? 'bg-muted' : 'bg-card border'}`}>
-      <div className="text-xs text-muted-foreground mb-1">
-        {m.role}
-        {m.model ? ` · ${m.model}` : ''}
-        {m.protocol ? ` · ${m.protocol}` : ''}
-      </div>
-      <div className="whitespace-pre-wrap text-sm">
-        {m.content || (m.streaming ? '▍' : '')}
-      </div>
-      {m.usage && (
-        <div className="text-xs text-muted-foreground mt-1">
-          prompt {m.usage.prompt_tokens ?? 0} · completion {m.usage.completion_tokens ?? 0}
-        </div>
-      )}
-    </div>
-  );
+// Map a playground protocol id (used by the request layer) to the
+// provider key the cooldown snapshot expects ("openai" vs. "openai-compat").
+function providerKeyForProtocol(protocolId) {
+  switch (protocolId) {
+    case 'openai-compat':
+      return 'openai';
+    case 'gemini':
+    case 'claude':
+    case 'codex':
+      return protocolId;
+    default:
+      return protocolId;
+  }
 }
 
 function ProtocolSwitcher({ value, onChange }) {
@@ -112,6 +112,18 @@ export default function PlaygroundPage() {
   const [draft, setDraft] = useState('');
   const userPickedProtocol = useRef(false);
 
+  // Inspector state — drawer visibility, current request, tab + pretty toggle.
+  const inspector = usePlaygroundInspector();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState('outgoing');
+  const [pretty, setPretty] = useState(true);
+  const [currentReqId, setCurrentReqId] = useState(null);
+
+  // Provider-scoped cooldown snapshot for the selected protocol.
+  const { state: cooldownState, refresh: refreshCooldown } = useCooldownWatch(
+    providerKeyForProtocol(protocolId),
+  );
+
   // Auto-detect protocol when the model changes, unless the user
   // explicitly picked one.
   useEffect(() => {
@@ -119,20 +131,30 @@ export default function PlaygroundPage() {
     setProtocolId(detectProtocol({ model }));
   }, [model]);
 
-  const doSend = useCallback(async () => {
-    if (!key || !model || state.inFlight || !draft.trim()) return;
+  // Shared executor: dispatches SEND, opens the stream, and records
+  // outgoing/incoming snapshots for the inspector. Returns nothing; the
+  // caller decides which user message's text to re-send.
+  const executeSend = useCallback(async (userText) => {
+    if (!key || !model || state.inFlight) return;
     const adapter = getProtocol(protocolId);
     const history = [];
     if (params.system) history.push({ role: 'system', content: params.system });
     for (const m of state.messages) history.push({ role: m.role, content: m.content });
-    history.push({ role: 'user', content: draft });
+    history.push({ role: 'user', content: userText });
     const reqId = `r-${Date.now()}`;
     const body = adapter.buildRequest(model, history, { ...params });
     const url = adapter.endpoint(model, params);
-    dispatch({ type: 'SEND', id: reqId, model, protocol: protocolId, userText: draft, params });
-    setDraft('');
+    dispatch({
+      type: 'SEND', id: reqId, model, protocol: protocolId, userText, params, outgoing: body,
+    });
+    setCurrentReqId(reqId);
+    inspector.recordOutgoing(reqId, body);
     const ac = new AbortController();
     abortRef.current = ac;
+    // v1 limitation: openStream only surfaces raw chunks, not a parsed
+    // response object. We accumulate the flat text and persist it so the
+    // inspector's "Incoming" tab can still show something useful.
+    let assembledIncoming = '';
     await openStream({
       url,
       init: {
@@ -148,19 +170,42 @@ export default function PlaygroundPage() {
         for (const line of event.split('\n')) {
           if (!line.trim()) continue;
           const { token } = adapter.parseStreamChunk(line);
-          if (token) dispatch({ type: 'TOKEN', id: reqId, token });
+          if (token) {
+            assembledIncoming += token;
+            dispatch({ type: 'TOKEN', id: reqId, token });
+          }
         }
       },
       onDone: () => {
-        dispatch({ type: 'DONE', id: reqId, usage: null });
+        const incoming = { assembled_text: assembledIncoming };
+        // v1 limitation: openStream doesn't surface response headers.
+        inspector.recordIncoming(reqId, incoming, {});
+        dispatch({ type: 'DONE', id: reqId, usage: null, incoming });
         abortRef.current = null;
       },
       onError: (e) => {
-        dispatch({ type: 'ERROR', id: reqId, error: e });
+        const incoming = { error: e };
+        inspector.recordIncoming(reqId, incoming, {});
+        dispatch({ type: 'ERROR', id: reqId, error: e, incoming });
         abortRef.current = null;
       },
     });
-  }, [key, model, protocolId, params, state.inFlight, state.messages, draft, dispatch]);
+  }, [key, model, protocolId, params, state.inFlight, state.messages, dispatch, inspector]);
+
+  const doSend = useCallback(async () => {
+    if (!draft.trim()) return;
+    const text = draft;
+    setDraft('');
+    await executeSend(text);
+  }, [draft, executeSend]);
+
+  // Retry re-sends the most recent user message with a fresh reqId.
+  // No-op when no user prompt exists yet.
+  const retry = useCallback(async (userMessage) => {
+    if (!userMessage || state.inFlight) return;
+    if (!key || !model) return;
+    await executeSend(userMessage.content);
+  }, [key, model, state.inFlight, executeSend]);
 
   const onAbort = useCallback(() => {
     if (abortRef.current) {
@@ -168,6 +213,29 @@ export default function PlaygroundPage() {
       abortRef.current = null;
     }
   }, []);
+
+  const inspect = useCallback((message) => {
+    const reqId = message?.reqId || inspector.findReqIdForMessage(message?.id, state.messages);
+    if (reqId) setCurrentReqId(reqId);
+    setActiveTab('outgoing');
+    setDrawerOpen(true);
+  }, [inspector, state.messages]);
+
+  const copy = useCallback(async (message) => {
+    try {
+      await navigator.clipboard.writeText(message?.content || '');
+    } catch {
+      /* clipboard unavailable */
+    }
+  }, []);
+
+  // Last user message is what Retry re-sends.
+  const lastUserMessage = useMemo(() => {
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      if (state.messages[i].role === 'user') return state.messages[i];
+    }
+    return null;
+  }, [state.messages]);
 
   if (keyLoading) return <div className="p-6 text-sm text-muted-foreground">Preparing playground key…</div>;
   if (keyError) {
@@ -194,11 +262,30 @@ export default function PlaygroundPage() {
         <ExportButton messages={state.messages} />
       </div>
       <div className="flex-1 flex flex-col">
+        <div className="flex justify-end p-2 border-b">
+          <button
+            type="button"
+            onClick={() => setDrawerOpen((o) => !o)}
+            className="playground-picker-row__badge"
+          >
+            {drawerOpen ? 'Hide inspector' : 'Inspect'}
+          </button>
+        </div>
+        <CooldownBanner state={cooldownState} onRefresh={refreshCooldown} />
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
           {state.messages.length === 0 && (
             <div className="text-sm text-muted-foreground">Pick a model and send a message to start.</div>
           )}
-          {state.messages.map((m) => <MessageBubble key={m.id} m={m} />)}
+          {state.messages.map((m) => (
+            <MessageBubble
+              key={m.id}
+              m={m}
+              streamingFast={state.inFlight === m.reqId}
+              onCopy={() => copy(m)}
+              onInspect={() => inspect(m)}
+              onRetry={lastUserMessage ? () => retry(lastUserMessage) : undefined}
+            />
+          ))}
           {state.error && (
             <div className="rounded border border-red-500 bg-red-50 dark:bg-red-950 p-3 text-sm">
               <div className="font-semibold">Error</div>
@@ -210,6 +297,14 @@ export default function PlaygroundPage() {
             </div>
           )}
         </div>
+        <UsageFooter
+          lastUsage={state.messages.at(-1)?.usage || null}
+          pricingPerMillion={
+            typeof window !== 'undefined' && window.__nixllmPricing && window.__nixllmPricing[model]
+              ? window.__nixllmPricing[model]
+              : null
+          }
+        />
         <div className="border-t p-3 flex gap-2">
           <textarea
             className="flex-1 border rounded px-2 py-1 bg-background resize-none"
@@ -217,10 +312,18 @@ export default function PlaygroundPage() {
             placeholder="Type a message…"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) doSend(); }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                doSend();
+              } else if (e.key === 'Escape' && state.inFlight) {
+                e.preventDefault();
+                onAbort();
+              }
+            }}
           />
           {state.inFlight ? (
-            <button onClick={onAbort} className="px-4 py-2 rounded border">Stop</button>
+            <button onClick={onAbort} className="playground-stop-button px-4 py-2 rounded">Stop</button>
           ) : (
             <button
               onClick={doSend}
@@ -232,6 +335,15 @@ export default function PlaygroundPage() {
           )}
         </div>
       </div>
+      <InspectorDrawer
+        open={drawerOpen}
+        view={currentReqId ? inspector.viewFor(currentReqId) : null}
+        activeTab={activeTab}
+        onClose={() => setDrawerOpen(false)}
+        onTabChange={setActiveTab}
+        pretty={pretty}
+        onPrettyToggle={() => setPretty((p) => !p)}
+      />
     </div>
   );
 }

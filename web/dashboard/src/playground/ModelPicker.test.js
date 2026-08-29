@@ -83,3 +83,7 @@ test('unwrapList prefers the first known key when several are present', () => {
   const data = { models: [{ id: 1 }], items: [{ id: 2 }] };
   assert.deepEqual(unwrapList(data), [{ id: 1 }]);
 });
+
+// The component-level smoke test for the unified ModelPicker lives in
+// the sibling ModelPicker.component.test.jsx — JSX needs the .jsx
+// extension for the node ESM loader to transform it.

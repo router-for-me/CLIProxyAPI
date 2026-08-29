@@ -4,13 +4,13 @@
 // State shape:
 //   { messages: [...], inFlight: id|null, error: object|null, lastUsage: id|null }
 // Message shape:
-//   { id, role, content, streaming?, usage? }
+//   { id, role, content, streaming?, usage?, outgoing?, incoming?, reqId? }
 //
 // Actions:
-//   SEND { id, userText, model, protocol, params }
+//   SEND { id, userText, model, protocol, params, outgoing }
 //   TOKEN { id, token }
-//   DONE { id, usage? }
-//   ERROR { id, error }
+//   DONE { id, usage?, incoming? }
+//   ERROR { id, error, incoming? }
 //   CLEAR_ERROR
 
 import { useReducer } from 'react';
@@ -29,7 +29,7 @@ export function reducer(state, action) {
   switch (action.type) {
     case 'SEND': {
       const userMsg = { id: genId(), role: 'user', content: action.userText, model: action.model, protocol: action.protocol, params: action.params };
-      const asstMsg = { id: genId(), role: 'assistant', content: '', streaming: true };
+      const asstMsg = { id: genId(), role: 'assistant', content: '', streaming: true, outgoing: action.outgoing, reqId: action.id };
       return {
         ...state,
         messages: [...state.messages, userMsg, asstMsg],
@@ -48,7 +48,7 @@ export function reducer(state, action) {
       if (state.inFlight !== action.id) return state;
       const messages = state.messages.map((m, i) =>
         i === state.messages.length - 1
-          ? { ...m, streaming: false, usage: action.usage }
+          ? { ...m, streaming: false, usage: action.usage, incoming: action.incoming }
           : m,
       );
       return { ...state, messages, inFlight: null, lastUsage: action.id };
@@ -56,7 +56,9 @@ export function reducer(state, action) {
     case 'ERROR': {
       if (state.inFlight !== action.id) return state;
       const messages = state.messages.map((m, i) =>
-        i === state.messages.length - 1 ? { ...m, streaming: false } : m,
+        i === state.messages.length - 1
+          ? { ...m, streaming: false, incoming: action.incoming }
+          : m,
       );
       return { ...state, messages, inFlight: null, error: action.error };
     }

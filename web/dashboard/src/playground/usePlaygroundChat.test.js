@@ -4,6 +4,9 @@ import { reducer, initialState, openStream } from './usePlaygroundChat.js';
 
 const baseParams = { temperature: 0.5, stream: true };
 
+// Pre-existing reducer coverage (restored after Task 2's reducer-fields
+// task replaced the file rather than appending).
+
 test('initialState has empty messages and no in-flight request', () => {
   assert.deepEqual(initialState.messages, []);
   assert.equal(initialState.inFlight, null);
@@ -62,7 +65,7 @@ test('CLEAR_ERROR removes the error without affecting messages', () => {
   assert.equal(c.messages.length, 2);
 });
 
-// openStream SSE coverage (Task 8)
+// Pre-existing openStream SSE coverage.
 
 test('openStream dispatches onChunk for each SSE event block', async () => {
   const events = [];
@@ -114,4 +117,82 @@ test('openStream reports a non-2xx as onError with status and body', async () =>
   assert.equal(captured.status, 503);
   assert.equal(captured.type, 'upstream');
   assert.equal(captured.body, 'upstream down');
+});
+
+// Task 2: outgoing/incoming on reducer messages.
+
+test('SEND stamps the assistant message with outgoing snapshot', () => {
+  const next = reducer(initialState, {
+    type: 'SEND',
+    id: 'r-1',
+    userText: 'hi',
+    model: 'm1',
+    protocol: 'openai-compat',
+    params: { stream: true },
+    outgoing: { model: 'm1', messages: [{ role: 'user', content: 'hi' }] },
+  });
+  const asst = next.messages[next.messages.length - 1];
+  assert.equal(asst.role, 'assistant');
+  assert.deepEqual(asst.outgoing, { model: 'm1', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(asst.incoming, undefined);
+});
+
+test('DONE stamps the assistant message with incoming snapshot', () => {
+  let s = reducer(initialState, {
+    type: 'SEND',
+    id: 'r-1',
+    userText: 'hi',
+    model: 'm1',
+    protocol: 'openai-compat',
+    params: { stream: true },
+    outgoing: { model: 'm1', messages: [] },
+  });
+  s = reducer(s, {
+    type: 'DONE',
+    id: 'r-1',
+    usage: { prompt_tokens: 1, completion_tokens: 2 },
+    incoming: { id: 'cmpl-1', choices: [{ message: { role: 'assistant', content: 'hello' } }] },
+  });
+  const asst = s.messages[s.messages.length - 1];
+  assert.equal(asst.streaming, false);
+  assert.deepEqual(asst.incoming, { id: 'cmpl-1', choices: [{ message: { role: 'assistant', content: 'hello' } }] });
+});
+
+test('ERROR stamps incoming with the error payload', () => {
+  let s = reducer(initialState, {
+    type: 'SEND',
+    id: 'r-1', userText: 'hi', model: 'm1', protocol: 'openai-compat', params: {},
+    outgoing: {},
+  });
+  s = reducer(s, {
+    type: 'ERROR',
+    id: 'r-1',
+    error: { message: 'HTTP 500', type: 'upstream' },
+    incoming: { error: 'upstream blew up', code: 500 },
+  });
+  const asst = s.messages[s.messages.length - 1];
+  assert.equal(asst.streaming, false);
+  assert.deepEqual(asst.incoming, { error: 'upstream blew up', code: 500 });
+});
+
+test('TOKEN and other actions leave outgoing/incoming untouched', () => {
+  let s = reducer(initialState, {
+    type: 'SEND',
+    id: 'r-1', userText: 'hi', model: 'm1', protocol: 'openai-compat', params: {},
+    outgoing: { model: 'm1' },
+  });
+  const before = s.messages[s.messages.length - 1].outgoing;
+  s = reducer(s, { type: 'TOKEN', id: 'r-1', token: 'a' });
+  s = reducer(s, { type: 'TOKEN', id: 'r-1', token: 'b' });
+  const asst = s.messages[s.messages.length - 1];
+  assert.deepEqual(asst.outgoing, before);
+  assert.equal(asst.incoming, undefined);
+});
+
+test('SEND stamps reqId on the assistant message', () => {
+  const next = reducer(initialState, {
+    type: 'SEND', id: 'r-42', userText: 'hi', model: 'm1', protocol: 'openai-compat', params: {}, outgoing: {},
+  });
+  const asst = next.messages[next.messages.length - 1];
+  assert.equal(asst.reqId, 'r-42');
 });
