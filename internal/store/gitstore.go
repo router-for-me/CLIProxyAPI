@@ -386,7 +386,10 @@ func (s *GitTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string
 		return "", fmt.Errorf("auth filestore: missing file path attribute for %s", auth.ID)
 	}
 
-	if auth.Disabled {
+	// A login record has TokenStorage and is an intentional write, including
+	// migration to a new canonical filename. Runtime metadata updates still must
+	// not recreate a disabled credential whose source file was removed.
+	if auth.Disabled && auth.Storage == nil {
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
 			return "", nil
 		}

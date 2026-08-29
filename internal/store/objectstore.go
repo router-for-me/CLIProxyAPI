@@ -173,7 +173,10 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		return "", fmt.Errorf("object store: missing file path attribute for %s", auth.ID)
 	}
 
-	if auth.Disabled {
+	// A login record has TokenStorage and is an intentional write, including
+	// migration to a new canonical filename. Runtime metadata updates still must
+	// not recreate a disabled credential whose source file was removed.
+	if auth.Disabled && auth.Storage == nil {
 		if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
 			return "", nil
 		}

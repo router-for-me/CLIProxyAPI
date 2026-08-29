@@ -224,7 +224,10 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", fmt.Errorf("postgres store: missing file path attribute for %s", auth.ID)
 	}
 
-	if auth.Disabled {
+	// A login record has TokenStorage and is an intentional write, including
+	// migration to a new canonical filename. Runtime metadata updates still must
+	// not recreate a disabled credential whose source file was removed.
+	if auth.Disabled && auth.Storage == nil {
 		if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
 			return "", nil
 		}

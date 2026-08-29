@@ -26,6 +26,11 @@ func MergeExistingAuthMetadata(target *Auth, existingMap map[string]any) {
 	if target.Metadata == nil {
 		target.Metadata = make(map[string]any)
 	}
+	if _, explicitlySet := target.Metadata["disabled"]; !explicitlySet {
+		if disabled, ok := existingMap["disabled"].(bool); ok {
+			target.Disabled = disabled
+		}
+	}
 	for k, v := range existingMap {
 		if IsAuthTokenPayloadKey(k) {
 			continue
