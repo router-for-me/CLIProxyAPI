@@ -127,15 +127,29 @@ func TestSynthesizeOpenAIStreamFramesPreservesRefusal(t *testing.T) {
 
 func TestSynthesizeOpenAIStreamFramesRejectsUnusableChoices(t *testing.T) {
 	cases := map[string]string{
-		"empty choice":  `{"id":"x","model":"m","created":1,"choices":[{}]}`,
-		"empty array":   `{"id":"x","model":"m","created":1,"choices":[]}`,
-		"empty message": `{"id":"x","model":"m","created":1,"choices":[{"index":0,"message":{"role":"assistant","content":""}}]}`,
-		"mixed choices": `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"content":"ok"}},{"index":1,"message":{}}]}`,
+		"empty choice":      `{"id":"x","model":"m","created":1,"choices":[{}]}`,
+		"empty array":       `{"id":"x","model":"m","created":1,"choices":[]}`,
+		"empty message":     `{"id":"x","model":"m","created":1,"choices":[{"index":0,"message":{"role":"assistant","content":""}}]}`,
+		"mixed choices":     `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"content":"ok"}},{"index":1,"message":{}}]}`,
+		"empty tool call":   `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"tool_calls","message":{"tool_calls":[{}]}}]}`,
+		"unnamed tool call": `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"","arguments":"{}"}}]}}]}`,
 	}
 	for name, body := range cases {
 		if frames := SynthesizeOpenAIStreamFrames([]byte(body)); frames != nil {
 			t.Fatalf("%s: expected rejection, got %v", name, frames)
 		}
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesPreservesAnnotations(t *testing.T) {
+	body := []byte(`{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"content":"cited","annotations":[{"type":"url_citation","url_citation":{"url":"https://example.com","start_index":0,"end_index":5}}]}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	joined := strings.Join(frames, "\n")
+	if !strings.Contains(joined, `"annotations":[{"type":"url_citation"`) {
+		t.Fatalf("annotations dropped: %s", joined)
+	}
+	if !strings.Contains(joined, `"content":"cited"`) {
+		t.Fatalf("content missing: %s", joined)
 	}
 }
 

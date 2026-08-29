@@ -105,7 +105,13 @@ func SynthesizeOpenAIStreamFrames(body []byte) []string {
 		}
 		contentEmitted := false
 		if content := message.Get("content"); content.Exists() && content.String() != "" {
-			emit(index, fmt.Sprintf(`{"content":%s}`, content.Raw), gjson.Result{}, logprobs, false)
+			delta := fmt.Sprintf(`{"content":%s}`, content.Raw)
+			if annotations := message.Get("annotations"); annotations.Exists() && annotations.Type != gjson.Null {
+				if updated, errSet := sjson.SetRaw(delta, "annotations", annotations.Raw); errSet == nil {
+					delta = updated
+				}
+			}
+			emit(index, delta, gjson.Result{}, logprobs, false)
 			contentEmitted = true
 		}
 		if !contentEmitted && logprobs.Exists() && logprobs.Type != gjson.Null {
@@ -152,9 +158,24 @@ func hasUsableAssistantChoice(choice gjson.Result) bool {
 		return true
 	}
 	if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0 {
-		return true
+		return hasUsableToolCalls(toolCalls)
 	}
 	return choice.Get("finish_reason").String() != ""
+}
+
+// hasUsableToolCalls reports whether every reported call carries function data
+// the client can act on. Placeholder entries such as tool_calls:[{}] are treated
+// as an unusable reply so the caller can fall back to another credential.
+func hasUsableToolCalls(toolCalls gjson.Result) bool {
+	usable := true
+	toolCalls.ForEach(func(_, call gjson.Result) bool {
+		if !call.IsObject() || call.Get("function.name").String() == "" {
+			usable = false
+			return false
+		}
+		return true
+	})
+	return usable
 }
 
 // buildToolCallsDelta rewrites a non-streaming tool_calls array into a single
