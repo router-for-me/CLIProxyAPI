@@ -109,6 +109,21 @@ func (r *ResponseCacheRegistry) Lookup(compat *config.OpenAICompatibility, provi
 	return responseCache, cache.ResponseCacheKey(keyProvider, url, model, stream, headers, payload), settings
 }
 
+// AppendCachedStreamFrame appends one length-prefixed frame without allowing
+// the encoded cache entry to exceed maxBytes. The returned false means callers
+// must discard the entry instead of retaining an oversized partial stream.
+func AppendCachedStreamFrame(encoded, frame []byte, maxBytes int) ([]byte, bool) {
+	const prefixBytes = 8
+	if maxBytes <= 0 || len(frame) > maxBytes-prefixBytes-len(encoded) {
+		return nil, false
+	}
+	var prefix [prefixBytes]byte
+	binary.BigEndian.PutUint64(prefix[:], uint64(len(frame)))
+	encoded = append(encoded, prefix[:]...)
+	encoded = append(encoded, frame...)
+	return encoded, true
+}
+
 // EncodeCachedStreamFrames serializes raw upstream SSE data frames using a
 // length-prefixed encoding. SSE events may contain pretty-printed JSON joined
 // with newlines, so newline-delimited storage would be ambiguous.
@@ -116,14 +131,11 @@ func EncodeCachedStreamFrames(frames []string) []byte {
 	if len(frames) == 0 {
 		return nil
 	}
-	var encoded bytes.Buffer
+	var encoded []byte
 	for _, frame := range frames {
-		if errWrite := binary.Write(&encoded, binary.BigEndian, uint64(len(frame))); errWrite != nil {
-			return nil
-		}
-		encoded.WriteString(frame)
+		encoded, _ = AppendCachedStreamFrame(encoded, []byte(frame), int(^uint(0)>>1))
 	}
-	return encoded.Bytes()
+	return encoded
 }
 
 // DecodeCachedStreamFrames restores length-prefixed upstream SSE data frames.

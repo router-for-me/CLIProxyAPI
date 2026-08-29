@@ -134,6 +134,19 @@ func TestResponseCacheLookupSeparatesAuthAndVariant(t *testing.T) {
 	}
 }
 
+func TestAppendCachedStreamFrameEnforcesEncodedLimit(t *testing.T) {
+	encoded, ok := AppendCachedStreamFrame(nil, []byte("{}"), 10)
+	if !ok || len(encoded) != 10 {
+		t.Fatalf("encoded frame = %d bytes, ok=%v; want exactly 10 bytes", len(encoded), ok)
+	}
+	if got, okSecond := AppendCachedStreamFrame(encoded, []byte("{}"), 19); okSecond || got != nil {
+		t.Fatalf("oversized append = %#v, ok=%v; want nil, false", got, okSecond)
+	}
+	if got, okSmall := AppendCachedStreamFrame(nil, []byte("{}"), 9); okSmall || got != nil {
+		t.Fatalf("undersized limit append = %#v, ok=%v; want nil, false", got, okSmall)
+	}
+}
+
 func TestCachedStreamFrameRoundTrip(t *testing.T) {
 	frames := []string{`{"choices":[{"delta":{"content":"a"}}]}`, "{\n  \"choices\": [{\"delta\": {\"content\": \"b\"}}]\n}", "[DONE]"}
 	decoded := DecodeCachedStreamFrames(EncodeCachedStreamFrames(frames))

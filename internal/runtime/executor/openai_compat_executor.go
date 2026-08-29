@@ -462,8 +462,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		var streamAborted bool
 		var upstreamEvent string
 		var frameData [][]byte
-		var cachedFrames []string
-		var cachedBytes int
+		var cachedStream []byte
 		var cacheOversized bool
 		maxEntryBytes := cacheSettings.MaxEntryBytes
 		defer streamUsage.Publish(ctx, reporter)
@@ -522,12 +521,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 			streamLine := append([]byte("data: "), dataPayload...)
 			if responseCache != nil && !cacheOversized {
-				cachedBytes += len(dataPayload) + 1
-				if cachedBytes > maxEntryBytes {
+				var cached bool
+				cachedStream, cached = helps.AppendCachedStreamFrame(cachedStream, dataPayload, maxEntryBytes)
+				if !cached {
 					cacheOversized = true
-					cachedFrames = nil
-				} else {
-					cachedFrames = append(cachedFrames, string(dataPayload))
+					cachedStream = nil
 				}
 			}
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, streamLine, &param, claudeInputTokens)
@@ -617,8 +615,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		reporter.EnsurePublished(ctx)
 		// Only complete, uninterrupted streams within configured size bounds are cacheable;
 		// a partial replay would otherwise be served as if it were a finished response.
-		if responseCache != nil && !cacheOversized && seenDone && !streamFailed && !streamAborted && errScan == nil && len(cachedFrames) > 0 {
-			responseCache.Store(cacheKey, helps.EncodeCachedStreamFrames(cachedFrames), httpResp.Header, true)
+		if responseCache != nil && !cacheOversized && seenDone && !streamFailed && !streamAborted && errScan == nil && len(cachedStream) > 0 {
+			responseCache.Store(cacheKey, cachedStream, httpResp.Header, true)
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
