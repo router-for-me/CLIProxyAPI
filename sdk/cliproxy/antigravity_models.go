@@ -74,6 +74,43 @@ func (s *Service) fetchAntigravityModelCapabilityHintsForAuth(ctx context.Contex
 	return antigravityModelCapabilityHints{}
 }
 
+// antigravityModelCapabilityHints resolves the Antigravity capability hints for
+// auth by combining what the upstream advertises with the operator-configured
+// web search overrides. The overrides are merged even when the upstream fetch
+// yields nothing, so a configured model keeps its search capability while the
+// remote model catalog is unreachable.
+func (s *Service) antigravityModelCapabilityHints(ctx context.Context, auth *coreauth.Auth) antigravityModelCapabilityHints {
+	hints := s.fetchAntigravityModelCapabilityHintsForAuth(ctx, auth)
+	overrides := s.antigravityWebSearchModelOverrides()
+	if len(overrides) == 0 {
+		return hints
+	}
+	// parseAntigravityModelCapabilityHints builds a fresh map per call, so the
+	// fetched hints are never shared and can be extended in place.
+	if hints.WebSearchModelIDs == nil {
+		hints.WebSearchModelIDs = make(map[string]struct{}, len(overrides))
+	}
+	for modelID := range overrides {
+		hints.WebSearchModelIDs[modelID] = struct{}{}
+	}
+	return hints
+}
+
+// antigravityWebSearchModelOverrides returns the normalized model IDs that the
+// configuration forces to be web search capable.
+func (s *Service) antigravityWebSearchModelOverrides() map[string]struct{} {
+	if s == nil || s.cfg == nil || len(s.cfg.Antigravity.WebSearchModels) == 0 {
+		return nil
+	}
+	overrides := make(map[string]struct{}, len(s.cfg.Antigravity.WebSearchModels))
+	for _, modelID := range s.cfg.Antigravity.WebSearchModels {
+		if modelID = normalizeAntigravityFetchedModelID(modelID); modelID != "" {
+			overrides[modelID] = struct{}{}
+		}
+	}
+	return overrides
+}
+
 func (s *Service) antigravityModelFetchProxyURL(auth *coreauth.Auth) string {
 	if auth != nil {
 		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {

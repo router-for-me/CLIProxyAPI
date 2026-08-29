@@ -108,6 +108,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if !reflect.DeepEqual(oldCfg.Antigravity.SensitiveWords, newCfg.Antigravity.SensitiveWords) {
 		changes = append(changes, fmt.Sprintf("antigravity.sensitive-words: %d -> %d", len(oldCfg.Antigravity.SensitiveWords), len(newCfg.Antigravity.SensitiveWords)))
 	}
+	if !reflect.DeepEqual(oldCfg.Antigravity.WebSearchModels, newCfg.Antigravity.WebSearchModels) {
+		changes = append(changes, fmt.Sprintf("antigravity.web-search-models: %d -> %d", len(oldCfg.Antigravity.WebSearchModels), len(newCfg.Antigravity.WebSearchModels)))
+	}
 
 	if oldCfg.Codex.IdentityConfuse != newCfg.Codex.IdentityConfuse {
 		changes = append(changes, fmt.Sprintf("codex.identity-confuse: %t -> %t", oldCfg.Codex.IdentityConfuse, newCfg.Codex.IdentityConfuse))

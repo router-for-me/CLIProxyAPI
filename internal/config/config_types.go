@@ -141,6 +141,14 @@ type XAIConfig struct {
 type AntigravityConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+	// WebSearchModels marks the listed Antigravity model IDs as web search capable,
+	// which makes Claude typed web_search tools translate into a native googleSearch
+	// request for them. fetchAvailableModels.webSearchModelIds omits models the
+	// upstream still accepts googleSearch for, and a model missing from that list
+	// silently degrades into a plain chat turn that returns no search results, so
+	// this opts them back in. Entries are matched case-insensitively against the
+	// bare model ID, without a thinking suffix.
+	WebSearchModels []string `yaml:"web-search-models,omitempty" json:"web-search-models,omitempty"`
 }
 
 // CodexConfig configures provider-wide Codex request behavior.
