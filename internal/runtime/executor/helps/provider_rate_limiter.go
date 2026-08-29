@@ -67,16 +67,29 @@ func (r *ProviderRateLimitRegistry) Wait(ctx context.Context, compat *config.Ope
 	limiter := state.limiter
 	r.mu.Unlock()
 
-	if pause := time.Until(blockedUntil); pause > 0 {
+	for {
+		if errWait := limiter.Wait(ctx); errWait != nil {
+			return errWait
+		}
+
+		// A queued caller may have started waiting before another request received
+		// a 429. Re-read the shared pause after every limiter wake so already queued
+		// calls also honor newly published Retry-After windows.
+		r.mu.Lock()
+		blockedUntil = state.blockedUntil
+		r.mu.Unlock()
+		pause := time.Until(blockedUntil)
+		if pause <= 0 {
+			return nil
+		}
 		timer := time.NewTimer(pause)
-		defer timer.Stop()
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
 		}
 	}
-	return limiter.Wait(ctx)
 }
 
 // NoteLimited pauses subsequent requests after an upstream 429 response.

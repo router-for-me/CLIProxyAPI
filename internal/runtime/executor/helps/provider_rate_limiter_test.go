@@ -49,6 +49,30 @@ func TestWaitProviderRateLimit_EnforcesPacing(t *testing.T) {
 	}
 }
 
+func TestWaitProviderRateLimit_RechecksRetryAfterForQueuedCall(t *testing.T) {
+	registry := NewProviderRateLimitRegistry()
+	cfg := &config.OpenAICompatibility{Name: "queued-provider", RequestsPerMinute: 60}
+	ctx := context.Background()
+	if err := registry.Wait(ctx, cfg, "provider|config:0", "key1"); err != nil {
+		t.Fatalf("initial wait: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- registry.Wait(ctx, cfg, "provider|config:0", "key1")
+	}()
+	time.Sleep(100 * time.Millisecond)
+	header := http.Header{}
+	header.Set("Retry-After", "2")
+	registry.NoteLimited(cfg, "provider|config:0", "key1", header)
+
+	select {
+	case err := <-done:
+		t.Fatalf("queued call ignored new Retry-After: %v", err)
+	case <-time.After(1200 * time.Millisecond):
+	}
+}
+
 func TestNoteProviderRateLimited_HonoursRetryAfter(t *testing.T) {
 	registry := NewProviderRateLimitRegistry()
 	cfg := &config.OpenAICompatibility{
