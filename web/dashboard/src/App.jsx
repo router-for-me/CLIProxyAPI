@@ -34,6 +34,7 @@ import AlertsPage from './pages/AlertsPage.jsx';
 import DashboardPage from './pages/DashboardPage.jsx';
 import ImportExportPage from './pages/ImportExportPage.jsx';
 import BackupPage from './pages/BackupPage.jsx';
+import PlaygroundPage from './pages/PlaygroundPage.jsx';
 import ManageCpaLayout from './pages/manage-cpa/ManageCpaLayout.jsx';
 import OverviewTab from './pages/manage-cpa/OverviewTab.jsx';
 import ProvidersTab from './pages/manage-cpa/ProvidersTab.jsx';
@@ -289,6 +290,7 @@ export default function App() {
             <Route path="/api-tokens/:id" element={<ApiTokenDetailPage />} />
             <Route path="/developer" element={<DeveloperPage />} />
             <Route path="/upstream-providers" element={<UpstreamProvidersPage />} />
+            <Route path="/playground" element={<PlaygroundPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/branding" element={<BrandingPage />} />
             <Route path="/import-export" element={<ImportExportPage />} />

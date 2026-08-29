@@ -430,6 +430,7 @@ const NAV_GROUPS = [
       { to: '/error-messages', label: 'Error Messages', icon: 'alert' },
       { to: '/api-tokens', label: 'API Management', icon: 'shield' },
       { to: '/upstream-providers', label: 'Upstream Providers', icon: 'server' },
+      { to: '/playground', label: 'Playground', icon: 'chat' },
       { to: '/developer', label: 'Developer', icon: 'code' },
       { to: '/manage-cpa', label: 'Manage CPA', icon: 'cpa' },
     ],
@@ -558,4 +559,5 @@ const ICON_MAP = {
   route: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="3" cy="8" r="1.6" /><circle cx="13" cy="8" r="1.6" /><path d="M4.6 8h6.8" /><path d="M5 6c0-1.5 1-2.5 3-2.5S11 4.5 11 6v.5" /><path d="M5 10c0 1.5 1 2.5 3 2.5s3-1 3-2.5V9.5" /></svg>,
   litellm: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><ellipse cx="8" cy="3.5" rx="6" ry="2.2" /><path d="M2 3.5v9c0 1.2 2.7 2.2 6 2.2s6-1 6-2.2v-9" /><path d="M2 8c0 1.2 2.7 2.2 6 2.2s6-1 6-2.2" /></svg>,
   archive: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="12" height="3" rx="0.5" /><path d="M3 6v6.5a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V6" /><path d="M6.5 9h3" /></svg>,
+  chat: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2.5 4.5A1.5 1.5 0 0 1 4 3h8a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 12 11H6.5L4 13.5V11H4a1.5 1.5 0 0 1-1.5-1.5v-5z" /><path d="M5.5 6.5h5M5.5 8.5h3" /></svg>,
 };
