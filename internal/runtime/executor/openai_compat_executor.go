@@ -40,13 +40,18 @@ const (
 // It performs request/response translation and executes against the provider base URL
 // using per-auth credentials (API key) and per-auth HTTP transport (proxy) from context.
 type OpenAICompatExecutor struct {
-	provider string
-	cfg      *config.Config
+	provider      string
+	cfg           *config.Config
+	responseCache *helps.ResponseCacheRegistry
 }
 
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
 func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatExecutor {
-	return &OpenAICompatExecutor{provider: provider, cfg: cfg}
+	return &OpenAICompatExecutor{
+		provider:      provider,
+		cfg:           cfg,
+		responseCache: helps.NewResponseCacheRegistry(),
+	}
 }
 
 // Identifier implements cliproxyauth.ProviderExecutor.
@@ -167,7 +172,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	// Serve byte-identical repeats from the provider response cache when enabled.
 	// Upstream aggregators without prompt caching bill every retry at full price.
-	responseCache, cacheKey, _ := helps.ResponseCacheLookup(e.resolveCompatConfig(auth), e.Identifier(), authID, url, baseModel, responseFormat.String(), false, httpReq.Header, translated)
+	responseCache, cacheKey, _ := e.responseCache.Lookup(e.resolveCompatConfig(auth), e.responseCacheProviderKey(auth), authID, url, baseModel, responseFormat.String(), false, httpReq.Header, translated)
 	if responseCache != nil {
 		if entry, ok := responseCache.Get(cacheKey); ok && !entry.Stream {
 			helps.LogWithRequestID(ctx).Debugf("openai compat executor: response cache hit for model %s", baseModel)
@@ -401,7 +406,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// Replay byte-identical streaming repeats from the provider response cache.
 	// Cached frames are the raw upstream SSE payloads, so they flow through the same
 	// translator pipeline that produced the original downstream output.
-	responseCache, cacheKey, cacheSettings := helps.ResponseCacheLookup(e.resolveCompatConfig(auth), e.Identifier(), authID, url, baseModel, responseFormat.String(), true, httpReq.Header, translated)
+	responseCache, cacheKey, cacheSettings := e.responseCache.Lookup(e.resolveCompatConfig(auth), e.responseCacheProviderKey(auth), authID, url, baseModel, responseFormat.String(), true, httpReq.Header, translated)
 	if responseCache != nil {
 		if entry, ok := responseCache.Get(cacheKey); ok && entry.Stream {
 			helps.LogWithRequestID(ctx).Debugf("openai compat executor: response cache hit for streaming model %s", baseModel)
@@ -999,6 +1004,16 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
 	}
 	return
+}
+
+func (e *OpenAICompatExecutor) responseCacheProviderKey(auth *cliproxyauth.Auth) string {
+	key := e.Identifier()
+	if auth != nil && auth.Attributes != nil {
+		if configIndex := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeConfigIndex]); configIndex != "" {
+			key += "|config:" + configIndex
+		}
+	}
+	return key
 }
 
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {

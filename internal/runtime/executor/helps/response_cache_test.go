@@ -47,30 +47,43 @@ func TestResolveResponseCacheSettingsParsesTTL(t *testing.T) {
 }
 
 func TestResponseCacheForReusesInstanceAndRebuildsOnChange(t *testing.T) {
-	ResetResponseCaches()
-	t.Cleanup(ResetResponseCaches)
-
+	registry := NewResponseCacheRegistry()
 	compat := &config.OpenAICompatibility{
 		Name:          "zen",
 		ResponseCache: config.ResponseCacheConfig{Enabled: true, TTL: "1m"},
 	}
-	first, _ := ResponseCacheFor(compat, "zendigikey")
-	second, _ := ResponseCacheFor(compat, "zendigikey")
+	first, _ := registry.CacheFor(compat, "zendigikey")
+	second, _ := registry.CacheFor(compat, "zendigikey")
 	if first == nil || first != second {
 		t.Fatal("expected the same cache instance for unchanged settings")
 	}
 
 	compat.ResponseCache.TTL = "2m"
-	third, _ := ResponseCacheFor(compat, "zendigikey")
+	third, _ := registry.CacheFor(compat, "zendigikey")
 	if third == first {
 		t.Fatal("expected a new cache instance after settings change")
 	}
 }
 
-func TestResponseCacheLookupRespectsModelAllowlist(t *testing.T) {
-	ResetResponseCaches()
-	t.Cleanup(ResetResponseCaches)
+func TestResponseCacheRegistrySeparatesProviderConfigurations(t *testing.T) {
+	registry := NewResponseCacheRegistry()
+	compat := &config.OpenAICompatibility{
+		Name:          "duplicate",
+		ResponseCache: config.ResponseCacheConfig{Enabled: true, TTL: "1m"},
+	}
+	first, _ := registry.CacheFor(compat, "openai-compatibility|config:0")
+	second, _ := registry.CacheFor(compat, "openai-compatibility|config:1")
+	if first == nil || second == nil || first == second {
+		t.Fatal("expected duplicate-name configurations to own separate caches")
+	}
+	again, _ := registry.CacheFor(compat, "openai-compatibility|config:0")
+	if again != first {
+		t.Fatal("expected provider configuration to reuse its own cache")
+	}
+}
 
+func TestResponseCacheLookupRespectsModelAllowlist(t *testing.T) {
+	registry := NewResponseCacheRegistry()
 	compat := &config.OpenAICompatibility{
 		Name: "zen",
 		ResponseCache: config.ResponseCacheConfig{
@@ -80,46 +93,42 @@ func TestResponseCacheLookupRespectsModelAllowlist(t *testing.T) {
 	}
 	payload := []byte(`{"model":"claude-opus-5"}`)
 
-	c, key, _ := ResponseCacheLookup(compat, "zendigikey", "auth1", "https://x/v1/chat/completions", "claude-opus-5", "openai", false, nil, payload)
+	c, key, _ := registry.Lookup(compat, "zendigikey", "auth1", "https://x/v1/chat/completions", "claude-opus-5", "openai", false, nil, payload)
 	if c == nil || key == "" {
 		t.Fatal("expected allowlisted model to be cacheable")
 	}
 
-	c, _, _ = ResponseCacheLookup(compat, "zendigikey", "auth1", "https://x/v1/chat/completions", "gpt-5.4-mini", "openai", false, nil, payload)
+	c, _, _ = registry.Lookup(compat, "zendigikey", "auth1", "https://x/v1/chat/completions", "gpt-5.4-mini", "openai", false, nil, payload)
 	if c != nil {
 		t.Fatal("expected non-allowlisted model to skip caching")
 	}
 }
 
 func TestResponseCacheLookupSkipsWhenDisabledOrEmptyPayload(t *testing.T) {
-	ResetResponseCaches()
-	t.Cleanup(ResetResponseCaches)
-
+	registry := NewResponseCacheRegistry()
 	enabled := &config.OpenAICompatibility{Name: "zen", ResponseCache: config.ResponseCacheConfig{Enabled: true}}
-	if c, _, _ := ResponseCacheLookup(enabled, "zendigikey", "auth1", "u", "m", "openai", false, nil, nil); c != nil {
+	if c, _, _ := registry.Lookup(enabled, "zendigikey", "auth1", "u", "m", "openai", false, nil, nil); c != nil {
 		t.Fatal("expected empty payload to skip caching")
 	}
 
 	disabled := &config.OpenAICompatibility{Name: "zen"}
-	if c, _, _ := ResponseCacheLookup(disabled, "zendigikey", "auth1", "u", "m", "openai", false, nil, []byte(`{}`)); c != nil {
+	if c, _, _ := registry.Lookup(disabled, "zendigikey", "auth1", "u", "m", "openai", false, nil, []byte(`{}`)); c != nil {
 		t.Fatal("expected disabled provider to skip caching")
 	}
 }
 
 func TestResponseCacheLookupSeparatesAuthAndVariant(t *testing.T) {
-	ResetResponseCaches()
-	t.Cleanup(ResetResponseCaches)
-
+	registry := NewResponseCacheRegistry()
 	compat := &config.OpenAICompatibility{Name: "zen", ResponseCache: config.ResponseCacheConfig{Enabled: true}}
 	payload := []byte(`{"a":1}`)
 
-	_, keyAuth1, _ := ResponseCacheLookup(compat, "zendigikey", "auth1", "u", "m", "openai", false, nil, payload)
-	_, keyAuth2, _ := ResponseCacheLookup(compat, "zendigikey", "auth2", "u", "m", "openai", false, nil, payload)
+	_, keyAuth1, _ := registry.Lookup(compat, "zendigikey", "auth1", "u", "m", "openai", false, nil, payload)
+	_, keyAuth2, _ := registry.Lookup(compat, "zendigikey", "auth2", "u", "m", "openai", false, nil, payload)
 	if keyAuth1 == keyAuth2 {
 		t.Fatal("expected different credentials to use different cache keys")
 	}
 
-	_, keyClaude, _ := ResponseCacheLookup(compat, "zendigikey", "auth1", "u", "m", "claude", false, nil, payload)
+	_, keyClaude, _ := registry.Lookup(compat, "zendigikey", "auth1", "u", "m", "claude", false, nil, payload)
 	if keyClaude == keyAuth1 {
 		t.Fatal("expected different response formats to use different cache keys")
 	}

@@ -13,14 +13,22 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
-// responseCacheRegistry keeps one response cache per OpenAI-compatible provider.
-// Executors are rebuilt whenever the configuration reloads, so the caches must
-// outlive them to stay useful across hot reloads.
-var (
-	responseCacheMu       sync.Mutex
-	responseCaches        = make(map[string]*cache.ResponseCache)
-	responseCacheProfiles = make(map[string]string)
-)
+// ResponseCacheRegistry owns response caches for one executor instance. Keeping
+// the registry executor-scoped lets configuration reloads retire caches for
+// removed providers when the old executor becomes unreachable.
+type ResponseCacheRegistry struct {
+	mu       sync.Mutex
+	caches   map[string]*cache.ResponseCache
+	profiles map[string]string
+}
+
+// NewResponseCacheRegistry creates an empty executor-scoped cache registry.
+func NewResponseCacheRegistry() *ResponseCacheRegistry {
+	return &ResponseCacheRegistry{
+		caches:   make(map[string]*cache.ResponseCache),
+		profiles: make(map[string]string),
+	}
+}
 
 // ResponseCacheSettings holds the resolved cache parameters for a provider.
 type ResponseCacheSettings struct {
@@ -54,43 +62,37 @@ func ResolveResponseCacheSettings(compat *config.OpenAICompatibility) (ResponseC
 	return settings, true
 }
 
-// ResponseCacheFor returns the shared cache for a provider, creating or replacing
-// it when the effective settings change. It returns nil when caching is disabled.
-func ResponseCacheFor(compat *config.OpenAICompatibility, providerKey string) (*cache.ResponseCache, ResponseCacheSettings) {
+// CacheFor returns the cache for one provider configuration, creating or
+// replacing it when the effective settings change.
+func (r *ResponseCacheRegistry) CacheFor(compat *config.OpenAICompatibility, providerKey string) (*cache.ResponseCache, ResponseCacheSettings) {
 	settings, enabled := ResolveResponseCacheSettings(compat)
-	if !enabled {
+	if !enabled || r == nil {
 		return nil, ResponseCacheSettings{}
 	}
-	name := strings.TrimSpace(compat.Name)
-	if name == "" {
-		name = strings.TrimSpace(providerKey)
-	}
-	if name == "" {
+	providerKey = strings.TrimSpace(providerKey)
+	if providerKey == "" {
 		return nil, ResponseCacheSettings{}
 	}
 	profile := fmt.Sprintf("%s|%d|%d|%s", settings.TTL, settings.MaxEntries, settings.MaxEntryBytes, strings.Join(settings.Models, ","))
 
-	responseCacheMu.Lock()
-	defer responseCacheMu.Unlock()
-	if existing, ok := responseCaches[name]; ok && responseCacheProfiles[name] == profile {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if existing, ok := r.caches[providerKey]; ok && r.profiles[providerKey] == profile {
 		return existing, settings
 	}
 	created := cache.NewResponseCache(settings.TTL, settings.MaxEntries, settings.MaxEntryBytes)
-	responseCaches[name] = created
-	responseCacheProfiles[name] = profile
+	r.caches[providerKey] = created
+	r.profiles[providerKey] = profile
 	return created, settings
 }
 
-// ResponseCacheLookup resolves the cache and key for one upstream request.
-// It returns a nil cache when the provider, model, or payload is not cacheable,
-// along with the effective provider cache settings.
-// variant separates entries that share an upstream payload but need different
-// downstream output, such as two response formats translated from one request.
-func ResponseCacheLookup(compat *config.OpenAICompatibility, providerKey, authID, url, model, variant string, stream bool, headers http.Header, payload []byte) (*cache.ResponseCache, string, ResponseCacheSettings) {
+// Lookup resolves the cache and key for one upstream request. providerKey must
+// identify the concrete provider configuration, not only its display name.
+func (r *ResponseCacheRegistry) Lookup(compat *config.OpenAICompatibility, providerKey, authID, url, model, variant string, stream bool, headers http.Header, payload []byte) (*cache.ResponseCache, string, ResponseCacheSettings) {
 	if len(payload) == 0 {
 		return nil, "", ResponseCacheSettings{}
 	}
-	responseCache, settings := ResponseCacheFor(compat, providerKey)
+	responseCache, settings := r.CacheFor(compat, providerKey)
 	if responseCache == nil {
 		return nil, "", ResponseCacheSettings{}
 	}
@@ -99,20 +101,12 @@ func ResponseCacheLookup(compat *config.OpenAICompatibility, providerKey, authID
 	}
 	keyProvider := providerKey
 	if authID != "" {
-		keyProvider = providerKey + "|" + authID
+		keyProvider += "|" + authID
 	}
 	if variant != "" {
-		keyProvider = keyProvider + "|" + variant
+		keyProvider += "|" + variant
 	}
 	return responseCache, cache.ResponseCacheKey(keyProvider, url, model, stream, headers, payload), settings
-}
-
-// ResetResponseCaches drops every provider cache. Used by tests.
-func ResetResponseCaches() {
-	responseCacheMu.Lock()
-	defer responseCacheMu.Unlock()
-	responseCaches = make(map[string]*cache.ResponseCache)
-	responseCacheProfiles = make(map[string]string)
 }
 
 // EncodeCachedStreamFrames serializes raw upstream SSE data frames using a

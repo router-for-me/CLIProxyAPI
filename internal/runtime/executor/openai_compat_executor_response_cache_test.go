@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -19,8 +18,6 @@ import (
 
 func newResponseCacheTestExecutor(t *testing.T, serverURL string, cacheCfg config.ResponseCacheConfig) (*OpenAICompatExecutor, *cliproxyauth.Auth) {
 	t.Helper()
-	helps.ResetResponseCaches()
-	t.Cleanup(helps.ResetResponseCaches)
 
 	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
 		OpenAICompatibility: []config.OpenAICompatibility{{
