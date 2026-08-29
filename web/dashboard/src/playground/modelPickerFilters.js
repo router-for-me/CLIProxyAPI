@@ -10,15 +10,34 @@ export function modelHealthIsLive(h) {
 
 export function filterLiveModels(upstreams, healthRows) {
   const byModel = new Map();
-  for (const h of healthRows || []) {
-    if (modelHealthIsLive(h)) byModel.set(h.model, true);
+  // Defensive: only iterate when healthRows is a real array. The unwrap
+  // helper should guarantee this, but a non-iterable here (e.g. an API
+  // error object) would otherwise throw "is not iterable" and crash the
+  // whole page on first render.
+  if (Array.isArray(healthRows)) {
+    for (const h of healthRows) {
+      if (modelHealthIsLive(h)) byModel.set(h.model, true);
+    }
   }
-  return (upstreams || []).filter((u) => byModel.get(u.model));
+  return Array.isArray(upstreams) ? upstreams.filter((u) => byModel.get(u.model)) : [];
 }
 
-// Tolerates either a bare array or the wrapped { items | providers | models }
-// shape returned by various API endpoints.
+// unwrapList extracts the list payload from various API response shapes:
+//
+//   - bare array                 : [ ... ]
+//   - /models-catalog            : { models: [ ... ], page, ... }
+//   - /upstream-providers        : { providers: [ ... ] }
+//   - /model-health              : { snapshots: [ ... ], settings, ... }
+//   - legacy/other endpoints     : { items: [ ... ] }
+//
+// When the payload is none of the above (an error envelope, a primitive,
+// an unknown wrapper), it returns an empty array rather than the raw
+// value, so callers can always treat the result as Array.
 export function unwrapList(payload) {
   if (Array.isArray(payload)) return payload;
-  return payload?.items || payload?.providers || payload?.models || payload || [];
+  if (!payload || typeof payload !== 'object') return [];
+  for (const key of ['models', 'providers', 'snapshots', 'items', 'keys', 'users']) {
+    if (Array.isArray(payload[key])) return payload[key];
+  }
+  return [];
 }
