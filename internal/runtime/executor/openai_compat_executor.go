@@ -608,42 +608,67 @@ func (e *OpenAICompatExecutor) executeStreamViaNonStream(ctx context.Context, au
 		Provider: e.Identifier(), AuthID: authID, AuthLabel: authLabel, AuthType: authType, AuthValue: authValue,
 	})
 
-	httpClient := reporter.TrackHTTPClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
-	}
-	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("openai compat executor: close response body error: %v", errClose)
-		}
-	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		body, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(body)}
-	}
-	body, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
-	frames := helps.SynthesizeOpenAIStreamFrames(body)
-	if len(frames) == 0 {
-		errSynth := statusErr{code: http.StatusBadGateway, msg: "upstream non-streaming reply could not be converted to a stream"}
-		helps.RecordAPIResponseError(ctx, e.cfg, errSynth)
-		return nil, errSynth
-	}
-
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		httpClient := reporter.TrackHTTPClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
+		httpResp, errDo := httpClient.Do(httpReq)
+		if errDo != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+			reporter.PublishFailure(ctx, errDo)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errDo}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		defer func() {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("openai compat executor: close response body error: %v", errClose)
+			}
+		}()
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+			body, _ := io.ReadAll(httpResp.Body)
+			helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+			streamErr := statusErr{code: httpResp.StatusCode, msg: string(body)}
+			reporter.PublishFailure(ctx, streamErr)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		body, errRead := io.ReadAll(httpResp.Body)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+			reporter.PublishFailure(ctx, errRead)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errRead}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+		frames := helps.SynthesizeOpenAIStreamFrames(body)
+		if len(frames) == 0 {
+			errSynth := statusErr{code: http.StatusBadGateway, msg: "upstream non-streaming reply could not be converted to a stream"}
+			helps.RecordAPIResponseError(ctx, e.cfg, errSynth)
+			reporter.PublishFailure(ctx, errSynth)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errSynth}:
+			case <-ctx.Done():
+			}
+			return
+		}
+
 		claudeInputTokens := helps.NewClaudeInputTokenState(opts.SourceFormat, to, responseFormat, originalPayload)
 		var param any
 		var streamUsage helps.StreamUsageBuffer
+		defer func() {
+			streamUsage.Publish(ctx, reporter)
+			reporter.EnsurePublished(ctx)
+		}()
 		for _, frame := range frames {
 			streamLine := append([]byte("data: "), frame...)
 			streamUsage.ObserveOpenAIStream(streamLine)
@@ -656,10 +681,10 @@ func (e *OpenAICompatExecutor) executeStreamViaNonStream(ctx context.Context, au
 				}
 			}
 		}
-		streamUsage.Publish(ctx, reporter)
-		reporter.EnsurePublished(ctx)
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+	// Return before connecting/reading so the streaming handler can start its
+	// response and configured keep-alives while the non-stream upstream runs.
+	return &cliproxyexecutor.StreamResult{Chunks: out}, nil
 }
 
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {
