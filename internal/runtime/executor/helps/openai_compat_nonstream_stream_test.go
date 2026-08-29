@@ -127,12 +127,14 @@ func TestSynthesizeOpenAIStreamFramesPreservesRefusal(t *testing.T) {
 
 func TestSynthesizeOpenAIStreamFramesRejectsUnusableChoices(t *testing.T) {
 	cases := map[string]string{
-		"empty choice":      `{"id":"x","model":"m","created":1,"choices":[{}]}`,
-		"empty array":       `{"id":"x","model":"m","created":1,"choices":[]}`,
-		"empty message":     `{"id":"x","model":"m","created":1,"choices":[{"index":0,"message":{"role":"assistant","content":""}}]}`,
-		"mixed choices":     `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"content":"ok"}},{"index":1,"message":{}}]}`,
-		"empty tool call":   `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"tool_calls","message":{"tool_calls":[{}]}}]}`,
-		"unnamed tool call": `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"","arguments":"{}"}}]}}]}`,
+		"empty choice":             `{"id":"x","model":"m","created":1,"choices":[{}]}`,
+		"empty array":              `{"id":"x","model":"m","created":1,"choices":[]}`,
+		"empty message":            `{"id":"x","model":"m","created":1,"choices":[{"index":0,"message":{"role":"assistant","content":""}}]}`,
+		"mixed choices":            `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"content":"ok"}},{"index":1,"message":{}}]}`,
+		"empty tool call":          `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"tool_calls","message":{"tool_calls":[{}]}}]}`,
+		"unnamed tool call":        `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"","arguments":"{}"}}]}}]}`,
+		"empty tool arguments":     `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":""}}]}}]}`,
+		"malformed tool arguments": `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{\"city\":"}}]}}]}`,
 	}
 	for name, body := range cases {
 		if frames := SynthesizeOpenAIStreamFrames([]byte(body)); frames != nil {
@@ -262,7 +264,10 @@ func TestSynthesizeOpenAIStreamFramesUsageOnceWithMultipleChoices(t *testing.T) 
 }
 
 func TestSynthesizeOpenAIStreamFramesRejectsUnusableBodies(t *testing.T) {
-	for _, body := range []string{``, `{}`, `{"choices":[]}`, `not json`} {
+	for _, body := range []string{``, `{}`, `{"choices":[]}`, `not json`,
+		`{"choices":[{"index":0,"finish_reason":"stop","message":{"content":"ok"}}]`,
+		`{"choices":[{"index":0,"finish_reason":"stop","message":{"content":"ok"}}]} trailing`,
+	} {
 		if frames := SynthesizeOpenAIStreamFrames([]byte(body)); len(frames) != 0 {
 			t.Fatalf("body %q produced frames %v, want none", body, frames)
 		}

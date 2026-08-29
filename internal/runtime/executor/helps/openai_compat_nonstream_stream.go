@@ -2,6 +2,7 @@ package helps
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/tidwall/gjson"
@@ -34,6 +35,9 @@ func ShouldForceNonStreamToolCalls(compat *config.OpenAICompatibility, payload [
 // used by the provider response cache.
 func SynthesizeOpenAIStreamFrames(body []byte) []string {
 	if len(body) == 0 {
+		return nil
+	}
+	if !gjson.ValidBytes(body) {
 		return nil
 	}
 	root := gjson.ParseBytes(body)
@@ -177,6 +181,13 @@ func hasUsableToolCalls(toolCalls gjson.Result) bool {
 	usable := true
 	toolCalls.ForEach(func(_, call gjson.Result) bool {
 		if !call.IsObject() || call.Get("function.name").String() == "" {
+			usable = false
+			return false
+		}
+		// The truncation this option recovers from shows up as empty or partial
+		// arguments, so a call is only usable when it carries valid JSON.
+		arguments := strings.TrimSpace(call.Get("function.arguments").String())
+		if arguments == "" || !gjson.Valid(arguments) {
 			usable = false
 			return false
 		}
