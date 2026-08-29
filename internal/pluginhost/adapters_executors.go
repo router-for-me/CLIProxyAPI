@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -661,8 +662,11 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 
 	var reporter *helps.UsageReporter
 	if auth != nil {
-		reporter = helps.NewExecutorUsageReporter(ctx, a, req.Model, auth)
+		reporter = helps.NewExecutorUsageReporter(ctx, a, thinking.ParseSuffix(req.Model).ModelName, auth)
 		defer reporter.TrackFailure(ctx, &err)
+		// Mirror native executors: start the clock before invoking the plugin and
+		// record TTFT when the first response payload arrives.
+		reporter.StartResponseTTFT()
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -677,18 +681,29 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 		return coreexecutor.Response{}, errPrepare
 	}
 	if reporter != nil {
-		reporter.SetTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String())
+		// Only override the context-derived reasoning effort when the request
+		// payload actually carries one, so suffix-only reasoning requests keep
+		// the canonical effort already placed in the context by the auth manager.
+		if effort := thinking.ExtractTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String()); effort != "" {
+			reporter.SetTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String())
+		}
 	}
 	pluginResp, errExecute := a.executor.Execute(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errExecute != nil {
 		return coreexecutor.Response{}, errExecute
 	}
+	// Translate before publishing: if host-side translation panics, the recovery
+	// defer must be able to publish a failure instead of a stale success record.
+	translatedPayload := a.translateExecutorResponse(ctx, prepared, pluginResp.Payload, false, nil)
 	if reporter != nil {
+		if len(pluginResp.Payload) > 0 {
+			reporter.ObserveTokenEvent(true)
+		}
 		reporter.Publish(ctx, helps.ParsePluginExecutorResponseUsage(prepared.outputFormat.String(), pluginResp.Payload))
 		reporter.EnsurePublished(ctx)
 	}
 	return coreexecutor.Response{
-		Payload:  a.translateExecutorResponse(ctx, prepared, pluginResp.Payload, false, nil),
+		Payload:  translatedPayload,
 		Metadata: cloneAnyMap(pluginResp.Metadata),
 		Headers:  cloneHeader(pluginResp.Headers),
 	}, nil
@@ -701,8 +716,11 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 
 	var reporter *helps.UsageReporter
 	if auth != nil {
-		reporter = helps.NewExecutorUsageReporter(ctx, a, req.Model, auth)
+		reporter = helps.NewExecutorUsageReporter(ctx, a, thinking.ParseSuffix(req.Model).ModelName, auth)
 		defer reporter.TrackFailure(ctx, &err)
+		// Mirror native executors: start the clock before invoking the plugin
+		// stream and record TTFT when the first payload chunk arrives.
+		reporter.StartResponseTTFT()
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -717,7 +735,9 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 		return nil, errPrepare
 	}
 	if reporter != nil {
-		reporter.SetTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String())
+		if effort := thinking.ExtractTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String()); effort != "" {
+			reporter.SetTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String())
+		}
 	}
 	pluginResp, errExecuteStream := a.executor.ExecuteStream(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errExecuteStream != nil {
@@ -733,6 +753,48 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	}, nil
 }
 
+// pluginStreamUsagePendingMax caps the cross-chunk partial-frame buffer so a
+// newline-less stream cannot grow memory without bound.
+const pluginStreamUsagePendingMax = 1 << 20
+
+// pluginUsageStartsNewFrame reports whether bytes begin a new explicit SSE frame.
+func pluginUsageStartsNewFrame(fragment []byte) bool {
+	trimmed := bytes.TrimSpace(fragment)
+	if len(trimmed) == 0 {
+		return false
+	}
+	return bytes.HasPrefix(trimmed, []byte("data:")) ||
+		bytes.HasPrefix(trimmed, []byte("event:"))
+}
+
+// pluginUsageLooksLikeFrameFragment reports whether bytes can be the beginning
+// of a stream frame, including a partial SSE field prefix.
+func pluginUsageLooksLikeFrameFragment(fragment []byte) bool {
+	trimmed := bytes.TrimSpace(fragment)
+	if len(trimmed) == 0 {
+		return false
+	}
+	if pluginUsageStartsNewFrame(trimmed) || trimmed[0] == '{' || trimmed[0] == '[' {
+		return true
+	}
+	return bytes.HasPrefix([]byte("data:"), trimmed) || bytes.HasPrefix([]byte("event:"), trimmed)
+}
+
+func pluginUsageIsCompleteFrame(fragment []byte) bool {
+	trimmed := bytes.TrimSpace(fragment)
+	if len(trimmed) == 0 {
+		return false
+	}
+	if json.Valid(trimmed) || bytes.Equal(trimmed, []byte("[DONE]")) {
+		return true
+	}
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		data := bytes.TrimSpace(trimmed[len("data:"):])
+		return bytes.Equal(data, []byte("[DONE]")) || json.Valid(data)
+	}
+	return false
+}
+
 func wrapPluginExecutorStreamUsage(ctx context.Context, protocol string, in <-chan pluginapi.ExecutorStreamChunk, reporter *helps.UsageReporter) <-chan pluginapi.ExecutorStreamChunk {
 	if reporter == nil {
 		return in
@@ -742,6 +804,63 @@ func wrapPluginExecutorStreamUsage(ctx context.Context, protocol string, in <-ch
 	}
 
 	var usageBuffer helps.StreamUsageBuffer
+	var pending []byte
+	flushPendingUsage := func() {
+		if len(pending) == 0 {
+			return
+		}
+		helps.ObservePluginExecutorStreamUsage(protocol, pending, &usageBuffer)
+		pending = nil
+	}
+	consumeUsagePayload := func(payload []byte, errorChunk bool) {
+		if len(payload) == 0 {
+			return
+		}
+		if errorChunk {
+			// Error payloads are not stream framing and must not be joined to
+			// adjacent response fragments.
+			flushPendingUsage()
+			helps.ObservePluginExecutorStreamUsage(protocol, payload, &usageBuffer)
+			return
+		}
+
+		if len(pending) > 0 {
+			switch {
+			case pluginUsageStartsNewFrame(payload), pluginUsageIsCompleteFrame(pending):
+				flushPendingUsage()
+			case len(pending)+len(payload) > pluginStreamUsagePendingMax:
+				flushPendingUsage()
+			default:
+				merged := make([]byte, 0, len(pending)+len(payload))
+				merged = append(merged, pending...)
+				merged = append(merged, payload...)
+				pending = nil
+				payload = merged
+			}
+		}
+
+		if idx := bytes.LastIndexByte(payload, '\n'); idx >= 0 {
+			helps.ObservePluginExecutorStreamUsage(protocol, payload[:idx+1], &usageBuffer)
+			if tail := payload[idx+1:]; len(tail) > 0 {
+				if len(tail) <= pluginStreamUsagePendingMax && pluginUsageLooksLikeFrameFragment(tail) {
+					pending = append([]byte(nil), tail...)
+				} else {
+					helps.ObservePluginExecutorStreamUsage(protocol, tail, &usageBuffer)
+				}
+			}
+			return
+		}
+		if pluginUsageIsCompleteFrame(payload) {
+			helps.ObservePluginExecutorStreamUsage(protocol, payload, &usageBuffer)
+			return
+		}
+		if len(payload) <= pluginStreamUsagePendingMax && pluginUsageLooksLikeFrameFragment(payload) {
+			pending = append([]byte(nil), payload...)
+			return
+		}
+		helps.ObservePluginExecutorStreamUsage(protocol, payload, &usageBuffer)
+	}
+
 	var finishOnce sync.Once
 	finish := func(streamErr error) {
 		finishOnce.Do(func() {
@@ -776,15 +895,20 @@ func wrapPluginExecutorStreamUsage(ctx context.Context, protocol string, in <-ch
 		for {
 			select {
 			case <-ctx.Done():
+				flushPendingUsage()
 				finish(terminalErr())
 				return
 			case chunk, ok := <-in:
 				if !ok {
+					flushPendingUsage()
 					finish(terminalErr())
 					return
 				}
 				if len(chunk.Payload) > 0 {
-					helps.ObservePluginExecutorStreamUsage(protocol, chunk.Payload, &usageBuffer)
+					// First payload doubles as the first-packet / TTFT mark;
+					// ObserveTokenEvent is idempotent afterwards.
+					reporter.ObserveTokenEvent(true)
+					consumeUsagePayload(chunk.Payload, chunk.Err != nil)
 				}
 				if firstErr == nil && chunk.Err != nil {
 					firstErr = chunk.Err
@@ -792,6 +916,7 @@ func wrapPluginExecutorStreamUsage(ctx context.Context, protocol string, in <-ch
 				select {
 				case out <- chunk:
 				case <-ctx.Done():
+					flushPendingUsage()
 					finish(terminalErr())
 					return
 				}

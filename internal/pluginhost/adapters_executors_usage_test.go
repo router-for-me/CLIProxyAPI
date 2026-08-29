@@ -373,6 +373,7 @@ func TestExecutorAdapterPublishesUsageThroughAuthManager(t *testing.T) {
 		fixture := newExecutorUsageFixture(t, &fakeExecutor{
 			identifier: executorUsageTestProvider,
 			execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+				time.Sleep(10 * time.Millisecond)
 				return pluginapi.ExecutorResponse{Payload: []byte(`{"id":"chatcmpl-usage","usage":{"prompt_tokens":12,"completion_tokens":34,"total_tokens":46}}`)}, nil
 			},
 		})
@@ -392,6 +393,9 @@ func TestExecutorAdapterPublishesUsageThroughAuthManager(t *testing.T) {
 		requireExecutorUsageIdentity(t, captured, requestID, fixture)
 		requireSuccessfulUsage(t, captured.record)
 		requireOpenAIUsageDetail(t, captured.record.Detail, 12, 34, 46)
+		if captured.record.TTFT <= 0 {
+			t.Fatalf("non-stream TTFT = %s, want positive duration", captured.record.TTFT)
+		}
 		capture.requireNoAdditionalRecords(t)
 	})
 
@@ -448,15 +452,149 @@ func TestExecutorAdapterPublishesUsageThroughAuthManager(t *testing.T) {
 	})
 }
 
+func TestExecutorAdapterUsageMetadata(t *testing.T) {
+	t.Run("strips thinking suffix and preserves context metadata", func(t *testing.T) {
+		requestID := "req-" + executorUsageTestSuffix(t.Name())
+		capture := registerCaptureExecutorUsagePlugin(t, requestID)
+		fixture := newExecutorUsageFixture(t, &fakeExecutor{
+			identifier: executorUsageTestProvider,
+			execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+				return pluginapi.ExecutorResponse{Payload: []byte(`{"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)}, nil
+			},
+		})
+
+		requestedModel := fixture.model + "(high)"
+		payload := []byte(fmt.Sprintf(`{"model":%q}`, requestedModel))
+		reportCtx := internallogging.WithRequestID(context.Background(), requestID)
+		reportCtx = coreusage.WithRequestedModelAlias(reportCtx, requestedModel)
+		reportCtx = coreusage.WithReasoningEffort(reportCtx, "high")
+		_, errExecute := fixture.adapter.Execute(reportCtx, fixture.auth, coreexecutor.Request{
+			Model:   requestedModel,
+			Format:  sdktranslator.FormatOpenAI,
+			Payload: payload,
+		}, coreexecutor.Options{
+			SourceFormat:    sdktranslator.FormatOpenAI,
+			ResponseFormat:  sdktranslator.FormatOpenAI,
+			OriginalRequest: bytes.Clone(payload),
+		})
+		if errExecute != nil {
+			t.Fatalf("adapter.Execute() error = %v", errExecute)
+		}
+		select {
+		case request := <-fixture.requests:
+			if request.Model != requestedModel {
+				t.Fatalf("executor request Model = %q, want %q", request.Model, requestedModel)
+			}
+		case <-time.After(executorUsageTestTimeout):
+			t.Fatal("timed out waiting for plugin executor request")
+		}
+
+		captured := capture.waitRecord(t)
+		if captured.requestID != requestID {
+			t.Fatalf("usage request ID = %q, want %q", captured.requestID, requestID)
+		}
+		if captured.record.Model != fixture.model {
+			t.Errorf("usage Model = %q, want base model %q", captured.record.Model, fixture.model)
+		}
+		if captured.record.Alias != requestedModel {
+			t.Errorf("usage Alias = %q, want %q", captured.record.Alias, requestedModel)
+		}
+		if captured.record.ReasoningEffort != "high" {
+			t.Errorf("usage ReasoningEffort = %q, want high", captured.record.ReasoningEffort)
+		}
+		requireSuccessfulUsage(t, captured.record)
+		requireOpenAIUsageDetail(t, captured.record.Detail, 3, 4, 7)
+		capture.requireNoAdditionalRecords(t)
+	})
+
+	t.Run("translated reasoning effort overrides context metadata", func(t *testing.T) {
+		requestID := "req-" + executorUsageTestSuffix(t.Name())
+		capture := registerCaptureExecutorUsagePlugin(t, requestID)
+		fixture := newExecutorUsageFixture(t, &fakeExecutor{
+			identifier: executorUsageTestProvider,
+			execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+				return pluginapi.ExecutorResponse{Payload: []byte(`{"usage":{"prompt_tokens":8,"completion_tokens":9,"total_tokens":17}}`)}, nil
+			},
+		})
+
+		ctx := internallogging.WithRequestID(context.Background(), requestID)
+		ctx = coreusage.WithReasoningEffort(ctx, "low")
+		_, errExecute := fixture.adapter.Execute(ctx, fixture.auth, coreexecutor.Request{
+			Model:   fixture.model,
+			Format:  sdktranslator.FormatOpenAI,
+			Payload: []byte(fmt.Sprintf(`{"model":%q,"reasoning_effort":"xhigh"}`, fixture.model)),
+		}, coreexecutor.Options{
+			SourceFormat:   sdktranslator.FormatOpenAI,
+			ResponseFormat: sdktranslator.FormatOpenAI,
+		})
+		if errExecute != nil {
+			t.Fatalf("adapter.Execute() error = %v", errExecute)
+		}
+		captured := capture.waitRecord(t)
+		if captured.record.ReasoningEffort != "xhigh" {
+			t.Errorf("usage ReasoningEffort = %q, want xhigh", captured.record.ReasoningEffort)
+		}
+		requireSuccessfulUsage(t, captured.record)
+		requireOpenAIUsageDetail(t, captured.record.Detail, 8, 9, 17)
+		capture.requireNoAdditionalRecords(t)
+	})
+
+	t.Run("translation failure publishes only failure", func(t *testing.T) {
+		requestID := "req-" + executorUsageTestSuffix(t.Name())
+		capture := registerCaptureExecutorUsagePlugin(t, requestID)
+		fixture := newExecutorUsageFixture(t, &fakeExecutor{
+			identifier: executorUsageTestProvider,
+			execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+				return pluginapi.ExecutorResponse{Payload: []byte(`{"usage":{"prompt_tokens":5,"completion_tokens":6,"total_tokens":11}}`)}, nil
+			},
+		})
+		outputFormat := sdktranslator.Format("pluginhost-usage-panic-output")
+		requestedFormat := sdktranslator.Format("pluginhost-usage-panic-requested")
+		sdktranslator.Register(requestedFormat, outputFormat, nil, sdktranslator.ResponseTransform{
+			NonStream: func(context.Context, string, []byte, []byte, []byte, *any) []byte {
+				panic("response translation panic")
+			},
+		})
+		fixture.adapter.outputFormats = []sdktranslator.Format{outputFormat}
+
+		ctx := internallogging.WithRequestID(context.Background(), requestID)
+		_, errExecute := fixture.adapter.Execute(ctx, fixture.auth, coreexecutor.Request{
+			Model:   fixture.model,
+			Format:  sdktranslator.FormatOpenAI,
+			Payload: []byte(fmt.Sprintf(`{"model":%q}`, fixture.model)),
+		}, coreexecutor.Options{
+			SourceFormat:   sdktranslator.FormatOpenAI,
+			ResponseFormat: requestedFormat,
+		})
+		wantErr := "plugin executor " + fixture.adapter.Identifier() + " panic: response translation panic"
+		if errExecute == nil || errExecute.Error() != wantErr {
+			t.Fatalf("adapter.Execute() error = %v, want %q", errExecute, wantErr)
+		}
+		select {
+		case <-fixture.requests:
+		case <-time.After(executorUsageTestTimeout):
+			t.Fatal("timed out waiting for plugin executor request")
+		}
+
+		captured := capture.waitRecord(t)
+		requireFailedUsage(t, captured.record, errors.New(wantErr))
+		requireNormalizedZeroUsageDetail(t, captured.record.Detail)
+		capture.requireNoAdditionalRecords(t)
+	})
+}
+
 func TestExecutorAdapterPublishesStreamUsageThroughAuthManager(t *testing.T) {
 	t.Run("clean close with usage", func(t *testing.T) {
 		requestID := "req-" + executorUsageTestSuffix(t.Name())
 		capture := registerCaptureExecutorUsagePlugin(t, requestID)
 		source := make(chan pluginapi.ExecutorStreamChunk, 3)
-		source <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")}
-		source <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":15,\"completion_tokens\":25,\"total_tokens\":40}}\n\n")}
-		source <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: [DONE]\n\n")}
-		close(source)
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			source <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")}
+			source <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":15,\"completion_tokens\":25,\"total_tokens\":40}}\n\n")}
+			source <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: [DONE]\n\n")}
+			close(source)
+		}()
 		fixture := newExecutorUsageFixture(t, &fakeExecutor{
 			identifier: executorUsageTestProvider,
 			executeStream: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
@@ -480,6 +618,9 @@ func TestExecutorAdapterPublishesStreamUsageThroughAuthManager(t *testing.T) {
 		requireExecutorUsageIdentity(t, captured, requestID, fixture)
 		requireSuccessfulUsage(t, captured.record)
 		requireOpenAIUsageDetail(t, captured.record.Detail, 15, 25, 40)
+		if captured.record.TTFT <= 0 {
+			t.Fatalf("stream TTFT = %s, want positive duration", captured.record.TTFT)
+		}
 		capture.requireNoAdditionalRecords(t)
 	})
 
@@ -778,6 +919,168 @@ func TestExecutorAdapterStreamUsageOnceIsPerInvocation(t *testing.T) {
 	requireExecutorUsageIdentity(t, second, secondRequestID, fixture)
 	requireSuccessfulUsage(t, second.record)
 	requireOpenAIUsageDetail(t, second.record.Detail, 2, 3, 5)
+	capture.requireNoAdditionalRecords(t)
+}
+
+func TestExecutorAdapterPublishesFragmentedStreamUsage(t *testing.T) {
+	requestID := "req-" + executorUsageTestSuffix(t.Name())
+	capture := registerCaptureExecutorUsagePlugin(t, requestID)
+	first := []byte(`data: {"choices":[],"usage":{"prompt_tokens":19,"completion_tokens":`)
+	second := []byte(`23,"total_tokens":42}}
+
+`)
+	source := make(chan pluginapi.ExecutorStreamChunk, 2)
+	source <- pluginapi.ExecutorStreamChunk{Payload: first}
+	source <- pluginapi.ExecutorStreamChunk{Payload: second}
+	close(source)
+	fixture := newExecutorUsageFixture(t, &fakeExecutor{
+		identifier: executorUsageTestProvider,
+		executeStream: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+			return pluginapi.ExecutorStreamResponse{Chunks: source}, nil
+		},
+	})
+
+	ctx := internallogging.WithRequestID(context.Background(), requestID)
+	result, errExecute := fixture.executeStream(t, ctx)
+	if errExecute != nil {
+		t.Fatalf("Manager.ExecuteStream() error = %v", errExecute)
+	}
+	chunks := collectExecutorStream(t, result)
+	if len(chunks) != 2 {
+		t.Fatalf("stream chunk count = %d, want 2", len(chunks))
+	}
+	if !bytes.Equal(chunks[0].Payload, first) || !bytes.Equal(chunks[1].Payload, second) {
+		t.Fatalf("stream payloads were not preserved: %#v", chunks)
+	}
+	fixture.requireSelectedRequest(t, true)
+	fixture.requireNoAdditionalRequests(t)
+
+	captured := capture.waitRecord(t)
+	requireExecutorUsageIdentity(t, captured, requestID, fixture)
+	requireSuccessfulUsage(t, captured.record)
+	requireOpenAIUsageDetail(t, captured.record.Detail, 19, 23, 42)
+	capture.requireNoAdditionalRecords(t)
+}
+
+func TestExecutorAdapterPublishesSplitSSEPrefixes(t *testing.T) {
+	tests := []struct {
+		name   string
+		first  []byte
+		second []byte
+	}{
+		{
+			name:   "split field prefix",
+			first:  []byte("d"),
+			second: []byte("ata: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n"),
+		},
+		{
+			name:   "split field value",
+			first:  []byte("data:"),
+			second: []byte(" {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":8,\"total_tokens\":15}}\n\n"),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requestID := "req-" + executorUsageTestSuffix(t.Name())
+			capture := registerCaptureExecutorUsagePlugin(t, requestID)
+			source := make(chan pluginapi.ExecutorStreamChunk, 2)
+			source <- pluginapi.ExecutorStreamChunk{Payload: test.first}
+			source <- pluginapi.ExecutorStreamChunk{Payload: test.second}
+			close(source)
+			fixture := newExecutorUsageFixture(t, &fakeExecutor{
+				identifier: executorUsageTestProvider,
+				executeStream: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+					return pluginapi.ExecutorStreamResponse{Chunks: source}, nil
+				},
+			})
+
+			ctx := internallogging.WithRequestID(context.Background(), requestID)
+			result, errExecute := fixture.executeStream(t, ctx)
+			if errExecute != nil {
+				t.Fatalf("Manager.ExecuteStream() error = %v", errExecute)
+			}
+			chunks := collectExecutorStream(t, result)
+			if len(chunks) != 2 || !bytes.Equal(chunks[0].Payload, test.first) || !bytes.Equal(chunks[1].Payload, test.second) {
+				t.Fatalf("stream chunks = %#v, want original split payloads", chunks)
+			}
+
+			captured := capture.waitRecord(t)
+			requireSuccessfulUsage(t, captured.record)
+			wantInput, wantOutput, wantTotal := int64(2), int64(3), int64(5)
+			if test.name == "split field value" {
+				wantInput, wantOutput, wantTotal = 7, 8, 15
+			}
+			requireOpenAIUsageDetail(t, captured.record.Detail, wantInput, wantOutput, wantTotal)
+			capture.requireNoAdditionalRecords(t)
+		})
+	}
+}
+
+func TestExecutorAdapterPublishesCompleteRawJSONStreamFrames(t *testing.T) {
+	requestID := "req-" + executorUsageTestSuffix(t.Name())
+	capture := registerCaptureExecutorUsagePlugin(t, requestID)
+	first := []byte(`{"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`)
+	second := []byte(`{"usage":{"prompt_tokens":7,"completion_tokens":8,"total_tokens":15}}`)
+	source := make(chan pluginapi.ExecutorStreamChunk, 2)
+	source <- pluginapi.ExecutorStreamChunk{Payload: first}
+	source <- pluginapi.ExecutorStreamChunk{Payload: second}
+	close(source)
+	fixture := newExecutorUsageFixture(t, &fakeExecutor{
+		identifier: executorUsageTestProvider,
+		executeStream: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+			return pluginapi.ExecutorStreamResponse{Chunks: source}, nil
+		},
+	})
+
+	ctx := internallogging.WithRequestID(context.Background(), requestID)
+	result, errExecute := fixture.executeStream(t, ctx)
+	if errExecute != nil {
+		t.Fatalf("Manager.ExecuteStream() error = %v", errExecute)
+	}
+	chunks := collectExecutorStream(t, result)
+	if len(chunks) != 2 || !bytes.Equal(chunks[0].Payload, first) || !bytes.Equal(chunks[1].Payload, second) {
+		t.Fatalf("stream chunks = %#v, want original raw JSON payloads", chunks)
+	}
+
+	captured := capture.waitRecord(t)
+	requireSuccessfulUsage(t, captured.record)
+	requireOpenAIUsageDetail(t, captured.record.Detail, 7, 8, 15)
+	capture.requireNoAdditionalRecords(t)
+}
+
+func TestExecutorAdapterDoesNotRetainOversizedUsageFragment(t *testing.T) {
+	requestID := "req-" + executorUsageTestSuffix(t.Name())
+	capture := registerCaptureExecutorUsagePlugin(t, requestID)
+	oversized := make([]byte, pluginStreamUsagePendingMax+1)
+	copy(oversized, []byte("data: "))
+	for index := len("data: "); index < len(oversized); index++ {
+		oversized[index] = 'x'
+	}
+	usagePayload := []byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":13,\"total_tokens\":24}}\n\n")
+	source := make(chan pluginapi.ExecutorStreamChunk, 2)
+	source <- pluginapi.ExecutorStreamChunk{Payload: oversized}
+	source <- pluginapi.ExecutorStreamChunk{Payload: usagePayload}
+	close(source)
+	fixture := newExecutorUsageFixture(t, &fakeExecutor{
+		identifier: executorUsageTestProvider,
+		executeStream: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+			return pluginapi.ExecutorStreamResponse{Chunks: source}, nil
+		},
+	})
+
+	ctx := internallogging.WithRequestID(context.Background(), requestID)
+	result, errExecute := fixture.executeStream(t, ctx)
+	if errExecute != nil {
+		t.Fatalf("Manager.ExecuteStream() error = %v", errExecute)
+	}
+	chunks := collectExecutorStream(t, result)
+	if len(chunks) != 2 || !bytes.Equal(chunks[1].Payload, usagePayload) {
+		t.Fatalf("stream chunks = %#v, want oversized fragment followed by usage", chunks)
+	}
+
+	captured := capture.waitRecord(t)
+	requireSuccessfulUsage(t, captured.record)
+	requireOpenAIUsageDetail(t, captured.record.Detail, 11, 13, 24)
 	capture.requireNoAdditionalRecords(t)
 }
 
