@@ -57,15 +57,6 @@ func decodeFrames(t *testing.T, frames []string) []map[string]any {
 	return out
 }
 
-func TestSynthesizeOpenAIStreamBootstrapFrame(t *testing.T) {
-	frame := SynthesizeOpenAIStreamBootstrapFrame("chatcmpl-stable", "alias-model", 1700000000)
-	for _, want := range []string{`"role":"assistant"`, `"model":"alias-model"`, `"id":"chatcmpl-stable"`, `"created":1700000000`} {
-		if !strings.Contains(frame, want) {
-			t.Fatalf("bootstrap frame missing %s: %s", want, frame)
-		}
-	}
-}
-
 func TestSynthesizeOpenAIStreamFramesToolCalls(t *testing.T) {
 	body := []byte(`{
 		"id":"msg_1","model":"claude-opus-5","created":1700000000,
@@ -131,6 +122,17 @@ func TestSynthesizeOpenAIStreamFramesPreservesRefusal(t *testing.T) {
 	decodeFrames(t, frames)
 	if !strings.Contains(strings.Join(frames, "\n"), `"refusal":"I cannot help with that."`) {
 		t.Fatalf("refusal missing from frames: %v", frames)
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesEmitsRoleForEveryChoice(t *testing.T) {
+	body := []byte(`{"id":"chatcmpl-n","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"content":"a"}},{"index":1,"finish_reason":"stop","message":{"content":"b"}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	joined := strings.Join(frames, "\n")
+	for _, want := range []string{`"index":0,"delta":{"role":"assistant"}`, `"index":1,"delta":{"role":"assistant"}`} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing role frame %s in %s", want, joined)
+		}
 	}
 }
 

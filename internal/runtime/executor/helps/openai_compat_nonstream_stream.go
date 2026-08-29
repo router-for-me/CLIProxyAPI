@@ -27,17 +27,6 @@ func ShouldForceNonStreamToolCalls(compat *config.OpenAICompatibility, payload [
 	return tools.Exists() && tools.IsArray() && len(tools.Array()) > 0
 }
 
-// SynthesizeOpenAIStreamBootstrapFrame builds the assistant-role opening chunk
-// used to release downstream bootstrap while a non-streaming upstream body is
-// still being generated.
-func SynthesizeOpenAIStreamBootstrapFrame(id, model string, created int64) string {
-	frame := []byte(`{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`)
-	frame, _ = sjson.SetBytes(frame, "id", id)
-	frame, _ = sjson.SetBytes(frame, "model", model)
-	frame, _ = sjson.SetBytes(frame, "created", created)
-	return string(frame)
-}
-
 // SynthesizeOpenAIStreamFrames converts a non-streaming OpenAI chat completion
 // response into the sequence of SSE data frames an equivalent streaming call
 // would have produced. The returned frames are raw JSON payloads without the
@@ -83,6 +72,8 @@ func SynthesizeOpenAIStreamFrames(body []byte) []string {
 		index := choice.Get("index").Int()
 		message := choice.Get("message")
 		finishReason := choice.Get("finish_reason")
+
+		emit(index, `{"role":"assistant"}`, gjson.Result{}, false)
 
 		if reasoning := message.Get("reasoning_content"); reasoning.Exists() && reasoning.String() != "" {
 			emit(index, fmt.Sprintf(`{"reasoning_content":%s}`, reasoning.Raw), gjson.Result{}, false)

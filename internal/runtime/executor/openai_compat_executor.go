@@ -626,22 +626,9 @@ func (e *OpenAICompatExecutor) executeStreamViaNonStream(ctx context.Context, au
 		return nil, statusErr{code: httpResp.StatusCode, msg: string(body)}
 	}
 
-	bootstrapID := "chatcmpl-" + uuid.NewString()
-	bootstrapCreated := time.Now().Unix()
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		claudeInputTokens := helps.NewClaudeInputTokenState(opts.SourceFormat, to, responseFormat, originalPayload)
-		var param any
-		bootstrapLine := []byte("data: " + helps.SynthesizeOpenAIStreamBootstrapFrame(bootstrapID, req.Model, bootstrapCreated))
-		bootstrapChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bootstrapLine, &param, claudeInputTokens)
-		for i := range bootstrapChunks {
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Payload: bootstrapChunks[i]}:
-			case <-ctx.Done():
-				return
-			}
-		}
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
@@ -658,8 +645,6 @@ func (e *OpenAICompatExecutor) executeStreamViaNonStream(ctx context.Context, au
 			return
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
-		body, _ = sjson.SetBytes(body, "id", bootstrapID)
-		body, _ = sjson.SetBytes(body, "created", bootstrapCreated)
 		frames := helps.SynthesizeOpenAIStreamFrames(body)
 		if len(frames) == 0 {
 			errSynth := statusErr{code: http.StatusBadGateway, msg: "upstream non-streaming reply could not be converted to a stream"}
@@ -672,6 +657,8 @@ func (e *OpenAICompatExecutor) executeStreamViaNonStream(ctx context.Context, au
 			return
 		}
 
+		claudeInputTokens := helps.NewClaudeInputTokenState(opts.SourceFormat, to, responseFormat, originalPayload)
+		var param any
 		var streamUsage helps.StreamUsageBuffer
 		defer func() {
 			streamUsage.Publish(ctx, reporter)
@@ -690,8 +677,8 @@ func (e *OpenAICompatExecutor) executeStreamViaNonStream(ctx context.Context, au
 			}
 		}
 	}()
-	// Headers and status are available synchronously, while body buffering runs
-	// behind the stream so the handler can emit keep-alives during generation.
+	// Status and headers are available synchronously. The first payload is sent
+	// only after the complete body is validated, preserving bootstrap fallback.
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
