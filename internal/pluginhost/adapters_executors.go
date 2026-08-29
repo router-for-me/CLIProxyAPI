@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -657,6 +658,12 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return coreexecutor.Response{}, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
+
+	var reporter *helps.UsageReporter
+	if auth != nil {
+		reporter = helps.NewExecutorUsageReporter(ctx, a, req.Model, auth)
+		defer reporter.TrackFailure(ctx, &err)
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "Executor.Execute", recovered)
@@ -669,9 +676,16 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 	if errPrepare != nil {
 		return coreexecutor.Response{}, errPrepare
 	}
+	if reporter != nil {
+		reporter.SetTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String())
+	}
 	pluginResp, errExecute := a.executor.Execute(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errExecute != nil {
 		return coreexecutor.Response{}, errExecute
+	}
+	if reporter != nil {
+		reporter.Publish(ctx, helps.ParsePluginExecutorResponseUsage(prepared.outputFormat.String(), pluginResp.Payload))
+		reporter.EnsurePublished(ctx)
 	}
 	return coreexecutor.Response{
 		Payload:  a.translateExecutorResponse(ctx, prepared, pluginResp.Payload, false, nil),
@@ -683,6 +697,12 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (result *coreexecutor.StreamResult, err error) {
 	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
+	}
+
+	var reporter *helps.UsageReporter
+	if auth != nil {
+		reporter = helps.NewExecutorUsageReporter(ctx, a, req.Model, auth)
+		defer reporter.TrackFailure(ctx, &err)
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -696,14 +716,89 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	if errPrepare != nil {
 		return nil, errPrepare
 	}
+	if reporter != nil {
+		reporter.SetTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String())
+	}
 	pluginResp, errExecuteStream := a.executor.ExecuteStream(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errExecuteStream != nil {
 		return nil, errExecuteStream
 	}
+	rawChunks := pluginResp.Chunks
+	if reporter != nil {
+		rawChunks = wrapPluginExecutorStreamUsage(ctx, prepared.outputFormat.String(), rawChunks, reporter)
+	}
 	return &coreexecutor.StreamResult{
 		Headers: cloneHeader(pluginResp.Headers),
-		Chunks:  mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, pluginResp.Chunks)),
+		Chunks:  mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, rawChunks)),
 	}, nil
+}
+
+func wrapPluginExecutorStreamUsage(ctx context.Context, protocol string, in <-chan pluginapi.ExecutorStreamChunk, reporter *helps.UsageReporter) <-chan pluginapi.ExecutorStreamChunk {
+	if reporter == nil {
+		return in
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var usageBuffer helps.StreamUsageBuffer
+	var finishOnce sync.Once
+	finish := func(streamErr error) {
+		finishOnce.Do(func() {
+			if streamErr != nil {
+				if !usageBuffer.PublishFailure(ctx, reporter, streamErr) {
+					reporter.PublishFailure(ctx, streamErr)
+				}
+				return
+			}
+			usageBuffer.Publish(ctx, reporter)
+			reporter.EnsurePublished(ctx)
+		})
+	}
+
+	if in == nil {
+		out := make(chan pluginapi.ExecutorStreamChunk)
+		close(out)
+		finish(nil)
+		return out
+	}
+
+	out := make(chan pluginapi.ExecutorStreamChunk)
+	go func() {
+		defer close(out)
+		var firstErr error
+		terminalErr := func() error {
+			if firstErr != nil {
+				return firstErr
+			}
+			return ctx.Err()
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				finish(terminalErr())
+				return
+			case chunk, ok := <-in:
+				if !ok {
+					finish(terminalErr())
+					return
+				}
+				if len(chunk.Payload) > 0 {
+					helps.ObservePluginExecutorStreamUsage(protocol, chunk.Payload, &usageBuffer)
+				}
+				if firstErr == nil && chunk.Err != nil {
+					firstErr = chunk.Err
+				}
+				select {
+				case out <- chunk:
+				case <-ctx.Done():
+					finish(terminalErr())
+					return
+				}
+			}
+		}
+	}()
+	return out
 }
 
 func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (refreshed *coreauth.Auth, err error) {
