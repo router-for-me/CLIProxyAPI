@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -801,6 +802,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Models                *[]config.OpenAICompatibilityModel  `json:"models"`
 		Headers               *map[string]string                  `json:"headers"`
 		SupportPromptCacheKey *bool                               `json:"support-prompt-cache-key"`
+		RequestsPerMinute     *int                                `json:"requests-per-minute"`
 		RequestRetry          *int                                `json:"request-retry"`
 		RequestScopedErrors   *[]config.RequestScopedErrorRule    `json:"request-scoped-errors"`
 	}
@@ -877,6 +879,13 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.SupportPromptCacheKey != nil {
 		entry.SupportPromptCacheKey = *body.Value.SupportPromptCacheKey
+	}
+	if body.Value.RequestsPerMinute != nil {
+		if *body.Value.RequestsPerMinute < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "requests-per-minute must be non-negative"})
+			return
+		}
+		entry.RequestsPerMinute = *body.Value.RequestsPerMinute
 	}
 	if body.Value.RequestScopedErrors != nil {
 		entry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), *body.Value.RequestScopedErrors...)
