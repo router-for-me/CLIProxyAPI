@@ -38,8 +38,16 @@ func SynthesizeOpenAIStreamFrames(body []byte) []string {
 	}
 	root := gjson.ParseBytes(body)
 	choices := root.Get("choices")
-	if !choices.Exists() || !choices.IsArray() {
+	if !choices.Exists() || !choices.IsArray() || len(choices.Array()) == 0 {
 		return nil
+	}
+	// Every choice must carry a usable assistant message. Rejecting placeholder
+	// entries such as {"choices":[{}]} keeps the caller's bootstrap error path
+	// intact so credential and model fallback can still run.
+	for _, choice := range choices.Array() {
+		if !hasUsableAssistantChoice(choice) {
+			return nil
+		}
 	}
 
 	id := root.Get("id").String()
@@ -123,13 +131,44 @@ func SynthesizeOpenAIStreamFrames(body []byte) []string {
 	return append(frames, "[DONE]")
 }
 
+// hasUsableAssistantChoice reports whether a non-streaming choice carries
+// something the synthesizer can replay as streaming deltas. A choice with an
+// empty message is still accepted when the upstream reported a terminal reason,
+// because an empty assistant reply is a legitimate completion.
+func hasUsableAssistantChoice(choice gjson.Result) bool {
+	message := choice.Get("message")
+	if !message.Exists() || !message.IsObject() {
+		return false
+	}
+	if content := message.Get("content"); content.Exists() && content.String() != "" {
+		return true
+	}
+	for _, field := range []string{"reasoning_content", "reasoning"} {
+		if value := message.Get(field); value.Exists() && value.String() != "" {
+			return true
+		}
+	}
+	if refusal := message.Get("refusal"); refusal.Exists() && refusal.Type != gjson.Null {
+		return true
+	}
+	if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0 {
+		return true
+	}
+	return choice.Get("finish_reason").String() != ""
+}
+
 // buildToolCallsDelta rewrites a non-streaming tool_calls array into a single
 // streaming delta that carries the complete arguments for every call.
 func buildToolCallsDelta(toolCalls gjson.Result) string {
 	delta := []byte(`{"tool_calls":[]}`)
 	position := 0
 	toolCalls.ForEach(func(_, call gjson.Result) bool {
-		entry := []byte(`{}`)
+		// Start from the upstream call so provider metadata such as Gemini's
+		// extra_content.google.thought_signature survives the rewrite.
+		entry := []byte(call.Raw)
+		if !call.IsObject() {
+			entry = []byte(`{}`)
+		}
 		entry, _ = sjson.SetBytes(entry, "index", position)
 		if id := call.Get("id"); id.Exists() {
 			entry, _ = sjson.SetBytes(entry, "id", id.String())

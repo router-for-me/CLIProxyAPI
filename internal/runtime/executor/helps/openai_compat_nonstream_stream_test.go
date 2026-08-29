@@ -125,6 +125,43 @@ func TestSynthesizeOpenAIStreamFramesPreservesRefusal(t *testing.T) {
 	}
 }
 
+func TestSynthesizeOpenAIStreamFramesRejectsUnusableChoices(t *testing.T) {
+	cases := map[string]string{
+		"empty choice":  `{"id":"x","model":"m","created":1,"choices":[{}]}`,
+		"empty array":   `{"id":"x","model":"m","created":1,"choices":[]}`,
+		"empty message": `{"id":"x","model":"m","created":1,"choices":[{"index":0,"message":{"role":"assistant","content":""}}]}`,
+		"mixed choices": `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"content":"ok"}},{"index":1,"message":{}}]}`,
+	}
+	for name, body := range cases {
+		if frames := SynthesizeOpenAIStreamFrames([]byte(body)); frames != nil {
+			t.Fatalf("%s: expected rejection, got %v", name, frames)
+		}
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesAcceptsEmptyReplyWithFinishReason(t *testing.T) {
+	body := []byte(`{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":""}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	if len(frames) == 0 {
+		t.Fatal("expected frames for empty assistant reply with terminal reason")
+	}
+	if !strings.Contains(strings.Join(frames, "\n"), `"finish_reason":"stop"`) {
+		t.Fatalf("missing terminal reason: %v", frames)
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesPreservesToolCallProviderMetadata(t *testing.T) {
+	body := []byte(`{"id":"chatcmpl-g","model":"gemini","created":1,"choices":[{"index":0,"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"},"extra_content":{"google":{"thought_signature":"sig-123"}}}]}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	joined := strings.Join(frames, "\n")
+	if !strings.Contains(joined, `"thought_signature":"sig-123"`) {
+		t.Fatalf("thought signature dropped: %s", joined)
+	}
+	if !strings.Contains(joined, `"arguments":"{}"`) {
+		t.Fatalf("arguments missing: %s", joined)
+	}
+}
+
 func TestSynthesizeOpenAIStreamFramesPreservesReasoningAliasLogprobsAndFingerprint(t *testing.T) {
 	body := []byte(`{"id":"chatcmpl-meta","model":"m","created":1,"system_fingerprint":"fp_test","choices":[{"index":0,"finish_reason":"stop","logprobs":{"content":[{"token":"ok","logprob":-0.1}]},"message":{"reasoning":"alternate reasoning","content":"ok"}}]}`)
 	frames := SynthesizeOpenAIStreamFrames(body)
