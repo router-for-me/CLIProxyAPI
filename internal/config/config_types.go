@@ -260,6 +260,10 @@ type OAuthModelAlias struct {
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+
+	// RoutingPriority overrides the credential priority only when this alias is requested.
+	// This lets several aliases expose rotated fallback orders without duplicating credentials.
+	RoutingPriority *int `yaml:"routing-priority,omitempty" json:"routing-priority,omitempty"`
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
