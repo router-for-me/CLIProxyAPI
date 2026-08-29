@@ -98,6 +98,25 @@ type Auth struct {
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
+
+	// proberBackoff counts consecutive probe failures for the exponential
+	// prober backoff ladder. It is not persisted.
+	proberBackoff int `json:"-"`
+
+	// proberCooldown marks that the current auth-level cooldown was set by
+	// the health prober. Only prober-owned cooldown may be cleared by a
+	// successful probe. It is not persisted.
+	proberCooldown bool `json:"-"`
+
+	// authLevelCooldown marks an auth-level (non-aggregated) cooldown such as
+	// a prober or invalid_grant failure. It is not persisted.
+	authLevelCooldown bool `json:"-"`
+
+	// authLevelUnavailable and authLevelNextRetryAfter keep credential-scoped
+	// cooldown state separate from the model-state aggregate stored in Unavailable
+	// and NextRetryAfter. They are not persisted.
+	authLevelUnavailable    bool      `json:"-"`
+	authLevelNextRetryAfter time.Time `json:"-"`
 }
 
 const (

@@ -579,6 +579,12 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		updated.Status = StatusActive
 	}
 	updated.UpdatedAt = now
+	updated.NextRetryAfter = time.Time{}
+	updated.authLevelCooldown = false
+	updated.authLevelUnavailable = false
+	updated.authLevelNextRetryAfter = time.Time{}
+	updated.proberCooldown = false
+	updated.proberBackoff = 0
 	modelsToResume := clearUnauthorizedModelStates(updated, now)
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)

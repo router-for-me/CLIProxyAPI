@@ -56,6 +56,13 @@ type Result struct {
 	RetryAfter *time.Duration
 	// CredentialScope indicates that the failure affects the whole credential across models (e.g. Anthropic 5h/7d unified limits).
 	CredentialScope bool
+	// IsProbe distinguishes prober health-check results from real execution results.
+	// Probe results update cooldown state but do not count toward user statistics or session affinity.
+	IsProbe bool
+	// SourceAuth is the auth pointer used at request time; MarkResult discards
+	// the result if the manager has replaced the auth with a newer copy before the update.
+	// It is cleared before the result is passed to hooks or selectors.
+	SourceAuth *Auth
 	// Error describes the failure when Success is false.
 	Error *Error
 	// Options carries execution request options (headers, metadata, etc.) for result tracking.
@@ -161,6 +168,14 @@ type Manager struct {
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
 
+	// Active credential prober state
+	proberCancel      context.CancelFunc
+	proberLoop        *authProberLoop
+	proberParent      context.Context
+	proberCtx         context.Context
+	proberWg          sync.WaitGroup
+	proberLifecycleMu sync.Mutex
+
 	requestPrepareLocks sync.Map
 	// refreshLocks serializes credential refresh per auth ID so concurrent
 	// 401 recoveries and auto-refresh workers do not race the same refresh_token.
@@ -196,4 +211,17 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
+}
+
+// currentConfig returns the latest runtime config snapshot.
+func (m *Manager) currentConfig() *internalconfig.Config {
+	if m == nil {
+		return nil
+	}
+	if v := m.runtimeConfig.Load(); v != nil {
+		if cfg, ok := v.(*internalconfig.Config); ok {
+			return cfg
+		}
+	}
+	return nil
 }

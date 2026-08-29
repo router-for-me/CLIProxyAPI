@@ -189,6 +189,9 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 		return false
 	}
 	s.syncPluginModelRuntime(registrationCtx)
+	if s.coreManager != nil {
+		s.coreManager.RestartProber()
+	}
 	return ctx.Err() == nil
 }
 
