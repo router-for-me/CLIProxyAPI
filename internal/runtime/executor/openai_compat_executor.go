@@ -626,12 +626,14 @@ func (e *OpenAICompatExecutor) executeStreamViaNonStream(ctx context.Context, au
 		return nil, statusErr{code: httpResp.StatusCode, msg: string(body)}
 	}
 
+	bootstrapID := "chatcmpl-" + uuid.NewString()
+	bootstrapCreated := time.Now().Unix()
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
 		claudeInputTokens := helps.NewClaudeInputTokenState(opts.SourceFormat, to, responseFormat, originalPayload)
 		var param any
-		bootstrapLine := []byte("data: " + helps.SynthesizeOpenAIStreamBootstrapFrame(req.Model))
+		bootstrapLine := []byte("data: " + helps.SynthesizeOpenAIStreamBootstrapFrame(bootstrapID, req.Model, bootstrapCreated))
 		bootstrapChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bootstrapLine, &param, claudeInputTokens)
 		for i := range bootstrapChunks {
 			select {
@@ -656,6 +658,8 @@ func (e *OpenAICompatExecutor) executeStreamViaNonStream(ctx context.Context, au
 			return
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+		body, _ = sjson.SetBytes(body, "id", bootstrapID)
+		body, _ = sjson.SetBytes(body, "created", bootstrapCreated)
 		frames := helps.SynthesizeOpenAIStreamFrames(body)
 		if len(frames) == 0 {
 			errSynth := statusErr{code: http.StatusBadGateway, msg: "upstream non-streaming reply could not be converted to a stream"}

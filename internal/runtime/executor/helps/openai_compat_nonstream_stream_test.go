@@ -58,9 +58,11 @@ func decodeFrames(t *testing.T, frames []string) []map[string]any {
 }
 
 func TestSynthesizeOpenAIStreamBootstrapFrame(t *testing.T) {
-	frame := SynthesizeOpenAIStreamBootstrapFrame("alias-model")
-	if !strings.Contains(frame, `"role":"assistant"`) || !strings.Contains(frame, `"model":"alias-model"`) {
-		t.Fatalf("invalid bootstrap frame: %s", frame)
+	frame := SynthesizeOpenAIStreamBootstrapFrame("chatcmpl-stable", "alias-model", 1700000000)
+	for _, want := range []string{`"role":"assistant"`, `"model":"alias-model"`, `"id":"chatcmpl-stable"`, `"created":1700000000`} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("bootstrap frame missing %s: %s", want, frame)
+		}
 	}
 }
 
