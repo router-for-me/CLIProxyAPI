@@ -774,6 +774,10 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 	filtered := make([]config.OpenAICompatibility, 0, len(arr))
 	for i := range arr {
 		normalizeOpenAICompatibilityEntry(&arr[i])
+		if arr[i].RequestsPerMinute < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("openai-compatibility[%d].requests-per-minute must be non-negative", i)})
+			return
+		}
 		if strings.TrimSpace(arr[i].BaseURL) == "" {
 			continue
 		}
