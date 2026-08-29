@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -158,6 +159,31 @@ func newUnauthorizedRefreshFixture(t *testing.T, refreshFail bool) (*Manager, *u
 	return m, executor, primary, backup, model
 }
 
+func configureUnauthorizedStopRule(t *testing.T, m *Manager, authID string) {
+	t.Helper()
+	m.SetConfig(&internalconfig.Config{
+		OAuthRequestScopedErrors: map[string][]internalconfig.RequestScopedErrorRule{
+			"codex": {
+				{
+					Status: http.StatusUnauthorized,
+					Match:  []string{"authentication token has been invalidated"},
+					Action: RequestScopedActionStop,
+				},
+			},
+		},
+	})
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	auth := m.auths[authID]
+	if auth == nil {
+		t.Fatalf("auth %q missing", authID)
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes[AttributeAuthKind] = AuthKindOAuth
+}
+
 func TestManager_Execute_UnauthorizedRefreshesCurrentAuthBeforeFallback(t *testing.T) {
 	m, executor, primary, backup, model := newUnauthorizedRefreshFixture(t, false)
 
@@ -224,6 +250,166 @@ func TestManager_ExecuteStream_UnauthorizedRefreshesCurrentAuthBeforeFallback(t 
 		if id == backup.ID {
 			t.Fatalf("backup auth should not be used when refresh recovers primary")
 		}
+	}
+}
+
+func TestManager_Execute_UnauthorizedStopRuleDoesNotRefreshOrRetry(t *testing.T) {
+	m, executor, primary, _, model := newUnauthorizedRefreshFixture(t, false)
+	configureUnauthorizedStopRule(t, m, primary.ID)
+
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("Execute error = nil, want stopped unauthorized error")
+	}
+	if got := executor.RefreshCalls(); got != 0 {
+		t.Fatalf("Refresh calls = %d, want 0", got)
+	}
+	if got := executor.ExecuteCalls(); len(got) != 1 || got[0] != primary.ID {
+		t.Fatalf("Execute calls = %v, want [primary]", got)
+	}
+}
+
+func TestManager_ExecuteStream_UnauthorizedStopRuleDoesNotRefreshOrRetry(t *testing.T) {
+	m, executor, primary, _, model := newUnauthorizedRefreshFixture(t, false)
+	configureUnauthorizedStopRule(t, m, primary.ID)
+
+	_, errStream := m.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errStream == nil {
+		t.Fatal("ExecuteStream error = nil, want stopped unauthorized error")
+	}
+	if got := executor.RefreshCalls(); got != 0 {
+		t.Fatalf("Refresh calls = %d, want 0", got)
+	}
+	if got := executor.StreamCalls(); len(got) != 1 || got[0] != primary.ID {
+		t.Fatalf("Stream calls = %v, want [primary]", got)
+	}
+}
+
+func configureHomeUnauthorizedStopRule(manager *Manager) {
+	manager.SetConfig(&internalconfig.Config{
+		Home: internalconfig.HomeConfig{Enabled: true},
+		OAuthRequestScopedErrors: map[string][]internalconfig.RequestScopedErrorRule{
+			homeUnauthorizedRefreshProvider: {{
+				Status: http.StatusUnauthorized,
+				Match:  []string{"expired access token"},
+				Action: RequestScopedActionStop,
+			}},
+		},
+	})
+}
+
+func TestManager_HomeUnauthorizedStopRuleDoesNotRefreshOrRetry(t *testing.T) {
+	dispatcher := &homeUnauthorizedRefreshDispatcher{}
+	executor := &homeUnauthorizedRefreshExecutor{}
+	manager := newHomeUnauthorizedRefreshManager(dispatcher, executor)
+	configureHomeUnauthorizedStopRule(manager)
+
+	_, errExecute := manager.Execute(context.Background(), []string{homeUnauthorizedRefreshProvider}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("Execute error = nil, want stopped unauthorized error")
+	}
+	if got := executor.refreshCalls.Load(); got != 0 {
+		t.Fatalf("Refresh calls = %d, want 0", got)
+	}
+	if got := executor.executeCalls.Load(); got != 1 {
+		t.Fatalf("Execute calls = %d, want 1", got)
+	}
+}
+
+func TestManager_HomeUnauthorizedStreamStopRuleDoesNotRefreshOrRetry(t *testing.T) {
+	dispatcher := &homeUnauthorizedRefreshDispatcher{}
+	executor := &homeUnauthorizedRefreshExecutor{}
+	manager := newHomeUnauthorizedRefreshManager(dispatcher, executor)
+	configureHomeUnauthorizedStopRule(manager)
+
+	_, errStream := manager.ExecuteStream(context.Background(), []string{homeUnauthorizedRefreshProvider}, cliproxyexecutor.Request{Model: "model-a"}, cliproxyexecutor.Options{Stream: true})
+	if errStream == nil {
+		t.Fatal("ExecuteStream error = nil, want stopped unauthorized error")
+	}
+	if got := executor.refreshCalls.Load(); got != 0 {
+		t.Fatalf("Refresh calls = %d, want 0", got)
+	}
+	if got := executor.streamCalls.Load(); got != 1 {
+		t.Fatalf("Stream calls = %d, want 1", got)
+	}
+}
+
+func TestManager_RefreshHomeSelectionSyntheticUnauthorizedDoesNotMatchBodyRule(t *testing.T) {
+	executor := &homeUnauthorizedRefreshExecutor{}
+	selection := &HomeDispatchSelection{
+		Auth:     &Auth{ID: "home-refresh-auth", Provider: homeUnauthorizedRefreshProvider, Attributes: map[string]string{AttributeAuthKind: AuthKindOAuth}, Metadata: map[string]any{"access_token": "fresh-access-token"}},
+		Executor: executor,
+		Provider: homeUnauthorizedRefreshProvider,
+	}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{OAuthRequestScopedErrors: map[string][]internalconfig.RequestScopedErrorRule{
+		homeUnauthorizedRefreshProvider: {{
+			Status: http.StatusUnauthorized,
+			Match:  []string{"upstream unauthorized"},
+			Action: RequestScopedActionStop,
+		}},
+	}})
+
+	failed := selection.CloneAuth()
+	failed.Metadata["access_token"] = "stale-access-token"
+	updated, reused, errRefresh := manager.RefreshHomeSelectionAfterUnauthorized(context.Background(), selection, failed)
+	if errRefresh != nil || !reused || authAccessToken(updated) != "fresh-access-token" {
+		t.Fatalf("RefreshHomeSelectionAfterUnauthorized() = %#v, %v, %v, want reused auth", updated, reused, errRefresh)
+	}
+	if got := executor.refreshCalls.Load(); got != 0 {
+		t.Fatalf("Refresh calls = %d, want 0", got)
+	}
+}
+
+func TestManager_RefreshHomeSelectionSyntheticUnauthorizedHonorsEmptyBodyCatchAllRule(t *testing.T) {
+	executor := &homeUnauthorizedRefreshExecutor{}
+	selection := &HomeDispatchSelection{
+		Auth:     &Auth{ID: "home-refresh-auth", Provider: homeUnauthorizedRefreshProvider, Attributes: map[string]string{AttributeAuthKind: AuthKindOAuth}, Metadata: map[string]any{"access_token": "stale-access-token"}},
+		Executor: executor,
+		Provider: homeUnauthorizedRefreshProvider,
+	}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{OAuthRequestScopedErrors: map[string][]internalconfig.RequestScopedErrorRule{
+		homeUnauthorizedRefreshProvider: {{
+			Status:      http.StatusUnauthorized,
+			MatchRegexr: []string{".*"},
+			Action:      RequestScopedActionStop,
+		}},
+	}})
+
+	_, refreshed, errRefresh := manager.RefreshHomeSelectionAfterUnauthorized(context.Background(), selection, selection.CloneAuth())
+	if errRefresh != nil || refreshed {
+		t.Fatalf("RefreshHomeSelectionAfterUnauthorized() = refreshed %v, err %v, want no refresh", refreshed, errRefresh)
+	}
+	if got := executor.refreshCalls.Load(); got != 0 {
+		t.Fatalf("Refresh calls = %d, want 0", got)
+	}
+}
+
+func TestManager_RefreshHomeSelectionSyntheticStopPreventsConcurrentTokenReuse(t *testing.T) {
+	executor := &homeUnauthorizedRefreshExecutor{}
+	selection := &HomeDispatchSelection{
+		Auth:     &Auth{ID: "home-refresh-auth", Provider: homeUnauthorizedRefreshProvider, Attributes: map[string]string{AttributeAuthKind: AuthKindOAuth}, Metadata: map[string]any{"access_token": "fresh-access-token"}},
+		Executor: executor,
+		Provider: homeUnauthorizedRefreshProvider,
+	}
+	failed := selection.CloneAuth()
+	failed.Metadata["access_token"] = "stale-access-token"
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{OAuthRequestScopedErrors: map[string][]internalconfig.RequestScopedErrorRule{
+		homeUnauthorizedRefreshProvider: {{
+			Status:      http.StatusUnauthorized,
+			MatchRegexr: []string{".*"},
+			Action:      RequestScopedActionStop,
+		}},
+	}})
+
+	_, reused, errRefresh := manager.RefreshHomeSelectionAfterUnauthorized(context.Background(), selection, failed)
+	if errRefresh != nil || reused {
+		t.Fatalf("RefreshHomeSelectionAfterUnauthorized() = reused %v, err %v, want no reuse", reused, errRefresh)
+	}
+	if got := executor.refreshCalls.Load(); got != 0 {
+		t.Fatalf("Refresh calls = %d, want 0", got)
 	}
 }
 

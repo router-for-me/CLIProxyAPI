@@ -387,6 +387,9 @@ func (m *Manager) RefreshHomeSelectionAfterUnauthorized(_ context.Context, selec
 	if failedAuth == nil {
 		failedAuth = current
 	}
+	if m.requestScopedStopPreventsRefresh(failedAuth, &Error{HTTPStatus: http.StatusUnauthorized}) {
+		return current, false, nil
+	}
 	if current != nil && failedAuth != nil && current.ID == failedAuth.ID {
 		currentToken := authAccessToken(current)
 		failedToken := authAccessToken(failedAuth)
@@ -397,6 +400,14 @@ func (m *Manager) RefreshHomeSelectionAfterUnauthorized(_ context.Context, selec
 	return current, false, nil
 }
 
+func (m *Manager) requestScopedStopPreventsRefresh(auth *Auth, execErr error) bool {
+	if isRequestScopedError(execErr) {
+		return true
+	}
+	action, ok := matchRequestScopedErrorAction(auth, execErr, m.runtimeConfigSnapshot())
+	return isRequestScopedStop(action, ok)
+}
+
 // tryRefreshAfterUnauthorized refreshes local OAuth credentials once after a
 // 401 so the current auth can be retried before fallback/suspend.
 func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool) (*Auth, bool) {
@@ -405,7 +416,7 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	}
 	// Request-scoped failures describe this request, not stale credentials.
 	// Refreshing would turn a direct error response into an implicit retry.
-	if isRequestScopedError(execErr) {
+	if m.requestScopedStopPreventsRefresh(auth, execErr) {
 		return auth, false
 	}
 	if !isUnauthorizedError(execErr) || !authHasRefreshCredential(auth) {
