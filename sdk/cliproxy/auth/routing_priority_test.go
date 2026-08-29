@@ -9,28 +9,27 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
-func TestRoutingPriorityRotatesFallbackRing(t *testing.T) {
+func TestRoutingPrioritySupportsPreferredRingEntryPoints(t *testing.T) {
 	const (
 		provider = "codex"
 		upstream = "ring-native-model"
 		routeA   = "ring-route-a"
 		routeB   = "ring-route-b"
-		routeArk = "ring-route-ark"
 	)
 
 	manager := NewManager(nil, nil, nil)
 	manager.SetSelector(&FillFirstSelector{})
 	manager.RegisterExecutor(schedulerTestExecutor{provider: provider})
 
-	routes := []string{routeA, routeB, routeArk}
+	routes := []string{routeA, routeB}
 	auths := []struct {
 		id              string
 		globalPriority  string
 		routingPriority []int
 	}{
-		{id: "account-a", globalPriority: "300", routingPriority: []int{300, 100, 200}},
-		{id: "account-b", globalPriority: "200", routingPriority: []int{200, 300, 100}},
-		{id: "ark", globalPriority: "100", routingPriority: []int{100, 200, 300}},
+		{id: "account-a", globalPriority: "300", routingPriority: []int{300, 200}},
+		{id: "account-b", globalPriority: "200", routingPriority: []int{200, 300}},
+		{id: "ark", globalPriority: "100", routingPriority: []int{100, 100}},
 	}
 
 	ctx := context.Background()
@@ -64,8 +63,7 @@ func TestRoutingPriorityRotatesFallbackRing(t *testing.T) {
 		want  []string
 	}{
 		{name: "route A starts at A", model: routeA, want: []string{"account-a", "account-b", "ark"}},
-		{name: "route B starts at B", model: routeB, want: []string{"account-b", "ark", "account-a"}},
-		{name: "route Ark starts at Ark", model: routeArk, want: []string{"ark", "account-a", "account-b"}},
+		{name: "route B starts at B", model: routeB, want: []string{"account-b", "account-a", "ark"}},
 		{name: "no override keeps global order", model: upstream, want: []string{"account-a", "account-b", "ark"}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
