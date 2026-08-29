@@ -125,6 +125,19 @@ func TestSynthesizeOpenAIStreamFramesPreservesRefusal(t *testing.T) {
 	}
 }
 
+func TestSynthesizeOpenAIStreamFramesPreservesServiceTier(t *testing.T) {
+	body := []byte(`{"id":"chatcmpl-tier","model":"m","created":1,"service_tier":"priority","choices":[{"index":0,"finish_reason":"stop","message":{"content":"ok"}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	if len(frames) < 2 {
+		t.Fatalf("expected synthesized frames, got %v", frames)
+	}
+	for _, frame := range frames[:len(frames)-1] {
+		if !strings.Contains(frame, `"service_tier":"priority"`) {
+			t.Fatalf("service tier missing from frame: %s", frame)
+		}
+	}
+}
+
 func TestSynthesizeOpenAIStreamFramesEmitsRoleForEveryChoice(t *testing.T) {
 	body := []byte(`{"id":"chatcmpl-n","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"content":"a"}},{"index":1,"finish_reason":"stop","message":{"content":"b"}}]}`)
 	frames := SynthesizeOpenAIStreamFrames(body)

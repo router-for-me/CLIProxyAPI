@@ -45,6 +45,7 @@ func SynthesizeOpenAIStreamFrames(body []byte) []string {
 	id := root.Get("id").String()
 	model := root.Get("model").String()
 	created := root.Get("created").Int()
+	serviceTier := root.Get("service_tier")
 	usage := root.Get("usage")
 
 	frames := make([]string, 0, 8)
@@ -53,6 +54,9 @@ func SynthesizeOpenAIStreamFrames(body []byte) []string {
 		frame, _ = sjson.SetBytes(frame, "id", id)
 		frame, _ = sjson.SetBytes(frame, "model", model)
 		frame, _ = sjson.SetBytes(frame, "created", created)
+		if serviceTier.Exists() && serviceTier.Type != gjson.Null {
+			frame, _ = sjson.SetRawBytes(frame, "service_tier", []byte(serviceTier.Raw))
+		}
 		frame, _ = sjson.SetBytes(frame, "choices.0.index", index)
 		if delta != "" {
 			frame, _ = sjson.SetRawBytes(frame, "choices.0.delta", []byte(delta))
