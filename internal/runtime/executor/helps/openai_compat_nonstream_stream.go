@@ -46,16 +46,20 @@ func SynthesizeOpenAIStreamFrames(body []byte) []string {
 	model := root.Get("model").String()
 	created := root.Get("created").Int()
 	serviceTier := root.Get("service_tier")
+	systemFingerprint := root.Get("system_fingerprint")
 	usage := root.Get("usage")
 
 	frames := make([]string, 0, 8)
-	emit := func(index int64, delta string, finishReason gjson.Result, withUsage bool) {
+	emit := func(index int64, delta string, finishReason, logprobs gjson.Result, withUsage bool) {
 		frame := []byte(`{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{}}]}`)
 		frame, _ = sjson.SetBytes(frame, "id", id)
 		frame, _ = sjson.SetBytes(frame, "model", model)
 		frame, _ = sjson.SetBytes(frame, "created", created)
 		if serviceTier.Exists() && serviceTier.Type != gjson.Null {
 			frame, _ = sjson.SetRawBytes(frame, "service_tier", []byte(serviceTier.Raw))
+		}
+		if systemFingerprint.Exists() && systemFingerprint.Type != gjson.Null {
+			frame, _ = sjson.SetRawBytes(frame, "system_fingerprint", []byte(systemFingerprint.Raw))
 		}
 		frame, _ = sjson.SetBytes(frame, "choices.0.index", index)
 		if delta != "" {
@@ -65,6 +69,9 @@ func SynthesizeOpenAIStreamFrames(body []byte) []string {
 			frame, _ = sjson.SetBytes(frame, "choices.0.finish_reason", finishReason.String())
 		} else {
 			frame, _ = sjson.SetRawBytes(frame, "choices.0.finish_reason", []byte("null"))
+		}
+		if logprobs.Exists() && logprobs.Type != gjson.Null {
+			frame, _ = sjson.SetRawBytes(frame, "choices.0.logprobs", []byte(logprobs.Raw))
 		}
 		if withUsage && usage.Exists() {
 			frame, _ = sjson.SetRawBytes(frame, "usage", []byte(usage.Raw))
@@ -76,21 +83,29 @@ func SynthesizeOpenAIStreamFrames(body []byte) []string {
 		index := choice.Get("index").Int()
 		message := choice.Get("message")
 		finishReason := choice.Get("finish_reason")
+		logprobs := choice.Get("logprobs")
 
-		emit(index, `{"role":"assistant"}`, gjson.Result{}, false)
+		emit(index, `{"role":"assistant"}`, gjson.Result{}, gjson.Result{}, false)
 
 		if reasoning := message.Get("reasoning_content"); reasoning.Exists() && reasoning.String() != "" {
-			emit(index, fmt.Sprintf(`{"reasoning_content":%s}`, reasoning.Raw), gjson.Result{}, false)
+			emit(index, fmt.Sprintf(`{"reasoning_content":%s}`, reasoning.Raw), gjson.Result{}, gjson.Result{}, false)
+		} else if reasoning = message.Get("reasoning"); reasoning.Exists() && reasoning.String() != "" {
+			emit(index, fmt.Sprintf(`{"reasoning":%s}`, reasoning.Raw), gjson.Result{}, gjson.Result{}, false)
 		}
 		if refusal := message.Get("refusal"); refusal.Exists() && refusal.Type != gjson.Null {
-			emit(index, fmt.Sprintf(`{"refusal":%s}`, refusal.Raw), gjson.Result{}, false)
+			emit(index, fmt.Sprintf(`{"refusal":%s}`, refusal.Raw), gjson.Result{}, gjson.Result{}, false)
 		}
+		contentEmitted := false
 		if content := message.Get("content"); content.Exists() && content.String() != "" {
-			emit(index, fmt.Sprintf(`{"content":%s}`, content.Raw), gjson.Result{}, false)
+			emit(index, fmt.Sprintf(`{"content":%s}`, content.Raw), gjson.Result{}, logprobs, false)
+			contentEmitted = true
+		}
+		if !contentEmitted && logprobs.Exists() && logprobs.Type != gjson.Null {
+			emit(index, "", gjson.Result{}, logprobs, false)
 		}
 		if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 			if delta := buildToolCallsDelta(toolCalls); delta != "" {
-				emit(index, delta, gjson.Result{}, false)
+				emit(index, delta, gjson.Result{}, gjson.Result{}, false)
 			}
 		}
 
@@ -98,7 +113,7 @@ func SynthesizeOpenAIStreamFrames(body []byte) []string {
 		// the usage block that stream_options.include_usage would have appended.
 		// Keying on the array position instead of the reported index keeps usage
 		// single even when an upstream omits the index field on every choice.
-		emit(index, "", finishReason, position.Int() == 0)
+		emit(index, "", finishReason, gjson.Result{}, position.Int() == 0)
 		return true
 	})
 

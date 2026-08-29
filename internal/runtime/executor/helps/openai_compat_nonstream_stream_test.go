@@ -125,6 +125,17 @@ func TestSynthesizeOpenAIStreamFramesPreservesRefusal(t *testing.T) {
 	}
 }
 
+func TestSynthesizeOpenAIStreamFramesPreservesReasoningAliasLogprobsAndFingerprint(t *testing.T) {
+	body := []byte(`{"id":"chatcmpl-meta","model":"m","created":1,"system_fingerprint":"fp_test","choices":[{"index":0,"finish_reason":"stop","logprobs":{"content":[{"token":"ok","logprob":-0.1}]},"message":{"reasoning":"alternate reasoning","content":"ok"}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	joined := strings.Join(frames, "\n")
+	for _, want := range []string{`"system_fingerprint":"fp_test"`, `"reasoning":"alternate reasoning"`, `"logprobs":{"content":[{"token":"ok","logprob":-0.1}]}`} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing metadata %s in %s", want, joined)
+		}
+	}
+}
+
 func TestSynthesizeOpenAIStreamFramesPreservesServiceTier(t *testing.T) {
 	body := []byte(`{"id":"chatcmpl-tier","model":"m","created":1,"service_tier":"priority","choices":[{"index":0,"finish_reason":"stop","message":{"content":"ok"}}]}`)
 	frames := SynthesizeOpenAIStreamFrames(body)
