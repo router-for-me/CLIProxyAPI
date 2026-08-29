@@ -1208,6 +1208,7 @@ func newRedisCommandTestClient(t *testing.T, handler func([]string) string) (*Cl
 		Port:                    port,
 		DisableClusterDiscovery: true,
 	})
+	client.testOperationTimeout = homeRedisTestOperationTimeout
 	options := &redis.Options{
 		Addr:                  listener.Addr().String(),
 		Protocol:              2,
@@ -1220,6 +1221,7 @@ func newRedisCommandTestClient(t *testing.T, handler func([]string) string) (*Cl
 	}
 	client.cmdOptions = cloneRedisOptions(options)
 	client.cmd = redis.NewClient(options)
+	client.sub = redis.NewClient(cloneRedisOptions(options))
 	t.Cleanup(func() {
 		client.Close()
 	})
@@ -1610,8 +1612,10 @@ func TestRunConfigSubscriberLifetimeRejectsInvalidSubscriptionACK(t *testing.T) 
 				switch {
 				case len(args) >= 1 && strings.EqualFold(args[0], "HELLO"):
 					return "%6\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:3\r\n$2\r\nid\r\n:1\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n"
+				case len(args) >= 2 && strings.EqualFold(args[0], "CLUSTER") && strings.EqualFold(args[1], "NODES"):
+					return "-ERR unknown command 'CLUSTER'\r\n"
 				case len(args) >= 2 && strings.EqualFold(args[0], "GET") && args[1] == redisKeyConfig:
-					return "$16\r\nhost: 127.0.0.1\r\n"
+					return "$15\r\nhost: 127.0.0.1\r\n"
 				case len(args) >= 2 && strings.EqualFold(args[0], "SUBSCRIBE") && args[1] == redisChannelConfig:
 					return ack
 				default:
@@ -2226,6 +2230,30 @@ func TestRunConfigSubscriberLifetimePreservesTakeoverWhenFreshCommandProbeFails(
 	args, _ := next.subscriptionParameters()
 	if !reflect.DeepEqual(args, []string{"config", "9", "takeover", client.MembershipInstanceID()}) {
 		t.Fatalf("replacement SUBSCRIBE args = %#v, want takeover", args)
+	}
+}
+
+func TestDefaultProductionClientTimeouts(t *testing.T) {
+	client := New(config.HomeConfig{Enabled: true, Host: "127.0.0.1", Port: 6379})
+	if client.testOperationTimeout != 0 {
+		t.Fatalf("default testOperationTimeout = %v, want 0", client.testOperationTimeout)
+	}
+	options, err := client.redisOptionsLocked("127.0.0.1:6379")
+	if err != nil {
+		t.Fatalf("redisOptionsLocked() error = %v", err)
+	}
+	if options.DialTimeout != homeRedisOperationTimeout {
+		t.Fatalf("DialTimeout = %v, want %v", options.DialTimeout, homeRedisOperationTimeout)
+	}
+	if options.ReadTimeout != homeRedisOperationTimeout {
+		t.Fatalf("ReadTimeout = %v, want %v", options.ReadTimeout, homeRedisOperationTimeout)
+	}
+	if options.WriteTimeout != homeRedisOperationTimeout {
+		t.Fatalf("WriteTimeout = %v, want %v", options.WriteTimeout, homeRedisOperationTimeout)
+	}
+	_, timeout := client.subscriptionParameters()
+	if timeout != 3*time.Second {
+		t.Fatalf("subscriptionParameters timeout = %v, want 3s", timeout)
 	}
 }
 

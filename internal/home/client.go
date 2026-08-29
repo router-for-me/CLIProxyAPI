@@ -200,12 +200,13 @@ type Client struct {
 	// lets a Home upgrade take effect on the next reconnect instead of
 	// requiring a CPA restart. The probe costs one round trip that returns an
 	// error without performing any write.
-	casUnsupported    atomic.Bool
-	recoveryState     atomic.Uint32
-	instanceID        string
-	legacyMembership  bool
-	clusterNodes      []clusterNode
-	reconnectFailures int
+	casUnsupported       atomic.Bool
+	testOperationTimeout time.Duration
+	recoveryState        atomic.Uint32
+	instanceID           string
+	legacyMembership     bool
+	clusterNodes         []clusterNode
+	reconnectFailures    int
 }
 
 func New(homeCfg config.HomeConfig) *Client {
@@ -225,13 +226,14 @@ func (c *Client) NewLifetime() *Client {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	next := &Client{
-		homeCfg:           c.homeCfg,
-		seedHost:          c.seedHost,
-		seedPort:          c.seedPort,
-		clusterNodes:      append([]clusterNode(nil), c.clusterNodes...),
-		reconnectFailures: c.reconnectFailures,
-		instanceID:        c.instanceID,
-		legacyMembership:  c.legacyMembership,
+		homeCfg:              c.homeCfg,
+		seedHost:             c.seedHost,
+		seedPort:             c.seedPort,
+		clusterNodes:         append([]clusterNode(nil), c.clusterNodes...),
+		reconnectFailures:    c.reconnectFailures,
+		testOperationTimeout: c.testOperationTimeout,
+		instanceID:           c.instanceID,
+		legacyMembership:     c.legacyMembership,
 	}
 	next.recoveryState.Store(c.recoveryState.Load())
 	return next
@@ -517,12 +519,30 @@ func (c *Client) redisOptionsLocked(addr string) (*redis.Options, error) {
 	if errTLS != nil {
 		return nil, errTLS
 	}
+	dialTimeout := homeRedisOperationTimeout
+	readTimeout := homeRedisOperationTimeout
+	writeTimeout := homeRedisOperationTimeout
+	if c.testOperationTimeout > 0 {
+		dialTimeout = c.testOperationTimeout
+		readTimeout = c.testOperationTimeout
+		writeTimeout = c.testOperationTimeout
+	} else if c.cmdOptions != nil {
+		if c.cmdOptions.DialTimeout > 0 {
+			dialTimeout = c.cmdOptions.DialTimeout
+		}
+		if c.cmdOptions.ReadTimeout > 0 {
+			readTimeout = c.cmdOptions.ReadTimeout
+		}
+		if c.cmdOptions.WriteTimeout > 0 {
+			writeTimeout = c.cmdOptions.WriteTimeout
+		}
+	}
 	options := &redis.Options{
 		Addr:                  addr,
 		TLSConfig:             tlsConfig,
-		DialTimeout:           homeRedisOperationTimeout,
-		ReadTimeout:           homeRedisOperationTimeout,
-		WriteTimeout:          homeRedisOperationTimeout,
+		DialTimeout:           dialTimeout,
+		ReadTimeout:           readTimeout,
+		WriteTimeout:          writeTimeout,
 		MaxRetries:            -1,
 		DialerRetries:         1,
 		ContextTimeoutEnabled: true,
@@ -1756,13 +1776,19 @@ func (c *Client) subscriptionParameters() ([]string, time.Duration) {
 	cfg := c.lifecycle.WithDefaults()
 	instanceID := c.instanceID
 	legacyMembership := c.legacyMembership
+	testTimeout := c.testOperationTimeout
 	c.mu.Unlock()
+
+	timeout := cfg.CPAHeartbeatTimeout
+	if testTimeout > 0 && cfg.LifecycleConfigRevision == 0 {
+		timeout = testTimeout
+	}
 
 	args := []string{redisChannelConfig}
 	if cfg.LifecycleConfigRevision > 0 {
 		args = append(args, strconv.FormatInt(cfg.LifecycleConfigRevision, 10))
 		if legacyMembership {
-			return args, cfg.CPAHeartbeatTimeout
+			return args, timeout
 		}
 		state := recoveryState(c.recoveryState.Load())
 		if state == recoveryStateTakeoverEligible || state == recoveryStateSwitchingTakeover {
@@ -1770,7 +1796,7 @@ func (c *Client) subscriptionParameters() ([]string, time.Duration) {
 		}
 		args = append(args, instanceID)
 	}
-	return args, cfg.CPAHeartbeatTimeout
+	return args, timeout
 }
 
 func (c *Client) markMembershipTakeoverEligible() {
