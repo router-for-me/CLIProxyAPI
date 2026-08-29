@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/errormessages"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -404,5 +405,128 @@ func TestWriteErrorResponse_ContextCanceledUses499(t *testing.T) {
 
 	if recorder.Code != clienterror.StatusClientClosedRequest {
 		t.Fatalf("status = %d, want %d", recorder.Code, clienterror.StatusClientClosedRequest)
+	}
+}
+
+// stubErrorMessageStore is a minimal in-memory errormessages.Store used by
+// the WriteErrorResponse registry tests. We do not exercise Upsert/Delete
+// here — only ListAll, which is the path RefreshFromDB consults on cold
+// cache. The Map keeps the table small and explicit.
+type stubErrorMessageStore struct {
+	Rows []errormessages.Message
+}
+
+func (s *stubErrorMessageStore) ListAll(_ context.Context) ([]errormessages.Message, error) {
+	out := make([]errormessages.Message, len(s.Rows))
+	copy(out, s.Rows)
+	return out, nil
+}
+
+func (s *stubErrorMessageStore) GetByStatusCode(_ context.Context, code int) (*errormessages.Message, error) {
+	for i := range s.Rows {
+		if s.Rows[i].StatusCode == code {
+			m := s.Rows[i]
+			return &m, nil
+		}
+	}
+	return nil, errors.New("not found")
+}
+
+func (s *stubErrorMessageStore) Upsert(_ context.Context, _ errormessages.Message) error {
+	return nil
+}
+
+func (s *stubErrorMessageStore) Delete(_ context.Context, _ int) error {
+	return nil
+}
+
+// TestWriteErrorResponse_HonorsOperatorOverride reproduces the regression
+// reported for the Error Messages page: an operator enables a custom
+// 503 override, but a routing-level 503 ("no available upstream for model
+// ...") still flows out via WriteErrorResponse and the operator's text is
+// dropped on the floor.
+//
+// SetStore primes the registry cache so Lookup returns the operator's
+// Message. After WriteErrorResponse, the response body must contain the
+// operator's title and message — not the raw Go error string.
+func TestWriteErrorResponse_HonorsOperatorOverride(t *testing.T) {
+	// Snapshot the previous registry singleton so this test does not leak
+	// state into siblings (the registry is package-global).
+	previous := errormessages.SetStoreForTest(&stubErrorMessageStore{
+		Rows: []errormessages.Message{
+			{
+				StatusCode: http.StatusServiceUnavailable,
+				Title:      "Custom Upstream Unavailable",
+				Message:    "No upstream provider is currently registered for the requested model.",
+				Enabled:    true,
+			},
+		},
+	})
+	t.Cleanup(func() { errormessages.SetStoreForTest(previous) })
+	errormessages.Invalidate()
+	errormessages.RefreshFromDB(context.Background())
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	handler := NewBaseAPIHandlers(nil, nil)
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode: http.StatusServiceUnavailable,
+		Error:      errors.New("no available upstream for model glm-5.3 on allowed providers [openai-compatible-openlimits openai-compatible-cmd openai-compatible-ol]"),
+	})
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	body := recorder.Body.String()
+	if strings.Contains(body, "no available upstream for model glm-5.3") {
+		t.Fatalf("response still leaks raw Go error text; registry override was ignored.\nbody = %s", body)
+	}
+	if !strings.Contains(body, "Custom Upstream Unavailable") {
+		t.Fatalf("response missing operator title.\nbody = %s", body)
+	}
+	if !strings.Contains(body, "No upstream provider is currently registered for the requested model.") {
+		t.Fatalf("response missing operator message.\nbody = %s", body)
+	}
+}
+
+// TestWriteErrorResponse_DisabledOverrideFallsBackToDefault ensures that
+// disabling an override keeps the proxy on the curated default body —
+// matching how the streaming path behaves. Operators who flip Enabled=false
+// must not see stale custom text leak into the response.
+func TestWriteErrorResponse_DisabledOverrideFallsBackToDefault(t *testing.T) {
+	previous := errormessages.SetStoreForTest(&stubErrorMessageStore{
+		Rows: []errormessages.Message{
+			{
+				StatusCode: http.StatusServiceUnavailable,
+				Title:      "Should Not Appear",
+				Message:    "Disabled override leaked.",
+				Enabled:    false,
+			},
+		},
+	})
+	t.Cleanup(func() { errormessages.SetStoreForTest(previous) })
+	errormessages.Invalidate()
+	errormessages.RefreshFromDB(context.Background())
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	handler := NewBaseAPIHandlers(nil, nil)
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode: http.StatusServiceUnavailable,
+		Error:      errors.New("raw text"),
+	})
+
+	body := recorder.Body.String()
+	if strings.Contains(body, "Should Not Appear") {
+		t.Fatalf("disabled override leaked into response.\nbody = %s", body)
+	}
+	if strings.Contains(body, "Disabled override leaked.") {
+		t.Fatalf("disabled override message leaked into response.\nbody = %s", body)
 	}
 }

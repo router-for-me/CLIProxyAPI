@@ -69,6 +69,21 @@ func SetStore(store Store) {
 	singleton = &Registry{store: store}
 }
 
+// SetStoreForTest swaps the registry's backing Store and returns the
+// previous one so test cleanup can restore it. Production callers should
+// use SetStore; this helper exists so a single failing test cannot leak
+// its stub into siblings that share the package-global singleton.
+func SetStoreForTest(store Store) Store {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	previous := singleton
+	if previous == nil {
+		previous = &Registry{}
+	}
+	singleton = &Registry{store: store}
+	return previous.store
+}
+
 // registry returns the singleton, creating an empty one if SetStore was not
 // called (e.g. tests without PG). Respond() will then always use defaults.
 func registry() *Registry {

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/errormessages"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"golang.org/x/net/context"
@@ -117,7 +119,17 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 		}
 	}
 
-	body := BuildErrorResponseBody(status, errText)
+	// Route through the errormessages registry so operator overrides
+	// (custom title / message / body_template) apply on the non-streaming
+	// error path too — mirroring the streaming WriteTerminalError callbacks.
+	// errText becomes the {{details}} substitution so overrides that include
+	// the placeholder still surface the underlying reason. When no override
+	// is configured for this status, BodyFor returns the curated default
+	// body (type/code/title/message), which keeps the response shape stable.
+	body, marshalErr := json.Marshal(errormessages.BodyFor(c.Request.Context(), status, errText))
+	if marshalErr != nil {
+		body = []byte(fmt.Sprintf(`{"error":{"message":%q,"type":"server_error","code":"internal_server_error"}}`, errText))
+	}
 	// Append first to preserve upstream response logs, then drop duplicate payloads if already recorded.
 	var previous []byte
 	if existing, exists := c.Get("API_RESPONSE"); exists {
