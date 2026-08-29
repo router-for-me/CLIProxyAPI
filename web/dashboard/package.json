@@ -9,6 +9,7 @@
     "build": "vite build",
     "preview": "vite preview --port 9173 --host",
     "lint": "eslint src --ext js,jsx --max-warnings 0",
+    "test": "node --test 'src/**/*.test.js' 'src/**/*.test.jsx'",
     "cf:dev": "npm run build && wrangler dev",
     "cf:deploy": "npm run build && wrangler deploy",
     "cf:tail": "wrangler tail"
