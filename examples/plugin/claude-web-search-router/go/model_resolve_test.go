@@ -41,3 +41,19 @@ func TestResolveAntigravityWebSearchTargetModelFromRegistry(t *testing.T) {
 		t.Fatalf("fallback = %q, want gemini-web-search-test", got)
 	}
 }
+
+func TestResolveAntigravityWebSearchTargetModelIncludesHiddenCatalogModels(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	const clientID = "test-claude-web-search-router-hidden-antigravity"
+	reg.RegisterClient(clientID, "antigravity", []*registry.ModelInfo{{
+		ID:                     "gemini-hidden-web-search-router-test",
+		SupportsWebSearch:      true,
+		HiddenFromModelCatalog: true,
+	}})
+	t.Cleanup(func() { reg.UnregisterClient(clientID) })
+
+	got := resolveAntigravityWebSearchTargetModel("", "unknown-model")
+	if got != "gemini-hidden-web-search-router-test" {
+		t.Fatalf("fallback = %q, want hidden capable model", got)
+	}
+}

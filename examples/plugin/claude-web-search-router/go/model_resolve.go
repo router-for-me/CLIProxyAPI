@@ -23,7 +23,7 @@ func resolveAntigravityWebSearchTargetModel(configured, requested string) string
 	if m := registry.AntigravityWebSearchModelFor(strings.TrimSpace(requested)); m != "" {
 		return m
 	}
-	for _, model := range registry.GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
+	for _, model := range registry.GetGlobalRegistry().GetAvailableModelCapabilitiesByProvider("antigravity") {
 		if model == nil || !model.SupportsWebSearch {
 			continue
 		}
