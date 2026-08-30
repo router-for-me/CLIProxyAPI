@@ -75,6 +75,20 @@ type SDKConfig struct {
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
 }
 
+// MarshalYAML writes the effective list-unprefixed-models behavior. The
+// explicitness marker is intentionally not serialized, so a zero-value config
+// must serialize its documented true default instead of raw false. A pointer
+// receiver keeps the method out of Config's inline field flattening.
+func (c *SDKConfig) MarshalYAML() (any, error) {
+	if c == nil {
+		return nil, nil
+	}
+	copyConfig := *c
+	copyConfig.ListUnprefixedModels = c.EffectiveListUnprefixedModels()
+	type sdkConfigYAML SDKConfig
+	return sdkConfigYAML(copyConfig), nil
+}
+
 // SetListUnprefixedModels explicitly sets whether unprefixed model aliases are
 // exposed in model catalogs. It lets programmatic configurations distinguish an
 // explicit false from the zero value, which uses the documented true default.

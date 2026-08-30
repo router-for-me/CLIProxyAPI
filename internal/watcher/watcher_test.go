@@ -229,6 +229,40 @@ func TestReloadConfigIfChanged_TriggersOnChangeAndSkipsUnchanged(t *testing.T) {
 	}
 }
 
+func TestListUnprefixedModelsChangedUsesEffectiveValues(t *testing.T) {
+	zeroValue := &config.Config{}
+	explicitFalse := &config.Config{}
+	explicitFalse.SetListUnprefixedModels(false)
+	explicitTrue := &config.Config{}
+	explicitTrue.SetListUnprefixedModels(true)
+
+	if !listUnprefixedModelsChanged(zeroValue, explicitFalse) {
+		t.Fatal("effective true to false change was not detected")
+	}
+	if listUnprefixedModelsChanged(zeroValue, explicitTrue) {
+		t.Fatal("two effective true configurations were reported as changed")
+	}
+	if !listUnprefixedModelsChanged(explicitFalse, &config.Config{}) {
+		t.Fatal("effective false to true change was not detected")
+	}
+}
+
+func TestSetConfigPreservesEffectiveListUnprefixedModelsForReload(t *testing.T) {
+	w := &Watcher{}
+	zeroValue := &config.Config{}
+	w.SetConfig(zeroValue)
+	if w.oldListUnprefixedModelsEffective == nil || !*w.oldListUnprefixedModelsEffective {
+		t.Fatal("zero-value config effective default was not captured")
+	}
+
+	explicitFalse := &config.Config{}
+	explicitFalse.SetListUnprefixedModels(false)
+	w.SetConfig(explicitFalse)
+	if w.oldListUnprefixedModelsEffective == nil || *w.oldListUnprefixedModelsEffective {
+		t.Fatal("explicit false effective value was not captured")
+	}
+}
+
 func TestStartAndStopSuccess(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")

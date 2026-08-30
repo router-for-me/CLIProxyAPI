@@ -62,6 +62,9 @@ type Watcher struct {
 	pluginAuthParser  synthesizer.PluginAuthParser
 	mirroredAuthDir   string
 	oldConfigYaml     []byte
+	// oldListUnprefixedModelsEffective preserves the behavior of the previous
+	// config across the YAML snapshot, which cannot carry explicitness metadata.
+	oldListUnprefixedModelsEffective *bool
 }
 
 // AuthUpdateAction represents the type of change detected in auth sources.
@@ -138,6 +141,11 @@ func (w *Watcher) SetConfig(cfg *config.Config) {
 	w.clientsMutex.Lock()
 	defer w.clientsMutex.Unlock()
 	w.config = cfg
+	effective := true
+	if cfg != nil {
+		effective = cfg.EffectiveListUnprefixedModels()
+	}
+	w.oldListUnprefixedModelsEffective = &effective
 	w.oldConfigYaml, _ = yaml.Marshal(cfg)
 }
 

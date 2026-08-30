@@ -172,3 +172,11 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 }
+
+// MarshalYAML writes the effective SDK catalog setting before flattening the
+// embedded SDK configuration into the root mapping.
+func (c Config) MarshalYAML() (any, error) {
+	c.SDKConfig.ListUnprefixedModels = c.EffectiveListUnprefixedModels()
+	type configYAML Config
+	return configYAML(c), nil
+}

@@ -112,6 +112,41 @@ func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing
 	}
 }
 
+func TestAntigravityWebSearchModelForRequiresAllEligibleClients(t *testing.T) {
+	registryRef := GetGlobalRegistry()
+	const (
+		mixedModelID       = "gemini-mixed-web-search-safety-test"
+		allCapableModelID  = "gemini-all-web-search-safety-test"
+		mixedDisabledID    = "test-antigravity-mixed-web-search-disabled"
+		mixedEnabledID     = "test-antigravity-mixed-web-search-enabled"
+		allCapableFirstID  = "test-antigravity-all-web-search-first"
+		allCapableSecondID = "test-antigravity-all-web-search-second"
+	)
+	registryRef.RegisterClient(mixedDisabledID, "antigravity", []*ModelInfo{{ID: mixedModelID}})
+	registryRef.RegisterClient(mixedEnabledID, "antigravity", []*ModelInfo{{ID: mixedModelID, SupportsWebSearch: true}})
+	registryRef.RegisterClient(allCapableFirstID, "antigravity", []*ModelInfo{{ID: allCapableModelID, SupportsWebSearch: true}})
+	registryRef.RegisterClient(allCapableSecondID, "antigravity", []*ModelInfo{{ID: allCapableModelID, SupportsWebSearch: true}})
+	t.Cleanup(func() {
+		registryRef.UnregisterClient(mixedDisabledID)
+		registryRef.UnregisterClient(mixedEnabledID)
+		registryRef.UnregisterClient(allCapableFirstID)
+		registryRef.UnregisterClient(allCapableSecondID)
+	})
+
+	if got := registryRef.AllEligibleClientsSupportWebSearchModel("antigravity", mixedModelID); got {
+		t.Fatal("mixed capability model should not be globally safe for native web search")
+	}
+	if got := AntigravityWebSearchModelFor(mixedModelID); got != "" {
+		t.Fatalf("mixed capability model enabled native web search: %q", got)
+	}
+	if got := registryRef.AllEligibleClientsSupportWebSearchModel("antigravity", allCapableModelID); !got {
+		t.Fatal("all-capable model should be globally safe for native web search")
+	}
+	if got := AntigravityWebSearchModelFor(allCapableModelID); got != allCapableModelID {
+		t.Fatalf("all-capable model native web-search model = %q, want %q", got, allCapableModelID)
+	}
+}
+
 func TestAntigravityWebSearchModelForIncludesHiddenCatalogModels(t *testing.T) {
 	registryRef := GetGlobalRegistry()
 	const (

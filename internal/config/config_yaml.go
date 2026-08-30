@@ -316,6 +316,11 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	if len(path) > 0 && path[len(path)-1] == "weight" && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!int" {
 		return false
 	}
+	// list-unprefixed-models defaults to true. An explicit false is meaningful
+	// and must survive insertion into a file that did not previously contain it.
+	if len(path) > 0 && path[len(path)-1] == "list-unprefixed-models" && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
+		return node.Value == "true"
+	}
 
 	// First check if it's a zero value
 	if isZeroValueNode(node) {

@@ -828,6 +828,72 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	return false
 }
 
+// ClientSupportsWebSearchModel reports the web-search capability advertised by
+// one client for one model. It intentionally does not use the aggregate model
+// registration, because another client may advertise a different capability.
+func (r *ModelRegistry) ClientSupportsWebSearchModel(clientID, modelID string) bool {
+	clientID = strings.TrimSpace(clientID)
+	modelID = normalizeAntigravityCapabilityModelID(modelID)
+	if clientID == "" || modelID == "" {
+		return false
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	for _, info := range r.clientModelInfos[clientID] {
+		if info == nil || normalizeAntigravityCapabilityModelID(info.ID) != modelID {
+			continue
+		}
+		return info.SupportsWebSearch
+	}
+	return false
+}
+
+// AllEligibleClientsSupportWebSearchModel reports whether every eligible client
+// for a provider/model advertises native web-search support. It returns false
+// when no eligible client exists or when any eligible client's metadata is
+// missing or does not advertise the capability.
+func (r *ModelRegistry) AllEligibleClientsSupportWebSearchModel(provider, modelID string) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	modelID = normalizeAntigravityCapabilityModelID(modelID)
+	if provider == "" || modelID == "" {
+		return false
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	eligibleClients := 0
+	for clientID, clientProvider := range r.clientProviders {
+		if clientProvider != provider {
+			continue
+		}
+
+		registeredModelID := ""
+		for _, candidateModelID := range r.clientModels[clientID] {
+			if normalizeAntigravityCapabilityModelID(candidateModelID) == modelID {
+				registeredModelID = strings.TrimSpace(candidateModelID)
+				break
+			}
+		}
+		if registeredModelID == "" {
+			continue
+		}
+		if !clientUsableForCatalogSelection(r.models[registeredModelID], clientID) {
+			continue
+		}
+
+		eligibleClients++
+		info := r.clientModelInfos[clientID][registeredModelID]
+		if info == nil || !info.SupportsWebSearch {
+			return false
+		}
+	}
+
+	return eligibleClients > 0
+}
+
 // GetAvailableModels returns all models that have at least one available client
 // Parameters:
 //   - handlerType: The handler type to filter models for (e.g., "openai", "claude", "gemini")
