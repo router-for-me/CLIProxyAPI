@@ -6,25 +6,19 @@ The plugin selects one target per logical request. It does not combine model out
 
 ## Build
 
-From the repository root, use the dedicated verification script:
+Run these commands from `examples/plugin/model-sequence-router/go`:
 
 ```bash
-./scripts/build-model-sequence-router.sh --plugin-only
-./scripts/build-model-sequence-router.sh --focused
-./scripts/build-model-sequence-router.sh --full
+mkdir -p ../../bin
+go test -race ./...
+go build -buildmode=c-shared -o ../../bin/model-sequence-router-go.so .
 ```
 
-The script is the single build and verification entry point. It detects all available host CPUs, runs Go and Make work with that parallelism, selects the platform artifact extension (`.so` on Linux, `.dylib` on macOS, or `.dll` on Windows under Git Bash/MSYS2), and removes its temporary build and Go cache data. Use `--plugin-only` to format, race-test, and build only this plugin, `--focused` while developing its core integration, and `--full` for repository-wide race and ordinary test suites.
+The build requires cgo. The shared-object extension is platform specific: `.so` on Linux, `.dylib` on macOS, and `.dll` on Windows. After changing Go sources, run `gofmt -w .` in the same directory.
 
-The unversioned deployment artifact is `examples/plugin/bin/model-sequence-router.so` on Linux, `model-sequence-router.dylib` on macOS, or `model-sequence-router.dll` on Windows. The script also reads the plugin's declared version and stages the same fresh binary as `plugins/model-sequence-router-v<version>.<extension>` for live upgrades. Copy that versioned artifact into the production plugin directory and then pin its version in configuration as described in [the deployment guide](../../../plugins/model-sequence-router.md#safe-upgrades-and-hot-reload).
+The `pluginVersion` constant in `go/main.go` states the version the plugin reports at registration. The host also reads a version from an artifact named `<plugin-id>-v<version>.<extension>`, so copying the build as `model-sequence-router-v<version>.so` keeps several versions available in the plugin directory at once.
 
-For the repository's local `luna-haiku` test configuration, build and start a CGO-enabled server with:
-
-```bash
-./scripts/start-model-sequence-router.sh
-```
-
-The launcher builds when the runnable binary is missing or source files changed, installs the deployment artifact into `plugins/`, and starts the isolated test server configured on port `8318`. Later launches reuse the existing build and perform no Git operations. Pass `--rebuild` to force verification and rebuilding; any other flags are forwarded to the server.
+Copy the built artifact into the directory named by `plugins.dir` in `config.yaml`, make it readable by the proxy service account, then restart the proxy or trigger a plugin reload.
 
 ## Codex and Claude example
 
@@ -42,6 +36,7 @@ plugins:
       enabled: true
       priority: 100
       session_ttl: 1h
+      on_unavailable: skip
       aliases:
         - alias: iterative-model
           display_name: Iterative Model
@@ -55,13 +50,15 @@ plugins:
               repeat: 1
 ```
 
-For every independently identified conversation, requests dispatch as:
+For every independently identified conversation, changed conversation histories dispatch as:
 
 ```text
 codex/terra → codex/terra → codex/terra → claude/claude-opus-4-6 → repeat
 ```
 
-Two simultaneous conversations maintain separate positions. By default, each new or expired conversation chooses a uniformly random effective sequence position and then follows the configured order. Set `random_start: false` on an alias for deterministic position-zero starts. Concurrent generations in one conversation reserve sequence positions atomically in dispatch order; response completion order may differ. A failed upstream request still consumes its reserved position.
+Two simultaneous conversations maintain separate positions. By default, each new or expired conversation chooses a uniformly random effective sequence position and then follows the configured order. Set `random_start: false` on an alias for deterministic position-zero starts.
+
+A cursor advances once when the recognized `messages`, `input`, or `contents` history changes. Repeated calls carrying the same history reuse the selected position, so token counting, retries, and parallel generations for one conversation state do not consume additional positions. A genuine next turn carries changed history and advances. An upstream failure leaves the selected position associated with that history, so a retry carrying the same history reaches the same provider and model.
 
 ## Arbitrary multi-provider example
 
@@ -258,8 +255,14 @@ Five positions alternate providers four times before reaching the most expensive
 - Alias matching is case-insensitive and ignores a supported effort suffix. The configured alias spelling is used in model catalogs.
 - The plugin selects a provider and target model. Response model presentation stays with the host and the upstream provider.
 - A client effort suffix is preserved on the selected target unless that target already has its own suffix or the selected slot's effort tier states a different effort for the requested level.
-- If the next provider is not currently registered, the router scans forward to the next available provider. Every matched stateful route consumes the positions it skips.
-- If no configured provider is available, the route is declined so normal host routing can continue.
+- A cursor advances once per changed conversation history. A request repeating the previous history replays that history's position and moves no cursor.
+- Turn replay reads only the recognized `messages`, `input`, or `contents` array. A request carrying no recognized history has no replay identity and advances on every call.
+- A client-supplied session identifier remains authoritative. Without one, the plugin derives a conversation identity from the system content and the first history item, both of which hold constant across the turns of one conversation. Two conversations that open with identical content and no session identifier share one cursor.
+- `on_unavailable` is a plugin-level setting selecting what happens when the next position's provider is not registered. It accepts `skip` and `overloaded`, spelled in lower case, and defaults to `skip`.
+- Under `skip`, the router scans forward to the next available position, consumes the positions it passes, and emits one warning per passed-over position naming the alias, index, and provider.
+- Under `overloaded`, an identified conversation examines only its next position. If that provider is unavailable, the cursor holds its place and the client receives a retryable HTTP `529`, so a retry re-enters on the same position.
+- Under `skip`, a provider that disappears between two calls carrying the same history can move that history to a later position. Under `overloaded`, the position is held instead.
+- If no configured provider is available under `skip`, the route is declined so normal host routing can continue.
 - Requests without an identifiable conversation always use the first available target and do not create or advance state.
 - `random_start` defaults to `true` per alias. It randomizes the initial effective slot for identified conversations; truly stateless requests remain first-target selections.
 - Cursor state is in memory with a sliding TTL. Proxy restart, plugin reload, disable/enable, and successful reconfiguration reset all positions.
@@ -307,11 +310,16 @@ targets:
 Set the top-level `debug: true` in `config.yaml`. Route decisions are emitted through the host logger as `model-sequence-router: selected target alias=<alias> position=<index> requested=<effort>`, where `requested=unset` marks a caller that sent no suffix. Those three values ride in the message because a host decides for itself which structured fields it prints. The same decision also carries these structured fields:
 
 - `alias`, `sequence_index`, the caller's `requested_effort`, `provider`, and the effective target `model`
-- `advanced`, `true` when a conversation cursor moved and `false` for stateless routing
+- `outcome`, one of `advanced`, `replayed`, `stateless`, or `exhausted`
+- `advanced`, `true` only when a changed conversation history moved the cursor
+- `identity_source`, `core` for a client-supplied identifier, `derived` for a plugin-computed identity, and `absent` for stateless routing
+- `skipped`, the number of positions passed over for unavailable providers
 - `random_start`, showing the alias policy used for a new or expired cursor
 - `session_hash`, an eight-character hash used to correlate one conversation without logging its identifier
 
-At startup or successful reconfiguration, the info log `model-sequence-router: configuration loaded and state reset` includes `alias_count`, `generation`, and `sequence_lengths`, and its JSONL record carries an explicit `event=config` discriminator. Stateless routing is identified at debug level. If none of an alias's configured providers is registered, a warning lists only the alias and its provider names. Request bodies, authorization data, credentials, prompt-cache keys, and complete session identifiers are never logged.
+Each passed-over position emits its own warning, `model-sequence-router: skipped unavailable sequence position`, carrying `event=skip`, `alias`, `sequence_index`, and `provider`. Under `overloaded`, a held position emits `model-sequence-router: holding sequence position for unavailable provider` with the held `sequence_index` and `provider`, which distinguishes a plugin-emitted `529` from an upstream one.
+
+At startup or successful reconfiguration, the info log `model-sequence-router: configuration loaded and state reset` includes `alias_count`, `generation`, and `sequence_lengths`, and its JSONL record carries an explicit `event=config` discriminator. If none of an alias's configured providers is registered, a warning lists only the alias and its provider names. Request bodies, authorization data, credentials, prompt-cache keys, and complete session identifiers are never logged.
 
 For the four-slot example above, filter for `model-sequence-router: selected target`. With the default `random_start: true`, a conversation begins at any one index and then follows cyclic order—for example, `2, 3, 0, 1, 2`. Set `random_start: false` when testing if you want the exact trace `0, 1, 2, 3, 0`. Host logs carry a supplementary subset of these fields; the JSONL diagnostic file is the authoritative record.
 
@@ -322,30 +330,27 @@ Enable the plugin-owned, bounded JSONL diagnostics sink without enabling raw req
 ```yaml
 diagnostics:
   enabled: true
-  path: /var/tmp/cliproxy-model-sequence-router/diagnostics.jsonl
+  path: /var/lib/cliproxy/diagnostics/model-sequence-router.jsonl
   max_size_mb: 25
   max_backups: 2
 ```
 
-Inspect the current cache and routing state or follow it live:
+Every record is one JSON object per line, so the file is readable with any JSON tool. Inspect routing decisions, skipped positions, and upstream cache counters:
 
 ```bash
-./scripts/inspect-model-sequence-router.py
-./scripts/inspect-model-sequence-router.py --follow --verbose
-./scripts/inspect-model-sequence-router.py --alias iterative-model --summary-only
-./scripts/inspect-model-sequence-router.py --list-reloads --since-last-reload --summary-only
-./scripts/inspect-model-sequence-router.py --generation 2 --summary-only
-./scripts/inspect-model-sequence-router.py \
-  --since '2026-08-01T21:09:47-07:00' \
-  --until '2026-08-01T22:00:00-07:00' \
-  --cache-low-percent 80
+DIAGNOSTICS_PATH=/var/lib/cliproxy/diagnostics/model-sequence-router.jsonl
+jq --arg alias iterative-model 'select(.event == "route" and .alias == $alias)
+  | {sequence_index, provider, model, outcome, identity_source, skipped}' "$DIAGNOSTICS_PATH"
+jq 'select(.event == "skip") | {alias, sequence_index, provider}' "$DIAGNOSTICS_PATH"
+jq 'select(.event == "usage") | {provider, model, cache_read_rate, input_tokens, failed}' "$DIAGNOSTICS_PATH"
+jq 'select(.event == "config") | {timestamp, generation, sequence_lengths}' "$DIAGNOSTICS_PATH"
 ```
 
-The inspector separates two kinds of evidence. `READ`, `CREATE`, and `HITS` are actual upstream usage counters. `WARM`, `SETTINGS`, and `PREFIX` compare content-free system, tool, and history fingerprints within the same alias/session/provider/model lane. A prefix warning is a request-shape warning, not proof of a cache miss; the upstream counters are authoritative. Fingerprints, session IDs, callback IDs, and credential IDs are hashed. Request bodies, prompt text, responses, tokens, and authorization headers are not written.
+The file separates two kinds of evidence. The `usage` records carry actual upstream counters, including `cache_read_tokens`, `cache_creation_tokens`, and the derived `cache_read_rate`. The `route` records carry `lane_continuity`, `system_match`, `tools_match`, and `prior_history_prefix_match`, which compare content-free system, tool, and history fingerprints within the same alias, session, provider, and model lane. A prefix warning is a request-shape warning, not proof of a cache miss; the upstream counters are authoritative.
 
-Use `--since-last-reload` to avoid combining observations made under different sequence configurations. `--list-reloads` shows the UTC and local timestamp, generation, and effective sequence lengths for every recorded reload. `--generation` selects one interval between reloads. `--since` and `--until` accept ISO-8601 timestamps; a timestamp without an offset uses the host's local timezone. For window boundaries, usage events are classified by `requested_at` rather than completion time, so a request started under the previous configuration is not attributed to the new one merely because it completed after reload. The cache table reports both token-weighted `READ%` and per-request `MEDIAN`; `--cache-low-percent` controls the threshold for the `LOW` request count.
+Select one configuration generation before comparing observations, because a reload resets every cursor. The `config` record marks each reload with its `generation` and effective `sequence_lengths`, and every subsequent record belongs to that generation until the next `config` record. Usage events carry `requested_at`, so a request started under the previous configuration is not attributed to the new one merely because it completed after the reload.
 
-For automation, `--fail-on-risk` exits `3` for failed usage, changed settings, a history-prefix mismatch, or an opaque continuation. `--require-cache-read` exits `4` when a successful generation with input tokens reports no cache read. A lane's first upstream request is normally cold, so use the latter only when a cache read is mandatory for the observed window.
+Fingerprints, session identifiers, callback identifiers, and credential identifiers are hashed. Request bodies, prompt text, responses, and authorization headers are never written.
 
 ## Credentials, affinity, and caches
 
@@ -355,7 +360,8 @@ The plugin preserves the client body, prompt-cache keys, headers, system prompts
 
 ## v1 boundaries
 
-- Advancement happens at dispatch reservation, not successful completion.
+- Advancement happens at dispatch reservation for a changed conversation history, not at successful completion.
+- Declaring `on_unavailable: overloaded` makes the plugin register an executor capability, which the host requires before it accepts the plugin's own routing target. Under that policy the plugin answers every executor work call with the retryable `529`; it never generates content.
 - Parallel completion order is not guaranteed.
 - State is local to one proxy process and is not shared across replicas.
 - Upstream errors may mention the selected provider or model.

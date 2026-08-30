@@ -5,16 +5,30 @@ import (
 	"fmt"
 	"strings"
 
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 const routeReason = "per_conversation_sequence"
 
+// routeDecision carries the resolved facts of one route.
+type routeDecision struct {
+	Config       *compiledConfig
+	Alias        *compiledAlias
+	SourceFormat string
+	Stream       bool
+	Observation  requestObservation
+	Identity     conversationIdentity
+	Selection    selectionResult
+	TargetModel  string
+}
+
 func (r *runtimeState) route(req pluginapi.ModelRouteRequest) pluginapi.ModelRouteResponse {
 	return r.routeWithCallback(req, "")
 }
 
+// routeWithCallback parses the request once, resolves conversation and turn
+// identity, selects a sequence position, and emits either a provider target or the
+// self target that carries the unavailable signal.
 func (r *runtimeState) routeWithCallback(req pluginapi.ModelRouteRequest, hostCallbackID string) pluginapi.ModelRouteResponse {
 	cfg := r.loadedConfig()
 	if cfg == nil || !cfg.Enabled {
@@ -32,80 +46,120 @@ func (r *runtimeState) routeWithCallback(req pluginapi.ModelRouteRequest, hostCa
 			available[key] = struct{}{}
 		}
 	}
-	sessionID := coreauth.ExtractSessionID(req.Headers, req.Body, req.Metadata)
-	var (
-		selected compiledTarget
-		index    int
-		ok       bool
-	)
-	if sessionID == "" {
-		selected, index, ok = selectStateless(alias.Sequence, available)
-		r.log("debug", "model-sequence-router: stateless first-target routing", map[string]any{
-			"alias": alias.Alias,
-		}, hostCallbackID)
-	} else {
-		key := cursorKey{Generation: cfg.Generation, Alias: alias.LookupKey, SessionID: sessionID}
-		selected, index, ok = r.cursors.selectTarget(key, alias.Sequence, available, cfg.SessionTTL, alias.RandomStart)
+	observation := inspectRequest(req.Body, r.fingerprintSalt)
+	decision := routeDecision{
+		Config:       cfg,
+		Alias:        alias,
+		SourceFormat: req.SourceFormat,
+		Stream:       req.Stream,
+		Observation:  observation,
+		Identity:     newConversationIdentity(req, observation, r.fingerprintSalt),
 	}
-	if !ok {
-		providers := uniqueProviders(alias.Sequence)
-		r.log("warn", "model-sequence-router: all configured providers unavailable", map[string]any{
-			"alias": alias.Alias, "providers": providers,
-		}, hostCallbackID)
-		return pluginapi.ModelRouteResponse{Handled: false}
+	decision.Selection = r.selectSequencePosition(decision, available)
+	switch decision.Selection.Outcome {
+	case selectionExhausted:
+		return r.unavailableTarget(decision, hostCallbackID)
+	case selectionAdvanced, selectionReplayed, selectionStateless:
+		decision.TargetModel = decision.Selection.Target.effectiveModel(requestedSuffix)
+	default:
+		panic(decision.Selection.Outcome)
 	}
-	targetModel := selected.effectiveModel(requestedSuffix)
+	r.logSkippedPositions(decision, hostCallbackID)
 
-	// A conversation cursor reserved and moved one sequence position; stateless routing moves none.
-	advanced := sessionID != ""
+	// A cursor advances once per conversation state; a repeated state replays its
+	// position and a request without identity moves no cursor at all.
 	fields := map[string]any{
-		"alias": alias.Alias, "sequence_index": index, "provider": selected.Provider,
-		"model": targetModel, "advanced": advanced, "random_start": alias.RandomStart,
+		"event": "route", "alias": alias.Alias, "sequence_index": decision.Selection.Index,
+		"provider": decision.Selection.Target.Provider, "model": decision.TargetModel,
+		"advanced":         decision.Selection.Outcome == selectionAdvanced,
+		"outcome":          decision.Selection.Outcome.String(),
+		"identity_source":  string(decision.Identity.Source),
+		"skipped":          len(decision.Selection.Skipped),
+		"random_start":     alias.RandomStart,
 		"requested_effort": requestedSuffix,
 	}
-	if sessionID != "" {
-		fields["session_hash"] = shortSessionHash(sessionID)
+	if decision.Identity.Value != "" {
+		fields["session_hash"] = shortSessionHash(decision.Identity.Value)
 	}
 	if cfg.Diagnostics.Enabled {
-		observation := inspectRequest(req.Body, r.fingerprintSalt)
-		opaqueContinuation := observation.HasPreviousID || observation.HasConversationID || observation.HasContainer
-		fields["event"] = "route"
-		fields["source_format"] = req.SourceFormat
-		fields["stream"] = req.Stream
-		fields["input_kind"] = observation.InputKind
-		fields["has_tool_result"] = observation.HasToolResult
-		fields["has_previous_response_id"] = observation.HasPreviousID
-		fields["has_conversation_id"] = observation.HasConversationID
-		fields["has_hosted_container"] = observation.HasContainer
-		fields["opaque_continuation"] = opaqueContinuation
-		fields["portable_history"] = len(observation.HistoryItems) > 0 && !opaqueContinuation
-		fields["thinking_signature_count"] = observation.ThinkingSignatures
-		fields["encrypted_reasoning_count"] = observation.EncryptedReasoning
-		fields["system_fingerprint"] = observation.SystemFingerprint
-		fields["tools_fingerprint"] = observation.ToolsFingerprint
-		fields["history_fingerprint"] = observation.HistoryFingerprint
-		fields["history_items"] = len(observation.HistoryItems)
-		if sessionID != "" {
-			key := laneObservationKey{
-				Generation: cfg.Generation,
-				Alias:      alias.LookupKey,
-				SessionID:  sessionID,
-				Provider:   selected.Provider,
-				Model:      targetModel,
-			}
-			for name, value := range r.observations.observe(key, observation, cfg.SessionTTL) {
-				fields[name] = value
-			}
+		for name, value := range r.diagnosticFields(decision) {
+			fields[name] = value
 		}
 	}
-	r.log("debug", routeSummary(alias.Alias, index, requestedSuffix), fields, hostCallbackID)
+	r.log("debug", routeSummary(alias.Alias, decision.Selection.Index, requestedSuffix), fields, hostCallbackID)
 	return pluginapi.ModelRouteResponse{
 		Handled:     true,
 		TargetKind:  pluginapi.ModelRouteTargetProvider,
-		Target:      selected.Provider,
-		TargetModel: targetModel,
+		Target:      decision.Selection.Target.Provider,
+		TargetModel: decision.TargetModel,
 		Reason:      routeReason,
 	}
+}
+
+// selectSequencePosition reserves a position for an identified conversation and
+// returns the first available position for a request that carries no identity.
+func (r *runtimeState) selectSequencePosition(decision routeDecision, available map[string]struct{}) selectionResult {
+	var selection selectionResult
+	if decision.Identity.Value == "" {
+		selection = selectStateless(decision.Alias.Sequence, available)
+	} else {
+		selection = r.cursors.selectTarget(selectionRequest{
+			Key:         cursorKey{Generation: decision.Config.Generation, Alias: decision.Alias.LookupKey, SessionID: decision.Identity.Value},
+			Sequence:    decision.Alias.Sequence,
+			Available:   available,
+			Turn:        newTurnIdentity(decision.Observation),
+			TTL:         decision.Config.SessionTTL,
+			RandomStart: decision.Alias.RandomStart,
+			ProbeLimit:  decision.Config.probeLimit(decision.Alias.Sequence),
+		})
+	}
+	return selection
+}
+
+// logSkippedPositions emits one notice per sequence position passed over because
+// that position's provider was unavailable.
+func (r *runtimeState) logSkippedPositions(decision routeDecision, hostCallbackID string) {
+	for _, skipped := range decision.Selection.Skipped {
+		r.log("warn", "model-sequence-router: skipped unavailable sequence position", map[string]any{
+			"event": "skip", "alias": decision.Alias.Alias,
+			"sequence_index": skipped.Index, "provider": skipped.Provider,
+		}, hostCallbackID)
+	}
+}
+
+// unavailableTarget answers an exhausted probe. The skip policy declines so the
+// host falls through to lower-priority routing. The overloaded policy targets this
+// plugin's own executor, which answers with a retryable status while the
+// conversation holds its sequence position.
+func (r *runtimeState) unavailableTarget(decision routeDecision, hostCallbackID string) pluginapi.ModelRouteResponse {
+	fields := map[string]any{
+		"event": "route", "alias": decision.Alias.Alias,
+		"outcome":         decision.Selection.Outcome.String(),
+		"identity_source": string(decision.Identity.Source),
+		"providers":       uniqueProviders(decision.Alias.Sequence),
+	}
+	response := pluginapi.ModelRouteResponse{Handled: false}
+	switch decision.Config.OnUnavailable {
+	case unavailableOverloaded:
+		// An identified conversation probes one position, so its single record
+		// names the held position. A stateless request records every position it
+		// read, and its first record names the position a retry re-enters on.
+		held := decision.Selection.Skipped[0]
+		fields["sequence_index"] = held.Index
+		fields["provider"] = held.Provider
+		r.log("warn", "model-sequence-router: holding sequence position for unavailable provider", fields, hostCallbackID)
+		response = pluginapi.ModelRouteResponse{
+			Handled:    true,
+			TargetKind: pluginapi.ModelRouteTargetSelf,
+			Reason:     unavailableCode,
+		}
+	case unavailableSkip:
+		r.logSkippedPositions(decision, hostCallbackID)
+		r.log("warn", "model-sequence-router: all configured providers unavailable", fields, hostCallbackID)
+	default:
+		panic(decision.Config.OnUnavailable)
+	}
+	return response
 }
 
 // routeSummary renders the alias, the sequence position, and the caller's
