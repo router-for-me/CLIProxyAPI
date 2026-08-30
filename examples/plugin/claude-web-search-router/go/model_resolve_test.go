@@ -57,3 +57,41 @@ func TestResolveAntigravityWebSearchTargetModelIncludesHiddenCatalogModels(t *te
 		t.Fatalf("fallback = %q, want hidden capable model", got)
 	}
 }
+
+func TestResolveAntigravityWebSearchTargetModelRejectsMixedCapabilities(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	const modelID = "gemini-mixed-capability-web-search-router-test"
+	const capableClientID = "test-claude-web-search-router-mixed-capable-antigravity"
+	const incapableClientID = "test-claude-web-search-router-mixed-incapable-antigravity"
+	reg.RegisterClient(capableClientID, "antigravity", []*registry.ModelInfo{{
+		ID:                modelID,
+		SupportsWebSearch: true,
+	}})
+	reg.RegisterClient(incapableClientID, "antigravity", []*registry.ModelInfo{{ID: modelID}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(capableClientID)
+		reg.UnregisterClient(incapableClientID)
+	})
+
+	if got := resolveAntigravityWebSearchTargetModel("", "unknown-model"); got != "" {
+		t.Fatalf("mixed-capability fallback = %q, want no fallback", got)
+	}
+}
+
+func TestResolveAntigravityWebSearchTargetModelAcceptsAllCapableFallback(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	const modelID = "gemini-all-capable-web-search-router-test"
+	const firstClientID = "test-claude-web-search-router-all-capable-antigravity-1"
+	const secondClientID = "test-claude-web-search-router-all-capable-antigravity-2"
+	models := []*registry.ModelInfo{{ID: modelID, SupportsWebSearch: true}}
+	reg.RegisterClient(firstClientID, "antigravity", models)
+	reg.RegisterClient(secondClientID, "antigravity", models)
+	t.Cleanup(func() {
+		reg.UnregisterClient(firstClientID)
+		reg.UnregisterClient(secondClientID)
+	})
+
+	if got := resolveAntigravityWebSearchTargetModel("", "unknown-model"); got != modelID {
+		t.Fatalf("all-capable fallback = %q, want %q", got, modelID)
+	}
+}

@@ -4,6 +4,11 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"encoding/json"
+	"strings"
+)
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
@@ -73,6 +78,78 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+const listUnprefixedModelsJSONKey = "list-unprefixed-models"
+
+// UnmarshalJSON preserves the presence of list-unprefixed-models so an explicit
+// JSON false is not confused with the zero-value default.
+func (c *SDKConfig) UnmarshalJSON(data []byte) error {
+	if c == nil {
+		return nil
+	}
+
+	fields, errFields := decodeJSONFields(data)
+	if errFields != nil {
+		return errFields
+	}
+	return c.unmarshalJSONWithFields(data, fields)
+}
+
+func (c *SDKConfig) unmarshalJSONWithFields(data []byte, fields map[string]json.RawMessage) error {
+	type sdkConfigJSON SDKConfig
+	decoded := sdkConfigJSON(*c)
+	if errDecode := json.Unmarshal(data, &decoded); errDecode != nil {
+		return errDecode
+	}
+
+	*c = SDKConfig(decoded)
+	if jsonFieldPresent(fields, listUnprefixedModelsJSONKey) {
+		c.ListUnprefixedModelsExplicit = true
+	}
+	return nil
+}
+
+// MarshalJSON writes the effective list-unprefixed-models behavior while keeping
+// the explicitness marker out of the serialized SDK configuration. A value
+// receiver also covers direct SDKConfig values passed to json.Marshal.
+func (c SDKConfig) MarshalJSON() ([]byte, error) {
+	c.ListUnprefixedModels = (&c).EffectiveListUnprefixedModels()
+	type sdkConfigJSON SDKConfig
+	return json.Marshal(sdkConfigJSON(c))
+}
+
+func decodeJSONFields(data []byte) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if errDecode := json.Unmarshal(data, &fields); errDecode != nil {
+		return nil, errDecode
+	}
+	return fields, nil
+}
+
+func jsonFieldPresent(fields map[string]json.RawMessage, name string) bool {
+	_, ok := lookupJSONField(fields, name)
+	return ok
+}
+
+func lookupJSONField(fields map[string]json.RawMessage, name string) (json.RawMessage, bool) {
+	if value, ok := fields[name]; ok {
+		return value, true
+	}
+	for key, value := range fields {
+		if strings.EqualFold(key, name) {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
+func jsonFieldName(tag, fallback string) string {
+	name, _, _ := strings.Cut(tag, ",")
+	if name == "" {
+		return fallback
+	}
+	return name
 }
 
 // MarshalYAML writes the effective list-unprefixed-models behavior. The

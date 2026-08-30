@@ -4,6 +4,12 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"encoding/json"
+	"fmt"
+	"reflect"
+)
+
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
 	SDKConfig `yaml:",inline"`
@@ -171,6 +177,57 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+}
+
+// UnmarshalJSON preserves the flattened SDKConfig JSON shape. SDKConfig has a
+// custom JSON unmarshaler for presence tracking, so an ordinary Config alias
+// would promote that method and skip the rest of Config's fields.
+func (c *Config) UnmarshalJSON(data []byte) error {
+	if c == nil {
+		return nil
+	}
+
+	fields, errFields := decodeJSONFields(data)
+	if errFields != nil {
+		return errFields
+	}
+	if errSDK := c.SDKConfig.unmarshalJSONWithFields(data, fields); errSDK != nil {
+		return errSDK
+	}
+
+	configValue := reflect.ValueOf(c).Elem()
+	configType := configValue.Type()
+	sdkConfigType := reflect.TypeOf(SDKConfig{})
+	for index := 0; index < configValue.NumField(); index++ {
+		fieldType := configType.Field(index)
+		if fieldType.Anonymous && fieldType.Type == sdkConfigType {
+			continue
+		}
+		if fieldType.PkgPath != "" {
+			continue
+		}
+
+		fieldName := jsonFieldName(fieldType.Tag.Get("json"), fieldType.Name)
+		if fieldName == "-" {
+			continue
+		}
+		fieldData, ok := lookupJSONField(fields, fieldName)
+		if !ok {
+			continue
+		}
+		if errDecode := json.Unmarshal(fieldData, configValue.Field(index).Addr().Interface()); errDecode != nil {
+			return fmt.Errorf("decode config field %q: %w", fieldName, errDecode)
+		}
+	}
+	return nil
+}
+
+// MarshalJSON writes the effective SDK catalog setting while keeping SDKConfig
+// fields flattened into the full configuration object.
+func (c Config) MarshalJSON() ([]byte, error) {
+	c.SDKConfig.ListUnprefixedModels = c.EffectiveListUnprefixedModels()
+	type configJSON Config
+	return json.Marshal(configJSON(c))
 }
 
 // MarshalYAML writes the effective SDK catalog setting before flattening the
