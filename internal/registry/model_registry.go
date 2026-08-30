@@ -1325,7 +1325,14 @@ func cloneModelMapValue(value any) any {
 func (r *ModelRegistry) collectProviderModelsLocked(provider string, includeHidden bool) map[string]*providerModelCatalogEntry {
 	providerModels := make(map[string]*providerModelCatalogEntry)
 
-	for clientID, clientProvider := range r.clientProviders {
+	clientIDs := make([]string, 0, len(r.clientProviders))
+	for clientID := range r.clientProviders {
+		clientIDs = append(clientIDs, clientID)
+	}
+	sort.Strings(clientIDs)
+
+	for _, clientID := range clientIDs {
+		clientProvider := r.clientProviders[clientID]
 		if clientProvider != provider {
 			continue
 		}
@@ -1387,7 +1394,14 @@ func (r *ModelRegistry) getAvailableModelsByProvider(provider string, includeHid
 	now := time.Now()
 	result := make([]*ModelInfo, 0, len(providerModels))
 
-	for modelID, entry := range providerModels {
+	modelIDs := make([]string, 0, len(providerModels))
+	for modelID := range providerModels {
+		modelIDs = append(modelIDs, modelID)
+	}
+	sort.Strings(modelIDs)
+
+	for _, modelID := range modelIDs {
+		entry := providerModels[modelID]
 		if entry == nil || entry.count <= 0 {
 			continue
 		}

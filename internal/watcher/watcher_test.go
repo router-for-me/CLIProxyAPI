@@ -247,20 +247,34 @@ func TestListUnprefixedModelsChangedUsesEffectiveValues(t *testing.T) {
 	}
 }
 
-func TestSetConfigPreservesEffectiveListUnprefixedModelsForReload(t *testing.T) {
-	w := &Watcher{}
-	zeroValue := &config.Config{}
-	w.SetConfig(zeroValue)
-	if w.oldListUnprefixedModelsEffective == nil || !*w.oldListUnprefixedModelsEffective {
-		t.Fatal("zero-value config effective default was not captured")
-	}
+func TestSetConfigSnapshotPreservesEffectiveListUnprefixedModels(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		cfg  *config.Config
+		want bool
+	}{
+		{name: "default", cfg: &config.Config{}, want: true},
+		{name: "explicit false", cfg: explicitListUnprefixedModelsConfig(false), want: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			w := &Watcher{}
+			w.SetConfig(testCase.cfg)
 
-	explicitFalse := &config.Config{}
-	explicitFalse.SetListUnprefixedModels(false)
-	w.SetConfig(explicitFalse)
-	if w.oldListUnprefixedModelsEffective == nil || *w.oldListUnprefixedModelsEffective {
-		t.Fatal("explicit false effective value was not captured")
+			var snapshot config.Config
+			if errUnmarshal := yaml.Unmarshal(w.oldConfigYaml, &snapshot); errUnmarshal != nil {
+				t.Fatalf("yaml.Unmarshal() error = %v", errUnmarshal)
+			}
+			if got := snapshot.EffectiveListUnprefixedModels(); got != testCase.want {
+				t.Fatalf("snapshot effective value = %t, want %t", got, testCase.want)
+			}
+		})
 	}
+}
+
+func explicitListUnprefixedModelsConfig(enabled bool) *config.Config {
+	cfg := &config.Config{}
+	cfg.SetListUnprefixedModels(enabled)
+	return cfg
 }
 
 func TestStartAndStopSuccess(t *testing.T) {

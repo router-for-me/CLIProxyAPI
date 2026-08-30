@@ -353,7 +353,6 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			ProxyURL:                   "http://old-proxy",
 			APIKeys:                    []string{"key-1"},
 			ForceModelPrefix:           false,
-			ListUnprefixedModels:       true,
 			NonStreamKeepAliveInterval: 0,
 		},
 	}
@@ -392,7 +391,6 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			ProxyURL:                   "http://new-proxy",
 			APIKeys:                    []string{" key-1 ", "key-2"},
 			ForceModelPrefix:           true,
-			ListUnprefixedModels:       false,
 			NonStreamKeepAliveInterval: 5,
 			DisableImageGeneration:     config.DisableImageGenerationAll,
 			ClaudeCode: sdkconfig.ClaudeCodeConfig{
@@ -400,6 +398,8 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			},
 		},
 	}
+	oldCfg.SetListUnprefixedModels(true)
+	newCfg.SetListUnprefixedModels(false)
 
 	details := BuildConfigChangeDetails(oldCfg, newCfg)
 	expectContains(t, details, "debug: false -> true")

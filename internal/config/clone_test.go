@@ -106,10 +106,12 @@ func sampleCloneRuntimeConfig() *Config {
 	bypassStrict := false
 	pluginEnabled := false
 	cacheUserID := true
+	listUnprefixedModels := false
 
 	return &Config{
 		SDKConfig: SDKConfig{
-			APIKeys: []string{"client-key"},
+			APIKeys:              []string{"client-key"},
+			ListUnprefixedModels: &listUnprefixedModels,
 			Streaming: StreamingConfig{
 				KeepAliveSeconds: 3,
 				BootstrapRetries: 2,

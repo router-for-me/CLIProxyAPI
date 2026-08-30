@@ -13,6 +13,11 @@ import (
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	persistCfg := cfg
+	if cfg != nil && cfg.ListUnprefixedModels == nil {
+		copyConfig := *cfg
+		copyConfig.SetListUnprefixedModels(true)
+		persistCfg = &copyConfig
+	}
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)
 	if err != nil {

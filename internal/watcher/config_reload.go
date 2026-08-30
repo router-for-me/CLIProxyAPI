@@ -108,12 +108,7 @@ func (w *Watcher) reloadConfig() bool {
 	w.clientsMutex.Lock()
 	var oldConfig *config.Config
 	_ = yaml.Unmarshal(w.oldConfigYaml, &oldConfig)
-	if oldConfig != nil && w.oldListUnprefixedModelsEffective != nil {
-		oldConfig.SetListUnprefixedModels(*w.oldListUnprefixedModelsEffective)
-	}
 	w.oldConfigYaml, _ = yaml.Marshal(newConfig)
-	effectiveListUnprefixedModels := newConfig.EffectiveListUnprefixedModels()
-	w.oldListUnprefixedModelsEffective = &effectiveListUnprefixedModels
 	w.config = newConfig
 	w.clientsMutex.Unlock()
 

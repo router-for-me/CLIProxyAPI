@@ -4,13 +4,6 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
-import (
-	"encoding/json"
-	"strings"
-
-	"gopkg.in/yaml.v3"
-)
-
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
@@ -49,14 +42,9 @@ type SDKConfig struct {
 	// ListUnprefixedModels controls whether unprefixed model aliases are exposed
 	// in the model catalog when a credential has a prefix. When false, only the
 	// prefixed form (e.g., "nim/<model>") is listed, while unprefixed requests
-	// still route as before. The default is true. Use SetListUnprefixedModels to
-	// explicitly disable this behavior in a programmatic configuration.
-	ListUnprefixedModels bool `yaml:"list-unprefixed-models" json:"list-unprefixed-models"`
-
-	// ListUnprefixedModelsExplicit distinguishes an intentional programmatic
-	// value from the zero-value default. It is managed by SetListUnprefixedModels
-	// and is not serialized.
-	ListUnprefixedModelsExplicit bool `yaml:"-" json:"-"`
+	// still route as before. A nil value uses the backward-compatible default
+	// true. Use SetListUnprefixedModels for programmatic configurations.
+	ListUnprefixedModels *bool `yaml:"list-unprefixed-models,omitempty" json:"list-unprefixed-models,omitempty"`
 
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
@@ -82,157 +70,13 @@ type SDKConfig struct {
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
 }
 
-const (
-	listUnprefixedModelsJSONKey = "list-unprefixed-models"
-	listUnprefixedModelsYAMLKey = "list-unprefixed-models"
-)
-
-// UnmarshalYAML preserves the presence of list-unprefixed-models so an explicit
-// YAML false is not confused with the zero-value default. This also handles the
-// SDKConfig field when it is inlined into Config.
-func (c *SDKConfig) UnmarshalYAML(value *yaml.Node) error {
-	if c == nil {
-		return nil
-	}
-	if value == nil {
-		return nil
-	}
-
-	fields, errFields := decodeYAMLFields(value)
-	if errFields != nil {
-		return errFields
-	}
-	return c.unmarshalYAMLWithFields(value, fields)
-}
-
-func (c *SDKConfig) unmarshalYAMLWithFields(value *yaml.Node, fields map[string]yaml.Node) error {
-	type sdkConfigYAML SDKConfig
-	decoded := sdkConfigYAML(*c)
-	if errDecode := value.Decode(&decoded); errDecode != nil {
-		return errDecode
-	}
-
-	*c = SDKConfig(decoded)
-	if yamlFieldPresent(fields, listUnprefixedModelsYAMLKey) {
-		c.ListUnprefixedModelsExplicit = true
-	}
-	return nil
-}
-
-func decodeYAMLFields(value *yaml.Node) (map[string]yaml.Node, error) {
-	var fields map[string]yaml.Node
-	if errDecode := value.Decode(&fields); errDecode != nil {
-		return nil, errDecode
-	}
-	return fields, nil
-}
-
-func yamlFieldPresent(fields map[string]yaml.Node, name string) bool {
-	_, ok := fields[name]
-	return ok
-}
-
-func yamlFieldName(tag, fallback string) string {
-	name, _, _ := strings.Cut(tag, ",")
-	if name == "" {
-		return strings.ToLower(fallback)
-	}
-	return name
-}
-
-// UnmarshalJSON preserves the presence of list-unprefixed-models so an explicit
-// JSON false is not confused with the zero-value default.
-func (c *SDKConfig) UnmarshalJSON(data []byte) error {
-	if c == nil {
-		return nil
-	}
-
-	fields, errFields := decodeJSONFields(data)
-	if errFields != nil {
-		return errFields
-	}
-	return c.unmarshalJSONWithFields(data, fields)
-}
-
-func (c *SDKConfig) unmarshalJSONWithFields(data []byte, fields map[string]json.RawMessage) error {
-	type sdkConfigJSON SDKConfig
-	decoded := sdkConfigJSON(*c)
-	if errDecode := json.Unmarshal(data, &decoded); errDecode != nil {
-		return errDecode
-	}
-
-	*c = SDKConfig(decoded)
-	if jsonFieldPresent(fields, listUnprefixedModelsJSONKey) {
-		c.ListUnprefixedModelsExplicit = true
-	}
-	return nil
-}
-
-// MarshalJSON writes the effective list-unprefixed-models behavior while keeping
-// the explicitness marker out of the serialized SDK configuration. A value
-// receiver also covers direct SDKConfig values passed to json.Marshal.
-func (c SDKConfig) MarshalJSON() ([]byte, error) {
-	c.ListUnprefixedModels = (&c).EffectiveListUnprefixedModels()
-	type sdkConfigJSON SDKConfig
-	return json.Marshal(sdkConfigJSON(c))
-}
-
-func decodeJSONFields(data []byte) (map[string]json.RawMessage, error) {
-	var fields map[string]json.RawMessage
-	if errDecode := json.Unmarshal(data, &fields); errDecode != nil {
-		return nil, errDecode
-	}
-	return fields, nil
-}
-
-func jsonFieldPresent(fields map[string]json.RawMessage, name string) bool {
-	_, ok := lookupJSONField(fields, name)
-	return ok
-}
-
-func lookupJSONField(fields map[string]json.RawMessage, name string) (json.RawMessage, bool) {
-	if value, ok := fields[name]; ok {
-		return value, true
-	}
-	for key, value := range fields {
-		if strings.EqualFold(key, name) {
-			return value, true
-		}
-	}
-	return nil, false
-}
-
-func jsonFieldName(tag, fallback string) string {
-	name, _, _ := strings.Cut(tag, ",")
-	if name == "" {
-		return fallback
-	}
-	return name
-}
-
-// MarshalYAML writes the effective list-unprefixed-models behavior. The
-// explicitness marker is intentionally not serialized, so a zero-value config
-// must serialize its documented true default instead of raw false. A pointer
-// receiver keeps the method out of Config's inline field flattening.
-func (c *SDKConfig) MarshalYAML() (any, error) {
-	if c == nil {
-		return nil, nil
-	}
-	copyConfig := *c
-	copyConfig.ListUnprefixedModels = c.EffectiveListUnprefixedModels()
-	type sdkConfigYAML SDKConfig
-	return sdkConfigYAML(copyConfig), nil
-}
-
 // SetListUnprefixedModels explicitly sets whether unprefixed model aliases are
-// exposed in model catalogs. It lets programmatic configurations distinguish an
-// explicit false from the zero value, which uses the documented true default.
+// exposed in model catalogs.
 func (c *SDKConfig) SetListUnprefixedModels(enabled bool) {
 	if c == nil {
 		return
 	}
-	c.ListUnprefixedModels = enabled
-	c.ListUnprefixedModelsExplicit = true
+	c.ListUnprefixedModels = &enabled
 }
 
 // EffectiveListUnprefixedModels returns the configured catalog behavior. A
@@ -241,8 +85,8 @@ func (c *SDKConfig) EffectiveListUnprefixedModels() bool {
 	if c == nil {
 		return true
 	}
-	if c.ListUnprefixedModelsExplicit {
-		return c.ListUnprefixedModels
+	if c.ListUnprefixedModels != nil {
+		return *c.ListUnprefixedModels
 	}
 	return true
 }
