@@ -981,8 +981,11 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 				resp, _ = sjson.SetBytes(resp, "usage.input_tokens_details.cached_tokens", d.Int())
 			}
 			resp, _ = sjson.SetBytes(resp, "usage.output_tokens", usage.Get("completion_tokens").Int())
-			// Reasoning tokens not available in Chat Completions; set only if present under output_tokens_details
+			// Chat Completions report reasoning under completion_tokens_details
+			// (OpenAI, vLLM); some upstreams already use the Responses shape.
 			if d := usage.Get("output_tokens_details.reasoning_tokens"); d.Exists() {
+				resp, _ = sjson.SetBytes(resp, "usage.output_tokens_details.reasoning_tokens", d.Int())
+			} else if d := usage.Get("completion_tokens_details.reasoning_tokens"); d.Exists() {
 				resp, _ = sjson.SetBytes(resp, "usage.output_tokens_details.reasoning_tokens", d.Int())
 			}
 			resp, _ = sjson.SetBytes(resp, "usage.total_tokens", usage.Get("total_tokens").Int())
