@@ -99,6 +99,12 @@ type availableModelsCacheEntry struct {
 	expiresAt time.Time
 }
 
+type providerModelCatalogEntry struct {
+	count       int
+	info        *ModelInfo
+	hasMetadata bool
+}
+
 // ThinkingSupport describes a model family's supported internal reasoning budget range.
 // Values are interpreted in provider-native token units.
 type ThinkingSupport struct {
@@ -901,8 +907,29 @@ func modelRegistrationAvailability(registration *ModelRegistration, now time.Tim
 // visibleModelInfo returns metadata for a model that should appear in a model
 // catalog. A model ID can be registered by more than one provider, so the
 // result is visible when at least one active provider registration is visible.
-func visibleModelInfo(registration *ModelRegistration) *ModelInfo {
+func (r *ModelRegistry) visibleModelInfo(modelID string, registration *ModelRegistration) *ModelInfo {
 	if registration == nil {
+		return nil
+	}
+
+	hasClientMetadata := false
+	for clientID, modelIDs := range r.clientModels {
+		for _, registeredModelID := range modelIDs {
+			if registeredModelID != modelID {
+				continue
+			}
+			info := r.clientModelInfos[clientID][modelID]
+			if info == nil {
+				break
+			}
+			hasClientMetadata = true
+			if !info.HiddenFromModelCatalog {
+				return info
+			}
+			break
+		}
+	}
+	if hasClientMetadata {
 		return nil
 	}
 
@@ -933,9 +960,9 @@ func (r *ModelRegistry) GetAvailableModelInfos() []*ModelInfo {
 	defer r.mutex.RUnlock()
 
 	result := make([]*ModelInfo, 0, len(r.models))
-	for _, registration := range r.models {
+	for modelID, registration := range r.models {
 		available, _ := modelRegistrationAvailability(registration, now)
-		info := visibleModelInfo(registration)
+		info := r.visibleModelInfo(modelID, registration)
 		if !available || info == nil {
 			continue
 		}
@@ -951,7 +978,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 	models := make([]map[string]any, 0, len(r.models))
 	var expiresAt time.Time
 
-	for _, registration := range r.models {
+	for modelID, registration := range r.models {
 		available, registrationExpiresAt := modelRegistrationAvailability(registration, now)
 		if !registrationExpiresAt.IsZero() && (expiresAt.IsZero() || registrationExpiresAt.Before(expiresAt)) {
 			expiresAt = registrationExpiresAt
@@ -960,7 +987,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 			continue
 		}
 
-		model := r.convertModelToMap(visibleModelInfo(registration), handlerType)
+		model := r.convertModelToMap(r.visibleModelInfo(modelID, registration), handlerType)
 		if model != nil {
 			models = append(models, model)
 		}
@@ -1006,27 +1033,8 @@ func cloneModelMapValue(value any) any {
 	}
 }
 
-// GetAvailableModelsByProvider returns models available for the given provider identifier.
-// Parameters:
-//   - provider: Provider identifier (e.g., "codex", "gemini", "antigravity")
-//
-// Returns:
-//   - []*ModelInfo: List of available models for the provider
-func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelInfo {
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	if provider == "" {
-		return nil
-	}
-
-	r.mutex.RLock()
-	defer r.mutex.RUnlock()
-
-	type providerModel struct {
-		count int
-		info  *ModelInfo
-	}
-
-	providerModels := make(map[string]*providerModel)
+func (r *ModelRegistry) collectProviderModelsLocked(provider string, includeHidden bool) map[string]*providerModelCatalogEntry {
+	providerModels := make(map[string]*providerModelCatalogEntry)
 
 	for clientID, clientProvider := range r.clientProviders {
 		if clientProvider != provider {
@@ -1044,28 +1052,41 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 			}
 			entry := providerModels[modelID]
 			if entry == nil {
-				entry = &providerModel{}
+				entry = &providerModelCatalogEntry{}
 				providerModels[modelID] = entry
 			}
 			entry.count++
-			if entry.info == nil || entry.info.HiddenFromModelCatalog {
-				if clientInfos != nil {
-					if info := clientInfos[modelID]; info != nil && !info.HiddenFromModelCatalog {
-						entry.info = info
-					}
+
+			info := clientInfos[modelID]
+			if info == nil {
+				continue
+			}
+			entry.hasMetadata = true
+			if !includeHidden {
+				if !info.HiddenFromModelCatalog && entry.info == nil {
+					entry.info = info
 				}
-				if entry.info == nil || entry.info.HiddenFromModelCatalog {
-					if reg, ok := r.models[modelID]; ok && reg != nil {
-						if info := reg.InfoByProvider[provider]; info != nil && !info.HiddenFromModelCatalog {
-							entry.info = info
-						} else if reg.Info != nil && !reg.Info.HiddenFromModelCatalog {
-							entry.info = reg.Info
-						}
-					}
-				}
+				continue
+			}
+			if entry.info == nil || (!entry.info.SupportsWebSearch && info.SupportsWebSearch) {
+				entry.info = info
 			}
 		}
 	}
+
+	return providerModels
+}
+
+func (r *ModelRegistry) getAvailableModelsByProvider(provider string, includeHidden bool) []*ModelInfo {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return nil
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	providerModels := r.collectProviderModelsLocked(provider, includeHidden)
 
 	if len(providerModels) == 0 {
 		return nil
@@ -1122,19 +1143,28 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
 			info := entry.info
-			if (info == nil || info.HiddenFromModelCatalog) && ok && registration != nil {
+			if info == nil && !entry.hasMetadata && ok && registration != nil {
 				info = registration.InfoByProvider[provider]
-				if info == nil || info.HiddenFromModelCatalog {
-					info = registration.Info
-				}
 			}
-			if info != nil && !info.HiddenFromModelCatalog {
+			if info != nil && (includeHidden || !info.HiddenFromModelCatalog) {
 				result = append(result, cloneModelInfo(info))
 			}
 		}
 	}
 
 	return result
+}
+
+// GetAvailableModelsByProvider returns models available for the given provider identifier.
+// Hidden catalog aliases are excluded because this method feeds user-facing model lists.
+func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelInfo {
+	return r.getAvailableModelsByProvider(provider, false)
+}
+
+// GetAvailableModelCapabilitiesByProvider returns active model metadata for provider capability checks.
+// Unlike GetAvailableModelsByProvider, it includes models hidden from user-facing catalogs.
+func (r *ModelRegistry) GetAvailableModelCapabilitiesByProvider(provider string) []*ModelInfo {
+	return r.getAvailableModelsByProvider(provider, true)
 }
 
 // GetModelCount returns the number of available clients for a specific model

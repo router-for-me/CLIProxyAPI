@@ -89,7 +89,7 @@ func AntigravityWebSearchModelFor(modelID string) string {
 	if modelID == "" {
 		return ""
 	}
-	for _, model := range GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
+	for _, model := range GetGlobalRegistry().GetAvailableModelCapabilitiesByProvider("antigravity") {
 		if model == nil {
 			continue
 		}

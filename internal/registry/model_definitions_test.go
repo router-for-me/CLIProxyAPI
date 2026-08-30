@@ -111,3 +111,27 @@ func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing
 		t.Fatalf("unknown model should not get Antigravity web search model, got %q", got)
 	}
 }
+
+func TestAntigravityWebSearchModelForIncludesHiddenCatalogModels(t *testing.T) {
+	registryRef := GetGlobalRegistry()
+	const (
+		clientID = "test-antigravity-hidden-web-search"
+		modelID  = "gemini-hidden-web-search-test"
+	)
+	registryRef.UnregisterClient(clientID)
+	registryRef.RegisterClient(clientID, "antigravity", []*ModelInfo{{
+		ID:                     modelID,
+		SupportsWebSearch:      true,
+		HiddenFromModelCatalog: true,
+	}})
+	t.Cleanup(func() { registryRef.UnregisterClient(clientID) })
+
+	for _, model := range registryRef.GetAvailableModelsByProvider("antigravity") {
+		if model != nil && model.ID == modelID {
+			t.Fatalf("hidden model returned by public catalog: %#v", model)
+		}
+	}
+	if got := AntigravityWebSearchModelFor(modelID); got != modelID {
+		t.Fatalf("hidden capable model = %q, want %q", got, modelID)
+	}
+}
