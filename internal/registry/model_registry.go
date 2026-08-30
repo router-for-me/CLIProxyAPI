@@ -81,6 +81,10 @@ type ModelInfo struct {
 	// IsCompat enables compatibility handling for this configured API-key model.
 	// It is internal metadata and is not exposed in model listings.
 	IsCompat bool `json:"-"`
+
+	// HiddenFromModelCatalog keeps a model available for routing while excluding
+	// it from user-facing model listings. It is internal metadata.
+	HiddenFromModelCatalog bool `json:"-"`
 }
 
 // ModelConfig holds optional runtime overrides for a model definition.
@@ -894,6 +898,34 @@ func modelRegistrationAvailability(registration *ModelRegistration, now time.Tim
 	return available, expiresAt
 }
 
+// visibleModelInfo returns metadata for a model that should appear in a model
+// catalog. A model ID can be registered by more than one provider, so the
+// result is visible when at least one active provider registration is visible.
+func visibleModelInfo(registration *ModelRegistration) *ModelInfo {
+	if registration == nil {
+		return nil
+	}
+
+	if len(registration.Providers) == 0 {
+		if registration.Info != nil && !registration.Info.HiddenFromModelCatalog {
+			return registration.Info
+		}
+		return nil
+	}
+
+	for provider, count := range registration.Providers {
+		if count <= 0 || registration.InfoByProvider == nil {
+			continue
+		}
+		info := registration.InfoByProvider[provider]
+		if info != nil && !info.HiddenFromModelCatalog {
+			return info
+		}
+	}
+
+	return nil
+}
+
 // GetAvailableModelInfos returns cloned metadata for all currently available models.
 func (r *ModelRegistry) GetAvailableModelInfos() []*ModelInfo {
 	now := time.Now()
@@ -903,10 +935,11 @@ func (r *ModelRegistry) GetAvailableModelInfos() []*ModelInfo {
 	result := make([]*ModelInfo, 0, len(r.models))
 	for _, registration := range r.models {
 		available, _ := modelRegistrationAvailability(registration, now)
-		if !available || registration == nil || registration.Info == nil {
+		info := visibleModelInfo(registration)
+		if !available || info == nil {
 			continue
 		}
-		result = append(result, cloneModelInfo(registration.Info))
+		result = append(result, cloneModelInfo(info))
 	}
 	sort.Slice(result, func(i, j int) bool {
 		return strings.TrimSpace(result[i].ID) < strings.TrimSpace(result[j].ID)
@@ -927,7 +960,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 			continue
 		}
 
-		model := r.convertModelToMap(registration.Info, handlerType)
+		model := r.convertModelToMap(visibleModelInfo(registration), handlerType)
 		if model != nil {
 			models = append(models, model)
 		}
@@ -1015,15 +1048,19 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 				providerModels[modelID] = entry
 			}
 			entry.count++
-			if entry.info == nil {
+			if entry.info == nil || entry.info.HiddenFromModelCatalog {
 				if clientInfos != nil {
-					if info := clientInfos[modelID]; info != nil {
+					if info := clientInfos[modelID]; info != nil && !info.HiddenFromModelCatalog {
 						entry.info = info
 					}
 				}
-				if entry.info == nil {
-					if reg, ok := r.models[modelID]; ok && reg != nil && reg.Info != nil {
-						entry.info = reg.Info
+				if entry.info == nil || entry.info.HiddenFromModelCatalog {
+					if reg, ok := r.models[modelID]; ok && reg != nil {
+						if info := reg.InfoByProvider[provider]; info != nil && !info.HiddenFromModelCatalog {
+							entry.info = info
+						} else if reg.Info != nil && !reg.Info.HiddenFromModelCatalog {
+							entry.info = reg.Info
+						}
 					}
 				}
 			}
@@ -1084,12 +1121,15 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 		}
 
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
-			if entry.info != nil {
-				result = append(result, cloneModelInfo(entry.info))
-				continue
+			info := entry.info
+			if (info == nil || info.HiddenFromModelCatalog) && ok && registration != nil {
+				info = registration.InfoByProvider[provider]
+				if info == nil || info.HiddenFromModelCatalog {
+					info = registration.Info
+				}
 			}
-			if ok && registration != nil && registration.Info != nil {
-				result = append(result, cloneModelInfo(registration.Info))
+			if info != nil && !info.HiddenFromModelCatalog {
+				result = append(result, cloneModelInfo(info))
 			}
 		}
 	}

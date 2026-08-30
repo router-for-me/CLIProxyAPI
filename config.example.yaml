@@ -137,6 +137,12 @@ proxy-url: ""
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
 
+# When true, unprefixed model aliases appear in /v1/models catalog in addition
+# to the prefixed form (e.g. "nim/<model>") for credentials with a prefix.
+# Set false to list only the prefixed form while leaving unprefixed routing intact.
+# The existing force-model-prefix exception for prefix == model name is preserved.
+list-unprefixed-models: true
+
 # When true, forward filtered upstream response headers to downstream clients.
 # Default is false (disabled).
 passthrough-headers: false

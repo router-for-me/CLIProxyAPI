@@ -39,6 +39,12 @@ type SDKConfig struct {
 	// credentials as well.
 	ForceModelPrefix bool `yaml:"force-model-prefix" json:"force-model-prefix"`
 
+	// ListUnprefixedModels controls whether unprefixed model aliases are exposed
+	// in the model catalog when a credential has a prefix. When false, only the
+	// prefixed form (e.g., "nim/<model>") is listed, while unprefixed requests
+	// still route as before. Default true (current behavior).
+	ListUnprefixedModels bool `yaml:"list-unprefixed-models" json:"list-unprefixed-models"`
+
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 

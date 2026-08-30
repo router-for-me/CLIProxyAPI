@@ -554,7 +554,7 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 	models := applyExcludedModels(result.Models, activeExcluded)
 	models = applyOAuthModelAliasForAuth(s.cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
 	if len(models) > 0 {
-		s.registerResolvedModelsForAuth(activeAuth, providerKey, applyModelPrefixes(models, activeAuth.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		s.registerResolvedModelsForAuth(activeAuth, providerKey, applyModelPrefixes(models, activeAuth.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix, s.cfg == nil || s.cfg.ListUnprefixedModels))
 		return true
 	}
 	GlobalModelRegistry().UnregisterClient(activeAuth.ID)
