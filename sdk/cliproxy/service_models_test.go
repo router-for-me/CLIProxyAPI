@@ -3,7 +3,43 @@ package cliproxy
 import (
 	"reflect"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
+
+func TestListUnprefixedModelsEffectiveValueControlsCatalogVisibility(t *testing.T) {
+	tests := []struct {
+		name       string
+		configure  func(*config.Config)
+		wantHidden bool
+	}{
+		{
+			name:       "programmatic zero value uses default true",
+			wantHidden: false,
+		},
+		{
+			name: "programmatic explicit false hides bare alias",
+			configure: func(cfg *config.Config) {
+				cfg.SetListUnprefixedModels(false)
+			},
+			wantHidden: true,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			if testCase.configure != nil {
+				testCase.configure(cfg)
+			}
+			service := &Service{cfg: cfg}
+			models := applyModelPrefixes([]*ModelInfo{{ID: "model"}}, "team", false, service.listUnprefixedModels())
+			if got := models[0].HiddenFromModelCatalog; got != testCase.wantHidden {
+				t.Fatalf("bare model hidden = %t, want %t", got, testCase.wantHidden)
+			}
+		})
+	}
+}
 
 func TestApplyModelPrefixesListUnprefixedModels(t *testing.T) {
 	tests := []struct {

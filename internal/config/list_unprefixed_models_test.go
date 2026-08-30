@@ -14,6 +14,9 @@ func TestParseConfigBytesListUnprefixedModelsDefaultsToTrue(t *testing.T) {
 	if !cfg.ListUnprefixedModels {
 		t.Fatal("list-unprefixed-models default = false, want true")
 	}
+	if !cfg.EffectiveListUnprefixedModels() {
+		t.Fatal("effective list-unprefixed-models default = false, want true")
+	}
 }
 
 func TestParseConfigBytesListUnprefixedModelsCanBeDisabled(t *testing.T) {
@@ -23,6 +26,9 @@ func TestParseConfigBytesListUnprefixedModelsCanBeDisabled(t *testing.T) {
 	}
 	if cfg.ListUnprefixedModels {
 		t.Fatal("list-unprefixed-models = true, want false")
+	}
+	if cfg.EffectiveListUnprefixedModels() {
+		t.Fatal("effective list-unprefixed-models = true, want false")
 	}
 }
 
@@ -38,5 +44,8 @@ func TestLoadConfigListUnprefixedModelsCanBeDisabled(t *testing.T) {
 	}
 	if cfg.ListUnprefixedModels {
 		t.Fatal("list-unprefixed-models = true, want false")
+	}
+	if cfg.EffectiveListUnprefixedModels() {
+		t.Fatal("effective list-unprefixed-models = true, want false")
 	}
 }
