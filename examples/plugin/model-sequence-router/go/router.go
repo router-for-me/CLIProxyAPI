@@ -128,7 +128,7 @@ func (r *runtimeState) logSkippedPositions(decision routeDecision, hostCallbackI
 }
 
 // unavailableTarget answers an exhausted probe. The skip policy declines so the
-// host falls through to lower-priority routing. The overloaded policy targets this
+// host falls through to lower-priority routing. The error policy targets this
 // plugin's own executor, which answers with a retryable status while the
 // conversation holds its sequence position.
 func (r *runtimeState) unavailableTarget(decision routeDecision, hostCallbackID string) pluginapi.ModelRouteResponse {
@@ -139,15 +139,15 @@ func (r *runtimeState) unavailableTarget(decision routeDecision, hostCallbackID 
 		"providers":       uniqueProviders(decision.Alias.Sequence),
 	}
 	response := pluginapi.ModelRouteResponse{Handled: false}
-	switch decision.Config.OnUnavailable {
-	case unavailableOverloaded:
+	switch decision.Config.UnavailableProvider {
+	case unavailableError:
 		// An identified conversation probes one position, so its single record
-		// names the held position. A stateless request records every position it
-		// read, and its first record names the position a retry re-enters on.
-		held := decision.Selection.Skipped[0]
-		fields["sequence_index"] = held.Index
-		fields["provider"] = held.Provider
-		r.log("warn", "model-sequence-router: holding sequence position for unavailable provider", fields, hostCallbackID)
+		// names the position it kept. A stateless request records every position
+		// it read, and its first record names the position a retry re-enters on.
+		kept := decision.Selection.Skipped[0]
+		fields["sequence_index"] = kept.Index
+		fields["provider"] = kept.Provider
+		r.log("warn", "model-sequence-router: reporting unavailable provider and keeping sequence position", fields, hostCallbackID)
 		response = pluginapi.ModelRouteResponse{
 			Handled:    true,
 			TargetKind: pluginapi.ModelRouteTargetSelf,
@@ -157,7 +157,7 @@ func (r *runtimeState) unavailableTarget(decision routeDecision, hostCallbackID 
 		r.logSkippedPositions(decision, hostCallbackID)
 		r.log("warn", "model-sequence-router: all configured providers unavailable", fields, hostCallbackID)
 	default:
-		panic(decision.Config.OnUnavailable)
+		panic(decision.Config.UnavailableProvider)
 	}
 	return response
 }

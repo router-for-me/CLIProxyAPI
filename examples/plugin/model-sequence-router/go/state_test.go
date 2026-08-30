@@ -249,7 +249,7 @@ func TestSingleProbeHoldsCursorForNextRequest(t *testing.T) {
 	all := map[string]struct{}{"codex": {}, "claude": {}}
 	recovered := store.selectTarget(testSelection(key, all, time.Hour, false))
 	if recovered.Outcome != selectionAdvanced || recovered.Index != 0 {
-		t.Fatalf("recovered selection = %#v, want held position 0", recovered)
+		t.Fatalf("recovered selection = %#v, want kept position 0", recovered)
 	}
 }
 

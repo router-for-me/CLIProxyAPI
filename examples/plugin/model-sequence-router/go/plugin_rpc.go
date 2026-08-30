@@ -97,7 +97,7 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 // declaration exists only when routing can self-target an unavailable position.
 func pluginRegistration(cfg *compiledConfig) registration {
 	capabilities := registrationCapability{ModelRegistrar: true, ModelRouter: true, UsagePlugin: true}
-	if cfg != nil && cfg.OnUnavailable == unavailableOverloaded {
+	if cfg != nil && cfg.UnavailableProvider == unavailableError {
 		// A host treats a format mismatch as unhandled and lets a self-targeted
 		// route fall through, so the declaration names every entry protocol.
 		formats := []string{
@@ -124,7 +124,7 @@ func pluginRegistration(cfg *compiledConfig) registration {
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable per-conversation model sequence routing."},
 				{Name: "session_ttl", Type: pluginapi.ConfigFieldTypeString, Description: "Sliding in-memory conversation cursor TTL (1m through 24h)."},
-				{Name: "on_unavailable", Type: pluginapi.ConfigFieldTypeString, Description: "Skip unavailable positions or hold the next position with a retryable overloaded response."},
+				{Name: "unavailable_provider", Type: pluginapi.ConfigFieldTypeString, Description: "Skip positions whose provider is not registered, or answer a retryable HTTP 529 without consuming a position."},
 				{Name: "diagnostics", Type: pluginapi.ConfigFieldTypeObject, Description: "Bounded content-free JSONL routing and cache diagnostics."},
 				{Name: "aliases", Type: pluginapi.ConfigFieldTypeArray, Description: "Client-visible aliases and ordered provider/model target sequences."},
 			},

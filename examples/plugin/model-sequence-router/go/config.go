@@ -28,16 +28,16 @@ type unavailableAction string
 const (
 	// unavailableSkip scans forward to the next available position.
 	unavailableSkip unavailableAction = "skip"
-	// unavailableOverloaded holds the position and answers the client with a retryable status.
-	unavailableOverloaded unavailableAction = "overloaded"
+	// unavailableError consumes no position and answers the client with a retryable status.
+	unavailableError unavailableAction = "error"
 )
 
 type pluginConfig struct {
-	Enabled       bool              `yaml:"enabled"`
-	SessionTTL    string            `yaml:"session_ttl"`
-	OnUnavailable unavailableAction `yaml:"on_unavailable"`
-	Diagnostics   diagnosticsConfig `yaml:"diagnostics"`
-	Aliases       []aliasConfig     `yaml:"aliases"`
+	Enabled             bool              `yaml:"enabled"`
+	SessionTTL          string            `yaml:"session_ttl"`
+	UnavailableProvider unavailableAction `yaml:"unavailable_provider"`
+	Diagnostics         diagnosticsConfig `yaml:"diagnostics"`
+	Aliases             []aliasConfig     `yaml:"aliases"`
 }
 
 type diagnosticsConfig struct {
@@ -92,27 +92,27 @@ func (c *targetConfig) UnmarshalYAML(node *yaml.Node) error {
 }
 
 type compiledConfig struct {
-	Enabled       bool
-	SessionTTL    time.Duration
-	OnUnavailable unavailableAction
-	Diagnostics   diagnosticsConfig
-	Generation    uint64
-	Aliases       []*compiledAlias
-	ByLookup      map[string]*compiledAlias
+	Enabled             bool
+	SessionTTL          time.Duration
+	UnavailableProvider unavailableAction
+	Diagnostics         diagnosticsConfig
+	Generation          uint64
+	Aliases             []*compiledAlias
+	ByLookup            map[string]*compiledAlias
 }
 
 // probeLimit projects the configured unavailable action onto the number of
 // sequence positions one selection is allowed to examine.
 func (c *compiledConfig) probeLimit(sequence []compiledTarget) int {
 	var limit int
-	switch c.OnUnavailable {
+	switch c.UnavailableProvider {
 	case unavailableSkip:
 		limit = len(sequence)
-	case unavailableOverloaded:
-		// A single probe holds the conversation on its position rather than moving past it.
+	case unavailableError:
+		// A single probe keeps the conversation on its position rather than moving past it.
 		limit = 1
 	default:
-		panic(c.OnUnavailable)
+		panic(c.UnavailableProvider)
 	}
 	return limit
 }
@@ -133,9 +133,9 @@ type compiledTarget struct {
 
 func defaultPluginConfig() pluginConfig {
 	return pluginConfig{
-		Enabled:       true,
-		SessionTTL:    defaultSessionTTL.String(),
-		OnUnavailable: unavailableSkip,
+		Enabled:             true,
+		SessionTTL:          defaultSessionTTL.String(),
+		UnavailableProvider: unavailableSkip,
 		Diagnostics: diagnosticsConfig{
 			MaxSizeMB:  defaultLogMaxSizeMB,
 			MaxBackups: defaultLogBackups,
@@ -164,8 +164,8 @@ func decodeAndCompileConfig(raw []byte, generation uint64) (*compiledConfig, err
 	if cfg.Enabled && len(cfg.Aliases) == 0 {
 		return nil, fmt.Errorf("enabled configuration requires at least one alias")
 	}
-	if (cfg.OnUnavailable != unavailableSkip) && (cfg.OnUnavailable != unavailableOverloaded) {
-		return nil, fmt.Errorf("on_unavailable must be %q or %q", unavailableSkip, unavailableOverloaded)
+	if (cfg.UnavailableProvider != unavailableSkip) && (cfg.UnavailableProvider != unavailableError) {
+		return nil, fmt.Errorf("unavailable_provider must be %q or %q", unavailableSkip, unavailableError)
 	}
 	diagnostics := cfg.Diagnostics
 	diagnostics.Path = strings.TrimSpace(diagnostics.Path)
@@ -186,13 +186,13 @@ func decodeAndCompileConfig(raw []byte, generation uint64) (*compiledConfig, err
 	}
 
 	compiled := &compiledConfig{
-		Enabled:       cfg.Enabled,
-		SessionTTL:    ttl,
-		OnUnavailable: cfg.OnUnavailable,
-		Diagnostics:   diagnostics,
-		Generation:    generation,
-		Aliases:       make([]*compiledAlias, 0, len(cfg.Aliases)),
-		ByLookup:      make(map[string]*compiledAlias, len(cfg.Aliases)),
+		Enabled:             cfg.Enabled,
+		SessionTTL:          ttl,
+		UnavailableProvider: cfg.UnavailableProvider,
+		Diagnostics:         diagnostics,
+		Generation:          generation,
+		Aliases:             make([]*compiledAlias, 0, len(cfg.Aliases)),
+		ByLookup:            make(map[string]*compiledAlias, len(cfg.Aliases)),
 	}
 	for aliasIndex, rawAlias := range cfg.Aliases {
 		aliasName := strings.TrimSpace(rawAlias.Alias)
