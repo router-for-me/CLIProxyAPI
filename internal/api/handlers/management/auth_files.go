@@ -251,6 +251,9 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 				if projectID := strings.TrimSpace(gjson.GetBytes(data, "project_id").String()); projectID != "" {
 					fileData["project_id"] = projectID
 				}
+				if prefix := strings.TrimSpace(gjson.GetBytes(data, "prefix").String()); prefix != "" {
+					fileData["prefix"] = prefix
+				}
 				if pv := gjson.GetBytes(data, "priority"); pv.Exists() {
 					switch pv.Type {
 					case gjson.Number:
@@ -353,6 +356,11 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	}
 	if projectID := authProjectID(auth); projectID != "" {
 		entry["project_id"] = projectID
+	}
+	// Routing prefix, so the console can show which credential a prefixed
+	// request reaches without downloading the whole credential file.
+	if prefix := strings.TrimSpace(auth.Prefix); prefix != "" {
+		entry["prefix"] = prefix
 	}
 	if accountType, account := auth.AccountInfo(); accountType != "" || account != "" {
 		if accountType != "" {
