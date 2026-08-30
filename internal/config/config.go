@@ -363,11 +363,38 @@ func (c Config) MarshalYAML() (any, error) {
 	if errConfig != nil {
 		return nil, errConfig
 	}
+	removeYAMLMappingKeys(configMapping, sdkMapping)
 
 	mapping := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 	mapping.Content = append(mapping.Content, sdkMapping.Content...)
 	mapping.Content = append(mapping.Content, configMapping.Content...)
 	return mapping, nil
+}
+
+func removeYAMLMappingKeys(mapping, excluded *yaml.Node) {
+	if mapping == nil || excluded == nil || mapping.Kind != yaml.MappingNode || excluded.Kind != yaml.MappingNode {
+		return
+	}
+
+	excludedKeys := make(map[string]struct{}, len(excluded.Content)/2)
+	for index := 0; index+1 < len(excluded.Content); index += 2 {
+		key := excluded.Content[index]
+		if key != nil {
+			excludedKeys[key.Value] = struct{}{}
+		}
+	}
+
+	filtered := make([]*yaml.Node, 0, len(mapping.Content))
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		key := mapping.Content[index]
+		if key != nil {
+			if _, duplicate := excludedKeys[key.Value]; duplicate {
+				continue
+			}
+		}
+		filtered = append(filtered, mapping.Content[index], mapping.Content[index+1])
+	}
+	mapping.Content = filtered
 }
 
 func marshalYAMLMapping(value any) (*yaml.Node, error) {

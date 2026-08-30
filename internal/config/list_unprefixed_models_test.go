@@ -222,6 +222,38 @@ func TestSaveConfigPreserveCommentsKeepsExplicitFalseWhenKeyIsNew(t *testing.T) 
 	}
 }
 
+func TestConfigYAMLMarshalsAndUnmarshalsWithoutDuplicateSDKFields(t *testing.T) {
+	cfg := &Config{
+		SDKConfig: SDKConfig{
+			ProxyURL:   "https://proxy.example.test",
+			RequestLog: true,
+		},
+		Host:  "127.0.0.1",
+		Port:  8317,
+		Debug: true,
+	}
+	cfg.SetListUnprefixedModels(false)
+
+	data, errMarshal := yaml.Marshal(cfg)
+	if errMarshal != nil {
+		t.Fatalf("yaml.Marshal() error = %v", errMarshal)
+	}
+
+	var decoded Config
+	if errUnmarshal := yaml.Unmarshal(data, &decoded); errUnmarshal != nil {
+		t.Fatalf("yaml.Unmarshal() error = %v; data=%s", errUnmarshal, data)
+	}
+	if decoded.ProxyURL != cfg.ProxyURL || !decoded.RequestLog {
+		t.Fatalf("SDK fields did not round-trip: got proxy-url=%q request-log=%t", decoded.ProxyURL, decoded.RequestLog)
+	}
+	if decoded.Host != cfg.Host || decoded.Port != cfg.Port || !decoded.Debug {
+		t.Fatalf("outer fields did not round-trip: got host=%q port=%d debug=%t", decoded.Host, decoded.Port, decoded.Debug)
+	}
+	if decoded.EffectiveListUnprefixedModels() {
+		t.Fatal("effective list-unprefixed-models = true, want false")
+	}
+}
+
 func explicitListUnprefixedModelsConfig(enabled bool) *Config {
 	cfg := &Config{}
 	cfg.SetListUnprefixedModels(enabled)
