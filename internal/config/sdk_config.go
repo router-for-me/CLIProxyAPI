@@ -42,8 +42,14 @@ type SDKConfig struct {
 	// ListUnprefixedModels controls whether unprefixed model aliases are exposed
 	// in the model catalog when a credential has a prefix. When false, only the
 	// prefixed form (e.g., "nim/<model>") is listed, while unprefixed requests
-	// still route as before. Default true (current behavior).
+	// still route as before. The default is true. Use SetListUnprefixedModels to
+	// explicitly disable this behavior in a programmatic configuration.
 	ListUnprefixedModels bool `yaml:"list-unprefixed-models" json:"list-unprefixed-models"`
+
+	// ListUnprefixedModelsExplicit distinguishes an intentional programmatic
+	// value from the zero-value default. It is managed by SetListUnprefixedModels
+	// and is not serialized.
+	ListUnprefixedModelsExplicit bool `yaml:"-" json:"-"`
 
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
@@ -67,6 +73,29 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// SetListUnprefixedModels explicitly sets whether unprefixed model aliases are
+// exposed in model catalogs. It lets programmatic configurations distinguish an
+// explicit false from the zero value, which uses the documented true default.
+func (c *SDKConfig) SetListUnprefixedModels(enabled bool) {
+	if c == nil {
+		return
+	}
+	c.ListUnprefixedModels = enabled
+	c.ListUnprefixedModelsExplicit = true
+}
+
+// EffectiveListUnprefixedModels returns the configured catalog behavior. A
+// programmatic zero-value configuration keeps the documented default true.
+func (c *SDKConfig) EffectiveListUnprefixedModels() bool {
+	if c == nil {
+		return true
+	}
+	if c.ListUnprefixedModelsExplicit {
+		return c.ListUnprefixedModels
+	}
+	return true
 }
 
 // ClaudeCodeConfig configures Claude Code compatibility behavior.
