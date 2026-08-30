@@ -15,6 +15,61 @@ type cursorKey struct {
 type cursorEntry struct {
 	Next      int
 	ExpiresAt time.Time
+	// LastTurn and LastIndex record the conversation state that produced the
+	// stored selection, so a request repeating that state receives the same
+	// sequence position instead of consuming the next one.
+	LastTurn  *turnIdentity
+	LastIndex int
+}
+
+// selectionOutcome discriminates how a sequence position was obtained.
+type selectionOutcome int
+
+const (
+	// selectionExhausted means the probe found no available position.
+	selectionExhausted selectionOutcome = iota
+	// selectionAdvanced means a new conversation state reserved the next position.
+	selectionAdvanced
+	// selectionReplayed means a repeated conversation state reused its position.
+	selectionReplayed
+	// selectionStateless means a request without identity took the first available position.
+	selectionStateless
+	// selectionOutcome_COUNT bounds the closed outcome set.
+	selectionOutcome_COUNT
+)
+
+// selectionOutcomeNames names every outcome for diagnostics. A value outside the
+// closed set has no name and fails the lookup rather than reporting a wrong one.
+var selectionOutcomeNames = [selectionOutcome_COUNT]string{
+	selectionExhausted: "exhausted",
+	selectionAdvanced:  "advanced",
+	selectionReplayed:  "replayed",
+	selectionStateless: "stateless",
+}
+
+// skippedPosition records one sequence position passed over for an unavailable provider.
+type skippedPosition struct {
+	Index    int
+	Provider string
+}
+
+// selectionRequest carries one selection's domain inputs.
+type selectionRequest struct {
+	Key         cursorKey
+	Sequence    []compiledTarget
+	Available   map[string]struct{}
+	Turn        *turnIdentity
+	TTL         time.Duration
+	RandomStart bool
+	ProbeLimit  int
+}
+
+// selectionResult reports the chosen position, how it was obtained, and every position passed over.
+type selectionResult struct {
+	Target  compiledTarget
+	Index   int
+	Outcome selectionOutcome
+	Skipped []skippedPosition
 }
 
 type cursorStore struct {
@@ -31,46 +86,103 @@ func newCursorStore(clock func() time.Time) *cursorStore {
 	return &cursorStore{entries: make(map[cursorKey]cursorEntry), clock: clock, random: rand.IntN}
 }
 
-// selectTarget reserves the next available sequence position for one conversation.
-// A successful selection always advances the cursor and refreshes its expiry; an
-// exhausted scan leaves the stored cursor untouched.
-func (s *cursorStore) selectTarget(key cursorKey, sequence []compiledTarget, available map[string]struct{}, ttl time.Duration, randomStart bool) (compiledTarget, int, bool) {
-	if s == nil || len(sequence) == 0 {
-		return compiledTarget{}, 0, false
+// String names the outcome for diagnostics and rejects values outside the closed set.
+func (o selectionOutcome) String() string {
+	return selectionOutcomeNames[o]
+}
+
+// loadCursorEntry returns the cursor stored for one conversation or a fresh
+// starting position and whether the returned entry was already stored.
+// selectTarget holds the store mutex across this call.
+func (s *cursorStore) loadCursorEntry(req selectionRequest, now time.Time) (cursorEntry, bool) {
+	entry, exists := s.entries[req.Key]
+	if exists && entry.ExpiresAt.After(now) && entry.Next >= 0 && entry.Next < len(req.Sequence) {
+		return entry, true
+	}
+	fresh := cursorEntry{}
+	if req.RandomStart {
+		fresh.Next = s.random(len(req.Sequence))
+	}
+	return fresh, false
+}
+
+// selectTarget reserves a sequence position for one conversation. A route
+// repeating the previous turn identity replays that turn's position and moves no
+// cursor. A new turn advances. An exhausted probe preserves its starting position.
+func (s *cursorStore) selectTarget(req selectionRequest) selectionResult {
+	result := selectionResult{Outcome: selectionExhausted}
+	if s == nil || len(req.Sequence) == 0 {
+		return result
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := s.clock()
-	entry, exists := s.entries[key]
-	if !exists || !entry.ExpiresAt.After(now) || entry.Next < 0 || entry.Next >= len(sequence) {
-		entry = cursorEntry{}
-		if randomStart {
-			entry.Next = s.random(len(sequence))
+	entry, stored := s.loadCursorEntry(req, now)
+	repeated := entry.LastTurn.equals(req.Turn) && entry.LastIndex >= 0 && entry.LastIndex < len(req.Sequence)
+	if repeated && providerAvailable(req.Sequence[entry.LastIndex], req.Available) {
+		entry.ExpiresAt = now.Add(req.TTL)
+		s.entries[req.Key] = entry
+		result.Target = req.Sequence[entry.LastIndex]
+		result.Index = entry.LastIndex
+		result.Outcome = selectionReplayed
+	} else {
+		// A repeated turn whose remembered provider disappeared re-probes its own
+		// position; every other request probes forward from the reserved position.
+		start := entry.Next
+		if repeated {
+			start = entry.LastIndex
+		}
+		reserved := false
+		for offset := 0; offset < req.ProbeLimit && !reserved; offset++ {
+			index := (start + offset) % len(req.Sequence)
+			target := req.Sequence[index]
+			if providerAvailable(target, req.Available) {
+				entry.Next = (index + 1) % len(req.Sequence)
+				entry.ExpiresAt = now.Add(req.TTL)
+				entry.LastTurn = req.Turn
+				entry.LastIndex = index
+				s.entries[req.Key] = entry
+				result.Target = target
+				result.Index = index
+				result.Outcome = selectionAdvanced
+				reserved = true
+			} else {
+				result.Skipped = append(result.Skipped, skippedPosition{Index: index, Provider: target.Provider})
+			}
+		}
+		// A drawn starting position exists nowhere else, so an exhausted probe
+		// records it and a retry re-enters on the position it examined.
+		if !reserved && !stored && req.RandomStart {
+			entry.ExpiresAt = now.Add(req.TTL)
+			s.entries[req.Key] = entry
 		}
 	}
-	start := entry.Next
-	for offset := range len(sequence) {
-		index := (start + offset) % len(sequence)
-		target := sequence[index]
-		if _, ok := available[target.Provider]; !ok {
-			continue
-		}
-		entry.Next = (index + 1) % len(sequence)
-		entry.ExpiresAt = now.Add(ttl)
-		s.entries[key] = entry
-		return target, index, true
-	}
-	return compiledTarget{}, 0, false
+	return result
 }
 
-func selectStateless(sequence []compiledTarget, available map[string]struct{}) (compiledTarget, int, bool) {
-	for index, target := range sequence {
-		if _, ok := available[target.Provider]; ok {
-			return target, index, true
+// selectStateless returns the first available position for a request with no identity.
+func selectStateless(sequence []compiledTarget, available map[string]struct{}) selectionResult {
+	result := selectionResult{Outcome: selectionExhausted}
+	found := false
+	for index := 0; index < len(sequence) && !found; index++ {
+		target := sequence[index]
+		if providerAvailable(target, available) {
+			result.Target = target
+			result.Index = index
+			result.Outcome = selectionStateless
+			found = true
+		} else {
+			result.Skipped = append(result.Skipped, skippedPosition{Index: index, Provider: target.Provider})
 		}
 	}
-	return compiledTarget{}, 0, false
+	return result
+}
+
+// providerAvailable reports whether a target's provider is currently routable.
+func providerAvailable(target compiledTarget, available map[string]struct{}) bool {
+	_, ok := available[target.Provider]
+	return ok
 }
 
 func (s *cursorStore) cleanupExpired() {

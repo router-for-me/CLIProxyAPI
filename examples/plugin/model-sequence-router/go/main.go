@@ -56,7 +56,6 @@ static void free_host_buffer(void* ptr, size_t len) {
 import "C"
 
 import (
-	"encoding/json"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -64,45 +63,12 @@ import (
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 const (
 	pluginIdentifier = "model-sequence-router"
-	pluginVersion    = "0.8.0"
+	pluginVersion    = "0.9.0"
 )
-
-type envelope struct {
-	OK     bool            `json:"ok"`
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  *envelopeError  `json:"error,omitempty"`
-}
-
-type envelopeError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
-type lifecycleRequest struct {
-	ConfigYAML []byte `json:"config_yaml"`
-}
-
-type registration struct {
-	SchemaVersion uint32                 `json:"schema_version"`
-	Metadata      pluginapi.Metadata     `json:"metadata"`
-	Capabilities  registrationCapability `json:"capabilities"`
-}
-
-type registrationCapability struct {
-	ModelRegistrar bool `json:"model_registrar"`
-	ModelRouter    bool `json:"model_router"`
-	UsagePlugin    bool `json:"usage_plugin"`
-}
-
-type rpcModelRouteRequest struct {
-	pluginapi.ModelRouteRequest
-	HostCallbackID string `json:"host_callback_id,omitempty"`
-}
 
 type runtimeState struct {
 	configMu        sync.Mutex
@@ -157,7 +123,7 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 		response.len = 0
 	}
 	if method == nil {
-		writeResponse(response, errorEnvelope("invalid_method", "method is required"))
+		writeResponse(response, errorEnvelope(envelopeError{Code: "invalid_method", Message: "method is required"}))
 		return 1
 	}
 	var requestBytes []byte
@@ -166,7 +132,7 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	}
 	raw, errHandle := handleMethod(C.GoString(method), requestBytes)
 	if errHandle != nil {
-		writeResponse(response, errorEnvelope("plugin_error", errHandle.Error()))
+		writeResponse(response, errorEnvelope(envelopeError{Code: "plugin_error", Message: errHandle.Error()}))
 		return 1
 	}
 	writeResponse(response, raw)
@@ -185,50 +151,16 @@ func cliproxyPluginShutdown() {
 	runtimePlugin.shutdown()
 }
 
-func handleMethod(method string, request []byte) ([]byte, error) {
-	switch method {
-	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
-		if errConfigure := runtimePlugin.configure(request); errConfigure != nil {
-			return nil, errConfigure
-		}
-		return okEnvelope(pluginRegistration())
-	case pluginabi.MethodModelRegister:
-		return okEnvelope(runtimePlugin.registeredModels())
-	case pluginabi.MethodModelRoute:
-		var req rpcModelRouteRequest
-		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
-			return nil, fmt.Errorf("decode model route request: %w", errUnmarshal)
-		}
-		return okEnvelope(runtimePlugin.routeWithCallback(req.ModelRouteRequest, req.HostCallbackID))
-	case pluginabi.MethodUsageHandle:
-		var record pluginapi.UsageRecord
-		if errUnmarshal := json.Unmarshal(request, &record); errUnmarshal != nil {
-			return nil, fmt.Errorf("decode usage record: %w", errUnmarshal)
-		}
-		runtimePlugin.handleUsage(record)
-		return okEnvelope(map[string]any{})
-	case pluginabi.MethodPluginShutdown:
-		runtimePlugin.shutdown()
-		return okEnvelope(map[string]any{})
-	default:
-		return errorEnvelope("unknown_method", "unknown method: "+method), nil
-	}
-}
-
-func (r *runtimeState) configure(raw []byte) error {
-	var req lifecycleRequest
-	if len(raw) > 0 {
-		if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
-			return fmt.Errorf("decode lifecycle request: %w", errUnmarshal)
-		}
-	}
+// configure compiles one configuration generation, clears the state scoped to the
+// prior generation, and publishes the compiled result to routing.
+func (r *runtimeState) configure(configYAML []byte) error {
 	r.configMu.Lock()
 	defer r.configMu.Unlock()
 	generation := uint64(1)
 	if current := r.config.Load(); current != nil {
 		generation = current.Generation + 1
 	}
-	next, errCompile := decodeAndCompileConfig(req.ConfigYAML, generation)
+	next, errCompile := decodeAndCompileConfig(configYAML, generation)
 	if errCompile != nil {
 		return errCompile
 	}
@@ -236,9 +168,13 @@ func (r *runtimeState) configure(raw []byte) error {
 	if errDiagnostic != nil {
 		return errDiagnostic
 	}
-	r.config.Store(next)
+
+	// Clearing precedes publication so a concurrent route cannot lose its reservation.
+	// A route running under the prior generation keys its entry by that generation,
+	// which the new configuration never reads and the expiry sweep removes.
 	r.cursors.reset()
 	r.observations.reset()
+	r.config.Store(next)
 	r.cleanup.restart(r.cursors, next.SessionTTL)
 	r.replaceDiagnosticSink(nextDiagnostic)
 	lengths := make(map[string]int, len(next.Aliases))
@@ -262,38 +198,6 @@ func (r *runtimeState) shutdown() {
 	r.cleanup.stop()
 	r.replaceDiagnosticSink(nil)
 	r.observations.reset()
-}
-
-func pluginRegistration() registration {
-	return registration{
-		SchemaVersion: pluginabi.SchemaVersion,
-		Metadata: pluginapi.Metadata{
-			Name:             pluginIdentifier,
-			Version:          pluginVersion,
-			Author:           "router-for-me",
-			GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
-			ConfigFields: []pluginapi.ConfigField{
-				{Name: "enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable per-conversation model sequence routing."},
-				{Name: "session_ttl", Type: pluginapi.ConfigFieldTypeString, Description: "Sliding in-memory conversation cursor TTL (1m through 24h)."},
-				{Name: "diagnostics", Type: pluginapi.ConfigFieldTypeObject, Description: "Bounded content-free JSONL routing and cache diagnostics."},
-				{Name: "aliases", Type: pluginapi.ConfigFieldTypeArray, Description: "Client-visible aliases and ordered provider/model target sequences."},
-			},
-		},
-		Capabilities: registrationCapability{ModelRegistrar: true, ModelRouter: true, UsagePlugin: true},
-	}
-}
-
-func okEnvelope(value any) ([]byte, error) {
-	raw, errMarshal := json.Marshal(value)
-	if errMarshal != nil {
-		return nil, errMarshal
-	}
-	return json.Marshal(envelope{OK: true, Result: raw})
-}
-
-func errorEnvelope(code, message string) []byte {
-	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message}})
-	return raw
 }
 
 func writeResponse(response *C.cliproxy_buffer, raw []byte) {

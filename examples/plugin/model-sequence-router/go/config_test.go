@@ -204,6 +204,38 @@ func TestAliasLookupIsSuffixAware(t *testing.T) {
 	}
 }
 
+func TestUnavailableActionDefaultsToSkipAndRejectsOtherValues(t *testing.T) {
+	const alias = "aliases:\n- alias: test\n  targets: [{provider: codex, model: terra}]"
+	cfg, errCompile := decodeAndCompileConfig([]byte(alias), 1)
+	if errCompile != nil {
+		t.Fatal(errCompile)
+	}
+	if cfg.OnUnavailable != unavailableSkip {
+		t.Fatalf("default on_unavailable = %q, want %q", cfg.OnUnavailable, unavailableSkip)
+	}
+	if got := cfg.probeLimit(cfg.Aliases[0].Sequence); got != len(cfg.Aliases[0].Sequence) {
+		t.Fatalf("skip probe limit = %d, want whole sequence", got)
+	}
+	overloaded, errOverloaded := decodeAndCompileConfig([]byte("on_unavailable: overloaded\n"+alias), 1)
+	if errOverloaded != nil {
+		t.Fatal(errOverloaded)
+	}
+	if got := overloaded.probeLimit(overloaded.Aliases[0].Sequence); got != 1 {
+		t.Fatalf("overloaded probe limit = %d, want 1", got)
+	}
+	for name, raw := range map[string]string{
+		"unknown action":   "on_unavailable: hold\n" + alias,
+		"uppercase action": "on_unavailable: SKIP\n" + alias,
+		"blank action":     "on_unavailable: ''\n" + alias,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, errInvalid := decodeAndCompileConfig([]byte(raw), 1); errInvalid == nil {
+				t.Fatal("decodeAndCompileConfig() error = nil, want validation error")
+			}
+		})
+	}
+}
+
 func TestUnsupportedParentheticalAliasRemainsLiteral(t *testing.T) {
 	cfg, errCompile := decodeAndCompileConfig([]byte(`
 aliases:

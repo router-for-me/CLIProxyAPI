@@ -6,6 +6,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 func TestRPCRegistrationRouteReconfigureAndShutdown(t *testing.T) {
@@ -71,8 +72,8 @@ func TestRPCRegistrationRouteReconfigureAndShutdown(t *testing.T) {
 
 func TestSuccessfulReconfigureResetsStateAndModels(t *testing.T) {
 	runtime := newRuntimeState(nil)
-	firstRaw, _ := json.Marshal(lifecycleRequest{ConfigYAML: []byte("aliases:\n- alias: first\n  random_start: false\n  targets: [{provider: codex, model: one}, {provider: codex, model: two}]")})
-	if errConfigure := runtime.configure(firstRaw); errConfigure != nil {
+	first := []byte("aliases:\n- alias: first\n  random_start: false\n  targets: [{provider: codex, model: one}, {provider: codex, model: two}]")
+	if errConfigure := runtime.configure(first); errConfigure != nil {
 		t.Fatal(errConfigure)
 	}
 	req := pluginapi.ModelRouteRequest{
@@ -84,8 +85,8 @@ func TestSuccessfulReconfigureResetsStateAndModels(t *testing.T) {
 	if got := runtime.route(req); got.TargetModel != "two" {
 		t.Fatalf("pre-reconfigure route = %#v", got)
 	}
-	secondRaw, _ := json.Marshal(lifecycleRequest{ConfigYAML: []byte("aliases:\n- alias: first\n  random_start: false\n  targets: [{provider: codex, model: one}, {provider: codex, model: two}]\n- alias: second\n  random_start: false\n  targets: [{provider: claude, model: opus}]")})
-	if errConfigure := runtime.configure(secondRaw); errConfigure != nil {
+	second := []byte("aliases:\n- alias: first\n  random_start: false\n  targets: [{provider: codex, model: one}, {provider: codex, model: two}]\n- alias: second\n  random_start: false\n  targets: [{provider: claude, model: opus}]")
+	if errConfigure := runtime.configure(second); errConfigure != nil {
 		t.Fatal(errConfigure)
 	}
 	if got := runtime.route(req); got.TargetModel != "one" {
@@ -97,4 +98,95 @@ func TestSuccessfulReconfigureResetsStateAndModels(t *testing.T) {
 	}
 	runtime.shutdown()
 	runtime.shutdown()
+}
+
+func TestExecutorMethodsReportRetryableUnavailability(t *testing.T) {
+	methods := []string{
+		pluginabi.MethodExecutorExecute,
+		pluginabi.MethodExecutorExecuteStream,
+		pluginabi.MethodExecutorCountTokens,
+		pluginabi.MethodExecutorHTTPRequest,
+	}
+	for _, method := range methods {
+		t.Run(method, func(t *testing.T) {
+			raw, errHandle := handleMethod(method, nil)
+			if errHandle != nil {
+				t.Fatalf("%s error = %v", method, errHandle)
+			}
+			var wrapped envelope
+			if errUnmarshal := json.Unmarshal(raw, &wrapped); errUnmarshal != nil {
+				t.Fatal(errUnmarshal)
+			}
+			if wrapped.OK || wrapped.Error == nil {
+				t.Fatalf("%s envelope = %#v", method, wrapped)
+			}
+			if wrapped.Error.Code != unavailableCode || wrapped.Error.HTTPStatus != unavailableStatus {
+				t.Fatalf("%s error = %#v", method, wrapped.Error)
+			}
+		})
+	}
+}
+
+func TestExecutorIdentifierNamesPlugin(t *testing.T) {
+	raw, errHandle := handleMethod(pluginabi.MethodExecutorIdentifier, nil)
+	if errHandle != nil {
+		t.Fatalf("identifier error = %v", errHandle)
+	}
+	var wrapped envelope
+	if errUnmarshal := json.Unmarshal(raw, &wrapped); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+	var identity executorIdentifier
+	if errUnmarshal := json.Unmarshal(wrapped.Result, &identity); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+	if !wrapped.OK || identity.Identifier != pluginIdentifier {
+		t.Fatalf("identifier envelope = %#v / %#v", wrapped, identity)
+	}
+}
+
+func TestExecutorCapabilityFollowsUnavailablePolicy(t *testing.T) {
+	const targets = "\n  targets: [{provider: codex, model: one}, {provider: claude, model: two}]"
+	skipped, errSkip := decodeAndCompileConfig([]byte("aliases:\n- alias: routed"+targets), 1)
+	if errSkip != nil {
+		t.Fatal(errSkip)
+	}
+	skipRegistration := pluginRegistration(skipped)
+	if skipRegistration.Capabilities.Executor ||
+		skipRegistration.Capabilities.ExecutorModelScope != "" ||
+		len(skipRegistration.Capabilities.ExecutorInputFormats) != 0 ||
+		len(skipRegistration.Capabilities.ExecutorOutputFormats) != 0 {
+		t.Fatalf("skip capabilities = %#v", skipRegistration.Capabilities)
+	}
+	if !skipRegistration.Capabilities.ModelRegistrar || !skipRegistration.Capabilities.ModelRouter || !skipRegistration.Capabilities.UsagePlugin {
+		t.Fatalf("skip capabilities dropped routing = %#v", skipRegistration.Capabilities)
+	}
+
+	overloaded, errOverloaded := decodeAndCompileConfig([]byte("on_unavailable: overloaded\naliases:\n- alias: routed"+targets), 1)
+	if errOverloaded != nil {
+		t.Fatal(errOverloaded)
+	}
+	capabilities := pluginRegistration(overloaded).Capabilities
+	if !capabilities.Executor || capabilities.ExecutorModelScope != pluginapi.ExecutorModelScopeStatic {
+		t.Fatalf("overloaded capabilities = %#v", capabilities)
+	}
+	wantFormats := []string{
+		string(translator.FormatOpenAI),
+		string(translator.FormatOpenAIResponse),
+		string(translator.FormatClaude),
+		string(translator.FormatGemini),
+		string(translator.FormatCodex),
+		string(translator.FormatAntigravity),
+		string(translator.FormatInteractions),
+	}
+	for _, formats := range [][]string{capabilities.ExecutorInputFormats, capabilities.ExecutorOutputFormats} {
+		if len(formats) != len(wantFormats) {
+			t.Fatalf("declared formats = %#v, want %#v", formats, wantFormats)
+		}
+		for index, want := range wantFormats {
+			if formats[index] != want {
+				t.Fatalf("format[%d] = %q, want %q", index, formats[index], want)
+			}
+		}
+	}
 }
