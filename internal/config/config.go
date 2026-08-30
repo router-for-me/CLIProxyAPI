@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -273,8 +274,78 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 // fields flattened into the full configuration object.
 func (c Config) MarshalJSON() ([]byte, error) {
 	c.SDKConfig.ListUnprefixedModels = c.EffectiveListUnprefixedModels()
-	type configJSON Config
-	return json.Marshal(configJSON(c))
+
+	type sdkConfigJSON SDKConfig
+	sdkData, errSDK := json.Marshal(sdkConfigJSON(c.SDKConfig))
+	if errSDK != nil {
+		return nil, errSDK
+	}
+
+	fields := make(map[string]json.RawMessage)
+	if errDecode := json.Unmarshal(sdkData, &fields); errDecode != nil {
+		return nil, errDecode
+	}
+
+	configValue := reflect.ValueOf(c)
+	configType := configValue.Type()
+	sdkConfigType := reflect.TypeOf(SDKConfig{})
+	for index := 0; index < configValue.NumField(); index++ {
+		fieldType := configType.Field(index)
+		if fieldType.Anonymous && fieldType.Type == sdkConfigType {
+			continue
+		}
+		if fieldType.PkgPath != "" {
+			continue
+		}
+
+		fieldName, options, _ := strings.Cut(fieldType.Tag.Get("json"), ",")
+		if fieldName == "" {
+			fieldName = fieldType.Name
+		}
+		if fieldName == "-" {
+			continue
+		}
+
+		fieldValue := configValue.Field(index)
+		if hasJSONOption(options, "omitempty") && isEmptyJSONValue(fieldValue) {
+			continue
+		}
+		fieldData, errField := json.Marshal(fieldValue.Interface())
+		if errField != nil {
+			return nil, fmt.Errorf("marshal config field %q: %w", fieldName, errField)
+		}
+		fields[fieldName] = fieldData
+	}
+
+	return json.Marshal(fields)
+}
+
+func hasJSONOption(options, want string) bool {
+	for _, option := range strings.Split(options, ",") {
+		if option == want {
+			return true
+		}
+	}
+	return false
+}
+
+func isEmptyJSONValue(value reflect.Value) bool {
+	switch value.Kind() {
+	case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
+		return value.Len() == 0
+	case reflect.Bool:
+		return !value.Bool()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return value.Int() == 0
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return value.Uint() == 0
+	case reflect.Float32, reflect.Float64:
+		return value.Float() == 0
+	case reflect.Interface, reflect.Pointer:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // MarshalYAML writes the effective SDK catalog setting before flattening the
