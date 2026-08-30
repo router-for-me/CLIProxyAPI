@@ -49,7 +49,7 @@ func TestApplyClaudeHeaders_ConfirmedClientKeepsOAuthCredentialBetas(t *testing.
 		t.Fatalf("Anthropic-Beta = %q, want OAuth cache trailer %s", got, claudeExtendedCacheTTLBeta)
 	}
 	if strings.Contains(got, "advisor-tool-2026-03-01") {
-		t.Fatalf("Anthropic-Beta = %q, contains stale OAuth tool beta", got)
+		t.Fatalf("Anthropic-Beta = %q, contains unrequested advisor tool beta", got)
 	}
 	if strings.Contains(got, claudeCacheDiagnosisBeta) {
 		t.Fatalf("Anthropic-Beta = %q, contains %s without a diagnostics body", got, claudeCacheDiagnosisBeta)
@@ -291,5 +291,235 @@ func TestClassifyClaudeUpstreamError_OtherStatusesUnaffected(t *testing.T) {
 	err := classifyClaudeUpstreamError(http.StatusInternalServerError, nil, body)
 	if scoped, ok := err.(cliproxyexecutor.RequestScopedError); ok && scoped.IsRequestScoped() {
 		t.Fatal("non-429 status was misclassified as request-scoped")
+	}
+}
+
+func TestApplyClaudeHeaders_AdvisorToolBetaPreservedWhenRequested(t *testing.T) {
+	incoming := http.Header{}
+	incoming.Set("Anthropic-Beta", "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24")
+
+	body := []byte(`{"model":"claude-opus-5","tools":[{"type":"advisor_20260301","name":"advisor"}]}`)
+
+	for _, stream := range []bool{false, true} {
+		req := newClaudeHeaderTestRequest(t, nil)
+		if err := applyClaudeHeaders(req, claudeOAuthAuthForBetaPolicy(), claudeRaceProbeOAuthKey, stream, nil,
+			body, nil, incoming, false); err != nil {
+			t.Fatalf("applyClaudeHeaders(stream=%v) error = %v", stream, err)
+		}
+
+		got := req.Header.Get("Anthropic-Beta")
+		if !strings.Contains(got, "advisor-tool-2026-03-01") {
+			t.Fatalf("stream=%v: Anthropic-Beta = %q, want advisor-tool-2026-03-01 preserved", stream, got)
+		}
+
+		parts := strings.Split(got, ",")
+		advIdx := -1
+		midIdx := -1
+		toolIdx := -1
+		for i, part := range parts {
+			switch strings.TrimSpace(part) {
+			case "advisor-tool-2026-03-01":
+				advIdx = i
+			case "mid-conversation-system-2026-04-07":
+				midIdx = i
+			case "advanced-tool-use-2025-11-20":
+				toolIdx = i
+			}
+		}
+
+		if advIdx == -1 {
+			t.Fatalf("stream=%v: advisor-tool-2026-03-01 missing from %q", stream, got)
+		}
+		if midIdx != -1 && advIdx < midIdx {
+			t.Fatalf("stream=%v: advisor-tool at %d should follow mid-conversation-system at %d in %q", stream, advIdx, midIdx, got)
+		}
+		if toolIdx != -1 && advIdx > toolIdx {
+			t.Fatalf("stream=%v: advisor-tool at %d should precede advanced-tool-use at %d in %q", stream, advIdx, toolIdx, got)
+		}
+	}
+}
+
+func TestApplyClaudeHeaders_AdvisorToolBetaInjectedWhenBodyHasTool_ConfirmedClient(t *testing.T) {
+	incoming := http.Header{}
+	incoming.Set("Anthropic-Beta", "claude-code-20250219,interleaved-thinking-2025-05-14,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24")
+
+	body := []byte(`{"model":"claude-opus-5","tools":[{"type":"advisor_20260301","name":"advisor"}]}`)
+
+	for _, stream := range []bool{false, true} {
+		req := newClaudeHeaderTestRequest(t, nil)
+		if err := applyClaudeHeaders(req, claudeOAuthAuthForBetaPolicy(), claudeRaceProbeOAuthKey, stream, nil,
+			body, nil, incoming, true); err != nil {
+			t.Fatalf("applyClaudeHeaders(stream=%v) error = %v", stream, err)
+		}
+
+		got := req.Header.Get("Anthropic-Beta")
+		if !strings.Contains(got, "advisor-tool-2026-03-01") {
+			t.Fatalf("stream=%v: Anthropic-Beta = %q, want advisor-tool-2026-03-01 injected for confirmed client", stream, got)
+		}
+
+		parts := strings.Split(got, ",")
+		advIdx := -1
+		midIdx := -1
+		toolIdx := -1
+		for i, part := range parts {
+			switch strings.TrimSpace(part) {
+			case "advisor-tool-2026-03-01":
+				advIdx = i
+			case "mid-conversation-system-2026-04-07":
+				midIdx = i
+			case "advanced-tool-use-2025-11-20":
+				toolIdx = i
+			}
+		}
+
+		if advIdx == -1 {
+			t.Fatalf("stream=%v: advisor-tool-2026-03-01 missing from %q", stream, got)
+		}
+		if midIdx != -1 && advIdx < midIdx {
+			t.Fatalf("stream=%v: advisor-tool at %d should follow mid-conversation-system at %d in %q", stream, advIdx, midIdx, got)
+		}
+		if toolIdx != -1 && advIdx > toolIdx {
+			t.Fatalf("stream=%v: advisor-tool at %d should precede advanced-tool-use at %d in %q", stream, advIdx, toolIdx, got)
+		}
+	}
+}
+
+func TestApplyClaudeHeaders_AdvisorToolBetaInjectedWhenBodyHasTool_APIKeyPassthrough(t *testing.T) {
+	incoming := http.Header{}
+	incoming.Set("Anthropic-Beta", claudeCodeBeta+",mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,"+claudeEffortBeta)
+
+	body := []byte(`{"model":"claude-opus-5","tools":[{"type":"advisor_20260301","name":"advisor"}]}`)
+
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-passthrough"}}
+	for _, stream := range []bool{false, true} {
+		req := newClaudeHeaderTestRequest(t, nil)
+		if err := applyClaudeHeaders(req, auth, "key-passthrough", stream, nil,
+			body, nil, incoming, false); err != nil {
+			t.Fatalf("applyClaudeHeaders(stream=%v) error = %v", stream, err)
+		}
+
+		got := req.Header.Get("Anthropic-Beta")
+		if !strings.Contains(got, "advisor-tool-2026-03-01") {
+			t.Fatalf("stream=%v: Anthropic-Beta = %q, want advisor-tool-2026-03-01 injected in API key passthrough", stream, got)
+		}
+
+		parts := strings.Split(got, ",")
+		advIdx := -1
+		midIdx := -1
+		toolIdx := -1
+		for i, part := range parts {
+			switch strings.TrimSpace(part) {
+			case "advisor-tool-2026-03-01":
+				advIdx = i
+			case "mid-conversation-system-2026-04-07":
+				midIdx = i
+			case "advanced-tool-use-2025-11-20":
+				toolIdx = i
+			}
+		}
+		if advIdx == -1 || (midIdx != -1 && advIdx < midIdx) || (toolIdx != -1 && advIdx > toolIdx) {
+			t.Fatalf("stream=%v: Anthropic-Beta = %q, want advisor-tool-2026-03-01 between mid-conversation-system and advanced-tool-use", stream, got)
+		}
+	}
+}
+
+func TestApplyClaudeHeaders_AdvisorToolBetaPreservedWhenLiftedFromBodyBetas_ConfirmedClient(t *testing.T) {
+	incoming := http.Header{}
+	incoming.Set("Anthropic-Beta", claudeCodeBeta+",interleaved-thinking-2025-05-14,"+claudeEffortBeta)
+
+	body := []byte(`{"model":"claude-opus-5"}`)
+	extraBetas := []string{"advisor-tool-2026-03-01"}
+
+	for _, stream := range []bool{false, true} {
+		req := newClaudeHeaderTestRequest(t, nil)
+		if err := applyClaudeHeaders(req, claudeOAuthAuthForBetaPolicy(), claudeRaceProbeOAuthKey, stream, extraBetas,
+			body, nil, incoming, true); err != nil {
+			t.Fatalf("applyClaudeHeaders(stream=%v) error = %v", stream, err)
+		}
+
+		got := req.Header.Get("Anthropic-Beta")
+		if !strings.Contains(got, "advisor-tool-2026-03-01") {
+			t.Fatalf("stream=%v: Anthropic-Beta = %q, want body-lifted advisor-tool-2026-03-01 preserved for confirmed client", stream, got)
+		}
+	}
+}
+
+func TestApplyClaudeHeaders_AdvisorToolBetaPreservedWhenCountTokens(t *testing.T) {
+	incoming := http.Header{}
+	incoming.Set("Anthropic-Beta", "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,token-counting-2024-11-01")
+
+	body := []byte(`{"model":"claude-opus-5","tools":[{"type":"advisor_20260301","name":"advisor"}]}`)
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages/count_tokens", bytes.NewReader(body))
+	if err := applyClaudeHeaders(req, claudeOAuthAuthForBetaPolicy(), claudeRaceProbeOAuthKey, false, nil,
+		body, nil, incoming, false); err != nil {
+		t.Fatalf("applyClaudeHeaders(count_tokens) error = %v", err)
+	}
+
+	got := req.Header.Get("Anthropic-Beta")
+	if !strings.Contains(got, "advisor-tool-2026-03-01") {
+		t.Fatalf("count_tokens Anthropic-Beta = %q, want advisor-tool-2026-03-01 preserved when advisor tools declared", got)
+	}
+}
+
+func TestApplyClaudeHeaders_AdvisorToolBetaRepositionedWhenOutOfOrder(t *testing.T) {
+	// Incoming header has advisor-tool at trailing position after effort
+	incoming := http.Header{}
+	incoming.Set("Anthropic-Beta", "claude-code-20250219,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,advisor-tool-2026-03-01")
+
+	body := []byte(`{"model":"claude-opus-5","tools":[{"type":"advisor_20260301","name":"advisor"}]}`)
+
+	for _, confirmed := range []bool{false, true} {
+		req := newClaudeHeaderTestRequest(t, nil)
+		if err := applyClaudeHeaders(req, claudeOAuthAuthForBetaPolicy(), claudeRaceProbeOAuthKey, false, nil,
+			body, nil, incoming, confirmed); err != nil {
+			t.Fatalf("confirmed=%v: applyClaudeHeaders() error = %v", confirmed, err)
+		}
+
+		got := req.Header.Get("Anthropic-Beta")
+		parts := strings.Split(got, ",")
+		advIdx := -1
+		midIdx := -1
+		toolIdx := -1
+		for i, part := range parts {
+			switch strings.TrimSpace(part) {
+			case "advisor-tool-2026-03-01":
+				advIdx = i
+			case "mid-conversation-system-2026-04-07":
+				midIdx = i
+			case "advanced-tool-use-2025-11-20":
+				toolIdx = i
+			}
+		}
+
+		if advIdx == -1 {
+			t.Fatalf("confirmed=%v: advisor-tool missing from %q", confirmed, got)
+		}
+		if midIdx != -1 && advIdx < midIdx {
+			t.Fatalf("confirmed=%v: advisor-tool at %d should follow mid-conversation-system at %d in %q", confirmed, advIdx, midIdx, got)
+		}
+		if toolIdx != -1 && advIdx > toolIdx {
+			t.Fatalf("confirmed=%v: advisor-tool at %d should precede advanced-tool-use at %d in %q", confirmed, advIdx, toolIdx, got)
+		}
+	}
+}
+
+func TestApplyClaudeHeaders_StructuredHelperBetaOrderPreservedWithAdvisor(t *testing.T) {
+	// Exact beta profile from measured structured Haiku helper with advisor
+	helperBeta := claudeCodeBeta + ",oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,structured-outputs-2025-12-15,cache-diagnosis-2026-04-07"
+	incoming := http.Header{}
+	incoming.Set("Anthropic-Beta", helperBeta)
+
+	body := []byte(`{"model":"claude-haiku-4-5-20251001","tools":[]}`)
+
+	req := newClaudeHeaderTestRequest(t, nil)
+	if err := applyClaudeHeadersWithNativeProfile(req, claudeOAuthAuthForBetaPolicy(), claudeRaceProbeOAuthKey, false, nil,
+		body, nil, incoming, true, true); err != nil {
+		t.Fatalf("applyClaudeHeadersWithNativeProfile() error = %v", err)
+	}
+
+	got := req.Header.Get("Anthropic-Beta")
+	if got != helperBeta {
+		t.Fatalf("helper Anthropic-Beta =\n got:  %q\n want: %q", got, helperBeta)
 	}
 }

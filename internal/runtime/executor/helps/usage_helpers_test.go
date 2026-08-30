@@ -3,6 +3,7 @@ package helps
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -556,7 +558,8 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 
 func TestUsageReporterTrackHTTPClientStartsTTFTBeforeRoundTrip(t *testing.T) {
 	delay := 40 * time.Millisecond
-	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
+	ctx := cliproxyexecutor.WithUpstreamAttemptTracker(context.Background())
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 	client := reporter.TrackHTTPClient(&http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			time.Sleep(delay)
@@ -570,7 +573,7 @@ func TestUsageReporterTrackHTTPClientStartsTTFTBeforeRoundTrip(t *testing.T) {
 		}),
 	})
 
-	req, errNewRequest := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.invalid/v1/chat/completions", strings.NewReader("{}"))
+	req, errNewRequest := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.invalid/v1/chat/completions", strings.NewReader("{}"))
 	if errNewRequest != nil {
 		t.Fatalf("NewRequestWithContext() error = %v", errNewRequest)
 	}
@@ -586,6 +589,135 @@ func TestUsageReporterTrackHTTPClientStartsTTFTBeforeRoundTrip(t *testing.T) {
 	}
 	if got := reporter.ttftDuration(); got < delay {
 		t.Fatalf("ttft = %v, want >= %v", got, delay)
+	}
+	if !cliproxyexecutor.UpstreamAttempted(ctx) {
+		t.Fatal("HTTP RoundTrip did not mark an upstream attempt")
+	}
+}
+
+func TestUsageReporterTrackHTTPClientRoundTripOnly_DoesNotTriggerOnBodyRead(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5.6-luna", nil)
+	client := reporter.TrackHTTPClientRoundTripOnly(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("data: {\"type\":\"response.created\"}\n\n")),
+				Request:    req,
+			}, nil
+		}),
+	})
+
+	req, errNewRequest := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.invalid/v1/responses", strings.NewReader("{}"))
+	if errNewRequest != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", errNewRequest)
+	}
+	resp, errDo := client.Do(req)
+	if errDo != nil {
+		t.Fatalf("Do() error = %v", errDo)
+	}
+	bodyBytes, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		t.Fatalf("ReadAll() error = %v", errRead)
+	}
+	if errClose := resp.Body.Close(); errClose != nil {
+		t.Fatalf("response body close error = %v", errClose)
+	}
+
+	// 1. Plain body reading must NOT set TTFT
+	if reporter.IsTTFTSet() {
+		t.Fatalf("TrackHTTPClientRoundTripOnly must not set TTFT on plain body read")
+	}
+
+	// 2. Observing metadata event records fallback, but does NOT set effective TTFT
+	ObserveResponsesTokenEvent(reporter, bodyBytes)
+	if reporter.IsTTFTSet() {
+		t.Fatalf("Observing metadata event must not set effective TTFT")
+	}
+	if reporter.ttftDuration() <= 0 {
+		t.Fatalf("Fallback TTFT should be recorded and > 0, got %v", reporter.ttftDuration())
+	}
+
+	// 3. Observing substantive token event sets effective TTFT
+	ObserveResponsesTokenEvent(reporter, []byte(`{"type":"response.output_text.delta","delta":"hello"}`))
+	if !reporter.IsTTFTSet() {
+		t.Fatalf("Observing token event must set effective TTFT")
+	}
+}
+
+func TestUsageReporterTrackHTTPClientRoundTripOnly_ErrorResponseRecordsFirstPacketFallback(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5.6-luna", nil)
+	client := reporter.TrackHTTPClientRoundTripOnly(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Status:     "429 Too Many Requests",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"rate limit"}}`)),
+				Request:    req,
+			}, nil
+		}),
+	})
+
+	req, errNewRequest := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.invalid/v1/responses", strings.NewReader("{}"))
+	if errNewRequest != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", errNewRequest)
+	}
+	resp, errDo := client.Do(req)
+	if errDo != nil {
+		t.Fatalf("Do() error = %v", errDo)
+	}
+	_, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		t.Fatalf("ReadAll() error = %v", errRead)
+	}
+	_ = resp.Body.Close()
+
+	if reporter.IsTTFTSet() {
+		t.Fatalf("error response read must not set substantive token TTFT")
+	}
+	if !reporter.IsFirstPacketSet() {
+		t.Fatalf("error response read must record first packet set fallback")
+	}
+}
+
+func TestUsageReporterObserveTokenEvent_FastPathNonTokenAndToken(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5.6-luna", nil)
+	reporter.StartResponseTTFT()
+
+	// 1. Initial state
+	if reporter.IsTTFTSet() {
+		t.Fatalf("expected IsTTFTSet() == false initially")
+	}
+
+	// 2. First non-token event records firstPacketDuration, but does not mark TTFT set
+	reporter.ObserveTokenEvent(false)
+	if reporter.IsTTFTSet() {
+		t.Fatalf("ObserveTokenEvent(false) must not set TTFT")
+	}
+	if !reporter.IsFirstPacketSet() {
+		t.Fatalf("expected IsFirstPacketSet() == true")
+	}
+	firstPacketDuration := reporter.firstPacketDuration
+
+	// 3. Subsequent non-token event is a fast-path return and does not alter firstPacketDuration
+	reporter.ObserveTokenEvent(false)
+	if reporter.firstPacketDuration != firstPacketDuration {
+		t.Fatalf("subsequent ObserveTokenEvent(false) must preserve original firstPacketDuration")
+	}
+
+	// 4. Substantive token event sets effective TTFT
+	reporter.ObserveTokenEvent(true)
+	if !reporter.IsTTFTSet() {
+		t.Fatalf("ObserveTokenEvent(true) must set IsTTFTSet() == true")
+	}
+	tokenTTFT := reporter.ttft
+
+	// 5. Subsequent token event is a fast-path return and does not alter TTFT
+	reporter.ObserveTokenEvent(true)
+	if reporter.ttft != tokenTTFT {
+		t.Fatalf("subsequent ObserveTokenEvent(true) must not alter already recorded TTFT")
 	}
 }
 
@@ -683,6 +815,50 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	}
 	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
 		t.Fatalf("expected non-zero cached token usage to be recorded")
+	}
+}
+
+type usageResponseBodyError struct {
+	status  int
+	message string
+	body    []byte
+}
+
+func (e usageResponseBodyError) Error() string {
+	return e.message
+}
+
+func (e usageResponseBodyError) StatusCode() int {
+	return e.status
+}
+
+func (e usageResponseBodyError) ResponseBody() []byte {
+	return e.body
+}
+
+func TestFailFromErrorsPrefersResponseBody(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{name: "original response body", body: []byte(" \n{\"error\":\"upstream rejected request\"}\r\n")},
+		{name: "empty response body"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errExecute := fmt.Errorf("execute failed: %w", usageResponseBodyError{
+				status:  http.StatusUnauthorized,
+				message: "generic upstream error",
+				body:    tc.body,
+			})
+			failure := failFromErrors(errExecute)
+			wantBody := errExecute.Error()
+			if len(tc.body) > 0 {
+				wantBody = string(tc.body)
+			}
+			if failure.StatusCode != http.StatusUnauthorized || failure.Body != wantBody {
+				t.Fatalf("failure = %#v, want status %d body %q", failure, http.StatusUnauthorized, wantBody)
+			}
+		})
 	}
 }
 

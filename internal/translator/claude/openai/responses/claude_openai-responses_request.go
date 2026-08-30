@@ -226,6 +226,32 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		pendingRole = "assistant"
 		pendingToolUseParts = append(pendingToolUseParts, toolUse)
 	}
+	appendReasoning := func(reasoningPart []byte) {
+		if len(reasoningPart) == 0 {
+			return
+		}
+		if pendingRole != "" && pendingRole != "assistant" {
+			flushPendingMessage()
+		}
+		pendingRole = "assistant"
+
+		// Client tool calls normally stay at the end of an assistant message, but
+		// a later reasoning item makes them a real separator between thinking blocks.
+		if len(pendingToolUseParts) > 0 {
+			pendingParts = append(pendingParts, pendingToolUseParts...)
+			pendingToolUseParts = nil
+		}
+
+		currentType := gjson.GetBytes(reasoningPart, "type").String()
+		if currentType == "thinking" && len(pendingParts) > 0 {
+			lastIdx := len(pendingParts) - 1
+			if gjson.GetBytes(pendingParts[lastIdx], "type").String() == "thinking" {
+				pendingParts[lastIdx] = reasoningPart
+				return
+			}
+		}
+		pendingParts = append(pendingParts, reasoningPart)
+	}
 
 	lastToolResult := map[string]gjson.Result{}
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
@@ -379,9 +405,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 
 			case "reasoning":
-				if thinkingPart := convertResponsesReasoningToClaudeThinking(item, preserveEmptyThinkingBlocks); len(thinkingPart) > 0 {
-					appendParts("assistant", thinkingPart)
-				}
+				appendReasoning(convertResponsesReasoningToClaudeThinking(item, preserveEmptyThinkingBlocks))
 
 			case "function_call", "custom_tool_call":
 				// Map to assistant tool_use. Freeform custom input is wrapped in an
@@ -452,7 +476,8 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	flushPendingMessage()
 	hadMessages := len(messageBlocks) > 0
 	if !preserveEmptyThinkingBlocks {
-		messageBlocks = dropUnsupportedFableAssistantPrefill(modelName, messageBlocks)
+		messageBlocks = stripTrailingClaudeThinkingBlocks(messageBlocks)
+		messageBlocks = dropUnsupportedClaudeAssistantPrefill(modelName, messageBlocks)
 	}
 	// Preserve a minimal conversational turn for system-only inputs or when messages became empty
 	// so downstream validation still sees a Claude-shaped request.
@@ -555,11 +580,11 @@ func isResponsesSystemLevelRole(role string) bool {
 	}
 }
 
-// dropUnsupportedFableAssistantPrefill removes a trailing assistant message for
-// Claude Fable models, which reject assistant message prefill.
-func dropUnsupportedFableAssistantPrefill(modelName string, messages [][]byte) [][]byte {
-	normalized := strings.ToLower(strings.TrimSpace(modelName))
-	if !strings.Contains(normalized, "fable") || len(messages) == 0 {
+// dropUnsupportedClaudeAssistantPrefill removes a trailing assistant message for
+// Claude model families that reject assistant message prefill (e.g., Fable,
+// Opus 5, Sonnet 4.6).
+func dropUnsupportedClaudeAssistantPrefill(modelName string, messages [][]byte) [][]byte {
+	if !claudeModelRejectsAssistantPrefill(modelName) || len(messages) == 0 {
 		return messages
 	}
 	last := gjson.ParseBytes(messages[len(messages)-1])
@@ -567,6 +592,70 @@ func dropUnsupportedFableAssistantPrefill(modelName string, messages [][]byte) [
 		return messages
 	}
 	return messages[:len(messages)-1]
+}
+
+// stripTrailingClaudeThinkingBlocks removes trailing thinking and
+// redacted_thinking blocks from the final assistant message. Anthropic rejects
+// requests whose final assistant content block is thinking. If no content
+// blocks remain after stripping, the assistant message itself is dropped.
+func stripTrailingClaudeThinkingBlocks(messages [][]byte) [][]byte {
+	if len(messages) == 0 {
+		return messages
+	}
+	lastIdx := len(messages) - 1
+	last := gjson.ParseBytes(messages[lastIdx])
+	if !strings.EqualFold(strings.TrimSpace(last.Get("role").String()), "assistant") {
+		return messages
+	}
+	content := last.Get("content")
+	if !content.IsArray() {
+		return messages
+	}
+	parts := content.Array()
+	end := len(parts)
+	for end > 0 {
+		partType := strings.TrimSpace(parts[end-1].Get("type").String())
+		if partType == "thinking" || partType == "redacted_thinking" {
+			end--
+		} else {
+			break
+		}
+	}
+	if end == len(parts) {
+		return messages
+	}
+	if end == 0 {
+		return messages[:lastIdx]
+	}
+	remainingParts := make([][]byte, end)
+	for i := 0; i < end; i++ {
+		remainingParts[i] = []byte(parts[i].Raw)
+	}
+	var updatedMsg []byte
+	if end == 1 {
+		part := parts[0]
+		if part.Get("type").String() == "text" && !part.Get("cache_control").Exists() && !part.Get("citations").Exists() {
+			updatedMsg, _ = sjson.SetBytes(messages[lastIdx], "content", part.Get("text").String())
+		} else {
+			updatedMsg, _ = sjson.SetRawBytes(messages[lastIdx], "content", common.JoinRawArray(remainingParts))
+		}
+	} else {
+		updatedMsg, _ = sjson.SetRawBytes(messages[lastIdx], "content", common.JoinRawArray(remainingParts))
+	}
+	messages[lastIdx] = updatedMsg
+	return messages
+}
+
+// claudeModelRejectsAssistantPrefill reports whether a Claude model family
+// disallows trailing assistant prefill in its conversation history.
+func claudeModelRejectsAssistantPrefill(modelName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(modelName))
+	for _, family := range []string{"fable", "opus-5", "sonnet-4-6"} {
+		if strings.Contains(normalized, family) {
+			return true
+		}
+	}
+	return false
 }
 
 // responsesSystemUnsupportedBlock represents a system-level content part that
