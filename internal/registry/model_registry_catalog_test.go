@@ -97,6 +97,35 @@ func TestCatalogVisibilityIgnoresNonQuotaSuspendedClientMetadata(t *testing.T) {
 	assertCatalogModelVisibility(t, r, modelID, true)
 }
 
+func TestCatalogCapabilityAggregationPreservesPerClientWebSearchMetadata(t *testing.T) {
+	const modelID = "mixed-antigravity-web-search-model"
+
+	r := newTestModelRegistry()
+	r.RegisterClient("web-search-disabled-client", "antigravity", []*ModelInfo{{ID: modelID}})
+	r.RegisterClient("web-search-enabled-client", "antigravity", []*ModelInfo{{ID: modelID, SupportsWebSearch: true}})
+
+	if !r.ClientSupportsModel("web-search-disabled-client", modelID) || !r.ClientSupportsModel("web-search-enabled-client", modelID) {
+		t.Fatal("both clients should support the shared model")
+	}
+	if r.ClientSupportsWebSearchModel("web-search-disabled-client", modelID) {
+		t.Fatal("web-search-disabled-client should not advertise web search")
+	}
+	if !r.ClientSupportsWebSearchModel("web-search-enabled-client", modelID) {
+		t.Fatal("web-search-enabled-client should advertise web search")
+	}
+
+	capabilities := r.GetAvailableModelCapabilitiesByProvider("antigravity")
+	for _, model := range capabilities {
+		if model != nil && model.ID == modelID {
+			if !model.SupportsWebSearch {
+				t.Fatal("aggregate capability catalog lost the advertised web-search capability")
+			}
+			return
+		}
+	}
+	t.Fatalf("aggregate capability catalog does not contain %q: %#v", modelID, capabilities)
+}
+
 func boolString(value bool) string {
 	if value {
 		return "true"

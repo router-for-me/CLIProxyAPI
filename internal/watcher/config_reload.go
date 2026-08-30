@@ -108,7 +108,12 @@ func (w *Watcher) reloadConfig() bool {
 	w.clientsMutex.Lock()
 	var oldConfig *config.Config
 	_ = yaml.Unmarshal(w.oldConfigYaml, &oldConfig)
+	if oldConfig != nil && w.oldListUnprefixedModelsEffective != nil {
+		oldConfig.SetListUnprefixedModels(*w.oldListUnprefixedModelsEffective)
+	}
 	w.oldConfigYaml, _ = yaml.Marshal(newConfig)
+	effectiveListUnprefixedModels := newConfig.EffectiveListUnprefixedModels()
+	w.oldListUnprefixedModelsEffective = &effectiveListUnprefixedModels
 	w.config = newConfig
 	w.clientsMutex.Unlock()
 
@@ -136,9 +141,16 @@ func (w *Watcher) reloadConfig() bool {
 
 	authDirChanged := oldConfig == nil || oldConfig.AuthDir != newConfig.AuthDir
 	retryConfigChanged := oldConfig != nil && (oldConfig.RequestRetry != newConfig.RequestRetry || oldConfig.MaxRetryInterval != newConfig.MaxRetryInterval || oldConfig.MaxRetryCredentials != newConfig.MaxRetryCredentials)
-	forceAuthRefresh := oldConfig != nil && (oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix || oldConfig.ListUnprefixedModels != newConfig.ListUnprefixedModels || !reflect.DeepEqual(oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias) || retryConfigChanged)
+	forceAuthRefresh := oldConfig != nil && (oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix || listUnprefixedModelsChanged(oldConfig, newConfig) || !reflect.DeepEqual(oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias) || retryConfigChanged)
 
 	log.Infof("config successfully reloaded, triggering client reload")
 	w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh)
 	return true
+}
+
+func listUnprefixedModelsChanged(oldConfig, newConfig *config.Config) bool {
+	if oldConfig == nil || newConfig == nil {
+		return false
+	}
+	return oldConfig.EffectiveListUnprefixedModels() != newConfig.EffectiveListUnprefixedModels()
 }
