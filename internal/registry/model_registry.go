@@ -1339,6 +1339,15 @@ func modelRegistrationAvailability(registration *ModelRegistration, now time.Tim
 	return available, expiresAt
 }
 
+func clientUsableForCatalogSelection(registration *ModelRegistration, clientID string) bool {
+	if registration == nil || registration.SuspendedClients == nil {
+		return true
+	}
+
+	reason, suspended := registration.SuspendedClients[clientID]
+	return !suspended || strings.EqualFold(reason, "quota")
+}
+
 // visibleModelInfo returns metadata for a model that should appear in a model
 // catalog. A model ID can be registered by more than one provider, so the
 // result is visible when at least one active provider registration is visible.
@@ -1352,6 +1361,9 @@ func (r *ModelRegistry) visibleModelInfo(modelID string, registration *ModelRegi
 		for _, registeredModelID := range modelIDs {
 			if registeredModelID != modelID {
 				continue
+			}
+			if !clientUsableForCatalogSelection(registration, clientID) {
+				break
 			}
 			info := r.clientModelInfos[clientID][modelID]
 			if info == nil {
@@ -1491,6 +1503,9 @@ func (r *ModelRegistry) collectProviderModelsLocked(provider string, includeHidd
 				providerModels[modelID] = entry
 			}
 			entry.count++
+			if registration := r.models[modelID]; !clientUsableForCatalogSelection(registration, clientID) {
+				continue
+			}
 
 			info := clientInfos[modelID]
 			if info == nil {

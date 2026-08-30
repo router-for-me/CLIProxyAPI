@@ -83,6 +83,20 @@ func TestCatalogVisibilityAggregatesActiveClientMetadata(t *testing.T) {
 	}
 }
 
+func TestCatalogVisibilityIgnoresNonQuotaSuspendedClientMetadata(t *testing.T) {
+	const modelID = "shared-provider-model"
+
+	r := newTestModelRegistry()
+	registerCatalogVisibilityClients(r, modelID, true)
+	assertCatalogModelVisibility(t, r, modelID, true)
+
+	r.SuspendClientModel("visible-client", modelID, "manual")
+	assertCatalogModelVisibility(t, r, modelID, false)
+
+	r.ResumeClientModel("visible-client", modelID)
+	assertCatalogModelVisibility(t, r, modelID, true)
+}
+
 func boolString(value bool) string {
 	if value {
 		return "true"
