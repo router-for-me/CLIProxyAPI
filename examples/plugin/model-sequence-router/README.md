@@ -36,7 +36,7 @@ plugins:
       enabled: true
       priority: 100
       session_ttl: 1h
-      on_unavailable: skip
+      unavailable_provider: skip
       aliases:
         - alias: iterative-model
           display_name: Iterative Model
@@ -258,10 +258,10 @@ Five positions alternate providers four times before reaching the most expensive
 - A cursor advances once per changed conversation history. A request repeating the previous history replays that history's position and moves no cursor.
 - Turn replay reads only the recognized `messages`, `input`, or `contents` array. A request carrying no recognized history has no replay identity and advances on every call.
 - A client-supplied session identifier remains authoritative. Without one, the plugin derives a conversation identity from the system content and the first history item, both of which hold constant across the turns of one conversation. Two conversations that open with identical content and no session identifier share one cursor.
-- `on_unavailable` is a plugin-level setting selecting what happens when the next position's provider is not registered. It accepts `skip` and `overloaded`, spelled in lower case, and defaults to `skip`.
+- `unavailable_provider` is a plugin-level setting selecting what happens when the next position's provider is not registered. It accepts `skip` and `error`, spelled in lower case, and defaults to `skip`.
 - Under `skip`, the router scans forward to the next available position, consumes the positions it passes, and emits one warning per passed-over position naming the alias, index, and provider.
-- Under `overloaded`, an identified conversation examines only its next position. If that provider is unavailable, the cursor holds its place and the client receives a retryable HTTP `529`, so a retry re-enters on the same position.
-- Under `skip`, a provider that disappears between two calls carrying the same history can move that history to a later position. Under `overloaded`, the position is held instead.
+- Under `error`, an identified conversation examines only its next position. If that provider is not registered, the router consumes no position and the client receives a retryable HTTP `529`, so a retry re-enters on the same position.
+- Under `skip`, a provider that disappears between two calls carrying the same history can move that history to a later position. Under `error`, the position is kept instead.
 - If no configured provider is available under `skip`, the route is declined so normal host routing can continue.
 - Requests without an identifiable conversation always use the first available target and do not create or advance state.
 - `random_start` defaults to `true` per alias. It randomizes the initial effective slot for identified conversations; truly stateless requests remain first-target selections.
@@ -317,7 +317,7 @@ Set the top-level `debug: true` in `config.yaml`. Route decisions are emitted th
 - `random_start`, showing the alias policy used for a new or expired cursor
 - `session_hash`, an eight-character hash used to correlate one conversation without logging its identifier
 
-Each passed-over position emits its own warning, `model-sequence-router: skipped unavailable sequence position`, carrying `event=skip`, `alias`, `sequence_index`, and `provider`. Under `overloaded`, a held position emits `model-sequence-router: holding sequence position for unavailable provider` with the held `sequence_index` and `provider`, which distinguishes a plugin-emitted `529` from an upstream one.
+Each passed-over position emits its own warning, `model-sequence-router: skipped unavailable sequence position`, carrying `event=skip`, `alias`, `sequence_index`, and `provider`. Under `error`, a kept position emits `model-sequence-router: reporting unavailable provider and keeping sequence position` with the kept `sequence_index` and `provider`, which distinguishes a plugin-emitted `529` from an upstream one.
 
 At startup or successful reconfiguration, the info log `model-sequence-router: configuration loaded and state reset` includes `alias_count`, `generation`, and `sequence_lengths`, and its JSONL record carries an explicit `event=config` discriminator. If none of an alias's configured providers is registered, a warning lists only the alias and its provider names. Request bodies, authorization data, credentials, prompt-cache keys, and complete session identifiers are never logged.
 
@@ -361,7 +361,7 @@ The plugin preserves the client body, prompt-cache keys, headers, system prompts
 ## v1 boundaries
 
 - Advancement happens at dispatch reservation for a changed conversation history, not at successful completion.
-- Declaring `on_unavailable: overloaded` makes the plugin register an executor capability, which the host requires before it accepts the plugin's own routing target. Under that policy the plugin answers every executor work call with the retryable `529`; it never generates content.
+- Declaring `unavailable_provider: error` makes the plugin register an executor capability, which the host requires before it accepts the plugin's own routing target. Under that policy the plugin answers every executor work call with the retryable `529`; it never generates content.
 - Parallel completion order is not guaranteed.
 - State is local to one proxy process and is not shared across replicas.
 - Upstream errors may mention the selected provider or model.

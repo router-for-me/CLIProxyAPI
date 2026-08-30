@@ -1,13 +1,13 @@
 package main
 
 const (
-	// unavailableStatus is the retryable status a client receives while its
-	// conversation holds a sequence position whose provider is unavailable.
+	// unavailableStatus is the retryable status a client receives when the
+	// provider of its next sequence position is unavailable.
 	unavailableStatus = 529
-	// unavailableCode names the held-position condition in the error envelope.
+	// unavailableCode names the unavailable-provider condition in the error envelope.
 	unavailableCode = "sequence_position_unavailable"
 	// unavailableMessage explains the condition to the client.
-	unavailableMessage = "model-sequence-router: the next sequence position is unavailable; retry to reuse the held position"
+	unavailableMessage = "model-sequence-router: the next sequence position's provider is unavailable; retry to reuse the same position"
 )
 
 // executorIdentifier names the executor provider in the identifier reply.

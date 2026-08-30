@@ -162,13 +162,13 @@ func TestExecutorCapabilityFollowsUnavailablePolicy(t *testing.T) {
 		t.Fatalf("skip capabilities dropped routing = %#v", skipRegistration.Capabilities)
 	}
 
-	overloaded, errOverloaded := decodeAndCompileConfig([]byte("on_unavailable: overloaded\naliases:\n- alias: routed"+targets), 1)
-	if errOverloaded != nil {
-		t.Fatal(errOverloaded)
+	reported, errReported := decodeAndCompileConfig([]byte("unavailable_provider: error\naliases:\n- alias: routed"+targets), 1)
+	if errReported != nil {
+		t.Fatal(errReported)
 	}
-	capabilities := pluginRegistration(overloaded).Capabilities
+	capabilities := pluginRegistration(reported).Capabilities
 	if !capabilities.Executor || capabilities.ExecutorModelScope != pluginapi.ExecutorModelScopeStatic {
-		t.Fatalf("overloaded capabilities = %#v", capabilities)
+		t.Fatalf("error capabilities = %#v", capabilities)
 	}
 	wantFormats := []string{
 		string(translator.FormatOpenAI),

@@ -210,23 +210,23 @@ func TestUnavailableActionDefaultsToSkipAndRejectsOtherValues(t *testing.T) {
 	if errCompile != nil {
 		t.Fatal(errCompile)
 	}
-	if cfg.OnUnavailable != unavailableSkip {
-		t.Fatalf("default on_unavailable = %q, want %q", cfg.OnUnavailable, unavailableSkip)
+	if cfg.UnavailableProvider != unavailableSkip {
+		t.Fatalf("default unavailable_provider = %q, want %q", cfg.UnavailableProvider, unavailableSkip)
 	}
 	if got := cfg.probeLimit(cfg.Aliases[0].Sequence); got != len(cfg.Aliases[0].Sequence) {
 		t.Fatalf("skip probe limit = %d, want whole sequence", got)
 	}
-	overloaded, errOverloaded := decodeAndCompileConfig([]byte("on_unavailable: overloaded\n"+alias), 1)
-	if errOverloaded != nil {
-		t.Fatal(errOverloaded)
+	reported, errReported := decodeAndCompileConfig([]byte("unavailable_provider: error\n"+alias), 1)
+	if errReported != nil {
+		t.Fatal(errReported)
 	}
-	if got := overloaded.probeLimit(overloaded.Aliases[0].Sequence); got != 1 {
-		t.Fatalf("overloaded probe limit = %d, want 1", got)
+	if got := reported.probeLimit(reported.Aliases[0].Sequence); got != 1 {
+		t.Fatalf("error probe limit = %d, want 1", got)
 	}
 	for name, raw := range map[string]string{
-		"unknown action":   "on_unavailable: hold\n" + alias,
-		"uppercase action": "on_unavailable: SKIP\n" + alias,
-		"blank action":     "on_unavailable: ''\n" + alias,
+		"unknown action":   "unavailable_provider: hold\n" + alias,
+		"uppercase action": "unavailable_provider: SKIP\n" + alias,
+		"blank action":     "unavailable_provider: ''\n" + alias,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, errInvalid := decodeAndCompileConfig([]byte(raw), 1); errInvalid == nil {

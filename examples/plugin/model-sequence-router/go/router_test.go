@@ -310,9 +310,9 @@ func TestRouterEmitsOneNoticePerSkippedPosition(t *testing.T) {
 	}
 }
 
-func TestOverloadedPolicyHoldsPositionAndSelfTargets(t *testing.T) {
+func TestErrorPolicyKeepsPositionAndSelfTargets(t *testing.T) {
 	cfg, errCompile := decodeAndCompileConfig([]byte(`
-on_unavailable: overloaded
+unavailable_provider: error
 aliases:
   - alias: held
     random_start: false
@@ -343,7 +343,7 @@ aliases:
 	req.AvailableProviders = []string{"codex", "claude"}
 	recovered := runtime.route(req)
 	if recovered.Target != "codex" || recovered.TargetModel != "one" {
-		t.Fatalf("recovered response = %#v, want the held position", recovered)
+		t.Fatalf("recovered response = %#v, want the kept position", recovered)
 	}
 }
 
