@@ -1185,8 +1185,15 @@ func (r *ModelRegistry) visibleModelInfo(modelID string, registration *ModelRegi
 		return nil
 	}
 
+	clientIDs := make([]string, 0, len(r.clientModels))
+	for clientID := range r.clientModels {
+		clientIDs = append(clientIDs, clientID)
+	}
+	sort.Strings(clientIDs)
+
 	hasClientMetadata := false
-	for clientID, modelIDs := range r.clientModels {
+	for _, clientID := range clientIDs {
+		modelIDs := r.clientModels[clientID]
 		for _, registeredModelID := range modelIDs {
 			if registeredModelID != modelID {
 				continue
@@ -1216,7 +1223,13 @@ func (r *ModelRegistry) visibleModelInfo(modelID string, registration *ModelRegi
 		return nil
 	}
 
-	for provider, count := range registration.Providers {
+	providers := make([]string, 0, len(registration.Providers))
+	for provider := range registration.Providers {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	for _, provider := range providers {
+		count := registration.Providers[provider]
 		if count <= 0 || registration.InfoByProvider == nil {
 			continue
 		}

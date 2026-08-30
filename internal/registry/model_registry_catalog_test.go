@@ -49,6 +49,42 @@ func TestVisibleProviderKeepsSharedModelInCatalog(t *testing.T) {
 	}
 }
 
+func TestCatalogMetadataSelectionUsesStableClientIDPrecedence(t *testing.T) {
+	const modelID = "shared-model"
+
+	r := newTestModelRegistry()
+	r.RegisterClient("z-client", "shared-provider", []*ModelInfo{{
+		ID:               modelID,
+		OwnedBy:          "z-owner",
+		DisplayName:      "Z model",
+		ContextLength:    128000,
+		MaxContextLength: 64000,
+	}})
+	r.RegisterClient("a-client", "shared-provider", []*ModelInfo{{
+		ID:               modelID,
+		OwnedBy:          "a-owner",
+		DisplayName:      "A model",
+		ContextLength:    256000,
+		MaxContextLength: 128000,
+	}})
+
+	for i := 0; i < 100; i++ {
+		infos := r.GetAvailableModelInfos()
+		if len(infos) != 1 {
+			t.Fatalf("GetAvailableModelInfos() returned %d models, want 1: %#v", len(infos), infos)
+		}
+		assertSelectedCatalogMetadata(t, infos[0], "a-owner", "A model", 256000, 128000)
+	}
+
+	assertSelectedCatalogModelMap(t, r.GetAvailableModels("openai"), modelID, "a-owner", "A model", 256000, 128000)
+
+	r.SuspendClientModel("a-client", modelID, "manual")
+	assertSelectedCatalogModelMap(t, r.GetAvailableModels("openai"), modelID, "z-owner", "Z model", 128000, 64000)
+
+	r.ResumeClientModel("a-client", modelID)
+	assertSelectedCatalogModelMap(t, r.GetAvailableModels("openai"), modelID, "a-owner", "A model", 256000, 128000)
+}
+
 func TestCatalogVisibilityAggregatesActiveClientMetadata(t *testing.T) {
 	const modelID = "shared-provider-model"
 
@@ -187,4 +223,31 @@ func modelInfoDisplayName(models []*ModelInfo, modelID string) string {
 		}
 	}
 	return ""
+}
+
+func assertSelectedCatalogMetadata(t *testing.T, model *ModelInfo, wantOwner, wantDisplayName string, wantContextLength, wantMaxContextLength int) {
+	t.Helper()
+
+	if model == nil {
+		t.Fatal("selected catalog model is nil")
+	}
+	if model.OwnedBy != wantOwner || model.DisplayName != wantDisplayName || model.ContextLength != wantContextLength || model.MaxContextLength != wantMaxContextLength {
+		t.Fatalf("selected catalog metadata = %+v, want owner=%q display_name=%q context_length=%d max_context_length=%d", model, wantOwner, wantDisplayName, wantContextLength, wantMaxContextLength)
+	}
+}
+
+func assertSelectedCatalogModelMap(t *testing.T, models []map[string]any, modelID, wantOwner, wantDisplayName string, wantContextLength, wantMaxContextLength int) {
+	t.Helper()
+
+	for _, model := range models {
+		if model == nil || model["id"] != modelID {
+			continue
+		}
+		if model["owned_by"] != wantOwner || model["display_name"] != wantDisplayName || model["context_length"] != wantContextLength || model["max_context_length"] != wantMaxContextLength {
+			t.Fatalf("selected catalog map = %#v, want owner=%q display_name=%q context_length=%d max_context_length=%d", model, wantOwner, wantDisplayName, wantContextLength, wantMaxContextLength)
+		}
+		return
+	}
+
+	t.Fatalf("catalog does not contain model %q: %#v", modelID, models)
 }
