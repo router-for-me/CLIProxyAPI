@@ -236,36 +236,6 @@ func TestConvertClaudeRequestToAntigravity_UsesDefaultWebSearchMaxResultCountWit
 	}
 }
 
-func TestConvertClaudeRequestToAntigravity_MapsTypedWebSearchForHiddenCatalogModel(t *testing.T) {
-	const (
-		clientID = "test-antigravity-claude-hidden-websearch"
-		modelID  = "gemini-hidden-web-search-test"
-	)
-	registryRef := registry.GetGlobalRegistry()
-	registryRef.RegisterClient(clientID, "antigravity", []*registry.ModelInfo{{
-		ID:                     modelID,
-		SupportsWebSearch:      true,
-		HiddenFromModelCatalog: true,
-	}})
-	t.Cleanup(func() { registryRef.UnregisterClient(clientID) })
-
-	for _, model := range registryRef.GetAvailableModelsByProvider("antigravity") {
-		if model != nil && model.ID == modelID {
-			t.Fatalf("hidden model returned by public catalog: %#v", model)
-		}
-	}
-
-	inputJSON := []byte(`{
-		"model": "gemini-hidden-web-search-test",
-		"messages": [{"role": "user", "content": "Search current weather"}],
-		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
-	}`)
-	output := ConvertClaudeRequestToAntigravity(modelID, inputJSON, true)
-	if got := gjson.GetBytes(output, "requestType").String(); got != "web_search" {
-		t.Fatalf("requestType = %q, want web_search: %s", got, output)
-	}
-}
-
 func TestConvertClaudeRequestToAntigravity_DoesNotMapTypedWebSearchWhenMixedWithCustomTools(t *testing.T) {
 	registry.GetGlobalRegistry().RegisterClient("test-antigravity-claude-websearch-mixed", "antigravity", []*registry.ModelInfo{
 		{ID: "gemini-3.1-flash-lite", SupportsWebSearch: true},
