@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -179,6 +181,51 @@ type Config struct {
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 }
 
+// UnmarshalYAML preserves the flattened SDKConfig YAML shape while decoding
+// every other Config field through its normal YAML handling.
+func (c *Config) UnmarshalYAML(value *yaml.Node) error {
+	if c == nil {
+		return nil
+	}
+	if value == nil {
+		return nil
+	}
+
+	fields, errFields := decodeYAMLFields(value)
+	if errFields != nil {
+		return errFields
+	}
+	if errSDK := c.SDKConfig.unmarshalYAMLWithFields(value, fields); errSDK != nil {
+		return errSDK
+	}
+
+	configValue := reflect.ValueOf(c).Elem()
+	configType := configValue.Type()
+	sdkConfigType := reflect.TypeOf(SDKConfig{})
+	for index := 0; index < configValue.NumField(); index++ {
+		fieldType := configType.Field(index)
+		if fieldType.Anonymous && fieldType.Type == sdkConfigType {
+			continue
+		}
+		if fieldType.PkgPath != "" {
+			continue
+		}
+
+		fieldName := yamlFieldName(fieldType.Tag.Get("yaml"), fieldType.Name)
+		if fieldName == "-" {
+			continue
+		}
+		fieldNode, ok := fields[fieldName]
+		if !ok {
+			continue
+		}
+		if errDecode := fieldNode.Decode(configValue.Field(index).Addr().Interface()); errDecode != nil {
+			return fmt.Errorf("decode config field %q: %w", fieldName, errDecode)
+		}
+	}
+	return nil
+}
+
 // UnmarshalJSON preserves the flattened SDKConfig JSON shape. SDKConfig has a
 // custom JSON unmarshaler for presence tracking, so an ordinary Config alias
 // would promote that method and skip the rest of Config's fields.
@@ -234,6 +281,39 @@ func (c Config) MarshalJSON() ([]byte, error) {
 // embedded SDK configuration into the root mapping.
 func (c Config) MarshalYAML() (any, error) {
 	c.SDKConfig.ListUnprefixedModels = c.EffectiveListUnprefixedModels()
+
+	type sdkConfigYAML SDKConfig
 	type configYAML Config
-	return configYAML(c), nil
+	sdkMapping, errSDK := marshalYAMLMapping(sdkConfigYAML(c.SDKConfig))
+	if errSDK != nil {
+		return nil, errSDK
+	}
+	configMapping, errConfig := marshalYAMLMapping(configYAML(c))
+	if errConfig != nil {
+		return nil, errConfig
+	}
+
+	mapping := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	mapping.Content = append(mapping.Content, sdkMapping.Content...)
+	mapping.Content = append(mapping.Content, configMapping.Content...)
+	return mapping, nil
+}
+
+func marshalYAMLMapping(value any) (*yaml.Node, error) {
+	data, errMarshal := yaml.Marshal(value)
+	if errMarshal != nil {
+		return nil, errMarshal
+	}
+
+	var document yaml.Node
+	if errDecode := yaml.Unmarshal(data, &document); errDecode != nil {
+		return nil, errDecode
+	}
+	if document.Kind != yaml.DocumentNode || len(document.Content) == 0 || document.Content[0] == nil {
+		return nil, fmt.Errorf("invalid generated yaml structure")
+	}
+	if document.Content[0].Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("expected generated root mapping node")
+	}
+	return document.Content[0], nil
 }

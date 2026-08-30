@@ -7,6 +7,8 @@ package config
 import (
 	"encoding/json"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // SDKConfig represents the application's configuration, loaded from a YAML file.
@@ -80,7 +82,63 @@ type SDKConfig struct {
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
 }
 
-const listUnprefixedModelsJSONKey = "list-unprefixed-models"
+const (
+	listUnprefixedModelsJSONKey = "list-unprefixed-models"
+	listUnprefixedModelsYAMLKey = "list-unprefixed-models"
+)
+
+// UnmarshalYAML preserves the presence of list-unprefixed-models so an explicit
+// YAML false is not confused with the zero-value default. This also handles the
+// SDKConfig field when it is inlined into Config.
+func (c *SDKConfig) UnmarshalYAML(value *yaml.Node) error {
+	if c == nil {
+		return nil
+	}
+	if value == nil {
+		return nil
+	}
+
+	fields, errFields := decodeYAMLFields(value)
+	if errFields != nil {
+		return errFields
+	}
+	return c.unmarshalYAMLWithFields(value, fields)
+}
+
+func (c *SDKConfig) unmarshalYAMLWithFields(value *yaml.Node, fields map[string]yaml.Node) error {
+	type sdkConfigYAML SDKConfig
+	decoded := sdkConfigYAML(*c)
+	if errDecode := value.Decode(&decoded); errDecode != nil {
+		return errDecode
+	}
+
+	*c = SDKConfig(decoded)
+	if yamlFieldPresent(fields, listUnprefixedModelsYAMLKey) {
+		c.ListUnprefixedModelsExplicit = true
+	}
+	return nil
+}
+
+func decodeYAMLFields(value *yaml.Node) (map[string]yaml.Node, error) {
+	var fields map[string]yaml.Node
+	if errDecode := value.Decode(&fields); errDecode != nil {
+		return nil, errDecode
+	}
+	return fields, nil
+}
+
+func yamlFieldPresent(fields map[string]yaml.Node, name string) bool {
+	_, ok := fields[name]
+	return ok
+}
+
+func yamlFieldName(tag, fallback string) string {
+	name, _, _ := strings.Cut(tag, ",")
+	if name == "" {
+		return strings.ToLower(fallback)
+	}
+	return name
+}
 
 // UnmarshalJSON preserves the presence of list-unprefixed-models so an explicit
 // JSON false is not confused with the zero-value default.
