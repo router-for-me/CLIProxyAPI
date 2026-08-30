@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,50 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+func TestSDKConfigJSONListUnprefixedModelsTracksPresence(t *testing.T) {
+	testCases := []struct {
+		name         string
+		payload      string
+		want         bool
+		wantExplicit bool
+	}{
+		{name: "default", payload: `{}`, want: true},
+		{name: "explicit false", payload: `{"list-unprefixed-models":false}`, want: false, wantExplicit: true},
+		{name: "explicit true", payload: `{"list-unprefixed-models":true}`, want: true, wantExplicit: true},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var cfg SDKConfig
+			if errUnmarshal := json.Unmarshal([]byte(testCase.payload), &cfg); errUnmarshal != nil {
+				t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+			}
+			if got := cfg.EffectiveListUnprefixedModels(); got != testCase.want {
+				t.Fatalf("effective value = %t, want %t", got, testCase.want)
+			}
+			if cfg.ListUnprefixedModelsExplicit != testCase.wantExplicit {
+				t.Fatalf("explicit marker = %t, want %t", cfg.ListUnprefixedModelsExplicit, testCase.wantExplicit)
+			}
+
+			for _, value := range []any{cfg, &cfg} {
+				encoded, errMarshal := json.Marshal(value)
+				if errMarshal != nil {
+					t.Fatalf("json.Marshal() error = %v", errMarshal)
+				}
+				var serialized struct {
+					ListUnprefixedModels bool `json:"list-unprefixed-models"`
+				}
+				if errUnmarshal := json.Unmarshal(encoded, &serialized); errUnmarshal != nil {
+					t.Fatalf("json.Unmarshal(serialized) error = %v; data=%s", errUnmarshal, encoded)
+				}
+				if serialized.ListUnprefixedModels != testCase.want {
+					t.Fatalf("serialized value = %t, want %t; data=%s", serialized.ListUnprefixedModels, testCase.want, encoded)
+				}
+			}
+		})
+	}
+}
 
 func TestParseConfigBytesListUnprefixedModelsDefaultsToTrue(t *testing.T) {
 	cfg, errParse := ParseConfigBytes([]byte("port: 8317\n"))

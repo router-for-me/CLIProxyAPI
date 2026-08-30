@@ -15,7 +15,7 @@ const (
 
 // resolveAntigravityWebSearchTargetModel picks an Antigravity model that can run native googleSearch.
 // Config antigravity_model wins; otherwise registry.AntigravityWebSearchModelFor(requested) or the
-// first available antigravity model with SupportsWebSearch.
+// first available antigravity model whose eligible clients all support web search.
 func resolveAntigravityWebSearchTargetModel(configured, requested string) string {
 	if m := strings.TrimSpace(configured); m != "" {
 		return m
@@ -23,11 +23,12 @@ func resolveAntigravityWebSearchTargetModel(configured, requested string) string
 	if m := registry.AntigravityWebSearchModelFor(strings.TrimSpace(requested)); m != "" {
 		return m
 	}
-	for _, model := range registry.GetGlobalRegistry().GetAvailableModelCapabilitiesByProvider("antigravity") {
+	registryRef := registry.GetGlobalRegistry()
+	for _, model := range registryRef.GetAvailableModelCapabilitiesByProvider("antigravity") {
 		if model == nil || !model.SupportsWebSearch {
 			continue
 		}
-		if id := strings.TrimSpace(model.ID); id != "" {
+		if id := strings.TrimSpace(model.ID); id != "" && registryRef.AllEligibleClientsSupportWebSearchModel("antigravity", id) {
 			return id
 		}
 	}
