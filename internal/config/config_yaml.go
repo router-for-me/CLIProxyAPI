@@ -15,6 +15,11 @@ import (
 func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...bool) error {
 	persistCfg := cfg
 	migrating := len(migrateV8) > 0 && migrateV8[0]
+	if cfg != nil && cfg.ListUnprefixedModels == nil {
+		copyConfig := *cfg
+		copyConfig.SetListUnprefixedModels(true)
+		persistCfg = &copyConfig
+	}
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)
 	if err != nil {

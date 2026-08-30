@@ -12,14 +12,14 @@ import (
 
 func TestSDKConfigJSONListUnprefixedModelsTracksPresence(t *testing.T) {
 	testCases := []struct {
-		name         string
-		payload      string
-		want         bool
-		wantExplicit bool
+		name        string
+		payload     string
+		want        bool
+		wantPresent bool
 	}{
 		{name: "default", payload: `{}`, want: true},
-		{name: "explicit false", payload: `{"list-unprefixed-models":false}`, want: false, wantExplicit: true},
-		{name: "explicit true", payload: `{"list-unprefixed-models":true}`, want: true, wantExplicit: true},
+		{name: "explicit false", payload: `{"list-unprefixed-models":false}`, want: false, wantPresent: true},
+		{name: "explicit true", payload: `{"list-unprefixed-models":true}`, want: true, wantPresent: true},
 	}
 
 	for _, testCase := range testCases {
@@ -31,8 +31,8 @@ func TestSDKConfigJSONListUnprefixedModelsTracksPresence(t *testing.T) {
 			if got := cfg.EffectiveListUnprefixedModels(); got != testCase.want {
 				t.Fatalf("effective value = %t, want %t", got, testCase.want)
 			}
-			if cfg.ListUnprefixedModelsExplicit != testCase.wantExplicit {
-				t.Fatalf("explicit marker = %t, want %t", cfg.ListUnprefixedModelsExplicit, testCase.wantExplicit)
+			if gotPresent := cfg.ListUnprefixedModels != nil; gotPresent != testCase.wantPresent {
+				t.Fatalf("value presence = %t, want %t", gotPresent, testCase.wantPresent)
 			}
 
 			for _, value := range []any{cfg, &cfg} {
@@ -40,14 +40,12 @@ func TestSDKConfigJSONListUnprefixedModelsTracksPresence(t *testing.T) {
 				if errMarshal != nil {
 					t.Fatalf("json.Marshal() error = %v", errMarshal)
 				}
-				var serialized struct {
-					ListUnprefixedModels bool `json:"list-unprefixed-models"`
-				}
+				var serialized SDKConfig
 				if errUnmarshal := json.Unmarshal(encoded, &serialized); errUnmarshal != nil {
 					t.Fatalf("json.Unmarshal(serialized) error = %v; data=%s", errUnmarshal, encoded)
 				}
-				if serialized.ListUnprefixedModels != testCase.want {
-					t.Fatalf("serialized value = %t, want %t; data=%s", serialized.ListUnprefixedModels, testCase.want, encoded)
+				if got := serialized.EffectiveListUnprefixedModels(); got != testCase.want {
+					t.Fatalf("round-trip value = %t, want %t; data=%s", got, testCase.want, encoded)
 				}
 			}
 		})
@@ -56,14 +54,14 @@ func TestSDKConfigJSONListUnprefixedModelsTracksPresence(t *testing.T) {
 
 func TestSDKConfigYAMLListUnprefixedModelsTracksPresence(t *testing.T) {
 	testCases := []struct {
-		name         string
-		payload      string
-		want         bool
-		wantExplicit bool
+		name        string
+		payload     string
+		want        bool
+		wantPresent bool
 	}{
 		{name: "absent", payload: "{}\n", want: true},
-		{name: "explicit false", payload: "list-unprefixed-models: false\n", want: false, wantExplicit: true},
-		{name: "explicit true", payload: "list-unprefixed-models: true\n", want: true, wantExplicit: true},
+		{name: "explicit false", payload: "list-unprefixed-models: false\n", want: false, wantPresent: true},
+		{name: "explicit true", payload: "list-unprefixed-models: true\n", want: true, wantPresent: true},
 	}
 
 	for _, testCase := range testCases {
@@ -75,8 +73,22 @@ func TestSDKConfigYAMLListUnprefixedModelsTracksPresence(t *testing.T) {
 			if got := cfg.EffectiveListUnprefixedModels(); got != testCase.want {
 				t.Fatalf("effective value = %t, want %t", got, testCase.want)
 			}
-			if cfg.ListUnprefixedModelsExplicit != testCase.wantExplicit {
-				t.Fatalf("explicit marker = %t, want %t", cfg.ListUnprefixedModelsExplicit, testCase.wantExplicit)
+			if gotPresent := cfg.ListUnprefixedModels != nil; gotPresent != testCase.wantPresent {
+				t.Fatalf("value presence = %t, want %t", gotPresent, testCase.wantPresent)
+			}
+
+			for _, value := range []any{cfg, &cfg} {
+				encoded, errMarshal := yaml.Marshal(value)
+				if errMarshal != nil {
+					t.Fatalf("yaml.Marshal() error = %v", errMarshal)
+				}
+				var serialized SDKConfig
+				if errUnmarshal := yaml.Unmarshal(encoded, &serialized); errUnmarshal != nil {
+					t.Fatalf("yaml.Unmarshal(serialized) error = %v; data=%s", errUnmarshal, encoded)
+				}
+				if got := serialized.EffectiveListUnprefixedModels(); got != testCase.want {
+					t.Fatalf("round-trip value = %t, want %t; data=%s", got, testCase.want, encoded)
+				}
 			}
 		})
 	}
@@ -87,8 +99,8 @@ func TestParseConfigBytesListUnprefixedModelsDefaultsToTrue(t *testing.T) {
 	if errParse != nil {
 		t.Fatalf("ParseConfigBytes() error = %v", errParse)
 	}
-	if !cfg.ListUnprefixedModels {
-		t.Fatal("list-unprefixed-models default = false, want true")
+	if cfg.ListUnprefixedModels != nil {
+		t.Fatalf("list-unprefixed-models default pointer = %v, want nil", *cfg.ListUnprefixedModels)
 	}
 	if !cfg.EffectiveListUnprefixedModels() {
 		t.Fatal("effective list-unprefixed-models default = false, want true")
@@ -100,8 +112,8 @@ func TestParseConfigBytesListUnprefixedModelsCanBeDisabled(t *testing.T) {
 	if errParse != nil {
 		t.Fatalf("ParseConfigBytes() error = %v", errParse)
 	}
-	if cfg.ListUnprefixedModels {
-		t.Fatal("list-unprefixed-models = true, want false")
+	if cfg.ListUnprefixedModels == nil || *cfg.ListUnprefixedModels {
+		t.Fatal("list-unprefixed-models is not an explicit false")
 	}
 	if cfg.EffectiveListUnprefixedModels() {
 		t.Fatal("effective list-unprefixed-models = true, want false")
@@ -118,8 +130,8 @@ func TestLoadConfigListUnprefixedModelsCanBeDisabled(t *testing.T) {
 	if errLoad != nil {
 		t.Fatalf("LoadConfig() error = %v", errLoad)
 	}
-	if cfg.ListUnprefixedModels {
-		t.Fatal("list-unprefixed-models = true, want false")
+	if cfg.ListUnprefixedModels == nil || *cfg.ListUnprefixedModels {
+		t.Fatal("list-unprefixed-models is not an explicit false")
 	}
 	if cfg.EffectiveListUnprefixedModels() {
 		t.Fatal("effective list-unprefixed-models = true, want false")
@@ -133,14 +145,14 @@ func TestListUnprefixedModelsSerializationPreservesEffectiveBehavior(t *testing.
 	}
 
 	testCases := []struct {
-		name         string
-		cfg          *Config
-		want         bool
-		wantExplicit bool
+		name        string
+		cfg         *Config
+		want        bool
+		wantPresent bool
 	}{
 		{name: "zero value uses true default", cfg: &Config{}, want: true},
-		{name: "programmatic false remains false", cfg: explicitListUnprefixedModelsConfig(false), want: false, wantExplicit: true},
-		{name: "parsed false remains false", cfg: parsedFalse, want: false, wantExplicit: true},
+		{name: "programmatic false remains false", cfg: explicitListUnprefixedModelsConfig(false), want: false, wantPresent: true},
+		{name: "parsed false remains false", cfg: parsedFalse, want: false, wantPresent: true},
 	}
 
 	for _, testCase := range testCases {
@@ -148,23 +160,21 @@ func TestListUnprefixedModelsSerializationPreservesEffectiveBehavior(t *testing.
 			if got := testCase.cfg.EffectiveListUnprefixedModels(); got != testCase.want {
 				t.Fatalf("effective value = %t, want %t", got, testCase.want)
 			}
-			if testCase.cfg.ListUnprefixedModelsExplicit != testCase.wantExplicit {
-				t.Fatalf("explicit marker = %t, want %t", testCase.cfg.ListUnprefixedModelsExplicit, testCase.wantExplicit)
+			if gotPresent := testCase.cfg.ListUnprefixedModels != nil; gotPresent != testCase.wantPresent {
+				t.Fatalf("value presence = %t, want %t", gotPresent, testCase.wantPresent)
 			}
 
-			for _, value := range []any{testCase.cfg, &testCase.cfg.SDKConfig} {
+			for _, value := range []any{testCase.cfg, testCase.cfg.SDKConfig, &testCase.cfg.SDKConfig} {
 				data, errMarshal := yaml.Marshal(value)
 				if errMarshal != nil {
 					t.Fatalf("yaml.Marshal() error = %v", errMarshal)
 				}
-				var persisted struct {
-					ListUnprefixedModels bool `yaml:"list-unprefixed-models"`
-				}
+				var persisted SDKConfig
 				if errUnmarshal := yaml.Unmarshal(data, &persisted); errUnmarshal != nil {
 					t.Fatalf("yaml.Unmarshal() error = %v; data=%s", errUnmarshal, data)
 				}
-				if persisted.ListUnprefixedModels != testCase.want {
-					t.Fatalf("serialized value = %t, want %t; data=%s", persisted.ListUnprefixedModels, testCase.want, data)
+				if got := persisted.EffectiveListUnprefixedModels(); got != testCase.want {
+					t.Fatalf("round-trip value = %t, want %t; data=%s", got, testCase.want, data)
 				}
 			}
 

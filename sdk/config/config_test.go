@@ -9,14 +9,14 @@ import (
 
 func TestPublicConfigJSONKeepsSDKFieldsFlattened(t *testing.T) {
 	for _, testCase := range []struct {
-		name         string
-		payload      string
-		want         bool
-		wantExplicit bool
+		name        string
+		payload     string
+		want        bool
+		wantPresent bool
 	}{
 		{name: "absent", payload: `{}`, want: true},
-		{name: "explicit false", payload: `{"list-unprefixed-models":false}`, want: false, wantExplicit: true},
-		{name: "explicit true", payload: `{"list-unprefixed-models":true}`, want: true, wantExplicit: true},
+		{name: "explicit false", payload: `{"list-unprefixed-models":false}`, want: false, wantPresent: true},
+		{name: "explicit true", payload: `{"list-unprefixed-models":true}`, want: true, wantPresent: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			var cfg Config
@@ -26,8 +26,8 @@ func TestPublicConfigJSONKeepsSDKFieldsFlattened(t *testing.T) {
 			if got := cfg.EffectiveListUnprefixedModels(); got != testCase.want {
 				t.Fatalf("effective list-unprefixed-models = %t, want %t", got, testCase.want)
 			}
-			if cfg.ListUnprefixedModelsExplicit != testCase.wantExplicit {
-				t.Fatalf("explicit marker = %t, want %t", cfg.ListUnprefixedModelsExplicit, testCase.wantExplicit)
+			if gotPresent := cfg.ListUnprefixedModels != nil; gotPresent != testCase.wantPresent {
+				t.Fatalf("value presence = %t, want %t", gotPresent, testCase.wantPresent)
 			}
 			if cfg.RequestLog || cfg.Debug {
 				t.Fatalf("unexpected fields decoded from empty payload: %#v", cfg)
@@ -44,15 +44,12 @@ func TestPublicConfigJSONKeepsSDKFieldsFlattened(t *testing.T) {
 			if _, nested := fields["SDKConfig"]; nested {
 				t.Fatalf("SDKConfig was nested instead of flattened: %s", encoded)
 			}
-			if _, explicit := fields["ListUnprefixedModelsExplicit"]; explicit {
-				t.Fatalf("explicitness marker was serialized: %s", encoded)
+			var roundTrip Config
+			if errUnmarshal := json.Unmarshal(encoded, &roundTrip); errUnmarshal != nil {
+				t.Fatalf("json.Unmarshal(round trip) error = %v; data=%s", errUnmarshal, encoded)
 			}
-			var listUnprefixedModels bool
-			if errUnmarshal := json.Unmarshal(fields["list-unprefixed-models"], &listUnprefixedModels); errUnmarshal != nil {
-				t.Fatalf("json.Unmarshal(list-unprefixed-models) error = %v; data=%s", errUnmarshal, encoded)
-			}
-			if listUnprefixedModels != testCase.want {
-				t.Fatalf("serialized list-unprefixed-models = %t, want %t: %s", listUnprefixedModels, testCase.want, encoded)
+			if got := roundTrip.EffectiveListUnprefixedModels(); got != testCase.want {
+				t.Fatalf("round-trip list-unprefixed-models = %t, want %t: %s", got, testCase.want, encoded)
 			}
 		})
 	}
@@ -60,15 +57,14 @@ func TestPublicConfigJSONKeepsSDKFieldsFlattened(t *testing.T) {
 
 func TestPublicConfigJSONMarshalsOuterFields(t *testing.T) {
 	for _, testCase := range []struct {
-		name         string
-		listValue    bool
-		explicit     bool
-		wantList     bool
-		wantExplicit bool
+		name      string
+		listValue bool
+		explicit  bool
+		wantList  bool
 	}{
 		{name: "default", wantList: true},
-		{name: "explicit false", listValue: false, explicit: true, wantList: false, wantExplicit: true},
-		{name: "explicit true", listValue: true, explicit: true, wantList: true, wantExplicit: true},
+		{name: "explicit false", listValue: false, explicit: true, wantList: false},
+		{name: "explicit true", listValue: true, explicit: true, wantList: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			cfg := Config{
@@ -91,9 +87,6 @@ func TestPublicConfigJSONMarshalsOuterFields(t *testing.T) {
 			}
 			if _, nested := fields["SDKConfig"]; nested {
 				t.Fatalf("SDKConfig was nested instead of flattened: %s", encoded)
-			}
-			if _, explicit := fields["ListUnprefixedModelsExplicit"]; explicit {
-				t.Fatalf("explicitness marker was serialized: %s", encoded)
 			}
 
 			var debug bool
@@ -120,15 +113,12 @@ func TestPublicConfigJSONMarshalsOuterFields(t *testing.T) {
 				t.Fatalf("serialized provider = %#v, want one provider with prefix team: %s", providers, encoded)
 			}
 
-			var listUnprefixedModels bool
-			if errDecode := json.Unmarshal(fields["list-unprefixed-models"], &listUnprefixedModels); errDecode != nil {
-				t.Fatalf("json.Unmarshal(list-unprefixed-models) error = %v; data=%s", errDecode, encoded)
+			var roundTrip Config
+			if errDecode := json.Unmarshal(encoded, &roundTrip); errDecode != nil {
+				t.Fatalf("json.Unmarshal(round trip) error = %v; data=%s", errDecode, encoded)
 			}
-			if listUnprefixedModels != testCase.wantList {
-				t.Fatalf("serialized list-unprefixed-models = %t, want %t: %s", listUnprefixedModels, testCase.wantList, encoded)
-			}
-			if cfg.ListUnprefixedModelsExplicit != testCase.wantExplicit {
-				t.Fatalf("explicit marker = %t, want %t", cfg.ListUnprefixedModelsExplicit, testCase.wantExplicit)
+			if got := roundTrip.EffectiveListUnprefixedModels(); got != testCase.wantList {
+				t.Fatalf("round-trip list-unprefixed-models = %t, want %t: %s", got, testCase.wantList, encoded)
 			}
 		})
 	}
@@ -149,14 +139,14 @@ func TestPublicConfigJSONDecodesFlattenedFields(t *testing.T) {
 
 func TestPublicConfigYAMLListUnprefixedModelsTracksPresence(t *testing.T) {
 	for _, testCase := range []struct {
-		name         string
-		payload      string
-		want         bool
-		wantExplicit bool
+		name        string
+		payload     string
+		want        bool
+		wantPresent bool
 	}{
 		{name: "absent", payload: "{}\n", want: true},
-		{name: "explicit false", payload: "list-unprefixed-models: false\n", want: false, wantExplicit: true},
-		{name: "explicit true", payload: "list-unprefixed-models: true\n", want: true, wantExplicit: true},
+		{name: "explicit false", payload: "list-unprefixed-models: false\n", want: false, wantPresent: true},
+		{name: "explicit true", payload: "list-unprefixed-models: true\n", want: true, wantPresent: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			var cfg Config
@@ -166,8 +156,8 @@ func TestPublicConfigYAMLListUnprefixedModelsTracksPresence(t *testing.T) {
 			if got := cfg.EffectiveListUnprefixedModels(); got != testCase.want {
 				t.Fatalf("effective list-unprefixed-models = %t, want %t", got, testCase.want)
 			}
-			if cfg.ListUnprefixedModelsExplicit != testCase.wantExplicit {
-				t.Fatalf("explicit marker = %t, want %t", cfg.ListUnprefixedModelsExplicit, testCase.wantExplicit)
+			if gotPresent := cfg.ListUnprefixedModels != nil; gotPresent != testCase.wantPresent {
+				t.Fatalf("value presence = %t, want %t", gotPresent, testCase.wantPresent)
 			}
 		})
 	}
@@ -183,5 +173,45 @@ func TestPublicConfigYAMLDecodesFlattenedFields(t *testing.T) {
 	}
 	if !cfg.RequestLog || !cfg.Debug {
 		t.Fatalf("flattened fields were not decoded: %#v", cfg)
+	}
+}
+
+func TestPublicSDKConfigCanBeEmbeddedWithoutDroppingOuterFields(t *testing.T) {
+	type wrapper struct {
+		SDKConfig `yaml:",inline"`
+		Name      string `yaml:"name" json:"name"`
+	}
+
+	cfg := wrapper{SDKConfig: SDKConfig{RequestLog: true}, Name: "example"}
+	cfg.SetListUnprefixedModels(false)
+
+	jsonData, errJSON := json.Marshal(cfg)
+	if errJSON != nil {
+		t.Fatalf("json.Marshal() error = %v", errJSON)
+	}
+	var jsonRoundTrip wrapper
+	if errUnmarshal := json.Unmarshal(jsonData, &jsonRoundTrip); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal() error = %v; data=%s", errUnmarshal, jsonData)
+	}
+	assertEmbeddedSDKConfig(t, jsonRoundTrip)
+
+	yamlData, errYAML := yaml.Marshal(cfg)
+	if errYAML != nil {
+		t.Fatalf("yaml.Marshal() error = %v", errYAML)
+	}
+	var yamlRoundTrip wrapper
+	if errUnmarshal := yaml.Unmarshal(yamlData, &yamlRoundTrip); errUnmarshal != nil {
+		t.Fatalf("yaml.Unmarshal() error = %v; data=%s", errUnmarshal, yamlData)
+	}
+	assertEmbeddedSDKConfig(t, yamlRoundTrip)
+}
+
+func assertEmbeddedSDKConfig(t *testing.T, cfg struct {
+	SDKConfig `yaml:",inline"`
+	Name      string `yaml:"name" json:"name"`
+}) {
+	t.Helper()
+	if cfg.Name != "example" || !cfg.RequestLog || cfg.EffectiveListUnprefixedModels() {
+		t.Fatalf("embedded config did not round-trip: %#v", cfg)
 	}
 }

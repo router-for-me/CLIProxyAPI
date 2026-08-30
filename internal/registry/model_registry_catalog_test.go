@@ -74,15 +74,36 @@ func TestCatalogMetadataSelectionUsesStableClientIDPrecedence(t *testing.T) {
 			t.Fatalf("GetAvailableModelInfos() returned %d models, want 1: %#v", len(infos), infos)
 		}
 		assertSelectedCatalogMetadata(t, infos[0], "a-owner", "A model", 256000, 128000)
+
+		providerInfos := r.GetAvailableModelsByProvider("shared-provider")
+		if len(providerInfos) != 1 {
+			t.Fatalf("GetAvailableModelsByProvider() returned %d models, want 1: %#v", len(providerInfos), providerInfos)
+		}
+		assertSelectedCatalogMetadata(t, providerInfos[0], "a-owner", "A model", 256000, 128000)
 	}
 
 	assertSelectedCatalogModelMap(t, r.GetAvailableModels("openai"), modelID, "a-owner", "A model", 256000, 128000)
 
 	r.SuspendClientModel("a-client", modelID, "manual")
 	assertSelectedCatalogModelMap(t, r.GetAvailableModels("openai"), modelID, "z-owner", "Z model", 128000, 64000)
+	providerInfos := r.GetAvailableModelsByProvider("shared-provider")
+	if len(providerInfos) != 1 {
+		t.Fatalf("GetAvailableModelsByProvider() returned %d models, want 1: %#v", len(providerInfos), providerInfos)
+	}
+	assertSelectedCatalogMetadata(t, providerInfos[0], "z-owner", "Z model", 128000, 64000)
 
 	r.ResumeClientModel("a-client", modelID)
 	assertSelectedCatalogModelMap(t, r.GetAvailableModels("openai"), modelID, "a-owner", "A model", 256000, 128000)
+}
+
+func TestProviderModelCatalogUsesStableModelIDOrder(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client", "provider", []*ModelInfo{{ID: "z-model"}, {ID: "a-model"}})
+
+	models := r.GetAvailableModelsByProvider("provider")
+	if len(models) != 2 || models[0].ID != "a-model" || models[1].ID != "z-model" {
+		t.Fatalf("provider models = %#v, want a-model then z-model", models)
+	}
 }
 
 func TestCatalogVisibilityAggregatesActiveClientMetadata(t *testing.T) {
