@@ -54,6 +54,34 @@ func TestSDKConfigJSONListUnprefixedModelsTracksPresence(t *testing.T) {
 	}
 }
 
+func TestSDKConfigYAMLListUnprefixedModelsTracksPresence(t *testing.T) {
+	testCases := []struct {
+		name         string
+		payload      string
+		want         bool
+		wantExplicit bool
+	}{
+		{name: "absent", payload: "{}\n", want: true},
+		{name: "explicit false", payload: "list-unprefixed-models: false\n", want: false, wantExplicit: true},
+		{name: "explicit true", payload: "list-unprefixed-models: true\n", want: true, wantExplicit: true},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var cfg SDKConfig
+			if errUnmarshal := yaml.Unmarshal([]byte(testCase.payload), &cfg); errUnmarshal != nil {
+				t.Fatalf("yaml.Unmarshal() error = %v", errUnmarshal)
+			}
+			if got := cfg.EffectiveListUnprefixedModels(); got != testCase.want {
+				t.Fatalf("effective value = %t, want %t", got, testCase.want)
+			}
+			if cfg.ListUnprefixedModelsExplicit != testCase.wantExplicit {
+				t.Fatalf("explicit marker = %t, want %t", cfg.ListUnprefixedModelsExplicit, testCase.wantExplicit)
+			}
+		})
+	}
+}
+
 func TestParseConfigBytesListUnprefixedModelsDefaultsToTrue(t *testing.T) {
 	cfg, errParse := ParseConfigBytes([]byte("port: 8317\n"))
 	if errParse != nil {

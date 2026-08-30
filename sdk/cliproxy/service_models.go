@@ -639,7 +639,7 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix, li
 	}
 
 	out := make([]*ModelInfo, 0, len(models)*2)
-	seen := make(map[string]struct{}, len(models)*2)
+	seen := make(map[string]int, len(models)*2)
 
 	addModel := func(model *ModelInfo) {
 		if model == nil {
@@ -649,10 +649,13 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix, li
 		if id == "" {
 			return
 		}
-		if _, exists := seen[id]; exists {
+		if index, exists := seen[id]; exists {
+			if out[index].HiddenFromModelCatalog && !model.HiddenFromModelCatalog {
+				out[index] = model
+			}
 			return
 		}
-		seen[id] = struct{}{}
+		seen[id] = len(out)
 		out = append(out, model)
 	}
 
