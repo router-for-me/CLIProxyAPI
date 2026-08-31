@@ -473,6 +473,8 @@ func (e *AIStudioExecutor) translateRequest(ctx context.Context, req cliproxyexe
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	payload = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", payload, originalTranslated, requestedModel, requestPath, opts.Headers)
+	// AI Studio requires canonical Google enum casing; keep shared Gemini translation unchanged.
+	payload = normalizeAIStudioThinkingLevel(payload)
 	payload, _ = sjson.DeleteBytes(payload, "generationConfig.maxOutputTokens")
 	payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseMimeType")
 	payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseJsonSchema")
@@ -489,6 +491,30 @@ func (e *AIStudioExecutor) translateRequest(ctx context.Context, req cliproxyexe
 	payload, _ = sjson.DeleteBytes(payload, "session_id")
 	payload = helps.EnsureGeminiLeadingUserContent(payload, "contents")
 	return payload, translatedPayload{payload: payload, action: action, toFormat: to}, nil
+}
+
+func normalizeAIStudioThinkingLevel(payload []byte) []byte {
+	const path = "generationConfig.thinkingConfig.thinkingLevel"
+	level := gjson.GetBytes(payload, path)
+	if level.Type != gjson.String {
+		return payload
+	}
+
+	normalized := strings.ToUpper(level.String())
+	switch normalized {
+	case "MINIMAL", "LOW", "MEDIUM", "HIGH":
+	default:
+		return payload
+	}
+	if normalized == level.String() {
+		return payload
+	}
+
+	result, err := sjson.SetBytes(payload, path, normalized)
+	if err != nil {
+		return payload
+	}
+	return result
 }
 
 func (e *AIStudioExecutor) buildEndpoint(model, action, alt string) string {
