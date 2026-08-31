@@ -91,8 +91,8 @@ func TestManagerSessionAffinityPreservesBindingAcrossHigherPriorityRecovery(t *t
 			}
 
 			expireSessionAffinityPriorityModelCooldown(t, manager, highID, model)
-			if got := pick(opts); got.ID != lowID {
-				t.Fatalf("binding after higher-priority recovery = %q, want sticky %q", got.ID, lowID)
+			if got := pick(opts); got.ID != highID {
+				t.Fatalf("binding after higher-priority recovery = %q, want recovered original %q", got.ID, highID)
 			}
 
 			newSessionOpts := cliproxyexecutor.Options{Metadata: map[string]any{

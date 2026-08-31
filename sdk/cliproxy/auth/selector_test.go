@@ -979,7 +979,7 @@ func TestSessionAffinitySelector_ThinkingSuffixVariantsPreserveBindingAndRelease
 		t.Fatalf("third Pick() auth.ID = %q, want %q (thinking suffix variant should keep session stickiness)", third.ID, first.ID)
 	}
 
-	// Failure on a thinking-suffix variant (with explicit metadata) should properly release the session binding
+	// Terminal failure on a thinking-suffix variant (with explicit metadata) should properly release the session binding
 	optsWithMetadata := cliproxyexecutor.Options{
 		OriginalRequest: payload,
 		Metadata: map[string]any{
@@ -992,7 +992,7 @@ func TestSessionAffinitySelector_ThinkingSuffixVariantsPreserveBindingAndRelease
 		Model:    "claude-sonnet-4-5(high)",
 		AuthID:   first.ID,
 		Success:  false,
-		Error:    &Error{Code: "rate_limited", Message: "rate limited"},
+		Error:    &Error{Code: "unauthorized", HTTPStatus: http.StatusUnauthorized, Message: "invalid api key"},
 		Options:  optsWithMetadata,
 	})
 
@@ -1037,10 +1037,21 @@ func TestSessionAffinitySelector_WeightedBindingRebindsAfterWeightBecomesZero(t 
 	authA.Attributes[AttributeWeight] = "10"
 	third, errThird := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
 	if errThird != nil {
-		t.Fatalf("Pick() after rebind error = %v", errThird)
+		t.Fatalf("Pick() after weight restored error = %v", errThird)
 	}
-	if third.ID != authB.ID {
-		t.Fatalf("Pick() after rebind auth.ID = %q, want sticky auth %q", third.ID, authB.ID)
+	if third.ID != authA.ID {
+		t.Fatalf("Pick() after weight restored auth.ID = %q, want original bound auth %q", third.ID, authA.ID)
+	}
+
+	// When authA is invalidated while remaining weight 0, session permanently rebinds to authB
+	authA.Attributes[AttributeWeight] = "0"
+	selector.InvalidateAuth(authA.ID)
+	fourth, errFourth := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if errFourth != nil {
+		t.Fatalf("Pick() after invalidation error = %v", errFourth)
+	}
+	if fourth.ID != authB.ID {
+		t.Fatalf("Pick() after invalidation auth.ID = %q, want %q", fourth.ID, authB.ID)
 	}
 }
 
@@ -1161,7 +1172,7 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 		t.Fatalf("Pick() error = %v", err)
 	}
 
-	// Remove the bound auth from available list (simulating rate limit)
+	// Remove the bound auth from available list (simulating rate limit / transient exclusion)
 	availableWithoutFirst := make([]*Auth, 0, len(auths)-1)
 	for _, a := range auths {
 		if a.ID != first.ID {
@@ -1169,7 +1180,7 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 		}
 	}
 
-	// With failover enabled, should pick a new auth
+	// While original auth is temporarily unavailable, should pick a fallback auth
 	second, err := selector.Pick(context.Background(), "claude", "claude-3", opts, availableWithoutFirst)
 	if err != nil {
 		t.Fatalf("Pick() after failover error = %v", err)
@@ -1178,11 +1189,28 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 		t.Fatalf("Pick() after failover returned same auth %q, expected different", first.ID)
 	}
 
-	// Subsequent picks should consistently return the new binding
+	// When original bound auth becomes available again, affinity is retained (returns to warm cache)
+	recovered, errRecovered := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if errRecovered != nil {
+		t.Fatalf("Pick() after recovery error = %v", errRecovered)
+	}
+	if recovered.ID != first.ID {
+		t.Fatalf("Pick() after recovery = %q, want original bound auth %q", recovered.ID, first.ID)
+	}
+
+	// When original auth is explicitly invalidated (permanent failover), session rebinds
+	selector.InvalidateAuth(first.ID)
+	third, errThird := selector.Pick(context.Background(), "claude", "claude-3", opts, availableWithoutFirst)
+	if errThird != nil {
+		t.Fatalf("Pick() after invalidation error = %v", errThird)
+	}
+	if third.ID == first.ID {
+		t.Fatalf("Pick() after invalidation returned invalidated auth %q", first.ID)
+	}
 	for i := 0; i < 5; i++ {
 		got, _ := selector.Pick(context.Background(), "claude", "claude-3", opts, availableWithoutFirst)
-		if got.ID != second.ID {
-			t.Fatalf("Pick() #%d after failover inconsistent: got %q, want %q", i, got.ID, second.ID)
+		if got.ID != third.ID {
+			t.Fatalf("Pick() #%d after permanent rebind inconsistent: got %q, want %q", i, got.ID, third.ID)
 		}
 	}
 }
