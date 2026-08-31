@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -27,6 +26,9 @@ func codexCacheImportEnabled() bool {
 // codexCachePath returns the official Codex CLI cache location or "" when
 // the home directory cannot be resolved.
 func codexCachePath() string {
+	if codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); codexHome != "" {
+		return filepath.Join(codexHome, "models_cache.json")
+	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return ""
@@ -69,6 +71,12 @@ func importCodexCacheSlugs(data *staticModelsJSON, cachePath string) []string {
 	}
 	raw, err := os.ReadFile(cachePath)
 	if err != nil {
+		log.Warnf("codex-cache import: failed to read %s: %v", cachePath, err)
+		return nil
+	}
+	// Re-check after reading to close the Stat/Read time-of-check gap.
+	if len(raw) > maxCodexClientModelsSize {
+		log.Warnf("codex-cache import: %s exceeds the size limit, skipping", cachePath)
 		return nil
 	}
 	var cache codexCacheFile
@@ -102,7 +110,14 @@ func importCodexCacheSlugs(data *staticModelsJSON, cachePath string) []string {
 		base.Object = "model"
 		base.OwnedBy = "openai"
 		base.Type = "openai"
-		base.Created = time.Now().Unix()
+		// Preserve the template timestamp so equivalent overlays stay byte-stable
+		// across periodic refreshes and do not emit false change callbacks.
+		base.Created = template.Created
+		// Do not leak the template model's human metadata or reasoning contract
+		// into a cache entry that does not attest those fields.
+		base.DisplayName = entry.Slug
+		base.Description = ""
+		base.Thinking = nil
 		if entry.DisplayName != "" {
 			base.DisplayName = entry.DisplayName
 		}
@@ -124,27 +139,21 @@ func importCodexCacheSlugs(data *staticModelsJSON, cachePath string) []string {
 	return added
 }
 
-var codexRequestReasoningLevels = map[string]bool{
-	"minimal": true,
-	"low":     true,
-	"medium":  true,
-	"high":    true,
-	"xhigh":   true,
-	"max":     true,
-}
+var codexRequestReasoningOrder = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
 
 func cacheReasoningLevels(raw []codexCacheReasoningLevel) []string {
 	seen := make(map[string]bool)
-	levels := make([]string, 0, len(raw))
 	for _, level := range raw {
 		effort := strings.ToLower(strings.TrimSpace(level.Effort))
-		// Cache metadata may lead the request API (for example `ultra`).
-		// Publish only levels accepted by internal/thinking's canonical parser.
-		if !codexRequestReasoningLevels[effort] || seen[effort] {
-			continue
-		}
 		seen[effort] = true
-		levels = append(levels, effort)
+	}
+	levels := make([]string, 0, len(codexRequestReasoningOrder))
+	for _, effort := range codexRequestReasoningOrder {
+		// Cache metadata may lead the request API (for example `ultra`).
+		// Publish only canonical levels, always in canonical ascending order.
+		if seen[effort] {
+			levels = append(levels, effort)
+		}
 	}
 	return levels
 }
@@ -196,15 +205,15 @@ func RefreshCodexCacheOverlay() []string {
 	if !codexCacheImportEnabled() {
 		return nil
 	}
-	modelsCatalogStore.mu.RLock()
+	// Keep clone, bounded cache I/O, overlay and publication under one writer
+	// lock so a concurrent remote refresh cannot be overwritten by a stale clone.
+	modelsCatalogStore.mu.Lock()
+	defer modelsCatalogStore.mu.Unlock()
 	next := cloneStaticModelsJSON(modelsCatalogStore.data)
-	modelsCatalogStore.mu.RUnlock()
 	added := overlayCodexCache(next)
 	if len(added) == 0 {
 		return nil
 	}
-	modelsCatalogStore.mu.Lock()
 	modelsCatalogStore.data = next
-	modelsCatalogStore.mu.Unlock()
 	return added
 }

@@ -47,6 +47,7 @@ func TestImportCodexCacheSlugs(t *testing.T) {
 		CodexPro: []*ModelInfo{{
 			ID:                       "gpt-5.6-luna",
 			Type:                     "openai",
+			Created:                  1700000000,
 			ContextLength:            372000,
 			MaxCompletionTokens:      128000,
 			Thinking:                 &ThinkingSupport{Levels: []string{"low", "high"}},
@@ -68,6 +69,9 @@ func TestImportCodexCacheSlugs(t *testing.T) {
 	if imported == nil {
 		t.Fatal("slug missing from codex-pro bucket")
 	}
+	if imported.Created != 1700000000 {
+		t.Fatalf("created = %d, want stable template timestamp", imported.Created)
+	}
 	if imported.ContextLength != 372000 || imported.Thinking == nil {
 		t.Fatalf("template capabilities not cloned: ctx=%d thinking=%v", imported.ContextLength, imported.Thinking)
 	}
@@ -81,6 +85,81 @@ func TestImportCodexCacheSlugs(t *testing.T) {
 	// Idempotent: second run registers nothing new.
 	if again := importCodexCacheSlugs(catalog, path); len(again) != 0 {
 		t.Fatalf("second run added %v, want none", again)
+	}
+}
+
+func TestCacheReasoningLevelsCanonicalOrder(t *testing.T) {
+	raw := []codexCacheReasoningLevel{{Effort: "xhigh"}, {Effort: "ultra"}, {Effort: "low"}, {Effort: "HIGH"}, {Effort: "low"}}
+	got := cacheReasoningLevels(raw)
+	want := []string{"low", "high", "xhigh"}
+	if len(got) != len(want) {
+		t.Fatalf("levels = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("levels = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestImportDoesNotLeakTemplateMetadata(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "models_cache.json")
+	payload, err := json.Marshal(map[string]any{"models": []map[string]any{{
+		"slug": "no-meta-slot", "visibility": "list", "supported_in_api": true,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := &staticModelsJSON{CodexPro: []*ModelInfo{{
+		ID: "gpt-5.6-luna", Type: "openai", DisplayName: "GPT 5.6 Luna",
+		Description: "luna description", Thinking: &ThinkingSupport{Levels: []string{"low", "high"}},
+	}}}
+	if added := importCodexCacheSlugs(catalog, path); len(added) != 1 {
+		t.Fatalf("added = %v", added)
+	}
+	got := catalog.CodexPro[len(catalog.CodexPro)-1]
+	if got.DisplayName != "no-meta-slot" || got.Description != "" || got.Thinking != nil {
+		t.Fatalf("template metadata leaked: name=%q description=%q thinking=%v", got.DisplayName, got.Description, got.Thinking)
+	}
+}
+
+func TestRefreshCodexCacheOverlayPublishesCodexHome(t *testing.T) {
+	dir := t.TempDir()
+	payload, err := json.Marshal(map[string]any{"models": []map[string]any{{
+		"slug": "sdk-cache-slot", "visibility": "list", "supported_in_api": true,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "models_cache.json"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(codexCacheImportEnv, "true")
+	t.Setenv("CODEX_HOME", dir)
+	modelsCatalogStore.mu.Lock()
+	original := modelsCatalogStore.data
+	modelsCatalogStore.data = &staticModelsJSON{CodexPro: []*ModelInfo{{ID: "gpt-5.6-luna", Type: "openai", Created: 123}}}
+	modelsCatalogStore.mu.Unlock()
+	t.Cleanup(func() {
+		modelsCatalogStore.mu.Lock()
+		modelsCatalogStore.data = original
+		modelsCatalogStore.mu.Unlock()
+	})
+	if added := RefreshCodexCacheOverlay(); len(added) != 1 || added[0] != "sdk-cache-slot" {
+		t.Fatalf("RefreshCodexCacheOverlay() = %v", added)
+	}
+	found := false
+	for _, model := range GetCodexProModels() {
+		if model.ID == "sdk-cache-slot" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("published catalog missing sdk-cache-slot")
 	}
 }
 
@@ -103,6 +182,14 @@ func TestOverlayBeforeComparisonIsStable(t *testing.T) {
 	importCodexCacheSlugs(newData, path)
 	if changed := detectChangedProviders(oldData, newData); len(changed) != 0 {
 		t.Fatalf("equivalent overlaid catalogs changed: %v", changed)
+	}
+}
+
+func TestCodexCachePathHonorsCodexHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	if got, want := codexCachePath(), filepath.Join(home, "models_cache.json"); got != want {
+		t.Fatalf("codexCachePath() = %q, want %q", got, want)
 	}
 }
 
