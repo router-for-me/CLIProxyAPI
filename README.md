@@ -123,7 +123,7 @@ PackyCode provides special discounts for our software users: register using <a h
 - Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Grok)
 - Simple CLI authentication flows (Gemini, OpenAI, Claude, Grok)
 - Generative Language API Key support
-- AI Studio Build multi-account load balancing
+- AI Studio Build multi-account load balancing, with Gemini thinking levels normalized to the canonical enum casing required by the Google AI Studio upstream
 - Claude Code multi-account load balancing
 - OpenAI Codex multi-account load balancing
 - Grok Build multi-account load balancing
