@@ -169,7 +169,7 @@ func TestGetRequestDetails_GlobalRoutePinsProviders(t *testing.T) {
 		Model: "gpt-5.2", Providers: []string{"openai"},
 	}})
 
-	providers, _, errMsg := handler.getRequestDetails("gpt-5.2")
+	providers, _, errMsg := handler.getRequestDetailsWithOptions(context.Background(), "gpt-5.2", false)
 	if errMsg != nil {
 		t.Fatalf("getRequestDetails error = %+v", errMsg)
 	}
@@ -223,7 +223,7 @@ func TestGetRequestDetails_NoGlobalOrKeyRouteUsesRegistry(t *testing.T) {
 
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
 	// No global router wired, no per-key route.
-	providers, _, errMsg := handler.getRequestDetails("gpt-5.2")
+	providers, _, errMsg := handler.getRequestDetailsWithOptions(context.Background(), "gpt-5.2", false)
 	if errMsg != nil {
 		t.Fatalf("getRequestDetails error = %+v", errMsg)
 	}

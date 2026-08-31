@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/errormessages"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 )
 
 // Context keys populated by the policy middleware so downstream handlers and
@@ -164,8 +165,9 @@ func PolicyMiddleware(svc policy.PolicyService) gin.HandlerFunc {
 // PolicyMiddleware stashed the principal's model_routes. Returns nil when no
 // policy/service is active, no routes are configured, or no route matches
 // modelID. A nil result means "use the registry default provider set".
-// The match is case-insensitive on the model id (routes are keyed on the bare
-// model id, without thinking suffix).
+// The match is case-insensitive on the canonical model id (thinking suffix
+// stripped on both sides, mirroring auth.canonicalModelKey), so a route saved
+// with a suffix still matches and a suffixed request still finds its route.
 func RouteForModel(c *gin.Context, modelID string) *store.ModelRoute {
 	if c == nil || modelID == "" {
 		return nil
@@ -178,10 +180,10 @@ func RouteForModel(c *gin.Context, modelID string) *store.ModelRoute {
 	if !ok {
 		return nil
 	}
-	target := strings.ToLower(strings.TrimSpace(modelID))
+	target := canonicalRouteModel(modelID)
 	for i := range routes {
-		r := &routes[i]
-		if strings.ToLower(strings.TrimSpace(r.Model)) == target {
+		if canonicalRouteModel(routes[i].Model) == target {
+			r := &routes[i]
 			if len(r.Providers) == 0 {
 				return nil
 			}
@@ -189,6 +191,22 @@ func RouteForModel(c *gin.Context, modelID string) *store.ModelRoute {
 		}
 	}
 	return nil
+}
+
+// canonicalRouteModel returns the lowercased, trimmed, thinking-suffix-stripped
+// form of a model id for per-key route matching. The two-line parse mirrors
+// auth.canonicalModelKey (which lives in package auth and is not importable
+// here without a dependency cycle).
+func canonicalRouteModel(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	parsed := thinking.ParseSuffix(model)
+	if modelName := strings.TrimSpace(parsed.ModelName); modelName != "" {
+		return strings.ToLower(modelName)
+	}
+	return strings.ToLower(model)
 }
 
 // RoutesForModel returns the pinned upstream providers for modelID from the gin

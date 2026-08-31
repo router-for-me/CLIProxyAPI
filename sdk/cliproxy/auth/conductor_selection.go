@@ -242,8 +242,16 @@ func (m *Manager) SetSelector(selector Selector) {
 		selector = &RoundRobinSelector{}
 	}
 	m.mu.Lock()
+	outgoing := m.selector
 	m.selector = selector
 	m.mu.Unlock()
+	// A swap replaces a resource-holding selector the manager owned (routing
+	// config changes build a fresh SessionAffinitySelector per update). Stop
+	// the outgoing one so its cache goroutine and map do not leak; a shared
+	// instance being re-assigned survives.
+	if outgoingAffinity, ok := outgoing.(*SessionAffinitySelector); ok && outgoingAffinity != selector {
+		outgoingAffinity.Stop()
+	}
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
@@ -1640,9 +1648,19 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	return authCopy, executor, providerKey, nil
 }
 
-func (m *Manager) pickNextMixedCompoundRoute(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+// pickNextMixedCompoundRoute tries the route's compound keys in order, rotating
+// the starting index per model when the per-model strategy is round-robin
+// ("failover"), so successive picks spread across the pinned rows. When the
+// strategy is fill-first ("priority") the rotation is pinned to index 0 and the
+// first route entry keeps serving, matching the non-compound scheduler path.
+func (m *Manager) pickNextMixedCompoundRoute(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, strategy schedulerStrategy) (*Auth, ProviderExecutor, string, error) {
+	startIndex := 0
+	if strategy == schedulerStrategyRoundRobin {
+		startIndex = m.nextCompoundRouteOffset(model, len(providers))
+	}
 	var lastRetryableErr error
-	for _, provider := range providers {
+	for offset := 0; offset < len(providers); offset++ {
+		provider := providers[(startIndex+offset)%len(providers)]
 		providerKey := strings.ToLower(strings.TrimSpace(provider))
 		if providerKey == "" {
 			continue
@@ -1670,6 +1688,27 @@ func (m *Manager) pickNextMixedCompoundRoute(ctx context.Context, providers []st
 	return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 }
 
+// nextCompoundRouteOffset returns the rotating start index for a compound-key
+// route under the failover (round-robin) strategy. The offset advances once per
+// successful pick so the next request starts at the following route entry.
+func (m *Manager) nextCompoundRouteOffset(model string, size int) int {
+	if m == nil || size <= 1 {
+		return 0
+	}
+	key := "compound-route:" + canonicalModelKey(model)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.providerOffsets == nil {
+		m.providerOffsets = make(map[string]int)
+	}
+	offset := m.providerOffsets[key]
+	if offset >= 2_147_483_640 {
+		offset = 0
+	}
+	m.providerOffsets[key] = offset + 1
+	return offset % size
+}
+
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
@@ -1692,7 +1731,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		// route keys one at a time; pickNextLegacy retains exact row matching.
 		routeStrategy := routeStrategyFromMetadata(opts.Metadata)
 		if routeStrategy == schedulerStrategyFillFirst || routeStrategy == schedulerStrategyRoundRobin {
-			return m.pickNextMixedCompoundRoute(ctx, providers, model, opts, tried)
+			return m.pickNextMixedCompoundRoute(ctx, providers, model, opts, tried, routeStrategy)
 		}
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}

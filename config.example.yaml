@@ -265,6 +265,20 @@ routing:
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
+  # Note on credential priority vs websocket transport (Codex/xai): when a
+  # downstream request arrives over websocket and the provider supports websocket
+  # transport, websocket-enabled credentials are preferred even when they sit in
+  # a lower priority tier than HTTP-only credentials. In other words, transport
+  # capability outranks priority for websocket requests; priority still decides
+  # among credentials of the same transport and for all non-websocket requests.
+  #
+  # Note on fill-first across multiple providers (a model served by more than one
+  # upstream): the provider try-order is taken from the registry's credential
+  # count — the provider with the most registered credentials is tried first —
+  # not from any route or priority ordering. Within one provider, fill-first
+  # drains credentials by priority as usual. To control cross-provider order
+  # explicitly, pin the model with a route (per-key model_routes or a Global
+  # Model route) carrying a "priority" strategy.
 
 # Codex provider behavior.
 codex:

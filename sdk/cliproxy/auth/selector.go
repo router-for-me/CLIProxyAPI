@@ -25,16 +25,60 @@ import (
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
 type RoundRobinSelector struct {
-	mu      sync.Mutex
-	cursors map[string]int
-	maxKeys int
+	mu       sync.Mutex
+	cursors  map[string]int
+	maxKeys  int
+	keyOrder boundedKeyTracker
 }
 
 // WeightedRoundRobinSelector provides smooth weighted round-robin selection.
 type WeightedRoundRobinSelector struct {
-	mu      sync.Mutex
-	states  map[string]*smoothWeightedState
-	maxKeys int
+	mu       sync.Mutex
+	states   map[string]*smoothWeightedState
+	maxKeys  int
+	keyOrder boundedKeyTracker
+}
+
+// boundedKeyTracker records the insertion order of a bounded map's keys so a
+// full map can evict its oldest keys in FIFO batches instead of being cleared
+// wholesale. It is not safe for concurrent use; callers hold the selector's
+// mutex. Re-inserting a known key is a no-op for ordering purposes, so a key
+// keeps its original position until it is actually evicted.
+type boundedKeyTracker struct {
+	order []string
+	pos   map[string]int
+}
+
+// touch records a key insertion and returns the keys to evict once the limit
+// is exceeded: enough of the oldest tracked keys to get back under the limit,
+// so live rotations keep their cursors and only one or two keys are dropped
+// per crossing instead of the whole map. Evicted keys are removed from the
+// tracker so later re-insertions are ordered fresh again.
+func (t *boundedKeyTracker) touch(key string, limit int) []string {
+	if t.pos == nil {
+		t.pos = make(map[string]int)
+	}
+	if _, exists := t.pos[key]; !exists {
+		t.pos[key] = len(t.order)
+		t.order = append(t.order, key)
+	}
+	if len(t.order) <= limit {
+		return nil
+	}
+	evictCount := len(t.order) - limit + 1
+	if evictCount <= 0 {
+		return nil
+	}
+	evicted := make([]string, 0, evictCount)
+	evicted = append(evicted, t.order[:evictCount]...)
+	t.order = append(t.order[:0], t.order[evictCount:]...)
+	for index, key := range t.order {
+		t.pos[key] = index
+	}
+	for _, key := range evicted {
+		delete(t.pos, key)
+	}
+	return evicted
 }
 
 type smoothWeightedState struct {
@@ -385,7 +429,12 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		limit = 4096
 	}
 
-	s.ensureCursorKey(key, limit)
+	// Crossing the key limit evicts the oldest half of the tracked keys in
+	// insertion order; live rotations keep their cursors instead of the whole
+	// map restarting at zero.
+	for _, evicted := range s.keyOrder.touch(key, limit) {
+		delete(s.cursors, evicted)
+	}
 	index := s.cursors[key]
 	if index >= 2_147_483_640 {
 		index = 0
@@ -393,14 +442,6 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	s.cursors[key] = index + 1
 	s.mu.Unlock()
 	return available[index%len(available)], nil
-}
-
-// ensureCursorKey ensures the cursor map has capacity for the given key.
-// Must be called with s.mu held.
-func (s *RoundRobinSelector) ensureCursorKey(key string, limit int) {
-	if _, ok := s.cursors[key]; !ok && len(s.cursors) >= limit {
-		s.cursors = make(map[string]int)
-	}
 }
 
 func positiveWeightAuths(auths []*Auth) []*Auth {
@@ -433,8 +474,11 @@ func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model s
 	if limit <= 0 {
 		limit = 4096
 	}
-	if _, ok := s.states[key]; !ok && len(s.states) >= limit {
-		s.states = make(map[string]*smoothWeightedState)
+	// Crossing the key limit evicts the oldest half of the tracked keys in
+	// insertion order; live smooth-WRR states survive instead of the whole
+	// map restarting.
+	for _, evicted := range s.keyOrder.touch(key, limit) {
+		delete(s.states, evicted)
 	}
 	state := s.states[key]
 	if state == nil {
@@ -480,36 +524,6 @@ func authWeightVector(auths []*Auth) map[string]int64 {
 		}
 	}
 	return weights
-}
-
-func pickSmoothWeightedAuth(auths []*Auth, current map[string]int64) *Auth {
-	active := make(map[string]struct{}, len(auths))
-	var picked *Auth
-	var pickedCurrent int64
-	var totalWeight int64
-	for _, auth := range auths {
-		weight := authWeight(auth)
-		if auth == nil || weight <= 0 {
-			continue
-		}
-		active[auth.ID] = struct{}{}
-		current[auth.ID] = saturatingAddInt64(current[auth.ID], weight)
-		totalWeight = saturatingAddInt64(totalWeight, weight)
-		if picked == nil || current[auth.ID] > pickedCurrent {
-			picked = auth
-			pickedCurrent = current[auth.ID]
-		}
-	}
-	for authID := range current {
-		if _, ok := active[authID]; !ok {
-			delete(current, authID)
-		}
-	}
-	if picked == nil {
-		return nil
-	}
-	current[picked.ID] = saturatingAddInt64(current[picked.ID], -totalWeight)
-	return picked
 }
 
 func saturatingAddInt64(value, delta int64) int64 {
@@ -677,10 +691,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 	fallbackAuths := highestPriorityAuths(available)
 
-	cacheKey := provider + "::" + primaryID + "::" + model
+	// Canonicalize the model so thinking suffixes (e.g. "model(high)" vs
+	// "model") resolve to one binding per session; splitAffinityKeyLocked
+	// splits on "::" and canonicalization never introduces one.
+	cacheKey := provider + "::" + primaryID + "::" + canonicalModelKey(model)
 	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey = provider + "::" + fallbackID + "::" + model
+		fallbackKey = provider + "::" + fallbackID + "::" + canonicalModelKey(model)
 	}
 	bind := func(authID string) {
 		if fallbackKey != "" {
@@ -725,6 +742,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return nil, err
 	}
 	bind(auth.ID)
+	entry.Debugf("session-affinity: cache miss, new binding | source=%s session=%s auth=%s provider=%s model=%s",
+		sessionIDSource(primaryID), truncateSessionID(primaryID), auth.ID, provider, model)
 	entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	return auth, nil
 }
@@ -745,6 +764,18 @@ func truncateSessionID(id string) string {
 		return id
 	}
 	return id[:8] + "..."
+}
+
+// sessionIDSource returns the signal class that produced a session ID (the
+// "claude:"/"codex:"/"msg:" prefix) so cache-miss logs show which extraction
+// level created each binding. The msg: fallback sharing one credential across
+// distinct sessions is a known hazard (audit P6); the source field lets an
+// operator quantify how much traffic actually lands on it.
+func sessionIDSource(id string) string {
+	if prefix, _, ok := strings.Cut(id, ":"); ok && prefix != "" {
+		return prefix
+	}
+	return "unknown"
 }
 
 // Stop releases resources held by the selector.
@@ -821,13 +852,16 @@ func sessionHeaderValue(headers http.Header, name string) string {
 //  3. Session-Id / Session_id (Codex and compatible clients)
 //  4. X-Session-ID
 //  5. X-Session-Affinity (OpenCode)
-//  6. X-Client-Request-Id (pi Responses)
-//  7. session_id / sessionId
-//  8. prompt_cache_key, with conversation / conversation.id as an alias
-//  9. metadata.user_id and conversation_id legacy body fields
-//  10. explicit execution session metadata
-//  11. stable context-derived session identity
-//  12. stable hash from initial message content
+//  6. session_id / sessionId
+//  7. prompt_cache_key, with conversation / conversation.id as an alias
+//  8. metadata.user_id and conversation_id legacy body fields
+//  9. explicit execution session metadata
+//  10. stable context-derived session identity
+//  11. stable hash from initial message content
+//
+// X-Client-Request-Id is deliberately NOT a session source: it identifies a
+// single request, so binding on it created one never-reused cache entry per
+// request (unbounded growth for a full TTL).
 func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
 	primary, _ := extractSessionIDs(headers, payload, metadata)
 	return primary
@@ -854,9 +888,6 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 	}
 	if sid := sessionHeaderValue(headers, "X-Session-Affinity"); sid != "" {
 		return "affinity:" + sid, ""
-	}
-	if sid := sessionHeaderValue(headers, "X-Client-Request-Id"); sid != "" {
-		return "clientreq:" + sid, ""
 	}
 
 	if len(payload) > 0 {

@@ -103,10 +103,10 @@ func TestResolveAutoRouterUnmatchedLeavesTierEmpty(t *testing.T) {
 
 // TestApplyAutoRouterRouteEnforcesPinEmptyIntersection verifies that when the
 // tier pin (route.Providers) shares zero providers with the computed execution
-// providers, the route is enforced strictly and the result is empty (signalling
-// an upstream "no pinned provider available" failure). The previous behaviour
-// silently fell back to the full computed providers list, which let requests
-// reach providers that were never pinned in the tier mapping.
+// providers, the route is enforced strictly: no providers are returned and an
+// explicit error names the model and the pinned providers. The previous
+// behaviour silently fell back to the full computed providers list, which let
+// requests reach providers that were never pinned in the tier mapping.
 func TestApplyAutoRouterRouteEnforcesPinEmptyIntersection(t *testing.T) {
 	h := &BaseAPIHandler{}
 	route := &autorouter.Resolved{
@@ -114,7 +114,10 @@ func TestApplyAutoRouterRouteEnforcesPinEmptyIntersection(t *testing.T) {
 		Providers: []string{"anthropic"},
 	}
 	computed := []string{"openai", "azure"}
-	got := h.applyAutoRouterRoute(context.Background(), computed, route)
+	got, errMsg := h.applyAutoRouterRoute(context.Background(), computed, route)
+	if errMsg == nil {
+		t.Fatalf("expected an explicit error when pin intersection is empty, got providers %v (pin=%v)", got, route.Providers)
+	}
 	if len(got) != 0 {
 		t.Fatalf("expected empty providers when pin intersection is empty, got %v (pin=%v)", got, route.Providers)
 	}
@@ -131,7 +134,10 @@ func TestApplyAutoRouterRouteEnforcesPinPartialIntersection(t *testing.T) {
 		Providers: []string{"anthropic"},
 	}
 	computed := []string{"openai", "anthropic", "azure"}
-	got := h.applyAutoRouterRoute(context.Background(), computed, route)
+	got, errMsg := h.applyAutoRouterRoute(context.Background(), computed, route)
+	if errMsg != nil {
+		t.Fatalf("unexpected error for a non-empty intersection: %v", errMsg.Error)
+	}
 	if len(got) != 1 || got[0] != "anthropic" {
 		t.Fatalf("expected only pinned provider, got %v (pin=%v)", got, route.Providers)
 	}
@@ -144,7 +150,10 @@ func TestApplyAutoRouterRouteNoPinReturnsComputed(t *testing.T) {
 	h := &BaseAPIHandler{}
 	route := &autorouter.Resolved{Model: "claude-opus-4-5"}
 	computed := []string{"openai", "azure"}
-	got := h.applyAutoRouterRoute(context.Background(), computed, route)
+	got, errMsg := h.applyAutoRouterRoute(context.Background(), computed, route)
+	if errMsg != nil {
+		t.Fatalf("unexpected error when no pin is set: %v", errMsg.Error)
+	}
 	if len(got) != 2 {
 		t.Fatalf("expected computed providers to pass through, got %v", got)
 	}

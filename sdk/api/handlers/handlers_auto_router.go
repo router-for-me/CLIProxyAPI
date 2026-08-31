@@ -2,9 +2,12 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -149,23 +152,27 @@ func (h *BaseAPIHandler) resolveAutoRouterModel(ctx context.Context, entryProtoc
 //
 // Behaviour matches the global/per-key route path (handlers_routing.go):
 //   - intersect the computed providers with the tier's pinned Providers;
-//   - when the intersection is empty, return an empty slice so the upstream
-//     dispatch fails fast with a clear "no pinned provider available" error
-//     instead of silently routing to a provider that was never pinned;
+//   - when the intersection is empty, return an explicit error naming the
+//     model and the pinned providers (same wording as the per-key route path)
+//     so the client sees a clear 503 instead of the generic provider_not_found
+//     that an empty provider list produces downstream;
 //   - when the tier strategy is "priority"/"failover", reorder by descending
 //     priority and stash the strategy so the conductor honours it.
-func (h *BaseAPIHandler) applyAutoRouterRoute(ctx context.Context, providers []string, route *autorouter.Resolved) []string {
+func (h *BaseAPIHandler) applyAutoRouterRoute(ctx context.Context, providers []string, route *autorouter.Resolved) ([]string, *interfaces.ErrorMessage) {
 	if route == nil || len(route.Providers) == 0 {
-		return providers
+		return providers, nil
 	}
 	filtered := intersectProviders(providers, route.Providers)
 	if len(filtered) == 0 {
 		// Pin is enforced strictly: returning the full computed list here would
 		// silently forward the request to a provider that was never pinned in
 		// the tier mapping, which is exactly what the operator's pin was meant
-		// to prevent. Surface the failure by handing back an empty slice so
-		// providersForExecution's caller treats it as "no provider available".
-		return nil
+		// to prevent. Surface the failure with the same diagnostic the per-key
+		// route path produces so operators see one consistent error.
+		return nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusServiceUnavailable,
+			Error:      fmt.Errorf("no available upstream for model %s on allowed providers %v", route.Model, route.Providers),
+		}
 	}
 	strategy := strings.ToLower(strings.TrimSpace(route.Strategy))
 	if strategy == "priority" || strategy == "failover" {
@@ -176,5 +183,5 @@ func (h *BaseAPIHandler) applyAutoRouterRoute(ctx context.Context, providers []s
 		filtered = orderProvidersByPriority(filtered, priorities)
 		stashRouteStrategy(ctx, strategy)
 	}
-	return filtered
+	return filtered, nil
 }

@@ -829,7 +829,8 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 	}
 	if preferWebsocket {
 		// When downstream is websocket and Codex supports websocket transport, prefer websocket-enabled
-		// credentials even if they are in a lower priority tier than HTTP-only credentials.
+		// credentials even if they are in a lower priority tier than HTTP-only credentials
+		// (documented for operators in config.example.yaml under the routing section).
 		for _, priority := range m.priorityOrder {
 			bucket := m.readyByPriority[priority]
 			if bucket == nil {
@@ -1072,6 +1073,23 @@ func (v *readyView) pickWeighted(predicate func(*scheduledAuth) bool) *scheduled
 	return pickSmoothWeightedScheduled(v.flat, v.weightedState.current, predicate)
 }
 
+// pickSmoothWeightedScheduled is the scheduler-side entry point over
+// []*scheduledAuth (see smooth_weighted.go for the shared algorithm).
+func pickSmoothWeightedScheduled(entries []*scheduledAuth, current map[string]int64, predicate func(*scheduledAuth) bool) *scheduledAuth {
+	wrapper := make([]scheduledSmoothWeighted, 0, len(entries))
+	for _, entry := range entries {
+		wrapper = append(wrapper, scheduledSmoothWeighted{entry: entry})
+	}
+	filter := func(candidate scheduledSmoothWeighted) bool {
+		return predicate == nil || predicate(candidate.entry)
+	}
+	picked := pickSmoothWeighted(wrapper, current, filter)
+	if picked.entry == nil {
+		return nil
+	}
+	return picked.entry
+}
+
 func scheduledWeightVector(entries []*scheduledAuth) map[string]int64 {
 	return scheduledWeightVectorMatching(entries, nil)
 }
@@ -1088,45 +1106,4 @@ func scheduledWeightVectorMatching(entries []*scheduledAuth, predicate func(*sch
 		weights[entry.auth.ID] = entry.meta.weight
 	}
 	return weights
-}
-
-func pickSmoothWeightedScheduled(entries []*scheduledAuth, current map[string]int64, predicate func(*scheduledAuth) bool) *scheduledAuth {
-	active := make(map[string]struct{}, len(entries))
-	for _, entry := range entries {
-		if entry == nil || entry.auth == nil || entry.meta == nil || entry.meta.weight <= 0 {
-			continue
-		}
-		if predicate != nil && !predicate(entry) {
-			continue
-		}
-		active[entry.auth.ID] = struct{}{}
-	}
-	for authID := range current {
-		if _, ok := active[authID]; !ok {
-			delete(current, authID)
-		}
-	}
-
-	var picked *scheduledAuth
-	var pickedCurrent int64
-	var totalWeight int64
-	for _, entry := range entries {
-		if entry == nil || entry.auth == nil || entry.meta == nil || entry.meta.weight <= 0 {
-			continue
-		}
-		if predicate != nil && !predicate(entry) {
-			continue
-		}
-		current[entry.auth.ID] = saturatingAddInt64(current[entry.auth.ID], entry.meta.weight)
-		totalWeight = saturatingAddInt64(totalWeight, entry.meta.weight)
-		if picked == nil || current[entry.auth.ID] > pickedCurrent {
-			picked = entry
-			pickedCurrent = current[entry.auth.ID]
-		}
-	}
-	if picked == nil {
-		return nil
-	}
-	current[picked.auth.ID] = saturatingAddInt64(current[picked.auth.ID], -totalWeight)
-	return picked
 }

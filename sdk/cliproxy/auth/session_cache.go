@@ -7,13 +7,25 @@ import (
 	"time"
 )
 
-const maxStableSessionAliases = 64
+const (
+	maxStableSessionAliases = 64
+
+	// maxSessionCacheEntries bounds the total number of cache keys. The alias
+	// cap above limits aliases per logical session, not sessions; without an
+	// entry bound, any per-request-ish session signal would grow the cache by
+	// one entry per request for a full TTL.
+	maxSessionCacheEntries = 10000
+)
 
 // sessionEntry stores an auth binding, its identifier aliases, and expiration.
 type sessionEntry struct {
 	authID    string
 	expiresAt time.Time
 	aliases   []string
+	// lastTouched preserves insertion/refresh order for drop-oldest eviction
+	// when the entry bound is exceeded. Aliases within one group share the
+	// value, so the group is evicted as a unit.
+	lastTouched time.Time
 }
 
 // SessionAffinityBinding is a safe, anonymized projection of one cache entry.
@@ -100,8 +112,22 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 	}
 
 	aliases := compactSessionAliases(mergeSessionAliases([]string{sessionID}, entry.aliases...))
-	c.replaceAliasGroupsLocked(entry.authID, now.Add(c.ttl), aliases, entry)
+	refreshed := sessionEntry{authID: entry.authID, expiresAt: now.Add(c.ttl), aliases: aliases, lastTouched: now}
+	c.replaceAliasGroupsLocked(refreshed, refreshed, entry)
 	return entry.authID, true
+}
+
+// replaceAliasGroupsLocked writes one alias group and enforces the entry
+// bound. previousGroups are removed first so a refreshed binding replaces
+// its stale copies instead of duplicating them.
+func (c *SessionCache) replaceAliasGroupsLocked(entry sessionEntry, previousGroups ...sessionEntry) {
+	for _, previous := range previousGroups {
+		c.removeAliasGroupLocked(previous)
+	}
+	for _, alias := range entry.aliases {
+		c.entries[alias] = entry
+	}
+	c.evictLocked(entry)
 }
 
 // Set binds a session to an auth ID with TTL refresh. Existing aliases for the
@@ -137,16 +163,59 @@ func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 	if len(aliases) == 0 {
 		return
 	}
-	c.replaceAliasGroupsLocked(authID, now.Add(c.ttl), aliases, previousGroups...)
+	entry := sessionEntry{authID: authID, expiresAt: now.Add(c.ttl), aliases: aliases, lastTouched: now}
+	c.replaceAliasGroupsLocked(entry, previousGroups...)
 }
 
-func (c *SessionCache) replaceAliasGroupsLocked(authID string, expiresAt time.Time, aliases []string, previousGroups ...sessionEntry) {
-	for _, previous := range previousGroups {
-		c.removeAliasGroupLocked(previous)
+// evictLocked enforces the entry bound after an insert. keep is the group the
+// caller just inserted or refreshed — it is never a candidate for eviction in
+// this pass. Expired entries are reclaimed first; if the cap is still
+// exceeded, the least recently touched alias groups are dropped until the
+// cache is back under the low-water mark (90% of the cap), so the O(n log n)
+// selection runs once per ~10% overshoot rather than on every insert.
+func (c *SessionCache) evictLocked(keep sessionEntry) {
+	if len(c.entries) <= maxSessionCacheEntries {
+		return
 	}
-	entry := sessionEntry{authID: authID, expiresAt: expiresAt, aliases: aliases}
-	for _, alias := range aliases {
-		c.entries[alias] = entry
+	now := time.Now()
+	for key, entry := range c.entries {
+		if entry.authID == keep.authID && entry.expiresAt.Equal(keep.expiresAt) && equalSessionAliases(entry.aliases, keep.aliases) {
+			continue
+		}
+		if !now.Before(entry.expiresAt) {
+			delete(c.entries, key)
+		}
+	}
+	if len(c.entries) <= maxSessionCacheEntries {
+		return
+	}
+	lowWaterMark := maxSessionCacheEntries * 9 / 10
+	over := len(c.entries) - lowWaterMark
+	groups := make([]sessionEntry, 0, len(c.entries))
+	seen := make(map[string]struct{}, len(c.entries))
+	for _, entry := range c.entries {
+		if len(entry.aliases) == 0 {
+			continue
+		}
+		// Aliases within one group are identical entries; the first alias
+		// identifies the group. sessionEntry holds a slice so it cannot be a
+		// map key itself.
+		if _, dup := seen[entry.aliases[0]]; dup {
+			continue
+		}
+		seen[entry.aliases[0]] = struct{}{}
+		groups = append(groups, entry)
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].lastTouched.Before(groups[j].lastTouched) })
+	for _, group := range groups {
+		if over <= 0 {
+			return
+		}
+		if group.authID == keep.authID && group.expiresAt.Equal(keep.expiresAt) && equalSessionAliases(group.aliases, keep.aliases) {
+			continue
+		}
+		c.removeAliasGroupLocked(group)
+		over -= len(group.aliases)
 	}
 }
 

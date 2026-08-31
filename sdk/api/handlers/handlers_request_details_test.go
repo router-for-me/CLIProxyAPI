@@ -106,7 +106,7 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			providers, model, errMsg := handler.getRequestDetails(tt.inputModel)
+			providers, model, errMsg := handler.getRequestDetailsWithOptions(context.Background(), tt.inputModel, false)
 			if (errMsg != nil) != tt.wantErr {
 				t.Fatalf("getRequestDetails() error = %v, wantErr %v", errMsg, tt.wantErr)
 			}
@@ -139,7 +139,7 @@ func TestGetRequestDetails_UnknownModelErrorResistsJSONInjection(t *testing.T) {
 		"foo\nbar",
 	} {
 		t.Run(model, func(t *testing.T) {
-			_, _, errMsg := handler.getRequestDetails(model)
+			_, _, errMsg := handler.getRequestDetailsWithOptions(context.Background(), model, false)
 			if errMsg == nil || errMsg.Error == nil {
 				t.Fatal("expected an error for an unroutable model")
 			}
@@ -174,7 +174,7 @@ func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 	}
 	for _, model := range imageOnlyModels {
 		t.Run(model, func(t *testing.T) {
-			_, _, errMsg := handler.getRequestDetails(model)
+			_, _, errMsg := handler.getRequestDetailsWithOptions(context.Background(), model, false)
 			if errMsg == nil {
 				t.Fatalf("expected error for %s, got nil", model)
 			}

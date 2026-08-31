@@ -268,7 +268,15 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return nil, nil, errChan
 	}
 	if autoRoute != nil {
-		providers = h.applyAutoRouterRoute(ctx, providers, autoRoute)
+		var routeErr *interfaces.ErrorMessage
+		providers, routeErr = h.applyAutoRouterRoute(ctx, providers, autoRoute)
+		if routeErr != nil {
+			recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, routeErr)
+			errChan := make(chan *interfaces.ErrorMessage, 1)
+			errChan <- routeErr
+			close(errChan)
+			return nil, nil, errChan
+		}
 	}
 	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
 	reqMeta := requestExecutionMetadata(ctx)

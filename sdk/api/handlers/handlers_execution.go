@@ -120,7 +120,12 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		return nil, nil, errMsg
 	}
 	if autoRoute != nil {
-		providers = h.applyAutoRouterRoute(ctx, providers, autoRoute)
+		var routeErr *interfaces.ErrorMessage
+		providers, routeErr = h.applyAutoRouterRoute(ctx, providers, autoRoute)
+		if routeErr != nil {
+			recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, routeErr)
+			return nil, nil, routeErr
+		}
 	}
 	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
 	reqMeta := requestExecutionMetadata(ctx)
@@ -214,7 +219,12 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 		return nil, nil, errMsg
 	}
 	if autoRoute != nil {
-		providers = h.applyAutoRouterRoute(ctx, providers, autoRoute)
+		var routeErr *interfaces.ErrorMessage
+		providers, routeErr = h.applyAutoRouterRoute(ctx, providers, autoRoute)
+		if routeErr != nil {
+			recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, normalizedModel, routeErr)
+			return nil, nil, routeErr
+		}
 	}
 	providers = adjustExecutionProvidersForEntryProtocol(handlerType, providers)
 	reqMeta := requestExecutionMetadata(ctx)

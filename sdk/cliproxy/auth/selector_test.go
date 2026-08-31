@@ -1019,11 +1019,14 @@ func TestExtractSessionID_CodexSessionIDHeader(t *testing.T) {
 func TestExtractSessionID_ClientRequestIDHeader(t *testing.T) {
 	t.Parallel()
 
+	// A request id is not a session id: it must not produce an affinity
+	// binding (see TestExtractSessionID_ClientRequestIDIsNotASession for the
+	// full rationale — per-request bindings grew the cache without bound).
 	headers := make(http.Header)
 	headers.Set("X-Client-Request-Id", "pi-session-123")
 
 	got := ExtractSessionID(headers, nil, nil)
-	want := "clientreq:pi-session-123"
+	want := ""
 	if got != want {
 		t.Errorf("ExtractSessionID() with X-Client-Request-Id = %q, want %q", got, want)
 	}
@@ -1994,12 +1997,12 @@ func TestExtractSessionIDNativeSignalPriority(t *testing.T) {
 			want:    "pck:shared-cache-bucket",
 		},
 		{
-			name: "client request id beats body fallbacks",
+			name: "body session signals beat per-request id header",
 			headers: http.Header{
 				"X-Client-Request-Id": []string{"client-session"},
 			},
 			payload: `{"prompt_cache_key":"prompt-session","conversation":{"id":"conversation-session"}}`,
-			want:    "clientreq:client-session",
+			want:    "pck:prompt-session",
 		},
 	}
 

@@ -63,13 +63,19 @@ func resolveWithRand(tier Tier, c *Config, rng *rand.Rand) (*Resolved, bool) {
 			}
 		}
 	}
-	// No deliberate mapping matched: fall back to the first resolvable mapping
-	// (acts as the router default target).
-	for i := range c.Mappings {
-		if targets := mappingTargets(&c.Mappings[i]); len(targets) > 0 {
-			resolved := resolvedFromMapping(&c.Mappings[i], targets, rng)
+	// No deliberate mapping matched: fall back to the router default — the
+	// lowest resolvable tier in TierOrder (cheapest first), NOT operator input
+	// order, so a config that lists reasoning before simple does not send
+	// every request to the reasoning model.
+	for _, t := range TierOrder {
+		m := c.mappingFor(t)
+		if m == nil {
+			continue
+		}
+		if targets := mappingTargets(m); len(targets) > 0 {
+			resolved := resolvedFromMapping(m, targets, rng)
 			if resolved != nil {
-				resolved.MappingTier = c.Mappings[i].Tier
+				resolved.MappingTier = t
 				resolved.FallbackChain = append([]Tier(nil), chain...)
 			}
 			return resolved, resolved != nil

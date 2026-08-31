@@ -51,7 +51,13 @@ func preferExecutionProvider(providers []string, preferred string) []string {
 			break
 		}
 	}
-	if preferredIndex <= 0 {
+	// Two distinct no-op cases, kept separate so a future edit cannot flip one
+	// into the other: -1 means the preferred provider is not in the list at
+	// all (nothing to reorder), 0 means it is already first (no rotation needed).
+	if preferredIndex == -1 {
+		return providers
+	}
+	if preferredIndex == 0 {
 		return providers
 	}
 	out := make([]string, 0, len(providers))
@@ -101,8 +107,29 @@ func excludeExecutionProvider(providers []string, excluded string) []string {
 	return out
 }
 
-func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
-	return h.getRequestDetailsWithOptions(context.Background(), modelName, false)
+// applyPinnedRoute intersects providers against a pinned route's provider set
+// (empty intersection is a hard 503) and applies the route's strategy ordering
+// when one is configured ("priority" reorders by descending priority, "failover"
+// reorders and stashes the strategy so the conductor uses its cross-provider
+// failover loop). Shared by the Global Model route and the per-API-key route
+// so both pin with identical mechanics.
+func applyPinnedRoute(ctx context.Context, providers []string, modelName string, route *store.ModelRoute) ([]string, *interfaces.ErrorMessage) {
+	if route == nil {
+		return providers, nil
+	}
+	filtered := intersectProviders(providers, route.Providers)
+	if len(filtered) == 0 {
+		return nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusServiceUnavailable,
+			Error:      fmt.Errorf("no available upstream for model %s on allowed providers %v", modelName, route.Providers),
+		}
+	}
+	strategy := strings.ToLower(strings.TrimSpace(route.Strategy))
+	if strategy == "priority" || strategy == "failover" {
+		filtered = orderProvidersByPriority(filtered, route.Priorities)
+		stashRouteStrategy(ctx, strategy)
+	}
+	return filtered, nil
 }
 
 func validateNativeInteractionsExecution(entryProtocol string, execOptions modelExecutionOptions, routeDecision modelRouteDecision) *interfaces.ErrorMessage {
@@ -347,19 +374,11 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(ctx context.Context, model
 	// model pinned inside a group.
 	if h != nil && h.GlobalModelRouter != nil {
 		if route := h.GlobalModelRouter.GlobalModelRoute(ctx, baseModel); route != nil {
-			filtered := intersectProviders(providers, route.Providers)
-			if len(filtered) == 0 {
-				return nil, "", &interfaces.ErrorMessage{
-					StatusCode: http.StatusServiceUnavailable,
-					Error:      fmt.Errorf("no available upstream for model %s on allowed providers %v", modelName, route.Providers),
-				}
+			filtered, errMsg := applyPinnedRoute(ctx, providers, modelName, route)
+			if errMsg != nil {
+				return nil, "", errMsg
 			}
 			providers = filtered
-			strategy := strings.ToLower(strings.TrimSpace(route.Strategy))
-			if strategy == "priority" || strategy == "failover" {
-				providers = orderProvidersByPriority(providers, route.Priorities)
-				stashRouteStrategy(ctx, strategy)
-			}
 		}
 	}
 
@@ -374,19 +393,11 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(ctx context.Context, model
 	// provider (priority) or relies on its cross-provider failover loop (failover).
 	// An empty strategy inherits the global routing.strategy unchanged.
 	if route := policyRouteForModel(ctx, baseModel); route != nil {
-		filtered := intersectProviders(registryProviders, route.Providers)
-		if len(filtered) == 0 {
-			return nil, "", &interfaces.ErrorMessage{
-				StatusCode: http.StatusServiceUnavailable,
-				Error:      fmt.Errorf("no available upstream for model %s on allowed providers %v", modelName, route.Providers),
-			}
+		filtered, errMsg := applyPinnedRoute(ctx, registryProviders, modelName, route)
+		if errMsg != nil {
+			return nil, "", errMsg
 		}
 		providers = filtered
-		strategy := strings.ToLower(strings.TrimSpace(route.Strategy))
-		if strategy == "priority" || strategy == "failover" {
-			providers = orderProvidersByPriority(providers, route.Priorities)
-			stashRouteStrategy(ctx, strategy)
-		}
 	}
 
 	// The thinking suffix is preserved in the model name itself, so no

@@ -14,6 +14,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 )
 
 // pgNotConfigured is the canonical response when a management route requires
@@ -452,15 +453,25 @@ func validateModelRoutes(p store.Policy) string {
 // (where there is no Policy carrier) and by PUT /policy when a model_group_id
 // is attached (the group fills model_routes at enforcement time, so the policy
 // payload may legitimately carry no routes of its own).
+//
+// Model ids are canonicalized in place (thinking suffix stripped, mirroring
+// how requests match routes at enforcement time) so a route saved as
+// "model(high)" persists as "model" and actually matches.
 func validateModelRoutesFor(allowedModels []string, routes []store.ModelRoute) string {
 	if len(routes) == 0 {
 		return ""
 	}
 	seen := make(map[string]struct{}, len(routes))
-	for _, r := range routes {
+	for i := range routes {
+		r := &routes[i]
 		model := strings.TrimSpace(r.Model)
 		if model == "" {
 			return "model_routes: entry with empty model is not allowed"
+		}
+		if canonical := canonicalRouteModelID(model); canonical != model {
+			log.Debugf("model_routes: model id %q canonicalized to %q on save", model, canonical)
+			model = canonical
+			r.Model = canonical
 		}
 		if len(r.Providers) == 0 && r.Strategy == "" && r.RPMLimit == nil && r.MaxBudgetUSD == nil {
 			return fmt.Sprintf("model_routes: route for %q must list at least one provider", model)
@@ -500,6 +511,22 @@ func validateModelRoutesFor(allowedModels []string, routes []store.ModelRoute) s
 		}
 	}
 	return ""
+}
+
+// canonicalRouteModelID strips a thinking suffix (e.g. "(high)") from a model
+// id so stored route rows match the suffix-stripped ids used at enforcement
+// time. It mirrors auth.canonicalModelKey / middleware.canonicalRouteModel
+// (kept local per package to avoid a dependency on sdk/cliproxy/auth).
+func canonicalRouteModelID(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	parsed := thinking.ParseSuffix(model)
+	if modelName := strings.TrimSpace(parsed.ModelName); modelName != "" {
+		return modelName
+	}
+	return model
 }
 
 // PutPGAPIKeyPolicy handles PUT /v0/management/api-keys-pg/:id/policy.
