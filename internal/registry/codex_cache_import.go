@@ -124,12 +124,23 @@ func importCodexCacheSlugs(data *staticModelsJSON, cachePath string) []string {
 	return added
 }
 
+var codexRequestReasoningLevels = map[string]bool{
+	"minimal": true,
+	"low":     true,
+	"medium":  true,
+	"high":    true,
+	"xhigh":   true,
+	"max":     true,
+}
+
 func cacheReasoningLevels(raw []codexCacheReasoningLevel) []string {
 	seen := make(map[string]bool)
 	levels := make([]string, 0, len(raw))
 	for _, level := range raw {
-		effort := strings.TrimSpace(level.Effort)
-		if effort == "" || seen[effort] {
+		effort := strings.ToLower(strings.TrimSpace(level.Effort))
+		// Cache metadata may lead the request API (for example `ultra`).
+		// Publish only levels accepted by internal/thinking's canonical parser.
+		if !codexRequestReasoningLevels[effort] || seen[effort] {
 			continue
 		}
 		seen[effort] = true

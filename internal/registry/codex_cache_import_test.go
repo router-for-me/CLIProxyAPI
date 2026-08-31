@@ -30,7 +30,7 @@ func TestImportCodexCacheSlugs(t *testing.T) {
 	path := filepath.Join(dir, "models_cache.json")
 	payload, err := json.Marshal(map[string]any{
 		"models": []map[string]any{
-			{"slug": "gpt-daybreak-blue-latest", "display_name": "GPT Daybreak Blue", "visibility": "list", "supported_in_api": true, "supported_reasoning_levels": []map[string]any{{"effort": "medium"}, {"effort": "xhigh"}}},
+			{"slug": "gpt-daybreak-blue-latest", "display_name": "GPT Daybreak Blue", "visibility": "list", "supported_in_api": true, "supported_reasoning_levels": []map[string]any{{"effort": "medium"}, {"effort": "xhigh"}, {"effort": "ultra"}}},
 			{"slug": "gpt-5.5"},
 			{"slug": "hidden-slot", "visibility": "hide", "supported_in_api": true},
 			{"slug": "noapi-slot", "supported_in_api": false},
