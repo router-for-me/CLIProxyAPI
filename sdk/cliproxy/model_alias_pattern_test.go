@@ -76,3 +76,61 @@ func TestCollectModelAliasPatterns_NoWildcards(t *testing.T) {
 		t.Errorf("patterns = %+v, want nil when no wildcard alias is configured", patterns)
 	}
 }
+
+func TestCollectModelAliasPatterns_TargetFollowsTheExactAliasThatReplacedIt(t *testing.T) {
+	t.Parallel()
+
+	// The exact alias removes "gpt-5.6-luna" from the catalog because it does not set
+	// fork, so the wildcard has to target the surviving id or it can never route.
+	patterns := collectModelAliasPatterns(map[string][]config.OAuthModelAlias{
+		"codex": {
+			{Name: "gpt-5.6-luna", Alias: "claude-haiku-4-5-*"},
+			{Name: "gpt-5.6-luna", Alias: "my-friendly-name"},
+		},
+	})
+
+	if len(patterns) != 1 {
+		t.Fatalf("pattern count = %d, want 1", len(patterns))
+	}
+	if patterns[0].Target != "my-friendly-name" {
+		t.Errorf("target = %q, want the published alias id", patterns[0].Target)
+	}
+}
+
+func TestCollectModelAliasPatterns_ForkKeepsTheUpstreamTarget(t *testing.T) {
+	t.Parallel()
+
+	patterns := collectModelAliasPatterns(map[string][]config.OAuthModelAlias{
+		"codex": {
+			{Name: "gpt-5.6-luna", Alias: "claude-haiku-4-5-*"},
+			{Name: "gpt-5.6-luna", Alias: "my-friendly-name", Fork: true},
+		},
+	})
+
+	if len(patterns) != 1 {
+		t.Fatalf("pattern count = %d, want 1", len(patterns))
+	}
+	if patterns[0].Target != "gpt-5.6-luna" {
+		t.Errorf("target = %q, want the upstream model kept by fork", patterns[0].Target)
+	}
+}
+
+func TestCollectModelAliasPatterns_TargetMatchesTheAppliedCatalog(t *testing.T) {
+	t.Parallel()
+
+	// Guard the two halves against drifting apart: whatever id the catalog ends up
+	// publishing for the upstream model must be the id the pattern targets.
+	aliases := []config.OAuthModelAlias{
+		{Name: "gpt-5.6-luna", Alias: "claude-haiku-4-5-*"},
+		{Name: "gpt-5.6-luna", Alias: "my-friendly-name"},
+	}
+	published := applyOAuthModelAliasEntries(aliases, []*ModelInfo{{ID: "gpt-5.6-luna"}})
+	patterns := collectModelAliasPatterns(map[string][]config.OAuthModelAlias{"codex": aliases})
+
+	if len(published) != 1 || len(patterns) != 1 {
+		t.Fatalf("published = %d models, patterns = %d, want 1 each", len(published), len(patterns))
+	}
+	if published[0].ID != patterns[0].Target {
+		t.Errorf("catalog id = %q but pattern target = %q", published[0].ID, patterns[0].Target)
+	}
+}

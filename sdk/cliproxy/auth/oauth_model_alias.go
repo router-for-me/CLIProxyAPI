@@ -3,10 +3,12 @@ package auth
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	log "github.com/sirupsen/logrus"
 )
 
 const oauthModelAliasesAttributeKey = "model_aliases"
@@ -347,6 +349,7 @@ func SetOAuthModelAliasesAttribute(auth *Auth, aliases []internalconfig.OAuthMod
 	if len(aliases) == 0 {
 		return
 	}
+	warnUnroutablePerAuthWildcardAliases(auth, aliases)
 	data, errMarshal := json.Marshal(aliases)
 	if errMarshal != nil {
 		return
@@ -425,7 +428,15 @@ func resolveUpstreamModelFromAliases(aliases []internalconfig.OAuthModelAlias, r
 				} else if !registry.MatchModelPattern(alias, key) {
 					continue
 				}
-				if result, stop := oauthModelAliasResultFor(entry.Name, alias, entry.ForceMapping, requestedModel, baseModel, requestResult); stop {
+				// A wildcard alias is a pattern, not a client-visible model id, so a
+				// force-mapped response must echo the concrete model the client asked
+				// for rather than the configured pattern. The thinking suffix is
+				// dropped the same way an exact alias never carries one.
+				responseAlias := alias
+				if !exactPass {
+					responseAlias = baseModel
+				}
+				if result, stop := oauthModelAliasResultFor(entry.Name, responseAlias, entry.ForceMapping, requestedModel, baseModel, requestResult); stop {
 					return result
 				}
 			}
@@ -495,7 +506,10 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 			if !registry.MatchModelPattern(wildcard.pattern, value) {
 				continue
 			}
-			if result, stop := oauthModelAliasResultFor(wildcard.entry.upstreamModel, wildcard.entry.configAlias, wildcard.entry.forceMapping, requestedModel, baseModel, requestResult); stop {
+			// The configured alias is a pattern here, so a force-mapped response echoes
+			// the concrete requested model instead of the pattern itself. The thinking
+			// suffix is dropped the same way an exact alias never carries one.
+			if result, stop := oauthModelAliasResultFor(wildcard.entry.upstreamModel, baseModel, wildcard.entry.forceMapping, requestedModel, baseModel, requestResult); stop {
 				return result
 			}
 		}
@@ -552,4 +566,39 @@ func normalizeOAuthModelAliasAuthKind(authKind string) string {
 	default:
 		return authKind
 	}
+}
+
+// warnedPerAuthWildcardAliases remembers the pattern list already reported for an
+// auth ID. Auth files are re-synthesized on every watcher event, including the
+// rewrite that follows a token refresh, so without this the warning would repeat on
+// every reload for the lifetime of the process.
+var warnedPerAuthWildcardAliases sync.Map // auth ID -> joined pattern list
+
+// warnUnroutablePerAuthWildcardAliases reports per-auth wildcard aliases that the
+// handler-level provider lookup cannot see.
+//
+// Only the global oauth-model-alias configuration feeds the registry pattern table,
+// so a wildcard declared in an auth file resolves once a credential is selected but
+// never makes the matching model routable on its own. Saying so keeps the gap
+// visible instead of surfacing as an opaque model_not_found.
+func warnUnroutablePerAuthWildcardAliases(auth *Auth, aliases []internalconfig.OAuthModelAlias) {
+	if auth == nil {
+		return
+	}
+	patterns := make([]string, 0, len(aliases))
+	for _, entry := range aliases {
+		alias := strings.TrimSpace(entry.Alias)
+		if alias != "" && strings.Contains(alias, "*") {
+			patterns = append(patterns, alias)
+		}
+	}
+	if len(patterns) == 0 {
+		return
+	}
+	joined := strings.Join(patterns, ",")
+	if previous, reported := warnedPerAuthWildcardAliases.Load(auth.ID); reported && previous == joined {
+		return
+	}
+	warnedPerAuthWildcardAliases.Store(auth.ID, joined)
+	log.Warnf("auth %s: per-auth wildcard model aliases %v are not published for routing; declare them under oauth-model-alias so requests matching the pattern can reach a provider", auth.ID, patterns)
 }

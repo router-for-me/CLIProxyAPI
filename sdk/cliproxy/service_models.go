@@ -1060,9 +1060,10 @@ func collectModelAliasPatterns(aliases map[string][]config.OAuthModelAlias) []re
 	}
 	sort.Strings(channels)
 
-	out := make([]registry.ModelAliasPattern, 0)
+	var out []registry.ModelAliasPattern
 	for _, channel := range channels {
-		for _, entry := range aliases[channel] {
+		entries := aliases[channel]
+		for _, entry := range entries {
 			name := strings.TrimSpace(entry.Name)
 			alias := strings.TrimSpace(entry.Alias)
 			if name == "" || alias == "" {
@@ -1071,13 +1072,46 @@ func collectModelAliasPatterns(aliases map[string][]config.OAuthModelAlias) []re
 			if !strings.Contains(alias, "*") {
 				continue
 			}
-			out = append(out, registry.ModelAliasPattern{Pattern: alias, Target: name})
+			out = append(out, registry.ModelAliasPattern{
+				Pattern: alias,
+				Target:  catalogModelIDForAliasTarget(entries, name),
+			})
 		}
 	}
-	if len(out) == 0 {
-		return nil
-	}
 	return out
+}
+
+// catalogModelIDForAliasTarget returns the model id the registry actually holds for
+// an upstream model name inside one alias channel.
+//
+// applyOAuthModelAliasEntries drops the upstream model from the published catalog
+// when the channel also maps it to exact aliases and none of them sets fork. A
+// wildcard whose target is that model must therefore point at a surviving alias id,
+// otherwise the registry lookup misses and the pattern silently never routes.
+func catalogModelIDForAliasTarget(entries []config.OAuthModelAlias, name string) string {
+	replacement := ""
+	for _, entry := range entries {
+		entryName := strings.TrimSpace(entry.Name)
+		alias := strings.TrimSpace(entry.Alias)
+		if entryName == "" || alias == "" || !strings.EqualFold(entryName, name) {
+			continue
+		}
+		// Mirror the skips applyOAuthModelAliasEntries performs before it reads fork.
+		if strings.EqualFold(entryName, alias) || strings.Contains(alias, "*") {
+			continue
+		}
+		if entry.Fork {
+			// The upstream model keeps its own catalog entry.
+			return name
+		}
+		if replacement == "" {
+			replacement = alias
+		}
+	}
+	if replacement == "" {
+		return name
+	}
+	return replacement
 }
 
 // applyModelAliasPatterns publishes wildcard alias patterns to the global model

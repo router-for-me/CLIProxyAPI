@@ -1342,17 +1342,23 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	defer r.mutex.RUnlock()
 
 	registration, exists := r.models[modelID]
-	if !exists || registration == nil || len(registration.Providers) == 0 {
-		// A wildcard OAuth model alias never registers a model of its own, so fall
-		// back to the pattern table and report the providers of its target model.
+	if !exists || registration == nil {
+		// A wildcard OAuth model alias never registers a model of its own, so an
+		// unknown id falls back to the pattern table and reports the providers of its
+		// target model. A registered id is never redirected this way, not even while
+		// it temporarily has no providers, so the fallback cannot shadow a model the
+		// operator registered on purpose.
 		target := r.resolveModelAliasPatternLocked(modelID)
 		if target == "" {
 			return nil
 		}
-		registration, exists = r.models[target]
-		if !exists || registration == nil || len(registration.Providers) == 0 {
+		registration = r.modelRegistrationForTargetLocked(target)
+		if registration == nil {
 			return nil
 		}
+	}
+	if len(registration.Providers) == 0 {
+		return nil
 	}
 
 	type providerCount struct {

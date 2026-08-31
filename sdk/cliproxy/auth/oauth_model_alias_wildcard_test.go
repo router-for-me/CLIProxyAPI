@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"strings"
 	"testing"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -174,5 +175,118 @@ func TestApplyOAuthModelAliasWithResult_WildcardForceMappingUsesRequestedModel(t
 	}
 	if result.OriginalAlias != "claude-haiku-4-5-20251001" {
 		t.Errorf("OriginalAlias = %q, want the requested model", result.OriginalAlias)
+	}
+}
+
+func TestApplyOAuthModelAliasWithResult_WildcardForceMappingEchoesRequestedModel(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{Name: "gpt-5.6-luna", Alias: "claude-haiku-4-5-*", ForceMapping: true}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	auth := &Auth{ID: "test-auth-id", Provider: "codex"}
+
+	result := mgr.applyOAuthModelAliasWithResult(auth, "claude-haiku-4-5-20251001")
+	if result.UpstreamModel != "gpt-5.6-luna" {
+		t.Errorf("UpstreamModel = %q, want %q", result.UpstreamModel, "gpt-5.6-luna")
+	}
+	if !result.ForceMapping {
+		t.Errorf("ForceMapping = false, want true")
+	}
+	// The pattern is not a model id, so it must never reach a response model field.
+	if result.OriginalAlias != "claude-haiku-4-5-20251001" {
+		t.Errorf("OriginalAlias = %q, want the concrete requested model", result.OriginalAlias)
+	}
+	if strings.Contains(result.OriginalAlias, "*") {
+		t.Errorf("OriginalAlias = %q, must not contain the wildcard pattern", result.OriginalAlias)
+	}
+}
+
+func TestApplyOAuthModelAliasWithResult_PerAuthWildcardForceMappingEchoesRequestedModel(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+
+	auth := &Auth{ID: "test-auth-id", Provider: "codex"}
+	SetOAuthModelAliasesAttribute(auth, []internalconfig.OAuthModelAlias{
+		{Name: "gpt-5.6-luna", Alias: "claude-haiku-4-5-*", ForceMapping: true},
+	})
+
+	result := mgr.applyOAuthModelAliasWithResult(auth, "claude-haiku-4-5-20251001")
+	if result.UpstreamModel != "gpt-5.6-luna" {
+		t.Errorf("UpstreamModel = %q, want %q", result.UpstreamModel, "gpt-5.6-luna")
+	}
+	if result.OriginalAlias != "claude-haiku-4-5-20251001" {
+		t.Errorf("OriginalAlias = %q, want the concrete requested model", result.OriginalAlias)
+	}
+}
+
+func TestApplyOAuthModelAliasWithResult_ExactForceMappingStillUsesConfiguredAlias(t *testing.T) {
+	t.Parallel()
+
+	// The wildcard fix must not change how an exact alias reports itself.
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{Name: "gpt-5.6-luna", Alias: "claude-haiku-4-5-20251001", ForceMapping: true}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	auth := &Auth{ID: "test-auth-id", Provider: "codex"}
+
+	result := mgr.applyOAuthModelAliasWithResult(auth, "claude-haiku-4-5-20251001")
+	if result.OriginalAlias != "claude-haiku-4-5-20251001" {
+		t.Errorf("OriginalAlias = %q, want the configured alias", result.OriginalAlias)
+	}
+}
+
+func TestApplyOAuthModelAliasWithResult_WildcardForceMappingDropsThinkingSuffix(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{Name: "gpt-5.6-luna", Alias: "claude-haiku-4-5-*", ForceMapping: true}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	auth := &Auth{ID: "test-auth-id", Provider: "codex"}
+
+	result := mgr.applyOAuthModelAliasWithResult(auth, "claude-haiku-4-5-20251001(high)")
+	if result.UpstreamModel != "gpt-5.6-luna(high)" {
+		t.Errorf("UpstreamModel = %q, want %q", result.UpstreamModel, "gpt-5.6-luna(high)")
+	}
+	// OriginalAlias is written verbatim into the response model field, so it must be a
+	// model id, exactly as an exact alias would report.
+	if result.OriginalAlias != "claude-haiku-4-5-20251001" {
+		t.Errorf("OriginalAlias = %q, want the suffix-free requested model", result.OriginalAlias)
+	}
+}
+
+func TestApplyOAuthModelAliasWithResult_PerAuthWildcardForceMappingDropsThinkingSuffix(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+
+	auth := &Auth{ID: "test-auth-suffix", Provider: "codex"}
+	SetOAuthModelAliasesAttribute(auth, []internalconfig.OAuthModelAlias{
+		{Name: "gpt-5.6-luna", Alias: "claude-haiku-4-5-*", ForceMapping: true},
+	})
+
+	result := mgr.applyOAuthModelAliasWithResult(auth, "claude-haiku-4-5-20251001(high)")
+	if result.UpstreamModel != "gpt-5.6-luna(high)" {
+		t.Errorf("UpstreamModel = %q, want %q", result.UpstreamModel, "gpt-5.6-luna(high)")
+	}
+	if result.OriginalAlias != "claude-haiku-4-5-20251001" {
+		t.Errorf("OriginalAlias = %q, want the suffix-free requested model", result.OriginalAlias)
 	}
 }
