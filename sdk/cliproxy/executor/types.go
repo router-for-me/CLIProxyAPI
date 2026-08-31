@@ -36,6 +36,8 @@ const (
 	PinnedAuthMetadataKey = "pinned_auth_id"
 	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.
 	SelectedAuthMetadataKey = "selected_auth_id"
+	// ExcludedAuthIDsMetadataKey stores a map[string]struct{} of auth IDs excluded from this execution.
+	ExcludedAuthIDsMetadataKey = "excluded_auth_ids"
 	// SelectedAuthCallbackMetadataKey carries an optional callback invoked with the selected auth ID.
 	SelectedAuthCallbackMetadataKey = "selected_auth_callback"
 	// SelectedAuthIndexMetadataKey stores the stable index of the auth selected by the scheduler.
