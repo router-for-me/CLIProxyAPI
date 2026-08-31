@@ -10,10 +10,10 @@ func IsGeminiThoughtPart(part gjson.Result) bool {
 	return part.Get("thought").Bool()
 }
 
-// MergeAdjacentGeminiContents merges consecutive Content turns with the same role.
-// Gemini and Antigravity APIs require roles in contents to strictly alternate between
-// "user" and "model". When mid-conversation system messages or consecutive user/model
-// turns occur, their parts are merged into a single turn.
+// MergeAdjacentGeminiContents merges consecutive Content turns with role "user".
+// Mid-conversation system messages or consecutive user turns from Claude Code
+// have their parts combined into a single "user" turn. "model" turns are intentionally
+// left unmerged to preserve thoughtSignature alignment and reasoning replay continuity.
 func MergeAdjacentGeminiContents(contents [][]byte) [][]byte {
 	if len(contents) <= 1 {
 		return contents
@@ -32,7 +32,7 @@ func MergeAdjacentGeminiContents(contents [][]byte) [][]byte {
 			lastIndex := len(merged) - 1
 			lastJSON := merged[lastIndex]
 			lastRole := gjson.GetBytes(lastJSON, "role").String()
-			if lastRole == role {
+			if lastRole == "user" && role == "user" {
 				lastParts := gjson.GetBytes(lastJSON, "parts").Array()
 				combinedParts := make([][]byte, 0, len(lastParts)+len(partsResult.Array()))
 				for _, p := range lastParts {

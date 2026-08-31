@@ -88,7 +88,9 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 			}
 			originalRole := roleResult.String()
 			precedingToolUseIDs := pendingToolUseIDs
-			pendingToolUseIDs = nil
+			if originalRole != "system" {
+				pendingToolUseIDs = nil
+			}
 			role := originalRole
 			if role == "assistant" {
 				role = "model"

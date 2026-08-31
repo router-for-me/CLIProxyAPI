@@ -369,7 +369,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			}
 			originalRole := roleResult.String()
 			precedingToolUseIDs := pendingToolUseIDs
-			pendingToolUseIDs = nil
+			if originalRole != "system" {
+				pendingToolUseIDs = nil
+			}
 			role := originalRole
 			if role == "assistant" {
 				role = "model"

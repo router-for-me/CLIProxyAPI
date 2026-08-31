@@ -59,7 +59,7 @@ func TestMergeAdjacentGeminiContents(t *testing.T) {
 		}
 	})
 
-	t.Run("merges consecutive model turns", func(t *testing.T) {
+	t.Run("leaves consecutive model turns unmerged", func(t *testing.T) {
 		contents := [][]byte{
 			[]byte(`{"role":"user","parts":[{"text":"question"}]}`),
 			[]byte(`{"role":"model","parts":[{"text":"thought","thought":true}]}`),
@@ -67,12 +67,8 @@ func TestMergeAdjacentGeminiContents(t *testing.T) {
 		}
 
 		merged := MergeAdjacentGeminiContents(contents)
-		if len(merged) != 2 {
-			t.Fatalf("expected 2 merged turns, got %d", len(merged))
-		}
-		partsModel := gjson.GetBytes(merged[1], "parts").Array()
-		if len(partsModel) != 2 {
-			t.Fatalf("expected 2 parts in model turn, got %d", len(partsModel))
+		if len(merged) != 3 {
+			t.Fatalf("expected 3 unmerged turns, got %d", len(merged))
 		}
 	})
 
