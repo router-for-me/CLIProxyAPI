@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -955,6 +956,12 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		if strings.EqualFold(name, alias) {
 			continue
 		}
+		if strings.Contains(alias, "*") {
+			// A wildcard alias is a routing pattern, not a model id, so it must never
+			// reach the catalog. The upstream model keeps its own entry and requests
+			// matching the pattern are resolved during routing instead.
+			continue
+		}
 		key := strings.ToLower(name)
 		forward[key] = append(forward[key], aliasEntry{
 			alias:       alias,
@@ -1036,4 +1043,45 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		}
 	}
 	return out
+}
+
+// collectModelAliasPatterns extracts routing-only wildcard alias patterns from the
+// OAuth model alias configuration. Exact aliases are published as models by
+// applyOAuthModelAliasEntries and are therefore not included here.
+//
+// Channels are walked in sorted order so a reload produces a stable pattern order.
+func collectModelAliasPatterns(aliases map[string][]config.OAuthModelAlias) []registry.ModelAliasPattern {
+	if len(aliases) == 0 {
+		return nil
+	}
+	channels := make([]string, 0, len(aliases))
+	for channel := range aliases {
+		channels = append(channels, channel)
+	}
+	sort.Strings(channels)
+
+	out := make([]registry.ModelAliasPattern, 0)
+	for _, channel := range channels {
+		for _, entry := range aliases[channel] {
+			name := strings.TrimSpace(entry.Name)
+			alias := strings.TrimSpace(entry.Alias)
+			if name == "" || alias == "" {
+				continue
+			}
+			if !strings.Contains(alias, "*") {
+				continue
+			}
+			out = append(out, registry.ModelAliasPattern{Pattern: alias, Target: name})
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// applyModelAliasPatterns publishes wildcard alias patterns to the global model
+// registry so provider lookups can resolve model ids that no client registers.
+func applyModelAliasPatterns(aliases map[string][]config.OAuthModelAlias) {
+	registry.GetGlobalRegistry().SetModelAliasPatterns(collectModelAliasPatterns(aliases))
 }
