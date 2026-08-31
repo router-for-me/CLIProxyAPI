@@ -1252,6 +1252,9 @@ func degradeAntigravityClaudeToolProvenanceIDs(payload []byte) ([]byte, int) {
 					continue
 				}
 				out, _ = sjson.SetBytes(out, partPath+".functionCall.id", antigravitySyntheticToolCallID(id))
+				if part.Get("thoughtSignature").Exists() && part.Get("thoughtSignature").String() != "" {
+					out, _ = sjson.SetBytes(out, partPath+".thoughtSignature", internalsignature.GeminiSkipThoughtSignatureValidator)
+				}
 				degraded++
 				continue
 			}

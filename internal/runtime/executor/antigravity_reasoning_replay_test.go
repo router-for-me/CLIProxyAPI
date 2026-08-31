@@ -1759,8 +1759,8 @@ func TestDegradeAntigravityClaudeToolProvenanceIDsKeepsParallelShape(t *testing.
 		if signature != "" {
 			signed++
 		}
-		if i == 0 && !antigravityHasNativeThoughtSignature(signature) {
-			t.Fatalf("first call thoughtSignature = %q, want the in-band signature kept through degradation", signature)
+		if i == 0 && signature != internalsignature.GeminiSkipThoughtSignatureValidator {
+			t.Fatalf("first call thoughtSignature = %q, want bypass sentinel signature", signature)
 		}
 		if i > 0 && signature != "" {
 			t.Fatalf("sibling call %d gained a signature %q, want unsigned", i, signature)
