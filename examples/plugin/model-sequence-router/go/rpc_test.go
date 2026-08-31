@@ -21,12 +21,14 @@ func TestRPCRegistrationRouteReconfigureAndShutdown(t *testing.T) {
 	if _, errRegister := handleMethod(pluginabi.MethodPluginRegister, lifecycleRaw); errRegister != nil {
 		t.Fatalf("register error = %v", errRegister)
 	}
-	routeRaw, _ := json.Marshal(pluginapi.ModelRouteRequest{
-		RequestedModel:     "routed",
-		AvailableProviders: []string{"codex"},
-		Headers:            map[string][]string{"X-Session-ID": {"rpc-session"}},
-	})
-	raw, errRoute := handleMethod(pluginabi.MethodModelRoute, routeRaw)
+	routePayload := func(turns int) []byte {
+		return marshalBody(t, pluginapi.ModelRouteRequest{
+			RequestedModel:     "routed",
+			AvailableProviders: []string{"codex"},
+			Body:               messagesTurn(t, "rpc", turns),
+		})
+	}
+	raw, errRoute := handleMethod(pluginabi.MethodModelRoute, routePayload(1))
 	if errRoute != nil {
 		t.Fatalf("route error = %v", errRoute)
 	}
@@ -49,7 +51,7 @@ func TestRPCRegistrationRouteReconfigureAndShutdown(t *testing.T) {
 	if runtimePlugin.loadedConfig() != before {
 		t.Fatal("failed reconfiguration replaced active config")
 	}
-	raw, errRoute = handleMethod(pluginabi.MethodModelRoute, routeRaw)
+	raw, errRoute = handleMethod(pluginabi.MethodModelRoute, routePayload(2))
 	if errRoute != nil {
 		t.Fatalf("route after failed reconfiguration error = %v", errRoute)
 	}
@@ -79,9 +81,10 @@ func TestSuccessfulReconfigureResetsStateAndModels(t *testing.T) {
 	req := pluginapi.ModelRouteRequest{
 		RequestedModel:     "first",
 		AvailableProviders: []string{"codex"},
-		Headers:            map[string][]string{"X-Session-ID": {"session"}},
+		Body:               messagesTurn(t, "reconfigure", 1),
 	}
 	_ = runtime.route(req)
+	req.Body = messagesTurn(t, "reconfigure", 2)
 	if got := runtime.route(req); got.TargetModel != "two" {
 		t.Fatalf("pre-reconfigure route = %#v", got)
 	}

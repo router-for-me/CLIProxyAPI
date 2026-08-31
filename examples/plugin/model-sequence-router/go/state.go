@@ -199,6 +199,16 @@ func (s *cursorStore) cleanupExpired() {
 	}
 }
 
+// size reports how many conversation cursors the store currently holds.
+func (s *cursorStore) size() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.entries)
+}
+
 func (s *cursorStore) reset() {
 	if s == nil {
 		return
@@ -219,13 +229,27 @@ func cleanupInterval(ttl time.Duration) time.Duration {
 	return interval
 }
 
+// expiringStore is generation-scoped state that a periodic sweep releases once
+// its entries pass their expiry.
+type expiringStore interface {
+	cleanupExpired()
+}
+
+// cleanupExpiredStores releases expired entries from every generation-scoped store.
+func cleanupExpiredStores(stores ...expiringStore) {
+	for _, store := range stores {
+		store.cleanupExpired()
+	}
+}
+
 type cleanupLoop struct {
 	mu     sync.Mutex
 	cancel chan struct{}
 	done   chan struct{}
 }
 
-func (l *cleanupLoop) restart(store *cursorStore, ttl time.Duration) {
+// restart sweeps every supplied store on one interval derived from the session TTL.
+func (l *cleanupLoop) restart(ttl time.Duration, stores ...expiringStore) {
 	l.stop()
 	l.mu.Lock()
 	cancel := make(chan struct{})
@@ -240,7 +264,7 @@ func (l *cleanupLoop) restart(store *cursorStore, ttl time.Duration) {
 		for {
 			select {
 			case <-ticker.C:
-				store.cleanupExpired()
+				cleanupExpiredStores(stores...)
 			case <-cancel:
 				return
 			}

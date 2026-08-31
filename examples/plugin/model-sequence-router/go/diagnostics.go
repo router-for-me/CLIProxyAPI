@@ -153,6 +153,40 @@ func (s *laneObservationStore) observe(key laneObservationKey, current requestOb
 	return fields
 }
 
+// cleanupExpired releases lane snapshots whose expiry has passed.
+func (s *laneObservationStore) cleanupExpired() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.clock()
+	for key, entry := range s.entries {
+		if !entry.ExpiresAt.After(now) {
+			delete(s.entries, key)
+		}
+	}
+}
+
+// size reports how many lanes the store currently holds.
+func (s *laneObservationStore) size() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.entries)
+}
+
+func (s *laneObservationStore) reset() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.entries = make(map[laneObservationKey]laneObservation)
+	s.mu.Unlock()
+}
+
 // diagnosticFields renders the content-free request description that accompanies
 // one route record, including the continuity comparison for the selected lane.
 func (r *runtimeState) diagnosticFields(decision routeDecision) map[string]any {
@@ -175,11 +209,11 @@ func (r *runtimeState) diagnosticFields(decision routeDecision) map[string]any {
 		"history_fingerprint":       observation.HistoryFingerprint,
 		"history_items":             len(observation.HistoryItems),
 	}
-	if decision.Identity.Value != "" {
+	if decision.Identity != "" {
 		key := laneObservationKey{
 			Generation: decision.Config.Generation,
 			Alias:      decision.Alias.LookupKey,
-			SessionID:  decision.Identity.Value,
+			SessionID:  string(decision.Identity),
 			Provider:   decision.Selection.Target.Provider,
 			Model:      decision.TargetModel,
 		}
@@ -188,15 +222,6 @@ func (r *runtimeState) diagnosticFields(decision routeDecision) map[string]any {
 		}
 	}
 	return fields
-}
-
-func (s *laneObservationStore) reset() {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	s.entries = make(map[laneObservationKey]laneObservation)
-	s.mu.Unlock()
 }
 
 func stringSlicePrefix(prefix, values []string) bool {

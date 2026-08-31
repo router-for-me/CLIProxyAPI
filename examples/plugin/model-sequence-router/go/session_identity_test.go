@@ -1,83 +1,111 @@
 package main
 
 import (
-	"net/http"
 	"strings"
 	"testing"
 
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
+// testIdentitySalt returns the stable fingerprint salt used by identity tests.
 func testIdentitySalt() []byte {
 	return []byte("model-sequence-router-identity-salt")
 }
 
-// testIdentity resolves the identity for one request body exactly as routing does.
-func testIdentity(req pluginapi.ModelRouteRequest) conversationIdentity {
-	salt := testIdentitySalt()
-	return newConversationIdentity(req, inspectRequest(req.Body, salt), salt)
+// TestConversationIdentityHoldsWhenPromptCacheKeyAppears proves a conversation keeps
+// one cursor key when a prompt cache key joins its later turns.
+func TestConversationIdentityHoldsWhenPromptCacheKeyAppears(t *testing.T) {
+	opening := newConversationIdentity(pluginapi.ModelRouteRequest{
+		SourceFormat: "openai-response",
+		Body:         []byte(`{"input":[{"role":"user","content":"opening"}]}`),
+	})
+	cached := newConversationIdentity(pluginapi.ModelRouteRequest{
+		SourceFormat: "openai-response",
+		Body:         []byte(`{"prompt_cache_key":"cache-lane","input":[{"role":"user","content":"opening"},{"role":"assistant","content":"answer"},{"role":"user","content":"second turn"}]}`),
+	})
+
+	if opening.source() != identitySourceDerived || cached.source() != identitySourceDerived {
+		t.Fatalf("identity sources = %q / %q, want %q", opening.source(), cached.source(), identitySourceDerived)
+	}
+	if opening != cached {
+		t.Fatalf("identity drifted when the prompt cache key appeared: %q / %q", opening, cached)
+	}
 }
 
-func TestDurableCoreIdentityPassesThrough(t *testing.T) {
-	req := pluginapi.ModelRouteRequest{
-		Headers: http.Header{"X-Session-ID": {"durable-session"}},
-		Body:    []byte(`{"messages":[{"role":"user","content":"opening"}]}`),
-	}
-	identity := testIdentity(req)
-	if identity.Source != identitySourceCore {
-		t.Fatalf("identity source = %q, want %q", identity.Source, identitySourceCore)
-	}
-	if !strings.Contains(identity.Value, "durable-session") {
-		t.Fatalf("identity value = %q, want the client-supplied session", identity.Value)
+// TestConversationsSharingPromptCacheKeyStayDistinct proves a shared cache lane cannot
+// merge two conversation cursor keys.
+func TestConversationsSharingPromptCacheKeyStayDistinct(t *testing.T) {
+	first := newConversationIdentity(pluginapi.ModelRouteRequest{
+		SourceFormat: "openai-response",
+		Body:         []byte(`{"prompt_cache_key":"shared-lane","input":[{"role":"user","content":"first conversation"}]}`),
+	})
+	second := newConversationIdentity(pluginapi.ModelRouteRequest{
+		SourceFormat: "openai-response",
+		Body:         []byte(`{"prompt_cache_key":"shared-lane","input":[{"role":"user","content":"second conversation"}]}`),
+	})
+	if first == second {
+		t.Fatalf("conversations sharing one cache lane share identity %q", first)
 	}
 }
 
-func TestContentHashIdentityIsReplacedAndHoldsAcrossTurns(t *testing.T) {
-	opening := pluginapi.ModelRouteRequest{
+// TestPromptCacheKeyAloneNeverKeysAConversation proves a cache-only signal yields a
+// content-derived cursor key rather than a cache-lane key.
+func TestPromptCacheKeyAloneNeverKeysAConversation(t *testing.T) {
+	identity := newConversationIdentity(pluginapi.ModelRouteRequest{
+		SourceFormat: "openai-response",
+		Body:         []byte(`{"prompt_cache_key":"cache-lane","input":[{"role":"user","content":"opening"}]}`),
+	})
+	if identity.source() != identitySourceDerived {
+		t.Fatalf("identity source = %q, want %q", identity.source(), identitySourceDerived)
+	}
+	if strings.Contains(string(identity), "cache-lane") {
+		t.Fatalf("cache lane reached the cursor key: %q", identity)
+	}
+}
+
+// TestDerivedIdentityHoldsAcrossTurns proves protocol-aware derivation stays fixed as
+// later assistant and user turns extend the transcript.
+func TestDerivedIdentityHoldsAcrossTurns(t *testing.T) {
+	opening := newConversationIdentity(pluginapi.ModelRouteRequest{
 		Body: []byte(`{"system":"shared instructions","messages":[{"role":"user","content":"opening"}]}`),
-	}
-	answered := pluginapi.ModelRouteRequest{
+	})
+	answered := newConversationIdentity(pluginapi.ModelRouteRequest{
 		Body: []byte(`{"system":"shared instructions","messages":[{"role":"user","content":"opening"},{"role":"assistant","content":"answer"},{"role":"user","content":"second turn"}]}`),
-	}
+	})
 
-	coreOpening := coreauth.ExtractSessionID(opening.Headers, opening.Body, opening.Metadata)
-	if !strings.HasPrefix(coreOpening, coreMessageHashPrefix) {
-		t.Fatalf("core identity = %q, want a content hash fallback", coreOpening)
+	if opening.source() != identitySourceDerived || answered.source() != identitySourceDerived {
+		t.Fatalf("identity sources = %q / %q, want %q", opening.source(), answered.source(), identitySourceDerived)
 	}
-
-	first := testIdentity(opening)
-	second := testIdentity(answered)
-	if first.Source != identitySourceDerived || second.Source != identitySourceDerived {
-		t.Fatalf("identity sources = %q / %q", first.Source, second.Source)
-	}
-	if first.Value != second.Value {
-		t.Fatalf("identity drifted between turns: %q / %q", first.Value, second.Value)
-	}
-	if strings.HasPrefix(first.Value, coreMessageHashPrefix) {
-		t.Fatalf("core content hash survived substitution: %q", first.Value)
+	if opening != answered {
+		t.Fatalf("identity drifted between turns: %q / %q", opening, answered)
 	}
 }
 
+// TestDistinctOpeningsProduceDistinctIdentities proves different first user content
+// separates two conversations.
 func TestDistinctOpeningsProduceDistinctIdentities(t *testing.T) {
-	first := testIdentity(pluginapi.ModelRouteRequest{
+	first := newConversationIdentity(pluginapi.ModelRouteRequest{
 		Body: []byte(`{"messages":[{"role":"user","content":"first conversation"}]}`),
 	})
-	second := testIdentity(pluginapi.ModelRouteRequest{
+	second := newConversationIdentity(pluginapi.ModelRouteRequest{
 		Body: []byte(`{"messages":[{"role":"user","content":"second conversation"}]}`),
 	})
-	if first.Value == second.Value {
-		t.Fatalf("distinct conversations share identity %q", first.Value)
+	if first == second {
+		t.Fatalf("distinct conversations share identity %q", first)
 	}
 }
 
+// TestAbsentContentYieldsNoIdentity proves a request with no user input remains
+// stateless and creates no cursor key.
 func TestAbsentContentYieldsNoIdentity(t *testing.T) {
-	identity := testIdentity(pluginapi.ModelRouteRequest{Body: []byte(`{"model":"routed"}`)})
-	if identity.Source != identitySourceAbsent || identity.Value != "" {
-		t.Fatalf("identity = %#v, want an absent identity", identity)
+	identity := newConversationIdentity(pluginapi.ModelRouteRequest{Body: []byte(`{"model":"routed"}`)})
+	if identity != "" || identity.source() != identitySourceAbsent {
+		t.Fatalf("identity = %q with source %q, want an absent identity", identity, identity.source())
 	}
 }
 
+// TestTurnIdentityRequiresHistory proves only recognized history shapes participate in
+// replay detection, while absent history never compares equal.
 func TestTurnIdentityRequiresHistory(t *testing.T) {
 	salt := testIdentitySalt()
 	absent := newTurnIdentity(inspectRequest([]byte(`{"system":"instructions only"}`), salt))

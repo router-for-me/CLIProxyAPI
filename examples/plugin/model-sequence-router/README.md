@@ -257,7 +257,7 @@ Five positions alternate providers four times before reaching the most expensive
 - A client effort suffix is preserved on the selected target unless that target already has its own suffix or the selected slot's effort tier states a different effort for the requested level.
 - A cursor advances once per changed conversation history. A request repeating the previous history replays that history's position and moves no cursor.
 - Turn replay reads only the recognized `messages`, `input`, or `contents` array. A request carrying no recognized history has no replay identity and advances on every call.
-- A client-supplied session identifier remains authoritative. Without one, the plugin derives a conversation identity from the system content and the first history item, both of which hold constant across the turns of one conversation. Two conversations that open with identical content and no session identifier share one cursor.
+- The plugin derives cursor identity through the shared protocol-aware conversation derivation before selecting a provider. Transport headers, client session identifiers, prompt-cache keys, credential affinity, and provider-specific continuation state never enter the cursor key. Two conversations with the same derivation inputs share one cursor under this content-derived limitation.
 - `unavailable_provider` is a plugin-level setting selecting what happens when the next position's provider is not registered. It accepts `skip` and `error`, spelled in lower case, and defaults to `skip`.
 - Under `skip`, the router scans forward to the next available position, consumes the positions it passes, and emits one warning per passed-over position naming the alias, index, and provider.
 - Under `error`, an identified conversation examines only its next position. If that provider is not registered, the router consumes no position and the client receives a retryable HTTP `529`, so a retry re-enters on the same position.
@@ -312,7 +312,7 @@ Set the top-level `debug: true` in `config.yaml`. Route decisions are emitted th
 - `alias`, `sequence_index`, the caller's `requested_effort`, `provider`, and the effective target `model`
 - `outcome`, one of `advanced`, `replayed`, `stateless`, or `exhausted`
 - `advanced`, `true` only when a changed conversation history moved the cursor
-- `identity_source`, `core` for a client-supplied identifier, `derived` for a plugin-computed identity, and `absent` for stateless routing
+- `identity_source`, `derived` for the shared content-derived conversation identity and `absent` for stateless routing
 - `skipped`, the number of positions passed over for unavailable providers
 - `random_start`, showing the alias policy used for a new or expired cursor
 - `session_hash`, an eight-character hash used to correlate one conversation without logging its identifier
@@ -354,9 +354,9 @@ Fingerprints, session identifiers, callback identifiers, and credential identifi
 
 ## Credentials, affinity, and caches
 
-The recommended `routing.session-affinity` settings keep a conversation on the same credential for repeated requests to a provider when that credential remains available. Existing affinity keys include provider, session, and model, so different providers and models retain separate scopes.
+The plugin selects the provider and model from YAML before credential affinity runs. The affinity selector receives that selected provider and model and can choose only a credential within the selected target; it cannot replace or pin the provider. Its key includes provider, affinity identity, and canonical base model, so repeated sequence positions using the same provider and base model retain one provider-local credential lane while different providers and models remain separate.
 
-The plugin preserves the client body, prompt-cache keys, headers, system prompts, and message order. Codex and Claude still maintain independent upstream caches; switching providers does not share cache contents. Cache TTLs, prefix rules, and read/write costs remain controlled by each upstream. With affinity disabled and multiple credentials configured, additional cache warmups are expected.
+The plugin preserves the client body, prompt-cache keys, headers, system prompts, and message order. Prompt-cache keys remain downstream credential-affinity inputs and never enter the router cursor. Codex and Claude maintain independent upstream caches; switching providers does not share cache contents. Cache TTLs, prefix rules, and read/write costs remain controlled by each upstream. With affinity disabled and multiple credentials configured, additional cache warmups are expected.
 
 ## v1 boundaries
 
