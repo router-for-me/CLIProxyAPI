@@ -657,14 +657,16 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
 type SessionAffinitySelector struct {
-	fallback Selector
-	cache    *SessionCache
+	fallback         Selector
+	cache            *SessionCache
+	priorityFailback bool
 }
 
 // SessionAffinityConfig configures the session affinity selector.
 type SessionAffinityConfig struct {
-	Fallback Selector
-	TTL      time.Duration
+	Fallback         Selector
+	TTL              time.Duration
+	PriorityFailback bool
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -684,8 +686,9 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		cfg.TTL = time.Hour
 	}
 	return &SessionAffinitySelector{
-		fallback: cfg.Fallback,
-		cache:    NewSessionCache(cfg.TTL),
+		fallback:         cfg.Fallback,
+		cache:            NewSessionCache(cfg.TTL),
+		priorityFailback: cfg.PriorityFailback,
 	}
 }
 
@@ -693,10 +696,10 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 // Explicit Claude Code, Codex, OpenCode, pi, and request-body session signals
 // precede execution metadata, stable derived identity, and the legacy hash fallback.
 //
-// An established binding outranks credential priority: a bound credential that is still
-// available is reused even when a higher-priority credential recovers. Credential priority
-// applies to cold bindings, requests without a session, and genuine bound-credential
-// failover, so the fallback selector only ever receives the highest available priority tier.
+// By default, an established binding outranks credential priority: a bound credential that
+// is still available is reused even when a higher-priority credential recovers. When priority
+// failback is enabled, a recovered higher-priority tier preempts a lower-priority binding.
+// The fallback selector only ever receives the highest available priority tier.
 //
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
@@ -744,10 +747,28 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 		s.cache.Set(cacheKey, authID)
 	}
+	rebindHigherPriority := func(cached *Auth) (*Auth, bool, error) {
+		if !s.shouldPriorityFailback(cached, fallbackAuths) {
+			return nil, false, nil
+		}
+		selected, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		if errPick != nil {
+			return nil, true, errPick
+		}
+		bind(selected.ID)
+		return selected, true, nil
+	}
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
+				if selected, rebound, errPick := rebindHigherPriority(auth); rebound {
+					if errPick != nil {
+						return nil, errPick
+					}
+					entry.Infof("session-affinity: higher-priority auth available, rebound | session=%s previous_auth=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, selected.ID, provider, model)
+					return selected, nil
+				}
 				bind(auth.ID)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
@@ -767,6 +788,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
+					if selected, rebound, errPick := rebindHigherPriority(auth); rebound {
+						if errPick != nil {
+							return nil, errPick
+						}
+						entry.Infof("session-affinity: higher-priority auth available, rebound | session=%s fallback=%s previous_auth=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, selected.ID, provider, model)
+						return selected, nil
+					}
 					bind(auth.ID)
 					entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 					return auth, nil
@@ -782,6 +810,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	bind(auth.ID)
 	entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	return auth, nil
+}
+
+func (s *SessionAffinitySelector) shouldPriorityFailback(cached *Auth, fallbackAuths []*Auth) bool {
+	return s.priorityFailback && len(fallbackAuths) > 0 && authPriority(fallbackAuths[0]) > authPriority(cached)
 }
 
 func selectorLogEntry(ctx context.Context) *log.Entry {
