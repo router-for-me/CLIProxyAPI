@@ -34,52 +34,58 @@ func codexCachePath() string {
 	return filepath.Join(home, ".codex", "models_cache.json")
 }
 
+type codexCacheReasoningLevel struct {
+	Effort string `json:"effort"`
+}
+
 type codexCacheEntry struct {
-	Slug           string `json:"slug"`
-	DisplayName    string `json:"display_name"`
-	Description    string `json:"description"`
-	Visibility     string `json:"visibility"`
-	SupportedInAPI bool   `json:"supported_in_api"`
+	Slug                     string                     `json:"slug"`
+	DisplayName              string                     `json:"display_name"`
+	Description              string                     `json:"description"`
+	Visibility               string                     `json:"visibility"`
+	SupportedInAPI           bool                       `json:"supported_in_api"`
+	SupportedReasoningLevels []codexCacheReasoningLevel `json:"supported_reasoning_levels"`
 }
 
 type codexCacheFile struct {
 	Models []codexCacheEntry `json:"models"`
 }
 
-// importCodexCacheSlugs appends every slug from the cache that is missing
-// from all known model buckets. Entries are synthesized from the first
-// existing codex template (gpt-5.6-luna preferred) so capabilities like
-// context length, thinking levels and modalities carry over. Returns the
-// newly registered slugs.
-func importCodexCacheSlugs(s *modelStore, cachePath string) []string {
-	data, err := os.ReadFile(cachePath)
+// importCodexCacheSlugs overlays cache-only slugs onto one unpublished
+// catalog. Entries are synthesized from the first existing codex template
+// (gpt-5.6-luna preferred) so context length and modalities carry over.
+// Returns the newly registered slugs.
+func importCodexCacheSlugs(data *staticModelsJSON, cachePath string) []string {
+	if data == nil {
+		return nil
+	}
+	info, err := os.Stat(cachePath)
 	if err != nil {
 		return nil // cache is optional; silent when absent
 	}
-	if len(data) > maxCodexClientModelsSize {
+	if info.Size() > maxCodexClientModelsSize {
 		log.Warnf("codex-cache import: %s exceeds the size limit, skipping", cachePath)
 		return nil
 	}
+	raw, err := os.ReadFile(cachePath)
+	if err != nil {
+		return nil
+	}
 	var cache codexCacheFile
-	if err := json.Unmarshal(data, &cache); err != nil {
+	if err := json.Unmarshal(raw, &cache); err != nil {
 		log.Warnf("codex-cache import: failed to parse %s: %v", cachePath, err)
 		return nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.data == nil {
-		return nil
-	}
 	known := make(map[string]bool)
-	for _, bucket := range [][]*ModelInfo{s.data.Claude, s.data.Gemini, s.data.Vertex, s.data.AIStudio, s.data.CodexFree, s.data.CodexTeam, s.data.CodexPlus, s.data.CodexPro, s.data.Kimi, s.data.Antigravity, s.data.XAI} {
+	for _, bucket := range [][]*ModelInfo{data.Claude, data.Gemini, data.Vertex, data.AIStudio, data.CodexFree, data.CodexTeam, data.CodexPlus, data.CodexPro, data.Kimi, data.Antigravity, data.XAI} {
 		for _, m := range bucket {
 			if m != nil {
 				known[m.ID] = true
 			}
 		}
 	}
-	template := codexTemplateEntry(s.data)
+	template := codexTemplateEntry(data)
 	if template == nil {
 		return nil
 	}
@@ -91,31 +97,45 @@ func importCodexCacheSlugs(s *modelStore, cachePath string) []string {
 		if entry.Visibility == "hide" || !entry.SupportedInAPI {
 			continue
 		}
-		mi := *template
-		mi.ID = entry.Slug
-		mi.Object = "model"
-		mi.OwnedBy = "openai"
-		mi.Type = "openai"
-		mi.Created = time.Now().Unix()
+		base := cloneModelInfo(template)
+		base.ID = entry.Slug
+		base.Object = "model"
+		base.OwnedBy = "openai"
+		base.Type = "openai"
+		base.Created = time.Now().Unix()
 		if entry.DisplayName != "" {
-			mi.DisplayName = entry.DisplayName
+			base.DisplayName = entry.DisplayName
 		}
 		if entry.Description != "" {
-			mi.Description = entry.Description
+			base.Description = entry.Description
+		}
+		if levels := cacheReasoningLevels(entry.SupportedReasoningLevels); len(levels) > 0 {
+			base.Thinking = &ThinkingSupport{Levels: levels}
 		}
 		// Register in every codex plan bucket: the catalog is a superset and
 		// upstream enforces per-account entitlements at request time.
-		s.data.CodexFree = append(s.data.CodexFree, &mi)
-		s.data.CodexTeam = append(s.data.CodexTeam, &mi)
-		s.data.CodexPlus = append(s.data.CodexPlus, &mi)
-		s.data.CodexPro = append(s.data.CodexPro, &mi)
+		data.CodexFree = append(data.CodexFree, cloneModelInfo(base))
+		data.CodexTeam = append(data.CodexTeam, cloneModelInfo(base))
+		data.CodexPlus = append(data.CodexPlus, cloneModelInfo(base))
+		data.CodexPro = append(data.CodexPro, cloneModelInfo(base))
 		known[entry.Slug] = true
 		added = append(added, entry.Slug)
 	}
-	if len(added) > 0 {
-		log.Infof("codex-cache import: registered %d new model slug(s): %v", len(added), added)
-	}
 	return added
+}
+
+func cacheReasoningLevels(raw []codexCacheReasoningLevel) []string {
+	seen := make(map[string]bool)
+	levels := make([]string, 0, len(raw))
+	for _, level := range raw {
+		effort := strings.TrimSpace(level.Effort)
+		if effort == "" || seen[effort] {
+			continue
+		}
+		seen[effort] = true
+		levels = append(levels, effort)
+	}
+	return levels
 }
 
 // codexTemplateEntry picks the catalog entry cloned for synthesized slugs:
@@ -134,12 +154,46 @@ func codexTemplateEntry(data *staticModelsJSON) *ModelInfo {
 	return nil
 }
 
-// maybeImportCodexCache runs the opt-in import when enabled.
-func maybeImportCodexCache() {
+func cloneStaticModelsJSON(data *staticModelsJSON) *staticModelsJSON {
+	if data == nil {
+		return nil
+	}
+	return &staticModelsJSON{
+		Claude: cloneModelInfos(data.Claude), Gemini: cloneModelInfos(data.Gemini),
+		Vertex: cloneModelInfos(data.Vertex), AIStudio: cloneModelInfos(data.AIStudio),
+		CodexFree: cloneModelInfos(data.CodexFree), CodexTeam: cloneModelInfos(data.CodexTeam),
+		CodexPlus: cloneModelInfos(data.CodexPlus), CodexPro: cloneModelInfos(data.CodexPro),
+		Kimi: cloneModelInfos(data.Kimi), Antigravity: cloneModelInfos(data.Antigravity),
+		XAI: cloneModelInfos(data.XAI),
+	}
+}
+
+func overlayCodexCache(data *staticModelsJSON) []string {
 	if !codexCacheImportEnabled() {
-		return
+		return nil
 	}
-	if path := codexCachePath(); path != "" {
-		importCodexCacheSlugs(modelsCatalogStore, path)
+	path := codexCachePath()
+	if path == "" {
+		return nil
 	}
+	return importCodexCacheSlugs(data, path)
+}
+
+// RefreshCodexCacheOverlay applies the cache to the currently published
+// catalog after process-level environment loading (including .env).
+func RefreshCodexCacheOverlay() []string {
+	if !codexCacheImportEnabled() {
+		return nil
+	}
+	modelsCatalogStore.mu.RLock()
+	next := cloneStaticModelsJSON(modelsCatalogStore.data)
+	modelsCatalogStore.mu.RUnlock()
+	added := overlayCodexCache(next)
+	if len(added) == 0 {
+		return nil
+	}
+	modelsCatalogStore.mu.Lock()
+	modelsCatalogStore.data = next
+	modelsCatalogStore.mu.Unlock()
+	return added
 }
