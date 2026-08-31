@@ -138,12 +138,17 @@ func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 	// them and rejects duplicates/identity conflicts without leaking any
 	// secret material.
 	for _, e := range body.APIKeyEntries {
-		p.APIKeyEntries = append(p.APIKeyEntries, store.UpstreamProviderAPIKey{
+		entry := store.UpstreamProviderAPIKey{
 			ID:       e.ID,
 			Name:     e.Name,
 			APIKey:   e.APIKey,
 			ProxyURL: e.ProxyURL,
-		})
+		}
+		if e.Weight != nil {
+			w := *e.Weight
+			entry.Weight = &w
+		}
+		p.APIKeyEntries = append(p.APIKeyEntries, entry)
 	}
 	return p
 }

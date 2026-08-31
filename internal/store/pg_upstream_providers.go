@@ -93,6 +93,14 @@ type UpstreamProviderAPIKey struct {
 	Name       string `json:"name,omitempty"`
 	ProxyURL   string `json:"proxy_url,omitempty"`
 	SortOrder  int    `json:"sort_order,omitempty"`
+	// Weight is the optional proportional selection weight under
+	// weighted-round-robin routing. nil means the credential falls back to the
+	// scheduler default (1). The dashboard editor restricts user input to
+	// positive values 1..MaxCredentialWeight; the scheduler treats non-positive
+	// weights as excluded. Stored as a nullable INTEGER so legacy rows survive
+	// the column add and "user did not pick a weight" stays distinct from
+	// "weight 0".
+	Weight *int `json:"weight,omitempty"`
 }
 
 // UpstreamProviderStore is the contract the management API consumes for the
@@ -489,7 +497,7 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 
 	// API-key entries (openai-compatibility only).
 	aRows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, provider_id, api_key, name, proxy_url, sort_order
+		SELECT id, provider_id, api_key, name, proxy_url, sort_order, weight
 		FROM %s WHERE provider_id = $1 ORDER BY sort_order, id
 	`, s.entries), p.ID)
 	if err != nil {
@@ -498,7 +506,8 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 	for aRows.Next() {
 		var e UpstreamProviderAPIKey
 		var entryName, proxyURL sql.NullString
-		if err = aRows.Scan(&e.ID, &e.ProviderID, &e.APIKey, &entryName, &proxyURL, &e.SortOrder); err != nil {
+		var weight sql.NullInt64
+		if err = aRows.Scan(&e.ID, &e.ProviderID, &e.APIKey, &entryName, &proxyURL, &e.SortOrder, &weight); err != nil {
 			aRows.Close()
 			return fmt.Errorf("postgres store: scan upstream provider api key entry: %w", err)
 		}
@@ -507,6 +516,10 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 		}
 		if proxyURL.Valid {
 			e.ProxyURL = proxyURL.String
+		}
+		if weight.Valid {
+			w := int(weight.Int64)
+			e.Weight = &w
 		}
 		p.APIKeyEntries = append(p.APIKeyEntries, e)
 	}
@@ -666,20 +679,20 @@ func (s *pgUpstreamProviderStore) syncAPIKeyEntriesTx(ctx context.Context, tx *s
 		entry.SortOrder = sortOrder
 		if entry.ID == 0 {
 			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
-				INSERT INTO %s (provider_id, api_key, name, proxy_url, sort_order)
-				VALUES ($1,$2,$3,$4,$5)
+				INSERT INTO %s (provider_id, api_key, name, proxy_url, sort_order, weight)
+				VALUES ($1,$2,$3,$4,$5,$6)
 				RETURNING id
-			`, s.entries), providerID, entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), sortOrder).Scan(&entry.ID); err != nil {
+			`, s.entries), providerID, entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), sortOrder, nullableInt(entry.Weight)).Scan(&entry.ID); err != nil {
 				return fmt.Errorf("postgres store: insert upstream provider api key entry: %w", err)
 			}
 		} else {
 			var persistedID int64
 			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
 				UPDATE %s
-				SET api_key = $1, name = $2, proxy_url = $3, sort_order = $4
-				WHERE id = $5 AND provider_id = $6
+				SET api_key = $1, name = $2, proxy_url = $3, sort_order = $4, weight = $5
+				WHERE id = $6 AND provider_id = $7
 				RETURNING id
-			`, s.entries), entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), sortOrder, entry.ID, providerID).Scan(&persistedID); err != nil {
+			`, s.entries), entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), sortOrder, nullableInt(entry.Weight), entry.ID, providerID).Scan(&persistedID); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					return fmt.Errorf("postgres store: upstream provider api key entry id %d is missing from upstream provider %d", entry.ID, providerID)
 				}
@@ -953,6 +966,16 @@ func nullableTime(t *time.Time) any {
 		return nil
 	}
 	return *t
+}
+
+// nullableInt binds a *int as nil when unset so the column round-trips
+// faithfully between Go (nil pointer) and SQL (NULL). Used for optional
+// integer columns whose zero value is meaningful (e.g. credential weight).
+func nullableInt(i *int) any {
+	if i == nil {
+		return nil
+	}
+	return *i
 }
 
 // Compile-time assertion that *pgUpstreamProviderStore implements the contract.

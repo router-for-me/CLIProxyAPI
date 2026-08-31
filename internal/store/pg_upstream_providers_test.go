@@ -310,3 +310,194 @@ func TestUpstreamProviderStoreAPIKeyEntryIdentitySync(t *testing.T) {
 		t.Fatalf("duplicate ID error = %v, want duplicate error", err)
 	}
 }
+
+// TestUpstreamProviderStoreAPIKeyEntryWeightRoundTrip verifies the nullable
+// Weight field on UpstreamProviderAPIKey is faithfully persisted on insert,
+// preserved on update (in place), cleared back to nil, and round-trips through
+// Get without leaking the entry api key. NULL/omitted weights must round-trip
+// as nil so the dashboard can distinguish "user did not pick a weight" from
+// "user picked weight N". The migration must add a nullable INTEGER column
+// (not NOT NULL) so existing rows stay readable.
+func TestUpstreamProviderStoreAPIKeyEntryWeightRoundTrip(t *testing.T) {
+	pg := newTestPostgresStore(t, "upstream_entry_weight")
+	defer pg.Close()
+	ensureMigrated(t, pg)
+
+	src := NewUpstreamProviderStore(pg)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// The migration must add a nullable INTEGER weight column. NOT NULL with a
+	// default would hide the "user did not pick a weight" signal from the
+	// dashboard, and DEFAULT 0 would silently change routing for legacy rows.
+	colType, colNullable, colDefault := "", "", ""
+	if err := pg.DB().QueryRowContext(ctx, `
+		SELECT data_type, is_nullable, COALESCE(column_default, '')
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2 AND column_name = 'weight'
+	`, pg.cfg.Schema, pg.cfg.UpstreamProviderEntriesTable).Scan(&colType, &colNullable, &colDefault); err != nil {
+		t.Fatalf("query weight column: %v", err)
+	}
+	if colType != "integer" {
+		t.Fatalf("weight column type = %q, want integer", colType)
+	}
+	if colNullable != "YES" {
+		t.Fatalf("weight column nullable = %q, want YES", colNullable)
+	}
+	if colDefault != "" {
+		t.Fatalf("weight column default = %q, want empty (NULL default)", colDefault)
+	}
+
+	created, err := src.Create(ctx, UpstreamProvider{
+		ProviderType: "openai-compatibility",
+		Name:         "weighted",
+		BaseURL:      "https://api.example.test/v1",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{APIKey: "weighted-secret-1", Name: "alpha"},
+			{APIKey: "weighted-secret-2", Name: "beta"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	firstID := created.APIKeyEntries[0].ID
+	secondID := created.APIKeyEntries[1].ID
+	if created.APIKeyEntries[0].Weight != nil {
+		t.Fatalf("Create returned Weight = %d for omitted entry, want nil", *created.APIKeyEntries[0].Weight)
+	}
+	if created.APIKeyEntries[1].Weight != nil {
+		t.Fatalf("Create returned Weight = %d for omitted entry, want nil", *created.APIKeyEntries[1].Weight)
+	}
+
+	positive := 25
+	updated, err := src.Update(ctx, UpstreamProvider{
+		ID:           created.ID,
+		ProviderType: "openai-compatibility",
+		Name:         "weighted",
+		BaseURL:      "https://api.example.test/v1",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{ID: firstID, APIKey: "weighted-secret-1", Name: "alpha", Weight: &positive},
+			{ID: secondID, APIKey: "weighted-secret-2", Name: "beta"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Update with weight: %v", err)
+	}
+	if updated.APIKeyEntries[0].Weight == nil || *updated.APIKeyEntries[0].Weight != positive {
+		t.Fatalf("updated Weight = %v, want pointer to %d", updated.APIKeyEntries[0].Weight, positive)
+	}
+	if updated.APIKeyEntries[1].Weight != nil {
+		t.Fatalf("updated second entry Weight = %v, want nil", updated.APIKeyEntries[1].Weight)
+	}
+
+	loaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get after weighted update: %v", err)
+	}
+	if len(loaded.APIKeyEntries) != 2 {
+		t.Fatalf("Get returned %d entries, want 2", len(loaded.APIKeyEntries))
+	}
+	var loadedFirst, loadedSecond UpstreamProviderAPIKey
+	for _, e := range loaded.APIKeyEntries {
+		switch e.ID {
+		case firstID:
+			loadedFirst = e
+		case secondID:
+			loadedSecond = e
+		}
+	}
+	if loadedFirst.Weight == nil || *loadedFirst.Weight != positive {
+		t.Fatalf("loaded first entry Weight = %v, want pointer to %d", loadedFirst.Weight, positive)
+	}
+	if loadedSecond.Weight != nil {
+		t.Fatalf("loaded second entry Weight = %v, want nil", loadedSecond.Weight)
+	}
+
+	// Clearing an explicit weight back to nil must round-trip — that's the
+	// dashboard's "reset to default" affordance.
+	cleared, err := src.Update(ctx, UpstreamProvider{
+		ID:           created.ID,
+		ProviderType: "openai-compatibility",
+		Name:         "weighted",
+		BaseURL:      "https://api.example.test/v1",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{ID: firstID, APIKey: "weighted-secret-1", Name: "alpha"},
+			{ID: secondID, APIKey: "weighted-secret-2", Name: "beta", Weight: &positive},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Update clearing weight: %v", err)
+	}
+	if cleared.APIKeyEntries[0].Weight != nil {
+		t.Fatalf("cleared entry Weight = %v, want nil", cleared.APIKeyEntries[0].Weight)
+	}
+	if cleared.APIKeyEntries[1].Weight == nil || *cleared.APIKeyEntries[1].Weight != positive {
+		t.Fatalf("moved Weight = %v, want pointer to %d", cleared.APIKeyEntries[1].Weight, positive)
+	}
+
+	reloaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get after clear: %v", err)
+	}
+	for _, e := range reloaded.APIKeyEntries {
+		switch e.ID {
+		case firstID:
+			if e.Weight != nil {
+				t.Fatalf("reloaded first entry Weight = %v, want nil", e.Weight)
+			}
+		case secondID:
+			if e.Weight == nil || *e.Weight != positive {
+				t.Fatalf("reloaded second entry Weight = %v, want pointer to %d", e.Weight, positive)
+			}
+		}
+	}
+
+	// Inserting a brand-new entry with an explicit weight must also round-trip.
+	newSecret := "weighted-secret-3"
+	bigger := 500_000
+	fresh, err := src.Update(ctx, UpstreamProvider{
+		ID:           created.ID,
+		ProviderType: "openai-compatibility",
+		Name:         "weighted",
+		BaseURL:      "https://api.example.test/v1",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{ID: firstID, APIKey: "weighted-secret-1", Name: "alpha"},
+			{ID: secondID, APIKey: "weighted-secret-2", Name: "beta"},
+			{APIKey: newSecret, Name: "gamma", Weight: &bigger},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Update inserting weighted entry: %v", err)
+	}
+	if len(fresh.APIKeyEntries) != 3 {
+		t.Fatalf("fresh returned %d entries, want 3", len(fresh.APIKeyEntries))
+	}
+	var newID int64
+	for _, e := range fresh.APIKeyEntries {
+		if e.ID != firstID && e.ID != secondID {
+			newID = e.ID
+			if e.Weight == nil || *e.Weight != bigger {
+				t.Fatalf("new entry Weight = %v, want pointer to %d", e.Weight, bigger)
+			}
+		}
+	}
+	if newID == 0 {
+		t.Fatal("could not find new entry ID after insert")
+	}
+
+	final, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get after insert: %v", err)
+	}
+	for _, e := range final.APIKeyEntries {
+		if e.ID != newID {
+			continue
+		}
+		if e.Weight == nil || *e.Weight != bigger {
+			t.Fatalf("final new entry Weight = %v, want pointer to %d", e.Weight, bigger)
+		}
+		if e.APIKey != newSecret {
+			t.Fatalf("final new entry api key mismatch: got %q", e.APIKey)
+		}
+	}
+}
