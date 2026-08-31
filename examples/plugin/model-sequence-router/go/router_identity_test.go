@@ -35,3 +35,28 @@ func TestRouteKeepsConversationsSharingOneCacheLaneApart(t *testing.T) {
 		t.Fatalf("second conversation inherited the first conversation's position: %#v", other)
 	}
 }
+
+// TestRouteReplaysScalarResponsesInput verifies that scalar and equivalent
+// array input share one observed turn before an extended transcript advances.
+func TestRouteReplaysScalarResponsesInput(t *testing.T) {
+	runtime := newTestRuntime(t)
+	logs := captureRouteLogs(runtime)
+	scalar := responsesRoute(t, "scalar", "", 1)
+	scalar.Body = []byte(`{"input":"scalar opening"}`)
+
+	runtime.route(scalar)
+	runtime.route(scalar)
+	runtime.route(responsesRoute(t, "scalar", "", 1))
+	runtime.route(responsesRoute(t, "scalar", "", 2))
+
+	wantOutcomes := []string{"advanced", "replayed", "replayed", "advanced"}
+	wantIndexes := []int{0, 0, 0, 1}
+	if len(*logs) != len(wantOutcomes) {
+		t.Fatalf("route records = %d, want %d: %#v", len(*logs), len(wantOutcomes), *logs)
+	}
+	for index, record := range *logs {
+		if record.fields["outcome"] != wantOutcomes[index] || record.fields["sequence_index"] != wantIndexes[index] {
+			t.Fatalf("record %d = %#v, want %s at %d", index, record.fields, wantOutcomes[index], wantIndexes[index])
+		}
+	}
+}

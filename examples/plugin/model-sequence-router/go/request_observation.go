@@ -46,7 +46,7 @@ func inspectRequest(body []byte, salt []byte) requestObservation {
 	if tools, ok := root["tools"]; ok {
 		observation.ToolsFingerprint = fingerprintJSON(tools, salt)
 	}
-	history := firstArray(root, "messages", "input", "contents")
+	history := firstHistory(root, "messages", "input", "contents")
 	if len(history) > 0 {
 		observation.HistoryItems = make([]string, 0, len(history))
 		for _, item := range history {
@@ -79,10 +79,15 @@ func inspectRequest(body []byte, salt []byte) requestObservation {
 	return observation
 }
 
-func firstArray(root map[string]any, keys ...string) []any {
+// firstHistory selects the first supported history field and folds scalar
+// Responses input into the same user-message shape accepted by array input.
+func firstHistory(root map[string]any, keys ...string) []any {
 	for _, key := range keys {
 		if values, ok := root[key].([]any); ok {
 			return values
+		}
+		if text, ok := root[key].(string); key == "input" && ok && strings.TrimSpace(text) != "" {
+			return []any{map[string]any{"role": "user", "content": text}}
 		}
 	}
 	return nil
