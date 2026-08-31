@@ -6,7 +6,9 @@
 package claude
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"strconv"
@@ -196,11 +198,12 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 								if mediaType == "" {
 									mediaType = sourceResult.Get("mime_type").String()
 								}
-								if mediaType == "" {
-									mediaType = "application/octet-stream"
+								dataURL, corrupt := sanitizeImageData(mediaType, data)
+								if corrupt {
+									appendTextContent(corruptImagePlaceholder)
+								} else {
+									appendImageContent(dataURL)
 								}
-								dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
-								appendImageContent(dataURL)
 							}
 						}
 					case "document":
@@ -257,14 +260,16 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 											if mediaType == "" {
 												mediaType = sourceResult.Get("mime_type").String()
 											}
-											if mediaType == "" {
-												mediaType = "application/octet-stream"
+											dataURL, corrupt := sanitizeImageData(mediaType, data)
+											if corrupt {
+												toolResultContent := []byte(`{"type":"input_text","text":""}`)
+												toolResultContent, _ = sjson.SetBytes(toolResultContent, "text", corruptImagePlaceholder)
+												toolResultContentItems = append(toolResultContentItems, toolResultContent)
+											} else {
+												toolResultContent := []byte(`{"type":"input_image","image_url":""}`)
+												toolResultContent, _ = sjson.SetBytes(toolResultContent, "image_url", dataURL)
+												toolResultContentItems = append(toolResultContentItems, toolResultContent)
 											}
-											dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
-
-											toolResultContent := []byte(`{"type":"input_image","image_url":""}`)
-											toolResultContent, _ = sjson.SetBytes(toolResultContent, "image_url", dataURL)
-											toolResultContentItems = append(toolResultContentItems, toolResultContent)
 										}
 									}
 								} else if toolResultContentType == "text" {
@@ -638,4 +643,54 @@ func normalizeToolParameters(raw string) string {
 		schema, _ = sjson.SetRawBytes(schema, "properties", []byte(`{}`))
 	}
 	return string(schema)
+}
+
+const corruptImagePlaceholder = "[image data truncated or corrupt; skipped]"
+
+// sanitizeImageData validates base64 image payload integrity. Truncated or
+// corrupt images (for example a screenshot written before IEND was flushed)
+// are rejected so callers can emit a text placeholder instead of forwarding
+// a bad data URL that some upstreams reject with 400 (e.g. Grok "Invalid PNG image").
+func sanitizeImageData(mediaType, data string) (safeDataURL string, corrupt bool) {
+	data = strings.TrimSpace(data)
+	if data == "" {
+		return "", true
+	}
+	raw, err := decodeImageBase64(data)
+	if err != nil {
+		return "", true
+	}
+	if len(raw) < 8 {
+		return "", true
+	}
+	isPNG := strings.Contains(strings.ToLower(mediaType), "png") || bytes.HasPrefix(raw, []byte("\x89PNG\r\n\x1a\n"))
+	if isPNG && !pngHasIEND(raw) {
+		return "", true
+	}
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	}
+	return fmt.Sprintf("data:%s;base64,%s", mediaType, data), false
+}
+
+func decodeImageBase64(data string) ([]byte, error) {
+	raw, err := base64.StdEncoding.DecodeString(data)
+	if err == nil {
+		return raw, nil
+	}
+	return base64.RawStdEncoding.DecodeString(strings.TrimRight(data, "="))
+}
+
+// pngHasIEND looks for an IEND chunk only near the file tail. Searching the
+// whole buffer with Contains can treat coincidental "IEND" bytes inside IDAT
+// as a complete image; a well-formed PNG ends with a 12-byte IEND chunk.
+func pngHasIEND(raw []byte) bool {
+	if len(raw) < 12 {
+		return false
+	}
+	tail := raw
+	if len(raw) > 24 {
+		tail = raw[len(raw)-24:]
+	}
+	return bytes.Contains(tail, []byte("IEND"))
 }

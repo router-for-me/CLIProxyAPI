@@ -1,7 +1,9 @@
 package claude
 
 import (
+	"bytes"
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -561,7 +563,7 @@ func TestConvertClaudeRequestToCodex_PreservesContentOrderAcrossToolAndReasoning
 			{"role":"user","content":[
 				{"type":"tool_result","tool_use_id":"toolu_1","content":[
 					{"type":"text","text":"tool output"},
-					{"type":"image","source":{"media_type":"image/png","data":"aW1hZ2U="}}
+					{"type":"image","source":{"media_type":"image/png","data":"` + validPNG1x1Base64 + `"}}
 				]},
 				{"type":"text","text":"continue"}
 			]}
@@ -594,7 +596,7 @@ func TestConvertClaudeRequestToCodex_PreservesContentOrderAcrossToolAndReasoning
 	if got := inputs[6].Get("output.0.type").String(); got != "input_text" {
 		t.Fatalf("tool result output.0.type = %q, want input_text", got)
 	}
-	if got := inputs[6].Get("output.1.image_url").String(); got != "data:image/png;base64,aW1hZ2U=" {
+	if got := inputs[6].Get("output.1.image_url").String(); got != "data:image/png;base64,"+validPNG1x1Base64 {
 		t.Fatalf("tool result image_url = %q, want data URL", got)
 	}
 	if got := inputs[7].Get("content.0.text").String(); got != "continue" {
@@ -817,4 +819,65 @@ func TestConvertClaudeRequestToCodex_OutputConfigFormat(t *testing.T) {
 			t.Errorf("expected reasoning.effort to be 'high', got %q", got)
 		}
 	})
+}
+
+// Tiny valid 1x1 PNG (includes trailing IEND).
+const validPNG1x1Base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+// Same idea as a screenshot flushed before IEND was written.
+const corruptPNGMissingIENDBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9aw=="
+
+func TestConvertClaudeRequestToCodex_SanitizesCorruptedPNG(t *testing.T) {
+	translated := ConvertClaudeRequestToCodex("grok-4.6", claudePNGPayload(corruptPNGMissingIENDBase64), false)
+	content := string(translated)
+	if strings.Contains(content, "input_image") {
+		t.Fatalf("expected corrupted PNG to be skipped, but got input_image in payload: %s", content)
+	}
+	if !strings.Contains(content, corruptImagePlaceholder) {
+		t.Fatalf("expected placeholder for corrupted PNG, but got: %s", content)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_KeepsValidPNG(t *testing.T) {
+	translated := ConvertClaudeRequestToCodex("grok-4.6", claudePNGPayload(validPNG1x1Base64), false)
+	content := string(translated)
+	if !strings.Contains(content, "input_image") {
+		t.Fatalf("expected valid PNG to stay input_image, got: %s", content)
+	}
+	if strings.Contains(content, corruptImagePlaceholder) {
+		t.Fatalf("valid PNG must not be treated as corrupt: %s", content)
+	}
+
+	unpadded := strings.TrimRight(validPNG1x1Base64, "=")
+	url, corrupt := sanitizeImageData("image/png", unpadded)
+	if corrupt || !strings.Contains(url, "data:image/png;base64,") {
+		t.Fatalf("unpadded valid PNG must pass, url=%q corrupt=%v", url, corrupt)
+	}
+}
+
+func TestPngHasIEND_LooksAtTailOnly(t *testing.T) {
+	fake := append([]byte("\x89PNG\r\n\x1a\nIEND"), bytes.Repeat([]byte{0x00}, 32)...)
+	if pngHasIEND(fake) {
+		t.Fatal("IEND in the middle of a truncated PNG must not count")
+	}
+	complete := append([]byte("\x89PNG\r\n\x1a\n"), []byte{0, 0, 0, 0, 'I', 'E', 'N', 'D', 0xae, 0x42, 0x60, 0x82}...)
+	if !pngHasIEND(complete) {
+		t.Fatal("canonical trailing IEND chunk must count")
+	}
+}
+
+func claudePNGPayload(data string) []byte {
+	return []byte(fmt.Sprintf(`{
+		"messages":[
+			{
+				"role":"user",
+				"content":[
+					{
+						"type":"image",
+						"source":{"type":"base64","media_type":"image/png","data":"%s"}
+					}
+				]
+			}
+		]
+	}`, data))
 }
