@@ -67,7 +67,7 @@ import (
 
 const (
 	pluginIdentifier = "model-sequence-router"
-	pluginVersion    = "0.9.0"
+	pluginVersion    = "0.10.0"
 )
 
 type runtimeState struct {
@@ -175,7 +175,7 @@ func (r *runtimeState) configure(configYAML []byte) error {
 	r.cursors.reset()
 	r.observations.reset()
 	r.config.Store(next)
-	r.cleanup.restart(r.cursors, next.SessionTTL)
+	r.cleanup.restart(next.SessionTTL, r.cursors, r.observations)
 	r.replaceDiagnosticSink(nextDiagnostic)
 	lengths := make(map[string]int, len(next.Aliases))
 	for _, alias := range next.Aliases {

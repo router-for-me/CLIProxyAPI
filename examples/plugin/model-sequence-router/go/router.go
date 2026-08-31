@@ -53,7 +53,7 @@ func (r *runtimeState) routeWithCallback(req pluginapi.ModelRouteRequest, hostCa
 		SourceFormat: req.SourceFormat,
 		Stream:       req.Stream,
 		Observation:  observation,
-		Identity:     newConversationIdentity(req, observation, r.fingerprintSalt),
+		Identity:     newConversationIdentity(req),
 	}
 	decision.Selection = r.selectSequencePosition(decision, available)
 	switch decision.Selection.Outcome {
@@ -73,13 +73,13 @@ func (r *runtimeState) routeWithCallback(req pluginapi.ModelRouteRequest, hostCa
 		"provider": decision.Selection.Target.Provider, "model": decision.TargetModel,
 		"advanced":         decision.Selection.Outcome == selectionAdvanced,
 		"outcome":          decision.Selection.Outcome.String(),
-		"identity_source":  string(decision.Identity.Source),
+		"identity_source":  string(decision.Identity.source()),
 		"skipped":          len(decision.Selection.Skipped),
 		"random_start":     alias.RandomStart,
 		"requested_effort": requestedSuffix,
 	}
-	if decision.Identity.Value != "" {
-		fields["session_hash"] = shortSessionHash(decision.Identity.Value)
+	if decision.Identity != "" {
+		fields["session_hash"] = shortSessionHash(string(decision.Identity))
 	}
 	if cfg.Diagnostics.Enabled {
 		for name, value := range r.diagnosticFields(decision) {
@@ -100,11 +100,11 @@ func (r *runtimeState) routeWithCallback(req pluginapi.ModelRouteRequest, hostCa
 // returns the first available position for a request that carries no identity.
 func (r *runtimeState) selectSequencePosition(decision routeDecision, available map[string]struct{}) selectionResult {
 	var selection selectionResult
-	if decision.Identity.Value == "" {
+	if decision.Identity == "" {
 		selection = selectStateless(decision.Alias.Sequence, available)
 	} else {
 		selection = r.cursors.selectTarget(selectionRequest{
-			Key:         cursorKey{Generation: decision.Config.Generation, Alias: decision.Alias.LookupKey, SessionID: decision.Identity.Value},
+			Key:         cursorKey{Generation: decision.Config.Generation, Alias: decision.Alias.LookupKey, SessionID: string(decision.Identity)},
 			Sequence:    decision.Alias.Sequence,
 			Available:   available,
 			Turn:        newTurnIdentity(decision.Observation),
@@ -135,7 +135,7 @@ func (r *runtimeState) unavailableTarget(decision routeDecision, hostCallbackID 
 	fields := map[string]any{
 		"event": "route", "alias": decision.Alias.Alias,
 		"outcome":         decision.Selection.Outcome.String(),
-		"identity_source": string(decision.Identity.Source),
+		"identity_source": string(decision.Identity.source()),
 		"providers":       uniqueProviders(decision.Alias.Sequence),
 	}
 	response := pluginapi.ModelRouteResponse{Handled: false}
