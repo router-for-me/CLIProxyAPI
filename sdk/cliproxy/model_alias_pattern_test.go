@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -77,11 +78,48 @@ func TestCollectModelAliasPatterns_NoWildcards(t *testing.T) {
 	}
 }
 
-func TestCollectModelAliasPatterns_TargetFollowsTheExactAliasThatReplacedIt(t *testing.T) {
+func TestApplyOAuthModelAliasEntries_WildcardTargetSurvivesExactReplacement(t *testing.T) {
 	t.Parallel()
 
-	// The exact alias removes "gpt-5.6-luna" from the catalog because it does not set
-	// fork, so the wildcard has to target the surviving id or it can never route.
+	// The exact alias sets no fork, so on its own it would replace "gpt-5.6-luna" in
+	// the catalog. The wildcard resolves to that upstream name, so it has to stay
+	// published or nothing can serve the pattern.
+	aliases := []config.OAuthModelAlias{
+		{Name: "gpt-5.6-luna", Alias: "claude-haiku-4-5-*"},
+		{Name: "gpt-5.6-luna", Alias: "my-friendly-name"},
+	}
+
+	published := applyOAuthModelAliasEntries(aliases, []*ModelInfo{{ID: "gpt-5.6-luna"}})
+	ids := make([]string, 0, len(published))
+	for _, model := range published {
+		ids = append(ids, model.ID)
+	}
+
+	if !slices.Contains(ids, "gpt-5.6-luna") {
+		t.Errorf("published ids = %v, want the wildcard target to remain", ids)
+	}
+	if !slices.Contains(ids, "my-friendly-name") {
+		t.Errorf("published ids = %v, want the exact alias as well", ids)
+	}
+}
+
+func TestApplyOAuthModelAliasEntries_ExactAliasStillReplacesWithoutWildcard(t *testing.T) {
+	t.Parallel()
+
+	// Without a wildcard on the same model the non-fork replacement is unchanged.
+	aliases := []config.OAuthModelAlias{
+		{Name: "gpt-5.6-luna", Alias: "my-friendly-name"},
+	}
+
+	published := applyOAuthModelAliasEntries(aliases, []*ModelInfo{{ID: "gpt-5.6-luna"}})
+	if len(published) != 1 || published[0].ID != "my-friendly-name" {
+		t.Fatalf("published = %v, want only the exact alias", published)
+	}
+}
+
+func TestCollectModelAliasPatterns_TargetIsTheUpstreamModel(t *testing.T) {
+	t.Parallel()
+
 	patterns := collectModelAliasPatterns(map[string][]config.OAuthModelAlias{
 		"codex": {
 			{Name: "gpt-5.6-luna", Alias: "claude-haiku-4-5-*"},
@@ -92,8 +130,8 @@ func TestCollectModelAliasPatterns_TargetFollowsTheExactAliasThatReplacedIt(t *t
 	if len(patterns) != 1 {
 		t.Fatalf("pattern count = %d, want 1", len(patterns))
 	}
-	if patterns[0].Target != "my-friendly-name" {
-		t.Errorf("target = %q, want the published alias id", patterns[0].Target)
+	if patterns[0].Target != "gpt-5.6-luna" {
+		t.Errorf("target = %q, want the upstream model", patterns[0].Target)
 	}
 }
 
@@ -115,22 +153,44 @@ func TestCollectModelAliasPatterns_ForkKeepsTheUpstreamTarget(t *testing.T) {
 	}
 }
 
-func TestCollectModelAliasPatterns_TargetMatchesTheAppliedCatalog(t *testing.T) {
+func TestCollectModelAliasPatterns_TargetIsAlwaysAPublishedCatalogID(t *testing.T) {
 	t.Parallel()
 
-	// Guard the two halves against drifting apart: whatever id the catalog ends up
-	// publishing for the upstream model must be the id the pattern targets.
-	aliases := []config.OAuthModelAlias{
-		{Name: "gpt-5.6-luna", Alias: "claude-haiku-4-5-*"},
-		{Name: "gpt-5.6-luna", Alias: "my-friendly-name"},
+	// The pattern target is also the value OAuth alias resolution returns for a
+	// wildcard, so this one invariant covers both gates: the handler provider lookup
+	// and the per-credential support check. If the catalog ever stops publishing the
+	// target, a matching request dies as model_not_found or auth_not_found.
+	cases := [][]config.OAuthModelAlias{
+		{
+			{Name: "gpt-5.6-luna", Alias: "claude-haiku-4-5-*"},
+		},
+		{
+			{Name: "gpt-5.6-luna", Alias: "claude-haiku-4-5-*"},
+			{Name: "gpt-5.6-luna", Alias: "my-friendly-name"},
+		},
+		{
+			{Name: "gpt-5.6-luna", Alias: "claude-haiku-4-5-*"},
+			{Name: "gpt-5.6-luna", Alias: "my-friendly-name", Fork: true},
+		},
+		{
+			{Name: "gpt-5.6-luna", Alias: "claude-haiku-4-5-*"},
+			{Name: "gpt-5.6-luna", Alias: "one"},
+			{Name: "gpt-5.6-luna", Alias: "two"},
+		},
 	}
-	published := applyOAuthModelAliasEntries(aliases, []*ModelInfo{{ID: "gpt-5.6-luna"}})
-	patterns := collectModelAliasPatterns(map[string][]config.OAuthModelAlias{"codex": aliases})
 
-	if len(published) != 1 || len(patterns) != 1 {
-		t.Fatalf("published = %d models, patterns = %d, want 1 each", len(published), len(patterns))
-	}
-	if published[0].ID != patterns[0].Target {
-		t.Errorf("catalog id = %q but pattern target = %q", published[0].ID, patterns[0].Target)
+	for i, aliases := range cases {
+		published := applyOAuthModelAliasEntries(aliases, []*ModelInfo{{ID: "gpt-5.6-luna"}})
+		ids := make([]string, 0, len(published))
+		for _, model := range published {
+			ids = append(ids, model.ID)
+		}
+		patterns := collectModelAliasPatterns(map[string][]config.OAuthModelAlias{"codex": aliases})
+		if len(patterns) != 1 {
+			t.Fatalf("case %d: pattern count = %d, want 1", i, len(patterns))
+		}
+		if !slices.Contains(ids, patterns[0].Target) {
+			t.Errorf("case %d: pattern target %q is not published; catalog has %v", i, patterns[0].Target, ids)
+		}
 	}
 }

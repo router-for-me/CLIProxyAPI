@@ -947,6 +947,9 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 	}
 
 	forward := make(map[string][]aliasEntry, len(aliases))
+	// wildcardTargets holds the upstream models a wildcard alias resolves to, keyed
+	// the same way as forward.
+	wildcardTargets := make(map[string]struct{})
 	for i := range aliases {
 		name := strings.TrimSpace(aliases[i].Name)
 		alias := strings.TrimSpace(aliases[i].Alias)
@@ -958,8 +961,10 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		}
 		if strings.Contains(alias, "*") {
 			// A wildcard alias is a routing pattern, not a model id, so it must never
-			// reach the catalog. The upstream model keeps its own entry and requests
-			// matching the pattern are resolved during routing instead.
+			// reach the catalog itself. Its target does have to stay published: routing
+			// resolves the pattern to this upstream name, and both the provider lookup
+			// and the credential support check compare against registered model ids.
+			wildcardTargets[strings.ToLower(name)] = struct{}{}
 			continue
 		}
 		key := strings.ToLower(name)
@@ -995,6 +1000,11 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		}
 
 		keepOriginal := false
+		if _, isWildcardTarget := wildcardTargets[key]; isWildcardTarget {
+			// An exact alias would otherwise replace this model, which would strand the
+			// wildcard on an id no client registers.
+			keepOriginal = true
+		}
 		for _, entry := range entries {
 			if entry.fork {
 				keepOriginal = true
@@ -1062,8 +1072,7 @@ func collectModelAliasPatterns(aliases map[string][]config.OAuthModelAlias) []re
 
 	var out []registry.ModelAliasPattern
 	for _, channel := range channels {
-		entries := aliases[channel]
-		for _, entry := range entries {
+		for _, entry := range aliases[channel] {
 			name := strings.TrimSpace(entry.Name)
 			alias := strings.TrimSpace(entry.Alias)
 			if name == "" || alias == "" {
@@ -1072,46 +1081,10 @@ func collectModelAliasPatterns(aliases map[string][]config.OAuthModelAlias) []re
 			if !strings.Contains(alias, "*") {
 				continue
 			}
-			out = append(out, registry.ModelAliasPattern{
-				Pattern: alias,
-				Target:  catalogModelIDForAliasTarget(entries, name),
-			})
+			out = append(out, registry.ModelAliasPattern{Pattern: alias, Target: name})
 		}
 	}
 	return out
-}
-
-// catalogModelIDForAliasTarget returns the model id the registry actually holds for
-// an upstream model name inside one alias channel.
-//
-// applyOAuthModelAliasEntries drops the upstream model from the published catalog
-// when the channel also maps it to exact aliases and none of them sets fork. A
-// wildcard whose target is that model must therefore point at a surviving alias id,
-// otherwise the registry lookup misses and the pattern silently never routes.
-func catalogModelIDForAliasTarget(entries []config.OAuthModelAlias, name string) string {
-	replacement := ""
-	for _, entry := range entries {
-		entryName := strings.TrimSpace(entry.Name)
-		alias := strings.TrimSpace(entry.Alias)
-		if entryName == "" || alias == "" || !strings.EqualFold(entryName, name) {
-			continue
-		}
-		// Mirror the skips applyOAuthModelAliasEntries performs before it reads fork.
-		if strings.EqualFold(entryName, alias) || strings.Contains(alias, "*") {
-			continue
-		}
-		if entry.Fork {
-			// The upstream model keeps its own catalog entry.
-			return name
-		}
-		if replacement == "" {
-			replacement = alias
-		}
-	}
-	if replacement == "" {
-		return name
-	}
-	return replacement
 }
 
 // applyModelAliasPatterns publishes wildcard alias patterns to the global model

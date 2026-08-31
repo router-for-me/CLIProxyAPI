@@ -695,12 +695,12 @@ nonstream-keepalive-interval: 0
 # unique aliases/prefixes or avoid overlapping names.
 # You can repeat the same name with different aliases to expose multiple client model names.
 # An alias may contain '*', which matches zero or more characters (case-insensitive).
-# Wildcard aliases are routing-only: they are never listed in /v1/models, because a
-# pattern is not a model id, so `fork` has no effect on a wildcard entry. A matching
-# request is routed to whatever catalog entry the upstream model currently has: its
-# own id, or the exact alias that replaced it when the same name is also mapped
-# without `fork`. Exact aliases always win; wildcards are consulted only when no
-# exact alias matched, and the first matching pattern is used.
+# Wildcard aliases are routing-only: the pattern itself is never listed in /v1/models,
+# because a pattern is not a model id, so `fork` has no effect on a wildcard entry.
+# The model a wildcard targets always keeps its own catalog entry, even when the same
+# name is also mapped to an exact alias without `fork`, because routing resolves the
+# pattern to that upstream id. Exact aliases always win; wildcards are consulted only
+# when no exact alias matched, and the first matching pattern is used.
 # This is useful for clients that send dated model ids, for example:
 #   - name: "gpt-5.6-luna"
 #     alias: "claude-haiku-4-5-*"
