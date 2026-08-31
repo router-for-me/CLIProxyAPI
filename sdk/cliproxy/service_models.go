@@ -2,10 +2,12 @@ package cliproxy
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
 
+	codebuddyauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -143,6 +145,9 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(models, excluded)
 	case "kimi":
 		models = registry.GetKimiModels()
+		models = applyExcludedModels(models, excluded)
+	case "codebuddy-cn":
+		models = buildCodeBuddyAuthModels(a)
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
@@ -795,6 +800,90 @@ func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "google", "vertex")
+}
+
+// buildCodeBuddyAuthModels builds the CodeBuddy model catalog from per-auth
+// metadata synced from the upstream /v3/config endpoint at login and refresh
+// time. Models without metadata fall back to plain ID entries.
+func buildCodeBuddyAuthModels(auth *coreauth.Auth) []*ModelInfo {
+	if auth == nil || len(auth.Metadata) == 0 {
+		return nil
+	}
+	now := time.Now().Unix()
+	if raw, ok := auth.Metadata["models_meta"].(string); ok {
+		if trimmed := strings.TrimSpace(raw); trimmed != "" {
+			var meta []codebuddyauth.ModelInfo
+			if err := json.Unmarshal([]byte(trimmed), &meta); err == nil && len(meta) > 0 {
+				out := make([]*ModelInfo, 0, len(meta))
+				for _, m := range meta {
+					if !codebuddyauth.IsRoutableModel(m.ID) {
+						continue
+					}
+					info := &ModelInfo{
+						ID:          m.ID,
+						Object:      "model",
+						Created:     now,
+						OwnedBy:     "codebuddy-cn",
+						Type:        "codebuddy-cn",
+						DisplayName: m.Name,
+						Name:        m.Name,
+					}
+					if m.MaxInputTokens > 0 {
+						info.ContextLength = m.MaxInputTokens
+						info.MaxContextLength = m.MaxInputTokens
+						info.InputTokenLimit = m.MaxInputTokens
+					}
+					if m.MaxOutputTokens > 0 {
+						info.MaxCompletionTokens = m.MaxOutputTokens
+						info.OutputTokenLimit = m.MaxOutputTokens
+					}
+					if m.SupportsImages {
+						info.SupportedInputModalities = append(info.SupportedInputModalities, "image")
+					}
+					out = append(out, info)
+				}
+				if len(out) > 0 {
+					return out
+				}
+			}
+		}
+	}
+	ids, ok := metadataStringSlice(auth.Metadata["enabled_models"])
+	if !ok {
+		return nil
+	}
+	out := make([]*ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		if !codebuddyauth.IsRoutableModel(id) {
+			continue
+		}
+		out = append(out, &ModelInfo{
+			ID:      id,
+			Object:  "model",
+			Created: now,
+			OwnedBy: "codebuddy-cn",
+			Type:    "codebuddy-cn",
+		})
+	}
+	return out
+}
+
+// metadataStringSlice converts a JSON-decoded metadata value into a string slice.
+func metadataStringSlice(raw any) ([]string, bool) {
+	switch v := raw.(type) {
+	case []string:
+		return v, true
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }
 
 func buildGeminiConfigModels(entry *config.GeminiKey) []*ModelInfo {

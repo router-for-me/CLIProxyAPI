@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
+	codebuddyauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
@@ -735,6 +736,129 @@ func watchOAuthSessionCancel(pollCtx context.Context, cancel context.CancelFunc,
 			}
 		}
 	}
+}
+
+func (h *Handler) RequestCodeBuddyToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing CodeBuddy (WorkBuddy) authentication...")
+
+	client := codebuddyauth.NewClient(h.cfg, "")
+	stateResult, errFetchState := client.FetchState(ctx)
+	if errFetchState != nil {
+		log.Errorf("Failed to generate CodeBuddy authorization URL: %v", errFetchState)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to generate authorization url"})
+		return
+	}
+	state := stateResult.State
+	authURL := stateResult.AuthURL
+
+	RegisterOAuthSession(state, "codebuddy-cn")
+
+	go func() {
+		pollCtx, cancelPoll := context.WithCancel(ctx)
+		defer cancelPoll()
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "codebuddy-cn")
+
+		fmt.Println("Waiting for CodeBuddy authorization...")
+		token, errWaitForAuthorization := client.WaitForToken(pollCtx, state)
+		if errWaitForAuthorization != nil {
+			if !IsOAuthSessionPending(state, "codebuddy-cn") {
+				return
+			}
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization))
+			fmt.Printf("Authentication failed: %v\n", errWaitForAuthorization)
+			return
+		}
+		if !IsOAuthSessionPending(state, "codebuddy-cn") {
+			return
+		}
+
+		// Account info and available models are optional extras.
+		account, accErr := client.GetAccountInfo(pollCtx, token.AccessToken, state)
+		if accErr != nil {
+			log.Warnf("codebuddy-cn: failed to fetch account info: %v", accErr)
+			account = nil
+		}
+		var models []codebuddyauth.ModelInfo
+		if configData, cfgErr := client.FetchConfig(pollCtx, token.AccessToken, accountUIDValue(account)); cfgErr != nil {
+			log.Warnf("codebuddy-cn: failed to fetch model config: %v", cfgErr)
+		} else if parsed, parseErr := codebuddyauth.ParseModels(configData); parseErr != nil {
+			log.Warnf("codebuddy-cn: failed to parse model config: %v", parseErr)
+		} else {
+			models = parsed
+		}
+
+		tokenStorage := codebuddyauth.BuildTokenStorage(token, account, models)
+
+		metadata := map[string]any{
+			"type":          "codebuddy-cn",
+			"access_token":  tokenStorage.AccessToken,
+			"refresh_token": tokenStorage.RefreshToken,
+			"token_type":    tokenStorage.TokenType,
+			"timestamp":     time.Now().UnixMilli(),
+		}
+		if tokenStorage.Scope != "" {
+			metadata["scope"] = tokenStorage.Scope
+		}
+		if tokenStorage.Domain != "" {
+			metadata["domain"] = tokenStorage.Domain
+		}
+		if tokenStorage.UID != "" {
+			metadata["uid"] = tokenStorage.UID
+		}
+		if tokenStorage.Nickname != "" {
+			metadata["nickname"] = tokenStorage.Nickname
+		}
+		if tokenStorage.Expired != "" {
+			metadata["expired"] = tokenStorage.Expired
+		}
+		if len(tokenStorage.EnabledModels) > 0 {
+			metadata["enabled_models"] = tokenStorage.EnabledModels
+		}
+		if tokenStorage.ModelsMeta != "" {
+			metadata["models_meta"] = tokenStorage.ModelsMeta
+		}
+
+		fileName := fmt.Sprintf("codebuddy-cn-%d.json", time.Now().UnixMilli())
+		label := "CodeBuddy User"
+		if nickname := strings.TrimSpace(tokenStorage.Nickname); nickname != "" {
+			label = nickname
+		}
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "codebuddy-cn",
+			FileName: fileName,
+			Label:    label,
+			Storage:  tokenStorage,
+			Metadata: metadata,
+		}
+		if errGuard := guardOAuthSessionPendingForSave(state, "codebuddy-cn"); errGuard != nil {
+			return
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use CodeBuddy (WorkBuddy) services through this CLI")
+		CompleteOAuthSession(state)
+	}()
+
+	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": "codebuddy-cn"}
+	c.JSON(200, response)
+}
+
+// accountUIDValue returns the account UID used for the /v3/config X-User-Id header.
+func accountUIDValue(account *codebuddyauth.AccountInfo) string {
+	if account == nil {
+		return ""
+	}
+	return account.UID
 }
 
 // CancelAuthSession cancels a pending OAuth session identified by state.

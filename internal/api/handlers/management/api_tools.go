@@ -71,6 +71,8 @@ type apiCallResponse struct {
 //     2) attributes.api_key
 //     3) metadata.token / metadata.id_token / metadata.cookie
 //     Example: {"Authorization":"Bearer $TOKEN$"}.
+//     Also supports magic variable "$UID$" which is replaced with metadata.uid
+//     (used by providers whose upstream APIs require the account UID, e.g. CodeBuddy CN billing).
 //     Note: if you need to override the HTTP Host header, set header["Host"].
 //   - data (optional): Raw request body as string (useful for POST/PUT/PATCH).
 //
@@ -160,6 +162,23 @@ func (h *Handler) APICall(c *gin.Context) {
 			continue
 		}
 		reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
+	}
+
+	for key, value := range reqHeaders {
+		if !strings.Contains(value, "$UID$") {
+			continue
+		}
+		uid := ""
+		if auth != nil && auth.Metadata != nil {
+			if raw, ok := auth.Metadata["uid"].(string); ok {
+				uid = strings.TrimSpace(raw)
+			}
+		}
+		if uid == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "auth uid not found"})
+			return
+		}
+		reqHeaders[key] = strings.ReplaceAll(value, "$UID$", uid)
 	}
 
 	var requestBody io.Reader
