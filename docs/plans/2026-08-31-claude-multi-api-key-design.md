@@ -24,7 +24,7 @@ Key findings that shaped this design:
 
 ## Decisions (from the brainstorming session)
 
-1. **Form UX:** replace the single `api_key` field with the `API Key Entries` editor (same as OpenAI). Legacy rows keep working: the old key hydrates as the first entry on edit, and the backend falls back to the `api_key` column for rows never edited.
+1. **Form UX:** replace the single `api_key` field with the `API Key Entries` editor (same as OpenAI). Legacy rows keep working: the old key hydrates as the first entry on edit, and an untouched row continues using the `api_key` column. A submitted provider with neither entries nor a legacy key is rejected as having no credential.
 2. **Per-entry pinning:** yes — each entry gets its own routing key (`claude:<rowID>:key-<entryID>`), so Model Routes can pin to a specific key, exactly like OpenAI entries.
 3. **Weight per entry:** yes — the editor gains an optional weight field, benefiting Claude and OpenAI equally (the backend already supports both).
 4. **Error behavior:** use the existing auth-manager cooldown mechanism — no new failover logic. Keys that hit rate limits/invalid-auth cool down; round-robin picks the others.
@@ -44,7 +44,7 @@ Dashboard (1 row, N entries)
 
 Data model changes (3 places):
 
-1. **PG child table** `upstream_provider_api_key_entries`: add `weight INTEGER NULL` (idempotent `ADD COLUMN IF NOT EXISTS` at schema init, `postgresstore.go` ~1629). NULL = weight 1, matching `Weight *int` semantics in config.
+1. **PG child table** `upstream_provider_api_key_entries`: add `weight INTEGER NULL` (idempotent `ADD COLUMN IF NOT EXISTS` at schema migration, `postgresstore.go` ~692). NULL = weight 1, matching `Weight *int` semantics in config.
 2. **`store.UpstreamProviderAPIKey`** and the shared request/response DTO `upstreamProviderEntryReq`: add `Weight *int` (json `weight,omitempty`). Since the DTO is shared, OpenAI entries gain weight for free.
 3. **`config.ClaudeKey`**: add `UpstreamProviderEntryID int64` (`yaml:"upstream-provider-entry-id,omitempty"`, `json:"-"`), mirroring `OpenAICompatibilityAPIKey.UpstreamProviderEntryID`. The flat list shape is preserved — no new nesting, so hand-written config.yaml keeps working.
 
@@ -57,12 +57,18 @@ Data model changes (3 places):
 - entries present → one item per entry with per-entry key/weight/proxy and row-level fields copied; stamp `UpstreamProviderID: p.ID`, `UpstreamProviderEntryID: e.ID`.
 - entries empty → one legacy item from `p.APIKey` (`UpstreamProviderEntryID: 0`).
 - `RenderConfig` (~line 64) appends the returned slice for `TypeClaudeAPIKey`.
+- When an entry proxy is empty, retain the provider-level proxy as its default; an explicit entry proxy overrides it.
 
 **2. `internal/upstreamsync/seed.go` — inverse collapse**
-`providerFromClaudeKey` (~line 180) collapses: N `ClaudeKey` items sharing an `UpstreamProviderID` → one provider row. Items with `UpstreamProviderEntryID > 0` become child entries (`api_key`, `weight`, `proxy_url`; name stays empty — identity derives from the id). Items with entry-id 0 become the legacy `p.APIKey`. Row-level fields (cloak, toggles, etc.) are read from the first item. Lossless because the renderer copies row-level fields identically into every item.
+`SeedFromArtifacts` (~line 53) iterates `cfg.ClaudeKey` and calls `st.Create(providerFromClaudeKey(k))` **per item**. Today the loop is **one item → one provider row**, which is what legacy YAML expects. The fan-out shape can survive this loop unchanged because:
 
-**3. `internal/watcher/synthesizer/config.go` — per-entry pinning**
-Add `addClaudeEntryProviderKey(attrs, providerKey, entryID)` modeled on `addOpenAICompatEntryProviderKey` (~line 56): identity is `key-<entryID>` from the **stable persisted child-row id**, never the mutable name (avoids the documented rename-breaks-route bug). `synthesizeClaudeKeys` (~line 178) stamps `provider_key = "claude:<rowID>"` plus `entry_provider_key = "claude:<rowID>:key-<entryID>"` when `UpstreamProviderEntryID > 0`. The existing `claude:*` wildcard match in the conductor keeps provider-level routes working unchanged.
+- Hand-written YAML entries without `UpstreamProviderID` (entry-id 0) seed exactly as they did before — each item becomes its own row with `api_key` in the parent column.
+- Forward render writes back `UpstreamProviderID: p.ID` for every emitted item; a re-seed of an operator-edited YAML (whose items carry the same `UpstreamProviderID`) would still create new rows because `st.Create` always returns a fresh id and ignores the input id.
+
+`providerFromClaudeKey` (~line 180) should copy `UpstreamProviderID` and `UpstreamProviderEntryID` into the produced `store.UpstreamProvider` *when non-zero*, so a future iteration that supports upsert-by-id (or alternative seeding strategies) can preserve identity. With the current loop semantics this only affects observability/debugging, not persistence. For dashboard-managed rows, identity is established by the forward renderer and survives `seed(render(state))` only because the forward direction is lossless within a single boot; across boots the absence of upsert semantics means operator edits to `config.yaml` may produce a new provider row. Document this in the runtime caveat.
+
+**3. OpenAI Compatibility renderer parity**
+`openAICompatFromProvider` (~line 174) and `providerFromOpenAICompat` (~line 217) propagate the new `Weight` field on entries so OpenAI rows also retain weight across round-trips, ensuring parity with Claude entries.
 
 **4. Weight validation — no change**
 `internal/config/weight.go` already validates `claude-api-key[i].weight` per item; fan-out produces one item per entry, so per-entry weights are validated automatically.
