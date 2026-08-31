@@ -110,3 +110,31 @@ func (r *ModelRegistry) resolveModelAliasPatternLocked(modelID string) string {
 	}
 	return ""
 }
+
+// modelRegistrationForTargetLocked resolves an alias pattern target to its
+// registration.
+//
+// Registered model ids keep the casing their client supplied, while a pattern
+// target comes from configuration. An exact lookup is tried first and a
+// case-insensitive scan only backs it up, so wildcard routing stays consistent
+// with the case-insensitive matching used everywhere else on the alias path.
+//
+// Callers must hold at least a read lock on the registry mutex.
+func (r *ModelRegistry) modelRegistrationForTargetLocked(target string) *ModelRegistration {
+	target = strings.TrimSpace(target)
+	if r == nil || target == "" {
+		return nil
+	}
+	if registration, exists := r.models[target]; exists && registration != nil {
+		return registration
+	}
+	for modelID, registration := range r.models {
+		if registration == nil {
+			continue
+		}
+		if strings.EqualFold(modelID, target) {
+			return registration
+		}
+	}
+	return nil
+}

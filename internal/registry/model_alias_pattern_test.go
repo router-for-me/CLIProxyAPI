@@ -104,3 +104,37 @@ func TestGetModelProviders_AliasPatternWithUnregisteredTarget(t *testing.T) {
 		t.Fatalf("providers = %v, want none when the target is not registered", providers)
 	}
 }
+
+func TestGetModelProviders_AliasPatternTargetIsCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "codex", []*ModelInfo{{ID: "gpt-5.6-luna"}})
+	// The configured target casing does not have to match the registered model id,
+	// which is how exact aliases already behave.
+	r.SetModelAliasPatterns([]ModelAliasPattern{
+		{Pattern: "claude-haiku-4-5-*", Target: "GPT-5.6-LUNA"},
+	})
+
+	providers := r.GetModelProviders("claude-haiku-4-5-20251001")
+	if len(providers) != 1 || providers[0] != "codex" {
+		t.Fatalf("providers = %v, want [codex]", providers)
+	}
+}
+
+func TestGetModelProviders_RegisteredModelIsNotRedirectedByPattern(t *testing.T) {
+	t.Parallel()
+
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "codex", []*ModelInfo{{ID: "gpt-5.6-luna"}})
+	// A registered model whose providers have all gone away must report nothing
+	// rather than being rerouted to an unrelated wildcard target.
+	r.models["claude-haiku-4-5-20251001"] = &ModelRegistration{Providers: map[string]int{}}
+	r.SetModelAliasPatterns([]ModelAliasPattern{
+		{Pattern: "claude-haiku-4-5-*", Target: "gpt-5.6-luna"},
+	})
+
+	if providers := r.GetModelProviders("claude-haiku-4-5-20251001"); len(providers) != 0 {
+		t.Fatalf("providers = %v, want none for a registered model with no providers", providers)
+	}
+}
