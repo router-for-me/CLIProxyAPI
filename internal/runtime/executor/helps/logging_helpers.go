@@ -54,6 +54,7 @@ type upstreamAttempt struct {
 	bodyHasContent       bool
 	prevWasSSEEvent      bool
 	errorWritten         bool
+	trailingNewlines     int
 }
 
 func requestLogCaptureEnabled(cfg *config.Config) bool {
@@ -474,6 +475,17 @@ func ensureResponseIntro(ginCtx *gin.Context, attempt *upstreamAttempt) {
 	if attempt == nil || attempt.response == nil || attempt.responseIntroWritten {
 		return
 	}
+	attempts := getAttempts(ginCtx)
+	for i := len(attempts) - 1; i >= 0; i-- {
+		previousAttempt := attempts[i]
+		if previousAttempt == nil || previousAttempt == attempt || !previousAttempt.responseIntroWritten {
+			continue
+		}
+		if missingNewlines := 2 - previousAttempt.trailingNewlines; missingNewlines > 0 {
+			writeAttemptResponse(ginCtx, attempt, []byte(strings.Repeat("\n", missingNewlines)))
+		}
+		break
+	}
 	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("=== API RESPONSE %d ===\n", attempt.index)))
 	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano))))
 	writeAttemptResponse(ginCtx, attempt, []byte("\n"))
@@ -484,6 +496,14 @@ func writeAttemptResponse(ginCtx *gin.Context, attempt *upstreamAttempt, payload
 	if attempt == nil || len(payload) == 0 {
 		return
 	}
+	trailingNewlines := 0
+	for i := len(payload) - 1; i >= 0 && payload[i] == '\n'; i-- {
+		trailingNewlines++
+	}
+	if trailingNewlines == len(payload) {
+		trailingNewlines += attempt.trailingNewlines
+	}
+	attempt.trailingNewlines = trailingNewlines
 	if attempt.responseSource == nil {
 		attempt.responseSource = apiResponseSourceOrNil(ginCtx)
 	}
@@ -527,7 +547,7 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 		return
 	}
 	var builder strings.Builder
-	for idx, attempt := range attempts {
+	for _, attempt := range attempts {
 		if attempt == nil || attempt.response == nil {
 			continue
 		}
@@ -536,12 +556,9 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 			continue
 		}
 		builder.WriteString(responseText)
-		if !strings.HasSuffix(responseText, "\n") {
-			builder.WriteString("\n")
-		}
-		if idx < len(attempts)-1 {
-			builder.WriteString("\n")
-		}
+	}
+	if responseText := builder.String(); responseText != "" && !strings.HasSuffix(responseText, "\n") {
+		builder.WriteString("\n")
 	}
 	ginCtx.Set(apiResponseKey, []byte(builder.String()))
 }

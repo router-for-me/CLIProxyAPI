@@ -10,7 +10,6 @@ import (
 
 func TestFetchLatestAssetSetsGitHubAuthorization(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "asset-token")
-	t.Setenv("github_token", "")
 	t.Setenv("GITSTORE_GIT_TOKEN", "")
 	t.Setenv("GITSTORE_GIT_URL", "")
 

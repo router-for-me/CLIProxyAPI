@@ -135,3 +135,48 @@ func TestModelCatalogUpdaterPlan(t *testing.T) {
 		})
 	}
 }
+
+func TestHomeConfigPayloadPortApplication(t *testing.T) {
+	tests := []struct {
+		name     string
+		yamlBody string
+		wantPort int
+	}{
+		{
+			name:     "custom port honored",
+			yamlBody: "port: 9090\n",
+			wantPort: 9090,
+		},
+		{
+			name:     "custom port 8327 honored",
+			yamlBody: "port: 8327\n",
+			wantPort: 8327,
+		},
+		{
+			name:     "missing port defaults to 8317",
+			yamlBody: "debug: true\n",
+			wantPort: 8317,
+		},
+		{
+			name:     "standard port 8317 preserved",
+			yamlBody: "port: 8317\n",
+			wantPort: 8317,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, errParse := config.ParseConfigBytes([]byte(tt.yamlBody))
+			if errParse != nil {
+				t.Fatalf("ParseConfigBytes() error = %v", errParse)
+			}
+			if parsed == nil {
+				parsed = &config.Config{}
+			}
+			parsed.Port = config.NormalizeHomePort(parsed.Port)
+			if parsed.Port != tt.wantPort {
+				t.Fatalf("parsed.Port = %d, want %d", parsed.Port, tt.wantPort)
+			}
+		})
+	}
+}

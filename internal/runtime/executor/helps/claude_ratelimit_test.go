@@ -147,6 +147,42 @@ func TestParseClaudeRateLimitReset_AllCases(t *testing.T) {
 		}
 	})
 
+	t.Run("fable-only rejection with allowed_warning on shared window uses retry-after only", func(t *testing.T) {
+		h := make(http.Header)
+		h.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+		h.Set("Anthropic-Ratelimit-Unified-5h-Status", "allowed")
+		h.Set("Anthropic-Ratelimit-Unified-7d-Status", "allowed_warning")
+		h.Set("Anthropic-Ratelimit-Unified-7d_oi-Status", "rejected")
+		h.Set("Anthropic-Ratelimit-Unified-7d_oi-Reset", strconv.FormatInt(now.Add(7*24*time.Hour).Unix(), 10))
+		h.Set("Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(now.Add(7*24*time.Hour).Unix(), 10))
+		h.Set("Retry-After", "60")
+
+		got := parseClaudeRateLimitResetWithFuzz(h, now, 0, 0)
+		if got == nil {
+			t.Fatal("expected non-nil RetryAfter")
+		}
+		if *got != 60*time.Second {
+			t.Fatalf("expected 60s from Retry-After, got %v", *got)
+		}
+	})
+
+	t.Run("missing unified status with allowed_warning shared windows ignores unified reset and uses retry-after", func(t *testing.T) {
+		h := make(http.Header)
+		// Missing Anthropic-Ratelimit-Unified-Status, shared windows are allowed_warning
+		h.Set("Anthropic-Ratelimit-Unified-5h-Status", "allowed_warning")
+		h.Set("Anthropic-Ratelimit-Unified-7d-Status", "allowed_warning")
+		h.Set("Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(now.Add(7*24*time.Hour).Unix(), 10))
+		h.Set("Retry-After", "60")
+
+		got := parseClaudeRateLimitResetWithFuzz(h, now, 0, 0)
+		if got == nil {
+			t.Fatal("expected non-nil RetryAfter")
+		}
+		if *got != 60*time.Second {
+			t.Fatalf("expected 60s from Retry-After, got %v", *got)
+		}
+	})
+
 	t.Run("non-fable combined rejection with 7d_oi reset keeps longer duration", func(t *testing.T) {
 		h := make(http.Header)
 		h.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
@@ -190,4 +226,82 @@ func TestParseClaudeRateLimitReset_AllCases(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestClaudeHeadersIndicateUnifiedRateLimitRejection_AllowedWarning(t *testing.T) {
+	tests := []struct {
+		name     string
+		headers  http.Header
+		expected bool
+	}{
+		{
+			name: "both shared windows allowed, 7d_oi rejected is fable-only",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status":       []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-5h-Status":    []string{"allowed"},
+				"Anthropic-Ratelimit-Unified-7d-Status":    []string{"allowed"},
+				"Anthropic-Ratelimit-Unified-7d_oi-Status": []string{"rejected"},
+			},
+			expected: false,
+		},
+		{
+			name: "7d allowed_warning and 5h allowed with 7d_oi rejected is fable-only",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status":       []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-5h-Status":    []string{"allowed"},
+				"Anthropic-Ratelimit-Unified-7d-Status":    []string{"allowed_warning"},
+				"Anthropic-Ratelimit-Unified-7d_oi-Status": []string{"rejected"},
+			},
+			expected: false,
+		},
+		{
+			name: "5h allowed_warning and 7d allowed with 7d_oi rejected is fable-only",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status":       []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-5h-Status":    []string{"allowed_warning"},
+				"Anthropic-Ratelimit-Unified-7d-Status":    []string{"allowed"},
+				"Anthropic-Ratelimit-Unified-7d_oi-Status": []string{"rejected"},
+			},
+			expected: false,
+		},
+		{
+			name: "both shared windows allowed_warning with 7d_oi rejected is fable-only",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status":       []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-5h-Status":    []string{"allowed_warning"},
+				"Anthropic-Ratelimit-Unified-7d-Status":    []string{"allowed_warning"},
+				"Anthropic-Ratelimit-Unified-7d_oi-Status": []string{"rejected"},
+			},
+			expected: false,
+		},
+		{
+			name: "5h rejected even if 7d allowed_warning is unified rejection",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status":       []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-5h-Status":    []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-7d-Status":    []string{"allowed_warning"},
+				"Anthropic-Ratelimit-Unified-7d_oi-Status": []string{"rejected"},
+			},
+			expected: true,
+		},
+		{
+			name: "7d rejected even if 5h allowed_warning is unified rejection",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Status":       []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-5h-Status":    []string{"allowed_warning"},
+				"Anthropic-Ratelimit-Unified-7d-Status":    []string{"rejected"},
+				"Anthropic-Ratelimit-Unified-7d_oi-Status": []string{"rejected"},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClaudeHeadersIndicateUnifiedRateLimitRejection(tt.headers)
+			if got != tt.expected {
+				t.Fatalf("ClaudeHeadersIndicateUnifiedRateLimitRejection() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
 }

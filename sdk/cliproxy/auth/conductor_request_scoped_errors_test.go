@@ -57,6 +57,25 @@ type customStatusError struct {
 	retryAfter *time.Duration
 }
 
+func TestUnwrapExecutionBoundaryErrorRemovesInternalMarkers(t *testing.T) {
+	t.Parallel()
+
+	base := &Error{Code: "request_failed", Message: "request failed", HTTPStatus: http.StatusBadRequest}
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "attempt inside stop", err: wrapRequestStopError(markUpstreamExecutionAttempt(base))},
+		{name: "stop inside attempt", err: markUpstreamExecutionAttempt(wrapRequestStopError(base))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := unwrapExecutionBoundaryError(test.err); got != base {
+				t.Fatalf("unwrapExecutionBoundaryError() = %T/%v, want original %T/%v", got, got, base, base)
+			}
+		})
+	}
+}
+
 func (e customStatusError) StatusCode() int {
 	return e.code
 }
@@ -123,6 +142,7 @@ func TestRequestScopedErrors_ActionStop(t *testing.T) {
 		identifier: "claude",
 		executeFn: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 			execCount++
+			cliproxyexecutor.MarkUpstreamAttempt(ctx)
 			return cliproxyexecutor.Response{}, customStatusError{
 				code: 400,
 				msg:  `{"error": {"message": "maximum_context_length exceeded"}}`,
@@ -134,6 +154,9 @@ func TestRequestScopedErrors_ActionStop(t *testing.T) {
 	resp, errExec := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-3"}, cliproxyexecutor.Options{})
 	if errExec == nil {
 		t.Fatalf("expected error, got resp: %+v", resp)
+	}
+	if _, okStatus := errExec.(customStatusError); !okStatus {
+		t.Fatalf("Execute() error = %T/%v, want original customStatusError", errExec, errExec)
 	}
 	// Action: stop should return immediately on the first credential and not rotate to auth2.
 	if execCount != 1 {
@@ -515,6 +538,7 @@ func TestRequestScopedErrors_Stream_ActionStop(t *testing.T) {
 		identifier: "claude",
 		streamFn: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 			execCount++
+			cliproxyexecutor.MarkUpstreamAttempt(ctx)
 			return nil, customStatusError{code: 400, msg: "stream_context_overflow"}
 		},
 	}
@@ -523,6 +547,9 @@ func TestRequestScopedErrors_Stream_ActionStop(t *testing.T) {
 	_, errStream := m.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-3"}, cliproxyexecutor.Options{})
 	if errStream == nil {
 		t.Fatal("expected error, got nil")
+	}
+	if _, okStatus := errStream.(customStatusError); !okStatus {
+		t.Fatalf("ExecuteStream() error = %T/%v, want original customStatusError", errStream, errStream)
 	}
 	if execCount != 1 {
 		t.Fatalf("execCount = %d, want 1 (should stop immediately)", execCount)
@@ -754,6 +781,7 @@ func TestRequestScopedErrors_CountTokens_StopAndCooldown(t *testing.T) {
 	exec := &mockCustomErrorExecutor{
 		identifier: "claude",
 		countFn: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+			cliproxyexecutor.MarkUpstreamAttempt(ctx)
 			return cliproxyexecutor.Response{}, customStatusError{
 				code: 404,
 				msg:  "count_endpoint_cooldown",
@@ -765,6 +793,9 @@ func TestRequestScopedErrors_CountTokens_StopAndCooldown(t *testing.T) {
 	_, errCount := m.ExecuteCount(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-3"}, cliproxyexecutor.Options{})
 	if errCount == nil {
 		t.Fatal("expected error, got nil")
+	}
+	if _, okStatus := errCount.(customStatusError); !okStatus {
+		t.Fatalf("ExecuteCount() error = %T/%v, want original customStatusError", errCount, errCount)
 	}
 
 	a1, _ := m.GetByID("auth-count-1")

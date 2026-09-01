@@ -28,6 +28,7 @@ const placeholderReasonDescription = "Brief explanation of why you are calling t
 
 type jsonSchemaCleanOptions struct {
 	addPlaceholder                    bool
+	addMissingArrayItems              bool
 	antigravitySemantics              bool
 	removeToolTitle                   bool
 	removeGeminiMetadata              bool
@@ -52,6 +53,7 @@ func CleanJSONSchemaForAntigravity(jsonStr string) string {
 func CleanJSONSchemaForAntigravityTool(jsonStr string, requirePlaceholder bool) string {
 	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{
 		addPlaceholder:       requirePlaceholder,
+		addMissingArrayItems: true,
 		antigravitySemantics: true,
 		removeToolTitle:      !requirePlaceholder,
 		flattenUnions:        true,
@@ -84,6 +86,7 @@ func CleanJSONSchemaForAntigravityResponse(jsonStr string) string {
 // It removes unsupported keywords and simplifies schemas, without adding empty-schema placeholders.
 func CleanJSONSchemaForGemini(jsonStr string) string {
 	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{
+		addMissingArrayItems: true,
 		removeGeminiMetadata: true,
 		flattenUnions:        true,
 		forceEnumStringType:  true,
@@ -93,7 +96,7 @@ func CleanJSONSchemaForGemini(jsonStr string) string {
 // cleanJSONSchema performs the core cleaning operations on the JSON schema.
 func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	// Phase 0: Normalize malformed schemas (e.g. bare property maps and boolean required from MCP tools)
-	jsonStr = normalizeMalformedSchemaObjects(jsonStr)
+	jsonStr = normalizeMalformedSchemaObjects(jsonStr, options.addMissingArrayItems)
 
 	// Phase 1: Convert and add hints
 	if options.antigravitySemantics {
@@ -230,7 +233,8 @@ func removePlaceholderFields(jsonStr string) string {
 // certain MCP tool definitions (e.g. Asana MCP server):
 // 1. Bare property maps missing the "type": "object" and "properties": {...} wrappers are wrapped.
 // 2. Boolean "required": true on property definitions are stripped and promoted to the parent's "required" array.
-func normalizeMalformedSchemaObjects(jsonStr string) string {
+// 3. Tool array schemas missing "items" receive a string item schema required by Gemini and Antigravity.
+func normalizeMalformedSchemaObjects(jsonStr string, addMissingArrayItems bool) string {
 	if jsonStr == "" {
 		return jsonStr
 	}
@@ -250,7 +254,7 @@ func normalizeMalformedSchemaObjects(jsonStr string) string {
 	// If wrapped in single-key {"schema": ...} by cleanNestedSchema, unwrap, repair, and re-wrap.
 	if len(rootMap) == 1 {
 		if innerSchema, ok := rootMap["schema"].(map[string]any); ok {
-			repairedInner, modified := repairSchemaNode(innerSchema)
+			repairedInner, modified := repairSchemaNode(innerSchema, addMissingArrayItems)
 			if !modified {
 				return jsonStr
 			}
@@ -262,7 +266,7 @@ func normalizeMalformedSchemaObjects(jsonStr string) string {
 		}
 	}
 
-	repaired, modified := repairSchemaNode(rootMap)
+	repaired, modified := repairSchemaNode(rootMap, addMissingArrayItems)
 	if !modified {
 		return jsonStr
 	}
@@ -319,6 +323,20 @@ func isNonObjectDeclaredType(t any) bool {
 	return false
 }
 
+func isArrayDeclaredType(t any) bool {
+	switch typeValue := t.(type) {
+	case string:
+		return typeValue == "array"
+	case []any:
+		for _, item := range typeValue {
+			if itemType, ok := item.(string); ok && itemType == "array" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func isAPIRequestDocument(m map[string]any) bool {
 	if _, ok := m["tools"].([]any); ok {
 		return true
@@ -343,7 +361,7 @@ func isAPIRequestDocument(m map[string]any) bool {
 	return false
 }
 
-func repairSchemaNode(node map[string]any) (map[string]any, bool) {
+func repairSchemaNode(node map[string]any, addMissingArrayItems bool) (map[string]any, bool) {
 	if node == nil {
 		return nil, false
 	}
@@ -369,7 +387,7 @@ func repairSchemaNode(node map[string]any) (map[string]any, bool) {
 		}
 
 		if len(bareProps) > 0 {
-			repairedProps, promotedReqs, _ := repairPropertyMap(bareProps)
+			repairedProps, promotedReqs, _ := repairPropertyMap(bareProps, addMissingArrayItems)
 			for k := range bareProps {
 				delete(clone, k)
 			}
@@ -401,7 +419,7 @@ func repairSchemaNode(node map[string]any) (map[string]any, bool) {
 
 	// 2. If node has a "properties" map, recursively repair all properties inside it
 	if propsVal, ok := clone["properties"].(map[string]any); ok {
-		repairedProps, promotedReqs, propsMod := repairPropertyMap(propsVal)
+		repairedProps, promotedReqs, propsMod := repairPropertyMap(propsVal, addMissingArrayItems)
 		if propsMod {
 			clone["properties"] = repairedProps
 			modified = true
@@ -414,15 +432,23 @@ func repairSchemaNode(node map[string]any) (map[string]any, bool) {
 		}
 	}
 
+	// Gemini and Antigravity reject tool array schemas without an items definition.
+	if addMissingArrayItems && isArrayDeclaredType(clone["type"]) {
+		if _, hasItems := clone["items"]; !hasItems {
+			clone["items"] = map[string]any{"type": "string"}
+			modified = true
+		}
+	}
+
 	// 3. Recurse into all other standard schema containers
 	if itemsVal, ok := clone["items"].(map[string]any); ok {
-		repairedItems, itemsMod := repairSchemaNode(itemsVal)
+		repairedItems, itemsMod := repairSchemaNode(itemsVal, addMissingArrayItems)
 		if itemsMod {
 			clone["items"] = repairedItems
 			modified = true
 		}
 	} else if itemsList, ok := clone["items"].([]any); ok {
-		repairedList, listMod := repairSchemaList(itemsList)
+		repairedList, listMod := repairSchemaList(itemsList, addMissingArrayItems)
 		if listMod {
 			clone["items"] = repairedList
 			modified = true
@@ -430,7 +456,7 @@ func repairSchemaNode(node map[string]any) (map[string]any, bool) {
 	}
 
 	if addProps, ok := clone["additionalProperties"].(map[string]any); ok {
-		repairedAddProps, addPropsMod := repairSchemaNode(addProps)
+		repairedAddProps, addPropsMod := repairSchemaNode(addProps, addMissingArrayItems)
 		if addPropsMod {
 			clone["additionalProperties"] = repairedAddProps
 			modified = true
@@ -438,7 +464,7 @@ func repairSchemaNode(node map[string]any) (map[string]any, bool) {
 	}
 
 	if patProps, ok := clone["patternProperties"].(map[string]any); ok {
-		repairedPatProps, _, patMod := repairPropertyMap(patProps)
+		repairedPatProps, _, patMod := repairPropertyMap(patProps, addMissingArrayItems)
 		if patMod {
 			clone["patternProperties"] = repairedPatProps
 			modified = true
@@ -447,7 +473,7 @@ func repairSchemaNode(node map[string]any) (map[string]any, bool) {
 
 	for _, key := range []string{"if", "then", "else", "not", "contains", "propertyNames", "unevaluatedProperties", "unevaluatedItems", "contentSchema", "additionalItems"} {
 		if subVal, ok := clone[key].(map[string]any); ok {
-			repairedSub, subMod := repairSchemaNode(subVal)
+			repairedSub, subMod := repairSchemaNode(subVal, addMissingArrayItems)
 			if subMod {
 				clone[key] = repairedSub
 				modified = true
@@ -457,7 +483,7 @@ func repairSchemaNode(node map[string]any) (map[string]any, bool) {
 
 	for _, key := range []string{"anyOf", "oneOf", "allOf", "prefixItems"} {
 		if listVal, ok := clone[key].([]any); ok {
-			repairedList, listMod := repairSchemaList(listVal)
+			repairedList, listMod := repairSchemaList(listVal, addMissingArrayItems)
 			if listMod {
 				clone[key] = repairedList
 				modified = true
@@ -471,7 +497,7 @@ func repairSchemaNode(node map[string]any) (map[string]any, bool) {
 			defsModified := false
 			for dk, dv := range defsVal {
 				if defMap, ok := dv.(map[string]any); ok {
-					repairedDef, defMod := repairSchemaNode(defMap)
+					repairedDef, defMod := repairSchemaNode(defMap, addMissingArrayItems)
 					repairedDefs[dk] = repairedDef
 					if defMod {
 						defsModified = true
@@ -490,12 +516,12 @@ func repairSchemaNode(node map[string]any) (map[string]any, bool) {
 	return clone, modified
 }
 
-func repairSchemaList(list []any) ([]any, bool) {
+func repairSchemaList(list []any, addMissingArrayItems bool) ([]any, bool) {
 	var repairedList []any
 	listModified := false
 	for _, item := range list {
 		if itemMap, ok := item.(map[string]any); ok {
-			repairedItem, itemMod := repairSchemaNode(itemMap)
+			repairedItem, itemMod := repairSchemaNode(itemMap, addMissingArrayItems)
 			repairedList = append(repairedList, repairedItem)
 			if itemMod {
 				listModified = true
@@ -507,7 +533,7 @@ func repairSchemaList(list []any) ([]any, bool) {
 	return repairedList, listModified
 }
 
-func repairPropertyMap(props map[string]any) (map[string]any, []string, bool) {
+func repairPropertyMap(props map[string]any, addMissingArrayItems bool) (map[string]any, []string, bool) {
 	out := make(map[string]any, len(props))
 	var promotedReqs []string
 	modified := false
@@ -532,7 +558,7 @@ func repairPropertyMap(props map[string]any) (map[string]any, []string, bool) {
 			}
 		}
 
-		repairedChild, childMod := repairSchemaNode(childClone)
+		repairedChild, childMod := repairSchemaNode(childClone, addMissingArrayItems)
 		if childMod {
 			modified = true
 		}

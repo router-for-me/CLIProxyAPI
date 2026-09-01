@@ -25,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -39,6 +40,7 @@ const (
 	claudeCodeBeta               = "claude-code-20250219"
 	claudeContext1MBeta          = "context-1m-2025-08-07"
 	claudeMidConvSystemBeta      = "mid-conversation-system-2026-04-07"
+	claudeAdvisorToolBeta        = "advisor-tool-2026-03-01"
 	claudeAdvancedToolUseBeta    = "advanced-tool-use-2025-11-20"
 	claudeEffortBeta             = "effort-2025-11-24"
 	claudeServerSideFallbackBeta = "server-side-fallback-2026-06-01"
@@ -91,13 +93,14 @@ var claudeCodeTrailingBetas = []string{
 //	 7 context-management-2025-06-27
 //	 8 prompt-caching-scope-2026-01-05
 //	 9 mid-conversation-system-2026-04-07  models accepting a role=system turn
-//	10 advanced-tool-use-2025-11-20       requests with tools
-//	11 effort-2025-11-24
-//	12 server-side-fallback-2026-06-01
-//	13 fallback-credit-2026-06-01
-//	14 fast-mode-2026-02-01               speed:fast requests only
-//	15 extended-cache-ttl-2025-04-11      OAuth credentials only
-//	16 cache-diagnosis-2026-04-07         requests with diagnostics only
+//	10 advisor-tool-2026-03-01             requests declaring advisor tools or requesting advisor beta
+//	11 advanced-tool-use-2025-11-20       requests with tools
+//	12 effort-2025-11-24
+//	13 server-side-fallback-2026-06-01
+//	14 fallback-credit-2026-06-01
+//	15 fast-mode-2026-02-01               speed:fast requests only
+//	16 extended-cache-ttl-2025-04-11      OAuth credentials only
+//	17 cache-diagnosis-2026-04-07         requests with diagnostics only
 //
 // An empty body keeps the optimistic role=system default, matching the cloaking
 // policy for unknown and future model IDs.
@@ -119,6 +122,9 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	}
 	if !claudeUsesLegacySystemReminder(body) {
 		betas = append(betas, claudeMidConvSystemBeta)
+	}
+	if requested[claudeAdvisorToolBeta] || claudeBodyHasAdvisorTool(body) {
+		betas = append(betas, claudeAdvisorToolBeta)
 	}
 	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() && len(tools.Array()) > 0 {
 		betas = append(betas, claudeAdvancedToolUseBeta)
@@ -142,6 +148,22 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 		betas = append(betas, claudeCacheDiagnosisBeta)
 	}
 	return strings.Join(betas, ",")
+}
+
+// claudeBodyHasAdvisorTool reports whether the request body declares an
+// advisor server tool.
+func claudeBodyHasAdvisorTool(body []byte) bool {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
+		if strings.HasPrefix(toolType, "advisor_") {
+			return true
+		}
+	}
+	return false
 }
 
 // claudeThinkingDisplaySet reports whether the request carries a thinking.display
@@ -250,6 +272,41 @@ func withClaudeOAuthCredentialBetas(betas string) string {
 	if !seen[claudeExtendedCacheTTLBeta] {
 		parts = append(parts, claudeExtendedCacheTTLBeta)
 	}
+	return strings.Join(parts, ",")
+}
+
+// withClaudeAdvisorToolBeta ensures advisor-tool-2026-03-01 is present when
+// the body declares an advisor server tool, placed at the observed wire position
+// before advanced-tool-use-2025-11-20 or effort-2025-11-24.
+func withClaudeAdvisorToolBeta(betas string) string {
+	if strings.TrimSpace(betas) == "" {
+		return claudeAdvisorToolBeta
+	}
+	parts := make([]string, 0, 16)
+	seen := make(map[string]bool)
+	for _, beta := range strings.Split(betas, ",") {
+		if beta = strings.TrimSpace(beta); beta != "" && beta != claudeAdvisorToolBeta && !seen[beta] {
+			parts = append(parts, beta)
+			seen[beta] = true
+		}
+	}
+	insertAt := len(parts)
+	for index, beta := range parts {
+		if beta == claudeAdvancedToolUseBeta ||
+			beta == claudeEffortBeta ||
+			beta == claudeServerSideFallbackBeta ||
+			beta == claudeFallbackCreditBeta ||
+			beta == claudeStructuredOutputsBeta ||
+			beta == claudeFastModeBeta ||
+			beta == claudeExtendedCacheTTLBeta ||
+			beta == claudeCacheDiagnosisBeta {
+			insertAt = index
+			break
+		}
+	}
+	parts = append(parts, "")
+	copy(parts[insertAt+1:], parts[insertAt:])
+	parts[insertAt] = claudeAdvisorToolBeta
 	return strings.Join(parts, ",")
 }
 
@@ -729,15 +786,24 @@ func applyClaudeHeadersWithNativeProfile(
 
 	incomingBetas := strings.TrimSpace(strings.Join(incomingHeaders.Values("Anthropic-Beta"), ","))
 	countTokens := r.URL != nil && strings.HasSuffix(r.URL.Path, "/count_tokens")
+	requestedMap := claudeRequestedBetas(incomingBetas, extraBetas)
+	advisorNeeded := requestedMap[claudeAdvisorToolBeta] || claudeBodyHasAdvisorTool(body)
+
 	baseBetas := incomingBetas
 	if !preserveCallerFingerprint {
-		baseBetas = claudeCodeCLIBetas(body, claudeRequestedBetas(incomingBetas, extraBetas), useOAuthBetas)
+		baseBetas = claudeCodeCLIBetas(body, requestedMap, useOAuthBetas)
 		if countTokens {
 			baseBetas = claudeCountTokensBetasForCredential(useOAuthBetas)
+			if advisorNeeded {
+				baseBetas = withClaudeAdvisorToolBeta(baseBetas)
+			}
 		}
 	}
 	if confirmedClaudeCode && incomingBetas != "" {
 		baseBetas = incomingBetas
+		if advisorNeeded {
+			baseBetas = withClaudeAdvisorToolBeta(baseBetas)
+		}
 		// Measured Haiku helper requests already carry the exact credential
 		// beta profile and intentionally omit extended-cache-ttl.
 		if useOAuthBetas && !helperProfile {
@@ -747,6 +813,9 @@ func applyClaudeHeadersWithNativeProfile(
 				baseBetas = withClaudeOAuthCredentialBetas(baseBetas)
 			}
 		}
+	}
+	if preserveCallerFingerprint && advisorNeeded {
+		baseBetas = withClaudeAdvisorToolBeta(baseBetas)
 	}
 	existingSet := make(map[string]bool)
 	for _, beta := range strings.Split(baseBetas, ",") {
@@ -979,6 +1048,7 @@ func applyClaudeHeadersWithNativeProfile(
 // exactly how the streaming and non-streaming beta sets diverged before.
 func doClaudeUpstreamRequest(client *http.Client, req *http.Request) (*http.Response, error) {
 	applyClaudeWireHeaderCasing(req)
+	cliproxyexecutor.MarkUpstreamAttempt(req.Context())
 	return client.Do(req)
 }
 

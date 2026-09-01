@@ -703,3 +703,229 @@ func TestNormalizeKimiUpstreamModel(t *testing.T) {
 		}
 	}
 }
+
+func TestKimiExecutorNormalizesToolSchemasForMoonshot(t *testing.T) {
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"chatcmpl_test","object":"chat.completion","created":1,"model":"k3","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+			)),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+
+	// Tool with $defs and $ref sibling type, matching the shape used by Codex Desktop app tools
+	payload := []byte(`{
+		"model":"kimi-k3",
+		"messages":[{"role":"user","content":"hello"}],
+		"tools":[
+			{
+				"type":"function",
+				"function":{
+					"name":"codex_app__automation_update",
+					"description":"Update automation",
+					"parameters":{
+						"$defs":{
+							"value":{
+								"type":"string"
+							}
+						},
+						"type":"object",
+						"properties":{
+							"value":{
+								"$ref":"#/$defs/value",
+								"type":"string",
+								"description":"A value"
+							}
+						}
+					}
+				}
+			}
+		]
+	}`)
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAI,
+		OriginalRequest: payload,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	tool := gjson.GetBytes(upstreamBody, "tools.0.function")
+	if !tool.Exists() {
+		t.Fatalf("upstream tool function not found: %s", upstreamBody)
+	}
+
+	// Moonshot rejects $ref with sibling type; verify $ref is inlined and removed
+	if ref := tool.Get("parameters.properties.value.$ref"); ref.Exists() {
+		t.Fatalf("upstream tool parameter still contains $ref: %s", tool.Get("parameters").Raw)
+	}
+	if got := tool.Get("parameters.properties.value.type").String(); got != "string" {
+		t.Fatalf("upstream tool parameter value.type = %q, want %q", got, "string")
+	}
+	if got := tool.Get("parameters.properties.value.description").String(); got != "A value" {
+		t.Fatalf("upstream tool parameter value.description = %q, want %q", got, "A value")
+	}
+	// Verify $defs container was pruned
+	if defs := tool.Get("parameters.$defs"); defs.Exists() {
+		t.Fatalf("upstream tool parameter still contains $defs: %s", tool.Get("parameters").Raw)
+	}
+	// Verify explicit object type
+	if got := tool.Get("parameters.type").String(); got != "object" {
+		t.Fatalf("upstream tool parameters.type = %q, want %q", got, "object")
+	}
+}
+
+func TestKimiExecutorStreamNormalizesToolSchemasFromResponses(t *testing.T) {
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader(
+				"data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n" +
+					"data: [DONE]\n\n",
+			)),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+
+	// Codex Responses format payload with tools containing $defs and $ref
+	payload := []byte(`{
+		"model":"kimi-k3",
+		"input":[{"type":"message","role":"user","content":"hello"}],
+		"tools":[
+			{
+				"type":"function",
+				"name":"codex_app__automation_update",
+				"description":"Update automation",
+				"parameters":{
+					"$defs":{
+						"sub":{
+							"type":"string"
+						}
+					},
+					"properties":{
+						"field":{
+							"$ref":"#/$defs/sub",
+							"type":"string"
+						}
+					}
+				}
+			}
+		]
+	}`)
+
+	streamResult, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: payload,
+		Stream:          true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if streamResult != nil && streamResult.Chunks != nil {
+		for range streamResult.Chunks {
+		}
+	}
+
+	tool := gjson.GetBytes(upstreamBody, "tools.0.function")
+	if !tool.Exists() {
+		t.Fatalf("upstream tool function not found in stream body: %s", upstreamBody)
+	}
+	if ref := tool.Get("parameters.properties.field.$ref"); ref.Exists() {
+		t.Fatalf("upstream stream tool parameter still contains $ref: %s", tool.Get("parameters").Raw)
+	}
+	if got := tool.Get("parameters.properties.field.type").String(); got != "string" {
+		t.Fatalf("upstream stream tool field.type = %q, want %q", got, "string")
+	}
+	if defs := tool.Get("parameters.$defs"); defs.Exists() {
+		t.Fatalf("upstream stream tool parameter still contains $defs: %s", tool.Get("parameters").Raw)
+	}
+	if got := tool.Get("parameters.type").String(); got != "object" {
+		t.Fatalf("upstream stream tool parameters.type = %q, want %q", got, "object")
+	}
+}
+
+func TestNormalizeKimiToolsDirect(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{
+				"type":"function",
+				"function":{
+					"name":"test_fn",
+					"parameters":{
+						"definitions":{
+							"prop":{"type":"number"}
+						},
+						"properties":{
+							"count":{"$ref":"#/definitions/prop","description":"item count"}
+						}
+					}
+				}
+			}
+		],
+		"functions":[
+			{
+				"name":"legacy_fn",
+				"parameters":{
+					"properties":{"name":{"type":"string"}}
+				}
+			}
+		]
+	}`)
+
+	normalized := normalizeKimiTools(input)
+
+	toolParams := gjson.GetBytes(normalized, "tools.0.function.parameters")
+	if toolParams.Get("definitions").Exists() {
+		t.Errorf("definitions was not stripped: %s", toolParams.Raw)
+	}
+	if toolParams.Get("properties.count.$ref").Exists() {
+		t.Errorf("$ref was not inlined: %s", toolParams.Raw)
+	}
+	if got := toolParams.Get("properties.count.type").String(); got != "number" {
+		t.Errorf("properties.count.type = %q, want number", got)
+	}
+	if got := toolParams.Get("properties.count.description").String(); got != "item count" {
+		t.Errorf("properties.count.description = %q, want 'item count'", got)
+	}
+	if got := toolParams.Get("type").String(); got != "object" {
+		t.Errorf("tools.0.function.parameters.type = %q, want object", got)
+	}
+
+	fnParams := gjson.GetBytes(normalized, "functions.0.parameters")
+	if got := fnParams.Get("type").String(); got != "object" {
+		t.Errorf("functions.0.parameters.type = %q, want object", got)
+	}
+}

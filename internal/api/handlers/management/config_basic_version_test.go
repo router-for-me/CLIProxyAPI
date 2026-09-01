@@ -25,7 +25,9 @@ func TestSetLatestReleaseRequestHeaders(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("GITHUB_TOKEN", tt.githubToken)
-			t.Setenv("github_token", "")
+			if tt.githubToken == "" {
+				t.Setenv("github_token", "")
+			}
 			t.Setenv("GITSTORE_GIT_TOKEN", "")
 			t.Setenv("GITSTORE_GIT_URL", "")
 

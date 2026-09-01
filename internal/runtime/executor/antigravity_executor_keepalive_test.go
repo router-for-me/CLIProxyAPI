@@ -150,7 +150,8 @@ func TestAntigravityCountTokensReusesUpstreamConnection(t *testing.T) {
 	const requests = 4
 	payload := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
 	for i := 0; i < requests; i++ {
-		if _, errCount := exec.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		ctx := cliproxyexecutor.WithUpstreamAttemptTracker(context.Background())
+		if _, errCount := exec.CountTokens(ctx, auth, cliproxyexecutor.Request{
 			Model:   "gemini-3.6-flash-high",
 			Payload: payload,
 		}, cliproxyexecutor.Options{
@@ -159,6 +160,9 @@ func TestAntigravityCountTokensReusesUpstreamConnection(t *testing.T) {
 			OriginalRequest: payload,
 		}); errCount != nil {
 			t.Fatalf("request %d: CountTokens() error = %v", i, errCount)
+		}
+		if !cliproxyexecutor.UpstreamAttempted(ctx) {
+			t.Fatalf("request %d: CountTokens() did not mark the upstream attempt", i)
 		}
 	}
 

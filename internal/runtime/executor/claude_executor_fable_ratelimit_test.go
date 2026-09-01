@@ -43,6 +43,29 @@ func TestClassifyClaudeUpstreamError_FableOnlyRejectionIsModelScoped(t *testing.
 	}
 }
 
+func TestClassifyClaudeUpstreamError_FableOnlyAllowedWarningIsModelScoped(t *testing.T) {
+	// Given: 7d window is in allowed_warning, 7d_oi is rejected
+	headers := http.Header{
+		"Anthropic-Ratelimit-Unified-Status":       []string{"rejected"},
+		"Anthropic-Ratelimit-Unified-5h-Status":    []string{"allowed"},
+		"Anthropic-Ratelimit-Unified-7d-Status":    []string{"allowed_warning"},
+		"Anthropic-Ratelimit-Unified-7d_oi-Status": []string{"rejected"},
+		"Retry-After": []string{"120"},
+	}
+
+	// When
+	err := classifyClaudeUpstreamError(http.StatusTooManyRequests, headers, []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Fable usage window rejected."}}`))
+
+	// Then
+	var scoped interface{ IsCredentialScoped() bool }
+	if !errors.As(err, &scoped) || scoped == nil {
+		t.Fatalf("expected %T to expose credential scope", err)
+	}
+	if scoped.IsCredentialScoped() {
+		t.Fatal("Fable-only 7d_oi rejection with allowed_warning was credential-scoped; want model-scoped")
+	}
+}
+
 func TestClassifyClaudeUpstreamError_SharedOrAmbiguousRejectionRemainsCredentialScoped(t *testing.T) {
 	tests := []struct {
 		name    string

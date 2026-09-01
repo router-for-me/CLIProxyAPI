@@ -12,11 +12,56 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
+
+func TestSaveTokenRecord_PostPersistHookReceivesCanonicalClaudeOAuth(t *testing.T) {
+	authDir := t.TempDir()
+	fileName := "claude-user@example.com.json"
+	accessToken := "sk-ant-oat01-hot-reload"
+
+	h := NewHandler(&config.Config{AuthDir: authDir}, "", nil)
+	var persistedAuth *coreauth.Auth
+	h.SetPostAuthPersistHook(func(_ context.Context, auth *coreauth.Auth) error {
+		persistedAuth = auth.Clone()
+		return nil
+	})
+
+	tokenStorage := &claude.ClaudeTokenStorage{
+		AccessToken:  accessToken,
+		RefreshToken: "refresh-token",
+		LastRefresh:  "2026-03-09T00:00:00Z",
+		Email:        "user@example.com",
+		Expire:       "2026-12-31T23:59:59Z",
+	}
+	record := &coreauth.Auth{
+		ID:       fileName,
+		Provider: "claude",
+		FileName: fileName,
+		Storage:  tokenStorage,
+		Metadata: map[string]any{"email": tokenStorage.Email},
+	}
+
+	if _, errSave := h.saveTokenRecord(context.Background(), record); errSave != nil {
+		t.Fatalf("saveTokenRecord error: %v", errSave)
+	}
+	if persistedAuth == nil {
+		t.Fatal("post-persist hook did not receive auth")
+	}
+	if got, _ := persistedAuth.Metadata["access_token"].(string); got != accessToken {
+		t.Fatalf("post-persist access_token = %q, want %q", got, accessToken)
+	}
+	if got := persistedAuth.AuthKind(); got != coreauth.AuthKindOAuth {
+		t.Fatalf("post-persist auth kind = %q, want %q", got, coreauth.AuthKindOAuth)
+	}
+	if persistedAuth.Status != coreauth.StatusActive {
+		t.Fatalf("post-persist status = %q, want %q", persistedAuth.Status, coreauth.StatusActive)
+	}
+}
 
 func TestSaveTokenRecord_PreservesExistingAuthFileSettings(t *testing.T) {
 	authDir := t.TempDir()

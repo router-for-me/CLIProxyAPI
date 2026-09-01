@@ -425,32 +425,20 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 
 	upstream, handshakeResponse, errDial := dialUpstream(selected)
-	if errDial != nil && selection != nil && handshakeResponse != nil && handshakeResponse.StatusCode == http.StatusUnauthorized {
-		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", session.model)
-		helps.RecordAPIWebsocketHandshake(ctx, runtimeConfig, handshakeResponse.StatusCode, callResponseHeaders(handshakeResponse.Header))
-		if handshakeResponse.Body != nil {
-			if errClose := handshakeResponse.Body.Close(); errClose != nil {
-				log.Errorf("codex live sideband: close unauthorized handshake body error: %v", errClose)
-			}
-		}
-		refreshed, didRefresh, errRefresh := h.authManager.RefreshHomeSelectionAfterUnauthorized(ctx, selection, selected)
-		if errRefresh != nil {
-			writeSelectionError(c, errRefresh)
-			return
-		}
-		if !didRefresh || refreshed == nil {
-			writeLiveError(c, http.StatusUnauthorized, "Codex credential unauthorized")
-			return
-		}
-		selected = refreshed
-		logging.SetGinCPATraceID(c, selected.EnsureIndex())
-		upstream, handshakeResponse, errDial = dialUpstream(selected)
-		if errDial != nil && handshakeResponse != nil && handshakeResponse.StatusCode == http.StatusUnauthorized {
-			h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", session.model)
-		}
-	}
 	if errDial != nil {
-		handleSidebandDialError(c, ctx, runtimeConfig, handshakeResponse, errDial)
+		handshakeStatus := clienterror.HTTPStatusFromErrorOr(errDial, http.StatusBadGateway)
+		if handshakeResponse != nil && handshakeResponse.StatusCode > 0 {
+			handshakeStatus = handshakeResponse.StatusCode
+		}
+		responseBody := handleSidebandDialError(c, ctx, runtimeConfig, handshakeResponse, errDial)
+		if selection != nil && handshakeStatus == http.StatusUnauthorized {
+			diagnosticBody := responseBody
+			if len(diagnosticBody) == 0 {
+				diagnosticBody = []byte(errDial.Error())
+			}
+			h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", session.model, diagnosticBody)
+			log.WithField("status", handshakeStatus).Warnf("codex live sideband upstream handshake failed: %s", logging.SafeDiagnosticForLog(string(diagnosticBody)))
+		}
 		return
 	}
 	if handshakeResponse != nil {
@@ -567,8 +555,9 @@ func callIDFromLocation(location string) string {
 	return callID
 }
 
-func handleSidebandDialError(c *gin.Context, ctx context.Context, cfg *config.Config, response *http.Response, errDial error) {
+func handleSidebandDialError(c *gin.Context, ctx context.Context, cfg *config.Config, response *http.Response, errDial error) []byte {
 	status := clienterror.HTTPStatusFromErrorOr(errDial, http.StatusBadGateway)
+	var responseBody []byte
 	if response != nil {
 		if response.StatusCode > 0 {
 			status = response.StatusCode
@@ -576,13 +565,32 @@ func handleSidebandDialError(c *gin.Context, ctx context.Context, cfg *config.Co
 		copyRealtimeHandshakeHeaders(c.Writer.Header(), response.Header)
 		helps.RecordAPIWebsocketHandshake(ctx, cfg, response.StatusCode, callResponseHeaders(response.Header))
 		if response.Body != nil {
+			var errRead error
+			responseBody, errRead = readLimitedBody(response.Body)
+			if errRead != nil {
+				log.Errorf("codex live sideband: read rejected handshake body error: %v", errRead)
+			}
+			helps.AppendAPIWebsocketResponse(ctx, cfg, responseBody)
 			if errClose := response.Body.Close(); errClose != nil {
 				log.Errorf("codex live sideband: close rejected handshake body error: %v", errClose)
 			}
 		}
 	}
 	helps.RecordAPIWebsocketError(ctx, cfg, "dial", errDial)
+	if response != nil && response.StatusCode == http.StatusUnauthorized {
+		if contentType := response.Header.Get("Content-Type"); contentType != "" {
+			c.Header("Content-Type", contentType)
+		}
+		c.Status(response.StatusCode)
+		if len(responseBody) > 0 {
+			if _, errWrite := c.Writer.Write(responseBody); errWrite != nil {
+				log.WithError(errWrite).Warn("codex live sideband: write rejected handshake body failed")
+			}
+		}
+		return responseBody
+	}
 	writeLiveError(c, status, "Codex live sideband upstream unavailable")
+	return nil
 }
 
 func websocketCloseFunc(name string, conn *websocket.Conn) func() error {

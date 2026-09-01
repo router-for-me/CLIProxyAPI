@@ -448,3 +448,132 @@ func TestStreamingTool_EmptyNameArgsOnlyNoID(t *testing.T) {
 		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
 	}
 }
+
+func TestStreamingTool_OmittedFinishReasonEmitsMessageDeltaOnDone(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":"{\"loc\":\"Paris\"}"}}]},"finish_reason":null}]}`,
+	)
+
+	if got := countByType(events, "message_delta"); got != 1 {
+		t.Fatalf("expected exactly one message_delta, got %d (events=%+v)", got, events)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+	if got := countByType(events, "message_stop"); got != 1 {
+		t.Fatalf("expected exactly one message_stop, got %d (events=%+v)", got, events)
+	}
+	if len(events) < 2 || events[len(events)-2].Type != "message_delta" || events[len(events)-1].Type != "message_stop" {
+		t.Fatalf("expected message_delta followed by message_stop at end (events=%+v)", events)
+	}
+}
+
+func TestStreamingText_OmittedFinishReasonEmitsEndTurnOnDone(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hello world"},"finish_reason":null}]}`,
+	)
+
+	if got := countByType(events, "message_delta"); got != 1 {
+		t.Fatalf("expected exactly one message_delta, got %d (events=%+v)", got, events)
+	}
+	if got := lastStopReason(events); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want %q", got, "end_turn")
+	}
+	if got := countByType(events, "message_stop"); got != 1 {
+		t.Fatalf("expected exactly one message_stop, got %d (events=%+v)", got, events)
+	}
+}
+
+func TestStreamingTool_UsageWithoutFinishReasonEmitsMessageDelta(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":"{\"loc\":\"Paris\"}"}}]},"finish_reason":null}]}`,
+		`{"id":"c1","model":"m","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}`,
+	)
+
+	if got := countByType(events, "message_delta"); got != 1 {
+		t.Fatalf("expected exactly one message_delta, got %d (events=%+v)", got, events)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+	var deltaEvent *sseEvent
+	for _, e := range events {
+		if e.Type == "message_delta" {
+			deltaEvent = &e
+			break
+		}
+	}
+	if deltaEvent == nil {
+		t.Fatalf("missing message_delta event")
+	}
+	if input := gjson.Get(deltaEvent.Payload, "usage.input_tokens").Int(); input != 10 {
+		t.Fatalf("input_tokens = %d, want 10", input)
+	}
+	if output := gjson.Get(deltaEvent.Payload, "usage.output_tokens").Int(); output != 5 {
+		t.Fatalf("output_tokens = %d, want 5", output)
+	}
+	if got := countByType(events, "message_stop"); got != 1 {
+		t.Fatalf("expected exactly one message_stop, got %d (events=%+v)", got, events)
+	}
+}
+
+func TestStreamingTool_OmittedToolCallIndexPreservesParallelCalls(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[
+			{"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}},
+			{"id":"call_time","type":"function","function":{"name":"get_time","arguments":"{\"tz\":\"UTC\"}"}}
+		]},"finish_reason":"tool_calls"}]}`,
+	)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 2 {
+		t.Fatalf("expected two tool_use starts, got %d (starts=%+v)", len(starts), starts)
+	}
+
+	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_weather" {
+		t.Fatalf("first tool id = %q, want %q", id, "call_weather")
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "get_weather" {
+		t.Fatalf("first tool name = %q, want %q", name, "get_weather")
+	}
+	if id := gjson.Get(starts[1].Payload, "content_block.id").String(); id != "call_time" {
+		t.Fatalf("second tool id = %q, want %q", id, "call_time")
+	}
+	if name := gjson.Get(starts[1].Payload, "content_block.name").String(); name != "get_time" {
+		t.Fatalf("second tool name = %q, want %q", name, "get_time")
+	}
+
+	var deltas []sseEvent
+	for _, e := range events {
+		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
+			deltas = append(deltas, e)
+		}
+	}
+	if len(deltas) != 2 {
+		t.Fatalf("expected two input_json_delta events, got %d (deltas=%+v)", len(deltas), deltas)
+	}
+
+	firstJSON := gjson.Get(deltas[0].Payload, "delta.partial_json").String()
+	secondJSON := gjson.Get(deltas[1].Payload, "delta.partial_json").String()
+
+	if !gjson.Valid(firstJSON) {
+		t.Fatalf("first input_json_delta is not valid JSON: %q", firstJSON)
+	}
+	if !gjson.Valid(secondJSON) {
+		t.Fatalf("second input_json_delta is not valid JSON: %q", secondJSON)
+	}
+
+	if gotCity := gjson.Get(firstJSON, "city").String(); gotCity != "Paris" {
+		t.Fatalf("first tool args city = %q, want %q", gotCity, "Paris")
+	}
+	if gotTz := gjson.Get(secondJSON, "tz").String(); gotTz != "UTC" {
+		t.Fatalf("second tool args tz = %q, want %q", gotTz, "UTC")
+	}
+
+	if got := countByType(events, "content_block_stop"); got != 2 {
+		t.Fatalf("expected two content_block_stop events, got %d", got)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+}

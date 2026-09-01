@@ -2,7 +2,6 @@ package live
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -149,46 +148,27 @@ func (h *Handler) HandleHangup(c *gin.Context) {
 		writeRealtimeError(c, clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), errRequest.Error(), "api_error", "realtime_upstream_unavailable")
 		return
 	}
-	if activeSelection != nil && response.StatusCode == http.StatusUnauthorized {
-		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", session.model)
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
-		if errClose := response.Body.Close(); errClose != nil {
-			log.Errorf("codex realtime hangup: close unauthorized response body error: %v", errClose)
-		}
-		refreshed, didRefresh, errRefresh := h.authManager.RefreshHomeSelectionAfterUnauthorized(ctx, activeSelection, selected)
-		if errRefresh != nil {
-			writeSelectionError(c, errRefresh)
-			return
-		}
-		if !didRefresh || refreshed == nil {
-			writeRealtimeError(c, http.StatusUnauthorized, "Codex credential unauthorized", "authentication_error", "realtime_upstream_unauthorized")
-			return
-		}
-		selected = refreshed
-		logging.SetGinCPATraceID(c, selected.EnsureIndex())
-		response, errRequest = performRequest(selected)
-		if errRequest != nil {
-			helps.RecordAPIResponseError(ctx, runtimeConfig, errRequest)
-			writeRealtimeError(c, clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), errRequest.Error(), "api_error", "realtime_upstream_unavailable")
-			return
-		}
-		if response.StatusCode == http.StatusUnauthorized {
-			h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", session.model)
-		}
-	}
 	defer func() {
 		if errClose := response.Body.Close(); errClose != nil {
 			log.Errorf("codex realtime hangup: close response body error: %v", errClose)
 		}
 	}()
+	helps.RecordAPIResponseMetadata(ctx, runtimeConfig, response.StatusCode, callResponseHeaders(response.Header))
 	responseBody, errResponse := readLimitedBody(response.Body)
 	if errResponse != nil {
+		helps.AppendAPIResponseChunk(ctx, runtimeConfig, responseBody)
+		if activeSelection != nil && response.StatusCode == http.StatusUnauthorized {
+			h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", session.model, responseBody)
+		}
 		helps.RecordAPIResponseError(ctx, runtimeConfig, errResponse)
 		writeRealtimeError(c, http.StatusBadGateway, "Failed to read Realtime hangup response", "api_error", "realtime_upstream_unavailable")
 		return
 	}
-	helps.RecordAPIResponseMetadata(ctx, runtimeConfig, response.StatusCode, callResponseHeaders(response.Header))
 	helps.AppendAPIResponseChunk(ctx, runtimeConfig, responseBody)
+	if activeSelection != nil && response.StatusCode == http.StatusUnauthorized {
+		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", session.model, responseBody)
+		log.WithField("status", response.StatusCode).Warnf("codex realtime hangup upstream request failed: %s", logging.SafeDiagnosticForLog(string(responseBody)))
+	}
 	if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
 		if selectionRelease != nil {
 			selectionRelease()

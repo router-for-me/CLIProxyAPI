@@ -128,8 +128,12 @@ func TestEnsureRepositoryReturnsErrorForMissingConfiguredBranchOnExistingReposit
 func TestEnsureRepositoryInitializesEmptyRemoteUsingConfiguredBranch(t *testing.T) {
 	root := t.TempDir()
 	remoteDir := filepath.Join(root, "remote.git")
-	if _, err := git.PlainInit(remoteDir, true); err != nil {
-		t.Fatalf("init bare remote: %v", err)
+	remoteRepo, errInit := git.PlainInit(remoteDir, true)
+	if errInit != nil {
+		t.Fatalf("init bare remote: %v", errInit)
+	}
+	if errClose := remoteRepo.Close(); errClose != nil {
+		t.Fatalf("close bare remote: %v", errClose)
 	}
 
 	branch := "feature/gemini-fix"
@@ -467,12 +471,25 @@ func TestGitTokenStorePersistConfigDropsUnrelatedStagedDeletions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open workspace repo: %v", err)
 	}
+	repoClosed := false
+	defer func() {
+		if !repoClosed {
+			if errClose := repo.Close(); errClose != nil {
+				t.Errorf("close workspace repo after test failure: %v", errClose)
+			}
+		}
+	}()
 	worktree, err := repo.Worktree()
 	if err != nil {
 		t.Fatalf("open workspace worktree: %v", err)
 	}
 	if _, err := worktree.Remove("auths/protected.json"); err != nil {
 		t.Fatalf("stage unexpected auth removal: %v", err)
+	}
+	errClose := repo.Close()
+	repoClosed = true
+	if errClose != nil {
+		t.Fatalf("close workspace repo after staged removal: %v", errClose)
 	}
 	if _, err := os.Stat(authPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("removed auth stat error = %v, want not exist", err)
@@ -666,8 +683,21 @@ func TestGitTokenStoreConcurrentInitializationDoesNotOverwriteCreatedBranch(t *t
 	if errInitRemote != nil {
 		t.Fatalf("init bare remote: %v", errInitRemote)
 	}
+	remoteRepoClosed := false
+	defer func() {
+		if !remoteRepoClosed {
+			if errClose := remoteRepo.Close(); errClose != nil {
+				t.Errorf("close initialized remote repo after test failure: %v", errClose)
+			}
+		}
+	}()
 	if errHead := remoteRepo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("master"))); errHead != nil {
 		t.Fatalf("set remote HEAD: %v", errHead)
+	}
+	errCloseRemote := remoteRepo.Close()
+	remoteRepoClosed = true
+	if errCloseRemote != nil {
+		t.Fatalf("close initialized remote repo: %v", errCloseRemote)
 	}
 
 	workspaceDir := filepath.Join(root, "workspace")
@@ -675,6 +705,14 @@ func TestGitTokenStoreConcurrentInitializationDoesNotOverwriteCreatedBranch(t *t
 	if errInitLocal != nil {
 		t.Fatalf("init local repository: %v", errInitLocal)
 	}
+	localRepoClosed := false
+	defer func() {
+		if !localRepoClosed {
+			if errClose := localRepo.Close(); errClose != nil {
+				t.Errorf("close initialized local repo after test failure: %v", errClose)
+			}
+		}
+	}()
 	if errSigning := disableGitCommitSigning(workspaceDir); errSigning != nil {
 		t.Fatalf("disable local commit signing: %v", errSigning)
 	}
@@ -690,12 +728,25 @@ func TestGitTokenStoreConcurrentInitializationDoesNotOverwriteCreatedBranch(t *t
 			t.Fatalf("write local placeholder: %v", errWrite)
 		}
 	}
+	errCloseLocal := localRepo.Close()
+	localRepoClosed = true
+	if errCloseLocal != nil {
+		t.Fatalf("close initialized local repo: %v", errCloseLocal)
+	}
 
 	winnerDir := filepath.Join(root, "winner")
 	winnerRepo, errInitWinner := git.PlainInit(winnerDir, false)
 	if errInitWinner != nil {
 		t.Fatalf("init winning repository: %v", errInitWinner)
 	}
+	winnerRepoClosed := false
+	defer func() {
+		if !winnerRepoClosed {
+			if errClose := winnerRepo.Close(); errClose != nil {
+				t.Errorf("close winning repository after test failure: %v", errClose)
+			}
+		}
+	}()
 	if errSigning := disableGitCommitSigning(winnerDir); errSigning != nil {
 		t.Fatalf("disable winner commit signing: %v", errSigning)
 	}
@@ -732,6 +783,11 @@ func TestGitTokenStoreConcurrentInitializationDoesNotOverwriteCreatedBranch(t *t
 	}
 	if errPush := winnerRepo.Push(&git.PushOptions{RemoteName: "origin", RefSpecs: []gitconfig.RefSpec{"refs/heads/master:refs/heads/master"}}); errPush != nil {
 		t.Fatalf("push winning initialization: %v", errPush)
+	}
+	errCloseWinner := winnerRepo.Close()
+	winnerRepoClosed = true
+	if errCloseWinner != nil {
+		t.Fatalf("close winning repository: %v", errCloseWinner)
 	}
 
 	store := NewGitTokenStore(remoteDir, "", "", "master")
@@ -777,6 +833,14 @@ func TestEnsureRepositoryRetryRestoresTrackedAuthOnUpToDatePull(t *testing.T) {
 	if errOpen != nil {
 		t.Fatalf("open workspace repository: %v", errOpen)
 	}
+	repoClosed := false
+	defer func() {
+		if !repoClosed {
+			if errClose := repo.Close(); errClose != nil {
+				t.Errorf("close workspace repository after test failure: %v", errClose)
+			}
+		}
+	}()
 	worktree, errWorktree := repo.Worktree()
 	if errWorktree != nil {
 		t.Fatalf("open workspace worktree: %v", errWorktree)
@@ -792,6 +856,11 @@ func TestEnsureRepositoryRetryRestoresTrackedAuthOnUpToDatePull(t *testing.T) {
 	if errSetConfig := repo.SetConfig(cfg); errSetConfig != nil {
 		t.Fatalf("break workspace origin: %v", errSetConfig)
 	}
+	errClose := repo.Close()
+	repoClosed = true
+	if errClose != nil {
+		t.Fatalf("close workspace repository before unavailable remote check: %v", errClose)
+	}
 	if errEnsure := store.EnsureRepository(); errEnsure == nil {
 		t.Fatal("EnsureRepository with unavailable remote error = nil, want retryable failure")
 	}
@@ -799,9 +868,26 @@ func TestEnsureRepositoryRetryRestoresTrackedAuthOnUpToDatePull(t *testing.T) {
 		t.Fatalf("missing auth stat error = %v, want not exist", errStat)
 	}
 
+	repoRestore, errOpen := git.PlainOpen(filepath.Join(root, "workspace"))
+	if errOpen != nil {
+		t.Fatalf("reopen workspace repository: %v", errOpen)
+	}
+	repoRestoreClosed := false
+	defer func() {
+		if !repoRestoreClosed {
+			if errClose := repoRestore.Close(); errClose != nil {
+				t.Errorf("close restored workspace repository after test failure: %v", errClose)
+			}
+		}
+	}()
 	cfg.Remotes["origin"].URLs = []string{remoteDir}
-	if errSetConfig := repo.SetConfig(cfg); errSetConfig != nil {
+	if errSetConfig := repoRestore.SetConfig(cfg); errSetConfig != nil {
 		t.Fatalf("restore workspace origin: %v", errSetConfig)
+	}
+	errCloseRestore := repoRestore.Close()
+	repoRestoreClosed = true
+	if errCloseRestore != nil {
+		t.Fatalf("close workspace repository before retry: %v", errCloseRestore)
 	}
 	if errEnsure := store.EnsureRepository(); errEnsure != nil {
 		t.Fatalf("EnsureRepository retry: %v", errEnsure)
@@ -1026,6 +1112,173 @@ func TestInstallRecoveredGitDirectoryRetainsBackupWhenRestoreFails(t *testing.T)
 	}
 	if !strings.Contains(errInstall.Error(), backupPath) {
 		t.Fatalf("install error = %q, want retained backup path %q", errInstall, backupPath)
+	}
+}
+
+func TestRecoverRepositoryCloseFailuresAbortBeforeMutation(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	store.SetBaseDir(filepath.Join(root, "workspace", "auths"))
+	if errEnsure := store.EnsureRepository(); errEnsure != nil {
+		t.Fatalf("EnsureRepository: %v", errEnsure)
+	}
+
+	repoDir := filepath.Join(root, "workspace")
+	baselineRepo, errOpen := git.PlainOpen(repoDir)
+	if errOpen != nil {
+		t.Fatalf("open baseline repository: %v", errOpen)
+	}
+	baselineRepoClosed := false
+	defer func() {
+		if !baselineRepoClosed {
+			if errClose := baselineRepo.Close(); errClose != nil {
+				t.Errorf("close baseline repository after test failure: %v", errClose)
+			}
+		}
+	}()
+	head, errHead := baselineRepo.Head()
+	if errHead != nil {
+		t.Fatalf("read baseline head: %v", errHead)
+	}
+	commit, errCommit := baselineRepo.CommitObject(head.Hash())
+	if errCommit != nil {
+		t.Fatalf("read baseline commit: %v", errCommit)
+	}
+	baselineTree, errTree := commit.Tree()
+	if errTree != nil {
+		t.Fatalf("read baseline tree: %v", errTree)
+	}
+	gitMarkerPath := filepath.Join(repoDir, ".git", "recovery-close-marker")
+	if errWrite := os.WriteFile(gitMarkerPath, []byte("original git\n"), 0o600); errWrite != nil {
+		t.Fatalf("write repository marker: %v", errWrite)
+	}
+	worktreeMarkerPath := filepath.Join(repoDir, "recovery-close-marker.txt")
+	if errWrite := os.WriteFile(worktreeMarkerPath, []byte("original worktree\n"), 0o600); errWrite != nil {
+		t.Fatalf("write worktree marker: %v", errWrite)
+	}
+
+	errBaselineClose := errors.New("close baseline failed")
+	errClonedClose := errors.New("close clone failed")
+	closeCalls := 0
+	errRecover := store.recoverRepositoryLocked(repoDir, nil, baselineRepo, baselineTree, nil, func(repo *git.Repository) error {
+		closeCalls++
+		errClose := repo.Close()
+		if repo == baselineRepo {
+			baselineRepoClosed = true
+		}
+		if errClose != nil {
+			return errClose
+		}
+		if repo == baselineRepo {
+			return errBaselineClose
+		}
+		return errClonedClose
+	}, os.Rename)
+	if !errors.Is(errRecover, errBaselineClose) || !errors.Is(errRecover, errClonedClose) {
+		t.Fatalf("recoverRepositoryLocked() error = %v, want both close failures", errRecover)
+	}
+	if closeCalls != 2 {
+		t.Fatalf("repository close calls = %d, want 2", closeCalls)
+	}
+	assertLocalFileContents(t, gitMarkerPath, "original git\n")
+	assertLocalFileContents(t, worktreeMarkerPath, "original worktree\n")
+	recoveryDirs, errGlob := filepath.Glob(filepath.Join(root, ".gitstore-recovery-*"))
+	if errGlob != nil {
+		t.Fatalf("glob recovery directories: %v", errGlob)
+	}
+	if len(recoveryDirs) != 0 {
+		t.Fatalf("recovery directories = %v, want none", recoveryDirs)
+	}
+}
+
+func TestRecoverRepositoryWorktreeBackupRollbackFailureRetainsRecoveryDirectory(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	store.SetBaseDir(filepath.Join(root, "workspace", "auths"))
+	if errEnsure := store.EnsureRepository(); errEnsure != nil {
+		t.Fatalf("EnsureRepository: %v", errEnsure)
+	}
+
+	repoDir := filepath.Join(root, "workspace")
+	if errWrite := os.WriteFile(filepath.Join(repoDir, "a.txt"), []byte("alpha\n"), 0o600); errWrite != nil {
+		t.Fatalf("write file a: %v", errWrite)
+	}
+	if errWrite := os.WriteFile(filepath.Join(repoDir, "z.txt"), []byte("zeta\n"), 0o600); errWrite != nil {
+		t.Fatalf("write file z: %v", errWrite)
+	}
+
+	errMoveZ := errors.New("move z failed")
+	errRestoreA := errors.New("restore a failed")
+	errRecover := store.recoverRepositoryLocked(repoDir, nil, nil, nil, nil, (*git.Repository).Close, func(source, target string) error {
+		if strings.HasSuffix(source, "z.txt") && strings.Contains(target, ".gitstore-recovery-") {
+			return errMoveZ
+		}
+		if strings.HasSuffix(source, "a.txt") && strings.Contains(source, ".gitstore-recovery-") {
+			return errRestoreA
+		}
+		return os.Rename(source, target)
+	})
+
+	if !errors.Is(errRecover, errMoveZ) || !errors.Is(errRecover, errRestoreA) {
+		t.Fatalf("recoverRepositoryLocked error = %v, want both move and restore errors", errRecover)
+	}
+	if !strings.Contains(errRecover.Error(), "backup retained at") {
+		t.Fatalf("recoverRepositoryLocked error = %q, want backup retention notice", errRecover)
+	}
+	recoveryDirs, errGlob := filepath.Glob(filepath.Join(root, ".gitstore-recovery-*"))
+	if errGlob != nil {
+		t.Fatalf("glob recovery directories: %v", errGlob)
+	}
+	if len(recoveryDirs) != 1 {
+		t.Fatalf("recovery directories count = %d, want 1 retained", len(recoveryDirs))
+	}
+}
+
+func TestRecoverRepositoryRecoveredCloseFailureTriggersRollback(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	store.SetBaseDir(filepath.Join(root, "workspace", "auths"))
+	if errEnsure := store.EnsureRepository(); errEnsure != nil {
+		t.Fatalf("EnsureRepository: %v", errEnsure)
+	}
+
+	repoDir := filepath.Join(root, "workspace")
+	originalMarkerPath := filepath.Join(repoDir, ".git", "pre-recovery-marker")
+	if errWrite := os.WriteFile(originalMarkerPath, []byte("pre-recovery git\n"), 0o600); errWrite != nil {
+		t.Fatalf("write pre-recovery marker: %v", errWrite)
+	}
+
+	errRecoveredClose := errors.New("close recovered repo failed")
+	closeCallCount := 0
+	errRecover := store.recoverRepositoryLocked(repoDir, nil, nil, nil, nil, func(repo *git.Repository) error {
+		closeCallCount++
+		if err := repo.Close(); err != nil {
+			return err
+		}
+		if closeCallCount == 3 {
+			return errRecoveredClose
+		}
+		return nil
+	}, os.Rename)
+	if !errors.Is(errRecover, errRecoveredClose) {
+		t.Fatalf("recoverRepositoryLocked() error = %v, want recovered close failure", errRecover)
+	}
+	assertLocalFileContents(t, originalMarkerPath, "pre-recovery git\n")
+	recoveryDirs, errGlob := filepath.Glob(filepath.Join(root, ".gitstore-recovery-*"))
+	if errGlob != nil {
+		t.Fatalf("glob recovery directories: %v", errGlob)
+	}
+	if len(recoveryDirs) != 0 {
+		t.Fatalf("recovery directories = %v, want none", recoveryDirs)
 	}
 }
 
@@ -1272,12 +1525,9 @@ func TestGitTokenStoreMissingPackfileRecoveryFailsClosedWithoutBaseline(t *testi
 		t.Fatalf("Save: %v", errSave)
 	}
 
-	repo := corruptGitRepository(t, filepath.Join(root, "workspace"))
+	corruptGitRepository(t, filepath.Join(root, "workspace"))
 	if errRemove := os.Remove(authPath); errRemove != nil {
 		t.Fatalf("remove local auth before recovery: %v", errRemove)
-	}
-	if errVerify := verifyRepositoryHead(repo); !isRepositoryCorruptionError(errVerify) {
-		t.Fatalf("verifyRepositoryHead error = %v, want repository corruption", errVerify)
 	}
 
 	errEnsure := store.EnsureRepository()
@@ -1288,6 +1538,46 @@ func TestGitTokenStoreMissingPackfileRecoveryFailsClosedWithoutBaseline(t *testi
 		t.Fatalf("local deleted auth stat error = %v, want not exist", errStat)
 	}
 	assertRemoteTreePath(t, remoteDir, "master", "auths/recover.json", true)
+}
+
+func TestInspectRecoveryBaselineFailureClosesRepositoryHandle(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := setupGitRemoteRepository(t, root, "master",
+		testBranchSpec{name: "master", contents: "remote master branch\n"},
+	)
+	repoDir := filepath.Join(root, "workspace")
+	store := NewGitTokenStore(remoteDir, "", "", "")
+	store.SetBaseDir(filepath.Join(repoDir, "auths"))
+	if errEnsure := store.EnsureRepository(); errEnsure != nil {
+		t.Fatalf("EnsureRepository: %v", errEnsure)
+	}
+
+	corruptGitRepository(t, repoDir)
+
+	repo, tree, dirty, errInspect := inspectRecoveryBaseline(repoDir)
+	if errInspect == nil {
+		t.Fatal("inspectRecoveryBaseline error = nil, want corruption error")
+	}
+	if repo != nil || tree != nil || dirty != nil {
+		t.Fatalf("inspectRecoveryBaseline returned non-nil values on error: repo=%v, tree=%v, dirty=%v", repo, tree, dirty)
+	}
+
+	gitDir := filepath.Join(repoDir, ".git")
+	renamedGitDir := filepath.Join(repoDir, ".git.renamed")
+	if errRename := os.Rename(gitDir, renamedGitDir); errRename != nil {
+		t.Fatalf("rename .git after inspectRecoveryBaseline failure: %v", errRename)
+	}
+	if errRenameBack := os.Rename(renamedGitDir, gitDir); errRenameBack != nil {
+		t.Fatalf("restore renamed .git: %v", errRenameBack)
+	}
+
+	if errRemove := os.RemoveAll(repoDir); errRemove != nil {
+		t.Fatalf("remove repoDir after handle release: %v", errRemove)
+	}
+	if errRetry := store.EnsureRepository(); errRetry != nil {
+		t.Fatalf("EnsureRepository retry after cleanup: %v", errRetry)
+	}
+	assertRemoteBranchContents(t, remoteDir, "master", "remote master branch\n")
 }
 
 func TestCommitAndPushLockedPushesBeforeRunningGC(t *testing.T) {
@@ -1378,6 +1668,14 @@ func TestEnsureRepositoryKeepsCurrentBranchWhenRemoteDefaultCannotBeResolved(t *
 	if err != nil {
 		t.Fatalf("open workspace repo: %v", err)
 	}
+	repoClosed := false
+	defer func() {
+		if !repoClosed {
+			if errClose := repo.Close(); errClose != nil {
+				t.Errorf("close workspace repo after test failure: %v", errClose)
+			}
+		}
+	}()
 	cfg, err := repo.Config()
 	if err != nil {
 		t.Fatalf("read repo config: %v", err)
@@ -1385,6 +1683,11 @@ func TestEnsureRepositoryKeepsCurrentBranchWhenRemoteDefaultCannotBeResolved(t *
 	cfg.Remotes["origin"].URLs = []string{authServer.URL}
 	if err := repo.SetConfig(cfg); err != nil {
 		t.Fatalf("set repo config: %v", err)
+	}
+	errClose := repo.Close()
+	repoClosed = true
+	if errClose != nil {
+		t.Fatalf("close workspace repo before fallback check: %v", errClose)
 	}
 
 	reopened := NewGitTokenStore(remoteDir, "", "", "")
@@ -1403,6 +1706,11 @@ func removeHeadFileObject(t *testing.T, repoDir, path string) {
 	if errOpen != nil {
 		t.Fatalf("open repository before object removal: %v", errOpen)
 	}
+	defer func() {
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close repository: %v", errClose)
+		}
+	}()
 	worktree, errWorktree := repo.Worktree()
 	if errWorktree != nil {
 		t.Fatalf("open worktree before object removal: %v", errWorktree)
@@ -1444,13 +1752,18 @@ func removeHeadFileObject(t *testing.T, repoDir, path string) {
 	}
 }
 
-func corruptGitRepository(t *testing.T, repoDir string) *git.Repository {
+func corruptGitRepository(t *testing.T, repoDir string) {
 	t.Helper()
 
 	repo, errOpen := git.PlainOpen(repoDir)
 	if errOpen != nil {
 		t.Fatalf("open repository before corruption: %v", errOpen)
 	}
+	defer func() {
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close corrupted repository: %v", errClose)
+		}
+	}()
 	if errRepack := repo.RepackObjects(&git.RepackConfig{}); errRepack != nil {
 		t.Fatalf("repack repository objects: %v", errRepack)
 	}
@@ -1478,15 +1791,21 @@ func corruptGitRepository(t *testing.T, repoDir string) *git.Repository {
 			t.Fatalf("remove packfile %s: %v", filepath.Base(packfile), errRemove)
 		}
 	}
-	return repo
+	if errVerify := verifyRepositoryHead(repo); !isRepositoryCorruptionError(errVerify) {
+		t.Fatalf("verifyRepositoryHead error = %v, want repository corruption", errVerify)
+	}
 }
 
 func setupGitRemoteRepository(t *testing.T, root, defaultBranch string, branches ...testBranchSpec) string {
 	t.Helper()
 
 	remoteDir := filepath.Join(root, "remote.git")
-	if _, err := git.PlainInit(remoteDir, true); err != nil {
-		t.Fatalf("init bare remote: %v", err)
+	remoteRepo, errInit := git.PlainInit(remoteDir, true)
+	if errInit != nil {
+		t.Fatalf("init bare remote: %v", errInit)
+	}
+	if errClose := remoteRepo.Close(); errClose != nil {
+		t.Fatalf("close initialized bare remote: %v", errClose)
 	}
 
 	seedDir := filepath.Join(root, "seed")
@@ -1494,6 +1813,11 @@ func setupGitRemoteRepository(t *testing.T, root, defaultBranch string, branches
 	if err != nil {
 		t.Fatalf("init seed repo: %v", err)
 	}
+	defer func() {
+		if errClose := seedRepo.Close(); errClose != nil {
+			t.Errorf("close seed repo: %v", errClose)
+		}
+	}()
 	seedConfig, errConfig := seedRepo.Config()
 	if errConfig != nil {
 		t.Fatalf("get seed repo config: %v", errConfig)
@@ -1540,10 +1864,15 @@ func setupGitRemoteRepository(t *testing.T, root, defaultBranch string, branches
 		t.Fatalf("push seed branches: %v", err)
 	}
 
-	remoteRepo, err := git.PlainOpen(remoteDir)
+	remoteRepo, err = git.PlainOpen(remoteDir)
 	if err != nil {
 		t.Fatalf("open remote repo: %v", err)
 	}
+	defer func() {
+		if errClose := remoteRepo.Close(); errClose != nil {
+			t.Errorf("close remote repo: %v", errClose)
+		}
+	}()
 	if err := remoteRepo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName(defaultBranch))); err != nil {
 		t.Fatalf("set remote HEAD: %v", err)
 	}
@@ -1578,6 +1907,11 @@ func advanceRemoteBranch(t *testing.T, seedDir, remoteDir, branch, contents, mes
 	if err != nil {
 		t.Fatalf("open seed repo: %v", err)
 	}
+	defer func() {
+		if errClose := seedRepo.Close(); errClose != nil {
+			t.Errorf("close seed repo: %v", errClose)
+		}
+	}()
 	worktree, err := seedRepo.Worktree()
 	if err != nil {
 		t.Fatalf("open seed worktree: %v", err)
@@ -1603,6 +1937,11 @@ func advanceRemoteBranchFromNewBranch(t *testing.T, seedDir, remoteDir, branch, 
 	if err != nil {
 		t.Fatalf("open seed repo: %v", err)
 	}
+	defer func() {
+		if errClose := seedRepo.Close(); errClose != nil {
+			t.Errorf("close seed repo: %v", errClose)
+		}
+	}()
 	worktree, err := seedRepo.Worktree()
 	if err != nil {
 		t.Fatalf("open seed worktree: %v", err)
@@ -1668,6 +2007,11 @@ func assertRemoteTreePath(t *testing.T, remoteDir, branch, path string, want boo
 	if err != nil {
 		t.Fatalf("open remote repo: %v", err)
 	}
+	defer func() {
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close remote repo: %v", errClose)
+		}
+	}()
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branch), true)
 	if err != nil {
 		t.Fatalf("read remote branch %s: %v", branch, err)
@@ -1697,6 +2041,11 @@ func assertRemoteFileContents(t *testing.T, remoteDir, branch, path, wantContent
 	if err != nil {
 		t.Fatalf("open remote repo: %v", err)
 	}
+	defer func() {
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close remote repo: %v", errClose)
+		}
+	}()
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branch), true)
 	if err != nil {
 		t.Fatalf("read remote branch %s: %v", branch, err)
@@ -1729,6 +2078,11 @@ func assertRepositoryBranchAndContents(t *testing.T, repoDir, branch, wantConten
 	if err != nil {
 		t.Fatalf("open local repo: %v", err)
 	}
+	defer func() {
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close local repo: %v", errClose)
+		}
+	}()
 	head, err := repo.Head()
 	if err != nil {
 		t.Fatalf("local repo head: %v", err)
@@ -1752,6 +2106,11 @@ func assertRepositoryHeadBranch(t *testing.T, repoDir, branch string) {
 	if err != nil {
 		t.Fatalf("open local repo: %v", err)
 	}
+	defer func() {
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close local repo: %v", errClose)
+		}
+	}()
 	head, err := repo.Head()
 	if err != nil {
 		t.Fatalf("local repo head: %v", err)
@@ -1768,6 +2127,11 @@ func assertRemoteHeadBranch(t *testing.T, remoteDir, branch string) {
 	if err != nil {
 		t.Fatalf("open remote repo: %v", err)
 	}
+	defer func() {
+		if errClose := remoteRepo.Close(); errClose != nil {
+			t.Errorf("close remote repo: %v", errClose)
+		}
+	}()
 	head, err := remoteRepo.Reference(plumbing.HEAD, false)
 	if err != nil {
 		t.Fatalf("read remote HEAD: %v", err)
@@ -1784,6 +2148,11 @@ func setRemoteHeadBranch(t *testing.T, remoteDir, branch string) {
 	if err != nil {
 		t.Fatalf("open remote repo: %v", err)
 	}
+	defer func() {
+		if errClose := remoteRepo.Close(); errClose != nil {
+			t.Errorf("close remote repo: %v", errClose)
+		}
+	}()
 	if err := remoteRepo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName(branch))); err != nil {
 		t.Fatalf("set remote HEAD to %s: %v", branch, err)
 	}
@@ -1796,6 +2165,11 @@ func assertRemoteBranchExistsWithCommit(t *testing.T, remoteDir, branch string) 
 	if err != nil {
 		t.Fatalf("open remote repo: %v", err)
 	}
+	defer func() {
+		if errClose := remoteRepo.Close(); errClose != nil {
+			t.Errorf("close remote repo: %v", errClose)
+		}
+	}()
 	ref, err := remoteRepo.Reference(plumbing.NewBranchReferenceName(branch), false)
 	if err != nil {
 		t.Fatalf("read remote branch %s: %v", branch, err)
@@ -1812,6 +2186,11 @@ func assertRemoteBranchDoesNotExist(t *testing.T, remoteDir, branch string) {
 	if err != nil {
 		t.Fatalf("open remote repo: %v", err)
 	}
+	defer func() {
+		if errClose := remoteRepo.Close(); errClose != nil {
+			t.Errorf("close remote repo: %v", errClose)
+		}
+	}()
 	if _, err := remoteRepo.Reference(plumbing.NewBranchReferenceName(branch), false); err == nil {
 		t.Fatalf("remote branch %s exists, want missing", branch)
 	} else if err != plumbing.ErrReferenceNotFound {
@@ -1826,6 +2205,11 @@ func assertRemoteBranchContents(t *testing.T, remoteDir, branch, wantContents st
 	if err != nil {
 		t.Fatalf("open remote repo: %v", err)
 	}
+	defer func() {
+		if errClose := remoteRepo.Close(); errClose != nil {
+			t.Errorf("close remote repo: %v", errClose)
+		}
+	}()
 	ref, err := remoteRepo.Reference(plumbing.NewBranchReferenceName(branch), false)
 	if err != nil {
 		t.Fatalf("read remote branch %s: %v", branch, err)

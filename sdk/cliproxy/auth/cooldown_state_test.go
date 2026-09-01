@@ -34,6 +34,12 @@ func (s *recordingCooldownStateStore) Save(_ context.Context, records []Cooldown
 	return nil
 }
 
+func (s *recordingCooldownStateStore) savedRecords() []CooldownStateRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneCooldownStateRecords(s.records)
+}
+
 func cloneCooldownStateRecords(records []CooldownStateRecord) []CooldownStateRecord {
 	if len(records) == 0 {
 		return nil

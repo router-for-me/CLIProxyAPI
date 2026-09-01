@@ -2,6 +2,7 @@ package claude
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -134,6 +135,64 @@ func TestConvertClaudeRequestToCodex_MessageSystemRoleWrapsAsUserReminder(t *tes
 	}
 	if got := inputs[4].Get("content.0.text").String(); got != "<system-reminder>\nUse the current repo\n</system-reminder>" {
 		t.Fatalf("unexpected second reminder text: %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_PreservesToolAdjacencyWithInterveningSystemMessage(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-5.4",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Execute tools"}]},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "tool_one", "input": {"a": 1}},
+					{"type": "tool_use", "id": "call_2", "name": "tool_two", "input": {"b": 2}}
+				]
+			},
+			{"role": "system", "content": "Context update between tool call and tool result"},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_2", "content": "result 2"},
+					{"type": "tool_result", "tool_use_id": "call_1", "content": "result 1"},
+					{"type": "text", "text": "Now summarize"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToCodex("gpt-5.4", []byte(inputJSON), false)
+	inputs := gjson.GetBytes(result, "input").Array()
+
+	// Expected item types:
+	// 0: message (role: user, "Execute tools")
+	// 1: function_call (call_id: call_1)
+	// 2: function_call (call_id: call_2)
+	// 3: function_call_output (call_id: call_1)
+	// 4: function_call_output (call_id: call_2)
+	// 5: message (role: user, text: <system-reminder>...)
+	// 6: message (role: user, text: Now summarize)
+	types := make([]string, 0, len(inputs))
+	for _, item := range inputs {
+		types = append(types, item.Get("type").String())
+	}
+	wantTypes := []string{"message", "function_call", "function_call", "function_call_output", "function_call_output", "message", "message"}
+	if fmt.Sprintf("%v", types) != fmt.Sprintf("%v", wantTypes) {
+		t.Fatalf("unexpected types: got %v, want %v", types, wantTypes)
+	}
+
+	if inputs[3].Get("call_id").String() != "call_1" {
+		t.Fatalf("expected output 0 to respond to call_1, got %q", inputs[3].Get("call_id").String())
+	}
+	if inputs[4].Get("call_id").String() != "call_2" {
+		t.Fatalf("expected output 1 to respond to call_2, got %q", inputs[4].Get("call_id").String())
+	}
+	if inputs[5].Get("content.0.text").String() != "<system-reminder>\nContext update between tool call and tool result\n</system-reminder>" {
+		t.Fatalf("unexpected system reminder content: %q", inputs[5].Get("content.0.text").String())
+	}
+	if inputs[6].Get("content.0.text").String() != "Now summarize" {
+		t.Fatalf("unexpected user summary content: %q", inputs[6].Get("content.0.text").String())
 	}
 }
 
@@ -709,4 +768,112 @@ func validCodexReasoningSignature() string {
 	raw[0] = 0x80
 	raw[8] = 1
 	return base64.URLEncoding.EncodeToString(raw)
+}
+
+func TestConvertClaudeRequestToCodex_OutputConfigFormat(t *testing.T) {
+	t.Run("Valid json_schema format", func(t *testing.T) {
+		payload := []byte(`{
+			"model": "gpt-5.4",
+			"max_tokens": 128,
+			"messages": [
+				{"role": "user", "content": "Return an object with one string field named answer."}
+			],
+			"output_config": {
+				"format": {
+					"type": "json_schema",
+					"schema": {
+						"type": "object",
+						"properties": {
+							"answer": {"type": "string"}
+						},
+						"required": ["answer"],
+						"additionalProperties": false
+					}
+				}
+			}
+		}`)
+
+		translated := ConvertClaudeRequestToCodex("gpt-5.4", payload, false)
+		root := gjson.ParseBytes(translated)
+
+		if !root.Get("text.format").Exists() {
+			t.Fatalf("expected text.format in translated payload, got: %s", translated)
+		}
+		if got := root.Get("text.format.type").String(); got != "json_schema" {
+			t.Errorf("expected text.format.type to be 'json_schema', got %q", got)
+		}
+		if got := root.Get("text.format.name").String(); got != "cli_proxy_structured_output" {
+			t.Errorf("expected text.format.name to be 'cli_proxy_structured_output', got %q", got)
+		}
+		if got := root.Get("text.format.strict").Bool(); !got {
+			t.Errorf("expected text.format.strict to be true, got %v", got)
+		}
+		if got := root.Get("text.format.schema.properties.answer.type").String(); got != "string" {
+			t.Errorf("expected schema.properties.answer.type to be 'string', got %q", got)
+		}
+	})
+
+	t.Run("Valid json_schema format with custom name and strict false", func(t *testing.T) {
+		payload := []byte(`{
+			"model": "gpt-5.4",
+			"messages": [
+				{"role": "user", "content": "hello"}
+			],
+			"output_config": {
+				"format": {
+					"type": "json_schema",
+					"name": "custom_schema",
+					"strict": false,
+					"schema": {
+						"type": "object"
+					}
+				}
+			}
+		}`)
+
+		translated := ConvertClaudeRequestToCodex("gpt-5.4", payload, false)
+		root := gjson.ParseBytes(translated)
+
+		if got := root.Get("text.format.name").String(); got != "custom_schema" {
+			t.Errorf("expected text.format.name to be 'custom_schema', got %q", got)
+		}
+		if got := root.Get("text.format.strict").Bool(); got != false {
+			t.Errorf("expected text.format.strict to be false, got %v", got)
+		}
+	})
+
+	t.Run("No output_config.format", func(t *testing.T) {
+		payload := []byte(`{
+			"model": "gpt-5.4",
+			"messages": [
+				{"role": "user", "content": "hello"}
+			]
+		}`)
+
+		translated := ConvertClaudeRequestToCodex("gpt-5.4", payload, false)
+		root := gjson.ParseBytes(translated)
+		if root.Get("text.format").Exists() {
+			t.Fatalf("expected no text.format in translated payload, got: %s", translated)
+		}
+	})
+
+	t.Run("output_config with effort only", func(t *testing.T) {
+		payload := []byte(`{
+			"model": "gpt-5.4",
+			"thinking": {"type": "adaptive"},
+			"output_config": {"effort": "high"},
+			"messages": [
+				{"role": "user", "content": "hello"}
+			]
+		}`)
+
+		translated := ConvertClaudeRequestToCodex("gpt-5.4", payload, false)
+		root := gjson.ParseBytes(translated)
+		if root.Get("text.format").Exists() {
+			t.Fatalf("expected no text.format in translated payload, got: %s", translated)
+		}
+		if got := root.Get("reasoning.effort").String(); got != "high" {
+			t.Errorf("expected reasoning.effort to be 'high', got %q", got)
+		}
+	})
 }

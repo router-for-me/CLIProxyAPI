@@ -8,6 +8,20 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
+func TestContextWithRequestedModelAliasIncludesStream(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "stream_false", true: "stream_true"}[stream], func(t *testing.T) {
+			ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
+				Stream: stream,
+			}, "fallback-model")
+
+			if got := coreusage.StreamFromContext(ctx); got != stream {
+				t.Fatalf("stream = %v, want %v", got, stream)
+			}
+		})
+	}
+}
+
 func TestContextWithRequestedModelAliasIncludesReasoningEffort(t *testing.T) {
 	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
 		Metadata: map[string]any{

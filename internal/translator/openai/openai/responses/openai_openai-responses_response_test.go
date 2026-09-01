@@ -1349,3 +1349,79 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Reasonin
 		})
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_EmptyToolCallsArrayDoesNotTerminateItems(t *testing.T) {
+	t.Parallel()
+
+	request := []byte(`{"model":"codebuddy-hy4"}`)
+	chunks := []string{
+		`data: {"id":"chatcmpl_empty_tc","object":"chat.completion.chunk","created":1773896263,"model":"codebuddy-hy4","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"Thinking part 1, ","function_call":null,"refusal":"","tool_calls":[]},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl_empty_tc","object":"chat.completion.chunk","created":1773896263,"model":"codebuddy-hy4","choices":[{"index":0,"delta":{"content":"","reasoning_content":"thinking part 2.","function_call":null,"refusal":"","tool_calls":[]},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl_empty_tc","object":"chat.completion.chunk","created":1773896263,"model":"codebuddy-hy4","choices":[{"index":0,"delta":{"content":"Hello ","reasoning_content":"","function_call":null,"refusal":"","tool_calls":[]},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl_empty_tc","object":"chat.completion.chunk","created":1773896263,"model":"codebuddy-hy4","choices":[{"index":0,"delta":{"content":"world!","reasoning_content":"","function_call":null,"refusal":"","tool_calls":[]},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var reasoningAddedCount, reasoningDoneCount int
+	var messageAddedCount, messageDoneCount int
+	var completedCount int
+	var lastReasoningSummaryText string
+	var lastMessageContentText string
+	var completedData gjson.Result
+
+	for _, line := range chunks {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "codebuddy-hy4", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			switch event {
+			case "response.output_item.added":
+				itemType := data.Get("item.type").String()
+				if itemType == "reasoning" {
+					reasoningAddedCount++
+				} else if itemType == "message" {
+					messageAddedCount++
+				}
+			case "response.output_item.done":
+				itemType := data.Get("item.type").String()
+				if itemType == "reasoning" {
+					reasoningDoneCount++
+					lastReasoningSummaryText = data.Get("item.summary.0.text").String()
+				} else if itemType == "message" {
+					messageDoneCount++
+					lastMessageContentText = data.Get("item.content.0.text").String()
+				}
+			case "response.completed":
+				completedCount++
+				completedData = data
+			}
+		}
+	}
+
+	if reasoningAddedCount != 1 {
+		t.Fatalf("expected exactly 1 reasoning output_item.added, got %d", reasoningAddedCount)
+	}
+	if reasoningDoneCount != 1 {
+		t.Fatalf("expected exactly 1 reasoning output_item.done, got %d", reasoningDoneCount)
+	}
+	if lastReasoningSummaryText != "Thinking part 1, thinking part 2." {
+		t.Fatalf("unexpected reasoning summary text: got %q, want %q", lastReasoningSummaryText, "Thinking part 1, thinking part 2.")
+	}
+	if messageAddedCount != 1 {
+		t.Fatalf("expected exactly 1 message output_item.added, got %d", messageAddedCount)
+	}
+	if messageDoneCount != 1 {
+		t.Fatalf("expected exactly 1 message output_item.done, got %d", messageDoneCount)
+	}
+	if lastMessageContentText != "Hello world!" {
+		t.Fatalf("unexpected message content text: got %q, want %q", lastMessageContentText, "Hello world!")
+	}
+	if completedCount != 1 {
+		t.Fatalf("expected exactly 1 response.completed, got %d", completedCount)
+	}
+	if got := completedData.Get("response.output.0.summary.0.text").String(); got != "Thinking part 1, thinking part 2." {
+		t.Fatalf("unexpected completed response reasoning summary: got %q, want %q", got, "Thinking part 1, thinking part 2.")
+	}
+	if got := completedData.Get("response.output.1.content.0.text").String(); got != "Hello world!" {
+		t.Fatalf("unexpected completed response message text: got %q, want %q", got, "Hello world!")
+	}
+}

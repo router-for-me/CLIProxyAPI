@@ -189,7 +189,7 @@ func xaiCreds(auth *cliproxyauth.Auth) (token, baseURL string) {
 }
 
 // xaiUsingAPI reports whether this xAI auth should use the official API path
-// for non-media HTTP chat. OAuth defaults to false to use Grok Build.
+// for HTTP chat and media. OAuth defaults to false to use Grok Build.
 func xaiUsingAPI(auth *cliproxyauth.Auth) bool {
 	if auth == nil {
 		return true
@@ -223,14 +223,14 @@ func xaiUsingAPI(auth *cliproxyauth.Auth) bool {
 	return !strings.EqualFold(xaiMetadataString(auth.Metadata, "auth_kind"), "oauth")
 }
 
-// xaiChatBaseURL returns the base URL for non-image/video xAI HTTP chat requests.
+// xaiChatBaseURL returns the base URL for xAI HTTP chat and media (image/video) requests.
 // When auth using_api is true, the official API base URL logic is used. When it
 // is false (including its OAuth default), empty or official default base_url is
 // rewritten to the CLI chat-proxy endpoint; an explicit non-default base_url is
 // still honored.
 // Websocket and compact transports intentionally do not use this helper:
-// cli-chat-proxy only accepts HTTP POST chat and does not implement
-// /responses/compact (404) or websocket upgrades (405).
+// cli-chat-proxy does not implement /responses/compact (404) or websocket
+// upgrades (405).
 func xaiChatBaseURL(auth *cliproxyauth.Auth) string {
 	_, baseURL := xaiCreds(auth)
 	if xaiUsingAPI(auth) {
