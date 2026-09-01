@@ -501,3 +501,152 @@ func TestUpstreamProviderStoreAPIKeyEntryWeightRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestUpstreamProviderStoreClaudeAPIKeyEntryIdentitySync exercises the
+// child-entry CRUD/update/delete/id-sync semantics for a "claude-api-key"
+// upstream provider row. The PG store's syncAPIKeyEntriesTx contract must
+// hold across provider types: an existing child id survives an update, a
+// brand-new child (zero id) receives a fresh positive id, and an omitted
+// child is deleted in the same transaction. This is the persistence-side
+// mirror of Task 2's renderer fan-out — without stable child ids the
+// downstream `claude:<rowID>:key-<entryID>` route identity cannot survive a
+// PUT, so the test guards the contract end-to-end. Fake redacted credentials
+// are used throughout; secret values never appear in failure messages.
+//
+// The test is environment-gated on PGSTORE_TEST_DSN (mirroring the existing
+// helper); when unset it is skipped so unit-test runs remain hermetic.
+func TestUpstreamProviderStoreClaudeAPIKeyEntryIdentitySync(t *testing.T) {
+	pg := newTestPostgresStore(t, "upstream_claude_entry_sync")
+	defer pg.Close()
+	ensureMigrated(t, pg)
+
+	src := NewUpstreamProviderStore(pg)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Create a Claude provider with two api_key_entries; both should get
+	// positive, distinct ids and ProviderID stamped onto the returned rows.
+	created, err := src.Create(ctx, UpstreamProvider{
+		ProviderType: "claude-api-key",
+		Name:         "primary",
+		Prefix:       "teamA/",
+		BaseURL:      "https://claude.example.test",
+		ProxyURL:     "http://provider-proxy",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{APIKey: "  claude-entry-secret-a  ", Name: "  Alpha  ", ProxyURL: "  http://proxy-a.example  "},
+			{APIKey: "claude-entry-secret-b", Name: "Beta", ProxyURL: "http://proxy-b.example"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.ID == 0 {
+		t.Fatal("Create returned zero provider ID")
+	}
+	if len(created.APIKeyEntries) != 2 {
+		t.Fatalf("Create returned %d entries, want 2", len(created.APIKeyEntries))
+	}
+	firstID := created.APIKeyEntries[0].ID
+	secondID := created.APIKeyEntries[1].ID
+	if firstID == 0 || secondID == 0 || firstID == secondID {
+		t.Fatalf("Create returned entry IDs %d and %d, want distinct positive IDs", firstID, secondID)
+	}
+	if created.APIKeyEntries[0].ProviderID != created.ID || created.APIKeyEntries[1].ProviderID != created.ID {
+		t.Fatalf("Create returned wrong entry provider IDs: %+v", created.APIKeyEntries)
+	}
+	// The Claude-specific scalar fields must round-trip on the parent row
+	// (the renderer copies them onto every emitted config.ClaudeKey).
+	if created.Prefix != "teamA/" || created.BaseURL != "https://claude.example.test" || created.ProxyURL != "http://provider-proxy" {
+		t.Fatalf("Create did not persist Claude row-level fields: %+v", created)
+	}
+
+	// Update: keep the second child id, drop the first (id omitted from the
+	// request), and add a brand-new third entry. The retained id must
+	// survive, the new entry must receive a positive id distinct from the
+	// retained one, and the dropped id must no longer be present after Get.
+	positive := 7
+	updated, err := src.Update(ctx, UpstreamProvider{
+		ID:           created.ID,
+		ProviderType: "claude-api-key",
+		Name:         "primary-renamed",
+		BaseURL:      "https://claude.example.test/v2",
+		ProxyURL:     "http://provider-proxy-v2",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{ID: secondID, APIKey: "claude-entry-secret-b-updated", Name: "BETA-UPDATED", ProxyURL: "http://proxy-b-new.example", Weight: &positive},
+			{APIKey: "claude-entry-secret-c", Name: "Gamma", ProxyURL: "http://proxy-c.example"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if updated.Name != "primary-renamed" || updated.BaseURL != "https://claude.example.test/v2" {
+		t.Fatalf("Update did not return updated parent: %+v", updated)
+	}
+	if len(updated.APIKeyEntries) != 2 {
+		t.Fatalf("Update returned %d entries, want 2 (retained + new)", len(updated.APIKeyEntries))
+	}
+	if updated.APIKeyEntries[0].ID != secondID {
+		t.Fatalf("updated existing entry ID = %d, want preserved ID %d", updated.APIKeyEntries[0].ID, secondID)
+	}
+	newID := updated.APIKeyEntries[1].ID
+	if newID == 0 || newID == firstID || newID == secondID {
+		t.Fatalf("updated inserted entry ID = %d, want a new positive ID", newID)
+	}
+	if updated.APIKeyEntries[0].Weight == nil || *updated.APIKeyEntries[0].Weight != positive {
+		t.Fatalf("updated retained entry Weight = %v, want pointer to %d", updated.APIKeyEntries[0].Weight, positive)
+	}
+	if updated.APIKeyEntries[1].Weight != nil {
+		t.Fatalf("updated new entry Weight = %v, want nil", updated.APIKeyEntries[1].Weight)
+	}
+	if updated.APIKeyEntries[0].SortOrder != 0 || updated.APIKeyEntries[1].SortOrder != 1 {
+		t.Fatalf("Update sort order = %d, %d; want 0, 1", updated.APIKeyEntries[0].SortOrder, updated.APIKeyEntries[1].SortOrder)
+	}
+
+	// Get after Update must reflect the synced shape: retained id present,
+	// firstID gone, newID present, weights preserved.
+	loaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get after Update: %v", err)
+	}
+	if len(loaded.APIKeyEntries) != 2 {
+		t.Fatalf("Get returned %d entries, want 2", len(loaded.APIKeyEntries))
+	}
+	if loaded.APIKeyEntries[0].ID != secondID || loaded.APIKeyEntries[1].ID != newID {
+		t.Fatalf("Get returned IDs %d, %d; want [%d %d] in request order",
+			loaded.APIKeyEntries[0].ID, loaded.APIKeyEntries[1].ID, secondID, newID)
+	}
+	for _, e := range loaded.APIKeyEntries {
+		if e.ID == firstID {
+			t.Fatalf("Get still contains dropped child id=%d", firstID)
+		}
+		if e.ProviderID != created.ID {
+			t.Fatalf("Get child ProviderID = %d, want parent %d", e.ProviderID, created.ID)
+		}
+	}
+	if loaded.APIKeyEntries[0].Weight == nil || *loaded.APIKeyEntries[0].Weight != positive {
+		t.Fatalf("Get retained entry Weight = %v, want pointer to %d", loaded.APIKeyEntries[0].Weight, positive)
+	}
+
+	// Legacy Claude rows: a provider with NO api_key_entries must still
+	// load with an empty slice (the renderer falls back to the parent's
+	// api_key + proxy in this case).
+	legacy, err := src.Create(ctx, UpstreamProvider{
+		ProviderType: "claude-api-key",
+		Name:         "legacy",
+		BaseURL:      "https://claude-legacy.example.test",
+		APIKey:       "claude-legacy-parent-secret",
+	})
+	if err != nil {
+		t.Fatalf("Create legacy: %v", err)
+	}
+	reloaded, err := src.Get(ctx, legacy.ID)
+	if err != nil {
+		t.Fatalf("Get legacy: %v", err)
+	}
+	if len(reloaded.APIKeyEntries) != 0 {
+		t.Fatalf("legacy Claude row fabricated child entries: %+v", reloaded.APIKeyEntries)
+	}
+	if reloaded.APIKey != "claude-legacy-parent-secret" {
+		t.Fatalf("legacy Claude row stripped parent api key: %q", reloaded.APIKey)
+	}
+}
