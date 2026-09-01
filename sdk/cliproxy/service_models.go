@@ -148,7 +148,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = registry.GetXAIModels()
 		if entry := s.resolveConfigXAIKey(a); entry != nil {
 			if len(entry.Models) > 0 {
-				models = buildXAIConfigModels(entry)
+				models = registry.WithXAIVoiceBuiltins(buildXAIConfigModels(entry))
 			}
 			if authKind == "apikey" {
 				excluded = entry.ExcludedModels

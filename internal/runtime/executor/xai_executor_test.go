@@ -5931,6 +5931,25 @@ func TestXAICompactBaseURL(t *testing.T) {
 	}
 }
 
+func TestXAIVoiceBaseURL(t *testing.T) {
+	tests := []struct {
+		name string
+		auth *cliproxyauth.Auth
+		want string
+	}{
+		{name: "empty defaults to official api", auth: &cliproxyauth.Auth{}, want: xaiauth.DefaultAPIBaseURL},
+		{name: "cli chat proxy defaults to official api", auth: &cliproxyauth.Auth{Attributes: map[string]string{"base_url": xaiauth.CLIChatProxyBaseURL}}, want: xaiauth.DefaultAPIBaseURL},
+		{name: "custom relay is honored", auth: &cliproxyauth.Auth{Attributes: map[string]string{"base_url": "https://gateway.example.com/v1"}}, want: "https://gateway.example.com/v1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := xaiVoiceBaseURL(tt.auth); got != tt.want {
+				t.Fatalf("xaiVoiceBaseURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestApplyXAIChatHeaders(t *testing.T) {
 	t.Run("non OAuth defaults to official API headers", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
