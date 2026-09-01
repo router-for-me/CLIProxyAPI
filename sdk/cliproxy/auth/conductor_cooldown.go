@@ -802,6 +802,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
+					if isOutOfExtraUsageResultError(result.Error) {
+						statusCode = http.StatusTooManyRequests
+						result.CredentialScope = true
+					}
 					if isModelSupportResultError(result.Error) {
 						next := now.Add(12 * time.Hour)
 						state.NextRetryAfter = next
@@ -1561,6 +1565,9 @@ func isCredentialScopedError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if isOutOfExtraUsageError(err) {
+		return true
+	}
 	type credentialScopedProvider interface {
 		IsCredentialScoped() bool
 	}
@@ -1947,6 +1954,28 @@ func isMissingModelPhrase(value string) bool {
 	}
 }
 
+func isOutOfExtraUsageError(err error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if clienterror.IsOutOfExtraUsage(status, err) {
+		return true
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil && authErr.Message != "" {
+		return clienterror.IsOutOfExtraUsage(status, errors.New(authErr.Message))
+	}
+	return false
+}
+
+func isOutOfExtraUsageResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	return isOutOfExtraUsageError(err)
+}
+
 // isRequestInvalidError returns true if the error represents a client request
 // error that should neither rotate nor penalize credentials. Model-support
 // errors remain eligible for alternate routing and keep their model-level state.
@@ -1964,6 +1993,9 @@ func isRequestInvalidError(err error) bool {
 		return false
 	}
 	if isModelSupportError(err) {
+		return false
+	}
+	if isOutOfExtraUsageError(err) {
 		return false
 	}
 	status := statusCodeFromError(err)
@@ -2004,6 +2036,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	}
 	statusCode := statusCodeFromResult(resultErr)
+	if isOutOfExtraUsageResultError(resultErr) {
+		statusCode = http.StatusTooManyRequests
+	}
 	if isCloudflareChallengeResultError(resultErr) {
 		auth.StatusMessage = "cloudflare challenge"
 		next, backoffLevel := nextCloudflareCooldown(auth.Quota.BackoffLevel, disableCooling, now)

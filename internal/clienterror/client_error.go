@@ -34,6 +34,11 @@ var requestFaultTypes = map[string]struct{}{
 	"invalid_prompt":        {},
 }
 
+const (
+	outOfExtraUsageNeedle       = "you're out of extra usage"
+	outOfExtraUsageExactMessage = "You're out of extra usage. Add more at claude.ai/settings/usage and keep going."
+)
+
 // HTTPStatusFromError extracts an HTTP status from err.
 // Explicit StatusCode() values win. Otherwise context.Canceled maps to 499
 // and context.DeadlineExceeded maps to 504. Returns 0 when unknown.
@@ -86,6 +91,12 @@ func IsRequestFault(status int, err error) bool {
 	if status == http.StatusPaymentRequired || status == http.StatusTooManyRequests {
 		return false
 	}
+	// Anthropic reports extra-usage exhaustion as HTTP 400 invalid_request_error
+	// rather than 429. Keep that credential eligible for cooldown and rotation
+	// without treating every account-level 400 as quota.
+	if IsOutOfExtraUsage(status, err) {
+		return false
+	}
 	// DeepSeek reports an invalid API key as 401 with the authentication_error
 	// type alongside the same generic code. Preserve that credential failure
 	// classification without weakening generic request-fault handling.
@@ -107,6 +118,67 @@ func IsRequestFault(status int, err error) bool {
 	default:
 		return false
 	}
+}
+
+// IsOutOfExtraUsage reports Anthropic's extra-usage exhaustion. Claude delivers
+// it as HTTP 400 invalid_request_error, not 429. The needle is intentionally
+// narrow: generic invalid_request_error 400s stay request faults.
+func IsOutOfExtraUsage(status int, err error) bool {
+	if err == nil {
+		return false
+	}
+	if status <= 0 {
+		type statusCoder interface {
+			StatusCode() int
+		}
+		var statusErr statusCoder
+		if errors.As(err, &statusErr) && statusErr != nil {
+			status = statusErr.StatusCode()
+		}
+	}
+	if status != http.StatusBadRequest {
+		return false
+	}
+	return isOutOfExtraUsageBody(err.Error())
+}
+
+func isOutOfExtraUsageBody(body string) bool {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return false
+	}
+	if body == outOfExtraUsageExactMessage {
+		return true
+	}
+	message := body
+	errType := ""
+	if json.Valid([]byte(body)) {
+		for _, path := range []string{"error.message", "message", "response.error.message", "body.error.message"} {
+			if value := strings.TrimSpace(gjson.Get(body, path).String()); value != "" {
+				message = value
+				break
+			}
+		}
+		for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
+			if value := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String())); value != "" {
+				errType = value
+				break
+			}
+		}
+	}
+	if message == outOfExtraUsageExactMessage {
+		return true
+	}
+	if !strings.Contains(strings.ToLower(message), outOfExtraUsageNeedle) &&
+		!strings.Contains(strings.ToLower(body), outOfExtraUsageNeedle) {
+		return false
+	}
+	if errType == "invalid_request_error" {
+		return true
+	}
+	// Non-JSON wrappers still need the Anthropic type token so a random 400
+	// that merely mentions extra usage is not treated as quota.
+	return errType == "" && strings.Contains(strings.ToLower(body), "invalid_request_error")
 }
 
 // IsItemNotPersisted matches the upstream 404 raised when a request references a
