@@ -2341,3 +2341,327 @@ func TestCleanJSONSchemaForAntigravityResponse_ContainsKeywordStripped(t *testin
 		}
 	}
 }
+
+func schemaCleaners() map[string]func(string) string {
+	return map[string]func(string) string{
+		"gemini":              CleanJSONSchemaForGemini,
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	}
+}
+
+// TestCleanJSONSchema_MinMaxPropertiesHintAndDrop covers private Gemini/Antigravity 400s on
+// minProperties / maxProperties. Those keywords follow the same hint-and-drop path as minItems.
+func TestCleanJSONSchema_MinMaxPropertiesHintAndDrop(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"meta": {
+				"type": "object",
+				"description": "Metadata",
+				"minProperties": 1,
+				"maxProperties": 3,
+				"properties": {
+					"name": {"type": "string"}
+				}
+			}
+		}
+	}`
+
+	for name, clean := range schemaCleaners() {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+		meta := parsed.Get("properties.meta")
+		if meta.Get("minProperties").Exists() || meta.Get("maxProperties").Exists() {
+			t.Errorf("%s: minProperties/maxProperties survived: %s", name, got)
+		}
+		desc := meta.Get("description").String()
+		if !strings.Contains(desc, "minProperties: 1") {
+			t.Errorf("%s: minProperties hint missing: %s", name, got)
+		}
+		if !strings.Contains(desc, "maxProperties: 3") {
+			t.Errorf("%s: maxProperties hint missing: %s", name, got)
+		}
+		if !strings.Contains(desc, "Metadata") {
+			t.Errorf("%s: original description lost: %s", name, got)
+		}
+	}
+}
+
+func TestCleanJSONSchema_KeepsPropertiesNamedMinMaxProperties(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"minProperties": {"type": "integer"},
+			"maxProperties": {"type": "integer"}
+		},
+		"required": ["minProperties"]
+	}`
+
+	for name, clean := range schemaCleaners() {
+		got := gjson.Parse(clean(input))
+		if got.Get("properties.minProperties.type").String() != "integer" {
+			t.Errorf("%s: property named minProperties was removed: %s", name, got.Raw)
+		}
+		if got.Get("properties.maxProperties.type").String() != "integer" {
+			t.Errorf("%s: property named maxProperties was removed: %s", name, got.Raw)
+		}
+	}
+}
+
+// TestCleanJSONSchemaForGemini_BooleanEnumKeepsBooleanType covers the Gemini 400 class where
+// boolean enum/const was rewritten to type:string plus a string enum.
+func TestCleanJSONSchemaForGemini_BooleanEnumKeepsBooleanType(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"enabled": {"type": "boolean", "enum": [true, false]},
+			"flag": {"type": "boolean", "const": true},
+			"status": {"type": "string", "enum": ["active", "inactive"]}
+		}
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+	parsed := gjson.Parse(result)
+
+	enabled := parsed.Get("properties.enabled")
+	if enabled.Get("type").String() != "boolean" {
+		t.Errorf("boolean enum type rewritten: %s", result)
+	}
+	if enabled.Get("enum").Exists() {
+		t.Errorf("boolean enum survived on Gemini: %s", result)
+	}
+	if !strings.Contains(enabled.Get("description").String(), "Allowed: true, false") {
+		t.Errorf("boolean enum hint missing: %s", result)
+	}
+
+	flag := parsed.Get("properties.flag")
+	if flag.Get("type").String() != "boolean" {
+		t.Errorf("boolean const type rewritten: %s", result)
+	}
+	if flag.Get("enum").Exists() || flag.Get("const").Exists() {
+		t.Errorf("boolean const constraint survived: %s", result)
+	}
+	if !strings.Contains(flag.Get("description").String(), "Allowed: true") {
+		t.Errorf("boolean const hint missing: %s", result)
+	}
+
+	status := parsed.Get("properties.status")
+	if status.Get("type").String() != "string" {
+		t.Errorf("string enum type changed: %s", result)
+	}
+	var enumVals []string
+	for _, item := range status.Get("enum").Array() {
+		enumVals = append(enumVals, item.String())
+	}
+	if !reflect.DeepEqual(enumVals, []string{"active", "inactive"}) {
+		t.Errorf("string enum values = %v, want [active inactive]: %s", enumVals, result)
+	}
+}
+
+func TestCleanJSONSchemaForGemini_UntypedBooleanEnumNotForcedToString(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"toggle": {"enum": [true, false]}
+		}
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+	toggle := gjson.Get(result, "properties.toggle")
+	if toggle.Get("type").String() == "string" {
+		t.Errorf("untyped boolean-only enum was forced to string: %s", result)
+	}
+	if toggle.Get("enum").Exists() {
+		for _, item := range toggle.Get("enum").Array() {
+			if item.Type == gjson.String {
+				t.Errorf("untyped boolean-only enum was rewritten to strings: %s", result)
+				break
+			}
+		}
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_BooleanEnumNotRewrittenToString(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"enabled": {"type": "boolean", "enum": [true, false]},
+			"status": {"type": "string", "enum": ["on", "off"]}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+	parsed := gjson.Parse(result)
+
+	enabled := parsed.Get("properties.enabled")
+	if enabled.Get("type").String() != "boolean" || enabled.Get("enum").Exists() {
+		t.Errorf("boolean tool enum should stay typed boolean without enum: %s", result)
+	}
+	if !strings.Contains(enabled.Get("description").String(), "Allowed: true, false") {
+		t.Errorf("boolean tool enum hint missing: %s", result)
+	}
+
+	status := parsed.Get("properties.status")
+	if status.Get("type").String() != "string" || status.Get("enum").Exists() {
+		t.Errorf("string tool enum should stay string and be dropped: %s", result)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravityResponse_BooleanEnumNotRewrittenToString(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"enabled": {"type": "boolean", "enum": [true, false]},
+			"flag": {"type": "boolean", "const": false}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravityResponse(input)
+	parsed := gjson.Parse(result)
+
+	enabled := parsed.Get("properties.enabled")
+	if enabled.Get("type").String() != "boolean" || enabled.Get("enum").Exists() {
+		t.Errorf("boolean response enum should stay typed boolean without enum: %s", result)
+	}
+	if !strings.Contains(enabled.Get("description").String(), "Allowed: true, false") {
+		t.Errorf("boolean response enum hint missing: %s", result)
+	}
+
+	flag := parsed.Get("properties.flag")
+	if flag.Get("type").String() != "boolean" || flag.Get("enum").Exists() || flag.Get("const").Exists() {
+		t.Errorf("boolean response const should stay typed boolean without constraint: %s", result)
+	}
+}
+
+// TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive rewrites numeric exclusiveMinimum /
+// exclusiveMaximum into inclusive minimum / maximum with the same value. Gemini keeps those
+// inclusive keywords; Antigravity then lifts them into description hints.
+func TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"score": {
+				"type": "number",
+				"exclusiveMinimum": 0,
+				"exclusiveMaximum": 100
+			},
+			"clamped": {
+				"type": "integer",
+				"minimum": 1,
+				"maximum": 10,
+				"exclusiveMinimum": 0,
+				"exclusiveMaximum": 20
+			}
+		}
+	}`
+
+	gemini := gjson.Parse(CleanJSONSchemaForGemini(input))
+	score := gemini.Get("properties.score")
+	if score.Get("exclusiveMinimum").Exists() || score.Get("exclusiveMaximum").Exists() {
+		t.Errorf("Gemini exclusive bounds survived: %s", gemini.Raw)
+	}
+	if score.Get("minimum").String() != "0" || score.Get("maximum").String() != "100" {
+		t.Errorf("Gemini exclusive bounds were not projected: %s", gemini.Raw)
+	}
+
+	clamped := gemini.Get("properties.clamped")
+	if clamped.Get("exclusiveMinimum").Exists() || clamped.Get("exclusiveMaximum").Exists() {
+		t.Errorf("Gemini exclusive siblings survived: %s", gemini.Raw)
+	}
+	if clamped.Get("minimum").String() != "1" || clamped.Get("maximum").String() != "10" {
+		t.Errorf("Gemini overwrote existing inclusive bounds: %s", gemini.Raw)
+	}
+
+	for name, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+		scoreDesc := parsed.Get("properties.score.description").String()
+		if parsed.Get("properties.score.exclusiveMinimum").Exists() || parsed.Get("properties.score.exclusiveMaximum").Exists() {
+			t.Errorf("%s: exclusive keywords survived: %s", name, got)
+		}
+		if parsed.Get("properties.score.minimum").Exists() || parsed.Get("properties.score.maximum").Exists() {
+			t.Errorf("%s: inclusive bounds should be hinted, not kept: %s", name, got)
+		}
+		if strings.Contains(scoreDesc, "exclusiveMinimum") || strings.Contains(scoreDesc, "exclusiveMaximum") {
+			t.Errorf("%s: exclusive keywords appeared as hints: %s", name, got)
+		}
+		if !strings.Contains(scoreDesc, "minimum: 0") || !strings.Contains(scoreDesc, "maximum: 100") {
+			t.Errorf("%s: projected inclusive hints missing: %s", name, got)
+		}
+
+		clampedDesc := parsed.Get("properties.clamped.description").String()
+		if parsed.Get("properties.clamped.minimum").Exists() || parsed.Get("properties.clamped.maximum").Exists() {
+			t.Errorf("%s: existing inclusive bounds should be hinted: %s", name, got)
+		}
+		if !strings.Contains(clampedDesc, "minimum: 1") || !strings.Contains(clampedDesc, "maximum: 10") {
+			t.Errorf("%s: existing inclusive hints missing: %s", name, got)
+		}
+		if strings.Contains(clampedDesc, "exclusiveMinimum") || strings.Contains(clampedDesc, "exclusiveMaximum") {
+			t.Errorf("%s: exclusive keywords appeared as hints on clamped: %s", name, got)
+		}
+	}
+}
+
+func TestCleanJSONSchema_Draft04BooleanExclusiveFlagsDropped(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"age": {
+				"type": "integer",
+				"minimum": 0,
+				"exclusiveMinimum": true,
+				"maximum": 120,
+				"exclusiveMaximum": false
+			}
+		}
+	}`
+
+	for name, clean := range schemaCleaners() {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+		age := parsed.Get("properties.age")
+		if age.Get("exclusiveMinimum").Exists() || age.Get("exclusiveMaximum").Exists() {
+			t.Errorf("%s: Draft-04 exclusive flags survived: %s", name, got)
+		}
+		if name == "gemini" {
+			if age.Get("minimum").String() != "0" || age.Get("maximum").String() != "120" {
+				t.Errorf("%s: sibling inclusive bounds were lost: %s", name, got)
+			}
+			continue
+		}
+		desc := age.Get("description").String()
+		if age.Get("minimum").Exists() || age.Get("maximum").Exists() {
+			t.Errorf("%s: inclusive bounds should be hinted: %s", name, got)
+		}
+		if !strings.Contains(desc, "minimum: 0") || !strings.Contains(desc, "maximum: 120") {
+			t.Errorf("%s: sibling inclusive hints missing: %s", name, got)
+		}
+		if strings.Contains(desc, "exclusiveMinimum") || strings.Contains(desc, "exclusiveMaximum") {
+			t.Errorf("%s: exclusive flags appeared as hints: %s", name, got)
+		}
+	}
+}
+
+func TestCleanJSONSchema_KeepsPropertyNamedExclusiveMinimum(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"exclusiveMinimum": {"type": "number"},
+			"exclusiveMaximum": {"type": "number"}
+		}
+	}`
+
+	for name, clean := range schemaCleaners() {
+		got := gjson.Parse(clean(input))
+		if got.Get("properties.exclusiveMinimum.type").String() != "number" {
+			t.Errorf("%s: property named exclusiveMinimum was removed: %s", name, got.Raw)
+		}
+		if got.Get("properties.exclusiveMaximum.type").String() != "number" {
+			t.Errorf("%s: property named exclusiveMaximum was removed: %s", name, got.Raw)
+		}
+	}
+}

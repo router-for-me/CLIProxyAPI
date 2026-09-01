@@ -90,6 +90,7 @@ func CleanJSONSchemaForGemini(jsonStr string) string {
 		removeGeminiMetadata: true,
 		flattenUnions:        true,
 		forceEnumStringType:  true,
+		dropBooleanEnums:     true,
 	})
 }
 
@@ -103,6 +104,7 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 		jsonStr = inlineLocalRefs(jsonStr)
 	}
 	jsonStr = convertRefsToHints(jsonStr, options.antigravitySemantics)
+	jsonStr = projectExclusiveBounds(jsonStr)
 	jsonStr = convertConstToEnum(jsonStr)
 	jsonStr = convertEnumValuesToStrings(jsonStr, options.forceEnumStringType)
 	jsonStr = addEnumHints(jsonStr)
@@ -763,6 +765,39 @@ func convertRefsToHints(jsonStr string, preserveSiblings bool) string {
 	return jsonStr
 }
 
+// projectExclusiveBounds rewrites numeric exclusiveMinimum / exclusiveMaximum into inclusive
+// minimum / maximum with the same value. An existing sibling inclusive bound is left unchanged.
+// Draft-04 boolean exclusive flags are dropped; the sibling inclusive bound is already the
+// projected form. Property names that collide with these keywords are preserved.
+func projectExclusiveBounds(jsonStr string) string {
+	pathsByField := findPathsByFields(jsonStr, []string{"exclusiveMinimum", "exclusiveMaximum"})
+	for _, key := range []string{"exclusiveMinimum", "exclusiveMaximum"} {
+		inclusive := "minimum"
+		if key == "exclusiveMaximum" {
+			inclusive = "maximum"
+		}
+		for _, p := range pathsByField[key] {
+			parentPath := trimSuffix(p, "."+key)
+			if isPropertyDefinition(parentPath) {
+				continue
+			}
+			val := gjson.Get(jsonStr, p)
+			if !val.Exists() {
+				continue
+			}
+			if val.Type == gjson.Number {
+				incPath := joinPath(parentPath, inclusive)
+				if !gjson.Get(jsonStr, incPath).Exists() {
+					updated, _ := sjson.SetRawBytes([]byte(jsonStr), incPath, []byte(val.Raw))
+					jsonStr = string(updated)
+				}
+			}
+			jsonStr, _ = sjson.Delete(jsonStr, p)
+		}
+	}
+	return jsonStr
+}
+
 func convertConstToEnum(jsonStr string) string {
 	for _, p := range findPaths(jsonStr, "const") {
 		val := gjson.Get(jsonStr, p)
@@ -787,6 +822,10 @@ func convertEnumValuesToStrings(jsonStr string, forceStringType bool) string {
 		if !arr.IsArray() {
 			continue
 		}
+		parentPath := trimSuffix(p, ".enum")
+		if isBooleanEnumSchema(jsonStr, parentPath, arr) {
+			continue
+		}
 
 		var stringVals []string
 		for _, item := range arr.Array() {
@@ -796,12 +835,26 @@ func convertEnumValuesToStrings(jsonStr string, forceStringType bool) string {
 		updated, _ := sjson.SetBytes([]byte(jsonStr), p, stringVals)
 		jsonStr = string(updated)
 		if forceStringType {
-			parentPath := trimSuffix(p, ".enum")
 			updated, _ = sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "type"), "string")
 			jsonStr = string(updated)
 		}
 	}
 	return jsonStr
+}
+
+func isBooleanEnumSchema(jsonStr, parentPath string, arr gjson.Result) bool {
+	if gjson.Get(jsonStr, joinPath(parentPath, "type")).String() == "boolean" {
+		return true
+	}
+	if !arr.IsArray() || len(arr.Array()) == 0 {
+		return false
+	}
+	for _, item := range arr.Array() {
+		if item.Type != gjson.True && item.Type != gjson.False {
+			return false
+		}
+	}
+	return true
 }
 
 func addEnumHints(jsonStr string) string {
@@ -830,7 +883,7 @@ func addEnumHints(jsonStr string) string {
 func dropIgnoredEnumsToHints(jsonStr string, options jsonSchemaCleanOptions) string {
 	for _, path := range findPaths(jsonStr, "enum") {
 		parentPath := trimSuffix(path, ".enum")
-		shouldDrop := options.dropAllEnums || (options.dropBooleanEnums && gjson.Get(jsonStr, joinPath(parentPath, "type")).String() == "boolean")
+		shouldDrop := options.dropAllEnums || (options.dropBooleanEnums && isBooleanEnumSchema(jsonStr, parentPath, gjson.Get(jsonStr, path)))
 		if !shouldDrop {
 			continue
 		}
@@ -853,8 +906,8 @@ func addAdditionalPropertiesHints(jsonStr string) string {
 }
 
 var unsupportedConstraints = []string{
-	"minLength", "maxLength", "exclusiveMinimum", "exclusiveMaximum",
-	"pattern", "minItems", "maxItems", "uniqueItems", "contains", "format",
+	"minLength", "maxLength",
+	"pattern", "minItems", "maxItems", "minProperties", "maxProperties", "uniqueItems", "contains", "format",
 	"default", "examples", // Claude rejects these in VALIDATED mode
 }
 
