@@ -78,6 +78,31 @@ func addOpenAICompatEntryProviderKey(attrs map[string]string, providerKey string
 	attrs[coreauth.AttributeEntryProviderKey] = providerKey + ":" + identity
 }
 
+// addClaudeEntryProviderKey stamps the per-entry routing identifier onto
+// the auth's attributes when the Claude entry was rendered from a PG-backed
+// upstream_providers row. It is the Claude analogue of
+// addOpenAICompatEntryProviderKey, but the ClaudeKey struct has no
+// operator-renameable Name field — the child-row ID is the only stable
+// identity available. The helper therefore emits the entry_provider_key
+// strictly when both the parent provider_key and the child
+// UpstreamProviderEntryID are positive; anything else (legacy YAML, mid-
+// migration rows, or absent IDs) leaves the attribute absent so the
+// runtime falls back to the bare "claude" channel key and the existing
+// round-robin behavior is preserved.
+//
+// No API key material participates in the identity, so this helper —
+// and the call sites that surface it (logs, error messages, dashboard
+// labels) — never need to redact credentials.
+func addClaudeEntryProviderKey(attrs map[string]string, providerKey string, entry config.ClaudeKey) {
+	if attrs == nil || providerKey == "" {
+		return
+	}
+	if entry.UpstreamProviderEntryID <= 0 {
+		return
+	}
+	attrs[coreauth.AttributeEntryProviderKey] = providerKey + ":key-" + strconv.FormatInt(entry.UpstreamProviderEntryID, 10)
+}
+
 // Synthesize generates Auth entries from config API keys.
 func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
 	out := make([]*coreauth.Auth, 0, 32)
@@ -214,6 +239,15 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
 		addUpstreamProviderKey(attrs, "claude", ck.UpstreamProviderID)
+		// Build the compound entry-level routing key only after the parent
+		// provider_key is in place, so legacy YAML entries (no parent id,
+		// no child id) keep their bare "claude" channel behavior and the
+		// PG-rendered entries gain the stable `claude:<rowID>:key-<id>`
+		// identity consumed by the model-route picker. The helper bails on
+		// an empty provider key, so legacy rows never get an
+		// entry_provider_key attribute.
+		providerKey := attrs["provider_key"]
+		addClaudeEntryProviderKey(attrs, providerKey, ck)
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{
 			ID:         id,
