@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -38,7 +39,45 @@ const (
 	// ClaudeThinkingReplayCacheMaxTotalBytes bounds aggregate in-process Claude replay content.
 	ClaudeThinkingReplayCacheMaxTotalBytes = 256 << 20
 
+	// ClaudeThinkingReplayCacheMaxAliases bounds the number of message-to-scope
+	// aliases kept in the local fallback map.
+	ClaudeThinkingReplayCacheMaxAliases = 102400
+
+	// ClaudeThinkingReplayCacheMaxAliasBytes bounds the aggregate byte size of
+	// the local alias map so a caller with very large model names cannot exhaust
+	// process memory under the count cap.
+	ClaudeThinkingReplayCacheMaxAliasBytes = 64 << 20
+
+	// ClaudeThinkingReplayCacheMaxAliasesPerKey bounds how many distinct
+	// conversation scopes a single message can map to in the local alias map.
+	ClaudeThinkingReplayCacheMaxAliasesPerKey = 8
+
+	// ClaudeThinkingReplayCacheMaxAliasesPerCredential bounds how many distinct
+	// alias keys a single credential/model can create in Home KV. Keep small so
+	// the per-credential index value does not exceed the underlying KV entry
+	// size limit.
+	ClaudeThinkingReplayCacheMaxAliasesPerCredential = 256
+
+	// ClaudeThinkingReplayCacheMaxFallbackSessions bounds how many fallback
+	// (fb:<uuid>) replay records a single credential can keep in Home KV. A
+	// session can be referenced by every alias key, so the maximum distinct
+	// fallback sessions is bounded by the product of the alias caps.
+	ClaudeThinkingReplayCacheMaxFallbackSessions = ClaudeThinkingReplayCacheMaxAliasesPerCredential * ClaudeThinkingReplayCacheMaxAliasesPerKey
+
 	claudeThinkingReplayCacheMaxSerializedBytes = ClaudeThinkingReplayCacheMaxBytesPerSession + 1024
+
+	// claudeThinkingReplayAliasTombstoneTTL is how long an evicted alias
+	// tombstone stays in Home KV. It must be long enough for the eviction
+	// compare-and-swap race window, but short enough that tombstones do not
+	// block legitimate re-registration or bloat physical storage under the
+	// per-credential alias cap.
+	claudeThinkingReplayAliasTombstoneTTL = 5 * time.Second
+
+	// claudeThinkingReplayTombstoneTTL is how long a deleted replay record
+	// tombstone stays in Home KV. A short TTL prevents evicted records from
+	// accumulating under the fallback-session cap while still giving a
+	// concurrent Replace/Cache enough time to cancel the tombstone.
+	claudeThinkingReplayTombstoneTTL = 5 * time.Second
 )
 
 type claudeThinkingReplayEntry struct {
@@ -61,7 +100,35 @@ var (
 	claudeThinkingReplayMu         sync.Mutex
 	claudeThinkingReplayEntries    = make(map[string]claudeThinkingReplayEntry)
 	claudeThinkingReplayTotalBytes int
+
+	claudeThinkingReplayAliasMu sync.RWMutex
+	// claudeThinkingReplayAliases maps a per-model message hash to a list of
+	// conversation-scoped session keys that have contained that message. The list
+	// lets two sessionless conversations share a visible message without
+	// overwriting each other; Resolve scores candidates by how many request
+	// messages resolve to the same session and breaks ties by recency.
+	claudeThinkingReplayAliases    = make(map[string][]claudeThinkingReplayAliasEntry)
+	claudeThinkingReplayAliasBytes int
+	claudeThinkingReplayAliasCount int
+
+	claudeThinkingReplayAliasPurgeInterval = 1 * time.Minute
+	claudeThinkingReplayLastAliasPurge     time.Time
 )
+
+type claudeThinkingReplayAliasEntry struct {
+	sessionKey    string
+	firstUserHash string
+	timestamp     time.Time
+}
+
+// ClaudeThinkingReplayAliasMessage pairs a message hash with the weight it
+// should receive during alias resolution. User messages typically receive a
+// higher weight because they are a stronger conversation anchor than
+// an echoed assistant turn.
+type ClaudeThinkingReplayAliasMessage struct {
+	Hash   string
+	Weight int
+}
 
 var currentClaudeThinkingReplayKVClient = func() (kimiThinkingReplayKVClient, bool, error) {
 	return homekv.CurrentKVClient()
@@ -104,6 +171,69 @@ func CacheClaudeThinkingReplayBestEffort(ctx context.Context, modelFamily, sessi
 func GetClaudeThinkingReplayRequired(ctx context.Context, modelFamily, sessionKey string) ([][]byte, bool, error) {
 	contents, _, found, errGet := GetClaudeThinkingReplayWithSnapshotRequired(ctx, modelFamily, sessionKey)
 	return contents, found, errGet
+}
+
+// GetClaudeThinkingReplayWithSnapshotIfExists reads replay state without reserving a tombstone.
+// Use this for no-nonce fallback scopes so Home KV is only populated when a replayable
+// response is actually cached.
+func GetClaudeThinkingReplayWithSnapshotIfExists(ctx context.Context, modelFamily, sessionKey string) ([][]byte, ClaudeThinkingReplaySnapshot, bool, error) {
+	key := claudeThinkingReplayCacheKey(modelFamily, sessionKey)
+	if key == "" {
+		return nil, ClaudeThinkingReplaySnapshot{}, false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client, homeMode, errClient := currentClaudeThinkingReplayKVClient()
+	if homeMode {
+		if errClient != nil {
+			return nil, ClaudeThinkingReplaySnapshot{}, false, errClient
+		}
+		kvKey := claudeThinkingReplayKVKey(modelFamily, sessionKey)
+		raw, found, errRead := client.KVGet(ctx, kvKey)
+		if errRead != nil {
+			return nil, ClaudeThinkingReplaySnapshot{}, false, errRead
+		}
+		if !found {
+			// Represent the absent value as a loaded, not-found snapshot so the
+			// later Replace can use compare-and-swap against absence instead of an
+			// unconditional KVSet that could overwrite a concurrent writer.
+			return nil, ClaudeThinkingReplaySnapshot{loaded: true, found: false}, false, nil
+		}
+		snapshot := ClaudeThinkingReplaySnapshot{raw: append([]byte(nil), raw...), loaded: true, found: true}
+		contents, generation, deleted, okDecode := decodeClaudeThinkingReplayHomeValue(raw)
+		if !okDecode {
+			return nil, snapshot, false, fmt.Errorf("invalid Claude thinking replay content")
+		}
+		snapshot.generation = generation
+		if _, errExpire := client.KVExpire(ctx, kvKey, ClaudeThinkingReplayCacheTTL); errExpire != nil {
+			log.Warnf("home kv Claude thinking replay expire failed: %v", errExpire)
+		}
+		if deleted {
+			return nil, snapshot, false, nil
+		}
+		return cloneClaudeThinkingReplayContents(contents), snapshot, len(contents) > 0, nil
+	}
+
+	cacheCleanupOnce.Do(startCacheCleanup)
+	now := time.Now()
+	claudeThinkingReplayMu.Lock()
+	defer claudeThinkingReplayMu.Unlock()
+	entry, ok := claudeThinkingReplayEntries[key]
+	if !ok || now.Sub(entry.Timestamp) > ClaudeThinkingReplayCacheTTL {
+		if ok {
+			claudeThinkingReplayTotalBytes -= claudeThinkingReplayEntryBytes(entry.Contents)
+			delete(claudeThinkingReplayEntries, key)
+		}
+		return nil, ClaudeThinkingReplaySnapshot{loaded: true, found: false}, false, nil
+	}
+	entry.Timestamp = now
+	claudeThinkingReplayEntries[key] = entry
+	snapshot := ClaudeThinkingReplaySnapshot{generation: entry.Generation, loaded: true, found: true}
+	if entry.Deleted {
+		return nil, snapshot, false, nil
+	}
+	return cloneClaudeThinkingReplayContents(entry.Contents), snapshot, len(entry.Contents) > 0, nil
 }
 
 // GetClaudeThinkingReplayWithSnapshotRequired retrieves replay content and the exact cache state read.
@@ -178,9 +308,14 @@ func ReplaceClaudeThinkingReplayIfUnchanged(ctx context.Context, modelFamily, se
 		if errClient != nil {
 			return false, errClient
 		}
-		contents, _, deleted, okDecode := decodeClaudeThinkingReplayHomeValue(snapshot.raw)
-		if !okDecode {
-			return false, fmt.Errorf("invalid Claude thinking replay snapshot")
+		var contents [][]byte
+		var deleted bool
+		if snapshot.found {
+			var okDecode bool
+			contents, _, deleted, okDecode = decodeClaudeThinkingReplayHomeValue(snapshot.raw)
+			if !okDecode {
+				return false, fmt.Errorf("invalid Claude thinking replay snapshot")
+			}
 		}
 		if deleted {
 			contents = nil
@@ -230,6 +365,10 @@ func DeleteClaudeThinkingReplayIfUnchanged(ctx context.Context, modelFamily, ses
 		if errClient != nil {
 			return false, errClient
 		}
+		if !snapshot.found {
+			// The key was already absent when we read it; nothing to delete.
+			return true, nil
+		}
 		tombstone, errMarshal := marshalClaudeThinkingReplayHomeValue(generation, true, nil)
 		if errMarshal != nil {
 			return false, errMarshal
@@ -274,12 +413,955 @@ func DeleteClaudeThinkingReplayRequired(ctx context.Context, modelFamily, sessio
 	return nil
 }
 
-// ClearClaudeThinkingReplayCache clears only Claude replay state.
+// ClearClaudeThinkingReplayCache clears only Claude replay state and its
+// message-to-scope aliases.
 func ClearClaudeThinkingReplayCache() {
 	claudeThinkingReplayMu.Lock()
 	claudeThinkingReplayEntries = make(map[string]claudeThinkingReplayEntry)
 	claudeThinkingReplayTotalBytes = 0
 	claudeThinkingReplayMu.Unlock()
+
+	claudeThinkingReplayAliasMu.Lock()
+	claudeThinkingReplayAliases = make(map[string][]claudeThinkingReplayAliasEntry)
+	claudeThinkingReplayAliasBytes = 0
+	claudeThinkingReplayAliasCount = 0
+	claudeThinkingReplayLastAliasPurge = time.Time{}
+	claudeThinkingReplayAliasMu.Unlock()
+}
+
+// RegisterClaudeThinkingReplayAlias records that a request message belongs to a
+// conversation scope. Two different conversations can share the same visible
+// message, so the alias is a list of (session, timestamp) pairs rather than a
+// single mapping. In Home KV mode the alias is stored as a separate KV entry
+// with a per-credential index that enforces a cap and evicts oldest aliases.
+func RegisterClaudeThinkingReplayAlias(ctx context.Context, modelFamily, sessionKey, messageHash, firstUserHash string) {
+	if modelFamily == "" || sessionKey == "" || messageHash == "" {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client, homeMode, errClient := currentClaudeThinkingReplayKVClient()
+	if homeMode {
+		if errClient != nil {
+			return
+		}
+		registerClaudeThinkingReplayAliasHome(ctx, client, modelFamily, sessionKey, messageHash, firstUserHash)
+		return
+	}
+
+	key := claudeThinkingReplayAliasKey(modelFamily, messageHash)
+	claudeThinkingReplayAliasMu.Lock()
+	defer claudeThinkingReplayAliasMu.Unlock()
+	now := time.Now()
+	if now.Sub(claudeThinkingReplayLastAliasPurge) >= claudeThinkingReplayAliasPurgeInterval {
+		purgeExpiredClaudeThinkingReplayAliasesLocked(now)
+		claudeThinkingReplayLastAliasPurge = now
+	}
+	claudeThinkingReplayUpsertAliasLocked(key, sessionKey, firstUserHash, now)
+	enforceClaudeThinkingReplayAliasLimitsLocked()
+}
+
+// ResolveClaudeThinkingReplaySessionKey looks for an existing conversation scope
+// that the request messages belong to. It scores each candidate session by the
+// weighted count of request messages that point to it and breaks ties by
+// recency, so shared messages do not resolve the wrong conversation when
+// multiple messages remain after compaction.
+func ResolveClaudeThinkingReplaySessionKey(ctx context.Context, modelFamily string, messages []ClaudeThinkingReplayAliasMessage, requestFirstUserHash string) (string, bool) {
+	if modelFamily == "" || len(messages) == 0 {
+		return "", false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client, homeMode, errClient := currentClaudeThinkingReplayKVClient()
+	if homeMode {
+		if errClient != nil {
+			return "", false
+		}
+		return resolveClaudeThinkingReplayAliasHome(ctx, client, modelFamily, messages, requestFirstUserHash)
+	}
+
+	claudeThinkingReplayAliasMu.RLock()
+	defer claudeThinkingReplayAliasMu.RUnlock()
+	return claudeThinkingReplayResolveBestAliasLocked(modelFamily, messages, requestFirstUserHash, time.Now())
+}
+
+func claudeThinkingReplayAliasKey(modelFamily, messageHash string) string {
+	return strings.Join([]string{modelFamily, messageHash}, "\x00")
+}
+
+func claudeThinkingReplayAliasKVKey(modelFamily, messageHash string) string {
+	return "cpa:claude:thinking-replay-alias:" + homekv.HashKeyPart(strings.TrimSpace(modelFamily)) + ":" + homekv.HashKeyPart(strings.TrimSpace(messageHash))
+}
+
+// claudeThinkingReplayCredentialHash extracts the stable credential hash embedded
+// in a modelFamily string ("claude:<hash>:<baseModel>"). The alias index is keyed
+// by credential so the per-credential cap applies across all model names a caller
+// may use.
+func claudeThinkingReplayCredentialHash(modelFamily string) string {
+	const prefix = "claude:"
+	if !strings.HasPrefix(modelFamily, prefix) {
+		return modelFamily
+	}
+	rest := modelFamily[len(prefix):]
+	if i := strings.IndexByte(rest, ':'); i > 0 {
+		return rest[:i]
+	}
+	return modelFamily
+}
+
+func claudeThinkingReplayAliasIndexKVKey(modelFamily string) string {
+	credentialHash := claudeThinkingReplayCredentialHash(modelFamily)
+	return "cpa:claude:thinking-replay-alias-index:" + homekv.HashKeyPart(strings.TrimSpace(credentialHash))
+}
+
+func claudeThinkingReplayUpsertAliasLocked(key, sessionKey, firstUserHash string, now time.Time) {
+	list := claudeThinkingReplayAliases[key]
+	for i := range list {
+		if list[i].sessionKey == sessionKey {
+			claudeThinkingReplayAliasBytes -= len(list[i].sessionKey) + len(list[i].firstUserHash)
+			list[i].timestamp = now
+			list[i].firstUserHash = firstUserHash
+			claudeThinkingReplayAliasBytes += len(sessionKey) + len(firstUserHash)
+			claudeThinkingReplayAliases[key] = list
+			return
+		}
+	}
+	list = append(list, claudeThinkingReplayAliasEntry{sessionKey: sessionKey, firstUserHash: firstUserHash, timestamp: now})
+	if len(list) == 1 {
+		claudeThinkingReplayAliasBytes += len(key)
+	}
+	claudeThinkingReplayAliasCount++
+	claudeThinkingReplayAliasBytes += len(sessionKey) + len(firstUserHash)
+	if len(list) > ClaudeThinkingReplayCacheMaxAliasesPerKey {
+		oldest := 0
+		for i := 1; i < len(list); i++ {
+			if list[i].timestamp.Before(list[oldest].timestamp) {
+				oldest = i
+			}
+		}
+		claudeThinkingReplayAliasBytes -= len(list[oldest].sessionKey) + len(list[oldest].firstUserHash)
+		list = append(list[:oldest], list[oldest+1:]...)
+		claudeThinkingReplayAliasCount--
+	}
+	claudeThinkingReplayAliases[key] = list
+}
+
+func claudeThinkingReplayResolveBestAliasLocked(modelFamily string, messages []ClaudeThinkingReplayAliasMessage, requestFirstUserHash string, now time.Time) (string, bool) {
+	const firstUserMatchBonus = 2
+	scores := make(map[string]int)
+	for _, m := range messages {
+		key := claudeThinkingReplayAliasKey(modelFamily, m.Hash)
+		list, ok := claudeThinkingReplayAliases[key]
+		if !ok {
+			continue
+		}
+		for _, entry := range list {
+			if now.Sub(entry.timestamp) > ClaudeThinkingReplayCacheTTL {
+				continue
+			}
+			scores[entry.sessionKey] += m.Weight
+			if requestFirstUserHash != "" && entry.firstUserHash == requestFirstUserHash {
+				scores[entry.sessionKey] += firstUserMatchBonus
+			}
+		}
+	}
+	return claudeThinkingReplayResolveBestAlias(scores)
+}
+
+// claudeThinkingReplayResolveBestAlias returns the session with the highest
+// score. If multiple sessions tie for the highest score the result is
+// ambiguous, so it returns no match rather than risk restoring the wrong
+// conversation.
+func claudeThinkingReplayResolveBestAlias(scores map[string]int) (string, bool) {
+	if len(scores) == 0 {
+		return "", false
+	}
+	maxScore := 0
+	for _, s := range scores {
+		if s > maxScore {
+			maxScore = s
+		}
+	}
+	if maxScore <= 0 {
+		return "", false
+	}
+	best := ""
+	tied := 0
+	for session, s := range scores {
+		if s == maxScore {
+			best = session
+			tied++
+		}
+	}
+	if tied > 1 {
+		return "", false
+	}
+	return best, true
+}
+
+func purgeExpiredClaudeThinkingReplayAliasesLocked(now time.Time) {
+	for key, list := range claudeThinkingReplayAliases {
+		kept := list[:0]
+		for _, entry := range list {
+			if now.Sub(entry.timestamp) <= ClaudeThinkingReplayCacheTTL {
+				kept = append(kept, entry)
+			} else {
+				claudeThinkingReplayAliasBytes -= len(entry.sessionKey) + len(entry.firstUserHash)
+				claudeThinkingReplayAliasCount--
+			}
+		}
+		if len(kept) == 0 {
+			claudeThinkingReplayAliasBytes -= len(key)
+			delete(claudeThinkingReplayAliases, key)
+		} else {
+			claudeThinkingReplayAliases[key] = kept
+		}
+	}
+}
+
+func enforceClaudeThinkingReplayAliasLimitsLocked() {
+	for claudeThinkingReplayAliasCount > ClaudeThinkingReplayCacheMaxAliases || claudeThinkingReplayAliasBytes > ClaudeThinkingReplayCacheMaxAliasBytes {
+		type candidate struct {
+			key           string
+			sessionKey    string
+			firstUserHash string
+			timestamp     time.Time
+		}
+		var candidates []candidate
+		for key, list := range claudeThinkingReplayAliases {
+			for _, entry := range list {
+				candidates = append(candidates, candidate{key: key, sessionKey: entry.sessionKey, firstUserHash: entry.firstUserHash, timestamp: entry.timestamp})
+			}
+		}
+		if len(candidates) == 0 {
+			break
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].timestamp.Before(candidates[j].timestamp)
+		})
+		batch := ClaudeThinkingReplayCacheEvictBatchSize
+		if batch > len(candidates) {
+			batch = len(candidates)
+		}
+		for i := 0; i < batch; i++ {
+			c := candidates[i]
+			list := claudeThinkingReplayAliases[c.key]
+			found := -1
+			for j, e := range list {
+				if e.sessionKey == c.sessionKey {
+					found = j
+					break
+				}
+			}
+			if found < 0 {
+				continue
+			}
+			claudeThinkingReplayAliasBytes -= len(list[found].sessionKey) + len(list[found].firstUserHash)
+			list = append(list[:found], list[found+1:]...)
+			if len(list) == 0 {
+				claudeThinkingReplayAliasBytes -= len(c.key)
+				delete(claudeThinkingReplayAliases, c.key)
+			} else {
+				claudeThinkingReplayAliases[c.key] = list
+			}
+			claudeThinkingReplayAliasCount--
+		}
+	}
+}
+
+// claudeThinkingReplayAliasIndexRecord and claudeThinkingReplayAliasIndex are
+// used to cap Home KV aliases per credential. The index lists all alias keys
+// created by that credential so the oldest can be evicted.
+type claudeThinkingReplayAliasIndexRecord struct {
+	AliasKey  string    `json:"alias_key"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+type claudeThinkingReplayAliasIndex struct {
+	Aliases []claudeThinkingReplayAliasIndexRecord `json:"aliases"`
+}
+
+type claudeThinkingReplayAliasHomeValue struct {
+	Sessions []claudeThinkingReplayAliasHomeSession `json:"sessions"`
+}
+
+type claudeThinkingReplayAliasHomeSession struct {
+	SessionKey    string    `json:"session_key"`
+	FirstUserHash string    `json:"first_user_hash"`
+	Timestamp     time.Time `json:"timestamp"`
+}
+
+// claudeThinkingReplayFallbackIndex and claudeThinkingReplayFallbackSession
+// track which fallback (fb:<uuid>) replay records are still referenced by at
+// least one alias. When a fallback session is no longer referenced by any
+// alias, its replay key can be deleted to prevent unbounded Home KV growth.
+type claudeThinkingReplayFallbackIndex struct {
+	Sessions []claudeThinkingReplayFallbackSession `json:"sessions"`
+}
+
+type claudeThinkingReplayFallbackSession struct {
+	SessionKey  string    `json:"session_key"`
+	Aliases     []string  `json:"aliases"`
+	ModelFamily string    `json:"model_family"`
+	Timestamp   time.Time `json:"timestamp"`
+}
+
+type claudeThinkingReplayFallbackRefChange struct {
+	sessionKey  string
+	modelFamily string
+	addAlias    string
+	removeAlias string
+}
+
+func registerClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThinkingReplayKVClient, modelFamily, sessionKey, messageHash, firstUserHash string) {
+	aliasKey := claudeThinkingReplayAliasKVKey(modelFamily, messageHash)
+	indexKey := claudeThinkingReplayAliasIndexKVKey(modelFamily)
+	now := time.Now()
+
+	fallbackChanges := make([]claudeThinkingReplayFallbackRefChange, 0, ClaudeThinkingReplayCacheMaxAliasesPerKey+1)
+	fallbackPrefix := "fb:"
+	isFallback := strings.HasPrefix(sessionKey, fallbackPrefix)
+
+	// Update the shared alias value atomically with compare-and-swap retries.
+	// Multiple sessionless conversations can register the same message hash
+	// concurrently, so an unconditional KVSet would let the last writer discard
+	// the others.
+	var committedAliasRaw []byte
+	var previousAliasRaw []byte
+	for attempt := 0; attempt < 4; attempt++ {
+		var value claudeThinkingReplayAliasHomeValue
+		raw, found, errGet := client.KVGet(ctx, aliasKey)
+		if errGet != nil {
+			log.Warnf("claude thinking replay alias read failed: %v", errGet)
+			return
+		}
+		if found {
+			previousAliasRaw = append([]byte(nil), raw...)
+		} else {
+			previousAliasRaw = nil
+		}
+		if found {
+			if err := json.Unmarshal(raw, &value); err != nil {
+				log.Warnf("claude thinking replay alias unmarshal failed: %v", err)
+				value = claudeThinkingReplayAliasHomeValue{}
+			}
+		}
+		oldSessions := value.Sessions
+		value.Sessions = claudeThinkingReplayAliasHomeValueUpsert(value.Sessions, sessionKey, firstUserHash, now)
+		var perAliasEvicted []claudeThinkingReplayAliasHomeSession
+		if len(value.Sessions) > ClaudeThinkingReplayCacheMaxAliasesPerKey {
+			sort.Slice(value.Sessions, func(i, j int) bool {
+				return value.Sessions[i].Timestamp.Before(value.Sessions[j].Timestamp)
+			})
+			keep := make(map[string]struct{}, ClaudeThinkingReplayCacheMaxAliasesPerKey)
+			for _, s := range value.Sessions[len(value.Sessions)-ClaudeThinkingReplayCacheMaxAliasesPerKey:] {
+				keep[s.SessionKey] = struct{}{}
+			}
+			for _, s := range oldSessions {
+				if _, ok := keep[s.SessionKey]; !ok {
+					perAliasEvicted = append(perAliasEvicted, s)
+				}
+			}
+			value.Sessions = value.Sessions[len(value.Sessions)-ClaudeThinkingReplayCacheMaxAliasesPerKey:]
+		}
+		newRaw, errMarshal := json.Marshal(value)
+		if errMarshal != nil {
+			log.Warnf("claude thinking replay alias marshal failed: %v", errMarshal)
+			return
+		}
+		swapped, errSwap := client.KVCompareAndSwap(ctx, aliasKey, raw, found, newRaw, ClaudeThinkingReplayCacheTTL)
+		if errSwap != nil {
+			log.Warnf("claude thinking replay alias cas failed: %v", errSwap)
+			// The command may have been applied before the error was returned.
+			// Roll back if the alias value still matches the attempted raw.
+			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, newRaw, previousAliasRaw, now)
+			return
+		}
+		if swapped {
+			committedAliasRaw = newRaw
+			fallbackChanges = fallbackChanges[:0]
+			if isFallback {
+				fallbackChanges = append(fallbackChanges, claudeThinkingReplayFallbackRefChange{sessionKey: sessionKey, modelFamily: modelFamily, addAlias: aliasKey})
+			}
+			for _, s := range perAliasEvicted {
+				if strings.HasPrefix(s.SessionKey, fallbackPrefix) {
+					fallbackChanges = append(fallbackChanges, claudeThinkingReplayFallbackRefChange{sessionKey: s.SessionKey, removeAlias: aliasKey})
+				}
+			}
+			break
+		}
+		if attempt == 3 {
+			log.Warnf("claude thinking replay alias cas exhausted after %d attempts", attempt+1)
+			return
+		}
+	}
+
+	// Maintain the per-credential index so old aliases can be evicted.
+	var evicted []claudeThinkingReplayAliasIndexRecord
+	indexUpdated := false
+	for attempt := 0; attempt < 4; attempt++ {
+		indexRaw, indexFound, errIndex := client.KVGet(ctx, indexKey)
+		if errIndex != nil {
+			log.Warnf("claude thinking replay alias index read failed: %v", errIndex)
+			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw, previousAliasRaw, now)
+			return
+		}
+		index, ok := decodeClaudeThinkingReplayAliasIndex(indexRaw)
+		if !ok {
+			index = claudeThinkingReplayAliasIndex{}
+		}
+		index.Aliases = purgeExpiredClaudeThinkingReplayAliasIndex(index.Aliases, now)
+		index.Aliases = claudeThinkingReplayAliasIndexUpsert(index.Aliases, aliasKey, now)
+		evicted = evicted[:0]
+		if len(index.Aliases) > ClaudeThinkingReplayCacheMaxAliasesPerCredential {
+			sort.Slice(index.Aliases, func(i, j int) bool {
+				return index.Aliases[i].Timestamp.Before(index.Aliases[j].Timestamp)
+			})
+			for len(index.Aliases) > ClaudeThinkingReplayCacheMaxAliasesPerCredential {
+				evicted = append(evicted, index.Aliases[0])
+				index.Aliases = index.Aliases[1:]
+			}
+		}
+		indexBytes, errMarshal := json.Marshal(index)
+		if errMarshal != nil {
+			log.Warnf("claude thinking replay alias index marshal failed: %v", errMarshal)
+			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw, previousAliasRaw, now)
+			return
+		}
+		swapped, errSwap := client.KVCompareAndSwap(ctx, indexKey, indexRaw, indexFound, indexBytes, ClaudeThinkingReplayCacheTTL)
+		if errSwap != nil {
+			log.Warnf("claude thinking replay alias index cas failed: %v", errSwap)
+			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw, previousAliasRaw, now)
+			return
+		}
+		if swapped {
+			indexUpdated = true
+			break
+		}
+		if attempt == 3 {
+			log.Warnf("claude thinking replay alias index cas exhausted after %d attempts", attempt+1)
+			rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw, previousAliasRaw, now)
+			return
+		}
+	}
+
+	if !indexUpdated {
+		// Defensive: should have rolled back above, but ensure no half-registered state.
+		rollBackClaudeThinkingReplayAliasHome(ctx, client, aliasKey, indexKey, committedAliasRaw, previousAliasRaw, now)
+		return
+	}
+
+	// Only delete evicted alias values after the index CAS succeeds and both the
+	// index and the alias value itself have been rechecked. A concurrent worker may
+	// have re-registered an evicted alias after our CAS; if the value has a session
+	// newer than the evicted index record we must not delete it.
+	currentIndexRaw, _, errCurrentIndex := client.KVGet(ctx, indexKey)
+	if errCurrentIndex != nil {
+		log.Warnf("claude thinking replay alias index re-read failed: %v", errCurrentIndex)
+		return
+	}
+	currentIndex, _ := decodeClaudeThinkingReplayAliasIndex(currentIndexRaw)
+	present := make(map[string]struct{}, len(currentIndex.Aliases))
+	for _, a := range currentIndex.Aliases {
+		present[a.AliasKey] = struct{}{}
+	}
+	evictedAliasSessions := make(map[string][]string)
+	for _, rec := range evicted {
+		if _, ok := present[rec.AliasKey]; ok {
+			continue
+		}
+		raw, found, errAlias := client.KVGet(ctx, rec.AliasKey)
+		if errAlias != nil || !found {
+			continue
+		}
+		if claudeThinkingReplayAliasValueRepopulated(raw, rec.Timestamp) {
+			continue
+		}
+		var aliasValue claudeThinkingReplayAliasHomeValue
+		if err := json.Unmarshal(raw, &aliasValue); err == nil {
+			for _, s := range aliasValue.Sessions {
+				if strings.HasPrefix(s.SessionKey, fallbackPrefix) {
+					evictedAliasSessions[rec.AliasKey] = append(evictedAliasSessions[rec.AliasKey], s.SessionKey)
+				}
+			}
+		}
+		// Atomically replace the evicted alias value with a short-lived tombstone
+		// so a concurrent re-registration after the KVGet cannot be deleted, but
+		// the tombstone still expires promptly and does not block later reuse.
+		tombstone, errMarshal := json.Marshal(claudeThinkingReplayAliasHomeValue{})
+		if errMarshal != nil {
+			log.Warnf("claude thinking replay alias eviction tombstone marshal failed: %v", errMarshal)
+			delete(evictedAliasSessions, rec.AliasKey)
+			continue
+		}
+		evictedAlias := false
+		swapped, errCAS := client.KVCompareAndSwap(ctx, rec.AliasKey, raw, true, tombstone, claudeThinkingReplayAliasTombstoneTTL)
+		if errCAS != nil {
+			if errors.Is(errCAS, homekv.ErrCompareAndSwapUnsupported) {
+				if _, errDel := client.KVDel(ctx, rec.AliasKey); errDel != nil {
+					log.Warnf("claude thinking replay alias eviction failed: %v", errDel)
+					delete(evictedAliasSessions, rec.AliasKey)
+					continue
+				}
+				evictedAlias = true
+			} else {
+				log.Warnf("claude thinking replay alias eviction cas failed: %v", errCAS)
+				delete(evictedAliasSessions, rec.AliasKey)
+				continue
+			}
+		} else if swapped {
+			evictedAlias = true
+		}
+		if !evictedAlias {
+			// The value changed; leave it for the next index update and do not
+			// remove fallback references for a live alias.
+			delete(evictedAliasSessions, rec.AliasKey)
+			continue
+		}
+	}
+	for aliasKey, sessions := range evictedAliasSessions {
+		for _, sessionKey := range sessions {
+			fallbackChanges = append(fallbackChanges, claudeThinkingReplayFallbackRefChange{sessionKey: sessionKey, removeAlias: aliasKey})
+		}
+	}
+
+	applyClaudeThinkingReplayFallbackIndexChanges(ctx, client, modelFamily, now, fallbackChanges)
+}
+
+// rollBackClaudeThinkingReplayAliasHome rolls an alias value back to the
+// previous value that existed before an unindexed commit. If there was no
+// previous value, it leaves an empty tombstone so the alias resolves to nothing
+// rather than a stale unindexed orphan. The rollback is conditional on the
+// committed value: if the alias still contains the exact bytes we wrote, it is
+// an orphan and should be removed. The index is consulted only as a best-effort
+// guard when it is readable; a failing index read does not prevent rollback
+// because the failed registration is precisely what produced the orphan.
+func rollBackClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThinkingReplayKVClient, aliasKey, indexKey string, committedAliasRaw, previousAliasRaw []byte, now time.Time) {
+	if len(committedAliasRaw) == 0 {
+		return
+	}
+	currentRaw, found, errCurrent := client.KVGet(ctx, aliasKey)
+	if errCurrent != nil || !found {
+		return
+	}
+	if !bytes.Equal(currentRaw, committedAliasRaw) {
+		return
+	}
+
+	// If we can confirm the alias is live in the index, another worker must
+	// have made it durable; leave it alone. The record must be from this
+	// registration (timestamp >= now); an older record means the index does not
+	// reflect the committed value and the alias will expire uncapped.
+	indexRaw, _, errIndex := client.KVGet(ctx, indexKey)
+	if errIndex == nil {
+		if index, ok := decodeClaudeThinkingReplayAliasIndex(indexRaw); ok {
+			for _, a := range index.Aliases {
+				if a.AliasKey == aliasKey {
+					if !a.Timestamp.Before(now) {
+						return
+					}
+					// Stale index record: keep rolling back.
+					break
+				}
+			}
+		}
+	} else {
+		log.Warnf("claude thinking replay alias rollback index check failed: %v", errIndex)
+	}
+
+	// Roll the alias value back to the previous value if there was one;
+	// otherwise leave an empty tombstone so the alias resolves to nothing
+	// rather than a stale unindexed orphan. The CAS is conditional on the
+	// current value still matching the committed value, so a concurrent
+	// re-registration cannot be overwritten.
+	var replacement []byte
+	ttl := claudeThinkingReplayAliasTombstoneTTL
+	if len(previousAliasRaw) > 0 {
+		replacement = append([]byte(nil), previousAliasRaw...)
+		ttl = ClaudeThinkingReplayCacheTTL
+	} else {
+		tombstone, errMarshal := json.Marshal(claudeThinkingReplayAliasHomeValue{})
+		if errMarshal != nil {
+			log.Warnf("claude thinking replay alias rollback tombstone marshal failed: %v", errMarshal)
+			return
+		}
+		replacement = tombstone
+	}
+	swapped, errCAS := client.KVCompareAndSwap(ctx, aliasKey, currentRaw, true, replacement, ttl)
+	if errCAS != nil {
+		if errors.Is(errCAS, homekv.ErrCompareAndSwapUnsupported) {
+			// CAS is unavailable; fall back to unconditional delete.
+			if _, errDel := client.KVDel(ctx, aliasKey); errDel != nil {
+				log.Warnf("claude thinking replay alias rollback failed: %v", errDel)
+			}
+			return
+		}
+		log.Warnf("claude thinking replay alias rollback CAS failed: %v", errCAS)
+		return
+	}
+	if !swapped {
+		// The value changed between KVGet and CAS; do not touch it.
+		return
+	}
+}
+
+func resolveClaudeThinkingReplayAliasHome(ctx context.Context, client kimiThinkingReplayKVClient, modelFamily string, messages []ClaudeThinkingReplayAliasMessage, requestFirstUserHash string) (string, bool) {
+	const firstUserMatchBonus = 2
+	scores := make(map[string]int)
+	now := time.Now()
+	for _, m := range messages {
+		raw, found, err := client.KVGet(ctx, claudeThinkingReplayAliasKVKey(modelFamily, m.Hash))
+		if err != nil || !found {
+			continue
+		}
+		var value claudeThinkingReplayAliasHomeValue
+		if err := json.Unmarshal(raw, &value); err != nil {
+			continue
+		}
+		for _, s := range value.Sessions {
+			if now.Sub(s.Timestamp) > ClaudeThinkingReplayCacheTTL {
+				continue
+			}
+			scores[s.SessionKey] += m.Weight
+			if requestFirstUserHash != "" && s.FirstUserHash == requestFirstUserHash {
+				scores[s.SessionKey] += firstUserMatchBonus
+			}
+		}
+	}
+	return claudeThinkingReplayResolveBestAlias(scores)
+}
+
+func decodeClaudeThinkingReplayAliasIndex(raw []byte) (claudeThinkingReplayAliasIndex, bool) {
+	if len(raw) == 0 {
+		return claudeThinkingReplayAliasIndex{}, true
+	}
+	var index claudeThinkingReplayAliasIndex
+	if err := json.Unmarshal(raw, &index); err != nil {
+		return claudeThinkingReplayAliasIndex{}, false
+	}
+	return index, true
+}
+
+func purgeExpiredClaudeThinkingReplayAliasIndex(records []claudeThinkingReplayAliasIndexRecord, now time.Time) []claudeThinkingReplayAliasIndexRecord {
+	kept := records[:0]
+	for _, r := range records {
+		if now.Sub(r.Timestamp) <= ClaudeThinkingReplayCacheTTL {
+			kept = append(kept, r)
+		}
+	}
+	return kept
+}
+
+func claudeThinkingReplayAliasIndexUpsert(records []claudeThinkingReplayAliasIndexRecord, aliasKey string, now time.Time) []claudeThinkingReplayAliasIndexRecord {
+	for i := range records {
+		if records[i].AliasKey == aliasKey {
+			records[i].Timestamp = now
+			return records
+		}
+	}
+	return append(records, claudeThinkingReplayAliasIndexRecord{AliasKey: aliasKey, Timestamp: now})
+}
+
+// claudeThinkingReplayAliasValueRepopulated reports whether an alias value has
+// been refreshed by a concurrent worker after the index record for that alias
+// was evicted. We compare the session timestamps in the value against the
+// evicted index record timestamp; a session newer than the evicted record means
+// a re-registration happened and the alias value must not be deleted.
+func claudeThinkingReplayAliasValueRepopulated(raw []byte, evictedTimestamp time.Time) bool {
+	var value claudeThinkingReplayAliasHomeValue
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false
+	}
+	for _, s := range value.Sessions {
+		if s.Timestamp.After(evictedTimestamp) {
+			return true
+		}
+	}
+	return false
+}
+
+func claudeThinkingReplayAliasHomeValueUpsert(sessions []claudeThinkingReplayAliasHomeSession, sessionKey, firstUserHash string, now time.Time) []claudeThinkingReplayAliasHomeSession {
+	for i := range sessions {
+		if sessions[i].SessionKey == sessionKey {
+			sessions[i].Timestamp = now
+			sessions[i].FirstUserHash = firstUserHash
+			return sessions
+		}
+	}
+	return append(sessions, claudeThinkingReplayAliasHomeSession{SessionKey: sessionKey, FirstUserHash: firstUserHash, Timestamp: now})
+}
+
+func claudeThinkingReplayFallbackIndexKVKey(modelFamily string) string {
+	credentialHash := claudeThinkingReplayCredentialHash(modelFamily)
+	return "cpa:claude:thinking-replay-fallback-index:" + homekv.HashKeyPart(strings.TrimSpace(credentialHash))
+}
+
+func decodeClaudeThinkingReplayFallbackIndex(raw []byte) (claudeThinkingReplayFallbackIndex, bool) {
+	if len(raw) == 0 {
+		return claudeThinkingReplayFallbackIndex{}, true
+	}
+	var index claudeThinkingReplayFallbackIndex
+	if err := json.Unmarshal(raw, &index); err != nil {
+		return claudeThinkingReplayFallbackIndex{}, false
+	}
+	return index, true
+}
+
+func claudeThinkingReplayFallbackIndexFind(sessions []claudeThinkingReplayFallbackSession, sessionKey string) int {
+	for i := range sessions {
+		if sessions[i].SessionKey == sessionKey {
+			return i
+		}
+	}
+	return -1
+}
+
+func claudeThinkingReplayFallbackIndexHasAlias(s claudeThinkingReplayFallbackSession, aliasKey string) bool {
+	for _, a := range s.Aliases {
+		if a == aliasKey {
+			return true
+		}
+	}
+	return false
+}
+
+func claudeThinkingReplayFallbackIndexAddAlias(sessions []claudeThinkingReplayFallbackSession, sessionKey, aliasKey, modelFamily string, now time.Time) []claudeThinkingReplayFallbackSession {
+	i := claudeThinkingReplayFallbackIndexFind(sessions, sessionKey)
+	if i < 0 {
+		return append(sessions, claudeThinkingReplayFallbackSession{SessionKey: sessionKey, Aliases: []string{aliasKey}, ModelFamily: modelFamily, Timestamp: now})
+	}
+	sessions[i].Timestamp = now
+	if !claudeThinkingReplayFallbackIndexHasAlias(sessions[i], aliasKey) {
+		sessions[i].Aliases = append(sessions[i].Aliases, aliasKey)
+	}
+	if sessions[i].ModelFamily == "" && modelFamily != "" {
+		sessions[i].ModelFamily = modelFamily
+	}
+	return sessions
+}
+
+func claudeThinkingReplayFallbackIndexRemoveAlias(sessions []claudeThinkingReplayFallbackSession, sessionKey, aliasKey string) (newSessions []claudeThinkingReplayFallbackSession, empty bool, modelFamily string) {
+	i := claudeThinkingReplayFallbackIndexFind(sessions, sessionKey)
+	if i < 0 {
+		return sessions, false, ""
+	}
+	modelFamily = sessions[i].ModelFamily
+	aliases := sessions[i].Aliases[:0]
+	for _, a := range sessions[i].Aliases {
+		if a != aliasKey {
+			aliases = append(aliases, a)
+		}
+	}
+	sessions[i].Aliases = aliases
+	return sessions, len(sessions[i].Aliases) == 0, modelFamily
+}
+
+func purgeExpiredClaudeThinkingReplayFallbackSessions(sessions []claudeThinkingReplayFallbackSession, now time.Time) []claudeThinkingReplayFallbackSession {
+	kept := sessions[:0]
+	for _, s := range sessions {
+		if now.Sub(s.Timestamp) <= ClaudeThinkingReplayCacheTTL {
+			kept = append(kept, s)
+		}
+	}
+	return kept
+}
+
+// applyClaudeThinkingReplayFallbackIndexChanges updates the per-credential
+// fallback session index and tombstones replay records for unreferenced fallback
+// sessions. It runs in a CAS loop so concurrent updates do not lose references.
+func applyClaudeThinkingReplayFallbackIndexChanges(ctx context.Context, client kimiThinkingReplayKVClient, modelFamily string, now time.Time, changes []claudeThinkingReplayFallbackRefChange) {
+	if len(changes) == 0 {
+		return
+	}
+	key := claudeThinkingReplayFallbackIndexKVKey(modelFamily)
+	for attempt := 0; attempt < 4; attempt++ {
+		raw, found, errGet := client.KVGet(ctx, key)
+		if errGet != nil {
+			log.Warnf("claude thinking replay fallback index read failed: %v", errGet)
+			return
+		}
+		index, _ := decodeClaudeThinkingReplayFallbackIndex(raw)
+		index.Sessions = purgeExpiredClaudeThinkingReplayFallbackSessions(index.Sessions, now)
+
+		var toDelete []struct {
+			sessionKey  string
+			modelFamily string
+		}
+		for _, ch := range changes {
+			if ch.addAlias != "" {
+				index.Sessions = claudeThinkingReplayFallbackIndexAddAlias(index.Sessions, ch.sessionKey, ch.addAlias, ch.modelFamily, now)
+			} else if ch.removeAlias != "" {
+				var empty bool
+				var sessionModel string
+				index.Sessions, empty, sessionModel = claudeThinkingReplayFallbackIndexRemoveAlias(index.Sessions, ch.sessionKey, ch.removeAlias)
+				if empty {
+					toDelete = append(toDelete, struct{ sessionKey, modelFamily string }{ch.sessionKey, sessionModel})
+					idx := claudeThinkingReplayFallbackIndexFind(index.Sessions, ch.sessionKey)
+					if idx >= 0 {
+						index.Sessions = append(index.Sessions[:idx], index.Sessions[idx+1:]...)
+					}
+				}
+			}
+		}
+
+		// Enforce the fallback session cap by deleting the oldest sessions that
+		// are no longer referenced by any alias. Active sessions are never removed.
+		if len(index.Sessions) > ClaudeThinkingReplayCacheMaxFallbackSessions {
+			sort.Slice(index.Sessions, func(i, j int) bool {
+				return index.Sessions[i].Timestamp.Before(index.Sessions[j].Timestamp)
+			})
+			for len(index.Sessions) > ClaudeThinkingReplayCacheMaxFallbackSessions && len(index.Sessions[0].Aliases) == 0 {
+				toDelete = append(toDelete, struct{ sessionKey, modelFamily string }{index.Sessions[0].SessionKey, index.Sessions[0].ModelFamily})
+				index.Sessions = index.Sessions[1:]
+			}
+		}
+
+		newRaw, errMarshal := json.Marshal(index)
+		if errMarshal != nil {
+			log.Warnf("claude thinking replay fallback index marshal failed: %v", errMarshal)
+			return
+		}
+
+		// Two-phase deletion: tombstone replay records before the index CAS. A
+		// concurrent Replace or Cache can cancel a tombstone by overwriting it.
+		// If the index CAS fails, the tombstones are rolled back to the original
+		// records so live continuation state is not erased.
+		var tombstones []claudeThinkingReplayPendingDeletion
+		var tombstoneOK = true
+		for _, rec := range toDelete {
+			pending, ok, err := tombstoneClaudeThinkingReplayRecordForDeletion(ctx, client, rec.modelFamily, rec.sessionKey)
+			if err != nil {
+				if errors.Is(err, homekv.ErrCompareAndSwapUnsupported) {
+					// CAS is unavailable: use the old unconditional index set and
+					// record delete path. Any tombstones already written are also
+					// removed by the KVDel loop.
+					if _, errSet := client.KVSet(ctx, key, newRaw, homekv.KVSetOptions{EX: ClaudeThinkingReplayCacheTTL}); errSet != nil {
+						log.Warnf("claude thinking replay fallback index set failed: %v", errSet)
+						return
+					}
+					for _, d := range toDelete {
+						if _, errDel := client.KVDel(ctx, claudeThinkingReplayKVKey(d.modelFamily, d.sessionKey)); errDel != nil {
+							log.Warnf("claude thinking replay fallback record delete failed: %v", errDel)
+						}
+					}
+					return
+				}
+				rollbackClaudeThinkingReplayRecordTombstones(ctx, client, tombstones)
+				log.Warnf("claude thinking replay fallback record tombstone failed: %v", err)
+				tombstoneOK = false
+				break
+			}
+			if !ok {
+				rollbackClaudeThinkingReplayRecordTombstones(ctx, client, tombstones)
+				tombstoneOK = false
+				break
+			}
+			if pending.found {
+				tombstones = append(tombstones, pending)
+			}
+		}
+		if !tombstoneOK {
+			continue
+		}
+
+		swapped, errSwap := client.KVCompareAndSwap(ctx, key, raw, found, newRaw, ClaudeThinkingReplayCacheTTL)
+		if errSwap != nil {
+			rollbackClaudeThinkingReplayRecordTombstones(ctx, client, tombstones)
+			log.Warnf("claude thinking replay fallback index cas failed: %v", errSwap)
+			return
+		}
+		if !swapped {
+			if attempt == 3 {
+				log.Warnf("claude thinking replay fallback index cas exhausted after %d attempts", attempt+1)
+			}
+			rollbackClaudeThinkingReplayRecordTombstones(ctx, client, tombstones)
+			continue
+		}
+
+		// Index committed and the records are tombstoned; nothing more to do.
+		return
+	}
+}
+
+// claudeThinkingReplayPendingDeletion tracks a replay record that has been
+// tombstoned in preparation for fallback index removal, so the original value
+// can be restored if the index CAS fails.
+type claudeThinkingReplayPendingDeletion struct {
+	sessionKey  string
+	modelFamily string
+	original    []byte
+	tombstone   []byte
+	found       bool
+}
+
+// tombstoneClaudeThinkingReplayRecordForDeletion replaces a live replay record
+// with a deleted tombstone using a CAS. A concurrent Cache or Replace will see
+// the tombstone and overwrite it, canceling the deletion. The caller must use
+// rollbackClaudeThinkingReplayRecordTombstones if it decides not to delete.
+func tombstoneClaudeThinkingReplayRecordForDeletion(ctx context.Context, client kimiThinkingReplayKVClient, modelFamily, sessionKey string) (claudeThinkingReplayPendingDeletion, bool, error) {
+	var pending claudeThinkingReplayPendingDeletion
+	pending.sessionKey = sessionKey
+	pending.modelFamily = modelFamily
+
+	key := claudeThinkingReplayKVKey(modelFamily, sessionKey)
+	if key == "" {
+		return pending, true, nil
+	}
+
+	raw, found, errGet := client.KVGet(ctx, key)
+	if errGet != nil {
+		return pending, false, errGet
+	}
+	if !found {
+		return pending, true, nil
+	}
+
+	// If the record is already a tombstone, or is invalid, leave it alone.
+	_, _, deleted, okDecode := decodeClaudeThinkingReplayHomeValue(raw)
+	if !okDecode || deleted {
+		return pending, true, nil
+	}
+
+	generation := uuid.NewString()
+	tombstone, errMarshal := marshalClaudeThinkingReplayHomeValue(generation, true, nil)
+	if errMarshal != nil {
+		return pending, false, errMarshal
+	}
+
+	swapped, errSwap := client.KVCompareAndSwap(ctx, key, raw, true, tombstone, claudeThinkingReplayTombstoneTTL)
+	if errSwap != nil {
+		return pending, false, errSwap
+	}
+	if !swapped {
+		return pending, false, nil
+	}
+
+	pending.original = raw
+	pending.tombstone = tombstone
+	pending.found = true
+	return pending, true, nil
+}
+
+// rollbackClaudeThinkingReplayRecordTombstones restores the original replay
+// record values for tombstones that have not yet been overwritten by a
+// concurrent writer. It is best-effort: a failed CAS means the record is now
+// live again and must not be restored to a stale value.
+func rollbackClaudeThinkingReplayRecordTombstones(ctx context.Context, client kimiThinkingReplayKVClient, tombstones []claudeThinkingReplayPendingDeletion) {
+	for _, p := range tombstones {
+		key := claudeThinkingReplayKVKey(p.modelFamily, p.sessionKey)
+		if key == "" || len(p.tombstone) == 0 {
+			continue
+		}
+		if len(p.original) == 0 {
+			// The record was absent when we started; nothing to restore.
+			continue
+		}
+		if _, err := client.KVCompareAndSwap(ctx, key, p.tombstone, true, p.original, ClaudeThinkingReplayCacheTTL); err != nil {
+			log.Warnf("claude thinking replay record tombstone rollback failed: %v", err)
+		}
+	}
 }
 
 func readOrReserveClaudeThinkingReplayHomeValue(ctx context.Context, client kimiThinkingReplayKVClient, key string) ([]byte, error) {
@@ -479,4 +1561,8 @@ func purgeExpiredClaudeThinkingReplayCache(now time.Time) {
 		}
 	}
 	claudeThinkingReplayMu.Unlock()
+
+	claudeThinkingReplayAliasMu.Lock()
+	purgeExpiredClaudeThinkingReplayAliasesLocked(now)
+	claudeThinkingReplayAliasMu.Unlock()
 }

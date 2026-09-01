@@ -60,31 +60,60 @@ func purgeExpiredSessionIDs() {
 	sessionIDCacheMu.Unlock()
 }
 
-func sessionIDCacheKey(apiKey string) string {
-	sum := sha256.Sum256([]byte(apiKey))
+func sessionIDScope(apiKey, credential string) string {
+	if apiKey != "" {
+		return apiKey
+	}
+	if credential != "" {
+		return "anonymous:" + credential
+	}
+	return "anonymous"
+}
+
+func sessionIDCacheKey(apiKey, credential string) string {
+	sum := sha256.Sum256([]byte(sessionIDScope(apiKey, credential)))
 	return hex.EncodeToString(sum[:])
 }
 
+func firstCredential(credential []string) string {
+	if len(credential) > 0 {
+		return credential[0]
+	}
+	return ""
+}
+
 // CachedSessionID returns a stable session UUID per apiKey, refreshing the TTL on each access.
-func CachedSessionID(apiKey string) string {
-	value, errValue := CachedSessionIDRequired(context.Background(), apiKey)
+// An optional credential scopes anonymous (empty apiKey) sessions so different credentials do not share a session.
+func CachedSessionID(apiKey string, credential ...string) string {
+	cred := firstCredential(credential)
+	value, errValue := CachedSessionIDRequired(context.Background(), apiKey, cred)
 	if errValue == nil && value != "" {
 		return value
 	}
-	return uuid.New().String()
+	return deterministicSessionID(apiKey, cred)
+}
+
+// deterministicSessionID returns a version-5 UUID derived from apiKey so
+// different workers and cache misses produce the same session for the same
+// credential. A missing apiKey falls back to a namespace UUID scoped by the
+// credential; an empty credential produces the legacy anonymous UUID.
+func deterministicSessionID(apiKey string, credential ...string) string {
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(sessionIDScope(apiKey, firstCredential(credential)))).String()
 }
 
 // CachedSessionIDRequired returns a stable session UUID per apiKey for request-time paths.
-func CachedSessionIDRequired(ctx context.Context, apiKey string) (string, error) {
+// An optional credential scopes anonymous sessions.
+func CachedSessionIDRequired(ctx context.Context, apiKey string, credential ...string) (string, error) {
+	cred := firstCredential(credential)
 	if apiKey == "" {
-		return uuid.New().String(), nil
+		return deterministicSessionID(apiKey, cred), nil
 	}
 	client, homeMode, errClient := currentClaudeIDKVClient()
 	if homeMode {
 		if errClient != nil {
 			return "", errClient
 		}
-		key := claudeSessionIDKVKey(apiKey)
+		key := claudeSessionIDKVKey(apiKey, cred)
 		raw, found, errGet := client.KVGet(ctx, key)
 		if errGet != nil {
 			return "", errGet
@@ -95,7 +124,7 @@ func CachedSessionIDRequired(ctx context.Context, apiKey string) (string, error)
 			}
 			return strings.TrimSpace(string(raw)), nil
 		}
-		newID := uuid.New().String()
+		newID := deterministicSessionID(apiKey, cred)
 		if _, errSet := client.KVSetNX(ctx, key, []byte(newID), sessionIDTTL); errSet != nil {
 			return "", errSet
 		}
@@ -111,7 +140,7 @@ func CachedSessionIDRequired(ctx context.Context, apiKey string) (string, error)
 
 	sessionIDCacheCleanupOnce.Do(startSessionIDCacheCleanup)
 
-	key := sessionIDCacheKey(apiKey)
+	key := sessionIDCacheKey(apiKey, cred)
 	now := time.Now()
 
 	sessionIDCacheMu.RLock()
@@ -130,7 +159,7 @@ func CachedSessionIDRequired(ctx context.Context, apiKey string) (string, error)
 		sessionIDCacheMu.Unlock()
 	}
 
-	newID := uuid.New().String()
+	newID := deterministicSessionID(apiKey, cred)
 
 	sessionIDCacheMu.Lock()
 	entry, ok = sessionIDCache[key]
@@ -143,6 +172,6 @@ func CachedSessionIDRequired(ctx context.Context, apiKey string) (string, error)
 	return entry.value, nil
 }
 
-func claudeSessionIDKVKey(apiKey string) string {
-	return "cpa:claude:session-id:" + homekv.HashKeyPart(apiKey)
+func claudeSessionIDKVKey(apiKey, credential string) string {
+	return "cpa:claude:session-id:" + homekv.HashKeyPart(sessionIDScope(apiKey, credential))
 }

@@ -10,6 +10,8 @@ import (
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	innersignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -20,6 +22,24 @@ type kimiLocalBadRequestError struct{}
 
 func (kimiLocalBadRequestError) Error() string   { return "local validation failed" }
 func (kimiLocalBadRequestError) StatusCode() int { return http.StatusBadRequest }
+
+func TestPrepareKimiThinkingReplayRequestStripsClientProvenanceMarker(t *testing.T) {
+	internalcache.ClearKimiThinkingReplayCache()
+	t.Cleanup(internalcache.ClearKimiThinkingReplayCache)
+
+	payload := []byte(`{"model":"kimi-k3","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"client","signature":"bad","_cliproxy_replay_provenance":"kimi-replay"}]},{"role":"user","content":"next"}]}`)
+	req := cliproxyexecutor.Request{Model: "kimi-k3", Payload: payload}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+
+	preparedReq, _ := prepareKimiThinkingReplayRequest(context.Background(), req, opts)
+
+	if gjson.GetBytes(preparedReq.Payload, "messages.0.content.0._cliproxy_replay_provenance").Exists() {
+		t.Fatalf("prepareKimi did not strip client provenance marker: %s", preparedReq.Payload)
+	}
+	if gjson.GetBytes(preparedReq.Payload, "messages.0.content.0.signature").String() != "bad" {
+		t.Fatalf("prepareKimi should leave the caller body untouched except for the marker: %s", preparedReq.Payload)
+	}
+}
 
 func TestKimiThinkingReplayModelFamily(t *testing.T) {
 	cases := []struct {
@@ -64,8 +84,9 @@ func TestRestoreKimiThinkingReplayContentPreservesCompleteAssistantContent(t *te
 		t.Fatal("expected cached thinking content to be restored")
 	}
 	got := gjson.GetBytes(updated, "messages.1.content")
-	if !kimiJSONEqual([]byte(got.Raw), cached) {
-		t.Fatalf("restored content = %s, want complete cached content %s", got.Raw, cached)
+	want := helps.WithClaudeThinkingReplayProvenance(cached, innersignature.KimiReplayProvenance)
+	if !helps.JSONEqual([]byte(got.Raw), want) {
+		t.Fatalf("restored content = %s, want complete cached content %s", got.Raw, want)
 	}
 }
 
@@ -77,8 +98,74 @@ func TestRestoreKimiThinkingReplayContentDoesNotReplaceExistingThinking(t *testi
 	if restored {
 		t.Fatalf("existing thinking must not be replaced: %s", updated)
 	}
-	if !kimiJSONEqual(updated, body) {
+	if !helps.JSONEqual(updated, body) {
 		t.Fatalf("request changed despite existing thinking: got %s want %s", updated, body)
+	}
+}
+
+func TestRestoreKimiThinkingReplayContentRejectsDuplicateUnsignedCandidates(t *testing.T) {
+	cached := []byte(`[{"type":"thinking","thinking":"cached","signature":"cached-signature"},{"type":"text","text":"OK"}]`)
+	// The earlier assistant is the retained signed turn, the later one is a
+	// new unsigned duplicate with the same visible text. The reverse scan must
+	// not restore the cached signature into the later duplicate.
+	body := []byte(`{"messages":[
+		{"role":"user","content":"hi"},
+		{"role":"assistant","content":[{"type":"text","text":"OK"}]},
+		{"role":"user","content":"again"},
+		{"role":"assistant","content":[{"type":"text","text":"OK"}]}
+	]}`)
+
+	updated, restored := restoreKimiThinkingReplayContent(body, cached)
+	if restored {
+		t.Fatalf("duplicate unsigned candidates must not be restored: %s", updated)
+	}
+	if !helps.JSONEqual(updated, body) {
+		t.Fatalf("request body changed when it should not: %s", updated)
+	}
+}
+
+func TestRestoreKimiThinkingReplayContentPrefersRetainedDuplicate(t *testing.T) {
+	cached := []byte(`[{"type":"thinking","thinking":"cached","signature":"cached-signature"},{"type":"text","text":"OK"}]`)
+	// Two matching assistants; the earlier one still carries the cached
+	// thinking (retained), the later one is an unsigned duplicate. The
+	// retained turn should receive the signature.
+	body := []byte(`{"messages":[
+		{"role":"user","content":"hi"},
+		{"role":"assistant","content":[{"type":"thinking","thinking":"cached","signature":"existing-signature"},{"type":"text","text":"OK"}]},
+		{"role":"user","content":"again"},
+		{"role":"assistant","content":[{"type":"text","text":"OK"}]}
+	]}`)
+
+	updated, restored := restoreKimiThinkingReplayContent(body, cached)
+	if !restored {
+		t.Fatal("expected restore for retained duplicate")
+	}
+	// The retained turn is at index 1; the later duplicate at index 3 stays unsigned.
+	if sig := gjson.GetBytes(updated, "messages.1.content.0.signature").String(); sig != "cached-signature" {
+		t.Fatalf("retained assistant got signature %q, want cached-signature", sig)
+	}
+	if sig := gjson.GetBytes(updated, "messages.3.content.0.signature").String(); sig != "" {
+		t.Fatalf("later duplicate should remain unsigned, got signature %q", sig)
+	}
+}
+
+func TestRestoreKimiThinkingReplayContentRejectsMultipleRetainedCandidates(t *testing.T) {
+	cached := []byte(`[{"type":"thinking","thinking":"cached","signature":"cached-signature"},{"type":"text","text":"OK"}]`)
+	// Two matching assistants both retain a thinking block with the same visible
+	// text; the cached signature must not be restored because the match is ambiguous.
+	body := []byte(`{"messages":[
+		{"role":"user","content":"hi"},
+		{"role":"assistant","content":[{"type":"thinking","thinking":"cached","signature":"sig-1"},{"type":"text","text":"OK"}]},
+		{"role":"user","content":"again"},
+		{"role":"assistant","content":[{"type":"thinking","thinking":"cached","signature":"sig-2"},{"type":"text","text":"OK"}]}
+	]}`)
+
+	updated, restored := restoreKimiThinkingReplayContent(body, cached)
+	if restored {
+		t.Fatalf("multiple retained candidates must fail closed: %s", updated)
+	}
+	if !helps.JSONEqual(updated, body) {
+		t.Fatalf("request body changed when it should not: %s", updated)
 	}
 }
 
@@ -202,7 +289,7 @@ func TestKimiExecutorClaudeNonStreamReplaysThinkingAcrossK3VariantSwitch(t *test
 		t.Fatalf("upstream request count = %d, want 2", len(upstreamBodies))
 	}
 	gotContent := gjson.GetBytes(upstreamBodies[1], "messages.1.content")
-	if !kimiJSONEqual([]byte(gotContent.Raw), []byte(cachedContent)) {
+	if !helps.JSONEqual([]byte(gotContent.Raw), []byte(cachedContent)) {
 		t.Fatalf("second upstream assistant content = %s, want %s", gotContent.Raw, cachedContent)
 	}
 	if _, found, errGet := internalcache.GetKimiThinkingReplayRequired(context.Background(), "k3", "execution:nonstream-switch"); errGet != nil || found {
@@ -358,6 +445,35 @@ func TestKimiExecutorClaudeStreamReplaysThinkingAcrossK3VariantSwitch(t *testing
 	}
 }
 
+func TestKimiThinkingReplayStreamAccumulator_PreservesCitations(t *testing.T) {
+	accumulator := newKimiThinkingReplayStreamAccumulator()
+	chunks := []byte(
+		"event: message_start\n" +
+			`data: {"type":"message_start","message":{"id":"msg_1","model":"k3"}}` + "\n\n" +
+			"event: content_block_start\n" +
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"","citations":[]}}` + "\n\n" +
+			"event: content_block_delta\n" +
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","url":"https://example.com"}}}` + "\n\n" +
+			"event: content_block_delta\n" +
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}` + "\n\n" +
+			"event: content_block_stop\n" +
+			`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+			"event: message_stop\n" +
+			`data: {"type":"message_stop"}` + "\n\n",
+	)
+	accumulator.observe(chunks)
+	content, ok := accumulator.content()
+	if !ok {
+		t.Fatal("accumulator did not complete")
+	}
+	if !strings.Contains(string(content), `"citations"`) {
+		t.Fatalf("cached content missing citations: %s", content)
+	}
+	if !strings.Contains(string(content), `"https://example.com"`) {
+		t.Fatalf("cached citation missing url: %s", content)
+	}
+}
+
 func TestKimiThinkingReplayUnknownStreamDeltaPreservesPreviousCache(t *testing.T) {
 	internalcache.ClearKimiThinkingReplayCache()
 	t.Cleanup(internalcache.ClearKimiThinkingReplayCache)
@@ -397,8 +513,56 @@ func TestKimiThinkingReplayUnknownStreamDeltaPreservesPreviousCache(t *testing.T
 	consumeKimiReplayStream(t, wrapKimiThinkingReplayStream(context.Background(), &cliproxyexecutor.StreamResult{Chunks: chunks}, scope))
 
 	got, found, errGet := internalcache.GetKimiThinkingReplayRequired(context.Background(), "k3", sessionKey)
-	if errGet != nil || !found || !kimiJSONEqual(got, cached) {
+	if errGet != nil || !found || !helps.JSONEqual(got, cached) {
 		t.Fatalf("unknown successful delta changed previous cache: got %s, found %v, error %v", got, found, errGet)
+	}
+}
+
+func TestRestoreKimiThinkingReplayContentMarksExactHit(t *testing.T) {
+	cached := []byte(`[{"type":"thinking","thinking":"cached","signature":"kimi-signature"},{"type":"text","text":"OK"}]`)
+	body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"cached","signature":"kimi-signature"},{"type":"text","text":"OK"}]}]}`)
+
+	updated, restored := restoreKimiThinkingReplayContent(body, cached)
+	if !restored {
+		t.Fatal("exact cache hit must be restored and marked trusted")
+	}
+
+	got := gjson.GetBytes(updated, "messages.0.content")
+	want := helps.WithClaudeThinkingReplayProvenance(cached, innersignature.KimiReplayProvenance)
+	if !helps.JSONEqual([]byte(got.Raw), want) {
+		t.Fatalf("exact cache hit did not get provenance marker: got %s, want %s", got.Raw, want)
+	}
+}
+
+func TestRestoreKimiThinkingReplayContentRejectsMultipleExactHits(t *testing.T) {
+	cached := []byte(`[{"type":"thinking","thinking":"cached","signature":"kimi-signature"},{"type":"text","text":"OK"}]`)
+	body := []byte(`{"messages":[
+		{"role":"assistant","content":[{"type":"thinking","thinking":"cached","signature":"kimi-signature"},{"type":"text","text":"OK"}]},
+		{"role":"assistant","content":[{"type":"thinking","thinking":"cached","signature":"kimi-signature"},{"type":"text","text":"OK"}]}
+	]}`)
+
+	updated, restored := restoreKimiThinkingReplayContent(body, cached)
+	if restored {
+		t.Fatalf("multiple exact matches must fail closed, got restored body: %s", updated)
+	}
+	if !helps.JSONEqual(updated, body) {
+		t.Fatalf("request body changed with multiple exact matches: %s", updated)
+	}
+}
+
+func TestRestoreKimiThinkingReplayContentNormalizesStringShorthand(t *testing.T) {
+	cached := []byte(`[{"type":"thinking","thinking":"cached","signature":"kimi-signature"},{"type":"text","text":"answer"}]`)
+	body := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"answer"}]}`)
+
+	updated, restored := restoreKimiThinkingReplayContent(body, cached)
+	if !restored {
+		t.Fatal("string shorthand assistant content should match cached text part")
+	}
+
+	got := gjson.GetBytes(updated, "messages.1.content")
+	want := helps.WithClaudeThinkingReplayProvenance(cached, innersignature.KimiReplayProvenance)
+	if !helps.JSONEqual([]byte(got.Raw), want) {
+		t.Fatalf("string shorthand did not restore to provenanced cache: got %s, want %s", got.Raw, want)
 	}
 }
 

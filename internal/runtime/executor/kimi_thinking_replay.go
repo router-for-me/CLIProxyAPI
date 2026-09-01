@@ -11,6 +11,7 @@ import (
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	innersignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -25,6 +26,9 @@ type kimiThinkingReplayScope struct {
 	snapshot      internalcache.KimiThinkingReplaySnapshot
 	cacheReady    bool
 	replayApplied bool
+	fallbackKey   bool
+	callerHash    string
+	firstUserHash string
 }
 
 func (s kimiThinkingReplayScope) valid() bool {
@@ -52,6 +56,11 @@ func kimiThinkingReplayScopeFromRequest(ctx context.Context, req cliproxyexecuto
 }
 
 func prepareKimiThinkingReplayRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, kimiThinkingReplayScope) {
+	// Strip any client-supplied provenance marker before using the payload for
+	// scope computation or cache matching. The returned Request is the only one
+	// that should be used downstream.
+	req.Payload = helps.StripClaudeThinkingReplayProvenanceMarkers(req.Payload)
+
 	scope := kimiThinkingReplayScopeFromRequest(ctx, req, opts)
 	if !scope.valid() {
 		return req, scope
@@ -125,24 +134,19 @@ func kimiThinkingReplayContentIsReplayable(content []byte) bool {
 		return false
 	}
 	hasSignedThinking := false
-	hasToolUse := false
 	for _, part := range root.Array() {
 		switch strings.TrimSpace(part.Get("type").String()) {
 		case "thinking":
 			if strings.TrimSpace(part.Get("signature").String()) != "" {
 				hasSignedThinking = true
 			}
-		case "tool_use":
-			if strings.TrimSpace(part.Get("id").String()) != "" {
-				hasToolUse = true
-			}
 		}
 	}
-	return hasSignedThinking && hasToolUse
+	return hasSignedThinking
 }
 
 func restoreKimiThinkingReplayContent(body, cachedContent []byte) ([]byte, bool) {
-	cachedParts, cachedOK := kimiNonThinkingContentParts(gjson.ParseBytes(cachedContent))
+	cachedParts, cachedOK := helps.NonThinkingContentParts(gjson.ParseBytes(cachedContent))
 	if !cachedOK {
 		return body, false
 	}
@@ -151,99 +155,83 @@ func restoreKimiThinkingReplayContent(body, cachedContent []byte) ([]byte, bool)
 		return body, false
 	}
 	messageItems := messages.Array()
+	var exactMatches []int
+	var matches []int
 	for index := len(messageItems) - 1; index >= 0; index-- {
 		message := messageItems[index]
 		if !strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "assistant") {
 			continue
 		}
 		currentContent := message.Get("content")
-		if kimiJSONEqual([]byte(currentContent.Raw), cachedContent) {
-			return body, false
+		if currentContent.Type == gjson.String {
+			normalized, err := json.Marshal([]map[string]string{{"type": "text", "text": currentContent.String()}})
+			if err != nil {
+				continue
+			}
+			currentContent = gjson.ParseBytes(normalized)
 		}
-		if kimiContentHasThinking(currentContent) {
+		if helps.JSONEqual([]byte(currentContent.Raw), cachedContent) {
+			// Exact cache hit: the client kept the complete cached block. Collect
+			// all exact matches and fail closed if there is more than one, because
+			// restoring the wrong turn's reasoning is worse than not restoring.
+			exactMatches = append(exactMatches, index)
 			continue
 		}
-		currentParts, currentOK := kimiNonThinkingContentParts(currentContent)
-		if !currentOK || !kimiCanonicalPartsEqual(currentParts, cachedParts) {
+		currentParts, currentOK := helps.NonThinkingContentParts(currentContent)
+		if !currentOK || !helps.CanonicalPartsEqual(currentParts, cachedParts) {
 			continue
 		}
-		updated, errSet := sjson.SetRawBytes(body, fmt.Sprintf("messages.%d.content", index), cachedContent)
+		// Non-thinking parts already match. If the current content has a
+		// thinking block, restore only when it matches the cached thinking block
+		// ignoring signature, so a sanitized echoed turn gets its cached
+		// provenance back.
+		if helps.ContentHasThinking(currentContent) && !helps.ThinkingMatchesCachedIgnoringSignature(currentContent, gjson.ParseBytes(cachedContent)) {
+			continue
+		}
+		matches = append(matches, index)
+	}
+
+	if len(exactMatches) > 1 {
+		return body, false
+	}
+	if len(exactMatches) == 1 {
+		idx := exactMatches[0]
+		provenanced := helps.WithClaudeThinkingReplayProvenance(cachedContent, innersignature.KimiReplayProvenance)
+		updated, errSet := sjson.SetRawBytes(body, fmt.Sprintf("messages.%d.content", idx), provenanced)
 		if errSet != nil {
 			return body, false
 		}
 		return updated, true
 	}
-	return body, false
-}
 
-func kimiContentHasThinking(content gjson.Result) bool {
-	if !content.IsArray() {
-		return false
+	if len(matches) == 0 {
+		return body, false
 	}
-	for _, part := range content.Array() {
-		switch strings.TrimSpace(part.Get("type").String()) {
-		case "thinking", "redacted_thinking":
-			return true
-		}
-	}
-	return false
-}
 
-func kimiNonThinkingContentParts(content gjson.Result) ([][]byte, bool) {
-	if !content.IsArray() {
-		return nil, false
-	}
-	parts := make([][]byte, 0, len(content.Array()))
-	hasToolUse := false
-	for _, part := range content.Array() {
-		switch strings.TrimSpace(part.Get("type").String()) {
-		case "thinking", "redacted_thinking":
-			continue
-		case "tool_use":
-			if strings.TrimSpace(part.Get("id").String()) == "" {
-				return nil, false
+	// A single unambiguous match is fine. Multiple matches are only safe when
+	// exactly one carries thinking that matches the cached turn. More than one
+	// retained candidate is ambiguous; without any retained candidate, multiple
+	// text-only duplicates are indistinguishable. Both cases must fail closed.
+	if len(matches) > 1 {
+		var retained []int
+		for _, idx := range matches {
+			if helps.ContentHasThinking(messageItems[idx].Get("content")) {
+				retained = append(retained, idx)
 			}
-			hasToolUse = true
 		}
-		canonical, ok := kimiCanonicalJSON([]byte(part.Raw))
-		if !ok {
-			return nil, false
+		if len(retained) != 1 {
+			return body, false
 		}
-		parts = append(parts, canonical)
+		matches = retained
 	}
-	return parts, hasToolUse
-}
 
-func kimiCanonicalPartsEqual(left, right [][]byte) bool {
-	if len(left) != len(right) {
-		return false
+	idx := matches[0]
+	provenanced := helps.WithClaudeThinkingReplayProvenance(cachedContent, innersignature.KimiReplayProvenance)
+	updated, errSet := sjson.SetRawBytes(body, fmt.Sprintf("messages.%d.content", idx), provenanced)
+	if errSet != nil {
+		return body, false
 	}
-	for i := range left {
-		if !bytes.Equal(left[i], right[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func kimiJSONEqual(left, right []byte) bool {
-	canonicalLeft, leftOK := kimiCanonicalJSON(left)
-	canonicalRight, rightOK := kimiCanonicalJSON(right)
-	return leftOK && rightOK && bytes.Equal(canonicalLeft, canonicalRight)
-}
-
-func kimiCanonicalJSON(raw []byte) ([]byte, bool) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value any
-	if errDecode := decoder.Decode(&value); errDecode != nil {
-		return nil, false
-	}
-	canonical, errMarshal := json.Marshal(value)
-	if errMarshal != nil {
-		return nil, false
-	}
-	return canonical, true
+	return updated, true
 }
 
 type kimiThinkingReplayStreamBlock struct {
@@ -252,6 +240,7 @@ type kimiThinkingReplayStreamBlock struct {
 	thinking             strings.Builder
 	signature            strings.Builder
 	input                strings.Builder
+	citations            []byte
 	textInitialized      bool
 	thinkingInitialized  bool
 	signatureInitialized bool
@@ -350,6 +339,27 @@ func (a *kimiThinkingReplayStreamAccumulator) observeBlockDelta(root gjson.Resul
 			block.input.WriteString(suffix)
 			block.hasInputDelta = true
 		}
+	case "citations_delta":
+		citation := delta.Get("citation")
+		if !citation.IsObject() {
+			a.abandon()
+			return
+		}
+		raw := []byte(citation.Raw)
+		if len(block.citations) == 0 {
+			if !a.reserveBytes(len(raw) + 2) {
+				return
+			}
+			block.citations = append(append([]byte("["), raw...), ']')
+		} else {
+			if !a.reserveBytes(len(raw) + 1) {
+				return
+			}
+			block.citations = block.citations[:len(block.citations)-1]
+			block.citations = append(block.citations, ',')
+			block.citations = append(block.citations, raw...)
+			block.citations = append(block.citations, ']')
+		}
 	default:
 		a.abandon()
 	}
@@ -426,6 +436,9 @@ func (a *kimiThinkingReplayStreamAccumulator) content() ([]byte, bool) {
 		}
 		if errSet == nil && block.hasInputDelta {
 			raw, errSet = sjson.SetRawBytes(raw, "input", []byte(block.input.String()))
+		}
+		if errSet == nil && len(block.citations) > 0 {
+			raw, errSet = sjson.SetRawBytes(raw, "citations", block.citations)
 		}
 		if errSet != nil {
 			a.abandon()

@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	innersignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -42,6 +43,7 @@ func NewKimiExecutor(cfg *config.Config) *KimiExecutor {
 			cfg:                     cfg,
 			requestLogProvider:      "kimi",
 			upstreamModelNormalizer: normalizeKimiUpstreamModel,
+			cacheControlDisabled:    true,
 		},
 		cfg: cfg,
 	}
@@ -97,6 +99,9 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if from.String() == "claude" {
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 		preparedReq, replayScope := prepareKimiThinkingReplayRequest(ctx, req, opts)
+		if replayScope.replayApplied && !helps.APIKeyModelIsCompat(preparedReq) {
+			preparedReq.Payload, _ = innersignature.SanitizeClaudeMessagesForClaudeUpstream(preparedReq.Payload, preparedReq.Model)
+		}
 		claudeResp, errExecute := e.ClaudeExecutor.Execute(ctx, auth, preparedReq, opts)
 		if errExecute != nil {
 			if replayScope.replayApplied && shouldClearKimiThinkingReplayAfterError(errExecute) {
@@ -220,6 +225,9 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if from.String() == "claude" {
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 		preparedReq, replayScope := prepareKimiThinkingReplayRequest(ctx, req, opts)
+		if replayScope.replayApplied && !helps.APIKeyModelIsCompat(preparedReq) {
+			preparedReq.Payload, _ = innersignature.SanitizeClaudeMessagesForClaudeUpstream(preparedReq.Payload, preparedReq.Model)
+		}
 		claudeResult, errExecute := e.ClaudeExecutor.ExecuteStream(ctx, auth, preparedReq, opts)
 		if errExecute != nil {
 			if replayScope.replayApplied && shouldClearKimiThinkingReplayAfterError(errExecute) {

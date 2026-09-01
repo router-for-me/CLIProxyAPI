@@ -2,13 +2,12 @@ package executor
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"strings"
+
+	"github.com/google/uuid"
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -33,71 +32,110 @@ func claudeThinkingReplayEnabled(auth *cliproxyauth.Auth, req cliproxyexecutor.R
 	return strings.TrimSpace(apiKey) != "" && !isClaudeOAuthToken(apiKey)
 }
 
-// A missing session identity intentionally disables replay instead of sharing hidden reasoning across callers.
+// claudeThinkingReplayScopeFromRequest selects a conversation replay scope.
+// It prefers an explicit execution/session metadata or prompt-cache/window key,
+// then a conversation nonce (client_metadata.conversation_id, conversation_id,
+// or X-Conversation-Id), and finally a content-derived fallback keyed by the
+// first user message and system prompt.
+//
+// When the fallback key is content-derived, history compaction changes
+// messages.0 and can orphan the cache. Resolve the original scope through any
+// remaining message aliases, then continue using that key for this request.
 func claudeThinkingReplayScopeFromRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) claudeThinkingReplayScope {
+	modelFamily := helps.ClaudeThinkingReplayModelFamily(auth, req.Model)
+	callerHash := helps.ClaudeThinkingReplayCallerHash(auth, req, opts)
+	firstUserHash := helps.ClaudeThinkingReplayFirstUserHash(modelFamily, callerHash, req.Payload)
 	sessionKey := codexReasoningReplaySessionKey(ctx, sdktranslator.FormatClaude, req, opts, req.Payload)
-	sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
-	return claudeThinkingReplayScope{
-		modelFamily: claudeThinkingReplayModelFamily(auth, req.Model),
-		sessionKey:  sessionKey,
+	fallback := false
+	if sessionKey != "" {
+		sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
 	}
-}
-
-func claudeThinkingReplayModelFamily(auth *cliproxyauth.Auth, model string) string {
-	baseModel := thinking.ParseSuffix(strings.TrimSpace(model)).ModelName
-	if baseModel == "" {
-		return ""
-	}
-	identity := ""
-	if auth != nil {
-		identity = strings.TrimSpace(auth.ID)
-		if identity == "" {
-			apiKey, baseURL := claudeCreds(auth)
-			identity = strings.TrimSpace(baseURL)
-			if identity == "" {
-				identity = strings.TrimSpace(apiKey)
-			}
+	if sessionKey == "" {
+		var usedNonce bool
+		sessionKey, usedNonce = helps.ClaudeThinkingReplayConversationSessionKey(auth, req, opts)
+		if sessionKey != "" {
+			// Stateless clients without an explicit conversation nonce use
+			// a content-derived seed key. The real session is resolved through
+			// message aliases below, and a new isolated session is allocated
+			// on first-request cache misses so identical openings do not race.
+			fallback = !usedNonce
 		}
 	}
-	if identity == "" {
-		return "claude:" + baseModel
+	return claudeThinkingReplayScope{
+		modelFamily:   modelFamily,
+		sessionKey:    sessionKey,
+		fallbackKey:   fallback,
+		callerHash:    callerHash,
+		firstUserHash: firstUserHash,
 	}
-	sum := sha256.Sum256([]byte(identity))
-	return "claude:" + hex.EncodeToString(sum[:8]) + ":" + baseModel
 }
 
-func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, claudeThinkingReplayScope) {
+// claudeThinkingReplayMaxAliasesPerRequest caps how many message hashes are
+// registered as scope aliases for a single request. This prevents long
+// histories from generating unbounded alias registration round trips and
+// evicting useful earlier aliases.
+const claudeThinkingReplayMaxAliasesPerRequest = 64
+
+func capClaudeThinkingReplayAliasMessages(hashes []internalcache.ClaudeThinkingReplayAliasMessage) []internalcache.ClaudeThinkingReplayAliasMessage {
+	if len(hashes) <= claudeThinkingReplayMaxAliasesPerRequest {
+		return hashes
+	}
+	keep := make([]internalcache.ClaudeThinkingReplayAliasMessage, 0, claudeThinkingReplayMaxAliasesPerRequest)
+	keep = append(keep, hashes[0])
+	keep = append(keep, hashes[len(hashes)-claudeThinkingReplayMaxAliasesPerRequest+1:]...)
+	return keep
+}
+
+// prepareClaudeThinkingReplayRequest loads cached assistant content for this
+// request and strips any client-supplied _cliproxy_replay_provenance markers
+// from req.Payload. The caller must use the returned Request because the
+// payload has been cleaned; the actual restore is applied to bodyForUpstream
+// after signature sanitization and before MCP tool-name remapping, so
+// cache-provenanced signatures bypass the sanitizer while matching against the
+// caller-facing body.
+func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, claudeThinkingReplayScope, [][]byte, bool) {
+	// Strip any client-supplied provenance marker before using the payload for
+	// scope computation or cache matching. The returned Request is the only one
+	// that should be used downstream.
+	req.Payload = helps.StripClaudeThinkingReplayProvenanceMarkers(req.Payload)
+
 	scope := claudeThinkingReplayScopeFromRequest(ctx, auth, req, opts)
 	if !scope.valid() {
-		return req, scope
+		return req, scope, nil, false
 	}
-	contents, snapshot, found, errGet := internalcache.GetClaudeThinkingReplayWithSnapshotRequired(ctx, scope.modelFamily, scope.sessionKey)
+
+	if scope.fallbackKey {
+		// Content-derived scopes are shared seeds across identical openings. Resolve
+		// the actual conversation from message aliases, or allocate a fresh isolated
+		// session on first requests so concurrent openings do not race the same cache.
+		messages := capClaudeThinkingReplayAliasMessages(helps.ClaudeThinkingReplayMessageHashes(scope.modelFamily, scope.callerHash, req.Payload))
+		if resolved, ok := internalcache.ResolveClaudeThinkingReplaySessionKey(ctx, scope.modelFamily, messages, scope.firstUserHash); ok {
+			scope.sessionKey = resolved
+		} else {
+			scope.sessionKey = "fb:" + uuid.NewString()
+		}
+	}
+
+	// Caller-controlled nonce scopes supply arbitrary openings per request; avoid
+	// reserving a Home KV tombstone until a replayable response is actually cached.
+	contents, snapshot, found, errGet := internalcache.GetClaudeThinkingReplayWithSnapshotIfExists(ctx, scope.modelFamily, scope.sessionKey)
 	scope.snapshot = snapshot
 	scope.cacheReady = errGet == nil
 	if errGet != nil {
 		log.Warnf("claude compatible thinking replay cache read failed: %v", errGet)
-		return req, scope
+		return req, scope, nil, false
 	}
 	if !found {
-		return req, scope
+		return req, scope, nil, false
 	}
-	updated, restored := restoreClaudeThinkingReplayContents(req.Payload, contents)
-	if restored {
-		req.Payload = updated
-		scope.replayApplied = true
+	// Normalize cached tool_use parts to match the shape the sanitizer will apply
+	// to the upstream body, so an echo'd tool_use with provenance fields does not
+	// fail the canonical comparison.
+	normalized := make([][]byte, len(contents))
+	for i, content := range contents {
+		normalized[i] = helps.ClaudeThinkingReplayNormalizeCachedContent(content)
 	}
-	return req, scope
-}
-
-func restoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) ([]byte, bool) {
-	updated := body
-	restored := false
-	for _, cachedContent := range cachedContents {
-		var restoredTurn bool
-		updated, restoredTurn = restoreKimiThinkingReplayContent(updated, cachedContent)
-		restored = restored || restoredTurn
-	}
-	return updated, restored
+	return req, scope, normalized, true
 }
 
 func cacheClaudeThinkingReplayResponse(ctx context.Context, scope claudeThinkingReplayScope, response []byte) {
@@ -113,17 +151,31 @@ func cacheClaudeThinkingReplayResponse(ctx context.Context, scope claudeThinking
 	}
 }
 
+// claudeThinkingReplayContentIsReplayable reports whether a content array
+// carries a decodable Claude thinking signature. Only provenanced signed turns
+// are cached; unsigned or malformed-signature responses must not evict earlier
+// replay state.
+
 func cacheClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingReplayScope, content []byte) {
 	if !scope.valid() || !scope.cacheReady {
 		return
 	}
-	if kimiThinkingReplayContentIsReplayable(content) {
-		if _, errReplace := internalcache.ReplaceClaudeThinkingReplayIfUnchanged(ctx, scope.modelFamily, scope.sessionKey, scope.snapshot, content); errReplace != nil {
+	// Unsigned or non-replayable responses must not evict earlier signed turns.
+	// Only append turns that carry signed thinking; prior replay state is retained
+	// for the next request that echoes an earlier assistant message.
+	if helps.ClaudeThinkingReplayContentIsReplayable(content) {
+		replaced, errReplace := internalcache.ReplaceClaudeThinkingReplayIfUnchanged(ctx, scope.modelFamily, scope.sessionKey, scope.snapshot, content)
+		if errReplace != nil {
 			log.Warnf("claude compatible thinking replay cache replace failed: %v", errReplace)
+		} else if replaced && scope.fallbackKey {
+			// Register the client-visible assistant shape as an alias only after a
+			// successful cache write, so aliases do not point at a missing or
+			// failed replay record.
+			if h := helps.ClaudeThinkingReplayAssistantMessageHash(scope.modelFamily, scope.callerHash, content); h != "" {
+				internalcache.RegisterClaudeThinkingReplayAlias(ctx, scope.modelFamily, scope.sessionKey, h, scope.firstUserHash)
+			}
 		}
-		return
 	}
-	clearClaudeThinkingReplayContent(ctx, scope)
 }
 
 func clearClaudeThinkingReplayContent(ctx context.Context, scope claudeThinkingReplayScope) {

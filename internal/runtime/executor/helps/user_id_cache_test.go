@@ -62,7 +62,7 @@ func TestCachedUserID_ExpiresAfterTTL(t *testing.T) {
 	resetUserIDCache()
 
 	expiredID := CachedUserID("api-key-expired")
-	cacheKey := userIDCacheKey("api-key-expired")
+	cacheKey := userIDCacheKey("api-key-expired", "")
 	userIDCacheMu.Lock()
 	userIDCache[cacheKey] = userIDCacheEntry{
 		value:  expiredID,
@@ -71,11 +71,23 @@ func TestCachedUserID_ExpiresAfterTTL(t *testing.T) {
 	userIDCacheMu.Unlock()
 
 	newID := CachedUserID("api-key-expired")
-	if newID == expiredID {
-		t.Fatalf("expected expired user_id to be replaced, got %q", newID)
-	}
 	if newID == "" {
 		t.Fatal("expected regenerated user_id to be non-empty")
+	}
+	if !IsValidUserID(newID) {
+		t.Fatalf("regenerated user_id %q is not valid", newID)
+	}
+	// The derived user_id is deterministic, so it is the same value with a
+	// refreshed TTL rather than a new random replacement.
+	if newID != expiredID {
+		t.Fatalf("expected deterministic user_id to be stable after expiry, got %q want %q", newID, expiredID)
+	}
+
+	userIDCacheMu.RLock()
+	entry := userIDCache[cacheKey]
+	userIDCacheMu.RUnlock()
+	if !entry.expire.After(time.Now().Add(30 * time.Minute)) {
+		t.Fatalf("expected expired cache entry to be refreshed, got expire %v", entry.expire)
 	}
 }
 
@@ -95,7 +107,7 @@ func TestCachedUserID_RenewsTTLOnHit(t *testing.T) {
 
 	key := "api-key-renew"
 	id := CachedUserID(key)
-	cacheKey := userIDCacheKey(key)
+	cacheKey := userIDCacheKey(key, "")
 
 	soon := time.Now()
 	userIDCacheMu.Lock()
@@ -173,7 +185,7 @@ func TestCachedUserIDRequiredHomeKVFailures(t *testing.T) {
 		{name: "get", client: &fakeClaudeIDKVClient{values: make(map[string][]byte), getErr: errors.New("get failed")}},
 		{name: "set", client: &fakeClaudeIDKVClient{values: make(map[string][]byte), setErr: errors.New("set failed")}},
 		{name: "expire", client: &fakeClaudeIDKVClient{values: map[string][]byte{
-			claudeUserIDKVKey("api-key-1"): []byte(GenerateFakeUserID()),
+			claudeUserIDKVKey("api-key-1", ""): []byte(GenerateFakeUserID()),
 		}, expireErr: errors.New("expire failed")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -8,6 +8,11 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const (
+	ClaudeReplayProvenance = "claude-replay"
+	KimiReplayProvenance   = "kimi-replay"
+)
+
 type ClaudeMessagesSignatureSanitizeOptions struct {
 	TargetProvider                SignatureProvider
 	TargetModel                   string
@@ -26,6 +31,14 @@ type SignatureSanitizeReport struct {
 	DroppedSignatures  int
 	ReplacedSignatures int
 	Decisions          []SignatureCompatibilityDecision
+}
+
+func isTrustedReplayProvenance(provenance gjson.Result) bool {
+	if !provenance.Exists() || provenance.Type != gjson.String {
+		return false
+	}
+	v := provenance.String()
+	return v == ClaudeReplayProvenance || v == KimiReplayProvenance
 }
 
 // SanitizeClaudeMessagesSignaturesForModel removes or preserves Claude
@@ -92,7 +105,7 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 			partType := part.Get("type").String()
 			if partType == "tool_use" {
 				if opts.DropToolSignatures {
-					updatedPart, changed := stripClaudeToolUseSignatureFields(part)
+					updatedPart, changed := StripClaudeToolUseSignatureFields(part)
 					if changed {
 						messageModified = true
 						report.DroppedSignatures++
@@ -124,10 +137,63 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 				continue
 			}
 
+			// Replay provenance is only trusted when it carries an internal
+			// string value set by the replay helpers. Client-supplied markers
+			// (booleans or arbitrary values) must be stripped so they cannot
+			// bypass signature validation. A trusted marker lets cache-born
+			// signatures survive without falling back to length or shape checks.
+			provenance := part.Get("_cliproxy_replay_provenance")
+			if provenance.Exists() {
+				if isTrustedReplayProvenance(provenance) {
+					report.Preserved++
+					updated, _ := sjson.Delete(part.Raw, "_cliproxy_replay_provenance")
+					keptParts = append(keptParts, updated)
+					messageModified = true
+					continue
+				}
+				updated, _ := sjson.Delete(part.Raw, "_cliproxy_replay_provenance")
+				part = gjson.Parse(updated)
+				messageModified = true
+			}
+
 			rawSignature := part.Get("signature").String()
 			if opts.PreserveEmptyThinkingBlocks {
-				report.Preserved++
-				keptParts = append(keptParts, part.Raw)
+				// In compat mode the block shape must survive, but the signature still
+				// needs to be normalized, emulated, or stripped to avoid sending an
+				// incompatible or opaque signature to the upstream.
+				decision := DecideSignatureCompatibilityForModel(targetProvider, opts.TargetModel, rawSignature, SignatureBlockKindClaudeThinking)
+				decision.Reason = fmt.Sprintf("messages[%d].content[%d]: %s", i, j, decision.Reason)
+				report.Decisions = append(report.Decisions, decision)
+
+				switch decision.Action {
+				case SignatureActionPreserve:
+					report.Preserved++
+					if decision.NormalizedSignature != "" && decision.NormalizedSignature != rawSignature {
+						updated, _ := sjson.Set(part.Raw, "signature", decision.NormalizedSignature)
+						keptParts = append(keptParts, updated)
+						messageModified = true
+					} else {
+						keptParts = append(keptParts, part.Raw)
+					}
+				case SignatureActionReplaceWithGeminiBypass:
+					report.ReplacedSignatures++
+					updated, _ := sjson.Set(part.Raw, "signature", decision.ReplacementSignature)
+					keptParts = append(keptParts, updated)
+					messageModified = true
+				default:
+					// DropBlock, DropSignature, or NoCompatibleReplacement: keep the
+					// block shape for the compat endpoint and preserve empty placeholders
+					// with their required signature member.
+					if isEmptyClaudeThinkingPlaceholder(part) {
+						report.Preserved++
+						keptParts = append(keptParts, part.Raw)
+					} else {
+						report.DroppedSignatures++
+						updated, _ := sjson.Set(part.Raw, "signature", "")
+						keptParts = append(keptParts, updated)
+					}
+					messageModified = true
+				}
 				continue
 			}
 			if targetProvider == SignatureProviderClaude && isEmptyClaudeThinkingPlaceholder(part) && !opts.DropEmptyThinkingPlaceholders {
@@ -185,7 +251,11 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 	return output, report
 }
 
-func stripClaudeToolUseSignatureFields(part gjson.Result) (string, bool) {
+// StripClaudeToolUseSignatureFields removes tool-use signature/provenance
+// fields and empty extra_content.google/extra_content wrappers. It is exported
+// so the executor's replay-cache match can normalize cached tool_use parts with
+// the same logic the upstream sanitizer applies.
+func StripClaudeToolUseSignatureFields(part gjson.Result) (string, bool) {
 	updated := part.Raw
 	changed := false
 	for _, sigPath := range claudeToolUseProvenancePaths() {
