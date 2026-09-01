@@ -455,8 +455,9 @@ type ClaudeKey struct {
 	// API-key entry inside the upstream_provider_api_key_entries table. The
 	// modern Upstream Providers editor stores one Claude provider row plus N
 	// child entries; the renderer fans the row out into N config.ClaudeKey
-	// values, each carrying this child ID so the synthesizer can emit a
-	// stable entry_provider_key for per-entry model-route pinning. Zero is
+	// values, each carrying this child ID as the persisted child-entry
+	// identity. Downstream route-key synthesis consumes the value to build a
+	// stable per-entry route key for per-entry model-route pinning. Zero is
 	// the legacy single-key fallback (no child entry exists in the store).
 	UpstreamProviderEntryID int64 `yaml:"upstream-provider-entry-id,omitempty" json:"-"`
 }
