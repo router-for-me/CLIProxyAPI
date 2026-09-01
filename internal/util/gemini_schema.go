@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -766,14 +767,17 @@ func convertRefsToHints(jsonStr string, preserveSiblings bool) string {
 }
 
 // projectExclusiveBounds rewrites numeric exclusiveMinimum / exclusiveMaximum into inclusive
-// minimum / maximum with the same value. An existing sibling inclusive bound is left unchanged.
-// Draft-04 boolean exclusive flags are dropped; the sibling inclusive bound is already the
-// projected form. Property names that collide with these keywords are preserved.
+// minimum / maximum. Integer bounds shift by ±1 (floor(val)+1 / ceil(val)-1) because Gemini
+// has no exclusive-bound field; number bounds keep the same value (intentional widening).
+// An existing sibling inclusive bound is left unchanged. Draft-04 boolean exclusive flags
+// are dropped; the sibling inclusive bound is already the projected form. Property names
+// that collide with these keywords are preserved.
 func projectExclusiveBounds(jsonStr string) string {
 	pathsByField := findPathsByFields(jsonStr, []string{"exclusiveMinimum", "exclusiveMaximum"})
 	for _, key := range []string{"exclusiveMinimum", "exclusiveMaximum"} {
 		inclusive := "minimum"
-		if key == "exclusiveMaximum" {
+		exclusiveMaximum := key == "exclusiveMaximum"
+		if exclusiveMaximum {
 			inclusive = "maximum"
 		}
 		for _, p := range pathsByField[key] {
@@ -788,7 +792,11 @@ func projectExclusiveBounds(jsonStr string) string {
 			if val.Type == gjson.Number {
 				incPath := joinPath(parentPath, inclusive)
 				if !gjson.Get(jsonStr, incPath).Exists() {
-					updated, _ := sjson.SetRawBytes([]byte(jsonStr), incPath, []byte(val.Raw))
+					projected := val.Raw
+					if gjson.Get(jsonStr, joinPath(parentPath, "type")).String() == "integer" {
+						projected = projectIntegerExclusiveBound(val.Raw, exclusiveMaximum)
+					}
+					updated, _ := sjson.SetRawBytes([]byte(jsonStr), incPath, []byte(projected))
 					jsonStr = string(updated)
 				}
 			}
@@ -796,6 +804,26 @@ func projectExclusiveBounds(jsonStr string) string {
 		}
 	}
 	return jsonStr
+}
+
+func projectIntegerExclusiveBound(raw string, exclusiveMaximum bool) string {
+	if i, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+		if exclusiveMaximum {
+			return strconv.FormatInt(i-1, 10)
+		}
+		return strconv.FormatInt(i+1, 10)
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return raw
+	}
+	var projected float64
+	if exclusiveMaximum {
+		projected = math.Ceil(f) - 1
+	} else {
+		projected = math.Floor(f) + 1
+	}
+	return strconv.FormatInt(int64(projected), 10)
 }
 
 func convertConstToEnum(jsonStr string) string {

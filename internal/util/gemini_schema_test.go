@@ -2534,9 +2534,10 @@ func TestCleanJSONSchemaForAntigravityResponse_BooleanEnumNotRewrittenToString(t
 	}
 }
 
-// TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive rewrites numeric exclusiveMinimum /
-// exclusiveMaximum into inclusive minimum / maximum with the same value. Gemini keeps those
-// inclusive keywords; Antigravity then lifts them into description hints.
+// TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive rewrites exclusiveMinimum /
+// exclusiveMaximum into inclusive minimum / maximum. Integer bounds shift by ±1; number
+// bounds keep the same value (intentional widening). Gemini keeps those inclusive keywords;
+// Antigravity then lifts them into description hints.
 func TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive(t *testing.T) {
 	input := `{
 		"type": "object",
@@ -2544,7 +2545,12 @@ func TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive(t *testing.T) {
 			"score": {
 				"type": "number",
 				"exclusiveMinimum": 0,
-				"exclusiveMaximum": 100
+				"exclusiveMaximum": 10
+			},
+			"count": {
+				"type": "integer",
+				"exclusiveMinimum": 0,
+				"exclusiveMaximum": 10
 			},
 			"clamped": {
 				"type": "integer",
@@ -2561,8 +2567,16 @@ func TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive(t *testing.T) {
 	if score.Get("exclusiveMinimum").Exists() || score.Get("exclusiveMaximum").Exists() {
 		t.Errorf("Gemini exclusive bounds survived: %s", gemini.Raw)
 	}
-	if score.Get("minimum").String() != "0" || score.Get("maximum").String() != "100" {
-		t.Errorf("Gemini exclusive bounds were not projected: %s", gemini.Raw)
+	if score.Get("minimum").String() != "0" || score.Get("maximum").String() != "10" {
+		t.Errorf("Gemini number exclusive bounds were not projected in place: %s", gemini.Raw)
+	}
+
+	count := gemini.Get("properties.count")
+	if count.Get("exclusiveMinimum").Exists() || count.Get("exclusiveMaximum").Exists() {
+		t.Errorf("Gemini integer exclusive bounds survived: %s", gemini.Raw)
+	}
+	if count.Get("minimum").String() != "1" || count.Get("maximum").String() != "9" {
+		t.Errorf("Gemini integer exclusive bounds were not shifted: %s", gemini.Raw)
 	}
 
 	clamped := gemini.Get("properties.clamped")
@@ -2589,8 +2603,19 @@ func TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive(t *testing.T) {
 		if strings.Contains(scoreDesc, "exclusiveMinimum") || strings.Contains(scoreDesc, "exclusiveMaximum") {
 			t.Errorf("%s: exclusive keywords appeared as hints: %s", name, got)
 		}
-		if !strings.Contains(scoreDesc, "minimum: 0") || !strings.Contains(scoreDesc, "maximum: 100") {
-			t.Errorf("%s: projected inclusive hints missing: %s", name, got)
+		if !strings.Contains(scoreDesc, "minimum: 0") || !strings.Contains(scoreDesc, "maximum: 10") {
+			t.Errorf("%s: projected number inclusive hints missing: %s", name, got)
+		}
+
+		countDesc := parsed.Get("properties.count.description").String()
+		if parsed.Get("properties.count.minimum").Exists() || parsed.Get("properties.count.maximum").Exists() {
+			t.Errorf("%s: integer inclusive bounds should be hinted, not kept: %s", name, got)
+		}
+		if !strings.Contains(countDesc, "minimum: 1") || !strings.Contains(countDesc, "maximum: 9") {
+			t.Errorf("%s: projected integer inclusive hints missing: %s", name, got)
+		}
+		if strings.Contains(countDesc, "exclusiveMinimum") || strings.Contains(countDesc, "exclusiveMaximum") {
+			t.Errorf("%s: exclusive keywords appeared as hints on count: %s", name, got)
 		}
 
 		clampedDesc := parsed.Get("properties.clamped.description").String()
