@@ -29,11 +29,11 @@ func TestEnsureGeminiLeadingUserContentReusesLargeValidPayload(t *testing.T) {
 
 func TestEnsureGeminiLeadingUserContent(t *testing.T) {
 	tests := []struct {
-		name             string
-		inputJSON        string
-		path             string
-		wantRoles        string
-		wantLeadingEmpty bool
+		name            string
+		inputJSON       string
+		path            string
+		wantRoles       string
+		wantPlaceholder bool
 	}{
 		{
 			name:      "user first is unchanged",
@@ -42,25 +42,25 @@ func TestEnsureGeminiLeadingUserContent(t *testing.T) {
 			wantRoles: "user",
 		},
 		{
-			name:             "leading model functionCall gets empty user",
-			inputJSON:        `{"contents":[{"role":"model","parts":[{"functionCall":{"name":"run"}}]},{"role":"user","parts":[{"functionResponse":{"name":"run"}}]}]}`,
-			path:             "contents",
-			wantRoles:        "user,model,user",
-			wantLeadingEmpty: true,
+			name:            "leading model functionCall gets placeholder user",
+			inputJSON:       `{"contents":[{"role":"model","parts":[{"functionCall":{"name":"run"}}]},{"role":"user","parts":[{"functionResponse":{"name":"run"}}]}]}`,
+			path:            "contents",
+			wantRoles:       "user,model,user",
+			wantPlaceholder: true,
 		},
 		{
-			name:             "leading model text gets empty user and preserves following turns",
-			inputJSON:        `{"contents":[{"role":"model","parts":[{"text":"answer"}]},{"role":"user","parts":[{"text":"continue"}]}]}`,
-			path:             "contents",
-			wantRoles:        "user,model,user",
-			wantLeadingEmpty: true,
+			name:            "leading model text gets placeholder user and preserves following turns",
+			inputJSON:       `{"contents":[{"role":"model","parts":[{"text":"answer"}]},{"role":"user","parts":[{"text":"continue"}]}]}`,
+			path:            "contents",
+			wantRoles:       "user,model,user",
+			wantPlaceholder: true,
 		},
 		{
-			name:             "nested contents are normalized",
-			inputJSON:        `{"request":{"contents":[{"role":"model","parts":[{"text":"answer"}]},{"role":"user","parts":[{"text":"continue"}]}]}}`,
-			path:             "request.contents",
-			wantRoles:        "request.user,model,user",
-			wantLeadingEmpty: true,
+			name:            "nested contents are normalized",
+			inputJSON:       `{"request":{"contents":[{"role":"model","parts":[{"text":"answer"}]},{"role":"user","parts":[{"text":"continue"}]}]}}`,
+			path:            "request.contents",
+			wantRoles:       "request.user,model,user",
+			wantPlaceholder: true,
 		},
 		{
 			name:      "empty contents are unchanged",
@@ -88,10 +88,10 @@ func TestEnsureGeminiLeadingUserContent(t *testing.T) {
 			if got := strings.Join(roles, ","); got != expectedRoles {
 				t.Fatalf("roles = %q, want %q; output=%s", got, expectedRoles, out)
 			}
-			if tt.wantLeadingEmpty {
+			if tt.wantPlaceholder {
 				text := gjson.GetBytes(out, tt.path+".0.parts.0.text")
-				if !text.Exists() || text.String() != "" {
-					t.Fatalf("leading empty user part missing; output=%s", out)
+				if !text.Exists() || text.String() != " " {
+					t.Fatalf("leading placeholder user part missing; output=%s", out)
 				}
 			}
 		})
