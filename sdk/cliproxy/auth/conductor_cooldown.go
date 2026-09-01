@@ -757,7 +757,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 
 		if result.Success {
-			if auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+			if isCredentialWideQuotaReason(auth.Quota.Reason) && auth.Quota.NextRecoverAt.After(now) {
 				// Retain active credential-scoped cooldown
 			} else if modelKey != "" {
 				state := ensureModelState(auth, modelKey)
@@ -1223,7 +1223,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	if auth == nil {
 		return
 	}
-	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+	if auth.Quota.Exceeded && isCredentialWideQuotaReason(auth.Quota.Reason) && auth.Quota.NextRecoverAt.After(now) {
 		auth.Unavailable = true
 		return
 	}
