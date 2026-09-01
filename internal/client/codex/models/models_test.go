@@ -143,6 +143,41 @@ func TestCodexClientModelsResponse_AppliesDisplayNameToTemplateModel(t *testing.
 	}
 }
 
+func TestCodexClientModelsResponse_ClearsTemplateMultiAgentV2WhenDisabled(t *testing.T) {
+	resp := BuildResponse([]map[string]any{
+		{"id": "gpt-5.6-sol"},
+		{"id": "gpt-5.6-terra"},
+		{"id": "gpt-5.6-luna"},
+	}, nil, false)
+	models, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
+	}
+
+	bySlug := make(map[string]map[string]any, len(models))
+	for _, model := range models {
+		bySlug[stringModelValue(model, "slug")] = model
+	}
+
+	for _, slug := range []string{"gpt-5.6-sol", "gpt-5.6-terra"} {
+		entry := bySlug[slug]
+		if entry == nil {
+			t.Fatalf("missing model %q", slug)
+		}
+		if got, exists := entry["multi_agent_version"]; exists {
+			t.Errorf("%s multi_agent_version = %#v (exists=%t), want omitted when optimize-multi-agent-v2 is false", slug, got, exists)
+		}
+	}
+
+	luna := bySlug["gpt-5.6-luna"]
+	if luna == nil {
+		t.Fatal("missing model gpt-5.6-luna")
+	}
+	if got := luna["multi_agent_version"]; got != "v1" {
+		t.Fatalf("gpt-5.6-luna multi_agent_version = %#v, want preserved v1", got)
+	}
+}
+
 func TestCodexClientModelsResponse_RewritesTemplateMultiAgentVersionWhenEnabled(t *testing.T) {
 	modelIDs := []string{"gpt-5.6-luna", "gpt-5.5"}
 	resp := BuildResponse([]map[string]any{{"id": modelIDs[0]}, {"id": modelIDs[1]}}, nil, true)
@@ -321,6 +356,16 @@ func TestApplyCodexClientModelMetadataPreservesMultiAgentVersionWhenDisabled(t *
 	applyCodexClientModelMetadata(entry, "custom-model", model, true)
 	if got := entry["multi_agent_version"]; got != "v2" {
 		t.Fatalf("enabled multi_agent_version = %#v, want v2", got)
+	}
+}
+
+func TestApplyCodexClientModelMetadataClearsTemplateMultiAgentV2WhenDisabled(t *testing.T) {
+	entry := map[string]any{"multi_agent_version": "v2"}
+	model := map[string]any{"id": "custom-model"}
+
+	applyCodexClientModelMetadata(entry, "custom-model", model, false)
+	if got, exists := entry["multi_agent_version"]; exists {
+		t.Fatalf("disabled template v2 multi_agent_version = %#v (exists=%t), want omitted", got, exists)
 	}
 }
 
