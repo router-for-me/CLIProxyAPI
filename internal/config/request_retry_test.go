@@ -25,6 +25,7 @@ claude-api-key:
 openai-compatibility:
   - name: "compat"
     base-url: "https://compat.example.com/v1"
+    wire-api: "RESPONSES"
     request-retry: 0
     api-key-entries:
       - api-key: "compat-key"
@@ -59,6 +60,9 @@ vertex-api-key:
 	}
 	if len(cfg.OpenAICompatibility) != 1 || cfg.OpenAICompatibility[0].RequestRetry == nil || *cfg.OpenAICompatibility[0].RequestRetry != 0 {
 		t.Fatalf("openai-compatibility[0].request-retry = %v, want 0", cfg.OpenAICompatibility[0].RequestRetry)
+	}
+	if cfg.OpenAICompatibility[0].WireAPI != "responses" {
+		t.Fatalf("openai-compatibility[0].wire-api = %q, want responses", cfg.OpenAICompatibility[0].WireAPI)
 	}
 	if len(cfg.VertexCompatAPIKey) != 1 || cfg.VertexCompatAPIKey[0].RequestRetry == nil || *cfg.VertexCompatAPIKey[0].RequestRetry != 4 {
 		t.Fatalf("vertex[0].request-retry = %v, want 4", cfg.VertexCompatAPIKey[0].RequestRetry)
