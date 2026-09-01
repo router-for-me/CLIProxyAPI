@@ -71,10 +71,13 @@ export function generateEntryIdentity(entry) {
 //
 //   level = 'provider' (the pool route) or 'entry' (a single entry pin).
 //
-// Empty for disabled rows or rows missing a provider_key. OpenAI Compatibility
-// rows always include a provider-level choice and one entry-level choice per
-// persisted entry with a derivable identity. API-key secrets are never
-// inspected.
+// Empty for disabled rows or rows missing a provider_key. Rows whose
+// provider type accepts `api_key_entries` (OpenAI Compatibility AND Claude
+// API Key) always include a provider-level choice and one entry-level
+// choice per persisted entry with a derivable identity. Provider-level
+// count is at least 1 and equals the entry count whenever entries exist,
+// so the picker reflects the underlying pool size. API-key secrets are
+// never inspected and never appear in labels or keys.
 export function expandProviderToChoices(row) {
   if (!row || row.disabled) return [];
   const providerKey = typeof row.provider_key === 'string' ? row.provider_key.trim() : '';
@@ -90,8 +93,13 @@ export function expandProviderToChoices(row) {
     return providerKey;
   })();
 
-  // Non-OpenAI providers contribute exactly one provider-level choice.
-  if (providerType !== 'openai-compatibility') {
+  // Provider types that round-robin across `api_key_entries` share the
+  // same provider/entry construction. Other types (Gemini/Codex/etc.)
+  // contribute exactly one provider-level choice.
+  const supportsEntries = providerType === 'openai-compatibility'
+    || providerType === 'claude-api-key';
+
+  if (!supportsEntries) {
     return [{
       key: providerKey,
       label: providerLabel,
