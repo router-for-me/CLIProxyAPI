@@ -9,6 +9,11 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// ProxyFallbackDirect falls back to a direct connection when the configured
+	// proxy is unreachable. Management APICall uses this so quota refresh does
+	// not sit in "running" while a local proxy accepts TCP but never completes CONNECT.
+	ProxyFallbackDirect bool `yaml:"proxy-fallback-direct" json:"proxy-fallback-direct"`
+
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//
 	// Supported values:
