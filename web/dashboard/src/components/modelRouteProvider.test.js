@@ -58,6 +58,38 @@ test('does not light up an OpenAI provider-level route for a different provider 
   assert.equal(providerKeyIsLive('openai-compatible-foo', ['openai-compatible-baz:bar']), false);
 });
 
+// --- Task 5: Claude compound live-key behaviour ---------------------------
+// Compound provider keys like `claude:<rowID>` and `claude:<rowID>:key-<id>`
+// must be matched exactly. A bare `claude` (legacy/OAuth) live key is NOT
+// evidence that every compound Claude row is serving the model. The
+// bare-prefix broadening stays scoped to OpenAI Compatibility.
+
+test('providerKeyIsLive: exact compound provider key is live', () => {
+  assert.equal(providerKeyIsLive('claude:42', ['claude:42']), true);
+});
+
+test('providerKeyIsLive: exact compound entry key is live', () => {
+  assert.equal(providerKeyIsLive('claude:42:key-7', ['claude:42:key-7']), true);
+});
+
+test('providerKeyIsLive: bare unrelated claude does NOT light up claude:<row> provider', () => {
+  assert.equal(providerKeyIsLive('claude:42', ['claude']), false);
+});
+
+test('providerKeyIsLive: bare unrelated claude does NOT light up claude:<row>:key-<id> entry', () => {
+  assert.equal(providerKeyIsLive('claude:42:key-7', ['claude']), false);
+});
+
+test('providerKeyIsLive: different compound claude key does NOT light up another row', () => {
+  assert.equal(providerKeyIsLive('claude:42', ['claude:99']), false);
+});
+
+test('providerKeyIsLive: compound entry key does NOT light up its parent provider route', () => {
+  // Bare-prefix broadening stays scoped to OpenAI; Claude compound provider
+  // routes require an exact compound hit at the provider level too.
+  assert.equal(providerKeyIsLive('claude:42', ['claude:42:key-7']), false);
+});
+
 // --- generateEntryIdentity -----------------------------------------------
 
 test('generateEntryIdentity prefers the stable id over the mutable name', () => {
@@ -109,6 +141,92 @@ test('expandProviderToChoices returns only a provider-level choice for non-OpenA
     identity: '',
     count: 1,
   }]);
+});
+
+// --- Task 5: Claude (API Key) entry choices ------------------------------
+// Task 5 extends `expandProviderToChoices` so a `claude-api-key` row with
+// `api_key_entries` shares the provider/entry construction used by OpenAI
+// Compatibility. The provider-level choice carries the entry count and
+// each entry with a derivable stable identity becomes its own route.
+
+test('expandProviderToChoices: claude-api-key with entries yields provider + per-entry choices', () => {
+  const out = expandProviderToChoices({
+    provider_type: 'claude-api-key',
+    provider_key: 'claude:42',
+    name: 'anthropic',
+    api_key_entries: [
+      { id: 7, name: 'alpha', api_key: 'FAKE-SECRET-alpha' },
+      { id: 9, name: 'beta', api_key: 'FAKE-SECRET-beta' },
+    ],
+  });
+  const keys = out.map((c) => c.key);
+  // Provider-level choice mirrors the OpenAI branch; count reflects entries.
+  const provider = out.find((c) => c.level === 'provider');
+  assert.ok(provider, 'provider-level choice present');
+  assert.equal(provider.key, 'claude:42');
+  assert.equal(provider.count, 2, 'provider count equals entry count when entries exist');
+  // Per-entry choices key off the stable persisted id, never the name.
+  assert.ok(keys.includes('claude:42:key-7'), 'id-keyed entry route present');
+  assert.ok(keys.includes('claude:42:key-9'), 'id-keyed entry route present');
+  // API-key secrets never leak into labels or keys.
+  for (const c of out) {
+    assert.ok(!c.label.includes('FAKE-SECRET'), 'label never carries secret');
+    assert.ok(!c.key.includes('FAKE-SECRET'), 'key never carries secret');
+  }
+});
+
+test('expandProviderToChoices: claude-api-key omits entries with no derivable identity', () => {
+  const out = expandProviderToChoices({
+    provider_type: 'claude-api-key',
+    provider_key: 'claude:42',
+    name: 'anthropic',
+    api_key_entries: [
+      { id: 7, name: 'alpha', api_key: 'FAKE-SECRET-alpha' },
+      // No id and no name → no identity, no entry choice.
+      { id: 0, name: '', api_key: 'FAKE-SECRET-ghost' },
+      // Whitespace-only name and no id → no identity, no entry choice.
+      { id: 0, name: '   ', api_key: 'FAKE-SECRET-blank' },
+    ],
+  });
+  const keys = out.map((c) => c.key);
+  assert.ok(keys.includes('claude:42:key-7'), 'persisted id entry present');
+  assert.ok(
+    !keys.some((k) => k.startsWith('claude:42:') && k !== 'claude:42:key-7'),
+    'no other entry-level keys emitted for invalid entries',
+  );
+  const provider = out.find((c) => c.level === 'provider');
+  assert.ok(provider, 'provider-level choice present');
+  assert.equal(provider.count, 3, 'provider count reflects all attempted entries');
+});
+
+test('expandProviderToChoices: claude-api-key without entries keeps provider-level only', () => {
+  const out = expandProviderToChoices({
+    provider_type: 'claude-api-key',
+    provider_key: 'claude:42',
+    name: 'anthropic',
+    api_key_entries: [],
+  });
+  assert.deepEqual(out, [{
+    key: 'claude:42',
+    label: 'anthropic',
+    providerType: 'claude-api-key',
+    level: 'provider',
+    identity: '',
+    count: 1,
+  }]);
+});
+
+test('expandProviderToChoices: claude-api-key honors reserved key-<digits> name fallback', () => {
+  const out = expandProviderToChoices({
+    provider_type: 'claude-api-key',
+    provider_key: 'claude:42',
+    name: 'anthropic',
+    api_key_entries: [{ id: 7, name: 'key-7', api_key: 'FAKE-SECRET-reserved' }],
+  });
+  const keys = out.map((c) => c.key);
+  // The reserved name collapses to the implicit key-7 identity derived from id.
+  assert.ok(keys.includes('claude:42:key-7'),
+    'reserved name still produces the id-keyed entry route');
 });
 
 test('expandProviderToChoices yields provider-level + per-entry choices keyed off the stable id', () => {

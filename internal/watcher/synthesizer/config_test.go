@@ -1189,3 +1189,157 @@ func TestConfigSynthesizer_BuiltInAPIKeyProviderKeyAttribute(t *testing.T) {
 		})
 	}
 }
+
+// TestConfigSynthesizer_Claude_EntryProviderKey covers the Task 3 behaviour
+// where PG-rendered Claude entries get a stable per-entry routing key of the
+// form `claude:<rowID>:key-<entryID>`. The identity MUST come from the
+// persisted child-row ID — never from the mutable entry name — so renaming
+// an entry does not invalidate saved model-route bindings.
+//
+// Two Claude entries with parent ID 42, child IDs 7 and 9, names
+// "renamed-a" and "" respectively, are projected through the synthesizer
+// and asserted on provider, provider_key, exact entry_provider_key, and
+// stability across a name change. Legacy configs (no parent id, no child
+// id) emit no entry_provider_key and remain on the bare "claude" channel.
+func TestConfigSynthesizer_Claude_EntryProviderKey(t *testing.T) {
+	const secret = "super-secret-claude-key"
+
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{
+					APIKey:                  secret + "-one",
+					UpstreamProviderID:      42,
+					UpstreamProviderEntryID: 7,
+				},
+				{
+					APIKey:                  secret + "-two",
+					UpstreamProviderID:      42,
+					UpstreamProviderEntryID: 9,
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths, got %d", len(auths))
+	}
+
+	wantProviderKeys := []string{"claude:42", "claude:42"}
+	wantEntryKeys := []string{"claude:42:key-7", "claude:42:key-9"}
+	for i, auth := range auths {
+		if got := auth.Provider; got != "claude" {
+			t.Errorf("auth[%d].Provider = %q, want %q", i, got, "claude")
+		}
+		if got := auth.Attributes["provider_key"]; got != wantProviderKeys[i] {
+			t.Errorf("auth[%d].provider_key = %q, want %q", i, got, wantProviderKeys[i])
+		}
+		gotEntry, ok := auth.Attributes[coreauth.AttributeEntryProviderKey]
+		if !ok {
+			t.Errorf("auth[%d].entry_provider_key missing, want %q", i, wantEntryKeys[i])
+			continue
+		}
+		if gotEntry != wantEntryKeys[i] {
+			t.Errorf("auth[%d].entry_provider_key = %q, want %q", i, gotEntry, wantEntryKeys[i])
+		}
+	}
+}
+
+// TestConfigSynthesizer_Claude_EntryProviderKey_NameChangeStable confirms
+// that the synthesised entry_provider_key derives from the stable child-row
+// ID, not from any operator-renameable surface on the entry (here, the
+// Prefix field, which is the closest analogue to a mutable entry name on
+// config.ClaudeKey). Mutating such fields must not change the routing key
+// — otherwise persisted model-route bindings silently break on rename (the
+// same regression the OpenAI path fixed in commit c0fcdd19).
+func TestConfigSynthesizer_Claude_EntryProviderKey_NameChangeStable(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	now := time.Now()
+	idGen := NewStableIDGenerator()
+
+	render := func(prefix string) string {
+		ctx := &SynthesisContext{
+			Config: &config.Config{
+				ClaudeKey: []config.ClaudeKey{
+					{
+						APIKey:                  "fake-key-1",
+						Prefix:                  prefix,
+						UpstreamProviderID:      42,
+						UpstreamProviderEntryID: 7,
+					},
+				},
+			},
+			Now:         now,
+			IDGenerator: idGen,
+		}
+		auths, err := synth.Synthesize(ctx)
+		if err != nil {
+			t.Fatalf("synth error (prefix=%q): %v", prefix, err)
+		}
+		if len(auths) != 1 {
+			t.Fatalf("auth count (prefix=%q) = %d, want 1", prefix, len(auths))
+		}
+		return auths[0].Attributes[coreauth.AttributeEntryProviderKey]
+	}
+
+	first := render("renamed-a")
+	renamed := render("renamed-b")
+	cleared := render("")
+
+	const want = "claude:42:key-7"
+	if first != want {
+		t.Errorf("entry_provider_key (prefix=renamed-a) = %q, want %q", first, want)
+	}
+	if renamed != want {
+		t.Errorf("entry_provider_key (prefix=renamed-b) = %q, want %q", renamed, want)
+	}
+	if cleared != want {
+		t.Errorf("entry_provider_key (prefix=empty) = %q, want %q", cleared, want)
+	}
+}
+
+// TestConfigSynthesizer_Claude_LegacyIDsHaveNoEntryProviderKey asserts that
+// the legacy YAML-only path — Claude entries with neither UpstreamProviderID
+// nor UpstreamProviderEntryID — produces an Auth with Provider "claude", no
+// provider_key, and no entry_provider_key. Existing bare-channel round-robin
+// behaviour must remain unchanged.
+func TestConfigSynthesizer_Claude_LegacyIDsHaveNoEntryProviderKey(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{APIKey: "legacy-key-a"},
+				{APIKey: "legacy-key-b"},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths, got %d", len(auths))
+	}
+
+	for i, auth := range auths {
+		if got := auth.Provider; got != "claude" {
+			t.Errorf("auth[%d].Provider = %q, want %q", i, got, "claude")
+		}
+		if v, ok := auth.Attributes["provider_key"]; ok {
+			t.Errorf("auth[%d].provider_key = %q, want attribute to be absent", i, v)
+		}
+		if v, ok := auth.Attributes[coreauth.AttributeEntryProviderKey]; ok {
+			t.Errorf("auth[%d].entry_provider_key = %q, want attribute to be absent", i, v)
+		}
+	}
+}

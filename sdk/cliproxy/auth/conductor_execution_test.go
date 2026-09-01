@@ -425,3 +425,119 @@ func TestManagerLiveProviderKeysForModelIncludesOpenAIEntryKey(t *testing.T) {
 		t.Fatalf("LiveProviderKeysForModel() = %v, want provider-level pin \"openai-compatible-foo\"", got)
 	}
 }
+
+// TestAuthMatchesProviderClaudeEntryAndProviderRoute covers the route
+// selection contract for Task 6's Claude multi-entry rows. Both the
+// provider-level route (`claude:<providerID>`) and the entry-level route
+// (`claude:<providerID>:key-<entryID>`) emitted by the synthesizer must
+// resolve back to the matching auth via the existing authMatchesProvider
+// branch. Concretely:
+//
+//   - An auth carrying `provider_key=claude:42` is a match for
+//     `claude:42` (exact provider-level route).
+//   - An auth carrying `provider_key=claude:42` and
+//     `entry_provider_key=claude:42:key-7` is also a match for
+//     `claude:42:key-7` (entry-level route).
+//   - The same auth must NOT match `claude:99`, `claude:42:key-9`, or an
+//     unrelated built-in route (negative cross-row guard).
+//
+// The test deliberately exercises only the route-selection contract —
+// executor selection, cooldown, and weighted-round-robin logic are
+// unchanged by Tasks 1–6 and stay covered by their dedicated tests. No
+// new failover/cooldown mechanism is invented here.
+func TestAuthMatchesProviderClaudeEntryAndProviderRoute(t *testing.T) {
+	t.Parallel()
+	auth := &Auth{
+		Provider: "claude",
+		Attributes: map[string]string{
+			"provider_key":            "claude:42",
+			AttributeEntryProviderKey: "claude:42:key-7",
+		},
+	}
+	if !authMatchesProvider(auth, "claude:42") {
+		t.Fatal(`"claude:42" must match a Claude auth carrying that provider_key`)
+	}
+	if !authMatchesProvider(auth, "CLAUDE:42") {
+		t.Fatal(`uppercase "CLAUDE:42" must match case-insensitively`)
+	}
+	if !authMatchesProvider(auth, "claude:42:key-7") {
+		t.Fatal(`"claude:42:key-7" must match the entry-level route on the same auth`)
+	}
+	if !authMatchesProvider(auth, "CLAUDE:42:KEY-7") {
+		t.Fatal(`uppercase entry pin must match case-insensitively`)
+	}
+	// Cross-row / cross-entry guards: an entry-level pin must not light up
+	// a sibling entry, and a sibling provider row must not match.
+	if authMatchesProvider(auth, "claude:99") {
+		t.Fatal(`"claude:99" must not match a Claude row pinned to id=42`)
+	}
+	if authMatchesProvider(auth, "claude:42:key-9") {
+		t.Fatal(`"claude:42:key-9" must not match an entry-level pin for id=7`)
+	}
+	if authMatchesProvider(auth, "openai-compatible-foo:bar") {
+		t.Fatal(`Claude auth must not match an OpenAI-compat entry pin`)
+	}
+
+	// Cross-row guard with the parent provider_level key for a sibling row.
+	sibling := &Auth{
+		Provider: "claude",
+		Attributes: map[string]string{
+			"provider_key":            "claude:99",
+			AttributeEntryProviderKey: "claude:99:key-7",
+		},
+	}
+	if !authMatchesProvider(sibling, "claude:99") {
+		t.Fatal(`sibling row must match its own "claude:99" pin`)
+	}
+	if authMatchesProvider(sibling, "claude:42") {
+		t.Fatal(`sibling row must not match the original "claude:42" pin`)
+	}
+
+	// Executor key resolution: the compound provider-level route must map
+	// back to the bare "claude" channel so the executor manager can resolve
+	// it. Entry-level routes (`claude:<rowID>:key-<id>`) are matched by the
+	// entry_provider_key attribute on the auth (see authMatchesProvider
+	// branch 2) rather than by executor-key stripping, so they pass through
+	// executorKeyFromRoutingKey unchanged — the executor manager never sees
+	// them directly.
+	if got := executorKeyFromRoutingKey("claude:42"); got != "claude" {
+		t.Fatalf(`executorKeyFromRoutingKey("claude:42") = %q, want "claude"`, got)
+	}
+}
+
+// TestManagerLiveProviderKeysForModelIncludesClaudeEntryKey pins down the
+// LiveProviderKeysForModel contract for the new Claude multi-entry rows:
+// when the runtime registry reports that an auth serves the model,
+// LiveProviderKeysForModel must expose BOTH the compound provider-level
+// route (`claude:<rowID>`) AND the entry-level route
+// (`claude:<rowID>:key-<entryID>`). Without the entry-level surfacing the
+// dashboard picker cannot distinguish a row's child entries as live, and
+// operators cannot pin a model to one specific child key. The companion
+// to TestManagerLiveProviderKeysForModelIncludesOpenAIEntryKey — keeps
+// the cross-provider contract symmetrical.
+func TestManagerLiveProviderKeysForModelIncludesClaudeEntryKey(t *testing.T) {
+	model := "live-provider-claude-entry-model"
+	entryAuthID := "live-provider-claude-entry-auth"
+	registry.GetGlobalRegistry().RegisterClient(entryAuthID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(entryAuthID) })
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	if _, errRegister := manager.Register(context.Background(), &Auth{
+		ID:       entryAuthID,
+		Provider: "claude",
+		Attributes: map[string]string{
+			"provider_key":            "claude:42",
+			AttributeEntryProviderKey: "claude:42:key-7",
+		},
+	}); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	got := manager.LiveProviderKeysForModel(model)
+	if !slices.Contains(got, "claude:42") {
+		t.Fatalf("LiveProviderKeysForModel() = %v, want provider-level pin \"claude:42\"", got)
+	}
+	if !slices.Contains(got, "claude:42:key-7") {
+		t.Fatalf("LiveProviderKeysForModel() = %v, want entry-level pin \"claude:42:key-7\"", got)
+	}
+}

@@ -61,6 +61,11 @@ type upstreamProviderEntryReq struct {
 	Name     string `json:"name,omitempty"`
 	APIKey   string `json:"api_key"`
 	ProxyURL string `json:"proxy_url,omitempty"`
+	// Weight is the optional proportional selection weight under
+	// weighted-round-robin routing. nil/omitted falls back to the scheduler
+	// default; the dashboard editor restricts user input to positive values
+	// 1..MaxCredentialWeight. Encoded as `weight` only when set.
+	Weight *int `json:"weight,omitempty"`
 }
 
 // parseRFC3339 parses an RFC3339 timestamp string, returning ok=false on

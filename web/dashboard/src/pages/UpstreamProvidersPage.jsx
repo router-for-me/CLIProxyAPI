@@ -1267,7 +1267,9 @@ function ChannelAliasEditor({ channel, label, rows, onChange, onSave, onRemove, 
 // Schema definitions (declarative, per provider_type)
 // ============================================================================
 
-function buildSchemas() {
+// buildSchemas is exported solely for focused tests in this directory —
+// the production callers only reach it via the React tree above.
+export function buildSchemas() {
   const commonEndpoint = [
     { name: 'base_url', label: 'Base URL', type: 'text', placeholder: 'https://api.example.com',
       hint: 'Upstream API base URL. Leave blank to use the provider default.',
@@ -1356,16 +1358,30 @@ function buildSchemas() {
       { name: 'websockets', label: 'WebSockets', type: 'toggle',
         hint: 'Use the Responses API websocket transport for this entry.' },
     ], [], [identifierField]),
-    'claude-api-key': apiKeyBase(
-      [
-        { name: 'rebuild_mid_system_message', label: 'Rebuild mid system message', type: 'toggle',
-          hint: 'Move role=system messages into the top-level system field.' },
-        { name: 'experimental_cch_signing', label: 'Experimental CCH signing', type: 'toggle',
-          hint: 'Opt-in final-body cch signing for cloaked Claude /v1/messages requests.' },
+    'claude-api-key': {
+      sections: [
+        { title: 'Identity', fields: [
+          identifierField,
+          // Claude (API Key) shares the multi-row editor with OpenAI
+          // Compatibility. Each entry authenticates a single key and is
+          // round-robined by the auth manager; the row-level proxy still
+          // serves as the default for entries that leave the per-entry
+          // override blank.
+          { name: 'api_key_entries', label: 'API key entries', type: 'api_key_entries',
+            hint: 'Multiple keys form a round-robin pool for this provider. Per-entry proxy overrides the row-level proxy when set.' },
+        ]},
+        { title: 'Endpoint', fields: commonEndpoint },
+        { title: 'Routing', fields: commonRouting, fetchModels: true },
+        { title: 'Behavior', fields: [
+          ...commonBehavior,
+          { name: 'rebuild_mid_system_message', label: 'Rebuild mid system message', type: 'toggle',
+            hint: 'Move role=system messages into the top-level system field.' },
+          { name: 'experimental_cch_signing', label: 'Experimental CCH signing', type: 'toggle',
+            hint: 'Opt-in final-body cch signing for cloaked Claude /v1/messages requests.' },
+        ]},
+        claudeCloakSection,
       ],
-      [claudeCloakSection],
-      [identifierField],
-    ),
+    },
     'vertex-api-key': apiKeyBase([], [], [identifierField]),
     'openai-compatibility': {
       sections: [
@@ -3107,18 +3123,20 @@ function ImportOAuthProviderModal({ existingProviderKeys = new Set(), onClose, o
   );
 }
 
-// APIKeyEntriesEditor — multi-row editor for openai-compatibility
-// api-key-entries. Each row carries an optional normalised identity (also
-// known as the entry provider key), a masked API key, and an optional proxy
-// URL. The persisted child-row id is round-tripped so the backend can update
-// rows in place rather than deleting and reinserting them.
+// APIKeyEntriesEditor — multi-row editor for OpenAI Compatibility and Claude
+// (API Key) api_key_entries. Each row carries an optional normalised
+// identity (also known as the entry provider key), a masked API key, an
+// optional proxy URL (override of the row-level proxy when filled), and an
+// optional weight for weighted round-robin. The persisted child-row id is
+// round-tripped so the backend can update rows in place rather than
+// deleting and reinserting them.
 function APIKeyEntriesEditor({ entries, onChange, error = '' }) {
   const safe = Array.isArray(entries) ? entries : [];
   function update(idx, patch) {
     onChange(safe.map((e, i) => (i === idx ? { ...e, ...patch } : e)));
   }
   function add() {
-    onChange([...safe, { api_key: '', proxy_url: '', name: '', id: 0 }]);
+    onChange([...safe, { api_key: '', proxy_url: '', name: '', id: 0, weight: '' }]);
   }
   function remove(idx) { onChange(safe.filter((_, i) => i !== idx)); }
 
@@ -3173,6 +3191,18 @@ function APIKeyEntriesEditor({ entries, onChange, error = '' }) {
                 spellCheck={false}
                 aria-label="API key entry proxy URL"
               />
+              <input
+                type="text"
+                inputMode="numeric"
+                value={e.weight ?? ''}
+                onChange={(ev) => update(idx, { weight: ev.target.value })}
+                placeholder="weight"
+                title="Positive integer 1..1000000. Blank = default."
+                spellCheck={false}
+                aria-label="API key entry weight"
+                aria-invalid={!!rowErr.weight}
+                data-testid={`api-key-entry-weight-${idx}`}
+              />
               <button
                 type="button"
                 className="list-editor__remove"
@@ -3187,6 +3217,9 @@ function APIKeyEntriesEditor({ entries, onChange, error = '' }) {
             {rowErr.name && (
               <div className="form__error" role="alert">{rowErr.name}</div>
             )}
+            {rowErr.weight && (
+              <div className="form__error" role="alert">{rowErr.weight}</div>
+            )}
           </div>
         );
       })}
@@ -3195,15 +3228,22 @@ function APIKeyEntriesEditor({ entries, onChange, error = '' }) {
   );
 }
 
+// MAX_ENTRY_WEIGHT matches config.MaxCredentialWeight (1,000,000). The
+// scheduler normalizes anything above that out, but the editor must
+// reject impossible values up front so the operator never hits a 400
+// from the backend on save.
+const MAX_ENTRY_WEIGHT = 1000000;
+
 // validateAPIKeyEntries enforces the same rules the backend's
 // normalizeUpstreamProviderEntryName applies, plus the duplicate-name check
-// across the provider's entries. Returns a map keyed by entry index plus a
-// __global bucket for cross-entry messages.
-function validateAPIKeyEntries(entries) {
+// across the provider's entries and the per-row weight bounds. Returns a map
+// keyed by entry index plus a __global bucket for cross-entry messages.
+export function validateAPIKeyEntries(entries) {
   const out = {};
+  const list = Array.isArray(entries) ? entries : [];
   const seenNames = new Map(); // normalised name → first occurrence idx
-  for (let i = 0; i < entries.length; i += 1) {
-    const e = entries[i] || {};
+  for (let i = 0; i < list.length; i += 1) {
+    const e = list[i] || {};
     const errs = {};
     const raw = typeof e.name === 'string' ? e.name : '';
     const trimmed = raw.trim();
@@ -3218,6 +3258,18 @@ function validateAPIKeyEntries(entries) {
         errs.name = firstIdx === i
           ? 'Duplicate identity detected.'
           : `Duplicate identity. Entry ${firstIdx + 1} already uses "${trimmed}".`;
+      }
+    }
+    // Weight: blank means default. Anything else must be a positive
+    // integer in 1..MAX_ENTRY_WEIGHT (inclusive). The backend re-bounds
+    // out-of-range values, but the editor keeps the user out of bad
+    // state up front.
+    const weightRaw = e && e.weight;
+    if (weightRaw !== undefined && weightRaw !== null && String(weightRaw).trim() !== '') {
+      const s = String(weightRaw).trim();
+      const n = Number(s);
+      if (!Number.isFinite(n) || !/^-?\d+$/.test(s) || n < 1 || n > MAX_ENTRY_WEIGHT || Math.floor(n) !== n) {
+        errs.weight = `Weight must be a whole number between 1 and ${MAX_ENTRY_WEIGHT}.`;
       }
     }
     if (Object.keys(errs).length > 0) out[i] = errs;
@@ -3243,7 +3295,26 @@ function idHintForIdentity(e) {
 // Form construction & payload building
 // ============================================================================
 
-function buildForm(providerType, initial, carryOver) {
+function hydrateEntries(src) {
+  // Shared row-shape used by both OpenAI Compatibility and Claude (API Key).
+  // Round-trip the persisted child-row id, the server-normalised name, the
+  // optional per-entry proxy override, and the optional weight so subsequent
+  // saves update rows in place rather than deleting and reinserting them.
+  if (!Array.isArray(src)) return [];
+  return src.map((e) => ({
+    id: Number(e && e.id) || 0,
+    name: e && e.name ? e.name : '',
+    api_key: e && e.api_key ? e.api_key : '',
+    proxy_url: e && e.proxy_url ? e.proxy_url : '',
+    // Weight is optional; editors leave it blank for the "default" affordance.
+    // Treat null/undefined as blank so the editor shows an empty input.
+    weight: e && e.weight !== undefined && e.weight !== null ? e.weight : '',
+  }));
+}
+
+// buildForm is exported solely for focused tests in this directory —
+// production callers only reach it via the React tree above.
+export function buildForm(providerType, initial, carryOver) {
   const src = initial || {};
   const carry = carryOver || {};
   const base = {
@@ -3297,22 +3368,30 @@ function buildForm(providerType, initial, carryOver) {
     base.headers = Object.entries(src.headers).map(([key, value]) => ({ key, value: String(value) }));
   }
 
-  // Hydrate openai-compat api_key_entries. Round-trip the persisted child-row
-  // id and the server-normalised name so subsequent saves update in place
-  // rather than deleting and reinserting the row.
-  if (Array.isArray(src.api_key_entries)) {
-    base.api_key_entries = src.api_key_entries.map((e) => ({
-      id: Number(e.id) || 0,
-      name: e.name || '',
-      api_key: e.api_key || '',
-      proxy_url: e.proxy_url || '',
-    }));
+  // Hydrate OpenAI Compatibility and Claude (API Key) api_key_entries.
+  // Claude also accepts a legacy single api_key; when entries are absent
+  // but the legacy api_key is set, synthesise one unsaved entry so the
+  // existing pg-backed child-row ID upsert replaces the legacy key
+  // transparently on save.
+  const entries = hydrateEntries(src.api_key_entries);
+  if (entries.length > 0) {
+    base.api_key_entries = entries;
+  } else if (providerType === 'claude-api-key' && typeof src.api_key === 'string' && src.api_key.trim()) {
+    base.api_key_entries = [{
+      id: 0,
+      name: '',
+      api_key: src.api_key,
+      proxy_url: '',
+      weight: '',
+    }];
   }
 
   return base;
 }
 
-function buildPayload(form, providerType) {
+// buildPayload is exported solely for focused tests in this directory —
+// the production callers only reach it via the React tree above.
+export function buildPayload(form, providerType) {
   const oauth = isOAuth(providerType);
   const openai = isOpenAI(providerType);
   const claude = isClaude(providerType);
@@ -3377,27 +3456,44 @@ function buildPayload(form, providerType) {
         payload.token_expiry = t.toISOString();
       }
     }
-  } else if (openai) {
+  } else if (openai || providerType === 'claude-api-key') {
+    // OpenAI Compatibility AND Claude (API Key) both use the multi-row
+    // entries editor in the modern UI; both round-trip the persisted
+    // child-row id, the optional normalised identity, the optional
+    // per-entry proxy override, and the optional weight for weighted
+    // round-robin. New rows omit the id so the backend treats them as
+    // inserts. Blank entries (no api_key) are filtered out so a Save
+    // never resends rows the operator cleared.
     payload.name = (form.name || '').trim();
-    // api_key_entries round-trip the persisted child-row id and the optional
-    // normalised identity. The id is only sent when it is a positive integer;
-    // new rows omit it so the backend treats them as inserts.
-    payload.api_key_entries = (form.api_key_entries || [])
-      .filter((e) => e.api_key && e.api_key.trim())
+    payload.api_key_entries = (Array.isArray(form.api_key_entries) ? form.api_key_entries : [])
+      .filter((e) => e && e.api_key && String(e.api_key).trim())
       .map((e) => {
         const entry = {
-          api_key: e.api_key.trim(),
+          api_key: String(e.api_key).trim(),
           proxy_url: (e.proxy_url || '').trim(),
         };
         const id = Number(e.id) || 0;
         if (id > 0) entry.id = id;
         const name = typeof e.name === 'string' ? e.name.trim().toLowerCase() : '';
         if (name) entry.name = name;
+        // Weight: only emitted when the operator filled it in with a
+        // valid positive integer; blank or malformed values fall back to
+        // the scheduler default (1). The validate() pass surfaces
+        // invalid weights as inline row errors before Save.
+        const weightRaw = e.weight;
+        if (weightRaw !== undefined && weightRaw !== null && String(weightRaw).trim() !== '') {
+          const s = String(weightRaw).trim();
+          const n = Number(s);
+          if (Number.isFinite(n) && /^-?\d+$/.test(s) && n >= 1 && n <= MAX_ENTRY_WEIGHT && Math.floor(n) === n) {
+            entry.weight = Math.trunc(n);
+          }
+        }
         return entry;
       });
   } else {
-    // API-key providers. The Identifier field maps to the generic `name`
-    // column (lower-cased by the proxy into the routing provider key).
+    // Other API-key providers (gemini, codex, xai, interactions,
+    // vertex). The Identifier field maps to the generic `name` column
+    // (lower-cased by the proxy into the routing provider key).
     payload.name = (form.name || '').trim();
     payload.api_key = (form.api_key || '').trim();
   }
@@ -3425,7 +3521,9 @@ function buildPayload(form, providerType) {
 // Validation
 // ============================================================================
 
-function validate(form, schema, providerType, siblingNames, isEdit) {
+// validate is exported solely for focused tests in this directory —
+// production callers only reach it via the React tree above.
+export function validate(form, schema, providerType, siblingNames, isEdit) {
   const errors = {};
   for (const section of schema.sections) {
     for (const field of section.fields) {
@@ -3447,25 +3545,45 @@ function validate(form, schema, providerType, siblingNames, isEdit) {
       }
     }
   }
-  // OpenAI-compat name uniqueness.
-  if (isOpenAI(providerType)) {
-    const name = (form.name || '').trim();
-    if (name && siblingNames.includes(name)) {
-      // In edit mode, the current row's own name is in siblingNames too;
-      // we can't distinguish without the editing row's id in the list, so
-      // only flag duplicates when there are 2+ occurrences.
-      const occurrences = siblingNames.filter((n) => n === name).length;
-      if (!isEdit || occurrences > 1) {
-        errors.name = `Another provider already uses the name "${name}".`;
+  // OpenAI-compat and Claude (API Key) entry validation: identity
+  // uniqueness/reserved-name rules + per-row weight bounds. Mirrors the
+  // backend's normalizeUpstreamProviderEntryName + credentialweight
+  // parsing so Save cannot submit a payload the server would reject.
+  const usesEntries = providerType === 'openai-compatibility' || providerType === 'claude-api-key';
+  if (usesEntries) {
+    // OpenAI-compat: provider-level name uniqueness.
+    if (isOpenAI(providerType)) {
+      const name = (form.name || '').trim();
+      if (name && siblingNames.includes(name)) {
+        // In edit mode, the current row's own name is in siblingNames too;
+        // we can't distinguish without the editing row's id in the list, so
+        // only flag duplicates when there are 2+ occurrences.
+        const occurrences = siblingNames.filter((n) => n === name).length;
+        if (!isEdit || occurrences > 1) {
+          errors.name = `Another provider already uses the name "${name}".`;
+        }
       }
     }
-    // API-key entry identity validation mirrors the backend's
-    // normalizeUpstreamProviderEntryName so the Save button cannot submit
-    // a payload the server would reject.
-    const entryErrors = validateAPIKeyEntries(form.api_key_entries || []);
-    const dupCount = Object.keys(entryErrors).length;
-    if (dupCount > 0) {
-      errors.api_key_entries = `${dupCount} API key entr${dupCount === 1 ? 'y has' : 'ies have'} an identity problem. See inline messages below.`;
+    // Entries are always coerced into an array; tolerate malformed input
+    // safely so a never-crash contract holds.
+    const rawEntries = Array.isArray(form.api_key_entries) ? form.api_key_entries : [];
+    const entryErrors = validateAPIKeyEntries(rawEntries);
+    const problemCount = Object.keys(entryErrors).length;
+    if (problemCount > 0) {
+      errors.api_key_entries = `${problemCount} API key entr${problemCount === 1 ? 'y has' : 'ies have'} an identity problem. See inline messages below.`;
+    }
+    // Claude (API Key) requires AT LEAST one non-blank entry (which
+    // includes legacy rows carrying a single api_key). Without it the
+    // operator would save an auth-less provider.
+    if (providerType === 'claude-api-key') {
+      const hasNonblankEntry = rawEntries.some((e) =>
+        e && typeof e.api_key === 'string' && e.api_key.trim() !== '',
+      );
+      if (!hasNonblankEntry) {
+        // Reuse the api_key_entries bucket so the inline editor + the
+        // Save banner both surface the same credential-required message.
+        if (!errors.api_key_entries) errors.api_key_entries = 'At least one API key is required.';
+      }
     }
   }
   return errors;

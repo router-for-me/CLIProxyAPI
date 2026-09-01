@@ -191,6 +191,20 @@ func providerFromClaudeKey(k config.ClaudeKey) store.UpstreamProvider {
 		ExperimentalCCHSigning:  k.ExperimentalCCHSigning,
 		SourceBackend:           "config",
 	}
+	// SeedFromArtifacts creates a fresh parent row per config item, and the
+	// store's syncAPIKeyEntriesTx validator rejects any positive child ID
+	// that does not already belong to that freshly minted parent. We
+	// therefore deliberately drop both UpstreamProviderID and
+	// UpstreamProviderEntryID on the seed path: those fields are runtime
+	// renderer/synthesizer metadata that the in-memory pipeline re-stamps
+	// after every reload, so losing them on first-boot seed does not affect
+	// the live runtime behavior. Likewise, k.Weight has nowhere to land on
+	// the parent row because store.UpstreamProvider has no parent weight
+	// column — propagating it would require inventing schema or creating a
+	// child entry, which would itself require a positive child ID we just
+	// dropped. Manual YAML seeds therefore remain "one parent row, no child
+	// entries" — the same one-item-to-one-row cardinality SeedFromArtifacts
+	// has always promised.
 	if k.DisableCooling {
 		setExtra(&p, "disable_cooling", true)
 	}
@@ -233,6 +247,7 @@ func providerFromOpenAICompat(k config.OpenAICompatibility) store.UpstreamProvid
 			Name:     e.Name,
 			APIKey:   e.APIKey,
 			ProxyURL: e.ProxyURL,
+			Weight:   e.Weight,
 		})
 	}
 	for _, m := range k.Models {

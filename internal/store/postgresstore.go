@@ -705,6 +705,17 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: migrate upstream provider entries name index: %w", err)
 	}
+	// upstream_provider_api_key_entries weight column. The dashboard now lets
+	// each API-key entry carry a proportional selection weight under
+	// weighted-round-robin routing. The column is nullable so legacy rows
+	// survive the upgrade with their existing routing behavior (nil falls back
+	// to the scheduler default). No DEFAULT: a non-null default would silently
+	// hide the "user did not pick a weight" signal from the dashboard.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS weight INTEGER`, upstreamEntriesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: migrate upstream provider entries weight column: %w", err)
+	}
 
 	// usage_stat_day is the pre-aggregated daily rollup of usage_events. It folds
 	// per-request rows into per-(day, user, api_key, model, provider, source)
@@ -1632,7 +1643,8 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			api_key     TEXT NOT NULL,
 			name        TEXT,
 			proxy_url   TEXT,
-			sort_order  INTEGER NOT NULL DEFAULT 0
+			sort_order  INTEGER NOT NULL DEFAULT 0,
+			weight      INTEGER
 		)
 	`, upstreamEntriesTable, upstreamProvidersTable)); err != nil {
 		return fmt.Errorf("postgres store: create upstream_provider_api_key_entries table: %w", err)

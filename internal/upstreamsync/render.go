@@ -74,7 +74,7 @@ func RenderConfig(providers []store.UpstreamProvider) config.Config {
 		case TypeXAIAPIKey:
 			cfg.XAIKey = append(cfg.XAIKey, codexKeyFromProvider(p))
 		case TypeClaudeAPIKey:
-			cfg.ClaudeKey = append(cfg.ClaudeKey, claudeKeyFromProvider(p))
+			cfg.ClaudeKey = append(cfg.ClaudeKey, claudeKeyFromProvider(p)...)
 		case TypeOpenAICompatibility:
 			cfg.OpenAICompatibility = append(cfg.OpenAICompatibility, openAICompatFromProvider(p))
 		case TypeVertexAPIKey:
@@ -135,18 +135,47 @@ func codexKeyFromProvider(p store.UpstreamProvider) config.CodexKey {
 	return k
 }
 
-func claudeKeyFromProvider(p store.UpstreamProvider) config.ClaudeKey {
+func claudeKeyFromProvider(p store.UpstreamProvider) []config.ClaudeKey {
+	if len(p.APIKeyEntries) == 0 {
+		// Legacy fallback: a Claude provider row that predates the modern
+		// multi-entry editor still renders as exactly one config.ClaudeKey
+		// sourced from the parent's api_key + provider proxy, with the
+		// entry ID left zero.
+		return []config.ClaudeKey{buildClaudeKey(p, store.UpstreamProviderAPIKey{
+			APIKey:   p.APIKey,
+			ProxyURL: p.ProxyURL,
+		})}
+	}
+	keys := make([]config.ClaudeKey, 0, len(p.APIKeyEntries))
+	for _, e := range p.APIKeyEntries {
+		keys = append(keys, buildClaudeKey(p, e))
+	}
+	return keys
+}
+
+// buildClaudeKey projects one store.UpstreamProvider + child entry into a
+// config.ClaudeKey, copying all provider-level fields onto the item and
+// choosing the entry proxy when set or the provider proxy when blank.
+// The entry proxy never overrides the provider proxy unless non-empty, so
+// operators can leave the column null and inherit the row default.
+func buildClaudeKey(p store.UpstreamProvider, e store.UpstreamProviderAPIKey) config.ClaudeKey {
+	proxyURL := e.ProxyURL
+	if proxyURL == "" {
+		proxyURL = p.ProxyURL
+	}
 	k := config.ClaudeKey{
-		APIKey:                  p.APIKey,
+		APIKey:                  e.APIKey,
+		Weight:                  e.Weight,
 		Priority:                p.Priority,
 		Prefix:                  p.Prefix,
 		BaseURL:                 p.BaseURL,
-		ProxyURL:                p.ProxyURL,
+		ProxyURL:                proxyURL,
 		Headers:                 p.Headers,
 		ExcludedModels:          p.ExcludedModels,
 		RebuildMidSystemMessage: p.RebuildMidSystemMessage,
 		ExperimentalCCHSigning:  p.ExperimentalCCHSigning,
 		UpstreamProviderID:      p.ID,
+		UpstreamProviderEntryID: e.ID,
 	}
 	for _, m := range p.Models {
 		k.Models = append(k.Models, config.ClaudeModel{
@@ -185,6 +214,7 @@ func openAICompatFromProvider(p store.UpstreamProvider) config.OpenAICompatibili
 			APIKey:                  e.APIKey,
 			Name:                    e.Name,
 			UpstreamProviderEntryID: e.ID,
+			Weight:                  e.Weight,
 			ProxyURL:                e.ProxyURL,
 		})
 	}
