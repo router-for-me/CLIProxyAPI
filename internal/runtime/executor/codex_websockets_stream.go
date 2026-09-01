@@ -158,7 +158,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if sess != nil {
 				sess.reqMu.Unlock()
 			}
-			return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
+			return nil, newCodexStatusErr(respHS.StatusCode, bodyErr)
 		}
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
 		if sess != nil {

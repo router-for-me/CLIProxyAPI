@@ -613,6 +613,9 @@ func TestCodexTerminalStreamErrHandlesUsageLimitErrorEvent(t *testing.T) {
 	if *retryAfter != 300*time.Second {
 		t.Fatalf("retryAfter = %v, want %v", *retryAfter, 300*time.Second)
 	}
+	if !streamErr.IsCredentialScoped() {
+		t.Fatal("expected usage_limit_reached terminal error to be credential-scoped")
+	}
 }
 
 func TestCodexTerminalStreamErrHandlesUsageLimitResponseFailed(t *testing.T) {
@@ -625,6 +628,9 @@ func TestCodexTerminalStreamErrHandlesUsageLimitResponseFailed(t *testing.T) {
 	}
 	if streamErr.RetryAfter() == nil {
 		t.Fatal("expected retryAfter from usage_limit_reached response.failed terminal error")
+	}
+	if !streamErr.IsCredentialScoped() {
+		t.Fatal("expected usage_limit_reached response.failed error to be credential-scoped")
 	}
 }
 
