@@ -21,8 +21,8 @@ import (
 
 // ExecuteStream performs a streaming request to the Antigravity API.
 func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
-	if opts.Alt == "responses/compact" {
-		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	if err := rejectUnsupportedCompaction(opts, req.Payload, opts.OriginalRequest); err != nil {
+		return nil, err
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 

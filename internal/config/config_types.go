@@ -679,6 +679,11 @@ type OpenAICompatibility struct {
 	// True disables auth/model cooldowns; false explicitly enables them.
 	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 
+	// RemoteCompactionV2 enables the Responses remote compaction v2 protocol for
+	// this OpenAI-compatible provider. It is opt-in because compatibility
+	// endpoints do not necessarily implement the protocol correctly.
+	RemoteCompactionV2 bool `yaml:"remote-compaction-v2,omitempty" json:"remote-compaction-v2,omitempty"`
+
 	// RequestRetry optionally overrides the global request-retry for this provider.
 	// Nil or a negative value means "use the global request-retry". 0 disables additional retry rounds.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`

@@ -61,7 +61,8 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeCodexInstructions(body)
-	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+	compactionTrigger := helps.ResponsesHasCompactionTrigger(req.Payload, originalPayload)
+	if !compactionTrigger && (e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff) {
 		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
@@ -140,6 +141,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		eventType := gjson.GetBytes(eventData, "type").String()
 
 		if streamErr, terminalBody, ok := codexTerminalFailureErr(eventData); ok {
+			if compactionTrigger {
+				err = remoteCompactionV2TerminalError(eventType)
+				return resp, err
+			}
 			if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 				return resp, errClearReplay
 			}
@@ -162,6 +167,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 
 		if eventType != "response.completed" && eventType != "response.incomplete" {
+			if compactionTrigger && isRemoteCompactionV2TerminalEvent(eventType) {
+				err = remoteCompactionV2TerminalError(eventType)
+				return resp, err
+			}
 			continue
 		}
 
@@ -171,6 +180,12 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		publishCodexImageToolUsage(ctx, reporter, body, eventData)
 
 		completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+		if compactionTrigger {
+			if errCompaction := validateRemoteCompactionV2Response(completedData, eventType); errCompaction != nil {
+				err = errCompaction
+				return resp, err
+			}
+		}
 		if eventType == "response.completed" {
 			cacheCodexReasoningReplayFromCompleted(replayScope, completedData)
 		}

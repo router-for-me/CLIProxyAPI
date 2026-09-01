@@ -127,8 +127,8 @@ func (e *GeminiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 //   - cliproxyexecutor.Response: The response from the API
 //   - error: An error if the request fails
 func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	if opts.Alt == "responses/compact" {
-		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	if err := rejectUnsupportedCompaction(opts, req.Payload, opts.OriginalRequest); err != nil {
+		return resp, err
 	}
 	if shouldExecuteNativeInteractions(auth, opts) {
 		return e.executeInteractions(ctx, auth, req, opts)
@@ -246,8 +246,8 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 // ExecuteStream performs a streaming request to the Gemini API.
 func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
-	if opts.Alt == "responses/compact" {
-		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	if err := rejectUnsupportedCompaction(opts, req.Payload, opts.OriginalRequest); err != nil {
+		return nil, err
 	}
 	if shouldExecuteNativeInteractions(auth, opts) {
 		return e.executeInteractionsStream(ctx, auth, req, opts)

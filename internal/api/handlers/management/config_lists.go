@@ -801,6 +801,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Models                *[]config.OpenAICompatibilityModel  `json:"models"`
 		Headers               *map[string]string                  `json:"headers"`
 		SupportPromptCacheKey *bool                               `json:"support-prompt-cache-key"`
+		RemoteCompactionV2    *bool                               `json:"remote-compaction-v2"`
 		RequestRetry          *int                                `json:"request-retry"`
 		RequestScopedErrors   *[]config.RequestScopedErrorRule    `json:"request-scoped-errors"`
 	}
@@ -846,6 +847,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if !applyDisableCoolingPatch(c, body.Value.DisableCooling, &entry.DisableCooling) {
 		return
+	}
+	if body.Value.RemoteCompactionV2 != nil {
+		entry.RemoteCompactionV2 = *body.Value.RemoteCompactionV2
 	}
 	if body.Value.RequestRetry != nil {
 		entry.RequestRetry = body.Value.RequestRetry

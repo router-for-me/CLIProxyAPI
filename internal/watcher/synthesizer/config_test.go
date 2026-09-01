@@ -733,6 +733,40 @@ func TestConfigSynthesizer_OpenAICompat_UsesNamespacedProviderKey(t *testing.T) 
 	}
 }
 
+func TestConfigSynthesizer_OpenAICompat_RemoteCompactionV2Attribute(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name:               "compact-provider",
+				BaseURL:            "https://compact.example.com/v1",
+				RemoteCompactionV2: true,
+				APIKeyEntries:      []config.OpenAICompatibilityAPIKey{{APIKey: "compact-key"}},
+			},
+			{
+				Name:    "plain-provider",
+				BaseURL: "https://plain.example.com/v1",
+			},
+		}},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths, got %d", len(auths))
+	}
+	if got := auths[0].Attributes[coreauth.AttributeRemoteCompactionV2]; got != "true" {
+		t.Fatalf("enabled provider attribute = %q, want true", got)
+	}
+	if _, ok := auths[1].Attributes[coreauth.AttributeRemoteCompactionV2]; ok {
+		t.Fatal("disabled provider unexpectedly received remote compaction attribute")
+	}
+}
+
 func TestConfigSynthesizer_VertexCompat(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

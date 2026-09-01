@@ -89,6 +89,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImages(ctx, auth, req, opts, endpointPath)
 	}
+	if opts.Alt != "responses/compact" && helps.ResponsesHasCompactionTrigger(req.Payload, opts.OriginalRequest) {
+		return e.executeResponsesCompactionTrigger(ctx, auth, req, opts)
+	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -307,6 +310,12 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImagesStream(ctx, auth, req, opts, endpointPath)
+	}
+	if opts.Alt == "responses/compact" {
+		return nil, newRemoteCompactionV2ProtocolError(http.StatusBadRequest, "streaming not supported for /responses/compact")
+	}
+	if helps.ResponsesHasCompactionTrigger(req.Payload, opts.OriginalRequest) {
+		return e.executeResponsesCompactionTriggerStream(ctx, auth, req, opts)
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -1011,9 +1020,10 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 }
 
 type statusErr struct {
-	code       int
-	msg        string
-	retryAfter *time.Duration
+	code          int
+	msg           string
+	retryAfter    *time.Duration
+	requestScoped bool
 }
 
 func (e statusErr) Error() string {
@@ -1024,3 +1034,4 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+func (e statusErr) IsRequestScoped() bool      { return e.requestScoped }

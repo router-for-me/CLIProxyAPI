@@ -17,7 +17,7 @@ import (
 
 func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	if opts.Alt == "responses/compact" {
-		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
+		return nil, newRemoteCompactionV2ProtocolError(http.StatusBadRequest, "streaming not supported for /responses/compact")
 	}
 	if xaiInputHasItemType(req.Payload, "compaction_trigger") {
 		return e.executeCompactionTriggerStream(ctx, auth, req, opts)

@@ -930,6 +930,10 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		return nil, errRetained
 	}
 	if retainedOK {
+		if remoteCompactionRequired(opts) && !authHandlesRemoteCompactionTrigger(retained.CloneAuth()) {
+			retained.End("remote_compaction_unsupported")
+			return nil, remoteCompactionUnsupportedError()
+		}
 		return retained, nil
 	}
 	if sessionID := homeExecutionSessionIDFromMetadata(opts.Metadata); sessionID != "" {
@@ -1120,6 +1124,10 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	if !okExecutor {
 		endScope()
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered", HTTPStatus: http.StatusBadGateway}
+	}
+	if remoteCompactionRequired(opts) && !authHandlesRemoteCompactionTrigger(&auth) {
+		endScope()
+		return nil, remoteCompactionUnsupportedError()
 	}
 	if scope == nil {
 		var errInstall error

@@ -26,6 +26,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if opts.Alt == "responses/compact" {
 		return e.CodexExecutor.executeCompact(ctx, auth, req, opts)
 	}
+	if helps.ResponsesHasCompactionTrigger(req.Payload, opts.OriginalRequest) {
+		return e.CodexExecutor.Execute(ctx, auth, req, opts)
+	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	apiKey, baseURL := codexCreds(auth)

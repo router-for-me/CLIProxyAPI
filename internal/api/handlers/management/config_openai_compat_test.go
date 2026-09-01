@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -63,5 +64,51 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 	}
 	if body.OpenAICompatibility[0].RequestRetry == nil || *body.OpenAICompatibility[0].RequestRetry != 0 {
 		t.Fatalf("expected request-retry to be present and 0, got %#v", body.OpenAICompatibility[0].RequestRetry)
+	}
+}
+
+func TestOpenAICompatRemoteCompactionV2GetAndPatch(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	h := NewHandlerWithoutConfigFilePath(&config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name:               "compact-provider",
+				BaseURL:            "https://compact.example.com/v1",
+				APIKeyEntries:      []config.OpenAICompatibilityAPIKey{{APIKey: "test-key"}},
+				RemoteCompactionV2: true,
+			},
+		},
+	}, nil)
+	h.configFilePath = writeTestConfigFile(t)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/openai-compatibility", nil)
+	h.GetOpenAICompat(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var getBody struct {
+		OpenAICompatibility []struct {
+			RemoteCompactionV2 bool `json:"remote-compaction-v2"`
+		} `json:"openai-compatibility"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &getBody); err != nil {
+		t.Fatalf("decode GET: %v", err)
+	}
+	if len(getBody.OpenAICompatibility) != 1 || !getBody.OpenAICompatibility[0].RemoteCompactionV2 {
+		t.Fatalf("GET remote-compaction-v2 = %#v", getBody.OpenAICompatibility)
+	}
+
+	patchRec := httptest.NewRecorder()
+	patchCtx, _ := gin.CreateTestContext(patchRec)
+	patchCtx.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/openai-compatibility", strings.NewReader(`{"index":0,"value":{"remote-compaction-v2":false}}`))
+	patchCtx.Request.Header.Set("Content-Type", "application/json")
+	h.PatchOpenAICompat(patchCtx)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, body=%s", patchRec.Code, patchRec.Body.String())
+	}
+	if h.cfg.OpenAICompatibility[0].RemoteCompactionV2 {
+		t.Fatal("PATCH did not clear remote-compaction-v2")
 	}
 }

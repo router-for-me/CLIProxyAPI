@@ -40,9 +40,13 @@ func claudeOAuthRequestCancellation(ctx context.Context, auth *Auth, err error) 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	req, opts = cliproxysession.Enrich(req, opts)
+	opts = markRemoteCompactionRequirement(opts, req.Payload)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+	if err := m.ensureRemoteCompactionCapability(normalized, opts); err != nil {
+		return cliproxyexecutor.Response{}, err
 	}
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, false)
@@ -87,9 +91,13 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	req, opts = cliproxysession.Enrich(req, opts)
+	opts = markRemoteCompactionRequirement(opts, req.Payload)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+	if err := m.ensureRemoteCompactionCapability(normalized, opts); err != nil {
+		return cliproxyexecutor.Response{}, err
 	}
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, true)
@@ -127,6 +135,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	req, opts = cliproxysession.Enrich(req, opts)
+	opts = markRemoteCompactionRequirement(opts, req.Payload)
 	if m.HomeEnabled() {
 		if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
 			defer unlockSession()
@@ -135,6 +144,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+	if err := m.ensureRemoteCompactionCapability(normalized, opts); err != nil {
+		return nil, err
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
@@ -226,6 +238,9 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 		req.Payload = bytes.Clone(resp.Body)
 		opts.OriginalRequest = bytes.Clone(resp.Body)
 	}
+	if errTrigger := ensureRemoteCompactionTriggerPreserved(req, opts); errTrigger != nil {
+		return req, opts, errTrigger
+	}
 	if resp.Terminate {
 		return req, opts, &cliproxyexecutor.RequestTerminatedError{
 			HTTPStatus: resp.StatusCode,
@@ -234,6 +249,16 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 		}
 	}
 	return req, opts, nil
+}
+
+func ensureRemoteCompactionTriggerPreserved(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
+	if !remoteCompactionRequired(opts) {
+		return nil
+	}
+	if requestHasRemoteCompactionTrigger(req.Payload) || requestHasRemoteCompactionTrigger(opts.OriginalRequest) {
+		return nil
+	}
+	return NewRequestScopedError("remote compaction v2 trigger was removed during request processing", http.StatusBadRequest)
 }
 
 func requestToFormat(provider string, executor ProviderExecutor, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) sdktranslator.Format {
@@ -363,6 +388,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts}
 			m.MarkResult(execCtx, result)
+			if isRequestInvalidError(errPrepare) {
+				return cliproxyexecutor.Response{}, errPrepare
+			}
 			lastErr = errPrepare
 			continue
 		}
@@ -537,6 +565,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts}
 			m.MarkResult(execCtx, result)
+			if isRequestInvalidError(errPrepare) {
+				return cliproxyexecutor.Response{}, errPrepare
+			}
 			lastErr = errPrepare
 			continue
 		}
@@ -864,6 +895,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "prepare_failed"); errEnd != nil {
 					return nil, errEnd
 				}
+			}
+			if isRequestInvalidError(errPrepare) {
+				return nil, errPrepare
 			}
 			continue
 		}

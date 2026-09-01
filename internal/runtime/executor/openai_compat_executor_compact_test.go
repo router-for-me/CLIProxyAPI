@@ -76,6 +76,182 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatExecutorRemoteCompactionV2UsesResponses(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","status":"completed","output":[{"type":"compaction","encrypted_content":"opaque-out"}]}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":"history"},{"type":"compaction_trigger"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != "/v1/responses" {
+		t.Fatalf("path = %q, want /v1/responses", gotPath)
+	}
+	if gjson.GetBytes(gotBody, "messages").Exists() {
+		t.Fatalf("v2 compact was translated to chat completions: %s", gotBody)
+	}
+	input := gjson.GetBytes(gotBody, "input").Array()
+	if len(input) != 2 || input[1].Get("type").String() != "compaction_trigger" {
+		t.Fatalf("compaction_trigger was dropped: %s", gotBody)
+	}
+	if gjson.GetBytes(resp.Payload, "output.0.type").String() != "compaction" {
+		t.Fatalf("payload = %s", resp.Payload)
+	}
+}
+
+func TestOpenAICompatExecutorRemoteCompactionV2RejectsChatStyleOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"summary"}]}]}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	_, err := executor.Execute(context.Background(), &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":[{"type":"compaction_trigger"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	})
+	if err == nil {
+		t.Fatal("expected missing compaction item to fail")
+	}
+	if !strings.Contains(err.Error(), "got 0 from 1 output items") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestOpenAICompatExecutorRemoteCompactionV2ResponseFailedIsRequestScoped(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "execute", true: "stream"}[stream], func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write([]byte(`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"type":"server_error","message":"compaction failed"}}}` + "\n\n"))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"type":"server_error","message":"compaction failed"}}}`))
+			}))
+			defer server.Close()
+
+			executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"base_url": server.URL + "/v1",
+				"api_key":  "test",
+			}}
+			req := cliproxyexecutor.Request{
+				Model:   "gpt-5.4",
+				Payload: []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":"history"},{"type":"compaction_trigger"}]}`),
+			}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: stream}
+			if !stream {
+				_, err := executor.Execute(context.Background(), auth, req, opts)
+				if err == nil {
+					t.Fatal("Execute succeeded, want response.failed error")
+				}
+				if got := statusCodeFromTestError(t, err); got != http.StatusBadGateway {
+					t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusBadGateway, err)
+				}
+				assertRequestScopedTestError(t, err)
+				return
+			}
+
+			result, err := executor.ExecuteStream(context.Background(), auth, req, opts)
+			if err != nil {
+				t.Fatalf("ExecuteStream setup error: %v", err)
+			}
+			var streamErr error
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					streamErr = chunk.Err
+				}
+			}
+			if streamErr == nil {
+				t.Fatal("stream completed, want response.failed error")
+			}
+			if got := statusCodeFromTestError(t, streamErr); got != http.StatusBadGateway {
+				t.Fatalf("stream status code = %d, want %d; err=%v", got, http.StatusBadGateway, streamErr)
+			}
+			assertRequestScopedTestError(t, streamErr)
+		})
+	}
+}
+
+func TestOpenAICompatExecutorRemoteCompactionV2RejectsTerminalEventWithCompletedStatus(t *testing.T) {
+	for _, eventType := range []string{"response.failed", "response.done", "error", "response.unknown"} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", eventType, stream), func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					payload := fmt.Sprintf(`{"type":%q,"status":"completed","response":{"status":"completed","output":[{"type":"compaction","encrypted_content":"opaque"}]}}`, eventType)
+					if stream {
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, payload)
+				}))
+				defer server.Close()
+
+				executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+				auth := &cliproxyauth.Auth{Attributes: map[string]string{
+					"base_url": server.URL + "/v1",
+					"api_key":  "test",
+				}}
+				req := cliproxyexecutor.Request{
+					Model:   "gpt-5.4",
+					Payload: []byte(`{"model":"gpt-5.4","input":[{"type":"compaction_trigger"}]}`),
+				}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: stream}
+				if !stream {
+					_, err := executor.Execute(context.Background(), auth, req, opts)
+					if err == nil {
+						t.Fatalf("Execute succeeded for %s", eventType)
+					}
+					assertRequestScopedTestError(t, err)
+					return
+				}
+				result, err := executor.ExecuteStream(context.Background(), auth, req, opts)
+				if err != nil {
+					t.Fatalf("ExecuteStream setup error: %v", err)
+				}
+				var streamErr error
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						streamErr = chunk.Err
+					}
+				}
+				if streamErr == nil {
+					t.Fatalf("stream succeeded for %s", eventType)
+				}
+				assertRequestScopedTestError(t, streamErr)
+			})
+		}
+	}
+}
+
 func TestOpenAICompatExecutorPayloadOverrideWinsOverThinkingSuffix(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -508,9 +684,9 @@ func TestOpenAICompatExecutorPromptCacheKeyExecuteStream(t *testing.T) {
 }
 
 func TestOpenAICompatExecutorPromptCacheKeyStreamCompactSkipped(t *testing.T) {
-	var gotBody []byte
+	var upstreamRequests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotBody, _ = io.ReadAll(r.Body)
+		upstreamRequests++
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[]}` + "\n\n"))
 		_, _ = w.Write([]byte("data: [DONE]\n\n"))
@@ -532,7 +708,7 @@ func TestOpenAICompatExecutorPromptCacheKeyStreamCompactSkipped(t *testing.T) {
 			"provider_key": "compat",
 		},
 	}
-	result, errExecute := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+	_, errExecute := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.6",
 		Payload: []byte(`{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}],"stream":true}`),
 	}, cliproxyexecutor.Options{
@@ -541,16 +717,14 @@ func TestOpenAICompatExecutorPromptCacheKeyStreamCompactSkipped(t *testing.T) {
 		Stream:       true,
 		Metadata:     map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:compact-stream"},
 	})
-	if errExecute != nil {
-		t.Fatalf("ExecuteStream error: %v", errExecute)
+	if errExecute == nil {
+		t.Fatal("ExecuteStream succeeded, want legacy /responses/compact streaming rejection")
 	}
-	for chunk := range result.Chunks {
-		if chunk.Err != nil {
-			t.Fatalf("stream chunk error: %v", chunk.Err)
-		}
+	if got := statusCodeFromTestError(t, errExecute); got != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusBadRequest, errExecute)
 	}
-	if gjson.GetBytes(gotBody, "prompt_cache_key").Exists() {
-		t.Fatalf("unexpected prompt_cache_key in streaming compact body: %s", string(gotBody))
+	if upstreamRequests != 0 {
+		t.Fatalf("upstream request count = %d, want 0", upstreamRequests)
 	}
 }
 

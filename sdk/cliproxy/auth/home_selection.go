@@ -271,7 +271,7 @@ func preserveHomeRoutingAttributes(updated, previous *Auth) {
 	if updated.Attributes == nil {
 		updated.Attributes = make(map[string]string)
 	}
-	for _, key := range []string{homeUpstreamModelAttributeKey, homeForceMappingAttributeKey, homeOriginalAliasAttributeKey} {
+	for _, key := range []string{homeUpstreamModelAttributeKey, homeForceMappingAttributeKey, homeOriginalAliasAttributeKey, AttributeRemoteCompactionV2} {
 		if value := strings.TrimSpace(previous.Attributes[key]); value != "" {
 			updated.Attributes[key] = value
 		}

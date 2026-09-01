@@ -312,6 +312,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"provider_key": internalProviderKey,
 				"config_index": strconv.Itoa(i),
 			}
+			if compat.RemoteCompactionV2 {
+				attrs[coreauth.AttributeRemoteCompactionV2] = "true"
+			}
 			metadata := map[string]any{}
 			if disableCooling != nil {
 				metadata["disable_cooling"] = *disableCooling
@@ -357,6 +360,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"compat_name":  compat.Name,
 				"provider_key": internalProviderKey,
 				"config_index": strconv.Itoa(i),
+			}
+			if compat.RemoteCompactionV2 {
+				attrs[coreauth.AttributeRemoteCompactionV2] = "true"
 			}
 			metadata := map[string]any{}
 			if disableCooling != nil {

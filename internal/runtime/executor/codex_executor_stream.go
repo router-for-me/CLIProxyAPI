@@ -22,7 +22,7 @@ import (
 
 func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	if opts.Alt == "responses/compact" {
-		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
+		return nil, newRemoteCompactionV2ProtocolError(http.StatusBadRequest, "streaming not supported for /responses/compact")
 	}
 	if isCodexOpenAIImageRequest(opts) {
 		return e.executeOpenAIImageStream(ctx, auth, req, opts)
@@ -67,7 +67,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = normalizeCodexInstructions(body)
-	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+	compactionTrigger := helps.ResponsesHasCompactionTrigger(req.Payload, originalPayload)
+	if !compactionTrigger && (e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff) {
 		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
@@ -174,6 +175,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				translatedLine = append([]byte("data: "), data...)
 				eventType := gjson.GetBytes(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErr(data); ok {
+					if compactionTrigger {
+						compactionErr := remoteCompactionV2TerminalError(eventType)
+						closeBootstrapBody()
+						helps.RecordAPIResponseError(ctx, e.cfg, compactionErr)
+						reporter.PublishFailure(ctx, compactionErr)
+						return nil, compactionErr
+					}
 					closeBootstrapBody()
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
@@ -200,16 +208,32 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				case "response.output_item.done":
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
 				case "response.completed", "response.incomplete":
+					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
+					if compactionTrigger {
+						if errCompaction := validateRemoteCompactionV2Response(data, eventType); errCompaction != nil {
+							closeBootstrapBody()
+							helps.RecordAPIResponseError(ctx, e.cfg, errCompaction)
+							reporter.PublishFailure(ctx, errCompaction)
+							return nil, errCompaction
+						}
+					}
 					terminalSuccess = true
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
 					}
 					publishCodexImageToolUsage(ctx, reporter, body, data)
-					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					if eventType == "response.completed" {
 						cacheCodexReasoningReplayFromCompleted(replayScope, data)
 					}
 					translatedLine = append([]byte("data: "), data...)
+				default:
+					if compactionTrigger && isRemoteCompactionV2TerminalEvent(eventType) {
+						compactionErr := remoteCompactionV2TerminalError(eventType)
+						closeBootstrapBody()
+						helps.RecordAPIResponseError(ctx, e.cfg, compactionErr)
+						reporter.PublishFailure(ctx, compactionErr)
+						return nil, compactionErr
+					}
 				}
 			} else {
 				isHandshake = true
@@ -300,6 +324,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				translatedLine = append([]byte("data: "), data...)
 				eventType := gjson.GetBytes(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErr(data); ok {
+					if compactionTrigger {
+						compactionErr := remoteCompactionV2TerminalError(eventType)
+						helps.RecordAPIResponseError(ctx, e.cfg, compactionErr)
+						reporter.PublishFailure(ctx, compactionErr)
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: compactionErr}:
+						case <-ctx.Done():
+						}
+						return
+					}
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)
@@ -321,16 +355,38 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				case "response.output_item.done":
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
 				case "response.completed", "response.incomplete":
+					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
+					if compactionTrigger {
+						if errCompaction := validateRemoteCompactionV2Response(data, eventType); errCompaction != nil {
+							helps.RecordAPIResponseError(ctx, e.cfg, errCompaction)
+							reporter.PublishFailure(ctx, errCompaction)
+							select {
+							case out <- cliproxyexecutor.StreamChunk{Err: errCompaction}:
+							case <-ctx.Done():
+							}
+							return
+						}
+					}
 					terminalSuccess = true
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
 					}
 					publishCodexImageToolUsage(ctx, reporter, body, data)
-					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					if eventType == "response.completed" {
 						cacheCodexReasoningReplayFromCompleted(replayScope, data)
 					}
 					translatedLine = append([]byte("data: "), data...)
+				default:
+					if compactionTrigger && isRemoteCompactionV2TerminalEvent(eventType) {
+						compactionErr := remoteCompactionV2TerminalError(eventType)
+						helps.RecordAPIResponseError(ctx, e.cfg, compactionErr)
+						reporter.PublishFailure(ctx, compactionErr)
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: compactionErr}:
+						case <-ctx.Done():
+						}
+						return
+					}
 				}
 			}
 
