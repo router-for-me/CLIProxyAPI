@@ -201,6 +201,7 @@ func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 	out := make([]CodexKey, 0, len(entries))
 	for i := range entries {
 		e := entries[i]
+		e.DisplayName = strings.TrimSpace(e.DisplayName)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
@@ -220,6 +221,7 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	}
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
+		entry.DisplayName = strings.TrimSpace(entry.DisplayName)
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
@@ -240,6 +242,7 @@ func sanitizeGeminiKeyEntries(entries []GeminiKey) []GeminiKey {
 	for i := range entries {
 		entry := entries[i]
 		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.DisplayName = strings.TrimSpace(entry.DisplayName)
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		if entry.APIKey == "" && entry.BaseURL == "" {
 			continue

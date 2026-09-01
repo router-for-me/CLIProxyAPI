@@ -191,6 +191,7 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	type geminiKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
+		DisplayName         *string                          `json:"display-name"`
 		Weight              json.RawMessage                  `json:"weight"`
 		Prefix              *string                          `json:"prefix"`
 		BaseURL             *string                          `json:"base-url"`
@@ -249,6 +250,9 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	entry := h.cfg.GeminiKey[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.DisplayName != nil {
+		entry.DisplayName = strings.TrimSpace(*body.Value.DisplayName)
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -393,6 +397,7 @@ func (h *Handler) PutInteractionsKeys(c *gin.Context) {
 func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 	type geminiKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
+		DisplayName         *string                          `json:"display-name"`
 		Weight              json.RawMessage                  `json:"weight"`
 		Prefix              *string                          `json:"prefix"`
 		BaseURL             *string                          `json:"base-url"`
@@ -452,6 +457,9 @@ func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 	entry := h.cfg.InteractionsKey[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.DisplayName != nil {
+		entry.DisplayName = strings.TrimSpace(*body.Value.DisplayName)
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -599,6 +607,7 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
 		APIKey                  *string                          `json:"api-key"`
+		DisplayName             *string                          `json:"display-name"`
 		FingerprintProfile      *string                          `json:"fingerprint-profile"`
 		Weight                  json.RawMessage                  `json:"weight"`
 		Prefix                  *string                          `json:"prefix"`
@@ -645,6 +654,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	entry := h.cfg.ClaudeKey[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.DisplayName != nil {
+		entry.DisplayName = strings.TrimSpace(*body.Value.DisplayName)
 	}
 	if body.Value.FingerprintProfile != nil {
 		if rejectInvalidFingerprintProfile(c, "fingerprint-profile", *body.Value.FingerprintProfile) {
@@ -955,6 +967,7 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	type vertexCompatPatch struct {
 		APIKey         *string                     `json:"api-key"`
+		DisplayName    *string                     `json:"display-name"`
 		Weight         json.RawMessage             `json:"weight"`
 		Prefix         *string                     `json:"prefix"`
 		BaseURL        *string                     `json:"base-url"`
@@ -1007,6 +1020,9 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 			return
 		}
 		entry.APIKey = trimmed
+	}
+	if body.Value.DisplayName != nil {
+		entry.DisplayName = strings.TrimSpace(*body.Value.DisplayName)
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -1421,6 +1437,7 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
+		DisplayName         *string                          `json:"display-name"`
 		Weight              json.RawMessage                  `json:"weight"`
 		Prefix              *string                          `json:"prefix"`
 		BaseURL             *string                          `json:"base-url"`
@@ -1466,6 +1483,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	entry := h.cfg.CodexKey[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.DisplayName != nil {
+		entry.DisplayName = strings.TrimSpace(*body.Value.DisplayName)
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -1615,6 +1635,7 @@ func (h *Handler) PutXAIKeys(c *gin.Context) {
 func (h *Handler) PatchXAIKey(c *gin.Context) {
 	type xaiKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
+		DisplayName         *string                          `json:"display-name"`
 		Priority            *int                             `json:"priority"`
 		Weight              json.RawMessage                  `json:"weight"`
 		Prefix              *string                          `json:"prefix"`
@@ -1661,6 +1682,9 @@ func (h *Handler) PatchXAIKey(c *gin.Context) {
 	entry := h.cfg.XAIKey[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.DisplayName != nil {
+		entry.DisplayName = strings.TrimSpace(*body.Value.DisplayName)
 	}
 	if body.Value.Priority != nil {
 		entry.Priority = *body.Value.Priority

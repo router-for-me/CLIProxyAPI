@@ -343,6 +343,9 @@ type ClaudeKey struct {
 	// APIKey is the authentication key for accessing Claude API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// DisplayName is an optional human-readable name for this provider credential.
+	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -458,6 +461,9 @@ type CodexKey struct {
 	// APIKey is the authentication key for accessing Codex API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// DisplayName is an optional human-readable name for this provider credential.
+	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -561,6 +567,9 @@ type XAIModel = CodexModel
 type GeminiKey struct {
 	// APIKey is the authentication key for accessing Gemini API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// DisplayName is an optional human-readable name for this provider credential.
+	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.

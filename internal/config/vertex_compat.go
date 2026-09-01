@@ -17,6 +17,9 @@ type VertexCompatKey struct {
 	// Maps to the x-goog-api-key header.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// DisplayName is an optional human-readable name for this provider credential.
+	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -98,6 +101,7 @@ func (cfg *Config) SanitizeVertexCompatKeys() {
 	for i := range cfg.VertexCompatAPIKey {
 		entry := cfg.VertexCompatAPIKey[i]
 		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.DisplayName = strings.TrimSpace(entry.DisplayName)
 		if entry.APIKey == "" {
 			continue
 		}
