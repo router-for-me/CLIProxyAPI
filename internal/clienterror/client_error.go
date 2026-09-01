@@ -35,7 +35,7 @@ var requestFaultTypes = map[string]struct{}{
 }
 
 const (
-	outOfExtraUsageNeedle       = "you're out of extra usage"
+	outOfExtraUsageNeedle       = "out of extra usage"
 	outOfExtraUsageExactMessage = "You're out of extra usage. Add more at claude.ai/settings/usage and keep going."
 )
 
@@ -121,8 +121,9 @@ func IsRequestFault(status int, err error) bool {
 }
 
 // IsOutOfExtraUsage reports Anthropic's extra-usage exhaustion. Claude delivers
-// it as HTTP 400 invalid_request_error, not 429. The needle is intentionally
-// narrow: generic invalid_request_error 400s stay request faults.
+// it as HTTP 400 invalid_request_error, not 429. The needle is the phrase
+// "out of extra usage" (covering you're-less variants); generic
+// invalid_request_error 400s stay request faults.
 func IsOutOfExtraUsage(status int, err error) bool {
 	if err == nil {
 		return false

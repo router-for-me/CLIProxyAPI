@@ -222,6 +222,12 @@ func TestIsRequestFault(t *testing.T) {
 			want:   false,
 		},
 		{
+			name:   "you're-less extra-usage billing period is not request fault",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"out of extra usage for this billing period"}}`),
+			want:   false,
+		},
+		{
 			name:   "generic invalid_request_error 400 remains request fault",
 			status: http.StatusBadRequest,
 			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"Invalid request parameter"}}`),
@@ -231,6 +237,12 @@ func TestIsRequestFault(t *testing.T) {
 			name:   "unexpected extra field 400 remains request fault",
 			status: http.StatusBadRequest,
 			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"Unexpected extra field 'foo' in request"}}`),
+			want:   true,
+		},
+		{
+			name:   "extra field not allowed remains request fault",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"extra field not allowed"}}`),
 			want:   true,
 		},
 		{name: "quota", status: http.StatusTooManyRequests, err: errors.New("quota")},
@@ -269,6 +281,12 @@ func TestIsOutOfExtraUsage(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "you're-less billing period variant",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"out of extra usage for this billing period"}}`),
+			want:   true,
+		},
+		{
 			name: "status from error",
 			err:  statusError{status: http.StatusBadRequest, body: extraUsageJSON},
 			want: true,
@@ -282,6 +300,11 @@ func TestIsOutOfExtraUsage(t *testing.T) {
 			name:   "unexpected extra field is not extra usage",
 			status: http.StatusBadRequest,
 			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"Unexpected extra field"}}`),
+		},
+		{
+			name:   "extra field not allowed is not extra usage",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"extra field not allowed"}}`),
 		},
 		{
 			name:   "needle without invalid_request_error type is not extra usage",

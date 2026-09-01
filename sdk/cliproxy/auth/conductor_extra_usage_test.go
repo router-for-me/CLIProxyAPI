@@ -39,6 +39,17 @@ func TestIsRequestInvalidError_ClaudeExtraUsageIsNotRequestFault(t *testing.T) {
 	if !isRequestInvalidError(extraFieldErr) {
 		t.Fatal("unexpected extra field 400 must remain request-invalid")
 	}
+
+	billingPeriodErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `{"error":{"type":"invalid_request_error","message":"out of extra usage for this billing period"}}`,
+	}
+	if isRequestInvalidError(billingPeriodErr) {
+		t.Fatal("you're-less extra-usage billing period must not be request-invalid")
+	}
+	if !isOutOfExtraUsageError(billingPeriodErr) {
+		t.Fatal("expected isOutOfExtraUsageError to match billing-period extra-usage variant")
+	}
 }
 
 func TestManager_Execute_ClaudeExtraUsage400CoolsAndRotates(t *testing.T) {
