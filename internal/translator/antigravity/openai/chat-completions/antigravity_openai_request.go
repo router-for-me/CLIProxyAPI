@@ -500,15 +500,24 @@ func applyOpenAIToolChoiceToAntigravity(out, rawJSON []byte, functionNameMap map
 		case "required", "any":
 			mode = "ANY"
 		}
-	} else if toolChoice.IsObject() && strings.EqualFold(toolChoice.Get("type").String(), "function") {
-		mode = "ANY"
-		allowedName = toolChoice.Get("function.name").String()
+	} else if toolChoice.IsObject() {
+		switch strings.ToLower(strings.TrimSpace(toolChoice.Get("type").String())) {
+		case "none":
+			mode = "NONE"
+		case "function":
+			mode = "ANY"
+			allowedName = toolChoice.Get("function.name").String()
+		}
 	}
 	if mode == "" {
 		return out
 	}
 
 	out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", mode)
+	if mode == "NONE" {
+		// Cloud Code ignores functionCallingConfig.mode=NONE and still invokes declared tools.
+		out, _ = sjson.DeleteBytes(out, "request.tools")
+	}
 	if strings.TrimSpace(allowedName) != "" {
 		mappedName := util.MapSanitizedFunctionName(functionNameMap, allowedName)
 		out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames", []string{mappedName})

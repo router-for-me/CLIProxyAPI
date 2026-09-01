@@ -1738,6 +1738,63 @@ func TestConvertClaudeRequestToAntigravity_ToolChoice_SpecificTool(t *testing.T)
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_ToolChoice_NoneOmitsTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"name":"get_weather",
+			"description":"Get weather",
+			"input_schema":{"type":"object","properties":{}}
+		}],
+		"tool_choice":{"type":"none"}
+	}`)
+	out := ConvertClaudeRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
+		t.Fatalf("functionCallingConfig.mode = %q, want NONE. Output: %s", got, out)
+	}
+	if tools := gjson.GetBytes(out, "request.tools"); tools.Exists() {
+		t.Fatalf("request.tools must be omitted when tool_choice is none. Output: %s", out)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ToolChoice_NoneStringOmitsTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"name":"get_weather",
+			"description":"Get weather",
+			"input_schema":{"type":"object","properties":{}}
+		}],
+		"tool_choice":"none"
+	}`)
+	out := ConvertClaudeRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
+		t.Fatalf("functionCallingConfig.mode = %q, want NONE. Output: %s", got, out)
+	}
+	if tools := gjson.GetBytes(out, "request.tools"); tools.Exists() {
+		t.Fatalf("request.tools must be omitted when tool_choice is none. Output: %s", out)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ToolChoice_AutoKeepsTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"name":"get_weather",
+			"description":"Get weather",
+			"input_schema":{"type":"object","properties":{}}
+		}],
+		"tool_choice":{"type":"auto"}
+	}`)
+	out := ConvertClaudeRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "AUTO" {
+		t.Fatalf("functionCallingConfig.mode = %q, want AUTO. Output: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "request.tools.0.functionDeclarations.0.name").String(); got != "get_weather" {
+		t.Fatalf("functionDeclarations[0].name = %q, want get_weather. Output: %s", got, out)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_ToolUse(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",

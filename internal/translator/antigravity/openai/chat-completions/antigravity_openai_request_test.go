@@ -350,6 +350,72 @@ func TestConvertOpenAIRequestToAntigravityMapsToolChoiceModes(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToAntigravityToolChoiceNoneOmitsTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"type":"function",
+			"function":{
+				"name":"get_weather",
+				"description":"Get weather",
+				"parameters":{"type":"object","properties":{}}
+			}
+		}],
+		"tool_choice":"none"
+	}`)
+	out := ConvertOpenAIRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
+		t.Fatalf("functionCallingConfig.mode = %q, want NONE. Output: %s", got, out)
+	}
+	if tools := gjson.GetBytes(out, "request.tools"); tools.Exists() {
+		t.Fatalf("request.tools must be omitted when tool_choice is none. Output: %s", out)
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravityToolChoiceNoneObjectOmitsTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"type":"function",
+			"function":{
+				"name":"get_weather",
+				"description":"Get weather",
+				"parameters":{"type":"object","properties":{}}
+			}
+		}],
+		"tool_choice":{"type":"none"}
+	}`)
+	out := ConvertOpenAIRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
+		t.Fatalf("functionCallingConfig.mode = %q, want NONE. Output: %s", got, out)
+	}
+	if tools := gjson.GetBytes(out, "request.tools"); tools.Exists() {
+		t.Fatalf("request.tools must be omitted when tool_choice type is none. Output: %s", out)
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravityToolChoiceAutoKeepsTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[{
+			"type":"function",
+			"function":{
+				"name":"get_weather",
+				"description":"Get weather",
+				"parameters":{"type":"object","properties":{}}
+			}
+		}],
+		"tool_choice":"auto"
+	}`)
+	out := ConvertOpenAIRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "AUTO" {
+		t.Fatalf("functionCallingConfig.mode = %q, want AUTO. Output: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "request.tools.0.functionDeclarations.0.name").String(); got != "get_weather" {
+		t.Fatalf("functionDeclarations[0].name = %q, want get_weather. Output: %s", got, out)
+	}
+}
+
 func TestConvertOpenAIRequestToAntigravityMapsResponseFormatJSONObject(t *testing.T) {
 	inputJSON := []byte(`{
 		"model":"gemini-3.6-flash-high",

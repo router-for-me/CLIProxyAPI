@@ -889,6 +889,8 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", "AUTO")
 		case "none":
 			out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", "NONE")
+			// Cloud Code ignores functionCallingConfig.mode=NONE and still invokes declared tools.
+			out, _ = sjson.DeleteBytes(out, "request.tools")
 		case "any":
 			out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", "ANY")
 		case "tool":

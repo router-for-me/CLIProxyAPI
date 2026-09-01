@@ -169,6 +169,26 @@ func TestConvertInteractionsRequestToAntigravityDeduplicatesAndDisambiguatesTool
 	}
 }
 
+func TestConvertInteractionsRequestToAntigravityToolChoiceNoneOmitsTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"input":"hi",
+		"tools":[{
+			"type":"function",
+			"name":"get_weather",
+			"description":"Get weather",
+			"parameters":{"type":"object","properties":{}}
+		}],
+		"tool_choice":"none"
+	}`)
+	out := ConvertInteractionsRequestToAntigravity("antigravity-test", inputJSON, false)
+	if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
+		t.Fatalf("functionCallingConfig.mode = %q, want NONE. Output: %s", got, out)
+	}
+	if tools := gjson.GetBytes(out, "request.tools"); tools.Exists() {
+		t.Fatalf("request.tools must be omitted when tool_choice is none. Output: %s", out)
+	}
+}
+
 func TestConvertInteractionsRequestToAntigravityPreservesNameMappingWhitespace(t *testing.T) {
 	inputJSON := []byte(`{
 		"input":[{"type":"function_call","name":" read/file ","arguments":{}}],

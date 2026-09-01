@@ -25,6 +25,11 @@ func ConvertInteractionsRequestToAntigravity(modelName string, inputRawJSON []by
 	appendInteractionsInputToAntigravity(&contentItems, root.Get("input"))
 	out = translatorcommon.SetRawArrayItems(out, "request.contents", contentItems)
 	out = copyInteractionsToolsToAntigravity(out, root, functionNameMap)
+	if gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String() == "NONE" {
+		// Cloud Code ignores functionCallingConfig.mode=NONE and still invokes declared tools.
+		// Tool choice is applied before tools are copied; delete after copy so they cannot reappear.
+		out, _ = sjson.DeleteBytes(out, "request.tools")
+	}
 	out = rewriteInteractionsFunctionNames(out, functionNameMap)
 	out = attachDefaultAntigravitySafetySettings(out)
 	return out
