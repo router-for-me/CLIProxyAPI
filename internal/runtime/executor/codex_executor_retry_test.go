@@ -46,6 +46,58 @@ func TestParseCodexRetryAfter(t *testing.T) {
 		}
 	})
 
+	t.Run("millisecond resets_at", func(t *testing.T) {
+		resetAt := now.Add(5 * time.Minute).UnixMilli()
+		body := []byte(`{"error":{"type":"usage_limit_reached","resets_at":` + itoa(resetAt) + `,"resets_in_seconds":1}}`)
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil {
+			t.Fatalf("expected retryAfter, got nil")
+		}
+		if *retryAfter < 5*time.Minute-time.Second || *retryAfter > 5*time.Minute+time.Second {
+			t.Fatalf("retryAfter = %v, want ~5m (not millennia from treating millis as seconds)", *retryAfter)
+		}
+	})
+
+	t.Run("fallback when millisecond resets_at is past", func(t *testing.T) {
+		resetAt := now.Add(-1 * time.Minute).UnixMilli()
+		body := []byte(`{"error":{"type":"usage_limit_reached","resets_at":` + itoa(resetAt) + `,"resets_in_seconds":77}}`)
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil {
+			t.Fatalf("expected retryAfter, got nil")
+		}
+		if *retryAfter != 77*time.Second {
+			t.Fatalf("retryAfter = %v, want %v", *retryAfter, 77*time.Second)
+		}
+	})
+
+	t.Run("garbage zero resets_at without resets_in_seconds", func(t *testing.T) {
+		body := []byte(`{"error":{"type":"usage_limit_reached","resets_at":0}}`)
+		if got := parseCodexRetryAfter(http.StatusTooManyRequests, body, now); got != nil {
+			t.Fatalf("expected nil for zero resets_at, got %v", *got)
+		}
+	})
+
+	t.Run("garbage empty body fields", func(t *testing.T) {
+		body := []byte(`{"error":{"type":"usage_limit_reached"}}`)
+		if got := parseCodexRetryAfter(http.StatusTooManyRequests, body, now); got != nil {
+			t.Fatalf("expected nil for empty reset fields, got %v", *got)
+		}
+	})
+
+	t.Run("implausible epoch falls back to resets_in_seconds", func(t *testing.T) {
+		// Microseconds (or any value that still lands centuries ahead after the
+		// milli heuristic) must not park the credential; fall through instead.
+		resetAt := now.Add(5 * time.Minute).UnixMicro()
+		body := []byte(`{"error":{"type":"usage_limit_reached","resets_at":` + itoa(resetAt) + `,"resets_in_seconds":42}}`)
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil {
+			t.Fatalf("expected retryAfter from resets_in_seconds fallback, got nil")
+		}
+		if *retryAfter != 42*time.Second {
+			t.Fatalf("retryAfter = %v, want %v", *retryAfter, 42*time.Second)
+		}
+	})
+
 	t.Run("non-429 status code", func(t *testing.T) {
 		body := []byte(`{"error":{"type":"usage_limit_reached","resets_in_seconds":30}}`)
 		if got := parseCodexRetryAfter(http.StatusBadRequest, body, now); got != nil {

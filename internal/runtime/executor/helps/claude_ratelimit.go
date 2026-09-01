@@ -208,8 +208,17 @@ func parseUnixOrTimestamp(raw string) (time.Time, bool) {
 	}
 	if sec, err := strconv.ParseFloat(raw, 64); err == nil && sec > 0 {
 		secInt := int64(sec)
-		nsec := int64((sec - float64(secInt)) * 1e9)
-		return time.Unix(secInt, nsec), true
+		var t time.Time
+		if secInt > 1_000_000_000_000 {
+			t = UnixSecondsOrMilli(secInt)
+		} else {
+			nsec := int64((sec - float64(secInt)) * 1e9)
+			t = time.Unix(secInt, nsec)
+		}
+		if t.IsZero() || t.Year() > 2100 {
+			return time.Time{}, false
+		}
+		return t, true
 	}
 	if t, err := time.Parse(time.RFC3339, raw); err == nil {
 		return t, true
