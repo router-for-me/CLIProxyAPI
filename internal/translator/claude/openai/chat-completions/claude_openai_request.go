@@ -139,6 +139,13 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
+		messageArray := messages.Array()
+		opus5PrefillStart := len(messageArray)
+		if strings.EqualFold(modelName, "claude-opus-5") {
+			for opus5PrefillStart > 0 && isPlainAssistantPrefill(messageArray[opus5PrefillStart-1]) {
+				opus5PrefillStart--
+			}
+		}
 		lastToolMessage := map[string]gjson.Result{}
 		messages.ForEach(func(_, message gjson.Result) bool {
 			if message.Get("role").String() == "tool" {
@@ -153,7 +160,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 
 		systemBlocks := make([][]byte, 0)
 		messageAccumulator := common.NewClaudeMessageAccumulator(int(root.Get("messages.#").Int()))
-		messages.ForEach(func(_, message gjson.Result) bool {
+		messages.ForEach(func(index, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
 
@@ -336,8 +343,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				} else if parameters := tool.Get("parameters"); parameters.Exists() {
 					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
 				}
-				out, _ = sjson.SetRawBytes(out, "tools.-1", anthropicTool)
-				hasAnthropicTools = true
+				anthropicTools = append(anthropicTools, anthropicTool)
 				return true
 			}
 			if toolType == "function" {

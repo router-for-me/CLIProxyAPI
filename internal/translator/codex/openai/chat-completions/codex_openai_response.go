@@ -212,7 +212,8 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.arguments", "")
 
 		template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
-		template = appendToolCallDeltaToTemplate(template, functionCallItemTemplate)
+		template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls", []byte(`[]`))
+		template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls.-1", functionCallItemTemplate)
 
 	} else if dataType == "response.function_call_arguments.delta" || dataType == "response.custom_tool_call_input.delta" {
 		p := (*param).(*ConvertCliToOpenAIParams)
@@ -347,7 +348,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.arguments", codexToolCallArguments(itemResult))
 		template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
-		template = appendToolCallDeltaToTemplate(template, functionCallItemTemplate)
+		template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls.-1", functionCallItemTemplate)
 
 	} else {
 		return [][]byte{}
@@ -481,7 +482,12 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 				}
 
 				if nameResult := outputItem.Get("name"); nameResult.Exists() {
-					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.name", resolveToolCallName(outputItem, originalRequestRawJSON))
+					name := nameResult.String()
+					reverseNames := buildReverseMapFromOriginalOpenAI(originalRequestRawJSON)
+					if originalName, ok := reverseNames[name]; ok {
+						name = originalName
+					}
+					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.name", name)
 				}
 
 				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.arguments", codexToolCallArguments(outputItem))
