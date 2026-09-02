@@ -903,20 +903,22 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 
 	// Model-free CAIS has no provider literal. Require its moved carrier and both
 	// known generation identifiers, while retaining the model-tagged sibling's
-	// tolerance for incidental varint values and optional fields.
+	// tolerance for incidental varint values and optional fields. The carrier is
+	// validated before the generation identifiers so malformed input never
+	// reports as an unknown generation.
 	switch {
 	case !haveEnvelopeVersion:
 		return nil, fmt.Errorf("invalid Claude model-free CAIS signature: missing envelope version")
-	case !isKnownClaudeCAISIdentifier(knownClaudeCAISEnvelopeVersions[:], info.EnvelopeVersion):
-		return nil, &claudeCAISUnknownGenerationError{identifier: "envelope version", value: info.EnvelopeVersion}
-	case !isKnownClaudeCAISIdentifier(knownClaudeCAISChannelIDs[:], info.ChannelID):
-		return nil, &claudeCAISUnknownGenerationError{identifier: "channel_id", value: info.ChannelID}
 	case !haveContainerCarrier:
 		return nil, fmt.Errorf("invalid Claude model-free CAIS signature: missing container field 5 carrier")
 	case containerCarrierType != protowire.BytesType:
 		return nil, fmt.Errorf("invalid Claude model-free CAIS signature: container field 5 carrier must be bytes")
 	case len(containerCarrier) == 0:
 		return nil, fmt.Errorf("invalid Claude model-free CAIS signature: container field 5 carrier must not be empty")
+	case !isKnownClaudeCAISIdentifier(knownClaudeCAISEnvelopeVersions[:], info.EnvelopeVersion):
+		return nil, &claudeCAISUnknownGenerationError{identifier: "envelope version", value: info.EnvelopeVersion}
+	case !isKnownClaudeCAISIdentifier(knownClaudeCAISChannelIDs[:], info.ChannelID):
+		return nil, &claudeCAISUnknownGenerationError{identifier: "channel_id", value: info.ChannelID}
 	}
 
 	return info, nil

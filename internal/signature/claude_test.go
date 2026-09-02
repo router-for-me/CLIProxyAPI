@@ -2,6 +2,7 @@ package signature
 
 import (
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 
@@ -1102,6 +1103,68 @@ func TestClassifyUnknownCAISGeneration(t *testing.T) {
 		}
 		if normalized != want {
 			t.Fatalf("normalized = %q, want %q (must agree with the real claudeCAISUnknownGenerationError value)", normalized, want)
+		}
+	})
+}
+
+// TestClaudeModelFreeCAISSignature_CarrierValidatedBeforeGeneration pins the
+// order of the model-free CAIS switch: a malformed container carrier (field 5)
+// must be reported as a structural defect, never as
+// claudeCAISUnknownGenerationError, even when the envelope version or
+// channel_id is also unrecognized. Otherwise malformed client input produces
+// a false stale-allowlist warning instead of naming the carrier defect that
+// actually caused rejection.
+func TestClaudeModelFreeCAISSignature_CarrierValidatedBeforeGeneration(t *testing.T) {
+	t.Run("unknown envelope version with missing carrier reports the carrier defect", func(t *testing.T) {
+		parts := defaultClaudeModelFreeCAISParts()
+		parts.envelopeVersion = 5
+		parts.includeCarrier = false
+		signature := parts.encode()
+
+		_, err := InspectClaudeCAISSignature(signature)
+		if err == nil {
+			t.Fatal("InspectClaudeCAISSignature err = nil, want a carrier error")
+		}
+		var unknownGeneration *claudeCAISUnknownGenerationError
+		if errors.As(err, &unknownGeneration) {
+			t.Fatalf("err = %v, must not classify as unknown-generation when the carrier is missing", err)
+		}
+		if !strings.Contains(err.Error(), "container field 5") {
+			t.Fatalf("err = %q, want it to mention container field 5", err.Error())
+		}
+	})
+
+	t.Run("unknown channel_id with empty carrier reports the carrier defect", func(t *testing.T) {
+		parts := defaultClaudeModelFreeCAISParts()
+		parts.channelID = 18
+		parts.carrierLen = 0
+		signature := parts.encode()
+
+		_, err := InspectClaudeCAISSignature(signature)
+		if err == nil {
+			t.Fatal("InspectClaudeCAISSignature err = nil, want a carrier error")
+		}
+		var unknownGeneration *claudeCAISUnknownGenerationError
+		if errors.As(err, &unknownGeneration) {
+			t.Fatalf("err = %v, must not classify as unknown-generation when the carrier is empty", err)
+		}
+		if !strings.Contains(err.Error(), "container field 5") {
+			t.Fatalf("err = %q, want it to mention container field 5", err.Error())
+		}
+	})
+
+	t.Run("unknown envelope version with a valid carrier still reports unknown generation", func(t *testing.T) {
+		parts := defaultClaudeModelFreeCAISParts()
+		parts.envelopeVersion = 5
+		signature := parts.encode()
+
+		_, err := InspectClaudeCAISSignature(signature)
+		if err == nil {
+			t.Fatal("InspectClaudeCAISSignature err = nil, want an unknown-generation error")
+		}
+		var unknownGeneration *claudeCAISUnknownGenerationError
+		if !errors.As(err, &unknownGeneration) {
+			t.Fatalf("err = %v, want *claudeCAISUnknownGenerationError when the carrier is well-formed", err)
 		}
 	})
 }
