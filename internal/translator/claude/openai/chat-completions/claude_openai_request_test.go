@@ -844,3 +844,46 @@ func TestConvertOpenAIRequestToClaude_DeterministicWithoutSessionKey(t *testing.
 		t.Fatalf("turn growth changed derived user_id: %q vs %q", idFirst, idSecond)
 	}
 }
+
+// Anthropic only accepts cache_control on the tool_result block itself, never
+// inside tool_result.content. A part-level marker on an OpenAI tool message
+// must be hoisted to the block, while ordinary message parts keep theirs.
+func TestConvertOpenAIRequestToClaude_ToolResultPartCacheControlHoisted(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"Use calc for 2+2.","cache_control":{"type":"ephemeral"}}]},
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"calc","arguments":"{\"expr\":\"2+2\"}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"4","cache_control":{"type":"ephemeral"}}]}
+		],
+		"tools":[{"type":"function","function":{"name":"calc","description":"calc","parameters":{"type":"object","properties":{"expr":{"type":"string"}},"required":["expr"]}}}]
+	}`)
+	out := ConvertOpenAIRequestToClaude("claude-test", inputJSON, false)
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("message count = %d, want 3. Output: %s", len(messages), string(out))
+	}
+
+	// Ordinary user content parts keep their part-level cache_control.
+	firstText := messages[0].Get("content.0")
+	if got := firstText.Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("user text part cache_control.type = %q, want ephemeral (must not be stripped). Output: %s", got, string(out))
+	}
+
+	// The tool_result block carries the hoisted marker.
+	toolResult := messages[2].Get("content.0")
+	if got := toolResult.Get("type").String(); got != "tool_result" {
+		t.Fatalf("messages[2].content[0].type = %q, want tool_result. Output: %s", got, string(out))
+	}
+	if got := toolResult.Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tool_result block cache_control.type = %q, want ephemeral (hoisted from the part). Output: %s", got, string(out))
+	}
+
+	// ... and the inner content parts carry no cache_control.
+	innerParts := toolResult.Get("content").Array()
+	for i, part := range innerParts {
+		if part.Get("cache_control").Exists() {
+			t.Fatalf("tool_result.content[%d] must not carry cache_control. Output: %s", i, string(out))
+		}
+	}
+}
