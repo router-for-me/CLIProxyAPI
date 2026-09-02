@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -126,6 +127,15 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	go func() {
 		defer close(out)
 		var failed bool
+		var committed bool
+		var historyScopeRecorded bool
+		defer func() {
+			if !committed || historyScopeRecorded {
+				return
+			}
+			opts.EnsureMetadata()[cliproxyexecutor.ProviderOutputCommittedMetadataKey] = true
+			m.rememberProviderHistoryScope(Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Options: opts})
+		}()
 		forward := true
 		var rewriter *StreamRewriter
 		if aliasResult.ForceMapping && strings.TrimSpace(aliasResult.OriginalAlias) != "" {
@@ -134,6 +144,9 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
 			if chunk.Err != nil && !failed {
 				failed = true
+				if committed {
+					opts.EnsureMetadata()[cliproxyexecutor.ProviderOutputCommittedMetadataKey] = true
+				}
 				entry := logEntryWithRequestID(ctx)
 				warnLogUpstreamFailure(ctx, entry, provider, resultModel, auth, time.Since(streamStart), chunk.Err)
 				rerr := resultErrorFromError(chunk.Err)
@@ -141,6 +154,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: opts}
 				applyRequestScopedActionToResult(action, okAction, &result)
 				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				historyScopeRecorded = true
 			}
 			if !forward {
 				return false
@@ -168,6 +182,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			chunk.Payload = payload
 			if ctx == nil {
 				out <- chunk
+				committed = true
 				return true
 			}
 			select {
@@ -175,6 +190,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				forward = false
 				return false
 			case out <- chunk:
+				committed = true
 				return true
 			}
 		}
@@ -198,9 +214,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		}
 		if !failed && (ephemeralResult || claudeOAuthRequestCancellation(ctx, auth, nil) == nil) {
 			m.recordExecutionResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: true, Options: opts}, auth, ephemeralResult)
+			historyScopeRecorded = true
 		}
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
+	return &cliproxyexecutor.StreamResult{Headers: headers, Metadata: maps.Clone(opts.Metadata), Chunks: out}
 }
 
 func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel, executionModel string, execModels []string, pooled bool, aliasResult OAuthModelAliasResult, routing *apiKeyModelRoutingSnapshot, allowRetry bool, ephemeralResult bool) (*cliproxyexecutor.StreamResult, error) {
@@ -220,13 +237,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			execReq.Model = executionModel
 		}
 		execOpts := opts
-		var errIntercept error
-		execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
-		if errIntercept != nil {
-			return nil, errIntercept
-		}
 		if executionModel == "" {
 			execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, execModel)
+		}
+		execOpts = withSelectedModelCompatibility(execOpts, execReq)
+		var errIntercept error
+		execReq, execOpts, errIntercept = m.applyRequestAfterAuthInterceptor(ctx, executor, auth, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+		if errIntercept != nil {
+			return nil, errIntercept
 		}
 		if errCtx := ctx.Err(); errCtx != nil {
 			return nil, errCtx

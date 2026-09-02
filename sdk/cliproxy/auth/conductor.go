@@ -168,6 +168,12 @@ type Manager struct {
 	// refreshLocks serializes credential refresh per auth ID so concurrent
 	// 401 recoveries and auto-refresh workers do not race the same refresh_token.
 	refreshLocks sync.Map
+
+	// providerHistoryScopes remembers which upstream credential last committed a
+	// session and whether a full-history handoff remains mixed. Mixed transcripts
+	// stay projected on later full-history turns until the client sends a neutral
+	// replacement; native same-credential incremental requests remain untouched.
+	providerHistoryScopes *SessionCache
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -190,6 +196,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		homeSessionSelections: make(map[string]map[homeSessionSelectionKey]*HomeDispatchSelection),
 		providerOffsets:       make(map[string]int),
 		modelPoolOffsets:      make(map[string]int),
+		providerHistoryScopes: NewSessionCache(time.Hour),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})

@@ -947,6 +947,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, authSnapshot)
+	m.rememberProviderHistoryScope(result)
 	m.updateSessionAffinity(result)
 }
 
@@ -981,6 +982,7 @@ func (m *Manager) reportHomeResult(ctx context.Context, result Result, auth *Aut
 	}
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, snapshot)
+	m.rememberProviderHistoryScope(result)
 }
 
 func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Result) {
@@ -1007,6 +1009,7 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
 
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, authSnapshot)
+	m.rememberProviderHistoryScope(result)
 }
 
 func existingModelState(auth *Auth, model string) *ModelState {

@@ -425,9 +425,21 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 
 	var responseSSEValidator *sseJSONValidationState
-	if responseProtocol == "openai-response" {
+	var responseSSELifecycle *responsesSSELifecycleState
+	responseExecutionMetadata := streamResult.Metadata
+	resetResponseSSEStates := func() {
+		if responseProtocol != "openai-response" {
+			responseSSEValidator = nil
+			responseSSELifecycle = nil
+			return
+		}
 		responseSSEValidator = &sseJSONValidationState{}
+		responseSSELifecycle = nil
+		if responsesSSELifecycleEnabled(responseExecutionMetadata) {
+			responseSSELifecycle = &responsesSSELifecycleState{}
+		}
 	}
+	resetResponseSSEStates()
 
 	transformStreamPayload := func(payload []byte, chunkIndex *int, historyChunks [][]byte) ([]byte, bool, *interfaces.ErrorMessage) {
 		applyStreamHeaderInit()
@@ -469,6 +481,16 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate}
 			}
 			payload = validatedPayload
+			if len(payload) == 0 {
+				return nil, false, nil
+			}
+		}
+		if responseSSELifecycle != nil {
+			normalizedPayload, errNormalize := responseSSELifecycle.AddChunk(payload)
+			if errNormalize != nil {
+				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errNormalize}
+			}
+			payload = normalizedPayload
 			if len(payload) == 0 {
 				return nil, false, nil
 			}
@@ -564,15 +586,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 		rawStreamHeaders = cloneHeader(retryResult.Headers)
 		baseStreamHeaders = cloneHeader(retryResult.Headers)
+		responseExecutionMetadata = retryResult.Metadata
 		streamHeaderInitialized = false
 		streamClosedBeforeRead = false
 		bootstrapStreamErr = nil
 		bootstrapPayload = nil
 		bootstrapChunkIndex = 0
 		bootstrapHistoryChunks = nil
-		if responseSSEValidator != nil {
-			responseSSEValidator = &sseJSONValidationState{}
-		}
+		resetResponseSSEStates()
 		chunks = retryResult.Chunks
 		if chunks == nil {
 			closed := make(chan coreexecutor.StreamChunk)
@@ -673,14 +694,23 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				return
 			}
 			if !ok {
+				var terminalErr error
 				if responseSSEValidator != nil {
 					if errValidate := responseSSEValidator.Finish(); errValidate != nil {
-						errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate}
-						completionOutcome = pluginapi.RequestCompletionFailed
-						completionStatus = errMsg.StatusCode
-						completionErr = errMsg.Error
-						_ = sendErr(errMsg)
+						terminalErr = errValidate
 					}
+				}
+				if terminalErr == nil && responseSSELifecycle != nil {
+					if errNormalize := responseSSELifecycle.Finish(); errNormalize != nil {
+						terminalErr = errNormalize
+					}
+				}
+				if terminalErr != nil {
+					errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: terminalErr}
+					completionOutcome = pluginapi.RequestCompletionFailed
+					completionStatus = errMsg.StatusCode
+					completionErr = errMsg.Error
+					_ = sendErr(errMsg)
 				}
 				return
 			}
