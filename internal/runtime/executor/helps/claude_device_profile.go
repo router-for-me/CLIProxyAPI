@@ -593,6 +593,22 @@ func DefaultClaudeVersion(cfg *config.Config) string {
 	return "2.1.258"
 }
 
+// claudeWireSplit is the first measured Claude Code release with the 2.1.258
+// wire shape (beta assembly and helper transport). Baselines below it keep the
+// measured 2.1.220 shape.
+var claudeWireSplit = claudeCLIVersion{major: 2, minor: 1, patch: 258}
+
+func claudeProfileUsesLegacyWire(profile ClaudeDeviceProfile) bool {
+	return profile.hasVersion && profile.version.Compare(claudeWireSplit) < 0
+}
+
+// ClaudeBaselineUsesLegacyWire reports whether the configured Claude Code
+// baseline predates the 2.1.258 wire shape, in which case callers emit and
+// expect the measured 2.1.220 shape instead.
+func ClaudeBaselineUsesLegacyWire(cfg *config.Config) bool {
+	return claudeProfileUsesLegacyWire(defaultClaudeDeviceProfile(cfg))
+}
+
 func ApplyClaudeDefaultDeviceProfileHeaders(r *http.Request, cfg *config.Config) {
 	ApplyClaudeDeviceProfileHeaders(r, defaultClaudeDeviceProfile(cfg))
 }

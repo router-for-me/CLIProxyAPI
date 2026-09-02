@@ -580,7 +580,10 @@ nonstream-keepalive-interval: 0
 # sits between fast-mode and extended-cache-ttl. On direct api.anthropic.com a caller
 # may only ask for betas real Claude Code also sends, and they are placed at their
 # observed positions; anything else is dropped so the outgoing set stays one a real
-# client could produce.
+# client could produce. Pinning claude-header-defaults below to a baseline older than
+# 2.1.258 (for example the previously measured 2.1.220 / 0.94.0) switches the beta
+# assembly and the native Haiku helper transport checks back to the measured 2.1.220
+# shape, so the outgoing fingerprint stays consistent with the advertised version.
 # Other Anthropic-compatible upstreams still forward caller betas verbatim.
 #
 # Default headers for Claude API requests. Update only after measuring a new Claude Code release.

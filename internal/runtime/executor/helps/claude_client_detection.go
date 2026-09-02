@@ -85,6 +85,13 @@ const (
 // advisor-tool without cache-diagnosis whenever the account's advisor feature
 // flag is on. Keeping the allowlist exact avoids turning the helper exception
 // into a generic no-claude-code-beta bypass.
+// claudeCodeHelperBetaProfilesSince258Structured was first observed on 2.1.258
+// and is not accepted while the configured baseline predates it.
+var claudeCodeHelperBetaProfilesSince258Structured = claudeCodeHelperBetaProfile(true,
+	"advisor-tool-2026-03-01",
+	"structured-outputs-2025-12-15",
+)
+
 var measuredClaudeCodeHelperBetaProfiles = map[string]claudeCodeHelperShape{
 	claudeCodeHelperBetaProfile(true):  claudeCodeHelperShapeMinimal,
 	claudeCodeHelperBetaProfile(false): claudeCodeHelperShapeMinimal,
@@ -93,10 +100,7 @@ var measuredClaudeCodeHelperBetaProfiles = map[string]claudeCodeHelperShape{
 		"structured-outputs-2025-12-15",
 		"cache-diagnosis-2026-04-07",
 	): claudeCodeHelperShapeStructured,
-	claudeCodeHelperBetaProfile(true,
-		"advisor-tool-2026-03-01",
-		"structured-outputs-2025-12-15",
-	): claudeCodeHelperShapeStructured,
+	claudeCodeHelperBetaProfilesSince258Structured: claudeCodeHelperShapeStructured,
 	claudeCodeHelperBetaProfile(true,
 		"structured-outputs-2025-12-15",
 		"fallback-credit-2026-06-01",
@@ -188,8 +192,12 @@ func matchesMeasuredClaudeCodeHelperProfile(
 		return false
 	}
 
-	shape := measuredClaudeCodeHelperBetaProfiles[normalizedClaudeBetaHeader(headers)]
+	betaHeader := normalizedClaudeBetaHeader(headers)
+	shape := measuredClaudeCodeHelperBetaProfiles[betaHeader]
 	if shape == claudeCodeHelperShapeNone || measuredClaudeCodeHelperBodyShape(payload) != shape {
+		return false
+	}
+	if betaHeader == claudeCodeHelperBetaProfilesSince258Structured && ClaudeBaselineUsesLegacyWire(cfg) {
 		return false
 	}
 	if !measuredClaudeCodeHelperHeadersMatch(headers, cfg, shape) {
@@ -297,7 +305,7 @@ func measuredClaudeCodeHelperHeadersMatch(headers http.Header, cfg *config.Confi
 	async := headerValue(headers, "X-Stainless-Async")
 	compression := headerValue(headers, "Accept-Encoding")
 	requestID := headerValue(headers, "X-Client-Request-Id")
-	if profile.hasVersion && profile.version.Compare(claudeHelperTransportSplit) < 0 {
+	if claudeProfileUsesLegacyWire(profile) {
 		if (shape == claudeCodeHelperShapeStructured && async != "async") ||
 			(shape == claudeCodeHelperShapeMinimal && async != "") {
 			return false
@@ -311,11 +319,6 @@ func measuredClaudeCodeHelperHeadersMatch(headers http.Header, cfg *config.Confi
 	}
 	return async == "" && compression == "gzip, deflate, br, zstd" && requestID == ""
 }
-
-// claudeHelperTransportSplit is the first measured Claude Code release that
-// uses the 2.1.258 helper transport envelope. Baselines below it keep the
-// 2.1.220 envelope.
-var claudeHelperTransportSplit = claudeCLIVersion{major: 2, minor: 1, patch: 258}
 
 func measuredClaudeCodeHelperSessionMatches(headers http.Header, payload []byte) bool {
 	metadata := gjson.GetBytes(payload, "metadata")

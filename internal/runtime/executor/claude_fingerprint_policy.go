@@ -27,7 +27,7 @@ var claudeFingerprintProfileWarned sync.Map
 
 // claudeFingerprintPolicy is a single switch-driven view of Claude fingerprint
 // behavior for Anthropic Messages. The heavy algorithms stay shared:
-//   - betas: claudeCodeCLIBetas(..., useOAuthBetas)
+//   - betas: claudeCodeCLIBetas(..., useOAuthBetas, legacyWire)
 //   - CCH: claudeCCHSigningEnabled / finalizeAnthropicMessagesBodyCCH
 //   - identity: EnsureClaudeCLIFingerprintIdentity + ApplyClaudeCredentialMetadata
 //

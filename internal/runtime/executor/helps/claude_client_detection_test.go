@@ -253,6 +253,18 @@ func TestDetectClaudeCodeRequestRecognizesMeasuredHaikuHelpers(t *testing.T) {
 	}
 }
 
+func TestClaudeBaselineUsesLegacyWire(t *testing.T) {
+	if ClaudeBaselineUsesLegacyWire(&config.Config{}) {
+		t.Fatal("default baseline reported as legacy wire")
+	}
+	if ClaudeBaselineUsesLegacyWire(nil) {
+		t.Fatal("nil config reported as legacy wire")
+	}
+	if !ClaudeBaselineUsesLegacyWire(legacyClaudeBaselineConfig()) {
+		t.Fatal("2.1.220 baseline not reported as legacy wire")
+	}
+}
+
 // TestDetectClaudeCodeRequestHelperTransportFollowsConfiguredBaseline pins the
 // envelope selection: a baseline pinned to 2.1.220 accepts the 2.1.220 helper
 // transport and rejects the 2.1.258 one, and the default baseline does the
@@ -290,6 +302,13 @@ func TestDetectClaudeCodeRequestHelperTransportFollowsConfiguredBaseline(t *test
 				return headers
 			}(),
 			payload: measuredClaudeCodeMinimalHelperPayload(),
+			want:    false,
+		},
+		{
+			name:    "legacy baseline rejects the 2.1.258-only helper beta sequence",
+			cfg:     legacyClaudeBaselineConfig(),
+			headers: measuredClaudeCodeLegacyHelperHeaders(claudeCodeHelperBetaProfilesSince258Structured, true),
+			payload: measuredClaudeCodeStructuredHelperPayload(),
 			want:    false,
 		},
 		{

@@ -110,7 +110,12 @@ var claudeCodeTrailingBetas = []string{
 //
 // An empty body keeps the optimistic role=system default, matching the cloaking
 // policy for unknown and future model IDs.
-func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool) string {
+//
+// legacyWire selects the measured 2.1.220 policy for an operator whose
+// claude-header-defaults pin a baseline older than 2.1.258: advanced-tool-use
+// accompanies every non-empty tool list and afk-mode is never sent, so the beta
+// set stays one that release really emitted.
+func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool, legacyWire bool) string {
 	betas := make([]string, 0, len(claudeCodeCLIConstantBetas)+len(claudeCodeTrailingBetas)+7)
 	betas = append(betas, claudeCodeBeta)
 	if oauthToken {
@@ -132,7 +137,12 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	if requested[claudeAdvisorToolBeta] || claudeBodyHasAdvisorTool(body) {
 		betas = append(betas, claudeAdvisorToolBeta)
 	}
-	if requested[claudeAdvancedToolUseBeta] || claudeBodyUsesAdvancedToolUse(body) {
+	advancedToolUse := requested[claudeAdvancedToolUseBeta] || claudeBodyUsesAdvancedToolUse(body)
+	if legacyWire {
+		tools := gjson.GetBytes(body, "tools")
+		advancedToolUse = tools.IsArray() && len(tools.Array()) > 0
+	}
+	if advancedToolUse {
 		betas = append(betas, claudeAdvancedToolUseBeta)
 	}
 	betas = append(betas, claudeEffortBeta)
@@ -147,7 +157,7 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	if claudeRequestUsesFastMode(body, requested) {
 		betas = append(betas, claudeFastModeBeta)
 	}
-	if requested[claudeAFKModeBeta] {
+	if !legacyWire && requested[claudeAFKModeBeta] {
 		betas = append(betas, claudeAFKModeBeta)
 	}
 	if oauthToken {
@@ -828,10 +838,11 @@ func applyClaudeHeadersWithNativeProfile(
 	countTokens := r.URL != nil && strings.HasSuffix(r.URL.Path, "/count_tokens")
 	requestedMap := claudeRequestedBetas(incomingBetas, extraBetas)
 	advisorNeeded := requestedMap[claudeAdvisorToolBeta] || claudeBodyHasAdvisorTool(body)
+	legacyWire := helps.ClaudeBaselineUsesLegacyWire(cfg)
 
 	baseBetas := incomingBetas
 	if !preserveCallerFingerprint {
-		baseBetas = claudeCodeCLIBetas(body, requestedMap, useOAuthBetas)
+		baseBetas = claudeCodeCLIBetas(body, requestedMap, useOAuthBetas, legacyWire)
 		if countTokens {
 			baseBetas = claudeCountTokensBetasForCredential(useOAuthBetas)
 			if advisorNeeded {
@@ -1033,7 +1044,11 @@ func applyClaudeHeadersWithNativeProfile(
 	applyTransportNegotiation := func() {
 		if helperProfile {
 			identityHeader("Accept", "application/json")
-			identityHeader("Accept-Encoding", "gzip, deflate, br, zstd")
+			helperEncoding := "gzip, deflate, br, zstd"
+			if legacyWire {
+				helperEncoding = "gzip"
+			}
+			identityHeader("Accept-Encoding", helperEncoding)
 			return
 		}
 		if stream && !isAnthropicBase {

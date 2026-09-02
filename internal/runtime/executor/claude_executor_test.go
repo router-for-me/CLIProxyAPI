@@ -82,7 +82,7 @@ func assertClaudeFingerprint(t *testing.T, headers http.Header, userAgent, pkgVe
 }
 
 func TestApplyClaudeHeaders_FastModeBetaIsConditional(t *testing.T) {
-	baseline := claudeCodeCLIBetas([]byte(`{"model":"claude-opus-5"}`), nil, false)
+	baseline := claudeCodeCLIBetas([]byte(`{"model":"claude-opus-5"}`), nil, false, false)
 	betasWithoutFastMode := baseline
 	betasWithFastMode := baseline + "," + claudeFastModeBeta
 
@@ -820,7 +820,7 @@ func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode258CLIFingerprint(t *testi
 	if got := seenHeaders.Get("X-App"); got != "cli" {
 		t.Fatalf("X-App = %q, want cli", got)
 	}
-	if want := claudeCodeCLIBetas(payload, nil, false); seenHeaders.Get("Anthropic-Beta") != want {
+	if want := claudeCodeCLIBetas(payload, nil, false, false); seenHeaders.Get("Anthropic-Beta") != want {
 		t.Fatalf("Anthropic-Beta = %q, want %q", seenHeaders.Get("Anthropic-Beta"), want)
 	}
 
@@ -5230,7 +5230,7 @@ func TestClaudeExecutor_ExecuteOAuthCustomToolMCPAliasRoundTrip(t *testing.T) {
 	if got := upstreamHeaders.Get("User-Agent"); got != "claude-cli/2.1.258 (external, cli)" {
 		t.Fatalf("Messages User-Agent = %q, want CLI identity", got)
 	}
-	wantBetas := claudeCodeCLIBetas(payload, nil, true)
+	wantBetas := claudeCodeCLIBetas(payload, nil, true, false)
 	if got := upstreamHeaders.Get("Anthropic-Beta"); got != wantBetas {
 		t.Fatalf("Messages Anthropic-Beta = %q, want %q", got, wantBetas)
 	}
@@ -5307,7 +5307,7 @@ func TestClaudeExecutor_ExecuteStreamOAuthCustomToolMCPAliasRoundTrip(t *testing
 	if got := upstreamHeaders.Get("User-Agent"); got != "claude-cli/2.1.258 (external, cli)" {
 		t.Fatalf("streaming User-Agent = %q, want CLI identity", got)
 	}
-	wantBetas := claudeCodeCLIBetas(payload, nil, true)
+	wantBetas := claudeCodeCLIBetas(payload, nil, true, false)
 	if got := upstreamHeaders.Get("Anthropic-Beta"); got != wantBetas {
 		t.Fatalf("streaming Anthropic-Beta = %q, want %q", got, wantBetas)
 	}
@@ -5689,7 +5689,51 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := claudeCodeCLIBetas([]byte(tt.body), tt.requested, tt.oauth); got != tt.want {
+			if got := claudeCodeCLIBetas([]byte(tt.body), tt.requested, tt.oauth, false); got != tt.want {
+				t.Fatalf("claudeCodeCLIBetas() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestClaudeCodeCLIBetas_LegacyBaselineKeeps220Policy pins the beta policy an
+// operator gets after pinning claude-header-defaults to 2.1.220: advanced-tool-use
+// with any non-empty tool list, and no afk-mode.
+func TestClaudeCodeCLIBetas_LegacyBaselineKeeps220Policy(t *testing.T) {
+	const constants = "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+	tests := []struct {
+		name      string
+		body      string
+		requested map[string]bool
+		oauth     bool
+		want      string
+	}{
+		{
+			name: "inline tools add advanced tool use",
+			body: `{"model":"claude-sonnet-4-6","tools":[{"name":"Read"}]}`,
+			want: constants + ",advanced-tool-use-2025-11-20,effort-2025-11-24",
+		},
+		{
+			name: "empty tools stay without it",
+			body: `{"model":"claude-sonnet-4-6","tools":[]}`,
+			want: constants + ",effort-2025-11-24",
+		},
+		{
+			name:      "afk-mode is dropped even when requested",
+			body:      `{"model":"claude-opus-5","speed":"fast"}`,
+			oauth:     true,
+			requested: map[string]bool{claudeAFKModeBeta: true},
+			want: "claude-code-20250219,oauth-2025-04-20," +
+				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
+				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07," +
+				"effort-2025-11-24,fallback-credit-2026-06-01,fast-mode-2026-02-01," +
+				"extended-cache-ttl-2025-04-11",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := claudeCodeCLIBetas([]byte(tt.body), tt.requested, tt.oauth, true); got != tt.want {
 				t.Fatalf("claudeCodeCLIBetas() = %q, want %q", got, tt.want)
 			}
 		})
