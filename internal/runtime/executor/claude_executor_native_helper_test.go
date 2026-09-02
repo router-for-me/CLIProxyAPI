@@ -23,10 +23,10 @@ const (
 	claudeNativeHelperCoreBetas = "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
 )
 
-func claudeNativeHelperHeaders(betas, compression string, structured bool) http.Header {
+func claudeNativeHelperHeaders(betas string) http.Header {
 	headers := http.Header{
 		"Accept":            {"application/json"},
-		"Accept-Encoding":   {compression},
+		"Accept-Encoding":   {"gzip, deflate, br, zstd"},
 		"Content-Type":      {"application/json"},
 		"User-Agent":        {"claude-cli/2.1.258 (external, cli)"},
 		"X-App":             {"cli"},
@@ -43,7 +43,6 @@ func claudeNativeHelperHeaders(betas, compression string, structured bool) http.
 		"X-Stainless-Retry-Count":                   {"0"},
 		"X-Stainless-Timeout":                       {"600"},
 	}
-	_ = structured // 2.1.258 helpers share one transport envelope for both shapes.
 	canonical := make(http.Header, len(headers))
 	for name, values := range headers {
 		for _, value := range values {
@@ -118,7 +117,7 @@ func TestClaudeExecutorMinimalNativeHelperPreservesMarkerlessWire(t *testing.T) 
 	defer server.Close()
 
 	payload := []byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"helper probe"}],"metadata":{"user_id":"` + strings.ReplaceAll(claudeNativeHelperUserID, `"`, `\"`) + `"}}`)
-	headers := claudeNativeHelperHeaders(claudeNativeHelperCoreBetas, "gzip, deflate, br, zstd", false)
+	headers := claudeNativeHelperHeaders(claudeNativeHelperCoreBetas)
 	executor := NewClaudeExecutor(&config.Config{})
 	_, errExecute := executor.Execute(context.Background(), claudeNativeHelperOAuthAuth(server.URL), cliproxyexecutor.Request{
 		Model:   "claude-haiku-4-5-20251001",
@@ -162,7 +161,7 @@ func TestClaudeExecutorStructuredNativeHelperPreservesStreamProfile(t *testing.T
 
 	betas := claudeNativeHelperCoreBetas + ",structured-outputs-2025-12-15"
 	payload := []byte(`{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":[{"type":"text","text":"helper probe"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.258; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"Return a short title."}],"tools":[],"metadata":{"user_id":"` + strings.ReplaceAll(claudeNativeHelperUserID, `"`, `\"`) + `"},"max_tokens":32000,"thinking":{"type":"disabled"},"temperature":1,"output_config":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}}},"stream":true}`)
-	headers := claudeNativeHelperHeaders(betas, "gzip, deflate, br, zstd", true)
+	headers := claudeNativeHelperHeaders(betas)
 	executor := NewClaudeExecutor(&config.Config{})
 	result, errStream := executor.ExecuteStream(context.Background(), claudeNativeHelperOAuthAuth(server.URL), cliproxyexecutor.Request{
 		Model:   "claude-haiku-4-5-20251001",

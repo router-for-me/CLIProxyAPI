@@ -24,7 +24,7 @@ func confirmedClaudeCodeHeaders() http.Header {
 	}
 }
 
-func measuredClaudeCodeHelperHeaders(betaProfile string, structured bool) http.Header {
+func measuredClaudeCodeHelperHeaders(betaProfile string) http.Header {
 	profile := defaultClaudeDeviceProfile(&config.Config{})
 	headers := http.Header{
 		"Accept":            {"application/json"},
@@ -45,7 +45,6 @@ func measuredClaudeCodeHelperHeaders(betaProfile string, structured bool) http.H
 		"X-Stainless-Retry-Count":                   {"0"},
 		"X-Stainless-Timeout":                       {"600"},
 	}
-	_ = structured // 2.1.258 helpers share one transport envelope for both shapes.
 	canonical := make(http.Header, len(headers))
 	for name, values := range headers {
 		for _, value := range values {
@@ -170,10 +169,9 @@ func TestDetectClaudeCodeCountTokensAllowsMissingMetadata(t *testing.T) {
 
 func TestDetectClaudeCodeRequestRecognizesMeasuredHaikuHelpers(t *testing.T) {
 	tests := []struct {
-		name       string
-		beta       string
-		structured bool
-		payload    []byte
+		name    string
+		beta    string
+		payload []byte
 	}{
 		{
 			name:    "minimal with redact thinking",
@@ -186,42 +184,37 @@ func TestDetectClaudeCodeRequestRecognizesMeasuredHaikuHelpers(t *testing.T) {
 			payload: measuredClaudeCodeMinimalHelperPayload(),
 		},
 		{
-			name:       "structured title helper with advisor",
-			beta:       claudeCodeHelperBetaProfile(true, "advisor-tool-2026-03-01", "structured-outputs-2025-12-15", "cache-diagnosis-2026-04-07"),
-			structured: true,
-			payload:    measuredClaudeCodeStructuredHelperPayload(),
+			name:    "structured title helper with advisor",
+			beta:    claudeCodeHelperBetaProfile(true, "advisor-tool-2026-03-01", "structured-outputs-2025-12-15", "cache-diagnosis-2026-04-07"),
+			payload: measuredClaudeCodeStructuredHelperPayload(),
 		},
 		{
 			// Captured 2026-09-02 from Claude Code 2.1.258: the session-title helper
 			// with the account's advisor feature flag on and no cache diagnostics.
-			name:       "structured title helper with advisor on 2.1.258",
-			beta:       claudeCodeHelperBetaProfile(true, "advisor-tool-2026-03-01", "structured-outputs-2025-12-15"),
-			structured: true,
-			payload:    measuredClaudeCodeStructuredHelperPayload(),
+			name:    "structured title helper with advisor on 2.1.258",
+			beta:    claudeCodeHelperBetaProfile(true, "advisor-tool-2026-03-01", "structured-outputs-2025-12-15"),
+			payload: measuredClaudeCodeStructuredHelperPayload(),
 		},
 		{
-			name:       "structured title helper with fallback credit",
-			beta:       claudeCodeHelperBetaProfile(true, "structured-outputs-2025-12-15", "fallback-credit-2026-06-01"),
-			structured: true,
-			payload:    measuredClaudeCodeStructuredHelperPayload(),
+			name:    "structured title helper with fallback credit",
+			beta:    claudeCodeHelperBetaProfile(true, "structured-outputs-2025-12-15", "fallback-credit-2026-06-01"),
+			payload: measuredClaudeCodeStructuredHelperPayload(),
 		},
 		{
-			name:       "structured title helper with lowercase hex CCH",
-			beta:       claudeCodeHelperBetaProfile(true, "structured-outputs-2025-12-15"),
-			structured: true,
-			payload:    []byte(strings.Replace(string(measuredClaudeCodeStructuredHelperPayload()), "cch=00000", "cch=7ee87", 1)),
+			name:    "structured title helper with lowercase hex CCH",
+			beta:    claudeCodeHelperBetaProfile(true, "structured-outputs-2025-12-15"),
+			payload: []byte(strings.Replace(string(measuredClaudeCodeStructuredHelperPayload()), "cch=00000", "cch=7ee87", 1)),
 		},
 		{
-			name:       "structured title helper without redact thinking",
-			beta:       claudeCodeHelperBetaProfile(false, "structured-outputs-2025-12-15"),
-			structured: true,
-			payload:    measuredClaudeCodeStructuredHelperPayload(),
+			name:    "structured title helper without redact thinking",
+			beta:    claudeCodeHelperBetaProfile(false, "structured-outputs-2025-12-15"),
+			payload: measuredClaudeCodeStructuredHelperPayload(),
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			detection := DetectClaudeCodeRequest(
-				measuredClaudeCodeHelperHeaders(test.beta, test.structured),
+				measuredClaudeCodeHelperHeaders(test.beta),
 				test.payload,
 				false,
 			)
@@ -248,7 +241,7 @@ func TestDetectClaudeCodeRequestRejectsMalformedStructuredHaikuHelpers(t *testin
 		{name: "open schema", payload: strings.Replace(basePayload, `"additionalProperties":false`, `"additionalProperties":true`, 1)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			detection := DetectClaudeCodeRequest(measuredClaudeCodeHelperHeaders(beta, true), []byte(test.payload), false)
+			detection := DetectClaudeCodeRequest(measuredClaudeCodeHelperHeaders(beta), []byte(test.payload), false)
 			if detection.Confirmed || detection.HelperProfile {
 				t.Fatalf("detection = %#v, want malformed structured helper rejected", detection)
 			}
@@ -330,7 +323,7 @@ func TestDetectClaudeCodeRequestRejectsNearMissHaikuHelpers(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			headers := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true), false)
+			headers := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true))
 			if test.mutate != nil {
 				test.mutate(headers)
 			}
@@ -378,7 +371,7 @@ func TestDetectClaudeCodeRequestAcceptsHelperSubagentParentSessionID(t *testing.
 	payload := []byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"helper probe"}],"metadata":{"user_id":` + string(encoded) + `}}`)
 
 	detection := DetectClaudeCodeRequest(
-		measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true), false),
+		measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true)),
 		payload,
 		false,
 	)
@@ -393,7 +386,7 @@ func TestDetectClaudeCodeRequestRejectsHelperIdentityWithUnknownKeys(t *testing.
 	payload := []byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"helper probe"}],"metadata":{"user_id":` + string(encoded) + `}}`)
 
 	detection := DetectClaudeCodeRequest(
-		measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true), false),
+		measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true)),
 		payload,
 		false,
 	)
@@ -412,7 +405,7 @@ func TestDetectClaudeCodeRequestAcceptsHelperFromNonBaselinePlatform(t *testing.
 		{"MacOS", "x64"},
 	} {
 		t.Run(platform.os+"/"+platform.arch, func(t *testing.T) {
-			headers := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true), false)
+			headers := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true))
 			headers.Set("X-Stainless-OS", platform.os)
 			headers.Set("X-Stainless-Arch", platform.arch)
 
@@ -432,7 +425,7 @@ func TestDetectClaudeCodeRequestRejectsHelperWithoutPlatformHeaders(t *testing.T
 		"X-Stainless-Runtime-Version",
 	} {
 		t.Run("missing "+name, func(t *testing.T) {
-			headers := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true), false)
+			headers := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true))
 			headers.Del(name)
 
 			detection := DetectClaudeCodeRequest(headers, measuredClaudeCodeMinimalHelperPayload(), false)
@@ -449,7 +442,7 @@ func TestDetectClaudeCodeRequestRejectsHelperWithForeignSoftwareTuple(t *testing
 		"X-Stainless-Runtime-Version": "v0.0.1",
 	} {
 		t.Run(name, func(t *testing.T) {
-			headers := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true), false)
+			headers := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true))
 			headers.Set(name, value)
 
 			detection := DetectClaudeCodeRequest(headers, measuredClaudeCodeMinimalHelperPayload(), false)
@@ -493,7 +486,7 @@ func TestNormalizedClaudeBetaHeaderIsDeterministic(t *testing.T) {
 // detector on claude-header-defaults.timeout instead of the measured constant
 // therefore rejected every genuine helper whenever that value was customized.
 func TestMeasuredHelperProfileIgnoresConfiguredStainlessTimeout(t *testing.T) {
-	headers := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true), false)
+	headers := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true))
 	payload := measuredClaudeCodeMinimalHelperPayload()
 	if got := headers.Get("X-Stainless-Timeout"); got != claudeDefaultStainlessTimeout {
 		t.Fatalf("measured helper timeout = %q, want %q", got, claudeDefaultStainlessTimeout)
@@ -525,7 +518,7 @@ func TestMeasuredHelperProfileIgnoresConfiguredStainlessTimeout(t *testing.T) {
 	// The measured constant stays the only accepted value, so a caller that does not
 	// send it is still disqualified even when the operator default happens to match.
 	t.Run("foreign timeout stays rejected", func(t *testing.T) {
-		foreign := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true), false)
+		foreign := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true))
 		foreign.Set("X-Stainless-Timeout", "900")
 		if detection := DetectClaudeCodeRequest(foreign, payload, false, withTimeout("900")); detection.HelperProfile {
 			t.Fatalf("detection = %#v, want a non-measured timeout to disqualify the helper profile", detection)

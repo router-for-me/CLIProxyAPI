@@ -191,7 +191,7 @@ func matchesMeasuredClaudeCodeHelperProfile(
 	if shape == claudeCodeHelperShapeNone || measuredClaudeCodeHelperBodyShape(payload) != shape {
 		return false
 	}
-	if !measuredClaudeCodeHelperHeadersMatch(headers, cfg, shape) {
+	if !measuredClaudeCodeHelperHeadersMatch(headers, cfg) {
 		return false
 	}
 	return measuredClaudeCodeHelperSessionMatches(headers, payload)
@@ -239,7 +239,7 @@ func normalizedClaudeBetaHeader(headers http.Header) string {
 // foreign client and cloak it. Values that carry real discriminating power - the
 // exact beta allowlist, the body shape, the billing CCH and the session binding -
 // stay strict.
-func measuredClaudeCodeHelperHeadersMatch(headers http.Header, cfg *config.Config, shape claudeCodeHelperShape) bool {
+func measuredClaudeCodeHelperHeadersMatch(headers http.Header, cfg *config.Config) bool {
 	profile := defaultClaudeDeviceProfile(cfg)
 	expected := map[string]string{
 		"Accept":                  "application/json",
