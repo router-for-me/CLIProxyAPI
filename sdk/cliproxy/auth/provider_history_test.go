@@ -247,6 +247,18 @@ func TestNormalizeProviderBoundResponseHistoryRejectsUnsafeReplay(t *testing.T) 
 	}
 }
 
+func TestNormalizeProviderBoundResponseHistoryIgnoresFunctionParameterNames(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"search","parameters":{"type":"object","properties":{"vector_store_id":{"type":"string"}}}}],"input":[{"type":"message","id":"foreign","role":"user","content":"continue"}]}`)
+
+	got, err := normalizeProviderBoundResponseHistory(body)
+	if err != nil {
+		t.Fatalf("normalizeProviderBoundResponseHistory() error = %v", err)
+	}
+	if !got.Changed || gjson.GetBytes(got.Body, "input.0.id").Exists() {
+		t.Fatalf("function schema was not normalized safely: %s", got.Body)
+	}
+}
+
 func TestManagerNormalizesHistoryOnlyWhenSessionChangesUpstreamScope(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	t.Cleanup(manager.StopAutoRefresh)
@@ -321,6 +333,13 @@ func TestManagerTracksStablePromptCacheAliasAcrossRequestIDs(t *testing.T) {
 	}
 	if gjson.GetBytes(got.Payload, "input.0.id").Exists() {
 		t.Fatalf("stable prompt cache alias did not trigger projection: %s", got.Payload)
+	}
+}
+
+func TestProviderHistorySessionIDsIgnoreHeuristicMessageHashes(t *testing.T) {
+	body := []byte(`{"input":[{"type":"message","role":"user","content":"continue"}]}`)
+	if got := providerHistorySessionIDs(nil, body, nil); len(got) != 0 {
+		t.Fatalf("provider history accepted heuristic session IDs: %v", got)
 	}
 }
 

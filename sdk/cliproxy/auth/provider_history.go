@@ -136,24 +136,21 @@ func normalizeProviderBoundResponseHistory(body []byte) (providerHistoryNormaliz
 }
 
 func providerHistoryHasCredentialBoundToolResource(value any) bool {
-	switch typed := value.(type) {
-	case []any:
-		for _, item := range typed {
-			if providerHistoryHasCredentialBoundToolResource(item) {
-				return true
-			}
+	tools, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, rawTool := range tools {
+		tool, okTool := rawTool.(map[string]any)
+		if !okTool {
+			continue
 		}
-	case map[string]any:
-		for key, item := range typed {
-			switch strings.ToLower(strings.TrimSpace(key)) {
-			case "vector_store_id", "vector_store_ids":
-				if hasSemanticHistoryValue(item) {
-					return true
-				}
-			}
-			if providerHistoryHasCredentialBoundToolResource(item) {
-				return true
-			}
+		toolType, _ := tool["type"].(string)
+		if !strings.EqualFold(strings.TrimSpace(toolType), "file_search") {
+			continue
+		}
+		if hasSemanticHistoryValue(tool["vector_store_id"]) || hasSemanticHistoryValue(tool["vector_store_ids"]) {
+			return true
 		}
 	}
 	return false
@@ -381,7 +378,7 @@ func providerHistoryUsesConversation(body []byte) bool {
 }
 
 func providerHistorySessionIDs(headers http.Header, payload []byte, metadata map[string]any) []string {
-	primaryID, fallbackID := extractSessionIDs(headers, payload, metadata)
+	primaryID, fallbackID := extractExplicitSessionIDs(headers, payload, metadata)
 	aliases := mergeSessionAliases(nil, primaryID, fallbackID)
 
 	var request struct {
