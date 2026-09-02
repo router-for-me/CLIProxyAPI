@@ -284,6 +284,139 @@ func TestConvertOpenAIResponsesRequestToClaude_DropsApplyPatchCustomTool(t *test
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_FlattensNamespaceRootObjectUnion(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[{
+			"type":"namespace",
+			"name":"mcp__codex_app",
+			"tools":[{
+				"type":"function",
+				"name":"mcp__codex_app.automation_update",
+				"description":"Create, update, view, or delete an automation.",
+				"parameters":{
+					"type":"object",
+					"properties":{},
+					"oneOf":[
+						{"$ref":"#/$defs/view"},
+						{"$ref":"#/$defs/createVariants"},
+						{"$ref":"#/$defs/updateVariants"},
+						{"$ref":"#/$defs/delete"}
+					],
+					"$defs":{
+						"view":{
+							"type":"object",
+							"additionalProperties":false,
+							"properties":{
+								"mode":{"type":"string","enum":["view"]},
+								"id":{"type":"string"}
+							},
+							"required":["mode","id"]
+						},
+						"createVariants":{"oneOf":[{"$ref":"#/$defs/createCron"},{"$ref":"#/$defs/createHeartbeat"}]},
+						"createCron":{
+							"type":"object",
+							"additionalProperties":false,
+							"properties":{
+								"mode":{"type":"string","const":"create"},
+								"kind":{"type":"string","const":"cron"},
+								"name":{"type":"string"},
+								"rrule":{"type":"string"},
+								"status":{"type":"string","enum":["ACTIVE","PAUSED"]}
+							},
+							"required":["mode","kind","name","rrule","status"]
+						},
+						"createHeartbeat":{
+							"type":"object",
+							"additionalProperties":false,
+							"properties":{
+								"mode":{"type":"string","const":"create"},
+								"kind":{"type":"string","const":"heartbeat"},
+								"name":{"type":"string"},
+								"rrule":{"type":"object","properties":{"frequency":{"oneOf":[{"type":"string"},{"type":"number"}]}}},
+								"status":{"type":"string","enum":["ACTIVE","PAUSED"]},
+								"targetThreadId":{"type":"string"}
+							},
+							"required":["mode","kind","name","rrule","status"]
+						},
+						"updateVariants":{"oneOf":[{"$ref":"#/$defs/updateCron"},{"$ref":"#/$defs/updateHeartbeat"}]},
+						"updateCron":{
+							"type":"object",
+							"additionalProperties":false,
+							"properties":{
+								"mode":{"type":"string","const":"update"},
+								"id":{"type":"string"},
+								"kind":{"type":"string","const":"cron"},
+								"name":{"type":"string"},
+								"rrule":{"type":"string"}
+							},
+							"required":["mode","id"]
+						},
+						"updateHeartbeat":{
+							"type":"object",
+							"additionalProperties":false,
+							"properties":{
+								"mode":{"type":"string","const":"update"},
+								"id":{"type":"string"},
+								"kind":{"type":"string","const":"heartbeat"},
+								"name":{"type":"string"},
+								"targetThreadId":{"type":"string"}
+							},
+							"required":["mode","id"]
+						},
+						"delete":{
+							"type":"object",
+							"additionalProperties":false,
+							"properties":{
+								"mode":{"type":"string","enum":["delete"]},
+								"id":{"type":"string"}
+							},
+							"required":["mode","id"]
+						}
+					}
+				}
+			}]
+		}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+	schema := root.Get("tools.0.input_schema")
+
+	if got := root.Get("tools.#").Int(); got != 1 {
+		t.Fatalf("tools count = %d, want 1. Output: %s", got, string(out))
+	}
+	if got := root.Get("tools.0.name").String(); got != "mcp__codex_app.automation_update" {
+		t.Fatalf("tool name = %q, want mcp__codex_app.automation_update", got)
+	}
+	for _, keyword := range []string{"oneOf", "anyOf", "allOf"} {
+		if schema.Get(keyword).Exists() {
+			t.Fatalf("root %s must be removed. Schema: %s", keyword, schema.Raw)
+		}
+	}
+	for _, property := range []string{"mode", "kind", "name", "rrule", "status", "targetThreadId", "id"} {
+		if !schema.Get("properties." + property).Exists() {
+			t.Fatalf("merged schema is missing property %q. Schema: %s", property, schema.Raw)
+		}
+	}
+	if got := schema.Get("required.#").Int(); got != 1 || schema.Get("required.0").String() != "mode" {
+		t.Fatalf("required = %s, want only mode", schema.Get("required").Raw)
+	}
+	if got := schema.Get("properties.mode.enum.#").Int(); got != 4 {
+		t.Fatalf("mode enum count = %d, want 4 unique modes. Schema: %s", got, schema.Raw)
+	}
+	if !schema.Get("properties.rrule.anyOf.1.properties.frequency.oneOf").Exists() {
+		t.Fatalf("nested property combinator must be preserved. Schema: %s", schema.Raw)
+	}
+	if !schema.Get("$defs.createCron").Exists() {
+		t.Fatalf("$defs must remain available for nested references. Schema: %s", schema.Raw)
+	}
+	if !schema.Get("additionalProperties").Exists() || schema.Get("additionalProperties").Bool() {
+		t.Fatalf("additionalProperties should remain false when every variant forbids it. Schema: %s", schema.Raw)
+	}
+}
+
 func testClaudeResponsesThinkingSignature(t *testing.T) (string, string) {
 	t.Helper()
 	channelBlock := []byte{}
