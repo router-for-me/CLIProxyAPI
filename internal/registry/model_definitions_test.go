@@ -46,35 +46,45 @@ func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
 }
 
 func TestAntigravityModelsIncludeGemini38Flash(t *testing.T) {
-	const modelID = "gemini-3.8-flash-high"
-
-	var got *ModelInfo
+	modelsByID := make(map[string]*ModelInfo)
 	for _, model := range GetAntigravityModels() {
-		if model != nil && model.ID == modelID {
-			got = model
-			break
+		if model != nil {
+			modelsByID[model.ID] = model
 		}
 	}
-	if got == nil {
-		t.Fatalf("Antigravity models do not contain %q", modelID)
+
+	tests := []struct {
+		id          string
+		description string
+	}{
+		{id: "gemini-3.8-flash-high", description: "Gemini 3.8 Flash (High)"},
+		{id: "gemini-3.8-flash-medium", description: "Gemini 3.8 Flash (Medium)"},
 	}
-	if got.OwnedBy != "antigravity" || got.Type != "antigravity" || got.Name != modelID || got.DisplayName != "Gemini 3.8 Flash" {
-		t.Fatalf("Gemini 3.8 Flash identity metadata = %+v", got)
-	}
-	if got.ContextLength != 1048576 || got.MaxCompletionTokens != 65536 {
-		t.Fatalf("Gemini 3.8 Flash token limits = %d/%d, want 1048576/65536", got.ContextLength, got.MaxCompletionTokens)
-	}
-	if got.Thinking == nil || got.Thinking.Min != 1 || got.Thinking.Max != 65535 || !got.Thinking.DynamicAllowed {
-		t.Fatalf("Gemini 3.8 Flash thinking metadata = %+v", got.Thinking)
-	}
-	if want := []string{"low", "medium", "high"}; !slices.Equal(got.Thinking.Levels, want) {
-		t.Fatalf("Gemini 3.8 Flash thinking levels = %v, want %v", got.Thinking.Levels, want)
-	}
-	if want := []string{"text", "image", "audio", "video"}; !slices.Equal(got.SupportedInputModalities, want) {
-		t.Fatalf("Gemini 3.8 Flash input modalities = %v, want %v", got.SupportedInputModalities, want)
-	}
-	if want := []string{"text"}; !slices.Equal(got.SupportedOutputModalities, want) {
-		t.Fatalf("Gemini 3.8 Flash output modalities = %v, want %v", got.SupportedOutputModalities, want)
+	for _, tt := range tests {
+		t.Run(tt.id, func(t *testing.T) {
+			got := modelsByID[tt.id]
+			if got == nil {
+				t.Fatalf("Antigravity models do not contain %q", tt.id)
+			}
+			if got.OwnedBy != "antigravity" || got.Type != "antigravity" || got.Name != tt.id || got.DisplayName != "Gemini 3.8 Flash" || got.Description != tt.description {
+				t.Fatalf("Gemini 3.8 Flash identity metadata = %+v", got)
+			}
+			if got.ContextLength != 1048576 || got.MaxCompletionTokens != 65536 {
+				t.Fatalf("Gemini 3.8 Flash token limits = %d/%d, want 1048576/65536", got.ContextLength, got.MaxCompletionTokens)
+			}
+			if got.Thinking == nil || got.Thinking.Min != 1 || got.Thinking.Max != 65535 || !got.Thinking.DynamicAllowed {
+				t.Fatalf("Gemini 3.8 Flash thinking metadata = %+v", got.Thinking)
+			}
+			if want := []string{"low", "medium", "high"}; !slices.Equal(got.Thinking.Levels, want) {
+				t.Fatalf("Gemini 3.8 Flash thinking levels = %v, want %v", got.Thinking.Levels, want)
+			}
+			if want := []string{"text", "image", "audio", "video"}; !slices.Equal(got.SupportedInputModalities, want) {
+				t.Fatalf("Gemini 3.8 Flash input modalities = %v, want %v", got.SupportedInputModalities, want)
+			}
+			if want := []string{"text"}; !slices.Equal(got.SupportedOutputModalities, want) {
+				t.Fatalf("Gemini 3.8 Flash output modalities = %v, want %v", got.SupportedOutputModalities, want)
+			}
+		})
 	}
 }
 
