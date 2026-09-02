@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -55,6 +56,24 @@ func TestOrderProvidersByPriority(t *testing.T) {
 			providers:  []string{"opencode"},
 			priorities: []store.ProviderPriority{{Provider: "opencode", Priority: 99}},
 			want:       []string{"opencode"},
+		},
+		{
+			name:       "openai_compat_pool_priority_applies_to_entry_provider",
+			providers:  []string{"openai-compatible-secondary:key-3", "openai-compatible-primary:key-7"},
+			priorities: []store.ProviderPriority{{Provider: "openai-compatible-primary", Priority: 10}, {Provider: "openai-compatible-secondary", Priority: 1}},
+			want:       []string{"openai-compatible-primary:key-7", "openai-compatible-secondary:key-3"},
+		},
+		{
+			name:       "openai_compat_named_colon_provider_priority_stays_exact",
+			providers:  []string{"openai-compatible-foo:bar", "openai-compatible-primary:key-7"},
+			priorities: []store.ProviderPriority{{Provider: "openai-compatible-primary", Priority: 10}, {Provider: "openai-compatible-foo", Priority: 5}},
+			want:       []string{"openai-compatible-primary:key-7", "openai-compatible-foo:bar"},
+		},
+		{
+			name:       "openai_compat_colon_pool_name_priority_applies_to_entry",
+			providers:  []string{"openai-compatible-foo:bar:key-7", "openai-compatible-primary:key-3"},
+			priorities: []store.ProviderPriority{{Provider: "openai-compatible-primary", Priority: 10}, {Provider: "openai-compatible-foo:bar", Priority: 5}},
+			want:       []string{"openai-compatible-primary:key-3", "openai-compatible-foo:bar:key-7"},
 		},
 	}
 	for _, tc := range cases {
@@ -121,6 +140,49 @@ func TestIntersectProviders(t *testing.T) {
 			pinned:    []string{"opencode"},
 			want:      []string{" opencode "},
 		},
+		{
+			name:      "openai_compat_provider_pin_matches_entry_provider",
+			providers: []string{"openai-compatible-openlimits:key-17"},
+			pinned:    []string{"openai-compatible-openlimits"},
+			want:      []string{"openai-compatible-openlimits:key-17"},
+		},
+		{
+			name:      "openai_compat_entry_pin_does_not_match_other_entry",
+			providers: []string{"openai-compatible-openlimits:key-17"},
+			pinned:    []string{"openai-compatible-openlimits:key-18"},
+			want:      nil,
+		},
+		{
+			name: "openai_compat_pool_pin_matches_all_entries_in_pool",
+			providers: []string{
+				"openai-compatible-openlimits:key-17",
+				"openai-compatible-openlimits:key-18",
+				"openai-compatible-other:key-19",
+			},
+			pinned: []string{"openai-compatible-openlimits"},
+			want: []string{
+				"openai-compatible-openlimits:key-17",
+				"openai-compatible-openlimits:key-18",
+			},
+		},
+		{
+			name:      "built_in_compound_provider_stays_row_specific",
+			providers: []string{"claude:42"},
+			pinned:    []string{"claude"},
+			want:      nil,
+		},
+		{
+			name:      "openai_compat_literal_colon_provider_stays_exact",
+			providers: []string{"openai-compatible-foo:bar"},
+			pinned:    []string{"openai-compatible-foo"},
+			want:      nil,
+		},
+		{
+			name:      "openai_compat_colon_pool_pin_matches_persisted_entry",
+			providers: []string{"openai-compatible-foo:bar:key-17"},
+			pinned:    []string{"openai-compatible-foo:bar"},
+			want:      []string{"openai-compatible-foo:bar:key-17"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -175,6 +237,73 @@ func TestGetRequestDetails_GlobalRoutePinsProviders(t *testing.T) {
 	}
 	if len(providers) != 1 || providers[0] != "openai" {
 		t.Fatalf("providers = %v, want [openai]", providers)
+	}
+}
+
+func TestGetRequestDetails_GlobalOpenAIProviderPoolPinMatchesEntry(t *testing.T) {
+	const model = "glm-5.3-global-pool-route"
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-global-openai-pool-route"
+	modelRegistry.RegisterClient(clientID, "openai-compatible-openlimits:key-17", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	handler.SetGlobalModelRouter(stubGlobalRouter{route: &store.ModelRoute{
+		Model: model, Providers: []string{"openai-compatible-openlimits"},
+	}})
+
+	providers, _, errMsg := handler.getRequestDetailsWithOptions(context.Background(), model, false)
+	if errMsg != nil {
+		t.Fatalf("getRequestDetails error = %+v", errMsg)
+	}
+	if len(providers) != 1 || providers[0] != "openai-compatible-openlimits:key-17" {
+		t.Fatalf("providers = %v, want [openai-compatible-openlimits:key-17]", providers)
+	}
+}
+
+func TestGetRequestDetails_PerKeyOpenAIProviderPoolPinMatchesEntry(t *testing.T) {
+	const model = "glm-5.3-key-pool-route"
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-key-openai-pool-route"
+	modelRegistry.RegisterClient(clientID, "openai-compatible-openlimits:key-17", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	ginCtx, _ := gin.CreateTestContext(nil)
+	ginCtx.Set(middleware.CtxPolicyModelRoutes, []store.ModelRoute{{
+		Model: model, Providers: []string{"openai-compatible-openlimits"},
+	}})
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	providers, _, errMsg := handler.getRequestDetailsWithOptions(ctx, model, false)
+	if errMsg != nil {
+		t.Fatalf("getRequestDetailsWithOptions error = %+v", errMsg)
+	}
+	if len(providers) != 1 || providers[0] != "openai-compatible-openlimits:key-17" {
+		t.Fatalf("providers = %v, want [openai-compatible-openlimits:key-17]", providers)
+	}
+}
+
+func TestGetRequestDetails_PerKeyOpenAIEntryPinStaysExact(t *testing.T) {
+	const model = "glm-5.3-entry-route"
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-entry-openai-pool-route"
+	modelRegistry.RegisterClient(clientID, "openai-compatible-openlimits:key-17", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	ginCtx, _ := gin.CreateTestContext(nil)
+	ginCtx.Set(middleware.CtxPolicyModelRoutes, []store.ModelRoute{{
+		Model: model, Providers: []string{"openai-compatible-openlimits:key-18"},
+	}})
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	providers, _, errMsg := handler.getRequestDetailsWithOptions(ctx, model, false)
+	if errMsg == nil {
+		t.Fatalf("expected exact entry pin mismatch to return an error, got providers %v", providers)
+	}
+	if errMsg.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
 	}
 }
 

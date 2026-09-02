@@ -158,3 +158,53 @@ func TestApplyAutoRouterRouteNoPinReturnsComputed(t *testing.T) {
 		t.Fatalf("expected computed providers to pass through, got %v", got)
 	}
 }
+
+// TestApplyAutoRouterRouteOpenAIProviderPoolPinMatchesEntry pins down the
+// routing-remediation fix: a tier pinning the OpenAI-compat pool at the
+// provider level must match a registry entry that exposes only the
+// per-entry compound key, mirroring what the dashboard can offer for the
+// pool while the registry registers models under entry identities.
+func TestApplyAutoRouterRouteOpenAIProviderPoolPinMatchesEntry(t *testing.T) {
+	h := &BaseAPIHandler{}
+	route := &autorouter.Resolved{
+		Model:     "glm-5.3",
+		Providers: []string{"openai-compatible-openlimits"},
+	}
+	computed := []string{"openai-compatible-openlimits:key-17"}
+	got, errMsg := h.applyAutoRouterRoute(context.Background(), computed, route)
+	if errMsg != nil {
+		t.Fatalf("unexpected error for provider-pool pin: %+v", errMsg)
+	}
+	if len(got) != 1 || got[0] != "openai-compatible-openlimits:key-17" {
+		t.Fatalf("expected pool pin to retain entry provider, got %v", got)
+	}
+}
+
+func TestApplyAutoRouterRouteOpenAIEntryPinStaysExact(t *testing.T) {
+	h := &BaseAPIHandler{}
+	route := &autorouter.Resolved{
+		Model:     "glm-5.3",
+		Providers: []string{"openai-compatible-openlimits:key-18"},
+	}
+	computed := []string{"openai-compatible-openlimits:key-17"}
+	got, errMsg := h.applyAutoRouterRoute(context.Background(), computed, route)
+	if errMsg == nil {
+		t.Fatalf("expected exact entry pin mismatch to return an error, got providers %v", got)
+	}
+}
+
+func TestApplyAutoRouterRouteOpenAICompatColonPoolPinMatchesEntry(t *testing.T) {
+	h := &BaseAPIHandler{}
+	route := &autorouter.Resolved{
+		Model:     "glm-5.3",
+		Providers: []string{"openai-compatible-foo:bar"},
+	}
+	computed := []string{"openai-compatible-foo:bar:key-17"}
+	got, errMsg := h.applyAutoRouterRoute(context.Background(), computed, route)
+	if errMsg != nil {
+		t.Fatalf("unexpected error for colon pool pin: %+v", errMsg)
+	}
+	if len(got) != 1 || got[0] != "openai-compatible-foo:bar:key-17" {
+		t.Fatalf("expected colon pool pin to retain entry provider, got %v", got)
+	}
+}

@@ -216,7 +216,10 @@ func policyRoutesForModel(ctx context.Context, modelID string) []string {
 // orderProvidersByPriority reorders providers in descending priority order.
 // Providers not listed in priorities default to priority 0. The original
 // (registry) order is preserved among providers sharing the same priority,
-// keeping precedence stable.
+// keeping precedence stable. OpenAI-compatible entry providers inherit the
+// priority configured at the provider-pool level so an operator who pinned
+// the whole pool can still rank multiple entries of that pool relative to
+// each other without enumerating every entry.
 func orderProvidersByPriority(providers []string, priorities []store.ProviderPriority) []string {
 	if len(providers) <= 1 || len(priorities) == 0 {
 		return providers
@@ -231,11 +234,12 @@ func orderProvidersByPriority(providers []string, priorities []store.ProviderPri
 		pos      int
 	}, len(providers))
 	for i, p := range providers {
+		key := strings.ToLower(strings.TrimSpace(p))
 		indexed[i] = struct {
 			key      string
 			priority int
 			pos      int
-		}{key: strings.ToLower(strings.TrimSpace(p)), priority: weight[strings.ToLower(strings.TrimSpace(p))], pos: i}
+		}{key: key, priority: providerPriority(p, weight), pos: i}
 	}
 	sort.SliceStable(indexed, func(i, j int) bool {
 		if indexed[i].priority != indexed[j].priority {
@@ -267,6 +271,10 @@ func stashRouteStrategy(ctx context.Context, strategy string) {
 
 // intersectProviders returns the subset of providers that appear (case-
 // insensitively) in pinned, preserving the order/precedence of providers.
+// Provider-level OpenAI-compatible pins also match their entry-level provider
+// keys (for example, "openai-compatible-foo" matches
+// "openai-compatible-foo:key-17"). Other compound keys remain exact matches
+// so row-specific built-in provider pins retain their isolation.
 // Returns nil when the intersection is empty.
 func intersectProviders(providers, pinned []string) []string {
 	if len(pinned) == 0 {
@@ -283,7 +291,7 @@ func intersectProviders(providers, pinned []string) []string {
 		if key == "" {
 			continue
 		}
-		if _, ok := pinnedSet[key]; !ok {
+		if _, ok := pinnedSet[key]; !ok && !matchesOpenAICompatibleProviderPool(key, pinnedSet) {
 			continue
 		}
 		if _, dup := seen[key]; dup {
@@ -296,6 +304,87 @@ func intersectProviders(providers, pinned []string) []string {
 		return nil
 	}
 	return out
+}
+
+func matchesOpenAICompatibleProviderPool(provider string, pinned map[string]struct{}) bool {
+	const prefix = "openai-compatible-"
+	if !strings.HasPrefix(provider, prefix) {
+		return false
+	}
+	// Provider names may themselves contain colons, so a generic prefix match
+	// would mistake a literal pool such as "openai-compatible-foo:bar" for a
+	// child of "openai-compatible-foo". Persisted entries use the unambiguous
+	// ":key-<positive id>" identity; only that identity is broadened here.
+	for pool := range pinned {
+		if strings.HasPrefix(pool, prefix) && !isOpenAICompatibleEntryIdentity(pool) && openAICompatibleEntryBelongsToPool(provider, pool) {
+			return true
+		}
+	}
+	return false
+}
+
+func isOpenAICompatibleEntryIdentity(key string) bool {
+	const prefix = "openai-compatible-"
+	if !strings.HasPrefix(key, prefix) {
+		return false
+	}
+	separator := strings.LastIndex(key, ":key-")
+	if separator <= len(prefix) {
+		return false
+	}
+	identity := key[separator+len(":key-"):]
+	if identity == "" || identity[0] == '0' {
+		return false
+	}
+	for i := 0; i < len(identity); i++ {
+		if identity[i] < '0' || identity[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func openAICompatibleEntryBelongsToPool(provider, pool string) bool {
+	prefix := pool + ":key-"
+	if !strings.HasPrefix(provider, prefix) {
+		return false
+	}
+	identity := provider[len(prefix):]
+	if identity == "" || identity[0] == '0' {
+		return false
+	}
+	for i := 0; i < len(identity); i++ {
+		if identity[i] < '0' || identity[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// providerPriority returns the exact priority for a provider, or the priority
+// of its most-specific OpenAI-compatible pool pin. Comparing against the
+// configured priority keys avoids parsing colons that may belong to a provider
+// name rather than to an entry identity.
+func providerPriority(provider string, priorities map[string]int) int {
+	key := strings.ToLower(strings.TrimSpace(provider))
+	if priority, ok := priorities[key]; ok {
+		return priority
+	}
+	bestLength := -1
+	bestPriority := 0
+	for pool, priority := range priorities {
+		if !strings.HasPrefix(pool, "openai-compatible-") || isOpenAICompatibleEntryIdentity(pool) || !openAICompatibleEntryBelongsToPool(key, pool) {
+			continue
+		}
+		if len(pool) > bestLength {
+			bestLength = len(pool)
+			bestPriority = priority
+		}
+	}
+	if bestLength >= 0 {
+		return bestPriority
+	}
+	return 0
 }
 
 func (h *BaseAPIHandler) getRequestDetailsWithOptions(ctx context.Context, modelName string, allowImageModel bool) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {

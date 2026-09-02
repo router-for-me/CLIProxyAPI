@@ -745,6 +745,45 @@ func TestManager_PickNextMixed_CompoundStrategyPreservesColonInOpenAICompatKey(t
 	}
 }
 
+func TestManager_PickNextMixed_OpenAICompatEntryKeyUsesParentExecutor(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	const (
+		model       = "openai-compat-entry-model"
+		providerKey = "openai-compatible-openlimits"
+		entryKey    = providerKey + ":key-17"
+		authID      = "openai-compat-entry-auth"
+	)
+	manager.executors[providerKey] = schedulerTestExecutor{provider: providerKey}
+	registry.GetGlobalRegistry().RegisterClient(authID, entryKey, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+	if _, errRegister := manager.Register(context.Background(), &Auth{
+		ID:       authID,
+		Provider: providerKey,
+		Attributes: map[string]string{
+			"provider_key":            providerKey,
+			AttributeEntryProviderKey: entryKey,
+		},
+	}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", authID, errRegister)
+	}
+
+	got, executor, provider, errPick := manager.pickNextMixed(
+		context.Background(), []string{entryKey}, model, cliproxyexecutor.Options{}, nil,
+	)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if got == nil || got.ID != authID {
+		t.Fatalf("pickNextMixed() auth = %#v, want %s", got, authID)
+	}
+	if executor == nil {
+		t.Fatal("pickNextMixed() executor = nil, want parent OpenAI-compat executor")
+	}
+	if provider != providerKey {
+		t.Fatalf("pickNextMixed() provider = %q, want %q", provider, providerKey)
+	}
+}
+
 func TestManager_PickNextMixed_CompoundLookingPluginKeyRemainsExact(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	providerKey := "claude:plugin"

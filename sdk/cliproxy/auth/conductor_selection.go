@@ -1133,10 +1133,17 @@ func (m *Manager) executorForRoutingKey(provider string) (ProviderExecutor, bool
 		return executor, true
 	}
 	executorKey := executorKeyFromRoutingKey(provider)
-	if executorKey == provider {
-		return nil, false
+	if executorKey != provider {
+		if executor, okExecutor := m.Executor(executorKey); okExecutor {
+			return executor, true
+		}
 	}
-	return m.Executor(executorKey)
+	// OpenAI-compatible entry routing keys are deliberately opaque because a
+	// provider name may contain a colon. Resolve them through the auth metadata
+	// instead of guessing where the provider/entry boundary is.
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.executorForEntryRoutingKeyLocked(provider)
 }
 
 // executorForRoutingKeyLocked is the lock-held variant of
@@ -1154,10 +1161,39 @@ func (m *Manager) executorForRoutingKeyLocked(provider string) (ProviderExecutor
 		return executor, true
 	}
 	executorKey := executorKeyFromRoutingKey(provider)
-	if executorKey == provider {
+	if executorKey != provider {
+		if executor, okExecutor := lookup(executorKey); okExecutor {
+			return executor, true
+		}
+	}
+	return m.executorForEntryRoutingKeyLocked(provider)
+}
+
+// executorForEntryRoutingKeyLocked resolves an OpenAI-compatible entry routing
+// key through the matching auth's provider metadata. The entry key is opaque:
+// provider names may contain colons, while persisted entries use a
+// ":key-<id>" suffix, so parsing the string alone would be ambiguous.
+func (m *Manager) executorForEntryRoutingKeyLocked(provider string) (ProviderExecutor, bool) {
+	if m == nil {
 		return nil, false
 	}
-	return lookup(executorKey)
+	for _, auth := range m.auths {
+		if auth == nil || auth.Attributes == nil {
+			continue
+		}
+		entryKey := strings.ToLower(strings.TrimSpace(auth.Attributes[AttributeEntryProviderKey]))
+		if entryKey == "" || entryKey != provider {
+			continue
+		}
+		executorKey := executorKeyFromAuth(auth)
+		if executorKey == "" {
+			continue
+		}
+		if executor, okExecutor := m.executors[executorKey]; okExecutor && executor != nil {
+			return executor, true
+		}
+	}
+	return nil, false
 }
 
 func (m *Manager) isCompoundRoutingKey(provider string) bool {
@@ -1170,7 +1206,20 @@ func (m *Manager) isCompoundRoutingKey(provider string) bool {
 	if _, okExecutor := m.Executor(provider); okExecutor {
 		return false
 	}
-	return executorKeyFromRoutingKey(provider) != provider
+	if executorKeyFromRoutingKey(provider) != provider {
+		return true
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, auth := range m.auths {
+		if auth == nil || auth.Attributes == nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(auth.Attributes[AttributeEntryProviderKey]), provider) {
+			return true
+		}
+	}
+	return false
 }
 
 // CloseExecutionSession asks all registered executors to release the supplied execution session.
