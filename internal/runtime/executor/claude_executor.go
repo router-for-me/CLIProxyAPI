@@ -123,6 +123,14 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 	var unknownGenerationDrops []unknownGenerationDrop
 	unknownGenerationDropIndex := make(map[string]int)
 	for _, decision := range report.Decisions {
+		// Only a dropped block can be an unknown-generation drop. A preserved
+		// decision's reason (claudeCompatibleSignatureReason) echoes the
+		// signature's own attacker-controlled model_text, which can contain
+		// this marker's prose as a substring; classifying before this filter
+		// would misreport that preserved block as dropped.
+		if decision.Action != sigcompat.SignatureActionDropBlock {
+			continue
+		}
 		reason, ok := sigcompat.ClassifyUnknownCAISGeneration(decision.Reason)
 		if !ok {
 			continue

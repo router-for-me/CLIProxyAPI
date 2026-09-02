@@ -162,6 +162,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -680,25 +681,69 @@ func claudeCAISUnknownGenerationReason(err error) string {
 // that runs the sanitizer end to end and checks agreement).
 const claudeCAISUnknownGenerationPrefix = "invalid Claude model-free CAIS signature: unknown "
 
+// claudeSignaturePositionPrefixPattern matches the optional position marker
+// that claude_messages_sanitize.go's thinking-block loop prepends to a
+// SignatureCompatibilityDecision.Reason before appending it to
+// SignatureSanitizeReport.Decisions: "messages[i].content[j]: ", where i and j
+// are sanitizer-owned loop indices, never attacker input, so anchoring on
+// this shape is safe. The pattern is anchored with ^, so a match (if any)
+// always starts at reason[0].
+//
+// sanitizeClaudeToolUseSignature (claude_messages_sanitize.go) composes a
+// second, longer shape ("messages[i].content[j].path: ") for tool-use
+// signature fields, but SanitizeClaudeMessagesForClaudeUpstream — the only
+// caller that feeds a report to ClassifyUnknownCAISGeneration via the Claude
+// executor's sanitize-report logger — hardcodes DropToolSignatures: true, so
+// that function is never called on the Claude-target path and this pattern
+// deliberately does not match its shape. If a future caller reaches this
+// classifier with DropToolSignatures: false, extend this pattern (and add a
+// positive control that exercises sanitizeClaudeToolUseSignature end to end,
+// the way the "agrees with the real sanitizer-produced reason" test does for
+// the thinking-block shape) rather than assuming the untested shape still
+// matches.
+var claudeSignaturePositionPrefixPattern = regexp.MustCompile(`^messages\[\d+\]\.content\[\d+\]: `)
+
 // ClassifyUnknownCAISGeneration reports whether reason describes an unknown
 // model-free CAIS generation drop (an unknown envelope version or unknown
 // channel_id, as produced by claudeCAISUnknownGenerationError.Error()).
 //
 // Callers such as the Claude executor's sanitize-report logger receive
 // SignatureCompatibilityDecision.Reason strings that the sanitizer may have
-// prefixed with a "messages[i].content[j]: " position marker; this tolerates
-// that prefix and returns the reason from the unknown-generation marker
-// onward, which is stable across occurrences of the same underlying cause and
-// is what callers should group/aggregate by. Do not re-match this prose
-// directly elsewhere — go through this function so there is exactly one place
-// that knows the contract between the error text and its classification.
+// prefixed with a "messages[i].content[j]: " position marker (see
+// claudeSignaturePositionPrefixPattern); this strips that prefix, if present,
+// and requires the unknown-generation marker to occupy the complete remainder
+// — not merely appear somewhere inside it. That anchoring matters because a
+// *preserved* decision's reason (claudeCompatibleSignatureReason) echoes the
+// signature's own attacker-controlled model_text, which can itself contain
+// this marker's prose as a substring; a preserved decision is never a drop,
+// so an unanchored substring search misreports it as one (it must never
+// return ok=true for such a reason). Do not re-match this prose directly
+// elsewhere — go through this function so there is exactly one place that
+// knows the contract between the error text and its classification.
 func ClassifyUnknownCAISGeneration(reason string) (normalized string, ok bool) {
-	markerIndex := strings.Index(reason, claudeCAISUnknownGenerationPrefix)
-	if markerIndex < 0 {
+	rest := reason
+	if loc := claudeSignaturePositionPrefixPattern.FindStringIndex(reason); loc != nil {
+		rest = reason[loc[1]:]
+	}
+	if !strings.HasPrefix(rest, claudeCAISUnknownGenerationPrefix) {
 		return "", false
 	}
-	return reason[markerIndex:], true
+	// claudeCAISUnknownGenerationError.Error() ends in "%s %d" (identifier,
+	// then its numeric value) with nothing appended after it by any caller
+	// today; require that shape all the way to the end of rest so trailing
+	// prose glued on after a genuine-looking marker cannot slip through
+	// either.
+	if !claudeCAISUnknownGenerationTrailingShape.MatchString(rest) {
+		return "", false
+	}
+	return rest, true
 }
+
+// claudeCAISUnknownGenerationTrailingShape matches a complete
+// claudeCAISUnknownGenerationError.Error() value: the fixed prefix, then a
+// non-empty identifier, a single space, and the decimal value running to the
+// end of the string (see claudeCAISUnknownGenerationError.Error()'s "%s %d").
+var claudeCAISUnknownGenerationTrailingShape = regexp.MustCompile(`^` + regexp.QuoteMeta(claudeCAISUnknownGenerationPrefix) + `.+ \d+$`)
 
 func isKnownClaudeCAISIdentifier(known []uint64, value uint64) bool {
 	for _, candidate := range known {

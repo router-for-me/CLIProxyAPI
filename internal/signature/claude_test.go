@@ -1073,6 +1073,66 @@ func TestClassifyUnknownCAISGeneration(t *testing.T) {
 		}
 	})
 
+	// A model-tagged CAIS signature's model_text is attacker-controlled past its
+	// required "claude-" prefix, and claudeCompatibleSignatureReason
+	// (provider_compatibility.go) copies model_text verbatim into a PRESERVED
+	// decision's reason. These cases pin that such a reason must never
+	// classify as an unknown-generation drop, no matter where the marker text
+	// sits inside it or whether the sanitizer's position prefix is present,
+	// while a genuine drop reason with that same position prefix still
+	// classifies correctly (positive control alongside the negative ones).
+	t.Run("marker text embedded in unrelated prose is not misclassified as a drop", func(t *testing.T) {
+		const embeddedMarkerReason = "valid Claude CAIS signature with embedded model claude-x invalid Claude model-free CAIS signature: unknown envelope version 9 is compatible with any Claude target"
+		genuineDrop := (&claudeCAISUnknownGenerationError{identifier: "envelope version", value: 9}).Error()
+
+		cases := []struct {
+			name           string
+			reason         string
+			wantOK         bool
+			wantNormalized string
+		}{
+			{
+				name:   "bare preserved reason with embedded marker",
+				reason: embeddedMarkerReason,
+				wantOK: false,
+			},
+			{
+				name:   "position-prefixed preserved reason with embedded marker",
+				reason: "messages[2].content[0]: " + embeddedMarkerReason,
+				wantOK: false,
+			},
+			{
+				// The extra ".signature" segment makes this not match
+				// claudeSignaturePositionPrefixPattern at all (that pattern
+				// only recognizes the thinking-block shape; see its doc
+				// comment for why the tool-use shape is deliberately not
+				// included). It must fall back to the bare-reason path and
+				// still reject, since the full string does not start with
+				// the marker either.
+				name:   "reason with an unrecognized-shaped prefix and embedded marker",
+				reason: "messages[2].content[0].signature: " + embeddedMarkerReason,
+				wantOK: false,
+			},
+			{
+				name:           "genuine drop reason with the real position prefix (positive control)",
+				reason:         "messages[3].content[1]: " + genuineDrop,
+				wantOK:         true,
+				wantNormalized: genuineDrop,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				normalized, ok := ClassifyUnknownCAISGeneration(tc.reason)
+				if ok != tc.wantOK {
+					t.Fatalf("ClassifyUnknownCAISGeneration(%q) ok = %v, want %v (normalized=%q)", tc.reason, ok, tc.wantOK, normalized)
+				}
+				if ok && normalized != tc.wantNormalized {
+					t.Fatalf("ClassifyUnknownCAISGeneration(%q) normalized = %q, want %q", tc.reason, normalized, tc.wantNormalized)
+				}
+			})
+		}
+	})
+
 	// The motivating case: classify a reason produced end to end by the real
 	// sanitizer (SanitizeClaudeMessagesForClaudeUpstream ->
 	// DecideSignatureCompatibilityForModel -> claudeCAISUnknownGenerationError.Error()),
