@@ -2,10 +2,12 @@ package claude
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
@@ -136,6 +138,64 @@ func TestConvertClaudeRequestToCodex_MessageSystemRoleWrapsAsUserReminder(t *tes
 	}
 }
 
+func TestConvertClaudeRequestToCodex_PreservesToolAdjacencyWithInterveningSystemMessage(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-5.4",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Execute tools"}]},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "tool_one", "input": {"a": 1}},
+					{"type": "tool_use", "id": "call_2", "name": "tool_two", "input": {"b": 2}}
+				]
+			},
+			{"role": "system", "content": "Context update between tool call and tool result"},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_2", "content": "result 2"},
+					{"type": "tool_result", "tool_use_id": "call_1", "content": "result 1"},
+					{"type": "text", "text": "Now summarize"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToCodex("gpt-5.4", []byte(inputJSON), false)
+	inputs := gjson.GetBytes(result, "input").Array()
+
+	// Expected item types:
+	// 0: message (role: user, "Execute tools")
+	// 1: function_call (call_id: call_1)
+	// 2: function_call (call_id: call_2)
+	// 3: function_call_output (call_id: call_1)
+	// 4: function_call_output (call_id: call_2)
+	// 5: message (role: user, text: <system-reminder>...)
+	// 6: message (role: user, text: Now summarize)
+	types := make([]string, 0, len(inputs))
+	for _, item := range inputs {
+		types = append(types, item.Get("type").String())
+	}
+	wantTypes := []string{"message", "function_call", "function_call", "function_call_output", "function_call_output", "message", "message"}
+	if fmt.Sprintf("%v", types) != fmt.Sprintf("%v", wantTypes) {
+		t.Fatalf("unexpected types: got %v, want %v", types, wantTypes)
+	}
+
+	if inputs[3].Get("call_id").String() != "call_1" {
+		t.Fatalf("expected output 0 to respond to call_1, got %q", inputs[3].Get("call_id").String())
+	}
+	if inputs[4].Get("call_id").String() != "call_2" {
+		t.Fatalf("expected output 1 to respond to call_2, got %q", inputs[4].Get("call_id").String())
+	}
+	if inputs[5].Get("content.0.text").String() != "<system-reminder>\nContext update between tool call and tool result\n</system-reminder>" {
+		t.Fatalf("unexpected system reminder content: %q", inputs[5].Get("content.0.text").String())
+	}
+	if inputs[6].Get("content.0.text").String() != "Now summarize" {
+		t.Fatalf("unexpected user summary content: %q", inputs[6].Get("content.0.text").String())
+	}
+}
+
 func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 	tests := []struct {
 		name                  string
@@ -186,6 +246,7 @@ func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
 	tests := []struct {
 		name            string
 		serviceTierJSON string
+		speedJSON       string
 		want            string
 		wantExists      bool
 	}{
@@ -196,7 +257,7 @@ func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
 			wantExists:      true,
 		},
 		{
-			name:            "Fast normalizes to priority",
+			name:            "Fast tier normalizes to priority",
 			serviceTierJSON: `"fast"`,
 			want:            "priority",
 			wantExists:      true,
@@ -209,17 +270,43 @@ func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
 			name:            "Non-string tier is omitted",
 			serviceTierJSON: `true`,
 		},
+		{
+			name:       "Fast speed maps to priority",
+			speedJSON:  `"fast"`,
+			want:       "priority",
+			wantExists: true,
+		},
+		{
+			name:      "Standard speed is omitted",
+			speedJSON: `"standard"`,
+		},
+		{
+			name:      "Non-string speed is omitted",
+			speedJSON: `true`,
+		},
+		{
+			name:            "Fast speed overrides unsupported Anthropic tier",
+			serviceTierJSON: `"auto"`,
+			speedJSON:       `"fast"`,
+			want:            "priority",
+			wantExists:      true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			inputJSON := `{
+			inputJSON := []byte(`{
 				"model": "gpt-5.4",
-				"service_tier": ` + tt.serviceTierJSON + `,
 				"messages": [{"role": "user", "content": "Reply with OK"}]
-			}`
+			}`)
+			if tt.serviceTierJSON != "" {
+				inputJSON, _ = sjson.SetRawBytes(inputJSON, "service_tier", []byte(tt.serviceTierJSON))
+			}
+			if tt.speedJSON != "" {
+				inputJSON, _ = sjson.SetRawBytes(inputJSON, "speed", []byte(tt.speedJSON))
+			}
 
-			result := ConvertClaudeRequestToCodex("gpt-5.4", []byte(inputJSON), false)
+			result := ConvertClaudeRequestToCodex("gpt-5.4", inputJSON, false)
 			serviceTierResult := gjson.GetBytes(result, "service_tier")
 			if serviceTierResult.Exists() != tt.wantExists {
 				t.Fatalf("service_tier exists = %v, want %v. Output: %s", serviceTierResult.Exists(), tt.wantExists, string(result))
@@ -480,6 +567,130 @@ func TestConvertClaudeRequestToCodex_AssistantThinkingSignatureToReasoningItem(t
 	}
 }
 
+func TestConvertClaudeRequestToCodex_PreservesBase64PDFDocumentContent(t *testing.T) {
+	inputJSON := `{
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "before"},
+				{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}},
+				{"type": "text", "text": "after"}
+			]
+		}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("gpt-5.6-sol", []byte(inputJSON), false)
+	content := gjson.GetBytes(result, "input.0.content").Array()
+	if len(content) != 3 {
+		t.Fatalf("got %d content items, want 3. Output: %s", len(content), result)
+	}
+
+	wantTypes := []string{"input_text", "input_file", "input_text"}
+	for i, wantType := range wantTypes {
+		if got := content[i].Get("type").String(); got != wantType {
+			t.Fatalf("content[%d].type = %q, want %q. Output: %s", i, got, wantType, result)
+		}
+	}
+	if got := content[0].Get("text").String(); got != "before" {
+		t.Fatalf("content[0].text = %q, want %q", got, "before")
+	}
+	if got := content[1].Get("file_data").String(); got != "data:application/pdf;base64,JVBERi0xLjQK" {
+		t.Fatalf("content[1].file_data = %q, want PDF data URL", got)
+	}
+	if got := content[1].Get("filename").String(); got != "document.pdf" {
+		t.Fatalf("content[1].filename = %q, want %q", got, "document.pdf")
+	}
+	if got := content[2].Get("text").String(); got != "after" {
+		t.Fatalf("content[2].text = %q, want %q", got, "after")
+	}
+}
+
+func TestConvertClaudeRequestToCodex_PreservesContentOrderAcrossToolAndReasoningItems(t *testing.T) {
+	signature := validCodexReasoningSignature()
+	inputJSON := `{
+		"system": "system rules",
+		"messages": [
+			{"role":"assistant","content":[
+				{"type":"text","text":"before reasoning"},
+				{"type":"thinking","signature":"` + signature + `"},
+				{"type":"text","text":"before tool"},
+				{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"query":"test"}},
+				{"type":"text","text":"after tool"}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"toolu_1","content":[
+					{"type":"text","text":"tool output"},
+					{"type":"image","source":{"media_type":"image/png","data":"aW1hZ2U="}}
+				]},
+				{"type":"text","text":"continue"}
+			]}
+		],
+		"tools": [{"name":"lookup","input_schema":{"type":"object"}}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("gpt-5.4", []byte(inputJSON), false)
+	inputs := gjson.GetBytes(result, "input").Array()
+	if len(inputs) != 8 {
+		t.Fatalf("got %d input items, want 8. Output: %s", len(inputs), result)
+	}
+
+	wantTypes := []string{"message", "message", "reasoning", "message", "function_call", "message", "function_call_output", "message"}
+	for i := 0; i < len(wantTypes); i++ {
+		if got := inputs[i].Get("type").String(); got != wantTypes[i] {
+			t.Fatalf("input[%d].type = %q, want %q. Output: %s", i, got, wantTypes[i], result)
+		}
+	}
+
+	if got := inputs[1].Get("content.0.text").String(); got != "before reasoning" {
+		t.Fatalf("input[1] text = %q, want before reasoning", got)
+	}
+	if got := inputs[3].Get("content.0.text").String(); got != "before tool" {
+		t.Fatalf("input[3] text = %q, want before tool", got)
+	}
+	if got := inputs[5].Get("content.0.text").String(); got != "after tool" {
+		t.Fatalf("input[5] text = %q, want after tool", got)
+	}
+	if got := inputs[6].Get("output.0.type").String(); got != "input_text" {
+		t.Fatalf("tool result output.0.type = %q, want input_text", got)
+	}
+	if got := inputs[6].Get("output.1.image_url").String(); got != "data:image/png;base64,aW1hZ2U=" {
+		t.Fatalf("tool result image_url = %q, want data URL", got)
+	}
+	if got := inputs[7].Get("content.0.text").String(); got != "continue" {
+		t.Fatalf("input[7] text = %q, want continue", got)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_AssistantGrokSignatureToReasoningItem(t *testing.T) {
+	signature := "HmlYdr2aCAqCYP/m9mr8PS6KOsdMs72FGDigmydR+Jsmuv8KX97yWPlbOwmXJgWn0CbHaCacdQD3+n5EvpgLfPNmafS3kdICBjRuDf4bzHy7uBiUhNVhqPtp/ee1y9q4imPE4LYgD1VZ4J+bp9mTeqA1+nC9Oue58CiNEMV9SVaGenCD+aBnVuSTzQhD32Y+68i6HLJW0Dx6ifaRfb8hxYtA/sPM+/FTvAMW11nRho5a2BBSkpnzfqqAz/e/vGJ77/bygpXM823QA9wL9i0X"
+	payload := []byte(`{"model":"grok-4.5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":""},{"type":"text","text":"answer"}]},{"role":"user","content":"next"}]}`)
+	payload, _ = sjson.SetBytes(payload, "messages.0.content.0.signature", signature)
+
+	out := ConvertClaudeRequestToCodex("grok-4.5", payload, false)
+	reasoning := gjson.GetBytes(out, "input.0")
+	if reasoning.Get("type").String() != "reasoning" {
+		t.Fatalf("input.0 type = %q, want reasoning; output=%s", reasoning.Get("type").String(), out)
+	}
+	if got := reasoning.Get("encrypted_content").String(); got != signature {
+		t.Fatalf("encrypted_content = %q, want Grok signature", got)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_IgnoresGrokSignatureForNonGrokTargets(t *testing.T) {
+	signature := "HmlYdr2aCAqCYP/m9mr8PS6KOsdMs72FGDigmydR+Jsmuv8KX97yWPlbOwmXJgWn0CbHaCacdQD3+n5EvpgLfPNmafS3kdICBjRuDf4bzHy7uBiUhNVhqPtp/ee1y9q4imPE4LYgD1VZ4J+bp9mTeqA1+nC9Oue58CiNEMV9SVaGenCD+aBnVuSTzQhD32Y+68i6HLJW0Dx6ifaRfb8hxYtA/sPM+/FTvAMW11nRho5a2BBSkpnzfqqAz/e/vGJ77/bygpXM823QA9wL9i0X"
+	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":""},{"type":"text","text":"answer"}]},{"role":"user","content":"next"}]}`)
+	payload, _ = sjson.SetBytes(payload, "messages.0.content.0.signature", signature)
+
+	for _, modelName := range []string{"gpt-5.4", "claude-sonnet-4-6"} {
+		t.Run(modelName, func(t *testing.T) {
+			out := ConvertClaudeRequestToCodex(modelName, payload, false)
+			if got := countRequestInputItemsByType(out, "reasoning"); got != 0 {
+				t.Fatalf("got %d reasoning items for non-Grok target, want 0; output=%s", got, out)
+			}
+		})
+	}
+}
+
 func TestConvertClaudeRequestToCodex_IgnoresNonCodexThinkingSignatures(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -557,4 +768,112 @@ func validCodexReasoningSignature() string {
 	raw[0] = 0x80
 	raw[8] = 1
 	return base64.URLEncoding.EncodeToString(raw)
+}
+
+func TestConvertClaudeRequestToCodex_OutputConfigFormat(t *testing.T) {
+	t.Run("Valid json_schema format", func(t *testing.T) {
+		payload := []byte(`{
+			"model": "gpt-5.4",
+			"max_tokens": 128,
+			"messages": [
+				{"role": "user", "content": "Return an object with one string field named answer."}
+			],
+			"output_config": {
+				"format": {
+					"type": "json_schema",
+					"schema": {
+						"type": "object",
+						"properties": {
+							"answer": {"type": "string"}
+						},
+						"required": ["answer"],
+						"additionalProperties": false
+					}
+				}
+			}
+		}`)
+
+		translated := ConvertClaudeRequestToCodex("gpt-5.4", payload, false)
+		root := gjson.ParseBytes(translated)
+
+		if !root.Get("text.format").Exists() {
+			t.Fatalf("expected text.format in translated payload, got: %s", translated)
+		}
+		if got := root.Get("text.format.type").String(); got != "json_schema" {
+			t.Errorf("expected text.format.type to be 'json_schema', got %q", got)
+		}
+		if got := root.Get("text.format.name").String(); got != "cli_proxy_structured_output" {
+			t.Errorf("expected text.format.name to be 'cli_proxy_structured_output', got %q", got)
+		}
+		if got := root.Get("text.format.strict").Bool(); !got {
+			t.Errorf("expected text.format.strict to be true, got %v", got)
+		}
+		if got := root.Get("text.format.schema.properties.answer.type").String(); got != "string" {
+			t.Errorf("expected schema.properties.answer.type to be 'string', got %q", got)
+		}
+	})
+
+	t.Run("Valid json_schema format with custom name and strict false", func(t *testing.T) {
+		payload := []byte(`{
+			"model": "gpt-5.4",
+			"messages": [
+				{"role": "user", "content": "hello"}
+			],
+			"output_config": {
+				"format": {
+					"type": "json_schema",
+					"name": "custom_schema",
+					"strict": false,
+					"schema": {
+						"type": "object"
+					}
+				}
+			}
+		}`)
+
+		translated := ConvertClaudeRequestToCodex("gpt-5.4", payload, false)
+		root := gjson.ParseBytes(translated)
+
+		if got := root.Get("text.format.name").String(); got != "custom_schema" {
+			t.Errorf("expected text.format.name to be 'custom_schema', got %q", got)
+		}
+		if got := root.Get("text.format.strict").Bool(); got != false {
+			t.Errorf("expected text.format.strict to be false, got %v", got)
+		}
+	})
+
+	t.Run("No output_config.format", func(t *testing.T) {
+		payload := []byte(`{
+			"model": "gpt-5.4",
+			"messages": [
+				{"role": "user", "content": "hello"}
+			]
+		}`)
+
+		translated := ConvertClaudeRequestToCodex("gpt-5.4", payload, false)
+		root := gjson.ParseBytes(translated)
+		if root.Get("text.format").Exists() {
+			t.Fatalf("expected no text.format in translated payload, got: %s", translated)
+		}
+	})
+
+	t.Run("output_config with effort only", func(t *testing.T) {
+		payload := []byte(`{
+			"model": "gpt-5.4",
+			"thinking": {"type": "adaptive"},
+			"output_config": {"effort": "high"},
+			"messages": [
+				{"role": "user", "content": "hello"}
+			]
+		}`)
+
+		translated := ConvertClaudeRequestToCodex("gpt-5.4", payload, false)
+		root := gjson.ParseBytes(translated)
+		if root.Get("text.format").Exists() {
+			t.Fatalf("expected no text.format in translated payload, got: %s", translated)
+		}
+		if got := root.Get("reasoning.effort").String(); got != "high" {
+			t.Errorf("expected reasoning.effort to be 'high', got %q", got)
+		}
+	})
 }

@@ -1,6 +1,7 @@
 package management
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -8,6 +9,43 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
+
+func parseCredentialWeightPatch(raw json.RawMessage) (*int, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("weight is missing")
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil
+	}
+	var weight int
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if errDecode := decoder.Decode(&weight); errDecode != nil {
+		return nil, fmt.Errorf("weight must be an integer")
+	}
+	if errValidate := config.ValidateCredentialWeight(&weight); errValidate != nil {
+		return nil, errValidate
+	}
+	return &weight, nil
+}
+
+func rejectInvalidCredentialWeight(c *gin.Context, field string, weight *int) bool {
+	if errValidate := config.ValidateCredentialWeight(weight); errValidate != nil {
+		c.JSON(400, gin.H{"error": fmt.Sprintf("%s: %v", field, errValidate)})
+		return true
+	}
+	return false
+}
+
+// rejectInvalidFingerprintProfile fails a write that carries a value the request
+// path would silently ignore, so a typo surfaces here instead of as a warning
+// behind every later request.
+func rejectInvalidFingerprintProfile(c *gin.Context, field, profile string) bool {
+	if errValidate := config.ValidateClaudeFingerprintProfile(profile); errValidate != nil {
+		c.JSON(400, gin.H{"error": fmt.Sprintf("%s: %v", field, errValidate)})
+		return true
+	}
+	return false
+}
 
 // Generic helpers for list[string]
 func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()) {
@@ -139,6 +177,11 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	for index := range arr {
+		if rejectInvalidCredentialWeight(c, fmt.Sprintf("gemini-api-key[%d].weight", index), arr[index].Weight) {
+			return
+		}
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.cfg.GeminiKey = append([]config.GeminiKey(nil), arr...)
@@ -147,12 +190,16 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 }
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	type geminiKeyPatch struct {
-		APIKey         *string            `json:"api-key"`
-		Prefix         *string            `json:"prefix"`
-		BaseURL        *string            `json:"base-url"`
-		ProxyURL       *string            `json:"proxy-url"`
-		Headers        *map[string]string `json:"headers"`
-		ExcludedModels *[]string          `json:"excluded-models"`
+		APIKey              *string                          `json:"api-key"`
+		Weight              json.RawMessage                  `json:"weight"`
+		Prefix              *string                          `json:"prefix"`
+		BaseURL             *string                          `json:"base-url"`
+		ProxyURL            *string                          `json:"proxy-url"`
+		Headers             *map[string]string               `json:"headers"`
+		ExcludedModels      *[]string                        `json:"excluded-models"`
+		DisableCooling      json.RawMessage                  `json:"disable-cooling"`
+		RequestRetry        *int                             `json:"request-retry"`
+		RequestScopedErrors *[]config.RequestScopedErrorRule `json:"request-scoped-errors"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -173,11 +220,24 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	if targetIndex == -1 && body.Match != nil {
 		match := strings.TrimSpace(*body.Match)
 		if match != "" {
+			baseRaw, hasBase := c.GetQuery("base-url")
+			base := strings.TrimSpace(baseRaw)
+			matches := make([]int, 0, 1)
 			for i := range h.cfg.GeminiKey {
-				if h.cfg.GeminiKey[i].APIKey == match {
-					targetIndex = i
-					break
+				if strings.TrimSpace(h.cfg.GeminiKey[i].APIKey) != match {
+					continue
 				}
+				if hasBase && strings.TrimSpace(h.cfg.GeminiKey[i].BaseURL) != base {
+					continue
+				}
+				matches = append(matches, i)
+			}
+			if len(matches) > 1 {
+				c.JSON(400, gin.H{"error": "multiple items match; index is required"})
+				return
+			}
+			if len(matches) == 1 {
+				targetIndex = matches[0]
 			}
 		}
 	}
@@ -188,14 +248,15 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 
 	entry := h.cfg.GeminiKey[targetIndex]
 	if body.Value.APIKey != nil {
-		trimmed := strings.TrimSpace(*body.Value.APIKey)
-		if trimmed == "" {
-			h.cfg.GeminiKey = append(h.cfg.GeminiKey[:targetIndex], h.cfg.GeminiKey[targetIndex+1:]...)
-			h.cfg.SanitizeGeminiKeys()
-			h.persistLocked(c)
+		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if len(body.Value.Weight) > 0 {
+		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
+		if errWeight != nil {
+			c.JSON(400, gin.H{"error": errWeight.Error()})
 			return
 		}
-		entry.APIKey = trimmed
+		entry.Weight = weight
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
@@ -212,6 +273,21 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
+	if !applyDisableCoolingPatch(c, body.Value.DisableCooling, &entry.DisableCooling) {
+		return
+	}
+	if body.Value.RequestRetry != nil {
+		entry.RequestRetry = body.Value.RequestRetry
+	}
+	if body.Value.RequestScopedErrors != nil {
+		entry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), *body.Value.RequestScopedErrors...)
+	}
+	if entry.APIKey == "" && entry.BaseURL == "" {
+		h.cfg.GeminiKey = append(h.cfg.GeminiKey[:targetIndex], h.cfg.GeminiKey[targetIndex+1:]...)
+		h.cfg.SanitizeGeminiKeys()
+		h.persistLocked(c)
+		return
+	}
 	h.cfg.GeminiKey[targetIndex] = entry
 	h.cfg.SanitizeGeminiKeys()
 	h.persistLocked(c)
@@ -223,20 +299,25 @@ func (h *Handler) DeleteGeminiKey(c *gin.Context) {
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
-			out := make([]config.GeminiKey, 0, len(h.cfg.GeminiKey))
-			for _, v := range h.cfg.GeminiKey {
-				if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
-					continue
+			matchIndex := -1
+			matchCount := 0
+			for i := range h.cfg.GeminiKey {
+				if strings.TrimSpace(h.cfg.GeminiKey[i].APIKey) == val && strings.TrimSpace(h.cfg.GeminiKey[i].BaseURL) == base {
+					matchIndex = i
+					matchCount++
 				}
-				out = append(out, v)
 			}
-			if len(out) != len(h.cfg.GeminiKey) {
-				h.cfg.GeminiKey = out
-				h.cfg.SanitizeGeminiKeys()
-				h.persistLocked(c)
-			} else {
+			if matchCount == 0 {
 				c.JSON(404, gin.H{"error": "item not found"})
+				return
 			}
+			if matchCount > 1 {
+				c.JSON(400, gin.H{"error": "multiple items match; index is required"})
+				return
+			}
+			h.cfg.GeminiKey = append(h.cfg.GeminiKey[:matchIndex], h.cfg.GeminiKey[matchIndex+1:]...)
+			h.cfg.SanitizeGeminiKeys()
+			h.persistLocked(c)
 			return
 		}
 
@@ -298,6 +379,11 @@ func (h *Handler) PutInteractionsKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	for index := range arr {
+		if rejectInvalidCredentialWeight(c, fmt.Sprintf("interactions-api-key[%d].weight", index), arr[index].Weight) {
+			return
+		}
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.cfg.InteractionsKey = append([]config.GeminiKey(nil), arr...)
@@ -306,12 +392,16 @@ func (h *Handler) PutInteractionsKeys(c *gin.Context) {
 }
 func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 	type geminiKeyPatch struct {
-		APIKey         *string            `json:"api-key"`
-		Prefix         *string            `json:"prefix"`
-		BaseURL        *string            `json:"base-url"`
-		ProxyURL       *string            `json:"proxy-url"`
-		Headers        *map[string]string `json:"headers"`
-		ExcludedModels *[]string          `json:"excluded-models"`
+		APIKey              *string                          `json:"api-key"`
+		Weight              json.RawMessage                  `json:"weight"`
+		Prefix              *string                          `json:"prefix"`
+		BaseURL             *string                          `json:"base-url"`
+		ProxyURL            *string                          `json:"proxy-url"`
+		Headers             *map[string]string               `json:"headers"`
+		ExcludedModels      *[]string                        `json:"excluded-models"`
+		DisableCooling      json.RawMessage                  `json:"disable-cooling"`
+		RequestRetry        *int                             `json:"request-retry"`
+		RequestScopedErrors *[]config.RequestScopedErrorRule `json:"request-scoped-errors"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -333,11 +423,24 @@ func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 	if targetIndex == -1 && body.Match != nil {
 		match := strings.TrimSpace(*body.Match)
 		if match != "" {
+			baseRaw, hasBase := c.GetQuery("base-url")
+			base := strings.TrimSpace(baseRaw)
+			matches := make([]int, 0, 1)
 			for i := range h.cfg.InteractionsKey {
-				if h.cfg.InteractionsKey[i].APIKey == match {
-					targetIndex = i
-					break
+				if strings.TrimSpace(h.cfg.InteractionsKey[i].APIKey) != match {
+					continue
 				}
+				if hasBase && strings.TrimSpace(h.cfg.InteractionsKey[i].BaseURL) != base {
+					continue
+				}
+				matches = append(matches, i)
+			}
+			if len(matches) > 1 {
+				c.JSON(400, gin.H{"error": "multiple items match; index is required"})
+				return
+			}
+			if len(matches) == 1 {
+				targetIndex = matches[0]
 			}
 		}
 	}
@@ -348,14 +451,15 @@ func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 
 	entry := h.cfg.InteractionsKey[targetIndex]
 	if body.Value.APIKey != nil {
-		trimmed := strings.TrimSpace(*body.Value.APIKey)
-		if trimmed == "" {
-			h.cfg.InteractionsKey = append(h.cfg.InteractionsKey[:targetIndex], h.cfg.InteractionsKey[targetIndex+1:]...)
-			h.cfg.SanitizeInteractionsKeys()
-			h.persistLocked(c)
+		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if len(body.Value.Weight) > 0 {
+		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
+		if errWeight != nil {
+			c.JSON(400, gin.H{"error": errWeight.Error()})
 			return
 		}
-		entry.APIKey = trimmed
+		entry.Weight = weight
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
@@ -372,6 +476,21 @@ func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
+	if !applyDisableCoolingPatch(c, body.Value.DisableCooling, &entry.DisableCooling) {
+		return
+	}
+	if body.Value.RequestRetry != nil {
+		entry.RequestRetry = body.Value.RequestRetry
+	}
+	if body.Value.RequestScopedErrors != nil {
+		entry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), *body.Value.RequestScopedErrors...)
+	}
+	if entry.APIKey == "" && entry.BaseURL == "" {
+		h.cfg.InteractionsKey = append(h.cfg.InteractionsKey[:targetIndex], h.cfg.InteractionsKey[targetIndex+1:]...)
+		h.cfg.SanitizeInteractionsKeys()
+		h.persistLocked(c)
+		return
+	}
 	h.cfg.InteractionsKey[targetIndex] = entry
 	h.cfg.SanitizeInteractionsKeys()
 	h.persistLocked(c)
@@ -383,20 +502,25 @@ func (h *Handler) DeleteInteractionsKey(c *gin.Context) {
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
-			out := make([]config.GeminiKey, 0, len(h.cfg.InteractionsKey))
-			for _, v := range h.cfg.InteractionsKey {
-				if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
-					continue
+			matchIndex := -1
+			matchCount := 0
+			for i := range h.cfg.InteractionsKey {
+				if strings.TrimSpace(h.cfg.InteractionsKey[i].APIKey) == val && strings.TrimSpace(h.cfg.InteractionsKey[i].BaseURL) == base {
+					matchIndex = i
+					matchCount++
 				}
-				out = append(out, v)
 			}
-			if len(out) != len(h.cfg.InteractionsKey) {
-				h.cfg.InteractionsKey = out
-				h.cfg.SanitizeInteractionsKeys()
-				h.persistLocked(c)
-			} else {
+			if matchCount == 0 {
 				c.JSON(404, gin.H{"error": "item not found"})
+				return
 			}
+			if matchCount > 1 {
+				c.JSON(400, gin.H{"error": "multiple items match; index is required"})
+				return
+			}
+			h.cfg.InteractionsKey = append(h.cfg.InteractionsKey[:matchIndex], h.cfg.InteractionsKey[matchIndex+1:]...)
+			h.cfg.SanitizeInteractionsKeys()
+			h.persistLocked(c)
 			return
 		}
 
@@ -459,6 +583,12 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 	}
 	for i := range arr {
 		normalizeClaudeKey(&arr[i])
+		if rejectInvalidCredentialWeight(c, fmt.Sprintf("claude-api-key[%d].weight", i), arr[i].Weight) {
+			return
+		}
+		if rejectInvalidFingerprintProfile(c, fmt.Sprintf("claude-api-key[%d].fingerprint-profile", i), arr[i].FingerprintProfile) {
+			return
+		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -468,14 +598,19 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
-		APIKey                  *string               `json:"api-key"`
-		Prefix                  *string               `json:"prefix"`
-		BaseURL                 *string               `json:"base-url"`
-		ProxyURL                *string               `json:"proxy-url"`
-		Models                  *[]config.ClaudeModel `json:"models"`
-		Headers                 *map[string]string    `json:"headers"`
-		ExcludedModels          *[]string             `json:"excluded-models"`
-		RebuildMidSystemMessage *bool                 `json:"rebuild-mid-system-message"`
+		APIKey                  *string                          `json:"api-key"`
+		FingerprintProfile      *string                          `json:"fingerprint-profile"`
+		Weight                  json.RawMessage                  `json:"weight"`
+		Prefix                  *string                          `json:"prefix"`
+		BaseURL                 *string                          `json:"base-url"`
+		ProxyURL                *string                          `json:"proxy-url"`
+		Models                  *[]config.ClaudeModel            `json:"models"`
+		Headers                 *map[string]string               `json:"headers"`
+		ExcludedModels          *[]string                        `json:"excluded-models"`
+		RebuildMidSystemMessage *bool                            `json:"rebuild-mid-system-message"`
+		DisableCooling          json.RawMessage                  `json:"disable-cooling"`
+		RequestRetry            *int                             `json:"request-retry"`
+		RequestScopedErrors     *[]config.RequestScopedErrorRule `json:"request-scoped-errors"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -511,6 +646,20 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
 	}
+	if body.Value.FingerprintProfile != nil {
+		if rejectInvalidFingerprintProfile(c, "fingerprint-profile", *body.Value.FingerprintProfile) {
+			return
+		}
+		entry.FingerprintProfile, _ = config.NormalizeClaudeFingerprintProfile(*body.Value.FingerprintProfile)
+	}
+	if len(body.Value.Weight) > 0 {
+		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
+		if errWeight != nil {
+			c.JSON(400, gin.H{"error": errWeight.Error()})
+			return
+		}
+		entry.Weight = weight
+	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
 	}
@@ -531,6 +680,15 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 	if body.Value.RebuildMidSystemMessage != nil {
 		entry.RebuildMidSystemMessage = *body.Value.RebuildMidSystemMessage
+	}
+	if !applyDisableCoolingPatch(c, body.Value.DisableCooling, &entry.DisableCooling) {
+		return
+	}
+	if body.Value.RequestRetry != nil {
+		entry.RequestRetry = body.Value.RequestRetry
+	}
+	if body.Value.RequestScopedErrors != nil {
+		entry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), *body.Value.RequestScopedErrors...)
 	}
 	normalizeClaudeKey(&entry)
 	h.cfg.ClaudeKey[targetIndex] = entry
@@ -615,9 +773,16 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 	filtered := make([]config.OpenAICompatibility, 0, len(arr))
 	for i := range arr {
 		normalizeOpenAICompatibilityEntry(&arr[i])
-		if strings.TrimSpace(arr[i].BaseURL) != "" {
-			filtered = append(filtered, arr[i])
+		if strings.TrimSpace(arr[i].BaseURL) == "" {
+			continue
 		}
+		for keyIndex := range arr[i].APIKeyEntries {
+			field := fmt.Sprintf("openai-compatibility[%d].api-key-entries[%d].weight", i, keyIndex)
+			if rejectInvalidCredentialWeight(c, field, arr[i].APIKeyEntries[keyIndex].Weight) {
+				return
+			}
+		}
+		filtered = append(filtered, arr[i])
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -627,14 +792,17 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	type openAICompatPatch struct {
-		Name           *string                             `json:"name"`
-		Prefix         *string                             `json:"prefix"`
-		Disabled       *bool                               `json:"disabled"`
-		DisableCooling *bool                               `json:"disable-cooling"`
-		BaseURL        *string                             `json:"base-url"`
-		APIKeyEntries  *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
-		Models         *[]config.OpenAICompatibilityModel  `json:"models"`
-		Headers        *map[string]string                  `json:"headers"`
+		Name                  *string                             `json:"name"`
+		Prefix                *string                             `json:"prefix"`
+		Disabled              *bool                               `json:"disabled"`
+		DisableCooling        json.RawMessage                     `json:"disable-cooling"`
+		BaseURL               *string                             `json:"base-url"`
+		APIKeyEntries         *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
+		Models                *[]config.OpenAICompatibilityModel  `json:"models"`
+		Headers               *map[string]string                  `json:"headers"`
+		SupportPromptCacheKey *bool                               `json:"support-prompt-cache-key"`
+		RequestRetry          *int                                `json:"request-retry"`
+		RequestScopedErrors   *[]config.RequestScopedErrorRule    `json:"request-scoped-errors"`
 	}
 	var body struct {
 		Name  *string            `json:"name"`
@@ -676,8 +844,11 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	if body.Value.Disabled != nil {
 		entry.Disabled = *body.Value.Disabled
 	}
-	if body.Value.DisableCooling != nil {
-		entry.DisableCooling = *body.Value.DisableCooling
+	if !applyDisableCoolingPatch(c, body.Value.DisableCooling, &entry.DisableCooling) {
+		return
+	}
+	if body.Value.RequestRetry != nil {
+		entry.RequestRetry = body.Value.RequestRetry
 	}
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
@@ -690,6 +861,12 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		entry.BaseURL = trimmed
 	}
 	if body.Value.APIKeyEntries != nil {
+		for keyIndex := range *body.Value.APIKeyEntries {
+			weight := (*body.Value.APIKeyEntries)[keyIndex].Weight
+			if rejectInvalidCredentialWeight(c, fmt.Sprintf("api-key-entries[%d].weight", keyIndex), weight) {
+				return
+			}
+		}
 		entry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), (*body.Value.APIKeyEntries)...)
 	}
 	if body.Value.Models != nil {
@@ -697,6 +874,12 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.Headers != nil {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+	}
+	if body.Value.SupportPromptCacheKey != nil {
+		entry.SupportPromptCacheKey = *body.Value.SupportPromptCacheKey
+	}
+	if body.Value.RequestScopedErrors != nil {
+		entry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), *body.Value.RequestScopedErrors...)
 	}
 	normalizeOpenAICompatibilityEntry(&entry)
 	h.cfg.OpenAICompatibility[targetIndex] = entry
@@ -759,6 +942,9 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 			c.JSON(400, gin.H{"error": fmt.Sprintf("vertex-api-key[%d].api-key is required", i)})
 			return
 		}
+		if rejectInvalidCredentialWeight(c, fmt.Sprintf("vertex-api-key[%d].weight", i), arr[i].Weight) {
+			return
+		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -769,12 +955,15 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	type vertexCompatPatch struct {
 		APIKey         *string                     `json:"api-key"`
+		Weight         json.RawMessage             `json:"weight"`
 		Prefix         *string                     `json:"prefix"`
 		BaseURL        *string                     `json:"base-url"`
 		ProxyURL       *string                     `json:"proxy-url"`
 		Headers        *map[string]string          `json:"headers"`
 		Models         *[]config.VertexCompatModel `json:"models"`
 		ExcludedModels *[]string                   `json:"excluded-models"`
+		DisableCooling json.RawMessage             `json:"disable-cooling"`
+		RequestRetry   *int                        `json:"request-retry"`
 	}
 	var body struct {
 		Index *int               `json:"index"`
@@ -819,18 +1008,19 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 		}
 		entry.APIKey = trimmed
 	}
+	if len(body.Value.Weight) > 0 {
+		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
+		if errWeight != nil {
+			c.JSON(400, gin.H{"error": errWeight.Error()})
+			return
+		}
+		entry.Weight = weight
+	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
 	}
 	if body.Value.BaseURL != nil {
-		trimmed := strings.TrimSpace(*body.Value.BaseURL)
-		if trimmed == "" {
-			h.cfg.VertexCompatAPIKey = append(h.cfg.VertexCompatAPIKey[:targetIndex], h.cfg.VertexCompatAPIKey[targetIndex+1:]...)
-			h.cfg.SanitizeVertexCompatKeys()
-			h.persistLocked(c)
-			return
-		}
-		entry.BaseURL = trimmed
+		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
 	}
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
@@ -843,6 +1033,12 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if !applyDisableCoolingPatch(c, body.Value.DisableCooling, &entry.DisableCooling) {
+		return
+	}
+	if body.Value.RequestRetry != nil {
+		entry.RequestRetry = body.Value.RequestRetry
 	}
 	normalizeVertexCompatKey(&entry)
 	h.cfg.VertexCompatAPIKey[targetIndex] = entry
@@ -1085,6 +1281,103 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 	h.persist(c)
 }
 
+// oauth-request-scoped-errors: map[string][]RequestScopedErrorRule
+func (h *Handler) GetOAuthRequestScopedErrors(c *gin.Context) {
+	c.JSON(200, gin.H{"oauth-request-scoped-errors": sanitizedOAuthRequestScopedErrors(h.cfg.OAuthRequestScopedErrors)})
+}
+
+func (h *Handler) PutOAuthRequestScopedErrors(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var entries map[string][]config.RequestScopedErrorRule
+	if err = json.Unmarshal(data, &entries); err != nil {
+		var wrapper struct {
+			Items map[string][]config.RequestScopedErrorRule `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &wrapper); err2 != nil {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		entries = wrapper.Items
+	}
+	h.cfg.OAuthRequestScopedErrors = sanitizedOAuthRequestScopedErrors(entries)
+	h.persist(c)
+}
+
+func (h *Handler) PatchOAuthRequestScopedErrors(c *gin.Context) {
+	var body struct {
+		Provider *string                         `json:"provider"`
+		Channel  *string                         `json:"channel"`
+		Rules    []config.RequestScopedErrorRule `json:"rules"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	channelRaw := ""
+	if body.Channel != nil {
+		channelRaw = *body.Channel
+	} else if body.Provider != nil {
+		channelRaw = *body.Provider
+	}
+	channel := strings.ToLower(strings.TrimSpace(channelRaw))
+	if channel == "" {
+		c.JSON(400, gin.H{"error": "invalid channel"})
+		return
+	}
+
+	normalizedMap := sanitizedOAuthRequestScopedErrors(map[string][]config.RequestScopedErrorRule{channel: body.Rules})
+	normalized := normalizedMap[channel]
+	if len(normalized) == 0 {
+		if h.cfg.OAuthRequestScopedErrors == nil {
+			c.JSON(404, gin.H{"error": "channel not found"})
+			return
+		}
+		if _, ok := h.cfg.OAuthRequestScopedErrors[channel]; !ok {
+			c.JSON(404, gin.H{"error": "channel not found"})
+			return
+		}
+		delete(h.cfg.OAuthRequestScopedErrors, channel)
+		if len(h.cfg.OAuthRequestScopedErrors) == 0 {
+			h.cfg.OAuthRequestScopedErrors = nil
+		}
+		h.persist(c)
+		return
+	}
+	if h.cfg.OAuthRequestScopedErrors == nil {
+		h.cfg.OAuthRequestScopedErrors = make(map[string][]config.RequestScopedErrorRule)
+	}
+	h.cfg.OAuthRequestScopedErrors[channel] = normalized
+	h.persist(c)
+}
+
+func (h *Handler) DeleteOAuthRequestScopedErrors(c *gin.Context) {
+	channel := strings.ToLower(strings.TrimSpace(c.Query("channel")))
+	if channel == "" {
+		channel = strings.ToLower(strings.TrimSpace(c.Query("provider")))
+	}
+	if channel == "" {
+		c.JSON(400, gin.H{"error": "missing channel"})
+		return
+	}
+	if h.cfg.OAuthRequestScopedErrors == nil {
+		c.JSON(404, gin.H{"error": "channel not found"})
+		return
+	}
+	if _, ok := h.cfg.OAuthRequestScopedErrors[channel]; !ok {
+		c.JSON(404, gin.H{"error": "channel not found"})
+		return
+	}
+	delete(h.cfg.OAuthRequestScopedErrors, channel)
+	if len(h.cfg.OAuthRequestScopedErrors) == 0 {
+		h.cfg.OAuthRequestScopedErrors = nil
+	}
+	h.persist(c)
+}
+
 // codex-api-key: []CodexKey
 func (h *Handler) GetCodexKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"codex-api-key": h.codexKeysWithAuthIndex()})
@@ -1114,6 +1407,9 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 		if entry.BaseURL == "" {
 			continue
 		}
+		if rejectInvalidCredentialWeight(c, fmt.Sprintf("codex-api-key[%d].weight", i), entry.Weight) {
+			return
+		}
 		filtered = append(filtered, entry)
 	}
 	h.mu.Lock()
@@ -1124,13 +1420,18 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
-		APIKey         *string              `json:"api-key"`
-		Prefix         *string              `json:"prefix"`
-		BaseURL        *string              `json:"base-url"`
-		ProxyURL       *string              `json:"proxy-url"`
-		Models         *[]config.CodexModel `json:"models"`
-		Headers        *map[string]string   `json:"headers"`
-		ExcludedModels *[]string            `json:"excluded-models"`
+		APIKey              *string                          `json:"api-key"`
+		Weight              json.RawMessage                  `json:"weight"`
+		Prefix              *string                          `json:"prefix"`
+		BaseURL             *string                          `json:"base-url"`
+		ProxyURL            *string                          `json:"proxy-url"`
+		AlphaSearch         *bool                            `json:"alpha-search"`
+		Models              *[]config.CodexModel             `json:"models"`
+		Headers             *map[string]string               `json:"headers"`
+		ExcludedModels      *[]string                        `json:"excluded-models"`
+		DisableCooling      json.RawMessage                  `json:"disable-cooling"`
+		RequestRetry        *int                             `json:"request-retry"`
+		RequestScopedErrors *[]config.RequestScopedErrorRule `json:"request-scoped-errors"`
 	}
 	var body struct {
 		Index *int           `json:"index"`
@@ -1166,6 +1467,14 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
 	}
+	if len(body.Value.Weight) > 0 {
+		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
+		if errWeight != nil {
+			c.JSON(400, gin.H{"error": errWeight.Error()})
+			return
+		}
+		entry.Weight = weight
+	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
 	}
@@ -1182,6 +1491,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
 	}
+	if body.Value.AlphaSearch != nil {
+		entry.AlphaSearch = *body.Value.AlphaSearch
+	}
 	if body.Value.Models != nil {
 		entry.Models = append([]config.CodexModel(nil), (*body.Value.Models)...)
 	}
@@ -1190,6 +1502,15 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if !applyDisableCoolingPatch(c, body.Value.DisableCooling, &entry.DisableCooling) {
+		return
+	}
+	if body.Value.RequestRetry != nil {
+		entry.RequestRetry = body.Value.RequestRetry
+	}
+	if body.Value.RequestScopedErrors != nil {
+		entry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), *body.Value.RequestScopedErrors...)
 	}
 	normalizeCodexKey(&entry)
 	h.cfg.CodexKey[targetIndex] = entry
@@ -1250,6 +1571,221 @@ func (h *Handler) DeleteCodexKey(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
 }
 
+// xai-api-key: []XAIKey
+func (h *Handler) GetXAIKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"xai-api-key": h.xaiKeysWithAuthIndex()})
+}
+
+func (h *Handler) PutXAIKeys(c *gin.Context) {
+	data, errRead := c.GetRawData()
+	if errRead != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.XAIKey
+	if errUnmarshal := json.Unmarshal(data, &arr); errUnmarshal != nil {
+		var obj struct {
+			Items []config.XAIKey `json:"items"`
+		}
+		if errObject := json.Unmarshal(data, &obj); errObject != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	filtered := make([]config.XAIKey, 0, len(arr))
+	for i := range arr {
+		entry := arr[i]
+		normalizeCodexKey(&entry)
+		if entry.BaseURL == "" {
+			continue
+		}
+		if rejectInvalidCredentialWeight(c, fmt.Sprintf("xai-api-key[%d].weight", i), entry.Weight) {
+			return
+		}
+		filtered = append(filtered, entry)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cfg.XAIKey = filtered
+	h.cfg.SanitizeXAIKeys()
+	h.persistLocked(c)
+}
+
+func (h *Handler) PatchXAIKey(c *gin.Context) {
+	type xaiKeyPatch struct {
+		APIKey              *string                          `json:"api-key"`
+		Priority            *int                             `json:"priority"`
+		Weight              json.RawMessage                  `json:"weight"`
+		Prefix              *string                          `json:"prefix"`
+		BaseURL             *string                          `json:"base-url"`
+		Websockets          *bool                            `json:"websockets"`
+		ProxyURL            *string                          `json:"proxy-url"`
+		Models              *[]config.XAIModel               `json:"models"`
+		Headers             *map[string]string               `json:"headers"`
+		ExcludedModels      *[]string                        `json:"excluded-models"`
+		DisableCooling      json.RawMessage                  `json:"disable-cooling"`
+		RequestRetry        *int                             `json:"request-retry"`
+		RequestScopedErrors *[]config.RequestScopedErrorRule `json:"request-scoped-errors"`
+	}
+	var body struct {
+		Index *int         `json:"index"`
+		Match *string      `json:"match"`
+		Value *xaiKeyPatch `json:"value"`
+	}
+	if errBind := c.ShouldBindJSON(&body); errBind != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.XAIKey) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != nil {
+		match := strings.TrimSpace(*body.Match)
+		for i := range h.cfg.XAIKey {
+			if h.cfg.XAIKey[i].APIKey == match {
+				targetIndex = i
+				break
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+
+	entry := h.cfg.XAIKey[targetIndex]
+	if body.Value.APIKey != nil {
+		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
+	}
+	if len(body.Value.Weight) > 0 {
+		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
+		if errWeight != nil {
+			c.JSON(400, gin.H{"error": errWeight.Error()})
+			return
+		}
+		entry.Weight = weight
+	}
+	if body.Value.Prefix != nil {
+		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.BaseURL != nil {
+		trimmed := strings.TrimSpace(*body.Value.BaseURL)
+		if trimmed == "" {
+			h.cfg.XAIKey = append(h.cfg.XAIKey[:targetIndex], h.cfg.XAIKey[targetIndex+1:]...)
+			h.cfg.SanitizeXAIKeys()
+			h.persistLocked(c)
+			return
+		}
+		entry.BaseURL = trimmed
+	}
+	if body.Value.Websockets != nil {
+		entry.Websockets = *body.Value.Websockets
+	}
+	if body.Value.ProxyURL != nil {
+		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+	}
+	if body.Value.Models != nil {
+		entry.Models = append([]config.XAIModel(nil), (*body.Value.Models)...)
+	}
+	if body.Value.Headers != nil {
+		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+	}
+	if body.Value.ExcludedModels != nil {
+		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if !applyDisableCoolingPatch(c, body.Value.DisableCooling, &entry.DisableCooling) {
+		return
+	}
+	if body.Value.RequestRetry != nil {
+		entry.RequestRetry = body.Value.RequestRetry
+	}
+	if body.Value.RequestScopedErrors != nil {
+		entry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), *body.Value.RequestScopedErrors...)
+	}
+	normalizeCodexKey(&entry)
+	h.cfg.XAIKey[targetIndex] = entry
+	h.cfg.SanitizeXAIKeys()
+	h.persistLocked(c)
+}
+
+func (h *Handler) DeleteXAIKey(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
+		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
+			base := strings.TrimSpace(baseRaw)
+			out := make([]config.XAIKey, 0, len(h.cfg.XAIKey))
+			for _, entry := range h.cfg.XAIKey {
+				if strings.TrimSpace(entry.APIKey) == val && strings.TrimSpace(entry.BaseURL) == base {
+					continue
+				}
+				out = append(out, entry)
+			}
+			h.cfg.XAIKey = out
+			h.cfg.SanitizeXAIKeys()
+			h.persistLocked(c)
+			return
+		}
+
+		matchIndex := -1
+		matchCount := 0
+		for i := range h.cfg.XAIKey {
+			if strings.TrimSpace(h.cfg.XAIKey[i].APIKey) == val {
+				matchCount++
+				if matchIndex == -1 {
+					matchIndex = i
+				}
+			}
+		}
+		if matchCount > 1 {
+			c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
+			return
+		}
+		if matchIndex != -1 {
+			h.cfg.XAIKey = append(h.cfg.XAIKey[:matchIndex], h.cfg.XAIKey[matchIndex+1:]...)
+		}
+		h.cfg.SanitizeXAIKeys()
+		h.persistLocked(c)
+		return
+	}
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, errScan := fmt.Sscanf(idxStr, "%d", &idx)
+		if errScan == nil && idx >= 0 && idx < len(h.cfg.XAIKey) {
+			h.cfg.XAIKey = append(h.cfg.XAIKey[:idx], h.cfg.XAIKey[idx+1:]...)
+			h.cfg.SanitizeXAIKeys()
+			h.persistLocked(c)
+			return
+		}
+	}
+	c.JSON(400, gin.H{"error": "missing api-key or index"})
+}
+
+func applyDisableCoolingPatch(c *gin.Context, raw json.RawMessage, target **bool) bool {
+	if len(raw) == 0 {
+		return true
+	}
+	if strings.TrimSpace(string(raw)) == "null" {
+		*target = nil
+		return true
+	}
+	var value bool
+	if errUnmarshal := json.Unmarshal(raw, &value); errUnmarshal != nil {
+		c.JSON(400, gin.H{"error": "disable-cooling must be a boolean or null"})
+		return false
+	}
+	*target = &value
+	return true
+}
+
 func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	if entry == nil {
 		return
@@ -1277,6 +1813,9 @@ func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) 
 		if len(copyEntry.APIKeyEntries) > 0 {
 			copyEntry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), copyEntry.APIKeyEntries...)
 		}
+		if len(copyEntry.RequestScopedErrors) > 0 {
+			copyEntry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), copyEntry.RequestScopedErrors...)
+		}
 		normalizeOpenAICompatibilityEntry(&copyEntry)
 		out[i] = copyEntry
 	}
@@ -1288,6 +1827,11 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 		return
 	}
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	if normalized, ok := config.NormalizeClaudeFingerprintProfile(entry.FingerprintProfile); ok {
+		entry.FingerprintProfile = normalized
+	} else {
+		entry.FingerprintProfile = strings.TrimSpace(entry.FingerprintProfile)
+	}
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
@@ -1380,4 +1924,26 @@ func sanitizedOAuthModelAlias(entries map[string][]config.OAuthModelAlias) map[s
 		return nil
 	}
 	return cfg.OAuthModelAlias
+}
+
+func sanitizedOAuthRequestScopedErrors(entries map[string][]config.RequestScopedErrorRule) map[string][]config.RequestScopedErrorRule {
+	if len(entries) == 0 {
+		return nil
+	}
+	copied := make(map[string][]config.RequestScopedErrorRule, len(entries))
+	for channel, rules := range entries {
+		if len(rules) == 0 {
+			continue
+		}
+		copied[channel] = append([]config.RequestScopedErrorRule(nil), rules...)
+	}
+	if len(copied) == 0 {
+		return nil
+	}
+	cfg := config.Config{OAuthRequestScopedErrors: copied}
+	cfg.SanitizeOAuthRequestScopedErrors()
+	if len(cfg.OAuthRequestScopedErrors) == 0 {
+		return nil
+	}
+	return cfg.OAuthRequestScopedErrors
 }

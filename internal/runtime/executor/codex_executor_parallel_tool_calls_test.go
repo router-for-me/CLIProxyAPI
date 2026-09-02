@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -36,5 +37,29 @@ func TestNormalizeCodexParallelToolCallsForTools_PreservesWhenToolsPresent(t *te
 
 	if !gjson.GetBytes(out, "parallel_tool_calls").Bool() {
 		t.Fatalf("parallel_tool_calls should be preserved when tools are present: %s", string(out))
+	}
+}
+
+func TestNormalizeCodexParallelToolCalls_ResponsesLiteMetadataForcesFalse(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.6-luna","tools":[{"type":"function","name":"lookup"}],"parallel_tool_calls":true,"client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"true"},"input":"hi"}`)
+
+	out := normalizeCodexParallelToolCalls(body, nil)
+
+	parallelToolCalls := gjson.GetBytes(out, "parallel_tool_calls")
+	if !parallelToolCalls.Exists() || parallelToolCalls.Bool() {
+		t.Fatalf("responses-lite parallel_tool_calls should be false: %s", string(out))
+	}
+}
+
+func TestNormalizeCodexParallelToolCalls_ResponsesLiteHeaderForcesFalse(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.6-luna","parallel_tool_calls":true,"input":"hi"}`)
+	headers := make(http.Header)
+	headers.Set(codexResponsesLiteHeader, "true")
+
+	out := normalizeCodexParallelToolCalls(body, headers)
+
+	parallelToolCalls := gjson.GetBytes(out, "parallel_tool_calls")
+	if !parallelToolCalls.Exists() || parallelToolCalls.Bool() {
+		t.Fatalf("responses-lite parallel_tool_calls should be false: %s", string(out))
 	}
 }

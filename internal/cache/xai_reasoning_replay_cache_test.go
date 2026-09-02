@@ -129,6 +129,99 @@ func TestXAIReasoningReplayCacheStoresGrokEncryptedContent(t *testing.T) {
 	}
 }
 
+func TestXAIReasoningReplayCacheStoresAssistantMessageWithReasoning(t *testing.T) {
+	ClearXAIReasoningReplayCache()
+	t.Cleanup(ClearXAIReasoningReplayCache)
+	encryptedContent := validGrokEncryptedContentForReplayCacheTest()
+
+	items := [][]byte{
+		[]byte(`{"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"visible"}],"encrypted_content":"` + encryptedContent + `"}`),
+		[]byte(`{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer","annotations":[],"logprobs":[]}]}`),
+	}
+	if !CacheXAIReasoningReplayItems("grok-4.5", "prompt-cache:session", items) {
+		t.Fatal("expected reasoning replay items to be cached")
+	}
+
+	got, ok := GetXAIReasoningReplayItems("grok-4.5", "prompt-cache:session")
+	if !ok || len(got) != 2 {
+		t.Fatalf("cached items = %q, %v, want two items", got, ok)
+	}
+	if gjson.GetBytes(got[0], "encrypted_content").String() != encryptedContent {
+		t.Fatalf("reasoning encrypted_content not preserved: %s", got[0])
+	}
+	if gotText := gjson.GetBytes(got[1], "content.0.text").String(); gotText != "answer" {
+		t.Fatalf("assistant message text = %q, want answer; item=%s", gotText, got[1])
+	}
+	if gjson.GetBytes(got[1], "id").Exists() || gjson.GetBytes(got[1], "status").Exists() {
+		t.Fatalf("assistant message transport fields were not stripped: %s", got[1])
+	}
+}
+
+func TestXAIReasoningReplayCacheRejectsAssistantMessageWithoutReasoning(t *testing.T) {
+	ClearXAIReasoningReplayCache()
+	t.Cleanup(ClearXAIReasoningReplayCache)
+
+	items := [][]byte{
+		[]byte(`{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer"}]}`),
+	}
+	if CacheXAIReasoningReplayItems("grok-4.5", "prompt-cache:message-only", items) {
+		t.Fatal("message-only replay batch must not be cached")
+	}
+	if _, ok := GetXAIReasoningReplayItems("grok-4.5", "prompt-cache:message-only"); ok {
+		t.Fatal("message-only replay batch unexpectedly exists in cache")
+	}
+}
+
+func TestXAIReasoningReplayCacheStoresToolCallWithoutReasoning(t *testing.T) {
+	ClearXAIReasoningReplayCache()
+	t.Cleanup(ClearXAIReasoningReplayCache)
+
+	tests := []struct {
+		name        string
+		sessionKey  string
+		item        []byte
+		wantType    string
+		wantPayload string
+	}{
+		{
+			name:        "function call",
+			sessionKey:  "prompt-cache:function-call-only",
+			item:        []byte(`{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"weather\"}"}`),
+			wantType:    "function_call",
+			wantPayload: `{"q":"weather"}`,
+		},
+		{
+			name:        "custom tool call",
+			sessionKey:  "prompt-cache:custom-tool-call-only",
+			item:        []byte(`{"type":"custom_tool_call","call_id":"call_2","name":"shell","input":"pwd"}`),
+			wantType:    "custom_tool_call",
+			wantPayload: "pwd",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !CacheXAIReasoningReplayItems("grok-4.3", tt.sessionKey, [][]byte{tt.item}) {
+				t.Fatal("tool-call-only replay batch must be cached")
+			}
+			items, ok := GetXAIReasoningReplayItems("grok-4.3", tt.sessionKey)
+			if !ok || len(items) != 1 {
+				t.Fatalf("cached items = %q, %v, want one item", items, ok)
+			}
+			if got := gjson.GetBytes(items[0], "type").String(); got != tt.wantType {
+				t.Fatalf("cached type = %q, want %q; item=%s", got, tt.wantType, items[0])
+			}
+			payloadPath := "arguments"
+			if tt.wantType == "custom_tool_call" {
+				payloadPath = "input"
+			}
+			if got := gjson.GetBytes(items[0], payloadPath).String(); got != tt.wantPayload {
+				t.Fatalf("cached %s = %q, want %q; item=%s", payloadPath, got, tt.wantPayload, items[0])
+			}
+		})
+	}
+}
+
 func TestXAIReasoningReplayRequiredHomeExpireFailureReturnsItems(t *testing.T) {
 	ClearXAIReasoningReplayCache()
 	t.Cleanup(ClearXAIReasoningReplayCache)
@@ -158,4 +251,31 @@ func validGrokEncryptedContentForReplayCacheTest() string {
 		buf = append(buf, sum[:]...)
 	}
 	return base64.RawStdEncoding.EncodeToString(buf[:256])
+}
+
+func TestXAIReasoningReplayCacheStoresRefusalMessagePart(t *testing.T) {
+	ClearXAIReasoningReplayCache()
+	t.Cleanup(ClearXAIReasoningReplayCache)
+	encryptedContent := validGrokEncryptedContentForReplayCacheTest()
+
+	items := [][]byte{
+		[]byte(`{"type":"reasoning","summary":[],"encrypted_content":"` + encryptedContent + `"}`),
+		[]byte(`{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I cannot help with that"}]}`),
+	}
+	if !CacheXAIReasoningReplayItems("grok-4.5", "prompt-cache:refusal", items) {
+		t.Fatal("expected refusal message with reasoning to be cached")
+	}
+	got, ok := GetXAIReasoningReplayItems("grok-4.5", "prompt-cache:refusal")
+	if !ok || len(got) != 2 {
+		t.Fatalf("cached items = %q, %v, want reasoning + refusal message", got, ok)
+	}
+	if gjson.GetBytes(got[1], "content.0.type").String() != "refusal" {
+		t.Fatalf("message part type = %s, want refusal; item=%s", gjson.GetBytes(got[1], "content.0.type").String(), got[1])
+	}
+	if gjson.GetBytes(got[1], "content.0.refusal").String() != "I cannot help with that" {
+		t.Fatalf("refusal text missing; item=%s", got[1])
+	}
+	if gjson.GetBytes(got[1], "content.0.text").Exists() {
+		t.Fatalf("refusal part should not use text field; item=%s", got[1])
+	}
 }

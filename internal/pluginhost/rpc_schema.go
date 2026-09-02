@@ -33,11 +33,13 @@ type rpcCapabilities struct {
 	RequestTranslator             bool                         `json:"request_translator"`
 	RequestNormalizer             bool                         `json:"request_normalizer"`
 	RequestInterceptor            bool                         `json:"request_interceptor"`
+	RequestLifecyclePlugin        bool                         `json:"request_lifecycle_plugin"`
 	ResponseTranslator            bool                         `json:"response_translator"`
 	ResponseBeforeTranslator      bool                         `json:"response_before_translator"`
 	ResponseAfterTranslator       bool                         `json:"response_after_translator"`
 	ResponseInterceptor           bool                         `json:"response_interceptor"`
 	StreamChunkInterceptor        bool                         `json:"response_stream_interceptor"`
+	WebSocketResponseObserver     bool                         `json:"websocket_response_observer"`
 	ThinkingApplier               bool                         `json:"thinking_applier"`
 	UsagePlugin                   bool                         `json:"usage_plugin"`
 	CommandLinePlugin             bool                         `json:"command_line_plugin"`
@@ -94,6 +96,11 @@ type rpcModelRouteRequest struct {
 	HostCallbackID string `json:"host_callback_id,omitempty"`
 }
 
+type rpcRequestCompletion struct {
+	pluginapi.RequestCompletion
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
 type rpcResponseInterceptRequest struct {
 	pluginapi.ResponseInterceptRequest
 	HostCallbackID string `json:"host_callback_id,omitempty"`
@@ -101,6 +108,11 @@ type rpcResponseInterceptRequest struct {
 
 type rpcStreamChunkInterceptRequest struct {
 	pluginapi.StreamChunkInterceptRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
+type rpcWebSocketResponseEvent struct {
+	pluginapi.WebSocketResponseEvent
 	HostCallbackID string `json:"host_callback_id,omitempty"`
 }
 
@@ -138,11 +150,13 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 		RequestTranslator:             caps.RequestTranslator != nil,
 		RequestNormalizer:             caps.RequestNormalizer != nil,
 		RequestInterceptor:            caps.RequestInterceptor != nil,
+		RequestLifecyclePlugin:        caps.RequestLifecyclePlugin != nil,
 		ResponseTranslator:            caps.ResponseTranslator != nil,
 		ResponseBeforeTranslator:      caps.ResponseBeforeTranslator != nil,
 		ResponseAfterTranslator:       caps.ResponseAfterTranslator != nil,
 		ResponseInterceptor:           caps.ResponseInterceptor != nil,
 		StreamChunkInterceptor:        caps.StreamChunkInterceptor != nil,
+		WebSocketResponseObserver:     caps.WebSocketResponseObserver != nil,
 		ThinkingApplier:               caps.ThinkingApplier != nil,
 		UsagePlugin:                   caps.UsagePlugin != nil,
 		CommandLinePlugin:             caps.CommandLinePlugin != nil,

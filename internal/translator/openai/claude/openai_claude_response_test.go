@@ -103,6 +103,25 @@ func lastStopReason(events []sseEvent) string {
 
 const streamReq = `{"stream":true}`
 
+func TestStreaming_LateUsageOnlyDoesNotEmitAfterMessageStop(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+		`{"id":"c1","model":"m","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+	)
+
+	if got := countByType(events, "message_delta"); got != 1 {
+		t.Fatalf("expected exactly one message_delta, got %d (events=%+v)", got, events)
+	}
+	if got := countByType(events, "message_stop"); got != 1 {
+		t.Fatalf("expected exactly one message_stop, got %d (events=%+v)", got, events)
+	}
+	if len(events) == 0 || events[len(events)-1].Type != "message_stop" {
+		t.Fatalf("message_stop must be the last semantic event (events=%+v)", events)
+	}
+}
+
 func TestConvertOpenAIResponseToClaude_StreamIgnoresNullToolNameDelta(t *testing.T) {
 	originalRequest := []byte(streamReq)
 	var param any
@@ -144,17 +163,24 @@ func TestStreamingTool_EmptyNameThroughout(t *testing.T) {
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
 
-	if got := len(toolUseStarts(events)); got != 0 {
-		t.Fatalf("expected zero tool_use content_block_start, got %d (events=%+v)", got, events)
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected one tool_use content_block_start with synthetic name, got %d (events=%+v)", len(starts), events)
 	}
-	if got := countByType(events, "content_block_delta"); got != 0 {
-		t.Fatalf("expected zero content_block_delta when start was suppressed, got %d", got)
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
+		t.Fatalf("announced tool name = %q, want %q", name, "tool_0")
 	}
-	if got := countByType(events, "content_block_stop"); got != 0 {
-		t.Fatalf("expected zero content_block_stop when start was suppressed, got %d", got)
+	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_a" {
+		t.Fatalf("announced tool id = %q, want %q", id, "call_a")
 	}
-	if got := lastStopReason(events); got == "tool_use" {
-		t.Fatalf("stop_reason must not be tool_use when zero tool_use blocks were emitted; got %q", got)
+	if got := countByType(events, "content_block_delta"); got != 1 {
+		t.Fatalf("expected one content_block_delta for accumulated args, got %d", got)
+	}
+	if got := countByType(events, "content_block_stop"); got != 1 {
+		t.Fatalf("expected one content_block_stop, got %d", got)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
 	}
 }
 
@@ -163,11 +189,21 @@ func TestStreamingTool_NullName(t *testing.T) {
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":null,"arguments":""}}]}}]}`,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
-	if got := len(toolUseStarts(events)); got != 0 {
-		t.Fatalf("null name must not produce a tool_use start; got %d", got)
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("null name with id should belated-emit synthetic tool name; got %d", len(starts))
 	}
-	if got := countByType(events, "content_block_stop"); got != 0 {
-		t.Fatalf("null name must not produce content_block_stop; got %d", got)
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
+		t.Fatalf("announced tool name = %q, want %q", name, "tool_0")
+	}
+	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_a" {
+		t.Fatalf("announced tool id = %q, want %q", id, "call_a")
+	}
+	if got := countByType(events, "content_block_stop"); got != 1 {
+		t.Fatalf("expected one content_block_stop, got %d", got)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
 	}
 }
 
@@ -176,8 +212,12 @@ func TestStreamingTool_NonStringName(t *testing.T) {
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":123,"arguments":""}}]}}]}`,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
-	if got := len(toolUseStarts(events)); got != 0 {
-		t.Fatalf("non-string name must not produce a tool_use start; got %d", got)
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("non-string name with id should belated-emit synthetic tool name; got %d", len(starts))
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
+		t.Fatalf("announced tool name = %q, want %q", name, "tool_0")
 	}
 }
 
@@ -201,10 +241,10 @@ func TestStreamingTool_RepeatedName(t *testing.T) {
 	}
 }
 
-func TestStreamingTool_MixedSuppressedAndValid(t *testing.T) {
+func TestStreamingTool_MixedEmptyNameAndValid(t *testing.T) {
 	events := runStream(t, streamReq,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[
-			{"index":0,"id":"call_skip","function":{"name":"","arguments":""}},
+			{"index":0,"id":"call_empty","function":{"name":"","arguments":""}},
 			{"index":1,"id":"call_real","function":{"name":"do_it","arguments":""}}
 		]}}]}`,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[
@@ -214,16 +254,36 @@ func TestStreamingTool_MixedSuppressedAndValid(t *testing.T) {
 	)
 
 	starts := toolUseStarts(events)
-	if len(starts) != 1 {
-		t.Fatalf("expected exactly one tool_use start, got %d", len(starts))
+	if len(starts) != 2 {
+		t.Fatalf("expected two tool_use starts (valid mid-stream + synthetic empty-name), got %d", len(starts))
 	}
-	if got := countByType(events, "content_block_stop"); got != 1 {
-		t.Fatalf("expected exactly one content_block_stop, got %d", got)
+	// Valid name+id is emitted mid-stream first; empty-name is belated at finish.
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "do_it" {
+		t.Fatalf("first tool name = %q, want %q", name, "do_it")
+	}
+	if name := gjson.Get(starts[1].Payload, "content_block.name").String(); name != "tool_0" {
+		t.Fatalf("second tool name = %q, want %q", name, "tool_0")
+	}
+	if got := countByType(events, "content_block_stop"); got != 2 {
+		t.Fatalf("expected two content_block_stop events, got %d", got)
 	}
 
 	indices := blockIndices(events)
-	if len(indices) == 0 || indices[0] != 0 {
-		t.Fatalf("first content_block_start index must be 0, got %v", indices)
+	if len(indices) < 2 || indices[0] != 0 || indices[1] != 1 {
+		t.Fatalf("content_block_start indices must be [0,1], got %v", indices)
+	}
+}
+
+func TestStreamingTool_EmptyNameWithoutSignalIsSuppressed(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"name":"","arguments":""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	if got := len(toolUseStarts(events)); got != 0 {
+		t.Fatalf("empty name without id/args must stay suppressed; got %d", got)
+	}
+	if got := lastStopReason(events); got == "tool_use" {
+		t.Fatalf("stop_reason must not be tool_use when zero tool_use blocks were emitted; got %q", got)
 	}
 }
 
@@ -352,14 +412,167 @@ func TestStreamingTool_LateIDAfterFinalization(t *testing.T) {
 	}
 }
 
-func TestStreamingTool_StopReasonMixedSuppressedAndValid(t *testing.T) {
+func TestStreamingTool_StopReasonMixedEmptyNameAndValid(t *testing.T) {
 	events := runStream(t, streamReq,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[
-			{"index":0,"id":"call_skip","function":{"name":"","arguments":""}},
+			{"index":0,"id":"call_empty","function":{"name":"","arguments":""}},
 			{"index":1,"id":"call_real","function":{"name":"do_it","arguments":"{}"}}
 		]}}]}`,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+	if got := len(toolUseStarts(events)); got != 2 {
+		t.Fatalf("expected two tool_use starts, got %d", got)
+	}
+}
+
+func TestStreamingTool_EmptyNameArgsOnlyNoID(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"name":"","arguments":"{\"q\":\"x\"}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected one belated tool_use start for empty-name args-only call, got %d", len(starts))
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
+		t.Fatalf("announced tool name = %q, want %q", name, "tool_0")
+	}
+	id := gjson.Get(starts[0].Payload, "content_block.id").String()
+	if !strings.HasPrefix(id, "toolu_") {
+		t.Fatalf("synthetic id should match toolu_<nanos>_<n>, got %q", id)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+}
+
+func TestStreamingTool_OmittedFinishReasonEmitsMessageDeltaOnDone(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":"{\"loc\":\"Paris\"}"}}]},"finish_reason":null}]}`,
+	)
+
+	if got := countByType(events, "message_delta"); got != 1 {
+		t.Fatalf("expected exactly one message_delta, got %d (events=%+v)", got, events)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+	if got := countByType(events, "message_stop"); got != 1 {
+		t.Fatalf("expected exactly one message_stop, got %d (events=%+v)", got, events)
+	}
+	if len(events) < 2 || events[len(events)-2].Type != "message_delta" || events[len(events)-1].Type != "message_stop" {
+		t.Fatalf("expected message_delta followed by message_stop at end (events=%+v)", events)
+	}
+}
+
+func TestStreamingText_OmittedFinishReasonEmitsEndTurnOnDone(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hello world"},"finish_reason":null}]}`,
+	)
+
+	if got := countByType(events, "message_delta"); got != 1 {
+		t.Fatalf("expected exactly one message_delta, got %d (events=%+v)", got, events)
+	}
+	if got := lastStopReason(events); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want %q", got, "end_turn")
+	}
+	if got := countByType(events, "message_stop"); got != 1 {
+		t.Fatalf("expected exactly one message_stop, got %d (events=%+v)", got, events)
+	}
+}
+
+func TestStreamingTool_UsageWithoutFinishReasonEmitsMessageDelta(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":"{\"loc\":\"Paris\"}"}}]},"finish_reason":null}]}`,
+		`{"id":"c1","model":"m","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}`,
+	)
+
+	if got := countByType(events, "message_delta"); got != 1 {
+		t.Fatalf("expected exactly one message_delta, got %d (events=%+v)", got, events)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+	var deltaEvent *sseEvent
+	for _, e := range events {
+		if e.Type == "message_delta" {
+			deltaEvent = &e
+			break
+		}
+	}
+	if deltaEvent == nil {
+		t.Fatalf("missing message_delta event")
+	}
+	if input := gjson.Get(deltaEvent.Payload, "usage.input_tokens").Int(); input != 10 {
+		t.Fatalf("input_tokens = %d, want 10", input)
+	}
+	if output := gjson.Get(deltaEvent.Payload, "usage.output_tokens").Int(); output != 5 {
+		t.Fatalf("output_tokens = %d, want 5", output)
+	}
+	if got := countByType(events, "message_stop"); got != 1 {
+		t.Fatalf("expected exactly one message_stop, got %d (events=%+v)", got, events)
+	}
+}
+
+func TestStreamingTool_OmittedToolCallIndexPreservesParallelCalls(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[
+			{"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}},
+			{"id":"call_time","type":"function","function":{"name":"get_time","arguments":"{\"tz\":\"UTC\"}"}}
+		]},"finish_reason":"tool_calls"}]}`,
+	)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 2 {
+		t.Fatalf("expected two tool_use starts, got %d (starts=%+v)", len(starts), starts)
+	}
+
+	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_weather" {
+		t.Fatalf("first tool id = %q, want %q", id, "call_weather")
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "get_weather" {
+		t.Fatalf("first tool name = %q, want %q", name, "get_weather")
+	}
+	if id := gjson.Get(starts[1].Payload, "content_block.id").String(); id != "call_time" {
+		t.Fatalf("second tool id = %q, want %q", id, "call_time")
+	}
+	if name := gjson.Get(starts[1].Payload, "content_block.name").String(); name != "get_time" {
+		t.Fatalf("second tool name = %q, want %q", name, "get_time")
+	}
+
+	var deltas []sseEvent
+	for _, e := range events {
+		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
+			deltas = append(deltas, e)
+		}
+	}
+	if len(deltas) != 2 {
+		t.Fatalf("expected two input_json_delta events, got %d (deltas=%+v)", len(deltas), deltas)
+	}
+
+	firstJSON := gjson.Get(deltas[0].Payload, "delta.partial_json").String()
+	secondJSON := gjson.Get(deltas[1].Payload, "delta.partial_json").String()
+
+	if !gjson.Valid(firstJSON) {
+		t.Fatalf("first input_json_delta is not valid JSON: %q", firstJSON)
+	}
+	if !gjson.Valid(secondJSON) {
+		t.Fatalf("second input_json_delta is not valid JSON: %q", secondJSON)
+	}
+
+	if gotCity := gjson.Get(firstJSON, "city").String(); gotCity != "Paris" {
+		t.Fatalf("first tool args city = %q, want %q", gotCity, "Paris")
+	}
+	if gotTz := gjson.Get(secondJSON, "tz").String(); gotTz != "UTC" {
+		t.Fatalf("second tool args tz = %q, want %q", gotTz, "UTC")
+	}
+
+	if got := countByType(events, "content_block_stop"); got != 2 {
+		t.Fatalf("expected two content_block_stop events, got %d", got)
+	}
 	if got := lastStopReason(events); got != "tool_use" {
 		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
 	}

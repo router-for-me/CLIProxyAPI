@@ -20,6 +20,7 @@ type keysTabModel struct {
 	interactions []map[string]any
 	claude       []map[string]any
 	codex        []map[string]any
+	xai          []map[string]any
 	vertex       []map[string]any
 	openai       []map[string]any
 	err          error
@@ -43,6 +44,7 @@ type keysDataMsg struct {
 	interactions []map[string]any
 	claude       []map[string]any
 	codex        []map[string]any
+	xai          []map[string]any
 	vertex       []map[string]any
 	openai       []map[string]any
 	err          error
@@ -80,6 +82,7 @@ func (m keysTabModel) fetchKeys() tea.Msg {
 	result.interactions, _ = m.client.GetInteractionsKeys()
 	result.claude, _ = m.client.GetClaudeKeys()
 	result.codex, _ = m.client.GetCodexKeys()
+	result.xai, _ = m.client.GetXAIKeys()
 	result.vertex, _ = m.client.GetVertexKeys()
 	result.openai, _ = m.client.GetOpenAICompat()
 	return result
@@ -100,6 +103,7 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 			m.interactions = msg.interactions
 			m.claude = msg.claude
 			m.codex = msg.codex
+			m.xai = msg.xai
 			m.vertex = msg.vertex
 			m.openai = msg.openai
 			if m.cursor >= len(m.keys) {
@@ -347,6 +351,7 @@ func (m keysTabModel) renderContent() string {
 	renderProviderKeys(&sb, "Interactions API Keys", m.interactions)
 	renderProviderKeys(&sb, "Claude API Keys", m.claude)
 	renderProviderKeys(&sb, "Codex API Keys", m.codex)
+	renderProviderKeys(&sb, "xAI API Keys", m.xai)
 	renderProviderKeys(&sb, "Vertex API Keys", m.vertex)
 
 	if len(m.openai) > 0 {

@@ -26,20 +26,24 @@ type runtimeItemConfig struct {
 	ConfigYAML []byte
 }
 
-func runtimeConfigFromConfig(cfg *config.Config) runtimeConfig {
+func runtimeConfigFromConfig(cfg *config.Config) (runtimeConfig, error) {
 	out := runtimeConfig{
 		Dir:   "plugins",
 		Items: make(map[string]runtimeItemConfig),
 	}
 	if cfg == nil {
-		return out
+		return out, nil
 	}
 
 	out.Enabled = cfg.Plugins.Enabled
-	out.Dir = strings.TrimSpace(cfg.Plugins.Dir)
-	if out.Dir == "" {
-		out.Dir = "plugins"
+	if !out.Enabled {
+		return out, nil
 	}
+	pluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(cfg.Plugins.Dir)
+	if errResolvePluginsDir != nil {
+		return runtimeConfig{}, errResolvePluginsDir
+	}
+	out.Dir = pluginsDir
 
 	ids := make([]string, 0, len(cfg.Plugins.Configs))
 	for id := range cfg.Plugins.Configs {
@@ -62,7 +66,7 @@ func runtimeConfigFromConfig(cfg *config.Config) runtimeConfig {
 			ConfigYAML: runtimeConfigYAML(item, enabled),
 		}
 	}
-	return out
+	return out, nil
 }
 
 func defaultRuntimeItemConfig(id string) runtimeItemConfig {

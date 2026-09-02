@@ -6,168 +6,90 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestConvertOpenAIRequestToClaude_Opus5StripsTrailingPlainAssistantPrefill(t *testing.T) {
-	inputJSON := `{
-		"model": "cc-opus5(xhigh)",
-		"messages": [
-			{"role": "user", "content": "Implement the plan."},
-			{"role": "assistant", "content": [{"type": "text", "text": "I will continue with the implementation."}]}
-		]
-	}`
-
-	result := ConvertOpenAIRequestToClaude("claude-opus-5", []byte(inputJSON), true)
-	messages := gjson.GetBytes(result, "messages").Array()
-	if len(messages) != 1 {
-		t.Fatalf("message count = %d, want 1 after stripping trailing assistant prefill", len(messages))
-	}
-	if got := messages[len(messages)-1].Get("role").String(); got != "user" {
-		t.Fatalf("last role = %q, want user", got)
-	}
-}
-
-func TestConvertOpenAIRequestToClaude_Opus5StripsConsecutiveTrailingAssistantPrefills(t *testing.T) {
-	inputJSON := `{
-		"model": "cc-opus5(xhigh)",
-		"messages": [
-			{"role": "user", "content": "Implement the plan."},
-			{"role": "assistant", "content": [{"type": "text", "text": "I have everything needed. Writing the element ledger now."}]},
-			{"role": "assistant", "content": [{"type": "text", "text": "I have everything needed. Writing the element ledger now."}]}
-		]
-	}`
-
-	result := ConvertOpenAIRequestToClaude("claude-opus-5", []byte(inputJSON), true)
-	messages := gjson.GetBytes(result, "messages").Array()
-	if len(messages) != 1 {
-		t.Fatalf("message count = %d, want 1 after stripping the terminal assistant-prefill run", len(messages))
-	}
-	if got := messages[len(messages)-1].Get("role").String(); got != "user" {
-		t.Fatalf("last role = %q, want user", got)
-	}
-}
-
-func TestConvertOpenAIRequestToClaude_Opus5KeepsHistoricalAssistantTextBeforeUserTurn(t *testing.T) {
-	inputJSON := `{
-		"model": "cc-opus5(xhigh)",
-		"messages": [
-			{"role": "user", "content": "Start."},
-			{"role": "assistant", "content": "Historical answer."},
-			{"role": "user", "content": "Continue."}
-		]
-	}`
-
-	result := ConvertOpenAIRequestToClaude("claude-opus-5", []byte(inputJSON), true)
-	messages := gjson.GetBytes(result, "messages").Array()
-	if len(messages) != 3 {
-		t.Fatalf("message count = %d, want 3", len(messages))
-	}
-	if got := messages[1].Get("role").String(); got != "assistant" {
-		t.Fatalf("historical role = %q, want assistant", got)
-	}
-	if got := messages[2].Get("role").String(); got != "user" {
-		t.Fatalf("last role = %q, want user", got)
-	}
-}
-
-func TestConvertOpenAIRequestToClaude_Opus5KeepsTrailingMixedAssistantContent(t *testing.T) {
-	inputJSON := `{
-		"model": "cc-opus5(xhigh)",
-		"messages": [
-			{"role": "user", "content": "Inspect the file."},
+func TestConvertOpenAIRequestToClaudeWithCompat_GroupsAssistantThinkingTextAndTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"assistant","reasoning_content":"reason","content":"answer"},
 			{
-				"role": "assistant",
-				"content": [
-					{"type": "text", "text": "Inspecting now."},
-					{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"path": "README.md"}}
+				"role":"assistant",
+				"content":"",
+				"tool_calls":[
+					{"id":"call_1","type":"function","function":{"name":"first","arguments":"{}"}},
+					{"id":"call_2","type":"function","function":{"name":"second","arguments":"{}"}}
 				]
 			}
 		]
-	}`
-
-	result := ConvertOpenAIRequestToClaude("claude-opus-5", []byte(inputJSON), true)
-	messages := gjson.GetBytes(result, "messages").Array()
-	if len(messages) != 2 {
-		t.Fatalf("message count = %d, want 2", len(messages))
+	}`)
+	out := ConvertOpenAIRequestToClaudeWithCompat("claude-test", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("message count = %d, want 1. Output: %s", len(messages), string(out))
 	}
-	if got := messages[1].Get("content.1.type").String(); got != "tool_use" {
-		t.Fatalf("last content type = %q, want tool_use", got)
+	content := messages[0].Get("content").Array()
+	wantTypes := []string{"thinking", "text", "tool_use", "tool_use"}
+	if len(content) != len(wantTypes) {
+		t.Fatalf("content count = %d, want %d. Output: %s", len(content), len(wantTypes), string(out))
 	}
-}
-
-func TestConvertOpenAIRequestToClaude_Opus5KeepsTrailingAssistantToolUse(t *testing.T) {
-	inputJSON := `{
-		"model": "cc-opus5(xhigh)",
-		"messages": [
-			{"role": "user", "content": "Inspect the file."},
-			{
-				"role": "assistant",
-				"content": "",
-				"tool_calls": [{
-					"id": "call_1",
-					"type": "function",
-					"function": {"name": "Read", "arguments": "{\"path\":\"README.md\"}"}
-				}]
-			}
-		]
-	}`
-
-	result := ConvertOpenAIRequestToClaude("claude-opus-5", []byte(inputJSON), true)
-	messages := gjson.GetBytes(result, "messages").Array()
-	if len(messages) != 2 {
-		t.Fatalf("message count = %d, want 2", len(messages))
-	}
-	last := messages[len(messages)-1]
-	if got := last.Get("role").String(); got != "assistant" {
-		t.Fatalf("last role = %q, want assistant", got)
-	}
-	if got := last.Get("content.0.type").String(); got != "tool_use" {
-		t.Fatalf("last content type = %q, want tool_use", got)
+	for i, wantType := range wantTypes {
+		if got := content[i].Get("type").String(); got != wantType {
+			t.Fatalf("content[%d].type = %q, want %q", i, got, wantType)
+		}
 	}
 }
 
-func TestConvertOpenAIRequestToClaude_Opus5KeepsTrailingNativeToolUse(t *testing.T) {
-	inputJSON := `{
-		"model": "cc-opus5(xhigh)",
-		"messages": [
-			{"role": "user", "content": "Inspect the file."},
-			{
-				"role": "assistant",
-				"content": [{
-					"type": "tool_use",
-					"id": "toolu_1",
-					"name": "Read",
-					"input": {"path": "README.md"}
-				}]
-			}
+func TestConvertOpenAIRequestToClaude_MergesToolResultWithAdjacentUserContent(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"work","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"ok"},
+			{"role":"user","content":"continue"}
 		]
-	}`
-
-	result := ConvertOpenAIRequestToClaude("claude-opus-5", []byte(inputJSON), true)
-	messages := gjson.GetBytes(result, "messages").Array()
+	}`)
+	out := ConvertOpenAIRequestToClaude("claude-test", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
 	if len(messages) != 2 {
-		t.Fatalf("message count = %d, want 2", len(messages))
+		t.Fatalf("message count = %d, want 2. Output: %s", len(messages), string(out))
 	}
-	last := messages[len(messages)-1]
-	if got := last.Get("content.0.type").String(); got != "tool_use" {
-		t.Fatalf("last content type = %q, want tool_use", got)
+	userContent := messages[1].Get("content").Array()
+	if len(userContent) != 2 {
+		t.Fatalf("user content count = %d, want 2. Output: %s", len(userContent), string(out))
+	}
+	if got := userContent[0].Get("type").String(); got != "tool_result" {
+		t.Fatalf("user content[0].type = %q, want tool_result", got)
+	}
+	if got := userContent[1].Get("text").String(); got != "continue" {
+		t.Fatalf("user content[1].text = %q, want continue", got)
 	}
 }
 
-func TestConvertOpenAIRequestToClaude_NonOpus5KeepsTrailingAssistantText(t *testing.T) {
-	inputJSON := `{
-		"model": "cc-sonnet",
-		"messages": [
-			{"role": "user", "content": "Continue."},
-			{"role": "assistant", "content": "Starting now."}
+func TestConvertOpenAIRequestToClaude_SystemDoesNotBreakUserTurnAndCacheBoundary(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"user","content":"first","cache_control":{"type":"ephemeral"}},
+			{"role":"system","content":"system rule"},
+			{"role":"user","content":"second"}
 		]
-	}`
-
-	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), true)
-	messages := gjson.GetBytes(result, "messages").Array()
-	if len(messages) != 2 {
-		t.Fatalf("message count = %d, want 2", len(messages))
+	}`)
+	out := ConvertOpenAIRequestToClaude("claude-test", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("message count = %d, want 1. Output: %s", len(messages), string(out))
 	}
-	if got := messages[len(messages)-1].Get("role").String(); got != "assistant" {
-		t.Fatalf("last role = %q, want assistant", got)
+	content := messages[0].Get("content").Array()
+	if len(content) != 2 {
+		t.Fatalf("content count = %d, want 2. Output: %s", len(content), string(out))
+	}
+	if got := content[0].Get("text").String(); got != "first" {
+		t.Fatalf("content[0].text = %q, want first", got)
+	}
+	if got := content[0].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("content[0].cache_control.type = %q, want ephemeral", got)
+	}
+	if got := content[1].Get("text").String(); got != "second" {
+		t.Fatalf("content[1].text = %q, want second", got)
+	}
+	if got := gjson.GetBytes(out, "system.0.text").String(); got != "system rule" {
+		t.Fatalf("system text = %q, want system rule", got)
 	}
 }
 
@@ -206,6 +128,70 @@ func TestConvertOpenAIRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T
 	}
 	if toolResultID != toolUseID {
 		t.Fatalf("tool_result tool_use_id = %q, want same sanitized id %q", toolResultID, toolUseID)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_GroupsConsecutiveParallelToolResults(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role": "user", "content": "Use both tools."},
+			{
+				"role": "assistant",
+				"content": "",
+				"tool_calls": [
+					{"id": "call_1", "type": "function", "function": {"name": "tool_a", "arguments": "{}"}},
+					{"id": "call_2", "type": "function", "function": {"name": "tool_b", "arguments": "{}"}}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_1",
+				"content": "one",
+				"cache_control": {"type": "ephemeral"}
+			},
+			{"role": "tool", "tool_call_id": "call_2", "content": "two"},
+			{"role": "assistant", "content": "Done."}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 4 {
+		t.Fatalf("Expected 4 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[2].Get("role").String(); got != "user" {
+		t.Fatalf("Expected grouped tool result role %q, got %q", "user", got)
+	}
+	toolResults := messages[2].Get("content").Array()
+	if len(toolResults) != 2 {
+		t.Fatalf("Expected 2 grouped tool results, got %d. Content: %s", len(toolResults), messages[2].Get("content").Raw)
+	}
+	wants := []struct {
+		id      string
+		content string
+	}{
+		{id: "call_1", content: "one"},
+		{id: "call_2", content: "two"},
+	}
+	for i, want := range wants {
+		if got := toolResults[i].Get("type").String(); got != "tool_result" {
+			t.Fatalf("tool result %d type = %q, want tool_result", i, got)
+		}
+		if got := toolResults[i].Get("tool_use_id").String(); got != want.id {
+			t.Fatalf("tool result %d tool_use_id = %q, want %q", i, got, want.id)
+		}
+		if got := toolResults[i].Get("content").String(); got != want.content {
+			t.Fatalf("tool result %d content = %q, want %q", i, got, want.content)
+		}
+	}
+	if got := toolResults[0].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("first tool result cache_control.type = %q, want ephemeral", got)
+	}
+	if got := messages[3].Get("content.0.text").String(); got != "Done." {
+		t.Fatalf("following assistant message text = %q, want Done.", got)
 	}
 }
 
@@ -547,6 +533,57 @@ func TestConvertOpenAIRequestToClaude_PreservesToolCacheControl(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_NormalizesRootToolSchemaUnions(t *testing.T) {
+	inputJSON := `{
+		"model":"claude-sonnet-4-5",
+		"messages":[{"role":"user","content":"hi"}],
+		"tools":[
+			{
+				"type":"function",
+				"function":{
+					"name":"without_type",
+					"parameters":{
+						"anyOf":[
+							{"type":"object","properties":{"a":{"type":"string"}}},
+							{"type":"object","properties":{"b":{"type":"string"}}}
+						]
+					}
+				}
+			},
+			{
+				"type":"function",
+				"function":{
+					"name":"constraint_union",
+					"parametersJsonSchema":{
+						"type":"object",
+						"properties":{"a":{"type":"string"},"b":{"type":"string"}},
+						"anyOf":[{"required":["a"]},{"required":["b"]}]
+					}
+				}
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	root := gjson.ParseBytes(result)
+
+	for _, toolName := range []string{"without_type", "constraint_union"} {
+		schema := root.Get(`tools.#(name=="` + toolName + `").input_schema`)
+		if got := schema.Get("type").String(); got != "object" {
+			t.Fatalf("%s input_schema.type = %q, want object. Output: %s", toolName, got, result)
+		}
+		if schema.Get("anyOf").Exists() {
+			t.Fatalf("%s input_schema should not contain root anyOf. Output: %s", toolName, result)
+		}
+		if !schema.Get("properties.a").Exists() || !schema.Get("properties.b").Exists() {
+			t.Fatalf("%s input_schema should contain properties a and b. Output: %s", toolName, result)
+		}
+		if schema.Get("required").Exists() {
+			t.Fatalf("%s input_schema should not merge alternative required fields. Output: %s", toolName, result)
+		}
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_PartCacheControlWinsOverMessageLevel(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",
@@ -569,5 +606,241 @@ func TestConvertOpenAIRequestToClaude_PartCacheControlWinsOverMessageLevel(t *te
 	}
 	if resultJSON.Get("messages.0.content.0.cache_control.ttl").Exists() {
 		t.Fatalf("part-level cache_control should win; unexpected ttl: %s", result)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_DeveloperRoleBecomesTopLevelSystem(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role": "system", "content": "S1"},
+			{"role": "developer", "content": [{"type": "text", "text": "D1"}, {"type": "text", "text": "D2"}]},
+			{"role": "user", "content": "Hello"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	system := resultJSON.Get("system").Array()
+	if len(system) != 3 {
+		t.Fatalf("system blocks = %d, want 3. system: %s", len(system), resultJSON.Get("system").Raw)
+	}
+	for idx, want := range []string{"S1", "D1", "D2"} {
+		if got := system[idx].Get("type").String(); got != "text" {
+			t.Fatalf("system[%d].type = %q, want text", idx, got)
+		}
+		if got := system[idx].Get("text").String(); got != want {
+			t.Fatalf("system[%d].text = %q, want %q", idx, got, want)
+		}
+	}
+
+	messages := resultJSON.Get("messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("messages = %d, want 1. messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("messages[0].role = %q, want user", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_DeveloperMessageCacheControlAppliesToLastBlock(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role": "developer", "content": [{"type": "text", "text": "D1"}, {"type": "text", "text": "D2"}], "cache_control": {"type": "ephemeral"}},
+			{"role": "user", "content": "Hello"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	system := gjson.ParseBytes(result).Get("system").Array()
+	if len(system) != 2 {
+		t.Fatalf("system blocks = %d, want 2", len(system))
+	}
+	if system[0].Get("cache_control").Exists() {
+		t.Fatalf("system[0] must not carry cache_control: %s", system[0].Raw)
+	}
+	if got := system[1].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system[1].cache_control.type = %q, want ephemeral", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_DeduplicatesToolResults(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"user","content":"Run tools"},
+			{"role":"assistant","tool_calls":[
+				{"id":"call_dup","type":"function","function":{"name":"lookup","arguments":"{}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_dup","content":"first output"},
+			{"role":"assistant","content":"Next step","tool_calls":[
+				{"id":"call_other","type":"function","function":{"name":"search","arguments":"{}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_dup","content":"final output"},
+			{"role":"tool","tool_call_id":"call_other","content":"search output"},
+			{"role":"tool","tool_call_id":"","content":"empty id output"}
+		]
+	}`)
+	out := ConvertOpenAIRequestToClaude("claude-test", inputJSON, false)
+	root := gjson.ParseBytes(out)
+
+	messages := root.Get("messages").Array()
+	if len(messages) < 5 {
+		t.Fatalf("expected at least 5 messages, got %d. Output: %s", len(messages), string(out))
+	}
+
+	// Message 1: assistant tool_use call_dup
+	if got := messages[1].Get("content.0.id").String(); got != "call_dup" {
+		t.Fatalf("messages[1].content.0.id = %q, want call_dup", got)
+	}
+
+	// Message 2: user tool_result for call_dup with final payload, before assistant message 3
+	if got := messages[2].Get("content.0.type").String(); got != "tool_result" {
+		t.Fatalf("messages[2].content.0.type = %q, want tool_result", got)
+	}
+	if got := messages[2].Get("content.0.tool_use_id").String(); got != "call_dup" {
+		t.Fatalf("messages[2].content.0.tool_use_id = %q, want call_dup", got)
+	}
+	if got := messages[2].Get("content.0.content").String(); got != "final output" {
+		t.Fatalf("messages[2].content.0.content = %q, want 'final output'", got)
+	}
+
+	// Message 3: assistant Next step + tool_use call_other
+	if got := messages[3].Get("content.0.text").String(); got != "Next step" {
+		t.Fatalf("messages[3].content.0.text = %q, want 'Next step'", got)
+	}
+	if got := messages[3].Get("content.1.id").String(); got != "call_other" {
+		t.Fatalf("messages[3].content.1.id = %q, want call_other", got)
+	}
+
+	// Message 4: user tool_results for call_other (search output) and empty id output; call_dup should NOT be repeated here
+	msg4Blocks := messages[4].Get("content").Array()
+	if len(msg4Blocks) != 2 {
+		t.Fatalf("expected 2 tool_result blocks in message 4, got %d. Output: %s", len(msg4Blocks), string(out))
+	}
+	if got := msg4Blocks[0].Get("tool_use_id").String(); got != "call_other" {
+		t.Fatalf("msg4Blocks[0].tool_use_id = %q, want call_other", got)
+	}
+	if got := msg4Blocks[0].Get("content").String(); got != "search output" {
+		t.Fatalf("msg4Blocks[0].content = %q, want 'search output'", got)
+	}
+	if got := msg4Blocks[1].Get("content").String(); got != "empty id output" {
+		t.Fatalf("msg4Blocks[1].content = %q, want 'empty id output'", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_MaxTokensAndMaxCompletionTokens(t *testing.T) {
+	tests := []struct {
+		name      string
+		rawJSON   string
+		wantLimit int64
+	}{
+		{
+			name:      "only max_completion_tokens",
+			rawJSON:   `{"messages":[{"role":"user","content":"hi"}],"max_completion_tokens":128000}`,
+			wantLimit: 128000,
+		},
+		{
+			name:      "only max_tokens",
+			rawJSON:   `{"messages":[{"role":"user","content":"hi"}],"max_tokens":4096}`,
+			wantLimit: 4096,
+		},
+		{
+			name:      "both present prefers max_tokens",
+			rawJSON:   `{"messages":[{"role":"user","content":"hi"}],"max_tokens":4096,"max_completion_tokens":128000}`,
+			wantLimit: 4096,
+		},
+		{
+			name:      "neither present uses default template limit",
+			rawJSON:   `{"messages":[{"role":"user","content":"hi"}]}`,
+			wantLimit: 32000,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := ConvertOpenAIRequestToClaude("claude-3-7-sonnet-20250219", []byte(tc.rawJSON), false)
+			got := gjson.GetBytes(out, "max_tokens").Int()
+			if got != tc.wantLimit {
+				t.Fatalf("max_tokens = %d, want %d. Output: %s", got, tc.wantLimit, string(out))
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_PreservesCallerSuppliedMetadataUserID(t *testing.T) {
+	testCases := []struct {
+		name     string
+		rawJSON  string
+		expected string
+	}{
+		{
+			name:     "plain string",
+			rawJSON:  `{"model":"claude-test","metadata":{"user_id":"custom-user-123"},"messages":[{"role":"user","content":"hello"}]}`,
+			expected: "custom-user-123",
+		},
+		{
+			name:     "special characters and json string",
+			rawJSON:  `{"model":"claude-test","metadata":{"user_id":"foo\"bar\nbaz\\qux"},"messages":[{"role":"user","content":"hello"}]}`,
+			expected: "foo\"bar\nbaz\\qux",
+		},
+		{
+			name:     "claude code json format",
+			rawJSON:  `{"model":"claude-test","metadata":{"user_id":"{\"device_id\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"session_id\":\"11111111-2222-4333-8444-555555555555\"}"},"messages":[{"role":"user","content":"hello"}]}`,
+			expected: `{"device_id":"0000000000000000000000000000000000000000000000000000000000000000","session_id":"11111111-2222-4333-8444-555555555555"}`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := ConvertOpenAIRequestToClaude("claude-test", []byte(tc.rawJSON), false)
+			if !gjson.ValidBytes(out) {
+				t.Fatalf("output is invalid json: %s", string(out))
+			}
+			got := gjson.GetBytes(out, "metadata.user_id").String()
+			if got != tc.expected {
+				t.Fatalf("metadata.user_id = %q, want %q", got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_PreservesOpenAIUserField(t *testing.T) {
+	raw := []byte(`{"model":"claude-test","user":"openai-user-456","messages":[{"role":"user","content":"hello"}]}`)
+	out := ConvertOpenAIRequestToClaude("claude-test", raw, false)
+	if !gjson.ValidBytes(out) {
+		t.Fatalf("output is invalid json: %s", string(out))
+	}
+	got := gjson.GetBytes(out, "metadata.user_id").String()
+	if got != "openai-user-456" {
+		t.Fatalf("metadata.user_id = %q, want %q", got, "openai-user-456")
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_DifferentSessionsProduceDifferentUserIDs(t *testing.T) {
+	a := []byte(`{"model":"claude-test","prompt_cache_key":"session-a","messages":[{"role":"user","content":"hello"}]}`)
+	b := []byte(`{"model":"claude-test","prompt_cache_key":"session-b","messages":[{"role":"user","content":"hello"}]}`)
+	outA := ConvertOpenAIRequestToClaude("claude-test", a, false)
+	outB := ConvertOpenAIRequestToClaude("claude-test", b, false)
+	idA := gjson.GetBytes(outA, "metadata.user_id").String()
+	idB := gjson.GetBytes(outB, "metadata.user_id").String()
+	if idA == idB {
+		t.Fatalf("different prompt_cache_key produced identical metadata.user_id: %q", idA)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_DeterministicWithoutSessionKey(t *testing.T) {
+	first := []byte(`{"model":"claude-test","messages":[{"role":"user","content":"stable first message"}]}`)
+	second := []byte(`{"model":"claude-test","messages":[{"role":"user","content":"stable first message"},{"role":"assistant","content":"hi"},{"role":"user","content":"second message"}]}`)
+	outFirst := ConvertOpenAIRequestToClaude("claude-test", first, false)
+	outSecond := ConvertOpenAIRequestToClaude("claude-test", second, false)
+	idFirst := gjson.GetBytes(outFirst, "metadata.user_id").String()
+	idSecond := gjson.GetBytes(outSecond, "metadata.user_id").String()
+	if idFirst == "" || idFirst == "unknown" {
+		t.Fatalf("expected non-empty derived user_id, got %q", idFirst)
+	}
+	if idFirst != idSecond {
+		t.Fatalf("turn growth changed derived user_id: %q vs %q", idFirst, idSecond)
 	}
 }

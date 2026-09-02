@@ -11,6 +11,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 )
 
 type rpcPluginAdapter struct {
@@ -35,16 +36,17 @@ type rpcThinkingApplier struct {
 	*rpcPluginAdapter
 }
 
-type rpcPluginError struct {
+type rpcError struct {
+	Code       string
 	message    string
 	statusCode int
 }
 
-func (e rpcPluginError) Error() string {
+func (e rpcError) Error() string {
 	return e.message
 }
 
-func (e rpcPluginError) StatusCode() int {
+func (e rpcError) StatusCode() int {
 	return e.statusCode
 }
 
@@ -68,8 +70,14 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 		return pluginapi.Plugin{}, fmt.Errorf("plugin schema version %d is not supported", resp.SchemaVersion)
 	}
 	adapter := &rpcPluginAdapter{id: id, host: host, client: client}
+	schemaVersion := resp.SchemaVersion
+	if schemaVersion == 0 {
+		// Missing schema_version is treated as the original contract.
+		schemaVersion = 1
+	}
 	plugin := pluginapi.Plugin{
-		Metadata: resp.Metadata,
+		Metadata:      resp.Metadata,
+		SchemaVersion: schemaVersion,
 		Capabilities: pluginapi.Capabilities{
 			FrontendAuthProviderExclusive: resp.Capabilities.FrontendAuthProvider && resp.Capabilities.FrontendAuthProviderExclusive,
 			ExecutorModelScope:            resp.Capabilities.ExecutorModelScope,
@@ -107,6 +115,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	if resp.Capabilities.RequestInterceptor {
 		plugin.Capabilities.RequestInterceptor = adapter
 	}
+	if resp.Capabilities.RequestLifecyclePlugin {
+		plugin.Capabilities.RequestLifecyclePlugin = adapter
+	}
 	if resp.Capabilities.ResponseTranslator {
 		plugin.Capabilities.ResponseTranslator = adapter
 	}
@@ -121,6 +132,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	}
 	if resp.Capabilities.StreamChunkInterceptor {
 		plugin.Capabilities.StreamChunkInterceptor = adapter
+	}
+	if resp.Capabilities.WebSocketResponseObserver {
+		plugin.Capabilities.WebSocketResponseObserver = adapter
 	}
 	if resp.Capabilities.ThinkingApplier {
 		plugin.Capabilities.ThinkingApplier = rpcThinkingApplier{rpcPluginAdapter: adapter}
@@ -191,10 +205,16 @@ func sanitizePluginRequest(request any) any {
 	case pluginapi.RequestInterceptRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
+	case pluginapi.RequestCompletion:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
 	case pluginapi.ResponseInterceptRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case pluginapi.StreamChunkInterceptRequest:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
+	case pluginapi.WebSocketResponseEvent:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case rpcRequestInterceptRequest:
@@ -203,10 +223,16 @@ func sanitizePluginRequest(request any) any {
 	case rpcModelRouteRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
+	case rpcRequestCompletion:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
 	case rpcResponseInterceptRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case rpcStreamChunkInterceptRequest:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
+	case rpcWebSocketResponseEvent:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case pluginapi.ExecutorHTTPRequest:
@@ -292,10 +318,11 @@ func decodeEnvelopeResult[T any](envelope pluginabi.Envelope) (T, error) {
 			if message == "" {
 				message = "plugin call failed"
 			}
-			if envelope.Error.HTTPStatus > 0 {
-				return zero, rpcPluginError{message: message, statusCode: envelope.Error.HTTPStatus}
+			return zero, rpcError{
+				Code:       strings.TrimSpace(envelope.Error.Code),
+				message:    message,
+				statusCode: envelope.Error.HTTPStatus,
 			}
-			return zero, fmt.Errorf("%s", message)
 		}
 		return zero, fmt.Errorf("plugin call failed")
 	}
@@ -476,6 +503,16 @@ func (a *rpcPluginAdapter) InterceptRequestAfterAuth(ctx context.Context, req pl
 	})
 }
 
+func (a *rpcPluginAdapter) HandleRequestComplete(ctx context.Context, completion pluginapi.RequestCompletion) error {
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	_, errCall := callPlugin[rpcEmptyResponse](ctx, a.client, pluginabi.MethodRequestComplete, rpcRequestCompletion{
+		RequestCompletion: completion,
+		HostCallbackID:    callbackID,
+	})
+	return errCall
+}
+
 func (a *rpcPluginAdapter) TranslateResponse(ctx context.Context, req pluginapi.ResponseTransformRequest) (pluginapi.PayloadResponse, error) {
 	return callPlugin[pluginapi.PayloadResponse](ctx, a.client, pluginabi.MethodResponseTranslate, req)
 }
@@ -502,6 +539,16 @@ func (a *rpcPluginAdapter) InterceptStreamChunk(ctx context.Context, req plugina
 	})
 }
 
+func (a *rpcPluginAdapter) ObserveWebSocketResponseEvent(ctx context.Context, event pluginapi.WebSocketResponseEvent) error {
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	_, errCall := callPlugin[rpcEmptyResponse](ctx, a.client, pluginabi.MethodWebSocketResponseEvent, rpcWebSocketResponseEvent{
+		WebSocketResponseEvent: event,
+		HostCallbackID:         callbackID,
+	})
+	return errCall
+}
+
 func (a rpcThinkingApplier) ApplyThinking(ctx context.Context, req pluginapi.ThinkingApplyRequest) (pluginapi.PayloadResponse, error) {
 	callbackID, closeCallback := a.openHostCallbackContext(ctx)
 	defer closeCallback()
@@ -512,7 +559,9 @@ func (a rpcThinkingApplier) ApplyThinking(ctx context.Context, req pluginapi.Thi
 }
 
 func (a *rpcPluginAdapter) HandleUsage(ctx context.Context, record pluginapi.UsageRecord) {
-	_, _ = callPlugin[rpcEmptyResponse](ctx, a.client, pluginabi.MethodUsageHandle, record)
+	if _, errCall := callPlugin[rpcEmptyResponse](ctx, a.client, pluginabi.MethodUsageHandle, record); errCall != nil {
+		log.Debugf("pluginhost: usage.handle to %s failed: %v", a.id, errCall)
+	}
 }
 
 func (a *rpcPluginAdapter) RegisterCommandLine(ctx context.Context, req pluginapi.CommandLineRegistrationRequest) (pluginapi.CommandLineRegistrationResponse, error) {

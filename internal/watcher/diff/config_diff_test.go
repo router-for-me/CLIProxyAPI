@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -38,6 +39,7 @@ func TestBuildConfigChangeDetails(t *testing.T) {
 	newCfg := &config.Config{
 		Port:    9090,
 		AuthDir: "/tmp/auth-new",
+		Codex:   config.CodexConfig{DisableCodexCloaking: true},
 		GeminiKey: []config.GeminiKey{
 			{APIKey: "old", BaseURL: "http://old", ExcludedModels: []string{"old-model", "extra"}},
 		},
@@ -77,6 +79,7 @@ func TestBuildConfigChangeDetails(t *testing.T) {
 	expectContains(t, details, "remote-management.allow-remote: false -> true")
 	expectContains(t, details, "remote-management.disable-auto-update-panel: false -> true")
 	expectContains(t, details, "remote-management.secret-key: updated")
+	expectContains(t, details, "codex.disable-codex-cloaking: false -> true")
 	expectContains(t, details, "oauth-excluded-models[providera]: updated (1 -> 2 entries)")
 	expectContains(t, details, "oauth-excluded-models[providerb]: added (1 entries)")
 	expectContains(t, details, "openai-compatibility:")
@@ -90,6 +93,46 @@ func TestBuildConfigChangeDetails_NoChanges(t *testing.T) {
 	}
 	if details := BuildConfigChangeDetails(cfg, cfg); len(details) != 0 {
 		t.Fatalf("expected no change entries, got %v", details)
+	}
+}
+
+func TestBuildConfigChangeDetails_CodexLiveMediaRelay(t *testing.T) {
+	oldCfg := &config.Config{Codex: config.CodexConfig{LiveMediaRelay: config.CodexLiveMediaRelayConfig{
+		Enabled:     false,
+		MaxSessions: 16,
+		ICEServers: []config.CodexLiveICEServer{{
+			URLs:       []string{"turn:old.example.com"},
+			Username:   "old-user",
+			Credential: "old-secret",
+		}},
+	}}}
+	newCfg := &config.Config{Codex: config.CodexConfig{LiveMediaRelay: config.CodexLiveMediaRelayConfig{
+		Enabled:                 true,
+		MaxSessions:             32,
+		DisablePrivateRemoteIPs: true,
+		PublicIP:                "203.0.113.10",
+		UDPPortMin:              40000,
+		UDPPortMax:              40063,
+		ICEServers: []config.CodexLiveICEServer{{
+			URLs:       []string{"turn:new.example.com"},
+			Username:   "new-user",
+			Credential: "new-secret",
+		}},
+	}}}
+
+	details := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, details, "codex.live-media-relay.enabled: false -> true")
+	expectContains(t, details, "codex.live-media-relay.max-sessions: 16 -> 32")
+	expectContains(t, details, "codex.live-media-relay.disable-private-remote-ips: false -> true")
+	expectContains(t, details, "codex.live-media-relay.public-ip: <none> -> 203.0.113.10")
+	expectContains(t, details, "codex.live-media-relay.udp-port-min: 0 -> 40000")
+	expectContains(t, details, "codex.live-media-relay.udp-port-max: 0 -> 40063")
+	expectContains(t, details, "codex.live-media-relay.ice-servers: updated (1 -> 1 entries, credentials redacted)")
+	joined := strings.Join(details, "\n")
+	for _, secret := range []string{"old-secret", "new-secret", "old-user", "new-user"} {
+		if strings.Contains(joined, secret) {
+			t.Fatalf("config change details leaked %q: %s", secret, joined)
+		}
 	}
 }
 
@@ -153,6 +196,76 @@ func TestBuildConfigChangeDetails_ModelPrefixes(t *testing.T) {
 	expectContains(t, changes, "vertex[0].prefix: old-v -> new-v")
 }
 
+func TestBuildConfigChangeDetails_CodexAlphaSearch(t *testing.T) {
+	oldCfg := &config.Config{CodexKey: []config.CodexKey{{APIKey: "key", BaseURL: "https://codex.example.com"}}}
+	newCfg := &config.Config{CodexKey: []config.CodexKey{{APIKey: "key", BaseURL: "https://codex.example.com", AlphaSearch: true}}}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "codex[0].alpha-search: false -> true")
+}
+
+func TestBuildConfigChangeDetails_XAIKeys(t *testing.T) {
+	oldRetry := 1
+	newRetry := 0
+	oldDisableCooling := false
+	newDisableCooling := true
+	oldCfg := &config.Config{XAIKey: []config.XAIKey{{
+		APIKey:         "old-key",
+		Priority:       1,
+		Prefix:         "old",
+		BaseURL:        "https://old.example.com/v1",
+		ProxyURL:       "http://old-proxy",
+		Websockets:     false,
+		DisableCooling: &oldDisableCooling,
+		RequestRetry:   &oldRetry,
+		Headers:        map[string]string{"X-Test": "old"},
+		Models:         []config.XAIModel{{Name: "grok-old", Alias: "grok"}},
+		ExcludedModels: []string{"grok-hidden"},
+	}}}
+	newCfg := &config.Config{XAIKey: []config.XAIKey{{
+		APIKey:         "new-key",
+		Priority:       2,
+		Prefix:         "new",
+		BaseURL:        "https://new.example.com/v1",
+		ProxyURL:       "http://new-proxy",
+		Websockets:     true,
+		DisableCooling: &newDisableCooling,
+		RequestRetry:   &newRetry,
+		Headers:        map[string]string{"X-Test": "new"},
+		Models:         []config.XAIModel{{Name: "grok-new", Alias: "grok"}},
+		ExcludedModels: []string{"grok-other"},
+	}}}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "xai[0].base-url: https://old.example.com -> https://new.example.com")
+	expectContains(t, changes, "xai[0].proxy-url: http://old-proxy -> http://new-proxy")
+	expectContains(t, changes, "xai[0].prefix: old -> new")
+	expectContains(t, changes, "xai[0].priority: 1 -> 2")
+	expectContains(t, changes, "xai[0].websockets: false -> true")
+	expectContains(t, changes, "xai[0].disable-cooling: false -> true")
+	expectContains(t, changes, "xai[0].request-retry: 1 -> 0")
+	expectContains(t, changes, "xai[0].api-key: updated")
+	expectContains(t, changes, "xai[0].headers: updated")
+	expectContains(t, changes, "xai[0].models: updated (1 -> 1 entries)")
+	expectContains(t, changes, "xai[0].excluded-models: updated (1 -> 1 entries)")
+}
+
+func TestBuildConfigChangeDetails_XAIForceMappingOnly(t *testing.T) {
+	oldCfg := &config.Config{XAIKey: []config.XAIKey{{
+		APIKey:  "xai-key",
+		BaseURL: "https://api.x.ai/v1",
+		Models:  []config.XAIModel{{Name: "grok-4.5", Alias: "grok-latest"}},
+	}}}
+	newCfg := &config.Config{XAIKey: []config.XAIKey{{
+		APIKey:  "xai-key",
+		BaseURL: "https://api.x.ai/v1",
+		Models:  []config.XAIModel{{Name: "grok-4.5", Alias: "grok-latest", ForceMapping: true}},
+	}}}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "xai[0].models: updated (1 -> 1 entries)")
+}
+
 func TestBuildConfigChangeDetails_NilSafe(t *testing.T) {
 	if details := BuildConfigChangeDetails(nil, &config.Config{}); len(details) != 0 {
 		t.Fatalf("expected empty change list when old nil, got %v", details)
@@ -185,6 +298,37 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 	expectContains(t, details, "remote-management.secret-key: created")
 }
 
+func TestBuildConfigChangeDetails_RedactsEndpointURLs(t *testing.T) {
+	oldCfg := &config.Config{
+		GeminiKey: []config.GeminiKey{{BaseURL: "https://old-user:old-pass@old.example/v1?token=old-token"}},
+		RemoteManagement: config.RemoteManagement{
+			PanelGitHubRepository: "https://old-user:old-pass@old-panel.example/private?token=old-token",
+		},
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			BaseURL: "https://old-user:old-pass@old-compat.example/v1?token=old-token",
+		}},
+	}
+	newCfg := &config.Config{
+		GeminiKey: []config.GeminiKey{{BaseURL: "https://new-user:new-pass@new.example/v1?token=new-token"}},
+		RemoteManagement: config.RemoteManagement{
+			PanelGitHubRepository: "https://new-user:new-pass@new-panel.example/private?token=new-token",
+		},
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			BaseURL: "https://new-user:new-pass@new-compat.example/v1?token=new-token",
+		}},
+	}
+
+	details := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, details, "gemini[0].base-url: https://old.example -> https://new.example")
+	expectContains(t, details, "remote-management.panel-github-repository: https://old-panel.example -> https://new-panel.example")
+	joined := strings.Join(details, "\n")
+	for _, sensitive := range []string{"old-user", "new-user", "old-pass", "new-pass", "old-token", "new-token", "/private", "/v1"} {
+		if strings.Contains(joined, sensitive) {
+			t.Fatalf("config change details leaked %q: %s", sensitive, joined)
+		}
+	}
+}
+
 func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	oldCfg := &config.Config{
 		Port:                          1000,
@@ -200,6 +344,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		MaxRetryInterval:              1,
 		WebsocketAuth:                 false,
 		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: false, SwitchPreviewModel: false, AntigravityCredits: false},
+		Antigravity:                   config.AntigravityConfig{SensitiveWords: []string{"old-word"}},
 		ClaudeKey:                     []config.ClaudeKey{{APIKey: "c1"}},
 		CodexKey:                      []config.CodexKey{{APIKey: "x1"}},
 		RemoteManagement:              config.RemoteManagement{DisableControlPanel: false, PanelGitHubRepository: "old/repo", SecretKey: "keep"},
@@ -225,6 +370,8 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		MaxRetryInterval:              3,
 		WebsocketAuth:                 true,
 		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true, AntigravityCredits: true},
+		Antigravity:                   config.AntigravityConfig{SensitiveWords: []string{"new-word-1", "new-word-2"}},
+		XAI:                           config.XAIConfig{InjectXSearch: true},
 		ClaudeKey: []config.ClaudeKey{
 			{APIKey: "c1", BaseURL: "http://new", ProxyURL: "http://p", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"a"}},
 			{APIKey: "c2"},
@@ -246,6 +393,9 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			ForceModelPrefix:           true,
 			NonStreamKeepAliveInterval: 5,
 			DisableImageGeneration:     config.DisableImageGenerationAll,
+			ClaudeCode: sdkconfig.ClaudeCodeConfig{
+				DisableCloakingModelList: true,
+			},
 		},
 	}
 
@@ -257,6 +407,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "save-cooldown-status: false -> true")
 	expectContains(t, details, "transient-error-cooldown-seconds: 0 -> -1")
 	expectContains(t, details, "disable-image-generation: false -> true")
+	expectContains(t, details, "claude-code.disable-cloaking-model-list: false -> true")
 	expectContains(t, details, "request-log: false -> true")
 	expectContains(t, details, "request-retry: 1 -> 2")
 	expectContains(t, details, "max-retry-credentials: 1 -> 3")
@@ -268,12 +419,14 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "quota-exceeded.switch-project: false -> true")
 	expectContains(t, details, "quota-exceeded.switch-preview-model: false -> true")
 	expectContains(t, details, "quota-exceeded.antigravity-credits: false -> true")
+	expectContains(t, details, "antigravity.sensitive-words: 1 -> 2")
+	expectContains(t, details, "xai.inject-x-search: false -> true")
 	expectContains(t, details, "api-keys count: 1 -> 2")
 	expectContains(t, details, "claude-api-key count: 1 -> 2")
 	expectContains(t, details, "codex-api-key count: 1 -> 2")
 	expectContains(t, details, "remote-management.disable-control-panel: false -> true")
 	expectContains(t, details, "remote-management.disable-auto-update-panel: false -> true")
-	expectContains(t, details, "remote-management.panel-github-repository: old/repo -> new/repo")
+	expectContains(t, details, "remote-management.panel-github-repository: old -> new")
 	expectContains(t, details, "remote-management.secret-key: deleted")
 }
 
@@ -427,7 +580,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	expectContains(t, changes, "remote-management.allow-remote: false -> true")
 	expectContains(t, changes, "remote-management.disable-control-panel: false -> true")
 	expectContains(t, changes, "remote-management.disable-auto-update-panel: false -> true")
-	expectContains(t, changes, "remote-management.panel-github-repository: old/repo -> new/repo")
+	expectContains(t, changes, "remote-management.panel-github-repository: old -> new")
 	expectContains(t, changes, "remote-management.secret-key: deleted")
 	expectContains(t, changes, "openai-compatibility:")
 }
@@ -477,7 +630,8 @@ func TestBuildConfigChangeDetails_CountBranches(t *testing.T) {
 	newCfg := &config.Config{
 		GeminiKey: []config.GeminiKey{{APIKey: "g"}},
 		ClaudeKey: []config.ClaudeKey{{APIKey: "c"}},
-		CodexKey:  []config.CodexKey{{APIKey: "x"}},
+		CodexKey:  []config.CodexKey{{APIKey: "c"}},
+		XAIKey:    []config.XAIKey{{APIKey: "x"}},
 		VertexCompatAPIKey: []config.VertexCompatKey{
 			{APIKey: "v", BaseURL: "http://v"},
 		},
@@ -487,6 +641,7 @@ func TestBuildConfigChangeDetails_CountBranches(t *testing.T) {
 	expectContains(t, changes, "gemini-api-key count: 0 -> 1")
 	expectContains(t, changes, "claude-api-key count: 0 -> 1")
 	expectContains(t, changes, "codex-api-key count: 0 -> 1")
+	expectContains(t, changes, "xai-api-key count: 0 -> 1")
 	expectContains(t, changes, "vertex-api-key count: 0 -> 1")
 }
 

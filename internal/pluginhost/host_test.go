@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +48,77 @@ func TestHostApplyConfig_DisabledGlobalSkipsSnapshot(t *testing.T) {
 	snap := h.Snapshot()
 	if snap.enabled || len(snap.records) != 0 {
 		t.Fatalf("Snapshot() = %+v, want empty disabled snapshot", snap)
+	}
+}
+
+func TestHostApplyConfig_DisabledGlobalDoesNotResolvePluginsDir(t *testing.T) {
+	loader := newTestSymbolLoader()
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	loader.lookups["alpha"] = newTestSymbolLookup(plugin)
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha"),
+			Configs: enabledPluginConfigs("alpha"),
+		},
+	})
+	if !h.PluginRegistered("alpha") {
+		t.Fatal("PluginRegistered(alpha) = false, want true before disable")
+	}
+
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	disabledCfg, errParseConfig := config.ParseConfigBytes([]byte(`
+plugins:
+  enabled: false
+  dir: "~/.cli-proxy-api/plugins"
+`))
+	if errParseConfig != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParseConfig)
+	}
+	h.ApplyConfig(context.Background(), disabledCfg)
+
+	if h.PluginRegistered("alpha") {
+		t.Fatal("PluginRegistered(alpha) = true, want false after disable")
+	}
+	if snap := h.Snapshot(); snap.enabled || len(snap.records) != 0 {
+		t.Fatalf("Snapshot() = %+v, want empty disabled snapshot", snap)
+	}
+}
+
+func TestHostApplyConfig_ExpandsPluginsDirLeadingTilde(t *testing.T) {
+	loader := newTestSymbolLoader()
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	loader.lookups["alpha"] = newTestSymbolLookup(plugin)
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+
+	pluginsDir := makePluginDir(t, "alpha")
+	homeDir := filepath.Dir(pluginsDir)
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     "~/" + filepath.ToSlash(filepath.Base(pluginsDir)),
+			Configs: enabledPluginConfigs("alpha"),
+		},
+	})
+
+	if loader.openCalls != 1 {
+		t.Fatalf("Open calls = %d, want 1", loader.openCalls)
+	}
+	if !h.PluginRegistered("alpha") {
+		t.Fatal("PluginRegistered(alpha) = false, want true")
 	}
 }
 
@@ -678,6 +752,451 @@ func TestHostApplyConfigLogsHotReloadActiveAndRetiredVersions(t *testing.T) {
 	}
 }
 
+func TestHostApplyConfigQuiescesBeforeHotReloadRegistration(t *testing.T) {
+	events := &lifecycleEventRecorder{}
+	oldClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		events.add("old." + method)
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	replacementClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		events.add("replacement." + method)
+		if method != pluginabi.MethodPluginRegister {
+			return nil, fmt.Errorf("unexpected replacement plugin method %s", method)
+		}
+		return lifecycleRegistrationResult(validTestPlugin("alpha"))
+	}}
+	loader := &sequencePluginLoader{clients: []pluginClient{oldClient, replacementClient}}
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0")
+
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	paths["2.0.0"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+
+	if got, want := events.snapshot(), []string{
+		"old." + pluginabi.MethodPluginRegister,
+		"old." + pluginabi.MethodPluginQuiesce,
+		"replacement." + pluginabi.MethodPluginRegister,
+	}; !slices.Equal(got, want) {
+		t.Fatalf("lifecycle events = %v, want %v", got, want)
+	}
+	if !h.pluginIdentityCurrent("alpha", paths["2.0.0"], "2.0.0") {
+		t.Fatal("replacement plugin did not become active")
+	}
+	h.mu.Lock()
+	retiredCount := len(h.retired["alpha"])
+	h.mu.Unlock()
+	if retiredCount != 1 {
+		t.Fatalf("retired plugin count = %d, want 1", retiredCount)
+	}
+}
+
+func TestHostApplyConfigRollsBackQuiescedPluginWhenReplacementFails(t *testing.T) {
+	events := &lifecycleEventRecorder{}
+	var configMu sync.Mutex
+	var registeredConfig []byte
+	var rollbackConfig []byte
+	oldClient := &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+		events.add("old." + method)
+		switch method {
+		case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+			var lifecycleRequest rpcLifecycleRequest
+			if errUnmarshal := json.Unmarshal(request, &lifecycleRequest); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			configMu.Lock()
+			if method == pluginabi.MethodPluginRegister {
+				registeredConfig = bytes.Clone(lifecycleRequest.ConfigYAML)
+			} else {
+				rollbackConfig = bytes.Clone(lifecycleRequest.ConfigYAML)
+			}
+			configMu.Unlock()
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	replacementClient := &lifecycleTestClient{
+		call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+			events.add("replacement." + method)
+			if method != pluginabi.MethodPluginRegister {
+				return nil, fmt.Errorf("unexpected replacement plugin method %s", method)
+			}
+			return nil, fmt.Errorf("replacement registration failed")
+		},
+		shutdown: func() { events.add("replacement.shutdown") },
+	}
+	loader := &sequencePluginLoader{clients: []pluginClient{oldClient, replacementClient}}
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0")
+
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+
+	if got, want := events.snapshot(), []string{
+		"old." + pluginabi.MethodPluginRegister,
+		"old." + pluginabi.MethodPluginQuiesce,
+		"replacement." + pluginabi.MethodPluginRegister,
+		"replacement.shutdown",
+		"old." + pluginabi.MethodPluginReconfigure,
+	}; !slices.Equal(got, want) {
+		t.Fatalf("lifecycle events = %v, want %v", got, want)
+	}
+	configMu.Lock()
+	gotRegisteredConfig := bytes.Clone(registeredConfig)
+	gotRollbackConfig := bytes.Clone(rollbackConfig)
+	configMu.Unlock()
+	if !bytes.Equal(gotRollbackConfig, gotRegisteredConfig) {
+		t.Fatalf("rollback config = %q, want original config %q", gotRollbackConfig, gotRegisteredConfig)
+	}
+	if replacementClient.shutdownCalls.Load() != 1 {
+		t.Fatalf("replacement shutdown calls = %d, want 1", replacementClient.shutdownCalls.Load())
+	}
+	if !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatal("old plugin did not remain active after rollback")
+	}
+	h.mu.Lock()
+	retiredCount := len(h.retired["alpha"])
+	h.mu.Unlock()
+	if retiredCount != 0 {
+		t.Fatalf("retired plugin count = %d, want 0", retiredCount)
+	}
+}
+
+func TestHostApplyConfigFallsBackWhenQuiesceUnsupported(t *testing.T) {
+	events := &lifecycleEventRecorder{}
+	oldClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		events.add("old." + method)
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			return marshalRPCError("unknown_method", "unknown method plugin.quiesce"), nil
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	replacementClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		events.add("replacement." + method)
+		if method != pluginabi.MethodPluginRegister {
+			return nil, fmt.Errorf("unexpected replacement plugin method %s", method)
+		}
+		return lifecycleRegistrationResult(validTestPlugin("alpha"))
+	}}
+	h := NewForTest(&sequencePluginLoader{clients: []pluginClient{oldClient, replacementClient}})
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0")
+
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	paths["2.0.0"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+
+	if got, want := events.snapshot(), []string{
+		"old." + pluginabi.MethodPluginRegister,
+		"old." + pluginabi.MethodPluginQuiesce,
+		"replacement." + pluginabi.MethodPluginRegister,
+	}; !slices.Equal(got, want) {
+		t.Fatalf("lifecycle events = %v, want %v", got, want)
+	}
+	if !h.pluginIdentityCurrent("alpha", paths["2.0.0"], "2.0.0") {
+		t.Fatal("unsupported quiesce prevented standard hot reload")
+	}
+}
+
+func TestHostCallQuiesceClassifiesErrors(t *testing.T) {
+	var out bytes.Buffer
+	originalOut := log.StandardLogger().Out
+	originalFormatter := log.StandardLogger().Formatter
+	originalLevel := log.GetLevel()
+	log.SetOutput(&out)
+	log.SetFormatter(&log.TextFormatter{
+		DisableColors:    true,
+		DisableTimestamp: true,
+	})
+	log.SetLevel(log.DebugLevel)
+	t.Cleanup(func() {
+		log.SetOutput(originalOut)
+		log.SetFormatter(originalFormatter)
+		log.SetLevel(originalLevel)
+	})
+
+	tests := []struct {
+		name        string
+		response    []byte
+		errCall     error
+		wantMessage string
+		wantLevel   string
+	}{
+		{
+			name:        "unknown method RPC error",
+			response:    marshalRPCError("unknown_method", "plugin.quiesce is unavailable"),
+			wantMessage: "pluginhost: plugin quiesce unsupported",
+			wantLevel:   "level=debug",
+		},
+		{
+			name:        "standard unsupported indication",
+			errCall:     fmt.Errorf("method not found: plugin.quiesce"),
+			wantMessage: "pluginhost: plugin quiesce unsupported",
+			wantLevel:   "level=debug",
+		},
+		{
+			name:        "runtime failure",
+			errCall:     fmt.Errorf("quiesce runtime failure"),
+			wantMessage: "pluginhost: plugin quiesce failed",
+			wantLevel:   "level=warning",
+		},
+		{
+			name:        "context cancellation",
+			errCall:     context.Canceled,
+			wantMessage: "pluginhost: plugin quiesce canceled",
+			wantLevel:   "level=debug",
+		},
+	}
+
+	h := New()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out.Reset()
+			client := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+				if method != pluginabi.MethodPluginQuiesce {
+					return nil, fmt.Errorf("unexpected plugin method %s", method)
+				}
+				return tt.response, tt.errCall
+			}}
+			if h.callQuiesce(context.Background(), &loadedPlugin{id: "alpha", client: client}) {
+				t.Fatal("callQuiesce() = true, want false")
+			}
+			logs := out.String()
+			if !strings.Contains(logs, tt.wantMessage) || !strings.Contains(logs, tt.wantLevel) {
+				t.Fatalf("quiesce log = %q, want %q at %s", logs, tt.wantMessage, tt.wantLevel)
+			}
+		})
+	}
+}
+
+func TestHostApplyConfigSerializesLifecycleDuringQuiesce(t *testing.T) {
+	events := &lifecycleEventRecorder{}
+	quiesceStarted := make(chan struct{})
+	releaseQuiesce := make(chan struct{})
+	replacementRegisterStarted := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseQuiesce) }) }
+	t.Cleanup(release)
+
+	var activeLifecycleCalls atomic.Int32
+	var concurrentLifecycleCalls atomic.Bool
+	enterLifecycle := func() func() {
+		if activeLifecycleCalls.Add(1) > 1 {
+			concurrentLifecycleCalls.Store(true)
+		}
+		return func() { activeLifecycleCalls.Add(-1) }
+	}
+	oldClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		exitLifecycle := enterLifecycle()
+		defer exitLifecycle()
+		events.add("old." + method)
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			close(quiesceStarted)
+			<-releaseQuiesce
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	var replacementRegisterOnce sync.Once
+	replacementClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		exitLifecycle := enterLifecycle()
+		defer exitLifecycle()
+		events.add("replacement." + method)
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			replacementRegisterOnce.Do(func() { close(replacementRegisterStarted) })
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginReconfigure:
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		default:
+			return nil, fmt.Errorf("unexpected replacement plugin method %s", method)
+		}
+	}}
+	loader := &sequencePluginLoader{clients: []pluginClient{oldClient, replacementClient}}
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, _ := makeVersionedPluginDir(t, "alpha", "1.0.0")
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	cfg := versionedPluginHostConfig(t, pluginsDir, "2.0.0")
+
+	firstDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), cfg)
+		close(firstDone)
+	}()
+	waitForHostTestSignal(t, quiesceStarted, "plugin quiesce")
+
+	probeDone := make(chan struct{})
+	go func() {
+		_ = h.currentModelExecutor()
+		close(probeDone)
+	}()
+	waitForHostTestSignal(t, probeDone, "Host.mu probe during quiesce")
+
+	secondDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), cfg)
+		close(secondDone)
+	}()
+	select {
+	case <-replacementRegisterStarted:
+		t.Fatal("replacement registration started before quiesce completed")
+	case <-secondDone:
+		t.Fatal("second ApplyConfig completed while quiesce was blocked")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	release()
+	waitForHostTestSignal(t, firstDone, "first hot reload")
+	waitForHostTestSignal(t, secondDone, "serialized reconfigure")
+	if concurrentLifecycleCalls.Load() {
+		t.Fatal("plugin lifecycle calls ran concurrently during quiesce")
+	}
+	if got, want := events.snapshot(), []string{
+		"old." + pluginabi.MethodPluginRegister,
+		"old." + pluginabi.MethodPluginQuiesce,
+		"replacement." + pluginabi.MethodPluginRegister,
+		"replacement." + pluginabi.MethodPluginReconfigure,
+	}; !slices.Equal(got, want) {
+		t.Fatalf("lifecycle events = %v, want %v", got, want)
+	}
+}
+
+func TestHostApplyConfigRollsBackQuiescedPluginWhenContextCanceled(t *testing.T) {
+	events := &lifecycleEventRecorder{}
+	oldClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		events.add("old." + method)
+		switch method {
+		case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	replacementRegisterStarted := make(chan struct{})
+	replacementClient := &lifecycleTestClient{
+		call: func(ctx context.Context, method string, _ []byte) ([]byte, error) {
+			events.add("replacement." + method)
+			if method != pluginabi.MethodPluginRegister {
+				return nil, fmt.Errorf("unexpected replacement plugin method %s", method)
+			}
+			close(replacementRegisterStarted)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+		shutdown: func() { events.add("replacement.shutdown") },
+	}
+	h := NewForTest(&sequencePluginLoader{clients: []pluginClient{oldClient, replacementClient}})
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0")
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+
+	cfg := versionedPluginHostConfig(t, pluginsDir, "2.0.0")
+	ctx, cancel := context.WithCancel(context.Background())
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(ctx, cfg)
+		close(applyDone)
+	}()
+	waitForHostTestSignal(t, replacementRegisterStarted, "replacement registration")
+	cancel()
+	waitForHostTestSignal(t, applyDone, "canceled hot reload")
+
+	if got, want := events.snapshot(), []string{
+		"old." + pluginabi.MethodPluginRegister,
+		"old." + pluginabi.MethodPluginQuiesce,
+		"replacement." + pluginabi.MethodPluginRegister,
+		"replacement.shutdown",
+		"old." + pluginabi.MethodPluginReconfigure,
+	}; !slices.Equal(got, want) {
+		t.Fatalf("lifecycle events = %v, want %v", got, want)
+	}
+	if !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatal("old plugin did not remain active after canceled hot reload")
+	}
+	if replacementClient.shutdownCalls.Load() != 1 {
+		t.Fatalf("replacement shutdown calls = %d, want 1", replacementClient.shutdownCalls.Load())
+	}
+}
+
+func TestHostApplyConfigShutsDownSuccessfulReplacementBeforeCanceledRollback(t *testing.T) {
+	events := &lifecycleEventRecorder{}
+	oldClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		events.add("old." + method)
+		switch method {
+		case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	replacementClient := &lifecycleTestClient{
+		call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+			events.add("replacement." + method)
+			if method != pluginabi.MethodPluginRegister {
+				return nil, fmt.Errorf("unexpected replacement plugin method %s", method)
+			}
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		},
+		shutdown: func() { events.add("replacement.shutdown") },
+	}
+	h := NewForTest(&sequencePluginLoader{clients: []pluginClient{oldClient, replacementClient}})
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0")
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+
+	ctx := &cancelOnErrContext{
+		Context:  context.Background(),
+		done:     make(chan struct{}),
+		cancelAt: 3,
+	}
+	h.ApplyConfig(ctx, versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+
+	if got, want := events.snapshot(), []string{
+		"old." + pluginabi.MethodPluginRegister,
+		"old." + pluginabi.MethodPluginQuiesce,
+		"replacement." + pluginabi.MethodPluginRegister,
+		"replacement.shutdown",
+		"old." + pluginabi.MethodPluginReconfigure,
+	}; !slices.Equal(got, want) {
+		t.Fatalf("lifecycle events = %v, want %v", got, want)
+	}
+	if replacementClient.shutdownCalls.Load() != 1 {
+		t.Fatalf("replacement shutdown calls = %d, want 1", replacementClient.shutdownCalls.Load())
+	}
+	if !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatal("old plugin did not remain active after canceled replacement")
+	}
+}
+
 func TestHostApplyConfigKeepsLoadedVersionWhenPinnedVersionMissing(t *testing.T) {
 	loader := newTestSymbolLoader()
 	plugin := &testPlugin{
@@ -1019,6 +1538,233 @@ func TestHostPluginBusyReportsLoadingPlugin(t *testing.T) {
 	}
 }
 
+func TestHostCanceledInitializationDiscardsBlockedClient(t *testing.T) {
+	client := &blockingInitializationClient{
+		started:      make(chan struct{}),
+		release:      make(chan struct{}),
+		registration: validTestPlugin("alpha"),
+	}
+	h := NewForTest(&blockingHostCallLoader{client: client})
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+		Configs: enabledPluginConfigs("alpha"),
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(ctx, cfg)
+		close(applyDone)
+	}()
+	waitForHostTestSignal(t, client.started, "plugin initialization")
+	cancel()
+	waitForHostTestSignal(t, applyDone, "canceled plugin initialization")
+	if !h.PluginBusy("alpha") || h.PluginLoaded("alpha") {
+		t.Fatal("canceled initialization did not retain only its in-flight load token")
+	}
+
+	close(client.release)
+	deadline := time.Now().Add(time.Second)
+	for client.shutdown.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := client.shutdown.Load(); got != 1 {
+		t.Fatalf("blocked initialization client shutdown calls = %d, want 1", got)
+	}
+	if h.PluginBusy("alpha") || h.PluginLoaded("alpha") {
+		t.Fatal("canceled initialization remained in the host after late cleanup")
+	}
+}
+
+func TestHostCancellationUnderMutationLockDoesNotInsertLoadedPlugin(t *testing.T) {
+	client := &blockingInitializationClient{
+		started:      make(chan struct{}),
+		release:      make(chan struct{}),
+		completed:    make(chan struct{}),
+		registration: validTestPlugin("alpha"),
+	}
+	h := NewForTest(&blockingHostCallLoader{client: client})
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+		Configs: enabledPluginConfigs("alpha"),
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(ctx, cfg)
+		close(applyDone)
+	}()
+	waitForHostTestSignal(t, client.started, "plugin initialization")
+
+	h.mu.Lock()
+	close(client.release)
+	waitForHostTestSignal(t, client.completed, "plugin initialization completion")
+	cancel()
+	h.mu.Unlock()
+	waitForHostTestSignal(t, applyDone, "canceled plugin apply")
+
+	deadline := time.Now().Add(time.Second)
+	for client.shutdown.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := client.shutdown.Load(); got != 1 {
+		t.Fatalf("late client shutdown calls = %d, want 1", got)
+	}
+	if h.PluginLoaded("alpha") || h.PluginBusy("alpha") {
+		t.Fatal("canceled load inserted or retained a completed plugin")
+	}
+}
+
+func TestHostCanceledLoadDiscardsLateClientWithoutReplacingCurrentPlugin(t *testing.T) {
+	first := &lateLoadClient{registration: validTestPlugin("alpha")}
+	second := &lateLoadClient{registration: validTestPlugin("alpha")}
+	loader := &lateLoadPluginLoader{
+		first:         first,
+		second:        second,
+		firstStarted:  make(chan struct{}),
+		firstRelease:  make(chan struct{}),
+		secondStarted: make(chan struct{}),
+	}
+	h := NewForTest(loader)
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+		Configs: enabledPluginConfigs("alpha"),
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	firstDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(ctx, cfg)
+		close(firstDone)
+	}()
+	waitForHostTestSignal(t, loader.firstStarted, "first plugin load")
+	cancel()
+	waitForHostTestSignal(t, firstDone, "canceled plugin load")
+	if !h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = false after canceled load, want retained load token")
+	}
+
+	secondDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), cfg)
+		close(secondDone)
+	}()
+	waitForHostTestSignal(t, secondDone, "replacement apply completion")
+	if got := loader.calls.Load(); got != 1 {
+		t.Fatalf("Open calls = %d, want 1 while canceled load is still blocked", got)
+	}
+	select {
+	case <-loader.secondStarted:
+		t.Fatal("replacement started a second load before the canceled load completed")
+	default:
+	}
+
+	close(loader.firstRelease)
+	deadline := time.Now().Add(time.Second)
+	for first.shutdown.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := first.shutdown.Load(); got != 1 {
+		t.Fatalf("late client shutdown calls = %d, want 1", got)
+	}
+	if h.PluginBusy("alpha") || h.PluginLoaded("alpha") {
+		t.Fatal("late canceled client remained in the host")
+	}
+	h.ShutdownAll()
+}
+
+func TestHostCanceledBlockedLoadKeepsOneLoaderAndCleanupPerPlugin(t *testing.T) {
+	first := &lateLoadClient{registration: validTestPlugin("alpha")}
+	loader := &lateLoadPluginLoader{
+		first:         first,
+		second:        &lateLoadClient{registration: validTestPlugin("alpha")},
+		firstStarted:  make(chan struct{}),
+		firstRelease:  make(chan struct{}),
+		secondStarted: make(chan struct{}),
+	}
+	h := NewForTest(loader)
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+		Configs: enabledPluginConfigs("alpha"),
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	firstDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(ctx, cfg)
+		close(firstDone)
+	}()
+	waitForHostTestSignal(t, loader.firstStarted, "first plugin load")
+	cancel()
+	waitForHostTestSignal(t, firstDone, "canceled plugin load")
+
+	for range 8 {
+		h.ApplyConfig(context.Background(), cfg)
+	}
+	if got := loader.calls.Load(); got != 1 {
+		t.Fatalf("Open calls = %d, want one blocked loader", got)
+	}
+
+	close(loader.firstRelease)
+	deadline := time.Now().Add(time.Second)
+	for first.shutdown.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := first.shutdown.Load(); got != 1 {
+		t.Fatalf("late client shutdown calls = %d, want one cleanup", got)
+	}
+	if h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = true after blocked load cleanup")
+	}
+}
+
+func TestHostUnloadPluginContextDetachesBlockedCall(t *testing.T) {
+	plugin := validTestPlugin("alpha")
+	client := &blockingHostCallClient{started: make(chan struct{}), release: make(chan struct{}), registration: plugin}
+	loader := &blockingHostCallLoader{client: client}
+	h := NewForTest(loader)
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+		Configs: enabledPluginConfigs("alpha"),
+	}}
+	h.ApplyConfig(context.Background(), cfg)
+
+	h.mu.Lock()
+	loaded := h.loaded["alpha"]
+	h.mu.Unlock()
+	if loaded == nil {
+		t.Fatal("plugin did not load")
+	}
+	go func() { _, _ = loaded.client.Call(context.Background(), pluginabi.MethodUsageHandle, nil) }()
+	waitForHostTestSignal(t, client.started, "blocked plugin call")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	unloadDone := make(chan bool, 1)
+	go func() { unloadDone <- h.UnloadPluginContext(ctx, "alpha") }()
+	if ok := waitForHostTestBool(t, unloadDone, "contextual unload"); !ok {
+		t.Fatal("UnloadPluginContext() = false, want true after detaching runtime")
+	}
+	if h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = true after contextual unload detached runtime")
+	}
+	if got := client.shutdown.Load(); got != 0 {
+		t.Fatalf("shutdown calls before blocked plugin call exits = %d, want 0", got)
+	}
+
+	close(client.release)
+	deadline := time.Now().Add(time.Second)
+	for client.shutdown.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := client.shutdown.Load(); got != 1 {
+		t.Fatalf("shutdown calls after blocked plugin call exits = %d, want 1", got)
+	}
+}
+
 func TestHostUnloadWaitsForBlockingLoad(t *testing.T) {
 	h, cfg, openStarted, releaseOpen := newBlockingOpenHost(t)
 	applyDone := make(chan struct{})
@@ -1128,6 +1874,99 @@ func TestSortRecordsPriorityDescendingAndIDTieBreak(t *testing.T) {
 	}
 }
 
+type lifecycleEventRecorder struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *lifecycleEventRecorder) add(event string) {
+	r.mu.Lock()
+	r.events = append(r.events, event)
+	r.mu.Unlock()
+}
+
+func (r *lifecycleEventRecorder) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.events...)
+}
+
+type lifecycleTestClient struct {
+	call          func(context.Context, string, []byte) ([]byte, error)
+	shutdown      func()
+	shutdownCalls atomic.Int32
+}
+
+func (c *lifecycleTestClient) Call(ctx context.Context, method string, request []byte) ([]byte, error) {
+	if c == nil || c.call == nil {
+		return nil, fmt.Errorf("lifecycle test client has no call handler")
+	}
+	return c.call(ctx, method, request)
+}
+
+func (c *lifecycleTestClient) Shutdown() {
+	c.shutdownCalls.Add(1)
+	if c.shutdown != nil {
+		c.shutdown()
+	}
+}
+
+type cancelOnErrContext struct {
+	context.Context
+	done     chan struct{}
+	cancelAt int32
+	errCalls atomic.Int32
+	cancel   sync.Once
+}
+
+func (c *cancelOnErrContext) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c *cancelOnErrContext) Err() error {
+	if c.errCalls.Add(1) < c.cancelAt {
+		return nil
+	}
+	c.cancel.Do(func() { close(c.done) })
+	return context.Canceled
+}
+
+type sequencePluginLoader struct {
+	mu      sync.Mutex
+	clients []pluginClient
+	calls   int
+}
+
+func (l *sequencePluginLoader) Open(file pluginFile, _ *Host) (pluginClient, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.calls >= len(l.clients) {
+		return nil, fmt.Errorf("missing test client for %s", file.Path)
+	}
+	client := l.clients[l.calls]
+	l.calls++
+	return client, nil
+}
+
+func lifecycleRegistrationResult(plugin pluginapi.Plugin) ([]byte, error) {
+	return marshalRPCResult(rpcRegistration{
+		SchemaVersion: pluginabi.SchemaVersion,
+		Metadata:      plugin.Metadata,
+		Capabilities:  rpcCapabilitiesFromPlugin(plugin),
+	})
+}
+
+func versionedPluginHostConfig(t *testing.T, pluginsDir string, version string) *config.Config {
+	t.Helper()
+	return &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     pluginsDir,
+		Configs: map[string]config.PluginInstanceConfig{
+			"alpha": enabledPluginConfigWithStoreVersion(t, version),
+		},
+	}}
+}
+
 type capturePluginClient struct {
 	requests map[string][]byte
 }
@@ -1141,6 +1980,117 @@ func (c *capturePluginClient) Call(ctx context.Context, method string, request [
 }
 
 func (c *capturePluginClient) Shutdown() {}
+
+type blockingInitializationClient struct {
+	started         chan struct{}
+	release         chan struct{}
+	completed       chan struct{}
+	registration    pluginapi.Plugin
+	shutdown        atomic.Int32
+	shutdownStarted chan struct{}
+	shutdownRelease chan struct{}
+}
+
+func (c *blockingInitializationClient) Call(_ context.Context, method string, _ []byte) ([]byte, error) {
+	if method != pluginabi.MethodPluginRegister {
+		return nil, fmt.Errorf("unexpected plugin method %s", method)
+	}
+	close(c.started)
+	<-c.release
+	if c.completed != nil {
+		close(c.completed)
+	}
+	return marshalRPCResult(rpcRegistration{
+		SchemaVersion: pluginabi.SchemaVersion,
+		Metadata:      c.registration.Metadata,
+		Capabilities:  rpcCapabilitiesFromPlugin(c.registration),
+	})
+}
+
+func (c *blockingInitializationClient) Shutdown() {
+	c.shutdown.Add(1)
+	if c.shutdownStarted != nil {
+		close(c.shutdownStarted)
+	}
+	if c.shutdownRelease != nil {
+		<-c.shutdownRelease
+	}
+}
+
+type lateLoadPluginLoader struct {
+	first         pluginClient
+	second        pluginClient
+	firstStarted  chan struct{}
+	firstRelease  chan struct{}
+	secondStarted chan struct{}
+	calls         atomic.Int32
+}
+
+func (l *lateLoadPluginLoader) Open(pluginFile, *Host) (pluginClient, error) {
+	if l.calls.Add(1) == 1 {
+		close(l.firstStarted)
+		<-l.firstRelease
+		return l.first, nil
+	}
+	close(l.secondStarted)
+	return l.second, nil
+}
+
+type lateLoadClient struct {
+	registration pluginapi.Plugin
+	shutdown     atomic.Int32
+}
+
+func (c *lateLoadClient) Call(_ context.Context, method string, _ []byte) ([]byte, error) {
+	if method != pluginabi.MethodPluginRegister {
+		return nil, fmt.Errorf("unexpected plugin method %s", method)
+	}
+	return marshalRPCResult(rpcRegistration{
+		SchemaVersion: pluginabi.SchemaVersion,
+		Metadata:      c.registration.Metadata,
+		Capabilities:  rpcCapabilitiesFromPlugin(c.registration),
+	})
+}
+
+func (c *lateLoadClient) Shutdown() {
+	c.shutdown.Add(1)
+}
+
+type blockingHostCallLoader struct {
+	client pluginClient
+}
+
+func (l *blockingHostCallLoader) Open(pluginFile, *Host) (pluginClient, error) {
+	return l.client, nil
+}
+
+type blockingHostCallClient struct {
+	started      chan struct{}
+	release      chan struct{}
+	registration pluginapi.Plugin
+	shutdown     atomic.Int32
+}
+
+func (c *blockingHostCallClient) Call(_ context.Context, method string, _ []byte) ([]byte, error) {
+	switch method {
+	case pluginabi.MethodPluginRegister:
+		return marshalRPCResult(rpcRegistration{
+			SchemaVersion: pluginabi.SchemaVersion,
+			Metadata:      c.registration.Metadata,
+			Capabilities:  rpcCapabilitiesFromPlugin(c.registration),
+		})
+	case pluginabi.MethodUsageHandle:
+		close(c.started)
+		<-c.release
+		return marshalRPCResult(rpcEmptyResponse{})
+	default:
+		return nil, fmt.Errorf("unexpected plugin method %s", method)
+	}
+}
+
+func (c *blockingHostCallClient) Shutdown() {
+	c.shutdown.Add(1)
+}
 
 type blockingOpenLoader struct {
 	inner     *testSymbolLoader
@@ -1236,5 +2186,120 @@ func waitForHostTestBool(t *testing.T, ch <-chan bool, name string) bool {
 	case <-time.After(time.Second):
 		t.Fatalf("timed out waiting for %s", name)
 		return false
+	}
+}
+
+type countingPluginLoader struct {
+	client      pluginClient
+	replacement pluginClient
+	calls       atomic.Int32
+}
+
+func (l *countingPluginLoader) Open(pluginFile, *Host) (pluginClient, error) {
+	if l.calls.Add(1) == 1 {
+		return l.client, nil
+	}
+	return l.replacement, nil
+}
+
+func TestHostShutdownAllRetainsBlockedLoadTokenUntilCleanup(t *testing.T) {
+	client := &blockingInitializationClient{
+		started:         make(chan struct{}),
+		release:         make(chan struct{}),
+		registration:    validTestPlugin("alpha"),
+		shutdownStarted: make(chan struct{}),
+		shutdownRelease: make(chan struct{}),
+	}
+	loader := &countingPluginLoader{client: client, replacement: &lateLoadClient{registration: validTestPlugin("alpha")}}
+	h := NewForTest(loader)
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+		Configs: enabledPluginConfigs("alpha"),
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	firstDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(ctx, cfg)
+		close(firstDone)
+	}()
+	waitForHostTestSignal(t, client.started, "plugin registration")
+	cancel()
+	waitForHostTestSignal(t, firstDone, "canceled plugin apply")
+	close(client.release)
+	waitForHostTestSignal(t, client.shutdownStarted, "plugin shutdown")
+
+	h.ShutdownAllContext(context.Background())
+	var applies sync.WaitGroup
+	for range 8 {
+		applies.Add(1)
+		go func() {
+			defer applies.Done()
+			h.ApplyConfig(context.Background(), cfg)
+		}()
+	}
+	applies.Wait()
+	if got := loader.calls.Load(); got != 1 {
+		t.Fatalf("Open calls while ShutdownAll cleanup is blocked = %d, want 1", got)
+	}
+	if !h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = false before physical shutdown returns")
+	}
+
+	close(client.shutdownRelease)
+	deadline := time.Now().Add(time.Second)
+	for h.PluginBusy("alpha") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = true after physical shutdown returned")
+	}
+}
+
+func TestHostCanceledRegisterRetainsLoadTokenUntilShutdownReturns(t *testing.T) {
+	client := &blockingInitializationClient{
+		started:         make(chan struct{}),
+		release:         make(chan struct{}),
+		registration:    validTestPlugin("alpha"),
+		shutdownStarted: make(chan struct{}),
+		shutdownRelease: make(chan struct{}),
+	}
+	loader := &countingPluginLoader{client: client, replacement: &lateLoadClient{registration: validTestPlugin("alpha")}}
+	h := NewForTest(loader)
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+		Configs: enabledPluginConfigs("alpha"),
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(ctx, cfg)
+		close(applyDone)
+	}()
+	waitForHostTestSignal(t, client.started, "plugin registration")
+	cancel()
+	waitForHostTestSignal(t, applyDone, "canceled plugin apply")
+	close(client.release)
+	waitForHostTestSignal(t, client.shutdownStarted, "plugin shutdown")
+
+	for range 8 {
+		h.ApplyConfig(context.Background(), cfg)
+	}
+	if got := loader.calls.Load(); got != 1 {
+		t.Fatalf("Open calls while shutdown is blocked = %d, want 1", got)
+	}
+	if !h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = false before physical shutdown returns")
+	}
+
+	close(client.shutdownRelease)
+	deadline := time.Now().Add(time.Second)
+	for h.PluginBusy("alpha") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = true after physical shutdown returned")
 	}
 }

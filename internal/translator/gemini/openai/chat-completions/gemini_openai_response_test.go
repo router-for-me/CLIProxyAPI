@@ -7,6 +7,30 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertGeminiResponseToOpenAIIncludesZeroCompletionTokensWhenMissing(t *testing.T) {
+	var param any
+	chunk := []byte(`{"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}}`)
+
+	result := ConvertGeminiResponseToOpenAI(context.Background(), "model", nil, nil, chunk, &param)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result))
+	}
+	completionTokens := gjson.GetBytes(result[0], "usage.completion_tokens")
+	if !completionTokens.Exists() || completionTokens.Int() != 0 {
+		t.Fatalf("completion_tokens = %s, want present with value 0. Output: %s", completionTokens.Raw, result[0])
+	}
+}
+
+func TestConvertGeminiResponseToOpenAINonStreamIncludesZeroCompletionTokensWhenMissing(t *testing.T) {
+	response := []byte(`{"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}}`)
+
+	result := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, response, nil)
+	completionTokens := gjson.GetBytes(result, "usage.completion_tokens")
+	if !completionTokens.Exists() || completionTokens.Int() != 0 {
+		t.Fatalf("completion_tokens = %s, want present with value 0. Output: %s", completionTokens.Raw, result)
+	}
+}
+
 func TestGeminiFinishReasonOnlyOnFinalChunk(t *testing.T) {
 	ctx := context.Background()
 	var param any
@@ -36,5 +60,20 @@ func TestGeminiFinishReasonOnlyOnFinalChunk(t *testing.T) {
 	nfr3 := gjson.GetBytes(result3[0], "choices.0.native_finish_reason").String()
 	if nfr3 != "stop" {
 		t.Fatalf("expected native_finish_reason stop, got %s", nfr3)
+	}
+}
+
+func TestConvertGeminiResponseToOpenAINonStream_EmptyTextProducesEmptyString(t *testing.T) {
+	response := []byte(`{"candidates":[{"content":{"parts":[{"text":""},{"text":"","thought":true}]},"finishReason":"STOP"}]}`)
+	result := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, response, nil)
+
+	content := gjson.GetBytes(result, "choices.0.message.content")
+	if !content.Exists() || content.String() != "" || content.Type == gjson.Null {
+		t.Fatalf("expected content to be empty string \"\", got %v (type %v)", content.Value(), content.Type)
+	}
+
+	reasoning := gjson.GetBytes(result, "choices.0.message.reasoning_content")
+	if !reasoning.Exists() || reasoning.String() != "" || reasoning.Type == gjson.Null {
+		t.Fatalf("expected reasoning_content to be empty string \"\", got %v (type %v)", reasoning.Value(), reasoning.Type)
 	}
 }

@@ -17,7 +17,101 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/tidwall/gjson"
 )
+
+func TestAIStudioTranslateRequestPreservesSummaryFromOriginalRequest(t *testing.T) {
+	executor := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
+	req := cliproxyexecutor.Request{
+		Model:   "gemini-3.6-flash",
+		Payload: []byte(`{"model":"gemini-3.6-flash","input":"hi"}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: []byte(`{"model":"gemini-3.6-flash","reasoning":{"summary":"auto"},"input":"hi"}`),
+	}
+	payload, _, err := executor.translateRequest(context.Background(), req, opts, false)
+	if err != nil {
+		t.Fatalf("translateRequest() error = %v", err)
+	}
+	if !gjson.GetBytes(payload, "generationConfig.thinkingConfig.includeThoughts").Bool() {
+		t.Fatalf("original request summary intent was lost: %s", payload)
+	}
+}
+
+func TestAIStudioTranslateRequestPrependsLeadingUserForIssue4959ResponsesHistory(t *testing.T) {
+	executor := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
+	_, body, err := executor.translateRequest(context.Background(), cliproxyexecutor.Request{
+		Model:   "gemini-3.7-flash-high",
+		Payload: issue4959ResponsesModelFirstPayload(),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}, false)
+	if err != nil {
+		t.Fatalf("translateRequest() error = %v", err)
+	}
+	assertIssue4959LeadingUserContents(t, gjson.GetBytes(body.payload, "contents").Array())
+}
+
+func TestAIStudioExecutorWithoutRelaySessionDoesNotMarkUpstreamAttempt(t *testing.T) {
+	const authID = "aistudio-not-connected"
+	relay := wsrelay.NewManager(wsrelay.Options{})
+	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
+	auth := &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}
+	req := cliproxyexecutor.Request{
+		Model:   "gemini-3.1-pro-preview",
+		Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
+
+	tests := []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{
+			name: "HTTP request",
+			run: func(ctx context.Context) error {
+				httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/generate", strings.NewReader(`{"contents":[]}`))
+				if errRequest != nil {
+					return errRequest
+				}
+				_, errRequest = exec.HttpRequest(ctx, auth, httpReq)
+				return errRequest
+			},
+		},
+		{
+			name: "execute",
+			run: func(ctx context.Context) error {
+				_, errExecute := exec.Execute(ctx, auth, req, opts)
+				return errExecute
+			},
+		},
+		{
+			name: "stream",
+			run: func(ctx context.Context) error {
+				_, errStream := exec.ExecuteStream(ctx, auth, req, opts)
+				return errStream
+			},
+		},
+		{
+			name: "count tokens",
+			run: func(ctx context.Context) error {
+				_, errCount := exec.CountTokens(ctx, auth, req, opts)
+				return errCount
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := cliproxyexecutor.WithUpstreamAttemptTracker(context.Background())
+			errRun := test.run(ctx)
+			if errRun == nil || !strings.Contains(errRun.Error(), "not connected") {
+				t.Fatalf("request error = %v, want provider not connected", errRun)
+			}
+			if cliproxyexecutor.UpstreamAttempted(ctx) {
+				t.Fatal("missing relay session was marked as an upstream attempt")
+			}
+		})
+	}
+}
 
 func TestAIStudioExecutorExecuteStartsTTFTBeforeRelayWait(t *testing.T) {
 	const authID = "aistudio-ttft-auth"
@@ -91,12 +185,16 @@ func TestAIStudioExecutorExecuteStartsTTFTBeforeRelayWait(t *testing.T) {
 	plugin := &captureAIStudioUsagePlugin{records: make(chan usage.Record, 16)}
 	usage.RegisterPlugin(plugin)
 	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
-	_, errExecute := exec.Execute(context.Background(), &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}, cliproxyexecutor.Request{
+	ctx := cliproxyexecutor.WithUpstreamAttemptTracker(context.Background())
+	_, errExecute := exec.Execute(ctx, &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}, cliproxyexecutor.Request{
 		Model:   "gemini-3.1-pro-preview",
 		Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if !cliproxyexecutor.UpstreamAttempted(ctx) {
+		t.Fatal("relay request did not mark an upstream attempt")
 	}
 	if errClient := <-clientDone; errClient != nil {
 		t.Fatal(errClient)
