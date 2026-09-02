@@ -1043,8 +1043,8 @@ func TestManager_MarkResult_TransientErrorCooldownDefault(t *testing.T) {
 		t.Fatal("expected transient error cooldown to keep the legacy default")
 	}
 	diff := time.Until(state.NextRetryAfter)
-	if diff < 55*time.Second || diff > 65*time.Second {
-		t.Fatalf("expected transient error cooldown to be ~60 seconds, got %v", diff)
+	if diff < 5*time.Second || diff > 15*time.Second {
+		t.Fatalf("expected transient error cooldown to be ~10 seconds, got %v", diff)
 	}
 }
 
