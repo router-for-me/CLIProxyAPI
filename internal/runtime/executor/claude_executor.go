@@ -112,7 +112,6 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 	}
 
 	logger := helps.LogWithRequestID(ctx)
-	const unknownGenerationMarker = "invalid Claude model-free CAIS signature: unknown "
 	type unknownGenerationDrop struct {
 		reason           string
 		firstOccurrence  string
@@ -124,11 +123,10 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 	var unknownGenerationDrops []unknownGenerationDrop
 	unknownGenerationDropIndex := make(map[string]int)
 	for _, decision := range report.Decisions {
-		markerIndex := strings.Index(decision.Reason, unknownGenerationMarker)
-		if markerIndex < 0 {
+		reason, ok := sigcompat.ClassifyUnknownCAISGeneration(decision.Reason)
+		if !ok {
 			continue
 		}
-		reason := decision.Reason[markerIndex:]
 		if index, ok := unknownGenerationDropIndex[reason]; ok {
 			unknownGenerationDrops[index].count++
 			continue

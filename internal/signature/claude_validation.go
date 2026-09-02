@@ -671,6 +671,35 @@ func claudeCAISUnknownGenerationReason(err error) string {
 	return ""
 }
 
+// claudeCAISUnknownGenerationPrefix is the fixed prose fragment that opens
+// every claudeCAISUnknownGenerationError.Error() value. It exists so
+// ClassifyUnknownCAISGeneration has a single, named string to match against
+// instead of a copy of the error's literal text; it is not read by Error()
+// itself, so a reword of Error() must update this constant too or the
+// classifier stops recognizing real errors (see the test in claude_test.go
+// that runs the sanitizer end to end and checks agreement).
+const claudeCAISUnknownGenerationPrefix = "invalid Claude model-free CAIS signature: unknown "
+
+// ClassifyUnknownCAISGeneration reports whether reason describes an unknown
+// model-free CAIS generation drop (an unknown envelope version or unknown
+// channel_id, as produced by claudeCAISUnknownGenerationError.Error()).
+//
+// Callers such as the Claude executor's sanitize-report logger receive
+// SignatureCompatibilityDecision.Reason strings that the sanitizer may have
+// prefixed with a "messages[i].content[j]: " position marker; this tolerates
+// that prefix and returns the reason from the unknown-generation marker
+// onward, which is stable across occurrences of the same underlying cause and
+// is what callers should group/aggregate by. Do not re-match this prose
+// directly elsewhere — go through this function so there is exactly one place
+// that knows the contract between the error text and its classification.
+func ClassifyUnknownCAISGeneration(reason string) (normalized string, ok bool) {
+	markerIndex := strings.Index(reason, claudeCAISUnknownGenerationPrefix)
+	if markerIndex < 0 {
+		return "", false
+	}
+	return reason[markerIndex:], true
+}
+
 func isKnownClaudeCAISIdentifier(known []uint64, value uint64) bool {
 	for _, candidate := range known {
 		if candidate == value {

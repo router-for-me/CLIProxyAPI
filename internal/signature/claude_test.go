@@ -1033,6 +1033,79 @@ func TestClaudeModelFreeCAISSignature_UnknownGenerationReasonIsSpecific(t *testi
 	}
 }
 
+// TestClassifyUnknownCAISGeneration pins the exported classifier that callers
+// (the Claude executor's sanitize-report logger) must use instead of
+// re-matching claudeCAISUnknownGenerationError's prose themselves.
+func TestClassifyUnknownCAISGeneration(t *testing.T) {
+	t.Run("bare reason", func(t *testing.T) {
+		err := &claudeCAISUnknownGenerationError{identifier: "channel_id", value: 99}
+		normalized, ok := ClassifyUnknownCAISGeneration(err.Error())
+		if !ok {
+			t.Fatalf("ClassifyUnknownCAISGeneration(%q) ok = false, want true", err.Error())
+		}
+		if normalized != err.Error() {
+			t.Fatalf("normalized = %q, want %q unchanged (no position prefix to strip)", normalized, err.Error())
+		}
+	})
+
+	t.Run("position-prefixed reason", func(t *testing.T) {
+		err := &claudeCAISUnknownGenerationError{identifier: "envelope version", value: 7}
+		prefixed := "messages[2].content[5]: " + err.Error()
+		normalized, ok := ClassifyUnknownCAISGeneration(prefixed)
+		if !ok {
+			t.Fatalf("ClassifyUnknownCAISGeneration(%q) ok = false, want true", prefixed)
+		}
+		if normalized != err.Error() {
+			t.Fatalf("normalized = %q, want %q (sanitizer position prefix must be stripped)", normalized, err.Error())
+		}
+	})
+
+	t.Run("non-matching reason", func(t *testing.T) {
+		for _, reason := range []string{
+			"",
+			"Claude has no cross-provider bypass sentinel for thinking blocks",
+			"GPT reasoning encrypted_content cannot be synthesized from another provider signature",
+		} {
+			if normalized, ok := ClassifyUnknownCAISGeneration(reason); ok {
+				t.Fatalf("ClassifyUnknownCAISGeneration(%q) = (%q, true), want ok=false", reason, normalized)
+			}
+		}
+	})
+
+	// The motivating case: classify a reason produced end to end by the real
+	// sanitizer (SanitizeClaudeMessagesForClaudeUpstream ->
+	// DecideSignatureCompatibilityForModel -> claudeCAISUnknownGenerationError.Error()),
+	// not a hand-typed string on either side of the comparison. This is the
+	// assertion that fails if someone rewords claudeCAISUnknownGenerationError.Error()
+	// without updating claudeCAISUnknownGenerationPrefix: ok would become false
+	// (the classifier no longer recognizes the real error's prose), which the
+	// t.Fatalf below on "ok = false" catches directly.
+	t.Run("agrees with the real sanitizer-produced reason", func(t *testing.T) {
+		parts := defaultClaudeModelFreeCAISParts()
+		parts.envelopeVersion = 5
+		signature := parts.encode()
+		input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"` + signature + `"},{"type":"text","text":"answer"}]}]}`)
+
+		_, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-fable-5-1")
+		if len(report.Decisions) != 1 {
+			t.Fatalf("decision count = %d, want 1; report=%+v", len(report.Decisions), report)
+		}
+		decision := report.Decisions[0]
+		if !strings.HasPrefix(decision.Reason, "messages[0].content[0]: ") {
+			t.Fatalf("decision.Reason = %q, want a sanitizer position prefix so this test exercises prefix tolerance", decision.Reason)
+		}
+
+		want := (&claudeCAISUnknownGenerationError{identifier: "envelope version", value: 5}).Error()
+		normalized, ok := ClassifyUnknownCAISGeneration(decision.Reason)
+		if !ok {
+			t.Fatalf("ClassifyUnknownCAISGeneration(%q) ok = false, want true", decision.Reason)
+		}
+		if normalized != want {
+			t.Fatalf("normalized = %q, want %q (must agree with the real claudeCAISUnknownGenerationError value)", normalized, want)
+		}
+	})
+}
+
 func TestClaudeModelFreeCAISSignature_RejectsLegacyOnlyChannelID(t *testing.T) {
 	parts := defaultClaudeModelFreeCAISParts()
 	parts.channelID = 11
