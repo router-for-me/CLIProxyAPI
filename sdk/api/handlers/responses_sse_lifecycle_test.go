@@ -190,6 +190,29 @@ func TestResponsesSSELifecyclePreservesSplitSSEFields(t *testing.T) {
 	}
 }
 
+func TestResponsesSSELifecycleWaitsForFrameDelimiterBeforeForwarding(t *testing.T) {
+	state := &responsesSSELifecycleState{}
+	first := []byte(`data: {"type":"response.completed","response":{"id":"resp1","status":"completed"}}` + "\n")
+	output, err := state.AddChunk(first)
+	if err != nil {
+		t.Fatalf("first AddChunk() error = %v", err)
+	}
+	if len(output) != 0 {
+		t.Fatalf("data was forwarded before the frame delimiter: %s", output)
+	}
+
+	output, err = state.AddChunk([]byte("id: provider-event-42\nretry: 1500\n\n"))
+	if err != nil {
+		t.Fatalf("second AddChunk() error = %v", err)
+	}
+	if !bytes.Contains(output, []byte("id: provider-event-42")) || !bytes.Contains(output, []byte("retry: 1500")) {
+		t.Fatalf("trailing fields were detached from their data frame: %s", output)
+	}
+	if err := state.Finish(); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+}
+
 func TestResponsesSSELifecycleSynthesizesMessageBeforeContentPart(t *testing.T) {
 	state := &responsesSSELifecycleState{}
 	chunks := []string{
@@ -224,6 +247,35 @@ func TestResponsesSSELifecycleSynthesizesMessageBeforeContentPart(t *testing.T) 
 		if gotType, _ := events[index]["type"].(string); gotType != wantType {
 			t.Fatalf("event[%d].type = %q, want %q; output=%s", index, gotType, wantType, output)
 		}
+	}
+}
+
+func TestResponsesSSELifecyclePreservesRefusalContent(t *testing.T) {
+	state := &responsesSSELifecycleState{}
+	chunks := []string{
+		`data: {"type":"response.content_part.added","item_id":"m1","output_index":0,"content_index":0,"part":{"type":"refusal","refusal":""}}` + "\n\n",
+		`data: {"type":"response.refusal.delta","item_id":"m1","output_index":0,"content_index":0,"delta":"cannot "}` + "\n\n",
+		`data: {"type":"response.refusal.done","item_id":"m1","output_index":0,"content_index":0,"refusal":"cannot comply"}` + "\n\n",
+		`data: {"type":"response.completed","response":{"id":"resp1","status":"completed"}}` + "\n\n",
+	}
+
+	var output []byte
+	for _, chunk := range chunks {
+		normalized, err := state.AddChunk([]byte(chunk))
+		if err != nil {
+			t.Fatalf("AddChunk() error = %v", err)
+		}
+		output = append(output, normalized...)
+	}
+	if err := state.Finish(); err != nil {
+		t.Fatalf("Finish() error = %v", err)
+	}
+	events := responsesSSETestEvents(t, output)
+	done := events[len(events)-2]
+	item := done["item"].(map[string]any)
+	content := item["content"].([]any)[0].(map[string]any)
+	if content["type"] != "refusal" || content["refusal"] != "cannot comply" {
+		t.Fatalf("refusal content = %#v, want preserved refusal", content)
 	}
 }
 

@@ -19,6 +19,10 @@ const (
 
 var providerBoundHistoryFields = [...]string{"id", "encrypted_content", "provider_item_id"}
 
+var providerHistoryRecoverableHostOutputNames = map[string]struct{}{
+	"automation_update": {},
+}
+
 type providerHistoryNormalization struct {
 	Body           []byte
 	Changed        bool
@@ -52,6 +56,9 @@ func normalizeProviderBoundResponseHistory(body []byte) (providerHistoryNormaliz
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return providerHistoryNormalization{}, &providerHistoryError{reason: "invalid_json"}
+	}
+	if providerHistoryHasCredentialBoundToolResource(request["tools"]) {
+		return providerHistoryNormalization{}, &providerHistoryError{reason: "foreign_tool_resource_requires_rehydration"}
 	}
 	input, exists := request["input"]
 	if !exists {
@@ -88,6 +95,11 @@ func normalizeProviderBoundResponseHistory(body []byte) (providerHistoryNormaliz
 		default:
 			return providerHistoryNormalization{}, &providerHistoryError{reason: "unsupported_history_item"}
 		}
+		if providerHistoryIsRecoverableOrphanHostOutput(item, items) {
+			result.Changed = true
+			result.DroppedItems++
+			continue
+		}
 
 		for _, field := range providerBoundHistoryFields {
 			if _, present := item[field]; present {
@@ -121,6 +133,55 @@ func normalizeProviderBoundResponseHistory(body []byte) (providerHistoryNormaliz
 	}
 	result.Body = normalizedBody
 	return result, nil
+}
+
+func providerHistoryHasCredentialBoundToolResource(value any) bool {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			if providerHistoryHasCredentialBoundToolResource(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for key, item := range typed {
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "vector_store_id", "vector_store_ids":
+				if hasSemanticHistoryValue(item) {
+					return true
+				}
+			}
+			if providerHistoryHasCredentialBoundToolResource(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func providerHistoryIsRecoverableOrphanHostOutput(item map[string]any, items []any) bool {
+	itemType, _ := item["type"].(string)
+	if itemType != "function_call_output" {
+		return false
+	}
+	callID, _ := item["call_id"].(string)
+	if strings.TrimSpace(callID) != "" {
+		return false
+	}
+	name, _ := item["name"].(string)
+	name = strings.TrimSpace(name)
+	if _, ok := providerHistoryRecoverableHostOutputNames[name]; !ok {
+		return false
+	}
+	for _, rawItem := range items {
+		candidate, _ := rawItem.(map[string]any)
+		candidateType, _ := candidate["type"].(string)
+		candidateName, _ := candidate["name"].(string)
+		if candidateType == "function_call" && strings.TrimSpace(candidateName) == name {
+			return false
+		}
+	}
+	return true
 }
 
 func hasSemanticHistoryValue(value any) bool {
@@ -268,6 +329,32 @@ func providerHistoryUsesPreviousResponse(body []byte) bool {
 	return strings.TrimSpace(request.PreviousResponseID) != ""
 }
 
+func providerHistoryIsNeutralIncrementalInput(body []byte) bool {
+	var request struct {
+		PreviousResponseID string          `json:"previous_response_id"`
+		Input              json.RawMessage `json:"input"`
+	}
+	if json.Unmarshal(body, &request) != nil || strings.TrimSpace(request.PreviousResponseID) == "" {
+		return false
+	}
+
+	var text string
+	if json.Unmarshal(request.Input, &text) == nil {
+		return true
+	}
+
+	var items []map[string]any
+	if json.Unmarshal(request.Input, &items) != nil || len(items) != 1 {
+		return false
+	}
+	itemType, _ := items[0]["type"].(string)
+	if itemType == "message" {
+		return true
+	}
+	_, hasRole := items[0]["role"].(string)
+	return itemType == "" && hasRole
+}
+
 func providerHistoryUsesConversation(body []byte) bool {
 	var request struct {
 		Conversation   json.RawMessage `json:"conversation"`
@@ -293,6 +380,36 @@ func providerHistoryUsesConversation(body []byte) bool {
 	return json.Unmarshal(rawConversation, &conversation) == nil && strings.TrimSpace(conversation.ID) != ""
 }
 
+func providerHistorySessionIDs(headers http.Header, payload []byte, metadata map[string]any) []string {
+	primaryID, fallbackID := extractSessionIDs(headers, payload, metadata)
+	aliases := mergeSessionAliases(nil, primaryID, fallbackID)
+
+	var request struct {
+		PromptCacheKey      string `json:"prompt_cache_key"`
+		PromptCacheKeyCamel string `json:"promptCacheKey"`
+		Request             *struct {
+			PromptCacheKey      string `json:"prompt_cache_key"`
+			PromptCacheKeyCamel string `json:"promptCacheKey"`
+		} `json:"request"`
+	}
+	if json.Unmarshal(payload, &request) == nil {
+		promptCacheKey := request.PromptCacheKey
+		if strings.TrimSpace(promptCacheKey) == "" {
+			promptCacheKey = request.PromptCacheKeyCamel
+		}
+		if strings.TrimSpace(promptCacheKey) == "" && request.Request != nil {
+			promptCacheKey = request.Request.PromptCacheKey
+			if strings.TrimSpace(promptCacheKey) == "" {
+				promptCacheKey = request.Request.PromptCacheKeyCamel
+			}
+		}
+		if promptCacheKey = normalizedSessionCandidate(promptCacheKey); promptCacheKey != "" {
+			aliases = mergeSessionAliases(aliases, "pck:"+promptCacheKey)
+		}
+	}
+	return compactSessionAliases(aliases)
+}
+
 func (m *Manager) normalizeProviderHistoryAttempt(provider string, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
 	if m == nil || m.providerHistoryScopes == nil || (opts.SourceFormat != sdktranslator.FormatOpenAIResponse && opts.SourceFormat != sdktranslator.FormatCodex) {
 		return req, opts, nil
@@ -307,24 +424,29 @@ func (m *Manager) normalizeProviderHistoryAttempt(provider string, auth *Auth, r
 	if targetScope == "" {
 		return req, opts, nil
 	}
-	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
-	if primaryID == "" && fallbackID == "" {
+	sessionIDs := providerHistorySessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if len(sessionIDs) == 0 {
 		return req, opts, nil
 	}
 
-	sourceState, found := m.providerHistoryScopes.GetAndRefresh(primaryID)
-	if !found && fallbackID != "" {
-		sourceState, found = m.providerHistoryScopes.GetAndRefresh(fallbackID)
+	sourceState := ""
+	found := false
+	for _, sessionID := range sessionIDs {
+		if sourceState, found = m.providerHistoryScopes.GetAndRefresh(sessionID); found {
+			break
+		}
 	}
 	sourceScope, tainted := providerHistoryScopeState(sourceState)
 	if !found || (!tainted && sourceScope == targetScope) {
 		return req, opts, nil
 	}
 	if tainted && sourceScope == targetScope && providerHistoryUsesPreviousResponse(req.Payload) {
-		// Native incremental requests are already pinned to the selected
-		// credential. Only full-history replays can carry the older mixed
-		// transcript that requires continued projection.
-		return req, opts, nil
+		// Only a provider-neutral incremental input can safely bypass full-history
+		// projection. Some clients carry a previous_response_id together with the
+		// older mixed transcript, which must remain quarantined.
+		if providerHistoryIsNeutralIncrementalInput(req.Payload) {
+			return req, opts, nil
+		}
 	}
 	if sourceScope != targetScope && providerHistoryUsesPreviousResponse(req.Payload) {
 		return req, opts, &providerHistoryError{reason: "foreign_previous_response_requires_rehydration"}
@@ -363,12 +485,12 @@ func (m *Manager) rememberProviderHistoryScope(result Result) {
 	if scope == "" {
 		return
 	}
-	primaryID, fallbackID := extractSessionIDs(result.Options.Headers, result.Options.OriginalRequest, result.Options.Metadata)
-	if primaryID == "" && fallbackID == "" {
+	sessionIDs := providerHistorySessionIDs(result.Options.Headers, result.Options.OriginalRequest, result.Options.Metadata)
+	if len(sessionIDs) == 0 {
 		return
 	}
 	if tainted, _ := result.Options.Metadata[providerHistoryTaintedMetadataKey].(bool); tainted {
 		scope = providerHistoryTaintedPrefix + scope
 	}
-	m.providerHistoryScopes.SetAliases(scope, primaryID, fallbackID)
+	m.providerHistoryScopes.SetAliases(scope, sessionIDs...)
 }

@@ -21,6 +21,8 @@ var responsesReasoningLifecycleEvents = map[string]struct{}{
 var responsesMessageLifecycleEvents = map[string]struct{}{
 	"response.output_text.delta": {},
 	"response.output_text.done":  {},
+	"response.refusal.delta":     {},
+	"response.refusal.done":      {},
 }
 
 type responsesSSEActiveItem struct {
@@ -29,6 +31,7 @@ type responsesSSEActiveItem struct {
 	outputIndex any
 	summaries   map[int]string
 	messageText string
+	messageType string
 }
 
 // responsesSSELifecycleState repairs provider-compatible Responses streams that
@@ -77,22 +80,6 @@ func (s *responsesSSELifecycleState) AddChunk(chunk []byte) ([]byte, error) {
 		output = append(output, normalized...)
 	}
 
-	if len(bytes.TrimSpace(s.pending)) == 0 {
-		s.pending = s.pending[:0]
-		return output, nil
-	}
-	payload, found := sseJSONValidationDataPayload(s.pending)
-	payload = bytes.TrimSpace(payload)
-	if !found || len(payload) == 0 || (!bytes.Equal(payload, []byte("[DONE]")) && !json.Valid(payload)) {
-		return output, nil
-	}
-	frame := bytes.Clone(s.pending)
-	s.pending = s.pending[:0]
-	normalized, err := s.normalizeFrame(frame)
-	if err != nil {
-		return nil, err
-	}
-	output = append(output, normalized...)
 	return output, nil
 }
 
@@ -337,7 +324,17 @@ func (s *responsesSSELifecycleState) closeActive(status string) ([]map[string]an
 		item["summary"] = summaries
 	case "message":
 		item["status"] = status
-		item["content"] = []any{map[string]any{"type": "output_text", "text": active.messageText}}
+		contentType := active.messageType
+		if contentType == "" {
+			contentType = "output_text"
+		}
+		content := map[string]any{"type": contentType}
+		if contentType == "refusal" {
+			content["refusal"] = active.messageText
+		} else {
+			content["text"] = active.messageText
+		}
+		item["content"] = []any{content}
 	}
 	event := map[string]any{
 		"type":         "response.output_item.done",
@@ -439,6 +436,24 @@ func (s *responsesSSELifecycleState) accumulate(event map[string]any) {
 	case "response.output_text.done":
 		text, _ := event["text"].(string)
 		s.active.messageText = text
+		s.active.messageType = "output_text"
+	case "response.refusal.delta":
+		delta, _ := event["delta"].(string)
+		s.active.messageText += delta
+		s.active.messageType = "refusal"
+	case "response.refusal.done":
+		text, _ := event["refusal"].(string)
+		if text == "" {
+			text, _ = event["text"].(string)
+		}
+		s.active.messageText = text
+		s.active.messageType = "refusal"
+	case "response.content_part.added":
+		part, _ := event["part"].(map[string]any)
+		partType, _ := part["type"].(string)
+		if partType == "refusal" || partType == "output_text" {
+			s.active.messageType = partType
+		}
 	}
 }
 
