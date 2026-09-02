@@ -314,7 +314,9 @@ func withClaudeOAuthCredentialBetas(betas string) string {
 
 // withClaudeAdvisorToolBeta ensures advisor-tool-2026-03-01 is present when
 // the body declares an advisor server tool, placed at the observed wire position
-// before advanced-tool-use-2025-11-20 or effort-2025-11-24.
+// before advanced-tool-use-2025-11-20 or effort-2025-11-24. Every beta that
+// follows advisor on the wire, afk-mode-2026-01-31 included, is an insertion
+// boundary so a caller-supplied trailer never ends up ahead of it.
 func withClaudeAdvisorToolBeta(betas string) string {
 	if strings.TrimSpace(betas) == "" {
 		return claudeAdvisorToolBeta
@@ -335,6 +337,7 @@ func withClaudeAdvisorToolBeta(betas string) string {
 			beta == claudeFallbackCreditBeta ||
 			beta == claudeStructuredOutputsBeta ||
 			beta == claudeFastModeBeta ||
+			beta == claudeAFKModeBeta ||
 			beta == claudeExtendedCacheTTLBeta ||
 			beta == claudeCacheDiagnosisBeta {
 			insertAt = index
