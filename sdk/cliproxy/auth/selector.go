@@ -165,15 +165,17 @@ func authPriority(auth *Auth) int {
 
 func authPriorityForModel(auth *Auth, model string) int {
 	defaultPriority := authPriority(auth)
-	_, candidates := modelAliasLookupCandidates(model)
+	requestedModel := rewriteModelForAuth(strings.TrimSpace(model), auth)
+	_, candidates := modelAliasLookupCandidates(requestedModel)
 	if len(candidates) == 0 {
 		return defaultPriority
 	}
-	for _, entry := range OAuthModelAliasesFromAttributes(authAttributes(auth)) {
-		if entry.RoutingPriority == nil {
-			continue
-		}
-		for _, candidate := range candidates {
+	entries := OAuthModelAliasesFromAttributes(authAttributes(auth))
+	for _, candidate := range candidates {
+		for _, entry := range entries {
+			if entry.RoutingPriority == nil {
+				continue
+			}
 			if strings.EqualFold(strings.TrimSpace(entry.Alias), strings.TrimSpace(candidate)) {
 				return *entry.RoutingPriority
 			}

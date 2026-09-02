@@ -165,3 +165,21 @@ func TestRoutingPriorityAppliesToAffinitySchedulerAndFastPath(t *testing.T) {
 		t.Fatalf("affinity sticky pick = %#v, want existing binding %q", selected, authA.ID)
 	}
 }
+
+func TestAuthPriorityForModelNormalizesPrefixAndPrefersExactSuffix(t *testing.T) {
+	auth := &Auth{
+		Prefix:     "account-b",
+		Attributes: map[string]string{"priority": "100"},
+	}
+	SetOAuthModelAliasesAttribute(auth, []internalconfig.OAuthModelAlias{
+		{Name: "native", Alias: "route", RoutingPriority: routePriority(200)},
+		{Name: "native", Alias: "route(high)", RoutingPriority: routePriority(300)},
+	})
+
+	if got := authPriorityForModel(auth, "account-b/route(high)"); got != 300 {
+		t.Fatalf("prefixed exact suffix priority = %d, want 300", got)
+	}
+	if got := authPriorityForModel(auth, "account-b/route(low)"); got != 200 {
+		t.Fatalf("prefixed base fallback priority = %d, want 200", got)
+	}
+}
