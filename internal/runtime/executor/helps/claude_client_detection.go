@@ -191,36 +191,48 @@ func matchesMeasuredClaudeCodeHelperProfile(
 	return measuredClaudeCodeHelperSessionMatches(headers, payload)
 }
 
-// normalizedClaudeBetaHeader joins every Anthropic-Beta value in wire order.
-// Values() is tried first so canonical headers keep a deterministic order; the
-// case-insensitive fallback only exists for hand-built header maps that store a
-// non-canonical key, where ranging the map alone would be order-dependent.
+// ClaudeBetaTokens returns every Anthropic-Beta token the caller sent, in a
+// deterministic order: matching header keys sorted bytewise, then each value in
+// slice order, then the comma-separated items inside each value. Items are
+// trimmed and empty ones are dropped.
+//
+// This is the single reader of that header: the native-client detector and the
+// outgoing request path must see the exact same tokens. The scan always covers
+// every case spelling of the key instead of stopping at the canonical one,
+// because SDK callers hand-build header maps whose literal "anthropic-beta" is
+// invisible to Header.Values. Reading only the canonical key would let a request
+// carrying two spellings confirm a measured native profile on a partial view
+// while the request path forwards a different, larger one. Sorting the keys
+// replaces Go's randomised map iteration with one stable order.
+func ClaudeBetaTokens(headers http.Header) []string {
+	if len(headers) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, 1)
+	for key := range headers {
+		if strings.EqualFold(key, "Anthropic-Beta") {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+
+	var betas []string
+	for _, key := range keys {
+		for _, value := range headers[key] {
+			for _, beta := range strings.Split(value, ",") {
+				if beta = strings.TrimSpace(beta); beta != "" {
+					betas = append(betas, beta)
+				}
+			}
+		}
+	}
+	return betas
+}
+
+// normalizedClaudeBetaHeader joins the tokens ClaudeBetaTokens extracted, which
+// is the view the measured-profile allowlist is keyed on.
 func normalizedClaudeBetaHeader(headers http.Header) string {
-	if headers == nil {
-		return ""
-	}
-	values := headers.Values("Anthropic-Beta")
-	if len(values) == 0 {
-		keys := make([]string, 0, 2)
-		for key := range headers {
-			if strings.EqualFold(key, "Anthropic-Beta") {
-				keys = append(keys, key)
-			}
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			values = append(values, headers[key]...)
-		}
-	}
-	betas := make([]string, 0, 12)
-	for _, value := range values {
-		for _, beta := range strings.Split(value, ",") {
-			if beta = strings.TrimSpace(beta); beta != "" {
-				betas = append(betas, beta)
-			}
-		}
-	}
-	return strings.Join(betas, ",")
+	return strings.Join(ClaudeBetaTokens(headers), ",")
 }
 
 // measuredClaudeCodeHelperHeadersMatch validates the helper transport envelope.
@@ -498,19 +510,9 @@ func headerValue(headers http.Header, name string) string {
 }
 
 func headerContainsClaudeCodeBeta(headers http.Header) bool {
-	if headers == nil {
-		return false
-	}
-	for key, values := range headers {
-		if !strings.EqualFold(key, "Anthropic-Beta") {
-			continue
-		}
-		for _, value := range values {
-			for _, beta := range strings.Split(value, ",") {
-				if strings.TrimSpace(beta) == "claude-code-20250219" {
-					return true
-				}
-			}
+	for _, beta := range ClaudeBetaTokens(headers) {
+		if beta == "claude-code-20250219" {
+			return true
 		}
 	}
 	return false

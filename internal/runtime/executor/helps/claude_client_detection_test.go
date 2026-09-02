@@ -528,3 +528,80 @@ func TestMeasuredHelperProfileIgnoresConfiguredStainlessTimeout(t *testing.T) {
 		}
 	})
 }
+
+// ClaudeBetaTokens is the single reader of Anthropic-Beta, so it has to expose
+// every spelling of the key at once, flatten repeated values and CSV items, and
+// return one order that does not depend on Go's map iteration.
+func TestClaudeBetaTokens(t *testing.T) {
+	headers := http.Header{
+		"X-Other":        {"ignored"},
+		"anthropic-beta": {"beta-lower-1, beta-lower-2", "beta-lower-3"},
+		"Anthropic-Beta": {"beta-canonical-1", " beta-canonical-2 ,beta-canonical-3"},
+		"ANTHROPIC-BETA": {"beta-upper-1", "beta-upper-2"},
+	}
+	// Keys sorted bytewise, then values in slice order, then CSV items.
+	want := []string{
+		"beta-upper-1", "beta-upper-2",
+		"beta-canonical-1", "beta-canonical-2", "beta-canonical-3",
+		"beta-lower-1", "beta-lower-2", "beta-lower-3",
+	}
+	for run := 0; run < 50; run++ {
+		got := ClaudeBetaTokens(headers)
+		if len(got) != len(want) {
+			t.Fatalf("len(got) = %d, want %d (%v)", len(got), len(want), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("run %d token[%d] = %q, want %q (%v)", run, i, got[i], want[i], got)
+			}
+		}
+	}
+
+	for name, header := range map[string]http.Header{
+		"nil":               nil,
+		"empty":             {},
+		"no beta key":       {"X-Other": {"ignored"}},
+		"blank csv":         {"Anthropic-Beta": {" , "}},
+		"blank values":      {"Anthropic-Beta": {"", "   "}},
+		"blank across keys": {"Anthropic-Beta": {""}, "anthropic-beta": {" ,, "}},
+	} {
+		if got := ClaudeBetaTokens(header); got != nil {
+			t.Fatalf("%s header tokens = %v, want none", name, got)
+		}
+	}
+
+	sparse := ClaudeBetaTokens(http.Header{"Anthropic-Beta": {"a,, ,b", " ", "c"}})
+	if len(sparse) != 3 || sparse[0] != "a" || sparse[1] != "b" || sparse[2] != "c" {
+		t.Fatalf("sparse tokens = %v, want [a b c]", sparse)
+	}
+
+	// The joined form the measured-profile allowlist is keyed on stays in step.
+	if got, want := normalizedClaudeBetaHeader(headers), strings.Join(want, ","); got != want {
+		t.Fatalf("normalizedClaudeBetaHeader = %q, want %q", got, want)
+	}
+}
+
+// The detector and claude_executor_request.go read the same header through
+// ClaudeBetaTokens. A second, non-canonical key changes the profile actually
+// forwarded upstream, so it has to break confirmation here instead of staying
+// invisible to a reader that stops at the canonical key.
+func TestDetectClaudeCodeRequestRejectsHelperWithExtraBetaHeaderKey(t *testing.T) {
+	payload := measuredClaudeCodeMinimalHelperPayload()
+
+	control := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true), false)
+	if detection := DetectClaudeCodeRequest(control, payload, false); !detection.Confirmed || !detection.HelperProfile {
+		t.Fatalf("control detection = %#v, want the measured profile confirmed", detection)
+	}
+
+	for _, key := range []string{"anthropic-beta", "ANTHROPIC-BETA"} {
+		t.Run(key, func(t *testing.T) {
+			headers := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true), false)
+			headers[key] = []string{"extra-beta-2099-01-01"}
+
+			detection := DetectClaudeCodeRequest(headers, payload, false)
+			if detection.HelperProfile || detection.Confirmed {
+				t.Fatalf("detection = %#v, want an extra %q key to disqualify the measured profile", detection, key)
+			}
+		})
+	}
+}
