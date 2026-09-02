@@ -38,7 +38,10 @@ func runStream(t *testing.T, originalReq string, chunks ...string) []sseEvent {
 		[]byte("data: [DONE]"),
 		&paramAny,
 	)...)
+	return parseSSEEvents(emitted)
+}
 
+func parseSSEEvents(emitted [][]byte) []sseEvent {
 	var events []sseEvent
 	for _, raw := range emitted {
 		s := string(raw)
@@ -830,5 +833,57 @@ func TestStreamingTool_PerChunkUsageWithoutFinishReasonUsesBufferedUsage(t *test
 	}
 	if got := countByType(events, "message_stop"); got != 1 {
 		t.Fatalf("expected exactly one message_stop, got %d (events=%+v)", got, events)
+	}
+}
+
+// When finish_reason arrives on its own chunk (without usage), the stream is
+// terminal: the buffered usage must be flushed and message_delta/message_stop
+// emitted on that chunk, not deferred to [DONE], which compatible upstreams
+// may delay or omit.
+func TestStreamingTool_FinishReasonChunkFlushesBufferedUsage(t *testing.T) {
+	chunks := []string{
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"loc\":\"Paris\"}"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":7}}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	}
+	var paramAny any
+	chunkEvents := make([][]sseEvent, 0, len(chunks))
+	for _, chunk := range chunks {
+		emitted := ConvertOpenAIResponseToClaude(context.Background(), "", []byte(streamReq), nil, []byte("data: "+chunk), &paramAny)
+		chunkEvents = append(chunkEvents, parseSSEEvents(emitted))
+	}
+
+	terminal := chunkEvents[2]
+	var deltaEvent *sseEvent
+	for i := range terminal {
+		if terminal[i].Type == "message_delta" {
+			deltaEvent = &terminal[i]
+		}
+	}
+	if deltaEvent == nil {
+		t.Fatalf("finish_reason chunk must emit message_delta immediately (events=%+v)", terminal)
+	}
+	if output := gjson.Get(deltaEvent.Payload, "usage.output_tokens").Int(); output != 7 {
+		t.Fatalf("output_tokens = %d, want 7 (buffered from the last usage chunk)", output)
+	}
+	if got := gjson.Get(deltaEvent.Payload, "delta.stop_reason").String(); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want tool_use", got)
+	}
+	hasStop := false
+	for _, e := range terminal {
+		if e.Type == "message_stop" {
+			hasStop = true
+		}
+	}
+	if !hasStop {
+		t.Fatalf("finish_reason chunk must emit message_stop immediately (events=%+v)", terminal)
+	}
+
+	// [DONE] must not duplicate the closing events.
+	doneEvents := parseSSEEvents(ConvertOpenAIResponseToClaude(context.Background(), "", []byte(streamReq), nil, []byte("data: [DONE]"), &paramAny))
+	for _, e := range doneEvents {
+		if e.Type == "message_delta" || e.Type == "message_stop" {
+			t.Fatalf("[DONE] must not re-emit %s (events=%+v)", e.Type, doneEvents)
+		}
 	}
 }

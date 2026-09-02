@@ -321,23 +321,30 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 	// Handle usage information separately (this comes in a later chunk)
 	// Only process if usage has actual values (not null)
 	if !param.MessageDeltaSent {
-		if usage := root.Get("usage"); usage.Exists() && usage.Type != gjson.Null {
-			inputTokens, outputTokens, cachedTokens, cacheWriteTokens := extractOpenAIUsage(usage)
-			if param.FinishReason != "" {
-				finalizeOpenAIAnthropicContentBlocks(param, &results)
-				emitAnthropicMessageDelta(param, &results, inputTokens, outputTokens, cachedTokens, cacheWriteTokens)
-				emitMessageStopIfNeeded(param, &results)
+		usage := root.Get("usage")
+		hasUsage := usage.Exists() && usage.Type != gjson.Null
+		// Buffered values only exist on per-chunk-usage upstreams. Without
+		// them a usage-less finish_reason chunk must keep waiting for the
+		// usage-only chunk that OpenAI's include_usage mode sends afterwards.
+		if param.FinishReason != "" && (hasUsage || param.LastUsageSeen) {
+			// The stream is terminal: close it on this chunk. Prefer the
+			// chunk's own usage, then the buffered values, then zeros.
+			var inputTokens, outputTokens, cachedTokens, cacheWriteTokens int64
+			if hasUsage {
+				inputTokens, outputTokens, cachedTokens, cacheWriteTokens = extractOpenAIUsage(usage)
 			} else {
-				// The stream has not terminated yet. Ending it here would drop
-				// tool call arguments that arrive in later chunks, so buffer
-				// the latest usage values instead; finish_reason or [DONE]
-				// emits them.
-				param.LastUsageSeen = true
-				param.LastInputTokens = inputTokens
-				param.LastOutputTokens = outputTokens
-				param.LastCachedTokens = cachedTokens
-				param.LastCacheWriteTokens = cacheWriteTokens
+				inputTokens, outputTokens, cachedTokens, cacheWriteTokens = param.LastInputTokens, param.LastOutputTokens, param.LastCachedTokens, param.LastCacheWriteTokens
 			}
+			finalizeOpenAIAnthropicContentBlocks(param, &results)
+			emitAnthropicMessageDelta(param, &results, inputTokens, outputTokens, cachedTokens, cacheWriteTokens)
+			emitMessageStopIfNeeded(param, &results)
+		} else if hasUsage {
+			// The stream has not terminated yet. Ending it here would drop
+			// tool call arguments that arrive in later chunks, so buffer
+			// the latest usage values instead; finish_reason or [DONE]
+			// emits them.
+			param.LastUsageSeen = true
+			param.LastInputTokens, param.LastOutputTokens, param.LastCachedTokens, param.LastCacheWriteTokens = extractOpenAIUsage(usage)
 		}
 	}
 
