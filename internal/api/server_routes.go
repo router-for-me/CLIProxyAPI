@@ -111,6 +111,9 @@ func (s *Server) setupRoutes() {
 	codexDirect := s.engine.Group("/backend-api/codex")
 	codexDirect.Use(AuthMiddleware(s.accessManager))
 	{
+		// Codex CLI expects its enriched catalog regardless of User-Agent. Keep this
+		// route isolated from the generic /v1/models content negotiation logic.
+		codexDirect.GET("/models", s.codexDirectModelsHandler(openaiHandlers))
 		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
 		codexDirect.POST("/responses/compact", openaiResponsesHandlers.Compact)
@@ -185,6 +188,26 @@ func (s *Server) setupRoutes() {
 	})
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
+}
+
+// codexDirectModelsHandler serves the enriched Codex client catalog without
+// content-negotiation based on User-Agent headers.
+func (s *Server) codexDirectModelsHandler(openaiHandler *openai.OpenAIAPIHandler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+			s.handleHomeCodexClientModels(c)
+			return
+		}
+		if openaiHandler == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "openai model handler unavailable"})
+			return
+		}
+		optimizeMultiAgentV2 := false
+		if s != nil && s.cfg != nil {
+			optimizeMultiAgentV2 = s.cfg.Codex.OptimizeMultiAgentV2
+		}
+		c.JSON(http.StatusOK, codexmodels.BuildResponse(openaiHandler.Models(), registry.GetGlobalRegistry().GetModelProviders, optimizeMultiAgentV2))
+	}
 }
 
 func (s *Server) codexAlphaSearchModelRouterHost() handlers.PluginModelRouterHost {

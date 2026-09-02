@@ -81,9 +81,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 			applyCodexClientSearchToolSupport(entry, id, true, providersForModel)
 			sanitizeCodexClientReasoningMetadata(entry, clientVersion)
 			applyCodexClientVisibilityOverride(entry, id)
-			if optimizeMultiAgentV2 {
-				entry["multi_agent_version"] = "v2"
-			}
+			applyCodexClientMultiAgentVersion(entry, optimizeMultiAgentV2)
 			result = append(result, entry)
 			continue
 		}
@@ -287,9 +285,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	entry["display_name"] = displayName
 	entry["description"] = description
 	entry["prefer_websockets"] = false
-	if optimizeMultiAgentV2 {
-		entry["multi_agent_version"] = "v2"
-	}
+	applyCodexClientMultiAgentVersion(entry, optimizeMultiAgentV2)
 	entry["service_tiers"] = []any{}
 	delete(entry, "apply_patch_tool_type")
 	delete(entry, "upgrade")
@@ -305,6 +301,19 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	}
 	if plans, ok := model["available_in_plans"]; ok {
 		entry["available_in_plans"] = cloneCodexClientModelValue(plans)
+	}
+}
+
+func applyCodexClientMultiAgentVersion(entry map[string]any, optimizeMultiAgentV2 bool) {
+	if entry == nil {
+		return
+	}
+	if optimizeMultiAgentV2 {
+		entry["multi_agent_version"] = "v2"
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(stringModelValue(entry, "multi_agent_version")), "v2") {
+		delete(entry, "multi_agent_version")
 	}
 }
 
