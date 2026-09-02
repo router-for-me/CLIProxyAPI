@@ -150,7 +150,10 @@ func BuildCursorRunPayload(payload []byte, modelID string) (*CursorRunPayload, e
 	}
 	userMessage := buildCursorUserMessage(actionText, actionImages, selectedContextBlob)
 	action := &cursorproto.ConversationAction{Action: &cursorproto.ConversationAction_UserMessageAction{
-		UserMessageAction: &cursorproto.UserMessageAction{UserMessage: userMessage},
+		UserMessageAction: &cursorproto.UserMessageAction{
+			UserMessage:               userMessage,
+			SendToInteractionListener: proto.Bool(true),
+		},
 	}}
 	conversationID := uuid.NewString()
 	run := &cursorproto.AgentRunRequest{

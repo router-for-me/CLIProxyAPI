@@ -48,6 +48,9 @@ func TestBuildCursorRunPayloadWithImageAndTools(t *testing.T) {
 	if userAction == nil || len(userAction.GetUserMessage().GetSelectedContext().GetSelectedImages()) != 1 {
 		t.Fatal("current image was not encoded")
 	}
+	if userAction.SendToInteractionListener == nil || !userAction.GetSendToInteractionListener() {
+		t.Fatal("interaction listener streaming was not enabled")
+	}
 }
 
 func TestRespondCursorExecIncludesSystemPromptInRequestContext(t *testing.T) {

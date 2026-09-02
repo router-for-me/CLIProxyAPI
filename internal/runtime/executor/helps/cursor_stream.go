@@ -160,6 +160,8 @@ func applyCursorRunHeaders(request *http.Request, accessToken string) {
 	request.Header.Set("X-Ghost-Mode", "true")
 	request.Header.Set("X-Cursor-Client-Version", cursorauth.ClientVersion)
 	request.Header.Set("X-Cursor-Client-Type", cursorauth.ClientType)
+	// Without this opt-in Cursor may coalesce interaction deltas before returning them.
+	request.Header.Set("X-Cursor-Streaming", "true")
 	request.Header.Set("X-Request-ID", uuid.NewString())
 }
 
