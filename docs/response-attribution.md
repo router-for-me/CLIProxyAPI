@@ -1,4 +1,4 @@
-# Response attribution
+# Response Attribution
 
 CLIProxyAPI can return `X-CPA-TRACE-ID` on proxy responses after it selects a
 credential. The header is also listed in `Access-Control-Expose-Headers`, so
