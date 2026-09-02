@@ -396,6 +396,25 @@ func TestHomeNoCandidateErrorsMapToServiceUnavailable(t *testing.T) {
 	}
 }
 
+func TestHomeBillingErrorsMapTo402And429(t *testing.T) {
+	cases := []struct {
+		code string
+		want int
+	}{
+		{"user_credits_insufficient", http.StatusPaymentRequired},
+		{"user_period_limit_exceeded", http.StatusTooManyRequests},
+	}
+	for _, tc := range cases {
+		t.Run(tc.code, func(t *testing.T) {
+			errDispatch := decodeHomeDispatchError([]byte(fmt.Sprintf(`{"error":{"type":%q,"message":"limited"}}`, tc.code)))
+			var authErr *Error
+			if !errors.As(errDispatch, &authErr) || authErr.Code != tc.code || authErr.HTTPStatus != tc.want {
+				t.Fatalf("decodeHomeDispatchError(%s) = %#v, want HTTP %d", tc.code, errDispatch, tc.want)
+			}
+		})
+	}
+}
+
 func TestHomeConcurrencyTupleAuthMismatchEndsScope(t *testing.T) {
 	dispatcher := &fixtureHomeDispatcher{payload: []byte(`{"concurrency":{"accounted":true,"credential_id":"cred-1","model":"gpt"},"auth_index":"other","auth":{"id":"cred-1","provider":"codex"}}`)}
 	manager := newHomeSelectionTestManager(t, dispatcher)
