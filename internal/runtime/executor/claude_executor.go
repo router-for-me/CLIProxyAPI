@@ -111,6 +111,25 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 		return
 	}
 
+	logger := helps.LogWithRequestID(ctx)
+	for index, decision := range report.Decisions {
+		if !strings.Contains(decision.Reason, "invalid Claude model-free CAIS signature: unknown ") {
+			continue
+		}
+		logger.WithFields(log.Fields{
+			"component":         "signature_sanitizer",
+			"executor":          "claude",
+			"action":            "drop_unknown_claude_cais_generation",
+			"target_provider":   string(report.TargetProvider),
+			"target_model":      baseModel,
+			"decision_index":    index,
+			"block_kind":        string(decision.BlockKind),
+			"detected_provider": string(decision.DetectedProvider),
+			"signature_action":  string(decision.Action),
+			"reason":            decision.Reason,
+		}).Warn("claude executor: dropped signed history for unknown CAIS generation")
+	}
+
 	fields := log.Fields{
 		"component":           "signature_sanitizer",
 		"executor":            "claude",
@@ -129,7 +148,7 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 		fields["first_reason"] = decision.Reason
 	}
 
-	helps.LogWithRequestID(ctx).WithFields(fields).Debug("claude executor: sanitized signature history before upstream")
+	logger.WithFields(fields).Debug("claude executor: sanitized signature history before upstream")
 }
 
 // Anthropic-compatible upstreams may reject or even crash when Claude models

@@ -122,11 +122,19 @@
 // payload-only discriminator for model-free CAIS is both generation-stable and
 // provider-distinguishing. Proof of origin requires trusted provenance from the
 // response path or cache envelope, so this result must never be treated as
-// authentication. In adversarial fuzz controls, the relaxed skeleton alone
-// accepted 0 of 200,000 uniform-random blobs forced to start with 0x08 and 0 of
-// 200,000 random well-formed protobuf trees starting with 0x08. Gemini and GPT
-// are unreachable here by their 0x12 and 0x80 envelope markers; Kimi and Grok
-// have no protobuf tree.
+// authentication. Measured adversarial controls for the predicate that ships:
+//
+//	uniform-random, first byte forced 0x08       n=1,000,000  shipped=0      spine-only=0
+//	random well-formed protobuf, 0x08 first      n=1,000,000  shipped=0      spine-only=25
+//	spine-shaped, identifiers randomised         n=200,000    shipped=4,754  (the {2,4}x{16,17} product)
+//	spine-shaped, exactly one identifier bumped  n=200,000    shipped=0
+//
+// The allowlist earns the small measured exclusion over the bare structure in
+// the second row. The last row is its residual cost: a future identifier bump
+// drops signed history until the list is amended. The executor emits that event
+// at operator-visible warning severity with the rejected identifier. Gemini and
+// GPT are unreachable here by their 0x12 and 0x80 envelope markers; Kimi and
+// Grok have no protobuf tree.
 //
 // # Which provider emits which envelope
 //

@@ -26,8 +26,11 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func resetClaudeDeviceProfileCache() {
@@ -45,6 +48,22 @@ func claudeOAuthTestMetadata() map[string]any {
 
 func malformedClaudeTreeSignatureForClaudeExecutorTest() string {
 	return base64.StdEncoding.EncodeToString([]byte{0x12, 0xFF, 0xFE, 0xFD})
+}
+
+func unknownGenerationClaudeCAISSignatureForExecutorTest() string {
+	channel := protowire.AppendTag(nil, 1, protowire.VarintType)
+	channel = protowire.AppendVarint(channel, 17)
+
+	container := protowire.AppendTag(nil, 1, protowire.BytesType)
+	container = protowire.AppendBytes(container, channel)
+	container = protowire.AppendTag(container, 5, protowire.BytesType)
+	container = protowire.AppendBytes(container, []byte("synthetic-model-free-carrier"))
+
+	payload := protowire.AppendTag(nil, 1, protowire.VarintType)
+	payload = protowire.AppendVarint(payload, 5)
+	payload = protowire.AppendTag(payload, 2, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, container)
+	return base64.StdEncoding.EncodeToString(payload)
 }
 
 func newClaudeHeaderTestRequest(t *testing.T, incoming http.Header) *http.Request {
@@ -3192,6 +3211,92 @@ func TestClaudeExecutor_ExecuteSanitizesSignaturesBeforeUpstream(t *testing.T) {
 			t.Fatalf("tool_use.%s should be removed before upstream: %s", path, seenBody)
 		}
 	}
+}
+
+func TestClaudeExecutor_ExecuteWarnsForUnknownCAISGenerationAtDefaultInfo(t *testing.T) {
+	logger := log.StandardLogger()
+	previousLevel := logger.GetLevel()
+	previousOutput := logger.Out
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	logger.SetLevel(log.InfoLevel)
+	logger.SetOutput(io.Discard)
+	hook := logtest.NewLocal(logger)
+	t.Cleanup(func() {
+		hook.Reset()
+		logger.ReplaceHooks(previousHooks)
+		logger.SetOutput(previousOutput)
+		logger.SetLevel(previousLevel)
+	})
+
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-fable-5-1","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	run := func(t *testing.T, signature string) ([]*log.Entry, []byte) {
+		t.Helper()
+		hook.Reset()
+		seenBody = nil
+		payload := []byte(`{"model":"claude-fable-5-1","max_tokens":16,"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"signed history","signature":"` + signature + `"},{"type":"text","text":"answer"}]},{"role":"user","content":[{"type":"text","text":"next"}]}]}`)
+		if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-fable-5-1",
+			Payload: payload,
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")}); err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if len(seenBody) == 0 {
+			t.Fatal("expected executor to send an upstream request")
+		}
+		return hook.AllEntries(), bytes.Clone(seenBody)
+	}
+
+	const warningMessage = "claude executor: dropped signed history for unknown CAIS generation"
+	t.Run("unknown generation is visible at default info", func(t *testing.T) {
+		signature := unknownGenerationClaudeCAISSignatureForExecutorTest()
+		entries, body := run(t, signature)
+		if bytes.Contains(body, []byte(signature)) {
+			t.Fatal("unknown-generation thinking signature reached upstream")
+		}
+
+		var warning *log.Entry
+		for _, entry := range entries {
+			if entry.Message == warningMessage {
+				warning = entry
+				break
+			}
+		}
+		if warning == nil {
+			t.Fatalf("default info logging emitted no unknown-generation diagnosis; entries=%v", entries)
+		}
+		if warning.Level != log.WarnLevel {
+			t.Fatalf("unknown-generation diagnosis level = %s, want warning", warning.Level)
+		}
+		reason := fmt.Sprint(warning.Data["reason"])
+		if !strings.Contains(reason, "unknown envelope version 5") {
+			t.Fatalf("warning reason = %q, want exact unknown-generation diagnosis", reason)
+		}
+	})
+
+	t.Run("ordinary drop stays below default info", func(t *testing.T) {
+		entries, body := run(t, "gAAAAABopenai-encrypted-content")
+		if bytes.Contains(body, []byte("gAAAAABopenai-encrypted-content")) {
+			t.Fatal("ordinary incompatible thinking signature reached upstream")
+		}
+		for _, entry := range entries {
+			if entry.Data["component"] == "signature_sanitizer" {
+				t.Fatalf("ordinary sanitize report escaped debug logging: level=%s message=%q fields=%v", entry.Level, entry.Message, entry.Data)
+			}
+		}
+	})
 }
 
 func TestClaudeExecutor_Execute_InvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
