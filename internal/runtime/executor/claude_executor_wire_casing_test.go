@@ -14,7 +14,7 @@ import (
 )
 
 // claudeCode2_1_220WireHeaderOrder is the header name sequence captured from a
-// real Claude Code 2.1.220 OAuth POST /v1/messages over HTTP/1.1, minus the four
+// real Claude Code 2.1.258 OAuth POST /v1/messages over HTTP/1.1, minus the four
 // names the Node HTTP layer appends after the sorted block (Connection, Host,
 // Accept-Encoding, Content-Length) and minus User-Agent. Go hardcodes Host,
 // User-Agent and Content-Length ahead of the sorted block, so those four

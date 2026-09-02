@@ -181,7 +181,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
-	// Claude Code 2.1.220's beta.messages.countTokens() always appends this beta.
+	// Claude Code's beta.messages.countTokens() always appends this beta (2.1.220 and 2.1.258 alike).
 	extraBetas = append(extraBetas, claudeTokenCountingBeta)
 	if fp.MCPAlias && cloaked {
 		mcpAliases := resolveClaudeMCPAliasOptions(ctx)
@@ -200,8 +200,8 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	// body by default: a caller that deliberately sends context_management expects
 	// the token count to reflect it, so CPA must not silently rewrite the request.
 	// Only an explicit claude-code-cli profile aligns the shape, and then it aligns
-	// to the measured one: Claude Code 2.1.220 count_tokens carries exactly model,
-	// messages and tools, never a system block.
+	// to the measured one: Claude Code 2.1.220 and 2.1.258 count_tokens carry exactly
+	// model, messages and tools, never a system block.
 	alignCLICountTokensShape := fp.ProfileClaudeCodeCLI
 	if directAnthropic || alignCLICountTokensShape {
 		body, _ = sjson.DeleteBytes(body, "metadata")

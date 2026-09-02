@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/tidwall/gjson"
 )
@@ -79,9 +78,12 @@ const (
 	claudeCodeHelperModel = "claude-haiku-4-5-20251001"
 )
 
-// These are the six exact beta sequences observed across 14 markerless native
-// Claude Code 2.1.220 Haiku helper requests. Keeping the allowlist exact avoids
-// turning the helper exception into a generic no-claude-code-beta bypass.
+// These are the seven exact beta sequences observed across markerless native
+// Claude Code Haiku helper requests: six from 14 requests captured on 2.1.220,
+// plus the 2.1.258 session-title helper captured on 2026-09-02, which carries
+// advisor-tool without cache-diagnosis whenever the account's advisor feature
+// flag is on. Keeping the allowlist exact avoids turning the helper exception
+// into a generic no-claude-code-beta bypass.
 var measuredClaudeCodeHelperBetaProfiles = map[string]claudeCodeHelperShape{
 	claudeCodeHelperBetaProfile(true):  claudeCodeHelperShapeMinimal,
 	claudeCodeHelperBetaProfile(false): claudeCodeHelperShapeMinimal,
@@ -89,6 +91,10 @@ var measuredClaudeCodeHelperBetaProfiles = map[string]claudeCodeHelperShape{
 		"advisor-tool-2026-03-01",
 		"structured-outputs-2025-12-15",
 		"cache-diagnosis-2026-04-07",
+	): claudeCodeHelperShapeStructured,
+	claudeCodeHelperBetaProfile(true,
+		"advisor-tool-2026-03-01",
+		"structured-outputs-2025-12-15",
 	): claudeCodeHelperShapeStructured,
 	claudeCodeHelperBetaProfile(true,
 		"structured-outputs-2025-12-15",
@@ -273,18 +279,20 @@ func measuredClaudeCodeHelperHeadersMatch(headers http.Header, cfg *config.Confi
 	if !meetsClaudeDeviceProfileBaseline(candidate, profile) {
 		return false
 	}
-	if async := headerValue(headers, "X-Stainless-Async"); (shape == claudeCodeHelperShapeStructured && async != "async") ||
-		(shape == claudeCodeHelperShapeMinimal && async != "") {
+	// Claude Code 2.1.258 (@anthropic-ai/sdk 0.112.1) no longer sends
+	// X-Stainless-Async on any request, offers the full compression set for both
+	// helper shapes, and attaches x-client-request-id only when its own base URL
+	// is api.anthropic.com, which a request that reached CPA never is. Measured
+	// 2026-09-02 on the quota probe and the session-title helper; 2.1.220 sent
+	// async on the structured helper, gzip only on the minimal one, and a UUID
+	// request ID on both.
+	if headerValue(headers, "X-Stainless-Async") != "" {
 		return false
 	}
-	compression := headerValue(headers, "Accept-Encoding")
-	if (shape == claudeCodeHelperShapeStructured && compression != "gzip, deflate, br, zstd") ||
-		(shape == claudeCodeHelperShapeMinimal && compression != "gzip") {
+	if headerValue(headers, "Accept-Encoding") != "gzip, deflate, br, zstd" {
 		return false
 	}
-	requestID := headerValue(headers, "X-Client-Request-Id")
-	_, errRequestID := uuid.Parse(requestID)
-	return errRequestID == nil
+	return headerValue(headers, "X-Client-Request-Id") == ""
 }
 
 func measuredClaudeCodeHelperSessionMatches(headers http.Header, payload []byte) bool {
@@ -298,7 +306,7 @@ func measuredClaudeCodeHelperSessionMatches(headers http.Header, payload []byte)
 	}
 	// The native metadata builder is
 	//	{...extraMetadata, device_id, account_uuid, session_id, ...parentSessionId && {parent_session_id}}
-	// in 2.1.220, 2.1.221 and 2.1.227 alike, so parent_session_id is a legitimate
+	// in 2.1.220, 2.1.221, 2.1.227 and 2.1.258 alike, so parent_session_id is a legitimate
 	// optional trailing key for sub-agent and forked sessions. Rejecting it would
 	// cloak the helper requests those sessions issue.
 	identityRaw := []byte(userID.String())

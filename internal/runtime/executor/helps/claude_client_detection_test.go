@@ -28,7 +28,7 @@ func measuredClaudeCodeHelperHeaders(betaProfile string, structured bool) http.H
 	profile := defaultClaudeDeviceProfile(&config.Config{})
 	headers := http.Header{
 		"Accept":            {"application/json"},
-		"Accept-Encoding":   {"gzip"},
+		"Accept-Encoding":   {"gzip, deflate, br, zstd"},
 		"Content-Type":      {"application/json"},
 		"User-Agent":        {profile.UserAgent},
 		"X-App":             {"cli"},
@@ -36,7 +36,6 @@ func measuredClaudeCodeHelperHeaders(betaProfile string, structured bool) http.H
 		"Anthropic-Version": {"2023-06-01"},
 		"Anthropic-Dangerous-Direct-Browser-Access": {"true"},
 		"X-Claude-Code-Session-Id":                  {"11111111-2222-4333-8444-555555555555"},
-		"X-Client-Request-Id":                       {"66666666-7777-4888-8999-aaaaaaaaaaaa"},
 		"X-Stainless-Lang":                          {"js"},
 		"X-Stainless-Runtime":                       {"node"},
 		"X-Stainless-Package-Version":               {profile.PackageVersion},
@@ -46,10 +45,7 @@ func measuredClaudeCodeHelperHeaders(betaProfile string, structured bool) http.H
 		"X-Stainless-Retry-Count":                   {"0"},
 		"X-Stainless-Timeout":                       {"600"},
 	}
-	if structured {
-		headers.Set("Accept-Encoding", "gzip, deflate, br, zstd")
-		headers.Set("X-Stainless-Async", "async")
-	}
+	_ = structured // 2.1.258 helpers share one transport envelope for both shapes.
 	canonical := make(http.Header, len(headers))
 	for name, values := range headers {
 		for _, value := range values {
@@ -196,6 +192,14 @@ func TestDetectClaudeCodeRequestRecognizesMeasuredHaikuHelpers(t *testing.T) {
 			payload:    measuredClaudeCodeStructuredHelperPayload(),
 		},
 		{
+			// Captured 2026-09-02 from Claude Code 2.1.258: the session-title helper
+			// with the account's advisor feature flag on and no cache diagnostics.
+			name:       "structured title helper with advisor on 2.1.258",
+			beta:       claudeCodeHelperBetaProfile(true, "advisor-tool-2026-03-01", "structured-outputs-2025-12-15"),
+			structured: true,
+			payload:    measuredClaudeCodeStructuredHelperPayload(),
+		},
+		{
 			name:       "structured title helper with fallback credit",
 			beta:       claudeCodeHelperBetaProfile(true, "structured-outputs-2025-12-15", "fallback-credit-2026-06-01"),
 			structured: true,
@@ -277,7 +281,7 @@ func TestDetectClaudeCodeRequestRejectsNearMissHaikuHelpers(t *testing.T) {
 		{
 			name: "wrong compression profile",
 			mutate: func(headers http.Header) {
-				headers.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+				headers.Set("Accept-Encoding", "gzip")
 			},
 			payload: minimalPayload,
 		},
@@ -289,9 +293,9 @@ func TestDetectClaudeCodeRequestRejectsNearMissHaikuHelpers(t *testing.T) {
 			payload: minimalPayload,
 		},
 		{
-			name: "invalid request id",
+			name: "unexpected request id",
 			mutate: func(headers http.Header) {
-				headers.Set("X-Client-Request-Id", "not-a-uuid")
+				headers.Set("X-Client-Request-Id", "66666666-7777-4888-8999-aaaaaaaaaaaa")
 			},
 			payload: minimalPayload,
 		},
