@@ -284,6 +284,33 @@ func TestConvertOpenAIResponsesRequestToClaude_DropsApplyPatchCustomTool(t *test
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_PreservesToolOutputWithoutCallIDAsUserMessage(t *testing.T) {
+	const delegation = `<codex_delegation><input>run the canary</input></codex_delegation>`
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"run the canary"}]},
+			{"type":"function_call_output","id":"fco_create_thread","name":"create_thread","output":"` + delegation + `"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("messages.#").Int(); got != 2 {
+		t.Fatalf("messages count = %d, want the user message and delegation output. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.1.role").String(); got != "user" {
+		t.Fatalf("messages.1.role = %q, want user. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.1.content").String(); got != delegation {
+		t.Fatalf("delegation content = %q, want %q. Output: %s", got, delegation, string(out))
+	}
+	if strings.Contains(root.Get("messages").Raw, "tool_result") {
+		t.Fatalf("call-ID-less function_call_output must not become a Claude tool_result. Output: %s", string(out))
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_FlattensNamespaceRootObjectUnion(t *testing.T) {
 	raw := []byte(`{
 		"model":"claude-test",

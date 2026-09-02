@@ -409,7 +409,20 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			case "function_call_output":
 				flushPendingReasoning()
 				// Map to user tool_result
-				callID := item.Get("call_id").String()
+				callID := strings.TrimSpace(item.Get("call_id").String())
+				if callID == "" {
+					output := item.Get("output")
+					content := output.String()
+					if output.Type != gjson.String {
+						content = output.Raw
+					}
+					if strings.TrimSpace(content) != "" {
+						usr := []byte(`{"role":"user","content":""}`)
+						usr, _ = sjson.SetBytes(usr, "content", content)
+						appendMessage(usr)
+					}
+					return true
+				}
 				callID = util.SanitizeClaudeToolID(callID)
 				flushPendingToolUseFor(callID)
 				output := item.Get("output")
