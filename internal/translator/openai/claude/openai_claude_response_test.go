@@ -740,3 +740,95 @@ func TestNonStreamingUsage_PreservesCacheWriteTokens(t *testing.T) {
 		})
 	}
 }
+
+// Upstreams that attach usage to every streaming chunk (e.g. vLLM) must not
+// have their tool call arguments dropped: the first tool chunk carries only
+// id and name, so finalizing the stream on it loses every argument delta.
+func TestStreamingTool_PerChunkUsageKeepsToolArguments(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"loc\":\"Par"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":7}}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"is\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":9}}`,
+	)
+
+	var args strings.Builder
+	inputDeltaIdx, blockStopIdx := -1, -1
+	for i, e := range events {
+		switch {
+		case e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "input_json_delta":
+			args.WriteString(gjson.Get(e.Payload, "delta.partial_json").String())
+			if inputDeltaIdx < 0 {
+				inputDeltaIdx = i
+			}
+		case e.Type == "content_block_stop" && blockStopIdx < 0:
+			blockStopIdx = i
+		}
+	}
+	if got := args.String(); got != `{"loc":"Paris"}` {
+		t.Fatalf("tool arguments lost: got %q, want %q", got, `{"loc":"Paris"}`)
+	}
+	if inputDeltaIdx < 0 || blockStopIdx < 0 || inputDeltaIdx > blockStopIdx {
+		t.Fatalf("input_json_delta must precede content_block_stop (delta=%d stop=%d)", inputDeltaIdx, blockStopIdx)
+	}
+	if got := countByType(events, "message_delta"); got != 1 {
+		t.Fatalf("expected exactly one message_delta, got %d (events=%+v)", got, events)
+	}
+	if got := countByType(events, "message_stop"); got != 1 {
+		t.Fatalf("expected exactly one message_stop, got %d (events=%+v)", got, events)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+	var deltaEvent *sseEvent
+	for i := range events {
+		if events[i].Type == "message_delta" {
+			deltaEvent = &events[i]
+		}
+	}
+	if deltaEvent == nil {
+		t.Fatalf("missing message_delta event")
+	}
+	if output := gjson.Get(deltaEvent.Payload, "usage.output_tokens").Int(); output != 9 {
+		t.Fatalf("output_tokens = %d, want 9 (usage from the final chunk)", output)
+	}
+}
+
+// With per-chunk usage and no finish_reason at all, the stream must still end
+// via [DONE] and report the latest buffered usage, not the first chunk's.
+func TestStreamingTool_PerChunkUsageWithoutFinishReasonUsesBufferedUsage(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":"{\"loc\":\"Paris\"}"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":8}}`,
+	)
+
+	var args strings.Builder
+	for _, e := range events {
+		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
+			args.WriteString(gjson.Get(e.Payload, "delta.partial_json").String())
+		}
+	}
+	if got := args.String(); got != `{"loc":"Paris"}` {
+		t.Fatalf("tool arguments lost: got %q, want %q", got, `{"loc":"Paris"}`)
+	}
+	if got := countByType(events, "message_delta"); got != 1 {
+		t.Fatalf("expected exactly one message_delta, got %d (events=%+v)", got, events)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+	var deltaEvent *sseEvent
+	for i := range events {
+		if events[i].Type == "message_delta" {
+			deltaEvent = &events[i]
+		}
+	}
+	if deltaEvent == nil {
+		t.Fatalf("missing message_delta event")
+	}
+	if output := gjson.Get(deltaEvent.Payload, "usage.output_tokens").Int(); output != 8 {
+		t.Fatalf("output_tokens = %d, want 8 (latest buffered usage)", output)
+	}
+	if got := countByType(events, "message_stop"); got != 1 {
+		t.Fatalf("expected exactly one message_stop, got %d (events=%+v)", got, events)
+	}
+}

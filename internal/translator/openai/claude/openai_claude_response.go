@@ -46,6 +46,15 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	ContentBlocksStopped bool
 	// Track if message_delta has been sent
 	MessageDeltaSent bool
+	// Usage buffered from the most recent chunk seen before the stream
+	// terminates. Upstreams that attach usage to every chunk must not end the
+	// stream on a non-terminal chunk; the buffered values are emitted when
+	// finish_reason arrives, or at [DONE] as a fallback.
+	LastUsageSeen        bool
+	LastInputTokens      int64
+	LastOutputTokens     int64
+	LastCachedTokens     int64
+	LastCacheWriteTokens int64
 	// Track if message_start has been sent
 	MessageStarted bool
 	// Track if message_stop has been sent
@@ -97,6 +106,11 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 			FinishReason:                "",
 			ContentBlocksStopped:        false,
 			MessageDeltaSent:            false,
+			LastUsageSeen:               false,
+			LastInputTokens:             0,
+			LastOutputTokens:            0,
+			LastCachedTokens:            0,
+			LastCacheWriteTokens:        0,
 			ToolCallBlockIndexes:        make(map[int]int),
 			TextContentBlockIndex:       -1,
 			ThinkingContentBlockIndex:   -1,
@@ -306,13 +320,24 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 	// Handle usage information separately (this comes in a later chunk)
 	// Only process if usage has actual values (not null)
-	if !param.MessageDeltaSent && (param.FinishReason != "" || param.SawToolCall) {
-		usage := root.Get("usage")
-		if usage.Exists() && usage.Type != gjson.Null {
-			finalizeOpenAIAnthropicContentBlocks(param, &results)
+	if !param.MessageDeltaSent {
+		if usage := root.Get("usage"); usage.Exists() && usage.Type != gjson.Null {
 			inputTokens, outputTokens, cachedTokens, cacheWriteTokens := extractOpenAIUsage(usage)
-			emitAnthropicMessageDelta(param, &results, inputTokens, outputTokens, cachedTokens, cacheWriteTokens)
-			emitMessageStopIfNeeded(param, &results)
+			if param.FinishReason != "" {
+				finalizeOpenAIAnthropicContentBlocks(param, &results)
+				emitAnthropicMessageDelta(param, &results, inputTokens, outputTokens, cachedTokens, cacheWriteTokens)
+				emitMessageStopIfNeeded(param, &results)
+			} else {
+				// The stream has not terminated yet. Ending it here would drop
+				// tool call arguments that arrive in later chunks, so buffer
+				// the latest usage values instead; finish_reason or [DONE]
+				// emits them.
+				param.LastUsageSeen = true
+				param.LastInputTokens = inputTokens
+				param.LastOutputTokens = outputTokens
+				param.LastCachedTokens = cachedTokens
+				param.LastCacheWriteTokens = cacheWriteTokens
+			}
 		}
 	}
 
@@ -326,7 +351,11 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 	finalizeOpenAIAnthropicContentBlocks(param, &results)
 
 	if !param.MessageDeltaSent {
-		emitAnthropicMessageDelta(param, &results, 0, 0, 0, 0)
+		inputTokens, outputTokens, cachedTokens, cacheWriteTokens := int64(0), int64(0), int64(0), int64(0)
+		if param.LastUsageSeen {
+			inputTokens, outputTokens, cachedTokens, cacheWriteTokens = param.LastInputTokens, param.LastOutputTokens, param.LastCachedTokens, param.LastCacheWriteTokens
+		}
+		emitAnthropicMessageDelta(param, &results, inputTokens, outputTokens, cachedTokens, cacheWriteTokens)
 	}
 
 	emitMessageStopIfNeeded(param, &results)
