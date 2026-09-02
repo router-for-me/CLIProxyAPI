@@ -1025,6 +1025,13 @@ func TestExecuteStreamWithAuthManager_ForwardsOverloadErrorWhenAllAuthsOverloade
 	if gotErr == nil {
 		t.Fatalf("expected terminal error")
 	}
+	var firstAuthErr *coreauth.Error
+	if !errors.As(gotErr.Error, &firstAuthErr) || firstAuthErr == nil {
+		t.Fatalf("expected first coreauth.Error, got %T", gotErr.Error)
+	}
+	if firstAuthErr.Code != "server_is_overloaded" {
+		t.Fatalf("first error code = %q, want %q", firstAuthErr.Code, "server_is_overloaded")
+	}
 	if !strings.Contains(gotErr.Error.Error(), "Our servers are currently overloaded. Please try again later.") && !strings.Contains(gotErr.Error.Error(), "server_is_overloaded") {
 		t.Fatalf("expected error message to contain overload details, got: %q", gotErr.Error.Error())
 	}
@@ -1039,6 +1046,13 @@ func TestExecuteStreamWithAuthManager_ForwardsOverloadErrorWhenAllAuthsOverloade
 	}
 	if gotErr2 == nil {
 		t.Fatalf("expected terminal error on reconnect request")
+	}
+	var reconnectAuthErr *coreauth.Error
+	if !errors.As(gotErr2.Error, &reconnectAuthErr) || reconnectAuthErr == nil {
+		t.Fatalf("expected reconnect coreauth.Error, got %T", gotErr2.Error)
+	}
+	if reconnectAuthErr.Code != "server_is_overloaded" {
+		t.Fatalf("reconnect error code = %q, want %q", reconnectAuthErr.Code, "server_is_overloaded")
 	}
 	if !strings.Contains(gotErr2.Error.Error(), "Our servers are currently overloaded. Please try again later.") && !strings.Contains(gotErr2.Error.Error(), "server_is_overloaded") {
 		t.Fatalf("expected reconnect error message to contain overload details, got: %q", gotErr2.Error.Error())
