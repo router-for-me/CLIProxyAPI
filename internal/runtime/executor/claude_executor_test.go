@@ -50,9 +50,9 @@ func malformedClaudeTreeSignatureForClaudeExecutorTest() string {
 	return base64.StdEncoding.EncodeToString([]byte{0x12, 0xFF, 0xFE, 0xFD})
 }
 
-func unknownGenerationClaudeCAISSignatureForExecutorTest() string {
+func modelFreeClaudeCAISSignatureForExecutorTest(envelopeVersion, channelID uint64) string {
 	channel := protowire.AppendTag(nil, 1, protowire.VarintType)
-	channel = protowire.AppendVarint(channel, 17)
+	channel = protowire.AppendVarint(channel, channelID)
 
 	container := protowire.AppendTag(nil, 1, protowire.BytesType)
 	container = protowire.AppendBytes(container, channel)
@@ -60,7 +60,7 @@ func unknownGenerationClaudeCAISSignatureForExecutorTest() string {
 	container = protowire.AppendBytes(container, []byte("synthetic-model-free-carrier"))
 
 	payload := protowire.AppendTag(nil, 1, protowire.VarintType)
-	payload = protowire.AppendVarint(payload, 5)
+	payload = protowire.AppendVarint(payload, envelopeVersion)
 	payload = protowire.AppendTag(payload, 2, protowire.BytesType)
 	payload = protowire.AppendBytes(payload, container)
 	return base64.StdEncoding.EncodeToString(payload)
@@ -3242,11 +3242,10 @@ func TestClaudeExecutor_ExecuteWarnsForUnknownCAISGenerationAtDefaultInfo(t *tes
 		"api_key":  "key-123",
 		"base_url": server.URL,
 	}}
-	run := func(t *testing.T, signature string) ([]*log.Entry, []byte) {
+	run := func(t *testing.T, payload []byte) ([]*log.Entry, []byte) {
 		t.Helper()
 		hook.Reset()
 		seenBody = nil
-		payload := []byte(`{"model":"claude-fable-5-1","max_tokens":16,"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"signed history","signature":"` + signature + `"},{"type":"text","text":"answer"}]},{"role":"user","content":[{"type":"text","text":"next"}]}]}`)
 		if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 			Model:   "claude-fable-5-1",
 			Payload: payload,
@@ -3260,35 +3259,79 @@ func TestClaudeExecutor_ExecuteWarnsForUnknownCAISGenerationAtDefaultInfo(t *tes
 	}
 
 	const warningMessage = "claude executor: dropped signed history for unknown CAIS generation"
-	t.Run("unknown generation is visible at default info", func(t *testing.T) {
-		signature := unknownGenerationClaudeCAISSignatureForExecutorTest()
-		entries, body := run(t, signature)
+	assertUnknownWarnings := func(t *testing.T, entries []*log.Entry, want map[string]int) {
+		t.Helper()
+		got := make(map[string]int)
+		for _, entry := range entries {
+			if entry.Message != warningMessage {
+				continue
+			}
+			if entry.Level != log.WarnLevel {
+				t.Fatalf("unknown-generation diagnosis level = %s, want warning", entry.Level)
+			}
+			reason := fmt.Sprint(entry.Data["reason"])
+			if _, duplicate := got[reason]; duplicate {
+				t.Fatalf("unknown-generation reason %q emitted more than once instead of being aggregated", reason)
+			}
+			count, ok := entry.Data["dropped_block_count"].(int)
+			if !ok {
+				t.Fatalf("warning for %q has dropped_block_count=%#v, want integer", reason, entry.Data["dropped_block_count"])
+			}
+			got[reason] = count
+		}
+		if len(got) != len(want) {
+			t.Fatalf("unknown-generation warning reasons = %v, want %v; entries=%v", got, want, entries)
+		}
+		for reason, count := range want {
+			if got[reason] != count {
+				t.Fatalf("warning count for %q = %d, want %d; all=%v", reason, got[reason], count, got)
+			}
+		}
+	}
+
+	const unknownEnvelopeReason = "invalid Claude model-free CAIS signature: unknown envelope version 5"
+	const unknownChannelReason = "invalid Claude model-free CAIS signature: unknown channel_id 18"
+	t.Run("sole unknown generation is visible at default info", func(t *testing.T) {
+		signature := modelFreeClaudeCAISSignatureForExecutorTest(5, 17)
+		payload := []byte(`{"model":"claude-fable-5-1","max_tokens":16,"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"signed history","signature":"` + signature + `"},{"type":"text","text":"answer"}]},{"role":"user","content":[{"type":"text","text":"next"}]}]}`)
+		entries, body := run(t, payload)
 		if bytes.Contains(body, []byte(signature)) {
 			t.Fatal("unknown-generation thinking signature reached upstream")
 		}
-
-		var warning *log.Entry
-		for _, entry := range entries {
-			if entry.Message == warningMessage {
-				warning = entry
-				break
-			}
-		}
-		if warning == nil {
-			t.Fatalf("default info logging emitted no unknown-generation diagnosis; entries=%v", entries)
-		}
-		if warning.Level != log.WarnLevel {
-			t.Fatalf("unknown-generation diagnosis level = %s, want warning", warning.Level)
-		}
-		reason := fmt.Sprint(warning.Data["reason"])
-		if !strings.Contains(reason, "unknown envelope version 5") {
-			t.Fatalf("warning reason = %q, want exact unknown-generation diagnosis", reason)
-		}
+		assertUnknownWarnings(t, entries, map[string]int{unknownEnvelopeReason: 1})
 	})
 
-	t.Run("ordinary drop stays below default info", func(t *testing.T) {
-		entries, body := run(t, "gAAAAABopenai-encrypted-content")
-		if bytes.Contains(body, []byte("gAAAAABopenai-encrypted-content")) {
+	t.Run("later unknown generations are aggregated at default info", func(t *testing.T) {
+		recognized := modelFreeClaudeCAISSignatureForExecutorTest(4, 17)
+		unknownEnvelope := modelFreeClaudeCAISSignatureForExecutorTest(5, 17)
+		unknownChannel := modelFreeClaudeCAISSignatureForExecutorTest(4, 18)
+		payload := []byte(`{"model":"claude-fable-5-1","max_tokens":16,"messages":[` +
+			`{"role":"assistant","content":[{"type":"thinking","thinking":"recognized","signature":"` + recognized + `"},{"type":"text","text":"answer 0"}]},` +
+			`{"role":"user","content":[{"type":"text","text":"next 0"}]},` +
+			`{"role":"assistant","content":[{"type":"thinking","thinking":"unknown envelope one","signature":"` + unknownEnvelope + `"},{"type":"text","text":"answer 1"}]},` +
+			`{"role":"user","content":[{"type":"text","text":"next 1"}]},` +
+			`{"role":"assistant","content":[{"type":"thinking","thinking":"unknown envelope two","signature":"` + unknownEnvelope + `"},{"type":"text","text":"answer 2"}]},` +
+			`{"role":"user","content":[{"type":"text","text":"next 2"}]},` +
+			`{"role":"assistant","content":[{"type":"thinking","thinking":"unknown channel","signature":"` + unknownChannel + `"},{"type":"text","text":"answer 3"}]},` +
+			`{"role":"user","content":[{"type":"text","text":"next 3"}]}]}`)
+		entries, body := run(t, payload)
+		if !bytes.Contains(body, []byte(recognized)) {
+			t.Fatal("recognized CAIS signature was not preserved ahead of later rejections")
+		}
+		if bytes.Contains(body, []byte(unknownEnvelope)) || bytes.Contains(body, []byte(unknownChannel)) {
+			t.Fatal("later unknown-generation thinking signature reached upstream")
+		}
+		assertUnknownWarnings(t, entries, map[string]int{
+			unknownEnvelopeReason: 2,
+			unknownChannelReason:  1,
+		})
+	})
+
+	t.Run("ordinary drop emits no warning", func(t *testing.T) {
+		const ordinarySignature = "gAAAAABopenai-encrypted-content"
+		payload := []byte(`{"model":"claude-fable-5-1","max_tokens":16,"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"foreign history","signature":"` + ordinarySignature + `"},{"type":"text","text":"answer"}]},{"role":"user","content":[{"type":"text","text":"next"}]}]}`)
+		entries, body := run(t, payload)
+		if bytes.Contains(body, []byte(ordinarySignature)) {
 			t.Fatal("ordinary incompatible thinking signature reached upstream")
 		}
 		for _, entry := range entries {

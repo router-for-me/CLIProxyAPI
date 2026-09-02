@@ -112,21 +112,50 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 	}
 
 	logger := helps.LogWithRequestID(ctx)
-	for index, decision := range report.Decisions {
-		if !strings.Contains(decision.Reason, "invalid Claude model-free CAIS signature: unknown ") {
+	const unknownGenerationMarker = "invalid Claude model-free CAIS signature: unknown "
+	type unknownGenerationDrop struct {
+		reason           string
+		firstOccurrence  string
+		blockKind        sigcompat.SignatureBlockKind
+		detectedProvider sigcompat.SignatureProvider
+		signatureAction  sigcompat.SignatureCompatibilityAction
+		count            int
+	}
+	var unknownGenerationDrops []unknownGenerationDrop
+	unknownGenerationDropIndex := make(map[string]int)
+	for _, decision := range report.Decisions {
+		markerIndex := strings.Index(decision.Reason, unknownGenerationMarker)
+		if markerIndex < 0 {
 			continue
 		}
+		reason := decision.Reason[markerIndex:]
+		if index, ok := unknownGenerationDropIndex[reason]; ok {
+			unknownGenerationDrops[index].count++
+			continue
+		}
+		unknownGenerationDropIndex[reason] = len(unknownGenerationDrops)
+		unknownGenerationDrops = append(unknownGenerationDrops, unknownGenerationDrop{
+			reason:           reason,
+			firstOccurrence:  decision.Reason,
+			blockKind:        decision.BlockKind,
+			detectedProvider: decision.DetectedProvider,
+			signatureAction:  decision.Action,
+			count:            1,
+		})
+	}
+	for _, drop := range unknownGenerationDrops {
 		logger.WithFields(log.Fields{
-			"component":         "signature_sanitizer",
-			"executor":          "claude",
-			"action":            "drop_unknown_claude_cais_generation",
-			"target_provider":   string(report.TargetProvider),
-			"target_model":      baseModel,
-			"decision_index":    index,
-			"block_kind":        string(decision.BlockKind),
-			"detected_provider": string(decision.DetectedProvider),
-			"signature_action":  string(decision.Action),
-			"reason":            decision.Reason,
+			"component":           "signature_sanitizer",
+			"executor":            "claude",
+			"action":              "drop_unknown_claude_cais_generation",
+			"target_provider":     string(report.TargetProvider),
+			"target_model":        baseModel,
+			"block_kind":          string(drop.blockKind),
+			"detected_provider":   string(drop.detectedProvider),
+			"signature_action":    string(drop.signatureAction),
+			"reason":              drop.reason,
+			"first_occurrence":    drop.firstOccurrence,
+			"dropped_block_count": drop.count,
 		}).Warn("claude executor: dropped signed history for unknown CAIS generation")
 	}
 

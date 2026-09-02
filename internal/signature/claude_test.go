@@ -385,6 +385,21 @@ func hasGrokOpaqueTransportShapeWithoutEnvelopeExclusions(raw string) bool {
 	return byteEntropyRatio(decoded) >= MinGrokEncryptedContentEntropyRatio
 }
 
+// hasKimiStreamingTransportShapeWithoutEnvelopeExclusions checks only Kimi's
+// fixed streaming length, base64 form, and entropy floor. It must not call the
+// Kimi validator because that validator invokes the Claude predicate under test
+// to reject self-describing foreign envelopes.
+func hasKimiStreamingTransportShapeWithoutEnvelopeExclusions(raw string) bool {
+	if len(raw) != KimiThinkingSignatureStreamingLen || raw != strings.TrimSpace(raw) || strings.Contains(raw, "=") {
+		return false
+	}
+	decoded, err := base64.RawStdEncoding.DecodeString(raw)
+	if err != nil {
+		return false
+	}
+	return byteEntropyRatio(decoded) >= MinKimiThinkingSignatureEntropyRatio
+}
+
 func TestClaudeCAISSignature_ObservedFable5Sample(t *testing.T) {
 	if !IsValidClaudeCAISSignature(observedFable5Sample) {
 		t.Fatal("IsValidClaudeCAISSignature(observedFable5Sample) = false, want true")
@@ -953,6 +968,24 @@ func TestClaudeModelFreeCAISSignature_UsesEnvelopeClassificationWithOpaqueOverla
 		if got := DetectSignatureProviderForBlock(control.signature, SignatureBlockKindClaudeThinking); got != control.provider {
 			t.Errorf("%s provider = %q, want %q", control.name, got, control.provider)
 		}
+	}
+}
+
+func TestClaudeModelFreeCAISSignature_UsesEnvelopeClassificationAtKimiStreamingLength(t *testing.T) {
+	parts := defaultClaudeModelFreeCAISParts()
+	parts.carrierLen = 3149 // 3,255 decoded bytes encode to Kimi's 4,340-character streaming length.
+	signature := parts.encode()
+
+	// This deliberately pads a syntactically valid CAIS envelope to Kimi's
+	// streaming dimensions. The overlap is outside the threat model because it
+	// requires an authenticated client to build the envelope against its own
+	// request. Anthropic still authenticates the carried signature, so matching
+	// Kimi's transport dimensions cannot make foreign reasoning authentic.
+	if !hasKimiStreamingTransportShapeWithoutEnvelopeExclusions(signature) {
+		t.Fatalf("synthetic CAIS length = %d, want independent Kimi streaming transport overlap", len(signature))
+	}
+	if got := DetectSignatureProviderForBlock(signature, SignatureBlockKindClaudeThinking); got != SignatureProviderClaude {
+		t.Fatalf("Kimi-dimension CAIS provider = %q, want %q", got, SignatureProviderClaude)
 	}
 }
 
