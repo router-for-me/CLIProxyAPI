@@ -46,6 +46,15 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	ContentBlocksStopped bool
 	// Track if message_delta has been sent
 	MessageDeltaSent bool
+	// Usage buffered from the most recent chunk seen before the stream
+	// terminates. Upstreams that attach usage to every chunk must not end the
+	// stream on a non-terminal chunk; the buffered values are emitted when
+	// finish_reason arrives, or at [DONE] as a fallback.
+	LastUsageSeen        bool
+	LastInputTokens      int64
+	LastOutputTokens     int64
+	LastCachedTokens     int64
+	LastCacheWriteTokens int64
 	// Track if message_start has been sent
 	MessageStarted bool
 	// Track if message_stop has been sent
@@ -97,6 +106,11 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 			FinishReason:                "",
 			ContentBlocksStopped:        false,
 			MessageDeltaSent:            false,
+			LastUsageSeen:               false,
+			LastInputTokens:             0,
+			LastOutputTokens:            0,
+			LastCachedTokens:            0,
+			LastCacheWriteTokens:        0,
 			ToolCallBlockIndexes:        make(map[int]int),
 			TextContentBlockIndex:       -1,
 			ThinkingContentBlockIndex:   -1,
@@ -306,13 +320,31 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 	// Handle usage information separately (this comes in a later chunk)
 	// Only process if usage has actual values (not null)
-	if !param.MessageDeltaSent && (param.FinishReason != "" || param.SawToolCall) {
+	if !param.MessageDeltaSent {
 		usage := root.Get("usage")
-		if usage.Exists() && usage.Type != gjson.Null {
+		hasUsage := usage.Exists() && usage.Type != gjson.Null
+		// Buffered values only exist on per-chunk-usage upstreams. Without
+		// them a usage-less finish_reason chunk must keep waiting for the
+		// usage-only chunk that OpenAI's include_usage mode sends afterwards.
+		if param.FinishReason != "" && (hasUsage || param.LastUsageSeen) {
+			// The stream is terminal: close it on this chunk. Prefer the
+			// chunk's own usage, then the buffered values, then zeros.
+			var inputTokens, outputTokens, cachedTokens, cacheWriteTokens int64
+			if hasUsage {
+				inputTokens, outputTokens, cachedTokens, cacheWriteTokens = extractOpenAIUsage(usage)
+			} else {
+				inputTokens, outputTokens, cachedTokens, cacheWriteTokens = param.LastInputTokens, param.LastOutputTokens, param.LastCachedTokens, param.LastCacheWriteTokens
+			}
 			finalizeOpenAIAnthropicContentBlocks(param, &results)
-			inputTokens, outputTokens, cachedTokens, cacheWriteTokens := extractOpenAIUsage(usage)
 			emitAnthropicMessageDelta(param, &results, inputTokens, outputTokens, cachedTokens, cacheWriteTokens)
 			emitMessageStopIfNeeded(param, &results)
+		} else if hasUsage {
+			// The stream has not terminated yet. Ending it here would drop
+			// tool call arguments that arrive in later chunks, so buffer
+			// the latest usage values instead; finish_reason or [DONE]
+			// emits them.
+			param.LastUsageSeen = true
+			param.LastInputTokens, param.LastOutputTokens, param.LastCachedTokens, param.LastCacheWriteTokens = extractOpenAIUsage(usage)
 		}
 	}
 
@@ -326,7 +358,11 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 	finalizeOpenAIAnthropicContentBlocks(param, &results)
 
 	if !param.MessageDeltaSent {
-		emitAnthropicMessageDelta(param, &results, 0, 0, 0, 0)
+		inputTokens, outputTokens, cachedTokens, cacheWriteTokens := int64(0), int64(0), int64(0), int64(0)
+		if param.LastUsageSeen {
+			inputTokens, outputTokens, cachedTokens, cacheWriteTokens = param.LastInputTokens, param.LastOutputTokens, param.LastCachedTokens, param.LastCacheWriteTokens
+		}
+		emitAnthropicMessageDelta(param, &results, inputTokens, outputTokens, cachedTokens, cacheWriteTokens)
 	}
 
 	emitMessageStopIfNeeded(param, &results)
