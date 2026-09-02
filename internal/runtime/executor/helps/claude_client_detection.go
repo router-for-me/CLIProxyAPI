@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/tidwall/gjson"
 )
@@ -191,7 +192,7 @@ func matchesMeasuredClaudeCodeHelperProfile(
 	if shape == claudeCodeHelperShapeNone || measuredClaudeCodeHelperBodyShape(payload) != shape {
 		return false
 	}
-	if !measuredClaudeCodeHelperHeadersMatch(headers, cfg) {
+	if !measuredClaudeCodeHelperHeadersMatch(headers, cfg, shape) {
 		return false
 	}
 	return measuredClaudeCodeHelperSessionMatches(headers, payload)
@@ -239,7 +240,7 @@ func normalizedClaudeBetaHeader(headers http.Header) string {
 // foreign client and cloak it. Values that carry real discriminating power - the
 // exact beta allowlist, the body shape, the billing CCH and the session binding -
 // stay strict.
-func measuredClaudeCodeHelperHeadersMatch(headers http.Header, cfg *config.Config) bool {
+func measuredClaudeCodeHelperHeadersMatch(headers http.Header, cfg *config.Config, shape claudeCodeHelperShape) bool {
 	profile := defaultClaudeDeviceProfile(cfg)
 	expected := map[string]string{
 		"Accept":                  "application/json",
@@ -279,21 +280,42 @@ func measuredClaudeCodeHelperHeadersMatch(headers http.Header, cfg *config.Confi
 	if !meetsClaudeDeviceProfileBaseline(candidate, profile) {
 		return false
 	}
-	// Claude Code 2.1.258 (@anthropic-ai/sdk 0.112.1) no longer sends
-	// X-Stainless-Async on any request, offers the full compression set for both
-	// helper shapes, and attaches x-client-request-id only when its own base URL
-	// is api.anthropic.com, which a request that reached CPA never is. Measured
-	// 2026-09-02 on the quota probe and the session-title helper; 2.1.220 sent
-	// async on the structured helper, gzip only on the minimal one, and a UUID
-	// request ID on both.
-	if headerValue(headers, "X-Stainless-Async") != "" {
-		return false
+	// Two measured transport envelopes, selected by the configured baseline so
+	// an operator who pins claude-header-defaults to 2.1.220 keeps recognising
+	// genuine 2.1.220 helpers.
+	//
+	// 2.1.220 (@anthropic-ai/sdk 0.94.0): the structured streaming helper sent
+	// X-Stainless-Async: async with the full compression set, the minimal probe
+	// sent no async header and gzip only, and both carried a UUID
+	// x-client-request-id.
+	//
+	// 2.1.258 (@anthropic-ai/sdk 0.112.1), measured 2026-09-02 on the quota
+	// probe and the session-title helper: X-Stainless-Async is never sent, both
+	// shapes offer the full compression set, and x-client-request-id is attached
+	// only when the base URL is api.anthropic.com, which a request that reached
+	// CPA never is.
+	async := headerValue(headers, "X-Stainless-Async")
+	compression := headerValue(headers, "Accept-Encoding")
+	requestID := headerValue(headers, "X-Client-Request-Id")
+	if profile.hasVersion && profile.version.Compare(claudeHelperTransportSplit) < 0 {
+		if (shape == claudeCodeHelperShapeStructured && async != "async") ||
+			(shape == claudeCodeHelperShapeMinimal && async != "") {
+			return false
+		}
+		if (shape == claudeCodeHelperShapeStructured && compression != "gzip, deflate, br, zstd") ||
+			(shape == claudeCodeHelperShapeMinimal && compression != "gzip") {
+			return false
+		}
+		_, errRequestID := uuid.Parse(requestID)
+		return errRequestID == nil
 	}
-	if headerValue(headers, "Accept-Encoding") != "gzip, deflate, br, zstd" {
-		return false
-	}
-	return headerValue(headers, "X-Client-Request-Id") == ""
+	return async == "" && compression == "gzip, deflate, br, zstd" && requestID == ""
 }
+
+// claudeHelperTransportSplit is the first measured Claude Code release that
+// uses the 2.1.258 helper transport envelope. Baselines below it keep the
+// 2.1.220 envelope.
+var claudeHelperTransportSplit = claudeCLIVersion{major: 2, minor: 1, patch: 258}
 
 func measuredClaudeCodeHelperSessionMatches(headers http.Header, payload []byte) bool {
 	metadata := gjson.GetBytes(payload, "metadata")
