@@ -70,19 +70,18 @@ func GetProviderName(modelName string) []string {
 		return providers
 	}
 
-	// 1. Static model definition lookup fallback
-	for _, p := range staticModelProviders(modelName) {
-		appendProvider(p)
-	}
-	if len(providers) > 0 {
-		return providers
-	}
-
-	// 2. Name heuristics fallback
-	for _, p := range heuristicModelProviders(modelName) {
+	for _, p := range InferredModelProviders(modelName) {
 		appendProvider(p)
 	}
 	return providers
+}
+
+// InferredModelProviders returns all static and heuristic providers capable of serving the model.
+func InferredModelProviders(modelName string) []string {
+	if providers := staticModelProviders(modelName); len(providers) > 0 {
+		return providers
+	}
+	return heuristicModelProviders(modelName)
 }
 
 func staticModelProviders(modelName string) []string {

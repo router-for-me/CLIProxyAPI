@@ -157,6 +157,15 @@ func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel
 }
 
 func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowImageModel bool) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	const maxModelNameLength = 512
+	if len(modelName) > maxModelNameLength {
+		body := `{"error":{"message":"model name exceeds maximum allowed length of 512 characters","type":"invalid_request_error","code":"model_not_found","param":"model"}}`
+		return nil, "", &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      errors.New(body),
+		}
+	}
+
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {

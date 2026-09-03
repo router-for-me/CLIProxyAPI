@@ -13,6 +13,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -829,19 +830,18 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 	if routeKey == "" {
 		return true
 	}
-	if registryRef.ClientSupportsModel(auth.ID, routeKey) {
-		return true
-	}
-	selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
-	if selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey) {
-		return true
+	if models := registryRef.GetModelsForClient(auth.ID); len(models) > 0 {
+		if registryRef.ClientSupportsModel(auth.ID, routeKey) {
+			return true
+		}
+		selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
+		return selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey)
 	}
 
-	// Fallback for static/inferred models: when registry has not dynamically indexed the model,
-	// check if the model is statically known to be supported by this auth's provider.
+	// Fallback for cold-start / unindexed auths: when auth has no models registered in the registry yet
 	providerKey := strings.ToLower(strings.TrimSpace(executorKeyFromAuth(auth)))
 	if providerKey != "" {
-		for _, p := range registry.LookupStaticModelProviders(routeKey) {
+		for _, p := range util.InferredModelProviders(routeKey) {
 			if strings.EqualFold(p, providerKey) {
 				return true
 			}

@@ -373,6 +373,7 @@ func LookupStaticModelProviders(modelID string) []string {
 	}{
 		{"claude", data.Claude},
 		{"gemini", data.Gemini},
+		{"gemini-interactions", data.Gemini},
 		{"vertex", data.Vertex},
 		{"aistudio", data.AIStudio},
 		{"codex", data.CodexPro},
