@@ -435,7 +435,13 @@ type CacheAggregate struct {
 	Misses                int64   `json:"misses"`
 	T0s                   int64   `json:"t0s"`
 	Probes                int64   `json:"probes"`
+	Rebinds               int64   `json:"rebinds"`
+	Classified            int64   `json:"classified"`
 	HitRate               float64 `json:"hit_rate"`
+	CachedShare           float64 `json:"cached_share"`
+	T0Rebinds             int64   `json:"t0_rebinds"`
+	T0Expiries            int64   `json:"t0_expiries"`
+	PromptTokens          int64   `json:"prompt_tokens"`
 	InputTokens           int64   `json:"input_tokens"`
 	OutputTokens          int64   `json:"output_tokens"`
 	CacheReadTokens       int64   `json:"cache_read_tokens"`
@@ -448,22 +454,25 @@ type CacheAggregate struct {
 	LastSeen              string  `json:"last_seen"`
 }
 
-// CacheSession summarises one prompt-caching session.
+// CacheSession summarises one prompt-caching session. It carries the same
+// aggregate counters as the global/model/auth buckets, so Classified applies
+// here too: zero means the provider reports no cache accounting.
 type CacheSession struct {
-	ID         string  `json:"id"`
-	ShortID    string  `json:"short_id"`
-	Model      string  `json:"model"`
-	AuthID     string  `json:"auth_id"`
-	Requests   int64   `json:"requests"`
-	Hits       int64   `json:"hits"`
-	Misses     int64   `json:"misses"`
-	T0s        int64   `json:"t0s"`
-	Probes     int64   `json:"probes"`
-	HitRate    float64 `json:"hit_rate"`
-	LostTokens int64   `json:"lost_tokens"`
-	Regime     string  `json:"regime"`
-	FirstSeen  string  `json:"first_seen"`
-	LastSeen   string  `json:"last_seen"`
+	ID       string `json:"id"`
+	ShortID  string `json:"short_id"`
+	KeyedBy  string `json:"keyed_by"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	AuthID   string `json:"auth_id"`
+	// CacheSignal reports how much cache accounting the provider exposes:
+	// "full" (reads and creations), "read" (reads only) or "none".
+	CacheSignal string `json:"cache_signal"`
+	CacheAggregate
+	Regime string `json:"regime"`
+	// Alerting marks sustained cache loss inside a one-hour sliding window.
+	Alerting bool `json:"alerting"`
+	// LostTokensInWindow is the loss inside the current sliding alert window.
+	LostTokensInWindow int64 `json:"lost_tokens_in_window"`
 }
 
 // CacheRequest is a single request inside a session's cache sequence.
@@ -472,6 +481,9 @@ type CacheRequest struct {
 	At                    string `json:"at"`
 	Model                 string `json:"model"`
 	AuthID                string `json:"auth_id"`
+	Provider              string `json:"provider"`
+	CacheSignal           string `json:"cache_signal"`
+	PromptTokens          int64  `json:"prompt_tokens"`
 	InputTokens           int64  `json:"input_tokens"`
 	OutputTokens          int64  `json:"output_tokens"`
 	MaxTokens             int64  `json:"max_tokens"`
@@ -479,20 +491,27 @@ type CacheRequest struct {
 	CacheCreationTokens   int64  `json:"cache_creation_tokens"`
 	CacheCreation5mTokens int64  `json:"cache_creation_5m_tokens"`
 	CacheCreation1hTokens int64  `json:"cache_creation_1h_tokens"`
-	Tier                  string `json:"tier"`
-	DeltaRead             int64  `json:"delta_read"`
-	MissReason            string `json:"miss_reason"`
-	MissedTokens          int64  `json:"missed_tokens"`
-	IsProbe               bool   `json:"is_probe"`
+	// Tier is "T0", "hit", "miss" or "n/a" (provider reports no cache accounting).
+	Tier      string `json:"tier"`
+	DeltaRead int64  `json:"delta_read"`
+	// T0Cause is set only when Tier is "T0": "first", "rebind" or "expiry".
+	T0Cause      string `json:"t0_cause"`
+	Rebind       bool   `json:"rebind"`
+	MissReason   string `json:"miss_reason"`
+	MissedTokens int64  `json:"missed_tokens"`
+	IsProbe      bool   `json:"is_probe"`
 }
 
 // CacheStats is the payload of GET /v0/management/cache-stats.
 type CacheStats struct {
-	Enabled  bool             `json:"enabled"`
-	Global   CacheAggregate   `json:"global"`
-	Models   []CacheAggregate `json:"models"`
-	Auths    []CacheAggregate `json:"auths"`
-	Sessions []CacheSession   `json:"sessions"`
+	Enabled bool `json:"enabled"`
+	// Provider echoes the applied ?provider= filter; empty when unfiltered.
+	Provider  string           `json:"provider"`
+	Global    CacheAggregate   `json:"global"`
+	Providers []CacheAggregate `json:"providers"`
+	Models    []CacheAggregate `json:"models"`
+	Auths     []CacheAggregate `json:"auths"`
+	Sessions  []CacheSession   `json:"sessions"`
 }
 
 // CacheSessionDetail is the payload of GET /v0/management/cache-stats/sessions/{id}.
@@ -501,9 +520,16 @@ type CacheSessionDetail struct {
 	Requests []CacheRequest `json:"requests"`
 }
 
-// GetCacheStats fetches aggregated prompt-cache statistics.
-func (c *Client) GetCacheStats() (*CacheStats, error) {
-	data, err := c.get("/v0/management/cache-stats")
+// GetCacheStats fetches aggregated prompt-cache statistics. An empty provider
+// requests the unfiltered view.
+func (c *Client) GetCacheStats(provider string) (*CacheStats, error) {
+	path := "/v0/management/cache-stats"
+	if provider = strings.TrimSpace(provider); provider != "" {
+		query := url.Values{}
+		query.Set("provider", provider)
+		path += "?" + query.Encode()
+	}
+	data, err := c.get(path)
 	if err != nil {
 		return nil, err
 	}

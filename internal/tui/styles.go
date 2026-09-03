@@ -67,6 +67,19 @@ var (
 			Foreground(colorError).
 			Bold(true)
 
+	// alertStyle is louder than errorStyle: used for rows that must stand out
+	// above ordinary error highlighting (e.g. sustained cache loss).
+	alertStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(colorError).
+			Bold(true)
+
+	// rebindStyle marks records attributed to a different credential.
+	rebindStyle = lipgloss.NewStyle().Foreground(colorInfo)
+
+	// mutedStyle renders records the provider gives no cache accounting for.
+	mutedStyle = lipgloss.NewStyle().Foreground(colorMuted)
+
 	successStyle = lipgloss.NewStyle().
 			Foreground(colorSuccess)
 
