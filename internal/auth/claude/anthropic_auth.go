@@ -29,7 +29,11 @@ const (
 	ProfileURL      = "https://api.anthropic.com/api/oauth/profile"
 	// RolesURL is the claude_cli role endpoint the native client queries right
 	// after a successful token exchange, alongside the profile lookup.
-	RolesURL         = "https://api.anthropic.com/api/oauth/claude_cli/roles"
+	RolesURL = "https://api.anthropic.com/api/oauth/claude_cli/roles"
+	// UsageURL reports the rate-limit windows of an OAuth credential.
+	UsageURL = "https://api.anthropic.com/api/oauth/usage"
+	// UsageBeta is the anthropic-beta value the usage endpoint requires.
+	UsageBeta        = "oauth-2025-04-20"
 	ClientID         = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	RedirectURI      = "http://localhost:54545/callback"
 	ClaudeOAuthScope = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
@@ -220,9 +224,22 @@ func applyClaudeOAuthAxiosHeaders(req *http.Request) {
 	req.Close = true
 }
 
+// OAuthStatusError is returned by the OAuth control-plane fetchers when the
+// endpoint answered with a non-2xx status. Callers that surface upstream
+// status codes (the management quota endpoint) unwrap it with errors.As.
+type OAuthStatusError struct {
+	Label      string
+	StatusCode int
+}
+
+func (e *OAuthStatusError) Error() string {
+	return fmt.Sprintf("fetch Claude OAuth %s failed with status %d", e.Label, e.StatusCode)
+}
+
 // fetchOAuthControlPlaneJSON issues an Axios-shaped OAuth control-plane GET and
-// returns the decoded response body. label names the endpoint in error text.
-func (o *ClaudeAuth) fetchOAuthControlPlaneJSON(ctx context.Context, endpoint, accessToken, label string) ([]byte, error) {
+// returns the decoded response body. label names the endpoint in error text;
+// extraHeaders are set after the shared Axios headers.
+func (o *ClaudeAuth) fetchOAuthControlPlaneJSON(ctx context.Context, endpoint, accessToken, label string, extraHeaders map[string]string) ([]byte, error) {
 	if o == nil || o.httpClient == nil {
 		return nil, fmt.Errorf("fetch Claude OAuth %s: HTTP client is nil", label)
 	}
@@ -237,6 +254,9 @@ func (o *ClaudeAuth) fetchOAuthControlPlaneJSON(ctx context.Context, endpoint, a
 	applyClaudeOAuthAxiosHeaders(req)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Cache-Control", "no-cache")
+	for key, value := range extraHeaders {
+		req.Header.Set(key, value)
+	}
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -252,14 +272,14 @@ func (o *ClaudeAuth) fetchOAuthControlPlaneJSON(ctx context.Context, endpoint, a
 		return nil, fmt.Errorf("read Claude OAuth %s response: %w", label, errRead)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("fetch Claude OAuth %s failed with status %d", label, resp.StatusCode)
+		return nil, &OAuthStatusError{Label: label, StatusCode: resp.StatusCode}
 	}
 	return body, nil
 }
 
 // FetchOAuthProfile retrieves the account identity associated with an OAuth access token.
 func (o *ClaudeAuth) FetchOAuthProfile(ctx context.Context, accessToken string) (*OAuthProfile, error) {
-	body, errFetch := o.fetchOAuthControlPlaneJSON(ctx, ProfileURL, accessToken, "profile")
+	body, errFetch := o.fetchOAuthControlPlaneJSON(ctx, ProfileURL, accessToken, "profile", nil)
 	if errFetch != nil {
 		return nil, errFetch
 	}
@@ -278,12 +298,28 @@ func (o *ClaudeAuth) FetchOAuthProfile(ctx context.Context, accessToken string) 
 // covered by captured evidence, so the payload stays opaque and is returned raw
 // instead of being decoded into a guessed structure.
 func (o *ClaudeAuth) FetchOAuthRoles(ctx context.Context, accessToken string) (json.RawMessage, error) {
-	body, errFetch := o.fetchOAuthControlPlaneJSON(ctx, RolesURL, accessToken, "claude_cli roles")
+	body, errFetch := o.fetchOAuthControlPlaneJSON(ctx, RolesURL, accessToken, "claude_cli roles", nil)
 	if errFetch != nil {
 		return nil, errFetch
 	}
 	if !json.Valid(body) {
 		return nil, fmt.Errorf("parse Claude OAuth claude_cli roles response: body is not valid JSON")
+	}
+	return json.RawMessage(body), nil
+}
+
+// FetchOAuthUsage retrieves the rate-limit windows of an OAuth access token
+// from the usage endpoint the native client polls. The payload is returned
+// raw: its shape (`limits`, plus the older `five_hour`/`seven_day`) is
+// interpreted by the caller.
+func (o *ClaudeAuth) FetchOAuthUsage(ctx context.Context, accessToken string) (json.RawMessage, error) {
+	body, errFetch := o.fetchOAuthControlPlaneJSON(ctx, UsageURL, accessToken, "usage",
+		map[string]string{"anthropic-beta": UsageBeta})
+	if errFetch != nil {
+		return nil, errFetch
+	}
+	if !json.Valid(body) {
+		return nil, fmt.Errorf("parse Claude OAuth usage response: body is not valid JSON")
 	}
 	return json.RawMessage(body), nil
 }

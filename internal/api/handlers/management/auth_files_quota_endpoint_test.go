@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,8 +9,29 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
+
+// fakeClaudeOAuthUsageClient stands in for the Claude OAuth client: it
+// records the tokens and proxies it was built with and answers like the
+// usage endpoint would.
+type fakeClaudeOAuthUsageClient struct {
+	mu       sync.Mutex
+	tokens   []string
+	proxyURL string
+}
+
+func (f *fakeClaudeOAuthUsageClient) FetchOAuthUsage(_ context.Context, accessToken string) (json.RawMessage, error) {
+	f.mu.Lock()
+	f.tokens = append(f.tokens, accessToken)
+	f.mu.Unlock()
+	if accessToken == "expired-token" {
+		return nil, &claude.OAuthStatusError{Label: "usage", StatusCode: http.StatusUnauthorized}
+	}
+	return json.RawMessage(claudeOAuthUsageFixture), nil
+}
 
 const claudeOAuthUsageFixture = `{
   "five_hour": {"utilization": 100.0, "resets_at": "2026-09-02T16:19:59+00:00"},
@@ -43,25 +65,16 @@ func runAuthFileQuota(t *testing.T, h *Handler, rawQuery string) authFileQuotaRe
 
 func TestGetAuthFileQuotaReportsClaudeOAuthWindows(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	var headersMu sync.Mutex
-	var gotAuthorization, gotBeta string
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		headersMu.Lock()
-		gotAuthorization = r.Header.Get("Authorization")
-		gotBeta = r.Header.Get("anthropic-beta")
-		headersMu.Unlock()
-		if r.Header.Get("Authorization") == "Bearer expired-token" {
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(`{"error":{"type":"authentication_error","message":"secret detail"}}`))
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(claudeOAuthUsageFixture))
-	}))
-	defer upstream.Close()
-	previousURL := claudeOAuthUsageURL
-	claudeOAuthUsageURL = upstream.URL
-	defer func() { claudeOAuthUsageURL = previousURL }()
+	fake := &fakeClaudeOAuthUsageClient{}
+	var builtProxies []string
+	previousFactory := newClaudeOAuthUsageClient
+	newClaudeOAuthUsageClient = func(_ *config.Config, proxyURL string) claudeOAuthUsageClient {
+		fake.mu.Lock()
+		builtProxies = append(builtProxies, proxyURL)
+		fake.mu.Unlock()
+		return fake
+	}
+	defer func() { newClaudeOAuthUsageClient = previousFactory }()
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	oauthAuth := &coreauth.Auth{
@@ -71,6 +84,7 @@ func TestGetAuthFileQuotaReportsClaudeOAuthWindows(t *testing.T) {
 		Status:     coreauth.StatusActive,
 		Attributes: map[string]string{"path": "/tmp/claude-oauth.json"},
 		Metadata:   map[string]any{"access_token": "live-token", "email": "alice@example.com"},
+		ProxyURL:   "socks5://127.0.0.1:1080",
 	}
 	registerAuthForLookupTest(t, manager, oauthAuth)
 	registerAuthForLookupTest(t, manager, &coreauth.Auth{
@@ -93,11 +107,11 @@ func TestGetAuthFileQuotaReportsClaudeOAuthWindows(t *testing.T) {
 	if len(out.Files) != 1 {
 		t.Fatalf("files = %#v, want only the Claude OAuth credential", out.Files)
 	}
-	if gotAuthorization != "Bearer live-token" {
-		t.Fatalf("Authorization = %q, want the metadata access token", gotAuthorization)
+	if len(fake.tokens) != 1 || fake.tokens[0] != "live-token" {
+		t.Fatalf("tokens = %q, want only the metadata access token", fake.tokens)
 	}
-	if gotBeta != claudeOAuthUsageBeta {
-		t.Fatalf("anthropic-beta = %q, want %q", gotBeta, claudeOAuthUsageBeta)
+	if len(builtProxies) != 1 || builtProxies[0] != "socks5://127.0.0.1:1080" {
+		t.Fatalf("client proxies = %q, want the credential's own proxy_url", builtProxies)
 	}
 	entry := out.Files[0]
 	if entry.Name != "claude-oauth.json" || entry.Email != "alice@example.com" || entry.Provider != "claude" {

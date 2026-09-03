@@ -3,28 +3,36 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
-// claudeOAuthUsageURL is the Anthropic endpoint that reports the usage windows
-// of a Claude OAuth credential. It is a variable so tests can point it at a
-// local server.
-var claudeOAuthUsageURL = "https://api.anthropic.com/api/oauth/usage"
+const authFileQuotaConcurrency = 4
 
-const (
-	claudeOAuthUsageBeta     = "oauth-2025-04-20"
-	authFileQuotaMaxBodySize = 2 << 20
-	authFileQuotaConcurrency = 4
-)
+// claudeOAuthUsageClient is the slice of the Claude OAuth client this endpoint
+// needs. The usage request goes through that client on purpose: it carries
+// the Firefox-uTLS transport and Axios-shaped headers Anthropic's OAuth
+// control plane expects, which a plain transport can trip over.
+type claudeOAuthUsageClient interface {
+	FetchOAuthUsage(ctx context.Context, accessToken string) (json.RawMessage, error)
+}
+
+// newClaudeOAuthUsageClient builds the client for one credential, honoring
+// its own proxy_url over the global one. A variable so tests can substitute
+// a fake without a network.
+var newClaudeOAuthUsageClient = func(cfg *config.Config, proxyURL string) claudeOAuthUsageClient {
+	return claude.NewClaudeAuthWithProxyURL(cfg, proxyURL)
+}
 
 // authFileQuotaWindow is one usage window as reported by the provider.
 // Kind keeps the provider's own vocabulary (Anthropic: "session",
@@ -138,43 +146,28 @@ func (h *Handler) fetchClaudeOAuthQuota(ctx context.Context, auth *coreauth.Auth
 		ObservedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	req, errNewRequest := http.NewRequestWithContext(ctx, http.MethodGet, claudeOAuthUsageURL, nil)
-	if errNewRequest != nil {
-		entry.Error = "failed to build request"
-		return entry
+	// No timeout beyond the transport's dial and TLS handshake bounds: once
+	// the upstream connection is up the request only ends with the response
+	// or the caller's context (the management client disconnecting).
+	// Repository policy allows timeouts during credential acquisition only.
+	var cfg *config.Config
+	if h != nil {
+		cfg = h.cfg
 	}
-	req.Header.Set("Authorization", "Bearer "+tokenValueFromMetadata(auth.Metadata))
-	req.Header.Set("anthropic-beta", claudeOAuthUsageBeta)
-	req.Header.Set("Accept", "application/json")
-
-	// No client-wide timeout: the transport's dial and TLS handshake
-	// timeouts bound connection setup, and once the upstream connection is
-	// established the request only ends with the response or the caller's
-	// context (the management client disconnecting). Repository policy
-	// allows timeouts during credential acquisition only.
-	httpClient := &http.Client{Transport: h.apiCallTransport(auth, "")}
-	resp, errDo := httpClient.Do(req)
-	if errDo != nil {
-		log.WithError(errDo).Debug("management auth file quota request failed")
+	client := newClaudeOAuthUsageClient(cfg, auth.ProxyURL)
+	body, errFetch := client.FetchOAuthUsage(ctx, tokenValueFromMetadata(auth.Metadata))
+	if errFetch != nil {
+		var statusErr *claude.OAuthStatusError
+		if errors.As(errFetch, &statusErr) {
+			entry.StatusCode = statusErr.StatusCode
+			entry.Error = fmt.Sprintf("upstream returned status %d", statusErr.StatusCode)
+			return entry
+		}
+		log.WithError(errFetch).Debug("management auth file quota request failed")
 		entry.Error = "request failed"
 		return entry
 	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
-		}
-	}()
-
-	entry.StatusCode = resp.StatusCode
-	body, errReadAll := io.ReadAll(io.LimitReader(resp.Body, authFileQuotaMaxBodySize))
-	if errReadAll != nil {
-		entry.Error = "failed to read response"
-		return entry
-	}
-	if resp.StatusCode != http.StatusOK {
-		entry.Error = fmt.Sprintf("upstream returned status %d", resp.StatusCode)
-		return entry
-	}
+	entry.StatusCode = http.StatusOK
 
 	windows, errParse := parseClaudeOAuthUsage(body)
 	if errParse != nil {
