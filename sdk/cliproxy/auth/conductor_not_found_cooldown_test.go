@@ -968,3 +968,146 @@ func TestMarkResultGenericNotFoundSurvivesRacingShort429(t *testing.T) {
 		t.Fatalf("short 429 shortened the generic-404 deadline: NextRetryAfter = %v, want >= %v", updated.ModelStates["gpt-5"].NextRetryAfter, genericDeadline)
 	}
 }
+
+// TestIsExplicitModelNotFoundError_ProviderShapes covers Codex's finding
+// that isExplicitModelNotFoundError missed Gemini's official missing-model
+// 404 shape, plus every other provider family the gateway fronts. Positive
+// fixtures are the documented/observed missing-model error bodies per
+// provider; negatives are a generic 404 and an endpoint-not-found 404 for
+// each provider family, which must NOT classify as explicit (they belong on
+// the short transient-retry path, not the 12h cooldown).
+//
+// xAI and Kimi are OpenAI-compatible upstreams: both executors pass the raw
+// upstream body through as statusErr.msg (kimi_executor.go:201,
+// xai_executor_execute.go), so any body conforming to the OpenAI envelope
+// (error.code == "model_not_found") is already structurally covered by the
+// "openai explicit not-found" case below - COULD-NOT-DETERMINE applies only
+// to their exact message wording: no captured fixture or documented string
+// for xAI's or Kimi's missing-model response exists in this repo, so no
+// provider-specific grammar was added or claimed for either.
+func TestIsExplicitModelNotFoundError_ProviderShapes(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		model    string
+		explicit bool
+	}{
+		// Gemini / Vertex / AI Studio: error.status == "NOT_FOUND", message
+		// "models/<id> is not found for API version ..., or is not
+		// supported for ...". Source: Codex review comment on #5472,
+		// 2026-09-03T18:12:51Z, sdk/cliproxy/auth/conductor_cooldown.go:2022.
+		{
+			name:     "gemini explicit not-found",
+			body:     `{"error":{"code":404,"message":"models/gemini-2.5-flash is not found for API version v1beta, or is not supported for bidiGenerateContent. Call ListModels to see the list of available models and their supported methods.","status":"NOT_FOUND"}}`,
+			model:    "gemini-2.5-flash",
+			explicit: true,
+		},
+		{
+			name:     "gemini generic 404 without model reference",
+			body:     `{"error":{"code":404,"message":"Requested entity was not found.","status":"NOT_FOUND"}}`,
+			model:    "gemini-2.5-flash",
+			explicit: false,
+		},
+		{
+			name:     "gemini endpoint not found",
+			body:     `{"error":{"code":404,"message":"method not found for API version v1beta.","status":"NOT_FOUND"}}`,
+			model:    "gemini-2.5-flash",
+			explicit: false,
+		},
+
+		// Anthropic: error.type == "not_found_error", message "model: <id>".
+		// Already covered pre-fix via the "type" key + "model:" prefix
+		// grammar; included here as a documented positive control.
+		{
+			name:     "anthropic explicit not-found",
+			body:     `{"type":"error","error":{"type":"not_found_error","message":"model: claude-not-a-real-model"}}`,
+			model:    "claude-not-a-real-model",
+			explicit: true,
+		},
+		{
+			name:     "anthropic generic 404",
+			body:     `{"type":"error","error":{"type":"not_found_error","message":"resource not found"}}`,
+			model:    "claude-not-a-real-model",
+			explicit: false,
+		},
+
+		// OpenAI: error.code == "model_not_found". Already covered
+		// pre-fix via the "code" key alone; included as a positive control.
+		{
+			name:     "openai explicit not-found",
+			body:     `{"error":{"message":"The model 'gpt-not-a-real-model' does not exist","type":"invalid_request_error","param":null,"code":"model_not_found"}}`,
+			model:    "gpt-not-a-real-model",
+			explicit: true,
+		},
+		{
+			name:     "openai generic 404",
+			body:     `{"error":{"message":"Unknown request URL.","type":"invalid_request_error","param":null,"code":null}}`,
+			model:    "gpt-not-a-real-model",
+			explicit: false,
+		},
+
+		// OpenAI-compatible / Ollama: two documented message shapes -
+		// `model "<id>" not found` and `model '<id>' not found, try
+		// pulling it first`.
+		{
+			name:     "ollama double-quoted not-found",
+			body:     `{"error":"model \"llama-not-a-real-model\" not found"}`,
+			model:    "llama-not-a-real-model",
+			explicit: true,
+		},
+		{
+			name:     "ollama single-quoted not-found with guidance suffix",
+			body:     `{"error":"model 'llama-not-a-real-model' not found, try pulling it first"}`,
+			model:    "llama-not-a-real-model",
+			explicit: true,
+		},
+		{
+			name:     "ollama generic 404",
+			body:     `{"error":"not found"}`,
+			model:    "llama-not-a-real-model",
+			explicit: false,
+		},
+
+		// Codex: OpenAI Responses-style envelope, error.type ==
+		// "not_found_error" (see internal/runtime/executor/codex_executor_terminal.go:172).
+		// The exact missing-model message wording is COULD-NOT-DETERMINE -
+		// no captured fixture or documented string exists in this repo for
+		// Codex's specific phrasing, so this fixture only exercises the
+		// type+model-reference combination already covered by the
+		// pre-existing "type" key path, not a Codex-specific grammar addition.
+		{
+			name:     "codex explicit not-found (type+model combo, wording unverified)",
+			body:     `{"error":{"type":"not_found_error","code":"model_not_found","message":"model: codex-not-a-real-model"}}`,
+			model:    "codex-not-a-real-model",
+			explicit: true,
+		},
+		{
+			name:     "codex generic 404",
+			body:     `{"error":{"type":"not_found_error","code":"not_found","message":"resource not found"}}`,
+			model:    "codex-not-a-real-model",
+			explicit: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := statusErrForTest{code: http.StatusNotFound, msg: tt.body}
+			got := isExplicitModelNotFoundError(err, tt.model)
+			if got != tt.explicit {
+				t.Fatalf("isExplicitModelNotFoundError(%q, %q) = %v, want %v", tt.body, tt.model, got, tt.explicit)
+			}
+		})
+	}
+}
+
+// statusErrForTest is a minimal error carrying a raw upstream body as its
+// Error() text, mirroring how executors (openai_compat_executor.go's
+// statusErr, kimi_executor.go, xai_executor_*.go) surface the unparsed
+// response body for downstream structured-error classification.
+type statusErrForTest struct {
+	code int
+	msg  string
+}
+
+func (e statusErrForTest) Error() string   { return e.msg }
+func (e statusErrForTest) StatusCode() int { return e.code }

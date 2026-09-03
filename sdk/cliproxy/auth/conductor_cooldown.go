@@ -1823,7 +1823,7 @@ func containsStructuredModelNotFound(value any, requestedModel string) bool {
 					if isModelNotFoundIdentifier(text) {
 						return true
 					}
-				case "type":
+				case "type", "status":
 					if isModelNotFoundIdentifier(text) {
 						return true
 					}
@@ -1892,6 +1892,13 @@ func isExplicitModelNotFoundMessage(message, requestedModel string) bool {
 	if strings.Contains(normalized, "model_not_found") || strings.Contains(normalized, "unknown_model") {
 		return true
 	}
+	// Gemini/Vertex/AI Studio's documented missing-model shape: message
+	// "models/<id> is not found for API version ..., or is not supported
+	// for ...". The "models/" prefix (no space) falls outside the generic
+	// "model " / "model:" prefix grammar below, so it needs its own check.
+	if isGeminiModelNotFoundMessage(lower, requestedModel) {
+		return true
+	}
 	for _, prefix := range []string{"no such model", "unknown model"} {
 		if lower != prefix && !strings.HasPrefix(lower, prefix+" ") && !strings.HasPrefix(lower, prefix+":") {
 			continue
@@ -1954,12 +1961,42 @@ func trimRequestedModelReference(value, requestedModel string) (string, bool) {
 }
 
 func isMissingModelPhrase(value string) bool {
-	switch strings.Trim(value, " .!;\t\r\n") {
-	case "not found", "was not found", "could not be found", "does not exist", "doesn't exist", "not exist", "is unknown":
-		return true
-	default:
+	trimmed := strings.Trim(value, " .!;\t\r\n")
+	for _, phrase := range []string{"not found", "was not found", "could not be found", "does not exist", "doesn't exist", "not exist", "is unknown"} {
+		if trimmed == phrase {
+			return true
+		}
+		// Ollama's shape appends guidance after the phrase, e.g.
+		// `model '<id>' not found, try pulling it first` - accept a
+		// comma/semicolon-delimited continuation without accepting an
+		// unrelated word run-on (`not founder` etc.).
+		if strings.HasPrefix(trimmed, phrase+",") || strings.HasPrefix(trimmed, phrase+";") {
+			return true
+		}
+	}
+	return false
+}
+
+// isGeminiModelNotFoundMessage recognizes the official Gemini/Vertex/AI
+// Studio missing-model 404 message shape:
+//
+//	"models/<id> is not found for API version v1beta, or is not supported
+//	for bidiGenerateContent. Call ListModels to see the list of available
+//	models and their supported methods."
+//
+// lower must already be lowercased and trimmed of leading/trailing
+// whitespace and sentence punctuation (see isExplicitModelNotFoundMessage).
+func isGeminiModelNotFoundMessage(lower, requestedModel string) bool {
+	const prefix = "models/"
+	if !strings.HasPrefix(lower, prefix) {
 		return false
 	}
+	remainder := strings.TrimPrefix(lower, prefix)
+	suffix, matches := trimRequestedModelReference(remainder, requestedModel)
+	if !matches {
+		return false
+	}
+	return strings.HasPrefix(strings.TrimSpace(suffix), "is not found")
 }
 
 // isRequestInvalidError returns true if the error represents a client request
