@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -54,41 +55,70 @@ func (p cacheKeepaliveProber) Probe(ctx context.Context, probe keepalive.ProbeRe
 		return keepalive.ProbeResult{}, err
 	}
 	usage := gjson.GetBytes(resp.Payload, "usage")
+	reason, missedTokens := claudeCacheMissReason(resp.Payload)
 	return keepalive.ProbeResult{
 		CacheReadInputTokens:     usage.Get("cache_read_input_tokens").Int(),
 		CacheCreationInputTokens: usage.Get("cache_creation_input_tokens").Int(),
-		Diagnosis:                claudeCacheDiagnosis(resp.Payload),
+		Diagnosis:                reason,
+		CacheMissedInputTokens:   missedTokens,
 	}, nil
 }
 
-// claudeCacheDiagnosis extracts the upstream cache-miss explanation when the
-// account carries the cache-diagnosis beta and the response supplied one.
+// claudeCacheMissReason reads the cache-miss diagnostics a Claude response
+// carries when the account has the cache-diagnosis beta.
 //
-// diagnostics.cache_miss_reason is the documented field. The others are shapes
-// seen on the wire; every known location is tried in order and an absent
-// diagnosis is simply empty, so a wrong guess costs an empty string, never an
-// error.
-func claudeCacheDiagnosis(payload []byte) string {
-	for _, path := range []string{
-		"diagnostics.cache_miss_reason",
-		"usage.diagnostics.cache_miss_reason",
-		"usage.cache_diagnosis.reason",
-		"usage.cache_diagnosis",
-		"cache_diagnosis.reason",
-		"cache_diagnosis",
-	} {
-		value := gjson.GetBytes(payload, path)
-		if !value.Exists() {
+// Two confirmed shapes, both captured on the wire:
+//
+//	non-streaming: {"usage":{...},"diagnostics":{"cache_miss_reason":{"type":"messages_changed","cache_missed_input_tokens":25154}}}
+//	streaming:     the identical object inside the message_start event's "message"
+//
+// This duplicates applyClaudeCacheMissReason in
+// internal/runtime/executor/helps/claude_cache_diagnostics.go on the cache-stats
+// branch. That file is not on this branch, so the two paths are read here
+// directly; fold them into the shared helper once both land.
+func claudeCacheMissReason(payload []byte) (string, int64) {
+	if len(payload) == 0 {
+		return "", 0
+	}
+	if gjson.ValidBytes(payload) {
+		root := gjson.ParseBytes(payload)
+		// Non-streaming: diagnostics sits beside usage at the top level.
+		if reason, tokens := cacheMissReasonAt(root); reason != "" || tokens != 0 {
+			return reason, tokens
+		}
+		// A whole message_start object handed over directly.
+		if reason, tokens := cacheMissReasonAt(root.Get("message")); reason != "" || tokens != 0 {
+			return reason, tokens
+		}
+		return "", 0
+	}
+	// Streaming: scan the SSE for the message_start event that carries it.
+	for _, line := range bytes.Split(payload, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
 			continue
 		}
-		if value.IsObject() || value.IsArray() {
-			return strings.TrimSpace(value.Raw)
+		event := bytes.TrimSpace(line[len("data:"):])
+		if len(event) == 0 || !gjson.ValidBytes(event) {
+			continue
 		}
-		if text := strings.TrimSpace(value.String()); text != "" {
-			return text
+		root := gjson.ParseBytes(event)
+		if root.Get("type").String() != "message_start" {
+			continue
+		}
+		if reason, tokens := cacheMissReasonAt(root.Get("message")); reason != "" || tokens != 0 {
+			return reason, tokens
 		}
 	}
-	return ""
+	return "", 0
+}
+
+func cacheMissReasonAt(node gjson.Result) (string, int64) {
+	reason := node.Get("diagnostics.cache_miss_reason")
+	if !reason.Exists() {
+		return "", 0
+	}
+	return strings.TrimSpace(reason.Get("type").String()), reason.Get("cache_missed_input_tokens").Int()
 }
 
 // cacheKeepaliveBinding answers whether the session is still bound to the

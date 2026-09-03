@@ -96,9 +96,12 @@ type ProbeResult struct {
 	// CacheCreationInputTokens is cache_creation_input_tokens from the probe
 	// response. A probe that writes rather than reads has already lost the race.
 	CacheCreationInputTokens int64
-	// Diagnosis carries the upstream cache-miss explanation when the account has
-	// the cache-diagnosis beta and the response supplied one.
+	// Diagnosis is diagnostics.cache_miss_reason.type from the response, when
+	// the account has the cache-diagnosis beta and the response supplied one.
 	Diagnosis string
+	// CacheMissedInputTokens is diagnostics.cache_miss_reason.cache_missed_input_tokens:
+	// how much of the prefix the upstream had to re-read.
+	CacheMissedInputTokens int64
 }
 
 // Prober sends a probe through the same execution path a real request uses.
@@ -200,6 +203,7 @@ type ProbeOutcome struct {
 	BaselineReadInputTokens int64  `json:"baseline_read_input_tokens,omitempty"`
 	Error                   string `json:"error,omitempty"`
 	Diagnosis               string `json:"diagnosis,omitempty"`
+	CacheMissedInputTokens  int64  `json:"cache_missed_input_tokens,omitempty"`
 }
 
 // Probe outcome statuses.
@@ -578,6 +582,7 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 		CacheCreationInputTokens: result.CacheCreationInputTokens,
 		BaselineReadInputTokens:  baselineRead,
 		Diagnosis:                result.Diagnosis,
+		CacheMissedInputTokens:   result.CacheMissedInputTokens,
 	}
 	if probeMissed(result.CacheReadInputTokens, baselineRead) {
 		outcome.Status = ProbeStatusMiss
@@ -644,8 +649,8 @@ func (s *Scheduler) logProbe(sessionID, authID, model string, outcome ProbeOutco
 		elapsed.Round(time.Millisecond), total, consecutive, rescheduled, next,
 	}
 	if outcome.Status == ProbeStatusMiss {
-		fields += " cache_miss_reason=%q"
-		args = append(args, outcome.Diagnosis)
+		fields += " cache_miss_reason=%q cache_missed_input_tokens=%d"
+		args = append(args, outcome.Diagnosis, outcome.CacheMissedInputTokens)
 		log.Warnf("cache-keepalive: probe MISSED | "+fields, args...)
 		return
 	}
