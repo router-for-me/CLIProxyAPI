@@ -192,6 +192,7 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 		return false
 	}
 	s.syncPluginModelRuntime(registrationCtx)
+	s.applyCacheStatsConfig(cfg)
 	return ctx.Err() == nil
 }
 
