@@ -203,15 +203,42 @@ claude-code:
   # binding, so its probe warms the same per-account entry the next real request hits.
   # A client-side hook cannot guarantee the account.
   #
-  # Only requests from a confirmed Claude Code client that carried an explicit
-  # cache_control ttl of "1h" are ever probed. A 5m request is never probed: on that
-  # pool the thirteen reads an hour cost more than the single write they avoid.
+  # Only requests from a confirmed Claude Code client are ever observed. Which cache
+  # pool is probed depends on the tier: a request that spelled out cache_control ttl
+  # "1h" is always eligible, while a 5m request is governed by probe-5m below.
   cache-keepalive:
     # Opt-in. Default false.
     enabled: false
 
-    # Fire the probe at (request start + ttl - before-expiry). Default 5m.
+    # Fire the probe at (request start + ttl - before-expiry) on the 1h pool.
+    # Default 5m.
     before-expiry: 5m
+
+    # The same lead time for the 5m pool. Default 45s. The TTL clock runs from the
+    # start of the request that wrote the entry and generation time counts against
+    # it, so this margin has to cover a slow turn plus the probe's own round trip
+    # and still land inside the window. Must be below 5m.
+    before-expiry-5m: 45s
+
+    # When to probe a session on the 5m pool.
+    #   auto    probe only when the request model's cache reads are cheap enough
+    #           for the arithmetic to work out (default). A probe buys one read and
+    #           avoids one write: at the usual 0.1x-base read against a 1.25x-base
+    #           write, the ~12 reads an hour a 5m window needs are a wash, but
+    #           claude-fable-5-1 and claude-mythos-5-1 read at 0.025x base
+    #           ($0.25/MTok against $10/MTok input), so the same 12 reads cost about
+    #           a third of the write they avoid.
+    #   always  probe every confirmed session regardless of model.
+    #   never   probe only 1h sessions, the original behaviour.
+    probe-5m: auto
+
+    # Replaces the built-in cheap-cache-read list "auto" matches the request model
+    # against. Entries match case-insensitively as substrings, so a provider-prefixed
+    # or suffixed spelling still resolves. Empty means the built-in list
+    # (claude-fable-5-1, claude-mythos-5-1).
+    # probe-5m-models:
+    #   - claude-fable-5-1
+    #   - claude-mythos-5-1
 
     # Probe only while a task of that session is still running. A session idling on
     # human input is never probed: that wait is unbounded, and the guarantee that
@@ -236,10 +263,16 @@ claude-code:
     # this above the longest silence worth paying a probe for.
     agent-idle-window: 10m
 
-    # Stop after this many consecutive probes without an intervening real request.
-    # Bounds the cost of an abandoned session to max-probes reads of its prefix.
-    # Default 6.
+    # Stop after this many consecutive probes without an intervening real request
+    # on the 1h pool. Bounds the cost of an abandoned session to max-probes reads
+    # of its prefix. Default 6.
     max-probes: 6
+
+    # The same cap for the 5m pool, where each probe buys only one short window:
+    # 6 probes would cover 25 minutes there against 6 hours on the 1h pool.
+    # Default 30, about two hours of idle. The liveness check above is what
+    # actually bounds the spend on a live session; this bounds an abandoned one.
+    max-probes-5m: 30
 
     # max_tokens the probe body carries. Default 1.
     max-tokens: 1

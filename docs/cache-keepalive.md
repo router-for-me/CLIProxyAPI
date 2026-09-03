@@ -10,29 +10,63 @@ longer than the prompt cache TTL. When the subagent returns, the next request is
 a full re-write of the whole context at the cache-write premium instead of a read
 at a tenth of the base rate.
 
-On the 5m pool a refresh is not worth it: thirteen reads an hour cost more than
-the single write they avoid. On the 1h pool the arithmetic reverses, and one read
-per hour is close to free next to a re-write of a large prefix.
+On the 1h pool the arithmetic is easy: one read per hour is close to free next to
+a re-write of a large prefix. On the 5m pool it depends on the model, which the
+next section works out.
 
 The proxy is the right place for the refresh. It holds the last request body, the
 credential, and the session-to-account binding, so its probe warms the same
 per-account entry the next real request will hit. A client-side hook cannot
 guarantee which account the refresh lands on.
 
+## Why 5m sessions are worth probing on Fable 5.1
+
+The break-even is the cache-read multiple of base input, because a probe buys one
+read and avoids one write.
+
+| | cache read | cache write (1h) | 12 reads/hour | vs. the write |
+|---|---|---|---|---|
+| most Claude models | 0.1x base | 1.25x base | 1.2x | a wash |
+| claude-fable-5-1, claude-mythos-5-1 | 0.025x base | 1.25x base | 0.3x | ~4x cheaper |
+
+On Fable 5.1 a cache read is $0.25/MTok against $10/MTok base input, so holding a
+5m entry open costs about a third of what letting it expire and re-writing costs.
+That is why `probe-5m` defaults to `auto` and probes exactly those models.
+Anthropic's prompt-caching guidance makes the same point from the other side: on
+these models prefer a keepalive on the 5m tier over paying the 1h TTL premium,
+unless pauses regularly approach an hour.
+
+The list of models lives in `CheapCacheReadModels` in
+`internal/runtime/keepalive/probe_5m.go` and is matched case-insensitively as a
+substring, so `us.anthropic.claude-fable-5-1-v1:0` and `claude-fable-5-1[1m]`
+both resolve. `probe-5m-models` replaces it without a rebuild when a new model
+lands first.
+
+`probe-5m: always` probes every confirmed session regardless of model, and
+`probe-5m: never` restores the original 1h-only rule.
+
 ## Policy
 
 A probe is only sent while a task belonging to that session is still running. A
 session idling on human input is never probed: that wait is unbounded, and the
 guarantee that another turn is coming is what makes the probe pay for itself.
+That gate, not the probe count, is what bounds the spend on either tier.
 
 ## How it works
 
-1. **Observe.** Every request that a confirmed Claude Code client sent with an
-   explicit `cache_control` `ttl` of `1h` is recorded against its session id, taken
-   from `metadata.user_id` or the `X-Claude-Code-Session-Id` header. The scheduler
-   stores the client body, the headers, and the credential that served it, then
-   arms a timer for `request start + ttl - before-expiry`. A request carrying only
-   a 5m marker never schedules anything.
+1. **Observe.** Every request that a confirmed Claude Code client sent with a
+   `cache_control` marker is recorded against its session id, taken from
+   `metadata.user_id` or the `X-Claude-Code-Session-Id` header. A marker with an
+   explicit `ttl` of `1h` puts the session on the 1h tier; anything else, a bare
+   `{"type":"ephemeral"}` included, is the 5m tier and is scheduled only when
+   `probe-5m` allows it. The scheduler stores the client body, the headers, and
+   the credential that served it, then arms a timer for
+   `request start + ttl - before-expiry`, using `before-expiry-5m` on the 5m tier.
+
+   The clock starts at the **request's** start, not the response's, and
+   generation time counts against the TTL. That is why the 5m lead time defaults
+   to 45s: the margin has to cover a slow turn plus the probe's own round trip
+   and still land inside the window.
 
 2. **Fire.** At the timer, in order:
    - a newer request for that session supersedes the probe, which is dropped;
@@ -49,9 +83,11 @@ guarantee that another turn is coming is what makes the probe pay for itself.
      marker stay byte-identical, and the request keeps the observed
      `Anthropic-Beta` list including `extended-cache-ttl-2025-04-11`.
 
-3. **Reschedule.** The next probe is measured from this probe's own start time.
-   After `max-probes` consecutive probes with no real request in between, the
-   session is dropped.
+3. **Reschedule.** The next probe is measured from this probe's own start time,
+   again with the tier's lead time. After `max-probes` consecutive probes with no
+   real request in between, the session is dropped; the 5m tier uses
+   `max-probes-5m`, because six probes buy six hours on the 1h pool and only 25
+   minutes here. The default of 30 covers about two hours of idle.
 
 ## Liveness
 
@@ -110,7 +146,10 @@ state the proxy cannot see, and it will keep probing an idle session until
 
 One read of the prefix per `ttl - before-expiry` while agents run. With a 400k
 prefix on the 1h pool that is roughly 40k token-equivalents an hour, against the
-~800k a re-write would cost. `max-probes` bounds an abandoned session.
+~800k a re-write would cost. On the 5m pool the same prefix on Fable 5.1 costs
+about 120k token-equivalents an hour against that same ~500k write. `max-probes`
+and `max-probes-5m` bound an abandoned session, and the liveness gate bounds a
+live one.
 
 ## Safety
 
@@ -125,11 +164,17 @@ the session is bound to.
 claude-code:
   cache-keepalive:
     enabled: false                 # opt-in
-    before-expiry: 5m              # fire at ttl - before-expiry
+    before-expiry: 5m              # 1h pool: fire at ttl - before-expiry
+    before-expiry-5m: 45s          # 5m pool: same, measured from the request start
+    probe-5m: auto                 # auto | always | never
+    # probe-5m-models:             # replaces the built-in cheap-cache-read list
+    #   - claude-fable-5-1
+    #   - claude-mythos-5-1
     only-when-agents-active: true
     liveness: claude-code-tasks    # or: always
     agent-idle-window: 10m         # how long an agent may be silent and still count as running
-    max-probes: 6
+    max-probes: 6                  # 1h pool
+    max-probes-5m: 30              # 5m pool, ~2h of idle
     max-tokens: 1
     # task-state-dirs:
     #   - "~/.claude/tasks"
@@ -150,11 +195,19 @@ Every line is prefixed `cache-keepalive:`, so `grep cache-keepalive main.log`
 tells the whole story with no other source.
 
 ```
-cache-keepalive: enabled | before-expiry=5m0s only-when-agents-active=true liveness=claude-code-tasks max-probes=6 max-tokens=1
-cache-keepalive: scheduled | session=4463ede6... auth=<id> model=<model> ttl=1h0m0s fires_in=55m0s next_probe_at=2026-09-02T20:51:57-07:00
-cache-keepalive: probe | session=4463ede6... auth=<id> model=<model> status=hit cache_read_input_tokens=161937 cache_creation_input_tokens=0 duration=612ms probes_sent=1 consecutive_probes=1 rescheduled=true next_probe_at=2026-09-02T21:46:57-07:00
-cache-keepalive: skipped | session=4463ede6... auth=<id> model=<model> reason=no-live-agents
+cache-keepalive: enabled | before-expiry=5m0s before-expiry-5m=45s probe-5m=auto only-when-agents-active=true liveness=claude-code-tasks agent-idle-window=10m0s max-probes=6 max-probes-5m=30 max-tokens=1
+cache-keepalive: scheduled | session=4463ede6... auth=<id> model=<model> ttl=1h0m0s ttl_tier=1h probe_5m=n/a fires_in=55m0s next_probe_at=2026-09-02T20:51:57-07:00
+cache-keepalive: scheduled | session=8f21ac03... auth=<id> model=claude-fable-5-1 ttl=5m0s ttl_tier=5m probe_5m=model-auto fires_in=4m15s next_probe_at=2026-09-02T20:36:12-07:00
+cache-keepalive: probe | session=4463ede6... auth=<id> model=<model> ttl_tier=1h probe_5m=n/a status=hit cache_read_input_tokens=161937 cache_creation_input_tokens=0 duration=612ms probes_sent=1 consecutive_probes=1 rescheduled=true next_probe_at=2026-09-02T21:46:57-07:00
+cache-keepalive: skipped | session=4463ede6... auth=<id> model=<model> ttl_tier=1h reason=no-live-agents
 ```
+
+`ttl_tier` is `5m` or `1h`, and `probe_5m` is the tier decision: `model-auto`
+when `auto` matched the request model, `always`, `skipped-never`,
+`skipped-model`, or `n/a` on the 1h pool where the policy does not apply. The two
+skips are logged at debug level, since a proxy serving mixed models emits one per
+request, and are counted under `counters.skipped_by_reason` where they stay
+visible at any log level.
 
 A probe that fails to refresh the entry is the malfunction signal, logged at
 **warning** level with `diagnostics.cache_miss_reason` when the account has the
@@ -189,8 +242,12 @@ route. It returns the live scheduler state:
 {
   "enabled": true,
   "before_expiry": "58m0s",
+  "before_expiry_5m": "45s",
+  "probe_5m": "auto",
+  "probe_5m_models": ["claude-fable-5-1", "claude-mythos-5-1"],
   "only_when_agents_active": false,
   "max_probes": 2,
+  "max_probes_5m": 30,
   "max_tokens": 1,
   "sessions": [
     {
@@ -200,6 +257,8 @@ route. It returns the live scheduler state:
       "model": "claude-haiku-4-5-20251001",
       "ttl": "1h0m0s",
       "ttl_seconds": 3600,
+      "ttl_tier": "1h",
+      "probe_5m_decision": "n/a",
       "last_request_at": "2026-09-02T20:31:12-07:00",
       "next_probe_at": "2026-09-02T20:35:11-07:00",
       "probes_sent": 1,
@@ -223,6 +282,10 @@ route. It returns the live scheduler state:
   }
 }
 ```
+
+`ttl_tier` and `probe_5m_decision` say which pool the session is on and why it is
+being probed, so a session missing from the list is explained by the counters
+rather than by guesswork.
 
 `status` is `hit`, `miss`, `error`, or `skipped`; a skipped entry carries
 `skipped_reason`, and a miss carries `diagnosis` and `cache_missed_input_tokens`
