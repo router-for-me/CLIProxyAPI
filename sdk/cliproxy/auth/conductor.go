@@ -50,6 +50,8 @@ type Result struct {
 	Provider string
 	// Model is the upstream model identifier used for the request.
 	Model string
+	// UpstreamModel is the actual provider model attempted after alias resolution.
+	UpstreamModel string
 	// RouteModel is the requested logical route model before alias resolution.
 	RouteModel string
 	// Success marks whether the execution succeeded.

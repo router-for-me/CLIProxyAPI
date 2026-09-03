@@ -125,7 +125,7 @@ func TestApplyAuthFailureState_429SubSecondRetryAfter_EnforcesMinimumCooldownFlo
 		Message:    "RESOURCE_EXHAUSTED",
 	}
 
-	applyAuthFailureState(auth, quotaErr, &subSecond, now, false)
+	applyAuthFailureState(auth, quotaErr, &subSecond, "", now, false)
 
 	if auth.NextRetryAfter.IsZero() {
 		t.Fatal("expected NextRetryAfter to be set")

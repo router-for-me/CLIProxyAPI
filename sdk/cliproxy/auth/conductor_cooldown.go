@@ -736,6 +736,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		return
 	}
 	modelKey := canonicalModelKey(result.Model)
+	classificationModel := strings.TrimSpace(result.UpstreamModel)
+	if classificationModel == "" {
+		classificationModel = result.Model
+	}
 
 	var authSnapshot *Auth
 	cooldownStateChanged := false
@@ -834,12 +838,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								state.NextRetryAfter = next
 							}
 						case 404:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(12 * time.Hour)
-								state.NextRetryAfter = next
-							}
+							state.NextRetryAfter = notFoundRetryAfter(result.Error, classificationModel, &state.Quota, now, disableCooling)
+							state.Unavailable = !state.NextRetryAfter.IsZero()
 						case 429:
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
@@ -917,7 +917,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 					disableCooling = false
 				}
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				applyAuthFailureState(auth, result.Error, result.RetryAfter, classificationModel, now, disableCooling)
 			}
 		}
 
@@ -1981,7 +1981,47 @@ func isRequestInvalidError(err error) bool {
 	return false
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
+func notFoundRetryAfter(resultErr *Error, requestedModel string, retryState *QuotaState, now time.Time, disableCooling bool) time.Time {
+	if disableCooling {
+		return time.Time{}
+	}
+	if isExplicitModelNotFoundError(resultErr, requestedModel) {
+		return now.Add(12 * time.Hour)
+	}
+	if retryState != nil && retryState.NextRecoverAt.After(now) {
+		return retryState.NextRecoverAt
+	}
+
+	baseRetryAt := nextTransientErrorRetryAfter(now)
+	if baseRetryAt.IsZero() {
+		return time.Time{}
+	}
+	backoffLevel := 0
+	if retryState != nil && retryState.BackoffLevel > 0 {
+		backoffLevel = retryState.BackoffLevel
+	}
+	cooldown := baseRetryAt.Sub(now)
+	for level := 0; level < backoffLevel && cooldown < quotaBackoffMax; level++ {
+		if cooldown > quotaBackoffMax/2 {
+			cooldown = quotaBackoffMax
+			break
+		}
+		cooldown *= 2
+	}
+	if cooldown > quotaBackoffMax {
+		cooldown = quotaBackoffMax
+	}
+	if retryState != nil && cooldown < quotaBackoffMax {
+		retryState.BackoffLevel = backoffLevel + 1
+	}
+	next := now.Add(cooldown)
+	if retryState != nil {
+		retryState.NextRecoverAt = next
+	}
+	return next
+}
+
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, attemptedModel string, now time.Time, disableCooling bool) {
 	if auth == nil {
 		return
 	}
@@ -2042,11 +2082,8 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	case 404:
 		auth.StatusMessage = "not_found"
-		if disableCooling {
-			auth.NextRetryAfter = time.Time{}
-		} else {
-			auth.NextRetryAfter = now.Add(12 * time.Hour)
-		}
+		auth.NextRetryAfter = notFoundRetryAfter(resultErr, attemptedModel, &auth.Quota, now, disableCooling)
+		auth.Unavailable = !auth.NextRetryAfter.IsZero()
 	case 429:
 		auth.StatusMessage = "quota exhausted"
 		auth.Quota.Exceeded = true
