@@ -3990,5 +3990,187 @@
       "context_length": 200000,
       "max_completion_tokens": 32768
     }
+  ],
+  "meta": [
+    {
+      "id": "muse-spark-1.3",
+      "object": "model",
+      "created": 1787000000,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Spark 1.3",
+      "name": "muse-spark-1.3",
+      "description": "Meta Muse Spark 1.3 flagship reasoning and agentic coding model",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "ultra"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-spark-1.3-contributor",
+      "object": "model",
+      "created": 1787000000,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Spark 1.3 Contributor",
+      "name": "muse-spark-1.3-contributor",
+      "description": "Meta Muse Spark 1.3 contributor model",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "ultra"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-spark-1.2",
+      "object": "model",
+      "created": 1785000000,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Spark 1.2",
+      "name": "muse-spark-1.2",
+      "description": "Meta Muse Spark 1.2 reasoning and agentic coding model",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "ultra"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-spark-1.2-contributor",
+      "object": "model",
+      "created": 1785000000,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Spark 1.2 Contributor",
+      "name": "muse-spark-1.2-contributor",
+      "description": "Meta Muse Spark 1.2 contributor model",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "ultra"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-spark-1.1",
+      "object": "model",
+      "created": 1783000000,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Spark 1.1",
+      "name": "muse-spark-1.1",
+      "description": "Meta Muse Spark 1.1 reasoning model",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "ultra"
+        ]
+      },
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-image-1.0",
+      "object": "model",
+      "created": 1783000000,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Image 1.0",
+      "name": "muse-image-1.0",
+      "description": "Meta Muse Image 1.0 generation model",
+      "context_length": 32768,
+      "max_completion_tokens": 4096,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "image"
+      ]
+    },
+    {
+      "id": "muse-voice-transcribe-1.0",
+      "object": "model",
+      "created": 1783000000,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Voice Transcribe 1.0",
+      "name": "muse-voice-transcribe-1.0",
+      "description": "Meta Muse voice transcription model",
+      "context_length": 32768,
+      "max_completion_tokens": 4096,
+      "supportedInputModalities": [
+        "audio"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    }
   ]
 }

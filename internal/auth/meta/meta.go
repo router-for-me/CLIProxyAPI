@@ -1,0 +1,422 @@
+// Package meta provides authentication and token management for Meta Muse (api.meta.ai).
+// It implements the RFC 8628 OAuth2 Device Authorization Grant flow for Meta accounts.
+package meta
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	log "github.com/sirupsen/logrus"
+)
+
+const (
+	// DefaultAPIBaseURL is the default official Meta API base URL.
+	DefaultAPIBaseURL = "https://api.meta.ai/v1"
+	// AuthHost is the Meta account OAuth authorization server.
+	AuthHost = "https://auth.meta.com"
+	// DeviceAuthorizationEndpoint is the device authorization request endpoint.
+	DeviceAuthorizationEndpoint = AuthHost + "/oidc/device/authorization/"
+	// TokenEndpoint is the token issuance and polling endpoint.
+	TokenEndpoint = AuthHost + "/oidc/device/token/"
+	// ClientID is Meta Muse CLI's official OAuth client ID.
+	ClientID = "1031625952748946"
+	// DeviceCodeGrantType is the RFC 8628 grant type parameter.
+	DeviceCodeGrantType = "urn:ietf:params:oauth:grant-type:device_code"
+	// DefaultPollInterval is the default polling interval when unspecified.
+	DefaultPollInterval = 5 * time.Second
+	// MaxPollDuration is the upper bound for waiting on user authorization.
+	MaxPollDuration = 15 * time.Minute
+	// httpClientTimeout bounds credential-acquisition HTTP calls.
+	httpClientTimeout = 30 * time.Second
+)
+
+// DeviceCodeResponse represents Meta's device authorization response.
+type DeviceCodeResponse struct {
+	DeviceCode              string `json:"device_code"`
+	UserCode                string `json:"user_code"`
+	VerificationURI         string `json:"verification_uri"`
+	VerificationURIComplete string `json:"verification_uri_complete"`
+	ExpiresIn               int    `json:"expires_in"`
+	Interval                int    `json:"interval"`
+	TokenEndpoint           string `json:"-"`
+}
+
+// TokenData represents the token response from Meta's OAuth token endpoint.
+type TokenData struct {
+	AccessToken      string `json:"access_token"`
+	TokenType        string `json:"token_type"`
+	ExpiresIn        int    `json:"expires_in,omitempty"`
+	ExpiresAt        int64  `json:"expires_at,omitempty"`
+	Error            string `json:"error,omitempty"`
+	ErrorDescription string `json:"error_description,omitempty"`
+}
+
+// MetaAuthBundle packages the token data and user metadata.
+type MetaAuthBundle struct {
+	TokenData *TokenData
+	Email     string
+	Name      string
+}
+
+// MetaTokenStorage represents persisted Meta OAuth tokens in auth files.
+type MetaTokenStorage struct {
+	Type        string `json:"type"`
+	AuthKind    string `json:"auth_kind"`
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type,omitempty"`
+	ExpiresIn   int    `json:"expires_in,omitempty"`
+	Expired     string `json:"expired,omitempty"`
+	LastRefresh string `json:"last_refresh,omitempty"`
+	BaseURL     string `json:"base_url,omitempty"`
+	Email       string `json:"email,omitempty"`
+	Name        string `json:"name,omitempty"`
+
+	Metadata map[string]any `json:"-"`
+}
+
+// SetMetadata allows the token store to merge status fields before saving.
+func (ts *MetaTokenStorage) SetMetadata(meta map[string]any) {
+	ts.Metadata = meta
+}
+
+// SaveTokenToFile writes Meta credentials to a JSON auth file.
+func (ts *MetaTokenStorage) SaveTokenToFile(authFilePath string) error {
+	ts.Type = "meta"
+	ts.AuthKind = "oauth"
+	if errMkdirAll := os.MkdirAll(filepath.Dir(authFilePath), 0o700); errMkdirAll != nil {
+		return fmt.Errorf("meta token storage: create directory: %w", errMkdirAll)
+	}
+
+	data := map[string]any{
+		"type":         ts.Type,
+		"auth_kind":    ts.AuthKind,
+		"access_token": ts.AccessToken,
+		"token_type":   ts.TokenType,
+		"expires_in":   ts.ExpiresIn,
+		"expired":      ts.Expired,
+		"last_refresh": ts.LastRefresh,
+		"base_url":     ts.BaseURL,
+	}
+	if ts.Email != "" {
+		data["email"] = ts.Email
+	}
+	if ts.Name != "" {
+		data["name"] = ts.Name
+	}
+	for k, v := range ts.Metadata {
+		if _, exists := data[k]; !exists {
+			data[k] = v
+		}
+	}
+
+	file, err := os.Create(authFilePath)
+	if err != nil {
+		return fmt.Errorf("meta token storage: create token file: %w", err)
+	}
+	defer func() {
+		if errClose := file.Close(); errClose != nil {
+			log.Errorf("meta token storage: close token file error: %v", errClose)
+		}
+	}()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err = encoder.Encode(data); err != nil {
+		return fmt.Errorf("meta token storage: write token file: %w", err)
+	}
+	return nil
+}
+
+// MetaAuth manages Meta OAuth operations.
+type MetaAuth struct {
+	cfg        *config.Config
+	httpClient *http.Client
+	proxyURL   string
+}
+
+// NewMetaAuth creates a new MetaAuth service instance.
+func NewMetaAuth(cfg *config.Config) *MetaAuth {
+	return NewMetaAuthWithProxyURL(cfg, "")
+}
+
+// NewMetaAuthWithProxyURL creates a MetaAuth service instance with an optional proxy URL.
+func NewMetaAuthWithProxyURL(cfg *config.Config, proxyURL string) *MetaAuth {
+	effectiveProxyURL := strings.TrimSpace(proxyURL)
+	var sdkCfg config.SDKConfig
+	if cfg != nil {
+		sdkCfg = cfg.SDKConfig
+		if effectiveProxyURL == "" {
+			effectiveProxyURL = strings.TrimSpace(cfg.ProxyURL)
+		}
+	}
+	sdkCfg.ProxyURL = effectiveProxyURL
+	return &MetaAuth{
+		cfg:        cfg,
+		httpClient: util.SetProxy(&sdkCfg, &http.Client{Timeout: httpClientTimeout}),
+		proxyURL:   proxyURL,
+	}
+}
+
+// StartDeviceFlow initiates the device authorization flow with Meta.
+func (a *MetaAuth) StartDeviceFlow(ctx context.Context) (*DeviceCodeResponse, error) {
+	return a.StartDeviceFlowWithEndpoint(ctx, DeviceAuthorizationEndpoint)
+}
+
+// StartDeviceFlowWithEndpoint initiates the device authorization flow against a specific endpoint.
+func (a *MetaAuth) StartDeviceFlowWithEndpoint(ctx context.Context, endpoint string) (*DeviceCodeResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		endpoint = DeviceAuthorizationEndpoint
+	}
+
+	form := url.Values{
+		"client_id": {ClientID},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("meta device flow: create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "muse-code/1.0.2")
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("meta device flow: request failed: %w", err)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("meta device flow: close response body error: %v", errClose)
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("meta device flow: read response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("meta device flow failed (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var dcr DeviceCodeResponse
+	if err := json.Unmarshal(body, &dcr); err != nil {
+		return nil, fmt.Errorf("meta device flow: parse response: %w", err)
+	}
+	if strings.TrimSpace(dcr.DeviceCode) == "" || strings.TrimSpace(dcr.UserCode) == "" {
+		return nil, fmt.Errorf("meta device flow: response missing required device_code or user_code")
+	}
+	dcr.TokenEndpoint = TokenEndpoint
+	return &dcr, nil
+}
+
+// WaitForAuthorization polls the token endpoint until the user approves the device code.
+func (a *MetaAuth) WaitForAuthorization(ctx context.Context, dcr *DeviceCodeResponse) (*MetaAuthBundle, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if dcr == nil || dcr.DeviceCode == "" {
+		return nil, fmt.Errorf("meta auth: missing device code response")
+	}
+
+	tokenEndpoint := dcr.TokenEndpoint
+	if tokenEndpoint == "" {
+		tokenEndpoint = TokenEndpoint
+	}
+
+	interval := time.Duration(dcr.Interval) * time.Second
+	if interval <= 0 {
+		interval = DefaultPollInterval
+	}
+
+	maxDuration := MaxPollDuration
+	if dcr.ExpiresIn > 0 {
+		maxDuration = time.Duration(dcr.ExpiresIn) * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, maxDuration)
+	defer cancel()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("meta auth: authorization timed out or canceled: %w", ctx.Err())
+		case <-ticker.C:
+			form := url.Values{
+				"grant_type":  {DeviceCodeGrantType},
+				"device_code": {dcr.DeviceCode},
+				"client_id":   {ClientID},
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
+			if err != nil {
+				return nil, fmt.Errorf("meta auth: create token request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Accept", "application/json")
+			req.Header.Set("User-Agent", "muse-code/1.0.2")
+
+			resp, err := a.httpClient.Do(req)
+			if err != nil {
+				log.Warnf("meta auth: poll request error: %v (retrying)", err)
+				continue
+			}
+
+			body, errRead := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if errRead != nil {
+				log.Warnf("meta auth: read token response error: %v (retrying)", errRead)
+				continue
+			}
+
+			if resp.StatusCode == http.StatusOK {
+				var tokenData TokenData
+				if err := json.Unmarshal(body, &tokenData); err != nil {
+					return nil, fmt.Errorf("meta auth: parse token response: %w", err)
+				}
+				if tokenData.AccessToken == "" {
+					return nil, fmt.Errorf("meta auth: response missing access_token")
+				}
+				if tokenData.ExpiresIn > 0 {
+					tokenData.ExpiresAt = time.Now().Add(time.Duration(tokenData.ExpiresIn) * time.Second).Unix()
+				}
+				return &MetaAuthBundle{
+					TokenData: &tokenData,
+				}, nil
+			}
+
+			var errResp TokenData
+			_ = json.Unmarshal(body, &errResp)
+			switch errResp.Error {
+			case "authorization_pending":
+				continue
+			case "slow_down":
+				interval += 5 * time.Second
+				ticker.Reset(interval)
+				continue
+			case "access_denied":
+				return nil, fmt.Errorf("meta auth: access was denied by user")
+			case "expired_token":
+				return nil, fmt.Errorf("meta auth: device code has expired")
+			default:
+				if errResp.Error != "" {
+					return nil, fmt.Errorf("meta auth: error from authorization server: %s: %s", errResp.Error, errResp.ErrorDescription)
+				}
+				log.Warnf("meta auth: unexpected response %d: %s", resp.StatusCode, string(body))
+			}
+		}
+	}
+}
+
+// CreateTokenStorage creates a serializable token storage record from the auth bundle.
+func (a *MetaAuth) CreateTokenStorage(bundle *MetaAuthBundle) *MetaTokenStorage {
+	if bundle == nil || bundle.TokenData == nil {
+		return nil
+	}
+	expired := ""
+	if bundle.TokenData.ExpiresAt > 0 {
+		expired = time.Unix(bundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
+	}
+	return &MetaTokenStorage{
+		Type:        "meta",
+		AuthKind:    "oauth",
+		AccessToken: bundle.TokenData.AccessToken,
+		TokenType:   bundle.TokenData.TokenType,
+		ExpiresIn:   bundle.TokenData.ExpiresIn,
+		Expired:     expired,
+		LastRefresh: time.Now().UTC().Format(time.RFC3339),
+		BaseURL:     DefaultAPIBaseURL,
+		Email:       bundle.Email,
+		Name:        bundle.Name,
+	}
+}
+
+// CredentialFileName derives a deterministic file name for the credentials.
+func CredentialFileName(email, sub string) string {
+	clean := strings.TrimSpace(email)
+	if clean != "" {
+		sanitized := strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
+				return r
+			}
+			return '_'
+		}, clean)
+		return fmt.Sprintf("meta-%s.json", sanitized)
+	}
+	if strings.TrimSpace(sub) != "" {
+		hash := sha256.Sum256([]byte(sub))
+		return fmt.Sprintf("meta-%s.json", hex.EncodeToString(hash[:8]))
+	}
+	return "meta-oauth.json"
+}
+
+// LocalMuseAuth represents credentials stored by the Meta Muse CLI (~/.config/muse/auth.json).
+type LocalMuseAuth struct {
+	SchemaVersion int `json:"schema_version"`
+	Providers     map[string]struct {
+		AccessToken  string `json:"access_token"`
+		APIKey       string `json:"api_key"`
+		APIBaseURL   string `json:"api_base_url"`
+		Mechanism    string `json:"mechanism"`
+		ObtainedVia  string `json:"obtained_via"`
+		UserEmail    string `json:"user_email"`
+		UserFullName string `json:"user_full_name"`
+	} `json:"providers"`
+}
+
+// ReadLocalMuseCLIAuth reads credentials from ~/.config/muse/auth.json or $MUSE_AUTH_PATH.
+func ReadLocalMuseCLIAuth() (token, baseURL, email string, ok bool) {
+	authPath := strings.TrimSpace(os.Getenv("MUSE_AUTH_PATH"))
+	if authPath == "" {
+		if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+			authPath = filepath.Join(xdg, "muse", "auth.json")
+		} else if home, err := os.UserHomeDir(); err == nil && home != "" {
+			authPath = filepath.Join(home, ".config", "muse", "auth.json")
+		}
+	}
+	if authPath == "" {
+		return "", "", "", false
+	}
+	data, err := os.ReadFile(authPath)
+	if err != nil || len(data) == 0 {
+		return "", "", "", false
+	}
+	var parsed LocalMuseAuth
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return "", "", "", false
+	}
+	metaProvider, exists := parsed.Providers["meta"]
+	if !exists {
+		return "", "", "", false
+	}
+	token = strings.TrimSpace(metaProvider.APIKey)
+	if token == "" {
+		token = strings.TrimSpace(metaProvider.AccessToken)
+	}
+	if token == "" {
+		return "", "", "", false
+	}
+	baseURL = strings.TrimSpace(metaProvider.APIBaseURL)
+	if baseURL == "" {
+		baseURL = DefaultAPIBaseURL
+	}
+	email = strings.TrimSpace(metaProvider.UserEmail)
+	return token, baseURL, email, true
+}

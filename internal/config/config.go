@@ -120,6 +120,9 @@ type Config struct {
 	// XAIKey defines xAI API key configurations using the same structure as Codex API keys.
 	XAIKey []XAIKey `yaml:"xai-api-key" json:"xai-api-key"`
 
+	// MetaKey defines Meta API key configurations using the same structure as Codex API keys.
+	MetaKey []MetaKey `yaml:"meta-api-key" json:"meta-api-key"`
+
 	// XAI configures provider-wide xAI request behavior.
 	XAI XAIConfig `yaml:"xai" json:"xai"`
 
