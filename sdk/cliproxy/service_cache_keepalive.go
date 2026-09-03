@@ -53,9 +53,37 @@ func (p cacheKeepaliveProber) Probe(ctx context.Context, probe keepalive.ProbeRe
 	if err != nil {
 		return keepalive.ProbeResult{}, err
 	}
+	usage := gjson.GetBytes(resp.Payload, "usage")
 	return keepalive.ProbeResult{
-		CacheReadInputTokens: gjson.GetBytes(resp.Payload, "usage.cache_read_input_tokens").Int(),
+		CacheReadInputTokens:     usage.Get("cache_read_input_tokens").Int(),
+		CacheCreationInputTokens: usage.Get("cache_creation_input_tokens").Int(),
+		Diagnosis:                claudeCacheDiagnosis(resp.Payload),
 	}, nil
+}
+
+// claudeCacheDiagnosis extracts the upstream cache-miss explanation when the
+// account carries the cache-diagnosis beta and the response supplied one. The
+// field has moved between response shapes, so every known location is tried and
+// an absent diagnosis is simply empty.
+func claudeCacheDiagnosis(payload []byte) string {
+	for _, path := range []string{
+		"usage.cache_diagnosis.reason",
+		"usage.cache_diagnosis",
+		"cache_diagnosis.reason",
+		"cache_diagnosis",
+	} {
+		value := gjson.GetBytes(payload, path)
+		if !value.Exists() {
+			continue
+		}
+		if value.IsObject() || value.IsArray() {
+			return strings.TrimSpace(value.Raw)
+		}
+		if text := strings.TrimSpace(value.String()); text != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 // cacheKeepaliveBinding answers whether the session is still bound to the

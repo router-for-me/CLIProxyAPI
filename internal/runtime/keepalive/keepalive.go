@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -87,6 +88,12 @@ type ProbeResult struct {
 	// CacheReadInputTokens is cache_read_input_tokens from the probe response.
 	// A value greater than zero means the probe hit the cached prefix.
 	CacheReadInputTokens int64
+	// CacheCreationInputTokens is cache_creation_input_tokens from the probe
+	// response. A probe that writes rather than reads has already lost the race.
+	CacheCreationInputTokens int64
+	// Diagnosis carries the upstream cache-miss explanation when the account has
+	// the cache-diagnosis beta and the response supplied one.
+	Diagnosis string
 }
 
 // Prober sends a probe through the same execution path a real request uses.
@@ -157,7 +164,85 @@ type sessionState struct {
 	ttl              time.Duration
 	probes           int
 	timer            Timer
+
+	// Observability. These outlive the probe body: a retired session keeps its
+	// history so the management endpoint can explain what happened, but drops
+	// the body and headers immediately.
+	lastRequestAt time.Time
+	nextProbeAt   time.Time
+	probesSent    int
+	lastProbe     *ProbeOutcome
+	retired       bool
+	retiredAt     time.Time
 }
+
+// ProbeOutcome records what happened on one probe attempt.
+type ProbeOutcome struct {
+	At                       time.Time `json:"at"`
+	Status                   string    `json:"status"`
+	CacheReadInputTokens     int64     `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64     `json:"cache_creation_input_tokens"`
+	SkippedReason            string    `json:"skipped_reason,omitempty"`
+	Error                    string    `json:"error,omitempty"`
+	Diagnosis                string    `json:"diagnosis,omitempty"`
+}
+
+// Probe outcome statuses.
+const (
+	// ProbeStatusHit means the probe read the cached prefix, which is the
+	// working state.
+	ProbeStatusHit = "hit"
+	// ProbeStatusMiss means the probe itself found no cached prefix. The entry it
+	// was meant to refresh was already gone, so keepalive is not working for that
+	// session.
+	ProbeStatusMiss = "miss"
+	// ProbeStatusError means the probe request failed.
+	ProbeStatusError = "error"
+	// ProbeStatusSkipped means the probe was deliberately not sent.
+	ProbeStatusSkipped = "skipped"
+)
+
+// SessionSnapshot is the read-only view of one tracked session.
+type SessionSnapshot struct {
+	SessionID         string        `json:"session_id"`
+	AuthID            string        `json:"auth_id"`
+	Provider          string        `json:"provider"`
+	Model             string        `json:"model"`
+	TTL               string        `json:"ttl"`
+	TTLSeconds        float64       `json:"ttl_seconds"`
+	LastRequestAt     *time.Time    `json:"last_request_at"`
+	NextProbeAt       *time.Time    `json:"next_probe_at"`
+	ProbesSent        int           `json:"probes_sent"`
+	ConsecutiveProbes int           `json:"consecutive_probes"`
+	Active            bool          `json:"active"`
+	RetiredAt         *time.Time    `json:"retired_at,omitempty"`
+	LastProbe         *ProbeOutcome `json:"last_probe"`
+}
+
+// Counters are the process-wide keepalive totals.
+type Counters struct {
+	Scheduled       uint64            `json:"scheduled"`
+	Fired           uint64            `json:"fired"`
+	Hits            uint64            `json:"hits"`
+	Misses          uint64            `json:"misses"`
+	Errors          uint64            `json:"errors"`
+	SkippedByReason map[string]uint64 `json:"skipped_by_reason"`
+}
+
+// Snapshot is the read-only view of the whole scheduler.
+type Snapshot struct {
+	Enabled              bool              `json:"enabled"`
+	BeforeExpiry         string            `json:"before_expiry"`
+	OnlyWhenAgentsActive bool              `json:"only_when_agents_active"`
+	MaxProbes            int               `json:"max_probes"`
+	MaxTokens            int               `json:"max_tokens"`
+	Sessions             []SessionSnapshot `json:"sessions"`
+	Counters             Counters          `json:"counters"`
+}
+
+// maxRetiredSessions bounds the retired-session history the snapshot exposes.
+// Retired records hold no request body, only counters and the last outcome.
+const maxRetiredSessions = 64
 
 // Scheduler keeps one pending keepalive probe per Claude Code session.
 //
@@ -176,6 +261,8 @@ type Scheduler struct {
 
 	newTimer func(time.Duration, func()) Timer
 	now      func() time.Time
+
+	counters Counters
 }
 
 // New creates a scheduler with the given configuration.
@@ -183,6 +270,7 @@ func New(cfg Config) *Scheduler {
 	return &Scheduler{
 		cfg:      cfg,
 		sessions: make(map[string]*sessionState),
+		counters: Counters{SkippedByReason: make(map[string]uint64)},
 		newTimer: func(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) },
 		now:      time.Now,
 	}
@@ -353,14 +441,28 @@ func (s *Scheduler) Observe(in ObserveInput) {
 		// A real request resets the consecutive-probe budget.
 		probes: 0,
 	}
+	now := s.now()
+	state.lastRequestAt = in.StartedAt
+	if state.lastRequestAt.IsZero() {
+		state.lastRequestAt = now
+	}
+	state.nextProbeAt = now.Add(delay)
+	// A session that had already probed keeps its lifetime probe count; only the
+	// consecutive budget resets on a real request.
+	if previous != nil {
+		state.probesSent = previous.probesSent
+		state.lastProbe = previous.lastProbe
+	}
 	s.sessions[in.SessionID] = state
+	s.pruneRetiredLocked()
+	s.counters.Scheduled++
 	sessionID := in.SessionID
 	state.timer = s.newTimer(delay, func() { s.fire(sessionID, generation) })
 	s.mu.Unlock()
 
 	stopTimer(previous)
-	log.Infof("cache-keepalive: scheduled | session=%s auth=%s model=%s ttl=%s fires_in=%s",
-		truncateSession(sessionID), in.AuthID, in.Model, in.TTL, delay.Round(time.Second))
+	log.Infof("cache-keepalive: scheduled | session=%s auth=%s model=%s ttl=%s fires_in=%s next_probe_at=%s",
+		truncateSession(sessionID), in.AuthID, in.Model, in.TTL, delay.Round(time.Second), state.nextProbeAt.Format(time.RFC3339))
 }
 
 func (s *Scheduler) fire(sessionID string, generation uint64) {
@@ -375,9 +477,9 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 		return
 	}
 	if state.probes >= cfg.MaxProbes {
-		delete(s.sessions, sessionID)
 		s.mu.Unlock()
-		log.Infof("cache-keepalive: skipped | session=%s reason=max-probes probes=%d", truncateSession(sessionID), state.probes)
+		s.retire(sessionID, generation, "max-probes")
+		log.Infof("cache-keepalive: skipped | session=%s reason=max-probes consecutive_probes=%d", truncateSession(sessionID), state.probes)
 		return
 	}
 	liveness := s.liveness
@@ -394,29 +496,29 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 
 	if cfg.OnlyWhenAgentsActive {
 		if liveness == nil || !liveness.Live(sessionID, ttl) {
-			s.drop(sessionID, generation)
-			log.Infof("cache-keepalive: skipped | session=%s reason=no-live-agents", truncateSession(sessionID))
+			s.retire(sessionID, generation, "no-live-agents")
+			log.Infof("cache-keepalive: skipped | session=%s auth=%s model=%s reason=no-live-agents", truncateSession(sessionID), authID, model)
 			return
 		}
 	}
 	if binding != nil && bindingSessionID != "" {
 		boundAuthID, state := binding.SessionBinding(provider, bindingSessionID, model)
 		if state == BindingLost || (state == BindingBound && boundAuthID != authID) {
-			s.drop(sessionID, generation)
-			log.Infof("cache-keepalive: skipped | session=%s reason=auth-binding-lost want_auth=%s bound_auth=%s",
-				truncateSession(sessionID), authID, boundAuthID)
+			s.retire(sessionID, generation, "auth-binding-lost")
+			log.Infof("cache-keepalive: skipped | session=%s auth=%s model=%s reason=auth-binding-lost want_auth=%s bound_auth=%s",
+				truncateSession(sessionID), authID, model, authID, boundAuthID)
 			return
 		}
 	}
 	if prober == nil {
-		s.drop(sessionID, generation)
+		s.retire(sessionID, generation, "no-prober")
 		log.Warnf("cache-keepalive: skipped | session=%s reason=no-prober", truncateSession(sessionID))
 		return
 	}
 
 	probeBody, errBody := ProbeBody(body, cfg.MaxTokens)
 	if errBody != nil {
-		s.drop(sessionID, generation)
+		s.retire(sessionID, generation, "probe-body-build-failed")
 		log.Warnf("cache-keepalive: skipped | session=%s reason=probe-body-build-failed error=%v", truncateSession(sessionID), errBody)
 		return
 	}
@@ -430,49 +532,227 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 		Body:      probeBody,
 		Headers:   headers.Clone(),
 	})
+	elapsed := s.now().Sub(probeStart)
 	if errProbe != nil {
-		s.drop(sessionID, generation)
-		log.Warnf("cache-keepalive: probe failed | session=%s auth=%s model=%s error=%v",
-			truncateSession(sessionID), authID, model, errProbe)
+		s.recordProbe(sessionID, generation, ProbeOutcome{
+			At:     probeStart,
+			Status: ProbeStatusError,
+			Error:  errProbe.Error(),
+		})
+		s.retire(sessionID, generation, "probe-error")
+		log.Warnf("cache-keepalive: probe | session=%s auth=%s model=%s status=error duration=%s error=%v",
+			truncateSession(sessionID), authID, model, elapsed.Round(time.Millisecond), errProbe)
 		return
 	}
 
+	outcome := ProbeOutcome{
+		At:                       probeStart,
+		Status:                   ProbeStatusHit,
+		CacheReadInputTokens:     result.CacheReadInputTokens,
+		CacheCreationInputTokens: result.CacheCreationInputTokens,
+		Diagnosis:                result.Diagnosis,
+	}
+	if result.CacheReadInputTokens <= 0 {
+		outcome.Status = ProbeStatusMiss
+	}
+	s.recordProbe(sessionID, generation, outcome)
+
 	// Reschedule from the probe's own start time so the next window is measured
 	// against the entry the probe just refreshed.
-	next := ttl - cfg.BeforeExpiry - s.now().Sub(probeStart)
+	next := ttl - cfg.BeforeExpiry - elapsed
 	s.mu.Lock()
 	current := s.sessions[sessionID]
 	if s.stopped || !s.cfg.Enabled || current == nil || current.generation != generation {
 		s.mu.Unlock()
-		log.Infof("cache-keepalive: fired | session=%s auth=%s model=%s cache_read_input_tokens=%d rescheduled=false",
-			truncateSession(sessionID), authID, model, result.CacheReadInputTokens)
+		s.logProbe(sessionID, authID, model, outcome, elapsed, 0, 0, false, time.Time{})
 		return
 	}
 	current.probes++
-	probes := current.probes
+	current.probesSent++
+	consecutive := current.probes
+	total := current.probesSent
 	rescheduled := false
-	if probes < s.cfg.MaxProbes && next > 0 {
+	var nextProbeAt time.Time
+	if consecutive < s.cfg.MaxProbes && next > 0 {
 		current.timer = s.newTimer(next, func() { s.fire(sessionID, generation) })
+		nextProbeAt = s.now().Add(next)
+		current.nextProbeAt = nextProbeAt
 		rescheduled = true
 	} else {
-		delete(s.sessions, sessionID)
+		s.retireLocked(current, sessionID, "max-probes")
 	}
 	s.mu.Unlock()
 
-	log.Infof("cache-keepalive: fired | session=%s auth=%s model=%s cache_read_input_tokens=%d probes=%d rescheduled=%t",
-		truncateSession(sessionID), authID, model, result.CacheReadInputTokens, probes, rescheduled)
+	s.logProbe(sessionID, authID, model, outcome, elapsed, total, consecutive, rescheduled, nextProbeAt)
 }
 
-func (s *Scheduler) drop(sessionID string, generation uint64) {
+// logProbe emits the single line that tells the whole story of one probe, so
+// `grep cache-keepalive` needs no other source.
+//
+// A probe that found nothing cached is the malfunction signal: the entry it was
+// meant to refresh had already expired, so it is logged at warning level.
+func (s *Scheduler) logProbe(sessionID, authID, model string, outcome ProbeOutcome, elapsed time.Duration, total, consecutive int, rescheduled bool, nextProbeAt time.Time) {
+	next := "none"
+	if !nextProbeAt.IsZero() {
+		next = nextProbeAt.Format(time.RFC3339)
+	}
+	fields := "session=%s auth=%s model=%s status=%s cache_read_input_tokens=%d cache_creation_input_tokens=%d duration=%s probes_sent=%d consecutive_probes=%d rescheduled=%t next_probe_at=%s"
+	args := []any{
+		truncateSession(sessionID), authID, model, outcome.Status,
+		outcome.CacheReadInputTokens, outcome.CacheCreationInputTokens,
+		elapsed.Round(time.Millisecond), total, consecutive, rescheduled, next,
+	}
+	if outcome.Status == ProbeStatusMiss {
+		fields += " diagnosis=%q"
+		args = append(args, outcome.Diagnosis)
+		log.Warnf("cache-keepalive: probe missed, the cached prefix was already gone | "+fields, args...)
+		return
+	}
+	log.Infof("cache-keepalive: probe | "+fields, args...)
+}
+
+// recordProbe stores the outcome against the session and updates the counters.
+func (s *Scheduler) recordProbe(sessionID string, generation uint64, outcome ProbeOutcome) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.counters.Fired++
+	switch outcome.Status {
+	case ProbeStatusHit:
+		s.counters.Hits++
+	case ProbeStatusMiss:
+		s.counters.Misses++
+	case ProbeStatusError:
+		s.counters.Errors++
+	}
+	if state := s.sessions[sessionID]; state != nil && state.generation == generation {
+		stored := outcome
+		state.lastProbe = &stored
+	}
+}
+
+// retire ends a session's scheduling and keeps its history for the snapshot.
+func (s *Scheduler) retire(sessionID string, generation uint64, reason string) {
 	s.mu.Lock()
 	state := s.sessions[sessionID]
-	if state != nil && state.generation == generation {
-		delete(s.sessions, sessionID)
-	} else {
-		state = nil
+	if state == nil || state.generation != generation {
+		s.mu.Unlock()
+		return
 	}
+	s.retireLocked(state, sessionID, reason)
 	s.mu.Unlock()
 	stopTimer(state)
+}
+
+// retireLocked drops the stored body and marks the session inactive. The record
+// stays visible to the snapshot so an operator can see why probing stopped, but
+// it never keeps the request body: those live in memory only, for as long as a
+// probe might still need them.
+func (s *Scheduler) retireLocked(state *sessionState, sessionID, reason string) {
+	if state == nil || state.retired {
+		return
+	}
+	state.retired = true
+	state.retiredAt = s.now()
+	state.body = nil
+	state.headers = nil
+	state.timer = nil
+	state.nextProbeAt = time.Time{}
+	if reason != "" {
+		if s.counters.SkippedByReason == nil {
+			s.counters.SkippedByReason = make(map[string]uint64)
+		}
+		s.counters.SkippedByReason[reason]++
+		if state.lastProbe == nil || state.lastProbe.SkippedReason != reason {
+			state.lastProbe = &ProbeOutcome{At: state.retiredAt, Status: ProbeStatusSkipped, SkippedReason: reason}
+		}
+	}
+	s.pruneRetiredLocked()
+	_ = sessionID
+}
+
+// pruneRetiredLocked bounds the retired history to the newest maxRetiredSessions.
+func (s *Scheduler) pruneRetiredLocked() {
+	retired := make([]string, 0, len(s.sessions))
+	for key, state := range s.sessions {
+		if state.retired {
+			retired = append(retired, key)
+		}
+	}
+	if len(retired) <= maxRetiredSessions {
+		return
+	}
+	sort.Slice(retired, func(i, j int) bool {
+		return s.sessions[retired[i]].retiredAt.Before(s.sessions[retired[j]].retiredAt)
+	})
+	for _, key := range retired[:len(retired)-maxRetiredSessions] {
+		delete(s.sessions, key)
+	}
+}
+
+// Snapshot returns the read-only view the management endpoint serves.
+func (s *Scheduler) Snapshot() Snapshot {
+	if s == nil {
+		return Snapshot{Sessions: []SessionSnapshot{}, Counters: Counters{SkippedByReason: map[string]uint64{}}}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := Snapshot{
+		Enabled:              s.cfg.Enabled && !s.stopped,
+		BeforeExpiry:         s.cfg.BeforeExpiry.String(),
+		OnlyWhenAgentsActive: s.cfg.OnlyWhenAgentsActive,
+		MaxProbes:            s.cfg.MaxProbes,
+		MaxTokens:            s.cfg.MaxTokens,
+		Sessions:             make([]SessionSnapshot, 0, len(s.sessions)),
+		Counters: Counters{
+			Scheduled:       s.counters.Scheduled,
+			Fired:           s.counters.Fired,
+			Hits:            s.counters.Hits,
+			Misses:          s.counters.Misses,
+			Errors:          s.counters.Errors,
+			SkippedByReason: make(map[string]uint64, len(s.counters.SkippedByReason)),
+		},
+	}
+	for reason, count := range s.counters.SkippedByReason {
+		out.Counters.SkippedByReason[reason] = count
+	}
+	for sessionID, state := range s.sessions {
+		out.Sessions = append(out.Sessions, sessionSnapshot(sessionID, state))
+	}
+	sort.Slice(out.Sessions, func(i, j int) bool {
+		return out.Sessions[i].SessionID < out.Sessions[j].SessionID
+	})
+	return out
+}
+
+func sessionSnapshot(sessionID string, state *sessionState) SessionSnapshot {
+	snapshot := SessionSnapshot{
+		SessionID:         sessionID,
+		AuthID:            state.authID,
+		Provider:          state.provider,
+		Model:             state.model,
+		TTL:               state.ttl.String(),
+		TTLSeconds:        state.ttl.Seconds(),
+		ProbesSent:        state.probesSent,
+		ConsecutiveProbes: state.probes,
+		Active:            !state.retired,
+	}
+	if !state.lastRequestAt.IsZero() {
+		at := state.lastRequestAt
+		snapshot.LastRequestAt = &at
+	}
+	if !state.nextProbeAt.IsZero() {
+		at := state.nextProbeAt
+		snapshot.NextProbeAt = &at
+	}
+	if !state.retiredAt.IsZero() {
+		at := state.retiredAt
+		snapshot.RetiredAt = &at
+	}
+	if state.lastProbe != nil {
+		probe := *state.lastProbe
+		snapshot.LastProbe = &probe
+	}
+	return snapshot
 }
 
 // ProbeBody derives the minimal refresh request from an observed client body.

@@ -190,6 +190,10 @@ claude-code:
 
   # Agent-aware prompt-cache keepalive.
   #
+  # State is visible at GET /v0/management/cache-keepalive and in the log, where
+  # every line is prefixed "cache-keepalive:". A probe that itself found nothing
+  # cached logs at WARN: that is the malfunction signal.
+  #
   # An orchestrator session that blocks on a subagent for longer than the prompt cache
   # TTL pays a full cache write on the return turn instead of a read. On the 1h pool
   # that write costs roughly ten times the read it replaces, so refreshing the entry

@@ -2,13 +2,17 @@ package keepalive
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/tidwall/gjson"
 )
+
+var errProbeTest = errors.New("upstream refused the probe")
 
 // fakeTimer records the requested delay and fires only when the test says so.
 type fakeTimer struct {
@@ -497,5 +501,140 @@ func TestStopClearsScheduledTimers(t *testing.T) {
 	clock.fireAt(t, 0)
 	if calls := prober.calls(); len(calls) != 0 {
 		t.Fatalf("probed after Stop(), want 0 probes")
+	}
+}
+
+func TestSnapshotTracksSessionAndCounters(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{result: ProbeResult{CacheReadInputTokens: 12468, CacheCreationInputTokens: 3}}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
+
+	observeOneHour(scheduler, "sess-1")
+	snapshot := scheduler.Snapshot()
+	if !snapshot.Enabled || len(snapshot.Sessions) != 1 {
+		t.Fatalf("snapshot after Observe = %+v", snapshot)
+	}
+	session := snapshot.Sessions[0]
+	if session.SessionID != "sess-1" || session.AuthID != "auth-a" || !session.Active {
+		t.Fatalf("session snapshot = %+v", session)
+	}
+	if session.LastRequestAt == nil || session.NextProbeAt == nil {
+		t.Fatalf("session snapshot is missing timestamps: %+v", session)
+	}
+	if session.TTL != "1h0m0s" || session.ProbesSent != 0 {
+		t.Fatalf("session snapshot = %+v", session)
+	}
+	if snapshot.Counters.Scheduled != 1 || snapshot.Counters.Fired != 0 {
+		t.Fatalf("counters after Observe = %+v", snapshot.Counters)
+	}
+
+	clock.fireLatest(t)
+	snapshot = scheduler.Snapshot()
+	if snapshot.Counters.Fired != 1 || snapshot.Counters.Hits != 1 || snapshot.Counters.Misses != 0 {
+		t.Fatalf("counters after a hit = %+v", snapshot.Counters)
+	}
+	session = snapshot.Sessions[0]
+	if session.ProbesSent != 1 || session.ConsecutiveProbes != 1 {
+		t.Fatalf("probe counts = %+v", session)
+	}
+	if session.LastProbe == nil || session.LastProbe.Status != ProbeStatusHit {
+		t.Fatalf("last probe = %+v", session.LastProbe)
+	}
+	if session.LastProbe.CacheReadInputTokens != 12468 || session.LastProbe.CacheCreationInputTokens != 3 {
+		t.Fatalf("last probe tokens = %+v", session.LastProbe)
+	}
+}
+
+func TestSnapshotRecordsAProbeThatMissed(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{result: ProbeResult{CacheReadInputTokens: 0, Diagnosis: "messages_changed"}}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
+
+	observeOneHour(scheduler, "sess-1")
+	clock.fireLatest(t)
+
+	snapshot := scheduler.Snapshot()
+	if snapshot.Counters.Misses != 1 || snapshot.Counters.Hits != 0 {
+		t.Fatalf("counters after a miss = %+v", snapshot.Counters)
+	}
+	probe := snapshot.Sessions[0].LastProbe
+	if probe == nil || probe.Status != ProbeStatusMiss || probe.Diagnosis != "messages_changed" {
+		t.Fatalf("last probe = %+v", probe)
+	}
+}
+
+func TestSnapshotRecordsProbeErrors(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{err: errProbeTest}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
+
+	observeOneHour(scheduler, "sess-1")
+	clock.fireLatest(t)
+
+	snapshot := scheduler.Snapshot()
+	if snapshot.Counters.Errors != 1 {
+		t.Fatalf("counters after an error = %+v", snapshot.Counters)
+	}
+	if snapshot.Counters.SkippedByReason["probe-error"] != 1 {
+		t.Fatalf("skipped_by_reason = %+v", snapshot.Counters.SkippedByReason)
+	}
+}
+
+func TestSnapshotKeepsRetiredSessionsWithoutTheirBodies(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: false}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
+
+	observeOneHour(scheduler, "sess-1")
+	clock.fireLatest(t)
+
+	snapshot := scheduler.Snapshot()
+	if len(snapshot.Sessions) != 1 {
+		t.Fatalf("retired session was dropped from the snapshot: %+v", snapshot.Sessions)
+	}
+	session := snapshot.Sessions[0]
+	if session.Active {
+		t.Fatalf("retired session still reports active")
+	}
+	if session.RetiredAt == nil || session.NextProbeAt != nil {
+		t.Fatalf("retired session = %+v", session)
+	}
+	if session.LastProbe == nil || session.LastProbe.SkippedReason != "no-live-agents" {
+		t.Fatalf("retired session last probe = %+v", session.LastProbe)
+	}
+	if snapshot.Counters.SkippedByReason["no-live-agents"] != 1 {
+		t.Fatalf("skipped_by_reason = %+v", snapshot.Counters.SkippedByReason)
+	}
+
+	scheduler.mu.Lock()
+	body := scheduler.sessions["sess-1"].body
+	headers := scheduler.sessions["sess-1"].headers
+	scheduler.mu.Unlock()
+	if body != nil || headers != nil {
+		t.Fatalf("retired session kept its request body in memory")
+	}
+}
+
+func TestSnapshotOnNilScheduler(t *testing.T) {
+	var scheduler *Scheduler
+	snapshot := scheduler.Snapshot()
+	if snapshot.Enabled || snapshot.Sessions == nil || snapshot.Counters.SkippedByReason == nil {
+		t.Fatalf("nil scheduler snapshot must be empty but well formed: %+v", snapshot)
+	}
+}
+
+func TestRetiredSessionHistoryIsBounded(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: false}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
+
+	for index := range maxRetiredSessions + 20 {
+		session := "sess-" + strconv.Itoa(index)
+		observeOneHour(scheduler, session)
+		clock.fireLatest(t)
+	}
+
+	if got := len(scheduler.Snapshot().Sessions); got > maxRetiredSessions {
+		t.Fatalf("retained %d retired sessions, want at most %d", got, maxRetiredSessions)
 	}
 }

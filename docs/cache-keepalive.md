@@ -104,15 +104,88 @@ claude-code:
 The block hot-reloads with the rest of the configuration. `~` and `<uid>` are
 expanded in both path lists.
 
-## Logs
+## Observability
 
-At info level, one line per event:
+The feature is not a black box. Everything it does is visible two ways.
+
+### Logs
+
+Every line is prefixed `cache-keepalive:`, so `grep cache-keepalive main.log`
+tells the whole story with no other source.
 
 ```
-cache-keepalive: scheduled | session=4463ede6... auth=<id> model=<model> ttl=1h0m0s fires_in=55m0s
-cache-keepalive: fired     | session=4463ede6... auth=<id> model=<model> cache_read_input_tokens=161937 probes=1 rescheduled=true
-cache-keepalive: skipped   | session=4463ede6... reason=no-live-agents
+cache-keepalive: enabled | before-expiry=5m0s only-when-agents-active=true liveness=claude-code-tasks max-probes=6 max-tokens=1
+cache-keepalive: scheduled | session=4463ede6... auth=<id> model=<model> ttl=1h0m0s fires_in=55m0s next_probe_at=2026-09-02T20:51:57-07:00
+cache-keepalive: probe | session=4463ede6... auth=<id> model=<model> status=hit cache_read_input_tokens=161937 cache_creation_input_tokens=0 duration=612ms probes_sent=1 consecutive_probes=1 rescheduled=true next_probe_at=2026-09-02T21:46:57-07:00
+cache-keepalive: skipped | session=4463ede6... auth=<id> model=<model> reason=no-live-agents
 ```
+
+A probe that finds nothing cached is the malfunction signal: the entry it was
+meant to refresh had already expired, so it is logged at **warning** level with
+the upstream diagnosis when the account has the cache-diagnosis beta.
+
+```
+cache-keepalive: probe missed, the cached prefix was already gone | session=4463ede6... auth=<id> model=<model> status=miss cache_read_input_tokens=0 cache_creation_input_tokens=161937 duration=743ms probes_sent=2 consecutive_probes=2 rescheduled=true next_probe_at=... diagnosis="messages_changed"
+```
+
+A probe request that fails outright logs at warning with `status=error`.
 
 `reason` is one of `superseded`, `max-probes`, `no-live-agents`,
-`auth-binding-lost`, `no-prober`, or `probe-body-build-failed`.
+`auth-binding-lost`, `probe-error`, `no-prober`, or `probe-body-build-failed`.
+
+### Management endpoint
+
+```
+GET /v0/management/cache-keepalive
+```
+
+Read-only, no parameters, same authentication as every other `/v0/management`
+route. It returns the live scheduler state:
+
+```json
+{
+  "enabled": true,
+  "before_expiry": "58m0s",
+  "only_when_agents_active": false,
+  "max_probes": 2,
+  "max_tokens": 1,
+  "sessions": [
+    {
+      "session_id": "aa11bb22-cc33-dd44-ee55-ff6677889900",
+      "auth_id": "claude-account.json",
+      "provider": "mixed",
+      "model": "claude-haiku-4-5-20251001",
+      "ttl": "1h0m0s",
+      "ttl_seconds": 3600,
+      "last_request_at": "2026-09-02T20:31:12-07:00",
+      "next_probe_at": "2026-09-02T20:35:11-07:00",
+      "probes_sent": 1,
+      "consecutive_probes": 1,
+      "active": true,
+      "last_probe": {
+        "at": "2026-09-02T20:33:11-07:00",
+        "status": "hit",
+        "cache_read_input_tokens": 12468,
+        "cache_creation_input_tokens": 0
+      }
+    }
+  ],
+  "counters": {
+    "scheduled": 1,
+    "fired": 1,
+    "hits": 1,
+    "misses": 0,
+    "errors": 0,
+    "skipped_by_reason": {}
+  }
+}
+```
+
+`status` is `hit`, `miss`, `error`, or `skipped`; a skipped entry carries
+`skipped_reason`, and a miss carries `diagnosis` when the upstream supplied one.
+
+A session that has stopped probing stays listed with `active: false`, a
+`retired_at` timestamp, and the reason, so an operator can tell "nothing to do"
+apart from "silently broken". The retired history is capped at 64 sessions.
+Retiring a session drops its stored request body immediately, so no request
+content is ever reachable through this endpoint.
