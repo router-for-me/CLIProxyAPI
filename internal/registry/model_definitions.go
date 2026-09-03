@@ -28,6 +28,7 @@ type staticModelsJSON struct {
 	CodexPlus   []*ModelInfo `json:"codex-plus"`
 	CodexPro    []*ModelInfo `json:"codex-pro"`
 	Kimi        []*ModelInfo `json:"kimi"`
+	Cursor      []*ModelInfo `json:"cursor"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
 }
@@ -75,6 +76,73 @@ func GetCodexProModels() []*ModelInfo {
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
 func GetKimiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Kimi)
+}
+
+// GetCursorModels returns the standard Cursor model definitions.
+//
+// If the remote catalog does not include a cursor section yet, this falls back
+// to a built-in list so the provider is usable out of the box.
+func GetCursorModels() []*ModelInfo {
+	models := cloneModelInfos(getModels().Cursor)
+	if len(models) > 0 {
+		return models
+	}
+	return cursorBuiltinModels()
+}
+
+// cursorBuiltinModels returns the default Cursor model list, independent of the
+// remote models.json refresh.
+func cursorBuiltinModels() []*ModelInfo {
+	return []*ModelInfo{
+		{
+			ID:                        "cursor-claude-sonnet-4-5",
+			Object:                    "model",
+			Created:                   1759104000,
+			OwnedBy:                   "cursor",
+			Type:                      "cursor",
+			DisplayName:               "Cursor Claude 4.5 Sonnet",
+			ContextLength:             200000,
+			MaxCompletionTokens:       64000,
+			SupportedInputModalities:  []string{"text", "image"},
+			SupportedOutputModalities: []string{"text"},
+		},
+		{
+			ID:                        "cursor-claude-opus-4",
+			Object:                    "model",
+			Created:                   1746316800,
+			OwnedBy:                   "cursor",
+			Type:                      "cursor",
+			DisplayName:               "Cursor Claude 4 Opus",
+			ContextLength:             200000,
+			MaxCompletionTokens:       64000,
+			SupportedInputModalities:  []string{"text", "image"},
+			SupportedOutputModalities: []string{"text"},
+		},
+		{
+			ID:                        "cursor-gpt-5",
+			Object:                    "model",
+			Created:                   1767225600,
+			OwnedBy:                   "cursor",
+			Type:                      "cursor",
+			DisplayName:               "Cursor GPT-5",
+			ContextLength:             200000,
+			MaxCompletionTokens:       64000,
+			SupportedInputModalities:  []string{"text", "image", "audio"},
+			SupportedOutputModalities: []string{"text"},
+		},
+		{
+			ID:                        "cursor-gpt-5-mini",
+			Object:                    "model",
+			Created:                   1767225600,
+			OwnedBy:                   "cursor",
+			Type:                      "cursor",
+			DisplayName:               "Cursor GPT-5 Mini",
+			ContextLength:             200000,
+			MaxCompletionTokens:       64000,
+			SupportedInputModalities:  []string{"text", "image"},
+			SupportedOutputModalities: []string{"text"},
+		},
+	}
 }
 
 // GetAntigravityModels returns the standard Antigravity model definitions.
@@ -304,6 +372,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - aistudio
 //   - codex
 //   - kimi
+//   - cursor
 //   - antigravity
 //   - xai
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
@@ -323,6 +392,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetCodexProModels()
 	case "kimi":
 		return GetKimiModels()
+	case "cursor":
+		return GetCursorModels()
 	case "antigravity":
 		return GetAntigravityModels()
 	case "xai", "x-ai", "grok":
@@ -347,6 +418,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.AIStudio,
 		data.CodexPro,
 		data.Kimi,
+		data.Cursor,
 		data.Antigravity,
 		data.XAI,
 	}

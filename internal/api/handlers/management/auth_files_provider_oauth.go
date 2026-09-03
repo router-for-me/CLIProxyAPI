@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -713,6 +714,88 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 	}
 	if deviceFlow.ExpiresIn > 0 {
 		response["expires_in"] = deviceFlow.ExpiresIn
+	}
+	c.JSON(200, response)
+}
+
+func (h *Handler) RequestCursorToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Cursor authentication...")
+
+	state := fmt.Sprintf("cur-%d", time.Now().UnixNano())
+	cursorAuth := cursor.NewCursorAuth(h.cfg)
+
+	flow, errStart := cursorAuth.StartLoginFlow(ctx)
+	if errStart != nil {
+		log.Errorf("Failed to generate Cursor authorization URL: %v", errStart)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+		return
+	}
+
+	RegisterOAuthSession(state, "cursor")
+
+	go func() {
+		pollCtx, cancelPoll := context.WithCancel(ctx)
+		defer cancelPoll()
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "cursor")
+
+		fmt.Println("Waiting for authentication...")
+		authBundle, errWait := cursorAuth.WaitForAuthorization(pollCtx, flow)
+		if errWait != nil {
+			if !IsOAuthSessionPending(state, "cursor") {
+				return
+			}
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWait))
+			fmt.Printf("Authentication failed: %v\n", errWait)
+			return
+		}
+		if !IsOAuthSessionPending(state, "cursor") {
+			return
+		}
+
+		tokenStorage := cursorAuth.CreateTokenStorage(authBundle)
+
+		metadata := map[string]any{
+			"type":         "cursor",
+			"access_token": authBundle.Login.AccessToken,
+			"auth_id":      authBundle.Login.AuthID,
+			"timestamp":    time.Now().UnixMilli(),
+		}
+		if authBundle.Login.Cookie != "" {
+			metadata["cookie"] = authBundle.Login.Cookie
+		}
+
+		fileName := fmt.Sprintf("cursor-%d.json", time.Now().UnixMilli())
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "cursor",
+			FileName: fileName,
+			Label:    authBundle.Label(),
+			Storage:  tokenStorage,
+			Metadata: metadata,
+		}
+		if errGuard := guardOAuthSessionPendingForSave(state, "cursor"); errGuard != nil {
+			return
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use Cursor services through this CLI")
+		CompleteOAuthSession(state)
+	}()
+
+	response := gin.H{"status": "ok", "url": flow.LoginURL, "state": state, "flow": "device"}
+	if flow.ExpiresIn > 0 {
+		response["expires_in"] = flow.ExpiresIn
+	} else {
+		response["expires_in"] = int(cursor.MaxPollDuration / time.Second)
 	}
 	c.JSON(200, response)
 }

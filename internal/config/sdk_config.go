@@ -64,6 +64,13 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// EnableLiveProviderModels, when true, allows the proxy to fetch each built-in
+	// native provider's model list from its default upstream URL and merge it with
+	// the static catalog. Supported for Kimi, xAI, Claude, Codex, Gemini, Vertex,
+	// AIStudio, Antigravity, and Cursor. Custom OpenAI-compatible providers are not
+	// affected and continue to use their configured model lists. Default is false.
+	EnableLiveProviderModels bool `yaml:"enable-live-provider-models" json:"enable-live-provider-models"`
 }
 
 // ClaudeCodeConfig configures Claude Code compatibility behavior.

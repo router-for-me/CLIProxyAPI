@@ -72,6 +72,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				excluded = entry.ExcludedModels
 			}
 		}
+		models = s.maybeMergeLiveModels(ctx, a, provider, models)
 		models = applyExcludedModels(models, excluded)
 	case constant.GeminiInteractions:
 		models = registry.GetGeminiModels()
@@ -83,6 +84,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				excluded = entry.ExcludedModels
 			}
 		}
+		models = s.maybeMergeLiveModels(ctx, a, provider, models)
 		models = applyExcludedModels(models, excluded)
 	case "vertex":
 		// Vertex AI Gemini supports the same model identifiers as Gemini.
@@ -95,13 +97,16 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				excluded = entry.ExcludedModels
 			}
 		}
+		models = s.maybeMergeLiveModels(ctx, a, provider, models)
 		models = applyExcludedModels(models, excluded)
 	case "aistudio":
 		models = registry.GetAIStudioModels()
+		models = s.maybeMergeLiveModels(ctx, a, provider, models)
 		models = applyExcludedModels(models, excluded)
 	case "antigravity":
 		models = registry.GetAntigravityModels()
 		models = applyAntigravityFetchedModelCapabilities(models, s.fetchAntigravityModelCapabilityHintsForAuth(ctx, a))
+		models = s.maybeMergeLiveModels(ctx, a, provider, models)
 		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
@@ -113,6 +118,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				excluded = entry.ExcludedModels
 			}
 		}
+		models = s.maybeMergeLiveModels(ctx, a, provider, models)
 		models = applyExcludedModels(models, excluded)
 	case "codex":
 		if authKind == "apikey" {
@@ -120,6 +126,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				models = buildCodexConfigModels(entry)
 				excluded = entry.ExcludedModels
 			}
+			models = s.maybeMergeLiveModels(ctx, a, provider, models)
 			models = applyExcludedModels(models, excluded)
 			break
 		}
@@ -140,9 +147,19 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		default:
 			models = registry.GetCodexProModels()
 		}
+		models = s.maybeMergeLiveModels(ctx, a, provider, models)
 		models = applyExcludedModels(models, excluded)
 	case "kimi":
 		models = registry.GetKimiModels()
+		models = s.maybeMergeLiveModels(ctx, a, provider, models)
+		models = applyExcludedModels(models, excluded)
+	case "cursor":
+		models = registry.GetCursorModels()
+		if s.cursorLiveModelsEnabled(a) {
+			if live := s.fetchCursorModelsForAuth(ctx, a); len(live) > 0 {
+				models = mergeCursorModels(live, models)
+			}
+		}
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
@@ -154,6 +171,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				excluded = entry.ExcludedModels
 			}
 		}
+		models = s.maybeMergeLiveModels(ctx, a, provider, models)
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
