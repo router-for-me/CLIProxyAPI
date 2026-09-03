@@ -93,6 +93,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/interactions-api-key", s.mgmt.PatchInteractionsKey)
 		mgmt.DELETE("/interactions-api-key", s.mgmt.DeleteInteractionsKey)
 
+		mgmt.GET("/cache-stats", s.mgmt.GetCacheStats)
+		// A fallback session key embeds the model name, which can contain
+		// slashes, so the id is matched as a catch-all rather than one segment.
+		mgmt.GET("/cache-stats/sessions/*id", s.mgmt.GetCacheStatsSession)
+		mgmt.DELETE("/cache-stats", s.mgmt.DeleteCacheStats)
+
 		mgmt.GET("/logs", s.mgmt.GetLogs)
 		mgmt.DELETE("/logs", s.mgmt.DeleteLogs)
 		mgmt.GET("/request-error-logs", s.mgmt.GetRequestErrorLogs)

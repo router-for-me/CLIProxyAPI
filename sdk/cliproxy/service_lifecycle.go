@@ -126,6 +126,8 @@ func (s *Service) Run(ctx context.Context) error {
 		s.authManager = newDefaultAuthManager()
 	}
 
+	s.applyCacheStatsConfig(s.cfg)
+
 	if homeEnabled {
 		s.startHomeSubscriber(ctx)
 	}

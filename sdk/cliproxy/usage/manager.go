@@ -45,6 +45,23 @@ type Record struct {
 	// nil or true means generation is enabled; only an explicit false disables generation.
 	// Use GenerateFlag to set the value and GenerateEnabled to read it with the default.
 	Generate *bool
+	// ClaudeSessionID is the Claude Code agent session UUID the request belongs
+	// to, when the executor could resolve one. Empty for every other caller.
+	ClaudeSessionID string
+	// ClientFingerprint is the downstream caller's User-Agent. It is the only
+	// client identity available for a caller that sends no session id.
+	ClientFingerprint string
+	// CacheMissReason mirrors Detail.CacheMissReason for sinks that only read
+	// the record header.
+	CacheMissReason string
+	// CacheMissedTokens mirrors Detail.CacheMissedTokens.
+	CacheMissedTokens int64
+	// RequestMaxTokens is the max_tokens the request body carried, which is what
+	// makes a one-token keepalive probe recognizable in a usage stream.
+	RequestMaxTokens int64
+	// ProbeOrigin names the internal subsystem that issued the request instead
+	// of a client. Empty for ordinary client traffic.
+	ProbeOrigin string
 	// Stream reports whether the request was executed in streaming mode.
 	Stream      bool
 	RequestedAt time.Time
@@ -71,9 +88,20 @@ type Detail struct {
 	CachedTokens        int64
 	CacheReadTokens     int64
 	CacheCreationTokens int64
-	TotalTokens         int64
-	TokenBreakdown      TokenBreakdown
-	ResponseServiceTier string
+	// CacheCreation5mTokens and CacheCreation1hTokens split CacheCreationTokens
+	// across the two Anthropic cache pools
+	// (usage.cache_creation.ephemeral_5m_input_tokens / ephemeral_1h_input_tokens).
+	// Both stay zero for providers that report no pool breakdown.
+	CacheCreation5mTokens int64
+	CacheCreation1hTokens int64
+	TotalTokens           int64
+	TokenBreakdown        TokenBreakdown
+	ResponseServiceTier   string
+	// CacheMissReason is diagnostics.cache_miss_reason.type from the upstream
+	// response. Anthropic returns it only while the cache-diagnosis beta is on.
+	CacheMissReason string
+	// CacheMissedTokens is diagnostics.cache_miss_reason.cache_missed_input_tokens.
+	CacheMissedTokens int64
 }
 
 type requestedModelAliasContextKey struct{}
@@ -412,3 +440,34 @@ func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }
 
 // StopDefault stops the default manager's dispatcher.
 func StopDefault() { DefaultManager().Stop() }
+
+type probeOriginContextKey struct{}
+
+// KeepaliveProbeOrigin marks a request issued by the prompt-cache keepalive
+// scheduler rather than by a client.
+const KeepaliveProbeOrigin = "cache-keepalive"
+
+// WithProbeOrigin marks ctx as belonging to an internally generated request and
+// names the subsystem that issued it.
+func WithProbeOrigin(ctx context.Context, origin string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	origin = strings.TrimSpace(origin)
+	if origin == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, probeOriginContextKey{}, origin)
+}
+
+// ProbeOriginFromContext returns the internal subsystem that issued the request,
+// or the empty string for ordinary client traffic.
+func ProbeOriginFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if value, ok := ctx.Value(probeOriginContextKey{}).(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}

@@ -62,6 +62,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if fp.ProfileClaudeCodeCLI {
 		claudeSessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, originalPayload, req.Payload, confirmedClaudeCode, opts.Metadata, req.Metadata)
 	}
+	reporter.SetClaudeSessionID(claudeSessionID)
+	reporter.SetRequestMaxTokens(helps.RequestMaxTokens(originalPayload, req.Payload))
 	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, upstreamStream, helps.APIKeyModelIsCompat(req))
 	body := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, upstreamStream, helps.APIKeyModelIsCompat(req))
 	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
@@ -293,9 +295,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 		commitClaudeDiagnostics(diagnosticsState, claudeMessageIDFromSSE(data))
 		lines := bytes.Split(data, []byte("\n"))
+		var cacheAnnotation helps.ClaudeCacheAnnotation
 		for i, line := range lines {
+			if annotation, ok := helps.ParseClaudeCacheAnnotation(line); ok {
+				cacheAnnotation = annotation
+			}
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
+				reporter.Publish(ctx, cacheAnnotation.Apply(detail))
 			}
 			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
 			if errRestore != nil {
