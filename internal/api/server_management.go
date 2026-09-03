@@ -93,6 +93,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/interactions-api-key", s.mgmt.PatchInteractionsKey)
 		mgmt.DELETE("/interactions-api-key", s.mgmt.DeleteInteractionsKey)
 
+		mgmt.GET("/cache-stats", s.mgmt.GetCacheStats)
+		mgmt.GET("/cache-stats/sessions/:id", s.mgmt.GetCacheStatsSession)
+		mgmt.DELETE("/cache-stats", s.mgmt.DeleteCacheStats)
+
 		mgmt.GET("/logs", s.mgmt.GetLogs)
 		mgmt.DELETE("/logs", s.mgmt.DeleteLogs)
 		mgmt.GET("/request-error-logs", s.mgmt.GetRequestErrorLogs)

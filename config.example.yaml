@@ -188,6 +188,26 @@ claude-code:
   # When true, return original model IDs in Anthropic model list responses instead of cloaked IDs.
   disable-cloaking-model-list: false
 
+# usage-cache-stats retains a per-session view of prompt-cache behavior so a miss
+# can be diagnosed after the fact. It keeps, in memory only, the last N requests
+# of each Claude Code session with their cache_read / cache_creation split and
+# the cache_miss_reason the API returns, and serves them at
+# /v0/management/cache-stats and in the TUI's Cache tab. See docs/cache-stats.md.
+usage-cache-stats:
+  # Opt-in. Default false.
+  enabled: false
+
+  # How many sessions to retain. The least recently seen session is dropped past
+  # this bound. Default 500.
+  max-sessions: 500
+
+  # How many requests to keep per session. Older requests fall out of the ring
+  # buffer; the per-session counters still cover every request seen. Default 200.
+  per-session-requests: 200
+
+  # Drop a session that has not been seen for this long. Default 24h.
+  idle-ttl: 24h
+
 # disable-image-generation supports: false (default), true, "chat", or "passthrough".
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
