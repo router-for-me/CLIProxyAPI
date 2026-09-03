@@ -775,11 +775,27 @@ func IsValidClaudeCAISSignature(rawSignature string) bool {
 	return err == nil
 }
 
+// IsStructurallyCompleteClaudeCAISEnvelope reports whether rawSignature is a
+// complete Claude CAIS envelope, including generations not yet allowlisted.
+// It does not verify cryptographic authenticity.
+func IsStructurallyCompleteClaudeCAISEnvelope(rawSignature string) bool {
+	_, err := inspectClaudeCAISSignature(rawSignature, base64.RawStdEncoding)
+	if err == nil {
+		return true
+	}
+	var unknownGeneration *claudeCAISUnknownGenerationError
+	return errors.As(err, &unknownGeneration)
+}
+
 // InspectClaudeCAISSignature decodes and classifies a Claude CAIS thinking
 // signature syntactically. See the CAIS envelope section in this file's package
 // comment for the layout and for why recognition is structural rather than
 // exact. This function does not verify cryptographic authenticity.
 func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, error) {
+	return inspectClaudeCAISSignature(rawSignature, base64.StdEncoding)
+}
+
+func inspectClaudeCAISSignature(rawSignature string, encoding *base64.Encoding) (*ClaudeCAISSignatureInfo, error) {
 	sig := stripClaudeSignaturePrefix(rawSignature)
 	if sig == "" {
 		return nil, fmt.Errorf("empty signature")
@@ -795,7 +811,7 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 		return nil, fmt.Errorf("invalid Claude CAIS signature: expected 'C' prefix, got %q", string(sig[0]))
 	}
 
-	decoded, err := base64.StdEncoding.DecodeString(sig)
+	decoded, err := encoding.DecodeString(sig)
 	if err != nil {
 		return nil, fmt.Errorf("invalid Claude CAIS signature: base64 decode failed: %w", err)
 	}
