@@ -89,3 +89,36 @@ func TestRoutingSessionAffinityRejectsBadInput(t *testing.T) {
 		t.Fatalf("rejected writes must not change the config: %+v", cfg.Routing)
 	}
 }
+
+func TestRoutingSessionAffinityClearedValuesLeaveTheFile(t *testing.T) {
+	cfg := &config.Config{Routing: config.RoutingConfig{Strategy: "fill-first"}}
+	path := writeTestConfigFile(t)
+	h := &Handler{cfg: cfg, configFilePath: path}
+
+	if code, _ := runSessionAffinity(t, h, http.MethodPut, `{"enabled":true,"ttl":"5m"}`); code != http.StatusOK {
+		t.Fatalf("PUT enable status = %d", code)
+	}
+	data, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatalf("read config: %v", errRead)
+	}
+	if !strings.Contains(string(data), "session-affinity: true") || !strings.Contains(string(data), "session-affinity-ttl: 5m") {
+		t.Fatalf("enabled values not persisted:\n%s", data)
+	}
+
+	// Disabling and clearing must remove the omitempty keys from the YAML,
+	// not just the in-memory fields, or a reload brings them back.
+	if code, _ := runSessionAffinity(t, h, http.MethodPut, `{"enabled":false,"ttl":""}`); code != http.StatusOK {
+		t.Fatalf("PUT clear status = %d", code)
+	}
+	data, errRead = os.ReadFile(path)
+	if errRead != nil {
+		t.Fatalf("read config: %v", errRead)
+	}
+	if strings.Contains(string(data), "session-affinity") {
+		t.Fatalf("cleared values still in the file:\n%s", data)
+	}
+	if !strings.Contains(string(data), "strategy: fill-first") {
+		t.Fatalf("strategy must survive the prune:\n%s", data)
+	}
+}
