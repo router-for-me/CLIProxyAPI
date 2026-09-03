@@ -918,18 +918,27 @@ func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map
 		return perAuthAliases
 	}
 	out := make([]config.OAuthModelAlias, 0, len(perAuthAliases)+len(globalAliases))
-	seenAlias := make(map[string]struct{}, len(perAuthAliases)+len(globalAliases))
+	// Dedupe on (name, alias), not on alias alone. The two alias tables have different
+	// jobs and different constraints: the catalog fork (applyOAuthModelAliasEntries) can
+	// only clone an upstream id that is already in the model list, while the request-time
+	// rename (oauth_model_alias.go) accepts any upstream string and consults per-auth
+	// entries first. Exposing a hidden upstream model such as Codex "gpt-reserve" needs
+	// both: a global `gpt-5.6-luna -> X, fork` to make X routable, and a per-auth
+	// `gpt-reserve -> X` to rewrite the body. Keyed on alias alone, the per-auth entry
+	// evicted the global fork, X was never registered, and every request for it failed
+	// with "unknown provider". Same-pair duplicates are still collapsed, per-auth first.
+	seenPair := make(map[string]struct{}, len(perAuthAliases)+len(globalAliases))
 	add := func(aliases []config.OAuthModelAlias) {
 		for _, entry := range aliases {
 			alias := strings.TrimSpace(entry.Alias)
 			if alias == "" {
 				continue
 			}
-			key := strings.ToLower(alias)
-			if _, exists := seenAlias[key]; exists {
+			key := strings.ToLower(strings.TrimSpace(entry.Name)) + "->" + strings.ToLower(alias)
+			if _, exists := seenPair[key]; exists {
 				continue
 			}
-			seenAlias[key] = struct{}{}
+			seenPair[key] = struct{}{}
 			out = append(out, entry)
 		}
 	}
