@@ -898,14 +898,32 @@ func applyOAuthModelAliasForAuth(cfg *config.Config, provider, authKind string, 
 	if channel == "" {
 		return models
 	}
-	aliases := oauthModelAliasesForAuth(cfg, channel, attributes)
+	aliases := oauthModelAliasesForAuth(cfg, channel, attributes, catalogModelIDs(models))
 	if len(aliases) == 0 {
 		return models
 	}
 	return applyOAuthModelAliasEntries(aliases, models)
 }
 
-func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map[string]string) []config.OAuthModelAlias {
+// catalogModelIDs is the set of upstream ids present in the catalog, lowercased, so the
+// alias merge can tell whether a per-auth source model can supply a catalog entry itself.
+func catalogModelIDs(models []*ModelInfo) map[string]struct{} {
+	ids := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if id := strings.ToLower(strings.TrimSpace(model.ID)); id != "" {
+			ids[id] = struct{}{}
+		}
+	}
+	return ids
+}
+
+// oauthModelAliasesForAuth merges a credential's aliases with the channel's global table.
+// catalog is the set of upstream ids the catalog already has; nil means unknown, which keeps
+// every global fork.
+func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map[string]string, catalog map[string]struct{}) []config.OAuthModelAlias {
 	perAuthAliases := coreauth.OAuthModelAliasesFromAttributes(attributes)
 	if cfg == nil || len(cfg.OAuthModelAlias) == 0 {
 		return perAuthAliases
@@ -924,11 +942,13 @@ func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map
 	// and a per-auth rename so the body says gpt-reserve. Keyed on alias alone, the per-auth
 	// entry evicted the fork and the id was never registered.
 	//
-	// So the key is the (name, alias) pair, with one exception: a global entry that is not a
-	// fork and shares its alias with a per-auth entry is still dropped. Keeping it would let
-	// applyOAuthModelAliasEntries rename the catalog from the global source while the
-	// credential routes the id elsewhere, so the registered entry would carry the wrong
-	// upstream's metadata and the global source would lose its own id.
+	// So the key is the (name, alias) pair, with one exception. A global entry that shares
+	// its alias with a per-auth entry is a fallback for the catalog, kept only when the
+	// per-auth source model is not in the catalog itself (the hidden-model case) and only
+	// when it is a fork. Keeping it otherwise would let applyOAuthModelAliasEntries build
+	// the catalog entry from the global source, in catalog order, while the credential
+	// routes the id to its own upstream: the registered entry would carry the wrong
+	// upstream's metadata and the per-auth source would stay exposed under its own id.
 	type aliasPair struct{ name, alias string }
 	pairOf := func(entry config.OAuthModelAlias) aliasPair {
 		return aliasPair{
@@ -938,7 +958,8 @@ func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map
 	}
 	out := make([]config.OAuthModelAlias, 0, len(perAuthAliases)+len(globalAliases))
 	seenPair := make(map[aliasPair]struct{}, len(perAuthAliases)+len(globalAliases))
-	perAuthAlias := make(map[string]struct{}, len(perAuthAliases))
+	// alias -> whether some per-auth source for that alias can supply the catalog entry.
+	perAuthAlias := make(map[string]bool, len(perAuthAliases))
 	for _, entry := range perAuthAliases {
 		pair := pairOf(entry)
 		if pair.alias == "" {
@@ -948,7 +969,11 @@ func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map
 			continue
 		}
 		seenPair[pair] = struct{}{}
-		perAuthAlias[pair.alias] = struct{}{}
+		inCatalog := false
+		if catalog != nil {
+			_, inCatalog = catalog[pair.name]
+		}
+		perAuthAlias[pair.alias] = perAuthAlias[pair.alias] || inCatalog
 		out = append(out, entry)
 	}
 	for _, entry := range globalAliases {
@@ -959,7 +984,7 @@ func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map
 		if _, exists := seenPair[pair]; exists {
 			continue
 		}
-		if _, shadowed := perAuthAlias[pair.alias]; shadowed && !entry.Fork {
+		if sourceInCatalog, shadowed := perAuthAlias[pair.alias]; shadowed && (!entry.Fork || sourceInCatalog) {
 			continue
 		}
 		seenPair[pair] = struct{}{}
