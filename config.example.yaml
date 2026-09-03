@@ -836,6 +836,11 @@ nonstream-keepalive-interval: 0
 #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
 #       params: # JSON path (gjson/sjson syntax) -> value
 #         "reasoning.effort": "high"
+#     - models:
+#         - name: "claude-fable-5-1"
+#           protocol: "claude"
+#       params:
+#         max_tokens: 128000 # override the final Claude Messages output budget after protocol translation
 #   override-raw: # Override raw rules always set parameters using raw JSON (must be valid JSON).
 #     - models:
 #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")

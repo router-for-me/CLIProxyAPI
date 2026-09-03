@@ -49,6 +49,7 @@ type claudeToResponsesState struct {
 	WebSearchByBlock  map[int]*claudeResponsesWebSearchItem
 	WebSearchByToolID map[string]*claudeResponsesWebSearchItem
 	WebSearchItems    []*claudeResponsesWebSearchItem
+	StopReason        string
 	// usage aggregation
 	Usage claudeResponsesUsageTokens
 }
@@ -70,6 +71,7 @@ type claudeResponsesMessageItem struct {
 	OutputIndex int
 	Text        string
 	Annotations []any
+	Status      string
 }
 
 type claudeResponsesReasoningItem struct {
@@ -141,6 +143,28 @@ func (u claudeResponsesUsageTokens) OpenAIResponsesUsage() (inputTokens, outputT
 	outputTokens = u.OutputTokens
 	totalTokens = inputTokens + outputTokens
 	return inputTokens, outputTokens, totalTokens, cachedTokens
+}
+
+func claudeResponsesIncompleteDetails(stopReason string) ([]byte, bool) {
+	if strings.EqualFold(strings.TrimSpace(stopReason), "max_tokens") {
+		return []byte(`{"reason":"max_output_tokens"}`), true
+	}
+	return nil, false
+}
+
+func claudeResponsesOutputStatus(stopReason string) string {
+	if _, incomplete := claudeResponsesIncompleteDetails(stopReason); incomplete {
+		return "incomplete"
+	}
+	return "completed"
+}
+
+func claudeResponsesTerminalState(stopReason string) (eventType, status string, incompleteDetails []byte) {
+	incompleteDetails, incomplete := claudeResponsesIncompleteDetails(stopReason)
+	if incomplete {
+		return "response.incomplete", "incomplete", incompleteDetails
+	}
+	return "response.completed", "completed", nil
 }
 
 func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
@@ -228,6 +252,7 @@ func (st *claudeToResponsesState) finalizeAssistantMessage(nextSeq func() int) [
 	}
 	fullText := st.TextBuf.String()
 	outputIndex := st.messageOutputIndex()
+	status := claudeResponsesOutputStatus(st.StopReason)
 	var out [][]byte
 	done := []byte(`{"type":"response.output_text.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"text":"","logprobs":[]}`)
 	done, _ = sjson.SetBytes(done, "sequence_number", nextSeq())
@@ -250,6 +275,7 @@ func (st *claudeToResponsesState) finalizeAssistantMessage(nextSeq func() int) [
 	final, _ = sjson.SetBytes(final, "sequence_number", nextSeq())
 	final, _ = sjson.SetBytes(final, "output_index", outputIndex)
 	final, _ = sjson.SetBytes(final, "item.id", st.CurrentMsgID)
+	final, _ = sjson.SetBytes(final, "item.status", status)
 	final, _ = sjson.SetBytes(final, "item.content.0.text", fullText)
 	if len(st.MessageAnnotations) > 0 {
 		final, _ = sjson.SetBytes(final, "item.content.0.annotations", st.MessageAnnotations)
@@ -261,6 +287,7 @@ func (st *claudeToResponsesState) finalizeAssistantMessage(nextSeq func() int) [
 		OutputIndex: outputIndex,
 		Text:        fullText,
 		Annotations: append([]any(nil), st.MessageAnnotations...),
+		Status:      status,
 	})
 	st.InTextBlock = false
 	st.MessageOpen = false
@@ -327,6 +354,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.ReasoningSignature = ""
 			st.ReasoningIndex = -1
 			st.ReasoningItems = nil
+			st.StopReason = ""
 			st.FuncArgsBuf = make(map[int]*strings.Builder)
 			st.FuncNames = make(map[int]string)
 			st.FuncCallIDs = make(map[int]string)
@@ -620,6 +648,9 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		return noSSEOutput(out)
 	case "message_delta":
 		st.Usage.Merge(root.Get("usage"))
+		if stopReason := root.Get("delta.stop_reason"); stopReason.Exists() {
+			st.StopReason = stopReason.String()
+		}
 		return [][]byte{}
 	case "message_stop":
 		out = append(out, st.finalizeAssistantMessage(nextSeq)...)
@@ -627,10 +658,16 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			out = append(out, st.finalizeWebSearch(item, nextSeq)...)
 		}
 
-		completed := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`)
+		eventType, responseStatus, incompleteDetails := claudeResponsesTerminalState(st.StopReason)
+		completed := []byte(`{"type":"","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"","background":false,"error":null}}`)
+		completed, _ = sjson.SetBytes(completed, "type", eventType)
 		completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
 		completed, _ = sjson.SetBytes(completed, "response.id", st.ResponseID)
 		completed, _ = sjson.SetBytes(completed, "response.created_at", st.CreatedAt)
+		completed, _ = sjson.SetBytes(completed, "response.status", responseStatus)
+		if len(incompleteDetails) > 0 {
+			completed, _ = sjson.SetRawBytes(completed, "response.incomplete_details", incompleteDetails)
+		}
 		// Inject original request fields into response as per docs/response.completed.json
 
 		reqBytes := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
@@ -712,8 +749,13 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		}
 		// assistant message items
 		for _, message := range st.MessageItems {
+			status := message.Status
+			if status == "" {
+				status = "completed"
+			}
 			item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
 			item, _ = sjson.SetBytes(item, "id", message.ID)
+			item, _ = sjson.SetBytes(item, "status", status)
 			item, _ = sjson.SetBytes(item, "content.0.text", message.Text)
 			if len(message.Annotations) > 0 {
 				item, _ = sjson.SetBytes(item, "content.0.annotations", message.Annotations)
@@ -789,7 +831,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", totalTokens)
 			}
 		}
-		out = append(out, emitEvent("response.completed", completed))
+		out = append(out, emitEvent(eventType, completed))
 	}
 
 	return noSSEOutput(out)
@@ -831,6 +873,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	var (
 		responseID  string
 		createdAt   int64
+		stopReason  string
 		usageTokens claudeResponsesUsageTokens
 	)
 
@@ -994,12 +1037,20 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 		case "message_delta":
 			usageTokens.Merge(root.Get("usage"))
+			if value := root.Get("delta.stop_reason"); value.Exists() {
+				stopReason = value.String()
+			}
 		}
 	}
 
 	// Populate base fields
+	_, responseStatus, incompleteDetails := claudeResponsesTerminalState(stopReason)
 	out, _ = sjson.SetBytes(out, "id", responseID)
 	out, _ = sjson.SetBytes(out, "created_at", createdAt)
+	out, _ = sjson.SetBytes(out, "status", responseStatus)
+	if len(incompleteDetails) > 0 {
+		out, _ = sjson.SetRawBytes(out, "incomplete_details", incompleteDetails)
+	}
 
 	// Inject request echo fields as top-level (similar to streaming variant)
 	if len(reqBytes) > 0 {
@@ -1083,6 +1134,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		case "message":
 			item = []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
 			item, _ = sjson.SetBytes(item, "id", outputItem.id)
+			item, _ = sjson.SetBytes(item, "status", claudeResponsesOutputStatus(stopReason))
 			item, _ = sjson.SetBytes(item, "content.0.text", outputItem.text.String())
 			if len(outputItem.annotations) > 0 {
 				item, _ = sjson.SetBytes(item, "content.0.annotations", outputItem.annotations)
@@ -1091,17 +1143,19 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			if outputItem.itemType == "custom_tool_call" {
 				item = []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
 				item, _ = sjson.SetBytes(item, "id", outputItem.id)
+				item, _ = sjson.SetBytes(item, "status", claudeResponsesOutputStatus(stopReason))
 				item, _ = sjson.SetBytes(item, "input", unwrapCustomToolInput(outputItem.args.String()))
 				item, _ = sjson.SetBytes(item, "call_id", outputItem.callID)
 				item = applyResponsesFunctionCallNamespaceFields(item, reqBytes, outputItem.name, "")
 				break
 			}
 			args := outputItem.args.String()
-			if args == "" {
+			if args == "" && responseStatus == "completed" {
 				args = "{}"
 			}
 			item = []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 			item, _ = sjson.SetBytes(item, "id", outputItem.id)
+			item, _ = sjson.SetBytes(item, "status", claudeResponsesOutputStatus(stopReason))
 			item, _ = sjson.SetBytes(item, "arguments", args)
 			item, _ = sjson.SetBytes(item, "call_id", outputItem.callID)
 			item = applyResponsesFunctionCallNamespaceFields(item, reqBytes, outputItem.name, "")

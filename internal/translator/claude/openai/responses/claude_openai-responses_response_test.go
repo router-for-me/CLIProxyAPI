@@ -1167,3 +1167,73 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_RestoresNamespaceFuncti
 		t.Fatalf("non-stream output namespace = %q, want mcp__node_repl", got)
 	}
 }
+
+func TestConvertClaudeResponseToOpenAIResponses_MaxTokensEmitsIncomplete(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_max_tokens","usage":{"input_tokens":10,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"unfinished reasoning"}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_max_tokens"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":64000}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var incomplete gjson.Result
+	for _, chunk := range chunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-fable-5-1", nil, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			if event == "response.completed" {
+				t.Fatalf("max_tokens response emitted response.completed: %s", output)
+			}
+			if event == "response.incomplete" {
+				incomplete = data
+			}
+		}
+	}
+
+	if !incomplete.Exists() {
+		t.Fatal("expected response.incomplete event")
+	}
+	if got := incomplete.Get("response.status").String(); got != "incomplete" {
+		t.Fatalf("response.status = %q, want incomplete", got)
+	}
+	if got := incomplete.Get("response.incomplete_details.reason").String(); got != "max_output_tokens" {
+		t.Fatalf("incomplete reason = %q, want max_output_tokens", got)
+	}
+	if got := incomplete.Get("response.output.0.type").String(); got != "reasoning" {
+		t.Fatalf("response.output.0.type = %q, want reasoning; response=%s", got, incomplete.Raw)
+	}
+	if got := incomplete.Get("response.output.0.summary.0.text").String(); got != "unfinished reasoning" {
+		t.Fatalf("reasoning summary = %q, want unfinished reasoning", got)
+	}
+	if got := incomplete.Get("response.usage.output_tokens").Int(); got != 64000 {
+		t.Fatalf("output_tokens = %d, want 64000", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponsesNonStream_MaxTokensPreservesPartialText(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_partial","usage":{"input_tokens":10,"output_tokens":0}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial answer"}}`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":64000}}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n"))
+
+	out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-fable-5-1", nil, nil, raw, nil)
+	root := gjson.ParseBytes(out)
+	if got := root.Get("status").String(); got != "incomplete" {
+		t.Fatalf("status = %q, want incomplete; response=%s", got, out)
+	}
+	if got := root.Get("incomplete_details.reason").String(); got != "max_output_tokens" {
+		t.Fatalf("incomplete reason = %q, want max_output_tokens", got)
+	}
+	if got := root.Get("output.0.status").String(); got != "incomplete" {
+		t.Fatalf("output.0.status = %q, want incomplete", got)
+	}
+	if got := root.Get("output.0.content.0.text").String(); got != "partial answer" {
+		t.Fatalf("partial text = %q, want partial answer", got)
+	}
+}
