@@ -190,9 +190,15 @@ claude-code:
 
 # usage-cache-stats retains a per-session view of prompt-cache behavior so a miss
 # can be diagnosed after the fact. It keeps, in memory only, the last N requests
-# of each Claude Code session with their cache_read / cache_creation split and
-# the cache_miss_reason the API returns, and serves them at
-# /v0/management/cache-stats and in the TUI's Cache tab. See docs/cache-stats.md.
+# of each session with their cache_read / cache_creation split and whatever miss
+# reason the provider returns, and serves them at /v0/management/cache-stats and
+# in the TUI's Cache tab.
+#
+# Every provider is recorded. How much each one reports is carried as a signal:
+# Anthropic reports reads, creation, the 5m/1h pool split and a miss reason;
+# OpenAI-compatible and Gemini report cached input tokens only; everything else
+# reports nothing and is shown as "no cache data" rather than a 0% hit rate.
+# See docs/cache-stats.md.
 usage-cache-stats:
   # Opt-in. Default false.
   enabled: false
@@ -207,6 +213,17 @@ usage-cache-stats:
 
   # Drop a session that has not been seen for this long. Default 24h.
   idle-ttl: 24h
+
+  # Warn once when a session sheds cached tokens faster than the threshold, over
+  # a one-hour sliding window. The session stays flagged until the window drains
+  # below half the threshold, so a session sitting on the line logs once, not on
+  # every request.
+  alert:
+    # Opt-in. Default false.
+    enabled: false
+
+    # Sliding-window threshold in cached tokens lost per hour. Default 500000.
+    lost-tokens-per-hour: 500000
 
 # disable-image-generation supports: false (default), true, "chat", or "passthrough".
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
