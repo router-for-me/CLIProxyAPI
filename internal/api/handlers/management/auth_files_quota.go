@@ -84,9 +84,10 @@ type claudeOAuthUsageLimit struct {
 // API-key credentials and other providers are left out of the response.
 //
 // Query parameters `name` and `auth_index` narrow the set the same way the
-// other auth-files endpoints do. Credentials are queried concurrently and a
-// failing upstream call yields a per-entry `error` rather than failing the
-// whole request. Upstream error bodies are never forwarded.
+// other auth-files endpoints do. Credentials are queried concurrently under
+// the request's context and a failing upstream call yields a per-entry
+// `error` rather than failing the whole request. Upstream error bodies are
+// never forwarded.
 func (h *Handler) GetAuthFileQuota(c *gin.Context) {
 	name := strings.TrimSpace(c.Query("name"))
 	authIndex := strings.TrimSpace(c.Query("auth_index"))
@@ -146,10 +147,12 @@ func (h *Handler) fetchClaudeOAuthQuota(ctx context.Context, auth *coreauth.Auth
 	req.Header.Set("anthropic-beta", claudeOAuthUsageBeta)
 	req.Header.Set("Accept", "application/json")
 
-	httpClient := &http.Client{
-		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth, ""),
-	}
+	// No client-wide timeout: the transport's dial and TLS handshake
+	// timeouts bound connection setup, and once the upstream connection is
+	// established the request only ends with the response or the caller's
+	// context (the management client disconnecting). Repository policy
+	// allows timeouts during credential acquisition only.
+	httpClient := &http.Client{Transport: h.apiCallTransport(auth, "")}
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
 		log.WithError(errDo).Debug("management auth file quota request failed")
