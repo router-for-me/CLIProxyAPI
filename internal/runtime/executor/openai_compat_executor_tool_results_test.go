@@ -2,9 +2,11 @@ package executor
 
 import (
 	"context"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -96,5 +98,45 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 				t.Fatalf("tool content type = %s, want array; body=%s", toolContent.Type, string(gotBody))
 			}
 		})
+	}
+}
+
+func TestOpenAICompatExecutorGLM53FlashLargeToolImage(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3295,"completion_tokens":1,"total_tokens":3296}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatible-zai", &config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+			"api_key":  "test",
+		},
+	}
+	dataURL := "data:image/png;base64," + strings.Repeat("A", base64.StdEncoding.EncodedLen(1_790_000))
+	payload := []byte(`{"model":"glm-5.3-flash","input":[{"type":"function_call","call_id":"call_image","name":"view_image","arguments":"{}"},{"type":"function_call_output","call_id":"call_image","output":[{"type":"input_image","image_url":"` + dataURL + `","detail":"high"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"Describe the tool image."}]}]}`)
+	req := cliproxyexecutor.Request{Model: "glm-5.3-flash", Payload: payload}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+	}
+
+	if _, errExecute := executor.Execute(context.Background(), auth, req, opts); errExecute != nil {
+		t.Fatalf("Execute error: %v", errExecute)
+	}
+	toolContent := gjson.GetBytes(gotBody, "messages.1.content")
+	if !toolContent.IsArray() {
+		t.Fatalf("tool content type = %s, want multimodal array", toolContent.Type)
+	}
+	if got := gjson.GetBytes(gotBody, "messages.1.tool_call_id").String(); got != "call_image" {
+		t.Fatalf("tool_call_id = %q, want call_image", got)
+	}
+	if got := toolContent.Get("0.image_url.url").String(); got != dataURL {
+		t.Fatalf("tool image URL length = %d, want %d", len(got), len(dataURL))
 	}
 }
