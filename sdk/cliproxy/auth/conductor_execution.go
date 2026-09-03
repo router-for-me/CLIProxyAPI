@@ -739,7 +739,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: sentModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts, SkipQuotaObservation: true}
+			countTokensWireModel := preferWireModel(wireModelFromError(errExec), sentModel)
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: countTokensWireModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts, SkipQuotaObservation: true}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
@@ -750,8 +751,12 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				// Some Anthropic-compatible upstreams do not implement the
 				// count_tokens route and return a generic endpoint 404. Record
 				// the failure for hooks and metrics without suspending a model
-				// that remains usable through the messages endpoint.
-				if isCountTokensEndpointNotFoundError(errExec, execReq.Model) && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) {
+				// that remains usable through the messages endpoint. Classify
+				// against the wire model an executor actually sent (e.g. Kimi's
+				// kimi-k3 -> k3 normalization), not the pre-normalization
+				// request model, or a 404 naming the wire model reads as
+				// endpoint-unsupported instead of explicit not-found.
+				if isCountTokensEndpointNotFoundError(errExec, countTokensWireModel) && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
 					if isCredentialScopedError(errExec) {

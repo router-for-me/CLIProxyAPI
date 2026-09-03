@@ -102,6 +102,68 @@ func TestMarkResultNotFoundCooldownPolicy(t *testing.T) {
 	}
 }
 
+func TestMarkResultUnsupportedModelSurvivesRacingGeneric404(t *testing.T) {
+	previousTransient := transientErrorCooldownSeconds.Load()
+	previousDisabled := quotaCooldownDisabled.Load()
+	SetTransientErrorCooldownSeconds(0)
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() {
+		transientErrorCooldownSeconds.Store(previousTransient)
+		quotaCooldownDisabled.Store(previousDisabled)
+	})
+
+	unsupported := &Error{HTTPStatus: http.StatusBadRequest, Message: "requested model is not supported"}
+	generic404 := &Error{HTTPStatus: http.StatusNotFound, Message: "Not Found"}
+
+	newAuth := func(id string) (*Manager, *Auth) {
+		manager := NewManager(nil, nil, nil)
+		auth := &Auth{ID: id, Provider: "codex", ModelStates: map[string]*ModelState{
+			"gpt-5": {},
+		}}
+		if _, err := manager.Register(WithSkipPersist(context.Background()), auth); err != nil {
+			t.Fatalf("Register() error = %v", err)
+		}
+		return manager, auth
+	}
+	cooldownFor := func(manager *Manager, authID string, before time.Time) time.Duration {
+		updated, ok := manager.GetByID(authID)
+		if !ok || updated.ModelStates["gpt-5"] == nil {
+			t.Fatal("MarkResult() did not retain model cooldown state")
+		}
+		return updated.ModelStates["gpt-5"].NextRetryAfter.Sub(before)
+	}
+
+	// unsupported-model 400 first, then a racing generic 404 for the same key
+	// must not shorten the 12h deadline.
+	managerA, authA := newAuth("unsupported-then-generic-404")
+	before := time.Now()
+	managerA.MarkResult(context.Background(), Result{AuthID: authA.ID, Provider: "codex", Model: "gpt-5", Error: unsupported})
+	cooldown := cooldownFor(managerA, authA.ID, before)
+	if cooldown < 12*time.Hour-time.Second || cooldown > 12*time.Hour+time.Second {
+		t.Fatalf("unsupported-model cooldown = %v, want about 12h", cooldown)
+	}
+	managerA.MarkResult(context.Background(), Result{AuthID: authA.ID, Provider: "codex", Model: "gpt-5", Error: generic404})
+	cooldown = cooldownFor(managerA, authA.ID, before)
+	if cooldown < 12*time.Hour-time.Second || cooldown > 12*time.Hour+time.Second {
+		t.Fatalf("racing generic 404 shortened unsupported-model deadline: cooldown = %v, want unchanged ~12h", cooldown)
+	}
+
+	// generic 404 first, then an unsupported-model 400 for the same key must
+	// land on the 12h deadline.
+	managerB, authB := newAuth("generic-404-then-unsupported")
+	before = time.Now()
+	managerB.MarkResult(context.Background(), Result{AuthID: authB.ID, Provider: "codex", Model: "gpt-5", Error: generic404})
+	cooldown = cooldownFor(managerB, authB.ID, before)
+	if cooldown < 59*time.Second || cooldown > 61*time.Second {
+		t.Fatalf("generic-404-first cooldown = %v, want about 1m", cooldown)
+	}
+	managerB.MarkResult(context.Background(), Result{AuthID: authB.ID, Provider: "codex", Model: "gpt-5", Error: unsupported})
+	cooldown = cooldownFor(managerB, authB.ID, before)
+	if cooldown < 12*time.Hour-time.Second || cooldown > 12*time.Hour+time.Second {
+		t.Fatalf("generic-then-unsupported cooldown = %v, want about 12h", cooldown)
+	}
+}
+
 func TestApplyAuthFailureStateNotFoundCooldownPolicy(t *testing.T) {
 	previousTransient := transientErrorCooldownSeconds.Load()
 	SetTransientErrorCooldownSeconds(0)
@@ -489,6 +551,80 @@ func TestMarkResultAliasUsesAttemptedUpstreamModelForExplicitNotFound(t *testing
 	cooldown := updated.ModelStates["public-alias"].NextRetryAfter.Sub(before)
 	if cooldown < 12*time.Hour-time.Second || cooldown > 12*time.Hour+time.Second {
 		t.Fatalf("alias explicit model-not-found cooldown = %v, want about 12h", cooldown)
+	}
+}
+
+// notFoundCountTokensWireModelExecutor simulates Kimi's countTokensUpstream
+// path: it normalizes the request model (e.g. "kimi-k3" -> "k3") before
+// sending it upstream, and its 404 names the normalized model. CountTokens
+// returns a zero Response on every error path (see
+// internal/runtime/executor/claude_executor_tokens.go), so the wire model
+// must ride on the error, mirroring ExecuteStream's wireModelErr.
+type notFoundCountTokensWireModelExecutor struct {
+	normalize func(model string) string
+}
+
+func (e notFoundCountTokensWireModelExecutor) Identifier() string { return "count-tokens-wire-model" }
+func (notFoundCountTokensWireModelExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (notFoundCountTokensWireModelExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+func (notFoundCountTokensWireModelExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+func (e notFoundCountTokensWireModelExecutor) CountTokens(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	wire := e.normalize(req.Model)
+	return cliproxyexecutor.Response{}, wireModelStreamError{
+		err: &Error{
+			HTTPStatus: http.StatusNotFound,
+			Message:    `{"error":{"type":"not_found_error","message":"model ` + wire + ` was not found"}}`,
+		},
+		model: wire,
+	}
+}
+func (notFoundCountTokensWireModelExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestExecuteCountExplicitNotFoundClassifiesAgainstReportedWireModelNotEndpointNeutral(t *testing.T) {
+	previousDisabled := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previousDisabled) })
+
+	manager := NewManager(nil, nil, nil)
+	reqModel := "kimi-k3"
+	normalize := func(m string) string { return strings.TrimPrefix(m, "kimi-") }
+	executor := notFoundCountTokensWireModelExecutor{normalize: normalize}
+	manager.RegisterExecutor(executor)
+	auth := &Auth{ID: "count-tokens-wire-model-auth", Provider: "count-tokens-wire-model"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: reqModel}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	before := time.Now()
+	if _, errCount := manager.ExecuteCount(context.Background(), []string{"count-tokens-wire-model"}, cliproxyexecutor.Request{Model: reqModel}, cliproxyexecutor.Options{}); errCount == nil {
+		t.Fatal("ExecuteCount() unexpectedly succeeded")
+	}
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found after ExecuteCount()")
+	}
+	var state *ModelState
+	for _, candidate := range updated.ModelStates {
+		state = candidate
+	}
+	if state == nil {
+		t.Fatal("ExecuteCount() did not record model cooldown state")
+	}
+	cooldown := state.NextRetryAfter.Sub(before)
+	if cooldown < 12*time.Hour-time.Second || cooldown > 12*time.Hour+time.Second {
+		t.Fatalf("cooldown = %v, want about 12h (a count_tokens 404 naming the reported wire model must classify as explicit not-found, not availability-neutral endpoint-unsupported)", cooldown)
 	}
 }
 

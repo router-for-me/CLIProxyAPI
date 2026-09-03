@@ -807,7 +807,20 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 					statusCode := statusCodeFromResult(result.Error)
 					if isModelSupportResultError(result.Error) {
+						// Route through the same stored-deadline mechanism as
+						// explicit not-found (preserveLongerCooldown +
+						// applyCooldownFields onto state.Quota), so a racing
+						// generic 404/5xx for the same key cannot shorten this
+						// 12h deadline, and this deadline in turn survives a
+						// racing generic 404 the same way explicit not-found does.
 						next := now.Add(12 * time.Hour)
+						next = preserveLongerCooldown(state.Quota, next)
+						applyCooldownFields(&state.Quota, QuotaState{
+							Exceeded:      true,
+							Reason:        "model_not_supported",
+							NextRecoverAt: next,
+							BackoffLevel:  state.Quota.BackoffLevel,
+						})
 						state.NextRetryAfter = next
 					} else if isCloudflareChallengeResultError(result.Error) {
 						next, backoffLevel := nextCloudflareCooldown(state.Quota.BackoffLevel, disableCooling, now)

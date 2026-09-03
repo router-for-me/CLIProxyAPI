@@ -217,6 +217,12 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	if errMidSystem := validateClaudeMidSystemMessageModel(body, confirmedClaudeCode, directAnthropic); errMidSystem != nil {
 		return cliproxyexecutor.Response{}, errMidSystem
 	}
+	// count_tokens has no payload-rule pass of its own, but read the finished
+	// body anyway so this stays symmetric with Execute/ExecuteStream and keeps
+	// working if one is ever added. CountTokens returns a zero Response on
+	// every error path, so the wire model must ride on the error like the
+	// stream path does.
+	wireModel := finalWireModel(body, upstreamModel)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
@@ -258,7 +264,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
-			return cliproxyexecutor.Response{}, classifyClaudeUpstreamError(resp.StatusCode, resp.Header, []byte(msg))
+			return cliproxyexecutor.Response{}, withWireModel(classifyClaudeUpstreamError(resp.StatusCode, resp.Header, []byte(msg)), wireModel)
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
@@ -271,7 +277,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
-		return cliproxyexecutor.Response{}, classifyClaudeUpstreamError(resp.StatusCode, resp.Header, b)
+		return cliproxyexecutor.Response{}, withWireModel(classifyClaudeUpstreamError(resp.StatusCode, resp.Header, b), wireModel)
 	}
 	decodedBody, err := decodeResponseBody(resp.Body, claudeResponseContentEncoding(resp.Header))
 	if err != nil {
