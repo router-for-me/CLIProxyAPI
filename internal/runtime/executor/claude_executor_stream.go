@@ -238,9 +238,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			helps.LogWithRequestID(ctx).Warn(msg)
 			errClassified := classifyClaudeUpstreamError(httpResp.StatusCode, httpResp.Header, []byte(msg))
 			if fastRequest {
+				// Fast-path errors are request-scoped and bypass cooldown
+				// classification entirely (see isRequestScopedError), so they
+				// keep their existing wrapping unchanged; type assertions on
+				// RequestScopedError elsewhere expect this exact type.
 				return nil, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errClassified)
 			}
-			return nil, errClassified
+			return nil, withWireModel(errClassified, upstreamModel)
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
@@ -257,7 +261,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if fastRequest {
 			return nil, newClaudeFastDirectResponseError(httpResp, b)
 		}
-		return nil, classifyClaudeUpstreamError(httpResp.StatusCode, httpResp.Header, b)
+		return nil, withWireModel(classifyClaudeUpstreamError(httpResp.StatusCode, httpResp.Header, b), upstreamModel)
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, claudeResponseContentEncoding(httpResp.Header))
 	if err != nil {

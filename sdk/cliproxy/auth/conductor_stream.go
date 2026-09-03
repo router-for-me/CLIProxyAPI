@@ -282,7 +282,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		if errStream != nil {
 			rerr := resultErrorFromError(errStream)
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: sentModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
+			streamWireModel := preferWireModel(wireModelFromError(errStream), sentModel)
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: streamWireModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
 			result.RetryAfter = retryAfterFromError(errStream)
 			if isCredentialScopedError(errStream) {
 				result.CredentialScope = true

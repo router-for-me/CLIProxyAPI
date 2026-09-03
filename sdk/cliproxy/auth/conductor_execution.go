@@ -1180,12 +1180,40 @@ func authSelectionModelFromOptions(opts cliproxyexecutor.Options, fallback strin
 // Claude stripping a thinking suffix, Kimi remapping an alias), so a
 // structured 404 naming the wire model classifies correctly.
 func wireModelOrSent(resp cliproxyexecutor.Response, sent string) string {
+	reported := ""
 	if resp.Metadata != nil {
 		if v, ok := resp.Metadata[cliproxyexecutor.WireModelMetadataKey].(string); ok {
-			if trimmed := strings.TrimSpace(v); trimmed != "" {
-				return trimmed
-			}
+			reported = strings.TrimSpace(v)
 		}
+	}
+	return preferWireModel(reported, sent)
+}
+
+// wireModelFromError extracts the wire model an executor attached to an
+// error via a WireModel() string method, mirroring wireModelOrSent's
+// Response.Metadata channel for paths (ExecuteStream) that return no
+// Response on failure and so must carry the wire model on the error itself.
+func wireModelFromError(err error) string {
+	if err == nil {
+		return ""
+	}
+	type wireModelProvider interface {
+		WireModel() string
+	}
+	var wmp wireModelProvider
+	if errors.As(err, &wmp) && wmp != nil {
+		return strings.TrimSpace(wmp.WireModel())
+	}
+	return ""
+}
+
+// preferWireModel returns the reported wire model when known, else the
+// pre-call sent model. Both wireModelOrSent (Response.Metadata) and
+// wireModelFromError (error-carried) funnel through here so every entry
+// point shares one precedence rule instead of repeating it.
+func preferWireModel(reported, sent string) string {
+	if reported != "" {
+		return reported
 	}
 	return sent
 }

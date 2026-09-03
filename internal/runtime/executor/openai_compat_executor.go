@@ -1066,3 +1066,46 @@ func openAICompatRetryAfter(status int, headers http.Header, body []byte, now ti
 	}
 	return nil
 }
+
+// wireModelErr decorates an error with the exact model an executor placed on
+// the outbound upstream request. Execute/CountTokens report this via
+// Response.Metadata (see cliproxyexecutor.WireModelMetadataKey), but
+// ExecuteStream returns no Response on failure, so this is the only channel
+// available for a structured stream-path error to carry the wire model back
+// to the conductor for classification.
+type wireModelErr struct {
+	error
+	model string
+}
+
+func (e wireModelErr) WireModel() string { return e.model }
+func (e wireModelErr) Unwrap() error     { return e.error }
+
+// StatusCode/RetryAfter forward to the wrapped error when present, so code
+// that type-asserts these interfaces directly (rather than via errors.As)
+// keeps working unchanged through the wrapper.
+func (e wireModelErr) StatusCode() int {
+	type statusCoder interface{ StatusCode() int }
+	if sc, ok := e.error.(statusCoder); ok {
+		return sc.StatusCode()
+	}
+	return 0
+}
+func (e wireModelErr) RetryAfter() *time.Duration {
+	type retryAfterProvider interface{ RetryAfter() *time.Duration }
+	if rap, ok := e.error.(retryAfterProvider); ok {
+		return rap.RetryAfter()
+	}
+	return nil
+}
+
+// withWireModel wraps err with the wire model an executor placed on the
+// outbound request, if err is non-nil and model is non-empty. Wrapping
+// preserves StatusCode()/RetryAfter()/etc. via Unwrap, so callers using
+// errors.As for those still find them.
+func withWireModel(err error, model string) error {
+	if err == nil || model == "" {
+		return err
+	}
+	return wireModelErr{error: err, model: model}
+}

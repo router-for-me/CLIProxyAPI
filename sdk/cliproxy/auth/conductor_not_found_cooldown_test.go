@@ -308,9 +308,34 @@ func (e notFoundWireModelExecutor) Execute(_ context.Context, _ *Auth, req clipr
 		Message:    `{"error":{"type":"not_found_error","message":"model ` + wire + ` was not found"}}`,
 	}
 }
-func (notFoundWireModelExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-	return nil, nil
+func (e notFoundWireModelExecutor) ExecuteStream(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if e.normalize == nil {
+		return nil, nil
+	}
+	// Mirrors ExecuteStream's real shape: no Response.Metadata channel exists
+	// on failure, so the wire model must ride on the error itself (see
+	// internal/runtime/executor's wireModelErr/withWireModel).
+	wire := e.normalize(req.Model)
+	return nil, wireModelStreamError{
+		err: &Error{
+			HTTPStatus: http.StatusNotFound,
+			Message:    `{"error":{"type":"not_found_error","message":"model ` + wire + ` was not found"}}`,
+		},
+		model: wire,
+	}
 }
+
+// wireModelStreamError simulates internal/runtime/executor's wireModelErr:
+// an error decorated with the wire model, exposed via WireModel(), that
+// still unwraps to the underlying classification error.
+type wireModelStreamError struct {
+	err   *Error
+	model string
+}
+
+func (e wireModelStreamError) Error() string     { return e.err.Error() }
+func (e wireModelStreamError) WireModel() string { return e.model }
+func (e wireModelStreamError) Unwrap() error     { return e.err }
 func (notFoundWireModelExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
 	return auth, nil
 }
@@ -323,9 +348,9 @@ func (notFoundWireModelExecutor) HttpRequest(context.Context, *Auth, *http.Reque
 
 func TestExecuteExplicitNotFoundClassifiesAgainstReportedWireModel(t *testing.T) {
 	cases := []struct {
-		name       string
-		reqModel   string
-		normalize  func(string) string
+		name      string
+		reqModel  string
+		normalize func(string) string
 	}{
 		{
 			// Claude strips a "-thinking-32k" style suffix before sending the
@@ -381,6 +406,46 @@ func TestExecuteExplicitNotFoundClassifiesAgainstReportedWireModel(t *testing.T)
 				t.Fatalf("cooldown = %v, want about 12h (404 naming the reported wire model must classify as explicit not-found, not the short retry)", cooldown)
 			}
 		})
+	}
+}
+
+func TestExecuteStreamExplicitNotFoundClassifiesAgainstReportedWireModel(t *testing.T) {
+	previousDisabled := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previousDisabled) })
+
+	manager := NewManager(nil, nil, nil)
+	reqModel := "claude-opus-4-8-thinking-32k"
+	normalize := func(m string) string { return strings.TrimSuffix(m, "-thinking-32k") }
+	executor := notFoundWireModelExecutor{normalize: normalize}
+	manager.RegisterExecutor(executor)
+	auth := &Auth{ID: "wire-model-stream-auth", Provider: "wire-model-vs-sent"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: reqModel}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	before := time.Now()
+	if _, errExecute := manager.ExecuteStream(context.Background(), []string{"wire-model-vs-sent"}, cliproxyexecutor.Request{Model: reqModel}, cliproxyexecutor.Options{}); errExecute == nil {
+		t.Fatal("ExecuteStream() unexpectedly succeeded")
+	}
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found after ExecuteStream()")
+	}
+	var state *ModelState
+	for _, candidate := range updated.ModelStates {
+		state = candidate
+	}
+	if state == nil {
+		t.Fatal("ExecuteStream() did not record model cooldown state")
+	}
+	cooldown := state.NextRetryAfter.Sub(before)
+	if cooldown < 12*time.Hour-time.Second || cooldown > 12*time.Hour+time.Second {
+		t.Fatalf("cooldown = %v, want about 12h (stream 404 naming the reported wire model must classify as explicit not-found, not the short retry)", cooldown)
 	}
 }
 

@@ -317,7 +317,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("kimi executor: close response body error: %v", errClose)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = withWireModel(statusErr{code: httpResp.StatusCode, msg: string(b)}, upstreamModel)
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
