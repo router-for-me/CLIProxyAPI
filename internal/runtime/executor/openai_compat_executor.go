@@ -142,6 +142,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat executor", translated)
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
+	resp.Metadata = map[string]any{cliproxyexecutor.WireModelMetadataKey: finalWireModel(translated, baseModel)}
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -193,7 +194,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = newOpenAICompatStatusError(httpResp.StatusCode, httpResp.Header, b)
+		err = withWireModel(newOpenAICompatStatusError(httpResp.StatusCode, httpResp.Header, b), finalWireModel(translated, baseModel))
 		return resp, err
 	}
 	body, err := io.ReadAll(httpResp.Body)
@@ -211,7 +212,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
-	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone(), Metadata: map[string]any{cliproxyexecutor.WireModelMetadataKey: finalWireModel(translated, baseModel)}}
 	return resp, nil
 }
 
@@ -294,13 +295,13 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
-		err = newOpenAICompatStatusError(httpResp.StatusCode, httpResp.Header, body)
+		err = withWireModel(newOpenAICompatStatusError(httpResp.StatusCode, httpResp.Header, body), finalWireModel(payload, baseModel))
 		return resp, err
 	}
 
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	reporter.EnsurePublished(ctx)
-	resp = cliproxyexecutor.Response{Payload: body, Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: body, Headers: httpResp.Header.Clone(), Metadata: map[string]any{cliproxyexecutor.WireModelMetadataKey: finalWireModel(payload, baseModel)}}
 	return resp, nil
 }
 
@@ -405,7 +406,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
-		err = newOpenAICompatStatusError(httpResp.StatusCode, httpResp.Header, b)
+		err = withWireModel(newOpenAICompatStatusError(httpResp.StatusCode, httpResp.Header, b), finalWireModel(translated, baseModel))
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -647,7 +648,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(body)}
+		return nil, withWireModel(statusErr{code: httpResp.StatusCode, msg: string(body)}, finalWireModel(payload, baseModel))
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)

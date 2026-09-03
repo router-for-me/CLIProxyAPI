@@ -739,7 +739,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
-			countTokensWireModel := preferWireModel(wireModelFromError(errExec), sentModel)
+			countTokensWireModel := preferWireModel(wireModelFromError(errExec), wireModelOrSent(resp, sentModel))
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: countTokensWireModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts, SkipQuotaObservation: true}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)

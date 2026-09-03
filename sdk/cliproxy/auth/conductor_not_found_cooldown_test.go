@@ -640,3 +640,148 @@ func TestApplyAuthFailureStateUsesAttemptedUpstreamModelForExplicitNotFound(t *t
 		t.Fatalf("alias explicit model-not-found NextRetryAfter = %v, want %v", auth.NextRetryAfter, want)
 	}
 }
+
+func TestMarkResultModelNotFoundSurvivesRacingCloudflareChallenge(t *testing.T) {
+	previousTransient := transientErrorCooldownSeconds.Load()
+	previousDisabled := quotaCooldownDisabled.Load()
+	SetTransientErrorCooldownSeconds(0)
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() {
+		transientErrorCooldownSeconds.Store(previousTransient)
+		quotaCooldownDisabled.Store(previousDisabled)
+	})
+
+	explicitNotFound := &Error{Code: "model_not_found", HTTPStatus: http.StatusNotFound, Message: "model gpt-5 not found"}
+	challenge := &Error{HTTPStatus: http.StatusForbidden, Message: "cloudflare challenge-platform detected"}
+
+	newAuth := func(id string) (*Manager, *Auth) {
+		manager := NewManager(nil, nil, nil)
+		auth := &Auth{ID: id, Provider: "codex", ModelStates: map[string]*ModelState{
+			"gpt-5": {},
+		}}
+		if _, err := manager.Register(WithSkipPersist(context.Background()), auth); err != nil {
+			t.Fatalf("Register() error = %v", err)
+		}
+		return manager, auth
+	}
+	cooldownFor := func(manager *Manager, authID string, before time.Time) time.Duration {
+		updated, ok := manager.GetByID(authID)
+		if !ok || updated.ModelStates["gpt-5"] == nil {
+			t.Fatal("MarkResult() did not retain model cooldown state")
+		}
+		return updated.ModelStates["gpt-5"].NextRetryAfter.Sub(before)
+	}
+
+	// explicit not-found first (12h), then a racing Cloudflare challenge for
+	// the same model key must not shorten the stored deadline.
+	manager, auth := newAuth("not-found-then-challenge")
+	before := time.Now()
+	manager.MarkResult(context.Background(), Result{AuthID: auth.ID, Provider: "codex", Model: "gpt-5", Error: explicitNotFound})
+	cooldown := cooldownFor(manager, auth.ID, before)
+	if cooldown < 12*time.Hour-time.Second || cooldown > 12*time.Hour+time.Second {
+		t.Fatalf("explicit not-found cooldown = %v, want about 12h", cooldown)
+	}
+	manager.MarkResult(context.Background(), Result{AuthID: auth.ID, Provider: "codex", Model: "gpt-5", Error: challenge})
+	cooldown = cooldownFor(manager, auth.ID, before)
+	if cooldown < 12*time.Hour-time.Second || cooldown > 12*time.Hour+time.Second {
+		t.Fatalf("racing cloudflare challenge shortened explicit not-found deadline: cooldown = %v, want unchanged ~12h", cooldown)
+	}
+}
+
+func TestApplyAuthFailureStateModelNotFoundSurvivesRacingCloudflareChallenge(t *testing.T) {
+	previousTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(previousTransient) })
+
+	now := time.Date(2026, 9, 3, 17, 30, 0, 0, time.UTC)
+	explicitNotFound := &Error{Code: "model_not_found", HTTPStatus: http.StatusNotFound, Message: "model gpt-5 not found"}
+	challenge := &Error{HTTPStatus: http.StatusForbidden, Message: "cloudflare challenge-platform detected"}
+
+	auth := &Auth{ID: "auth-not-found-then-challenge"}
+	applyAuthFailureState(auth, explicitNotFound, nil, "gpt-5", now, false)
+	if want := now.Add(12 * time.Hour); !auth.NextRetryAfter.Equal(want) {
+		t.Fatalf("explicit not-found NextRetryAfter = %v, want %v", auth.NextRetryAfter, want)
+	}
+
+	applyAuthFailureState(auth, challenge, nil, "gpt-5", now.Add(time.Minute), false)
+	if want := now.Add(12 * time.Hour); !auth.NextRetryAfter.Equal(want) {
+		t.Fatalf("racing cloudflare challenge shortened explicit not-found deadline: NextRetryAfter = %v, want unchanged %v", auth.NextRetryAfter, want)
+	}
+}
+
+// notFoundCountTokensResponseMetadataExecutor simulates a custom CountTokens
+// executor that follows the public Response.Metadata contract
+// (cliproxyexecutor.WireModelMetadataKey) instead of the error-carried
+// wireModelStreamError channel used by the Claude/Kimi executors: it returns
+// a non-zero Response naming the normalized model alongside a plain error
+// with no WireModel() method. If the classification path only reads
+// wireModelFromError, it falls back to the pre-call sent model here and
+// misclassifies an explicit not-found as an endpoint-neutral 404.
+type notFoundCountTokensResponseMetadataExecutor struct {
+	normalize func(model string) string
+}
+
+func (e notFoundCountTokensResponseMetadataExecutor) Identifier() string {
+	return "count-tokens-response-metadata"
+}
+func (notFoundCountTokensResponseMetadataExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (notFoundCountTokensResponseMetadataExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+func (notFoundCountTokensResponseMetadataExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+func (e notFoundCountTokensResponseMetadataExecutor) CountTokens(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	wire := e.normalize(req.Model)
+	resp := cliproxyexecutor.Response{Metadata: map[string]any{cliproxyexecutor.WireModelMetadataKey: wire}}
+	err := &Error{
+		HTTPStatus: http.StatusNotFound,
+		Message:    `{"error":{"type":"not_found_error","message":"model ` + wire + ` was not found"}}`,
+	}
+	return resp, err
+}
+func (notFoundCountTokensResponseMetadataExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestExecuteCountReadsWireModelFromResponseMetadataNotJustError(t *testing.T) {
+	previousDisabled := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previousDisabled) })
+
+	manager := NewManager(nil, nil, nil)
+	reqModel := "kimi-k3"
+	normalize := func(m string) string { return strings.TrimPrefix(m, "kimi-") }
+	executor := notFoundCountTokensResponseMetadataExecutor{normalize: normalize}
+	manager.RegisterExecutor(executor)
+	auth := &Auth{ID: "count-tokens-response-metadata-auth", Provider: "count-tokens-response-metadata"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: reqModel}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	before := time.Now()
+	if _, errCount := manager.ExecuteCount(context.Background(), []string{"count-tokens-response-metadata"}, cliproxyexecutor.Request{Model: reqModel}, cliproxyexecutor.Options{}); errCount == nil {
+		t.Fatal("ExecuteCount() unexpectedly succeeded")
+	}
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found after ExecuteCount()")
+	}
+	var state *ModelState
+	for _, candidate := range updated.ModelStates {
+		state = candidate
+	}
+	if state == nil {
+		t.Fatal("ExecuteCount() did not record model cooldown state")
+	}
+	cooldown := state.NextRetryAfter.Sub(before)
+	if cooldown < 12*time.Hour-time.Second || cooldown > 12*time.Hour+time.Second {
+		t.Fatalf("explicit not-found (via Response.Metadata) cooldown = %v, want about 12h (endpoint-neutral misclassification: wire model not read from resp.Metadata)", cooldown)
+	}
+}

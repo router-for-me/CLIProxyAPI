@@ -824,6 +824,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state.NextRetryAfter = next
 					} else if isCloudflareChallengeResultError(result.Error) {
 						next, backoffLevel := nextCloudflareCooldown(state.Quota.BackoffLevel, disableCooling, now)
+						// A racing challenge must not shorten a longer deadline
+						// already stored by an explicit not-found/unsupported-model
+						// classification for this model key.
+						next = preserveLongerCooldown(state.Quota, next)
 						state.NextRetryAfter = next
 						state.StatusMessage = "cloudflare challenge"
 						if auth.LastError != nil {
@@ -2079,6 +2083,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if isCloudflareChallengeResultError(resultErr) {
 		auth.StatusMessage = "cloudflare challenge"
 		next, backoffLevel := nextCloudflareCooldown(auth.Quota.BackoffLevel, disableCooling, now)
+		// A racing challenge must not shorten a longer deadline already
+		// stored by an explicit not-found classification for this auth.
+		next = preserveLongerCooldown(auth.Quota, next)
 		applyCooldownFields(&auth.Quota, QuotaState{
 			Exceeded:      true,
 			Reason:        "cloudflare challenge",
