@@ -49,6 +49,11 @@ func ObserveClaudeCacheKeepalive(ctx context.Context, observation ClaudeCacheKee
 	if !observation.ConfirmedClaudeCode || strings.TrimSpace(observation.AuthID) == "" || len(observation.OriginalPayload) == 0 {
 		return
 	}
+	// A probe travels this same path. Observing it would reset the session's
+	// consecutive-probe budget on every probe and defeat max-probes.
+	if keepalive.IsProbeExecution(observation.Metadata) {
+		return
+	}
 	ttl := keepalive.ExtendedCacheTTL(observation.OriginalPayload)
 	if !keepalive.IsExtendedCacheTTL(ttl) {
 		return

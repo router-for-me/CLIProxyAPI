@@ -121,3 +121,13 @@ func TestClaudeCacheKeepaliveAffinityKeyPrefersSelectionMetadata(t *testing.T) {
 		t.Fatalf("affinity key fallback = (%q, %q)", provider, model)
 	}
 }
+
+func TestObserveClaudeCacheKeepaliveIgnoresItsOwnProbe(t *testing.T) {
+	scheduled := installKeepaliveScheduler(t)
+	observation := baseObservation(keepaliveBody("1h"))
+	observation.Metadata = map[string]any{keepalive.ProbeMetadataKey: true}
+	ObserveClaudeCacheKeepalive(context.Background(), observation)
+	if len(*scheduled) != 0 {
+		t.Fatalf("scheduled %d probes for a probe execution, want 0: a probe must not reset its own budget", len(*scheduled))
+	}
+}

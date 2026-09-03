@@ -46,6 +46,7 @@ func (p cacheKeepaliveProber) Probe(ctx context.Context, probe keepalive.ProbeRe
 		Metadata: map[string]any{
 			coreexecutor.PinnedAuthMetadataKey:     probe.AuthID,
 			coreexecutor.RequestedModelMetadataKey: probe.Model,
+			keepalive.ProbeMetadataKey:             true,
 		},
 	}
 	resp, err := p.manager.Execute(ctx, []string{provider}, req, opts)

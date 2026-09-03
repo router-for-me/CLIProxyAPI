@@ -28,6 +28,23 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// ProbeMetadataKey marks an execution as a keepalive probe.
+//
+// A probe travels the ordinary request path, so without this marker the
+// observation hook would record the probe as a real request: that would reset
+// the consecutive-probe budget on every probe and let an idle session probe
+// forever, defeating max-probes.
+const ProbeMetadataKey = "cache_keepalive_probe"
+
+// IsProbeExecution reports whether execution metadata belongs to a keepalive probe.
+func IsProbeExecution(metadata map[string]any) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	marker, ok := metadata[ProbeMetadataKey].(bool)
+	return ok && marker
+}
+
 // Timer is the subset of time.Timer the scheduler needs. Tests substitute a
 // deterministic implementation.
 type Timer interface {
