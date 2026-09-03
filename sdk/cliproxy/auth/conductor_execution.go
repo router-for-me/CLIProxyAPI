@@ -1238,6 +1238,24 @@ func preferWireModel(reported, sent string) string {
 	return sent
 }
 
+// bootstrapStreamWireModel resolves the wire model for a stream bootstrap
+// failure Result. A bootstrap error can surface as a structured error value
+// (wireModelFromError, via a WireModel() wrapper) or, when ExecuteStream
+// already succeeded and only the first *chunk* was a structured failure
+// without that wrapper, as StreamResult.Metadata captured before the first
+// chunk was emitted (see wireModelOrSentStream). Checking wireModelFromError
+// alone and falling straight through to sent silently drops a normalized
+// model an executor already reported via metadata - the same class of gap
+// wireModelOrSentStream exists to close on the success path. Every bootstrap
+// Result constructor should funnel through here instead of calling
+// preferWireModel(wireModelFromError(err), sent) directly.
+func bootstrapStreamWireModel(bootstrapErr error, metadata map[string]any, sent string) string {
+	if reported := wireModelFromError(bootstrapErr); reported != "" {
+		return reported
+	}
+	return wireModelOrSentStream(metadata, sent)
+}
+
 func executionModelForAuthSelection(opts cliproxyexecutor.Options, model string) (string, bool) {
 	model = strings.TrimSpace(model)
 	if model == "" {

@@ -1244,3 +1244,106 @@ type statusErrForTest struct {
 
 func (e statusErrForTest) Error() string   { return e.msg }
 func (e statusErrForTest) StatusCode() int { return e.code }
+
+// bootstrapWireModelExecutor mirrors a Kimi/Claude-style executor whose
+// ExecuteStream call itself succeeds (err == nil, StreamResult.Metadata
+// carries the normalized wire model, captured before any chunk is emitted),
+// but whose very FIRST chunk is a structured 404 that implements no
+// WireModel() method. readStreamBootstrap treats a first-chunk error as a
+// bootstrap failure (streaming never actually started from the conductor's
+// point of view), which is a different code path from a later chunk's error
+// (see kimiStyleWireModelExecutor/midStreamWireModelExecutor above, which
+// already succeed via the success-path wireModelOrSentStream resolution at
+// wrapStreamResult). Before this round's fix, every bootstrap Result
+// constructor in conductor_stream.go (:373/:393/:404/:419) resolved via
+// preferWireModel(wireModelFromError(bootstrapErr), sentModel) only -
+// wireModelFromError finds nothing (no WireModel() wrapper) and falls
+// through straight to the pre-normalization sent model, so classification
+// against the reported wire model never matches and the 12h explicit
+// not-found cooldown is missed entirely.
+type bootstrapWireModelExecutor struct {
+	normalize func(model string) string
+}
+
+func (e bootstrapWireModelExecutor) Identifier() string { return "bootstrap-wire-model" }
+func (e bootstrapWireModelExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (e bootstrapWireModelExecutor) ExecuteStream(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	wire := e.normalize(req.Model)
+	ch := make(chan cliproxyexecutor.StreamChunk, 1)
+	ch <- cliproxyexecutor.StreamChunk{Err: &Error{
+		HTTPStatus: http.StatusNotFound,
+		Message:    `{"error":{"type":"not_found_error","message":"model ` + wire + ` was not found"}}`,
+	}}
+	close(ch)
+	return &cliproxyexecutor.StreamResult{
+		Chunks:   ch,
+		Metadata: map[string]any{cliproxyexecutor.WireModelMetadataKey: wire},
+	}, nil
+}
+func (bootstrapWireModelExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+func (bootstrapWireModelExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (bootstrapWireModelExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+// TestExecuteStreamBootstrapFirstChunkClassifiesAgainstReportedWireModel
+// covers the delta review's must-fix item 2: a successful ExecuteStream call
+// whose first chunk is a structured 404 without a WireModel() wrapper, with
+// StreamResult.Metadata carrying the normalized wire model, must still
+// classify as an explicit not-found for that reported model and cool down
+// for about 12h - not silently misclassify against the un-normalized
+// pre-call model and fall back to a short transient-error backoff.
+func TestExecuteStreamBootstrapFirstChunkClassifiesAgainstReportedWireModel(t *testing.T) {
+	previousDisabled := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previousDisabled) })
+
+	manager := NewManager(nil, nil, nil)
+	reqModel := "kimi-k3-thinking-32k"
+	normalize := func(m string) string { return "k3" }
+	executor := bootstrapWireModelExecutor{normalize: normalize}
+	manager.RegisterExecutor(executor)
+	auth := &Auth{ID: "bootstrap-wire-model-auth", Provider: "bootstrap-wire-model"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: reqModel}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	before := time.Now()
+	// The single registered model is also the only execModel candidate, so
+	// once the bootstrap 404 cools it down there is nothing left to retry;
+	// ExecuteStream's own return value (error vs. an empty completed
+	// stream) is an orthogonal retry-exhaustion detail this test does not
+	// assert on - what item 2 is about is whether the cooldown state that
+	// gets recorded along the way classifies against the reported wire
+	// model. Drain whatever comes back so nothing leaks.
+	streamResult, _ := manager.ExecuteStream(context.Background(), []string{"bootstrap-wire-model"}, cliproxyexecutor.Request{Model: reqModel}, cliproxyexecutor.Options{})
+	if streamResult != nil {
+		for range streamResult.Chunks {
+		}
+	}
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found after ExecuteStream()")
+	}
+	var state *ModelState
+	for _, candidate := range updated.ModelStates {
+		state = candidate
+	}
+	if state == nil {
+		t.Fatal("ExecuteStream() did not record model cooldown state from the bootstrap first-chunk error")
+	}
+	cooldown := state.NextRetryAfter.Sub(before)
+	if cooldown < 12*time.Hour-time.Second || cooldown > 12*time.Hour+time.Second {
+		t.Fatalf("cooldown = %v, want about 12h (bootstrap first-chunk 404 naming the executor-reported wire model, from StreamResult.Metadata on a successful ExecuteStream call, must classify as explicit not-found)", cooldown)
+	}
+}

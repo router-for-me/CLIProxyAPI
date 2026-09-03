@@ -424,26 +424,81 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 
 	// modelCooldownStateRecord only ever persists a record for a BLOCKED
 	// model (see its !blocked early-return) - an available sibling never
-	// gets one. So restoring a single model-scoped record into a fresh
-	// Manager necessarily leaves auth.ModelStates holding only the cooling
-	// model(s), never the siblings that were selectable before shutdown.
-	// updateAggregatedAvailability's sweep treats an ABSENT entry the same
-	// as an unavailable one (allUnavailable starts true and is only
-	// lowered by entries actually present), so calling it unconditionally
-	// here would mark the whole credential unavailable from a single
-	// restored model - even though isAuthBlockedForModel's own model!=""
-	// path (used by every real selection call) already blocks just that
-	// model correctly. Only let this restore LOWER auth.Unavailable
-	// (e.g. a previously-restored auth-level record clears once a model
-	// comes back), never RAISE it on the strength of one partially
-	// restored model map: that escalation is exactly what would make a
-	// multi-model credential go dark after a restart over one cooling
-	// sibling.
+	// gets one. So restoring model-scoped records into a fresh Manager
+	// necessarily leaves auth.ModelStates holding only the cooling
+	// model(s); a sibling that was selectable before shutdown either has
+	// no entry at all, or - if this credential's whole registered model
+	// set was cooling - has no entry for the same reason every other
+	// model doesn't: none of them needed a fresh state, they all got one
+	// from their own persisted record. updateAggregatedAvailability's
+	// sweep treats an ABSENT entry the same as an unavailable one
+	// (allUnavailable starts true and is only lowered by entries actually
+	// present), so calling it unconditionally here would mark the whole
+	// credential unavailable from a single restored model even when
+	// siblings exist and are selectable - even though isAuthBlockedForModel's
+	// own model!="" path (used by every real selection call) already
+	// blocks just that model correctly. Only let this restore RAISE
+	// auth.Unavailable when the restored model-state map is PROVABLY
+	// COMPLETE: every model this credential is actually registered for
+	// (read fresh from the model registry, not from the record) has a
+	// restored, blocked state. Otherwise only let it LOWER
+	// auth.Unavailable (e.g. a previously-restored auth-level record
+	// clears once a model comes back) - never raise it on the strength of
+	// a model set that might just be partially restored.
 	wasUnavailable := auth.Unavailable
 	updateAggregatedAvailability(auth, now)
-	if !wasUnavailable && auth.Unavailable {
+	if !wasUnavailable && auth.Unavailable && !m.restoredModelSetIsComplete(auth, now) {
 		auth.Unavailable = false
 		auth.NextRetryAfter = time.Time{}
+	}
+	return true
+}
+
+// restoredModelSetIsComplete reports whether every model currently
+// registered for this credential in the global model registry has a
+// restored ModelState entry that is itself blocked. Only in that case can a
+// restored model-state map be trusted to prove the credential is entirely
+// down - modelCooldownStateRecord never persists a record for an available
+// model, so an incomplete restored set (the registry lists a model with no
+// corresponding restored state) must never be read as "everything is
+// unavailable."
+func (m *Manager) restoredModelSetIsComplete(auth *Auth, now time.Time) bool {
+	if m == nil || auth == nil || len(auth.ModelStates) == 0 {
+		return false
+	}
+	supportedModels := registry.GetGlobalRegistry().GetModelsForClient(auth.ID)
+	if len(supportedModels) == 0 {
+		return false
+	}
+	required := make(map[string]struct{}, len(supportedModels))
+	for _, model := range supportedModels {
+		if model == nil || strings.TrimSpace(model.ID) == "" {
+			continue
+		}
+		key := m.selectionModelKeyForAuth(auth, model.ID)
+		if key == "" {
+			key = canonicalModelKey(model.ID)
+		}
+		if key == "" {
+			continue
+		}
+		required[key] = struct{}{}
+	}
+	if len(required) == 0 {
+		return false
+	}
+	for key := range required {
+		state, ok := auth.ModelStates[key]
+		if !ok || state == nil {
+			return false
+		}
+		if state.Status == StatusDisabled {
+			continue
+		}
+		blocked, _, _ := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+		if !blocked {
+			return false
+		}
 	}
 	return true
 }
@@ -1364,15 +1419,29 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		stateUnavailable := false
 		if state.Status == StatusDisabled {
 			stateUnavailable = true
-		} else if state.Unavailable {
-			if state.NextRetryAfter.IsZero() {
-				stateUnavailable = false
-			} else if state.NextRetryAfter.After(now) {
+		} else {
+			// Decide per model via the same predicate the selector uses
+			// (isAuthBlockedForModel's matched-model path calls
+			// availabilityBlock with these exact five values) instead of a
+			// field-specific shortcut that only looked at
+			// state.Unavailable/NextRetryAfter. A generic 404 stores its
+			// backoff in state.Quota.NextRecoverAt without setting
+			// state.Quota.Exceeded; a shortcut keyed off NextRetryAfter
+			// alone loses that recovery time the moment a concurrent,
+			// shorter-lived error (e.g. a transient 5xx) overwrites
+			// NextRetryAfter and then expires - availabilityBlock
+			// considers both NextRetryAfter and NextRecoverAt and takes
+			// whichever is later, so it can't be fooled that way.
+			blocked, _, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+			if blocked {
 				stateUnavailable = true
-				if earliestRetry.IsZero() || state.NextRetryAfter.Before(earliestRetry) {
-					earliestRetry = state.NextRetryAfter
+				if !next.IsZero() && (earliestRetry.IsZero() || next.Before(earliestRetry)) {
+					earliestRetry = next
 				}
-			} else {
+			} else if state.Unavailable {
+				// Every recovery signal has expired - clear the stale
+				// flags instead of leaving them set, mirroring the
+				// previous self-healing behavior.
 				state.Unavailable = false
 				state.NextRetryAfter = time.Time{}
 			}

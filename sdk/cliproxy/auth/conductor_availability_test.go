@@ -8,9 +8,20 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
-func TestUpdateAggregatedAvailability_UnavailableWithoutNextRetryDoesNotBlockAuth(t *testing.T) {
+func TestUpdateAggregatedAvailability_UnavailableWithoutNextRetryBlocksAuthIndefinitely(t *testing.T) {
 	t.Parallel()
 
+	// This intentionally documents a behavior change from the delta review's
+	// item 3 ("no field-specific shortcuts... decide per model via the same
+	// predicate the selector uses"): isAuthBlockedForModel's own matched-state
+	// branch (selector.go) already treats a state with Unavailable=true and
+	// no deadlines at all as an indefinite block - availabilityBlock returns
+	// (true, ..., zero) for that combination, and the matched-model loop
+	// returns that block immediately when next.IsZero(). The pre-fix
+	// aggregation shortcut disagreed with the selector on this exact case
+	// (it read Unavailable=true + zero NextRetryAfter as "not blocking"),
+	// which is precisely the shortcut/selector divergence item 3 removed.
+	// Aggregation must now agree with the live per-model selector here too.
 	now := time.Now()
 	model := "test-model"
 	auth := &Auth{
@@ -25,11 +36,11 @@ func TestUpdateAggregatedAvailability_UnavailableWithoutNextRetryDoesNotBlockAut
 
 	updateAggregatedAvailability(auth, now)
 
-	if auth.Unavailable {
-		t.Fatalf("auth.Unavailable = true, want false")
+	if !auth.Unavailable {
+		t.Fatalf("auth.Unavailable = false, want true (matches isAuthBlockedForModel's own indefinite-block behavior for Unavailable=true with no deadlines)")
 	}
 	if !auth.NextRetryAfter.IsZero() {
-		t.Fatalf("auth.NextRetryAfter = %v, want zero", auth.NextRetryAfter)
+		t.Fatalf("auth.NextRetryAfter = %v, want zero (indefinite block has no known deadline)", auth.NextRetryAfter)
 	}
 }
 
