@@ -69,7 +69,7 @@ func TestOAuthModelAliasesForAuthDropsGlobalForkWhenPerAuthSourceIsInCatalog(t *
 	}
 	// End to end: the catalog ends up with luna, and reserve renamed to the alias, once.
 	models := []*ModelInfo{{ID: "gpt-5.6-luna"}, {ID: "gpt-reserve"}}
-	out := applyOAuthModelAliasForAuth(cfg, "codex", "oauth", attrs, models)
+	out := applyOAuthModelAliasForAuth(cfg, "codex", "oauth", attrs, nil, models)
 	ids := make([]string, 0, len(out))
 	for _, m := range out {
 		ids = append(ids, m.ID)
@@ -96,8 +96,12 @@ func TestOAuthModelAliasesForAuthDropsGlobalForkWhenPerAuthSourceIsExcluded(t *t
 	if len(got) != 1 || got[0].Name != "gpt-reserve" {
 		t.Fatalf("expected the fork to be dropped, got %+v", got)
 	}
-	models := applyExcludedModels([]*ModelInfo{{ID: "gpt-5.6-luna"}, {ID: "gpt-reserve"}}, []string{"gpt-reserve"})
-	out := applyOAuthModelAliasForAuth(cfg, "codex", "oauth", attrs, models)
+	// The exclusion may come from the global oauth-excluded-models table rather than the
+	// attribute, as for an SDK-created credential; the caller passes whatever it filtered with.
+	delete(attrs, "excluded_models")
+	excluded := []string{"gpt-reserve"}
+	models := applyExcludedModels([]*ModelInfo{{ID: "gpt-5.6-luna"}, {ID: "gpt-reserve"}}, excluded)
+	out := applyOAuthModelAliasForAuth(cfg, "codex", "oauth", attrs, excluded, models)
 	for _, m := range out {
 		if m.ID == "gpt-5.6-luna-reserve" {
 			t.Fatalf("excluded source must not be reachable through the alias, got %+v", out)

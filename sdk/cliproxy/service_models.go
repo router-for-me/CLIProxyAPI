@@ -262,7 +262,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	if ctx.Err() != nil {
 		return
 	}
-	models = applyOAuthModelAliasForAuth(s.cfg, provider, authKind, a.Attributes, models)
+	models = applyOAuthModelAliasForAuth(s.cfg, provider, authKind, a.Attributes, excluded, models)
 	if ctx.Err() != nil {
 		return
 	}
@@ -887,10 +887,13 @@ func rewriteModelInfoName(name, oldID, newID string) string {
 }
 
 func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
-	return applyOAuthModelAliasForAuth(cfg, provider, authKind, nil, models)
+	return applyOAuthModelAliasForAuth(cfg, provider, authKind, nil, nil, models)
 }
 
-func applyOAuthModelAliasForAuth(cfg *config.Config, provider, authKind string, attributes map[string]string, models []*ModelInfo) []*ModelInfo {
+// applyOAuthModelAliasForAuth applies the merged alias table to a catalog that has already
+// had `excluded` removed. excluded is the same effective list the caller filtered with, so a
+// source that exclusions removed is not mistaken for a hidden upstream model.
+func applyOAuthModelAliasForAuth(cfg *config.Config, provider, authKind string, attributes map[string]string, excluded []string, models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
 		return models
 	}
@@ -898,7 +901,7 @@ func applyOAuthModelAliasForAuth(cfg *config.Config, provider, authKind string, 
 	if channel == "" {
 		return models
 	}
-	aliases := oauthModelAliasesForAuth(cfg, channel, attributes, catalogModelIDs(models), excludedModelsFromAttributes(attributes))
+	aliases := oauthModelAliasesForAuth(cfg, channel, attributes, catalogModelIDs(models), excluded)
 	if len(aliases) == 0 {
 		return models
 	}
@@ -920,19 +923,6 @@ func catalogModelIDs(models []*ModelInfo) map[string]struct{} {
 	return ids
 }
 
-// excludedModelsFromAttributes reads the synthesizer's pre-merged exclusion list, the same
-// attribute registerModelsForAuth applies before the alias pass.
-func excludedModelsFromAttributes(attributes map[string]string) []string {
-	if attributes == nil {
-		return nil
-	}
-	raw := strings.TrimSpace(attributes["excluded_models"])
-	if raw == "" {
-		return nil
-	}
-	return strings.Split(raw, ",")
-}
-
 func modelExcluded(id string, excluded []string) bool {
 	for _, pattern := range excluded {
 		if trimmed := strings.ToLower(strings.TrimSpace(pattern)); trimmed != "" && matchWildcard(trimmed, id) {
@@ -944,9 +934,10 @@ func modelExcluded(id string, excluded []string) bool {
 
 // oauthModelAliasesForAuth merges a credential's aliases with the channel's global table.
 // catalog is the set of upstream ids the catalog has after exclusions; nil means unknown,
-// which keeps every global fork. excluded is the credential's exclusion list: a per-auth
-// source that exclusions removed must not be treated as a hidden model, or the global fork
-// would register an id that request-time resolution routes to the excluded model.
+// which keeps every global fork. excluded is the effective exclusion list the catalog was
+// filtered with (global oauth-excluded-models or the synthesizer's merged attribute): a
+// per-auth source that exclusions removed must not be treated as a hidden model, or the
+// global fork would register an id that request-time resolution routes to the excluded model.
 func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map[string]string, catalog map[string]struct{}, excluded []string) []config.OAuthModelAlias {
 	perAuthAliases := coreauth.OAuthModelAliasesFromAttributes(attributes)
 	if cfg == nil || len(cfg.OAuthModelAlias) == 0 {
