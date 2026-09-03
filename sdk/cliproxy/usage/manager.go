@@ -50,9 +50,12 @@ type Record struct {
 	RequestedAt time.Time
 	Latency     time.Duration
 	TTFT        time.Duration
-	Failed      bool
-	Fail        Failure
-	Detail      Detail
+	// TokensPerSecond is output-token generation throughput excluding TTFT.
+	// Zero means unknown (do not invent tokens/total_latency).
+	TokensPerSecond float64
+	Failed          bool
+	Fail            Failure
+	Detail          Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
 }
