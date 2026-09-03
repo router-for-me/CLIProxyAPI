@@ -19,9 +19,10 @@ const (
 )
 
 const (
-	defaultClaudeCodeKeepaliveBeforeExpiry = 5 * time.Minute
-	defaultClaudeCodeKeepaliveMaxProbes    = 6
-	defaultClaudeCodeKeepaliveMaxTokens    = 1
+	defaultClaudeCodeKeepaliveBeforeExpiry    = 5 * time.Minute
+	defaultClaudeCodeKeepaliveAgentIdleWindow = 10 * time.Minute
+	defaultClaudeCodeKeepaliveMaxProbes       = 6
+	defaultClaudeCodeKeepaliveMaxTokens       = 1
 )
 
 // ClaudeCodeCacheKeepaliveConfig configures agent-aware prompt-cache keepalive
@@ -43,6 +44,11 @@ type ClaudeCodeCacheKeepaliveConfig struct {
 	// Liveness selects the liveness strategy. Default "claude-code-tasks".
 	Liveness string `yaml:"liveness" json:"liveness"`
 
+	// AgentIdleWindow is how long an agent may be silent and still count as
+	// running. Default 10m. It is deliberately not the cache TTL: an agent that
+	// has written nothing for an hour is finished, not busy.
+	AgentIdleWindow time.Duration `yaml:"agent-idle-window" json:"agent-idle-window"`
+
 	// MaxProbes caps consecutive probes without an intervening real request. Default 6.
 	MaxProbes int `yaml:"max-probes" json:"max-probes"`
 
@@ -61,6 +67,7 @@ type ClaudeCodeCacheKeepaliveConfig struct {
 	beforeExpiryPresent         bool
 	onlyWhenAgentsActivePresent bool
 	livenessPresent             bool
+	agentIdleWindowPresent      bool
 	maxProbesPresent            bool
 	maxTokensPresent            bool
 }
@@ -73,6 +80,7 @@ func (c *ClaudeCodeCacheKeepaliveConfig) UnmarshalYAML(value *yaml.Node) error {
 		BeforeExpiry         time.Duration `yaml:"before-expiry"`
 		OnlyWhenAgentsActive bool          `yaml:"only-when-agents-active"`
 		Liveness             string        `yaml:"liveness"`
+		AgentIdleWindow      time.Duration `yaml:"agent-idle-window"`
 		MaxProbes            int           `yaml:"max-probes"`
 		MaxTokens            int           `yaml:"max-tokens"`
 		TaskStateDirs        []string      `yaml:"task-state-dirs"`
@@ -89,6 +97,7 @@ func (c *ClaudeCodeCacheKeepaliveConfig) UnmarshalYAML(value *yaml.Node) error {
 		BeforeExpiry:                raw.BeforeExpiry,
 		OnlyWhenAgentsActive:        raw.OnlyWhenAgentsActive,
 		Liveness:                    strings.TrimSpace(raw.Liveness),
+		AgentIdleWindow:             raw.AgentIdleWindow,
 		MaxProbes:                   raw.MaxProbes,
 		MaxTokens:                   raw.MaxTokens,
 		TaskStateDirs:               raw.TaskStateDirs,
@@ -97,6 +106,7 @@ func (c *ClaudeCodeCacheKeepaliveConfig) UnmarshalYAML(value *yaml.Node) error {
 		beforeExpiryPresent:         claudeCodeKeepaliveFieldPresent(value, "before-expiry"),
 		onlyWhenAgentsActivePresent: claudeCodeKeepaliveFieldPresent(value, "only-when-agents-active"),
 		livenessPresent:             claudeCodeKeepaliveFieldPresent(value, "liveness"),
+		agentIdleWindowPresent:      claudeCodeKeepaliveFieldPresent(value, "agent-idle-window"),
 		maxProbesPresent:            claudeCodeKeepaliveFieldPresent(value, "max-probes"),
 		maxTokensPresent:            claudeCodeKeepaliveFieldPresent(value, "max-tokens"),
 	}
@@ -130,6 +140,9 @@ func (c ClaudeCodeCacheKeepaliveConfig) WithDefaults() ClaudeCodeCacheKeepaliveC
 	if c.Liveness == "" {
 		c.Liveness = ClaudeCodeKeepaliveLivenessClaudeCodeTasks
 	}
+	if !c.agentIdleWindowPresent && c.AgentIdleWindow == 0 {
+		c.AgentIdleWindow = defaultClaudeCodeKeepaliveAgentIdleWindow
+	}
 	if !c.maxProbesPresent && c.MaxProbes == 0 {
 		c.MaxProbes = defaultClaudeCodeKeepaliveMaxProbes
 	}
@@ -152,6 +165,9 @@ func (c ClaudeCodeCacheKeepaliveConfig) Validate() error {
 	default:
 		return fmt.Errorf("claude-code.cache-keepalive.liveness must be %q or %q, got %q",
 			ClaudeCodeKeepaliveLivenessClaudeCodeTasks, ClaudeCodeKeepaliveLivenessAlways, c.Liveness)
+	}
+	if c.AgentIdleWindow <= 0 && c.Liveness == ClaudeCodeKeepaliveLivenessClaudeCodeTasks {
+		return fmt.Errorf("claude-code.cache-keepalive.agent-idle-window must be positive")
 	}
 	if c.MaxProbes <= 0 {
 		return fmt.Errorf("claude-code.cache-keepalive.max-probes must be positive")

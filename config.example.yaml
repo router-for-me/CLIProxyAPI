@@ -219,10 +219,22 @@ claude-code:
     only-when-agents-active: true
 
     # Liveness strategy.
-    #   claude-code-tasks  read Claude Code's on-disk task state (default)
+    #   claude-code-tasks  read Claude Code's on-disk agent state (default). The
+    #                      primary signal is <task-output-dir>/<project-slug>/<session>/tasks/*.output,
+    #                      one file per background agent or shell, symlink-resolved:
+    #                      the session is live while any of them was written inside
+    #                      agent-idle-window. The TodoWrite state files are a
+    #                      secondary fallback only; they are the user-facing todo
+    #                      list, not subagent state.
     #   always             no liveness check; for clients whose agent state the proxy
     #                      cannot see. Costs up to max-probes reads per idle session.
     liveness: claude-code-tasks
+
+    # How long an agent may be silent and still count as running. Default 10m.
+    # Deliberately not the cache TTL: an agent that has written nothing for an hour
+    # is finished, not busy. Timestamps only advance when the process writes, so set
+    # this above the longest silence worth paying a probe for.
+    agent-idle-window: 10m
 
     # Stop after this many consecutive probes without an intervening real request.
     # Bounds the cost of an abandoned session to max-probes reads of its prefix.

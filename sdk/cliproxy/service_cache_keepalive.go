@@ -129,6 +129,7 @@ func announceCacheKeepalive(settings internalconfig.ClaudeCodeCacheKeepaliveConf
 		previous.BeforeExpiry != settings.BeforeExpiry ||
 		previous.OnlyWhenAgentsActive != settings.OnlyWhenAgentsActive ||
 		previous.Liveness != settings.Liveness ||
+		previous.AgentIdleWindow != settings.AgentIdleWindow ||
 		previous.MaxProbes != settings.MaxProbes ||
 		previous.MaxTokens != settings.MaxTokens
 }
@@ -163,6 +164,7 @@ func (s *Service) applyCacheKeepaliveConfig(cfg *config.Config) {
 		Enabled:              true,
 		BeforeExpiry:         settings.BeforeExpiry,
 		OnlyWhenAgentsActive: settings.OnlyWhenAgentsActive,
+		AgentIdleWindow:      settings.AgentIdleWindow,
 		MaxProbes:            settings.MaxProbes,
 		MaxTokens:            settings.MaxTokens,
 	}
@@ -189,7 +191,7 @@ func (s *Service) applyCacheKeepaliveConfig(cfg *config.Config) {
 		scheduler.ApplyConfig(runtimeCfg)
 	}
 	if changed {
-		log.Infof("cache-keepalive: enabled | before-expiry=%s only-when-agents-active=%t liveness=%s max-probes=%d max-tokens=%d",
-			settings.BeforeExpiry, settings.OnlyWhenAgentsActive, settings.Liveness, settings.MaxProbes, settings.MaxTokens)
+		log.Infof("cache-keepalive: enabled | before-expiry=%s only-when-agents-active=%t liveness=%s agent-idle-window=%s max-probes=%d max-tokens=%d",
+			settings.BeforeExpiry, settings.OnlyWhenAgentsActive, settings.Liveness, settings.AgentIdleWindow, settings.MaxProbes, settings.MaxTokens)
 	}
 }

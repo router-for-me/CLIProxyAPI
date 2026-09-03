@@ -36,6 +36,7 @@ func writeTaskOutput(t *testing.T, root, project, sessionDir, name string, modTi
 
 const testSession = "4463ede6-1111-2222-3333-444455556666"
 
+// The TodoWrite files are the secondary signal; these tests pin that fallback.
 func TestClaudeCodeTasksLivenessRunningTask(t *testing.T) {
 	stateRoot := t.TempDir()
 	writeTaskState(t, stateRoot, testSession, "1.json", "in_progress")
@@ -168,5 +169,49 @@ func TestNewClaudeCodeTasksLivenessDefaults(t *testing.T) {
 	}
 	if len(liveness.OutputDirs) != 1 || liveness.OutputDirs[0] == DefaultTaskOutputDirs[0] {
 		t.Fatalf("OutputDirs = %v, want the expanded default", liveness.OutputDirs)
+	}
+}
+
+func TestClaudeCodeTasksLivenessUsesTheIdleWindowNotTheTTL(t *testing.T) {
+	outputRoot := t.TempDir()
+	now := time.Now()
+	// Twenty minutes of silence: inside a 1h cache TTL, outside a 10m idle window.
+	writeTaskOutput(t, outputRoot, "-Users-me-src", testSession, "abc.output", now.Add(-20*time.Minute))
+	liveness := &ClaudeCodeTasksLiveness{OutputDirs: []string{outputRoot}, now: func() time.Time { return now }}
+
+	if liveness.Live(testSession, 10*time.Minute) {
+		t.Fatalf("Live() = true for a 10m idle window, want false")
+	}
+	if !liveness.Live(testSession, time.Hour) {
+		t.Fatalf("Live() = false for a 1h window; the test fixture is wrong")
+	}
+}
+
+func TestClaudeCodeTasksLivenessOutputWinsWithNoTodoState(t *testing.T) {
+	outputRoot := t.TempDir()
+	stateRoot := t.TempDir()
+	now := time.Now()
+	writeTaskOutput(t, outputRoot, "-Users-me-src", testSession, "abc.output", now.Add(-1*time.Minute))
+
+	// The real failure this replaced: a session with a running subagent has no
+	// TodoWrite file at all, so the todo check alone reported it dead.
+	liveness := &ClaudeCodeTasksLiveness{
+		OutputDirs: []string{outputRoot},
+		StateDirs:  []string{stateRoot},
+		now:        func() time.Time { return now },
+	}
+	if !liveness.Live(testSession, 10*time.Minute) {
+		t.Fatalf("Live() = false, want true: a fresh task output must not need a todo file")
+	}
+}
+
+func TestClaudeCodeTasksLivenessIgnoresAnotherSessionsOutput(t *testing.T) {
+	outputRoot := t.TempDir()
+	now := time.Now()
+	writeTaskOutput(t, outputRoot, "-Users-me-src", "99999999-0000-0000-0000-000000000000", "abc.output", now)
+
+	liveness := &ClaudeCodeTasksLiveness{OutputDirs: []string{outputRoot}, now: func() time.Time { return now }}
+	if liveness.Live(testSession, 10*time.Minute) {
+		t.Fatalf("Live() = true, want false when only another session has fresh output")
 	}
 }

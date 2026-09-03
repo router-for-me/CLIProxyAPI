@@ -36,7 +36,7 @@ guarantee that another turn is coming is what makes the probe pay for itself.
 
 2. **Fire.** At the timer, in order:
    - a newer request for that session supersedes the probe, which is dropped;
-   - the liveness check must report a running task, unless
+   - the liveness check must report a running agent, unless
      `only-when-agents-active` is false;
    - the session must still be bound to the same credential. If the binding is
      gone, because of a cooldown or a rotation, the probe is skipped: a probe on a
@@ -55,21 +55,56 @@ guarantee that another turn is coming is what makes the probe pay for itself.
 
 ## Liveness
 
-`liveness: claude-code-tasks` reads Claude Code's on-disk task state. A session
-counts as live when either signal holds:
+`liveness: claude-code-tasks` reads Claude Code's on-disk agent state.
 
-- a file under `<task-state-dir>/<session>/*.json` has a `status` that is not
-  `completed`, `failed`, `cancelled`, `killed`, or another terminal value;
-- a file under `<task-output-dir>/<project>/<session>/tasks/*.output` was modified
-  within the TTL window.
+**The primary signal is the per-agent task output file:**
 
-A session directory is matched as either the full session UUID or `session-` plus
-its first eight characters, because Claude Code uses both spellings. An
+```
+<task-output-dir>/<project-slug>/<session-uuid>/tasks/*.output
+```
+
+Every background agent and shell of a session has one, and a running agent keeps
+writing to it. The session is live when any of those files was modified inside
+`agent-idle-window`. The project slug is the client's working directory with
+every `/` replaced by `-`, so `/Users/me/src` becomes `-Users-me-src`; the proxy
+matches it with a wildcard rather than deriving it, since it does not know the
+client's directory.
+
+Some of these files are symlinks into
+`~/.claude/projects/<slug>/<session>/subagents/agent-*.jsonl`, where the real
+writes land. The symlink's own timestamp lags the target's, so the check follows
+the link and reads the target. Reading the link's own timestamp would report a
+busy agent as gone.
+
+**The TodoWrite state files are a secondary fallback only.** A file under
+`<task-state-dir>/<session>/*.json` whose `status` is not `completed`, `failed`,
+`cancelled`, `killed` or another terminal value also counts as live. These files
+are the user-facing todo list, not subagent state: a session with a running
+subagent frequently has no todo file at all, and a stale todo left at
+`in_progress` would keep a finished session looking alive. Never rely on it
+alone.
+
+A session directory is matched as either the full session UUID or `session-`
+plus its first eight characters, because Claude Code uses both spellings. An
 unrecognised status counts as live: a false negative silently disables the
 feature, while a false positive costs one cheap read.
 
-`liveness: always` skips the check. It exists for clients whose agent state the
-proxy cannot see, and it will keep probing an idle session until `max-probes`.
+### The idle window
+
+`agent-idle-window` (default 10m) is how long an agent may be silent and still
+count as running. It is deliberately **not** the cache TTL: an agent that has
+written nothing for an hour is finished, not busy, and probing for it would
+burn the budget on a dead session.
+
+The flip side is that an agent doing long work that emits nothing looks idle
+once the window passes. Timestamps only advance when the process actually
+writes, so a background step that prints nothing for twenty minutes will not
+hold the session live under a 10m window. Set the window above the longest
+silence worth paying a probe for.
+
+`liveness: always` skips the check entirely. It exists for clients whose agent
+state the proxy cannot see, and it will keep probing an idle session until
+`max-probes`.
 
 ## Cost
 
@@ -93,6 +128,7 @@ claude-code:
     before-expiry: 5m              # fire at ttl - before-expiry
     only-when-agents-active: true
     liveness: claude-code-tasks    # or: always
+    agent-idle-window: 10m         # how long an agent may be silent and still count as running
     max-probes: 6
     max-tokens: 1
     # task-state-dirs:

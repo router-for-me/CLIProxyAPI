@@ -60,6 +60,10 @@ type Config struct {
 	BeforeExpiry time.Duration
 	// OnlyWhenAgentsActive gates every probe on the liveness check.
 	OnlyWhenAgentsActive bool
+	// AgentIdleWindow is how long an agent may be silent and still count as
+	// running. It is deliberately not the cache TTL: an agent that has written
+	// nothing for an hour is finished, not busy.
+	AgentIdleWindow time.Duration
 	// MaxProbes caps consecutive probes without an intervening real request.
 	MaxProbes int
 	// MaxTokens is the max_tokens value the probe body carries.
@@ -103,8 +107,9 @@ type Prober interface {
 
 // Liveness reports whether a session still has work in flight.
 type Liveness interface {
-	// Live reports whether any task of the session is still running. Window
-	// bounds how stale a filesystem signal may be and still count as live.
+	// Live reports whether any agent of the session is still running. Window is
+	// the agent idle window: how stale the newest filesystem signal may be and
+	// still count as running.
 	Live(sessionID string, window time.Duration) bool
 }
 
@@ -236,11 +241,15 @@ type Snapshot struct {
 	Enabled              bool              `json:"enabled"`
 	BeforeExpiry         string            `json:"before_expiry"`
 	OnlyWhenAgentsActive bool              `json:"only_when_agents_active"`
+	AgentIdleWindow      string            `json:"agent_idle_window"`
 	MaxProbes            int               `json:"max_probes"`
 	MaxTokens            int               `json:"max_tokens"`
 	Sessions             []SessionSnapshot `json:"sessions"`
 	Counters             Counters          `json:"counters"`
 }
+
+// defaultAgentIdleWindow is the fallback when no idle window is configured.
+const defaultAgentIdleWindow = 10 * time.Minute
 
 // maxRetiredSessions bounds the retired-session history the snapshot exposes.
 // Retired records hold no request body, only counters and the last outcome.
@@ -497,7 +506,11 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 	s.mu.Unlock()
 
 	if cfg.OnlyWhenAgentsActive {
-		if liveness == nil || !liveness.Live(sessionID, ttl) {
+		idleWindow := cfg.AgentIdleWindow
+		if idleWindow <= 0 {
+			idleWindow = defaultAgentIdleWindow
+		}
+		if liveness == nil || !liveness.Live(sessionID, idleWindow) {
 			s.retire(sessionID, generation, "no-live-agents")
 			log.Infof("cache-keepalive: skipped | session=%s auth=%s model=%s reason=no-live-agents", truncateSession(sessionID), authID, model)
 			return
@@ -706,6 +719,7 @@ func (s *Scheduler) Snapshot() Snapshot {
 		Enabled:              s.cfg.Enabled && !s.stopped,
 		BeforeExpiry:         s.cfg.BeforeExpiry.String(),
 		OnlyWhenAgentsActive: s.cfg.OnlyWhenAgentsActive,
+		AgentIdleWindow:      s.cfg.AgentIdleWindow.String(),
 		MaxProbes:            s.cfg.MaxProbes,
 		MaxTokens:            s.cfg.MaxTokens,
 		Sessions:             make([]SessionSnapshot, 0, len(s.sessions)),

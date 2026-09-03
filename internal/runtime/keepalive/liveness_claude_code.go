@@ -11,17 +11,27 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// DefaultTaskStateDirs is where Claude Code writes per-session task state JSON.
-var DefaultTaskStateDirs = []string{"~/.claude/tasks"}
-
-// DefaultTaskOutputDirs is where Claude Code writes per-task output files. The
-// <uid> placeholder expands to the current process user id.
+// DefaultTaskOutputDirs is where Claude Code records one file per background
+// agent or shell. The <uid> placeholder expands to the current process user id.
+//
+// The layout is <root>/<project-slug>/<session-uuid>/tasks/*.output, where the
+// project slug is the working directory with every "/" replaced by "-", for
+// example /Users/me/src becomes -Users-me-src. The slug is matched with a
+// wildcard rather than derived, because the proxy does not know the client's
+// working directory.
 var DefaultTaskOutputDirs = []string{"/private/tmp/claude-<uid>"}
 
-// terminalTaskStatuses are the task states that mean no further turn is coming
-// from that task. Anything else — pending, in_progress, or a status this build
-// has not seen — counts as live, because a false negative silently disables the
-// feature while a false positive costs one cheap cache read.
+// DefaultTaskStateDirs is where Claude Code writes per-session TodoWrite state.
+//
+// This is the secondary signal only. These files are the user-facing todo list,
+// not subagent state: a session with a running subagent frequently has no todo
+// file at all, and a stale todo left at in_progress would keep a finished
+// session looking alive. The task output files above are the authority.
+var DefaultTaskStateDirs = []string{"~/.claude/tasks"}
+
+// terminalTaskStatuses are the todo states that mean no further turn is coming
+// from that item. Anything else counts as live, because a false negative
+// silently disables the feature while a false positive costs one cheap read.
 var terminalTaskStatuses = map[string]struct{}{
 	"completed": {},
 	"complete":  {},
@@ -35,32 +45,41 @@ var terminalTaskStatuses = map[string]struct{}{
 
 // AlwaysLive is the "always" liveness strategy: it never blocks a probe.
 //
-// It exists for clients whose agent state the proxy cannot observe. Combined with
-// a session that is genuinely idle it will keep probing until max-probes, which
-// is the documented cost ceiling for that choice.
+// It exists for clients whose agent state the proxy cannot observe. Combined
+// with a session that is genuinely idle it will keep probing until max-probes,
+// which is the documented cost ceiling for that choice.
 type AlwaysLive struct{}
 
 // Live always reports true.
 func (AlwaysLive) Live(string, time.Duration) bool { return true }
 
 // ClaudeCodeTasksLiveness reports session liveness from Claude Code's on-disk
-// task state.
+// agent state.
 //
-// Two independent signals are consulted, and either one is enough:
+// The primary and authoritative signal is the per-agent task output file:
 //
-//   - a task state file under <state dir>/<session>/*.json whose status is not
-//     terminal;
-//   - a task output file under <output dir>/<project>/<session>/tasks/*.output
-//     modified within the TTL window.
+//	<output dir>/<project-slug>/<session-uuid>/tasks/*.output
 //
-// Claude Code names a session's state directory either by the full session UUID
-// or by a "session-" prefix plus the first eight characters of the UUID, so both
-// spellings are searched.
+// Every background agent and shell of a session has one. A running agent keeps
+// writing to it, so its modification time advances. Some of these files are
+// symlinks into ~/.claude/projects/<slug>/<session>/subagents/agent-*.jsonl,
+// where the real writes land; the symlink's own timestamp lags the target's, so
+// liveness follows the link and reads the target.
+//
+// A file counts as live only while it was written inside the idle window. The
+// window is not the cache TTL: an agent that has produced nothing for an hour is
+// finished, not busy. Its flip side is that a genuinely silent agent, one doing
+// long work that emits nothing, looks idle once the window passes, so the window
+// should exceed the longest silence worth paying a probe for.
+//
+// The TodoWrite state files are consulted only as a secondary fallback.
 type ClaudeCodeTasksLiveness struct {
-	// StateDirs are the roots holding per-session task state directories.
-	StateDirs []string
 	// OutputDirs are the roots holding <project>/<session>/tasks/*.output files.
+	// This is the primary signal.
 	OutputDirs []string
+	// StateDirs are the roots holding per-session TodoWrite state directories.
+	// Secondary signal only; see DefaultTaskStateDirs.
+	StateDirs []string
 
 	now func() time.Time
 }
@@ -81,15 +100,52 @@ func NewClaudeCodeTasksLiveness(stateDirs, outputDirs []string) *ClaudeCodeTasks
 	}
 }
 
-// Live reports whether the session still has a task in flight.
+// Live reports whether the session still has an agent running. The window is the
+// configured agent idle window.
 func (l *ClaudeCodeTasksLiveness) Live(sessionID string, window time.Duration) bool {
 	if l == nil || strings.TrimSpace(sessionID) == "" {
 		return false
 	}
-	if l.hasRunningTaskState(sessionID) {
+	// Primary: a task output file written inside the idle window.
+	if l.hasRecentTaskOutput(sessionID, window) {
 		return true
 	}
-	return l.hasRecentTaskOutput(sessionID, window)
+	// Secondary: a TodoWrite item that never reached a terminal status.
+	return l.hasRunningTaskState(sessionID)
+}
+
+func (l *ClaudeCodeTasksLiveness) hasRecentTaskOutput(sessionID string, window time.Duration) bool {
+	if window <= 0 {
+		window = 10 * time.Minute
+	}
+	now := time.Now
+	if l.now != nil {
+		now = l.now
+	}
+	cutoff := now().Add(-window)
+	for _, root := range l.OutputDirs {
+		for _, dirName := range sessionDirNames(sessionID) {
+			entries, errGlob := filepath.Glob(filepath.Join(root, "*", dirName, "tasks", "*.output"))
+			if errGlob != nil {
+				continue
+			}
+			for _, entry := range entries {
+				// os.Stat follows symlinks, which is required: these entries are
+				// often links to the agent transcript, and only the target's
+				// timestamp advances as the agent writes.
+				info, errStat := os.Stat(entry)
+				if errStat != nil {
+					continue
+				}
+				if info.ModTime().After(cutoff) {
+					log.Debugf("cache-keepalive: liveness hit | session=%s source=task-output file=%s modified=%s",
+						truncateSession(sessionID), entry, info.ModTime().Format(time.RFC3339))
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (l *ClaudeCodeTasksLiveness) hasRunningTaskState(sessionID string) bool {
@@ -109,37 +165,8 @@ func (l *ClaudeCodeTasksLiveness) hasRunningTaskState(sessionID string) bool {
 					continue
 				}
 				if _, terminal := terminalTaskStatuses[status]; !terminal {
-					log.Debugf("cache-keepalive: liveness hit | session=%s file=%s status=%s", truncateSession(sessionID), entry, status)
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-func (l *ClaudeCodeTasksLiveness) hasRecentTaskOutput(sessionID string, window time.Duration) bool {
-	if window <= 0 {
-		window = time.Hour
-	}
-	now := time.Now
-	if l.now != nil {
-		now = l.now
-	}
-	cutoff := now().Add(-window)
-	for _, root := range l.OutputDirs {
-		for _, dirName := range sessionDirNames(sessionID) {
-			entries, errGlob := filepath.Glob(filepath.Join(root, "*", dirName, "tasks", "*.output"))
-			if errGlob != nil {
-				continue
-			}
-			for _, entry := range entries {
-				info, errStat := os.Stat(entry)
-				if errStat != nil {
-					continue
-				}
-				if info.ModTime().After(cutoff) {
-					log.Debugf("cache-keepalive: liveness hit | session=%s file=%s modified=%s", truncateSession(sessionID), entry, info.ModTime())
+					log.Debugf("cache-keepalive: liveness hit | session=%s source=todo-state file=%s status=%s",
+						truncateSession(sessionID), entry, status)
 					return true
 				}
 			}
@@ -149,6 +176,8 @@ func (l *ClaudeCodeTasksLiveness) hasRecentTaskOutput(sessionID string, window t
 }
 
 // sessionDirNames returns the directory spellings Claude Code uses for a session.
+// Task output directories use the full session UUID; the secondary TodoWrite
+// directories are also seen as "session-" plus the first eight characters.
 func sessionDirNames(sessionID string) []string {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
