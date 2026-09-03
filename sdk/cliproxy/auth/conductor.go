@@ -160,6 +160,9 @@ type Manager struct {
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
 
+	// torRotator handles Tor exit node IP rotation when Tor mode is enabled.
+	torRotator TorRotator
+
 	// Auto refresh state
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
@@ -200,4 +203,25 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
+}
+
+// TorRotator defines the interface for Tor exit node IP rotation.
+type TorRotator interface {
+	ShouldRetryWithNewTorIP(statusCode int) bool
+	RotateIP() error
+	ResetRetryCount()
+}
+
+// SetTorRotator sets the Tor IP rotator for this manager.
+func (m *Manager) SetTorRotator(rotator TorRotator) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.torRotator = rotator
+}
+
+// GetTorRotator returns the Tor rotator, if set.
+func (m *Manager) GetTorRotator() TorRotator {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.torRotator
 }

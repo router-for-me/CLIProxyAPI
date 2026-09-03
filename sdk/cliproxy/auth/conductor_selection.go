@@ -1215,6 +1215,13 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	if !isCredentialRetryRoundStatus(status) || !m.retryAllowed(attempt, providers, model, eligibility, pinnedAuthID, defaultRequestRetry) {
+		// Tor IP rotation: when Tor mode is enabled and a retryable status code
+		// is received, rotate the Tor exit node IP before retrying.
+		if rotator := m.GetTorRotator(); rotator != nil && rotator.ShouldRetryWithNewTorIP(status) {
+			if rotateErr := rotator.RotateIP(); rotateErr == nil {
+				return 0, true
+			}
+		}
 		return 0, false
 	}
 	wait, found := m.closestCooldownWaitWithAttempted(providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry, status, attempted)

@@ -180,6 +180,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 		mgmt.DELETE("/oauth-session", s.mgmt.CancelAuthSession)
+		mgmt.POST("/test-proxy", s.mgmt.TestProxy)
+		mgmt.POST("/tor-rotate", s.mgmt.TorRotate)
 	}
 }
 
@@ -318,3 +320,4 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 
 	c.File(filePath)
 }
+

@@ -10,11 +10,13 @@ import (
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // Builder constructs a Service instance with customizable providers.
@@ -257,11 +259,25 @@ func (b *Builder) Build() (*Service, error) {
 		appliedRoutingState = &routingState
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
-	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
+	if helps.IsTorMode(b.cfg) {
+		// In Tor mode, all outbound traffic routes through the Tor SOCKS5 proxy.
+		torTransport := helps.NewTorHTTPTransport(b.cfg.TorProxyAddr)
+		if torTransport != nil {
+			coreManager.SetRoundTripperProvider(&torRoundTripperProvider{transport: torTransport})
+		} else {
+			log.Warn("Tor mode enabled but Tor transport unavailable; falling back to default provider")
+			coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
+		}
+	} else {
+		coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
+	}
 	coreManager.SetConfig(b.cfg)
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
 	if pluginHost != nil {
 		coreManager.SetPluginScheduler(pluginHost)
+	}
+	if helps.IsTorMode(b.cfg) {
+		coreManager.SetTorRotator(helps.NewTorRotator(b.cfg))
 	}
 
 	service := &Service{

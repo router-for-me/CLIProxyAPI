@@ -48,6 +48,30 @@ type SDKConfig struct {
 	// ClaudeCode configures Claude Code compatibility behavior.
 	ClaudeCode ClaudeCodeConfig `yaml:"claude-code" json:"claude-code"`
 
+	// ProxyMode selects the proxy mode: "proxy" (default for regular HTTP/SOCKS proxy)
+	// or "tor" for Tor SOCKS5 proxy with automatic IP rotation on error codes.
+	ProxyMode string `yaml:"proxy-mode" json:"proxy-mode"`
+
+	// TorControlAddr is the address of the Tor control port for sending NEWNYM signals
+	// to rotate the Tor exit node IP. Format: "127.0.0.1:9051"
+	TorControlAddr string `yaml:"tor-control-addr" json:"tor-control-addr"`
+
+	// TorControlPassword is the password for the Tor control port.
+	// Leave empty if no password is configured (default Tor control port behavior).
+	TorControlPassword string `yaml:"tor-control-password" json:"tor-control-password"`
+
+	// TorProxyAddr is the address of the Tor SOCKS5 proxy.
+	// Format: "127.0.0.1:9050"
+	TorProxyAddr string `yaml:"tor-proxy-addr" json:"tor-proxy-addr"`
+
+	// TorRetryAttempts is the maximum number of times to retry a request after rotating
+	// the Tor exit node IP. Set to 0 for unlimited retries.
+	TorRetryAttempts int `yaml:"tor-retry-attempts" json:"tor-retry-attempts"`
+
+	// TorRetryOnCodes lists HTTP status codes that trigger a Tor IP rotation + retry.
+	// Example: [429, 403, 500, 502, 503]
+	TorRetryOnCodes []int `yaml:"tor-retry-on-codes" json:"tor-retry-on-codes"`
+
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
