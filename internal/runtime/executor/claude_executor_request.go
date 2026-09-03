@@ -34,21 +34,22 @@ import (
 )
 
 const (
-	claudeTokenCountingBeta      = "token-counting-2024-11-01"
-	claudeFastModeBeta           = "fast-mode-2026-02-01"
-	claudeOAuthBeta              = "oauth-2025-04-20"
-	claudeCodeBeta               = "claude-code-20250219"
-	claudeContext1MBeta          = "context-1m-2025-08-07"
-	claudeMidConvSystemBeta      = "mid-conversation-system-2026-04-07"
-	claudeAdvisorToolBeta        = "advisor-tool-2026-03-01"
-	claudeAdvancedToolUseBeta    = "advanced-tool-use-2025-11-20"
-	claudeEffortBeta             = "effort-2025-11-24"
-	claudeServerSideFallbackBeta = "server-side-fallback-2026-06-01"
-	claudeFallbackCreditBeta     = "fallback-credit-2026-06-01"
-	claudeStructuredOutputsBeta  = "structured-outputs-2025-12-15"
-	claudeExtendedCacheTTLBeta   = "extended-cache-ttl-2025-04-11"
-	claudeCacheDiagnosisBeta     = "cache-diagnosis-2026-04-07"
-	claudeRedactThinkingBeta     = "redact-thinking-2026-02-12"
+	claudeTokenCountingBeta           = "token-counting-2024-11-01"
+	claudeFastModeBeta                = "fast-mode-2026-02-01"
+	claudeOAuthBeta                   = "oauth-2025-04-20"
+	claudeCodeBeta                    = "claude-code-20250219"
+	claudeContext1MBeta               = "context-1m-2025-08-07"
+	claudeMidConvSystemBeta           = "mid-conversation-system-2026-04-07"
+	claudeAdvisorToolBeta             = "advisor-tool-2026-03-01"
+	claudeAdvancedToolUseBeta         = "advanced-tool-use-2025-11-20"
+	claudeEffortBeta                  = "effort-2025-11-24"
+	claudeServerSideFallbackBeta      = "server-side-fallback-2026-06-01"
+	claudeFallbackCreditBeta          = "fallback-credit-2026-06-01"
+	claudeStructuredOutputsBeta       = "structured-outputs-2025-12-15"
+	claudeExtendedCacheTTLBeta        = "extended-cache-ttl-2025-04-11"
+	claudeCacheDiagnosisBeta          = "cache-diagnosis-2026-04-07"
+	claudeRedactThinkingBeta          = "redact-thinking-2026-02-12"
+	claudeThinkingBindingControlsBeta = "thinking-binding-controls-2026-08-01"
 )
 
 // claudeCodeCLIConstantBetas are the betas Claude Code 2.1.220 sends on every
@@ -379,18 +380,86 @@ func claudeBodyIndicatesFastModeCredits(body []byte) bool {
 			(strings.Contains(message, "usage credits") || strings.Contains(message, "credits are required")))
 }
 
-// claudeRequestedBetas collects every beta the caller asked for, from the
+// parseAnthropicBetasFromHeader flattens every Anthropic-Beta token the caller
+// sent into one ordered slice.
+//
+// It delegates to helps.ClaudeBetaTokens so this path and the native-client
+// detector read one identical view of the header. A detector reading only the
+// canonical key could confirm a measured native profile on a partial view while
+// this path forwarded a different, larger one.
+func parseAnthropicBetasFromHeader(headers http.Header) []string {
+	return helps.ClaudeBetaTokens(headers)
+}
+
+// claudeBodyHasBlockBinding reports whether the finished upstream body carries a
+// thinking.block_binding object on an active thinking configuration.
+//
+// thinking.type == "disabled" switches extended thinking off entirely, so a
+// block_binding left next to it configures nothing and must not pull the
+// protocol beta onto the request. Only an object counts: a missing key, an
+// explicit null, or a scalar placeholder are all "no binding requested".
+func claudeBodyHasBlockBinding(body []byte) bool {
+	thinking := gjson.GetBytes(body, "thinking")
+	if !thinking.IsObject() {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(thinking.Get("type").String()), "disabled") {
+		return false
+	}
+	return thinking.Get("block_binding").IsObject()
+}
+
+// canonicalizeClaudeBetaToken guarantees exactly one occurrence of canonical in
+// betas: the first token matching case-insensitively keeps its position and is
+// rewritten to canonical's exact spelling, every later match is removed. All
+// other tokens and separators are left untouched.
+//
+// Beta dedup is case-insensitive, so without the rewrite a caller casing variant
+// already present in the list would suppress the canonical token CPA owns and
+// ship a spelling upstream does not recognise. Without the removal, a caller
+// sending the same token twice - identically or in mixed spellings - would put
+// it on the wire twice, which no real client does.
+func canonicalizeClaudeBetaToken(betas, canonical string) string {
+	parts := strings.Split(betas, ",")
+	kept := make([]string, 0, len(parts))
+	changed := false
+	seen := false
+	for _, part := range parts {
+		if !strings.EqualFold(strings.TrimSpace(part), canonical) {
+			kept = append(kept, part)
+			continue
+		}
+		if seen {
+			changed = true
+			continue
+		}
+		seen = true
+		if part != canonical {
+			part = canonical
+			changed = true
+		}
+		kept = append(kept, part)
+	}
+	if !changed {
+		return betas
+	}
+	return strings.Join(kept, ",")
+}
+
+// claudeRequestedBetas collects every beta the caller asked for, lowercased, from the
 // Anthropic-Beta header and from betas lifted out of the request body.
 func claudeRequestedBetas(incomingBetas string, extraBetas []string) map[string]bool {
 	requested := make(map[string]bool)
 	for _, beta := range strings.Split(incomingBetas, ",") {
-		if beta = strings.TrimSpace(beta); beta != "" {
+		if beta = strings.ToLower(strings.TrimSpace(beta)); beta != "" {
 			requested[beta] = true
 		}
 	}
 	for _, beta := range extraBetas {
-		if beta = strings.TrimSpace(beta); beta != "" {
-			requested[beta] = true
+		for _, part := range strings.Split(beta, ",") {
+			if part = strings.ToLower(strings.TrimSpace(part)); part != "" {
+				requested[part] = true
+			}
 		}
 	}
 	return requested
@@ -784,7 +853,8 @@ func applyClaudeHeadersWithNativeProfile(
 		}
 	}
 
-	incomingBetas := strings.TrimSpace(strings.Join(incomingHeaders.Values("Anthropic-Beta"), ","))
+	incomingBetasSlice := parseAnthropicBetasFromHeader(incomingHeaders)
+	incomingBetas := strings.Join(incomingBetasSlice, ",")
 	countTokens := r.URL != nil && strings.HasSuffix(r.URL.Path, "/count_tokens")
 	requestedMap := claudeRequestedBetas(incomingBetas, extraBetas)
 	advisorNeeded := requestedMap[claudeAdvisorToolBeta] || claudeBodyHasAdvisorTool(body)
@@ -820,12 +890,12 @@ func applyClaudeHeadersWithNativeProfile(
 	existingSet := make(map[string]bool)
 	for _, beta := range strings.Split(baseBetas, ",") {
 		if beta = strings.TrimSpace(beta); beta != "" {
-			existingSet[beta] = true
+			existingSet[strings.ToLower(beta)] = true
 		}
 	}
 	appendBeta := func(beta string) {
 		beta = strings.TrimSpace(beta)
-		if beta == "" || existingSet[beta] {
+		if beta == "" || existingSet[strings.ToLower(beta)] {
 			return
 		}
 		if strings.TrimSpace(baseBetas) == "" {
@@ -833,31 +903,75 @@ func applyClaudeHeadersWithNativeProfile(
 		} else {
 			baseBetas += "," + beta
 		}
-		existingSet[beta] = true
+		existingSet[strings.ToLower(beta)] = true
+	}
+	// appendCanonicalBeta places a beta whose spelling CPA owns, as opposed to a
+	// token forwarded from the caller. Dedup is case-insensitive, so a caller
+	// casing variant sitting in baseBetas would otherwise silently swallow the
+	// append and leave an unrecognised spelling on the wire. Rewriting that
+	// occurrence in place keeps the caller's ordering and emits the canonical
+	// token exactly once. Caller-owned tokens still go through appendBeta and
+	// keep their casing.
+	appendCanonicalBeta := func(beta string) {
+		if existingSet[strings.ToLower(beta)] {
+			baseBetas = canonicalizeClaudeBetaToken(baseBetas, beta)
+			return
+		}
+		appendBeta(beta)
 	}
 	if preserveCallerFingerprint {
-		// Caller-owned mode preserves both header and body-lifted betas verbatim.
-		// The explicit speed=fast request still needs its protocol beta.
+		// Caller-owned mode forwards the caller's header and body-lifted betas as
+		// they were sent. The only exceptions are the tokens whose spelling CPA
+		// owns - the speed=fast protocol beta here and the body-driven binding beta
+		// appended below - which are normalised in place to a single canonical
+		// occurrence instead of being duplicated.
 		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, "speed").String()), "fast") {
-			appendBeta(claudeFastModeBeta)
+			appendCanonicalBeta(claudeFastModeBeta)
 		}
 		for _, beta := range extraBetas {
-			appendBeta(beta)
+			for _, part := range strings.Split(beta, ",") {
+				appendBeta(part)
+			}
 		}
 	} else {
 		// On direct Anthropic an unconfirmed CLI-profile caller's own betas are
 		// dropped: appending them to the measured baseline produces a shape real
 		// Claude Code never sends. Custom gateways keep caller extensions.
 		if !confirmedClaudeCode && incomingBetas != "" && !isAnthropicBase {
-			for _, beta := range strings.Split(incomingBetas, ",") {
+			for _, beta := range incomingBetasSlice {
 				appendBeta(beta)
 			}
 		}
 		if !isAnthropicBase {
 			for _, beta := range extraBetas {
-				appendBeta(beta)
+				for _, part := range strings.Split(beta, ",") {
+					appendBeta(part)
+				}
 			}
 		}
+	}
+	// thinking.block_binding is a body-driven protocol opt-in: Anthropic rejects
+	// the field unless thinking-binding-controls-2026-08-01 is declared. The
+	// trigger is the finished upstream body and nothing else, deliberately.
+	//
+	// Deriving it from the caller's Anthropic-Beta header or body "betas" instead
+	// would let any caller pin a beta onto a first-party request whose body never
+	// uses it, and would keep declaring it after a later rewrite dropped the
+	// thinking block (disableThinkingIfToolChoiceForced deletes it whenever
+	// tool_choice forces tool use). Reading the same bytes that go on the wire
+	// keeps header and body in agreement on every path, count_tokens included.
+	//
+	// Restricted to first-party Anthropic: other Anthropic-compatible upstreams
+	// have their own beta vocabulary and must not receive a token CPA invented
+	// for api.anthropic.com.
+	//
+	// Position policy: no wire capture of a native client sending this beta
+	// exists, so its place in the list is CPA's own decision, not a measurement.
+	// The minimal one is taken here: append at the end of the assembled baseline
+	// and never move a beta that is already present, which leaves every historical
+	// position byte-identical to what the caller or the baseline produced.
+	if isAnthropicBase && claudeBodyHasBlockBinding(body) {
+		appendCanonicalBeta(claudeThinkingBindingControlsBeta)
 	}
 	applyBetaHeader := func() {
 		if strings.TrimSpace(baseBetas) == "" {
