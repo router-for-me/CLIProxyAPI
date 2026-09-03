@@ -22,6 +22,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	upstreamModel := e.upstreamModel(baseModel)
+	resp.Metadata = map[string]any{cliproxyexecutor.WireModelMetadataKey: upstreamModel}
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -286,6 +287,100 @@ func TestExecuteExplicitNotFoundClassifiesAgainstExecutionModelNotSelectionModel
 	cooldown := state.NextRetryAfter.Sub(before)
 	if cooldown < 12*time.Hour-time.Second || cooldown > 12*time.Hour+time.Second {
 		t.Fatalf("cooldown = %v, want about 12h (execution-model 404 must not be classified against the selection model and get the short retry)", cooldown)
+	}
+}
+
+// notFoundWireModelExecutor simulates an executor that normalizes the
+// request model internally (e.g. stripping a thinking suffix, remapping an
+// alias) before sending it upstream: it reports the normalized model via
+// Response.Metadata[WireModelMetadataKey], and its 404 names that normalized
+// model, not the pre-normalization req.Model the conductor sent it.
+type notFoundWireModelExecutor struct {
+	normalize func(model string) string
+}
+
+func (e notFoundWireModelExecutor) Identifier() string { return "wire-model-vs-sent" }
+func (e notFoundWireModelExecutor) Execute(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	wire := e.normalize(req.Model)
+	resp := cliproxyexecutor.Response{Metadata: map[string]any{cliproxyexecutor.WireModelMetadataKey: wire}}
+	return resp, &Error{
+		HTTPStatus: http.StatusNotFound,
+		Message:    `{"error":{"type":"not_found_error","message":"model ` + wire + ` was not found"}}`,
+	}
+}
+func (notFoundWireModelExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+func (notFoundWireModelExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+func (notFoundWireModelExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (notFoundWireModelExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestExecuteExplicitNotFoundClassifiesAgainstReportedWireModel(t *testing.T) {
+	cases := []struct {
+		name       string
+		reqModel   string
+		normalize  func(string) string
+	}{
+		{
+			// Claude strips a "-thinking-32k" style suffix before sending the
+			// model upstream; the provider's 404 names the stripped model.
+			name:      "claude thinking suffix stripped",
+			reqModel:  "claude-opus-4-8-thinking-32k",
+			normalize: func(m string) string { return strings.TrimSuffix(m, "-thinking-32k") },
+		},
+		{
+			// Kimi strips the "kimi-" prefix before sending the model
+			// upstream; the provider's 404 names the stripped model.
+			name:      "kimi alias stripped",
+			reqModel:  "kimi-k3",
+			normalize: func(m string) string { return strings.TrimPrefix(m, "kimi-") },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			previousDisabled := quotaCooldownDisabled.Load()
+			quotaCooldownDisabled.Store(false)
+			t.Cleanup(func() { quotaCooldownDisabled.Store(previousDisabled) })
+
+			manager := NewManager(nil, nil, nil)
+			executor := notFoundWireModelExecutor{normalize: tc.normalize}
+			manager.RegisterExecutor(executor)
+			auth := &Auth{ID: "wire-model-auth-" + tc.name, Provider: "wire-model-vs-sent"}
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: tc.reqModel}})
+			t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+			if _, err := manager.Register(context.Background(), auth); err != nil {
+				t.Fatalf("Register() error = %v", err)
+			}
+
+			before := time.Now()
+			if _, errExecute := manager.Execute(context.Background(), []string{"wire-model-vs-sent"}, cliproxyexecutor.Request{Model: tc.reqModel}, cliproxyexecutor.Options{}); errExecute == nil {
+				t.Fatal("Execute() unexpectedly succeeded")
+			}
+
+			updated, ok := manager.GetByID(auth.ID)
+			if !ok {
+				t.Fatal("auth not found after Execute()")
+			}
+			var state *ModelState
+			for _, candidate := range updated.ModelStates {
+				state = candidate
+			}
+			if state == nil {
+				t.Fatal("Execute() did not record model cooldown state")
+			}
+			cooldown := state.NextRetryAfter.Sub(before)
+			if cooldown < 12*time.Hour-time.Second || cooldown > 12*time.Hour+time.Second {
+				t.Fatalf("cooldown = %v, want about 12h (404 naming the reported wire model must classify as explicit not-found, not the short retry)", cooldown)
+			}
+		})
 	}
 }
 

@@ -228,6 +228,14 @@ func ResponseFormatOrSource(opts Options) sdktranslator.Format {
 	return opts.SourceFormat
 }
 
+// WireModelMetadataKey is the Response.Metadata key an executor sets to the
+// exact model string it placed on the outbound upstream request, once known
+// (before or after the call completes). Executors that normalize the model
+// internally (stripping a thinking suffix, remapping an alias) should
+// populate this so callers can classify upstream errors against the model
+// the provider actually saw, instead of the pre-normalization request model.
+const WireModelMetadataKey = "wire_model"
+
 // Response wraps either a full provider response or metadata for streaming flows.
 type Response struct {
 	// Payload is the provider response in the executor format.

@@ -546,7 +546,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: sentModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts}
+			wireModel := wireModelOrSent(resp, sentModel)
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: wireModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
@@ -1171,6 +1172,22 @@ func authSelectionModelFromOptions(opts cliproxyexecutor.Options, fallback strin
 		}
 	}
 	return fallback
+}
+
+// wireModelOrSent prefers the exact model an executor reports having placed
+// on the outbound upstream request (via Response.Metadata) over the
+// pre-call model captured before executor-internal normalization (e.g.
+// Claude stripping a thinking suffix, Kimi remapping an alias), so a
+// structured 404 naming the wire model classifies correctly.
+func wireModelOrSent(resp cliproxyexecutor.Response, sent string) string {
+	if resp.Metadata != nil {
+		if v, ok := resp.Metadata[cliproxyexecutor.WireModelMetadataKey].(string); ok {
+			if trimmed := strings.TrimSpace(v); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return sent
 }
 
 func executionModelForAuthSelection(opts cliproxyexecutor.Options, model string) (string, bool) {
