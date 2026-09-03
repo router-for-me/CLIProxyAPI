@@ -26,6 +26,33 @@ func TestOAuthModelAliasesForAuthKeepsForkAlongsidePerAuthRename(t *testing.T) {
 	}
 }
 
+// A global rename (not a fork) that shares its alias with a per-auth entry is still dropped:
+// keeping it would rename the catalog from the global source while the credential routes
+// the id to its own upstream.
+func TestOAuthModelAliasesForAuthDropsShadowedGlobalRename(t *testing.T) {
+	cfg := &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{
+		"codex": {{Name: "gpt-5.6-luna", Alias: "shared"}},
+	}}
+	attrs := map[string]string{"model_aliases": `[{"name":"gpt-reserve","alias":"shared"}]`}
+	got := oauthModelAliasesForAuth(cfg, "codex", attrs)
+	if len(got) != 1 || got[0].Name != "gpt-reserve" {
+		t.Fatalf("expected only the per-auth entry, got %+v", got)
+	}
+}
+
+// The pair key is a struct, not a joined string, so names and aliases that themselves
+// contain the joiner cannot collide: {a->b, c} and {a, b->c} are different pairs.
+func TestOAuthModelAliasesForAuthPairKeyIsCollisionFree(t *testing.T) {
+	cfg := &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{
+		"codex": {{Name: "a", Alias: "b->c", Fork: true}},
+	}}
+	attrs := map[string]string{"model_aliases": `[{"name":"a->b","alias":"c"}]`}
+	got := oauthModelAliasesForAuth(cfg, "codex", attrs)
+	if len(got) != 2 {
+		t.Fatalf("expected both pairs to survive, got %d: %+v", len(got), got)
+	}
+}
+
 // Identical (name, alias) pairs still collapse, with the per-auth copy winning.
 func TestOAuthModelAliasesForAuthStillDedupesSamePair(t *testing.T) {
 	cfg := &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{

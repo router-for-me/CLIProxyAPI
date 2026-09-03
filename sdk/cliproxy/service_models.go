@@ -917,33 +917,54 @@ func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map
 	if len(globalAliases) == 0 {
 		return perAuthAliases
 	}
-	out := make([]config.OAuthModelAlias, 0, len(perAuthAliases)+len(globalAliases))
-	// Dedupe on (name, alias), not on alias alone. The two alias tables have different
-	// jobs and different constraints: the catalog fork (applyOAuthModelAliasEntries) can
-	// only clone an upstream id that is already in the model list, while the request-time
-	// rename (oauth_model_alias.go) accepts any upstream string and consults per-auth
-	// entries first. Exposing a hidden upstream model such as Codex "gpt-reserve" needs
-	// both: a global `gpt-5.6-luna -> X, fork` to make X routable, and a per-auth
-	// `gpt-reserve -> X` to rewrite the body. Keyed on alias alone, the per-auth entry
-	// evicted the global fork, X was never registered, and every request for it failed
-	// with "unknown provider". Same-pair duplicates are still collapsed, per-auth first.
-	seenPair := make(map[string]struct{}, len(perAuthAliases)+len(globalAliases))
-	add := func(aliases []config.OAuthModelAlias) {
-		for _, entry := range aliases {
-			alias := strings.TrimSpace(entry.Alias)
-			if alias == "" {
-				continue
-			}
-			key := strings.ToLower(strings.TrimSpace(entry.Name)) + "->" + strings.ToLower(alias)
-			if _, exists := seenPair[key]; exists {
-				continue
-			}
-			seenPair[key] = struct{}{}
-			out = append(out, entry)
+	// Two tables, two jobs. The global table may fork a catalog entry (clone an upstream
+	// id under a new client-visible id); a per-auth entry decides what one credential sends
+	// upstream for that id, and request-time resolution consults per-auth first. A hidden
+	// upstream model (Codex "gpt-reserve") needs both: a global fork so the id is routable,
+	// and a per-auth rename so the body says gpt-reserve. Keyed on alias alone, the per-auth
+	// entry evicted the fork and the id was never registered.
+	//
+	// So the key is the (name, alias) pair, with one exception: a global entry that is not a
+	// fork and shares its alias with a per-auth entry is still dropped. Keeping it would let
+	// applyOAuthModelAliasEntries rename the catalog from the global source while the
+	// credential routes the id elsewhere, so the registered entry would carry the wrong
+	// upstream's metadata and the global source would lose its own id.
+	type aliasPair struct{ name, alias string }
+	pairOf := func(entry config.OAuthModelAlias) aliasPair {
+		return aliasPair{
+			name:  strings.ToLower(strings.TrimSpace(entry.Name)),
+			alias: strings.ToLower(strings.TrimSpace(entry.Alias)),
 		}
 	}
-	add(perAuthAliases)
-	add(globalAliases)
+	out := make([]config.OAuthModelAlias, 0, len(perAuthAliases)+len(globalAliases))
+	seenPair := make(map[aliasPair]struct{}, len(perAuthAliases)+len(globalAliases))
+	perAuthAlias := make(map[string]struct{}, len(perAuthAliases))
+	for _, entry := range perAuthAliases {
+		pair := pairOf(entry)
+		if pair.alias == "" {
+			continue
+		}
+		if _, exists := seenPair[pair]; exists {
+			continue
+		}
+		seenPair[pair] = struct{}{}
+		perAuthAlias[pair.alias] = struct{}{}
+		out = append(out, entry)
+	}
+	for _, entry := range globalAliases {
+		pair := pairOf(entry)
+		if pair.alias == "" {
+			continue
+		}
+		if _, exists := seenPair[pair]; exists {
+			continue
+		}
+		if _, shadowed := perAuthAlias[pair.alias]; shadowed && !entry.Fork {
+			continue
+		}
+		seenPair[pair] = struct{}{}
+		out = append(out, entry)
+	}
 	return out
 }
 
