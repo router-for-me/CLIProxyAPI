@@ -161,7 +161,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	// so its tokens stay counted, and obfuscate sensitive words exactly like the
 	// Messages path. Kimi opt-in uses the same contract.
 	policy, settings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
-	cloaked := policy.Cloak
+	cloaked := policy.Cloak && !claudeRequestContainsAdvisorState(body)
 	if cloaked {
 		if !settings.strictMode {
 			if errSystem := validateClaudeCallerSystemBlocks(gjson.GetBytes(body, "system")); errSystem != nil {
