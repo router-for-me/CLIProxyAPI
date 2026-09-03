@@ -807,3 +807,197 @@ func TestManagerResultSaveWaitsForCooldownStoreTransition(t *testing.T) {
 		t.Fatalf("new store save count = %d, want 1", got)
 	}
 }
+
+// TestAuthCooldownStateRecordSkipsAggregateOnlyQuotaWithAvailableSibling
+// reproduces the P1 Codex finding on discussion_r3927779676: aggregating
+// one cooling model's quota into auth.Quota (via updateAggregatedAvailability)
+// while leaving auth.Unavailable false, because a sibling model remains
+// available, must NOT itself cause authCooldownStateRecord to emit a
+// credential-level record. A raw availabilityBlock(auth.Quota...) call
+// cannot see the aggregate-vs-credential distinction and would persist a
+// record that blocks the WHOLE credential (all models) after a restart,
+// even though only one of several sibling models was ever cooling. This
+// asserts persist skips the auth-level record, and that a fresh Manager
+// restoring only the model-scoped record still leaves the sibling
+// selectable while the cooled model stays blocked.
+func TestAuthCooldownStateRecordSkipsAggregateOnlyQuotaWithAvailableSibling(t *testing.T) {
+	now := time.Now()
+	longDeadline := now.Add(12 * time.Hour)
+
+	auth := &Auth{
+		ID:       "auth-multi",
+		Provider: "openai-compat",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			"llama3": {
+				Status:      StatusError,
+				Unavailable: true,
+				Quota: QuotaState{
+					Exceeded:      true,
+					Reason:        "quota",
+					NextRecoverAt: longDeadline,
+				},
+				NextRetryAfter: longDeadline,
+				UpdatedAt:      now,
+			},
+			"mistral": {
+				Status: StatusActive,
+			},
+		},
+	}
+	// Mirror what updateAggregatedAvailability actually does: copy the
+	// cooling sibling's quota into auth.Quota while leaving auth.Unavailable
+	// false because "mistral" is still available.
+	updateAggregatedAvailability(auth, now)
+	if auth.Unavailable {
+		t.Fatal("auth.Unavailable = true after aggregation with an available sibling, want false (precondition for this test)")
+	}
+	if !auth.Quota.Exceeded {
+		t.Fatal("auth.Quota.Exceeded = false after aggregation, want true (precondition: aggregate quota was copied)")
+	}
+
+	if _, ok := authCooldownStateRecord(auth, now); ok {
+		t.Fatal("authCooldownStateRecord() = true from an aggregate-only quota with an available sibling, want false")
+	}
+
+	llamaRecord, ok := modelCooldownStateRecord(auth, "llama3", auth.ModelStates["llama3"], now)
+	if !ok {
+		t.Fatal("modelCooldownStateRecord(llama3) = false, want true")
+	}
+
+	manager := NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-multi", Provider: "openai-compat", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+	manager.mu.Lock()
+	restored := manager.restoreCooldownRecordLocked(llamaRecord, now)
+	manager.mu.Unlock()
+	if !restored {
+		t.Fatal("restoreCooldownRecordLocked(llama3) = false, want true")
+	}
+
+	restoredAuth, ok := manager.GetByID("auth-multi")
+	if !ok {
+		t.Fatal("restored auth not found")
+	}
+	if blocked, _, _ := isAuthBlockedForModel(restoredAuth, "mistral", now); blocked {
+		t.Fatal("isAuthBlockedForModel(mistral) = blocked after restoring only the llama3 model record, want selectable")
+	}
+	if blocked, _, _ := isAuthBlockedForModel(restoredAuth, "llama3", now); !blocked {
+		t.Fatal("isAuthBlockedForModel(llama3) = not blocked after restore, want blocked until the cooldown deadline")
+	}
+	if blocked, _, _ := isAuthBlockedForModel(restoredAuth, "", now); blocked {
+		t.Fatal("isAuthBlockedForModel(\"\") = blocked for the whole credential after restoring one cooling sibling, want selectable per the aggregate exception")
+	}
+
+	// Self-reinforcement guard: if restore had left restoredAuth.Unavailable
+	// true, the next persist cycle's authCooldownStateRecord call would see
+	// !auth.Unavailable fail, write a fresh credential-level record from
+	// nothing but the surviving model-scoped state, and the credential would
+	// never recover across a second restart. Confirm the persist path agrees
+	// the credential is selectable one cycle after restore.
+	if _, ok := authCooldownStateRecord(restoredAuth, now); ok {
+		t.Fatal("authCooldownStateRecord() = true one persist cycle after restoring one cooling sibling, want false (would re-darken the credential on the next restart)")
+	}
+}
+
+// TestAuthCooldownStateRecordPersistsGenuineCredentialLevel401 covers the
+// companion case: a real credential-wide cooldown (e.g. a 401, with no
+// per-model states at all) must still persist and, on restore into a fresh
+// Manager, block every model - proving the P1 fix's write-side reuse of
+// isAuthBlockedForModel didn't accidentally suppress genuine credential-level
+// records, and the restore-side fix didn't route this case through
+// updateAggregatedAvailability (which would wipe it via
+// clearAggregatedAvailability when ModelStates is empty).
+func TestAuthCooldownStateRecordPersistsGenuineCredentialLevel401(t *testing.T) {
+	now := time.Now()
+	deadline := now.Add(time.Hour)
+
+	auth := &Auth{
+		ID:             "auth-401",
+		Provider:       "openai-compat",
+		Status:         StatusError,
+		Unavailable:    true,
+		NextRetryAfter: deadline,
+		LastError:      &Error{Message: "unauthorized", HTTPStatus: 401},
+		UpdatedAt:      now,
+	}
+
+	record, ok := authCooldownStateRecord(auth, now)
+	if !ok {
+		t.Fatal("authCooldownStateRecord() = false for a genuine credential-level 401 cooldown, want true")
+	}
+	if !record.NextRetryAfter.Equal(deadline) {
+		t.Fatalf("persisted NextRetryAfter = %v, want %v", record.NextRetryAfter, deadline)
+	}
+
+	manager := NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-401", Provider: "openai-compat", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+	manager.mu.Lock()
+	restored := manager.restoreCooldownRecordLocked(record, now)
+	manager.mu.Unlock()
+	if !restored {
+		t.Fatal("restoreCooldownRecordLocked() = false for the credential-level 401 record, want true")
+	}
+
+	restoredAuth, ok := manager.GetByID("auth-401")
+	if !ok {
+		t.Fatal("restored auth not found")
+	}
+	if !restoredAuth.Unavailable {
+		t.Fatal("restored auth.Unavailable = false, want true (genuine credential-level cooldown must survive restore)")
+	}
+	for _, model := range []string{"", "any-model", "another-model"} {
+		if blocked, _, _ := isAuthBlockedForModel(restoredAuth, model, now); !blocked {
+			t.Fatalf("isAuthBlockedForModel(%q) = not blocked after restoring a credential-level 401, want blocked", model)
+		}
+	}
+}
+
+// TestAuthCooldownStateRecordAgreesWithSelectorOnWriteSideGate is a direct,
+// standalone assertion that authCooldownStateRecord agrees with
+// isAuthBlockedForModel(auth, "", now) on the same in-memory auth (no
+// restore round-trip). It does not by itself prove the write-side fix is
+// exercised - that proof is the mutation-control run recorded in the P1
+// report (reverting authCooldownStateRecord to call
+// availabilityBlock(auth.Quota...) directly is caught by
+// TestAuthCooldownStateRecordSkipsAggregateOnlyQuotaWithAvailableSibling).
+// This test exists so a reviewer can see the exact gate condition without
+// cross-referencing that other test.
+func TestAuthCooldownStateRecordAgreesWithSelectorOnWriteSideGate(t *testing.T) {
+	now := time.Now()
+	auth := &Auth{
+		ID:       "auth-gate",
+		Provider: "openai-compat",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			"cooling-model": {
+				Status:      StatusError,
+				Unavailable: true,
+				Quota: QuotaState{
+					Exceeded:      true,
+					Reason:        "quota",
+					NextRecoverAt: now.Add(12 * time.Hour),
+				},
+				NextRetryAfter: now.Add(12 * time.Hour),
+				UpdatedAt:      now,
+			},
+			"available-model": {Status: StatusActive},
+		},
+	}
+	updateAggregatedAvailability(auth, now)
+
+	// isAuthBlockedForModel(auth, "", now) is the exact function the fixed
+	// authCooldownStateRecord now calls; assert it agrees the credential is
+	// NOT blocked here - this is the gate whose removal would regress to
+	// the old bug.
+	blocked, _, _ := isAuthBlockedForModel(auth, "", now)
+	if blocked {
+		t.Fatal("isAuthBlockedForModel(auth, \"\", now) = blocked from an aggregate-only quota with an available sibling, want selectable")
+	}
+	if _, ok := authCooldownStateRecord(auth, now); ok {
+		t.Fatal("authCooldownStateRecord() must agree with isAuthBlockedForModel(auth, \"\", now) and skip the record")
+	}
+}

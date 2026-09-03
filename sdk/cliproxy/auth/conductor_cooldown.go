@@ -376,9 +376,6 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	model := strings.TrimSpace(record.Model)
 
 	if model == "" {
-		auth.Unavailable = true
-		auth.Status = StatusError
-		auth.NextRetryAfter = next
 		applyCooldownFields(&auth.Quota, quota)
 		auth.Quota = mergeQuotaObservation(auth.Quota, quota)
 		auth.Generation++
@@ -387,6 +384,28 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 			auth.StatusMessage = reason
 		}
 		auth.LastError = cloneError(record.LastError)
+		if len(auth.ModelStates) > 0 {
+			// This auth already has (or, since RestoreCooldownStates applies
+			// model-scoped records before auth-level ones, just received)
+			// per-model state. An auth-level record built from one cooling
+			// sibling's aggregate quota (see authCooldownStateRecord) must
+			// not force the whole credential unavailable here - re-derive
+			// auth.Unavailable/NextRetryAfter/Quota from the actual model
+			// states via updateAggregatedAvailability instead of trusting
+			// this record's own flags, so restore agrees with write
+			// regardless of record order.
+			updateAggregatedAvailability(auth, now)
+		} else {
+			// No per-model state exists for this credential at all, so the
+			// auth-level record IS the sole source of truth for a genuine
+			// credential-wide cooldown (e.g. a 401 or credential_quota) -
+			// updateAggregatedAvailability would otherwise treat "no model
+			// states" as "nothing is wrong" and wipe it via
+			// clearAggregatedAvailability.
+			auth.Unavailable = true
+			auth.Status = StatusError
+			auth.NextRetryAfter = next
+		}
 		return true
 	}
 
@@ -402,7 +421,30 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	})
 	auth.Generation++
 	auth.UpdatedAt = updatedAt
+
+	// modelCooldownStateRecord only ever persists a record for a BLOCKED
+	// model (see its !blocked early-return) - an available sibling never
+	// gets one. So restoring a single model-scoped record into a fresh
+	// Manager necessarily leaves auth.ModelStates holding only the cooling
+	// model(s), never the siblings that were selectable before shutdown.
+	// updateAggregatedAvailability's sweep treats an ABSENT entry the same
+	// as an unavailable one (allUnavailable starts true and is only
+	// lowered by entries actually present), so calling it unconditionally
+	// here would mark the whole credential unavailable from a single
+	// restored model - even though isAuthBlockedForModel's own model!=""
+	// path (used by every real selection call) already blocks just that
+	// model correctly. Only let this restore LOWER auth.Unavailable
+	// (e.g. a previously-restored auth-level record clears once a model
+	// comes back), never RAISE it on the strength of one partially
+	// restored model map: that escalation is exactly what would make a
+	// multi-model credential go dark after a restart over one cooling
+	// sibling.
+	wasUnavailable := auth.Unavailable
 	updateAggregatedAvailability(auth, now)
+	if !wasUnavailable && auth.Unavailable {
+		auth.Unavailable = false
+		auth.NextRetryAfter = time.Time{}
+	}
 	return true
 }
 
@@ -691,21 +733,33 @@ func cooldownErrorEqual(a, b *Error) bool {
 
 // authCooldownStateRecord builds the persisted record for a credential-level
 // cooldown. Whether a record exists at all, and what deadline it carries, is
-// decided by availabilityBlock - the same function the in-memory selector
-// uses to decide whether this auth is blocked - rather than by NextRetryAfter
-// alone. A later failure of a different kind (e.g. a transient 5xx) can
-// shorten auth.NextRetryAfter without touching auth.Quota.NextRecoverAt (see
+// decided by isAuthBlockedForModel(auth, "", now) - the same aggregate-vs-
+// credential logic the in-memory selector uses to decide whether the WHOLE
+// credential is blocked - rather than by availabilityBlock on auth.Quota
+// directly. updateAggregatedAvailability deliberately copies one cooling
+// sibling model's quota into auth.Quota (Reason "quota") while leaving
+// auth.Unavailable false when other models remain available; a raw
+// availabilityBlock call on auth.Quota alone cannot see that distinction and
+// would persist a credential-level record from that aggregate-only quota,
+// blocking every model for this credential after a restart even though only
+// one sibling was ever cooling. isAuthBlockedForModel(auth, "", now) already
+// encodes the exception (aggregate quota with Reason != "credential_quota"
+// and auth.Unavailable false does not block), so reusing it here keeps both
+// call sites in exact agreement.
+//
+// A later failure of a different kind (e.g. a transient 5xx) can shorten
+// auth.NextRetryAfter without touching auth.Quota.NextRecoverAt (see
 // notFoundRetryAfter/preserveLongerCooldown); checking NextRetryAfter alone
 // would silently drop the record - and the cooldown it protects - the moment
 // the shortened deadline passes, even though the credential is still blocked
 // in memory until the longer NextRecoverAt. The persisted NextRetryAfter is
-// the effective (longer) deadline availabilityBlock returns, so a `.cds`
-// file always shows the deadline that is actually in force.
+// the effective (longer) deadline availabilityBlock returns internally, so a
+// `.cds` file always shows the deadline that is actually in force.
 func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bool) {
 	if auth == nil {
 		return CooldownStateRecord{}, false
 	}
-	blocked, _, next := availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
+	blocked, _, next := isAuthBlockedForModel(auth, "", now)
 	if !blocked || next.IsZero() {
 		return CooldownStateRecord{}, false
 	}
