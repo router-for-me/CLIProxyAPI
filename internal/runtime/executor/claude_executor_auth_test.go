@@ -377,4 +377,3 @@ func TestClaudeExecutorPrepareRequestAuthRejectsOAuthShapedPlaceholder(t *testin
 		t.Fatal("placeholder must fail before fetchClaudeOAuthProfile")
 	}
 }
-
