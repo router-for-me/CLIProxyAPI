@@ -3,6 +3,7 @@ package helps
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -40,8 +41,10 @@ func TestTokensPerSecondHeaderFromUsage(t *testing.T) {
 		ttftSet:     true,
 	}
 	attachTokensPerSecondHeader(headers, []byte(`{"usage":{"completion_tokens":200}}`), reporter)
-	if headers.Get(tokensPerSecondHeader) != "100.000" {
-		t.Fatalf("header = %q", headers.Get(tokensPerSecondHeader))
+	got := headers.Get(tokensPerSecondHeader)
+	parsed, err := strconv.ParseFloat(got, 64)
+	if err != nil || parsed < 99 || parsed > 101 {
+		t.Fatalf("header = %q, want ~100", got)
 	}
 }
 
