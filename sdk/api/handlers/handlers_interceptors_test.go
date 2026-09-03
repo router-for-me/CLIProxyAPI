@@ -1635,3 +1635,65 @@ func TestHandlerWebSocketResponseObserverForwardsToPluginHost(t *testing.T) {
 		t.Fatal("RequestID is empty, want populated request ID")
 	}
 }
+
+func TestDownstreamHeadersFromExecutorKeepsTokensPerSecondWithoutPassthrough(t *testing.T) {
+	src := http.Header{
+		"X-Upstream":                      []string{"secret"},
+		"X-CLIProxyAPI-Tokens-Per-Second": []string{"100.000"},
+	}
+	got := downstreamHeadersFromExecutor(src, false)
+	if got.Get("X-CLIProxyAPI-Tokens-Per-Second") != "100.000" {
+		t.Fatalf("headers = %#v, want gateway TPS header without passthrough", got)
+	}
+	if got.Get("X-Upstream") != "" {
+		t.Fatalf("leaked raw upstream header with passthrough disabled: %#v", got)
+	}
+}
+
+func TestDownstreamHeadersAfterInterceptorsKeepsTokensPerSecondWithoutPassthrough(t *testing.T) {
+	base := http.Header{
+		"X-Upstream":                      []string{"raw"},
+		"X-CLIProxyAPI-Tokens-Per-Second": []string{"100.000"},
+	}
+	final := http.Header{
+		"X-Upstream":                      []string{"raw"},
+		"X-CLIProxyAPI-Tokens-Per-Second": []string{"100.000"},
+		"X-Plugin":                        []string{"response"},
+	}
+	got := downstreamHeadersAfterInterceptors(base, final, false)
+	if got.Get("X-CLIProxyAPI-Tokens-Per-Second") != "100.000" {
+		t.Fatalf("headers = %#v, want gateway TPS header without passthrough", got)
+	}
+	if got.Get("X-Plugin") != "response" {
+		t.Fatalf("headers = %#v, want interceptor-added header", got)
+	}
+	if got.Get("X-Upstream") != "" {
+		t.Fatalf("leaked unchanged upstream header with passthrough disabled: %#v", got)
+	}
+}
+
+func TestHandlerForwardsTokensPerSecondWhenPassthroughDisabled(t *testing.T) {
+	model := "handler-tps-header-model"
+	executor := &interceptorCaptureExecutor{
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			return coreexecutor.Response{
+				Payload: []byte(`{"usage":{"completion_tokens":200}}`),
+				Headers: http.Header{
+					"X-Upstream":                      []string{"raw"},
+					"X-CLIProxyAPI-Tokens-Per-Second": []string{"100.000"},
+				},
+			}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{PassthroughHeaders: false})
+	_, headers, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %+v", errMsg)
+	}
+	if headers.Get("X-CLIProxyAPI-Tokens-Per-Second") != "100.000" {
+		t.Fatalf("headers = %#v, want gateway TPS header without passthrough", headers)
+	}
+	if headers.Get("X-Upstream") != "" {
+		t.Fatalf("leaked raw upstream header with passthrough disabled: %#v", headers)
+	}
+}
