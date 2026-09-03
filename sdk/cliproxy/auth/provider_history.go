@@ -28,6 +28,7 @@ type providerHistoryNormalization struct {
 	Body           []byte
 	Changed        bool
 	DroppedItems   int
+	ProjectedItems int
 	StrippedFields int
 }
 
@@ -96,9 +97,10 @@ func normalizeProviderBoundResponseHistory(body []byte) (providerHistoryNormaliz
 		default:
 			return providerHistoryNormalization{}, &providerHistoryError{reason: "unsupported_history_item"}
 		}
-		if providerHistoryIsRecoverableOrphanHostOutput(item, items) {
+		if projected, okProjected := providerHistoryProjectRecoverableOrphanHostOutput(item, items); okProjected {
 			result.Changed = true
-			result.DroppedItems++
+			result.ProjectedItems++
+			normalized = append(normalized, projected)
 			continue
 		}
 
@@ -180,6 +182,68 @@ func providerHistoryIsRecoverableOrphanHostOutput(item map[string]any, items []a
 		}
 	}
 	return true
+}
+
+func providerHistoryProjectRecoverableOrphanHostOutput(item map[string]any, items []any) (map[string]any, bool) {
+	if !providerHistoryIsRecoverableOrphanHostOutput(item, items) {
+		return nil, false
+	}
+	output, present := item["output"]
+	if !present || !hasSemanticHistoryValue(output) {
+		return nil, false
+	}
+	content, isString := output.(string)
+	if !isString {
+		encoded, err := json.Marshal(output)
+		if err != nil {
+			return nil, false
+		}
+		content = string(encoded)
+	}
+	if strings.TrimSpace(content) == "" {
+		return nil, false
+	}
+	return map[string]any{
+		"type":    "message",
+		"role":    "user",
+		"content": content,
+	}, true
+}
+
+func projectRecoverableOrphanHostOutputs(body []byte) ([]byte, bool) {
+	var request map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if decoder.Decode(&request) != nil {
+		return body, false
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return body, false
+	}
+	items, ok := request["input"].([]any)
+	if !ok {
+		return body, false
+	}
+	normalized := make([]any, 0, len(items))
+	changed := false
+	for _, rawItem := range items {
+		item, _ := rawItem.(map[string]any)
+		if projected, okProjected := providerHistoryProjectRecoverableOrphanHostOutput(item, items); item != nil && okProjected {
+			changed = true
+			normalized = append(normalized, projected)
+			continue
+		}
+		normalized = append(normalized, rawItem)
+	}
+	if !changed {
+		return body, false
+	}
+	request["input"] = normalized
+	normalizedBody, err := json.Marshal(request)
+	if err != nil {
+		return body, false
+	}
+	return normalizedBody, true
 }
 
 func hasSemanticHistoryValue(value any) bool {
@@ -409,7 +473,17 @@ func providerHistorySessionIDs(headers http.Header, payload []byte, metadata map
 }
 
 func (m *Manager) normalizeProviderHistoryAttempt(provider string, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
-	if m == nil || m.providerHistoryScopes == nil || (opts.SourceFormat != sdktranslator.FormatOpenAIResponse && opts.SourceFormat != sdktranslator.FormatCodex) {
+	if m == nil || (opts.SourceFormat != sdktranslator.FormatOpenAIResponse && opts.SourceFormat != sdktranslator.FormatCodex) {
+		return req, opts, nil
+	}
+	compatible, _ := opts.Metadata[cliproxyexecutor.SelectedModelCompatibilityMetadataKey].(bool)
+	if compatible {
+		if normalized, changed := projectRecoverableOrphanHostOutputs(req.Payload); changed {
+			req.Payload = bytes.Clone(normalized)
+			opts.OriginalRequest = bytes.Clone(normalized)
+		}
+	}
+	if m.providerHistoryScopes == nil {
 		return req, opts, nil
 	}
 	targetScope := ""

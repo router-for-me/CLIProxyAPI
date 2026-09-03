@@ -80,7 +80,7 @@ func TestNormalizeProviderBoundResponseHistoryPreservesCustomToolPairs(t *testin
 	}
 }
 
-func TestNormalizeProviderBoundResponseHistoryDropsKnownOrphanHostOutput(t *testing.T) {
+func TestNormalizeProviderBoundResponseHistoryProjectsKnownOrphanHostOutput(t *testing.T) {
 	for _, hostOutputName := range []string{"automation_update", "send_message_to_thread"} {
 		t.Run(hostOutputName, func(t *testing.T) {
 			items := []any{map[string]any{"type": "message", "role": "user", "content": "continue"}}
@@ -95,7 +95,7 @@ func TestNormalizeProviderBoundResponseHistoryDropsKnownOrphanHostOutput(t *test
 				"type":   "function_call_output",
 				"id":     "host_injected_output",
 				"name":   hostOutputName,
-				"output": `{"status":"applied"}`,
+				"output": `<host-control>run pwd exactly once</host-control>`,
 			})
 			body, errMarshal := json.Marshal(map[string]any{"input": items})
 			if errMarshal != nil {
@@ -106,14 +106,20 @@ func TestNormalizeProviderBoundResponseHistoryDropsKnownOrphanHostOutput(t *test
 			if err != nil {
 				t.Fatalf("normalizeProviderBoundResponseHistory() error = %v", err)
 			}
-			if !got.Changed || got.DroppedItems != 1 || got.StrippedFields != 80 {
+			if !got.Changed || got.ProjectedItems != 1 || got.DroppedItems != 0 || got.StrippedFields != 80 {
 				t.Fatalf("normalization metadata = %#v", got)
 			}
-			if count := int(gjson.GetBytes(got.Body, "input.#").Int()); count != 81 {
-				t.Fatalf("normalized input count = %d, want 81", count)
+			if count := int(gjson.GetBytes(got.Body, "input.#").Int()); count != 82 {
+				t.Fatalf("normalized input count = %d, want 82", count)
 			}
 			if bytes.Contains(got.Body, []byte(hostOutputName)) {
-				t.Fatalf("recoverable orphan host output survived: %s", got.Body)
+				t.Fatalf("host tool identity survived projection: %s", got.Body)
+			}
+			if role := gjson.GetBytes(got.Body, "input.81.role").String(); role != "user" {
+				t.Fatalf("projected host output role = %q, want user", role)
+			}
+			if content := gjson.GetBytes(got.Body, "input.81.content").String(); content != `<host-control>run pwd exactly once</host-control>` {
+				t.Fatalf("projected host output content = %q", content)
 			}
 		})
 	}
@@ -135,6 +141,10 @@ func TestNormalizeProviderBoundResponseHistoryRejectsUnknownOrPairedMissingCallI
 		{
 			name: "matching send message call exists",
 			body: `{"input":[{"type":"message","role":"user","content":"continue"},{"type":"function_call","call_id":"call_1","name":"send_message_to_thread","arguments":"{}"},{"type":"function_call_output","name":"send_message_to_thread","output":"ok"}]}`,
+		},
+		{
+			name: "known host output without semantic content",
+			body: `{"input":[{"type":"message","role":"user","content":"continue"},{"type":"function_call_output","name":"send_message_to_thread","output":""}]}`,
 		},
 	}
 	for _, tt := range tests {
@@ -309,6 +319,45 @@ func TestManagerNormalizesHistoryOnlyWhenSessionChangesUpstreamScope(t *testing.
 		t.Fatalf("cross-scope identity survived: %s", crossReq.Payload)
 	}
 	if !bytes.Equal(crossReq.Payload, crossOpts.OriginalRequest) {
+		t.Fatalf("translated payload and OriginalRequest diverged")
+	}
+}
+
+func TestManagerProjectsRecoverableOrphanHostOutputForCompatibleModelWithoutHandoff(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	t.Cleanup(manager.StopAutoRefresh)
+	body := []byte(`{"input":[{"type":"message","role":"user","content":"continue"},{"type":"function_call_output","name":"automation_update","output":"<heartbeat>run the quota command</heartbeat>"}]}`)
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: bytes.Clone(body),
+		Metadata: map[string]any{
+			cliproxyexecutor.SelectedAuthMetadataKey:               "ark",
+			cliproxyexecutor.SelectedModelCompatibilityMetadataKey: true,
+		},
+	}
+
+	got, gotOpts, err := manager.applyRequestAfterAuthInterceptor(
+		nil,
+		nil,
+		&Auth{ID: "ark", Provider: "codex"},
+		"codex",
+		cliproxyexecutor.Request{Payload: bytes.Clone(body)},
+		opts,
+		"deepseek-v4-flash-ga-260731",
+	)
+	if err != nil {
+		t.Fatalf("compatible same-scope request error = %v", err)
+	}
+	if gjson.GetBytes(got.Payload, "input.#").Int() != 2 || bytes.Contains(got.Payload, []byte("automation_update")) {
+		t.Fatalf("host tool identity survived projection: %s", got.Payload)
+	}
+	if role := gjson.GetBytes(got.Payload, "input.1.role").String(); role != "user" {
+		t.Fatalf("projected host output role = %q, want user", role)
+	}
+	if content := gjson.GetBytes(got.Payload, "input.1.content").String(); content != "<heartbeat>run the quota command</heartbeat>" {
+		t.Fatalf("projected host output content = %q", content)
+	}
+	if !bytes.Equal(got.Payload, gotOpts.OriginalRequest) {
 		t.Fatalf("translated payload and OriginalRequest diverged")
 	}
 }
