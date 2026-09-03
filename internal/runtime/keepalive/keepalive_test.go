@@ -104,11 +104,11 @@ func (l staticLiveness) Live(string, time.Duration) bool { return l.live }
 
 type staticBinding struct {
 	authID string
-	ok     bool
+	state  BindingState
 }
 
-func (b staticBinding) BoundAuthID(string, string, string) (string, bool) {
-	return b.authID, b.ok
+func (b staticBinding) SessionBinding(string, string, string) (string, BindingState) {
+	return b.authID, b.state
 }
 
 const oneHourBody = `{
@@ -145,7 +145,7 @@ func testScheduler(t *testing.T, clock *fakeClock, prober Prober, liveness Liven
 	scheduler.SetProber(prober)
 	scheduler.SetLiveness(liveness)
 	scheduler.SetBinding(binding)
-	scheduler.newTimer = clock.after
+	scheduler.SetTimerFactory(clock.after)
 	return scheduler
 }
 
@@ -165,7 +165,7 @@ func observeOneHour(scheduler *Scheduler, session string) {
 func TestObserveSchedulesAtTTLMinusBeforeExpiry(t *testing.T) {
 	clock := &fakeClock{}
 	prober := &recordingProber{}
-	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", ok: true}, nil)
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
 
 	observeOneHour(scheduler, "sess-1")
 
@@ -182,7 +182,7 @@ func TestObserveSchedulesAtTTLMinusBeforeExpiry(t *testing.T) {
 func TestObserveSupersedesEarlierTimer(t *testing.T) {
 	clock := &fakeClock{}
 	prober := &recordingProber{}
-	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", ok: true}, nil)
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
 
 	observeOneHour(scheduler, "sess-1")
 	observeOneHour(scheduler, "sess-1")
@@ -210,7 +210,7 @@ func TestObserveSupersedesEarlierTimer(t *testing.T) {
 func TestFireSkipsWhenNoAgentsLive(t *testing.T) {
 	clock := &fakeClock{}
 	prober := &recordingProber{}
-	scheduler := testScheduler(t, clock, prober, staticLiveness{live: false}, staticBinding{authID: "auth-a", ok: true}, nil)
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: false}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
 
 	observeOneHour(scheduler, "sess-1")
 	clock.fireLatest(t)
@@ -226,7 +226,7 @@ func TestFireSkipsWhenNoAgentsLive(t *testing.T) {
 func TestFireProbesWhenLivenessIsAlwaysEvenWithNoAgents(t *testing.T) {
 	clock := &fakeClock{}
 	prober := &recordingProber{}
-	scheduler := testScheduler(t, clock, prober, staticLiveness{live: false}, staticBinding{authID: "auth-a", ok: true}, func(cfg *Config) {
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: false}, staticBinding{authID: "auth-a", state: BindingBound}, func(cfg *Config) {
 		cfg.OnlyWhenAgentsActive = false
 	})
 
@@ -238,10 +238,23 @@ func TestFireProbesWhenLivenessIsAlwaysEvenWithNoAgents(t *testing.T) {
 	}
 }
 
+func TestFireProbesWhenBindingIsUnknown(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{state: BindingUnknown}, nil)
+
+	observeOneHour(scheduler, "sess-1")
+	clock.fireLatest(t)
+
+	if calls := prober.calls(); len(calls) != 1 {
+		t.Fatalf("probed %d times, want 1: without session-sticky routing there is no binding to lose", len(calls))
+	}
+}
+
 func TestFireSkipsWhenAuthBindingLost(t *testing.T) {
 	clock := &fakeClock{}
 	prober := &recordingProber{}
-	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "", ok: false}, nil)
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{state: BindingLost}, nil)
 
 	observeOneHour(scheduler, "sess-1")
 	clock.fireLatest(t)
@@ -254,7 +267,7 @@ func TestFireSkipsWhenAuthBindingLost(t *testing.T) {
 func TestFireSkipsWhenAuthBindingMovedToAnotherCredential(t *testing.T) {
 	clock := &fakeClock{}
 	prober := &recordingProber{}
-	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-b", ok: true}, nil)
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-b", state: BindingBound}, nil)
 
 	observeOneHour(scheduler, "sess-1")
 	clock.fireLatest(t)
@@ -267,7 +280,7 @@ func TestFireSkipsWhenAuthBindingMovedToAnotherCredential(t *testing.T) {
 func TestConsecutiveProbesStopAtMaxProbes(t *testing.T) {
 	clock := &fakeClock{}
 	prober := &recordingProber{}
-	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", ok: true}, func(cfg *Config) {
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, func(cfg *Config) {
 		cfg.MaxProbes = 3
 	})
 
@@ -299,7 +312,7 @@ func TestConsecutiveProbesStopAtMaxProbes(t *testing.T) {
 func TestRealRequestResetsProbeBudget(t *testing.T) {
 	clock := &fakeClock{}
 	prober := &recordingProber{}
-	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", ok: true}, func(cfg *Config) {
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, func(cfg *Config) {
 		cfg.MaxProbes = 1
 	})
 
@@ -316,7 +329,7 @@ func TestRealRequestResetsProbeBudget(t *testing.T) {
 func TestProbeBodyPreservesCacheControlBetasAndPrefix(t *testing.T) {
 	clock := &fakeClock{}
 	prober := &recordingProber{}
-	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", ok: true}, nil)
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
 
 	observeOneHour(scheduler, "sess-1")
 	clock.fireLatest(t)
@@ -369,7 +382,7 @@ func TestProbeBodyPreservesCacheControlBetasAndPrefix(t *testing.T) {
 func TestDisabledSchedulerNeverSchedules(t *testing.T) {
 	clock := &fakeClock{}
 	prober := &recordingProber{}
-	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", ok: true}, func(cfg *Config) {
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, func(cfg *Config) {
 		cfg.Enabled = false
 	})
 
@@ -388,7 +401,7 @@ func TestNilSchedulerObserveIsSafe(t *testing.T) {
 func TestObserveIgnoredWithoutSessionOrTTL(t *testing.T) {
 	clock := &fakeClock{}
 	prober := &recordingProber{}
-	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", ok: true}, nil)
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
 
 	scheduler.Observe(ObserveInput{AuthID: "auth-a", Body: []byte(oneHourBody), TTL: time.Hour})
 	scheduler.Observe(ObserveInput{SessionID: "sess-1", AuthID: "auth-a", Body: []byte(oneHourBody)})
@@ -402,7 +415,7 @@ func TestObserveIgnoredWithoutSessionOrTTL(t *testing.T) {
 func TestObserveIgnoredWhenBeforeExpiryExceedsTTL(t *testing.T) {
 	clock := &fakeClock{}
 	prober := &recordingProber{}
-	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", ok: true}, func(cfg *Config) {
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, func(cfg *Config) {
 		cfg.BeforeExpiry = 2 * time.Hour
 	})
 
@@ -450,7 +463,7 @@ func TestIsExtendedCacheTTL(t *testing.T) {
 func TestStopClearsScheduledTimers(t *testing.T) {
 	clock := &fakeClock{}
 	prober := &recordingProber{}
-	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", ok: true}, nil)
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
 
 	observeOneHour(scheduler, "sess-1")
 	scheduler.Stop()

@@ -84,9 +84,23 @@ type Liveness interface {
 	Live(sessionID string, window time.Duration) bool
 }
 
+// BindingState describes what the proxy knows about a session's credential binding.
+type BindingState int
+
+const (
+	// BindingUnknown means routing is not session-sticky, so there is no binding
+	// to check. The scheduler proceeds: with no affinity there is no binding to lose.
+	BindingUnknown BindingState = iota
+	// BindingBound means the session is bound to the reported credential.
+	BindingBound
+	// BindingLost means the session had a binding and no longer has one, normally
+	// because the credential entered cooldown or rotated out.
+	BindingLost
+)
+
 // Binding reports the credential a session is currently bound to.
 type Binding interface {
-	BoundAuthID(provider, sessionID, model string) (string, bool)
+	SessionBinding(provider, sessionID, model string) (authID string, state BindingState)
 }
 
 // ObserveInput describes one completed real request.
@@ -145,6 +159,19 @@ func New(cfg Config) *Scheduler {
 		newTimer: func(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) },
 		now:      time.Now,
 	}
+}
+
+// SetTimerFactory replaces the timer constructor.
+//
+// Tests use it to drive scheduling deterministically; the repository forbids
+// wall-clock sleeps in TTL and ordering tests for exactly this reason.
+func (s *Scheduler) SetTimerFactory(factory func(time.Duration, func()) Timer) {
+	if s == nil || factory == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.newTimer = factory
 }
 
 // SetProber installs the upstream probe sender.
@@ -344,8 +371,8 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 		}
 	}
 	if binding != nil {
-		boundAuthID, ok := binding.BoundAuthID(provider, sessionID, model)
-		if !ok || boundAuthID != authID {
+		boundAuthID, state := binding.SessionBinding(provider, sessionID, model)
+		if state == BindingLost || (state == BindingBound && boundAuthID != authID) {
 			s.drop(sessionID, generation)
 			log.Infof("cache-keepalive: skipped | session=%s reason=auth-binding-lost want_auth=%s bound_auth=%s",
 				truncateSession(sessionID), authID, boundAuthID)

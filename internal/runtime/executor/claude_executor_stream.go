@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -22,6 +23,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	requestStartedAt := time.Now()
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	upstreamModel := e.upstreamModel(baseModel)
 
@@ -421,6 +423,16 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			commitClaudeDiagnostics(diagnosticsState, upstreamMessageID)
 		}
 	}()
+	helps.ObserveClaudeCacheKeepalive(ctx, helps.ClaudeCacheKeepaliveObservation{
+		ConfirmedClaudeCode: confirmedClaudeCode,
+		AuthID:              authID,
+		AuthProvider:        e.Identifier(),
+		Model:               baseModel,
+		OriginalPayload:     originalPayload,
+		Headers:             incomingHeaders,
+		Metadata:            opts.Metadata,
+		StartedAt:           requestStartedAt,
+	})
 	result := &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}
 	if replayScope.valid() {
 		result = wrapClaudeThinkingReplayStream(ctx, result, replayScope)

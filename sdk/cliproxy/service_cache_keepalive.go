@@ -1,0 +1,137 @@
+package cliproxy
+
+import (
+	"context"
+	"errors"
+	"strings"
+
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/keepalive"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+)
+
+// cacheKeepaliveProbeProvider is the auth provider a Claude Code keepalive probe
+// routes through when the observation recorded none.
+const cacheKeepaliveProbeProvider = "claude"
+
+// cacheKeepaliveProber sends a probe through the ordinary execution path so it
+// receives the same translation, cloaking, header and cache_control handling a
+// real request gets. The credential is pinned to the one the session is bound to.
+type cacheKeepaliveProber struct {
+	manager *coreauth.Manager
+}
+
+func (p cacheKeepaliveProber) Probe(ctx context.Context, probe keepalive.ProbeRequest) (keepalive.ProbeResult, error) {
+	if p.manager == nil {
+		return keepalive.ProbeResult{}, errors.New("cache keepalive: no auth manager")
+	}
+	provider := strings.TrimSpace(probe.Provider)
+	if provider == "" || strings.EqualFold(provider, "mixed") {
+		provider = cacheKeepaliveProbeProvider
+	}
+	claudeFormat := sdktranslator.FromString("claude")
+	req := coreexecutor.Request{Model: probe.Model, Payload: probe.Body}
+	opts := coreexecutor.Options{
+		Stream:          false,
+		OriginalRequest: probe.Body,
+		SourceFormat:    claudeFormat,
+		ResponseFormat:  claudeFormat,
+		Headers:         probe.Headers,
+		Metadata: map[string]any{
+			coreexecutor.PinnedAuthMetadataKey:     probe.AuthID,
+			coreexecutor.RequestedModelMetadataKey: probe.Model,
+		},
+	}
+	resp, err := p.manager.Execute(ctx, []string{provider}, req, opts)
+	if err != nil {
+		return keepalive.ProbeResult{}, err
+	}
+	return keepalive.ProbeResult{
+		CacheReadInputTokens: gjson.GetBytes(resp.Payload, "usage.cache_read_input_tokens").Int(),
+	}, nil
+}
+
+// cacheKeepaliveBinding answers whether the session is still bound to the
+// credential the probe was recorded against.
+type cacheKeepaliveBinding struct {
+	manager *coreauth.Manager
+}
+
+func (b cacheKeepaliveBinding) SessionBinding(provider, sessionID, model string) (string, keepalive.BindingState) {
+	if b.manager == nil {
+		return "", keepalive.BindingUnknown
+	}
+	lookup, ok := b.manager.SessionBindingLookup()
+	if !ok {
+		// Routing is not session-sticky, so there is no binding to lose.
+		return "", keepalive.BindingUnknown
+	}
+	authID, bound := lookup.BoundAuthID(provider, sessionID, model)
+	if !bound {
+		return "", keepalive.BindingLost
+	}
+	return authID, keepalive.BindingBound
+}
+
+// applyCacheKeepaliveConfig installs or reconfigures the prompt-cache keepalive
+// scheduler. It is safe to call on every config reload.
+func (s *Service) applyCacheKeepaliveConfig(cfg *config.Config) {
+	if s == nil {
+		return
+	}
+	settings := internalconfig.ClaudeCodeCacheKeepaliveConfig{}
+	if cfg != nil {
+		settings = cfg.ClaudeCode.CacheKeepalive
+	}
+	settings = settings.WithDefaults()
+
+	if !settings.Enabled {
+		if keepalive.Default() != nil {
+			log.Info("cache-keepalive: disabled")
+		}
+		keepalive.SetDefault(nil)
+		return
+	}
+	if s.coreManager == nil {
+		log.Warn("cache-keepalive: enabled but no auth manager is available; keepalive stays off")
+		keepalive.SetDefault(nil)
+		return
+	}
+
+	runtimeCfg := keepalive.Config{
+		Enabled:              true,
+		BeforeExpiry:         settings.BeforeExpiry,
+		OnlyWhenAgentsActive: settings.OnlyWhenAgentsActive,
+		MaxProbes:            settings.MaxProbes,
+		MaxTokens:            settings.MaxTokens,
+	}
+
+	var liveness keepalive.Liveness
+	switch settings.Liveness {
+	case internalconfig.ClaudeCodeKeepaliveLivenessAlways:
+		liveness = keepalive.AlwaysLive{}
+	default:
+		liveness = keepalive.NewClaudeCodeTasksLiveness(settings.TaskStateDirs, settings.TaskOutputDirs)
+	}
+
+	scheduler := keepalive.Default()
+	if scheduler == nil {
+		scheduler = keepalive.New(runtimeCfg)
+		scheduler.SetProber(cacheKeepaliveProber{manager: s.coreManager})
+		scheduler.SetBinding(cacheKeepaliveBinding{manager: s.coreManager})
+		scheduler.SetLiveness(liveness)
+		keepalive.SetDefault(scheduler)
+	} else {
+		scheduler.SetProber(cacheKeepaliveProber{manager: s.coreManager})
+		scheduler.SetBinding(cacheKeepaliveBinding{manager: s.coreManager})
+		scheduler.SetLiveness(liveness)
+		scheduler.ApplyConfig(runtimeCfg)
+	}
+	log.Infof("cache-keepalive: enabled | before-expiry=%s only-when-agents-active=%t liveness=%s max-probes=%d max-tokens=%d",
+		settings.BeforeExpiry, settings.OnlyWhenAgentsActive, settings.Liveness, settings.MaxProbes, settings.MaxTokens)
+}
