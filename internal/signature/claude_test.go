@@ -289,6 +289,7 @@ type claudeModelFreeCAISParts struct {
 	topTrailer            uint64
 	includeCarrier        bool
 	carrierLen            int
+	carrierTypes          []protowire.Type
 }
 
 func defaultClaudeModelFreeCAISParts() claudeModelFreeCAISParts {
@@ -304,6 +305,7 @@ func defaultClaudeModelFreeCAISParts() claudeModelFreeCAISParts {
 		topTrailer:            1,
 		includeCarrier:        true,
 		carrierLen:            96,
+		carrierTypes:          []protowire.Type{protowire.BytesType},
 	}
 }
 
@@ -346,8 +348,17 @@ func (p claudeModelFreeCAISParts) encode() string {
 	container = protowire.AppendTag(container, 4, protowire.BytesType)
 	container = protowire.AppendBytes(container, syntheticSignatureBytes(48, 0x65))
 	if p.includeCarrier {
-		container = protowire.AppendTag(container, 5, protowire.BytesType)
-		container = protowire.AppendBytes(container, syntheticSignatureBytes(p.carrierLen, 0x87))
+		for _, carrierType := range p.carrierTypes {
+			container = protowire.AppendTag(container, 5, carrierType)
+			switch carrierType {
+			case protowire.BytesType:
+				container = protowire.AppendBytes(container, syntheticSignatureBytes(p.carrierLen, 0x87))
+			case protowire.VarintType:
+				container = protowire.AppendVarint(container, 1)
+			default:
+				panic("unsupported synthetic carrier wire type")
+			}
+		}
 	}
 
 	var payload []byte
@@ -1227,6 +1238,38 @@ func TestClaudeModelFreeCAISSignature_CarrierValidatedBeforeGeneration(t *testin
 			t.Fatalf("err = %v, want *claudeCAISUnknownGenerationError when the carrier is well-formed", err)
 		}
 	})
+}
+
+func TestClaudeModelFreeCAISSignature_RejectsAnyWrongWireCarrierOccurrence(t *testing.T) {
+	tests := []struct {
+		name         string
+		carrierTypes []protowire.Type
+		wantValid    bool
+	}{
+		{name: "wrong then valid", carrierTypes: []protowire.Type{protowire.VarintType, protowire.BytesType}},
+		{name: "valid then wrong", carrierTypes: []protowire.Type{protowire.BytesType, protowire.VarintType}},
+		{name: "valid then valid", carrierTypes: []protowire.Type{protowire.BytesType, protowire.BytesType}, wantValid: true},
+		{name: "single wrong", carrierTypes: []protowire.Type{protowire.VarintType}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			parts := defaultClaudeModelFreeCAISParts()
+			parts.carrierTypes = tc.carrierTypes
+			_, err := InspectClaudeCAISSignature(parts.encode())
+			if tc.wantValid {
+				if err != nil {
+					t.Fatalf("InspectClaudeCAISSignature() error = %v, want accepted", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("InspectClaudeCAISSignature() error = nil, want wrong-wire rejection")
+			}
+			if !strings.Contains(err.Error(), "container field 5 carrier must be bytes") {
+				t.Fatalf("error = %q, want container field 5 wrong-wire error", err)
+			}
+		})
+	}
 }
 
 func TestClaudeModelFreeCAISSignature_RejectsLegacyOnlyChannelID(t *testing.T) {

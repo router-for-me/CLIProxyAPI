@@ -840,7 +840,6 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 	}
 
 	var channelBlock, containerCarrier []byte
-	var containerCarrierType protowire.Type
 	var haveContainerCarrier bool
 	err = walkClaudeProtobufFields(container, func(num protowire.Number, typ protowire.Type, raw []byte) error {
 		switch num {
@@ -851,15 +850,12 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 			}
 			channelBlock = value
 		case 5:
-			haveContainerCarrier = true
-			containerCarrierType = typ
-			if typ == protowire.BytesType {
-				value, errField := decodeClaudeBytesField(raw, "CAIS container field 5 carrier")
-				if errField != nil {
-					return errField
-				}
-				containerCarrier = value
+			value, errField := decodeClaudeCAISBytes(raw, typ, "CAIS container field 5 carrier")
+			if errField != nil {
+				return errField
 			}
+			haveContainerCarrier = true
+			containerCarrier = value
 		}
 		return nil
 	})
@@ -956,8 +952,6 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 		return nil, fmt.Errorf("invalid Claude model-free CAIS signature: missing envelope version")
 	case !haveContainerCarrier:
 		return nil, fmt.Errorf("invalid Claude model-free CAIS signature: missing container field 5 carrier")
-	case containerCarrierType != protowire.BytesType:
-		return nil, fmt.Errorf("invalid Claude model-free CAIS signature: container field 5 carrier must be bytes")
 	case len(containerCarrier) == 0:
 		return nil, fmt.Errorf("invalid Claude model-free CAIS signature: container field 5 carrier must not be empty")
 	case !isKnownClaudeCAISIdentifier(knownClaudeCAISEnvelopeVersions[:], info.EnvelopeVersion):
