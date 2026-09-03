@@ -1579,6 +1579,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.Quota.BackoffLevel = 0
 	auth.LastError = nil
 	auth.NextRetryAfter = time.Time{}
+	auth.CredentialCooldown = false
 	auth.UpdatedAt = now
 }
 
@@ -2455,7 +2456,16 @@ func applyAuthFailureStateForModel(auth *Auth, resultErr *Error, retryAfter *tim
 		}
 	case 404:
 		auth.StatusMessage = "not_found"
-		auth.NextRetryAfter = notFoundRetryAfter(resultErr, attemptedModel, &auth.Quota, now, disableCooling)
+		existingRetryAfter := auth.NextRetryAfter
+		next := notFoundRetryAfter(resultErr, attemptedModel, &auth.Quota, now, disableCooling)
+		// A racing generic 404 must not shorten or clear a longer-lived
+		// credential-wide cooldown already recorded in NextRetryAfter (e.g.
+		// a live 401) - same effective-deadline rule as preserveLongerCooldown,
+		// just taken across both fields instead of within Quota alone.
+		if existingRetryAfter.After(now) && existingRetryAfter.After(next) {
+			next = existingRetryAfter
+		}
+		auth.NextRetryAfter = next
 		auth.Unavailable = !auth.NextRetryAfter.IsZero()
 	case 429:
 		auth.StatusMessage = "quota exhausted"

@@ -174,6 +174,19 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 				auth.Status = existing.Status
 			}
 		}
+		// A refreshed/clean Auth (e.g. after a token refresh) must not erase a
+		// live credential-wide cooldown (e.g. a 401) - the incoming Auth
+		// carries no cooldown context of its own, so without this the update
+		// would silently clear an active block before its deadline just
+		// because the new value looks clean.
+		if existing.CredentialCooldown && existing.NextRetryAfter.After(time.Now()) {
+			auth.Unavailable = existing.Unavailable
+			auth.NextRetryAfter = existing.NextRetryAfter
+			auth.CredentialCooldown = existing.CredentialCooldown
+			if auth.Status == StatusActive {
+				auth.Status = existing.Status
+			}
+		}
 	}
 	now := time.Now()
 	auth.UpdatedAt = now

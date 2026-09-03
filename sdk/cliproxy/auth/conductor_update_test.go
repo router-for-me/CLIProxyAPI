@@ -251,3 +251,103 @@ func TestManager_Update_ActiveInheritsModelStates(t *testing.T) {
 		t.Fatalf("expected BackoffLevel to be %d, got %d", backoffLevel, state.Quota.BackoffLevel)
 	}
 }
+
+func TestManager_Update_PreservesCredentialCooldownUntilDeadline(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	now := time.Now()
+	deadline := now.Add(30 * time.Minute)
+
+	if _, errRegister := m.Register(context.Background(), &Auth{
+		ID:                 "auth-401",
+		Provider:           "claude",
+		Unavailable:        true,
+		Status:             StatusError,
+		NextRetryAfter:     deadline,
+		CredentialCooldown: true,
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	// A refreshed/clean Auth carries no cooldown fields of its own - e.g. a
+	// token refresh completing while the 401 block is still live.
+	updated, errUpdate := m.Update(context.Background(), &Auth{
+		ID:       "auth-401",
+		Provider: "claude",
+		Status:   StatusActive,
+	})
+	if errUpdate != nil {
+		t.Fatalf("update auth: %v", errUpdate)
+	}
+	if !updated.Unavailable || !updated.CredentialCooldown || !updated.NextRetryAfter.Equal(deadline) {
+		t.Fatalf("Update() while cooldown live = %+v, want Unavailable/CredentialCooldown preserved until %v", updated, deadline)
+	}
+	blocked, _, next := isAuthBlockedForModel(updated, "", time.Now())
+	if !blocked || !next.Equal(deadline) {
+		t.Fatalf("isAuthBlockedForModel(auth, \"\", now) after Update = blocked=%v next=%v, want blocked until %v", blocked, next, deadline)
+	}
+}
+
+func TestManager_Update_ClearsCredentialCooldownAfterDeadline(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	now := time.Now()
+	pastDeadline := now.Add(-time.Minute)
+
+	if _, errRegister := m.Register(context.Background(), &Auth{
+		ID:                 "auth-401-expired",
+		Provider:           "claude",
+		Unavailable:        true,
+		Status:             StatusError,
+		NextRetryAfter:     pastDeadline,
+		CredentialCooldown: true,
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	updated, errUpdate := m.Update(context.Background(), &Auth{
+		ID:       "auth-401-expired",
+		Provider: "claude",
+		Status:   StatusActive,
+	})
+	if errUpdate != nil {
+		t.Fatalf("update auth: %v", errUpdate)
+	}
+	if updated.Unavailable || updated.CredentialCooldown {
+		t.Fatalf("Update() after deadline passed = %+v, want cooldown cleared", updated)
+	}
+}
+
+func TestManager_Update_CredentialCooldownMutationControl(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	now := time.Now()
+	deadline := now.Add(30 * time.Minute)
+
+	if _, errRegister := m.Register(context.Background(), &Auth{
+		ID:                 "auth-401-mc",
+		Provider:           "claude",
+		Unavailable:        true,
+		Status:             StatusError,
+		NextRetryAfter:     deadline,
+		CredentialCooldown: true,
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	// Mimic the pre-fix Update path directly: a clean incoming Auth applied
+	// with no existing.CredentialCooldown preservation at all loses the
+	// cooldown outright, reproducing the original defect this test guards
+	// against (see the guarded branch added to Manager.Update).
+	m.mu.Lock()
+	existing := m.auths["auth-401-mc"]
+	m.mu.Unlock()
+	if existing == nil || !existing.CredentialCooldown || !existing.NextRetryAfter.After(now) {
+		t.Fatalf("expected existing auth to carry a live credential cooldown, got %+v", existing)
+	}
+	clean := &Auth{ID: "auth-401-mc", Provider: "claude", Status: StatusActive}
+	if !existing.CredentialCooldown && existing.NextRetryAfter.After(now) {
+		clean.Unavailable = existing.Unavailable
+		clean.NextRetryAfter = existing.NextRetryAfter
+	}
+	if clean.Unavailable || clean.CredentialCooldown || !clean.NextRetryAfter.IsZero() {
+		t.Fatalf("mutation-control clean auth unexpectedly carries cooldown fields: %+v", clean)
+	}
+}

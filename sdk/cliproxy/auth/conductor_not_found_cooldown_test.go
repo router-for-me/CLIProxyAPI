@@ -1347,3 +1347,81 @@ func TestExecuteStreamBootstrapFirstChunkClassifiesAgainstReportedWireModel(t *t
 		t.Fatalf("cooldown = %v, want about 12h (bootstrap first-chunk 404 naming the executor-reported wire model, from StreamResult.Metadata on a successful ExecuteStream call, must classify as explicit not-found)", cooldown)
 	}
 }
+
+func TestApplyAuthFailureStateCredentialCooldownSurvivesRacingGeneric404(t *testing.T) {
+	previousTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(previousTransient) })
+
+	now := time.Date(2026, 9, 3, 14, 42, 0, 0, time.UTC)
+	generic := &Error{HTTPStatus: http.StatusNotFound, Message: "Not Found"}
+	unauthorized := &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"}
+	deadline := now.Add(30 * time.Minute)
+
+	// 401 then a racing generic 404 for the same credential must not
+	// shorten the 30-minute credential-wide deadline down to the generic
+	// 404's short transient backoff.
+	auth401First := &Auth{ID: "auth-401-then-404"}
+	applyAuthFailureStateForModel(auth401First, unauthorized, nil, "", now, false)
+	if !auth401First.NextRetryAfter.Equal(deadline) {
+		t.Fatalf("401 NextRetryAfter = %v, want %v", auth401First.NextRetryAfter, deadline)
+	}
+	applyAuthFailureStateForModel(auth401First, generic, nil, "", now, false)
+	if !auth401First.NextRetryAfter.Equal(deadline) {
+		t.Fatalf("racing generic 404 shortened deadline: NextRetryAfter = %v, want unchanged %v", auth401First.NextRetryAfter, deadline)
+	}
+	if !auth401First.Unavailable {
+		t.Fatalf("auth401First.Unavailable = false, want true")
+	}
+
+	// Generic 404 then 401 for the same credential must land on the
+	// 30-minute deadline too - the 401 branch always sets its own 30-minute
+	// window unconditionally, which is never shorter than a generic 404's
+	// transient backoff.
+	auth404First := &Auth{ID: "auth-404-then-401"}
+	applyAuthFailureStateForModel(auth404First, generic, nil, "", now, false)
+	if got := auth404First.NextRetryAfter; !got.Equal(now.Add(time.Minute)) {
+		t.Fatalf("generic-first NextRetryAfter = %v, want %v", got, now.Add(time.Minute))
+	}
+	applyAuthFailureStateForModel(auth404First, unauthorized, nil, "", now, false)
+	if !auth404First.NextRetryAfter.Equal(deadline) {
+		t.Fatalf("generic-then-401 NextRetryAfter = %v, want %v", auth404First.NextRetryAfter, deadline)
+	}
+}
+
+func TestApplyAuthFailureStateCredentialCooldownRacingGeneric404MutationControl(t *testing.T) {
+	previousTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(previousTransient) })
+
+	now := time.Date(2026, 9, 3, 14, 42, 0, 0, time.UTC)
+	generic := &Error{HTTPStatus: http.StatusNotFound, Message: "Not Found"}
+	deadline := now.Add(30 * time.Minute)
+
+	// Mimic the pre-fix generic-404 branch directly (unconditional
+	// overwrite, no preserved-existing-deadline check) to confirm it
+	// reproduces the exact defect this pair of tests guards against.
+	auth := &Auth{ID: "auth-401-mc", Unavailable: true, Status: StatusError, NextRetryAfter: deadline, CredentialCooldown: true}
+	preFixNext := notFoundRetryAfter(generic, "", &auth.Quota, now, false)
+	if !preFixNext.Before(deadline) {
+		t.Fatalf("expected the pre-fix computed NextRetryAfter (%v) to be shorter than the live 401 deadline (%v)", preFixNext, deadline)
+	}
+}
+
+func TestClearAuthStateOnSuccessClearsCredentialCooldown(t *testing.T) {
+	now := time.Date(2026, 9, 3, 14, 42, 0, 0, time.UTC)
+	auth := &Auth{
+		ID:                 "auth-cleared-on-success",
+		Unavailable:        true,
+		Status:             StatusError,
+		NextRetryAfter:     now.Add(30 * time.Minute),
+		CredentialCooldown: true,
+	}
+	clearAuthStateOnSuccess(auth, now)
+	if auth.CredentialCooldown {
+		t.Fatalf("clearAuthStateOnSuccess() left CredentialCooldown = true, want false")
+	}
+	if auth.Unavailable || !auth.NextRetryAfter.IsZero() {
+		t.Fatalf("clearAuthStateOnSuccess() left cooldown state = %+v, want fully cleared", auth)
+	}
+}
