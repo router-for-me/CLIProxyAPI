@@ -188,6 +188,55 @@ claude-code:
   # When true, return original model IDs in Anthropic model list responses instead of cloaked IDs.
   disable-cloaking-model-list: false
 
+  # Agent-aware prompt-cache keepalive.
+  #
+  # An orchestrator session that blocks on a subagent for longer than the prompt cache
+  # TTL pays a full cache write on the return turn instead of a read. On the 1h pool
+  # that write costs roughly ten times the read it replaces, so refreshing the entry
+  # with one minimal request per window is close to free.
+  #
+  # The proxy holds the last request body, the credential, and the session-to-account
+  # binding, so its probe warms the same per-account entry the next real request hits.
+  # A client-side hook cannot guarantee the account.
+  #
+  # Only requests from a confirmed Claude Code client that carried an explicit
+  # cache_control ttl of "1h" are ever probed. A 5m request is never probed: on that
+  # pool the thirteen reads an hour cost more than the single write they avoid.
+  cache-keepalive:
+    # Opt-in. Default false.
+    enabled: false
+
+    # Fire the probe at (request start + ttl - before-expiry). Default 5m.
+    before-expiry: 5m
+
+    # Probe only while a task of that session is still running. A session idling on
+    # human input is never probed: that wait is unbounded, and the guarantee that
+    # another turn is coming is what makes the probe pay for itself. Default true.
+    only-when-agents-active: true
+
+    # Liveness strategy.
+    #   claude-code-tasks  read Claude Code's on-disk task state (default)
+    #   always             no liveness check; for clients whose agent state the proxy
+    #                      cannot see. Costs up to max-probes reads per idle session.
+    liveness: claude-code-tasks
+
+    # Stop after this many consecutive probes without an intervening real request.
+    # Bounds the cost of an abandoned session to max-probes reads of its prefix.
+    # Default 6.
+    max-probes: 6
+
+    # max_tokens the probe body carries. Default 1.
+    max-tokens: 1
+
+    # Where the claude-code-tasks liveness check looks. Both default to the paths
+    # Claude Code uses; "~" and "<uid>" are expanded.
+    # A session directory is matched as either the full session UUID or
+    # "session-" plus its first eight characters.
+    # task-state-dirs:
+    #   - "~/.claude/tasks"
+    # task-output-dirs:
+    #   - "/private/tmp/claude-<uid>"
+
 # disable-image-generation supports: false (default), true, "chat", or "passthrough".
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.

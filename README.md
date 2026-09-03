@@ -125,6 +125,7 @@ PackyCode provides special discounts for our software users: register using <a h
 - Grok Build multi-account load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
+- Agent-aware prompt-cache keepalive for Claude Code sessions on the 1h cache pool (see `docs/cache-keepalive.md`)
 
 ## Getting Started
 
