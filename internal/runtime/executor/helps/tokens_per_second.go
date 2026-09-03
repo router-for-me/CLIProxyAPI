@@ -10,7 +10,18 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const tokensPerSecondHeader = "X-CLIProxyAPI-Tokens-Per-Second"
+// TokensPerSecondHeader is the gateway-generated generation throughput header.
+// Handlers copy it to clients even when passthrough-headers is false.
+const TokensPerSecondHeader = "X-CLIProxyAPI-Tokens-Per-Second"
+
+const tokensPerSecondHeader = TokensPerSecondHeader
+
+var usageObjectPaths = []string{
+	"usage",
+	"response.usage",
+	"usageMetadata",
+	"response.usageMetadata",
+}
 
 func reporterTokensPerSecond(reporter *UsageReporter, outputTokens int64) float64 {
 	if reporter == nil {
@@ -27,6 +38,24 @@ func outputTokensFromUsageNode(node gjson.Result) int64 {
 		}
 	}
 	return 0
+}
+
+func usageNodeFromPayload(payload []byte) gjson.Result {
+	for _, path := range usageObjectPaths {
+		node := gjson.GetBytes(payload, path)
+		if node.Exists() && node.IsObject() {
+			if tokens := outputTokensFromUsageNode(node); tokens > 0 {
+				return node
+			}
+		}
+	}
+	for _, path := range usageObjectPaths {
+		node := gjson.GetBytes(payload, path)
+		if node.Exists() && node.IsObject() {
+			return node
+		}
+	}
+	return gjson.Result{}
 }
 
 func attachTokensPerSecondAt(jsonBody []byte, path string, tps float64) []byte {
@@ -56,21 +85,37 @@ func AttachTokensPerSecond(payload []byte, reporter *UsageReporter) []byte {
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return payload
 	}
-	usageNode := gjson.GetBytes(trimmed, "usage")
-	if !usageNode.Exists() {
-		usageNode = gjson.GetBytes(trimmed, "response.usage")
+	tps := reporterTokensPerSecond(reporter, outputTokensFromUsageNode(usageNodeFromPayload(trimmed)))
+	updated := trimmed
+	for _, path := range usageObjectPaths {
+		updated = attachTokensPerSecondAt(updated, path, tps)
 	}
-	tps := reporterTokensPerSecond(reporter, outputTokensFromUsageNode(usageNode))
-	updated := attachTokensPerSecondAt(trimmed, "usage", tps)
-	return attachTokensPerSecondAt(updated, "response.usage", tps)
+	return updated
+}
+
+func jsonPayloadFromSSE(line []byte) []byte {
+	if payload := jsonPayload(line); len(payload) > 0 {
+		return payload
+	}
+	for _, part := range bytes.Split(line, []byte("\n")) {
+		trimmed := bytes.TrimSpace(part)
+		if !bytes.HasPrefix(trimmed, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(trimmed[len("data:"):])
+		if len(data) > 0 && data[0] == '{' {
+			return data
+		}
+	}
+	return nil
 }
 
 // AttachStreamTokensPerSecond patches an SSE data line the same way.
 func AttachStreamTokensPerSecond(line []byte, reporter *UsageReporter) []byte {
-	if reporter == nil || !bytes.Contains(line, []byte(`"usage"`)) {
+	if reporter == nil || !(bytes.Contains(line, []byte(`"usage"`)) || bytes.Contains(line, []byte(`"usageMetadata"`))) {
 		return line
 	}
-	payload := jsonPayload(line)
+	payload := jsonPayloadFromSSE(line)
 	if len(payload) == 0 || payload[0] != '{' {
 		return line
 	}
@@ -78,11 +123,7 @@ func AttachStreamTokensPerSecond(line []byte, reporter *UsageReporter) []byte {
 	if bytes.Equal(updated, payload) {
 		return line
 	}
-	prefix := line[:len(line)-len(payload)]
-	if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) {
-		return append(append([]byte(nil), prefix...), updated...)
-	}
-	return updated
+	return bytes.Replace(line, payload, updated, 1)
 }
 
 func setTokensPerSecondHeader(headers map[string][]string, tps float64) {
@@ -101,9 +142,5 @@ func attachTokensPerSecondHeader(headers map[string][]string, payload []byte, re
 	if reporter == nil {
 		return
 	}
-	usageNode := gjson.GetBytes(payload, "usage")
-	if !usageNode.Exists() {
-		usageNode = gjson.GetBytes(payload, "response.usage")
-	}
-	setTokensPerSecondHeader(headers, reporterTokensPerSecond(reporter, outputTokensFromUsageNode(usageNode)))
+	setTokensPerSecondHeader(headers, reporterTokensPerSecond(reporter, outputTokensFromUsageNode(usageNodeFromPayload(payload))))
 }
