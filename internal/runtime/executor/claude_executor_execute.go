@@ -122,6 +122,17 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// first-user marker cannot suppress system/latest-user breakpoints.
 	// cloaked and confirmedClaudeCode are mutually exclusive: resolveClaudeWirePolicy
 	// forces Cloak off for a confirmed native client.
+	// Fold mid-conversation system turns for upstreams that only cache up to the last user text block (MiniMax).
+	// Runs after cloaking and payload rules so nothing re-introduces a role=system turn, and before the marker
+	// steps below so the moved marker is what enforceCacheControlLimit/normalizeCacheControlTTL see.
+	if foldMidSystemMessageEnabled(e.cfg, auth) {
+		if rebuildMidSystemMessageEnabled(e.cfg, auth) {
+			log.Warnf("[fold-mid-system] rebuild-mid-system-message and fold-mid-system-message are both set for this credential; rebuild wins, fold skipped")
+		} else if folded, applied := foldMidSystemMessagesIntoUserTurns(body); applied {
+			body = folded
+			logFoldApplied(body, apiKey)
+		}
+	}
 	cpaOwnsCacheControl := shouldEnsureCacheControl(body, cloaked, confirmedClaudeCode)
 	if cpaOwnsCacheControl {
 		body = ensureCacheControl(body)

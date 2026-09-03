@@ -373,6 +373,11 @@ type ClaudeKey struct {
 	// RebuildMidSystemMessage moves Claude messages with role "system" into the top-level system field.
 	RebuildMidSystemMessage bool `yaml:"rebuild-mid-system-message,omitempty" json:"rebuild-mid-system-message,omitempty"`
 
+	// FoldMidSystemMessage folds Claude messages with role "system" into the preceding user turn as text blocks and
+	// anchors tool_result-ending user turns with a text block, for upstreams that only cache up to the last user text
+	// block (e.g. MiniMax). Ignored when RebuildMidSystemMessage is also set (rebuild wins, a warning is logged).
+	FoldMidSystemMessage bool `yaml:"fold-mid-system-message,omitempty" json:"fold-mid-system-message,omitempty"`
+
 	// DisableCooling overrides the global cooling policy for this credential when set.
 	// True disables auth/model cooldowns; false explicitly enables them.
 	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
