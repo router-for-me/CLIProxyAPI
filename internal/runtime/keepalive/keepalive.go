@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -824,7 +825,36 @@ func ProbeBody(body []byte, maxTokens int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	// Dropping thinking invalidates any context-management strategy that requires
+	// it: Claude Code sends clear_thinking_20251015, and the upstream rejects the
+	// request outright when thinking is absent. Neither the strategy nor thinking
+	// participates in the cached prefix, so the probe drops both together.
+	return removeThinkingDependentContextManagement(out)
+}
+
+// contextManagementThinkingPrefix marks the strategies that require thinking.
+const contextManagementThinkingPrefix = "clear_thinking"
+
+func removeThinkingDependentContextManagement(body []byte) ([]byte, error) {
+	edits := gjson.GetBytes(body, "context_management.edits")
+	if !edits.IsArray() {
+		return body, nil
+	}
+	kept := make([]json.RawMessage, 0, len(edits.Array()))
+	for _, edit := range edits.Array() {
+		if strings.HasPrefix(edit.Get("type").String(), contextManagementThinkingPrefix) {
+			continue
+		}
+		kept = append(kept, json.RawMessage(edit.Raw))
+	}
+	if len(kept) == len(edits.Array()) {
+		return body, nil
+	}
+	if len(kept) == 0 {
+		// An empty edits array is not a valid context_management block.
+		return sjson.DeleteBytes(body, "context_management")
+	}
+	return sjson.SetBytes(body, "context_management.edits", kept)
 }
 
 // ExtendedCacheTTL returns the longest explicit cache_control TTL in the body,

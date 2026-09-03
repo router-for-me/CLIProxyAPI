@@ -743,3 +743,54 @@ func TestFullReadAgainstABaselineCountsAsAHit(t *testing.T) {
 		t.Fatalf("counters = %+v", counters)
 	}
 }
+
+func TestProbeBodyDropsThinkingDependentContextManagement(t *testing.T) {
+	body := []byte(`{"model":"m","max_tokens":32000,"thinking":{"type":"adaptive"},` +
+		`"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]},` +
+		`"messages":[{"role":"user","content":"hi"}]}`)
+
+	probe, err := ProbeBody(body, 1)
+	if err != nil {
+		t.Fatalf("ProbeBody() error = %v", err)
+	}
+	if gjson.GetBytes(probe, "thinking").Exists() {
+		t.Fatalf("thinking survived into the probe body")
+	}
+	// The upstream rejects clear_thinking_20251015 outright when thinking is
+	// absent, so the strategy must go with it.
+	if gjson.GetBytes(probe, "context_management").Exists() {
+		t.Fatalf("context_management survived with only a thinking-dependent edit: %s", probe)
+	}
+}
+
+func TestProbeBodyKeepsOtherContextManagementEdits(t *testing.T) {
+	body := []byte(`{"model":"m","max_tokens":32000,"thinking":{"type":"adaptive"},` +
+		`"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"},{"type":"clear_tool_uses_20250919","keep":3}]},` +
+		`"messages":[{"role":"user","content":"hi"}]}`)
+
+	probe, err := ProbeBody(body, 1)
+	if err != nil {
+		t.Fatalf("ProbeBody() error = %v", err)
+	}
+	edits := gjson.GetBytes(probe, "context_management.edits")
+	if !edits.IsArray() || len(edits.Array()) != 1 {
+		t.Fatalf("edits = %s, want only the non-thinking edit", edits.Raw)
+	}
+	if got := edits.Get("0.type").String(); got != "clear_tool_uses_20250919" {
+		t.Fatalf("kept edit = %q", got)
+	}
+}
+
+func TestProbeBodyLeavesContextManagementAloneWhenNoThinkingEdit(t *testing.T) {
+	body := []byte(`{"model":"m","max_tokens":32000,` +
+		`"context_management":{"edits":[{"type":"clear_tool_uses_20250919","keep":3}]},` +
+		`"messages":[{"role":"user","content":"hi"}]}`)
+
+	probe, err := ProbeBody(body, 1)
+	if err != nil {
+		t.Fatalf("ProbeBody() error = %v", err)
+	}
+	if got := gjson.GetBytes(probe, "context_management.edits.0.type").String(); got != "clear_tool_uses_20250919" {
+		t.Fatalf("context_management was rewritten: %s", probe)
+	}
+}
