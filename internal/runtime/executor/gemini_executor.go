@@ -412,6 +412,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	fromProtocol := opts.SourceFormat.String()
 	originalTranslated := geminiInteractionsPayloadConfigSource(ctx, e.cfg, targetName, req.Payload, opts, false, helps.APIKeyModelIsCompat(req))
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	resp.Metadata = map[string]any{cliproxyexecutor.WireModelMetadataKey: finalWireModel(body, targetName)}
 
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/interactions", baseURL, glAPIVersion)
@@ -460,7 +461,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
+		err = withWireModelIfNotFound(statusErr{code: httpResp.StatusCode, msg: string(data)}, httpResp.StatusCode, finalWireModel(body, targetName))
 		return resp, err
 	}
 	reporter.Publish(ctx, helps.ParseInteractionsUsage(data))
@@ -470,7 +471,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	if targetFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
-	return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
+	return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone(), Metadata: map[string]any{cliproxyexecutor.WireModelMetadataKey: finalWireModel(body, targetName)}}, nil
 }
 
 func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -533,7 +534,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 			log.Errorf("gemini executor: close interactions error response body error: %v", errClose)
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return nil, withWireModelIfNotFound(statusErr{code: httpResp.StatusCode, msg: string(data)}, httpResp.StatusCode, finalWireModel(body, targetName))
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)

@@ -932,7 +932,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 					disableCooling = false
 				}
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, classificationModel, now, disableCooling)
+				applyAuthFailureStateForModel(auth, result.Error, result.RetryAfter, classificationModel, now, disableCooling)
 			}
 		}
 
@@ -2057,7 +2057,19 @@ func notFoundRetryAfter(resultErr *Error, requestedModel string, retryState *Quo
 	return next
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, attemptedModel string, now time.Time, disableCooling bool) {
+// applyAuthFailureState preserves the original origin/dev signature so
+// existing callers/tests are untouched. It has no per-model context, so the
+// 404 branch classifies without a requested-model comparison (matching prior
+// behavior for this entrypoint).
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
+	applyAuthFailureStateForModel(auth, resultErr, retryAfter, "", now, disableCooling)
+}
+
+// applyAuthFailureStateForModel is the model-aware variant used by callers
+// that know which model was attempted, so the 404 branch can classify an
+// explicit model-not-found against a longer stored deadline via
+// notFoundRetryAfter/preserveLongerCooldown.
+func applyAuthFailureStateForModel(auth *Auth, resultErr *Error, retryAfter *time.Duration, attemptedModel string, now time.Time, disableCooling bool) {
 	if auth == nil {
 		return
 	}

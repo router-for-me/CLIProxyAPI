@@ -172,7 +172,7 @@ func TestApplyAuthFailureStateNotFoundCooldownPolicy(t *testing.T) {
 	now := time.Date(2026, 9, 3, 14, 42, 0, 0, time.UTC)
 	generic := &Error{HTTPStatus: http.StatusNotFound, Message: "Not Found"}
 	auth := &Auth{ID: "auth-not-found-policy"}
-	applyAuthFailureState(auth, generic, nil, "", now, false)
+	applyAuthFailureStateForModel(auth, generic, nil, "", now, false)
 	if want := now.Add(time.Minute); !auth.NextRetryAfter.Equal(want) {
 		t.Fatalf("first generic 404 NextRetryAfter = %v, want %v", auth.NextRetryAfter, want)
 	}
@@ -181,7 +181,7 @@ func TestApplyAuthFailureStateNotFoundCooldownPolicy(t *testing.T) {
 	}
 
 	auth.Quota.NextRecoverAt = now.Add(-time.Second)
-	applyAuthFailureState(auth, generic, nil, "", now, false)
+	applyAuthFailureStateForModel(auth, generic, nil, "", now, false)
 	if want := now.Add(2 * time.Minute); !auth.NextRetryAfter.Equal(want) {
 		t.Fatalf("repeated generic 404 NextRetryAfter = %v, want %v", auth.NextRetryAfter, want)
 	}
@@ -194,13 +194,13 @@ func TestApplyAuthFailureStateNotFoundCooldownPolicy(t *testing.T) {
 	}
 
 	explicit := &Auth{ID: "auth-explicit-model-not-found"}
-	applyAuthFailureState(explicit, &Error{Code: "model_not_found", HTTPStatus: http.StatusNotFound}, nil, "", now, false)
+	applyAuthFailureStateForModel(explicit, &Error{Code: "model_not_found", HTTPStatus: http.StatusNotFound}, nil, "", now, false)
 	if want := now.Add(12 * time.Hour); !explicit.NextRetryAfter.Equal(want) {
 		t.Fatalf("explicit model-not-found NextRetryAfter = %v, want %v", explicit.NextRetryAfter, want)
 	}
 
 	disabled := &Auth{ID: "auth-not-found-disabled"}
-	applyAuthFailureState(disabled, generic, nil, "", now, true)
+	applyAuthFailureStateForModel(disabled, generic, nil, "", now, true)
 	if !disabled.NextRetryAfter.IsZero() {
 		t.Fatalf("disabled cooling NextRetryAfter = %v, want zero", disabled.NextRetryAfter)
 	}
@@ -217,23 +217,23 @@ func TestApplyAuthFailureStateExplicitNotFoundSurvivesRacingGeneric404(t *testin
 
 	// explicit-404 then a racing generic-404 for the same key must not shorten the 12h deadline.
 	authExplicitFirst := &Auth{ID: "auth-explicit-then-generic"}
-	applyAuthFailureState(authExplicitFirst, explicit, nil, "", now, false)
+	applyAuthFailureStateForModel(authExplicitFirst, explicit, nil, "", now, false)
 	want := now.Add(12 * time.Hour)
 	if !authExplicitFirst.NextRetryAfter.Equal(want) {
 		t.Fatalf("explicit-first NextRetryAfter = %v, want %v", authExplicitFirst.NextRetryAfter, want)
 	}
-	applyAuthFailureState(authExplicitFirst, generic, nil, "", now, false)
+	applyAuthFailureStateForModel(authExplicitFirst, generic, nil, "", now, false)
 	if !authExplicitFirst.NextRetryAfter.Equal(want) {
 		t.Fatalf("racing generic 404 shortened deadline: NextRetryAfter = %v, want unchanged %v", authExplicitFirst.NextRetryAfter, want)
 	}
 
 	// generic-404 then explicit-404 for the same key must land on the 12h deadline.
 	authGenericFirst := &Auth{ID: "auth-generic-then-explicit"}
-	applyAuthFailureState(authGenericFirst, generic, nil, "", now, false)
+	applyAuthFailureStateForModel(authGenericFirst, generic, nil, "", now, false)
 	if got := authGenericFirst.NextRetryAfter; !got.Equal(now.Add(time.Minute)) {
 		t.Fatalf("generic-first NextRetryAfter = %v, want %v", got, now.Add(time.Minute))
 	}
-	applyAuthFailureState(authGenericFirst, explicit, nil, "", now, false)
+	applyAuthFailureStateForModel(authGenericFirst, explicit, nil, "", now, false)
 	if !authGenericFirst.NextRetryAfter.Equal(want) {
 		t.Fatalf("generic-then-explicit NextRetryAfter = %v, want %v", authGenericFirst.NextRetryAfter, want)
 	}
@@ -249,12 +249,12 @@ func TestApplyAuthFailureStateExplicitNotFoundNeverShortensLongerCooldown(t *tes
 	// A long 429 window (e.g. a provider retry window beyond 12h) must survive
 	// a later explicit-404 for the same key: the 404 must not shorten it.
 	authLong429First := &Auth{ID: "auth-long-429-then-explicit"}
-	applyAuthFailureState(authLong429First, rateLimited, &longRetryAfter, "", now, false)
+	applyAuthFailureStateForModel(authLong429First, rateLimited, &longRetryAfter, "", now, false)
 	want429 := now.Add(longRetryAfter)
 	if !authLong429First.NextRetryAfter.Equal(want429) {
 		t.Fatalf("long-429 NextRetryAfter = %v, want %v", authLong429First.NextRetryAfter, want429)
 	}
-	applyAuthFailureState(authLong429First, explicit, nil, "", now, false)
+	applyAuthFailureStateForModel(authLong429First, explicit, nil, "", now, false)
 	if !authLong429First.NextRetryAfter.Equal(want429) {
 		t.Fatalf("explicit 404 shortened a longer 429 deadline: NextRetryAfter = %v, want unchanged %v", authLong429First.NextRetryAfter, want429)
 	}
@@ -263,12 +263,12 @@ func TestApplyAuthFailureStateExplicitNotFoundNeverShortensLongerCooldown(t *tes
 	// must not lose to a stale short window, and here it is itself longer, so
 	// it applies (the max, not the 404, wins when the 429 is genuinely longer).
 	authExplicitThenLong429 := &Auth{ID: "auth-explicit-then-long-429"}
-	applyAuthFailureState(authExplicitThenLong429, explicit, nil, "", now, false)
+	applyAuthFailureStateForModel(authExplicitThenLong429, explicit, nil, "", now, false)
 	want12h := now.Add(12 * time.Hour)
 	if !authExplicitThenLong429.NextRetryAfter.Equal(want12h) {
 		t.Fatalf("explicit-first NextRetryAfter = %v, want %v", authExplicitThenLong429.NextRetryAfter, want12h)
 	}
-	applyAuthFailureState(authExplicitThenLong429, rateLimited, &longRetryAfter, "", now, false)
+	applyAuthFailureStateForModel(authExplicitThenLong429, rateLimited, &longRetryAfter, "", now, false)
 	if !authExplicitThenLong429.NextRetryAfter.Equal(want429) {
 		t.Fatalf("explicit-then-long-429 NextRetryAfter = %v, want %v", authExplicitThenLong429.NextRetryAfter, want429)
 	}
@@ -276,11 +276,11 @@ func TestApplyAuthFailureStateExplicitNotFoundNeverShortensLongerCooldown(t *tes
 	// An explicit-404 recorded first must survive a later SHORT 429 for the
 	// same key: the shorter 429 window must not override the 12h deadline.
 	authExplicitThenShort429 := &Auth{ID: "auth-explicit-then-short-429"}
-	applyAuthFailureState(authExplicitThenShort429, explicit, nil, "", now, false)
+	applyAuthFailureStateForModel(authExplicitThenShort429, explicit, nil, "", now, false)
 	if !authExplicitThenShort429.NextRetryAfter.Equal(want12h) {
 		t.Fatalf("explicit-first NextRetryAfter = %v, want %v", authExplicitThenShort429.NextRetryAfter, want12h)
 	}
-	applyAuthFailureState(authExplicitThenShort429, rateLimited, &shortRetryAfter, "", now, false)
+	applyAuthFailureStateForModel(authExplicitThenShort429, rateLimited, &shortRetryAfter, "", now, false)
 	if !authExplicitThenShort429.NextRetryAfter.Equal(want12h) {
 		t.Fatalf("short 429 shortened the explicit 12h deadline: NextRetryAfter = %v, want unchanged %v", authExplicitThenShort429.NextRetryAfter, want12h)
 	}
@@ -635,7 +635,7 @@ func TestApplyAuthFailureStateUsesAttemptedUpstreamModelForExplicitNotFound(t *t
 		HTTPStatus: http.StatusNotFound,
 		Message:    `{"error":{"type":"not_found_error","message":"model provider-model was not found"}}`,
 	}
-	applyAuthFailureState(auth, err, nil, "provider-model", now, false)
+	applyAuthFailureStateForModel(auth, err, nil, "provider-model", now, false)
 	if want := now.Add(12 * time.Hour); !auth.NextRetryAfter.Equal(want) {
 		t.Fatalf("alias explicit model-not-found NextRetryAfter = %v, want %v", auth.NextRetryAfter, want)
 	}
@@ -698,12 +698,12 @@ func TestApplyAuthFailureStateModelNotFoundSurvivesRacingCloudflareChallenge(t *
 	challenge := &Error{HTTPStatus: http.StatusForbidden, Message: "cloudflare challenge-platform detected"}
 
 	auth := &Auth{ID: "auth-not-found-then-challenge"}
-	applyAuthFailureState(auth, explicitNotFound, nil, "gpt-5", now, false)
+	applyAuthFailureStateForModel(auth, explicitNotFound, nil, "gpt-5", now, false)
 	if want := now.Add(12 * time.Hour); !auth.NextRetryAfter.Equal(want) {
 		t.Fatalf("explicit not-found NextRetryAfter = %v, want %v", auth.NextRetryAfter, want)
 	}
 
-	applyAuthFailureState(auth, challenge, nil, "gpt-5", now.Add(time.Minute), false)
+	applyAuthFailureStateForModel(auth, challenge, nil, "gpt-5", now.Add(time.Minute), false)
 	if want := now.Add(12 * time.Hour); !auth.NextRetryAfter.Equal(want) {
 		t.Fatalf("racing cloudflare challenge shortened explicit not-found deadline: NextRetryAfter = %v, want unchanged %v", auth.NextRetryAfter, want)
 	}
