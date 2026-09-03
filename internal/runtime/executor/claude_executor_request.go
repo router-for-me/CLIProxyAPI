@@ -780,7 +780,8 @@ func applyClaudeHeadersWithNativeProfile(
 	if helps.ObserveClaudeClientVersion(auth, apiKey, incomingHeaders, cfg) {
 		log.Warnf(
 			"claude client version %q differs from the configured baseline %q; "+
-				"cloaked requests on this credential still present the configured version. "+
+				"a client below the baseline is cloaked rather than passed through, and the "+
+				"configured version is what a credential presents until a newer client is seen. "+
 				"Update %s to match, or inspect GET /v0/management/claude-client-versions",
 			strings.TrimSpace(incomingHeaders.Get("User-Agent")),
 			helps.ConfiguredClaudeUserAgent(cfg),
