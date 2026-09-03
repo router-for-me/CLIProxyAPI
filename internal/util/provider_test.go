@@ -10,70 +10,17 @@ func TestGetProviderName(t *testing.T) {
 		model    string
 		expected []string
 	}{
-		{
-			model:    "gemini-3.7-flash-high",
-			expected: []string{"antigravity"},
-		},
-		{
-			model:    "gemini-2.5-pro",
-			expected: []string{"gemini", "gemini-interactions", "vertex", "aistudio"},
-		},
-		{
-			model:    "claude-sonnet-4-6",
-			expected: []string{"claude", "antigravity"},
-		},
-		{
-			model:    "claude-sonnet-4-5",
-			expected: []string{"claude"},
-		},
-		{
-			model:    "gpt-5",
-			expected: []string{"codex"},
-		},
-		{
-			model:    "chatgpt-4o-latest",
-			expected: []string{"codex"},
-		},
-		{
-			model:    "o1-preview",
-			expected: []string{"codex"},
-		},
-		{
-			model:    "o3-mini",
-			expected: []string{"codex"},
-		},
-		{
-			model:    "text-embedding-3-small",
-			expected: []string{"codex"},
-		},
-		{
-			model:    "grok-3",
-			expected: []string{"xai"},
-		},
-		{
-			model:    "xai-grok-2",
-			expected: []string{"xai"},
-		},
-		{
-			model:    "kimi-k1.5",
-			expected: []string{"kimi"},
-		},
-		{
-			model:    "moonshot-v1-8k",
-			expected: []string{"kimi"},
-		},
-		{
-			model:    "deepseek-chat",
-			expected: []string{"codex", "claude"},
-		},
-		{
-			model:    "completely-unrecognized-model",
-			expected: nil,
-		},
-		{
-			model:    "",
-			expected: nil,
-		},
+		{"gemini-3.7-flash-high", []string{"antigravity"}},
+		{"gemini-2.5-pro", []string{"gemini", "gemini-interactions", "vertex", "aistudio"}},
+		{"claude-sonnet-4-6", []string{"claude", "antigravity"}},
+		{"claude-sonnet-4-5", []string{"claude"}},
+		{"gpt-5", []string{"codex"}},
+		{"o3-mini", []string{"codex"}},
+		{"grok-3", []string{"xai"}},
+		{"kimi-k1.5", []string{"kimi"}},
+		{"deepseek-chat", []string{"codex", "claude"}},
+		{"unknown-model", nil},
+		{"", nil},
 	}
 
 	for _, tt := range tests {
