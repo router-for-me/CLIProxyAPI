@@ -2,6 +2,7 @@ package executor
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"testing"
@@ -72,6 +73,9 @@ func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
 	if err.RetryAfter() != nil {
 		t.Fatalf("expected nil explicit retryAfter for capacity fallback, got %v", *err.RetryAfter())
 	}
+	if err.IsCredentialScoped() {
+		t.Fatal("expected model capacity errors to stay model-scoped")
+	}
 }
 
 func TestNewCodexStatusErrTreatsUsageLimitAsRetryableRateLimit(t *testing.T) {
@@ -88,6 +92,27 @@ func TestNewCodexStatusErrTreatsUsageLimitAsRetryableRateLimit(t *testing.T) {
 	}
 	if *retryAfter != 120*time.Second {
 		t.Fatalf("retryAfter = %v, want %v", *retryAfter, 120*time.Second)
+	}
+	if !err.IsCredentialScoped() {
+		t.Fatal("expected usage_limit_reached to be credential-scoped")
+	}
+}
+
+func TestNewCodexStatusErrDefaultsUsageLimitCooldownWhenResetMissing(t *testing.T) {
+	err := newCodexStatusErr(http.StatusBadRequest, []byte(`{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`))
+
+	if got := err.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if !err.IsCredentialScoped() {
+		t.Fatal("expected usage_limit_reached without reset timing to be credential-scoped")
+	}
+	retryAfter := err.RetryAfter()
+	if retryAfter == nil {
+		t.Fatal("expected default retryAfter for usage_limit_reached without reset timing")
+	}
+	if *retryAfter != defaultCodexUsageLimitCooldown {
+		t.Fatalf("retryAfter = %v, want default %v", *retryAfter, defaultCodexUsageLimitCooldown)
 	}
 }
 
@@ -218,4 +243,12 @@ func assertCodexErrorCode(t *testing.T, raw string, wantType string, wantCode st
 
 func itoa(v int64) string {
 	return strconv.FormatInt(v, 10)
+}
+
+func isTestCredentialScoped(err error) bool {
+	type credentialScopeProvider interface {
+		IsCredentialScoped() bool
+	}
+	var csp credentialScopeProvider
+	return errors.As(err, &csp) && csp != nil && csp.IsCredentialScoped()
 }

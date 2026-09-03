@@ -290,9 +290,7 @@ func newCodexStatusErr(statusCode int, body []byte) statusErr {
 	}
 	body = classifyCodexStatusError(errCode, body)
 	err := statusErr{code: errCode, msg: string(body)}
-	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
-		err.retryAfter = retryAfter
-	}
+	applyCodexUsageLimitMetadata(&err, body)
 	return err
 }
 
@@ -362,6 +360,34 @@ func isCodexModelCapacityError(errorBody []byte) bool {
 		}
 	}
 	return false
+}
+
+// defaultCodexUsageLimitCooldown is used when Codex reports usage_limit_reached
+// without resets_at/resets_in_seconds. Plus accounts share a rolling 5-hour
+// window across models, so a missing reset hint still pauses the credential.
+const defaultCodexUsageLimitCooldown = 5 * time.Hour
+
+// applyCodexUsageLimitMetadata marks plan-quota exhaustion as credential-scoped
+// so the auth manager pauses the whole account and fails over to another auth
+// instead of retrying sibling models that share the same Plus window.
+func applyCodexUsageLimitMetadata(err *statusErr, body []byte) {
+	if err == nil {
+		return
+	}
+	if !isCodexUsageLimitError(body) {
+		if retryAfter := parseCodexRetryAfter(err.code, body, time.Now()); retryAfter != nil {
+			err.retryAfter = retryAfter
+		}
+		return
+	}
+	err.code = http.StatusTooManyRequests
+	err.credentialScoped = true
+	if retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, time.Now()); retryAfter != nil {
+		err.retryAfter = retryAfter
+		return
+	}
+	wait := defaultCodexUsageLimitCooldown
+	err.retryAfter = &wait
 }
 
 // isCodexUsageLimitError reports whether the error body represents a Codex

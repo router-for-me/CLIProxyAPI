@@ -1651,6 +1651,31 @@ func TestParseCodexWebsocketErrorUsesUsageLimitRetryMetadata(t *testing.T) {
 	if got := *retryable.RetryAfter(); got != 7*time.Second {
 		t.Fatalf("retryAfter = %v, want 7s", got)
 	}
+	if !isTestCredentialScoped(err) {
+		t.Fatal("expected usage_limit_reached websocket errors to be credential-scoped")
+	}
+}
+
+func TestParseCodexWebsocketErrorDefaultsUsageLimitCooldownWhenResetMissing(t *testing.T) {
+	err, ok := parseCodexWebsocketError([]byte(`{"type":"error","status":400,"body":{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}}`))
+	if !ok {
+		t.Fatalf("expected websocket error")
+	}
+
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok || status.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("status = %#v, want 429", err)
+	}
+	retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil {
+		t.Fatalf("expected default retryAfter for usage limit websocket error")
+	}
+	if got := *retryable.RetryAfter(); got != defaultCodexUsageLimitCooldown {
+		t.Fatalf("retryAfter = %v, want default %v", got, defaultCodexUsageLimitCooldown)
+	}
+	if !isTestCredentialScoped(err) {
+		t.Fatal("expected usage_limit_reached websocket errors to be credential-scoped")
+	}
 }
 
 func TestParseCodexWebsocketErrorPreservesWrappedBodyAndHeaders(t *testing.T) {
