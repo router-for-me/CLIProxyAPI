@@ -372,14 +372,22 @@ func TestMerklePrefixMatcherPrefixEntryBound(t *testing.T) {
 func TestMerklePrefixMatcherTTLAndAuthInvalidation(t *testing.T) {
 	t.Parallel()
 
-	matcher := NewMerklePrefixMatcher(5 * time.Millisecond)
+	current := time.Now()
+	matcher := NewMerklePrefixMatcherWithConfig(MerklePrefixMatcherConfig{
+		TTL: 5 * time.Minute,
+		NowFunc: func() time.Time {
+			return current
+		},
+	})
 	namespace := "lcp:v1:ttl:model:caller"
 	turns := turnsFromTexts("one")
 	matcher.Bind(namespace, turns, "auth-a")
 	if match, ok := matcher.Match(namespace, turns); !ok || match.AuthID != "auth-a" {
 		t.Fatalf("initial match = %#v, %v", match, ok)
 	}
-	time.Sleep(10 * time.Millisecond)
+
+	// Advance mock clock past TTL without wall-clock sleep
+	current = current.Add(10 * time.Minute)
 	if _, ok := matcher.Match(namespace, turns); ok {
 		t.Fatal("expired matcher entry remained available")
 	}
@@ -571,7 +579,15 @@ func TestMerklePrefixMatcherTouchFingerprintsDelayedSuccessProtection(t *testing
 }
 
 func TestMerklePrefixMatcherTouchExpiredEntry(t *testing.T) {
-	matcher := NewMerklePrefixMatcher(10 * time.Millisecond)
+	t.Parallel()
+
+	current := time.Now()
+	matcher := NewMerklePrefixMatcherWithConfig(MerklePrefixMatcherConfig{
+		TTL: 10 * time.Minute,
+		NowFunc: func() time.Time {
+			return current
+		},
+	})
 	namespace := "lcp:v1:test:model:caller"
 	turns := turnsFromTexts("alpha", "beta")
 	fingerprints, minPrefixLength := matcher.Prepare(turns)
@@ -580,7 +596,8 @@ func TestMerklePrefixMatcherTouchExpiredEntry(t *testing.T) {
 	}
 
 	matcher.BindFingerprints(namespace, fingerprints, minPrefixLength, "auth-A")
-	time.Sleep(25 * time.Millisecond)
+	// Advance mock clock past TTL without wall-clock sleep
+	current = current.Add(25 * time.Minute)
 
 	// After TTL expires, Match should not find the expired binding
 	if _, ok := matcher.MatchFingerprints(namespace, fingerprints, minPrefixLength); ok {
@@ -675,6 +692,250 @@ func BenchmarkMerklePrefixMatcherMatch(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		_, _ = matcher.Match("lcp:v1:benchmark:model:caller", turns)
+	}
+}
+
+func TestMerklePrefixMatcherForkLineageTree(t *testing.T) {
+	t.Parallel()
+
+	matcher := NewMerklePrefixMatcher(time.Hour)
+	defer matcher.Clear()
+	namespace := "lcp:v1:test-fork:model:caller"
+
+	// 4 test sequences:
+	// Seq 1: 1 2 3 4 5 6 7 A
+	// Seq 2: 1 2 3 4 5 6 7 8
+	// Seq 3: 1 2 3 C 12
+	// Seq 4: 1 2 3 C D
+	seq1 := turnsFromTexts("1", "2", "3", "4", "5", "6", "7", "A")
+	seq2 := turnsFromTexts("1", "2", "3", "4", "5", "6", "7", "8")
+	seq3 := turnsFromTexts("1", "2", "3", "C", "12")
+	seq4 := turnsFromTexts("1", "2", "3", "C", "D")
+
+	// 1. Seq 1: Initial root establishment
+	res1 := matcher.BindWithResult(namespace, seq1, "auth-root")
+	if res1.SessionID == "" {
+		t.Fatal("seq1 bind returned empty session ID")
+	}
+	if res1.IsFork {
+		t.Fatal("seq1 unexpectedly marked as fork")
+	}
+	if res1.ParentSessionID != "" {
+		t.Fatalf("seq1 parentSessionID = %q, want empty", res1.ParentSessionID)
+	}
+
+	// 2. Seq 2: Forks from Seq 1 at depth 7 ("8" vs "A")
+	match2, ok2 := matcher.Match(namespace, seq2)
+	if !ok2 {
+		t.Fatal("seq2 match failed")
+	}
+	if !match2.IsFork {
+		t.Fatal("seq2 should be recognized as a true fork")
+	}
+	if match2.PrefixLength != 7 {
+		t.Fatalf("seq2 prefix length = %d, want 7", match2.PrefixLength)
+	}
+	if match2.AuthID != "auth-root" {
+		t.Fatalf("seq2 authID = %q, want auth-root", match2.AuthID)
+	}
+	if match2.SessionID == res1.SessionID {
+		t.Fatalf("seq2 sessionID = %q should differ from seq1 root %q", match2.SessionID, res1.SessionID)
+	}
+	if match2.ParentSessionID == "" {
+		t.Fatal("seq2 parentSessionID should not be empty")
+	}
+	res2 := matcher.BindWithResult(namespace, seq2, "auth-root")
+	if res2.SessionID != match2.SessionID || res2.ParentSessionID != match2.ParentSessionID {
+		t.Fatalf("seq2 bind result mismatch: bind=%+v, match=%+v", res2, match2)
+	}
+
+	// 3. Seq 3: Forks from root tree at depth 3 ("C" vs "4")
+	match3, ok3 := matcher.Match(namespace, seq3)
+	if !ok3 {
+		t.Fatal("seq3 match failed")
+	}
+	if !match3.IsFork {
+		t.Fatal("seq3 should be recognized as a true fork")
+	}
+	if match3.PrefixLength != 3 {
+		t.Fatalf("seq3 prefix length = %d, want 3", match3.PrefixLength)
+	}
+	if match3.AuthID != "auth-root" {
+		t.Fatalf("seq3 authID = %q, want auth-root", match3.AuthID)
+	}
+	if match3.SessionID == res1.SessionID || match3.SessionID == res2.SessionID {
+		t.Fatalf("seq3 sessionID = %q collided with seq1=%q or seq2=%q", match3.SessionID, res1.SessionID, res2.SessionID)
+	}
+	if match3.ParentSessionID == "" || match3.ParentSessionID == match2.ParentSessionID {
+		t.Fatalf("seq3 parentSessionID = %q, should point to prefix 3 (distinct from seq2 prefix 7 parent %q)", match3.ParentSessionID, match2.ParentSessionID)
+	}
+	res3 := matcher.BindWithResult(namespace, seq3, "auth-root")
+	if res3.SessionID != match3.SessionID || res3.ParentSessionID != match3.ParentSessionID {
+		t.Fatalf("seq3 bind result mismatch: bind=%+v, match=%+v", res3, match3)
+	}
+
+	// 4. Seq 4: Nested fork from Seq 3 at depth 4 ("D" vs "12")
+	match4, ok4 := matcher.Match(namespace, seq4)
+	if !ok4 {
+		t.Fatal("seq4 match failed")
+	}
+	if !match4.IsFork {
+		t.Fatal("seq4 should be recognized as a true fork")
+	}
+	if match4.PrefixLength != 4 {
+		t.Fatalf("seq4 prefix length = %d, want 4", match4.PrefixLength)
+	}
+	if match4.AuthID != "auth-root" {
+		t.Fatalf("seq4 authID = %q, want auth-root", match4.AuthID)
+	}
+	if match4.SessionID == res1.SessionID || match4.SessionID == res2.SessionID || match4.SessionID == res3.SessionID {
+		t.Fatalf("seq4 sessionID = %q collided with earlier sessions", match4.SessionID)
+	}
+	// Crucial: seq4's parent should be seq3's branch session ID (prefix 4: 1 2 3 C)
+	if match4.ParentSessionID != res3.SessionID {
+		t.Fatalf("seq4 parentSessionID = %q, want seq3 session ID %q", match4.ParentSessionID, res3.SessionID)
+	}
+	res4 := matcher.BindWithResult(namespace, seq4, "auth-root")
+	if res4.SessionID != match4.SessionID || res4.ParentSessionID != match4.ParentSessionID {
+		t.Fatalf("seq4 bind result mismatch: bind=%+v, match=%+v", res4, match4)
+	}
+
+	// 5. Linear continuation of Seq 4 (Seq 4.2: 1 2 3 C D E)
+	seq4Cont := turnsFromTexts("1", "2", "3", "C", "D", "E")
+	match4Cont, ok4Cont := matcher.Match(namespace, seq4Cont)
+	if !ok4Cont {
+		t.Fatal("seq4Cont match failed")
+	}
+	if match4Cont.IsFork {
+		t.Fatal("seq4Cont is a linear continuation, should NOT be marked as fork")
+	}
+	if match4Cont.PrefixLength != 5 {
+		t.Fatalf("seq4Cont prefix length = %d, want 5", match4Cont.PrefixLength)
+	}
+	if match4Cont.SessionID != res4.SessionID {
+		t.Fatalf("seq4Cont sessionID = %q, want identical to seq4 %q across linear growth", match4Cont.SessionID, res4.SessionID)
+	}
+	if match4Cont.ParentSessionID != res4.ParentSessionID {
+		t.Fatalf("seq4Cont parentSessionID = %q, want %q", match4Cont.ParentSessionID, res4.ParentSessionID)
+	}
+}
+
+func BenchmarkMerklePrefixMatcherFork(b *testing.B) {
+	matcher := NewMerklePrefixMatcher(time.Hour)
+	trunk := turnsFromTexts("1", "2", "3", "4", "5", "6", "7", "A")
+	fork := turnsFromTexts("1", "2", "3", "4", "5", "6", "7", "8")
+	matcher.Bind("lcp:v1:benchmark:fork", trunk, "auth-a")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_, _ = matcher.Match("lcp:v1:benchmark:fork", fork)
+	}
+}
+
+func TestMerklePrefixMatcherShorterGroupDoesNotMaskLongerTrajectory(t *testing.T) {
+	t.Parallel()
+
+	matcher := NewMerklePrefixMatcher(time.Hour)
+	defer matcher.Clear()
+	namespace := "lcp:v1:mask-test:model:caller"
+
+	// 1. Bind long trajectory [1, 2, 3]
+	longTrunk := turnsFromTexts("1", "2", "3")
+	matcher.Bind(namespace, longTrunk, "auth-root")
+
+	// 2. Bind shorter exact-prefix group [1, 2] afterwards (more recently accessed)
+	shortPrefix := turnsFromTexts("1", "2")
+	matcher.Bind(namespace, shortPrefix, "auth-root")
+
+	// 3. Query a fork [1, 2, 4] diverging at turn 3 from the long trunk
+	fork := turnsFromTexts("1", "2", "4")
+	match, ok := matcher.Match(namespace, fork)
+	if !ok {
+		t.Fatal("fork match failed")
+	}
+	if !match.IsFork {
+		t.Fatal("fork must NOT be masked by shorter exact-prefix group [1, 2]")
+	}
+	if match.PrefixLength != 2 {
+		t.Fatalf("prefix length = %d, want 2", match.PrefixLength)
+	}
+}
+
+func TestMerklePrefixMatcherRemoveFingerprintsBeforeGenerationGuard(t *testing.T) {
+	t.Parallel()
+
+	matcher := NewMerklePrefixMatcher(time.Hour)
+	defer matcher.Clear()
+	namespace := "lcp:v1:gen-test:model:caller"
+
+	turns := turnsFromTexts("1", "2")
+	fps, minPrefix := matcher.Prepare(turns)
+
+	// 1. Initial bind at generation G1
+	res1 := matcher.BindFingerprintsWithResult(namespace, fps, minPrefix, "auth-1")
+	g1 := res1.AccessNumber
+	if g1 == 0 {
+		t.Fatal("expected non-zero access generation")
+	}
+
+	// 2. Concurrent success touches entry and advances to generation G2 > G1
+	if !matcher.TouchFingerprints(namespace, fps, minPrefix, "auth-1") {
+		t.Fatal("TouchFingerprints failed")
+	}
+
+	// 3. Stale failure from request 1 attempts to remove with generation G1
+	removedStale := matcher.RemoveFingerprintsBefore(namespace, fps, "auth-1", g1)
+	if removedStale {
+		t.Fatal("stale RemoveFingerprintsBefore should not delete entry refreshed by newer touch")
+	}
+
+	// Entry must remain active
+	if _, ok := matcher.MatchFingerprints(namespace, fps, minPrefix); !ok {
+		t.Fatal("entry should still be present after stale removal attempt")
+	}
+
+	// 4. Current failure with generation 0 (unconditional) removes it
+	removedCurrent := matcher.RemoveFingerprints(namespace, fps, "auth-1")
+	if !removedCurrent {
+		t.Fatal("unconditional RemoveFingerprints should succeed")
+	}
+	if _, ok := matcher.MatchFingerprints(namespace, fps, minPrefix); ok {
+		t.Fatal("entry should be removed after unconditional removal")
+	}
+}
+
+func TestMerklePrefixMatcherClearPreservesMonotonicGeneration(t *testing.T) {
+	t.Parallel()
+	matcher := NewMerklePrefixMatcher(time.Hour)
+	namespace := "lcp:v1:test:model:caller"
+	fps := []string{"fp-1", "fp-2"}
+	minPrefix := 1
+
+	// Bind initial sequence and record generation
+	res1 := matcher.BindFingerprintsWithResult(namespace, fps, minPrefix, "auth-old")
+	if res1.AccessNumber == 0 {
+		t.Fatal("expected non-zero generation for initial bind")
+	}
+
+	// Clear matcher
+	matcher.Clear()
+
+	// Rebind same sequence under new auth post-clear
+	res2 := matcher.BindFingerprintsWithResult(namespace, fps, minPrefix, "auth-new")
+	if res2.AccessNumber <= res1.AccessNumber {
+		t.Fatalf("expected generation to increase monotonically across Clear(), got %d <= %d", res2.AccessNumber, res1.AccessNumber)
+	}
+
+	// Pre-clear generation should NOT be able to evict post-clear binding
+	if matcher.RemoveFingerprintsBefore(namespace, fps, "auth-new", res1.AccessNumber) {
+		t.Fatal("stale pre-clear generation should not evict post-clear binding")
+	}
+
+	// The binding must remain intact
+	match, ok := matcher.MatchFingerprints(namespace, fps, minPrefix)
+	if !ok || match.AuthID != "auth-new" {
+		t.Fatalf("binding should remain intact, got ok=%v match=%+v", ok, match)
 	}
 }
 

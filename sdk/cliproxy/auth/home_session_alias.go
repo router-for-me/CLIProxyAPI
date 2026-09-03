@@ -240,7 +240,7 @@ func isHierarchyParent(primary, fallback string) bool {
 	if strings.Contains(primary, ":agent:") {
 		return true
 	}
-	for _, prefix := range []string{"codex:", "header:", "affinity:", "slot:", "thread:", "conv:", "session:", "claude:", "agy:", "geminicache:"} {
+	for _, prefix := range []string{"codex:", "header:", "affinity:", "slot:", "thread:", "conv:", "session:", "claude:", "agy:", "geminicache:", "lcp:"} {
 		if strings.HasPrefix(primary, prefix) && strings.HasPrefix(fallback, prefix) && primary != fallback {
 			return true
 		}
@@ -272,13 +272,25 @@ func (m *Manager) homeDispatchSessionIDs(opts cliproxyexecutor.Options) (string,
 			aliasFallback = fallback
 		}
 	}
+	if parentSessionID == "" && opts.Metadata != nil {
+		if metaParent, ok := opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey].(string); ok && strings.TrimSpace(metaParent) != "" {
+			parentSessionID = strings.TrimSpace(metaParent)
+		}
+	}
 
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	ttl := homeSessionAliasTTL(cfg)
 	now := time.Now()
 	canonical := m.homeSessionAliases.canonical(primary, aliasFallback, ttl, now)
 	if parentSessionID != "" {
-		parentSessionID = m.homeSessionAliases.canonical(parentSessionID, "", ttl, now)
+		if parentSessionID == canonical || parentSessionID == primary || (aliasFallback != "" && parentSessionID == aliasFallback) {
+			parentSessionID = ""
+		} else {
+			parentSessionID = m.homeSessionAliases.canonical(parentSessionID, "", ttl, now)
+			if parentSessionID == canonical {
+				parentSessionID = ""
+			}
+		}
 	}
 	return canonical, parentSessionID
 }

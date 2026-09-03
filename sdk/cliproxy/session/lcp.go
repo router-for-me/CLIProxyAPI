@@ -627,9 +627,12 @@ func formatEqual(left, right sdktranslator.Format) bool {
 
 // MerklePrefixMatch describes the best known affinity match for a request.
 type MerklePrefixMatch struct {
-	AuthID       string
-	SessionID    string
-	PrefixLength int
+	AuthID          string
+	SessionID       string
+	ParentSessionID string
+	PrefixLength    int
+	IsFork          bool
+	AccessNumber    uint64
 }
 
 // MerklePrefixMatcherConfig controls the bounded in-memory LCP index.
@@ -639,6 +642,8 @@ type MerklePrefixMatcherConfig struct {
 	MaxGroups int
 	// MaxPrefixes bounds group-to-prefix index entries, not just groups.
 	MaxPrefixes int
+	// NowFunc provides a mockable clock for deterministic TTL/expiration tests.
+	NowFunc func() time.Time
 }
 
 // MerklePrefixMatcher stores rolling Merkle prefixes and their selected auth bindings.
@@ -651,6 +656,7 @@ type MerklePrefixMatcher struct {
 	maxTurns      int
 	maxGroups     int
 	maxPrefixes   int
+	nowFunc       func() time.Time
 	groups        map[string]*lcpNamespace
 	lru           *list.List
 	lruElements   map[*lcpGroup]*list.Element
@@ -670,6 +676,7 @@ type lcpGroup struct {
 	namespace        string
 	authID           string
 	sessionID        string
+	parentSessionID  string
 	minPrefixLength  int
 	fingerprints     []string
 	prefixKeys       []string
@@ -699,15 +706,27 @@ func NewMerklePrefixMatcherWithConfig(cfg MerklePrefixMatcherConfig) *MerklePref
 	if cfg.MaxPrefixes < cfg.MaxTurns {
 		cfg.MaxPrefixes = cfg.MaxTurns
 	}
+	nowFunc := cfg.NowFunc
+	if nowFunc == nil {
+		nowFunc = time.Now
+	}
 	return &MerklePrefixMatcher{
 		ttl:         cfg.TTL,
 		maxTurns:    cfg.MaxTurns,
 		maxGroups:   cfg.MaxGroups,
 		maxPrefixes: cfg.MaxPrefixes,
+		nowFunc:     nowFunc,
 		groups:      make(map[string]*lcpNamespace),
 		lru:         list.New(),
 		lruElements: make(map[*lcpGroup]*list.Element),
 	}
+}
+
+func (m *MerklePrefixMatcher) now() time.Time {
+	if m != nil && m.nowFunc != nil {
+		return m.nowFunc()
+	}
+	return time.Now()
 }
 
 // Prepare returns bounded turn fingerprints and the first eligible prefix boundary.
@@ -754,7 +773,7 @@ func (m *MerklePrefixMatcher) MatchFingerprints(namespace string, fingerprints [
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.prepareLocked()
-	match, matchOK := m.matchLocked(namespace, fingerprints, minPrefixLength, time.Now())
+	match, matchOK := m.matchLocked(namespace, fingerprints, minPrefixLength, m.now())
 	if !matchOK {
 		return MerklePrefixMatch{}, false
 	}
@@ -767,19 +786,38 @@ func (m *MerklePrefixMatcher) Bind(namespace string, turns []CanonicalTurn, auth
 	return m.BindFingerprints(namespace, fingerprints, minPrefixLength, authID)
 }
 
+// BindWithResult records a request sequence for an auth and returns detailed session identities.
+func (m *MerklePrefixMatcher) BindWithResult(namespace string, turns []CanonicalTurn, authID string) MerklePrefixBindResult {
+	fingerprints, minPrefixLength := m.Prepare(turns)
+	return m.BindFingerprintsWithResult(namespace, fingerprints, minPrefixLength, authID)
+}
+
+// MerklePrefixBindResult describes the session identities produced by binding an LCP sequence.
+type MerklePrefixBindResult struct {
+	SessionID       string
+	ParentSessionID string
+	IsFork          bool
+	AccessNumber    uint64
+}
+
 // BindFingerprints records a precomputed request sequence for an auth.
 func (m *MerklePrefixMatcher) BindFingerprints(namespace string, fingerprints []string, minPrefixLength int, authID string) string {
+	return m.BindFingerprintsWithResult(namespace, fingerprints, minPrefixLength, authID).SessionID
+}
+
+// BindFingerprintsWithResult records a precomputed request sequence for an auth and returns detailed session identities.
+func (m *MerklePrefixMatcher) BindFingerprintsWithResult(namespace string, fingerprints []string, minPrefixLength int, authID string) MerklePrefixBindResult {
 	if m == nil || strings.TrimSpace(namespace) == "" || strings.TrimSpace(authID) == "" {
-		return ""
+		return MerklePrefixBindResult{}
 	}
 	var ok bool
 	if fingerprints, minPrefixLength, ok = m.sanitizeFingerprints(fingerprints, minPrefixLength); !ok {
-		return ""
+		return MerklePrefixBindResult{}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.prepareLocked()
-	return m.bindLocked(namespace, fingerprints, minPrefixLength, strings.TrimSpace(authID), time.Now())
+	return m.bindLocked(namespace, fingerprints, minPrefixLength, strings.TrimSpace(authID), m.now())
 }
 
 // Touch refreshes an existing sequence or binds it to authID when it is a new extension.
@@ -800,7 +838,7 @@ func (m *MerklePrefixMatcher) TouchFingerprints(namespace string, fingerprints [
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.prepareLocked()
-	return m.touchLocked(namespace, fingerprints, minPrefixLength, strings.TrimSpace(authID), time.Now())
+	return m.touchLocked(namespace, fingerprints, minPrefixLength, strings.TrimSpace(authID), m.now())
 }
 
 // Remove removes the exact request sequence when it is still bound to authID.
@@ -811,6 +849,12 @@ func (m *MerklePrefixMatcher) Remove(namespace string, turns []CanonicalTurn, au
 
 // RemoveFingerprints removes an exact precomputed request sequence.
 func (m *MerklePrefixMatcher) RemoveFingerprints(namespace string, fingerprints []string, authID string) bool {
+	return m.RemoveFingerprintsBefore(namespace, fingerprints, authID, 0)
+}
+
+// RemoveFingerprintsBefore removes an exact precomputed request sequence only if it has not
+// been refreshed after maxGeneration. If maxGeneration is 0, it removes the sequence unconditionally.
+func (m *MerklePrefixMatcher) RemoveFingerprintsBefore(namespace string, fingerprints []string, authID string, maxGeneration uint64) bool {
 	if m == nil || namespace == "" || authID == "" || len(fingerprints) == 0 {
 		return false
 	}
@@ -828,8 +872,16 @@ func (m *MerklePrefixMatcher) RemoveFingerprints(namespace string, fingerprints 
 	if ns == nil {
 		return false
 	}
-	group := ns.groups[sequenceKey(fingerprints)]
+	prefixKeys := rollingPrefixKeys(fingerprints)
+	if len(prefixKeys) == 0 {
+		return false
+	}
+	group := ns.groups[prefixKeys[len(prefixKeys)-1]]
 	if group == nil || group.authID != authID {
+		return false
+	}
+	if maxGeneration > 0 && group.lastAccessNumber > maxGeneration {
+		// Entry was refreshed/touched by a newer concurrent request; preserve the active binding.
 		return false
 	}
 	m.removeGroupLocked(group)
@@ -863,7 +915,9 @@ func (m *MerklePrefixMatcher) Clear() {
 	m.lruElements = make(map[*lcpGroup]*list.Element)
 	m.groupCount = 0
 	m.prefixCount = 0
-	m.accessCounter = 0
+	// Do NOT reset accessCounter to 0. Keeping accessCounter monotonically increasing
+	// across Clear() ensures that in-flight requests with pre-clear generations cannot
+	// accidentally evict newly created post-clear bindings.
 	m.mu.Unlock()
 }
 
@@ -894,7 +948,7 @@ func (m *MerklePrefixMatcher) prepareLocked() {
 	}
 	m.operations++
 	if m.operations%128 == 0 {
-		m.cleanupLocked(time.Now())
+		m.cleanupLocked(m.now())
 	}
 }
 
@@ -936,30 +990,44 @@ func (m *MerklePrefixMatcher) touchLocked(namespace string, fingerprints []strin
 	return true
 }
 
-func (m *MerklePrefixMatcher) bindLocked(namespace string, fingerprints []string, minPrefixLength int, authID string, now time.Time) string {
+func (m *MerklePrefixMatcher) bindLocked(namespace string, fingerprints []string, minPrefixLength int, authID string, now time.Time) MerklePrefixBindResult {
 	ns := m.namespaceLocked(namespace)
 	key := sequenceKey(fingerprints)
 	if existing := ns.groups[key]; existing != nil {
 		if now.Before(existing.expiresAt) {
 			sessionID := existing.sessionID
+			parentSessionID := existing.parentSessionID
+			isFork := parentSessionID != ""
 			m.removeGroupLocked(existing)
-			m.addGroupLocked(&lcpGroup{
+			reboundGroup := &lcpGroup{
 				key:             key,
 				namespace:       namespace,
 				authID:          authID,
 				sessionID:       sessionID,
+				parentSessionID: parentSessionID,
 				minPrefixLength: minPrefixLength,
 				fingerprints:    append([]string(nil), fingerprints...),
+				prefixKeys:      existing.prefixKeys,
 				expiresAt:       now.Add(m.ttl),
-			})
-			return sessionID
+			}
+			m.addGroupLocked(reboundGroup)
+			return MerklePrefixBindResult{
+				SessionID:       sessionID,
+				ParentSessionID: parentSessionID,
+				IsFork:          isFork,
+				AccessNumber:    reboundGroup.lastAccessNumber,
+			}
 		}
 		m.removeGroupLocked(existing)
 	}
 
 	sessionID := ""
+	parentSessionID := ""
+	isFork := false
 	if match, ok := m.matchLocked(namespace, fingerprints, minPrefixLength, now); ok {
 		sessionID = match.SessionID
+		parentSessionID = match.ParentSessionID
+		isFork = match.IsFork
 	}
 	prefixKeys := rollingPrefixKeys(fingerprints)
 	if sessionID == "" {
@@ -973,17 +1041,24 @@ func (m *MerklePrefixMatcher) bindLocked(namespace string, fingerprints []string
 		}
 		sessionID = newLCPSessionID(namespace, firstKey)
 	}
-	m.addGroupLocked(&lcpGroup{
+	createdGroup := &lcpGroup{
 		key:             key,
 		namespace:       namespace,
 		authID:          authID,
 		sessionID:       sessionID,
+		parentSessionID: parentSessionID,
 		minPrefixLength: minPrefixLength,
 		fingerprints:    append([]string(nil), fingerprints...),
 		prefixKeys:      prefixKeys,
 		expiresAt:       now.Add(m.ttl),
-	})
-	return sessionID
+	}
+	m.addGroupLocked(createdGroup)
+	return MerklePrefixBindResult{
+		SessionID:       sessionID,
+		ParentSessionID: parentSessionID,
+		IsFork:          isFork,
+		AccessNumber:    createdGroup.lastAccessNumber,
+	}
 }
 
 func (m *MerklePrefixMatcher) addGroupLocked(group *lcpGroup) {
@@ -1084,7 +1159,28 @@ func (m *MerklePrefixMatcher) matchLocked(namespace string, fingerprints []strin
 	if element := m.lruElements[best]; element != nil {
 		m.lru.MoveToBack(element)
 	}
-	return MerklePrefixMatch{AuthID: best.authID, SessionID: best.sessionID, PrefixLength: bestLength}, true
+
+	sessionID := best.sessionID
+	parentSessionID := best.parentSessionID
+	isFork := false
+
+	// Divergence check:
+	// A request represents a true fork if the longest matched common prefix is strictly
+	// shorter than the matched group's trajectory, and the request extends past that prefix.
+	if bestLength < len(best.fingerprints) && len(fingerprints) > bestLength {
+		isFork = true
+		parentSessionID = newLCPSessionID(namespace, prefixKeys[bestLength-1])
+		sessionID = newLCPSessionID(namespace, prefixKeys[bestLength])
+	}
+
+	return MerklePrefixMatch{
+		AuthID:          best.authID,
+		SessionID:       sessionID,
+		ParentSessionID: parentSessionID,
+		PrefixLength:    bestLength,
+		IsFork:          isFork,
+		AccessNumber:    best.lastAccessNumber,
+	}, true
 }
 
 func newestMatchingGroup(bucket map[string]*lcpGroup, fingerprints []string, now time.Time) *lcpGroup {
@@ -1093,7 +1189,12 @@ func newestMatchingGroup(bucket map[string]*lcpGroup, fingerprints []string, now
 		if group == nil || !now.Before(group.expiresAt) || group.minPrefixLength > len(fingerprints) || len(group.fingerprints) < len(fingerprints) || !equalStrings(group.fingerprints[:len(fingerprints)], fingerprints) {
 			continue
 		}
-		if best == nil || group.lastAccessNumber > best.lastAccessNumber || (group.lastAccessNumber == best.lastAccessNumber && group.expiresAt.After(best.expiresAt)) {
+		// Prefer the longest known trajectory so an exact prefix match on an earlier turn
+		// does not mask a deeper divergent fork. Break ties by recency of access.
+		if best == nil || len(group.fingerprints) > len(best.fingerprints) ||
+			(len(group.fingerprints) == len(best.fingerprints) &&
+				(group.lastAccessNumber > best.lastAccessNumber ||
+					(group.lastAccessNumber == best.lastAccessNumber && group.expiresAt.After(best.expiresAt)))) {
 			best = group
 		}
 	}
