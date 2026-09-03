@@ -176,6 +176,53 @@ func TestApplyAuthFailureStateExplicitNotFoundSurvivesRacingGeneric404(t *testin
 	}
 }
 
+func TestApplyAuthFailureStateExplicitNotFoundNeverShortensLongerCooldown(t *testing.T) {
+	now := time.Date(2026, 9, 3, 14, 42, 0, 0, time.UTC)
+	explicit := &Error{Code: "model_not_found", HTTPStatus: http.StatusNotFound, Message: "model unavailable"}
+	rateLimited := &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}
+	longRetryAfter := 24 * time.Hour
+	shortRetryAfter := 5 * time.Minute
+
+	// A long 429 window (e.g. a provider retry window beyond 12h) must survive
+	// a later explicit-404 for the same key: the 404 must not shorten it.
+	authLong429First := &Auth{ID: "auth-long-429-then-explicit"}
+	applyAuthFailureState(authLong429First, rateLimited, &longRetryAfter, "", now, false)
+	want429 := now.Add(longRetryAfter)
+	if !authLong429First.NextRetryAfter.Equal(want429) {
+		t.Fatalf("long-429 NextRetryAfter = %v, want %v", authLong429First.NextRetryAfter, want429)
+	}
+	applyAuthFailureState(authLong429First, explicit, nil, "", now, false)
+	if !authLong429First.NextRetryAfter.Equal(want429) {
+		t.Fatalf("explicit 404 shortened a longer 429 deadline: NextRetryAfter = %v, want unchanged %v", authLong429First.NextRetryAfter, want429)
+	}
+
+	// An explicit-404 recorded first must survive a later long 429: the 429
+	// must not lose to a stale short window, and here it is itself longer, so
+	// it applies (the max, not the 404, wins when the 429 is genuinely longer).
+	authExplicitThenLong429 := &Auth{ID: "auth-explicit-then-long-429"}
+	applyAuthFailureState(authExplicitThenLong429, explicit, nil, "", now, false)
+	want12h := now.Add(12 * time.Hour)
+	if !authExplicitThenLong429.NextRetryAfter.Equal(want12h) {
+		t.Fatalf("explicit-first NextRetryAfter = %v, want %v", authExplicitThenLong429.NextRetryAfter, want12h)
+	}
+	applyAuthFailureState(authExplicitThenLong429, rateLimited, &longRetryAfter, "", now, false)
+	if !authExplicitThenLong429.NextRetryAfter.Equal(want429) {
+		t.Fatalf("explicit-then-long-429 NextRetryAfter = %v, want %v", authExplicitThenLong429.NextRetryAfter, want429)
+	}
+
+	// An explicit-404 recorded first must survive a later SHORT 429 for the
+	// same key: the shorter 429 window must not override the 12h deadline.
+	authExplicitThenShort429 := &Auth{ID: "auth-explicit-then-short-429"}
+	applyAuthFailureState(authExplicitThenShort429, explicit, nil, "", now, false)
+	if !authExplicitThenShort429.NextRetryAfter.Equal(want12h) {
+		t.Fatalf("explicit-first NextRetryAfter = %v, want %v", authExplicitThenShort429.NextRetryAfter, want12h)
+	}
+	applyAuthFailureState(authExplicitThenShort429, rateLimited, &shortRetryAfter, "", now, false)
+	if !authExplicitThenShort429.NextRetryAfter.Equal(want12h) {
+		t.Fatalf("short 429 shortened the explicit 12h deadline: NextRetryAfter = %v, want unchanged %v", authExplicitThenShort429.NextRetryAfter, want12h)
+	}
+}
+
 // notFoundExecutionModelExecutor returns an explicit model-not-found error that
 // names the model actually present on the request it receives, so the test can
 // tell whether the caller classified the failure against the execution model

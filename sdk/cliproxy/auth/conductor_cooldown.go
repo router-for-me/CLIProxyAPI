@@ -853,9 +853,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								} else {
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
 								}
-								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
-									next = state.Quota.NextRecoverAt
-								}
+								next = preserveLongerCooldown(state.Quota, next)
 							}
 							state.NextRetryAfter = next
 							applyCooldownFields(&state.Quota, QuotaState{
@@ -1981,6 +1979,17 @@ func isRequestInvalidError(err error) bool {
 	return false
 }
 
+// preserveLongerCooldown keeps an existing cooldown deadline if it extends
+// further into the future than a newly computed one, so a later failure of a
+// different kind (429 vs. explicit not-found) cannot shorten an active
+// cooldown recorded by an earlier failure.
+func preserveLongerCooldown(existing QuotaState, next time.Time) time.Time {
+	if existing.Exceeded && existing.NextRecoverAt.After(next) {
+		return existing.NextRecoverAt
+	}
+	return next
+}
+
 func notFoundRetryAfter(resultErr *Error, requestedModel string, retryState *QuotaState, now time.Time, disableCooling bool) time.Time {
 	if disableCooling {
 		return time.Time{}
@@ -1988,7 +1997,13 @@ func notFoundRetryAfter(resultErr *Error, requestedModel string, retryState *Quo
 	if isExplicitModelNotFoundError(resultErr, requestedModel) {
 		next := now.Add(12 * time.Hour)
 		if retryState != nil {
-			retryState.NextRecoverAt = next
+			next = preserveLongerCooldown(*retryState, next)
+			applyCooldownFields(retryState, QuotaState{
+				Exceeded:      true,
+				Reason:        "model_not_found",
+				NextRecoverAt: next,
+				BackoffLevel:  retryState.BackoffLevel,
+			})
 		}
 		return next
 	}
@@ -2103,9 +2118,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			} else {
 				next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
 			}
-			if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
-				next = auth.Quota.NextRecoverAt
-			}
+			next = preserveLongerCooldown(auth.Quota, next)
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
