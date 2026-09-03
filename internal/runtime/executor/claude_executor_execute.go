@@ -188,6 +188,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 	}
 	bodyForUpstream = stripDefaultKimiClaudeCodeAttribution(auth, url, fp.ProfileClaudeCodeCLI, bodyForUpstream)
+	// Payload rules (ApplyPayloadConfigWithRequestTracked) can rewrite model
+	// long after upstreamModel was computed, so re-derive the wire model from
+	// the finished body: a structured error naming an overridden model must
+	// classify against what was actually sent, not the pre-override value.
+	resp.Metadata = map[string]any{cliproxyexecutor.WireModelMetadataKey: finalWireModel(bodyForUpstream, upstreamModel)}
 	// Runs on the finished body: payload rules can rewrite model and messages
 	// long after translation, so an earlier check would not describe the request
 	// that is about to be sent.

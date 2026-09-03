@@ -366,6 +366,17 @@ func TestExecuteExplicitNotFoundClassifiesAgainstReportedWireModel(t *testing.T)
 			reqModel:  "kimi-k3",
 			normalize: func(m string) string { return strings.TrimPrefix(m, "kimi-") },
 		},
+		{
+			// A config payload-override rule rewrites the outbound body's
+			// top-level model field long after the pre-call normalization
+			// that computed the pre-override model (mirrors
+			// ApplyPayloadConfigWithRequestTracked/finalWireModel in
+			// internal/runtime/executor): the provider's 404 names the
+			// override target, not the client-requested model.
+			name:      "payload override rewrites model",
+			reqModel:  "claude-opus-4-8",
+			normalize: func(string) string { return "payload-override-target-model" },
+		},
 	}
 
 	for _, tc := range cases {

@@ -179,6 +179,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 	bodyForUpstream = stripDefaultKimiClaudeCodeAttribution(auth, url, fp.ProfileClaudeCodeCLI, bodyForUpstream)
+	// Payload rules (ApplyPayloadConfigWithRequestTracked) can rewrite model
+	// long after upstreamModel was computed, so re-derive the wire model from
+	// the finished body: a structured error naming an overridden model must
+	// classify against what was actually sent, not the pre-override value.
+	wireModel := finalWireModel(bodyForUpstream, upstreamModel)
 	// Runs on the finished body: payload rules can rewrite model and messages
 	// long after translation, so an earlier check would not describe the request
 	// that is about to be sent.
@@ -244,7 +249,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				// RequestScopedError elsewhere expect this exact type.
 				return nil, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errClassified)
 			}
-			return nil, withWireModel(errClassified, upstreamModel)
+			return nil, withWireModel(errClassified, wireModel)
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
@@ -261,7 +266,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if fastRequest {
 			return nil, newClaudeFastDirectResponseError(httpResp, b)
 		}
-		return nil, withWireModel(classifyClaudeUpstreamError(httpResp.StatusCode, httpResp.Header, b), upstreamModel)
+		return nil, withWireModel(classifyClaudeUpstreamError(httpResp.StatusCode, httpResp.Header, b), wireModel)
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, claudeResponseContentEncoding(httpResp.Header))
 	if err != nil {

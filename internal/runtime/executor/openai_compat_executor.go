@@ -1109,3 +1109,15 @@ func withWireModel(err error, model string) error {
 	}
 	return wireModelErr{error: err, model: model}
 }
+
+// finalWireModel reads the model actually present in the finished outbound
+// payload, falling back when the field is absent or empty. Payload rules
+// (ApplyPayloadConfigWithRequest/Tracked) can rewrite the top-level model
+// long after the pre-call normalization that computes upstreamModel, so only
+// a read of the body about to be sent describes what the provider will see.
+func finalWireModel(body []byte, fallback string) string {
+	if v := strings.TrimSpace(gjson.GetBytes(body, "model").String()); v != "" {
+		return v
+	}
+	return fallback
+}

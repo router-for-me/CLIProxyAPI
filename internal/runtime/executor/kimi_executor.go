@@ -147,6 +147,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}
 	body = normalizeKimiTools(body)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
+	// Payload rules (ApplyPayloadConfigWithRequest) can rewrite model long
+	// after upstreamModel was computed, so re-derive the wire model from the
+	// finished body about to be sent.
+	resp.Metadata = map[string]any{cliproxyexecutor.WireModelMetadataKey: finalWireModel(body, upstreamModel)}
 
 	url := kimiauth.KimiAPIBaseURL + "/v1/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -272,6 +276,10 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	body = normalizeKimiTools(body)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
+	// Payload rules (ApplyPayloadConfigWithRequest) can rewrite model long
+	// after upstreamModel was computed, so re-derive the wire model from the
+	// finished body about to be sent.
+	wireModel := finalWireModel(body, upstreamModel)
 
 	url := kimiauth.KimiAPIBaseURL + "/v1/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -317,7 +325,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("kimi executor: close response body error: %v", errClose)
 		}
-		err = withWireModel(statusErr{code: httpResp.StatusCode, msg: string(b)}, upstreamModel)
+		err = withWireModel(statusErr{code: httpResp.StatusCode, msg: string(b)}, wireModel)
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
