@@ -675,7 +675,9 @@ func TestProbeMissed(t *testing.T) {
 		{name: "read nothing with no baseline is still a miss", read: 0, baseline: 0, want: true},
 		{name: "full read is a hit", read: 100000, baseline: 100000, want: false},
 		{name: "just above half is a hit", read: 50001, baseline: 100000, want: false},
-		{name: "exactly half is a miss", read: 50000, baseline: 100000, want: true},
+		// The rule is "below half", so exactly half still counts as a hit.
+		{name: "exactly half is a hit", read: 50000, baseline: 100000, want: false},
+		{name: "one token below half is a miss", read: 49999, baseline: 100000, want: true},
 		{name: "far below half is a miss", read: 12000, baseline: 100000, want: true},
 		{name: "unknown baseline cannot judge proportion", read: 12000, baseline: 0, want: false},
 		{name: "reading more than the baseline is a hit", read: 120000, baseline: 100000, want: false},
