@@ -27,8 +27,9 @@ type ClaudeCacheKeepaliveObservation struct {
 	OriginalPayload []byte
 	// Headers are the inbound client headers, carrying the Anthropic-Beta list.
 	Headers http.Header
-	// Metadata is the shared execution metadata map, which carries the session
-	// affinity namespace the binding check must be keyed by.
+	// Metadata is the shared execution metadata map. Credential selection
+	// publishes the affinity namespace and the canonical session identity into
+	// it, and the binding check must be keyed by exactly those.
 	Metadata map[string]any
 	// StartedAt is when the request began.
 	StartedAt time.Time
@@ -58,14 +59,15 @@ func ObserveClaudeCacheKeepalive(ctx context.Context, observation ClaudeCacheKee
 	}
 	provider, model := claudeCacheKeepaliveAffinityKey(observation)
 	scheduler.Observe(keepalive.ObserveInput{
-		SessionID: sessionID,
-		AuthID:    observation.AuthID,
-		Provider:  provider,
-		Model:     model,
-		Body:      observation.OriginalPayload,
-		Headers:   observation.Headers,
-		TTL:       ttl,
-		StartedAt: observation.StartedAt,
+		SessionID:        sessionID,
+		BindingSessionID: claudeCacheKeepaliveMetadataString(observation.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey),
+		AuthID:           observation.AuthID,
+		Provider:         provider,
+		Model:            model,
+		Body:             observation.OriginalPayload,
+		Headers:          observation.Headers,
+		TTL:              ttl,
+		StartedAt:        observation.StartedAt,
 	})
 }
 

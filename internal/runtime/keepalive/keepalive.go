@@ -99,16 +99,25 @@ const (
 )
 
 // Binding reports the credential a session is currently bound to.
+//
+// bindingSessionID is the identity credential selection keyed the binding by,
+// which is not the bare Claude Code session id: selection canonicalizes it, for
+// example to "claude:<session>:agent:main".
 type Binding interface {
-	SessionBinding(provider, sessionID, model string) (authID string, state BindingState)
+	SessionBinding(provider, bindingSessionID, model string) (authID string, state BindingState)
 }
 
 // ObserveInput describes one completed real request.
 type ObserveInput struct {
+	// SessionID is the Claude Code session id. It keys the scheduler and the
+	// liveness check, which reads that session's on-disk task state.
 	SessionID string
-	AuthID    string
-	Provider  string
-	Model     string
+	// BindingSessionID is the identity credential selection keyed the session
+	// affinity binding by. Empty disables the binding check.
+	BindingSessionID string
+	AuthID           string
+	Provider         string
+	Model            string
 	// Body is the inbound client body, stored verbatim so the probe reproduces
 	// the same prefix the next real request will send.
 	Body []byte
@@ -121,15 +130,16 @@ type ObserveInput struct {
 }
 
 type sessionState struct {
-	generation uint64
-	authID     string
-	provider   string
-	model      string
-	body       []byte
-	headers    http.Header
-	ttl        time.Duration
-	probes     int
-	timer      Timer
+	generation       uint64
+	bindingSessionID string
+	authID           string
+	provider         string
+	model            string
+	body             []byte
+	headers          http.Header
+	ttl              time.Duration
+	probes           int
+	timer            Timer
 }
 
 // Scheduler keeps one pending keepalive probe per Claude Code session.
@@ -315,13 +325,14 @@ func (s *Scheduler) Observe(in ObserveInput) {
 		generation = previous.generation + 1
 	}
 	state := &sessionState{
-		generation: generation,
-		authID:     in.AuthID,
-		provider:   in.Provider,
-		model:      in.Model,
-		body:       body,
-		headers:    headers,
-		ttl:        in.TTL,
+		generation:       generation,
+		bindingSessionID: in.BindingSessionID,
+		authID:           in.AuthID,
+		provider:         in.Provider,
+		model:            in.Model,
+		body:             body,
+		headers:          headers,
+		ttl:              in.TTL,
 		// A real request resets the consecutive-probe budget.
 		probes: 0,
 	}
@@ -356,6 +367,7 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 	binding := s.binding
 	prober := s.prober
 	authID := state.authID
+	bindingSessionID := state.bindingSessionID
 	provider := state.provider
 	model := state.model
 	ttl := state.ttl
@@ -370,8 +382,8 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 			return
 		}
 	}
-	if binding != nil {
-		boundAuthID, state := binding.SessionBinding(provider, sessionID, model)
+	if binding != nil && bindingSessionID != "" {
+		boundAuthID, state := binding.SessionBinding(provider, bindingSessionID, model)
 		if state == BindingLost || (state == BindingBound && boundAuthID != authID) {
 			s.drop(sessionID, generation)
 			log.Infof("cache-keepalive: skipped | session=%s reason=auth-binding-lost want_auth=%s bound_auth=%s",

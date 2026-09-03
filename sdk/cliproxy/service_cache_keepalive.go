@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/keepalive"
@@ -78,6 +79,31 @@ func (b cacheKeepaliveBinding) SessionBinding(provider, sessionID, model string)
 	return authID, keepalive.BindingBound
 }
 
+// cacheKeepaliveLastApplied guards the announcement of the keepalive settings so
+// startup and the config-runtime pass that follows it do not log the same state
+// twice. It tracks the process-wide scheduler, which is itself a package global.
+var (
+	cacheKeepaliveAnnounceMu sync.Mutex
+	cacheKeepaliveAnnounced  *internalconfig.ClaudeCodeCacheKeepaliveConfig
+)
+
+// announceCacheKeepalive reports whether the settings changed since the last call.
+func announceCacheKeepalive(settings internalconfig.ClaudeCodeCacheKeepaliveConfig) bool {
+	cacheKeepaliveAnnounceMu.Lock()
+	defer cacheKeepaliveAnnounceMu.Unlock()
+	previous := cacheKeepaliveAnnounced
+	cacheKeepaliveAnnounced = &settings
+	if previous == nil {
+		return true
+	}
+	return previous.Enabled != settings.Enabled ||
+		previous.BeforeExpiry != settings.BeforeExpiry ||
+		previous.OnlyWhenAgentsActive != settings.OnlyWhenAgentsActive ||
+		previous.Liveness != settings.Liveness ||
+		previous.MaxProbes != settings.MaxProbes ||
+		previous.MaxTokens != settings.MaxTokens
+}
+
 // applyCacheKeepaliveConfig installs or reconfigures the prompt-cache keepalive
 // scheduler. It is safe to call on every config reload.
 func (s *Service) applyCacheKeepaliveConfig(cfg *config.Config) {
@@ -90,6 +116,7 @@ func (s *Service) applyCacheKeepaliveConfig(cfg *config.Config) {
 	}
 	settings = settings.WithDefaults()
 
+	changed := announceCacheKeepalive(settings)
 	if !settings.Enabled {
 		if keepalive.Default() != nil {
 			log.Info("cache-keepalive: disabled")
@@ -132,6 +159,8 @@ func (s *Service) applyCacheKeepaliveConfig(cfg *config.Config) {
 		scheduler.SetLiveness(liveness)
 		scheduler.ApplyConfig(runtimeCfg)
 	}
-	log.Infof("cache-keepalive: enabled | before-expiry=%s only-when-agents-active=%t liveness=%s max-probes=%d max-tokens=%d",
-		settings.BeforeExpiry, settings.OnlyWhenAgentsActive, settings.Liveness, settings.MaxProbes, settings.MaxTokens)
+	if changed {
+		log.Infof("cache-keepalive: enabled | before-expiry=%s only-when-agents-active=%t liveness=%s max-probes=%d max-tokens=%d",
+			settings.BeforeExpiry, settings.OnlyWhenAgentsActive, settings.Liveness, settings.MaxProbes, settings.MaxTokens)
+	}
 }

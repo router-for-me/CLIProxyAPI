@@ -151,14 +151,15 @@ func testScheduler(t *testing.T, clock *fakeClock, prober Prober, liveness Liven
 
 func observeOneHour(scheduler *Scheduler, session string) {
 	scheduler.Observe(ObserveInput{
-		SessionID: session,
-		AuthID:    "auth-a",
-		Provider:  "claude",
-		Model:     "claude-haiku-4-5-20251001",
-		Body:      []byte(oneHourBody),
-		Headers:   http.Header{"Anthropic-Beta": []string{"claude-code-20250219,extended-cache-ttl-2025-04-11"}},
-		TTL:       time.Hour,
-		StartedAt: time.Now(),
+		SessionID:        session,
+		BindingSessionID: "claude:" + session + ":agent:main",
+		AuthID:           "auth-a",
+		Provider:         "claude",
+		Model:            "claude-haiku-4-5-20251001",
+		Body:             []byte(oneHourBody),
+		Headers:          http.Header{"Anthropic-Beta": []string{"claude-code-20250219,extended-cache-ttl-2025-04-11"}},
+		TTL:              time.Hour,
+		StartedAt:        time.Now(),
 	})
 }
 
@@ -235,6 +236,28 @@ func TestFireProbesWhenLivenessIsAlwaysEvenWithNoAgents(t *testing.T) {
 
 	if calls := prober.calls(); len(calls) != 1 {
 		t.Fatalf("probed %d times, want 1", len(calls))
+	}
+}
+
+func TestFireSkipsBindingCheckWithoutBindingSessionID(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{state: BindingLost}, nil)
+
+	scheduler.Observe(ObserveInput{
+		SessionID: "sess-1",
+		AuthID:    "auth-a",
+		Provider:  "claude",
+		Model:     "claude-haiku-4-5-20251001",
+		Body:      []byte(oneHourBody),
+		Headers:   http.Header{},
+		TTL:       time.Hour,
+		StartedAt: time.Now(),
+	})
+	clock.fireLatest(t)
+
+	if calls := prober.calls(); len(calls) != 1 {
+		t.Fatalf("probed %d times, want 1: with no binding identity there is nothing to check", len(calls))
 	}
 }
 
