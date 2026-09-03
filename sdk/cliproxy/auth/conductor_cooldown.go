@@ -342,9 +342,26 @@ func (m *Manager) RestoreCooldownStates(ctx context.Context) error {
 	return nil
 }
 
+// restoreCooldownRecordLocked mirrors authCooldownStateRecord/
+// modelCooldownStateRecord's use of availabilityBlock: a record is still
+// live if EITHER record.NextRetryAfter or record.Quota.NextRecoverAt is
+// still in the future, and the restored NextRetryAfter is the effective
+// (longer) of the two - not record.NextRetryAfter alone - so a process
+// restart between an expired short NextRetryAfter and a still-active
+// NextRecoverAt does not silently drop the cooldown. A legacy record with
+// NextRecoverAt zero (or, for a quota-exceeded record, backfilled from
+// NextRetryAfter just below) behaves exactly as before this fix.
 func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now time.Time) bool {
 	authID := strings.TrimSpace(record.AuthID)
-	if authID == "" || record.NextRetryAfter.IsZero() || !record.NextRetryAfter.After(now) {
+	if authID == "" {
+		return false
+	}
+	quota := record.Quota
+	if quota.Exceeded && quota.NextRecoverAt.IsZero() {
+		quota.NextRecoverAt = record.NextRetryAfter
+	}
+	blocked, _, next := availabilityBlock(true, quota.Exceeded, record.NextRetryAfter, quota.NextRecoverAt, now)
+	if !blocked || next.IsZero() {
 		return false
 	}
 	auth := m.auths[authID]
@@ -357,15 +374,11 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	}
 	reason := strings.TrimSpace(record.Reason)
 	model := strings.TrimSpace(record.Model)
-	quota := record.Quota
-	if quota.Exceeded && quota.NextRecoverAt.IsZero() {
-		quota.NextRecoverAt = record.NextRetryAfter
-	}
 
 	if model == "" {
 		auth.Unavailable = true
 		auth.Status = StatusError
-		auth.NextRetryAfter = record.NextRetryAfter
+		auth.NextRetryAfter = next
 		applyCooldownFields(&auth.Quota, quota)
 		auth.Quota = mergeQuotaObservation(auth.Quota, quota)
 		auth.Generation++
@@ -382,7 +395,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		Unavailable:    true,
 		Status:         StatusError,
 		StatusMessage:  reason,
-		NextRetryAfter: record.NextRetryAfter,
+		NextRetryAfter: next,
 		Quota:          quota,
 		LastError:      cloneError(record.LastError),
 		UpdatedAt:      updatedAt,
@@ -676,8 +689,24 @@ func cooldownErrorEqual(a, b *Error) bool {
 		a.HTTPStatus == b.HTTPStatus
 }
 
+// authCooldownStateRecord builds the persisted record for a credential-level
+// cooldown. Whether a record exists at all, and what deadline it carries, is
+// decided by availabilityBlock - the same function the in-memory selector
+// uses to decide whether this auth is blocked - rather than by NextRetryAfter
+// alone. A later failure of a different kind (e.g. a transient 5xx) can
+// shorten auth.NextRetryAfter without touching auth.Quota.NextRecoverAt (see
+// notFoundRetryAfter/preserveLongerCooldown); checking NextRetryAfter alone
+// would silently drop the record - and the cooldown it protects - the moment
+// the shortened deadline passes, even though the credential is still blocked
+// in memory until the longer NextRecoverAt. The persisted NextRetryAfter is
+// the effective (longer) deadline availabilityBlock returns, so a `.cds`
+// file always shows the deadline that is actually in force.
 func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bool) {
-	if auth == nil || !auth.Unavailable || auth.NextRetryAfter.IsZero() || !auth.NextRetryAfter.After(now) {
+	if auth == nil {
+		return CooldownStateRecord{}, false
+	}
+	blocked, _, next := availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
+	if !blocked || next.IsZero() {
 		return CooldownStateRecord{}, false
 	}
 	return CooldownStateRecord{
@@ -685,7 +714,7 @@ func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bo
 		AuthID:         auth.ID,
 		AuthFile:       cooldownAuthFile(auth),
 		Status:         "cooling",
-		NextRetryAfter: auth.NextRetryAfter,
+		NextRetryAfter: next,
 		Reason:         cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError),
 		Quota:          cooldownFieldsOf(auth.Quota),
 		LastError:      cloneError(auth.LastError),
@@ -693,9 +722,16 @@ func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bo
 	}, true
 }
 
+// modelCooldownStateRecord mirrors authCooldownStateRecord for a per-model
+// cooldown; see its comment for why the gate and the persisted deadline both
+// come from availabilityBlock instead of NextRetryAfter alone.
 func modelCooldownStateRecord(auth *Auth, model string, state *ModelState, now time.Time) (CooldownStateRecord, bool) {
 	model = strings.TrimSpace(model)
-	if auth == nil || state == nil || model == "" || !state.Unavailable || state.NextRetryAfter.IsZero() || !state.NextRetryAfter.After(now) {
+	if auth == nil || state == nil || model == "" {
+		return CooldownStateRecord{}, false
+	}
+	blocked, _, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+	if !blocked || next.IsZero() {
 		return CooldownStateRecord{}, false
 	}
 	return CooldownStateRecord{
@@ -704,7 +740,7 @@ func modelCooldownStateRecord(auth *Auth, model string, state *ModelState, now t
 		AuthFile:       cooldownAuthFile(auth),
 		Model:          model,
 		Status:         "cooling",
-		NextRetryAfter: state.NextRetryAfter,
+		NextRetryAfter: next,
 		Reason:         cooldownReason(state.StatusMessage, state.Quota, state.LastError),
 		Quota:          cooldownFieldsOf(state.Quota),
 		LastError:      cloneError(state.LastError),

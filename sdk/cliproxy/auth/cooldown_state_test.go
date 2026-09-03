@@ -501,6 +501,198 @@ func TestManager_RestoreCooldownStates(t *testing.T) {
 	}
 }
 
+// TestCooldownEffectiveDeadlineSurvivesRestartAcrossShorterNextRetryAfter
+// reproduces the sequence Codex flagged at conductor_cooldown.go:2154: an
+// explicit not-found classification escalates Quota.NextRecoverAt (and
+// initially NextRetryAfter) to a 12h deadline, then a later, unrelated
+// transient 5xx overwrites NextRetryAfter alone with a much shorter
+// deadline (see the 408/500/502/503/504 branch of
+// applyAuthFailureStateForModel, which never touches Quota.NextRecoverAt).
+// Gating persistence and restore on NextRetryAfter alone would silently
+// drop the cooldown - and the credential would come back online early -
+// the moment the short deadline passes, even though the credential is
+// still blocked in memory (via availabilityBlock) until the long
+// Quota.NextRecoverAt deadline. This asserts the persisted record survives
+// past the short deadline, carries the effective (long) deadline as its
+// NextRetryAfter - so a `.cds` file is a truthful acceptance instrument -
+// and that restoring it into a brand new Manager still blocks until the
+// long deadline.
+func TestCooldownEffectiveDeadlineSurvivesRestartAcrossShorterNextRetryAfter(t *testing.T) {
+	now := time.Now()
+	longDeadline := now.Add(12 * time.Hour)
+	shortDeadline := now.Add(time.Minute)
+
+	auth := &Auth{
+		ID:             "auth-1",
+		Provider:       "xai",
+		Unavailable:    true,
+		Status:         StatusError,
+		NextRetryAfter: shortDeadline, // shortened by the later 5xx
+		Quota: QuotaState{
+			Exceeded:      true, // set true, and left untouched, by the earlier not-found escalation
+			Reason:        "model_not_found",
+			NextRecoverAt: longDeadline,
+		},
+	}
+
+	// Simulate a persistence tick that runs after the short deadline has
+	// passed but well before the long one.
+	afterShortDeadline := shortDeadline.Add(time.Minute)
+	record, ok := authCooldownStateRecord(auth, afterShortDeadline)
+	if !ok {
+		t.Fatal("authCooldownStateRecord() = false after the short NextRetryAfter expired, want true because Quota.NextRecoverAt is still active")
+	}
+	if !record.NextRetryAfter.Equal(longDeadline) {
+		t.Fatalf("persisted NextRetryAfter = %v, want the effective (long) deadline %v so the .cds file reflects the deadline actually in force", record.NextRetryAfter, longDeadline)
+	}
+	if !record.Quota.NextRecoverAt.Equal(longDeadline) {
+		t.Fatalf("persisted Quota.NextRecoverAt = %v, want %v", record.Quota.NextRecoverAt, longDeadline)
+	}
+
+	// Restore into a brand new Manager, as if the process had restarted at
+	// a point after the short deadline but before the long one.
+	manager := NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-1", Provider: "xai", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+	restartAt := afterShortDeadline.Add(time.Minute)
+	manager.mu.Lock()
+	restored := manager.restoreCooldownRecordLocked(record, restartAt)
+	manager.mu.Unlock()
+	if !restored {
+		t.Fatal("restoreCooldownRecordLocked() = false at a time between the short and long deadlines, want true")
+	}
+
+	restoredAuth, ok := manager.GetByID("auth-1")
+	if !ok {
+		t.Fatal("restored auth not found")
+	}
+	if !restoredAuth.Unavailable {
+		t.Fatal("restored auth.Unavailable = false, want true")
+	}
+	if !restoredAuth.NextRetryAfter.Equal(longDeadline) {
+		t.Fatalf("restored auth.NextRetryAfter = %v, want the effective (long) deadline %v", restoredAuth.NextRetryAfter, longDeadline)
+	}
+	blocked, _, next := availabilityBlock(restoredAuth.Unavailable, restoredAuth.Quota.Exceeded, restoredAuth.NextRetryAfter, restoredAuth.Quota.NextRecoverAt, restartAt)
+	if !blocked {
+		t.Fatal("availabilityBlock() = not blocked for the restored auth, want blocked until the long deadline")
+	}
+	if !next.Equal(longDeadline) {
+		t.Fatalf("availabilityBlock() next = %v, want the long deadline %v", next, longDeadline)
+	}
+}
+
+// TestCooldownRestoreHonorsNextRecoverAtOnAHandBuiltRecord isolates the
+// restore-side gate from the persist-side fix above: it feeds
+// restoreCooldownRecordLocked a record whose NextRetryAfter is already
+// shortened (as authCooldownStateRecord would have written before this fix,
+// or as any pre-existing `.cds` file on disk still does until it is next
+// rewritten) while Quota.NextRecoverAt carries the true, longer deadline.
+// Restore must still honor the record and adopt the effective deadline.
+func TestCooldownRestoreHonorsNextRecoverAtOnAHandBuiltRecord(t *testing.T) {
+	now := time.Now()
+	longDeadline := now.Add(12 * time.Hour)
+	shortDeadline := now.Add(time.Minute)
+	restartAt := shortDeadline.Add(time.Minute) // after short, well before long
+
+	record := CooldownStateRecord{
+		Provider:       "xai",
+		AuthID:         "auth-hand-built",
+		Status:         "cooling",
+		NextRetryAfter: shortDeadline,
+		Reason:         "model_not_found",
+		Quota: QuotaState{
+			Exceeded:      true,
+			Reason:        "model_not_found",
+			NextRecoverAt: longDeadline,
+		},
+	}
+
+	manager := NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-hand-built", Provider: "xai", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+	manager.mu.Lock()
+	restored := manager.restoreCooldownRecordLocked(record, restartAt)
+	manager.mu.Unlock()
+	if !restored {
+		t.Fatal("restoreCooldownRecordLocked() = false for a record whose NextRetryAfter already expired but Quota.NextRecoverAt is still active, want true")
+	}
+	restoredAuth, ok := manager.GetByID("auth-hand-built")
+	if !ok {
+		t.Fatal("restored auth not found")
+	}
+	if !restoredAuth.NextRetryAfter.Equal(longDeadline) {
+		t.Fatalf("restored NextRetryAfter = %v, want the effective (long) deadline %v", restoredAuth.NextRetryAfter, longDeadline)
+	}
+}
+
+// TestCooldownRecordLegacyRoundTripWithoutNextRecoverAt covers a genuinely
+// legacy on-disk record: only NextRetryAfter was ever meaningful for it
+// (Quota.NextRecoverAt is its zero value, as it always has been for a plain
+// transient-error cooldown that never went through the not-found/quota
+// escalation paths). It must persist and restore exactly as it did before
+// this fix - gated on, and carrying, NextRetryAfter alone.
+func TestCooldownRecordLegacyRoundTripWithoutNextRecoverAt(t *testing.T) {
+	now := time.Now()
+	deadline := now.Add(30 * time.Minute)
+
+	auth := &Auth{
+		ID:             "auth-legacy",
+		Provider:       "xai",
+		Unavailable:    true,
+		Status:         StatusError,
+		NextRetryAfter: deadline,
+		// Quota left at its zero value: no Exceeded, no NextRecoverAt.
+	}
+
+	record, ok := authCooldownStateRecord(auth, now)
+	if !ok {
+		t.Fatal("authCooldownStateRecord() = false for a live legacy-shaped cooldown, want true")
+	}
+	if !record.NextRetryAfter.Equal(deadline) {
+		t.Fatalf("persisted NextRetryAfter = %v, want %v (unchanged, no NextRecoverAt to take the max against)", record.NextRetryAfter, deadline)
+	}
+	if !record.Quota.NextRecoverAt.IsZero() {
+		t.Fatalf("persisted Quota.NextRecoverAt = %v, want zero for a legacy record", record.Quota.NextRecoverAt)
+	}
+
+	manager := NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-legacy", Provider: "xai", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+
+	// Before the deadline: restores exactly as before.
+	beforeDeadline := deadline.Add(-time.Minute)
+	manager.mu.Lock()
+	restored := manager.restoreCooldownRecordLocked(record, beforeDeadline)
+	manager.mu.Unlock()
+	if !restored {
+		t.Fatal("restoreCooldownRecordLocked() = false before the legacy deadline, want true")
+	}
+	restoredAuth, ok := manager.GetByID("auth-legacy")
+	if !ok {
+		t.Fatal("restored auth not found")
+	}
+	if !restoredAuth.NextRetryAfter.Equal(deadline) {
+		t.Fatalf("restored NextRetryAfter = %v, want %v", restoredAuth.NextRetryAfter, deadline)
+	}
+
+	// After the deadline: a legacy record with no NextRecoverAt to fall
+	// back on is correctly treated as expired, exactly like before this fix.
+	manager2 := NewManager(nil, nil, nil)
+	if _, errRegister := manager2.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-legacy", Provider: "xai", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+	afterDeadline := deadline.Add(time.Minute)
+	manager2.mu.Lock()
+	restoredAfter := manager2.restoreCooldownRecordLocked(record, afterDeadline)
+	manager2.mu.Unlock()
+	if restoredAfter {
+		t.Fatal("restoreCooldownRecordLocked() = true past a legacy record's only deadline, want false")
+	}
+}
+
 func TestManager_RestoreCooldownStatesCanonicalizesThinkingSuffixes(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	laterRetry := now.Add(2 * time.Hour)
