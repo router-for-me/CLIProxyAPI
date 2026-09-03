@@ -624,7 +624,11 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 			}
 		}
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+	return &cliproxyexecutor.StreamResult{
+		Headers:  httpResp.Header.Clone(),
+		Chunks:   out,
+		Metadata: map[string]any{cliproxyexecutor.WireModelMetadataKey: finalWireModel(body, targetName)},
+	}, nil
 }
 
 // CountTokens counts tokens for the given request using the Gemini API.

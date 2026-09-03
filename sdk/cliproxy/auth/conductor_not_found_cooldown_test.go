@@ -1190,6 +1190,24 @@ func TestIsExplicitModelNotFoundError_ProviderShapes(t *testing.T) {
 			explicit: false,
 		},
 
+		// Adversarial negatives for the free-substring over-classification
+		// bug fixed in isExplicitModelNotFoundMessage: a message containing
+		// "model_not_found"/"unknown_model" as a substring, without naming
+		// THIS requestedModel in the identified position, must not classify
+		// as explicit. Source: team-lead final whole-branch review, 2026-09-03.
+		{
+			name:     "message names a different model, not the requested one",
+			body:     `{"error":{"message":"model other-model not found"}}`,
+			model:    "target-model",
+			explicit: false,
+		},
+		{
+			name:     "html body whose title happens to contain the requested model and not-found wording",
+			body:     `{"error":{"message":"<title>model target-model not found</title>"}}`,
+			model:    "target-model",
+			explicit: false,
+		},
+
 		// Codex: OpenAI Responses-style envelope, error.type ==
 		// "not_found_error" (see internal/runtime/executor/codex_executor_terminal.go:172).
 		// The exact missing-model message wording is COULD-NOT-DETERMINE - no

@@ -1979,10 +1979,12 @@ func isExplicitModelNotFoundMessage(message, requestedModel string) bool {
 	if lower == "" {
 		return false
 	}
-	normalized := strings.NewReplacer("-", "_", " ", "_").Replace(lower)
-	if strings.Contains(normalized, "model_not_found") || strings.Contains(normalized, "unknown_model") {
-		return true
-	}
+	// A free substring match on "model_not_found"/"unknown_model" anywhere in
+	// the message over-classifies: it fires regardless of which model is
+	// actually named (e.g. an unrelated model's error, or an HTML page whose
+	// title happens to contain the phrase). Every branch below instead
+	// requires the message to name THIS requestedModel in the identified
+	// position via trimRequestedModelReference/isMissingModelPhrase.
 	// Gemini/Vertex/AI Studio's "models/<id> is not found ..." grammar is
 	// NOT checked here on message text alone - it additionally requires
 	// error.status == "NOT_FOUND" from the same "error" object, which this
