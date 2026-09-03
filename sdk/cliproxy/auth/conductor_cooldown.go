@@ -1986,7 +1986,11 @@ func notFoundRetryAfter(resultErr *Error, requestedModel string, retryState *Quo
 		return time.Time{}
 	}
 	if isExplicitModelNotFoundError(resultErr, requestedModel) {
-		return now.Add(12 * time.Hour)
+		next := now.Add(12 * time.Hour)
+		if retryState != nil {
+			retryState.NextRecoverAt = next
+		}
+		return next
 	}
 	if retryState != nil && retryState.NextRecoverAt.After(now) {
 		return retryState.NextRecoverAt

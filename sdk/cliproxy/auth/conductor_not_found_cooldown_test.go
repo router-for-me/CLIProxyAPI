@@ -140,6 +140,39 @@ func TestApplyAuthFailureStateNotFoundCooldownPolicy(t *testing.T) {
 	}
 }
 
+func TestApplyAuthFailureStateExplicitNotFoundSurvivesRacingGeneric404(t *testing.T) {
+	previousTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(previousTransient) })
+
+	now := time.Date(2026, 9, 3, 14, 42, 0, 0, time.UTC)
+	generic := &Error{HTTPStatus: http.StatusNotFound, Message: "Not Found"}
+	explicit := &Error{Code: "model_not_found", HTTPStatus: http.StatusNotFound, Message: "model unavailable"}
+
+	// explicit-404 then a racing generic-404 for the same key must not shorten the 12h deadline.
+	authExplicitFirst := &Auth{ID: "auth-explicit-then-generic"}
+	applyAuthFailureState(authExplicitFirst, explicit, nil, "", now, false)
+	want := now.Add(12 * time.Hour)
+	if !authExplicitFirst.NextRetryAfter.Equal(want) {
+		t.Fatalf("explicit-first NextRetryAfter = %v, want %v", authExplicitFirst.NextRetryAfter, want)
+	}
+	applyAuthFailureState(authExplicitFirst, generic, nil, "", now, false)
+	if !authExplicitFirst.NextRetryAfter.Equal(want) {
+		t.Fatalf("racing generic 404 shortened deadline: NextRetryAfter = %v, want unchanged %v", authExplicitFirst.NextRetryAfter, want)
+	}
+
+	// generic-404 then explicit-404 for the same key must land on the 12h deadline.
+	authGenericFirst := &Auth{ID: "auth-generic-then-explicit"}
+	applyAuthFailureState(authGenericFirst, generic, nil, "", now, false)
+	if got := authGenericFirst.NextRetryAfter; !got.Equal(now.Add(time.Minute)) {
+		t.Fatalf("generic-first NextRetryAfter = %v, want %v", got, now.Add(time.Minute))
+	}
+	applyAuthFailureState(authGenericFirst, explicit, nil, "", now, false)
+	if !authGenericFirst.NextRetryAfter.Equal(want) {
+		t.Fatalf("generic-then-explicit NextRetryAfter = %v, want %v", authGenericFirst.NextRetryAfter, want)
+	}
+}
+
 func TestMarkResultAliasUsesAttemptedUpstreamModelForExplicitNotFound(t *testing.T) {
 	previousDisabled := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
