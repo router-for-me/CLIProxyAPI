@@ -460,6 +460,14 @@ type ClaudeKey struct {
 	// stable per-entry route key for per-entry model-route pinning. Zero is
 	// the legacy single-key fallback (no child entry exists in the store).
 	UpstreamProviderEntryID int64 `yaml:"upstream-provider-entry-id,omitempty" json:"-"`
+
+	// UpstreamProviderStrategy is the canonicalized pool routing strategy of
+	// the upstream_providers row this entry was rendered from. The renderer
+	// populates it; the synthesizer embeds it in the auth's `pool_strategy`
+	// attribute which activates in-pool aggressive failover in the conductor.
+	// Empty = legacy single-key behavior. Operators should not set this
+	// field manually.
+	UpstreamProviderStrategy string `yaml:"upstream-provider-strategy,omitempty" json:"-"`
 }
 
 func (k ClaudeKey) GetAPIKey() string { return k.APIKey }
@@ -708,6 +716,13 @@ type OpenAICompatibility struct {
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
+	// Strategy selects the in-pool credential selection strategy for this
+	// provider's api-key-entries (round-robin, weighted-round-robin,
+	// fill-first). Empty = follow the global routing.strategy. Any non-empty
+	// value opts the pool into aggressive failover: entry errors rotate to
+	// the next entry before surfacing to the client.
+	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
 	// Disabled prevents this provider from being used for routing.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 
@@ -747,6 +762,11 @@ type OpenAICompatibilityAPIKey struct {
 	// Weight controls proportional selection under weighted-round-robin.
 	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
 	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
+
+	// Priority is the optional selection tier for this entry within the
+	// pool. nil = inherit the pool-level Priority. The scheduler serves the
+	// highest ready tier first and descends when a tier cools down.
+	Priority *int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`

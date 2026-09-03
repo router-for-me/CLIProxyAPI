@@ -672,29 +672,35 @@ func TestUpstreamProviderStoreRoutingStrategyAndEntryPriorityRoundTrip(t *testin
 	// The migration must add a nullable TEXT routing_strategy column. A NOT
 	// NULL constraint would break legacy rows, and a non-NULL DEFAULT would
 	// silently opt existing pools into the new failover behavior.
-	var strategyType, strategyNullable string
+	var strategyType, strategyNullable, strategyDefault string
 	if err := pg.DB().QueryRowContext(ctx, `
-		SELECT data_type, is_nullable
+		SELECT data_type, is_nullable, COALESCE(column_default, '')
 		FROM information_schema.columns
 		WHERE table_schema = $1 AND table_name = $2 AND column_name = 'routing_strategy'
-	`, pg.cfg.Schema, pg.cfg.UpstreamProvidersTable).Scan(&strategyType, &strategyNullable); err != nil {
+	`, pg.cfg.Schema, pg.cfg.UpstreamProvidersTable).Scan(&strategyType, &strategyNullable, &strategyDefault); err != nil {
 		t.Fatalf("query routing_strategy column: %v", err)
 	}
 	if strategyType != "text" || strategyNullable != "YES" {
 		t.Fatalf("routing_strategy column = %s/%s, want text/YES", strategyType, strategyNullable)
 	}
+	if strategyDefault != "" {
+		t.Fatalf("routing_strategy column default = %q, want empty (NULL default)", strategyDefault)
+	}
 	// The entries priority column must be nullable INTEGER so "inherit the
 	// row priority" stays distinct from an explicit tier 0.
-	var prioType, prioNullable string
+	var prioType, prioNullable, prioDefault string
 	if err := pg.DB().QueryRowContext(ctx, `
-		SELECT data_type, is_nullable
+		SELECT data_type, is_nullable, COALESCE(column_default, '')
 		FROM information_schema.columns
 		WHERE table_schema = $1 AND table_name = $2 AND column_name = 'priority'
-	`, pg.cfg.Schema, pg.cfg.UpstreamProviderEntriesTable).Scan(&prioType, &prioNullable); err != nil {
+	`, pg.cfg.Schema, pg.cfg.UpstreamProviderEntriesTable).Scan(&prioType, &prioNullable, &prioDefault); err != nil {
 		t.Fatalf("query entries priority column: %v", err)
 	}
 	if prioType != "integer" || prioNullable != "YES" {
 		t.Fatalf("entries priority column = %s/%s, want integer/YES", prioType, prioNullable)
+	}
+	if prioDefault != "" {
+		t.Fatalf("entries priority column default = %q, want empty (NULL default)", prioDefault)
 	}
 
 	created, err := src.Create(ctx, UpstreamProvider{
