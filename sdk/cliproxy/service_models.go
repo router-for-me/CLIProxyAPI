@@ -262,13 +262,15 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	if ctx.Err() != nil {
 		return
 	}
-	models = applyOAuthModelAliasForAuth(s.cfg, provider, authKind, a.Attributes, excluded, models)
-	if ctx.Err() != nil {
-		return
-	}
 	key := provider
 	if key == "" {
 		key = strings.ToLower(strings.TrimSpace(a.Provider))
+	}
+	// Plugin models are appended after the alias pass, so a per-auth source that a static
+	// plugin supplies is not in `models` yet; the alias merge still needs to know it exists.
+	models = applyOAuthModelAliasForAuthWithCatalog(s.cfg, provider, authKind, a.Attributes, excluded, models, catalogModelIDs(s.appendPluginModels(key, models)))
+	if ctx.Err() != nil {
+		return
 	}
 	models = s.appendPluginModels(key, models)
 	if len(models) > 0 {
@@ -894,6 +896,13 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 // had `excluded` removed. excluded is the same effective list the caller filtered with, so a
 // source that exclusions removed is not mistaken for a hidden upstream model.
 func applyOAuthModelAliasForAuth(cfg *config.Config, provider, authKind string, attributes map[string]string, excluded []string, models []*ModelInfo) []*ModelInfo {
+	return applyOAuthModelAliasForAuthWithCatalog(cfg, provider, authKind, attributes, excluded, models, catalogModelIDs(models))
+}
+
+// applyOAuthModelAliasForAuthWithCatalog is applyOAuthModelAliasForAuth with an explicit set
+// of upstream ids the credential will end up serving, for callers whose final catalog is
+// larger than `models` (plugin models are appended after the alias pass).
+func applyOAuthModelAliasForAuthWithCatalog(cfg *config.Config, provider, authKind string, attributes map[string]string, excluded []string, models []*ModelInfo, catalog map[string]struct{}) []*ModelInfo {
 	if len(models) == 0 {
 		return models
 	}
@@ -901,7 +910,7 @@ func applyOAuthModelAliasForAuth(cfg *config.Config, provider, authKind string, 
 	if channel == "" {
 		return models
 	}
-	aliases := oauthModelAliasesForAuth(cfg, channel, attributes, catalogModelIDs(models), excluded)
+	aliases := oauthModelAliasesForAuth(cfg, channel, attributes, catalog, excluded)
 	if len(aliases) == 0 {
 		return models
 	}

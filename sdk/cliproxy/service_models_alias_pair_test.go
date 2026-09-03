@@ -131,6 +131,26 @@ func TestOAuthModelAliasesForAuthDropsGlobalForkWhenAliasIsExcluded(t *testing.T
 	}
 }
 
+// A per-auth source supplied by a static plugin is appended after the alias pass, so it is
+// absent from the catalog the alias pass sees. The caller passes the ids it will end up
+// serving, plugin models included, so a plugin-backed source is not read as hidden.
+func TestOAuthModelAliasesForAuthSeesPluginSourcesAsPresent(t *testing.T) {
+	cfg := &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{
+		"codex": {{Name: "gpt-5.6-luna", Alias: "gpt-5.6-luna-reserve", Fork: true}},
+	}}
+	attrs := map[string]string{"model_aliases": `[{"name":"gpt-reserve","alias":"gpt-5.6-luna-reserve"}]`}
+	// Upstream catalog without the plugin model: the fork would be kept.
+	if got := oauthModelAliasesForAuth(cfg, "codex", attrs, catalogOf("gpt-5.6-luna"), nil); len(got) != 2 {
+		t.Fatalf("without the plugin source the fork is a needed fallback, got %+v", got)
+	}
+	// Final catalog including the plugin-supplied source: the fork is dropped.
+	models := []*ModelInfo{{ID: "gpt-5.6-luna"}}
+	out := applyOAuthModelAliasForAuthWithCatalog(cfg, "codex", "oauth", attrs, nil, models, catalogOf("gpt-5.6-luna", "gpt-reserve"))
+	if len(out) != 1 || out[0].ID != "gpt-5.6-luna" {
+		t.Fatalf("expected the fork dropped and no alias registered from the global source, got %+v", out)
+	}
+}
+
 // The pair key is a struct, not a joined string, so names and aliases that themselves
 // contain the joiner cannot collide: {a->b, c} and {a, b->c} are different pairs.
 func TestOAuthModelAliasesForAuthPairKeyIsCollisionFree(t *testing.T) {
