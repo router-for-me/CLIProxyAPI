@@ -833,7 +833,21 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 		return true
 	}
 	selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
-	return selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey)
+	if selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey) {
+		return true
+	}
+
+	// Fallback for static/inferred models: when registry has not dynamically indexed the model,
+	// check if the model is statically known to be supported by this auth's provider.
+	providerKey := strings.ToLower(strings.TrimSpace(executorKeyFromAuth(auth)))
+	if providerKey != "" {
+		for _, p := range registry.LookupStaticModelProviders(routeKey) {
+			if strings.EqualFold(p, providerKey) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (m *Manager) normalizeProviders(providers []string) []string {

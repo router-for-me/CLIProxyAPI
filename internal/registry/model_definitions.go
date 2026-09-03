@@ -360,3 +360,42 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 
 	return nil
 }
+
+// LookupStaticModelProviders returns all provider channel names that contain the model in static definitions.
+func LookupStaticModelProviders(modelID string) []string {
+	if modelID == "" {
+		return nil
+	}
+	data := getModels()
+	sections := []struct {
+		provider string
+		models   []*ModelInfo
+	}{
+		{"claude", data.Claude},
+		{"gemini", data.Gemini},
+		{"vertex", data.Vertex},
+		{"aistudio", data.AIStudio},
+		{"codex", data.CodexPro},
+		{"codex", data.CodexPlus},
+		{"codex", data.CodexTeam},
+		{"codex", data.CodexFree},
+		{"kimi", data.Kimi},
+		{"antigravity", data.Antigravity},
+		{"xai", data.XAI},
+	}
+
+	providers := make([]string, 0, 4)
+	seen := make(map[string]struct{})
+	for _, sec := range sections {
+		for _, m := range sec.models {
+			if m != nil && strings.EqualFold(m.ID, modelID) {
+				if _, exists := seen[sec.provider]; !exists {
+					seen[sec.provider] = struct{}{}
+					providers = append(providers, sec.provider)
+				}
+				break
+			}
+		}
+	}
+	return providers
+}

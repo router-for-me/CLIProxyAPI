@@ -86,28 +86,7 @@ func GetProviderName(modelName string) []string {
 }
 
 func staticModelProviders(modelName string) []string {
-	info := registry.LookupStaticModelInfo(modelName)
-	if info == nil {
-		return nil
-	}
-	ownedBy := strings.ToLower(strings.TrimSpace(info.OwnedBy))
-	typeStr := strings.ToLower(strings.TrimSpace(info.Type))
-	switch {
-	case ownedBy == "antigravity" || typeStr == "antigravity":
-		return []string{"antigravity", "gemini", "vertex", "aistudio"}
-	case ownedBy == "gemini" || typeStr == "gemini" || ownedBy == "google":
-		return []string{"gemini", "antigravity", "vertex", "aistudio"}
-	case ownedBy == "claude" || typeStr == "claude" || ownedBy == "anthropic":
-		return []string{"claude"}
-	case ownedBy == "codex" || typeStr == "codex" || typeStr == "openai" || ownedBy == "openai":
-		return []string{"codex"}
-	case ownedBy == "xai" || typeStr == "xai" || typeStr == "grok":
-		return []string{"xai"}
-	case ownedBy == "kimi" || typeStr == "kimi" || ownedBy == "moonshot":
-		return []string{"kimi"}
-	default:
-		return nil
-	}
+	return registry.LookupStaticModelProviders(modelName)
 }
 
 func heuristicModelProviders(modelName string) []string {

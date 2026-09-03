@@ -12,11 +12,11 @@ func TestGetProviderName(t *testing.T) {
 	}{
 		{
 			model:    "gemini-3.7-flash-high",
-			expected: []string{"antigravity", "gemini", "vertex", "aistudio"},
+			expected: []string{"antigravity"},
 		},
 		{
 			model:    "gemini-2.5-pro",
-			expected: []string{"gemini", "antigravity", "vertex", "aistudio"},
+			expected: []string{"gemini", "vertex", "aistudio"},
 		},
 		{
 			model:    "claude-sonnet-4-5",

@@ -836,11 +836,22 @@ func (m *scheduledAuthMeta) supportsModel(modelKey string) bool {
 	if modelKey == "" {
 		return true
 	}
-	if len(m.supportedModelSet) == 0 {
-		return false
+	if len(m.supportedModelSet) > 0 {
+		if _, ok := m.supportedModelSet[modelKey]; ok {
+			return true
+		}
 	}
-	_, ok := m.supportedModelSet[modelKey]
-	return ok
+	if m.auth != nil {
+		providerKey := strings.ToLower(strings.TrimSpace(executorKeyFromAuth(m.auth)))
+		if providerKey != "" {
+			for _, p := range registry.LookupStaticModelProviders(modelKey) {
+				if strings.EqualFold(p, providerKey) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // upsertEntryLocked updates or inserts one auth entry and rebuilds indexes when ordering changes.
