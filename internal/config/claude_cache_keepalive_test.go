@@ -29,6 +29,18 @@ func TestParseConfigBytesClaudeCodeCacheKeepaliveDefaults(t *testing.T) {
 	if keepalive.MaxTokens != 1 {
 		t.Fatalf("MaxTokens = %d, want 1", keepalive.MaxTokens)
 	}
+	if keepalive.BeforeExpiry5m != 45*time.Second {
+		t.Fatalf("BeforeExpiry5m = %s, want 45s", keepalive.BeforeExpiry5m)
+	}
+	if keepalive.Probe5m != ClaudeCodeKeepaliveProbe5mAuto {
+		t.Fatalf("Probe5m = %q, want %q", keepalive.Probe5m, ClaudeCodeKeepaliveProbe5mAuto)
+	}
+	if len(keepalive.Probe5mModels) != 0 {
+		t.Fatalf("Probe5mModels = %v, want empty so the built-in list applies", keepalive.Probe5mModels)
+	}
+	if keepalive.MaxProbes5m != 30 {
+		t.Fatalf("MaxProbes5m = %d, want 30", keepalive.MaxProbes5m)
+	}
 }
 
 func TestParseConfigBytesClaudeCodeCacheKeepaliveOverrides(t *testing.T) {
@@ -40,6 +52,11 @@ func TestParseConfigBytesClaudeCodeCacheKeepaliveOverrides(t *testing.T) {
 		"    liveness: always\n" +
 		"    max-probes: 2\n" +
 		"    max-tokens: 4\n" +
+		"    before-expiry-5m: 20s\n" +
+		"    probe-5m: always\n" +
+		"    max-probes-5m: 12\n" +
+		"    probe-5m-models:\n" +
+		"      - claude-experimental-9\n" +
 		"    task-state-dirs:\n" +
 		"      - /tmp/state\n" +
 		"    task-output-dirs:\n" +
@@ -73,6 +90,18 @@ func TestParseConfigBytesClaudeCodeCacheKeepaliveOverrides(t *testing.T) {
 	if len(keepalive.TaskOutputDirs) != 1 || keepalive.TaskOutputDirs[0] != "/tmp/output" {
 		t.Fatalf("TaskOutputDirs = %v, want [/tmp/output]", keepalive.TaskOutputDirs)
 	}
+	if keepalive.BeforeExpiry5m != 20*time.Second {
+		t.Fatalf("BeforeExpiry5m = %s, want 20s", keepalive.BeforeExpiry5m)
+	}
+	if keepalive.Probe5m != ClaudeCodeKeepaliveProbe5mAlways {
+		t.Fatalf("Probe5m = %q, want %q", keepalive.Probe5m, ClaudeCodeKeepaliveProbe5mAlways)
+	}
+	if keepalive.MaxProbes5m != 12 {
+		t.Fatalf("MaxProbes5m = %d, want 12", keepalive.MaxProbes5m)
+	}
+	if len(keepalive.Probe5mModels) != 1 || keepalive.Probe5mModels[0] != "claude-experimental-9" {
+		t.Fatalf("Probe5mModels = %v, want [claude-experimental-9]", keepalive.Probe5mModels)
+	}
 }
 
 func TestClaudeCodeCacheKeepaliveValidate(t *testing.T) {
@@ -104,6 +133,26 @@ func TestClaudeCodeCacheKeepaliveValidate(t *testing.T) {
 		{
 			name:    "enabled with defaults accepted",
 			yaml:    "claude-code:\n  cache-keepalive:\n    enabled: true\n",
+			wantErr: false,
+		},
+		{
+			name:    "unknown probe-5m rejected when enabled",
+			yaml:    "claude-code:\n  cache-keepalive:\n    enabled: true\n    probe-5m: sometimes\n",
+			wantErr: true,
+		},
+		{
+			name:    "before-expiry-5m at or above the 5m ttl rejected",
+			yaml:    "claude-code:\n  cache-keepalive:\n    enabled: true\n    before-expiry-5m: 5m\n",
+			wantErr: true,
+		},
+		{
+			name:    "non-positive max-probes-5m rejected",
+			yaml:    "claude-code:\n  cache-keepalive:\n    enabled: true\n    max-probes-5m: 0\n",
+			wantErr: true,
+		},
+		{
+			name:    "probe-5m never ignores the 5m knobs",
+			yaml:    "claude-code:\n  cache-keepalive:\n    enabled: true\n    probe-5m: never\n    max-probes-5m: 0\n",
 			wantErr: false,
 		},
 	}
