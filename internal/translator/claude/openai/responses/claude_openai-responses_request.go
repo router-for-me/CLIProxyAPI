@@ -14,6 +14,11 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const (
+	defaultClaudeResponsesMaxTokens = 32000
+	defaultFableResponsesMaxTokens  = 64000
+)
+
 // ConvertOpenAIResponsesRequestToClaude transforms an OpenAI Responses API request
 // into a Claude Messages API request using only gjson/sjson for JSON handling.
 // It supports:
@@ -43,6 +48,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	// Base Claude message payload
 	out := []byte(`{"model":"","max_tokens":32000,"messages":[],"metadata":{}}`)
 	out, _ = sjson.SetBytes(out, "metadata.user_id", userID)
+	out, _ = sjson.SetBytes(out, "max_tokens", defaultClaudeResponsesMaxTokensForModel(modelName))
 
 	root := gjson.ParseBytes(rawJSON)
 
@@ -566,6 +572,17 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	return out
+}
+
+func defaultClaudeResponsesMaxTokensForModel(modelName string) int {
+	maxTokens := defaultClaudeResponsesMaxTokens
+	if strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "fable") {
+		maxTokens = defaultFableResponsesMaxTokens
+	}
+	if info := registry.LookupModelInfo(modelName, "claude"); info != nil && info.MaxCompletionTokens > 0 && info.MaxCompletionTokens < maxTokens {
+		return info.MaxCompletionTokens
+	}
+	return maxTokens
 }
 
 // isResponsesSystemLevelRole reports whether an input item carries system-level

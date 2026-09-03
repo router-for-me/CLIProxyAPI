@@ -6117,9 +6117,46 @@ func TestClaudeExecutorPayloadOverrideReenablesThinking(t *testing.T) {
 	}
 }
 
-func executeClaudeContextManagementRequest(t *testing.T, cfg *config.Config, payload []byte, stream bool) []byte {
+func TestClaudeExecutorPayloadOverrideMaxTokens(t *testing.T) {
+	const model = "claude-fable-5-1"
+	for _, test := range []struct {
+		name            string
+		stream          bool
+		maxOutputTokens int
+	}{
+		{name: "execute"},
+		{name: "execute stream", stream: true},
+		{name: "execute overrides client limit", maxOutputTokens: 32000},
+		{name: "execute stream overrides client limit", stream: true, maxOutputTokens: 32000},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+				Models: []config.PayloadModelRule{{Name: model, Protocol: "claude"}},
+				Params: map[string]any{"max_tokens": 128000},
+			}}}}
+			payload := []byte(`{"model":"claude-fable-5-1","input":"hi"}`)
+			if test.maxOutputTokens > 0 {
+				payload, _ = sjson.SetBytes(payload, "max_output_tokens", test.maxOutputTokens)
+			}
+			upstreamBody := executeClaudeContextManagementRequest(t, cfg, payload, test.stream, sdktranslator.FormatOpenAIResponse)
+			if got := gjson.GetBytes(upstreamBody, "max_tokens").Int(); got != 128000 {
+				t.Fatalf("final upstream max_tokens = %d, want 128000; body=%s", got, upstreamBody)
+			}
+		})
+	}
+}
+
+func executeClaudeContextManagementRequest(t *testing.T, cfg *config.Config, payload []byte, stream bool, sourceFormats ...sdktranslator.Format) []byte {
 	t.Helper()
 
+	sourceFormat := sdktranslator.FormatClaude
+	if len(sourceFormats) > 0 {
+		sourceFormat = sourceFormats[0]
+	}
+	model := gjson.GetBytes(payload, "model").String()
+	if model == "" {
+		model = "claude-opus-5"
+	}
 	var upstreamBody []byte
 	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		var errRead error
@@ -6143,8 +6180,8 @@ func executeClaudeContextManagementRequest(t *testing.T, cfg *config.Config, pay
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 	executor := NewClaudeExecutor(cfg)
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-payload-rule", "cloak_mode": "always"}}
-	request := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}
-	options := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+	request := cliproxyexecutor.Request{Model: model, Payload: payload}
+	options := cliproxyexecutor.Options{SourceFormat: sourceFormat, ResponseFormat: sdktranslator.FormatClaude}
 
 	if stream {
 		result, errStream := executor.ExecuteStream(ctx, auth, request, options)
