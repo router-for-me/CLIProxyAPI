@@ -32,6 +32,9 @@ codex-header-defaults:
 	if cfg.Codex.DisableCodexCloaking {
 		t.Fatal("DisableCodexCloaking = true, want default false")
 	}
+	if cfg.Codex.ForceHTTP1 {
+		t.Fatal("ForceHTTP1 = true, want default false")
+	}
 }
 
 func TestLoadConfigOptional_CodexIdentityConfuse(t *testing.T) {
@@ -41,6 +44,7 @@ func TestLoadConfigOptional_CodexIdentityConfuse(t *testing.T) {
 codex:
   identity-confuse: true
   disable-codex-cloaking: true
+  force-http1: true
   optimize-multi-agent-v2: true
 `)
 	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
@@ -57,6 +61,9 @@ codex:
 	}
 	if !cfg.Codex.DisableCodexCloaking {
 		t.Fatal("DisableCodexCloaking = false, want true")
+	}
+	if !cfg.Codex.ForceHTTP1 {
+		t.Fatal("ForceHTTP1 = false, want true")
 	}
 	if !cfg.Codex.OptimizeMultiAgentV2 {
 		t.Fatalf("OptimizeMultiAgentV2 = false, want true")

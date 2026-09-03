@@ -239,6 +239,11 @@ codex:
   identity-confuse: false
   # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
   disable-codex-cloaking: false
+  # Use HTTP/1.1 for ChatGPT Codex HTTP/SSE requests while retaining the Chrome
+  # uTLS fingerprint. Enable this only when the configured proxy cannot reliably
+  # carry HTTP/2. Other upstream transports continue using their existing protocols.
+  # Default: false
+  force-http1: false
   # Hold back the initial handshake events (response.created, response.in_progress and the
   # websocket metadata frames) until the upstream emits its first generated event.
   # Why: the upstream smuggles `server_is_overloaded` rejections *inside* an HTTP 200 stream,
