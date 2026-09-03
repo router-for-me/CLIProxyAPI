@@ -336,7 +336,11 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 
 // defaultSessionAffinityTTL mirrors the runtime default applied when
 // routing.session-affinity-ttl is unset (sdk/cliproxy/service_config.go).
-const defaultSessionAffinityTTL = "1h"
+const (
+	defaultSessionAffinityTTL = "1h"
+	// minSessionAffinityTTL mirrors the floor the routing runtime enforces.
+	minSessionAffinityTTL = time.Second
+)
 
 // RoutingSessionAffinity exposes routing.session-affinity and its TTL the
 // same way routing/strategy is exposed: read the effective values, write
@@ -360,8 +364,11 @@ func (h *Handler) PutRoutingSessionAffinity(c *gin.Context) {
 	if body.TTL != nil {
 		ttl := strings.TrimSpace(*body.TTL)
 		if ttl != "" {
+			// The runtime clamps the selector TTL to one second
+			// (normalizedRoutingRuntimeState); reject shorter values so
+			// the persisted setting never diverges from the effective one.
 			parsed, errParse := time.ParseDuration(ttl)
-			if errParse != nil || parsed <= 0 {
+			if errParse != nil || parsed < minSessionAffinityTTL {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid ttl"})
 				return
 			}

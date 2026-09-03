@@ -79,7 +79,7 @@ func TestRoutingSessionAffinityRejectsBadInput(t *testing.T) {
 	cfg := &config.Config{Routing: config.RoutingConfig{SessionAffinity: true, SessionAffinityTTL: "1h"}}
 	h := &Handler{cfg: cfg, configFilePath: writeTestConfigFile(t)}
 
-	for _, body := range []string{`{}`, `{"ttl":"soon"}`, `{"ttl":"-5m"}`, `{"enabled":"yes"}`, `not json`} {
+	for _, body := range []string{`{}`, `{"ttl":"soon"}`, `{"ttl":"-5m"}`, `{"ttl":"500ms"}`, `{"enabled":"yes"}`, `not json`} {
 		code, _ := runSessionAffinity(t, h, http.MethodPut, body)
 		if code != http.StatusBadRequest {
 			t.Fatalf("PUT %s status = %d, want 400", body, code)
