@@ -898,7 +898,7 @@ func applyOAuthModelAliasForAuth(cfg *config.Config, provider, authKind string, 
 	if channel == "" {
 		return models
 	}
-	aliases := oauthModelAliasesForAuth(cfg, channel, attributes, catalogModelIDs(models))
+	aliases := oauthModelAliasesForAuth(cfg, channel, attributes, catalogModelIDs(models), excludedModelsFromAttributes(attributes))
 	if len(aliases) == 0 {
 		return models
 	}
@@ -920,10 +920,34 @@ func catalogModelIDs(models []*ModelInfo) map[string]struct{} {
 	return ids
 }
 
+// excludedModelsFromAttributes reads the synthesizer's pre-merged exclusion list, the same
+// attribute registerModelsForAuth applies before the alias pass.
+func excludedModelsFromAttributes(attributes map[string]string) []string {
+	if attributes == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(attributes["excluded_models"])
+	if raw == "" {
+		return nil
+	}
+	return strings.Split(raw, ",")
+}
+
+func modelExcluded(id string, excluded []string) bool {
+	for _, pattern := range excluded {
+		if trimmed := strings.ToLower(strings.TrimSpace(pattern)); trimmed != "" && matchWildcard(trimmed, id) {
+			return true
+		}
+	}
+	return false
+}
+
 // oauthModelAliasesForAuth merges a credential's aliases with the channel's global table.
-// catalog is the set of upstream ids the catalog already has; nil means unknown, which keeps
-// every global fork.
-func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map[string]string, catalog map[string]struct{}) []config.OAuthModelAlias {
+// catalog is the set of upstream ids the catalog has after exclusions; nil means unknown,
+// which keeps every global fork. excluded is the credential's exclusion list: a per-auth
+// source that exclusions removed must not be treated as a hidden model, or the global fork
+// would register an id that request-time resolution routes to the excluded model.
+func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map[string]string, catalog map[string]struct{}, excluded []string) []config.OAuthModelAlias {
 	perAuthAliases := coreauth.OAuthModelAliasesFromAttributes(attributes)
 	if cfg == nil || len(cfg.OAuthModelAlias) == 0 {
 		return perAuthAliases
@@ -969,11 +993,14 @@ func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map
 			continue
 		}
 		seenPair[pair] = struct{}{}
-		inCatalog := false
-		if catalog != nil {
-			_, inCatalog = catalog[pair.name]
+		// "Can supply the entry" is the fork-fallback question; an excluded source
+		// answers yes here on purpose, so the fork is dropped and the alias stays
+		// unroutable through this credential.
+		canSupply := modelExcluded(pair.name, excluded)
+		if !canSupply && catalog != nil {
+			_, canSupply = catalog[pair.name]
 		}
-		perAuthAlias[pair.alias] = perAuthAlias[pair.alias] || inCatalog
+		perAuthAlias[pair.alias] = perAuthAlias[pair.alias] || canSupply
 		out = append(out, entry)
 	}
 	for _, entry := range globalAliases {

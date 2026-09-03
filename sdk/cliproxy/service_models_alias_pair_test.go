@@ -30,7 +30,7 @@ func TestOAuthModelAliasesForAuthKeepsForkAlongsidePerAuthRename(t *testing.T) {
 		"model_aliases": `[{"name":"gpt-reserve","alias":"gpt-5.6-luna-reserve"}]`,
 	}
 	catalog := catalogOf("gpt-5.6-luna")
-	got := oauthModelAliasesForAuth(cfg, "codex", attrs, catalog)
+	got := oauthModelAliasesForAuth(cfg, "codex", attrs, catalog, nil)
 	if len(got) != 2 {
 		t.Fatalf("expected both entries to survive, got %d: %+v", len(got), got)
 	}
@@ -48,7 +48,7 @@ func TestOAuthModelAliasesForAuthDropsShadowedGlobalRename(t *testing.T) {
 	}}
 	attrs := map[string]string{"model_aliases": `[{"name":"gpt-reserve","alias":"shared"}]`}
 	catalog := catalogOf("gpt-5.6-luna")
-	got := oauthModelAliasesForAuth(cfg, "codex", attrs, catalog)
+	got := oauthModelAliasesForAuth(cfg, "codex", attrs, catalog, nil)
 	if len(got) != 1 || got[0].Name != "gpt-reserve" {
 		t.Fatalf("expected only the per-auth entry, got %+v", got)
 	}
@@ -63,7 +63,7 @@ func TestOAuthModelAliasesForAuthDropsGlobalForkWhenPerAuthSourceIsInCatalog(t *
 	}}
 	attrs := map[string]string{"model_aliases": `[{"name":"gpt-reserve","alias":"gpt-5.6-luna-reserve"}]`}
 	catalog := catalogOf("gpt-5.6-luna", "gpt-reserve")
-	got := oauthModelAliasesForAuth(cfg, "codex", attrs, catalog)
+	got := oauthModelAliasesForAuth(cfg, "codex", attrs, catalog, nil)
 	if len(got) != 1 || got[0].Name != "gpt-reserve" {
 		t.Fatalf("expected only the per-auth rename, got %+v", got)
 	}
@@ -79,6 +79,32 @@ func TestOAuthModelAliasesForAuthDropsGlobalForkWhenPerAuthSourceIsInCatalog(t *
 	}
 }
 
+// A per-auth source removed by oauth-excluded-models must not read as a hidden model. If the
+// global fork survived, X would be registered from the fork while request-time resolution
+// (per-auth first) sent X to the excluded model. Both the merge and the end-to-end catalog
+// pin that the fork is dropped and X is not registered.
+func TestOAuthModelAliasesForAuthDropsGlobalForkWhenPerAuthSourceIsExcluded(t *testing.T) {
+	cfg := &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{
+		"codex": {{Name: "gpt-5.6-luna", Alias: "gpt-5.6-luna-reserve", Fork: true}},
+	}}
+	attrs := map[string]string{
+		"model_aliases":   `[{"name":"gpt-reserve","alias":"gpt-5.6-luna-reserve"}]`,
+		"excluded_models": "gpt-reserve",
+	}
+	// The catalog after exclusions: gpt-reserve is gone, exactly as a hidden model would be.
+	got := oauthModelAliasesForAuth(cfg, "codex", attrs, catalogOf("gpt-5.6-luna"), []string{"gpt-reserve"})
+	if len(got) != 1 || got[0].Name != "gpt-reserve" {
+		t.Fatalf("expected the fork to be dropped, got %+v", got)
+	}
+	models := applyExcludedModels([]*ModelInfo{{ID: "gpt-5.6-luna"}, {ID: "gpt-reserve"}}, []string{"gpt-reserve"})
+	out := applyOAuthModelAliasForAuth(cfg, "codex", "oauth", attrs, models)
+	for _, m := range out {
+		if m.ID == "gpt-5.6-luna-reserve" {
+			t.Fatalf("excluded source must not be reachable through the alias, got %+v", out)
+		}
+	}
+}
+
 // The pair key is a struct, not a joined string, so names and aliases that themselves
 // contain the joiner cannot collide: {a->b, c} and {a, b->c} are different pairs.
 func TestOAuthModelAliasesForAuthPairKeyIsCollisionFree(t *testing.T) {
@@ -87,7 +113,7 @@ func TestOAuthModelAliasesForAuthPairKeyIsCollisionFree(t *testing.T) {
 	}}
 	attrs := map[string]string{"model_aliases": `[{"name":"a->b","alias":"c"}]`}
 	catalog := catalogOf("gpt-5.6-luna")
-	got := oauthModelAliasesForAuth(cfg, "codex", attrs, catalog)
+	got := oauthModelAliasesForAuth(cfg, "codex", attrs, catalog, nil)
 	if len(got) != 2 {
 		t.Fatalf("expected both pairs to survive, got %d: %+v", len(got), got)
 	}
@@ -100,7 +126,7 @@ func TestOAuthModelAliasesForAuthStillDedupesSamePair(t *testing.T) {
 	}}
 	attrs := map[string]string{"model_aliases": `[{"name":"gpt-5.6-luna","alias":"luna-fast","force-mapping":true}]`}
 	catalog := catalogOf("gpt-5.6-luna")
-	got := oauthModelAliasesForAuth(cfg, "codex", attrs, catalog)
+	got := oauthModelAliasesForAuth(cfg, "codex", attrs, catalog, nil)
 	if len(got) != 1 || !got[0].ForceMapping {
 		t.Fatalf("expected one entry, the per-auth one, got %+v", got)
 	}
