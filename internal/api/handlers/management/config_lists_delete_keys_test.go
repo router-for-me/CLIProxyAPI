@@ -271,6 +271,33 @@ func TestDeleteXAIKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 	}
 }
 
+func TestDeleteMetaKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg: &config.Config{
+			MetaKey: []config.MetaKey{
+				{APIKey: "shared-key", BaseURL: "https://a.example.com"},
+				{APIKey: "shared-key", BaseURL: "https://b.example.com"},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/meta-api-key?api-key=shared-key", nil)
+
+	h.DeleteMetaKey(c)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if got := len(h.cfg.MetaKey); got != 2 {
+		t.Fatalf("Meta keys len = %d, want 2", got)
+	}
+}
+
 func TestDeleteCodexKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 	t.Parallel()
 
