@@ -10,11 +10,14 @@ import (
 
 // cacheStatsResponse is the payload of GET /v0/management/cache-stats.
 type cacheStatsResponse struct {
-	Enabled  bool                        `json:"enabled"`
-	Global   cachestats.Aggregate        `json:"global"`
-	Models   []cachestats.KeyedAggregate `json:"models"`
-	Auths    []cachestats.KeyedAggregate `json:"auths"`
-	Sessions []cachestats.SessionSummary `json:"sessions"`
+	Enabled bool `json:"enabled"`
+	// Provider echoes the applied filter, empty when every provider is included.
+	Provider  string                      `json:"provider,omitempty"`
+	Global    cachestats.Aggregate        `json:"global"`
+	Providers []cachestats.KeyedAggregate `json:"providers"`
+	Models    []cachestats.KeyedAggregate `json:"models"`
+	Auths     []cachestats.KeyedAggregate `json:"auths"`
+	Sessions  []cachestats.SessionSummary `json:"sessions"`
 }
 
 // cacheStatsResetResponse is the payload of DELETE /v0/management/cache-stats.
@@ -26,24 +29,17 @@ type cacheStatsResetResponse struct {
 // GetCacheStats returns the global, per-model and per-auth prompt-cache summary
 // together with the retained session list, newest activity first.
 func (h *Handler) GetCacheStats(c *gin.Context) {
-	store := cachestats.Default()
-	response := cacheStatsResponse{
-		Enabled:  store.Enabled(),
-		Global:   store.Global(),
-		Models:   store.ByModel(),
-		Auths:    store.ByAuth(),
-		Sessions: store.Sessions(),
-	}
-	if response.Models == nil {
-		response.Models = []cachestats.KeyedAggregate{}
-	}
-	if response.Auths == nil {
-		response.Auths = []cachestats.KeyedAggregate{}
-	}
-	if response.Sessions == nil {
-		response.Sessions = []cachestats.SessionSummary{}
-	}
-	c.JSON(http.StatusOK, response)
+	provider := strings.TrimSpace(c.Query("provider"))
+	snapshot := cachestats.Default().Snapshot(cachestats.Filter{Provider: provider})
+	c.JSON(http.StatusOK, cacheStatsResponse{
+		Enabled:   snapshot.Enabled,
+		Provider:  provider,
+		Global:    snapshot.Global,
+		Providers: snapshot.Providers,
+		Models:    snapshot.Models,
+		Auths:     snapshot.Auths,
+		Sessions:  snapshot.Sessions,
+	})
 }
 
 // GetCacheStatsSession returns one session's summary and its retained request

@@ -48,6 +48,9 @@ type Record struct {
 	// ClaudeSessionID is the Claude Code agent session UUID the request belongs
 	// to, when the executor could resolve one. Empty for every other caller.
 	ClaudeSessionID string
+	// ClientFingerprint is the downstream caller's User-Agent. It is the only
+	// client identity available for a caller that sends no session id.
+	ClientFingerprint string
 	// CacheMissReason mirrors Detail.CacheMissReason for sinks that only read
 	// the record header.
 	CacheMissReason string

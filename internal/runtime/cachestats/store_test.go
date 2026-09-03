@@ -18,10 +18,14 @@ func newTestStore(t *testing.T, maxSessions, perSession int, idleTTL time.Durati
 func observation(session string, cacheRead, cacheCreation int64, at time.Time) Observation {
 	return Observation{
 		SessionID:           session,
+		KeyedBy:             KeyedBySession,
+		Provider:            "claude",
 		Model:               "claude-sonnet-5",
 		AuthID:              "auth-1",
 		At:                  at,
+		Signal:              SignalFull,
 		InputTokens:         2,
+		PromptTokens:        2 + cacheRead + cacheCreation,
 		OutputTokens:        4,
 		MaxTokens:           1024,
 		CacheReadTokens:     cacheRead,
@@ -280,5 +284,266 @@ func TestApplyConfigShrinksBounds(t *testing.T) {
 	}
 	if len(detail.Requests) != 2 {
 		t.Fatalf("Requests length after shrink = %d, want 2", len(detail.Requests))
+	}
+}
+
+func TestProviderWithoutCacheSignalIsNeverClassified(t *testing.T) {
+	base := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	store := newTestStore(t, 10, 10, time.Hour)
+
+	for i := 0; i < 3; i++ {
+		store.Record(Observation{
+			SessionID: "s1", KeyedBy: KeyedByAPIKeyModel, Provider: "xai", Model: "grok-4",
+			AuthID: "auth-1", At: base.Add(time.Duration(i) * time.Second), Signal: SignalNone,
+			InputTokens: 500, PromptTokens: 500, OutputTokens: 20,
+		})
+	}
+
+	detail, ok := store.Session("s1")
+	if !ok {
+		t.Fatal("Session(s1) not found")
+	}
+	for _, request := range detail.Requests {
+		if request.Tier != TierNA {
+			t.Errorf("tier = %q, want %q for a provider with no cache signal", request.Tier, TierNA)
+		}
+	}
+	summary := detail.Summary
+	if summary.Requests != 3 {
+		t.Errorf("requests = %d, want 3", summary.Requests)
+	}
+	if summary.Classified != 0 {
+		t.Errorf("classified = %d, want 0", summary.Classified)
+	}
+	if summary.Hits != 0 || summary.Misses != 0 || summary.T0s != 0 {
+		t.Errorf("tier counters must stay zero: %+v", summary.Aggregate)
+	}
+	if summary.HitRate != 0 {
+		t.Errorf("hit rate = %v, want 0 with a zero Classified count", summary.HitRate)
+	}
+	if summary.Signal != SignalNone {
+		t.Errorf("signal = %q, want none", summary.Signal)
+	}
+	if summary.KeyedBy != KeyedByAPIKeyModel {
+		t.Errorf("keyed_by = %q, want apikey-model", summary.KeyedBy)
+	}
+}
+
+func TestReadOnlySignalClassifiesAndReportsCachedShare(t *testing.T) {
+	base := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	store := newTestStore(t, 10, 10, time.Hour)
+
+	// OpenAI-style: prompt_tokens already includes cached_tokens.
+	store.Record(Observation{
+		SessionID: "s1", Provider: "openai-compatibility", Model: "gpt-x", AuthID: "auth-1",
+		At: base, Signal: SignalRead, InputTokens: 1000, PromptTokens: 1000, OutputTokens: 10,
+	})
+	store.Record(Observation{
+		SessionID: "s1", Provider: "openai-compatibility", Model: "gpt-x", AuthID: "auth-1",
+		At: base.Add(time.Second), Signal: SignalRead, InputTokens: 1000, PromptTokens: 1000,
+		OutputTokens: 10, CacheReadTokens: 800,
+	})
+
+	detail, _ := store.Session("s1")
+	if detail.Requests[0].Tier != TierT0 {
+		t.Errorf("first tier = %q, want T0", detail.Requests[0].Tier)
+	}
+	if detail.Requests[1].Tier != TierHit {
+		t.Errorf("second tier = %q, want hit", detail.Requests[1].Tier)
+	}
+	if detail.Summary.Classified != 2 {
+		t.Errorf("classified = %d, want 2", detail.Summary.Classified)
+	}
+	// 800 cached of 2000 prompt tokens.
+	if got := detail.Summary.CachedShare; got < 0.399 || got > 0.401 {
+		t.Errorf("cached share = %v, want 0.4", got)
+	}
+	// A read-only provider never reports a creation split, so no regime.
+	if detail.Summary.Regime != RegimeNone {
+		t.Errorf("regime = %q, want none", detail.Summary.Regime)
+	}
+}
+
+func TestRebindAttributionOnT0(t *testing.T) {
+	base := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	store := newTestStore(t, 10, 10, time.Hour)
+
+	first := observation("s1", 0, 1000, base)
+	store.Record(first)
+
+	warm := observation("s1", 5000, 0, base.Add(time.Second))
+	store.Record(warm)
+
+	// Same credential, cold read: the prefix aged out.
+	expired := observation("s1", 0, 4000, base.Add(2*time.Second))
+	store.Record(expired)
+
+	// Different credential, cold read: the prefix lives on the other account.
+	rebound := observation("s1", 0, 4000, base.Add(3*time.Second))
+	rebound.AuthID = "auth-2"
+	store.Record(rebound)
+
+	detail, _ := store.Session("s1")
+	wantCauses := []T0Cause{T0CauseFirst, "", T0CauseExpiry, T0CauseRebind}
+	for i, want := range wantCauses {
+		if got := detail.Requests[i].T0Cause; got != want {
+			t.Errorf("request %d t0_cause = %q, want %q", i+1, got, want)
+		}
+	}
+	if detail.Requests[3].Rebind != true {
+		t.Error("credential change must mark the request as a rebind")
+	}
+	if detail.Requests[2].Rebind {
+		t.Error("same credential must not be marked as a rebind")
+	}
+	summary := detail.Summary
+	if summary.Rebinds != 1 {
+		t.Errorf("rebinds = %d, want 1", summary.Rebinds)
+	}
+	if summary.T0Rebinds != 1 || summary.T0Expiries != 1 {
+		t.Errorf("t0 split = %d rebind / %d expiry, want 1/1", summary.T0Rebinds, summary.T0Expiries)
+	}
+	if got := store.Global().Rebinds; got != 1 {
+		t.Errorf("global rebinds = %d, want 1", got)
+	}
+}
+
+func alertingStore(t *testing.T, threshold int64) *Store {
+	t.Helper()
+	return NewStore(Config{
+		Enabled: true, MaxSessions: 10, PerSessionRequests: 50, IdleTTL: 24 * time.Hour,
+		Alert: AlertConfig{Enabled: true, LostTokensPerHour: threshold},
+	})
+}
+
+func TestLossAlertRaisesAndRearms(t *testing.T) {
+	base := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	store := alertingStore(t, 10000)
+
+	// Build a high-water mark of 20000, then regress twice for 6000 each.
+	store.Record(observation("s1", 20000, 0, base))
+	store.Record(observation("s1", 14000, 0, base.Add(time.Minute)))
+
+	if summary, _ := store.Session("s1"); summary.Summary.Alerting {
+		t.Fatal("alert fired below the threshold")
+	}
+
+	store.Record(observation("s1", 14000, 0, base.Add(2*time.Minute)))
+	detail, _ := store.Session("s1")
+	if !detail.Summary.Alerting {
+		t.Fatalf("alert did not fire: window loss = %d, threshold 10000", detail.Summary.LostTokensInWindow)
+	}
+	if detail.Summary.LostTokensInWindow != 12000 {
+		t.Errorf("window loss = %d, want 12000", detail.Summary.LostTokensInWindow)
+	}
+
+	// Still above half the threshold an hour later minus a minute: one 6000
+	// event has aged out, leaving 6000, which is not below half of 10000.
+	store.Record(observation("s1", 20000, 0, base.Add(61*time.Minute)))
+	detail, _ = store.Session("s1")
+	if !detail.Summary.Alerting {
+		t.Error("alert re-armed while the window still held half the threshold")
+	}
+
+	// Both events aged out: the window drains and the alert re-arms.
+	store.Record(observation("s1", 20000, 0, base.Add(3*time.Hour)))
+	detail, _ = store.Session("s1")
+	if detail.Summary.Alerting {
+		t.Errorf("alert did not re-arm: window loss = %d", detail.Summary.LostTokensInWindow)
+	}
+	if detail.Summary.LostTokensInWindow != 0 {
+		t.Errorf("window loss = %d, want 0 after the window drained", detail.Summary.LostTokensInWindow)
+	}
+}
+
+func TestLossAlertStaysOffWhenDisabled(t *testing.T) {
+	base := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	store := newTestStore(t, 10, 50, 24*time.Hour)
+
+	store.Record(observation("s1", 90000, 0, base))
+	store.Record(observation("s1", 0, 0, base.Add(time.Minute)))
+
+	detail, _ := store.Session("s1")
+	if detail.Summary.Alerting {
+		t.Fatal("alert fired with the alert disabled")
+	}
+}
+
+func TestApplyConfigReevaluatesAlert(t *testing.T) {
+	base := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	store := newTestStore(t, 10, 50, 24*time.Hour)
+	store.Record(observation("s1", 20000, 0, base))
+	store.Record(observation("s1", 5000, 0, base.Add(time.Minute)))
+
+	store.ApplyConfig(Config{
+		Enabled: true, MaxSessions: 10, PerSessionRequests: 50, IdleTTL: 24 * time.Hour,
+		Alert: AlertConfig{Enabled: true, LostTokensPerHour: 1000},
+	})
+	detail, _ := store.Session("s1")
+	if !detail.Summary.Alerting {
+		t.Fatal("lowering the threshold did not raise the alert")
+	}
+
+	store.ApplyConfig(Config{
+		Enabled: true, MaxSessions: 10, PerSessionRequests: 50, IdleTTL: 24 * time.Hour,
+		Alert: AlertConfig{Enabled: false},
+	})
+	detail, _ = store.Session("s1")
+	if detail.Summary.Alerting {
+		t.Fatal("disabling the alert did not clear it")
+	}
+}
+
+func TestSnapshotProviderFilter(t *testing.T) {
+	base := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	store := newTestStore(t, 10, 10, time.Hour)
+
+	store.Record(observation("claude-session", 0, 1000, base))
+	store.Record(Observation{
+		SessionID: "gemini-session", KeyedBy: KeyedByAPIKeyModel, Provider: "gemini",
+		Model: "gemini-3-pro", AuthID: "auth-2", At: base.Add(time.Second), Signal: SignalRead,
+		InputTokens: 900, PromptTokens: 900, OutputTokens: 5, CacheReadTokens: 400,
+	})
+
+	all := store.Snapshot(Filter{})
+	if len(all.Sessions) != 2 {
+		t.Fatalf("unfiltered sessions = %d, want 2", len(all.Sessions))
+	}
+	if len(all.Providers) != 2 {
+		t.Fatalf("provider groups = %d, want 2", len(all.Providers))
+	}
+
+	filtered := store.Snapshot(Filter{Provider: "GEMINI"})
+	if len(filtered.Sessions) != 1 || filtered.Sessions[0].ID != "gemini-session" {
+		t.Fatalf("filtered sessions = %+v, want only gemini-session", filtered.Sessions)
+	}
+	if filtered.Global.Requests != 1 {
+		t.Errorf("filtered global requests = %d, want 1", filtered.Global.Requests)
+	}
+	if len(filtered.Providers) != 1 || filtered.Providers[0].Key != "gemini" {
+		t.Errorf("filtered provider groups = %+v, want only gemini", filtered.Providers)
+	}
+
+	empty := store.Snapshot(Filter{Provider: "nope"})
+	if len(empty.Sessions) != 0 || empty.Global.Requests != 0 {
+		t.Errorf("unknown provider filter returned data: %+v", empty)
+	}
+}
+
+func TestShortIDHashesCompositeKeys(t *testing.T) {
+	uuid := "7c9e4b21-0000-4aaa-bbbb-cccccccccccc"
+	if got := shortID(uuid); got != "7c9e4b21" {
+		t.Errorf("shortID(uuid) = %q, want the first block", got)
+	}
+	first := shortID("apikey:abcd1234|gpt-x|curl/8.7")
+	second := shortID("apikey:abcd1234|gpt-y|curl/8.7")
+	if len(first) != 8 || len(second) != 8 {
+		t.Fatalf("composite short ids must be 8 chars: %q, %q", first, second)
+	}
+	if first == second {
+		t.Error("composite keys that differ must not share a short id")
+	}
+	if shortID("apikey:abcd1234|gpt-x|curl/8.7") != first {
+		t.Error("shortID must be stable for the same key")
 	}
 }

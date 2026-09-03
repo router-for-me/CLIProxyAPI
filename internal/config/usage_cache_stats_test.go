@@ -70,3 +70,38 @@ func TestUsageCacheStatsValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestParseConfigBytesUsageCacheStatsAlertDefaults(t *testing.T) {
+	cfg, err := ParseConfigBytes([]byte("usage-cache-stats:\n  enabled: true\n  alert:\n    enabled: true\n"))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes error = %v", err)
+	}
+	alert := cfg.UsageCacheStats.Alert
+	if !alert.Enabled {
+		t.Error("alert.Enabled = false, want true")
+	}
+	if alert.LostTokensPerHour != defaultUsageCacheStatsAlertLostPerHour {
+		t.Errorf("alert.LostTokensPerHour = %d, want %d", alert.LostTokensPerHour, defaultUsageCacheStatsAlertLostPerHour)
+	}
+}
+
+func TestParseConfigBytesUsageCacheStatsAlertOverride(t *testing.T) {
+	cfg, err := ParseConfigBytes([]byte("usage-cache-stats:\n  enabled: true\n  alert:\n    enabled: true\n    lost-tokens-per-hour: 250000\n"))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes error = %v", err)
+	}
+	if got := cfg.UsageCacheStats.Alert.LostTokensPerHour; got != 250000 {
+		t.Fatalf("alert.LostTokensPerHour = %d, want 250000", got)
+	}
+}
+
+func TestUsageCacheStatsAlertValidate(t *testing.T) {
+	_, err := ParseConfigBytes([]byte("usage-cache-stats:\n  enabled: true\n  alert:\n    enabled: true\n    lost-tokens-per-hour: 0\n"))
+	if err == nil {
+		t.Fatal("ParseConfigBytes succeeded for a zero threshold, want error")
+	}
+	// A disabled alert keeps a zero threshold legal.
+	if _, err := ParseConfigBytes([]byte("usage-cache-stats:\n  enabled: true\n  alert:\n    lost-tokens-per-hour: 0\n")); err != nil {
+		t.Fatalf("ParseConfigBytes error for a disabled alert = %v", err)
+	}
+}

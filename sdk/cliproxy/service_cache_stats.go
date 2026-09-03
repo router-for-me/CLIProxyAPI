@@ -31,7 +31,8 @@ func announceCacheStats(settings internalconfig.UsageCacheStatsConfig) bool {
 	return previous.Enabled != settings.Enabled ||
 		previous.MaxSessions != settings.MaxSessions ||
 		previous.PerSessionRequests != settings.PerSessionRequests ||
-		previous.IdleTTL != settings.IdleTTL
+		previous.IdleTTL != settings.IdleTTL ||
+		previous.Alert != settings.Alert
 }
 
 // applyCacheStatsConfig installs or reconfigures the per-session prompt-cache
@@ -52,6 +53,10 @@ func (s *Service) applyCacheStatsConfig(cfg *config.Config) {
 		MaxSessions:        settings.MaxSessions,
 		PerSessionRequests: settings.PerSessionRequests,
 		IdleTTL:            settings.IdleTTL,
+		Alert: cachestats.AlertConfig{
+			Enabled:           settings.Alert.Enabled,
+			LostTokensPerHour: settings.Alert.LostTokensPerHour,
+		},
 	})
 
 	if !announceCacheStats(settings) {
@@ -61,6 +66,7 @@ func (s *Service) applyCacheStatsConfig(cfg *config.Config) {
 		log.Info("cache-stats: disabled")
 		return
 	}
-	log.Infof("cache-stats: enabled | max-sessions=%d per-session-requests=%d idle-ttl=%s",
-		settings.MaxSessions, settings.PerSessionRequests, settings.IdleTTL)
+	log.Infof("cache-stats: enabled | max-sessions=%d per-session-requests=%d idle-ttl=%s alert=%t lost-tokens-per-hour=%d",
+		settings.MaxSessions, settings.PerSessionRequests, settings.IdleTTL,
+		settings.Alert.Enabled, settings.Alert.LostTokensPerHour)
 }

@@ -1,6 +1,10 @@
 package helps
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+)
 
 const nonStreamCacheBody = `{"id":"msg_01","type":"message","role":"assistant","model":"claude-sonnet-5",` +
 	`"usage":{"input_tokens":2,"cache_creation_input_tokens":35314,"cache_read_input_tokens":161937,` +
@@ -113,5 +117,88 @@ func TestClaudeCacheAnnotationApplyFillsOnlyMissingFields(t *testing.T) {
 func TestParseClaudeStreamUsageKeepsMessageDeltaAsUsageSource(t *testing.T) {
 	if _, ok := ParseClaudeStreamUsage([]byte(messageStartLine)); ok {
 		t.Error("message_start must not be treated as the usage source; message_delta is authoritative")
+	}
+}
+
+const openAICachedBody = `{"id":"chatcmpl-1","object":"chat.completion","model":"gpt-x",` +
+	`"usage":{"prompt_tokens":4096,"completion_tokens":120,"total_tokens":4216,` +
+	`"prompt_tokens_details":{"cached_tokens":3584},` +
+	`"completion_tokens_details":{"reasoning_tokens":40}}}`
+
+const geminiCachedBody = `{"candidates":[{"content":{"parts":[{"text":"ok"}]}}],` +
+	`"usageMetadata":{"promptTokenCount":5000,"candidatesTokenCount":80,"thoughtsTokenCount":20,` +
+	`"cachedContentTokenCount":4200,"totalTokenCount":5100}}`
+
+const noCacheSignalBody = `{"id":"resp-1","usage":{"prompt_tokens":300,"completion_tokens":15,"total_tokens":315}}`
+
+func TestParseOpenAIUsageReportsCachedTokensAsCacheRead(t *testing.T) {
+	detail := ParseOpenAIUsage([]byte(openAICachedBody))
+
+	if detail.CacheReadTokens != 3584 {
+		t.Errorf("CacheReadTokens = %d, want 3584", detail.CacheReadTokens)
+	}
+	if detail.CacheCreationTokens != 0 {
+		t.Errorf("CacheCreationTokens = %d, want 0: OpenAI reports no cache creation", detail.CacheCreationTokens)
+	}
+	if detail.CacheCreation5mTokens != 0 || detail.CacheCreation1hTokens != 0 {
+		t.Errorf("OpenAI must report no pool split, got %d/%d", detail.CacheCreation5mTokens, detail.CacheCreation1hTokens)
+	}
+	if detail.CacheMissReason != "" {
+		t.Errorf("CacheMissReason = %q, want empty", detail.CacheMissReason)
+	}
+	// prompt_tokens already includes cached_tokens, so the normalized input
+	// total must stay 4096 rather than double-counting the cache.
+	if got := detail.TokenBreakdown.Input.TotalTokens; got != 4096 {
+		t.Errorf("normalized prompt tokens = %d, want 4096", got)
+	}
+	if got := detail.TokenBreakdown.Input.CacheReadTokens; got != 3584 {
+		t.Errorf("normalized cache read = %d, want 3584", got)
+	}
+	if !detail.TokenBreakdown.Valid() {
+		t.Errorf("TokenBreakdown is not valid: %+v", detail.TokenBreakdown)
+	}
+}
+
+func TestParseGeminiUsageReportsCachedContentAsCacheRead(t *testing.T) {
+	detail := ParseGeminiUsage([]byte(geminiCachedBody))
+
+	if detail.CacheReadTokens != 4200 {
+		t.Errorf("CacheReadTokens = %d, want 4200", detail.CacheReadTokens)
+	}
+	if detail.CacheCreationTokens != 0 {
+		t.Errorf("CacheCreationTokens = %d, want 0: Gemini reports no cache creation", detail.CacheCreationTokens)
+	}
+	if detail.CacheCreation5mTokens != 0 || detail.CacheCreation1hTokens != 0 {
+		t.Errorf("Gemini must report no pool split, got %d/%d", detail.CacheCreation5mTokens, detail.CacheCreation1hTokens)
+	}
+	// cachedContentTokenCount is part of promptTokenCount.
+	if got := detail.TokenBreakdown.Input.TotalTokens; got != 5000 {
+		t.Errorf("normalized prompt tokens = %d, want 5000", got)
+	}
+	if got := detail.TokenBreakdown.Input.CacheReadTokens; got != 4200 {
+		t.Errorf("normalized cache read = %d, want 4200", got)
+	}
+}
+
+func TestParseUsageWithoutAnyCacheSignal(t *testing.T) {
+	detail := ParseOpenAIUsage([]byte(noCacheSignalBody))
+
+	if detail.CacheReadTokens != 0 || detail.CacheCreationTokens != 0 {
+		t.Errorf("cache tokens = %d/%d, want zeros", detail.CacheReadTokens, detail.CacheCreationTokens)
+	}
+	if got := detail.TokenBreakdown.Input.TotalTokens; got != 300 {
+		t.Errorf("normalized prompt tokens = %d, want 300", got)
+	}
+	if usage.CacheSignalForProvider("xai", "XAIExecutor") != usage.CacheSignalRead {
+		t.Error("xAI is OpenAI-compatible and reports cached_tokens")
+	}
+	if got := usage.CacheSignalForProvider("some-unknown-provider", "MysteryExecutor"); got != usage.CacheSignalNone {
+		t.Errorf("unknown provider signal = %q, want none", got)
+	}
+	if got := usage.CacheSignalForProvider("claude", "ClaudeExecutor"); got != usage.CacheSignalFull {
+		t.Errorf("claude signal = %q, want full", got)
+	}
+	if got := usage.CacheSignalForProvider("gemini", "GeminiExecutor"); got != usage.CacheSignalRead {
+		t.Errorf("gemini signal = %q, want read", got)
 	}
 }

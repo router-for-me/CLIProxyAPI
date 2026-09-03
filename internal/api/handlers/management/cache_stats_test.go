@@ -21,17 +21,20 @@ func seedCacheStats(t *testing.T) {
 	})
 	base := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
 	store.Record(cachestats.Observation{
-		SessionID: "session-a", Model: "claude-sonnet-5", AuthID: "auth-1", At: base,
-		InputTokens: 2, OutputTokens: 4, MaxTokens: 1024,
+		SessionID: "session-a", KeyedBy: cachestats.KeyedBySession, Provider: "claude",
+		Model: "claude-sonnet-5", AuthID: "auth-1", At: base, Signal: cachestats.SignalFull,
+		InputTokens: 2, PromptTokens: 35316, OutputTokens: 4, MaxTokens: 1024,
 		CacheCreationTokens: 35314, CacheCreation1hTokens: 35314,
 	})
 	store.Record(cachestats.Observation{
-		SessionID: "session-a", Model: "claude-sonnet-5", AuthID: "auth-1", At: base.Add(time.Minute),
-		InputTokens: 2, OutputTokens: 9, MaxTokens: 1024, CacheReadTokens: 35314,
+		SessionID: "session-a", KeyedBy: cachestats.KeyedBySession, Provider: "claude",
+		Model: "claude-sonnet-5", AuthID: "auth-1", At: base.Add(time.Minute), Signal: cachestats.SignalFull,
+		InputTokens: 2, PromptTokens: 35316, OutputTokens: 9, MaxTokens: 1024, CacheReadTokens: 35314,
 	})
 	store.Record(cachestats.Observation{
-		SessionID: "session-a", Model: "claude-sonnet-5", AuthID: "auth-1", At: base.Add(2 * time.Minute),
-		InputTokens: 2, OutputTokens: 9, MaxTokens: 1024, CacheReadTokens: 10112,
+		SessionID: "session-a", KeyedBy: cachestats.KeyedBySession, Provider: "claude",
+		Model: "claude-sonnet-5", AuthID: "auth-1", At: base.Add(2 * time.Minute), Signal: cachestats.SignalFull,
+		InputTokens: 2, PromptTokens: 10114, OutputTokens: 9, MaxTokens: 1024, CacheReadTokens: 10112,
 		CacheMissReason: "messages_changed", CacheMissedTokens: 25202,
 	})
 	cachestats.SetDefault(store)
@@ -157,5 +160,130 @@ func TestDeleteCacheStatsResets(t *testing.T) {
 	}
 	if summary.Global.Requests != 0 || len(summary.Sessions) != 0 {
 		t.Fatalf("store not empty after reset: %+v", summary)
+	}
+}
+
+func seedMixedProviderCacheStats(t *testing.T) {
+	t.Helper()
+	store := cachestats.NewStore(cachestats.Config{
+		Enabled: true, MaxSessions: 10, PerSessionRequests: 10, IdleTTL: time.Hour,
+	})
+	base := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	store.Record(cachestats.Observation{
+		SessionID: "claude-session", KeyedBy: cachestats.KeyedBySession, Provider: "claude",
+		Model: "claude-sonnet-5", AuthID: "auth-1", At: base, Signal: cachestats.SignalFull,
+		InputTokens: 2, PromptTokens: 2, OutputTokens: 4,
+		CacheCreationTokens: 35314, CacheCreation1hTokens: 35314,
+	})
+	store.Record(cachestats.Observation{
+		SessionID: "openai-session", KeyedBy: cachestats.KeyedByAPIKeyModel, Provider: "openai-compatibility",
+		Model: "gpt-x", AuthID: "auth-2", At: base.Add(time.Minute), Signal: cachestats.SignalRead,
+		InputTokens: 1000, PromptTokens: 1000, OutputTokens: 10, CacheReadTokens: 800,
+	})
+	store.Record(cachestats.Observation{
+		SessionID: "mystery-session", KeyedBy: cachestats.KeyedByAPIKeyModel, Provider: "mystery",
+		Model: "mystery-1", AuthID: "auth-3", At: base.Add(2 * time.Minute), Signal: cachestats.SignalNone,
+		InputTokens: 300, PromptTokens: 300, OutputTokens: 5,
+	})
+	cachestats.SetDefault(store)
+	t.Cleanup(func() { cachestats.SetDefault(nil) })
+}
+
+func TestGetCacheStatsBreaksDownByProvider(t *testing.T) {
+	seedMixedProviderCacheStats(t)
+	recorder := doCacheStatsRequest(t, newCacheStatsRouter(t), http.MethodGet, "/v0/management/cache-stats")
+
+	var response cacheStatsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response.Providers) != 3 {
+		t.Fatalf("provider groups = %d, want 3", len(response.Providers))
+	}
+	keys := map[string]bool{}
+	for _, group := range response.Providers {
+		keys[group.Key] = true
+	}
+	for _, want := range []string{"claude", "openai-compatibility", "mystery"} {
+		if !keys[want] {
+			t.Errorf("provider group %q missing from %+v", want, response.Providers)
+		}
+	}
+	// Three requests, but only the two providers with a cache signal are
+	// classified, so the global hit rate is not diluted by the third.
+	if response.Global.Requests != 3 {
+		t.Errorf("global requests = %d, want 3", response.Global.Requests)
+	}
+	if response.Global.Classified != 2 {
+		t.Errorf("global classified = %d, want 2", response.Global.Classified)
+	}
+}
+
+func TestGetCacheStatsProviderFilter(t *testing.T) {
+	seedMixedProviderCacheStats(t)
+	recorder := doCacheStatsRequest(t, newCacheStatsRouter(t), http.MethodGet, "/v0/management/cache-stats?provider=openai-compatibility")
+
+	var response cacheStatsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Provider != "openai-compatibility" {
+		t.Errorf("echoed provider = %q", response.Provider)
+	}
+	if len(response.Sessions) != 1 || response.Sessions[0].ID != "openai-session" {
+		t.Fatalf("filtered sessions = %+v, want only openai-session", response.Sessions)
+	}
+	if response.Global.Requests != 1 {
+		t.Errorf("filtered global requests = %d, want 1", response.Global.Requests)
+	}
+	if response.Sessions[0].Signal != cachestats.SignalRead {
+		t.Errorf("signal = %q, want read", response.Sessions[0].Signal)
+	}
+	if response.Sessions[0].KeyedBy != cachestats.KeyedByAPIKeyModel {
+		t.Errorf("keyed_by = %q, want apikey-model", response.Sessions[0].KeyedBy)
+	}
+	if got := response.Sessions[0].CachedShare; got < 0.799 || got > 0.801 {
+		t.Errorf("cached share = %v, want 0.8", got)
+	}
+}
+
+func TestGetCacheStatsProviderFilterWithNoMatches(t *testing.T) {
+	seedMixedProviderCacheStats(t)
+	recorder := doCacheStatsRequest(t, newCacheStatsRouter(t), http.MethodGet, "/v0/management/cache-stats?provider=nope")
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	var response cacheStatsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response.Sessions) != 0 || response.Global.Requests != 0 {
+		t.Fatalf("unknown provider returned data: %+v", response)
+	}
+	if response.Sessions == nil || response.Providers == nil {
+		t.Error("empty collections must serialize as [] rather than null")
+	}
+}
+
+func TestGetCacheStatsSessionReportsSignalAndCause(t *testing.T) {
+	seedMixedProviderCacheStats(t)
+	recorder := doCacheStatsRequest(t, newCacheStatsRouter(t), http.MethodGet, "/v0/management/cache-stats/sessions/mystery-session")
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	var detail cachestats.SessionDetail
+	if err := json.Unmarshal(recorder.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if detail.Requests[0].Tier != cachestats.TierNA {
+		t.Errorf("tier = %q, want n/a", detail.Requests[0].Tier)
+	}
+	if detail.Requests[0].Signal != cachestats.SignalNone {
+		t.Errorf("signal = %q, want none", detail.Requests[0].Signal)
+	}
+	if detail.Requests[0].Provider != "mystery" {
+		t.Errorf("provider = %q, want mystery", detail.Requests[0].Provider)
 	}
 }

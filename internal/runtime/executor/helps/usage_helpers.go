@@ -38,6 +38,7 @@ type UsageReporter struct {
 	reasoning           string
 	serviceTier         string
 	claudeSessionID     string
+	clientFingerprint   string
 	requestMaxTokens    int64
 	probeOrigin         string
 	generate            bool
@@ -73,18 +74,19 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		alias = model
 	}
 	reporter := &UsageReporter{
-		provider:    provider,
-		model:       model,
-		alias:       strings.TrimSpace(alias),
-		requestedAt: time.Now(),
-		apiKey:      apiKey,
-		source:      resolveUsageSource(auth, apiKey),
-		authType:    resolveUsageAuthType(auth),
-		reasoning:   usage.ReasoningEffortFromContext(ctx),
-		serviceTier: usage.ServiceTierFromContext(ctx),
-		probeOrigin: usage.ProbeOriginFromContext(ctx),
-		generate:    usage.GenerateFromContext(ctx),
-		stream:      usage.StreamFromContext(ctx),
+		provider:          provider,
+		model:             model,
+		alias:             strings.TrimSpace(alias),
+		requestedAt:       time.Now(),
+		apiKey:            apiKey,
+		source:            resolveUsageSource(auth, apiKey),
+		authType:          resolveUsageAuthType(auth),
+		reasoning:         usage.ReasoningEffortFromContext(ctx),
+		serviceTier:       usage.ServiceTierFromContext(ctx),
+		probeOrigin:       usage.ProbeOriginFromContext(ctx),
+		clientFingerprint: ClientUserAgentFromContext(ctx),
+		generate:          usage.GenerateFromContext(ctx),
+		stream:            usage.StreamFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -421,6 +423,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		ServiceTier:         r.serviceTier,
 		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
 		ClaudeSessionID:     r.claudeSessionID,
+		ClientFingerprint:   r.clientFingerprint,
 		CacheMissReason:     strings.TrimSpace(detail.CacheMissReason),
 		CacheMissedTokens:   detail.CacheMissedTokens,
 		RequestMaxTokens:    r.requestMaxTokens,
@@ -539,6 +542,19 @@ func (r *usageTTFTReadCloser) Read(p []byte) (int, error) {
 		r.once.Do(r.mark)
 	}
 	return n, errRead
+}
+
+// ClientUserAgentFromContext returns the downstream client's User-Agent, which
+// is the only client fingerprint available for callers that send no session id.
+func ClientUserAgentFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil {
+		return ""
+	}
+	return strings.TrimSpace(ginCtx.Request.Header.Get("User-Agent"))
 }
 
 func APIKeyFromContext(ctx context.Context) string {

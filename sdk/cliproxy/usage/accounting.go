@@ -399,3 +399,36 @@ func nonNegativeSum(values ...int64) (int64, bool) {
 	}
 	return total, true
 }
+
+// Cache signal levels describe how much prompt-cache accounting a provider
+// reports, so a consumer never presents a fabricated zero for a provider that
+// simply reports nothing.
+const (
+	// CacheSignalFull is Anthropic: reads, creation, the 5m/1h pool split and,
+	// with the diagnosis beta on, a miss reason.
+	CacheSignalFull = "full"
+	// CacheSignalRead is a provider reporting cached input tokens but no cache
+	// creation: OpenAI-compatible prompt_tokens_details.cached_tokens, or the
+	// Gemini family's cachedContentTokenCount.
+	CacheSignalRead = "read"
+	// CacheSignalNone is a provider that reports no cache accounting at all.
+	CacheSignalNone = "none"
+)
+
+// CacheSignalForProvider classifies how much prompt-cache accounting a provider
+// reports. It follows the same provider markers as the token-accounting
+// semantics, so a provider added to one stays consistent with the other.
+func CacheSignalForProvider(provider, executorType string) string {
+	switch tokenAccountingSemanticsFor(provider, executorType) {
+	case tokenAccountingSemanticsIndependent:
+		// Anthropic is the only independent-accounting provider, and the only
+		// one reporting cache creation separately from input.
+		return CacheSignalFull
+	case tokenAccountingSemanticsSubset, tokenAccountingSemanticsSeparateReasoning:
+		// OpenAI-compatible and the Gemini family both report cached input
+		// tokens inside their prompt total, and neither reports creation.
+		return CacheSignalRead
+	default:
+		return CacheSignalNone
+	}
+}
