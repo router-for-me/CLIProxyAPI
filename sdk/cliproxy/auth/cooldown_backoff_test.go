@@ -144,14 +144,104 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 		t.Fatalf("expected second window to close at %v, got %v", now.Add(4*time.Second), auth.Quota.NextRecoverAt)
 	}
 
-	// A provider supplied retry hint always takes effect, even in-window.
+	// A short provider supplied retry hint is floored, even in-window.
 	retryAfter := 10 * time.Second
 	applyAuthFailureState(auth, quotaErr, &retryAfter, now.Add(3*time.Second), false)
 	if auth.Quota.BackoffLevel != 2 {
 		t.Fatalf("expected BackoffLevel to stay 2 with retry hint, got %d", auth.Quota.BackoffLevel)
 	}
-	if !auth.Quota.NextRecoverAt.Equal(now.Add(13 * time.Second)) {
-		t.Fatalf("expected retry hint window to close at %v, got %v", now.Add(13*time.Second), auth.Quota.NextRecoverAt)
+	if !auth.Quota.NextRecoverAt.Equal(now.Add(33 * time.Second)) {
+		t.Fatalf("expected retry hint window to close at %v, got %v", now.Add(33*time.Second), auth.Quota.NextRecoverAt)
+	}
+}
+
+func TestQuotaCooldownAfterRetryHintFloorsShortDurations(t *testing.T) {
+	now := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	shortRetryAfter := 708 * time.Millisecond
+	longRetryAfter := 45 * time.Second
+	quota := QuotaState{BackoffLevel: 4}
+
+	tests := []struct {
+		name       string
+		retryAfter time.Duration
+		want       time.Duration
+	}{
+		{name: "sub-second hint", retryAfter: shortRetryAfter, want: minimumQuotaRetryAfter},
+		{name: "long hint", retryAfter: longRetryAfter, want: longRetryAfter},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, gotBackoffLevel := quotaCooldownAfterRetryHint(quota, &testCase.retryAfter, now)
+			if want := now.Add(testCase.want); !got.Equal(want) {
+				t.Fatalf("quota cooldown = %v, want %v", got, want)
+			}
+			if gotBackoffLevel != quota.BackoffLevel {
+				t.Fatalf("backoff level = %d, want %d", gotBackoffLevel, quota.BackoffLevel)
+			}
+		})
+	}
+}
+
+func TestManagerMarkResultFloorsShortQuotaRetryAfter(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-short-retry-after",
+		Provider: "gemini",
+		Metadata: map[string]any{"type": "gemini"},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	retryAfter := 708 * time.Millisecond
+	before := time.Now()
+	manager.MarkResult(context.Background(), Result{
+		AuthID:     auth.ID,
+		Provider:   auth.Provider,
+		Model:      "gemini-3.1-flash-image",
+		RetryAfter: &retryAfter,
+		Error: &Error{
+			Code:       "rate_limit",
+			Message:    "quota",
+			HTTPStatus: http.StatusTooManyRequests,
+		},
+	})
+	after := time.Now()
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gemini-3.1-flash-image"] == nil {
+		t.Fatalf("expected model state after failure")
+	}
+	state := updated.ModelStates["gemini-3.1-flash-image"]
+	if state.NextRetryAfter.Before(before.Add(minimumQuotaRetryAfter)) || state.NextRetryAfter.After(after.Add(minimumQuotaRetryAfter)) {
+		t.Fatalf("model cooldown = %v, want approximately %v", state.NextRetryAfter, minimumQuotaRetryAfter)
+	}
+}
+
+func TestApplyAuthFailureStateFloorsShortQuotaRetryAfter(t *testing.T) {
+	now := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	quotaErr := &Error{Code: "rate_limit", Message: "quota", HTTPStatus: http.StatusTooManyRequests}
+
+	shortRetryAfter := 708 * time.Millisecond
+	auth := &Auth{ID: "auth-short-retry-after-level"}
+	applyAuthFailureState(auth, quotaErr, &shortRetryAfter, now, false)
+	if want := now.Add(minimumQuotaRetryAfter); !auth.NextRetryAfter.Equal(want) || !auth.Quota.NextRecoverAt.Equal(want) {
+		t.Fatalf("auth cooldown = %v, quota recovery = %v, want %v", auth.NextRetryAfter, auth.Quota.NextRecoverAt, want)
+	}
+
+	longRetryAfter := 45 * time.Second
+	auth = &Auth{ID: "auth-long-retry-after-level"}
+	applyAuthFailureState(auth, quotaErr, &longRetryAfter, now, false)
+	if want := now.Add(longRetryAfter); !auth.NextRetryAfter.Equal(want) || !auth.Quota.NextRecoverAt.Equal(want) {
+		t.Fatalf("auth cooldown = %v, quota recovery = %v, want %v", auth.NextRetryAfter, auth.Quota.NextRecoverAt, want)
+	}
+
+	auth = &Auth{ID: "auth-disabled-short-retry-after"}
+	applyAuthFailureState(auth, quotaErr, &shortRetryAfter, now, true)
+	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || !auth.Quota.NextRecoverAt.IsZero() || auth.Quota.Exceeded {
+		t.Fatalf("cooldown with disable_cooling = unavailable %t next %v recovery %v exceeded %t", auth.Unavailable, auth.NextRetryAfter, auth.Quota.NextRecoverAt, auth.Quota.Exceeded)
 	}
 }
 
