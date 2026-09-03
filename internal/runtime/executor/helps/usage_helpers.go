@@ -444,7 +444,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 	if r == nil {
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
 	}
-	return usage.Record{
+	record := usage.Record{
 		Provider:            r.provider,
 		BaseURL:             r.baseURL,
 		ExecutorType:        r.executorType,
@@ -470,6 +470,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Fail:                fail,
 		Detail:              detail,
 	}
+	record.TokensPerSecond = usage.TokensPerSecond(detail.OutputTokens, record.Latency, record.TTFT)
+	return record
 }
 
 func failFromErrors(errs ...error) usage.Failure {
