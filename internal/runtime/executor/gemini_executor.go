@@ -15,7 +15,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -89,9 +88,6 @@ func (e *GeminiExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 	if apiKey != "" {
 		req.Header.Set("x-goog-api-key", apiKey)
 		req.Header.Del("Authorization")
-	} else {
-		req.Header.Del("x-goog-api-key")
-		req.Header.Del("Authorization")
 	}
 	applyGeminiHeaders(req, auth)
 	return nil
@@ -163,7 +159,6 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = capGeminiMaxOutputTokens(body, baseModel)
-	body = internalsignature.SanitizeGeminiRequestThoughtSignatures(body, "contents")
 
 	action := "generateContent"
 	if req.Metadata != nil {
@@ -281,7 +276,6 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = capGeminiMaxOutputTokens(body, baseModel)
-	body = internalsignature.SanitizeGeminiRequestThoughtSignatures(body, "contents")
 	body = helps.EnsureGeminiLeadingUserContent(body, "contents")
 
 	baseURL := resolveGeminiBaseURL(auth)
@@ -412,6 +406,16 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	fromProtocol := opts.SourceFormat.String()
 	originalTranslated := geminiInteractionsPayloadConfigSource(ctx, e.cfg, targetName, req.Payload, opts, false, helps.APIKeyModelIsCompat(req))
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	// For the antigravity agent, a tool-calling continuation turn must resume
+	// the upstream interaction (previous_interaction_id + environment_id) and
+	// send only its function_result — NOT replay the assistant tool-call
+	// history. Otherwise Google rejects with "Cannot specify tool calls
+	// outside of Turn items". Applied AFTER payload-config so the rewrite is
+	// the final authoritative body.
+	body = helps.ApplyAntigravityInteractionsContinuation(ctx, targetName, originalRequestRawJSON(req, opts), opts, body)
+	// Metadata only: the full body may carry prompts, file content, and tool
+	// results that must not bypass the configured request-recording path.
+	log.Debugf("gemini interactions upstream REQUEST target=%s bytes=%d steps=%d", targetName, len(body), len(gjson.GetBytes(body, "input").Array()))
 
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/interactions", baseURL, glAPIVersion)
@@ -464,6 +468,12 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 		return resp, err
 	}
 	reporter.Publish(ctx, helps.ParseInteractionsUsage(data))
+	// Capture the upstream continuation coordinates so a later tool-calling
+	// turn can resume this antigravity agent (non-stream variant).
+	helps.CacheAntigravityInteractionsState(ctx, targetName, originalRequestRawJSON(req, opts), opts, data)
+	// Metadata only: success bodies can embed full model output; errors keep
+	// the summarized body for diagnostics.
+	log.Debugf("gemini interactions non-stream upstream response: status=%d bytes=%d", httpResp.StatusCode, len(data))
 	targetFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatInteractions, targetFormat, req.Model, opts.OriginalRequest, body, data, &param)
@@ -493,6 +503,13 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	originalTranslated := geminiInteractionsPayloadConfigSource(ctx, e.cfg, targetName, req.Payload, opts, true, helps.APIKeyModelIsCompat(req))
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = helps.SetBoolIfDifferent(body, "stream", true)
+	// For the antigravity agent, a tool-calling continuation turn must resume
+	// the upstream interaction (previous_interaction_id + environment_id) and
+	// send only its function_result — NOT replay the assistant tool-call
+	// history. Otherwise Google rejects with "Cannot specify tool calls
+	// outside of Turn items". Applied AFTER payload-config so the rewrite is
+	// the final authoritative body.
+	body = helps.ApplyAntigravityInteractionsContinuation(ctx, targetName, originalRequestRawJSON(req, opts), opts, body)
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/interactions", baseURL, glAPIVersion)
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -572,6 +589,11 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 				if detail, ok := helps.ParseInteractionsStreamUsage(payload); ok {
 					reporter.Publish(ctx, detail)
 				}
+				// Capture the upstream continuation coordinates so a later
+				// tool-calling turn can resume this antigravity agent instead
+				// of replaying the full assistant tool-call history (Google:
+				// "Cannot specify tool calls outside of Turn items").
+				helps.CacheAntigravityInteractionsState(ctx, targetName, originalRequest, opts, payload)
 			}
 			if responseFormat == sdktranslator.FormatInteractions {
 				visibleFrame := append(bytes.TrimRight(rawFrame, "\r\n"), '\n', '\n')
@@ -648,7 +670,6 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
 	translatedReq = helps.SetStringIfDifferent(translatedReq, "model", baseModel)
-	translatedReq = internalsignature.SanitizeGeminiRequestThoughtSignatures(translatedReq, "contents")
 	translatedReq = helps.EnsureGeminiLeadingUserContent(translatedReq, "contents")
 
 	baseURL := resolveGeminiBaseURL(auth)
@@ -684,7 +705,6 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -975,4 +995,13 @@ func fixGeminiImageAspectRatio(modelName string, rawJSON []byte) []byte {
 		}
 	}
 	return rawJSON
+}
+
+// originalRequestRawJSON resolves the client-facing request body the same way
+// the executor does elsewhere (opts.OriginalRequest falls back to Payload).
+func originalRequestRawJSON(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) []byte {
+	if len(opts.OriginalRequest) > 0 {
+		return opts.OriginalRequest
+	}
+	return req.Payload
 }
