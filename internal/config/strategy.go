@@ -9,8 +9,9 @@ import (
 // (claude-api-key, openai-compatibility). Empty means unset: entries follow
 // the global routing.strategy and request-fault errors keep the historical
 // hard-stop rotation behavior. "priority"/"failover" are accepted as Model
-// Routes-compatible aliases at input boundaries (store read, config parse)
-// and canonicalized here so downstream layers see one spelling.
+// Routes-compatible aliases at input boundaries (the management API request,
+// canonicalized in the DTO; and the renderer's store read) so downstream
+// layers see one spelling.
 const (
 	PoolStrategyRoundRobin         = "round-robin"
 	PoolStrategyWeightedRoundRobin = "weighted-round-robin"
@@ -21,11 +22,11 @@ const (
 // strategy. Unknown or blank values return "" (unset).
 func NormalizePoolRoutingStrategy(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "round-robin", "failover":
+	case "round-robin", "roundrobin", "rr", "failover":
 		return PoolStrategyRoundRobin
-	case "weighted-round-robin", "wrr":
+	case "weighted-round-robin", "weightedroundrobin", "wrr":
 		return PoolStrategyWeightedRoundRobin
-	case "fill-first", "priority", "ff":
+	case "fill-first", "fillfirst", "ff", "priority":
 		return PoolStrategyFillFirst
 	default:
 		return ""

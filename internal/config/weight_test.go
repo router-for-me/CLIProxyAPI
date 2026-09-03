@@ -60,3 +60,46 @@ func TestAPIKeyWeightParsingAndZeroPersistence(t *testing.T) {
 		t.Fatalf("saved config does not preserve explicit zero weight:\n%s", saved)
 	}
 }
+
+// TestOpenAICompatibilityEntryPriorityParsingAndZeroPersistence mirrors
+// TestAPIKeyWeightParsingAndZeroPersistence for the pointer-backed per-entry
+// priority: an explicit tier 0 must parse into *int 0 and survive the YAML
+// save/merge path instead of being pruned as a "default zero".
+func TestOpenAICompatibilityEntryPriorityParsingAndZeroPersistence(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`openai-compatibility:
+  - name: openrouter
+    base-url: https://openrouter.ai/api/v1
+    api-key-entries:
+      - api-key: key
+        priority: 0
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if len(cfg.OpenAICompatibility) != 1 || len(cfg.OpenAICompatibility[0].APIKeyEntries) != 1 {
+		t.Fatalf("parsed provider entries = %#v, want one provider with one entry", cfg.OpenAICompatibility)
+	}
+	if entry := cfg.OpenAICompatibility[0].APIKeyEntries[0]; entry.Priority == nil || *entry.Priority != 0 {
+		t.Fatalf("parsed entry priority = %#v, want explicit zero", entry)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if errWrite := os.WriteFile(configPath, []byte(`openai-compatibility:
+  - name: openrouter
+    base-url: https://openrouter.ai/api/v1
+    api-key-entries:
+      - api-key: key
+`), 0644); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
+		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	}
+	saved, errRead := os.ReadFile(configPath)
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	if !strings.Contains(string(saved), "priority: 0") {
+		t.Fatalf("saved config does not preserve explicit zero entry priority:\n%s", saved)
+	}
+}

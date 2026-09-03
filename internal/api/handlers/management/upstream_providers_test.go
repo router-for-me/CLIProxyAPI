@@ -187,6 +187,96 @@ func TestUpstreamProviderResponseExposesEntryIdentity(t *testing.T) {
 	}
 }
 
+// TestToUpstreamProviderMapsRoutingStrategyAndEntryPriority covers the DTO
+// boundary for pool routing: the row-level routing_strategy is canonicalized
+// here (a raw "failover" from the dashboard is stored as "round-robin"), and
+// each entry's optional priority pointer is copied verbatim (nil stays nil =
+// inherit the row-level priority). The response side embeds the store row
+// verbatim, so the canonical strategy and entry priorities round-trip to the
+// dashboard editor.
+func TestToUpstreamProviderMapsRoutingStrategyAndEntryPriority(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+	p := toUpstreamProvider(&upstreamProviderReq{
+		ProviderType:    "claude-api-key",
+		RoutingStrategy: "failover",
+		APIKeyEntries: []upstreamProviderEntryReq{
+			{APIKey: "k1", Priority: intPtr(10)},
+			{APIKey: "k2"}, // inherit
+		},
+	})
+	if p.RoutingStrategy != "round-robin" {
+		t.Fatalf("RoutingStrategy = %q, want round-robin (failover canonicalized at the boundary)", p.RoutingStrategy)
+	}
+	if p.APIKeyEntries[0].Priority == nil || *p.APIKeyEntries[0].Priority != 10 {
+		t.Fatalf("entry 0 priority = %#v, want *10", p.APIKeyEntries[0].Priority)
+	}
+	if p.APIKeyEntries[1].Priority != nil {
+		t.Fatalf("entry 1 priority = %#v, want nil", p.APIKeyEntries[1].Priority)
+	}
+
+	// The persisted row must surface through the dashboard response with the
+	// canonical strategy and the explicit priority; a nil priority must stay
+	// absent (distinct from an explicit 0).
+	raw, err := json.Marshal(toUpstreamProviderResponse(store.UpstreamProvider{
+		ID:              1,
+		ProviderType:    "claude-api-key",
+		RoutingStrategy: p.RoutingStrategy,
+		APIKeyEntries:   p.APIKeyEntries,
+	}))
+	if err != nil {
+		t.Fatalf("encode response: %v", err)
+	}
+	encoded := string(raw)
+	if !strings.Contains(encoded, `"routing_strategy":"round-robin"`) {
+		t.Fatalf("response missing canonical routing_strategy: %s", encoded)
+	}
+	if !strings.Contains(encoded, `"priority":10`) {
+		t.Fatalf("response missing entry priority: %s", encoded)
+	}
+	// The nil-priority entry must omit the key entirely (the row-level
+	// `priority` scalar is always emitted by the store row; only the per-entry
+	// projection is optional).
+	var decoded struct {
+		APIKeyEntries []struct {
+			APIKey   string `json:"api_key"`
+			Priority *int   `json:"priority"`
+		} `json:"api_key_entries"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(decoded.APIKeyEntries) != 2 {
+		t.Fatalf("decoded %d entries, want 2", len(decoded.APIKeyEntries))
+	}
+	if decoded.APIKeyEntries[1].Priority != nil {
+		t.Fatalf("nil-priority entry decoded priority = %#v, want nil", decoded.APIKeyEntries[1].Priority)
+	}
+	if !strings.Contains(encoded, `"api_key":"k2"}`) {
+		t.Fatalf("nil-priority entry emitted keys beyond api_key: %s", encoded)
+	}
+}
+
+// TestValidateUpstreamProviderRequestRoutingStrategy verifies the pre-store
+// gate: an unknown strategy is rejected with the descriptive fixable error,
+// while canonical values, the Model Routes aliases, and the global-normalizer
+// shorthands pass through (they are canonicalized in toUpstreamProvider).
+func TestValidateUpstreamProviderRequestRoutingStrategy(t *testing.T) {
+	for _, raw := range []string{"bogus", "fill first", "fail-over"} {
+		err := validateUpstreamProviderRequest(&upstreamProviderReq{RoutingStrategy: raw})
+		if err == nil {
+			t.Fatalf("validateUpstreamProviderRequest(%q) = nil, want error", raw)
+		}
+		if !strings.Contains(err.Error(), "invalid routing strategy") {
+			t.Fatalf("error for %q = %v, want the descriptive invalid-routing-strategy message", raw, err)
+		}
+	}
+	for _, raw := range []string{"", "   ", "failover", "priority", "round-robin", "weighted-round-robin", "wrr", "fill-first", "ff"} {
+		if err := validateUpstreamProviderRequest(&upstreamProviderReq{RoutingStrategy: raw}); err != nil {
+			t.Fatalf("validateUpstreamProviderRequest(%q) = %v, want nil", raw, err)
+		}
+	}
+}
+
 func TestUpstreamProviderErrorResponseEntryNameConflictIsSafe(t *testing.T) {
 	const secretValue = "entry-secret-must-not-appear"
 	recorder := httptest.NewRecorder()

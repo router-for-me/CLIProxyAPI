@@ -11,9 +11,13 @@ func TestNormalizePoolRoutingStrategy(t *testing.T) {
 		{"   ", ""},
 		{"round-robin", "round-robin"},
 		{" Round-Robin ", "round-robin"},
+		{"roundrobin", "round-robin"}, // global-normalizer shorthand
+		{"rr", "round-robin"},         // global-normalizer shorthand
 		{"weighted-round-robin", "weighted-round-robin"},
+		{"weightedroundrobin", "weighted-round-robin"}, // global-normalizer shorthand
 		{"wrr", "weighted-round-robin"},
 		{"fill-first", "fill-first"},
+		{"fillfirst", "fill-first"}, // global-normalizer shorthand
 		{"ff", "fill-first"},
 		{"priority", "fill-first"},  // alias, canonicalized
 		{"failover", "round-robin"}, // alias, canonicalized

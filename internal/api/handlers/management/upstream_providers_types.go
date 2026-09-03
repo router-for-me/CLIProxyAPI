@@ -10,9 +10,13 @@ import "time"
 // upstream_providers.go) so callers must round-trip the entry id to preserve
 // row identity across edits.
 type upstreamProviderReq struct {
-	ProviderType            string         `json:"provider_type"`
-	Name                    string         `json:"name,omitempty"`
-	Priority                int            `json:"priority,omitempty"`
+	ProviderType string `json:"provider_type"`
+	Name         string `json:"name,omitempty"`
+	Priority     int    `json:"priority,omitempty"`
+	// RoutingStrategy is the optional in-pool selection strategy for
+	// entry-bearing providers. Accepts the canonical values plus the Model
+	// Routes aliases (priority, failover) — canonicalized in toUpstreamProvider.
+	RoutingStrategy         string         `json:"routing_strategy,omitempty"`
 	Disabled                bool           `json:"disabled,omitempty"`
 	Prefix                  string         `json:"prefix,omitempty"`
 	APIKey                  string         `json:"api_key,omitempty"`
@@ -66,6 +70,10 @@ type upstreamProviderEntryReq struct {
 	// default; the dashboard editor restricts user input to positive values
 	// 1..MaxCredentialWeight. Encoded as `weight` only when set.
 	Weight *int `json:"weight,omitempty"`
+
+	// Priority is the optional selection tier for this entry. nil = inherit
+	// the row-level priority.
+	Priority *int `json:"priority,omitempty"`
 }
 
 // parseRFC3339 parses an RFC3339 timestamp string, returning ok=false on

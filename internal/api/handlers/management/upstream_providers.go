@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 )
@@ -75,6 +76,18 @@ func (h *Handler) upstreamProviderErrorResponse(c *gin.Context, err error) {
 	}})
 }
 
+// validateUpstreamProviderRequest checks a decoded request body before it
+// reaches the store. Unknown routing strategies are rejected here with the
+// descriptive config error so the operator sees a fixable message instead of
+// the strategy being silently dropped to "unset"; recognized aliases and
+// canonical values pass through (toUpstreamProvider canonicalizes them).
+func validateUpstreamProviderRequest(body *upstreamProviderReq) error {
+	if raw := strings.TrimSpace(body.RoutingStrategy); raw != "" && config.NormalizePoolRoutingStrategy(raw) == "" {
+		return config.ValidatePoolRoutingStrategy(raw)
+	}
+	return nil
+}
+
 // toUpstreamProvider maps a decoded JSON body to a store.UpstreamProvider,
 // zeroing the id/timestamps (set by the DB on insert/update).
 func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
@@ -82,6 +95,7 @@ func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 		ProviderType:            strings.TrimSpace(body.ProviderType),
 		Name:                    strings.TrimSpace(body.Name),
 		Priority:                body.Priority,
+		RoutingStrategy:         config.NormalizePoolRoutingStrategy(body.RoutingStrategy),
 		Disabled:                body.Disabled,
 		Prefix:                  strings.TrimSpace(body.Prefix),
 		APIKey:                  strings.TrimSpace(body.APIKey),
@@ -147,6 +161,10 @@ func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 		if e.Weight != nil {
 			w := *e.Weight
 			entry.Weight = &w
+		}
+		if e.Priority != nil {
+			v := *e.Priority
+			entry.Priority = &v
 		}
 		p.APIKeyEntries = append(p.APIKeyEntries, entry)
 	}
@@ -231,6 +249,12 @@ func (h *Handler) CreateUpstreamProvider(c *gin.Context) {
 		}})
 		return
 	}
+	if err := validateUpstreamProviderRequest(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"type": "invalid_request", "message": err.Error(),
+		}})
+		return
+	}
 	p := toUpstreamProvider(&body)
 	created, err := srcs.Create(c.Request.Context(), p)
 	if err != nil {
@@ -271,6 +295,12 @@ func (h *Handler) UpdateUpstreamProvider(c *gin.Context) {
 	}
 	var body upstreamProviderReq
 	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"type": "invalid_request", "message": err.Error(),
+		}})
+		return
+	}
+	if err := validateUpstreamProviderRequest(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
 			"type": "invalid_request", "message": err.Error(),
 		}})
