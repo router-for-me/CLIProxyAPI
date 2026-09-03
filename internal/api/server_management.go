@@ -40,6 +40,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/plugins/:id/config", s.mgmt.PutPluginConfig)
 		mgmt.PATCH("/plugins/:id/config", s.mgmt.PatchPluginConfig)
 
+		mgmt.GET("/claude-client-versions", s.mgmt.GetClaudeClientVersions)
+
 		mgmt.GET("/debug", s.mgmt.GetDebug)
 		mgmt.PUT("/debug", s.mgmt.PutDebug)
 		mgmt.PATCH("/debug", s.mgmt.PutDebug)

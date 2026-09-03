@@ -28,6 +28,10 @@ const (
 	claudeDeviceProfileTTL                 = 7 * 24 * time.Hour
 	claudeDeviceProfileLockTTL             = 5 * time.Second
 	claudeDeviceProfileCleanupPeriod       = time.Hour
+	// claudeMaxPlausibleMajorDrift bounds how far ahead of the configured baseline
+	// a client User-Agent may claim to be before it stops being a believable
+	// upgrade and starts looking like a fabricated version string.
+	claudeMaxPlausibleMajorDrift = 1
 )
 
 var (
@@ -79,6 +83,10 @@ func (v claudeCLIVersion) Compare(other claudeCLIVersion) int {
 	default:
 		return 0
 	}
+}
+
+func (v claudeCLIVersion) String() string {
+	return strconv.Itoa(v.major) + "." + strconv.Itoa(v.minor) + "." + strconv.Itoa(v.patch)
 }
 
 type ClaudeDeviceProfile struct {
@@ -212,8 +220,56 @@ func shouldUpgradeClaudeDeviceProfile(candidate, current ClaudeDeviceProfile) bo
 	return candidate.version.Compare(current.version) > 0
 }
 
+// plausibleClaudeCLIVersion treats the configured baseline as a FLOOR rather than
+// a lock. Claude Code auto-updates, so an equality gate silently reclassified every
+// genuine client as foreign the moment the operator pin fell behind, and real native
+// requests were cloaked as a result. A candidate at or above the baseline is
+// plausible; anything older is a stale copied User-Agent and stays implausible.
+//
+// claudeMaxPlausibleMajorDrift keeps a ceiling on that floor: a client one major
+// ahead of the pin is a believable upgrade, "claude-cli/999.0.0" is not.
 func plausibleClaudeCLIVersion(candidate, baseline claudeCLIVersion) bool {
-	return candidate.Compare(baseline) == 0
+	if candidate.major > baseline.major+claudeMaxPlausibleMajorDrift {
+		return false
+	}
+	return candidate.Compare(baseline) >= 0
+}
+
+// atLeastDottedVersion applies the same floor rule to the Stainless package and
+// Node runtime versions. Both move independently of the CLI version, so demanding
+// equality would re-create the identical silent downgrade the next time the bundled
+// SDK or Node build is bumped. An unparseable value on either side falls back to
+// exact equality so a malformed header cannot slip past the check.
+func atLeastDottedVersion(candidate, baseline string) bool {
+	candidateParts, okCandidate := parseDottedVersion(candidate)
+	baselineParts, okBaseline := parseDottedVersion(baseline)
+	if !okCandidate || !okBaseline {
+		return strings.TrimSpace(candidate) == strings.TrimSpace(baseline)
+	}
+	for index := range candidateParts {
+		if candidateParts[index] != baselineParts[index] {
+			return candidateParts[index] > baselineParts[index]
+		}
+	}
+	return true
+}
+
+// parseDottedVersion accepts "0.112.1" and "v26.3.0" alike.
+func parseDottedVersion(value string) ([3]int, bool) {
+	var parts [3]int
+	trimmed := strings.TrimPrefix(strings.TrimSpace(value), "v")
+	fields := strings.Split(trimmed, ".")
+	if len(fields) != 3 {
+		return parts, false
+	}
+	for index, field := range fields {
+		number, errParse := strconv.Atoi(field)
+		if errParse != nil || number < 0 {
+			return parts, false
+		}
+		parts[index] = number
+	}
+	return parts, true
 }
 
 func meetsClaudeDeviceProfileBaseline(candidate, baseline ClaudeDeviceProfile) bool {
@@ -224,8 +280,8 @@ func meetsClaudeDeviceProfileBaseline(candidate, baseline ClaudeDeviceProfile) b
 		return false
 	}
 	return plausibleClaudeCLIVersion(candidate.version, baseline.version) &&
-		candidate.PackageVersion == baseline.PackageVersion &&
-		candidate.RuntimeVersion == baseline.RuntimeVersion
+		atLeastDottedVersion(candidate.PackageVersion, baseline.PackageVersion) &&
+		atLeastDottedVersion(candidate.RuntimeVersion, baseline.RuntimeVersion)
 }
 
 func pinClaudeDeviceProfilePlatform(profile, baseline ClaudeDeviceProfile) ClaudeDeviceProfile {
@@ -360,6 +416,24 @@ func purgeExpiredClaudeDeviceProfiles() {
 func ResolveClaudeDeviceProfile(auth *cliproxyauth.Auth, apiKey string, headers http.Header, cfg *config.Config) ClaudeDeviceProfile {
 	profile, errProfile := ResolveClaudeDeviceProfileRequired(context.Background(), auth, apiKey, headers, cfg)
 	if errProfile != nil {
+		return defaultClaudeDeviceProfile(cfg)
+	}
+	return profile
+}
+
+// ResolveClaudeDeviceProfileBestEffort resolves the per-credential device profile
+// without ever failing the request. It is used on two paths that must not turn a
+// profile-store error into a user-visible failure:
+//
+//   - learning a confirmed client's profile when header stabilization is OFF, so a
+//     later cloaked request on the same credential can present the newest observed
+//     Claude Code version instead of the configured constant;
+//   - reading that learned profile for an unconfirmed client. Passing nil headers
+//     makes the read side-effect free: there is no candidate to store, so an
+//     unconfirmed client can never contribute its own software profile.
+func ResolveClaudeDeviceProfileBestEffort(ctx context.Context, auth *cliproxyauth.Auth, apiKey string, headers http.Header, cfg *config.Config) ClaudeDeviceProfile {
+	profile, errProfile := ResolveClaudeDeviceProfileRequired(ctx, auth, apiKey, headers, cfg)
+	if errProfile != nil || strings.TrimSpace(profile.UserAgent) == "" {
 		return defaultClaudeDeviceProfile(cfg)
 	}
 	return profile
@@ -597,11 +671,23 @@ func ApplyClaudeDefaultDeviceProfileHeaders(r *http.Request, cfg *config.Config)
 	ApplyClaudeDeviceProfileHeaders(r, defaultClaudeDeviceProfile(cfg))
 }
 
-func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg *config.Config, confirmedClaudeCode bool) {
+// ApplyClaudeLegacyDeviceHeaders applies the pre-stabilization header contract.
+// An optional learned profile may be supplied; when it is at or above the
+// configured baseline it replaces the config constant, so a cloaked request
+// presents the newest Claude Code version actually seen on this credential.
+func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg *config.Config, confirmedClaudeCode bool, learned ...ClaudeDeviceProfile) {
 	if r == nil {
 		return
 	}
-	profile := defaultClaudeDeviceProfile(cfg)
+	baseline := defaultClaudeDeviceProfile(cfg)
+	// The configured tuple is a floor. A confirmed client at or above it keeps its
+	// own software versions; only an unconfirmed client falls back, and it falls
+	// back to the newest profile already learned for this credential rather than
+	// to the configured constant.
+	profile := baseline
+	if len(learned) > 0 && meetsClaudeDeviceProfileBaseline(learned[0], baseline) {
+		profile = pinClaudeDeviceProfilePlatform(learned[0], baseline)
+	}
 	miscEnsure := func(name, fallback string, valid func(string) bool) {
 		if current := strings.TrimSpace(r.Header.Get(name)); current != "" && (valid == nil || valid(current)) {
 			return
@@ -614,8 +700,12 @@ func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg
 	}
 
 	if confirmedClaudeCode {
-		miscEnsure("X-Stainless-Runtime-Version", profile.RuntimeVersion, func(value string) bool { return value == profile.RuntimeVersion })
-		miscEnsure("X-Stainless-Package-Version", profile.PackageVersion, func(value string) bool { return value == profile.PackageVersion })
+		miscEnsure("X-Stainless-Runtime-Version", profile.RuntimeVersion, func(value string) bool {
+			return atLeastDottedVersion(value, baseline.RuntimeVersion)
+		})
+		miscEnsure("X-Stainless-Package-Version", profile.PackageVersion, func(value string) bool {
+			return atLeastDottedVersion(value, baseline.PackageVersion)
+		})
 		miscEnsure("X-Stainless-Os", mapStainlessOS(), nil)
 		miscEnsure("X-Stainless-Arch", mapStainlessArch(), nil)
 		if clientUA := strings.TrimSpace(ginHeaders.Get("User-Agent")); plausibleClaudeCodeUserAgent(clientUA, cfg) {
