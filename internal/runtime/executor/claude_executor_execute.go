@@ -71,15 +71,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
-		body = rebuildMidSystemMessagesToTopLevel(body)
+		_, rebuildSettings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
+		body = rebuildMidSystemMessagesToTopLevelPreservingSignedPrefix(body, rebuildSettings.strictMode)
 	}
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
 	bodyBeforeCloaking := body
-	advisorBound := claudeRequestContainsAdvisorState(bodyBeforeCloaking)
-	cloakPolicy, _ := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
-	cloakWouldApply := cloakPolicy.Cloak
 	var cloaked bool
 	body, cloaked, err = applyCloaking(
 		ctx,
@@ -111,14 +109,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body, contextManagementState.payloadRuleTouched = helps.ApplyPayloadConfigWithRequestTracked(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers, "context_management")
-	// Payload rules run exactly once. When this request is eligible for cloaking,
-	// adding or removing advisor state would change its treatment from the incoming
-	// first-turn contract, so reject instead of guessing and replaying rules. If the
-	// resolved wire policy is already cloak-off, no placement transition is possible.
-	if cloakWouldApply && claudeRequestContainsAdvisorState(body) != advisorBound {
-		log.Warn(claudeAdvisorRuleStateError)
-		return resp, statusErr{code: http.StatusBadRequest, msg: claudeAdvisorRuleStateError}
-	}
 	body = reconcileClaudeCodeSystemPlacementAfterPayload(body, systemPlacementState)
 	body = ensureModelMaxTokens(body, baseModel)
 

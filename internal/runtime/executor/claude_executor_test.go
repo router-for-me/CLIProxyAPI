@@ -26,8 +26,6 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	log "github.com/sirupsen/logrus"
-	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -6516,237 +6514,138 @@ func TestClaudeExecutor_PreservesNativeAgentAndEnvironmentHeaders(t *testing.T) 
 	}
 }
 
-func TestClaudeAdvisorStateDetection(t *testing.T) {
-	for _, payload := range [][]byte{
-		[]byte(`{"tools":[{"type":"advisor_20260301","name":"advisor"}]}`),
-		[]byte(`{"messages":[{"role":"assistant","content":[{"type":"server_tool_use","name":"advisor"}]}]}`),
-		[]byte(`{"messages":[{"role":"user","content":[[{"type":"advisor_tool_result"}]]}]}`),
-	} {
-		if !claudeRequestContainsAdvisorState(payload) {
-			t.Fatalf("advisor state not detected: %s", payload)
-		}
-	}
-	for _, payload := range [][]byte{
-		[]byte(`{"tools":[{"name":"advisor_helper"}]}`),
-		[]byte(`{"tools":[{"type":"custom","name":"advisor"}]}`),
-		[]byte(`{"tools":[{"type":"advisor_20260301","name":"advisor_helper"}]}`),
-	} {
-		if claudeRequestContainsAdvisorState(payload) {
-			t.Fatalf("non-advisor state falsely detected: %s", payload)
+func TestClaudeSignedHistoryBoundaryTypes(t *testing.T) {
+	types := []string{"server_tool_use", "advisor_tool_result", "web_search_tool_result", "web_fetch_tool_result", "code_execution_tool_result", "bash_code_execution_tool_result", "text_editor_code_execution_tool_result"}
+	for _, blockType := range types {
+		payload := []byte(fmt.Sprintf(`{"messages":[{"role":"user","content":"first"},{"role":"assistant","content":[{"type":%q}]}]}`, blockType))
+		if got := claudeSignedHistoryBoundary(payload); got != 1 {
+			t.Errorf("%s boundary = %d, want 1", blockType, got)
 		}
 	}
 }
 
-func TestClaudeExecutor_PayloadRuleAdvisorStateChangeFailsClosed(t *testing.T) {
-	logger, hook := logtest.NewNullLogger()
-	standard := log.StandardLogger()
-	oldOutput, oldFormatter, oldLevel, oldHooks := standard.Out, standard.Formatter, standard.Level, standard.Hooks
-	log.SetOutput(logger.Out)
-	log.SetFormatter(logger.Formatter)
-	log.SetLevel(log.WarnLevel)
-	standard.ReplaceHooks(log.LevelHooks{log.WarnLevel: []log.Hook{hook}})
-	t.Cleanup(func() {
-		log.SetOutput(oldOutput)
-		log.SetFormatter(oldFormatter)
-		log.SetLevel(oldLevel)
-		standard.ReplaceHooks(oldHooks)
-	})
-
-	cases := []struct {
-		name          string
-		payload       []byte
-		payloadConfig config.PayloadConfig
-	}{
-		{
-			name:    "inject advisor",
-			payload: []byte(`{"model":"claude-fable-5","messages":[{"role":"user","content":"question"}]}`),
-			payloadConfig: config.PayloadConfig{OverrideRaw: []config.PayloadRule{{
-				Models: []config.PayloadModelRule{{Name: "claude-fable-5", Protocol: "claude"}},
-				Params: map[string]any{"tools": `[{"type":"advisor_20260301","name":"advisor"}]`},
-			}}},
-		},
-		{
-			name:    "remove advisor",
-			payload: []byte(`{"model":"claude-fable-5","tools":[{"type":"advisor_20260301","name":"advisor"}],"messages":[{"role":"user","content":"question"}]}`),
-			payloadConfig: config.PayloadConfig{Filter: []config.PayloadFilterRule{{
-				Models: []config.PayloadModelRule{{Name: "claude-fable-5", Protocol: "claude"}},
-				Params: []string{"tools"},
-			}}},
-		},
-	}
-	for _, tc := range cases {
-		for _, stream := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, stream), func(t *testing.T) {
-				hook.Reset()
-				executor := NewClaudeExecutor(&config.Config{Payload: tc.payloadConfig})
-				auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key", "cloak_mode": "always"}}
-				req := cliproxyexecutor.Request{Model: "claude-fable-5", Payload: tc.payload}
-				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
-				var err error
-				if stream {
-					_, err = executor.ExecuteStream(context.Background(), auth, req, opts)
-				} else {
-					_, err = executor.Execute(context.Background(), auth, req, opts)
+func stripClaudeCacheControlForPrefixTest(raw string) string {
+	var walk func(gjson.Result) any
+	walk = func(value gjson.Result) any {
+		if value.IsArray() {
+			out := make([]any, 0, len(value.Array()))
+			for _, item := range value.Array() {
+				out = append(out, walk(item))
+			}
+			return out
+		}
+		if value.IsObject() {
+			out := map[string]any{}
+			value.ForEach(func(key, item gjson.Result) bool {
+				if key.String() != "cache_control" {
+					out[key.String()] = walk(item)
 				}
-				requestErr, ok := err.(statusErr)
-				if !ok || requestErr.code != http.StatusBadRequest || requestErr.msg != claudeAdvisorRuleStateError {
-					t.Fatalf("error = %#v, want 400 %q", err, claudeAdvisorRuleStateError)
-				}
-				entries := hook.AllEntries()
-				if len(entries) != 1 || entries[0].Level != log.WarnLevel || entries[0].Message != claudeAdvisorRuleStateError {
-					t.Fatalf("warnings = %#v", entries)
-				}
+				return true
 			})
+			return out
+		}
+		return value.Value()
+	}
+	encoded, _ := json.Marshal(walk(gjson.Parse(raw)))
+	return string(encoded)
+}
+
+func TestClaudeCloakIsDeterministicFromRawClientHistory(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	matcher := helps.BuildSensitiveWordMatcher([]string{"secret"})
+	rawTurn1 := []byte(`{"model":"claude-opus-5","system":"secret operator","messages":[{"role":"user","content":"s​ecret first"}]}`)
+	cloak := func(payload []byte, strict bool) []byte {
+		payload = checkSystemInstructionsWithSigningModeAt(payload, strict, true, "2.1.258", "cli", "", now)
+		return helps.ObfuscateSensitiveWords(payload, matcher)
+	}
+	for _, strict := range []bool{false, true} {
+		cloaked1 := cloak(rawTurn1, strict)
+		raw1Messages := gjson.GetBytes(rawTurn1, "messages").Array()
+		raw := []string{raw1Messages[0].Raw,
+			`{"role":"assistant","content":[{"type":"server_tool_use","name":"advisor"}]}`,
+			`{"role":"user","content":[{"type":"advisor_tool_result","content":[]}]}`,
+			`{"role":"user","content":"secret follow up"}`}
+		rawTurn2 := []byte(`{"model":"claude-opus-5","system":"secret operator","messages":[]}`)
+		rawTurn2, _ = sjson.SetRawBytes(rawTurn2, "messages", []byte("["+strings.Join(raw, ",")+"]"))
+		cloaked2 := cloak(rawTurn2, strict)
+		prefix1 := gjson.GetBytes(cloaked1, "messages").Array()
+		prefix2 := gjson.GetBytes(cloaked2, "messages").Array()
+		for i := range prefix1 {
+			got, want := stripClaudeCacheControlForPrefixTest(prefix2[i].Raw), stripClaudeCacheControlForPrefixTest(prefix1[i].Raw)
+			if got != want {
+				t.Fatalf("strict=%v message %d differs\n got %s\nwant %s", strict, i, got, want)
+			}
+		}
+		if !strings.Contains(gjson.GetBytes(cloaked1, "messages.0.content.0.text").String(), "# currentDate") || !strings.Contains(gjson.GetBytes(cloaked2, "messages.0.content.0.text").String(), "# currentDate") {
+			t.Fatalf("strict=%v date reminder missing", strict)
+		}
+		if strings.Contains(string(cloaked2), "secret") {
+			t.Fatalf("strict=%v sensitive word leaked", strict)
+		}
+		if seed := claudeBillingFingerprintMessageText(rawTurn2); seed != "secret follow up" {
+			t.Fatalf("strict=%v raw last-user seed = %q", strict, seed)
 		}
 	}
 }
 
-func TestClaudeExecutor_AdvisorCloakOffParityAcrossRealPaths(t *testing.T) {
-	payloads := map[string][]byte{
-		"declaration": []byte(`{"model":"claude-fable-5","system":[{"type":"text","text":"caller system"}],"tools":[{"type":"advisor_20260301","name":"advisor"}],"messages":[{"role":"user","content":"question"},{"role":"system","content":"mid system"}]}`),
-		"history":     []byte(`{"model":"claude-fable-5","system":[{"type":"text","text":"caller system"}],"messages":[{"role":"user","content":"question"},{"role":"system","content":"mid system"},{"role":"assistant","content":[{"type":"server_tool_use","id":"srvtoolu_advisor","name":"advisor","input":{}}]},{"role":"user","content":[{"type":"advisor_tool_result","tool_use_id":"srvtoolu_advisor","content":[{"type":"advisor_redacted_result","encrypted_content":"opaque"}]}]}]}`),
+func TestClaudeBoundaryBoundsOnlyMidSystemRebuild(t *testing.T) {
+	payload := []byte(`{"system":"operator","messages":[{"role":"user","content":"first"},{"role":"system","content":"before"},{"role":"assistant","content":[{"type":"server_tool_use"}]},{"role":"system","content":"after"},{"role":"user","content":"last"}]}`)
+	rebuilt := rebuildMidSystemMessagesToTopLevelPreservingSignedPrefix(payload, false)
+	messages := gjson.GetBytes(rebuilt, "messages").Array()
+	if messages[1].Get("role").String() != "system" {
+		t.Fatal("pre-boundary system turn moved")
 	}
-	for payloadName, payload := range payloads {
-		for _, strict := range []bool{false, true} {
-			for _, rebuild := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/strict=%t/rebuild=%t", payloadName, strict, rebuild), func(t *testing.T) {
-					casePayload := payload
-					if !rebuild {
-						casePayload = []byte(strings.Replace(string(casePayload), `,{"role":"system","content":"mid system"}`, "", 1))
-					}
-					type observations struct{ execute, stream, upstreamCount, localCount []byte }
-					run := func(mode string) observations {
-						t.Helper()
-						var path string
-						captured := map[string][]byte{}
-						server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-							body, _ := io.ReadAll(r.Body)
-							captured[path] = append([]byte(nil), body...)
-							w.Header().Set("Content-Type", "application/json")
-							if strings.Contains(r.URL.Path, "count_tokens") {
-								_, _ = w.Write([]byte(`{"input_tokens":7}`))
-								return
-							}
-							if path == "stream" {
-								w.Header().Set("Content-Type", "text/event-stream")
-								_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
-								return
-							}
-							_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`))
-						}))
-						defer server.Close()
-						auth := &cliproxyauth.Auth{ID: "advisor-parity-" + mode, Attributes: map[string]string{
-							"api_key": "sk-ant-oat-test", "base_url": server.URL, "cloak_mode": mode,
-							"cloak_strict_mode": fmt.Sprintf("%t", strict), "rebuild_mid_system_message": fmt.Sprintf("%t", rebuild),
-						}, Metadata: claudeOAuthTestMetadata()}
-						executor := NewClaudeExecutor(&config.Config{})
-						req := cliproxyexecutor.Request{Model: "claude-fable-5", Payload: casePayload}
-						opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
-						path = "execute"
-						if _, err := executor.Execute(context.Background(), auth, req, opts); err != nil {
-							t.Fatal(err)
-						}
-						path = "stream"
-						result, err := executor.ExecuteStream(context.Background(), auth, req, opts)
-						if err != nil {
-							t.Fatal(err)
-						}
-						for chunk := range result.Chunks {
-							if chunk.Err != nil {
-								t.Fatal(chunk.Err)
-							}
-						}
-						path = "upstream"
-						if _, err = executor.countTokensUpstream(context.Background(), auth, req, opts); err != nil {
-							t.Fatal(err)
-						}
-						localAuth := &cliproxyauth.Auth{ID: "advisor-local-" + mode, Attributes: map[string]string{"api_key": "ordinary-key", "base_url": server.URL, "cloak_mode": mode, "cloak_strict_mode": fmt.Sprintf("%t", strict), "rebuild_mid_system_message": fmt.Sprintf("%t", rebuild)}}
-						local, err := executor.CountTokens(context.Background(), localAuth, req, opts)
-						if err != nil {
-							t.Fatal(err)
-						}
-						return observations{captured["execute"], captured["stream"], captured["upstream"], local.Payload}
-					}
-					on, off := run("always"), run("never")
-					for path, pair := range map[string][2][]byte{"execute": {on.execute, off.execute}, "stream": {on.stream, off.stream}, "upstream_count": {on.upstreamCount, off.upstreamCount}, "local_count": {on.localCount, off.localCount}} {
-						if !bytes.Equal(pair[0], pair[1]) {
-							t.Fatalf("%s cloak-on differs from cloak-off\non: %s\noff: %s", path, pair[0], pair[1])
-						}
-					}
-				})
-			}
-		}
+	if messages[3].Get("role").String() != "system" || messages[3].Get("content.0.text").String() != "after" {
+		t.Fatal("post-boundary system turn did not remain canonicalized in suffix")
 	}
 }
 
-func TestClaudeExecutor_AdvisorRuleChangeAllowedWhenWirePolicyIsCloakOff(t *testing.T) {
-	payload := []byte(`{"model":"claude-fable-5","tools":[],"system":[{"type":"text","text":"caller system"}],"messages":[{"role":"user","content":"question"}],"metadata":{"user_id":"{\"device_id\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"account_uuid\":\"\",\"session_id\":\"11111111-2222-4333-8444-555555555555\"}"}}`)
-	cfg := &config.Config{Payload: config.PayloadConfig{OverrideRaw: []config.PayloadRule{{
-		Models: []config.PayloadModelRule{{Name: "claude-fable-5", Protocol: "claude"}},
-		Params: map[string]any{"tools": `[{"type":"advisor_20260301","name":"advisor"}]`},
-	}}}}
-	for _, stream := range []bool{false, true} {
-		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
-			run := func(mode string, confirmed bool, withRule bool) []byte {
-				t.Helper()
-				var captured []byte
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					captured, _ = io.ReadAll(r.Body)
-					if stream {
-						w.Header().Set("Content-Type", "text/event-stream")
-						_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
-						return
-					}
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`))
-				}))
-				defer server.Close()
-				auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key", "base_url": server.URL, "cloak_mode": mode}}
-				ctx := context.Background()
-				if confirmed {
-					ctx = contextWithGinHeaders(map[string]string{
-						"User-Agent": "claude-cli/2.1.258 (external, cli)", "X-App": "cli", "Anthropic-Beta": "claude-code-20250219",
-					})
-				}
-				runCfg := cfg
-				if !withRule {
-					runCfg = &config.Config{}
-				}
-				executor := NewClaudeExecutor(runCfg)
-				req := cliproxyexecutor.Request{Model: "claude-fable-5", Payload: payload}
-				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
-				if stream {
-					result, err := executor.ExecuteStream(ctx, auth, req, opts)
-					if err != nil {
-						t.Fatalf("ExecuteStream(%s, confirmed=%t): %v", mode, confirmed, err)
-					}
-					for chunk := range result.Chunks {
-						if chunk.Err != nil {
-							t.Fatal(chunk.Err)
-						}
-					}
-				} else if _, err := executor.Execute(ctx, auth, req, opts); err != nil {
-					t.Fatalf("Execute(%s, confirmed=%t): %v", mode, confirmed, err)
-				}
-				if withRule && !claudeRequestContainsAdvisorState(captured) {
-					t.Fatalf("payload rule did not inject advisor: %s", captured)
-				}
-				return captured
+func TestClaudeExecutor_LocalCountTokensRebuildsSystemBeforeSignedBlock(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"rebuild_mid_system_message": "true"}}
+	payload := []byte(`{"system":"Top","messages":[{"role":"user","content":"hello"},{"role":"system","content":"Mid"},{"role":"assistant","content":[{"type":"server_tool_use","name":"advisor"}]},{"role":"user","content":[{"type":"advisor_tool_result","content":[]}]}]}`)
+	resp, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{Model: "claude-sonnet-4-5", Payload: payload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if err != nil {
+		t.Fatalf("CountTokens() error = %v", err)
+	}
+	if got := gjson.GetBytes(resp.Payload, "input_tokens").Int(); got <= 0 {
+		t.Fatalf("input_tokens = %d, want positive", got)
+	}
+}
+
+func TestClaudeBoundedRebuildCanonicalizesRetainedSystemString(t *testing.T) {
+	rawTurn1 := []byte(`{"model":"claude-opus-5","system":"top","messages":[{"role":"user","content":"first"},{"role":"system","content":"mid"}]}`)
+	turn1 := rebuildMidSystemMessagesToTopLevel(rawTurn1)
+	turn1 = checkSystemInstructionsWithSigningModeAt(turn1, false, true, "2.1.258", "cli", "", time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC))
+	want := gjson.GetBytes(turn1, "messages.2").Raw
+
+	rawTurn2 := []byte(`{"model":"claude-opus-5","system":"top","messages":[{"role":"user","content":"first"},{"role":"system","content":"mid"},{"role":"assistant","content":[{"type":"server_tool_use","name":"advisor"}]},{"role":"user","content":[{"type":"advisor_tool_result","content":[]}]},{"role":"user","content":"follow up"}]}`)
+	turn2 := rebuildMidSystemMessagesToTopLevelPreservingSignedPrefix(rawTurn2, false)
+	got := gjson.GetBytes(turn2, "messages.1").Raw
+	if got != want {
+		t.Fatalf("bounded rebuild representation differs\n got %s\nwant %s", got, want)
+	}
+	if gjson.GetBytes(turn2, "messages.1.role").String() != "system" {
+		t.Fatal("pre-boundary system turn was relocated")
+	}
+}
+
+func TestClaudeBoundedRebuildKeepsPostBoundarySystemInSuffix(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":"first"},{"role":"assistant","content":[{"type":"server_tool_use","name":"advisor"}]},{"role":"user","content":[{"type":"advisor_tool_result","content":[]}]},{"role":"system","content":"suffix rule"},{"role":"user","content":"follow up"}]}`)
+	for _, strict := range []bool{false, true} {
+		got := rebuildMidSystemMessagesToTopLevelPreservingSignedPrefix(payload, strict)
+		if gjson.GetBytes(got, "messages.1.content.0.type").String() != "server_tool_use" {
+			t.Fatalf("strict=%v signed prefix moved", strict)
+		}
+		system := gjson.GetBytes(got, `messages.#(role=="system")`)
+		if strict {
+			if system.Exists() {
+				t.Fatal("strict rebuild retained post-boundary system turn")
 			}
-			for _, tc := range []struct {
-				mode      string
-				confirmed bool
-			}{{"never", false}, {"always", true}} {
-				base := run(tc.mode, tc.confirmed, false)
-				want, err := sjson.SetRawBytes(base, "tools", []byte(`[{"type":"advisor_20260301","name":"advisor"}]`))
-				if err != nil {
-					t.Fatal(err)
-				}
-				got := run(tc.mode, tc.confirmed, true)
-				if !bytes.Equal(got, want) {
-					t.Fatalf("%s confirmed=%t rule-applied body differs from cloak-off oracle\ngot: %s\nwant: %s", tc.mode, tc.confirmed, got, want)
-				}
+		} else {
+			if !system.Exists() || system.Get("content.0.text").String() != "suffix rule" {
+				t.Fatalf("suffix system missing or misplaced: %s", gjson.GetBytes(got, "messages").Raw)
 			}
-		})
+		}
 	}
 }

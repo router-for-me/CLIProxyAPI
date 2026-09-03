@@ -151,7 +151,8 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 		return cliproxyexecutor.Response{}, errThinking
 	}
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
-		body = rebuildMidSystemMessagesToTopLevel(body)
+		_, rebuildSettings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
+		body = rebuildMidSystemMessagesToTopLevelPreservingSignedPrefix(body, rebuildSettings.strictMode)
 	}
 
 	directAnthropic := isAnthropicUpstreamBase(baseURL)
@@ -161,7 +162,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	// so its tokens stay counted, and obfuscate sensitive words exactly like the
 	// Messages path. Kimi opt-in uses the same contract.
 	policy, settings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
-	cloaked := policy.Cloak && !claudeRequestContainsAdvisorState(body)
+	cloaked := policy.Cloak
 	if cloaked {
 		if !settings.strictMode {
 			if errSystem := validateClaudeCallerSystemBlocks(gjson.GetBytes(body, "system")); errSystem != nil {

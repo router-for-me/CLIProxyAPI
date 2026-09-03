@@ -200,8 +200,6 @@ func claudeCCHFallbackBillingHeader(ctx context.Context, cfg *config.Config, pay
 	)
 }
 
-const claudeAdvisorRuleStateError = "payload rule changed advisor state after cloaking decision; advisor tools/history must be present in the incoming request or cloaking must be disabled"
-
 const claudeCodeCLIIdentity = "You are Claude Code, Anthropic's official CLI for Claude."
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
@@ -433,44 +431,25 @@ func validateClaudeCallerSystemBlocks(system gjson.Result) error {
 	return blockErr
 }
 
-// claudeRequestContainsAdvisorState reports whether the incoming request is bound to
-// Anthropic's server-managed advisor context. It recognizes a first-turn tool
-// declaration only when name is "advisor" and type starts with "advisor_". In
-// message history it recognizes advisor_tool_result blocks and server_tool_use
-// blocks whose name is "advisor". Message content is scanned recursively through
-// nested arrays and nested object content, including advisor_redacted_result data
-// below an advisor_tool_result.
-//
-// Advisor results are bound to Anthropic's signed conversation context. Moving the
-// caller system prompt into mid-conversation messages changes that context and made
-// replay fail with HTTP 400, "Advisor tool result content could not be processed."
-// Keep this detection at the cloak boundary so advisor-bound requests follow the
-// ordinary cloak-off wire pipeline. See upstream issue #5470.
-func claudeRequestContainsAdvisorState(payload []byte) bool {
-	tools := gjson.GetBytes(payload, "tools")
-	if tools.IsArray() {
-		found := false
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			found = tool.Get("name").String() == "advisor" && strings.HasPrefix(tool.Get("type").String(), "advisor_")
-			return !found
-		})
-		if found {
-			return true
+// claudeSignedHistoryBoundary returns the last message index containing a
+// server-managed block whose replay is bound to Anthropic's signed history.
+// A negative result means the request has no immutable history prefix.
+func claudeSignedHistoryBoundary(payload []byte) int {
+	boundary := -1
+	gjson.GetBytes(payload, "messages").ForEach(func(key, message gjson.Result) bool {
+		if claudeContentContainsSignedServerState(message.Get("content")) {
+			boundary = int(key.Int())
 		}
-	}
-	found := false
-	gjson.GetBytes(payload, "messages").ForEach(func(_, message gjson.Result) bool {
-		found = claudeContentContainsAdvisorState(message.Get("content"))
-		return !found
+		return true
 	})
-	return found
+	return boundary
 }
 
-func claudeContentContainsAdvisorState(content gjson.Result) bool {
+func claudeContentContainsSignedServerState(content gjson.Result) bool {
 	if content.IsArray() {
 		found := false
 		content.ForEach(func(_, item gjson.Result) bool {
-			found = claudeContentContainsAdvisorState(item)
+			found = claudeContentContainsSignedServerState(item)
 			return !found
 		})
 		return found
@@ -478,11 +457,13 @@ func claudeContentContainsAdvisorState(content gjson.Result) bool {
 	if !content.IsObject() {
 		return false
 	}
-	blockType := content.Get("type").String()
-	if blockType == "advisor_tool_result" || blockType == "server_tool_use" && content.Get("name").String() == "advisor" {
+	switch content.Get("type").String() {
+	case "server_tool_use", "advisor_tool_result", "web_search_tool_result",
+		"web_fetch_tool_result", "code_execution_tool_result",
+		"bash_code_execution_tool_result", "text_editor_code_execution_tool_result":
 		return true
 	}
-	return claudeContentContainsAdvisorState(content.Get("content"))
+	return claudeContentContainsSignedServerState(content.Get("content"))
 }
 
 func collectForwardedClaudeSystemPromptBlocks(system gjson.Result) []string {
@@ -1068,12 +1049,6 @@ func applyCloaking(
 ) ([]byte, bool, error) {
 	policy, settings := resolveClaudeWirePolicy(cfg, auth, apiKey, confirmedClaudeCode)
 	if !policy.Cloak {
-		return payload, false, nil
-	}
-	// The incoming body alone selects the cloak-off pipeline for advisor-bound
-	// conversations. Every turn must receive the same treatment; later mutations
-	// cannot safely change the decision around context-bound advisor results.
-	if claudeRequestContainsAdvisorState(payload) {
 		return payload, false, nil
 	}
 	// Strict mode drops caller system prompts entirely, so nothing needs a

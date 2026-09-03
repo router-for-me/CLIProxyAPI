@@ -1130,6 +1130,48 @@ func claudePayloadHasMidSystemMessage(payload []byte) bool {
 }
 
 func rebuildMidSystemMessagesToTopLevel(payload []byte) []byte {
+	return rebuildMidSystemMessagesToTopLevelAfter(payload, -1)
+}
+
+func rebuildMidSystemMessagesToTopLevelPreservingSignedPrefix(payload []byte, strictMode bool) []byte {
+	boundary := claudeSignedHistoryBoundary(payload)
+	if boundary < 0 {
+		return rebuildMidSystemMessagesToTopLevel(payload)
+	}
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return payload
+	}
+	kept := make([]string, 0, int(messages.Get("#").Int()))
+	changed := false
+	messages.ForEach(func(key, message gjson.Result) bool {
+		isSystem := strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "system")
+		if isSystem && int(key.Int()) > boundary && strictMode {
+			changed = true
+			return true
+		}
+		messageRaw := message.Raw
+		if isSystem && message.Get("content").Type == gjson.String {
+			content := "[" + buildTextBlock(message.Get("content").String(), &claudeCodeCacheControl) + "]"
+			if updated, errSet := sjson.SetRawBytes([]byte(messageRaw), "content", []byte(content)); errSet == nil {
+				messageRaw = string(updated)
+				changed = true
+			}
+		}
+		kept = append(kept, messageRaw)
+		return true
+	})
+	if !changed {
+		return payload
+	}
+	updated, errSet := sjson.SetRawBytes(payload, "messages", rawJSONArray(kept))
+	if errSet != nil {
+		return payload
+	}
+	return updated
+}
+
+func rebuildMidSystemMessagesToTopLevelAfter(payload []byte, boundary int) []byte {
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.IsArray() {
 		return payload
