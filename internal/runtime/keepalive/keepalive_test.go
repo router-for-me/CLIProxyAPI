@@ -602,6 +602,9 @@ func TestSnapshotKeepsRetiredSessionsWithoutTheirBodies(t *testing.T) {
 	if session.LastProbe == nil || session.LastProbe.SkippedReason != "no-live-agents" {
 		t.Fatalf("retired session last probe = %+v", session.LastProbe)
 	}
+	if session.RetiredReason != "no-live-agents" {
+		t.Fatalf("retired reason = %q", session.RetiredReason)
+	}
 	if snapshot.Counters.SkippedByReason["no-live-agents"] != 1 {
 		t.Fatalf("skipped_by_reason = %+v", snapshot.Counters.SkippedByReason)
 	}
@@ -612,6 +615,28 @@ func TestSnapshotKeepsRetiredSessionsWithoutTheirBodies(t *testing.T) {
 	scheduler.mu.Unlock()
 	if body != nil || headers != nil {
 		t.Fatalf("retired session kept its request body in memory")
+	}
+}
+
+func TestRetiringDoesNotEraseTheLastProbeResult(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{result: ProbeResult{CacheReadInputTokens: 4242}}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, func(cfg *Config) {
+		cfg.MaxProbes = 1
+	})
+
+	observeOneHour(scheduler, "sess-1")
+	clock.fireLatest(t)
+
+	session := scheduler.Snapshot().Sessions[0]
+	if session.Active {
+		t.Fatalf("session should be retired after reaching max-probes")
+	}
+	if session.RetiredReason != "max-probes" {
+		t.Fatalf("retired reason = %q, want max-probes", session.RetiredReason)
+	}
+	if session.LastProbe == nil || session.LastProbe.Status != ProbeStatusHit || session.LastProbe.CacheReadInputTokens != 4242 {
+		t.Fatalf("retiring erased the probe result: %+v", session.LastProbe)
 	}
 }
 

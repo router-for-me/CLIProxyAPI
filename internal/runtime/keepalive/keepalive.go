@@ -174,6 +174,7 @@ type sessionState struct {
 	lastProbe     *ProbeOutcome
 	retired       bool
 	retiredAt     time.Time
+	retiredReason string
 }
 
 // ProbeOutcome records what happened on one probe attempt.
@@ -216,6 +217,7 @@ type SessionSnapshot struct {
 	ConsecutiveProbes int           `json:"consecutive_probes"`
 	Active            bool          `json:"active"`
 	RetiredAt         *time.Time    `json:"retired_at,omitempty"`
+	RetiredReason     string        `json:"retired_reason,omitempty"`
 	LastProbe         *ProbeOutcome `json:"last_probe"`
 }
 
@@ -653,6 +655,7 @@ func (s *Scheduler) retireLocked(state *sessionState, sessionID, reason string) 
 	}
 	state.retired = true
 	state.retiredAt = s.now()
+	state.retiredReason = reason
 	state.body = nil
 	state.headers = nil
 	state.timer = nil
@@ -662,7 +665,10 @@ func (s *Scheduler) retireLocked(state *sessionState, sessionID, reason string) 
 			s.counters.SkippedByReason = make(map[string]uint64)
 		}
 		s.counters.SkippedByReason[reason]++
-		if state.lastProbe == nil || state.lastProbe.SkippedReason != reason {
+		// A skip that happened instead of a probe is the session's last outcome.
+		// A skip that ends a session which did probe must not erase the result of
+		// that probe: the reason is reported separately.
+		if state.lastProbe == nil {
 			state.lastProbe = &ProbeOutcome{At: state.retiredAt, Status: ProbeStatusSkipped, SkippedReason: reason}
 		}
 	}
@@ -747,6 +753,7 @@ func sessionSnapshot(sessionID string, state *sessionState) SessionSnapshot {
 	if !state.retiredAt.IsZero() {
 		at := state.retiredAt
 		snapshot.RetiredAt = &at
+		snapshot.RetiredReason = state.retiredReason
 	}
 	if state.lastProbe != nil {
 		probe := *state.lastProbe

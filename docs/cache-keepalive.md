@@ -185,7 +185,9 @@ route. It returns the live scheduler state:
 `skipped_reason`, and a miss carries `diagnosis` when the upstream supplied one.
 
 A session that has stopped probing stays listed with `active: false`, a
-`retired_at` timestamp, and the reason, so an operator can tell "nothing to do"
-apart from "silently broken". The retired history is capped at 64 sessions.
+`retired_at` timestamp and a `retired_reason`, so an operator can tell "nothing
+to do" apart from "silently broken". `retired_reason` is separate from
+`last_probe` on purpose: ending a session never erases the result of the last
+probe it actually sent. The retired history is capped at 64 sessions.
 Retiring a session drops its stored request body immediately, so no request
 content is ever reachable through this endpoint.
