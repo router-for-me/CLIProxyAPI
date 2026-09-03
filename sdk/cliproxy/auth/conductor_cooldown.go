@@ -1998,10 +1998,18 @@ func isRequestInvalidError(err error) bool {
 
 // preserveLongerCooldown keeps an existing cooldown deadline if it extends
 // further into the future than a newly computed one, so a later failure of a
-// different kind (429 vs. explicit not-found) cannot shorten an active
-// cooldown recorded by an earlier failure.
+// different kind (429 vs. explicit not-found, Cloudflare challenge vs.
+// generic 404) cannot shorten an active cooldown recorded by an earlier
+// failure. This intentionally does not require existing.Exceeded: a generic
+// 404's short backoff is stored in NextRecoverAt without Exceeded set (see
+// the else branch below notFoundRetryAfter), and a later Cloudflare
+// challenge or shorter 429 must still not overwrite it with a shorter
+// deadline. Every caller of preserveLongerCooldown always overwrites
+// existing.NextRecoverAt afterward via applyCooldownFields/direct
+// assignment, so there is no legitimate caller relying on this function to
+// let a later, unrelated failure shorten an active deadline.
 func preserveLongerCooldown(existing QuotaState, next time.Time) time.Time {
-	if existing.Exceeded && existing.NextRecoverAt.After(next) {
+	if existing.NextRecoverAt.After(next) {
 		return existing.NextRecoverAt
 	}
 	return next

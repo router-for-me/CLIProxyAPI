@@ -119,3 +119,78 @@ func TestOpenAICompatExecutor_ExecuteStreamPayloadOverrideWireModelReflectsFinal
 		t.Fatalf("WireModel() = %q, want %q", got, overrideModel)
 	}
 }
+
+// TestOpenAICompatExecutor_MidStreamStructuredNotFoundChunkErrorCarriesWireModel
+// covers the SSE mid-stream case: the initial HTTP response is 200, so
+// ExecuteStream's status check never runs, but the first data frame embeds a
+// structured 404 naming the payload-override model. The conductor only ever
+// sees this via StreamChunk.Err (see wrapStreamResult in
+// sdk/cliproxy/auth/conductor_stream.go), so the executor must attach the
+// wire model to that chunk error the same way it does for a status-line 404.
+func TestOpenAICompatExecutor_MidStreamStructuredNotFoundChunkErrorCarriesWireModel(t *testing.T) {
+	const requestedModel = "gpt-4o-mini"
+	const overrideModel = "compat-override-target-model"
+
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: " + openaiCompatStreamStructuredNotFoundFrame(overrideModel) + "\n\n"))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("compat-test", openaiCompatOverridePayloadConfig(requestedModel, overrideModel))
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"model":"` + requestedModel + `","messages":[{"role":"user","content":"hi"}]}`)
+
+	streamResult, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   requestedModel,
+		Payload: payload,
+	}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("ExecuteStream() unexpectedly failed before streaming began: %v", err)
+	}
+	if got := gjsonModel(seenBody); got != overrideModel {
+		t.Fatalf("upstream saw model = %q, want override %q (payload override rule did not fire; test setup is wrong)", got, overrideModel)
+	}
+
+	var chunkErr error
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			chunkErr = chunk.Err
+			break
+		}
+	}
+	if chunkErr == nil {
+		t.Fatal("no StreamChunk carried an error; the mid-stream structured 404 was not detected")
+	}
+	type statusCodeProvider interface {
+		StatusCode() int
+	}
+	if sc, ok := chunkErr.(statusCodeProvider); !ok || sc.StatusCode() != http.StatusNotFound {
+		t.Fatalf("chunk error = %v (%T), want a 404 StatusCode()", chunkErr, chunkErr)
+	}
+	type wireModelProvider interface {
+		WireModel() string
+	}
+	wmp, ok := chunkErr.(wireModelProvider)
+	if !ok {
+		t.Fatalf("chunk error = %v (%T), want a WireModel()-carrying error", chunkErr, chunkErr)
+	}
+	if got := wmp.WireModel(); got != overrideModel {
+		t.Fatalf("WireModel() = %q, want %q", got, overrideModel)
+	}
+}
+
+func openaiCompatStreamStructuredNotFoundFrame(model string) string {
+	return `{"error":{"type":"invalid_request_error","code":"model_not_found","message":"The model ` + model + ` does not exist","status":404}}`
+}

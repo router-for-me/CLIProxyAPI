@@ -436,8 +436,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 			helps.RecordAPIResponseError(ctx, e.cfg, loggedErr)
 			reporter.PublishFailure(ctx, loggedErr)
+			// A structured error arriving mid-stream (after a 200) still needs the
+			// wire model attached when it is a 404, so a not-found classification
+			// after the SSE has started reads the same as one caught on the
+			// initial response status check.
+			chunkErr := withWireModelIfNotFound(error(streamErr), streamErr.code, finalWireModel(translated, baseModel))
 			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+			case out <- cliproxyexecutor.StreamChunk{Err: chunkErr}:
 			case <-ctx.Done():
 			}
 			streamFailed = true

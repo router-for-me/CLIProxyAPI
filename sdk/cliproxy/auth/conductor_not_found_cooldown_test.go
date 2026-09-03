@@ -785,3 +785,191 @@ func TestExecuteCountReadsWireModelFromResponseMetadataNotJustError(t *testing.T
 		t.Fatalf("explicit not-found (via Response.Metadata) cooldown = %v, want about 12h (endpoint-neutral misclassification: wire model not read from resp.Metadata)", cooldown)
 	}
 }
+
+// midStreamWireModelExecutor mirrors an OpenAICompat-style executor whose
+// ExecuteStream call itself succeeds (HTTP 200, err == nil) but whose SSE
+// body contains a structured 404 arriving as a later frame. The conductor
+// only ever observes this via StreamChunk.Err from the returned channel
+// (see wrapStreamResult in conductor_stream.go), never via ExecuteStream's
+// return error — so this is the shape Codex's item (b) finding targeted.
+type midStreamWireModelExecutor struct {
+	normalize func(model string) string
+}
+
+func (e midStreamWireModelExecutor) Identifier() string { return "mid-stream-wire-model" }
+func (e midStreamWireModelExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (e midStreamWireModelExecutor) ExecuteStream(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	wire := e.normalize(req.Model)
+	ch := make(chan cliproxyexecutor.StreamChunk, 2)
+	ch <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{}}]}\n\n")}
+	ch <- cliproxyexecutor.StreamChunk{Err: wireModelStreamError{
+		err: &Error{
+			HTTPStatus: http.StatusNotFound,
+			Message:    `{"error":{"type":"not_found_error","message":"model ` + wire + ` was not found"}}`,
+		},
+		model: wire,
+	}}
+	close(ch)
+	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+}
+func (midStreamWireModelExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+func (midStreamWireModelExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (midStreamWireModelExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestExecuteStreamMidStreamChunkErrorClassifiesAgainstReportedWireModel(t *testing.T) {
+	previousDisabled := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previousDisabled) })
+
+	manager := NewManager(nil, nil, nil)
+	reqModel := "claude-opus-4-8-thinking-32k"
+	normalize := func(m string) string { return strings.TrimSuffix(m, "-thinking-32k") }
+	executor := midStreamWireModelExecutor{normalize: normalize}
+	manager.RegisterExecutor(executor)
+	auth := &Auth{ID: "mid-stream-wire-model-auth", Provider: "mid-stream-wire-model"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: reqModel}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	before := time.Now()
+	streamResult, errExecute := manager.ExecuteStream(context.Background(), []string{"mid-stream-wire-model"}, cliproxyexecutor.Request{Model: reqModel}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() unexpectedly failed before streaming began: %v", errExecute)
+	}
+	for range streamResult.Chunks {
+		// Drain to let wrapStreamResult observe the terminal chunk error and
+		// record the Result.
+	}
+
+	// wrapStreamResult records asynchronously as it forwards chunks; give it
+	// a moment to finish before reading state.
+	var state *ModelState
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		updated, ok := manager.GetByID(auth.ID)
+		if !ok {
+			t.Fatal("auth not found after ExecuteStream()")
+		}
+		for _, candidate := range updated.ModelStates {
+			state = candidate
+		}
+		if state != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if state == nil {
+		t.Fatal("ExecuteStream() did not record model cooldown state from the mid-stream chunk error")
+	}
+	cooldown := state.NextRetryAfter.Sub(before)
+	if cooldown < 12*time.Hour-time.Second || cooldown > 12*time.Hour+time.Second {
+		t.Fatalf("cooldown = %v, want about 12h (mid-stream chunk error naming the reported wire model must classify as explicit not-found, not the short retry)", cooldown)
+	}
+}
+
+// TestApplyAuthFailureStateGenericNotFoundSurvivesRacingCloudflareChallenge
+// covers Codex's item (c) finding: a generic-404 backoff is stored in
+// NextRecoverAt WITHOUT Exceeded set (see notFoundRetryAfter's non-explicit
+// branch), so preserveLongerCooldown's old Exceeded-gated guard let a later
+// Cloudflare challenge overwrite it with a shorter deadline. The fix drops
+// the Exceeded requirement so ANY active (future) NextRecoverAt is honored.
+func TestApplyAuthFailureStateGenericNotFoundSurvivesRacingCloudflareChallenge(t *testing.T) {
+	previousTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(previousTransient) })
+
+	now := time.Date(2026, 9, 3, 14, 42, 0, 0, time.UTC)
+	generic404 := &Error{HTTPStatus: http.StatusNotFound, Message: "Not Found"}
+	challenge := &Error{HTTPStatus: http.StatusForbidden, Message: "cloudflare challenge detected"}
+
+	auth := &Auth{ID: "auth-generic-404-then-challenge"}
+	// Escalate the generic-404 backoff a few times so its stored deadline is
+	// clearly longer than a fresh level-0 Cloudflare cooldown, isolating the
+	// Exceeded-gating bug from a coincidental tie in magnitude.
+	for i := 0; i < 3; i++ {
+		applyAuthFailureStateForModel(auth, generic404, nil, "", now, false)
+	}
+	if auth.Quota.Exceeded {
+		t.Fatalf("generic 404 unexpectedly set Exceeded = true (test premise requires the non-Exceeded storage path)")
+	}
+	genericDeadline := auth.NextRetryAfter
+	if !genericDeadline.After(now) {
+		t.Fatalf("generic 404 NextRetryAfter = %v, want after %v", genericDeadline, now)
+	}
+
+	applyAuthFailureStateForModel(auth, challenge, nil, "", now, false)
+	if auth.NextRetryAfter.Before(genericDeadline) {
+		t.Fatalf("Cloudflare challenge shortened the generic-404 deadline: NextRetryAfter = %v, want >= %v", auth.NextRetryAfter, genericDeadline)
+	}
+}
+
+// TestMarkResultGenericNotFoundSurvivesRacingShort429 covers the model-scoped
+// half of Codex's item (c) finding: MarkResult's 429 branch (unlike
+// applyAuthFailureStateForModel's auth-scoped 429 branch, which sets
+// Exceeded=true before calling preserveLongerCooldown and so is
+// self-satisfying either way) calls preserveLongerCooldown(state.Quota, next)
+// BEFORE setting Exceeded on this failure, so it genuinely reads whatever
+// Exceeded was left by the PRIOR failure. A generic-404 leaves Exceeded
+// unset, so the old Exceeded-gated guard let a later, shorter 429 overwrite
+// it; the fix (dropping the Exceeded requirement) closes that gap.
+func TestMarkResultGenericNotFoundSurvivesRacingShort429(t *testing.T) {
+	previousTransient := transientErrorCooldownSeconds.Load()
+	previousDisabled := quotaCooldownDisabled.Load()
+	SetTransientErrorCooldownSeconds(0)
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() {
+		transientErrorCooldownSeconds.Store(previousTransient)
+		quotaCooldownDisabled.Store(previousDisabled)
+	})
+
+	generic404 := &Error{HTTPStatus: http.StatusNotFound, Message: "Not Found"}
+	rateLimited := &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}
+	shortRetryAfter := 5 * time.Second
+
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "generic-404-then-short-429", Provider: "codex", ModelStates: map[string]*ModelState{
+		"gpt-5": {},
+	}}
+	if _, err := manager.Register(WithSkipPersist(context.Background()), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	before := time.Now()
+	// Escalate a few times so the generic-404 deadline is clearly longer than
+	// a fresh level-0 429 cooldown, isolating the Exceeded-gating bug from a
+	// coincidental tie in magnitude.
+	for i := 0; i < 3; i++ {
+		manager.MarkResult(context.Background(), Result{AuthID: auth.ID, Provider: "codex", Model: "gpt-5", Error: generic404})
+	}
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated.ModelStates["gpt-5"] == nil {
+		t.Fatal("MarkResult() did not retain model cooldown state")
+	}
+	if updated.ModelStates["gpt-5"].Quota.Exceeded {
+		t.Fatalf("generic 404 unexpectedly set Exceeded = true (test premise requires the non-Exceeded storage path)")
+	}
+	genericDeadline := updated.ModelStates["gpt-5"].NextRetryAfter
+	if !genericDeadline.After(before) {
+		t.Fatalf("generic 404 NextRetryAfter = %v, want after %v", genericDeadline, before)
+	}
+
+	manager.MarkResult(context.Background(), Result{AuthID: auth.ID, Provider: "codex", Model: "gpt-5", Error: rateLimited, RetryAfter: &shortRetryAfter})
+	updated, ok = manager.GetByID(auth.ID)
+	if !ok || updated.ModelStates["gpt-5"] == nil {
+		t.Fatal("MarkResult() did not retain model cooldown state after 429")
+	}
+	if updated.ModelStates["gpt-5"].NextRetryAfter.Before(genericDeadline) {
+		t.Fatalf("short 429 shortened the generic-404 deadline: NextRetryAfter = %v, want >= %v", updated.ModelStates["gpt-5"].NextRetryAfter, genericDeadline)
+	}
+}

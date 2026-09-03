@@ -546,7 +546,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
-			wireModel := wireModelOrSent(resp, sentModel)
+			wireModel := preferWireModel(wireModelFromError(errExec), wireModelOrSent(resp, sentModel))
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: wireModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
