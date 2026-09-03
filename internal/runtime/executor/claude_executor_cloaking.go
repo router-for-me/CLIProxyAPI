@@ -1245,6 +1245,46 @@ func countCacheControls(payload []byte) int {
 	return count
 }
 
+// stripCacheControls removes Anthropic-only prompt-caching fields before a
+// delegated Claude-format request is sent to a provider that does not support
+// them, such as Kimi. It only targets protocol-level cache_control markers on
+// system/tool/message blocks and nested content blocks (e.g. tool_result
+// content); arbitrary JSON like tool input_schema properties named
+// "cache_control" are left untouched.
+func stripCacheControls(payload []byte) []byte {
+	result := payload
+	for i := range gjson.GetBytes(result, "system").Array() {
+		result, _ = sjson.DeleteBytes(result, fmt.Sprintf("system.%d.cache_control", i))
+		result = stripContentCacheControls(result, fmt.Sprintf("system.%d.content", i))
+	}
+	for i := range gjson.GetBytes(result, "tools").Array() {
+		result, _ = sjson.DeleteBytes(result, fmt.Sprintf("tools.%d.cache_control", i))
+	}
+	for i := range gjson.GetBytes(result, "messages").Array() {
+		result, _ = sjson.DeleteBytes(result, fmt.Sprintf("messages.%d.cache_control", i))
+		result = stripContentCacheControls(result, fmt.Sprintf("messages.%d.content", i))
+	}
+	return result
+}
+
+// stripContentCacheControls removes cache_control from each block in a content
+// array and recurses into nested content arrays (e.g. a tool_result whose
+// content is an array of text/image blocks). It does not walk into siblings of
+// content such as tool_use input or tool input_schema.
+func stripContentCacheControls(payload []byte, contentPath string) []byte {
+	result := payload
+	arr := gjson.GetBytes(result, contentPath)
+	if !arr.IsArray() {
+		return result
+	}
+	for i := range arr.Array() {
+		itemPath := fmt.Sprintf("%s.%d", contentPath, i)
+		result, _ = sjson.DeleteBytes(result, fmt.Sprintf("%s.cache_control", itemPath))
+		result = stripContentCacheControls(result, fmt.Sprintf("%s.content", itemPath))
+	}
+	return result
+}
+
 // normalizeCacheControlTTL ensures cache_control TTL values don't violate the
 // prompt-caching-scope-2026-01-05 ordering constraint: a 1h-TTL block must not
 // appear after a 5m-TTL block anywhere in the evaluation order.
