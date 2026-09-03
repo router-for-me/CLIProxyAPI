@@ -1807,7 +1807,62 @@ func isStructuredModelNotFoundError(message, requestedModel string) bool {
 	if errJSON := json.Unmarshal([]byte(strings.TrimSpace(message)), &payload); errJSON != nil {
 		return false
 	}
+	if isGeminiStructuredNotFound(payload, requestedModel) {
+		return true
+	}
 	return containsStructuredModelNotFound(payload, requestedModel)
+}
+
+// isGeminiStructuredNotFound implements Gemini/Vertex/AI Studio's documented
+// missing-model shape: a top-level "error" object whose "status" field is
+// literally "NOT_FOUND" AND whose "message" field matches the documented
+// "models/<id> is not found for API version ..." grammar. Both conditions
+// are required and both must come from the SAME "error" object - a message
+// with the right text but no status field, or a status field that lives
+// outside "error" (e.g. at the JSON root, sibling to "error"), does not
+// count. This intentionally does not use the generic recursive
+// containsStructuredModelNotFound() walker, because that walker has no
+// concept of "am I inside error" and so cannot enforce the nesting
+// requirement.
+func isGeminiStructuredNotFound(payload any, requestedModel string) bool {
+	root, ok := payload.(map[string]any)
+	if !ok {
+		return false
+	}
+	var errObj map[string]any
+	for key, value := range root {
+		if strings.ToLower(strings.TrimSpace(key)) != "error" {
+			continue
+		}
+		if m, ok := value.(map[string]any); ok {
+			errObj = m
+		}
+		break
+	}
+	if errObj == nil {
+		return false
+	}
+	status, hasStatus := mapStringField(errObj, "status")
+	if !hasStatus || !isNotFoundErrorIdentifier(status) {
+		return false
+	}
+	message, _ := mapStringField(errObj, "message")
+	lower := strings.Trim(strings.ToLower(strings.TrimSpace(message)), " .!;\t\r\n")
+	return isGeminiModelNotFoundMessage(lower, requestedModel)
+}
+
+// mapStringField does a case-insensitive lookup of key within m, returning
+// the value and true only if it is present and is a JSON string.
+func mapStringField(m map[string]any, key string) (string, bool) {
+	target := strings.ToLower(strings.TrimSpace(key))
+	for k, v := range m {
+		if strings.ToLower(strings.TrimSpace(k)) != target {
+			continue
+		}
+		s, isString := v.(string)
+		return s, isString
+	}
+	return "", false
 }
 
 func containsStructuredModelNotFound(value any, requestedModel string) bool {
@@ -1823,7 +1878,7 @@ func containsStructuredModelNotFound(value any, requestedModel string) bool {
 					if isModelNotFoundIdentifier(text) {
 						return true
 					}
-				case "type", "status":
+				case "type":
 					if isModelNotFoundIdentifier(text) {
 						return true
 					}
@@ -1892,13 +1947,11 @@ func isExplicitModelNotFoundMessage(message, requestedModel string) bool {
 	if strings.Contains(normalized, "model_not_found") || strings.Contains(normalized, "unknown_model") {
 		return true
 	}
-	// Gemini/Vertex/AI Studio's documented missing-model shape: message
-	// "models/<id> is not found for API version ..., or is not supported
-	// for ...". The "models/" prefix (no space) falls outside the generic
-	// "model " / "model:" prefix grammar below, so it needs its own check.
-	if isGeminiModelNotFoundMessage(lower, requestedModel) {
-		return true
-	}
+	// Gemini/Vertex/AI Studio's "models/<id> is not found ..." grammar is
+	// NOT checked here on message text alone - it additionally requires
+	// error.status == "NOT_FOUND" from the same "error" object, which this
+	// function (message-only) cannot see. That combined check lives in
+	// isGeminiStructuredNotFound, called from isStructuredModelNotFoundError.
 	for _, prefix := range []string{"no such model", "unknown model"} {
 		if lower != prefix && !strings.HasPrefix(lower, prefix+" ") && !strings.HasPrefix(lower, prefix+":") {
 			continue
@@ -1966,13 +2019,14 @@ func isMissingModelPhrase(value string) bool {
 		if trimmed == phrase {
 			return true
 		}
-		// Ollama's shape appends guidance after the phrase, e.g.
-		// `model '<id>' not found, try pulling it first` - accept a
-		// comma/semicolon-delimited continuation without accepting an
-		// unrelated word run-on (`not founder` etc.).
-		if strings.HasPrefix(trimmed, phrase+",") || strings.HasPrefix(trimmed, phrase+";") {
-			return true
-		}
+	}
+	// Ollama's documented guidance suffix is this EXACT continuation, e.g.
+	// `model '<id>' not found, try pulling it first` - not a generic
+	// comma/semicolon-delimited run-on, which would also accept unrelated
+	// adversarial text after "not found" (`, but endpoint /v1/foo missing`,
+	// `; HTML endpoint page follows`).
+	if trimmed == "not found, try pulling it first" {
+		return true
 	}
 	return false
 }

@@ -1014,6 +1014,18 @@ func TestIsExplicitModelNotFoundError_ProviderShapes(t *testing.T) {
 			model:    "gemini-2.5-flash",
 			explicit: false,
 		},
+		{
+			name:     "gemini not-found message without status field",
+			body:     `{"error":{"code":404,"message":"models/gemini-2.5-flash is not found for API version v1beta, or is not supported for bidiGenerateContent."}}`,
+			model:    "gemini-2.5-flash",
+			explicit: false,
+		},
+		{
+			name:     "gemini not-found message with status at JSON root, not nested under error",
+			body:     `{"status":"NOT_FOUND","error":{"code":404,"message":"models/gemini-2.5-flash is not found for API version v1beta, or is not supported for bidiGenerateContent."}}`,
+			model:    "gemini-2.5-flash",
+			explicit: false,
+		},
 
 		// Anthropic: error.type == "not_found_error", message "model: <id>".
 		// Already covered pre-fix via the "type" key + "model:" prefix
@@ -1067,20 +1079,25 @@ func TestIsExplicitModelNotFoundError_ProviderShapes(t *testing.T) {
 			model:    "llama-not-a-real-model",
 			explicit: false,
 		},
+		{
+			name:     "ollama not-found with unrelated adversarial comma continuation",
+			body:     `{"error":"model 'llama-not-a-real-model' not found, but endpoint /v1/foo missing"}`,
+			model:    "llama-not-a-real-model",
+			explicit: false,
+		},
+		{
+			name:     "ollama not-found with unrelated adversarial semicolon continuation",
+			body:     `{"error":"model 'llama-not-a-real-model' not found; HTML endpoint page follows"}`,
+			model:    "llama-not-a-real-model",
+			explicit: false,
+		},
 
 		// Codex: OpenAI Responses-style envelope, error.type ==
 		// "not_found_error" (see internal/runtime/executor/codex_executor_terminal.go:172).
-		// The exact missing-model message wording is COULD-NOT-DETERMINE -
-		// no captured fixture or documented string exists in this repo for
-		// Codex's specific phrasing, so this fixture only exercises the
-		// type+model-reference combination already covered by the
-		// pre-existing "type" key path, not a Codex-specific grammar addition.
-		{
-			name:     "codex explicit not-found (type+model combo, wording unverified)",
-			body:     `{"error":{"type":"not_found_error","code":"model_not_found","message":"model: codex-not-a-real-model"}}`,
-			model:    "codex-not-a-real-model",
-			explicit: true,
-		},
+		// The exact missing-model message wording is COULD-NOT-DETERMINE - no
+		// captured fixture or documented string exists in this repo for
+		// Codex's specific phrasing. Left uncovered by a fixture, same as
+		// xAI/Kimi below, rather than testing an invented wording.
 		{
 			name:     "codex generic 404",
 			body:     `{"error":{"type":"not_found_error","code":"not_found","message":"resource not found"}}`,
