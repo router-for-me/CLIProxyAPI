@@ -42,9 +42,10 @@ type ClaudeCacheKeepaliveObservation struct {
 // ObserveClaudeCacheKeepalive records a completed request with the keepalive
 // scheduler when it qualifies.
 //
-// A request qualifies only when it came from a confirmed Claude Code client and
-// carried an explicit 1h cache_control TTL. A 5m request never schedules a probe:
-// on that pool the thirteen reads an hour cost more than the write they avoid.
+// A request qualifies when it came from a confirmed Claude Code client and
+// selected a cache pool at all. Which pools are actually probed is the
+// scheduler's decision, not this hook's: it holds the probe-5m policy and the
+// counters that make a skipped tier visible.
 func ObserveClaudeCacheKeepalive(ctx context.Context, observation ClaudeCacheKeepaliveObservation) {
 	scheduler := keepalive.Default()
 	if !scheduler.Enabled() {
@@ -58,8 +59,8 @@ func ObserveClaudeCacheKeepalive(ctx context.Context, observation ClaudeCacheKee
 	if keepalive.IsProbeExecution(observation.Metadata) {
 		return
 	}
-	ttl := keepalive.ExtendedCacheTTL(observation.OriginalPayload)
-	if !keepalive.IsExtendedCacheTTL(ttl) {
+	ttl := keepalive.RequestCacheTTL(observation.OriginalPayload)
+	if ttl <= 0 {
 		return
 	}
 	sessionID := ExtractClaudeCodeSessionID(ctx, observation.OriginalPayload, observation.Headers)

@@ -57,18 +57,46 @@ type Timer interface {
 type Config struct {
 	// Enabled turns scheduling on. A disabled scheduler ignores every observation.
 	Enabled bool
-	// BeforeExpiry fires a probe at t_start + ttl - BeforeExpiry.
+	// BeforeExpiry fires a probe at t_start + ttl - BeforeExpiry on the 1h pool.
 	BeforeExpiry time.Duration
+	// BeforeExpiry5m is the same lead time for the 5m pool. Zero falls back to
+	// BeforeExpiry, which on a 5m TTL leaves no window and drops the session.
+	BeforeExpiry5m time.Duration
+	// Probe5m selects when a 5m session is probed: Probe5mAuto, Probe5mAlways
+	// or Probe5mNever. An empty value is treated as auto.
+	Probe5m string
+	// Probe5mModels overrides the built-in cheap-cache-read list Probe5mAuto
+	// matches the request model against. Empty means CheapCacheReadModels.
+	Probe5mModels []string
 	// OnlyWhenAgentsActive gates every probe on the liveness check.
 	OnlyWhenAgentsActive bool
 	// AgentIdleWindow is how long an agent may be silent and still count as
 	// running. It is deliberately not the cache TTL: an agent that has written
 	// nothing for an hour is finished, not busy.
 	AgentIdleWindow time.Duration
-	// MaxProbes caps consecutive probes without an intervening real request.
+	// MaxProbes caps consecutive probes without an intervening real request on
+	// the 1h pool.
 	MaxProbes int
+	// MaxProbes5m is the same cap for the 5m pool. Zero falls back to MaxProbes.
+	MaxProbes5m int
 	// MaxTokens is the max_tokens value the probe body carries.
 	MaxTokens int
+}
+
+// beforeExpiryFor is the lead time the tier is scheduled with.
+func (c Config) beforeExpiryFor(tier string) time.Duration {
+	if tier == TTLTier5m && c.BeforeExpiry5m > 0 {
+		return c.BeforeExpiry5m
+	}
+	return c.BeforeExpiry
+}
+
+// maxProbesFor is the consecutive-probe budget the tier is allowed.
+func (c Config) maxProbesFor(tier string) int {
+	if tier == TTLTier5m && c.MaxProbes5m > 0 {
+		return c.MaxProbes5m
+	}
+	return c.MaxProbes
 }
 
 // ProbeRequest describes one keepalive probe to send upstream.
@@ -175,6 +203,8 @@ type sessionState struct {
 	body             []byte
 	headers          http.Header
 	ttl              time.Duration
+	tier             string
+	probe5m          string
 	probes           int
 	timer            Timer
 
@@ -229,6 +259,8 @@ type SessionSnapshot struct {
 	Model             string        `json:"model"`
 	TTL               string        `json:"ttl"`
 	TTLSeconds        float64       `json:"ttl_seconds"`
+	TTLTier           string        `json:"ttl_tier"`
+	Probe5mDecision   string        `json:"probe_5m_decision"`
 	LastRequestAt     *time.Time    `json:"last_request_at"`
 	NextProbeAt       *time.Time    `json:"next_probe_at"`
 	ProbesSent        int           `json:"probes_sent"`
@@ -253,9 +285,13 @@ type Counters struct {
 type Snapshot struct {
 	Enabled              bool              `json:"enabled"`
 	BeforeExpiry         string            `json:"before_expiry"`
+	BeforeExpiry5m       string            `json:"before_expiry_5m"`
+	Probe5m              string            `json:"probe_5m"`
+	Probe5mModels        []string          `json:"probe_5m_models"`
 	OnlyWhenAgentsActive bool              `json:"only_when_agents_active"`
 	AgentIdleWindow      string            `json:"agent_idle_window"`
 	MaxProbes            int               `json:"max_probes"`
+	MaxProbes5m          int               `json:"max_probes_5m"`
 	MaxTokens            int               `json:"max_tokens"`
 	Sessions             []SessionSnapshot `json:"sessions"`
 	Counters             Counters          `json:"counters"`
@@ -416,9 +452,11 @@ func stopTimer(state *sessionState) {
 
 // Observe records a completed real request and reschedules that session's probe.
 //
-// Callers must only pass requests that carried an explicit 1h cache_control TTL.
-// Scheduling a probe for the 5m pool loses money: thirteen reads an hour cost
-// more than the single write they avoid.
+// Callers pass any request that selected a cache pool at all; the tier policy
+// lives here so the log line and the counters see every decision. A session on
+// the 5m pool is scheduled only when Probe5m allows it: probing there is worth
+// it exactly when the model's cache reads are cheap relative to the write they
+// avoid, which is what CheapCacheReadModels records.
 func (s *Scheduler) Observe(in ObserveInput) {
 	if s == nil {
 		return
@@ -433,10 +471,23 @@ func (s *Scheduler) Observe(in ObserveInput) {
 	if in.SessionID == "" || in.AuthID == "" || in.TTL <= 0 || len(in.Body) == 0 {
 		return
 	}
-	delay := in.TTL - cfg.BeforeExpiry
+	tier := TTLTier(in.TTL)
+	decision := Probe5mDecisionNotApplicable
+	if tier == TTLTier5m {
+		var allowed bool
+		allowed, decision = probe5mDecision(cfg.Probe5m, cfg.Probe5mModels, in.Model)
+		if !allowed {
+			s.countSkip(decision)
+			log.Debugf("cache-keepalive: skipped scheduling | session=%s ttl_tier=5m model=%s reason=%s",
+				truncateSession(in.SessionID), in.Model, decision)
+			return
+		}
+	}
+	beforeExpiry := cfg.beforeExpiryFor(tier)
+	delay := in.TTL - beforeExpiry
 	if delay <= 0 {
-		log.Debugf("cache-keepalive: skipped scheduling | session=%s reason=before-expiry-exceeds-ttl ttl=%s before-expiry=%s",
-			truncateSession(in.SessionID), in.TTL, cfg.BeforeExpiry)
+		log.Debugf("cache-keepalive: skipped scheduling | session=%s ttl_tier=%s reason=before-expiry-exceeds-ttl ttl=%s before-expiry=%s",
+			truncateSession(in.SessionID), tier, in.TTL, beforeExpiry)
 		return
 	}
 	if !in.StartedAt.IsZero() {
@@ -475,6 +526,8 @@ func (s *Scheduler) Observe(in ObserveInput) {
 		body:             body,
 		headers:          headers,
 		ttl:              in.TTL,
+		tier:             tier,
+		probe5m:          decision,
 		// A real request resets the consecutive-probe budget.
 		probes: 0,
 	}
@@ -499,8 +552,22 @@ func (s *Scheduler) Observe(in ObserveInput) {
 	s.mu.Unlock()
 
 	stopTimer(previous)
-	log.Infof("cache-keepalive: scheduled | session=%s auth=%s model=%s ttl=%s fires_in=%s next_probe_at=%s",
-		truncateSession(sessionID), in.AuthID, in.Model, in.TTL, delay.Round(time.Second), state.nextProbeAt.Format(time.RFC3339))
+	log.Infof("cache-keepalive: scheduled | session=%s auth=%s model=%s ttl=%s ttl_tier=%s probe_5m=%s fires_in=%s next_probe_at=%s",
+		truncateSession(sessionID), in.AuthID, in.Model, in.TTL, tier, decision, delay.Round(time.Second), state.nextProbeAt.Format(time.RFC3339))
+}
+
+// countSkip records a decision that stopped a session before it was tracked, so
+// a policy that silently drops every 5m session is still visible in the counters.
+func (s *Scheduler) countSkip(reason string) {
+	if reason == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.counters.SkippedByReason == nil {
+		s.counters.SkippedByReason = make(map[string]uint64)
+	}
+	s.counters.SkippedByReason[reason]++
 }
 
 func (s *Scheduler) fire(sessionID string, generation uint64) {
@@ -514,10 +581,14 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 		}
 		return
 	}
-	if state.probes >= cfg.MaxProbes {
+	tier := state.tier
+	if tier == "" {
+		tier = TTLTier(state.ttl)
+	}
+	if state.probes >= cfg.maxProbesFor(tier) {
 		s.mu.Unlock()
 		s.retire(sessionID, generation, "max-probes")
-		log.Infof("cache-keepalive: skipped | session=%s reason=max-probes consecutive_probes=%d", truncateSession(sessionID), state.probes)
+		log.Infof("cache-keepalive: skipped | session=%s ttl_tier=%s reason=max-probes consecutive_probes=%d", truncateSession(sessionID), tier, state.probes)
 		return
 	}
 	liveness := s.liveness
@@ -528,6 +599,7 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 	provider := state.provider
 	model := state.model
 	ttl := state.ttl
+	probe5m := state.probe5m
 	baselineRead := state.baselineRead
 	body := state.body
 	headers := state.headers
@@ -540,7 +612,7 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 		}
 		if liveness == nil || !liveness.Live(sessionID, idleWindow) {
 			s.retire(sessionID, generation, "no-live-agents")
-			log.Infof("cache-keepalive: skipped | session=%s auth=%s model=%s reason=no-live-agents", truncateSession(sessionID), authID, model)
+			log.Infof("cache-keepalive: skipped | session=%s auth=%s model=%s ttl_tier=%s reason=no-live-agents", truncateSession(sessionID), authID, model, tier)
 			return
 		}
 	}
@@ -604,12 +676,12 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 
 	// Reschedule from the probe's own start time so the next window is measured
 	// against the entry the probe just refreshed.
-	next := ttl - cfg.BeforeExpiry - elapsed
+	next := ttl - cfg.beforeExpiryFor(tier) - elapsed
 	s.mu.Lock()
 	current := s.sessions[sessionID]
 	if s.stopped || !s.cfg.Enabled || current == nil || current.generation != generation {
 		s.mu.Unlock()
-		s.logProbe(sessionID, authID, model, outcome, elapsed, 0, 0, false, time.Time{})
+		s.logProbe(sessionID, authID, model, tier, probe5m, outcome, elapsed, 0, 0, false, time.Time{})
 		return
 	}
 	current.probes++
@@ -618,7 +690,7 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 	total := current.probesSent
 	rescheduled := false
 	var nextProbeAt time.Time
-	if consecutive < s.cfg.MaxProbes && next > 0 {
+	if consecutive < s.cfg.maxProbesFor(tier) && next > 0 {
 		current.timer = s.newTimer(next, func() { s.fire(sessionID, generation) })
 		nextProbeAt = s.now().Add(next)
 		current.nextProbeAt = nextProbeAt
@@ -628,7 +700,7 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 	}
 	s.mu.Unlock()
 
-	s.logProbe(sessionID, authID, model, outcome, elapsed, total, consecutive, rescheduled, nextProbeAt)
+	s.logProbe(sessionID, authID, model, tier, probe5m, outcome, elapsed, total, consecutive, rescheduled, nextProbeAt)
 }
 
 // probeMissed reports whether a probe failed to refresh the entry it was sent for.
@@ -650,14 +722,14 @@ func probeMissed(read, baseline int64) bool {
 //
 // A probe that found nothing cached is the malfunction signal: the entry it was
 // meant to refresh had already expired, so it is logged at warning level.
-func (s *Scheduler) logProbe(sessionID, authID, model string, outcome ProbeOutcome, elapsed time.Duration, total, consecutive int, rescheduled bool, nextProbeAt time.Time) {
+func (s *Scheduler) logProbe(sessionID, authID, model, tier, probe5m string, outcome ProbeOutcome, elapsed time.Duration, total, consecutive int, rescheduled bool, nextProbeAt time.Time) {
 	next := "none"
 	if !nextProbeAt.IsZero() {
 		next = nextProbeAt.Format(time.RFC3339)
 	}
-	fields := "session=%s auth=%s model=%s status=%s cache_read_input_tokens=%d cache_creation_input_tokens=%d baseline_read_input_tokens=%d duration=%s probes_sent=%d consecutive_probes=%d rescheduled=%t next_probe_at=%s"
+	fields := "session=%s auth=%s model=%s ttl_tier=%s probe_5m=%s status=%s cache_read_input_tokens=%d cache_creation_input_tokens=%d baseline_read_input_tokens=%d duration=%s probes_sent=%d consecutive_probes=%d rescheduled=%t next_probe_at=%s"
 	args := []any{
-		truncateSession(sessionID), authID, model, outcome.Status,
+		truncateSession(sessionID), authID, model, tier, probe5m, outcome.Status,
 		outcome.CacheReadInputTokens, outcome.CacheCreationInputTokens, outcome.BaselineReadInputTokens,
 		elapsed.Round(time.Millisecond), total, consecutive, rescheduled, next,
 	}
@@ -762,9 +834,13 @@ func (s *Scheduler) Snapshot() Snapshot {
 	out := Snapshot{
 		Enabled:              s.cfg.Enabled && !s.stopped,
 		BeforeExpiry:         s.cfg.BeforeExpiry.String(),
+		BeforeExpiry5m:       s.cfg.BeforeExpiry5m.String(),
+		Probe5m:              s.cfg.Probe5m,
+		Probe5mModels:        probe5mModels(s.cfg.Probe5mModels),
 		OnlyWhenAgentsActive: s.cfg.OnlyWhenAgentsActive,
 		AgentIdleWindow:      s.cfg.AgentIdleWindow.String(),
 		MaxProbes:            s.cfg.MaxProbes,
+		MaxProbes5m:          s.cfg.MaxProbes5m,
 		MaxTokens:            s.cfg.MaxTokens,
 		Sessions:             make([]SessionSnapshot, 0, len(s.sessions)),
 		Counters: Counters{
@@ -788,7 +864,23 @@ func (s *Scheduler) Snapshot() Snapshot {
 	return out
 }
 
+// probe5mModels reports the list "auto" is matching against, so the endpoint
+// answers "which models does this build consider cheap" without a rebuild.
+func probe5mModels(configured []string) []string {
+	source := configured
+	if len(source) == 0 {
+		source = CheapCacheReadModels
+	}
+	out := make([]string, len(source))
+	copy(out, source)
+	return out
+}
+
 func sessionSnapshot(sessionID string, state *sessionState) SessionSnapshot {
+	tier := state.tier
+	if tier == "" {
+		tier = TTLTier(state.ttl)
+	}
 	snapshot := SessionSnapshot{
 		SessionID:         sessionID,
 		AuthID:            state.authID,
@@ -796,6 +888,8 @@ func sessionSnapshot(sessionID string, state *sessionState) SessionSnapshot {
 		Model:             state.model,
 		TTL:               state.ttl.String(),
 		TTLSeconds:        state.ttl.Seconds(),
+		TTLTier:           tier,
+		Probe5mDecision:   state.probe5m,
 		ProbesSent:        state.probesSent,
 		ConsecutiveProbes: state.probes,
 		Active:            !state.retired,

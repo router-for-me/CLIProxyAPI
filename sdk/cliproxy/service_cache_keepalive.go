@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 
@@ -162,10 +163,14 @@ func announceCacheKeepalive(settings internalconfig.ClaudeCodeCacheKeepaliveConf
 	}
 	return previous.Enabled != settings.Enabled ||
 		previous.BeforeExpiry != settings.BeforeExpiry ||
+		previous.BeforeExpiry5m != settings.BeforeExpiry5m ||
+		previous.Probe5m != settings.Probe5m ||
+		!slices.Equal(previous.Probe5mModels, settings.Probe5mModels) ||
 		previous.OnlyWhenAgentsActive != settings.OnlyWhenAgentsActive ||
 		previous.Liveness != settings.Liveness ||
 		previous.AgentIdleWindow != settings.AgentIdleWindow ||
 		previous.MaxProbes != settings.MaxProbes ||
+		previous.MaxProbes5m != settings.MaxProbes5m ||
 		previous.MaxTokens != settings.MaxTokens
 }
 
@@ -198,9 +203,13 @@ func (s *Service) applyCacheKeepaliveConfig(cfg *config.Config) {
 	runtimeCfg := keepalive.Config{
 		Enabled:              true,
 		BeforeExpiry:         settings.BeforeExpiry,
+		BeforeExpiry5m:       settings.BeforeExpiry5m,
+		Probe5m:              settings.Probe5m,
+		Probe5mModels:        settings.Probe5mModels,
 		OnlyWhenAgentsActive: settings.OnlyWhenAgentsActive,
 		AgentIdleWindow:      settings.AgentIdleWindow,
 		MaxProbes:            settings.MaxProbes,
+		MaxProbes5m:          settings.MaxProbes5m,
 		MaxTokens:            settings.MaxTokens,
 	}
 
@@ -226,7 +235,8 @@ func (s *Service) applyCacheKeepaliveConfig(cfg *config.Config) {
 		scheduler.ApplyConfig(runtimeCfg)
 	}
 	if changed {
-		log.Infof("cache-keepalive: enabled | before-expiry=%s only-when-agents-active=%t liveness=%s agent-idle-window=%s max-probes=%d max-tokens=%d",
-			settings.BeforeExpiry, settings.OnlyWhenAgentsActive, settings.Liveness, settings.AgentIdleWindow, settings.MaxProbes, settings.MaxTokens)
+		log.Infof("cache-keepalive: enabled | before-expiry=%s before-expiry-5m=%s probe-5m=%s only-when-agents-active=%t liveness=%s agent-idle-window=%s max-probes=%d max-probes-5m=%d max-tokens=%d",
+			settings.BeforeExpiry, settings.BeforeExpiry5m, settings.Probe5m, settings.OnlyWhenAgentsActive, settings.Liveness,
+			settings.AgentIdleWindow, settings.MaxProbes, settings.MaxProbes5m, settings.MaxTokens)
 	}
 }

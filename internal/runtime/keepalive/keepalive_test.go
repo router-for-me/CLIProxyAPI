@@ -138,8 +138,11 @@ func testScheduler(t *testing.T, clock *fakeClock, prober Prober, liveness Liven
 	cfg := Config{
 		Enabled:              true,
 		BeforeExpiry:         5 * time.Minute,
+		BeforeExpiry5m:       45 * time.Second,
+		Probe5m:              Probe5mAuto,
 		OnlyWhenAgentsActive: true,
 		MaxProbes:            6,
+		MaxProbes5m:          30,
 		MaxTokens:            1,
 	}
 	if mutate != nil {
@@ -163,6 +166,20 @@ func observeOneHour(scheduler *Scheduler, session string) {
 		Body:             []byte(oneHourBody),
 		Headers:          http.Header{"Anthropic-Beta": []string{"claude-code-20250219,extended-cache-ttl-2025-04-11"}},
 		TTL:              time.Hour,
+		StartedAt:        time.Now(),
+	})
+}
+
+func observeFiveMinutes(scheduler *Scheduler, session, model string) {
+	scheduler.Observe(ObserveInput{
+		SessionID:        session,
+		BindingSessionID: "claude:" + session + ":agent:main",
+		AuthID:           "auth-a",
+		Provider:         "claude",
+		Model:            model,
+		Body:             []byte(fiveMinuteBody),
+		Headers:          http.Header{"Anthropic-Beta": []string{"claude-code-20250219"}},
+		TTL:              5 * time.Minute,
 		StartedAt:        time.Now(),
 	})
 }
@@ -832,5 +849,191 @@ func TestProbeBodyLeavesContextManagementAloneWhenNoThinkingEdit(t *testing.T) {
 	}
 	if got := gjson.GetBytes(probe, "context_management.edits.0.type").String(); got != "clear_tool_uses_20250919" {
 		t.Fatalf("context_management was rewritten: %s", probe)
+	}
+}
+
+func TestProbe5mDecision(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    string
+		models  []string
+		model   string
+		wantOK  bool
+		wantWhy string
+	}{
+		{name: "auto matches fable", mode: Probe5mAuto, model: "claude-fable-5-1", wantOK: true, wantWhy: Probe5mDecisionModelAuto},
+		{name: "auto matches mythos", mode: Probe5mAuto, model: "claude-mythos-5-1", wantOK: true, wantWhy: Probe5mDecisionModelAuto},
+		{name: "auto matches a suffixed spelling", mode: Probe5mAuto, model: "claude-fable-5-1[1m]", wantOK: true, wantWhy: Probe5mDecisionModelAuto},
+		{name: "auto matches a provider-prefixed spelling", mode: Probe5mAuto, model: "us.anthropic.CLAUDE-FABLE-5-1-v1:0", wantOK: true, wantWhy: Probe5mDecisionModelAuto},
+		{name: "auto skips opus", mode: Probe5mAuto, model: "claude-opus-5", wantOK: false, wantWhy: Probe5mDecisionSkippedModel},
+		{name: "auto skips an empty model", mode: Probe5mAuto, model: "", wantOK: false, wantWhy: Probe5mDecisionSkippedModel},
+		{name: "an empty mode behaves as auto", mode: "", model: "claude-fable-5-1", wantOK: true, wantWhy: Probe5mDecisionModelAuto},
+		{name: "always takes any model", mode: Probe5mAlways, model: "claude-opus-5", wantOK: true, wantWhy: Probe5mDecisionAlways},
+		{name: "never refuses fable too", mode: Probe5mNever, model: "claude-fable-5-1", wantOK: false, wantWhy: Probe5mDecisionSkippedNever},
+		{name: "an override list replaces the built-in one", mode: Probe5mAuto, models: []string{"claude-opus-5"}, model: "claude-opus-5", wantOK: true, wantWhy: Probe5mDecisionModelAuto},
+		{name: "an override list excludes the built-in entries", mode: Probe5mAuto, models: []string{"claude-opus-5"}, model: "claude-fable-5-1", wantOK: false, wantWhy: Probe5mDecisionSkippedModel},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ok, why := probe5mDecision(tt.mode, tt.models, tt.model)
+			if ok != tt.wantOK || why != tt.wantWhy {
+				t.Fatalf("probe5mDecision(%q, %v, %q) = (%t, %q), want (%t, %q)", tt.mode, tt.models, tt.model, ok, why, tt.wantOK, tt.wantWhy)
+			}
+		})
+	}
+}
+
+func TestObserveSchedulesA5mSessionAtTTLMinusBeforeExpiry5m(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
+
+	observeFiveMinutes(scheduler, "sess-5m", "claude-fable-5-1")
+
+	if clock.count() != 1 {
+		t.Fatalf("scheduled %d timers, want 1", clock.count())
+	}
+	// 5m minus the 45s lead time, measured from the observed request's start.
+	if got := clock.timers[0].delay; got > 4*time.Minute+15*time.Second || got < 4*time.Minute+10*time.Second {
+		t.Fatalf("delay = %s, want ~4m15s", got)
+	}
+}
+
+func TestObserveAutoSkipsA5mSessionOnAnExpensiveCacheReadModel(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
+
+	observeFiveMinutes(scheduler, "sess-5m", "claude-opus-5")
+
+	if clock.count() != 0 {
+		t.Fatalf("scheduled %d timers for an expensive-cache-read model, want 0", clock.count())
+	}
+	if got := scheduler.Snapshot().Counters.SkippedByReason[Probe5mDecisionSkippedModel]; got != 1 {
+		t.Fatalf("skipped_by_reason[%s] = %d, want 1", Probe5mDecisionSkippedModel, got)
+	}
+}
+
+func TestObserveAutoStillSchedulesA1hSessionOnAnyModel(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
+
+	// oneHourBody's model is a haiku, which is not on the cheap-cache-read list.
+	observeOneHour(scheduler, "sess-1h")
+
+	if clock.count() != 1 {
+		t.Fatalf("scheduled %d timers for a 1h session, want 1: probe-5m must not gate the 1h pool", clock.count())
+	}
+}
+
+func TestObserveAlwaysProbesA5mSessionOnAnyModel(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound},
+		func(cfg *Config) { cfg.Probe5m = Probe5mAlways })
+
+	observeFiveMinutes(scheduler, "sess-5m", "claude-opus-5")
+
+	if clock.count() != 1 {
+		t.Fatalf("scheduled %d timers under probe-5m=always, want 1", clock.count())
+	}
+	if got := scheduler.Snapshot().Sessions[0].Probe5mDecision; got != Probe5mDecisionAlways {
+		t.Fatalf("probe_5m_decision = %q, want %q", got, Probe5mDecisionAlways)
+	}
+}
+
+func TestObserveNeverSkipsEvery5mSessionButKeepsThe1hPool(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound},
+		func(cfg *Config) { cfg.Probe5m = Probe5mNever })
+
+	observeFiveMinutes(scheduler, "sess-5m", "claude-fable-5-1")
+	if clock.count() != 0 {
+		t.Fatalf("scheduled %d timers under probe-5m=never, want 0", clock.count())
+	}
+	if got := scheduler.Snapshot().Counters.SkippedByReason[Probe5mDecisionSkippedNever]; got != 1 {
+		t.Fatalf("skipped_by_reason[%s] = %d, want 1", Probe5mDecisionSkippedNever, got)
+	}
+
+	observeOneHour(scheduler, "sess-1h")
+	if clock.count() != 1 {
+		t.Fatalf("probe-5m=never must leave the 1h pool alone; timers = %d, want 1", clock.count())
+	}
+}
+
+func TestFiveMinuteSessionsUseTheirOwnProbeBudget(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{result: ProbeResult{CacheReadInputTokens: 4096}}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound},
+		func(cfg *Config) {
+			cfg.MaxProbes = 6
+			cfg.MaxProbes5m = 2
+		})
+
+	observeFiveMinutes(scheduler, "sess-5m", "claude-fable-5-1")
+	clock.fireLatest(t)
+	clock.fireLatest(t)
+	if calls := prober.calls(); len(calls) != 2 {
+		t.Fatalf("probed %d times, want 2 from max-probes-5m", len(calls))
+	}
+	// The second probe exhausts the 5m budget, so nothing is rearmed.
+	if clock.count() != 2 {
+		t.Fatalf("timers = %d, want 2: the budget must stop the rescheduling", clock.count())
+	}
+	session := scheduler.Snapshot().Sessions[0]
+	if session.Active || session.RetiredReason != "max-probes" {
+		t.Fatalf("session = %+v, want retired for max-probes", session)
+	}
+}
+
+func TestFiveMinuteRescheduleUsesThe5mLeadTime(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{result: ProbeResult{CacheReadInputTokens: 4096}}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
+
+	observeFiveMinutes(scheduler, "sess-5m", "claude-fable-5-1")
+	clock.fireLatest(t)
+
+	if clock.count() != 2 {
+		t.Fatalf("timers = %d, want 2: the probe must rearm", clock.count())
+	}
+	if got := clock.timers[1].delay; got > 4*time.Minute+15*time.Second || got < 4*time.Minute+10*time.Second {
+		t.Fatalf("reschedule delay = %s, want ~4m15s", got)
+	}
+}
+
+func TestSnapshotReportsTheTierAndTheProbe5mSettings(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
+
+	observeFiveMinutes(scheduler, "sess-5m", "claude-fable-5-1")
+	observeOneHour(scheduler, "sess-1h")
+
+	snapshot := scheduler.Snapshot()
+	if snapshot.BeforeExpiry5m != "45s" {
+		t.Fatalf("before_expiry_5m = %q, want 45s", snapshot.BeforeExpiry5m)
+	}
+	if snapshot.Probe5m != Probe5mAuto {
+		t.Fatalf("probe_5m = %q, want %q", snapshot.Probe5m, Probe5mAuto)
+	}
+	if snapshot.MaxProbes5m != 30 {
+		t.Fatalf("max_probes_5m = %d, want 30", snapshot.MaxProbes5m)
+	}
+	if len(snapshot.Probe5mModels) != len(CheapCacheReadModels) {
+		t.Fatalf("probe_5m_models = %v, want the built-in list %v", snapshot.Probe5mModels, CheapCacheReadModels)
+	}
+
+	byID := map[string]SessionSnapshot{}
+	for _, session := range snapshot.Sessions {
+		byID[session.SessionID] = session
+	}
+	if got := byID["sess-5m"]; got.TTLTier != TTLTier5m || got.Probe5mDecision != Probe5mDecisionModelAuto {
+		t.Fatalf("5m session = (tier %q, decision %q), want (%q, %q)", got.TTLTier, got.Probe5mDecision, TTLTier5m, Probe5mDecisionModelAuto)
+	}
+	if got := byID["sess-1h"]; got.TTLTier != TTLTier1h || got.Probe5mDecision != Probe5mDecisionNotApplicable {
+		t.Fatalf("1h session = (tier %q, decision %q), want (%q, %q)", got.TTLTier, got.Probe5mDecision, TTLTier1h, Probe5mDecisionNotApplicable)
 	}
 }
