@@ -984,10 +984,10 @@ func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map
 			continue
 		}
 		seenPair[pair] = struct{}{}
-		// "Can supply the entry" is the fork-fallback question; an excluded source
-		// answers yes here on purpose, so the fork is dropped and the alias stays
-		// unroutable through this credential.
-		canSupply := modelExcluded(pair.name, excluded)
+		// "Can supply the entry" is the fork-fallback question. An excluded source, or
+		// an excluded alias, answers yes on purpose: the fork is dropped and the id stays
+		// unroutable through this credential, which is what the exclusion asked for.
+		canSupply := modelExcluded(pair.name, excluded) || modelExcluded(pair.alias, excluded)
 		if !canSupply && catalog != nil {
 			_, canSupply = catalog[pair.name]
 		}

@@ -109,6 +109,28 @@ func TestOAuthModelAliasesForAuthDropsGlobalForkWhenPerAuthSourceIsExcluded(t *t
 	}
 }
 
+// The exclusion may name the client-visible alias rather than the source. Exclusions run
+// before aliases, so a surviving fork would recreate the excluded id from the global source
+// while requests for it route to the per-auth upstream. The fork is dropped for that too.
+func TestOAuthModelAliasesForAuthDropsGlobalForkWhenAliasIsExcluded(t *testing.T) {
+	cfg := &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{
+		"codex": {{Name: "gpt-5.6-luna", Alias: "gpt-5.6-luna-reserve", Fork: true}},
+	}}
+	attrs := map[string]string{"model_aliases": `[{"name":"gpt-reserve","alias":"gpt-5.6-luna-reserve"}]`}
+	excluded := []string{"gpt-5.6-luna-*"}
+	got := oauthModelAliasesForAuth(cfg, "codex", attrs, catalogOf("gpt-5.6-luna"), excluded)
+	if len(got) != 1 || got[0].Name != "gpt-reserve" {
+		t.Fatalf("expected the fork to be dropped, got %+v", got)
+	}
+	models := applyExcludedModels([]*ModelInfo{{ID: "gpt-5.6-luna"}}, excluded)
+	out := applyOAuthModelAliasForAuth(cfg, "codex", "oauth", attrs, excluded, models)
+	for _, m := range out {
+		if m.ID == "gpt-5.6-luna-reserve" {
+			t.Fatalf("excluded alias must not be recreated, got %+v", out)
+		}
+	}
+}
+
 // The pair key is a struct, not a joined string, so names and aliases that themselves
 // contain the joiner cannot collide: {a->b, c} and {a, b->c} are different pairs.
 func TestOAuthModelAliasesForAuthPairKeyIsCollisionFree(t *testing.T) {
