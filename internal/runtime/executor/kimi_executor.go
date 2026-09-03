@@ -372,7 +372,11 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			}
 		}
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+	return &cliproxyexecutor.StreamResult{
+		Headers:  httpResp.Header.Clone(),
+		Chunks:   out,
+		Metadata: map[string]any{cliproxyexecutor.WireModelMetadataKey: wireModel},
+	}, nil
 }
 
 // CountTokens estimates token count for Kimi requests.

@@ -430,7 +430,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			commitClaudeDiagnostics(diagnosticsState, upstreamMessageID)
 		}
 	}()
-	result := &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}
+	result := &cliproxyexecutor.StreamResult{
+		Headers:  httpResp.Header.Clone(),
+		Chunks:   out,
+		Metadata: map[string]any{cliproxyexecutor.WireModelMetadataKey: wireModel},
+	}
 	if replayScope.valid() {
 		result = wrapClaudeThinkingReplayStream(ctx, result, replayScope)
 	}

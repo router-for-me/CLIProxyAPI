@@ -1194,6 +1194,21 @@ func wireModelOrSent(resp cliproxyexecutor.Response, sent string) string {
 	return preferWireModel(reported, sent)
 }
 
+// wireModelOrSentStream mirrors wireModelOrSent for the streaming path: a
+// streaming executor that normalizes the model internally (Kimi remapping an
+// alias, Claude stripping a thinking suffix) reports the exact wire model via
+// StreamResult.Metadata, captured before the first chunk is emitted, since a
+// StreamResult carries no per-chunk Response to attach it to on success.
+func wireModelOrSentStream(metadata map[string]any, sent string) string {
+	reported := ""
+	if metadata != nil {
+		if v, ok := metadata[cliproxyexecutor.WireModelMetadataKey].(string); ok {
+			reported = strings.TrimSpace(v)
+		}
+	}
+	return preferWireModel(reported, sent)
+}
+
 // wireModelFromError extracts the wire model an executor attached to an
 // error via a WireModel() string method, mirroring wireModelOrSent's
 // Response.Metadata channel for paths (ExecuteStream) that return no

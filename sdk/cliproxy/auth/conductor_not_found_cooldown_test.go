@@ -786,6 +786,104 @@ func TestExecuteCountReadsWireModelFromResponseMetadataNotJustError(t *testing.T
 	}
 }
 
+// kimiStyleWireModelExecutor mirrors a Kimi/Claude-style executor whose
+// ExecuteStream call succeeds (a normal payload chunk is emitted first) but
+// which normalized the requested model internally before sending it upstream
+// (e.g. Kimi remapping "kimi-k3-thinking-32k" to "k3"). It reports that wire
+// model via StreamResult.Metadata[WireModelMetadataKey], captured before the
+// first chunk, exactly like Kimi/Claude's real ExecuteStream now does. A
+// LATER chunk in the same stream carries a structured 404 error that itself
+// implements no WireModel() method (unlike wireModelStreamError below),
+// forcing classification to fall back through wireModelOrSentStream's
+// Metadata resolution rather than the error-carried path - this is Codex's
+// "propagate the wire model for successful streams" finding.
+type kimiStyleWireModelExecutor struct {
+	normalize func(model string) string
+}
+
+func (e kimiStyleWireModelExecutor) Identifier() string { return "kimi-style-wire-model" }
+func (e kimiStyleWireModelExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (e kimiStyleWireModelExecutor) ExecuteStream(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	wire := e.normalize(req.Model)
+	ch := make(chan cliproxyexecutor.StreamChunk, 2)
+	ch <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{}}]}\n\n")}
+	ch <- cliproxyexecutor.StreamChunk{Err: &Error{
+		HTTPStatus: http.StatusNotFound,
+		Message:    `{"error":{"type":"not_found_error","message":"model ` + wire + ` was not found"}}`,
+	}}
+	close(ch)
+	return &cliproxyexecutor.StreamResult{
+		Chunks:   ch,
+		Metadata: map[string]any{cliproxyexecutor.WireModelMetadataKey: wire},
+	}, nil
+}
+func (kimiStyleWireModelExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+func (kimiStyleWireModelExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (kimiStyleWireModelExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+// TestExecuteStreamSuccessPathPropagatesReportedWireModel covers Codex's
+// "Propagate the wire model for successful streams" finding: ExecuteStream
+// itself returns no error (streamResult.Metadata carries the executor's
+// reported wire model instead of a WireModel()-carrying error), and a later
+// mid-stream frame names that wire model as not-found without implementing
+// WireModel() itself. Classification must still resolve to the wire model
+// via StreamResult.Metadata, not the pre-normalization request model - a
+// pre-fix conductor would classify against the un-normalized request model
+// and never match, missing the 12h explicit-not-found cooldown entirely.
+func TestExecuteStreamSuccessPathPropagatesReportedWireModel(t *testing.T) {
+	previousDisabled := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previousDisabled) })
+
+	manager := NewManager(nil, nil, nil)
+	reqModel := "kimi-k3-thinking-32k"
+	normalize := func(m string) string { return "k3" }
+	executor := kimiStyleWireModelExecutor{normalize: normalize}
+	manager.RegisterExecutor(executor)
+	auth := &Auth{ID: "kimi-style-wire-model-auth", Provider: "kimi-style-wire-model"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: reqModel}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	before := time.Now()
+	streamResult, errExecute := manager.ExecuteStream(context.Background(), []string{"kimi-style-wire-model"}, cliproxyexecutor.Request{Model: reqModel}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() unexpectedly failed before streaming began: %v", errExecute)
+	}
+	for range streamResult.Chunks {
+		// Drain to completion; see the happens-before note on
+		// TestExecuteStreamMidStreamChunkErrorClassifiesAgainstReportedWireModel
+		// above for why no extra synchronization is needed here.
+	}
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found after ExecuteStream()")
+	}
+	var state *ModelState
+	for _, candidate := range updated.ModelStates {
+		state = candidate
+	}
+	if state == nil {
+		t.Fatal("ExecuteStream() did not record model cooldown state from the mid-stream chunk error")
+	}
+	cooldown := state.NextRetryAfter.Sub(before)
+	if cooldown < 12*time.Hour-time.Second || cooldown > 12*time.Hour+time.Second {
+		t.Fatalf("cooldown = %v, want about 12h (mid-stream error naming the executor-reported wire model, from a successful ExecuteStream call, must classify as explicit not-found via StreamResult.Metadata)", cooldown)
+	}
+}
+
 // midStreamWireModelExecutor mirrors an OpenAICompat-style executor whose
 // ExecuteStream call itself succeeds (HTTP 200, err == nil) but whose SSE
 // body contains a structured 404 arriving as a later frame. The conductor

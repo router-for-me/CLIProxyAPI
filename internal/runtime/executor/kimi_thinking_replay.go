@@ -476,7 +476,7 @@ func wrapThinkingReplayStream(ctx context.Context, result *cliproxyexecutor.Stre
 			clearContent(ctx, scope)
 		}
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: result.Headers.Clone(), Chunks: out}
+	return &cliproxyexecutor.StreamResult{Headers: result.Headers.Clone(), Chunks: out, Metadata: result.Metadata}
 }
 
 func wrapKimiThinkingReplayStream(ctx context.Context, result *cliproxyexecutor.StreamResult, scope kimiThinkingReplayScope) *cliproxyexecutor.StreamResult {

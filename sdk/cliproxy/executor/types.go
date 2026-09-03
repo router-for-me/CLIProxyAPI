@@ -261,6 +261,16 @@ type StreamResult struct {
 	Headers http.Header
 	// Chunks is the channel of streaming payload units.
 	Chunks <-chan StreamChunk
+	// Metadata exposes optional structured data about the stream, captured
+	// before streaming begins. Executors that normalize the model internally
+	// on a streaming request (stripping a thinking suffix, remapping an
+	// alias) should set Metadata[WireModelMetadataKey] to the exact model
+	// placed on the outbound upstream request, mirroring Response.Metadata's
+	// contract on the non-streaming path, so a successful stream's recorded
+	// Result.UpstreamModel - and any mid-stream structured 404 without its
+	// own WireModel() - can be classified against the wire model instead of
+	// the pre-normalization request model.
+	Metadata map[string]any
 }
 
 // StatusError represents an error that carries an HTTP-like status code.
