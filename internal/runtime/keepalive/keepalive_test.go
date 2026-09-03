@@ -475,6 +475,46 @@ func TestCacheControlTTL(t *testing.T) {
 	}
 }
 
+func TestRequestCacheTTLResolvesTheWireDefault(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want time.Duration
+	}{
+		{name: "explicit one hour", body: oneHourBody, want: time.Hour},
+		{name: "explicit five minutes", body: fiveMinuteBody, want: 5 * time.Minute},
+		{name: "bare ephemeral is the 5m default", body: `{"system":[{"type":"text","cache_control":{"type":"ephemeral"}}]}`, want: 5 * time.Minute},
+		{name: "bare ephemeral nested in messages", body: `{"messages":[{"content":[{"cache_control":{"type":"ephemeral"}}]}]}`, want: 5 * time.Minute},
+		{name: "longest marker wins over a bare one", body: `{"tools":[{"cache_control":{"type":"ephemeral"}}],"system":[{"cache_control":{"type":"ephemeral","ttl":"1h"}}]}`, want: time.Hour},
+		{name: "no cache control caches nothing", body: `{"messages":[{"role":"user","content":"hi"}]}`, want: 0},
+		{name: "invalid json", body: `not json`, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RequestCacheTTL([]byte(tt.body)); got != tt.want {
+				t.Fatalf("RequestCacheTTL() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTTLTier(t *testing.T) {
+	tests := []struct {
+		ttl  time.Duration
+		want string
+	}{
+		{ttl: 5 * time.Minute, want: TTLTier5m},
+		{ttl: 59 * time.Minute, want: TTLTier5m},
+		{ttl: time.Hour, want: TTLTier1h},
+		{ttl: 2 * time.Hour, want: TTLTier1h},
+	}
+	for _, tt := range tests {
+		if got := TTLTier(tt.ttl); got != tt.want {
+			t.Fatalf("TTLTier(%s) = %q, want %q", tt.ttl, got, tt.want)
+		}
+	}
+}
+
 func TestIsExtendedCacheTTL(t *testing.T) {
 	if IsExtendedCacheTTL(ExtendedCacheTTL([]byte(fiveMinuteBody))) {
 		t.Fatalf("a 5m-only body must not qualify for keepalive")

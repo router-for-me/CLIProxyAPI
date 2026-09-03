@@ -261,6 +261,19 @@ type Snapshot struct {
 	Counters             Counters          `json:"counters"`
 }
 
+// Cache TTL tiers. Every observed session belongs to exactly one of them, and
+// the tier decides the lead time, the probe budget, and whether the session is
+// eligible at all.
+const (
+	// TTLTier5m is the default ephemeral pool.
+	TTLTier5m = "5m"
+	// TTLTier1h is the extended pool a client opts into with ttl: "1h".
+	TTLTier1h = "1h"
+)
+
+// defaultCacheTTL is the pool a bare {"type":"ephemeral"} marker selects.
+const defaultCacheTTL = 5 * time.Minute
+
 // defaultAgentIdleWindow is the fallback when no idle window is configured.
 const defaultAgentIdleWindow = 10 * time.Minute
 
@@ -866,13 +879,14 @@ func removeThinkingDependentContextManagement(body []byte) ([]byte, error) {
 // or zero when the body carries no explicit TTL.
 //
 // A bare {"type":"ephemeral"} marker is the 5m wire default and returns zero:
-// only a TTL the client wrote out is treated as an opt-in to the long pool.
+// only a TTL the client wrote out is reported here. Use RequestCacheTTL to get
+// the pool the request actually selected.
 func ExtendedCacheTTL(body []byte) time.Duration {
 	if len(body) == 0 || !json.Valid(body) {
 		return 0
 	}
 	var longest time.Duration
-	walkCacheControlTTLs(gjson.ParseBytes(body), func(ttl time.Duration) {
+	walkCacheControl(gjson.ParseBytes(body), func(ttl time.Duration) {
 		if ttl > longest {
 			longest = ttl
 		}
@@ -880,22 +894,51 @@ func ExtendedCacheTTL(body []byte) time.Duration {
 	return longest
 }
 
-func walkCacheControlTTLs(value gjson.Result, visit func(time.Duration)) {
+// RequestCacheTTL returns the cache TTL the body actually selected, resolving
+// the wire default.
+//
+// A marker that spells out a ttl selects that pool. A bare
+// {"type":"ephemeral"} marker selects the 5m default, so any body carrying a
+// cache_control marker selects at least 5m. A body with no marker caches
+// nothing and returns zero.
+func RequestCacheTTL(body []byte) time.Duration {
+	if len(body) == 0 || !json.Valid(body) {
+		return 0
+	}
+	var longest time.Duration
+	var marked bool
+	walkCacheControl(gjson.ParseBytes(body), func(ttl time.Duration) {
+		marked = true
+		if ttl > longest {
+			longest = ttl
+		}
+	})
+	switch {
+	case longest > 0:
+		return longest
+	case marked:
+		return defaultCacheTTL
+	default:
+		return 0
+	}
+}
+
+// walkCacheControl visits every cache_control marker in the body, passing the
+// marker's explicit TTL or zero when it carries none.
+func walkCacheControl(value gjson.Result, visit func(time.Duration)) {
 	switch {
 	case value.IsObject():
 		value.ForEach(func(key, child gjson.Result) bool {
 			if key.String() == "cache_control" && child.IsObject() {
-				if ttl := parseCacheTTL(child.Get("ttl").String()); ttl > 0 {
-					visit(ttl)
-				}
+				visit(parseCacheTTL(child.Get("ttl").String()))
 				return true
 			}
-			walkCacheControlTTLs(child, visit)
+			walkCacheControl(child, visit)
 			return true
 		})
 	case value.IsArray():
 		value.ForEach(func(_, child gjson.Result) bool {
-			walkCacheControlTTLs(child, visit)
+			walkCacheControl(child, visit)
 			return true
 		})
 	}
@@ -920,9 +963,16 @@ func truncateSession(sessionID string) string {
 }
 
 // IsExtendedCacheTTL reports whether a TTL selects the long cache pool.
-//
-// Keepalive is only economical there. On the 5m pool a probe every window costs
-// thirteen reads an hour, which is more than the single write it avoids.
 func IsExtendedCacheTTL(ttl time.Duration) bool {
 	return ttl >= time.Hour
+}
+
+// TTLTier names the cache pool a TTL belongs to. It is what the logs and the
+// management snapshot report, and it selects the lead time and probe budget the
+// session is scheduled with.
+func TTLTier(ttl time.Duration) string {
+	if IsExtendedCacheTTL(ttl) {
+		return TTLTier1h
+	}
+	return TTLTier5m
 }
