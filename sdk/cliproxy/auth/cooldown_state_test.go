@@ -1308,3 +1308,179 @@ func TestUpdateAggregatedAvailabilityGenericNotFoundMutationControl(t *testing.T
 		t.Fatal("pre-fix wipe followed by availabilityBlock(false, false, ...) unexpectedly still blocks - mutation control precondition broken, update this test")
 	}
 }
+
+// TestRestoreCooldownStatesCredentialWideSurvivesCleanModelStates covers the
+// delta review's second must-fix item: a genuine credential-wide failure
+// (e.g. a 401, applied directly to auth.Unavailable/NextRetryAfter by
+// applyAuthFailureStateForModel, with no per-model context at all) must not
+// be silently cleared by updateAggregatedAvailability just because this
+// credential also happens to carry clean historical ModelStates entries
+// (models it has served successfully before, with no error state of their
+// own). Before this fix, restoreCooldownRecordLocked's model=="" branch
+// unconditionally re-derived auth.Unavailable from ModelStates the moment
+// ModelStates was non-empty, discarding the persisted 401's own deadline the
+// instant any clean sibling model state existed. The fix persists an
+// explicit Scope=credential marker on the auth-level record and threads it
+// through to auth.CredentialCooldown, which updateAggregatedAvailability now
+// checks before ever consulting ModelStates.
+func TestRestoreCooldownStatesCredentialWideSurvivesCleanModelStates(t *testing.T) {
+	now := time.Now()
+	deadline := now.Add(30 * time.Minute).UTC().Truncate(time.Second)
+
+	store := &recordingCooldownStateStore{
+		load: []CooldownStateRecord{
+			{
+				Provider:       "claude",
+				AuthID:         "auth-401",
+				Model:          "",
+				Status:         "cooling",
+				NextRetryAfter: deadline,
+				Reason:         "unauthorized",
+				Scope:          cooldownScopeCredential,
+				UpdatedAt:      now,
+			},
+		},
+	}
+	manager := NewManager(nil, nil, nil)
+	manager.SetCooldownStateStore(store)
+	auth := &Auth{
+		ID:       "auth-401",
+		Provider: "claude",
+		Status:   StatusActive,
+		// Clean historical model states: this credential has served these
+		// models before with no error of their own. This is exactly the
+		// condition Codex flagged as silently clearing a genuine
+		// credential-wide cooldown.
+		ModelStates: map[string]*ModelState{
+			"claude-opus":  {Status: StatusActive},
+			"claude-haiku": {Status: StatusActive},
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+
+	if errRestore := manager.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatalf("RestoreCooldownStates() returned error: %v", errRestore)
+	}
+
+	restored, ok := manager.GetByID("auth-401")
+	if !ok {
+		t.Fatal("restored auth was not found")
+	}
+	if !restored.Unavailable {
+		t.Fatal("restored auth.Unavailable = false, want true (credential-wide 401 must survive clean sibling model states)")
+	}
+	if !restored.CredentialCooldown {
+		t.Fatal("restored auth.CredentialCooldown = false, want true")
+	}
+	if !restored.NextRetryAfter.Equal(deadline) {
+		t.Fatalf("restored auth.NextRetryAfter = %v, want %v", restored.NextRetryAfter, deadline)
+	}
+	if blocked, _, next := isAuthBlockedForModel(restored, "", now); !blocked || !next.Equal(deadline) {
+		t.Fatalf("isAuthBlockedForModel(auth, \"\", now) = (%v, _, %v), want (true, _, %v)", blocked, next, deadline)
+	}
+	// Every individual model must be blocked too - a credential-wide failure
+	// blocks everything, not just the aggregate query.
+	if blocked, _, _ := isAuthBlockedForModel(restored, "claude-opus", now); !blocked {
+		t.Fatal("isAuthBlockedForModel(auth, \"claude-opus\", now) = false, want true")
+	}
+
+	// Once the deadline has actually passed, the credential-wide block must
+	// lift - this is a deadline, not a permanent flag.
+	afterDeadline := deadline.Add(time.Second)
+	if blocked, _, _ := isAuthBlockedForModel(restored, "", afterDeadline); blocked {
+		t.Fatal("isAuthBlockedForModel(auth, \"\", afterDeadline) = true, want false once the credential-wide deadline has passed")
+	}
+}
+
+// TestRestoreCooldownStatesLegacyAuthRecordRoundTrip confirms a record
+// written before the Scope field existed (Scope == "", the zero value)
+// keeps its pre-existing behavior on restore: an auth-level record is still
+// re-derived from ModelStates whenever any exist, exactly as before this
+// round's fix. This is the documented backward-compatibility default from
+// the delta review - only an explicit Scope=credential marker changes
+// behavior.
+func TestRestoreCooldownStatesLegacyAuthRecordRoundTrip(t *testing.T) {
+	now := time.Now()
+	deadline := now.Add(30 * time.Minute).UTC().Truncate(time.Second)
+
+	store := &recordingCooldownStateStore{
+		load: []CooldownStateRecord{
+			{
+				Provider:       "claude",
+				AuthID:         "auth-legacy",
+				Model:          "",
+				Status:         "cooling",
+				NextRetryAfter: deadline,
+				Reason:         "unauthorized",
+				// Scope intentionally left unset (zero value), simulating a
+				// record persisted by a build before this field existed.
+				UpdatedAt: now,
+			},
+		},
+	}
+	manager := NewManager(nil, nil, nil)
+	manager.SetCooldownStateStore(store)
+	auth := &Auth{
+		ID:       "auth-legacy",
+		Provider: "claude",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			"claude-opus": {Status: StatusActive},
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+
+	if errRestore := manager.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatalf("RestoreCooldownStates() returned error: %v", errRestore)
+	}
+
+	restored, ok := manager.GetByID("auth-legacy")
+	if !ok {
+		t.Fatal("restored auth was not found")
+	}
+	// Unchanged pre-existing behavior: a legacy auth-level record with
+	// ModelStates present is re-derived from ModelStates, not trusted
+	// directly - the clean sibling clears it.
+	if restored.Unavailable {
+		t.Fatal("restored auth.Unavailable = true, want false (legacy Scope=\"\" record must keep the pre-existing ModelStates-derived behavior)")
+	}
+	if restored.CredentialCooldown {
+		t.Fatal("restored auth.CredentialCooldown = true, want false for a legacy record")
+	}
+}
+
+// TestRestoreCooldownStatesCredentialWideMutationControl is a mutation
+// control for the credential-scope fix: reverting
+// restoreCooldownRecordLocked's model=="" branch to unconditionally call
+// updateAggregatedAvailability whenever ModelStates is non-empty (ignoring
+// record.Scope entirely, as before this round) must be caught by
+// TestRestoreCooldownStatesCredentialWideSurvivesCleanModelStates.
+func TestRestoreCooldownStatesCredentialWideMutationControl(t *testing.T) {
+	now := time.Now()
+	deadline := now.Add(30 * time.Minute)
+
+	auth := &Auth{
+		ID:       "auth-401",
+		Provider: "claude",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			"claude-opus": {Status: StatusActive},
+		},
+	}
+	// Directly re-execute the pre-fix branch: unconditional
+	// updateAggregatedAvailability whenever ModelStates is non-empty,
+	// without ever consulting a Scope marker.
+	auth.Unavailable = true
+	auth.Status = StatusError
+	auth.NextRetryAfter = deadline
+	if len(auth.ModelStates) > 0 {
+		updateAggregatedAvailability(auth, now)
+	}
+	if auth.Unavailable {
+		t.Fatal("pre-fix unconditional updateAggregatedAvailability unexpectedly still reports unavailable - mutation control precondition broken, update this test")
+	}
+}

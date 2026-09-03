@@ -17,17 +17,29 @@ import (
 
 // CooldownStateRecord is a persisted runtime cooldown snapshot for one auth/model pair.
 type CooldownStateRecord struct {
-	Provider       string     `json:"provider,omitempty"`
-	AuthID         string     `json:"auth_id"`
-	AuthFile       string     `json:"-"`
-	Model          string     `json:"model,omitempty"`
-	Status         string     `json:"status,omitempty"`
-	NextRetryAfter time.Time  `json:"next_retry_after"`
-	Reason         string     `json:"reason,omitempty"`
-	Quota          QuotaState `json:"quota,omitempty"`
-	LastError      *Error     `json:"last_error,omitempty"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	Provider       string    `json:"provider,omitempty"`
+	AuthID         string    `json:"auth_id"`
+	AuthFile       string    `json:"-"`
+	Model          string    `json:"model,omitempty"`
+	Status         string    `json:"status,omitempty"`
+	NextRetryAfter time.Time `json:"next_retry_after"`
+	Reason         string    `json:"reason,omitempty"`
+	// Scope distinguishes an auth-level (Model == "") record's origin: either
+	// cooldownScopeCredential (a genuine credential-wide failure, e.g. a 401,
+	// where Unavailable/NextRetryAfter/Quota were set directly and must
+	// survive aggregation until this deadline) or empty/legacy (derived from
+	// ModelStates aggregation - the current, pre-existing behavior, kept as
+	// the default for backward compatibility with records written before
+	// this field existed). Unused for a model-scoped record.
+	Scope     string     `json:"scope,omitempty"`
+	Quota     QuotaState `json:"quota,omitempty"`
+	LastError *Error     `json:"last_error,omitempty"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
+
+// cooldownScopeCredential marks a CooldownStateRecord as a genuine
+// credential-wide cooldown. See CooldownStateRecord.Scope.
+const cooldownScopeCredential = "credential"
 
 // CooldownStateStore persists runtime cooldown state independently from auth tokens.
 type CooldownStateStore interface {

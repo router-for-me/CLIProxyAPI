@@ -92,6 +92,14 @@ type Auth struct {
 	NextRefreshAfter time.Time `json:"next_refresh_after"`
 	// NextRetryAfter is the earliest time a retry should retrigger.
 	NextRetryAfter time.Time `json:"next_retry_after"`
+	// CredentialCooldown marks that Unavailable/NextRetryAfter/Quota were set
+	// directly by a genuine credential-wide failure (e.g. a 401 or a
+	// credential-scoped 429), not derived from ModelStates. Aggregation
+	// (updateAggregatedAvailability) must not silently clear this before
+	// NextRetryAfter/Quota.NextRecoverAt actually passes, even when
+	// ModelStates is non-empty and otherwise clean - a credential-wide
+	// failure blocks every model regardless of any individual model's state.
+	CredentialCooldown bool `json:"credential_cooldown,omitempty"`
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 

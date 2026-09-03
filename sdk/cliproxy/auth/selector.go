@@ -808,6 +808,14 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 		return true, blockReasonCooldown, auth.Quota.NextRecoverAt
 	}
+	// A genuine credential-wide cooldown (e.g. a 401) blocks every model
+	// regardless of any individual model's own ModelStates entry - a clean
+	// per-model state does not mean the credential itself is usable. Without
+	// this check, the matched-model branch below decides solely from that
+	// model's own state and can miss a real credential-wide block entirely.
+	if auth.CredentialCooldown && auth.Unavailable && auth.NextRetryAfter.After(now) {
+		return true, blockReasonCooldown, auth.NextRetryAfter
+	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
 			modelKey := canonicalModelKey(model)
