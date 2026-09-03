@@ -848,26 +848,21 @@ func TestExecuteStreamMidStreamChunkErrorClassifiesAgainstReportedWireModel(t *t
 		t.Fatalf("ExecuteStream() unexpectedly failed before streaming began: %v", errExecute)
 	}
 	for range streamResult.Chunks {
-		// Drain to let wrapStreamResult observe the terminal chunk error and
-		// record the Result.
+		// Drain to completion. wrapStreamResult's emit() calls
+		// m.recordExecutionResult synchronously BEFORE forwarding the
+		// terminal errored chunk on the (unbuffered) out channel, so by the
+		// time this range loop observes that chunk (and later the closed
+		// channel), the record is already visible per Go's channel
+		// happens-before guarantee — no extra synchronization needed.
 	}
 
-	// wrapStreamResult records asynchronously as it forwards chunks; give it
-	// a moment to finish before reading state.
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found after ExecuteStream()")
+	}
 	var state *ModelState
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		updated, ok := manager.GetByID(auth.ID)
-		if !ok {
-			t.Fatal("auth not found after ExecuteStream()")
-		}
-		for _, candidate := range updated.ModelStates {
-			state = candidate
-		}
-		if state != nil {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+	for _, candidate := range updated.ModelStates {
+		state = candidate
 	}
 	if state == nil {
 		t.Fatal("ExecuteStream() did not record model cooldown state from the mid-stream chunk error")
