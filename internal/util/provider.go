@@ -70,7 +70,68 @@ func GetProviderName(modelName string) []string {
 		return providers
 	}
 
+	// 1. Static model definition lookup fallback
+	for _, p := range staticModelProviders(modelName) {
+		appendProvider(p)
+	}
+	if len(providers) > 0 {
+		return providers
+	}
+
+	// 2. Name heuristics fallback
+	for _, p := range heuristicModelProviders(modelName) {
+		appendProvider(p)
+	}
 	return providers
+}
+
+func staticModelProviders(modelName string) []string {
+	info := registry.LookupStaticModelInfo(modelName)
+	if info == nil {
+		return nil
+	}
+	ownedBy := strings.ToLower(strings.TrimSpace(info.OwnedBy))
+	typeStr := strings.ToLower(strings.TrimSpace(info.Type))
+	switch {
+	case ownedBy == "antigravity" || typeStr == "antigravity":
+		return []string{"antigravity", "gemini", "vertex", "aistudio"}
+	case ownedBy == "gemini" || typeStr == "gemini" || ownedBy == "google":
+		return []string{"gemini", "antigravity", "vertex", "aistudio"}
+	case ownedBy == "claude" || typeStr == "claude" || ownedBy == "anthropic":
+		return []string{"claude"}
+	case ownedBy == "codex" || typeStr == "codex" || typeStr == "openai" || ownedBy == "openai":
+		return []string{"codex"}
+	case ownedBy == "xai" || typeStr == "xai" || typeStr == "grok":
+		return []string{"xai"}
+	case ownedBy == "kimi" || typeStr == "kimi" || ownedBy == "moonshot":
+		return []string{"kimi"}
+	default:
+		return nil
+	}
+}
+
+func heuristicModelProviders(modelName string) []string {
+	lower := strings.ToLower(strings.TrimSpace(modelName))
+	switch {
+	case strings.Contains(lower, "gemini"):
+		return []string{"gemini", "antigravity", "vertex", "aistudio"}
+	case strings.HasPrefix(lower, "claude"):
+		return []string{"claude"}
+	case strings.HasPrefix(lower, "gpt-") || strings.HasPrefix(lower, "chatgpt") ||
+		strings.HasPrefix(lower, "o1-") || lower == "o1" ||
+		strings.HasPrefix(lower, "o3-") || lower == "o3" ||
+		strings.HasPrefix(lower, "o4-") || lower == "o4" ||
+		strings.HasPrefix(lower, "codex") || strings.HasPrefix(lower, "text-embedding"):
+		return []string{"codex"}
+	case strings.HasPrefix(lower, "grok") || strings.HasPrefix(lower, "xai"):
+		return []string{"xai"}
+	case strings.HasPrefix(lower, "kimi") || strings.HasPrefix(lower, "moonshot"):
+		return []string{"kimi"}
+	case strings.HasPrefix(lower, "deepseek"):
+		return []string{"codex", "claude"}
+	default:
+		return nil
+	}
 }
 
 // ResolveAutoModel resolves the "auto" model name to an actual available model.
