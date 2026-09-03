@@ -438,6 +438,12 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 		if s := format.Get("strict"); s.Exists() && s.Type == gjson.False {
 			strict = false
 		}
+		// OpenAI strict mode requires every declared property to be listed
+		// in required. Downgrade instead of emitting an unsatisfiable
+		// strict schema that strict backends reject with HTTP 400.
+		if strict && codexSchemaMissesRequired(format.Get("schema")) {
+			strict = false
+		}
 		translatedFormat := []byte(`{"type":"json_schema","name":"","strict":true,"schema":{}}`)
 		translatedFormat, _ = sjson.SetBytes(translatedFormat, "name", name)
 		translatedFormat, _ = sjson.SetBytes(translatedFormat, "strict", strict)
@@ -674,4 +680,96 @@ func normalizeToolParameters(raw string) string {
 		schema, _ = sjson.SetRawBytes(schema, "properties", []byte(`{}`))
 	}
 	return string(schema)
+}
+
+// codexSchemaMapKeywords holds JSON Schema keywords whose values are maps of
+// subschemas; codexSchemaValueKeywords holds keywords with a single nested
+// schema or a list of schemas.
+var codexSchemaMapKeywords = [...]string{
+	"properties",
+	"$defs",
+	"definitions",
+	"patternProperties",
+	"dependentSchemas",
+	"dependencies",
+}
+
+var codexSchemaValueKeywords = [...]string{
+	"items",
+	"prefixItems",
+	"contains",
+	"additionalProperties",
+	"propertyNames",
+	"unevaluatedProperties",
+	"unevaluatedItems",
+	"additionalItems",
+	"contentSchema",
+	"anyOf",
+	"oneOf",
+	"allOf",
+	"not",
+	"if",
+	"then",
+	"else",
+}
+
+// codexSchemaMissesRequired reports whether a JSON Schema has any declared
+// property missing from its sibling required list (recursively). OpenAI
+// strict mode rejects such schemas with HTTP 400, so callers downgrade
+// text.format.strict instead of emitting an unsatisfiable schema.
+func codexSchemaMissesRequired(schema gjson.Result) bool {
+	if !schema.IsObject() {
+		if schema.IsArray() {
+			miss := false
+			schema.ForEach(func(_, child gjson.Result) bool {
+				if codexSchemaMissesRequired(child) {
+					miss = true
+					return false
+				}
+				return true
+			})
+			return miss
+		}
+		return false
+	}
+	if properties := schema.Get("properties"); properties.IsObject() {
+		required := schema.Get("required")
+		if !required.IsArray() {
+			return len(properties.Map()) > 0
+		}
+		names := make(map[string]struct{}, len(required.Array()))
+		for _, item := range required.Array() {
+			if item.Type == gjson.String {
+				names[item.String()] = struct{}{}
+			}
+		}
+		for name := range properties.Map() {
+			if _, ok := names[name]; !ok {
+				return true
+			}
+		}
+	}
+	for _, keyword := range codexSchemaMapKeywords {
+		children := schema.Get(keyword)
+		if !children.IsObject() {
+			continue
+		}
+		miss := false
+		children.ForEach(func(_, child gjson.Result) bool {
+			if codexSchemaMissesRequired(child) {
+				miss = true
+				return false
+			}
+			return true
+		})
+		if miss {
+			return true
+		}
+	}
+	for _, keyword := range codexSchemaValueKeywords {
+		if child := schema.Get(keyword); child.Exists() && codexSchemaMissesRequired(child) {
+			return true
+		}
+	}
+	return false
 }
