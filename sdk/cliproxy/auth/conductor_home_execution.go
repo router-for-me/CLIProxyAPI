@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -178,15 +179,16 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			execOpts := opts
 			execOpts.ExecutionLifecycle = selection
+			if !restoreExecutionModel {
+				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel)
+			}
+			execOpts = withSelectedModelCompatibility(execOpts, execReq)
 			var errIntercept error
-			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execReq, execOpts, errIntercept = m.applyRequestAfterAuthInterceptor(execCtx, selection.Executor, preparedAuth, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
 				releaseAttempt()
 				selection.End("request_intercepted")
 				return cliproxyexecutor.Response{}, errIntercept
-			}
-			if !restoreExecutionModel {
-				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel)
 			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				releaseAttempt()
@@ -335,7 +337,7 @@ func wrapHomeStream(ctx context.Context, result *cliproxyexecutor.StreamResult, 
 			}
 		}
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: result.Headers, Chunks: out}
+	return &cliproxyexecutor.StreamResult{Headers: result.Headers, Metadata: maps.Clone(result.Metadata), Chunks: out}
 }
 
 func sanitizeDownstreamWebsocketFallbackRequest(ctx context.Context, auth *Auth, req cliproxyexecutor.Request) cliproxyexecutor.Request {

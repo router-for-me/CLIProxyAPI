@@ -222,6 +222,24 @@ func readOpenAICompatStreamPayload(t *testing.T, streamResult *cliproxyexecutor.
 	return string(payload)
 }
 
+func TestManagerExecuteStreamPublishesSelectedModelCompatibility(t *testing.T) {
+	alias := "portable-model"
+	manager := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{{
+		Name: "compat-upstream-model", Alias: alias, IsCompat: true,
+	}}, nil)
+
+	result, err := manager.ExecuteStream(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if compatible, _ := result.Metadata[cliproxyexecutor.SelectedModelCompatibilityMetadataKey].(bool); !compatible {
+		t.Fatalf("stream result compatibility metadata = %#v, want true", result.Metadata)
+	}
+	if payload := readOpenAICompatStreamPayload(t, result); payload != "compat-upstream-model" {
+		t.Fatalf("stream payload = %q, want compat-upstream-model", payload)
+	}
+}
+
 func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testing.T) {
 	alias := "claude-opus-4.66"
 	invalidErr := &Error{HTTPStatus: http.StatusUnprocessableEntity, Message: "unprocessable entity"}

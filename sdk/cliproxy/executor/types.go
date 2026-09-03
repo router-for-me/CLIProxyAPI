@@ -42,6 +42,12 @@ const (
 	SelectedAuthIndexMetadataKey = "selected_auth_index"
 	// SelectedAuthIndexCallbackMetadataKey carries an optional callback invoked with the selected auth index.
 	SelectedAuthIndexCallbackMetadataKey = "selected_auth_index_callback"
+	// SelectedModelCompatibilityMetadataKey reports whether the selected configured model
+	// uses a provider-compatible protocol instead of its provider's native protocol.
+	SelectedModelCompatibilityMetadataKey = "selected_model_compatibility"
+	// ProviderOutputCommittedMetadataKey reports that a streaming attempt delivered at
+	// least one payload before it failed, so later history belongs to that attempt.
+	ProviderOutputCommittedMetadataKey = "provider_output_committed"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
 	// DerivedSessionIDMetadataKey stores a stable session identity inferred from request context.
@@ -244,6 +250,8 @@ type StreamChunk struct {
 type StreamResult struct {
 	// Headers carries upstream HTTP response headers from the initial connection.
 	Headers http.Header
+	// Metadata carries attempt-scoped execution facts selected after auth routing.
+	Metadata map[string]any
 	// Chunks is the channel of streaming payload units.
 	Chunks <-chan StreamChunk
 }
