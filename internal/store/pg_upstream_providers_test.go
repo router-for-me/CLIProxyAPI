@@ -650,3 +650,126 @@ func TestUpstreamProviderStoreClaudeAPIKeyEntryIdentitySync(t *testing.T) {
 		t.Fatalf("legacy Claude row stripped parent api key: %q", reloaded.APIKey)
 	}
 }
+
+// TestUpstreamProviderStoreRoutingStrategyAndEntryPriorityRoundTrip pins the
+// schema contract for the pool routing strategy and the per-entry priority
+// tier: upstream_providers.routing_strategy is a nullable TEXT column
+// (NULL/empty = unset = today's behavior) and the entries priority column is
+// a nullable INTEGER (NULL = inherit the provider row priority). Both must
+// round-trip through Create/Update/Get, clearing either back to unset must
+// persist, and an explicit tier 0 must stay distinct from "inherit". Like the
+// other store round-trips this is gated on PGSTORE_TEST_DSN; fake redacted
+// credentials are used throughout and never appear in failure messages.
+func TestUpstreamProviderStoreRoutingStrategyAndEntryPriorityRoundTrip(t *testing.T) {
+	pg := newTestPostgresStore(t, "upstream_entry_routing")
+	defer pg.Close()
+	ensureMigrated(t, pg)
+
+	src := NewUpstreamProviderStore(pg)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// The migration must add a nullable TEXT routing_strategy column. A NOT
+	// NULL constraint would break legacy rows, and a non-NULL DEFAULT would
+	// silently opt existing pools into the new failover behavior.
+	var strategyType, strategyNullable string
+	if err := pg.DB().QueryRowContext(ctx, `
+		SELECT data_type, is_nullable
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2 AND column_name = 'routing_strategy'
+	`, pg.cfg.Schema, pg.cfg.UpstreamProvidersTable).Scan(&strategyType, &strategyNullable); err != nil {
+		t.Fatalf("query routing_strategy column: %v", err)
+	}
+	if strategyType != "text" || strategyNullable != "YES" {
+		t.Fatalf("routing_strategy column = %s/%s, want text/YES", strategyType, strategyNullable)
+	}
+	// The entries priority column must be nullable INTEGER so "inherit the
+	// row priority" stays distinct from an explicit tier 0.
+	var prioType, prioNullable string
+	if err := pg.DB().QueryRowContext(ctx, `
+		SELECT data_type, is_nullable
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2 AND column_name = 'priority'
+	`, pg.cfg.Schema, pg.cfg.UpstreamProviderEntriesTable).Scan(&prioType, &prioNullable); err != nil {
+		t.Fatalf("query entries priority column: %v", err)
+	}
+	if prioType != "integer" || prioNullable != "YES" {
+		t.Fatalf("entries priority column = %s/%s, want integer/YES", prioType, prioNullable)
+	}
+
+	created, err := src.Create(ctx, UpstreamProvider{
+		ProviderType:    "claude-api-key",
+		Name:            "pooled",
+		BaseURL:         "https://claude.example.test",
+		RoutingStrategy: "failover",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{APIKey: "routing-secret-a", Name: "alpha", Priority: intPtr(10)},
+			{APIKey: "routing-secret-b", Name: "beta"}, // nil priority = inherit
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.ID == 0 {
+		t.Fatal("Create returned zero provider ID")
+	}
+	if created.RoutingStrategy != "failover" {
+		t.Fatalf("created strategy = %q, want failover", created.RoutingStrategy)
+	}
+	firstID := created.APIKeyEntries[0].ID
+	secondID := created.APIKeyEntries[1].ID
+	if firstID == 0 || secondID == 0 || firstID == secondID {
+		t.Fatalf("Create returned entry IDs %d and %d, want distinct positive IDs", firstID, secondID)
+	}
+
+	loaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if loaded.RoutingStrategy != "failover" {
+		t.Fatalf("strategy round-trip = %q, want failover", loaded.RoutingStrategy)
+	}
+	if len(loaded.APIKeyEntries) != 2 {
+		t.Fatalf("Get returned %d entries, want 2", len(loaded.APIKeyEntries))
+	}
+	if loaded.APIKeyEntries[0].Priority == nil || *loaded.APIKeyEntries[0].Priority != 10 {
+		t.Fatalf("entry 0 priority = %#v, want pointer to 10", loaded.APIKeyEntries[0].Priority)
+	}
+	if loaded.APIKeyEntries[1].Priority != nil {
+		t.Fatalf("entry 1 priority = %#v, want nil (inherit)", loaded.APIKeyEntries[1].Priority)
+	}
+
+	// Clearing the strategy back to unset must round-trip, and an explicit
+	// tier 0 must persist as a non-nil pointer rather than collapsing to
+	// "inherit". Both are the dashboard's "back to default" and "tier 0"
+	// affordances.
+	_, err = src.Update(ctx, UpstreamProvider{
+		ID:           created.ID,
+		ProviderType: "claude-api-key",
+		Name:         "pooled",
+		BaseURL:      "https://claude.example.test",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{ID: firstID, APIKey: "routing-secret-a", Name: "alpha", Priority: intPtr(0)},
+			{ID: secondID, APIKey: "routing-secret-b", Name: "beta"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Update clearing strategy: %v", err)
+	}
+	reloaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get after clear: %v", err)
+	}
+	if reloaded.RoutingStrategy != "" {
+		t.Fatalf("strategy after clear = %q, want empty", reloaded.RoutingStrategy)
+	}
+	if len(reloaded.APIKeyEntries) != 2 {
+		t.Fatalf("Get after clear returned %d entries, want 2", len(reloaded.APIKeyEntries))
+	}
+	if reloaded.APIKeyEntries[0].Priority == nil || *reloaded.APIKeyEntries[0].Priority != 0 {
+		t.Fatalf("entry 0 priority after clear = %#v, want pointer to explicit 0", reloaded.APIKeyEntries[0].Priority)
+	}
+	if reloaded.APIKeyEntries[1].Priority != nil {
+		t.Fatalf("entry 1 priority after clear = %#v, want nil (inherit)", reloaded.APIKeyEntries[1].Priority)
+	}
+}

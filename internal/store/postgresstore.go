@@ -716,6 +716,23 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: migrate upstream provider entries weight column: %w", err)
 	}
+	// upstream_providers.routing_strategy column. The optional in-pool
+	// selection strategy for entry-bearing providers; NULL = unset = today's
+	// behavior. Nullable TEXT with no DEFAULT so legacy rows keep NULL.
+	upstreamProvidersTable := s.fullTableName(s.cfg.UpstreamProvidersTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS routing_strategy TEXT`, upstreamProvidersTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: migrate upstream providers routing strategy column: %w", err)
+	}
+	// upstream_provider_api_key_entries priority column. Optional per-entry
+	// selection tier; NULL = inherit the provider row priority. Nullable
+	// INTEGER with no DEFAULT, mirroring the weight column contract.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS priority INTEGER`, upstreamEntriesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: migrate upstream provider entries priority column: %w", err)
+	}
 
 	// usage_stat_day is the pre-aggregated daily rollup of usage_events. It folds
 	// per-request rows into per-(day, user, api_key, model, provider, source)
@@ -1530,6 +1547,7 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			name                       TEXT,
 			priority                   INTEGER NOT NULL DEFAULT 0,
 			disabled                   BOOLEAN NOT NULL DEFAULT FALSE,
+			routing_strategy           TEXT,
 			prefix                     TEXT,
 			api_key                    TEXT,
 			base_url                   TEXT,
@@ -1644,7 +1662,8 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			name        TEXT,
 			proxy_url   TEXT,
 			sort_order  INTEGER NOT NULL DEFAULT 0,
-			weight      INTEGER
+			weight      INTEGER,
+			priority    INTEGER
 		)
 	`, upstreamEntriesTable, upstreamProvidersTable)); err != nil {
 		return fmt.Errorf("postgres store: create upstream_provider_api_key_entries table: %w", err)

@@ -24,11 +24,18 @@ import (
 // OAuth/file-backed auths use the "oauth:<channel>" form, e.g.
 // "oauth:claude", "oauth:codex".
 type UpstreamProvider struct {
-	ID                      int64          `json:"id"`
-	ProviderType            string         `json:"provider_type"`
-	Name                    string         `json:"name,omitempty"`
-	Priority                int            `json:"priority"`
-	Disabled                bool           `json:"disabled"`
+	ID           int64  `json:"id"`
+	ProviderType string `json:"provider_type"`
+	Name         string `json:"name,omitempty"`
+	Priority     int    `json:"priority"`
+	Disabled     bool   `json:"disabled"`
+	// RoutingStrategy is the optional in-pool credential-selection strategy
+	// for entry-bearing providers (claude-api-key, openai-compatibility).
+	// Empty = unset: entries follow the global routing.strategy and
+	// request-fault errors keep today's hard-stop behavior. Any valid value
+	// additionally opts the pool into aggressive failover — any entry error
+	// rotates to the next entry before surfacing to the client.
+	RoutingStrategy         string         `json:"routing_strategy,omitempty"`
 	Prefix                  string         `json:"prefix,omitempty"`
 	APIKey                  string         `json:"api_key,omitempty"`
 	BaseURL                 string         `json:"base_url,omitempty"`
@@ -101,6 +108,12 @@ type UpstreamProviderAPIKey struct {
 	// the column add and "user did not pick a weight" stays distinct from
 	// "weight 0".
 	Weight *int `json:"weight,omitempty"`
+	// Priority is the optional selection tier for this entry within its
+	// pool. nil = inherit the provider row's Priority (today's behavior);
+	// the scheduler always serves the highest ready tier first and descends
+	// when the upper tier cools down. Stored as nullable INTEGER so
+	// "inherit" stays distinct from an explicit 0.
+	Priority *int `json:"priority,omitempty"`
 }
 
 // UpstreamProviderStore is the contract the management API consumes for the
@@ -194,7 +207,7 @@ func (s *pgUpstreamProviderStore) Get(ctx context.Context, id int64) (*UpstreamP
 		return nil, fmt.Errorf("postgres store: upstream providers store not initialized")
 	}
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT id, provider_type, name, priority, disabled, prefix, api_key,
+		SELECT id, provider_type, name, priority, disabled, routing_strategy, prefix, api_key,
 		       base_url, proxy_url, label, email, file_name, source_backend,
 		       status, unavailable, last_error, last_error_at, websockets,
 		       rebuild_mid_system_message, experimental_cch_signing, cloak_mode,
@@ -243,7 +256,7 @@ func (s *pgUpstreamProviderStore) Create(ctx context.Context, p UpstreamProvider
 	}
 	row := tx.QueryRowContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
-			provider_type, name, priority, disabled, prefix, api_key,
+			provider_type, name, priority, disabled, routing_strategy, prefix, api_key,
 			base_url, proxy_url, label, email, file_name, source_backend,
 			status, unavailable, last_error, last_error_at, websockets,
 			rebuild_mid_system_message, experimental_cch_signing, cloak_mode,
@@ -251,9 +264,9 @@ func (s *pgUpstreamProviderStore) Create(ctx context.Context, p UpstreamProvider
 			token_access_token, token_refresh_token, token_token_type,
 			token_expiry, token_expired, token_scope, extra_config
 		) VALUES (
-			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31
 		)
-		RETURNING id, provider_type, name, priority, disabled, prefix, api_key,
+		RETURNING id, provider_type, name, priority, disabled, routing_strategy, prefix, api_key,
 		          base_url, proxy_url, label, email, file_name, source_backend,
 		          status, unavailable, last_error, last_error_at, websockets,
 		          rebuild_mid_system_message, experimental_cch_signing, cloak_mode,
@@ -262,7 +275,7 @@ func (s *pgUpstreamProviderStore) Create(ctx context.Context, p UpstreamProvider
 		          token_expiry, token_expired, token_scope, extra_config,
 		          created_at, updated_at
 	`, s.table),
-		p.ProviderType, nullableString(p.Name), p.Priority, p.Disabled, nullableString(p.Prefix),
+		p.ProviderType, nullableString(p.Name), p.Priority, p.Disabled, nullableString(p.RoutingStrategy), nullableString(p.Prefix),
 		nullableString(p.APIKey), nullableString(p.BaseURL), nullableString(p.ProxyURL),
 		nullableString(p.Label), nullableString(p.Email), nullableString(p.FileName),
 		nullableString(p.SourceBackend), nullableString(p.Status), p.Unavailable,
@@ -322,35 +335,36 @@ func (s *pgUpstreamProviderStore) Update(ctx context.Context, p UpstreamProvider
 			name = $2,
 			priority = $3,
 			disabled = $4,
-			prefix = $5,
-			api_key = $6,
-			base_url = $7,
-			proxy_url = $8,
-			label = $9,
-			email = $10,
-			file_name = $11,
-			source_backend = $12,
-			status = $13,
-			unavailable = $14,
-			last_error = $15,
-			last_error_at = $16,
-			websockets = $17,
-			rebuild_mid_system_message = $18,
-			experimental_cch_signing = $19,
-			cloak_mode = $20,
-			cloak_strict_mode = $21,
-			cloak_sensitive_words = $22,
-			cloak_cache_user_id = $23,
-			token_access_token = $24,
-			token_refresh_token = $25,
-			token_token_type = $26,
-			token_expiry = $27,
-			token_expired = $28,
-			token_scope = $29,
-			extra_config = $30,
+			routing_strategy = $5,
+			prefix = $6,
+			api_key = $7,
+			base_url = $8,
+			proxy_url = $9,
+			label = $10,
+			email = $11,
+			file_name = $12,
+			source_backend = $13,
+			status = $14,
+			unavailable = $15,
+			last_error = $16,
+			last_error_at = $17,
+			websockets = $18,
+			rebuild_mid_system_message = $19,
+			experimental_cch_signing = $20,
+			cloak_mode = $21,
+			cloak_strict_mode = $22,
+			cloak_sensitive_words = $23,
+			cloak_cache_user_id = $24,
+			token_access_token = $25,
+			token_refresh_token = $26,
+			token_token_type = $27,
+			token_expiry = $28,
+			token_expired = $29,
+			token_scope = $30,
+			extra_config = $31,
 			updated_at = NOW()
-		WHERE id = $31
-		RETURNING id, provider_type, name, priority, disabled, prefix, api_key,
+		WHERE id = $32
+		RETURNING id, provider_type, name, priority, disabled, routing_strategy, prefix, api_key,
 		          base_url, proxy_url, label, email, file_name, source_backend,
 		          status, unavailable, last_error, last_error_at, websockets,
 		          rebuild_mid_system_message, experimental_cch_signing, cloak_mode,
@@ -359,7 +373,7 @@ func (s *pgUpstreamProviderStore) Update(ctx context.Context, p UpstreamProvider
 		          token_expiry, token_expired, token_scope, extra_config,
 		          created_at, updated_at
 	`, s.table),
-		p.ProviderType, nullableString(p.Name), p.Priority, p.Disabled, nullableString(p.Prefix),
+		p.ProviderType, nullableString(p.Name), p.Priority, p.Disabled, nullableString(p.RoutingStrategy), nullableString(p.Prefix),
 		nullableString(p.APIKey), nullableString(p.BaseURL), nullableString(p.ProxyURL),
 		nullableString(p.Label), nullableString(p.Email), nullableString(p.FileName),
 		nullableString(p.SourceBackend), nullableString(p.Status), p.Unavailable,
@@ -497,7 +511,7 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 
 	// API-key entries (openai-compatibility only).
 	aRows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, provider_id, api_key, name, proxy_url, sort_order, weight
+		SELECT id, provider_id, api_key, name, proxy_url, sort_order, weight, priority
 		FROM %s WHERE provider_id = $1 ORDER BY sort_order, id
 	`, s.entries), p.ID)
 	if err != nil {
@@ -506,8 +520,8 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 	for aRows.Next() {
 		var e UpstreamProviderAPIKey
 		var entryName, proxyURL sql.NullString
-		var weight sql.NullInt64
-		if err = aRows.Scan(&e.ID, &e.ProviderID, &e.APIKey, &entryName, &proxyURL, &e.SortOrder, &weight); err != nil {
+		var weight, priority sql.NullInt64
+		if err = aRows.Scan(&e.ID, &e.ProviderID, &e.APIKey, &entryName, &proxyURL, &e.SortOrder, &weight, &priority); err != nil {
 			aRows.Close()
 			return fmt.Errorf("postgres store: scan upstream provider api key entry: %w", err)
 		}
@@ -520,6 +534,10 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 		if weight.Valid {
 			w := int(weight.Int64)
 			e.Weight = &w
+		}
+		if priority.Valid {
+			pr := int(priority.Int64)
+			e.Priority = &pr
 		}
 		p.APIKeyEntries = append(p.APIKeyEntries, e)
 	}
@@ -605,7 +623,9 @@ func (s *pgUpstreamProviderStore) replaceChildrenTx(ctx context.Context, tx *sql
 
 // syncAPIKeyEntriesTx synchronizes the API-key child rows for providerID. A
 // positive incoming ID must already belong to providerID; zero means insert a
-// new row. The caller must hold the surrounding parent transaction.
+// new row. Each entry carries its optional weight and priority (nil = inherit
+// the provider row's priority). The caller must hold the surrounding parent
+// transaction.
 func (s *pgUpstreamProviderStore) syncAPIKeyEntriesTx(ctx context.Context, tx *sql.Tx, providerID int64, p *UpstreamProvider) error {
 	current, err := s.listAPIKeyEntryIDsTx(ctx, tx, providerID)
 	if err != nil {
@@ -679,20 +699,20 @@ func (s *pgUpstreamProviderStore) syncAPIKeyEntriesTx(ctx context.Context, tx *s
 		entry.SortOrder = sortOrder
 		if entry.ID == 0 {
 			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
-				INSERT INTO %s (provider_id, api_key, name, proxy_url, sort_order, weight)
-				VALUES ($1,$2,$3,$4,$5,$6)
+				INSERT INTO %s (provider_id, api_key, name, proxy_url, sort_order, weight, priority)
+				VALUES ($1,$2,$3,$4,$5,$6,$7)
 				RETURNING id
-			`, s.entries), providerID, entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), sortOrder, nullableInt(entry.Weight)).Scan(&entry.ID); err != nil {
+			`, s.entries), providerID, entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority)).Scan(&entry.ID); err != nil {
 				return fmt.Errorf("postgres store: insert upstream provider api key entry: %w", err)
 			}
 		} else {
 			var persistedID int64
 			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
 				UPDATE %s
-				SET api_key = $1, name = $2, proxy_url = $3, sort_order = $4, weight = $5
-				WHERE id = $6 AND provider_id = $7
+				SET api_key = $1, name = $2, proxy_url = $3, sort_order = $4, weight = $5, priority = $6
+				WHERE id = $7 AND provider_id = $8
 				RETURNING id
-			`, s.entries), entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), sortOrder, nullableInt(entry.Weight), entry.ID, providerID).Scan(&persistedID); err != nil {
+			`, s.entries), entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.ID, providerID).Scan(&persistedID); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					return fmt.Errorf("postgres store: upstream provider api key entry id %d is missing from upstream provider %d", entry.ID, providerID)
 				}
@@ -838,7 +858,7 @@ func normalizeUpstreamProviderEntryName(name string) (string, bool) {
 // ExtraConfig map.
 func scanUpstreamProvider(sc scanner, p *UpstreamProvider) error {
 	var (
-		name, prefix, apiKey, baseURL, proxyURL, label, email,
+		name, routingStrategy, prefix, apiKey, baseURL, proxyURL, label, email,
 		fileName, sourceBackend, status, lastError,
 		cloakMode, tokenAccess, tokenRefresh, tokenType, tokenScope sql.NullString
 		lastErrorAt, tokenExpiry       sql.NullTime
@@ -846,7 +866,7 @@ func scanUpstreamProvider(sc scanner, p *UpstreamProvider) error {
 		sensitiveBytes, extraBytes     []byte
 	)
 	if err := sc.Scan(
-		&p.ID, &p.ProviderType, &name, &p.Priority, &p.Disabled, &prefix, &apiKey,
+		&p.ID, &p.ProviderType, &name, &p.Priority, &p.Disabled, &routingStrategy, &prefix, &apiKey,
 		&baseURL, &proxyURL, &label, &email, &fileName, &sourceBackend,
 		&status, &p.Unavailable, &lastError, &lastErrorAt, &p.Websockets,
 		&p.RebuildMidSystemMessage, &p.ExperimentalCCHSigning, &cloakMode,
@@ -857,6 +877,7 @@ func scanUpstreamProvider(sc scanner, p *UpstreamProvider) error {
 		return err
 	}
 	p.Name = name.String
+	p.RoutingStrategy = routingStrategy.String
 	p.Prefix = prefix.String
 	p.APIKey = apiKey.String
 	p.BaseURL = baseURL.String
