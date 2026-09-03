@@ -20,7 +20,8 @@ const (
 var providerBoundHistoryFields = [...]string{"id", "encrypted_content", "provider_item_id"}
 
 var providerHistoryRecoverableHostOutputNames = map[string]struct{}{
-	"automation_update": {},
+	"automation_update":      {},
+	"send_message_to_thread": {},
 }
 
 type providerHistoryNormalization struct {

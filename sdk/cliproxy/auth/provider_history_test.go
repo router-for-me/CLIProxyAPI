@@ -81,37 +81,41 @@ func TestNormalizeProviderBoundResponseHistoryPreservesCustomToolPairs(t *testin
 }
 
 func TestNormalizeProviderBoundResponseHistoryDropsKnownOrphanHostOutput(t *testing.T) {
-	items := []any{map[string]any{"type": "message", "role": "user", "content": "continue"}}
-	for index := 0; index < 40; index++ {
-		callID := fmt.Sprintf("call_%02d", index)
-		items = append(items,
-			map[string]any{"type": "custom_tool_call", "id": "foreign_call_" + callID, "call_id": callID, "name": "shell", "input": "pwd"},
-			map[string]any{"type": "custom_tool_call_output", "id": "foreign_output_" + callID, "call_id": callID, "output": "ok"},
-		)
-	}
-	items = append(items, map[string]any{
-		"type":   "function_call_output",
-		"id":     "host_injected_output",
-		"name":   "automation_update",
-		"output": `{"status":"applied"}`,
-	})
-	body, errMarshal := json.Marshal(map[string]any{"input": items})
-	if errMarshal != nil {
-		t.Fatalf("marshal fixture: %v", errMarshal)
-	}
+	for _, hostOutputName := range []string{"automation_update", "send_message_to_thread"} {
+		t.Run(hostOutputName, func(t *testing.T) {
+			items := []any{map[string]any{"type": "message", "role": "user", "content": "continue"}}
+			for index := 0; index < 40; index++ {
+				callID := fmt.Sprintf("call_%02d", index)
+				items = append(items,
+					map[string]any{"type": "custom_tool_call", "id": "foreign_call_" + callID, "call_id": callID, "name": "shell", "input": "pwd"},
+					map[string]any{"type": "custom_tool_call_output", "id": "foreign_output_" + callID, "call_id": callID, "output": "ok"},
+				)
+			}
+			items = append(items, map[string]any{
+				"type":   "function_call_output",
+				"id":     "host_injected_output",
+				"name":   hostOutputName,
+				"output": `{"status":"applied"}`,
+			})
+			body, errMarshal := json.Marshal(map[string]any{"input": items})
+			if errMarshal != nil {
+				t.Fatalf("marshal fixture: %v", errMarshal)
+			}
 
-	got, err := normalizeProviderBoundResponseHistory(body)
-	if err != nil {
-		t.Fatalf("normalizeProviderBoundResponseHistory() error = %v", err)
-	}
-	if !got.Changed || got.DroppedItems != 1 || got.StrippedFields != 80 {
-		t.Fatalf("normalization metadata = %#v", got)
-	}
-	if count := int(gjson.GetBytes(got.Body, "input.#").Int()); count != 81 {
-		t.Fatalf("normalized input count = %d, want 81", count)
-	}
-	if bytes.Contains(got.Body, []byte("automation_update")) {
-		t.Fatalf("recoverable orphan host output survived: %s", got.Body)
+			got, err := normalizeProviderBoundResponseHistory(body)
+			if err != nil {
+				t.Fatalf("normalizeProviderBoundResponseHistory() error = %v", err)
+			}
+			if !got.Changed || got.DroppedItems != 1 || got.StrippedFields != 80 {
+				t.Fatalf("normalization metadata = %#v", got)
+			}
+			if count := int(gjson.GetBytes(got.Body, "input.#").Int()); count != 81 {
+				t.Fatalf("normalized input count = %d, want 81", count)
+			}
+			if bytes.Contains(got.Body, []byte(hostOutputName)) {
+				t.Fatalf("recoverable orphan host output survived: %s", got.Body)
+			}
+		})
 	}
 }
 
@@ -127,6 +131,10 @@ func TestNormalizeProviderBoundResponseHistoryRejectsUnknownOrPairedMissingCallI
 		{
 			name: "matching call exists",
 			body: `{"input":[{"type":"message","role":"user","content":"continue"},{"type":"function_call","call_id":"call_1","name":"automation_update","arguments":"{}"},{"type":"function_call_output","name":"automation_update","output":"ok"}]}`,
+		},
+		{
+			name: "matching send message call exists",
+			body: `{"input":[{"type":"message","role":"user","content":"continue"},{"type":"function_call","call_id":"call_1","name":"send_message_to_thread","arguments":"{}"},{"type":"function_call_output","name":"send_message_to_thread","output":"ok"}]}`,
 		},
 	}
 	for _, tt := range tests {
