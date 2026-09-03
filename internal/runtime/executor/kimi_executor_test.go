@@ -211,6 +211,42 @@ func TestKimiExecutorCountTokensUsesCanonicalUpstreamModel(t *testing.T) {
 	}
 }
 
+// TestKimiExecutorCountTokensReportsWireModelOnSuccess covers Codex's finding
+// at conductor_execution.go:743 / claude_executor_tokens.go:303: a successful
+// CountTokens call for a normalized model (Kimi's suffix stripping, shared by
+// Claude via countTokensUpstream) must report the actually-sent wire model in
+// Response.Metadata[WireModelMetadataKey], mirroring the wire_model contract
+// Execute/ExecuteStream already honor on success. Without it, the conductor's
+// wireModelOrSent falls back to the pre-normalization sent model and
+// Result.UpstreamModel is wrong for every successful count.
+func TestKimiExecutorCountTokensReportsWireModelOnSuccess(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"input_tokens":42}`)),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+	payload := []byte(`{"model":"kimi-k3[1m](high)","messages":[{"role":"user","content":"hello"}]}`)
+	resp, err := executor.CountTokens(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3[1m](high)",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if err != nil {
+		t.Fatalf("CountTokens() error = %v", err)
+	}
+	got, ok := resp.Metadata[cliproxyexecutor.WireModelMetadataKey].(string)
+	if !ok || got != "k3" {
+		t.Fatalf("Response.Metadata[WireModelMetadataKey] = %v (ok=%v), want %q", resp.Metadata[cliproxyexecutor.WireModelMetadataKey], ok, "k3")
+	}
+}
+
 func TestKimiExecutorCountTokensInvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{

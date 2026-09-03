@@ -300,5 +300,11 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	count := gjson.GetBytes(data, "input_tokens").Int()
 	out := sdktranslator.TranslateTokenCount(ctx, to, responseFormat, count, data)
-	return cliproxyexecutor.Response{Payload: out, Headers: resp.Header.Clone()}, nil
+	return cliproxyexecutor.Response{
+		Payload: out,
+		Headers: resp.Header.Clone(),
+		Metadata: map[string]any{
+			cliproxyexecutor.WireModelMetadataKey: wireModel,
+		},
+	}, nil
 }
