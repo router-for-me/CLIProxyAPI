@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 type sessionIDCacheEntry struct {
@@ -60,31 +61,66 @@ func purgeExpiredSessionIDs() {
 	sessionIDCacheMu.Unlock()
 }
 
-func sessionIDCacheKey(apiKey string) string {
-	sum := sha256.Sum256([]byte(apiKey))
+func claudeCredentialSeed(apiKey string, auth *cliproxyauth.Auth) string {
+	if seed := strings.TrimSpace(apiKey); seed != "" {
+		return seed
+	}
+	if auth != nil {
+		if id := strings.TrimSpace(auth.ID); id != "" {
+			return "auth-id|" + id
+		}
+		if index := strings.TrimSpace(auth.Index); index != "" {
+			return "auth-index|" + index
+		}
+		if fileName := strings.TrimSpace(auth.FileName); fileName != "" {
+			return "auth-file|" + fileName
+		}
+		if label := strings.TrimSpace(auth.Label); label != "" {
+			return "auth-label|" + label
+		}
+		if provider := strings.TrimSpace(auth.Provider); provider != "" {
+			return "auth-provider|" + provider
+		}
+	}
+	return "anonymous"
+}
+
+func sessionIDCacheKey(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
 	return hex.EncodeToString(sum[:])
 }
 
-// CachedSessionID returns a stable session UUID per apiKey, refreshing the TTL on each access.
-func CachedSessionID(apiKey string) string {
-	value, errValue := CachedSessionIDRequired(context.Background(), apiKey)
+// CachedSessionID returns a stable session UUID per credential, refreshing the TTL on each access.
+func CachedSessionID(apiKey string, auth *cliproxyauth.Auth) string {
+	value, errValue := CachedSessionIDRequired(context.Background(), apiKey, auth)
 	if errValue == nil && value != "" {
 		return value
 	}
-	return uuid.New().String()
+	return deterministicSessionID(claudeCredentialSeed(apiKey, auth))
 }
 
-// CachedSessionIDRequired returns a stable session UUID per apiKey for request-time paths.
-func CachedSessionIDRequired(ctx context.Context, apiKey string) (string, error) {
-	if apiKey == "" {
-		return uuid.New().String(), nil
+// deterministicSessionID returns a version-5 UUID derived from the credential
+// seed so different workers and cache misses produce the same session for the
+// same credential. No stable identity falls back to a stable anonymous UUID.
+func deterministicSessionID(seed string) string {
+	if seed == "" || seed == "anonymous" {
+		return uuid.NewSHA1(uuid.NameSpaceURL, []byte("cpa:claude:session:anonymous")).String()
+	}
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(seed)).String()
+}
+
+// CachedSessionIDRequired returns a stable session UUID per credential for request-time paths.
+func CachedSessionIDRequired(ctx context.Context, apiKey string, auth *cliproxyauth.Auth) (string, error) {
+	seed := claudeCredentialSeed(apiKey, auth)
+	if seed == "anonymous" {
+		return deterministicSessionID(seed), nil
 	}
 	client, homeMode, errClient := currentClaudeIDKVClient()
 	if homeMode {
 		if errClient != nil {
 			return "", errClient
 		}
-		key := claudeSessionIDKVKey(apiKey)
+		key := claudeSessionIDKVKey(seed)
 		raw, found, errGet := client.KVGet(ctx, key)
 		if errGet != nil {
 			return "", errGet
@@ -95,7 +131,7 @@ func CachedSessionIDRequired(ctx context.Context, apiKey string) (string, error)
 			}
 			return strings.TrimSpace(string(raw)), nil
 		}
-		newID := uuid.New().String()
+		newID := deterministicSessionID(seed)
 		if _, errSet := client.KVSetNX(ctx, key, []byte(newID), sessionIDTTL); errSet != nil {
 			return "", errSet
 		}
@@ -111,7 +147,7 @@ func CachedSessionIDRequired(ctx context.Context, apiKey string) (string, error)
 
 	sessionIDCacheCleanupOnce.Do(startSessionIDCacheCleanup)
 
-	key := sessionIDCacheKey(apiKey)
+	key := sessionIDCacheKey(seed)
 	now := time.Now()
 
 	sessionIDCacheMu.RLock()
@@ -130,7 +166,7 @@ func CachedSessionIDRequired(ctx context.Context, apiKey string) (string, error)
 		sessionIDCacheMu.Unlock()
 	}
 
-	newID := uuid.New().String()
+	newID := deterministicSessionID(seed)
 
 	sessionIDCacheMu.Lock()
 	entry, ok = sessionIDCache[key]
@@ -143,6 +179,6 @@ func CachedSessionIDRequired(ctx context.Context, apiKey string) (string, error)
 	return entry.value, nil
 }
 
-func claudeSessionIDKVKey(apiKey string) string {
-	return "cpa:claude:session-id:" + homekv.HashKeyPart(apiKey)
+func claudeSessionIDKVKey(seed string) string {
+	return "cpa:claude:session-id:" + homekv.HashKeyPart(seed)
 }
