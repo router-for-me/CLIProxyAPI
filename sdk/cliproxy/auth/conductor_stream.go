@@ -228,6 +228,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		if executionModel == "" {
 			execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, execModel)
 		}
+		sentModel := execReq.Model
 		if errCtx := ctx.Err(); errCtx != nil {
 			return nil, errCtx
 		}
@@ -281,7 +282,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		if errStream != nil {
 			rerr := resultErrorFromError(errStream)
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: execModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: sentModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
 			result.RetryAfter = retryAfterFromError(errStream)
 			if isCredentialScopedError(errStream) {
 				result.CredentialScope = true
@@ -367,7 +368,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.runtimeConfigSnapshot())
 			if okAction {
 				rerr := resultErrorFromError(bootstrapErr)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: execModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: sentModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				if isCredentialScopedError(bootstrapErr) {
 					result.CredentialScope = true
@@ -387,7 +388,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			if isRequestInvalidError(bootstrapErr) {
 				rerr := resultErrorFromError(bootstrapErr)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: execModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: sentModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				if isCredentialScopedError(bootstrapErr) {
 					result.CredentialScope = true
@@ -398,7 +399,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			if idx < len(execModels)-1 {
 				rerr := resultErrorFromError(bootstrapErr)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: execModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: sentModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				if isCredentialScopedError(bootstrapErr) {
 					result.CredentialScope = true
@@ -413,7 +414,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				continue
 			}
 			rerr := resultErrorFromError(bootstrapErr)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: execModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: sentModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
 			result.RetryAfter = retryAfterFromError(bootstrapErr)
 			if isCredentialScopedError(bootstrapErr) {
 				result.CredentialScope = true
@@ -431,7 +432,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				upstreamErr = currentErr
 			}
 			warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, time.Since(startStream), emptyErr)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: execModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(emptyErr), Options: execOpts}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, UpstreamModel: sentModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(emptyErr), Options: execOpts}
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 			if idx < len(execModels)-1 {
 				lastErr = emptyErr
@@ -447,7 +448,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			remaining = closedCh
 		}
 		attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, execModel, aliasResult)
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, execModel, routeModel, streamResult.Headers, buffered, remaining, attemptAliasResult, ephemeralResult, execOpts), nil
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, sentModel, routeModel, streamResult.Headers, buffered, remaining, attemptAliasResult, ephemeralResult, execOpts), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}

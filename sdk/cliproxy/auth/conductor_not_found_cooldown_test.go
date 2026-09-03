@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 func TestMarkResultNotFoundCooldownPolicy(t *testing.T) {
@@ -170,6 +173,72 @@ func TestApplyAuthFailureStateExplicitNotFoundSurvivesRacingGeneric404(t *testin
 	applyAuthFailureState(authGenericFirst, explicit, nil, "", now, false)
 	if !authGenericFirst.NextRetryAfter.Equal(want) {
 		t.Fatalf("generic-then-explicit NextRetryAfter = %v, want %v", authGenericFirst.NextRetryAfter, want)
+	}
+}
+
+// notFoundExecutionModelExecutor returns an explicit model-not-found error that
+// names the model actually present on the request it receives, so the test can
+// tell whether the caller classified the failure against the execution model
+// (what was sent) or the selection model (what routing picked).
+type notFoundExecutionModelExecutor struct{}
+
+func (notFoundExecutionModelExecutor) Identifier() string { return "selection-vs-execution" }
+func (notFoundExecutionModelExecutor) Execute(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{
+		HTTPStatus: http.StatusNotFound,
+		Message:    `{"error":{"type":"not_found_error","message":"model ` + req.Model + ` was not found"}}`,
+	}
+}
+func (notFoundExecutionModelExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+func (notFoundExecutionModelExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+func (notFoundExecutionModelExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (notFoundExecutionModelExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestExecuteExplicitNotFoundClassifiesAgainstExecutionModelNotSelectionModel(t *testing.T) {
+	previousDisabled := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previousDisabled) })
+
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(notFoundExecutionModelExecutor{})
+	auth := &Auth{ID: "selection-vs-execution-auth", Provider: "selection-vs-execution"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "selection-model"}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.AuthSelectionModelMetadataKey: "selection-model",
+	}}
+	before := time.Now()
+	if _, errExecute := manager.Execute(context.Background(), []string{"selection-vs-execution"}, cliproxyexecutor.Request{Model: "execution-model"}, opts); errExecute == nil {
+		t.Fatal("Execute() unexpectedly succeeded")
+	}
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("auth not found after Execute()")
+	}
+	var state *ModelState
+	for _, candidate := range updated.ModelStates {
+		state = candidate
+	}
+	if state == nil {
+		t.Fatal("Execute() did not record model cooldown state")
+	}
+	cooldown := state.NextRetryAfter.Sub(before)
+	if cooldown < 12*time.Hour-time.Second || cooldown > 12*time.Hour+time.Second {
+		t.Fatalf("cooldown = %v, want about 12h (execution-model 404 must not be classified against the selection model and get the short retry)", cooldown)
 	}
 }
 
