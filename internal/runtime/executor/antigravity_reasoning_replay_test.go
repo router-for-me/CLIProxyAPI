@@ -1820,6 +1820,38 @@ func TestDegradeAntigravityClaudeToolProvenanceIDs_AllCallsSigned_OnlyFirstGetsB
 	}
 }
 
+var antigravityDegradeBenchmarkOutput []byte
+
+func BenchmarkDegradeAntigravityClaudeToolProvenanceIDs(b *testing.B) {
+	const calls = 217
+	var payload strings.Builder
+	payload.Grow(1<<20 + calls*512)
+	payload.WriteString(`{"request":{"contents":[{"role":"user","parts":[{"text":"`)
+	payload.WriteString(strings.Repeat("x", 1<<20))
+	payload.WriteString(`"}]}`)
+	for i := range calls {
+		id := util.GeminiClaudeToolUseID(fmt.Sprintf("native-%d", i), "Read", `{"file_path":"/tmp/a"}`)
+		fmt.Fprintf(&payload, `,{"role":"model","parts":[{"thoughtSignature":"signature-%d","functionCall":{"id":"%s","name":"Read","args":{"file_path":"/tmp/a"}}}]}`, i, id)
+		fmt.Fprintf(&payload, `,{"role":"user","parts":[{"functionResponse":{"id":"%s","name":"Read","response":{"result":"ok"}}}]}`, id)
+	}
+	payload.WriteString(`]}}`)
+	input := []byte(payload.String())
+	if _, degraded := degradeAntigravityClaudeToolProvenanceIDs(input); degraded != calls*2 {
+		b.Fatalf("degraded = %d, want %d", degraded, calls*2)
+	}
+
+	b.SetBytes(int64(len(input)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		var degraded int
+		antigravityDegradeBenchmarkOutput, degraded = degradeAntigravityClaudeToolProvenanceIDs(input)
+		if degraded != calls*2 {
+			b.Fatalf("degraded = %d, want %d", degraded, calls*2)
+		}
+	}
+}
+
 func TestPrepareAntigravityGeminiReasoningReplay_ReordersPermutedParallelToolResponsesWithDegradedIDs(t *testing.T) {
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
