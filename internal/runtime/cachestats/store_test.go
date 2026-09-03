@@ -532,18 +532,18 @@ func TestSnapshotProviderFilter(t *testing.T) {
 
 func TestShortIDHashesCompositeKeys(t *testing.T) {
 	uuid := "7c9e4b21-0000-4aaa-bbbb-cccccccccccc"
-	if got := shortID(uuid); got != "7c9e4b21" {
-		t.Errorf("shortID(uuid) = %q, want the first block", got)
+	if got := shortIDOf(uuid); got != "7c9e4b21" {
+		t.Errorf("shortIDOf(uuid) = %q, want the first block", got)
 	}
-	first := shortID("apikey:abcd1234|gpt-x|curl/8.7")
-	second := shortID("apikey:abcd1234|gpt-y|curl/8.7")
+	first := shortIDOf("apikey:abcd1234|gpt-x|curl/8.7")
+	second := shortIDOf("apikey:abcd1234|gpt-y|curl/8.7")
 	if len(first) != 8 || len(second) != 8 {
 		t.Fatalf("composite short ids must be 8 chars: %q, %q", first, second)
 	}
 	if first == second {
 		t.Error("composite keys that differ must not share a short id")
 	}
-	if shortID("apikey:abcd1234|gpt-x|curl/8.7") != first {
+	if shortIDOf("apikey:abcd1234|gpt-x|curl/8.7") != first {
 		t.Error("shortID must be stable for the same key")
 	}
 }

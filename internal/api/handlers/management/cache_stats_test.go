@@ -47,7 +47,7 @@ func newCacheStatsRouter(t *testing.T) *gin.Engine {
 	handler := &Handler{}
 	engine := gin.New()
 	engine.GET("/v0/management/cache-stats", handler.GetCacheStats)
-	engine.GET("/v0/management/cache-stats/sessions/:id", handler.GetCacheStatsSession)
+	engine.GET("/v0/management/cache-stats/sessions/*id", handler.GetCacheStatsSession)
 	engine.DELETE("/v0/management/cache-stats", handler.DeleteCacheStats)
 	return engine
 }
@@ -285,5 +285,57 @@ func TestGetCacheStatsSessionReportsSignalAndCause(t *testing.T) {
 	}
 	if detail.Requests[0].Provider != "mystery" {
 		t.Errorf("provider = %q, want mystery", detail.Requests[0].Provider)
+	}
+}
+
+// A fallback session key embeds the model name, which for gateway-style
+// providers contains slashes. The route has to address it anyway.
+func TestGetCacheStatsSessionWithSlashesInTheKey(t *testing.T) {
+	store := cachestats.NewStore(cachestats.Config{
+		Enabled: true, MaxSessions: 10, PerSessionRequests: 10, IdleTTL: time.Hour,
+	})
+	key := "apikey:31569dce16ee|bedrock/converse/zai.glm-5|integration-check/1.0"
+	store.Record(cachestats.Observation{
+		SessionID: key, KeyedBy: cachestats.KeyedByAPIKeyModel, Provider: "openai-compatibility",
+		Model: "bedrock/converse/zai.glm-5", AuthID: "auth-1",
+		At: time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC), Signal: cachestats.SignalRead,
+		InputTokens: 12, PromptTokens: 12, OutputTokens: 2,
+	})
+	cachestats.SetDefault(store)
+	t.Cleanup(func() { cachestats.SetDefault(nil) })
+
+	engine := newCacheStatsRouter(t)
+	recorder := doCacheStatsRequest(t, engine, http.MethodGet, "/v0/management/cache-stats/sessions/"+key)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a key containing slashes", recorder.Code)
+	}
+	var detail cachestats.SessionDetail
+	if err := json.Unmarshal(recorder.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if detail.Summary.ID != key {
+		t.Errorf("id = %q, want %q", detail.Summary.ID, key)
+	}
+	if detail.Requests[0].T0Cause != cachestats.T0CauseFirst {
+		t.Errorf("t0_cause = %q, want first", detail.Requests[0].T0Cause)
+	}
+
+	// The short id is an equally valid handle, which is what a human types.
+	short := doCacheStatsRequest(t, engine, http.MethodGet, "/v0/management/cache-stats/sessions/"+detail.Summary.ShortID)
+	if short.Code != http.StatusOK {
+		t.Fatalf("short id lookup status = %d, want 200", short.Code)
+	}
+	var byShort cachestats.SessionDetail
+	if err := json.Unmarshal(short.Body.Bytes(), &byShort); err != nil {
+		t.Fatalf("decode short id response: %v", err)
+	}
+	if byShort.Summary.ID != key {
+		t.Errorf("short id resolved to %q, want %q", byShort.Summary.ID, key)
+	}
+
+	// A trailing slash carries no id and must not be treated as one.
+	empty := doCacheStatsRequest(t, engine, http.MethodGet, "/v0/management/cache-stats/sessions/")
+	if empty.Code != http.StatusBadRequest {
+		t.Errorf("empty id status = %d, want 400", empty.Code)
 	}
 }

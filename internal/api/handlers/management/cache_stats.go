@@ -2,6 +2,7 @@ package management
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -45,7 +46,12 @@ func (h *Handler) GetCacheStats(c *gin.Context) {
 // GetCacheStatsSession returns one session's summary and its retained request
 // sequence in order.
 func (h *Handler) GetCacheStatsSession(c *gin.Context) {
-	id := strings.TrimSpace(c.Param("id"))
+	// The catch-all param arrives with a leading slash, and the id may itself
+	// contain slashes, so only the first one is stripped.
+	id := strings.TrimSpace(strings.TrimPrefix(c.Param("id"), "/"))
+	if unescaped, errUnescape := url.PathUnescape(id); errUnescape == nil {
+		id = unescaped
+	}
 	if id == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "session id is required"})
 		return

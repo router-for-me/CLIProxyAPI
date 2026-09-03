@@ -590,21 +590,45 @@ func (s *Store) evictLocked() {
 	}
 }
 
-// Session returns one session's summary and retained request sequence.
+// Session returns one session's summary and retained request sequence. The id
+// may be the full session key or the eight-character short id, because a
+// fallback key embeds a model name and is neither memorable nor URL-shaped.
 func (s *Store) Session(id string) (SessionDetail, bool) {
 	if s == nil {
 		return SessionDetail{}, false
 	}
 	id = strings.TrimSpace(id)
+	if id == "" {
+		return SessionDetail{}, false
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	entry, ok := s.sessions[id]
+	if !ok {
+		entry, ok = s.sessionByShortIDLocked(id)
+	}
 	if !ok {
 		return SessionDetail{}, false
 	}
 	requests := make([]Request, len(entry.requests))
 	copy(requests, entry.requests)
 	return SessionDetail{Summary: entry.summary(), Requests: requests}, true
+}
+
+// sessionByShortIDLocked resolves a short id, refusing an ambiguous prefix
+// rather than returning an arbitrary one of several matches.
+func (s *Store) sessionByShortIDLocked(shortID string) (*session, bool) {
+	var match *session
+	for _, entry := range s.sessions {
+		if !strings.EqualFold(shortIDOf(entry.id), shortID) {
+			continue
+		}
+		if match != nil {
+			return nil, false
+		}
+		match = entry
+	}
+	return match, match != nil
 }
 
 // Sessions returns every retained session summary, newest activity first.
@@ -720,7 +744,7 @@ func (e *session) summary() SessionSummary {
 	}
 	return SessionSummary{
 		ID:                 e.id,
-		ShortID:            shortID(e.id),
+		ShortID:            shortIDOf(e.id),
 		KeyedBy:            keyedBy,
 		Provider:           e.provider,
 		Model:              e.model,
@@ -752,7 +776,7 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 // shortID gives every session a stable eight-character label. A UUID keeps its
 // own first block so it stays recognizable; a composite fallback key is hashed,
 // because its readable prefix is identical across every session on one API key.
-func shortID(id string) string {
+func shortIDOf(id string) string {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return ""
