@@ -3,6 +3,7 @@
 package meta
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -63,9 +64,24 @@ type TokenData struct {
 	ErrorDescription string `json:"error_description,omitempty"`
 }
 
-// MetaAuthBundle packages the token data and user metadata.
+// MintedKeyResponse represents the API key response minted from https://api.meta.ai/muse-code/key.
+type MintedKeyResponse struct {
+	APIKey           string `json:"api_key"`
+	BaseURL          string `json:"base_url"`
+	UserEmail        string `json:"user_email"`
+	UserFullName     string `json:"user_full_name"`
+	SubsTierName     string `json:"subs_tier_name"`
+	SubsTierID       string `json:"subs_tier_id"`
+	IsSubsActive     bool   `json:"is_subs_active"`
+	HasPaymentMethod bool   `json:"has_payment_method"`
+	RequirePayment   bool   `json:"require_payment"`
+	CanSubscribe     bool   `json:"can_subscribe"`
+}
+
+// MetaAuthBundle packages the token data, minted key, and user metadata.
 type MetaAuthBundle struct {
 	TokenData *TokenData
+	MintedKey *MintedKeyResponse
 	Email     string
 	Name      string
 }
@@ -75,6 +91,8 @@ type MetaTokenStorage struct {
 	Type        string `json:"type"`
 	AuthKind    string `json:"auth_kind"`
 	AccessToken string `json:"access_token"`
+	DCAToken    string `json:"dca_token,omitempty"`
+	APIKey      string `json:"api_key,omitempty"`
 	TokenType   string `json:"token_type,omitempty"`
 	ExpiresIn   int    `json:"expires_in,omitempty"`
 	Expired     string `json:"expired,omitempty"`
@@ -108,6 +126,12 @@ func (ts *MetaTokenStorage) SaveTokenToFile(authFilePath string) error {
 		"expired":      ts.Expired,
 		"last_refresh": ts.LastRefresh,
 		"base_url":     ts.BaseURL,
+	}
+	if ts.APIKey != "" {
+		data["api_key"] = ts.APIKey
+	}
+	if ts.DCAToken != "" {
+		data["dca_token"] = ts.DCAToken
 	}
 	if ts.Email != "" {
 		data["email"] = ts.Email
@@ -297,9 +321,22 @@ func (a *MetaAuth) WaitForAuthorization(ctx context.Context, dcr *DeviceCodeResp
 				if tokenData.ExpiresIn > 0 {
 					tokenData.ExpiresAt = time.Now().Add(time.Duration(tokenData.ExpiresIn) * time.Second).Unix()
 				}
-				return &MetaAuthBundle{
+				bundle := &MetaAuthBundle{
 					TokenData: &tokenData,
-				}, nil
+				}
+				minted, errMint := a.MintAPIKey(ctx, tokenData.AccessToken)
+				if errMint != nil {
+					log.Warnf("meta auth: could not mint api_key from dca_token: %v", errMint)
+				} else if minted != nil {
+					bundle.MintedKey = minted
+					if minted.UserEmail != "" {
+						bundle.Email = minted.UserEmail
+					}
+					if minted.UserFullName != "" {
+						bundle.Name = minted.UserFullName
+					}
+				}
+				return bundle, nil
 			}
 
 			var errResp TokenData
@@ -325,6 +362,57 @@ func (a *MetaAuth) WaitForAuthorization(ctx context.Context, dcr *DeviceCodeResp
 	}
 }
 
+// MintAPIKey exchanges a Device Client Access token (dca:...) for an LLM API key via https://api.meta.ai/muse-code/key.
+func (a *MetaAuth) MintAPIKey(ctx context.Context, dcaToken string) (*MintedKeyResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	dcaToken = strings.TrimSpace(dcaToken)
+	if dcaToken == "" {
+		return nil, fmt.Errorf("meta auth: missing dca token")
+	}
+
+	reqBody, _ := json.Marshal(map[string]string{
+		"dca_token": dcaToken,
+	})
+
+	mintURL := "https://api.meta.ai/muse-code/key"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, mintURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("meta auth: create mint request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+dcaToken)
+	req.Header.Set("User-Agent", "muse-code/1.0.2")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("meta auth: mint request failed: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	body, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		return nil, fmt.Errorf("meta auth: read mint response: %w", errRead)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("meta auth: mint key failed (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var minted MintedKeyResponse
+	if err := json.Unmarshal(body, &minted); err != nil {
+		return nil, fmt.Errorf("meta auth: parse mint response: %w", err)
+	}
+	if strings.TrimSpace(minted.APIKey) == "" {
+		return nil, fmt.Errorf("meta auth: mint response missing api_key")
+	}
+	return &minted, nil
+}
+
 // CreateTokenStorage creates a serializable token storage record from the auth bundle.
 func (a *MetaAuth) CreateTokenStorage(bundle *MetaAuthBundle) *MetaTokenStorage {
 	if bundle == nil || bundle.TokenData == nil {
@@ -334,17 +422,31 @@ func (a *MetaAuth) CreateTokenStorage(bundle *MetaAuthBundle) *MetaTokenStorage 
 	if bundle.TokenData.ExpiresAt > 0 {
 		expired = time.Unix(bundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
 	}
+	apiKey := ""
+	email := bundle.Email
+	name := bundle.Name
+	if bundle.MintedKey != nil {
+		apiKey = bundle.MintedKey.APIKey
+		if bundle.MintedKey.UserEmail != "" {
+			email = bundle.MintedKey.UserEmail
+		}
+		if bundle.MintedKey.UserFullName != "" {
+			name = bundle.MintedKey.UserFullName
+		}
+	}
 	return &MetaTokenStorage{
 		Type:        "meta",
 		AuthKind:    "oauth",
 		AccessToken: bundle.TokenData.AccessToken,
+		DCAToken:    bundle.TokenData.AccessToken,
+		APIKey:      apiKey,
 		TokenType:   bundle.TokenData.TokenType,
 		ExpiresIn:   bundle.TokenData.ExpiresIn,
 		Expired:     expired,
 		LastRefresh: time.Now().UTC().Format(time.RFC3339),
 		BaseURL:     DefaultAPIBaseURL,
-		Email:       bundle.Email,
-		Name:        bundle.Name,
+		Email:       email,
+		Name:        name,
 	}
 }
 

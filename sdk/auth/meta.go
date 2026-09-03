@@ -105,6 +105,12 @@ func (a MetaAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 		"base_url":     tokenStorage.BaseURL,
 		"auth_kind":    "oauth",
 	}
+	if tokenStorage.APIKey != "" {
+		metadata["api_key"] = tokenStorage.APIKey
+	}
+	if tokenStorage.DCAToken != "" {
+		metadata["dca_token"] = tokenStorage.DCAToken
+	}
 	if tokenStorage.Email != "" {
 		metadata["email"] = tokenStorage.Email
 	}

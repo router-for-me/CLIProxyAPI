@@ -176,6 +176,8 @@ func (e *MetaExecutor) enrichAuth(auth *cliproxyauth.Auth) *cliproxyauth.Auth {
 
 func metaCreds(a *cliproxyauth.Auth) (baseURL, token string) {
 	baseURL = metaauth.DefaultAPIBaseURL
+	var dcaToken string
+
 	if a != nil {
 		if a.Attributes != nil {
 			if b := strings.TrimSpace(a.Attributes["base_url"]); b != "" {
@@ -184,7 +186,11 @@ func metaCreds(a *cliproxyauth.Auth) (baseURL, token string) {
 			if k := strings.TrimSpace(a.Attributes["api_key"]); k != "" {
 				token = k
 			} else if t := strings.TrimSpace(a.Attributes["access_token"]); t != "" {
-				token = t
+				if strings.HasPrefix(t, "dca:") {
+					dcaToken = t
+				} else {
+					token = t
+				}
 			}
 		}
 		if token == "" && a.Metadata != nil {
@@ -195,8 +201,19 @@ func metaCreds(a *cliproxyauth.Auth) (baseURL, token string) {
 			}
 			if k, ok := a.Metadata["api_key"].(string); ok && strings.TrimSpace(k) != "" {
 				token = strings.TrimSpace(k)
-			} else if t, ok := a.Metadata["access_token"].(string); ok && strings.TrimSpace(t) != "" {
-				token = strings.TrimSpace(t)
+			}
+			if t, ok := a.Metadata["dca_token"].(string); ok && strings.TrimSpace(t) != "" {
+				dcaToken = strings.TrimSpace(t)
+			}
+			if token == "" {
+				if t, ok := a.Metadata["access_token"].(string); ok && strings.TrimSpace(t) != "" {
+					trimmed := strings.TrimSpace(t)
+					if strings.HasPrefix(trimmed, "dca:") {
+						dcaToken = trimmed
+					} else {
+						token = trimmed
+					}
+				}
 			}
 		}
 	}
@@ -211,6 +228,25 @@ func metaCreds(a *cliproxyauth.Auth) (baseURL, token string) {
 			if localBase != "" && baseURL == metaauth.DefaultAPIBaseURL {
 				baseURL = localBase
 			}
+		}
+	}
+	if token == "" && dcaToken != "" {
+		authSvc := metaauth.NewMetaAuth(nil)
+		if minted, err := authSvc.MintAPIKey(context.Background(), dcaToken); err == nil && minted != nil {
+			token = minted.APIKey
+			if a != nil {
+				if a.Metadata != nil {
+					a.Metadata["api_key"] = minted.APIKey
+					if minted.UserEmail != "" {
+						a.Metadata["email"] = minted.UserEmail
+					}
+				}
+				if a.Attributes != nil {
+					a.Attributes["api_key"] = minted.APIKey
+				}
+			}
+		} else if err != nil {
+			log.Warnf("meta executor: mint API key from dca_token failed: %v", err)
 		}
 	}
 	return baseURL, token
