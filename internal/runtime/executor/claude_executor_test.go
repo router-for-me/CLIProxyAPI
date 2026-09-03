@@ -82,7 +82,7 @@ func assertClaudeFingerprint(t *testing.T, headers http.Header, userAgent, pkgVe
 }
 
 func TestApplyClaudeHeaders_FastModeBetaIsConditional(t *testing.T) {
-	baseline := claudeCodeCLIBetas([]byte(`{"model":"claude-opus-5"}`), nil, false)
+	baseline := claudeCodeCLIBetas([]byte(`{"model":"claude-opus-5"}`), nil, false, false)
 	betasWithoutFastMode := baseline
 	betasWithFastMode := baseline + "," + claudeFastModeBeta
 
@@ -154,7 +154,7 @@ func assertClaudeCredentialIdentity(t *testing.T, body []byte, headers http.Head
 }
 
 // assertClaudeCountTokensIdentity pins the count_tokens shape captured from real
-// Claude Code 2.1.220: the endpoint carries no metadata whatsoever. Anthropic
+// Claude Code 2.1.258: the endpoint carries no metadata whatsoever. Anthropic
 // rejects the field there with "metadata: Extra inputs are not permitted", so the
 // credential identity travels only on the header and on the Messages endpoint.
 func assertClaudeCountTokensIdentity(t *testing.T, body []byte, headers http.Header) {
@@ -789,7 +789,7 @@ func TestApplyClaudeHeaders_EmptyAPIKey_OmitsAuthHeaders(t *testing.T) {
 	}
 }
 
-func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode220CLIFingerprint(t *testing.T) {
+func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode258CLIFingerprint(t *testing.T) {
 	var seenBody []byte
 	var seenHeaders http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -820,7 +820,7 @@ func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode220CLIFingerprint(t *testi
 	if got := seenHeaders.Get("X-App"); got != "cli" {
 		t.Fatalf("X-App = %q, want cli", got)
 	}
-	if want := claudeCodeCLIBetas(payload, nil, false); seenHeaders.Get("Anthropic-Beta") != want {
+	if want := claudeCodeCLIBetas(payload, nil, false, false); seenHeaders.Get("Anthropic-Beta") != want {
 		t.Fatalf("Anthropic-Beta = %q, want %q", seenHeaders.Get("Anthropic-Beta"), want)
 	}
 
@@ -3831,6 +3831,11 @@ func TestClaudeBillingFingerprintUsesLatestUserText(t *testing.T) {
 	if got := computeFingerprint(prompt, "2.1.258"); got != "1f4" {
 		t.Fatalf("computeFingerprint() = %q, want official 2.1.258 capture suffix 1f4", got)
 	}
+	// Captured 2026-09-02 from Claude Code 2.1.258 (cli entrypoint): the prompt
+	// "Reply with OK" produced cc_version=2.1.258.c6a.
+	if got := computeFingerprint("Reply with OK", "2.1.258"); got != "c6a" {
+		t.Fatalf("computeFingerprint() = %q, want official 2.1.258 capture suffix c6a", got)
+	}
 }
 
 func TestClaudeCodeLocalDateMatchesNativeLocalCalendarAlgorithm(t *testing.T) {
@@ -5225,7 +5230,7 @@ func TestClaudeExecutor_ExecuteOAuthCustomToolMCPAliasRoundTrip(t *testing.T) {
 	if got := upstreamHeaders.Get("User-Agent"); got != "claude-cli/2.1.258 (external, cli)" {
 		t.Fatalf("Messages User-Agent = %q, want CLI identity", got)
 	}
-	wantBetas := claudeCodeCLIBetas(payload, nil, true)
+	wantBetas := claudeCodeCLIBetas(payload, nil, true, false)
 	if got := upstreamHeaders.Get("Anthropic-Beta"); got != wantBetas {
 		t.Fatalf("Messages Anthropic-Beta = %q, want %q", got, wantBetas)
 	}
@@ -5302,7 +5307,7 @@ func TestClaudeExecutor_ExecuteStreamOAuthCustomToolMCPAliasRoundTrip(t *testing
 	if got := upstreamHeaders.Get("User-Agent"); got != "claude-cli/2.1.258 (external, cli)" {
 		t.Fatalf("streaming User-Agent = %q, want CLI identity", got)
 	}
-	wantBetas := claudeCodeCLIBetas(payload, nil, true)
+	wantBetas := claudeCodeCLIBetas(payload, nil, true, false)
 	if got := upstreamHeaders.Get("Anthropic-Beta"); got != wantBetas {
 		t.Fatalf("streaming Anthropic-Beta = %q, want %q", got, wantBetas)
 	}
@@ -5435,8 +5440,10 @@ func TestInsertClaudeMidConversationSystemMessages_IsIdempotent(t *testing.T) {
 }
 
 // TestClaudeCodeCLIBetas_MatchesObservedClientMatrix pins the Anthropic-Beta
-// baseline to Claude Code 2.1.220 behavior captured against api.anthropic.com.
-// The OAuth profile was reverified on 2026-08-03 with two distinct accounts.
+// baseline to Claude Code 2.1.258 behavior. The 2.1.220 OAuth profile was
+// reverified on 2026-08-03 with two distinct accounts; the 2.1.258 profile was
+// captured on 2026-09-02 from the installed CLI on the cli and sdk-cli
+// entrypoints with an OAuth credential.
 func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 	const constants = "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
 
@@ -5463,7 +5470,7 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 		},
 		{
 			name: "opus-5 1m variant reproduces the full observed order",
-			body: `{"model":"claude-opus-5","tools":[{"name":"Read"}]}`,
+			body: `{"model":"claude-opus-5","tools":[{"name":"Read","defer_loading":true}]}`,
 			requested: map[string]bool{
 				claudeContext1MBeta:          true,
 				claudeServerSideFallbackBeta: true,
@@ -5504,13 +5511,18 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			want: constants + ",mid-conversation-system-2026-04-07,effort-2025-11-24",
 		},
 		{
+			name: "claude-fable-5-1 accepts role=system",
+			body: `{"model":"claude-fable-5-1"}`,
+			want: constants + ",mid-conversation-system-2026-04-07,effort-2025-11-24",
+		},
+		{
 			name: "claude-opus-4-7 stays on the reminder path",
 			body: `{"model":"claude-opus-4-7"}`,
 			want: constants + ",effort-2025-11-24",
 		},
 		{
-			name:  "oauth uses advanced tools and the current cache TTL trailer",
-			body:  `{"model":"claude-opus-4-6","tools":[{"name":"Read"}]}`,
+			name:  "oauth uses tool search and the current cache TTL trailer",
+			body:  `{"model":"claude-opus-4-6","tools":[{"name":"Read","defer_loading":true}]}`,
 			oauth: true,
 			want: "claude-code-20250219,oauth-2025-04-20," +
 				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
@@ -5520,8 +5532,26 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 				"extended-cache-ttl-2025-04-11",
 		},
 		{
+			// Captured 2026-09-02 from Claude Code 2.1.258 (cli entrypoint, OAuth,
+			// auto mode on): 158 inline tools without tool search, advisor beta
+			// enabled for the account, thinking adaptive without display.
+			name:  "2.1.258 main thread capture with inline tools and afk-mode",
+			body:  `{"model":"claude-fable-5-1","tools":[{"name":"Read"}],"thinking":{"type":"adaptive"}}`,
+			oauth: true,
+			requested: map[string]bool{
+				claudeAdvisorToolBeta: true,
+				claudeAFKModeBeta:     true,
+			},
+			want: "claude-code-20250219,oauth-2025-04-20," +
+				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
+				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07," +
+				"advisor-tool-2026-03-01,effort-2025-11-24,fallback-credit-2026-06-01," +
+				"afk-mode-2026-01-31,extended-cache-ttl-2025-04-11",
+		},
+		{
 			name:  "oauth precedes context-1m",
-			body:  `{"model":"claude-opus-5","tools":[{"name":"Read"}]}`,
+			body:  `{"model":"claude-opus-5","tools":[{"name":"Read","defer_loading":true}]}`,
 			oauth: true,
 			requested: map[string]bool{
 				claudeContext1MBeta:          true,
@@ -5547,9 +5577,35 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			want: constants + ",effort-2025-11-24",
 		},
 		{
-			name: "legacy model with tools adds advanced tool use only",
+			name: "legacy model with inline tools no longer adds advanced tool use",
 			body: `{"model":"claude-sonnet-4-6","tools":[{"name":"Read"}]}`,
+			want: constants + ",effort-2025-11-24",
+		},
+		{
+			name: "deferred tool adds advanced tool use",
+			body: `{"model":"claude-sonnet-4-6","tools":[{"name":"Read","defer_loading":true}]}`,
 			want: constants + ",advanced-tool-use-2025-11-20,effort-2025-11-24",
+		},
+		{
+			name: "tool search server tool adds advanced tool use",
+			body: `{"model":"claude-sonnet-4-6","tools":[{"type":"tool_search_tool_regex_20251119","name":"tool_search_tool_regex"},{"name":"Read"}]}`,
+			want: constants + ",advanced-tool-use-2025-11-20,effort-2025-11-24",
+		},
+		{
+			name: "tool use examples add advanced tool use",
+			body: `{"model":"claude-sonnet-4-6","tools":[{"name":"Read","input_examples":[{"path":"a.go"}]}]}`,
+			want: constants + ",advanced-tool-use-2025-11-20,effort-2025-11-24",
+		},
+		{
+			name: "programmatic tool calling adds advanced tool use",
+			body: `{"model":"claude-sonnet-4-6","tools":[{"name":"Read","allowed_callers":["code_execution_20250825"]}]}`,
+			want: constants + ",advanced-tool-use-2025-11-20,effort-2025-11-24",
+		},
+		{
+			name:      "requested advanced tool use is honored for inline tools",
+			body:      `{"model":"claude-sonnet-4-6","tools":[{"name":"Read"}]}`,
+			requested: map[string]bool{claudeAdvancedToolUseBeta: true},
+			want:      constants + ",advanced-tool-use-2025-11-20,effort-2025-11-24",
 		},
 		{
 			name: "role=system model without tools adds mid conversation system only",
@@ -5557,8 +5613,8 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			want: constants + ",mid-conversation-system-2026-04-07,effort-2025-11-24",
 		},
 		{
-			name: "role=system model with tools adds both in wire order",
-			body: `{"model":"claude-opus-5","tools":[{"name":"Read"}]}`,
+			name: "role=system model with tool search adds both in wire order",
+			body: `{"model":"claude-opus-5","tools":[{"name":"Read","defer_loading":true}]}`,
 			want: constants + ",mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24",
 		},
 		{
@@ -5598,21 +5654,127 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 		},
 		{
 			name:      "advisor tool beta requested placed before advanced-tool-use",
-			body:      `{"model":"claude-opus-5","tools":[{"name":"Read"}]}`,
+			body:      `{"model":"claude-opus-5","tools":[{"name":"Read","defer_loading":true}]}`,
 			requested: map[string]bool{"advisor-tool-2026-03-01": true},
 			want:      constants + ",mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24",
 		},
 		{
 			name: "body with advisor server tool automatically adds advisor-tool beta",
 			body: `{"model":"claude-opus-5","tools":[{"type":"advisor_20260301","name":"advisor"}]}`,
-			want: constants + ",mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24",
+			want: constants + ",mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,effort-2025-11-24",
+		},
+		{
+			name:      "afk-mode sits between fast-mode and extended-cache-ttl",
+			body:      `{"model":"claude-opus-5","speed":"fast"}`,
+			oauth:     true,
+			requested: map[string]bool{claudeAFKModeBeta: true},
+			want: "claude-code-20250219,oauth-2025-04-20," +
+				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
+				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07," +
+				"effort-2025-11-24,fallback-credit-2026-06-01,fast-mode-2026-02-01," +
+				"afk-mode-2026-01-31,extended-cache-ttl-2025-04-11",
+		},
+		{
+			name:  "afk-mode is not added unless the caller sent it",
+			body:  `{"model":"claude-opus-5"}`,
+			oauth: true,
+			want: "claude-code-20250219,oauth-2025-04-20," +
+				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
+				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07," +
+				"effort-2025-11-24,fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := claudeCodeCLIBetas([]byte(tt.body), tt.requested, tt.oauth); got != tt.want {
+			if got := claudeCodeCLIBetas([]byte(tt.body), tt.requested, tt.oauth, false); got != tt.want {
 				t.Fatalf("claudeCodeCLIBetas() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestClaudeCodeCLIBetas_LegacyBaselineKeeps220Policy pins the beta policy an
+// operator gets after pinning claude-header-defaults to 2.1.220: advanced-tool-use
+// with any non-empty tool list, and no afk-mode.
+func TestClaudeCodeCLIBetas_LegacyBaselineKeeps220Policy(t *testing.T) {
+	const constants = "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+	tests := []struct {
+		name      string
+		body      string
+		requested map[string]bool
+		oauth     bool
+		want      string
+	}{
+		{
+			name: "inline tools add advanced tool use",
+			body: `{"model":"claude-sonnet-4-6","tools":[{"name":"Read"}]}`,
+			want: constants + ",advanced-tool-use-2025-11-20,effort-2025-11-24",
+		},
+		{
+			name: "empty tools stay without it",
+			body: `{"model":"claude-sonnet-4-6","tools":[]}`,
+			want: constants + ",effort-2025-11-24",
+		},
+		{
+			name:      "afk-mode is dropped even when requested",
+			body:      `{"model":"claude-opus-5","speed":"fast"}`,
+			oauth:     true,
+			requested: map[string]bool{claudeAFKModeBeta: true},
+			want: "claude-code-20250219,oauth-2025-04-20," +
+				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
+				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07," +
+				"effort-2025-11-24,fallback-credit-2026-06-01,fast-mode-2026-02-01," +
+				"extended-cache-ttl-2025-04-11",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := claudeCodeCLIBetas([]byte(tt.body), tt.requested, tt.oauth, true); got != tt.want {
+				t.Fatalf("claudeCodeCLIBetas() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWithClaudeAdvisorToolBeta_InsertsBeforeTrailingBetas pins the advisor
+// insertion point against every beta that follows it on the 2.1.258 wire,
+// including a caller-supplied afk-mode-2026-01-31.
+func TestWithClaudeAdvisorToolBeta_InsertsBeforeTrailingBetas(t *testing.T) {
+	const head = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,mid-conversation-system-2026-04-07"
+	tests := []struct {
+		name  string
+		betas string
+		want  string
+	}{
+		{
+			name:  "afk-mode only trailer",
+			betas: head + ",afk-mode-2026-01-31,extended-cache-ttl-2025-04-11",
+			want:  head + ",advisor-tool-2026-03-01,afk-mode-2026-01-31,extended-cache-ttl-2025-04-11",
+		},
+		{
+			name:  "effort ahead of afk-mode",
+			betas: head + ",effort-2025-11-24,fallback-credit-2026-06-01,afk-mode-2026-01-31,extended-cache-ttl-2025-04-11",
+			want:  head + ",advisor-tool-2026-03-01,effort-2025-11-24,fallback-credit-2026-06-01,afk-mode-2026-01-31,extended-cache-ttl-2025-04-11",
+		},
+		{
+			name:  "already present stays put",
+			betas: head + ",advisor-tool-2026-03-01,effort-2025-11-24,afk-mode-2026-01-31",
+			want:  head + ",advisor-tool-2026-03-01,effort-2025-11-24,afk-mode-2026-01-31",
+		},
+		{
+			name:  "no trailer appends",
+			betas: head,
+			want:  head + ",advisor-tool-2026-03-01",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := withClaudeAdvisorToolBeta(tt.betas); got != tt.want {
+				t.Fatalf("withClaudeAdvisorToolBeta() = %q, want %q", got, tt.want)
 			}
 		})
 	}

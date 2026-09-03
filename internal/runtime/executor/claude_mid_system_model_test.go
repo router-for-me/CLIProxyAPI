@@ -282,7 +282,7 @@ func TestClaudeExecutor_PayloadOverrideReconcilesRelocatedSystemPrompt(t *testin
 func TestClaudeExecutor_ConfirmedNativeLegacyMidSystemMessageForwarded(t *testing.T) {
 	upstream := &midSystemUpstream{}
 	ex := NewClaudeExecutor(midSystemConfig())
-	headers := claudeNativeHelperHeaders("claude-code-20250219,"+claudeNativeHelperCoreBetas, "gzip", false)
+	headers := claudeNativeHelperHeaders("claude-code-20250219," + claudeNativeHelperCoreBetas)
 
 	if _, err := ex.Execute(upstream.context(t, headers), midSystemAuth(), cliproxyexecutor.Request{
 		Model:   "claude-haiku-4-5-20251001",
