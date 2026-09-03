@@ -236,6 +236,11 @@ func (e *OAuthStatusError) Error() string {
 	return fmt.Sprintf("fetch Claude OAuth %s failed with status %d", e.Label, e.StatusCode)
 }
 
+// maxOAuthControlPlaneBodyBytes caps a control-plane JSON reply (profile,
+// roles, usage) on the wire and after decompression: these payloads are a
+// few KB, and the management quota endpoint fans several reads out at once.
+const maxOAuthControlPlaneBodyBytes int64 = 2 << 20
+
 // fetchOAuthControlPlaneJSON issues an Axios-shaped OAuth control-plane GET and
 // returns the decoded response body. label names the endpoint in error text;
 // extraHeaders are set after the shared Axios headers.
@@ -267,7 +272,7 @@ func (o *ClaudeAuth) fetchOAuthControlPlaneJSON(ctx context.Context, endpoint, a
 			log.Errorf("failed to close Claude OAuth %s response body: %v", label, errClose)
 		}
 	}()
-	body, errRead := readClaudeOAuthResponseBody(resp)
+	body, errRead := readClaudeOAuthResponseBodyLimited(resp, maxOAuthControlPlaneBodyBytes)
 	if errRead != nil {
 		return nil, fmt.Errorf("read Claude OAuth %s response: %w", label, errRead)
 	}

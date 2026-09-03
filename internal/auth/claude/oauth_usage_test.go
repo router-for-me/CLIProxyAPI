@@ -1,6 +1,8 @@
 package claude
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
@@ -55,5 +57,39 @@ func TestFetchOAuthUsageReportsUpstreamStatus(t *testing.T) {
 	}
 	if strings.Contains(errFetch.Error(), "secret detail") {
 		t.Fatalf("error text leaks the upstream body: %v", errFetch)
+	}
+}
+
+func TestFetchOAuthUsageBoundsTheBodyBeforeAndAfterDecompression(t *testing.T) {
+	// 3 MiB of zeros gzips to a few KB: small on the wire, over the cap decoded.
+	var bomb bytes.Buffer
+	gz := gzip.NewWriter(&bomb)
+	if _, errWrite := gz.Write(make([]byte, 3<<20)); errWrite != nil {
+		t.Fatalf("gzip write: %v", errWrite)
+	}
+	if errClose := gz.Close(); errClose != nil {
+		t.Fatalf("gzip close: %v", errClose)
+	}
+	cases := map[string]*http.Response{
+		"plain oversize": {
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader(make([]byte, (2<<20)+1))),
+			Header:     make(http.Header),
+		},
+		"gzip bomb": {
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader(bomb.Bytes())),
+			Header:     http.Header{"Content-Encoding": []string{"gzip"}},
+		},
+	}
+	for name, resp := range cases {
+		auth := &ClaudeAuth{httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			resp.Request = req
+			return resp, nil
+		})}}
+		_, errFetch := auth.FetchOAuthUsage(context.Background(), "access")
+		if errFetch == nil || !strings.Contains(errFetch.Error(), "exceeds") {
+			t.Fatalf("%s: error = %v, want a size-bound error", name, errFetch)
+		}
 	}
 }
