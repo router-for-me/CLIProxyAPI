@@ -344,6 +344,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		Headers:             incomingHeaders,
 		Metadata:            opts.Metadata,
 		StartedAt:           requestStartedAt,
+		// The baseline a later probe is measured against: a probe that reads far
+		// less than the real request did refreshed only part of the prefix.
+		CacheReadInputTokens: gjson.GetBytes(data, "usage.cache_read_input_tokens").Int(),
 	})
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil

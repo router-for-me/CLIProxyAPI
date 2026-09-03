@@ -663,3 +663,81 @@ func TestRetiredSessionHistoryIsBounded(t *testing.T) {
 		t.Fatalf("retained %d retired sessions, want at most %d", got, maxRetiredSessions)
 	}
 }
+
+func TestProbeMissed(t *testing.T) {
+	tests := []struct {
+		name     string
+		read     int64
+		baseline int64
+		want     bool
+	}{
+		{name: "read nothing is a miss", read: 0, baseline: 100000, want: true},
+		{name: "read nothing with no baseline is still a miss", read: 0, baseline: 0, want: true},
+		{name: "full read is a hit", read: 100000, baseline: 100000, want: false},
+		{name: "just above half is a hit", read: 50001, baseline: 100000, want: false},
+		{name: "exactly half is a miss", read: 50000, baseline: 100000, want: true},
+		{name: "far below half is a miss", read: 12000, baseline: 100000, want: true},
+		{name: "unknown baseline cannot judge proportion", read: 12000, baseline: 0, want: false},
+		{name: "reading more than the baseline is a hit", read: 120000, baseline: 100000, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := probeMissed(tt.read, tt.baseline); got != tt.want {
+				t.Fatalf("probeMissed(%d, %d) = %t, want %t", tt.read, tt.baseline, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPartialReadCountsAsAMiss(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{result: ProbeResult{CacheReadInputTokens: 4000, Diagnosis: "messages_changed"}}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
+
+	scheduler.Observe(ObserveInput{
+		SessionID:            "sess-1",
+		BindingSessionID:     "claude:sess-1:agent:main",
+		AuthID:               "auth-a",
+		Provider:             "claude",
+		Model:                "claude-haiku-4-5-20251001",
+		Body:                 []byte(oneHourBody),
+		Headers:              http.Header{},
+		TTL:                  time.Hour,
+		StartedAt:            time.Now(),
+		CacheReadInputTokens: 100000,
+	})
+	clock.fireLatest(t)
+
+	snapshot := scheduler.Snapshot()
+	if snapshot.Counters.Misses != 1 || snapshot.Counters.Hits != 0 {
+		t.Fatalf("a probe reading 4%% of the baseline must count as a miss: %+v", snapshot.Counters)
+	}
+	probe := snapshot.Sessions[0].LastProbe
+	if probe == nil || probe.Status != ProbeStatusMiss || probe.BaselineReadInputTokens != 100000 {
+		t.Fatalf("last probe = %+v", probe)
+	}
+}
+
+func TestFullReadAgainstABaselineCountsAsAHit(t *testing.T) {
+	clock := &fakeClock{}
+	prober := &recordingProber{result: ProbeResult{CacheReadInputTokens: 99000}}
+	scheduler := testScheduler(t, clock, prober, staticLiveness{live: true}, staticBinding{authID: "auth-a", state: BindingBound}, nil)
+
+	scheduler.Observe(ObserveInput{
+		SessionID:            "sess-1",
+		BindingSessionID:     "claude:sess-1:agent:main",
+		AuthID:               "auth-a",
+		Provider:             "claude",
+		Model:                "claude-haiku-4-5-20251001",
+		Body:                 []byte(oneHourBody),
+		Headers:              http.Header{},
+		TTL:                  time.Hour,
+		StartedAt:            time.Now(),
+		CacheReadInputTokens: 100000,
+	})
+	clock.fireLatest(t)
+
+	if counters := scheduler.Snapshot().Counters; counters.Hits != 1 || counters.Misses != 0 {
+		t.Fatalf("counters = %+v", counters)
+	}
+}

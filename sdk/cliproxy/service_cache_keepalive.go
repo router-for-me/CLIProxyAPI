@@ -62,11 +62,16 @@ func (p cacheKeepaliveProber) Probe(ctx context.Context, probe keepalive.ProbeRe
 }
 
 // claudeCacheDiagnosis extracts the upstream cache-miss explanation when the
-// account carries the cache-diagnosis beta and the response supplied one. The
-// field has moved between response shapes, so every known location is tried and
-// an absent diagnosis is simply empty.
+// account carries the cache-diagnosis beta and the response supplied one.
+//
+// diagnostics.cache_miss_reason is the documented field. The others are shapes
+// seen on the wire; every known location is tried in order and an absent
+// diagnosis is simply empty, so a wrong guess costs an empty string, never an
+// error.
 func claudeCacheDiagnosis(payload []byte) string {
 	for _, path := range []string{
+		"diagnostics.cache_miss_reason",
+		"usage.diagnostics.cache_miss_reason",
 		"usage.cache_diagnosis.reason",
 		"usage.cache_diagnosis",
 		"cache_diagnosis.reason",

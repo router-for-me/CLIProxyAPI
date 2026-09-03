@@ -33,6 +33,10 @@ type ClaudeCacheKeepaliveObservation struct {
 	Metadata map[string]any
 	// StartedAt is when the request began.
 	StartedAt time.Time
+	// CacheReadInputTokens is what this request read from the cache, the
+	// baseline a later probe is judged against. Zero means unknown, which is
+	// the normal case on the streaming path where usage is not yet available.
+	CacheReadInputTokens int64
 }
 
 // ObserveClaudeCacheKeepalive records a completed request with the keepalive
@@ -64,15 +68,16 @@ func ObserveClaudeCacheKeepalive(ctx context.Context, observation ClaudeCacheKee
 	}
 	provider, model := claudeCacheKeepaliveAffinityKey(observation)
 	scheduler.Observe(keepalive.ObserveInput{
-		SessionID:        sessionID,
-		BindingSessionID: claudeCacheKeepaliveMetadataString(observation.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey),
-		AuthID:           observation.AuthID,
-		Provider:         provider,
-		Model:            model,
-		Body:             observation.OriginalPayload,
-		Headers:          observation.Headers,
-		TTL:              ttl,
-		StartedAt:        observation.StartedAt,
+		SessionID:            sessionID,
+		BindingSessionID:     claudeCacheKeepaliveMetadataString(observation.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey),
+		AuthID:               observation.AuthID,
+		Provider:             provider,
+		Model:                model,
+		Body:                 observation.OriginalPayload,
+		Headers:              observation.Headers,
+		TTL:                  ttl,
+		StartedAt:            observation.StartedAt,
+		CacheReadInputTokens: observation.CacheReadInputTokens,
 	})
 }
 

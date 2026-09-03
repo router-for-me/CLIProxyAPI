@@ -154,6 +154,10 @@ type ObserveInput struct {
 	Headers http.Header
 	// TTL is the cache TTL the request asked for.
 	TTL time.Duration
+	// CacheReadInputTokens is what the observed real request read from the
+	// cache. It is the baseline a later probe is judged against. Zero means
+	// unknown, which disables the proportional check.
+	CacheReadInputTokens int64
 	// StartedAt is when the observed request began.
 	StartedAt time.Time
 }
@@ -174,6 +178,7 @@ type sessionState struct {
 	// history so the management endpoint can explain what happened, but drops
 	// the body and headers immediately.
 	lastRequestAt time.Time
+	baselineRead  int64
 	nextProbeAt   time.Time
 	probesSent    int
 	lastProbe     *ProbeOutcome
@@ -189,8 +194,11 @@ type ProbeOutcome struct {
 	CacheReadInputTokens     int64     `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int64     `json:"cache_creation_input_tokens"`
 	SkippedReason            string    `json:"skipped_reason,omitempty"`
-	Error                    string    `json:"error,omitempty"`
-	Diagnosis                string    `json:"diagnosis,omitempty"`
+	// BaselineReadInputTokens is what the observed real request read. A probe
+	// that reads far less than this refreshed only part of the prefix.
+	BaselineReadInputTokens int64  `json:"baseline_read_input_tokens,omitempty"`
+	Error                   string `json:"error,omitempty"`
+	Diagnosis               string `json:"diagnosis,omitempty"`
 }
 
 // Probe outcome statuses.
@@ -458,6 +466,7 @@ func (s *Scheduler) Observe(in ObserveInput) {
 		state.lastRequestAt = now
 	}
 	state.nextProbeAt = now.Add(delay)
+	state.baselineRead = in.CacheReadInputTokens
 	// A session that had already probed keeps its lifetime probe count; only the
 	// consecutive budget resets on a real request.
 	if previous != nil {
@@ -501,6 +510,7 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 	provider := state.provider
 	model := state.model
 	ttl := state.ttl
+	baselineRead := state.baselineRead
 	body := state.body
 	headers := state.headers
 	s.mu.Unlock()
@@ -565,9 +575,10 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 		Status:                   ProbeStatusHit,
 		CacheReadInputTokens:     result.CacheReadInputTokens,
 		CacheCreationInputTokens: result.CacheCreationInputTokens,
+		BaselineReadInputTokens:  baselineRead,
 		Diagnosis:                result.Diagnosis,
 	}
-	if result.CacheReadInputTokens <= 0 {
+	if probeMissed(result.CacheReadInputTokens, baselineRead) {
 		outcome.Status = ProbeStatusMiss
 	}
 	s.recordProbe(sessionID, generation, outcome)
@@ -601,6 +612,20 @@ func (s *Scheduler) fire(sessionID string, generation uint64) {
 	s.logProbe(sessionID, authID, model, outcome, elapsed, total, consecutive, rescheduled, nextProbeAt)
 }
 
+// probeMissed reports whether a probe failed to refresh the entry it was sent for.
+//
+// Reading nothing is an outright miss. Reading less than half the baseline is
+// also a miss: the probe found only a fragment of the prefix cached, so most of
+// the context it was meant to keep warm had already expired. A zero baseline
+// means the observed request's usage was unavailable, which leaves only the
+// outright check.
+func probeMissed(read, baseline int64) bool {
+	if read <= 0 {
+		return true
+	}
+	return baseline > 0 && read*2 < baseline
+}
+
 // logProbe emits the single line that tells the whole story of one probe, so
 // `grep cache-keepalive` needs no other source.
 //
@@ -611,16 +636,16 @@ func (s *Scheduler) logProbe(sessionID, authID, model string, outcome ProbeOutco
 	if !nextProbeAt.IsZero() {
 		next = nextProbeAt.Format(time.RFC3339)
 	}
-	fields := "session=%s auth=%s model=%s status=%s cache_read_input_tokens=%d cache_creation_input_tokens=%d duration=%s probes_sent=%d consecutive_probes=%d rescheduled=%t next_probe_at=%s"
+	fields := "session=%s auth=%s model=%s status=%s cache_read_input_tokens=%d cache_creation_input_tokens=%d baseline_read_input_tokens=%d duration=%s probes_sent=%d consecutive_probes=%d rescheduled=%t next_probe_at=%s"
 	args := []any{
 		truncateSession(sessionID), authID, model, outcome.Status,
-		outcome.CacheReadInputTokens, outcome.CacheCreationInputTokens,
+		outcome.CacheReadInputTokens, outcome.CacheCreationInputTokens, outcome.BaselineReadInputTokens,
 		elapsed.Round(time.Millisecond), total, consecutive, rescheduled, next,
 	}
 	if outcome.Status == ProbeStatusMiss {
-		fields += " diagnosis=%q"
+		fields += " cache_miss_reason=%q"
 		args = append(args, outcome.Diagnosis)
-		log.Warnf("cache-keepalive: probe missed, the cached prefix was already gone | "+fields, args...)
+		log.Warnf("cache-keepalive: probe MISSED | "+fields, args...)
 		return
 	}
 	log.Infof("cache-keepalive: probe | "+fields, args...)

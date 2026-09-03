@@ -156,12 +156,19 @@ cache-keepalive: probe | session=4463ede6... auth=<id> model=<model> status=hit 
 cache-keepalive: skipped | session=4463ede6... auth=<id> model=<model> reason=no-live-agents
 ```
 
-A probe that finds nothing cached is the malfunction signal: the entry it was
-meant to refresh had already expired, so it is logged at **warning** level with
-the upstream diagnosis when the account has the cache-diagnosis beta.
+A probe that fails to refresh the entry is the malfunction signal, logged at
+**warning** level with `diagnostics.cache_miss_reason` when the account has the
+cache-diagnosis beta and the upstream supplied one. Two cases count as a miss:
+
+- the probe read nothing at all, so the entry had already expired;
+- the probe read less than half of what the observed real request read, so most
+  of the prefix it was meant to keep warm was already gone. The real request's
+  read is recorded as `baseline_read_input_tokens`; a zero baseline, which is the
+  normal case on the streaming path where usage is not yet available, leaves only
+  the first check.
 
 ```
-cache-keepalive: probe missed, the cached prefix was already gone | session=4463ede6... auth=<id> model=<model> status=miss cache_read_input_tokens=0 cache_creation_input_tokens=161937 duration=743ms probes_sent=2 consecutive_probes=2 rescheduled=true next_probe_at=... diagnosis="messages_changed"
+cache-keepalive: probe MISSED | session=4463ede6... auth=<id> model=<model> status=miss cache_read_input_tokens=0 cache_creation_input_tokens=161937 baseline_read_input_tokens=161937 duration=743ms probes_sent=2 consecutive_probes=2 rescheduled=true next_probe_at=... cache_miss_reason="messages_changed"
 ```
 
 A probe request that fails outright logs at warning with `status=error`.
@@ -219,6 +226,7 @@ route. It returns the live scheduler state:
 
 `status` is `hit`, `miss`, `error`, or `skipped`; a skipped entry carries
 `skipped_reason`, and a miss carries `diagnosis` when the upstream supplied one.
+Misses are counted under `counters.misses`.
 
 A session that has stopped probing stays listed with `active: false`, a
 `retired_at` timestamp and a `retired_reason`, so an operator can tell "nothing
