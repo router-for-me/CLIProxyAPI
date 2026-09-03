@@ -198,7 +198,6 @@ claude-code:
 # Anthropic reports reads, creation, the 5m/1h pool split and a miss reason;
 # OpenAI-compatible and Gemini report cached input tokens only; everything else
 # reports nothing and is shown as "no cache data" rather than a 0% hit rate.
-# See docs/cache-stats.md.
 usage-cache-stats:
   # Opt-in. Default false.
   enabled: false
