@@ -43,6 +43,10 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	}
 
 	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
+	cfg.UsageCacheStats = cfg.UsageCacheStats.WithDefaults()
+	if errValidate := cfg.UsageCacheStats.Validate(); errValidate != nil {
+		return nil, errValidate
+	}
 	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {
 		return nil, errValidate
 	}

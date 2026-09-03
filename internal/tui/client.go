@@ -423,3 +423,135 @@ func (c *Client) DeleteField(path string) error {
 	_, _, err := c.doRequest("DELETE", "/v0/management/"+path, nil)
 	return err
 }
+
+// ----- Cache statistics -----
+
+// CacheAggregate holds cache counters for the global scope or for a single
+// model/auth bucket returned by the management cache-stats endpoint.
+type CacheAggregate struct {
+	Key                   string  `json:"key"`
+	Requests              int64   `json:"requests"`
+	Hits                  int64   `json:"hits"`
+	Misses                int64   `json:"misses"`
+	T0s                   int64   `json:"t0s"`
+	Probes                int64   `json:"probes"`
+	HitRate               float64 `json:"hit_rate"`
+	InputTokens           int64   `json:"input_tokens"`
+	OutputTokens          int64   `json:"output_tokens"`
+	CacheReadTokens       int64   `json:"cache_read_tokens"`
+	CacheCreationTokens   int64   `json:"cache_creation_tokens"`
+	CacheCreation5mTokens int64   `json:"cache_creation_5m_tokens"`
+	CacheCreation1hTokens int64   `json:"cache_creation_1h_tokens"`
+	LostTokens            int64   `json:"lost_tokens"`
+	Sessions              int64   `json:"sessions"`
+	FirstSeen             string  `json:"first_seen"`
+	LastSeen              string  `json:"last_seen"`
+}
+
+// CacheSession summarises one prompt-caching session.
+type CacheSession struct {
+	ID         string  `json:"id"`
+	ShortID    string  `json:"short_id"`
+	Model      string  `json:"model"`
+	AuthID     string  `json:"auth_id"`
+	Requests   int64   `json:"requests"`
+	Hits       int64   `json:"hits"`
+	Misses     int64   `json:"misses"`
+	T0s        int64   `json:"t0s"`
+	Probes     int64   `json:"probes"`
+	HitRate    float64 `json:"hit_rate"`
+	LostTokens int64   `json:"lost_tokens"`
+	Regime     string  `json:"regime"`
+	FirstSeen  string  `json:"first_seen"`
+	LastSeen   string  `json:"last_seen"`
+}
+
+// CacheRequest is a single request inside a session's cache sequence.
+type CacheRequest struct {
+	Seq                   int    `json:"seq"`
+	At                    string `json:"at"`
+	Model                 string `json:"model"`
+	AuthID                string `json:"auth_id"`
+	InputTokens           int64  `json:"input_tokens"`
+	OutputTokens          int64  `json:"output_tokens"`
+	MaxTokens             int64  `json:"max_tokens"`
+	CacheReadTokens       int64  `json:"cache_read_tokens"`
+	CacheCreationTokens   int64  `json:"cache_creation_tokens"`
+	CacheCreation5mTokens int64  `json:"cache_creation_5m_tokens"`
+	CacheCreation1hTokens int64  `json:"cache_creation_1h_tokens"`
+	Tier                  string `json:"tier"`
+	DeltaRead             int64  `json:"delta_read"`
+	MissReason            string `json:"miss_reason"`
+	MissedTokens          int64  `json:"missed_tokens"`
+	IsProbe               bool   `json:"is_probe"`
+}
+
+// CacheStats is the payload of GET /v0/management/cache-stats.
+type CacheStats struct {
+	Enabled  bool             `json:"enabled"`
+	Global   CacheAggregate   `json:"global"`
+	Models   []CacheAggregate `json:"models"`
+	Auths    []CacheAggregate `json:"auths"`
+	Sessions []CacheSession   `json:"sessions"`
+}
+
+// CacheSessionDetail is the payload of GET /v0/management/cache-stats/sessions/{id}.
+type CacheSessionDetail struct {
+	Session  CacheSession   `json:"session"`
+	Requests []CacheRequest `json:"requests"`
+}
+
+// GetCacheStats fetches aggregated prompt-cache statistics.
+func (c *Client) GetCacheStats() (*CacheStats, error) {
+	data, err := c.get("/v0/management/cache-stats")
+	if err != nil {
+		return nil, err
+	}
+	var stats CacheStats
+	if err := json.Unmarshal(data, &stats); err != nil {
+		return nil, err
+	}
+	return &stats, nil
+}
+
+// GetCacheSession fetches the per-request sequence for a single cache session.
+func (c *Client) GetCacheSession(id string) (*CacheSessionDetail, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("session id is required")
+	}
+	data, code, err := c.doRequest("GET", "/v0/management/cache-stats/sessions/"+url.PathEscape(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	if code == http.StatusNotFound {
+		return nil, fmt.Errorf("session not found")
+	}
+	if code >= 400 {
+		return nil, fmt.Errorf("HTTP %d: %s", code, strings.TrimSpace(string(data)))
+	}
+	var detail CacheSessionDetail
+	if err := json.Unmarshal(data, &detail); err != nil {
+		return nil, err
+	}
+	return &detail, nil
+}
+
+// ResetCacheStats clears all collected cache statistics.
+func (c *Client) ResetCacheStats() (int, error) {
+	data, code, err := c.doRequest("DELETE", "/v0/management/cache-stats", nil)
+	if err != nil {
+		return 0, err
+	}
+	if code >= 400 {
+		return 0, fmt.Errorf("HTTP %d: %s", code, strings.TrimSpace(string(data)))
+	}
+	var result struct {
+		Status          string `json:"status"`
+		ClearedSessions int    `json:"cleared_sessions"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return 0, nil
+	}
+	return result.ClearedSessions, nil
+}

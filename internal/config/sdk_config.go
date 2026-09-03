@@ -48,6 +48,9 @@ type SDKConfig struct {
 	// ClaudeCode configures Claude Code compatibility behavior.
 	ClaudeCode ClaudeCodeConfig `yaml:"claude-code" json:"claude-code"`
 
+	// UsageCacheStats configures the retained per-session prompt-cache statistics store.
+	UsageCacheStats UsageCacheStatsConfig `yaml:"usage-cache-stats" json:"usage-cache-stats"`
+
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
