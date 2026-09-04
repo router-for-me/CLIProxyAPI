@@ -591,3 +591,71 @@ func TestSanitizeCodexClientReasoningMetadataPreservesEmptyArray(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexClientModelsResponseKeepsTemplateReasoningLevelsWhenModelDeclaresNone(t *testing.T) {
+	// Models such as Antigravity's claude-sonnet-4-6 advertise thinking as a token
+	// budget ({"min":1024,"max":64000}) without a level list. They still support
+	// reasoning, so the entry keeps the default template's levels instead of
+	// reporting none. An entirely empty ThinkingSupport declares no capability at
+	// all and reports an empty array.
+	tests := []struct {
+		name       string
+		version    string
+		thinking   *registry.ThinkingSupport
+		wantLevels bool
+	}{
+		{name: "budget only modern client", version: "0.153.0", thinking: &registry.ThinkingSupport{Min: 1024, Max: 64000}, wantLevels: true},
+		{name: "budget only legacy client", version: "0.143.9", thinking: &registry.ThinkingSupport{Min: 1024, Max: 64000}, wantLevels: true},
+		{name: "max only budget", version: "0.153.0", thinking: &registry.ThinkingSupport{Max: 64000}, wantLevels: true},
+		{name: "empty thinking support", version: "0.153.0", thinking: &registry.ThinkingSupport{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := BuildResponseForClient([]map[string]any{{
+				"id":       "home-budget-thinking-model-test",
+				"thinking": tt.thinking,
+			}}, nil, false, tt.version)
+			models, ok := resp["models"].([]map[string]any)
+			if !ok || len(models) != 1 {
+				t.Fatalf("models = %#v, want one model", resp["models"])
+			}
+			model := models[0]
+
+			rawLevels, ok := model["supported_reasoning_levels"].([]any)
+			if !ok {
+				t.Fatalf("supported_reasoning_levels = %#v, want an array", model["supported_reasoning_levels"])
+			}
+
+			if !tt.wantLevels {
+				// No declared capability: the required field stays present but empty,
+				// and the optional default is omitted.
+				if len(rawLevels) != 0 {
+					t.Fatalf("supported_reasoning_levels = %#v, want an empty array", rawLevels)
+				}
+				if _, exists := model["default_reasoning_level"]; exists {
+					t.Fatalf("default_reasoning_level = %#v, want absent", model["default_reasoning_level"])
+				}
+				return
+			}
+
+			if len(rawLevels) == 0 {
+				t.Fatal("supported_reasoning_levels is empty, want the default template levels")
+			}
+			defaultLevel := stringModelValue(model, "default_reasoning_level")
+			if defaultLevel == "" {
+				t.Fatal("default_reasoning_level is empty, want the default template level")
+			}
+			for _, rawLevel := range rawLevels {
+				level, okLevel := rawLevel.(map[string]any)
+				if !okLevel {
+					t.Fatalf("supported_reasoning_levels entry = %#v, want an object", rawLevel)
+				}
+				if stringModelValue(level, "effort") == defaultLevel {
+					return
+				}
+			}
+			t.Fatalf("default_reasoning_level %q is not listed in supported_reasoning_levels %#v", defaultLevel, rawLevels)
+		})
+	}
+}
