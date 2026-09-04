@@ -12,6 +12,22 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+func init() {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
+		applyTransportTuning(transport)
+	}
+}
+
+func applyTransportTuning(t *http.Transport) {
+	if t == nil {
+		return
+	}
+	t.MaxIdleConns = 200
+	t.MaxIdleConnsPerHost = 20
+	t.IdleConnTimeout = 90 * time.Second
+	t.ForceAttemptHTTP2 = true
+}
+
 // NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
 // 2. Use cfg.ProxyURL if auth proxy is not configured
@@ -46,6 +62,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	if proxyURL != "" {
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
+			applyTransportTuning(transport)
 			httpClient.Transport = transport
 			return httpClient
 		}
