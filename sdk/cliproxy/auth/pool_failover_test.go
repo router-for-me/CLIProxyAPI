@@ -339,21 +339,28 @@ func TestPoolStrategyRotationStaysInsidePool(t *testing.T) {
 // TestPoolStrategyBareKeyStaysUnpinned pins the compound-only pinning rule: a
 // pool-strategy auth with a BARE channel routing key (the OpenAI-compat and
 // fallback shapes) must not confine rotation to that channel. After the bare
-// pool fails, a multi-provider request may still be rescued by another
-// provider serving the model — the aggressive-failover intent for
-// bare-channel pools. This is the exact scenario the routing-key pin exists
-// to keep open; pinning the bare key would surface the pool's error without
-// ever attempting the rescuing provider.
+// pool fails, a multi-provider request may still be rescued by a DIFFERENT
+// provider serving the same model — the aggressive-failover intent for
+// bare-channel pools. The rescue must live on a second channel: with a
+// same-channel rescue the pin would be a no-op (the narrowed list equals the
+// original single-element list) and the test would pass even with the buggy
+// pin restored. Pinning the bare key in this setup would surface the pool's
+// error without ever attempting the rescuing provider — which is exactly the
+// failure mode that distinguishes this test from the pinned compound pools
+// in TestPoolStrategyRotationStaysInsidePool.
 func TestPoolStrategyBareKeyStaysUnpinned(t *testing.T) {
 	model := "pool-failover-model-" + uuid.NewString()
-	// Bare-channel pool whose entry fails with the request-fault 400.
-	failMessages := map[string]string{
-		"pool-bare-auth": "quota-bare",
+	// Bare-channel compat pool whose only entry fails with the request-fault 400.
+	compatExecutor := &poolFailoverTestExecutor{
+		failMessages: map[string]string{"pool-bare-auth": "quota-bare"},
+		identifier:   "openai-compatible-foo",
 	}
-	executor := &poolFailoverTestExecutor{failMessages: failMessages, identifier: "openai-compatible-foo"}
+	// A succeeding rescue provider on a different channel.
+	rescueExecutor := &poolFailoverTestExecutor{identifier: "gemini"}
 	manager := NewManager(nil, nil, NoopHook{})
 	manager.SetRetryConfig(0, 0, 0)
-	manager.RegisterExecutor(executor)
+	manager.RegisterExecutor(compatExecutor)
+	manager.RegisterExecutor(rescueExecutor)
 	bare := &Auth{
 		ID:       "pool-bare-auth",
 		Provider: "openai-compatible-foo",
@@ -365,14 +372,11 @@ func TestPoolStrategyBareKeyStaysUnpinned(t *testing.T) {
 			AttributePoolStrategy: "round-robin",
 		},
 	}
-	// A second, succeeding provider on the same bare channel proves rotation
-	// crossed the failed pool rather than dying inside it.
 	rescue := &Auth{
 		ID:       "pool-bare-rescue",
-		Provider: "openai-compatible-foo",
+		Provider: "gemini",
 		Status:   StatusActive,
 		Attributes: map[string]string{
-			"provider_key":    "openai-compatible-foo",
 			AttributeAuthKind: "apikey",
 			AttributeAPIKey:   "k-rescue",
 		},
@@ -390,16 +394,15 @@ func TestPoolStrategyBareKeyStaysUnpinned(t *testing.T) {
 		}
 	})
 
-	resp, errExecute := manager.Execute(context.Background(), []string{"openai-compatible-foo"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	resp, errExecute := manager.Execute(context.Background(), []string{"openai-compatible-foo", "gemini"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 	if errExecute != nil {
-		t.Fatalf("Execute() error = %v, want the rescuing auth to serve after the failed bare-pool entry", errExecute)
+		t.Fatalf("Execute() error = %v, want the cross-channel rescue to serve after the failed bare-pool entry", errExecute)
 	}
-	calls := executor.ExecuteCalls()
-	if len(calls) != 2 {
-		t.Fatalf("execute calls = %v, want the failed entry plus the rescuing auth", calls)
-	}
-	if got := callsForAuth(calls, "pool-bare-auth"); got != 1 {
+	if got := callsForAuth(compatExecutor.ExecuteCalls(), "pool-bare-auth"); got != 1 {
 		t.Fatalf("failing entry called %d times, want 1", got)
+	}
+	if got := callsForAuth(rescueExecutor.ExecuteCalls(), "pool-bare-rescue"); got != 1 {
+		t.Fatalf("rescue entry called %d times, want 1", got)
 	}
 	if served := string(resp.Payload); served != "pool-bare-rescue" {
 		t.Fatalf("request served by %q, want pool-bare-rescue", served)
