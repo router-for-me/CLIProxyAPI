@@ -152,3 +152,35 @@ accessManager.SetProviders(sdkaccess.RegisteredProviders())
 ```
 
 This mirrors the behaviour in `internal/access.ApplyAccessProviders`, enabling runtime updates without restarting the process.
+
+### Authenticated model-list visibility
+
+Authentication providers and frontend authentication plugins can optionally return
+the metadata entry `model_list_allowed_ids` (SDK constant
+`pluginapi.ModelListAllowedIDsMetadataKey`). Its value is a JSON array of exact IDs:
+
+```go
+Metadata: map[string]string{
+    pluginapi.ModelListAllowedIDsMetadataKey: `["model-a", "model-b"]`,
+},
+```
+
+Only metadata produced by successful authentication is consulted. Request headers
+and query parameters cannot set this policy. Existing native keys and plugins
+that omit the entry retain their current behavior. An empty array hides every
+model; invalid policy data fails closed with a generic server error. Restricted
+responses use `Cache-Control: private, no-store`.
+
+Filtering is applied to the final OpenAI, Claude, Gemini, Codex-client and Grok
+model lists, including Home-backed lists. IDs are case-sensitive and there is no
+wildcard matching. OpenAI/Claude/Grok use the returned `id`; Codex uses `slug`;
+Gemini uses `name` and also accepts its value without the `models/` prefix.
+For Claude cloaking, supply the final displayed ID, or disable model-list
+cloaking using the existing configuration. The policy only removes entries: it
+does not register aliases or add models absent from the underlying catalog.
+Retained entries keep their fields, and Claude boundary IDs are recomputed.
+
+This is discovery filtering, **not execution authorization**. Plugins must still
+enforce allowed models when handling inference requests. Individual Gemini model
+detail requests and fields within retained entries are not filtered by this
+list-only policy. No Docker configuration changes or custom endpoints are needed.
