@@ -109,6 +109,11 @@ type ThinkingSupport struct {
 	// Levels defines discrete reasoning effort levels (e.g., "low", "medium", "high").
 	// When set, the model uses level-based reasoning instead of token budgets.
 	Levels []string `json:"levels,omitempty" yaml:"levels,omitempty"`
+	// LevelsAssumed marks Levels as a proxy default fabricated for models whose
+	// configuration declares no thinking support at all. The declared set cannot
+	// be trusted, so requested effort levels must be forwarded verbatim for the
+	// upstream to validate instead of being mapped or clamped against them.
+	LevelsAssumed bool `json:"levels_assumed,omitempty" yaml:"levels-assumed,omitempty"`
 }
 
 // ModelRegistration tracks a model's availability
