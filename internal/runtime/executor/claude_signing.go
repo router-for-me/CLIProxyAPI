@@ -536,22 +536,17 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 		}
 	}
 	formattedAuthHeaders := formatHeaderIdentity(authHeaders)
+	authPrefix := strings.TrimSpace(auth.Prefix)
+	authProxyURL := strings.TrimSpace(auth.ProxyURL)
 	matchesCredentials := func(entry *config.ClaudeKey) bool {
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if apiKey != "" && baseURL != "" {
-			return strings.EqualFold(cfgKey, apiKey) && strings.EqualFold(cfgBase, baseURL)
-		}
-		if apiKey != "" {
-			return strings.EqualFold(cfgKey, apiKey) && (cfgBase == "" || strings.EqualFold(cfgBase, baseURL))
-		}
-		return strings.EqualFold(cfgBase, baseURL)
+		return strings.TrimSpace(entry.APIKey) == apiKey && strings.TrimSpace(entry.BaseURL) == baseURL
 	}
 	matchesIdentity := func(entry *config.ClaudeKey) bool {
-		return matchesCredentials(entry) && strings.EqualFold(strings.TrimSpace(entry.Prefix), strings.TrimSpace(auth.Prefix)) && strings.EqualFold(strings.TrimSpace(entry.ProxyURL), strings.TrimSpace(auth.ProxyURL)) && formatHeaderIdentity(entry.Headers) == formattedAuthHeaders
+		return matchesCredentials(entry) && strings.TrimSpace(entry.Prefix) == authPrefix && strings.TrimSpace(entry.ProxyURL) == authProxyURL && formatHeaderIdentity(entry.Headers) == formattedAuthHeaders
 	}
 
-	if auth.AuthSourceKind() == cliproxyauth.AuthSourceConfig && auth.Attributes != nil {
+	configAuth := auth.AuthSourceKind() == cliproxyauth.AuthSourceConfig
+	if configAuth && auth.Attributes != nil {
 		index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeConfigIndex]))
 		if errIndex == nil && index >= 0 && index < len(cfg.ClaudeKey) && matchesIdentity(&cfg.ClaudeKey[index]) {
 			return &cfg.ClaudeKey[index]
@@ -564,6 +559,11 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 			return entry
 		}
 	}
+	// Config auths record their full identity, including empty fields. Only legacy
+	// auths without a prefix, proxy or custom headers use credential-only fallback.
+	if configAuth || authPrefix != "" || authProxyURL != "" || len(authHeaders) != 0 {
+		return nil
+	}
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
 		if matchesCredentials(entry) {
@@ -573,7 +573,7 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 	if apiKey != "" && baseURL == "" {
 		for i := range cfg.ClaudeKey {
 			entry := &cfg.ClaudeKey[i]
-			if strings.EqualFold(strings.TrimSpace(entry.APIKey), apiKey) {
+			if strings.TrimSpace(entry.APIKey) == apiKey {
 				return entry
 			}
 		}
