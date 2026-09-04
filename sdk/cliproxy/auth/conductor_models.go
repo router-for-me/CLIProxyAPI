@@ -235,16 +235,26 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 	}
 
 	state := existingModelState(auth, targetKey)
+	// Suspension is derived from effectiveBlock's own reason set
+	// (2026-09-04 review, finding 4), the same predicate selection uses,
+	// rather than a parallel set of direct-field reads that duplicated its
+	// logic and diverged from it: the old reads here recognised only
+	// Quota.Reason=="credential_quota" and the per-model fields, so a
+	// genuine credential-wide auth.CredentialCooldown/auth.NextRetryAfter
+	// block (e.g. a 401) was invisible to this projection even though
+	// effectiveBlock correctly rejected the model for selection - producing
+	// a false-available result. QuotaExceeded stays a separate, quota-only
+	// projection value, not folded into Suspended.
 	isSuspended := auth.Disabled || auth.Status == StatusDisabled
-	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+	if state != nil && state.Status == StatusDisabled {
+		isSuspended = true
+	}
+	if blocked, _, _ := effectiveBlock(auth, targetKey, now); blocked {
 		isSuspended = true
 	}
 	isQuotaExceeded := false
 	var suspendReason string
 	if state != nil {
-		if state.Status == StatusDisabled || state.Unavailable || (!state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now)) {
-			isSuspended = true
-		}
 		if state.Quota.Exceeded && (state.Quota.NextRecoverAt.IsZero() || state.Quota.NextRecoverAt.After(now)) {
 			isQuotaExceeded = true
 		}

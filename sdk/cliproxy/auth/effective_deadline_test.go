@@ -81,13 +81,25 @@ func TestEffectiveDeadline(t *testing.T) {
 		{
 			name: "modelKey with no matching state ignored",
 			auth: &Auth{
-				NextRetryAfter: future(time.Minute),
+				CredentialCooldown: true,
+				NextRetryAfter:     future(time.Minute),
 				ModelStates: map[string]*ModelState{
 					"gpt-5": {NextRetryAfter: future(time.Hour)},
 				},
 			},
 			modelKey: "claude-4",
 			want:     future(time.Minute),
+		},
+		{
+			name: "modelKey with no matching state and no genuine credential scope ignores the aggregate too",
+			auth: &Auth{
+				NextRetryAfter: future(time.Minute),
+				ModelStates: map[string]*ModelState{
+					"gpt-5": {NextRetryAfter: future(time.Hour)},
+				},
+			},
+			modelKey: "claude-4",
+			want:     time.Time{},
 		},
 		{
 			name: "model NextRetryAfter alone is the max",
@@ -110,7 +122,19 @@ func TestEffectiveDeadline(t *testing.T) {
 			want:     future(25 * time.Minute),
 		},
 		{
-			name: "credential deadline beats a shorter model deadline",
+			name: "genuine credential deadline beats a shorter model deadline",
+			auth: &Auth{
+				CredentialCooldown: true,
+				NextRetryAfter:     future(time.Hour),
+				ModelStates: map[string]*ModelState{
+					"gpt-5": {NextRetryAfter: future(5 * time.Minute)},
+				},
+			},
+			modelKey: "gpt-5",
+			want:     future(time.Hour),
+		},
+		{
+			name: "aggregate-only (non-genuine) credential deadline does not beat a shorter model deadline",
 			auth: &Auth{
 				NextRetryAfter: future(time.Hour),
 				ModelStates: map[string]*ModelState{
@@ -118,7 +142,7 @@ func TestEffectiveDeadline(t *testing.T) {
 				},
 			},
 			modelKey: "gpt-5",
-			want:     future(time.Hour),
+			want:     future(5 * time.Minute),
 		},
 		{
 			name: "model deadline beats a shorter credential deadline",

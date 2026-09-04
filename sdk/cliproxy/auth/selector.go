@@ -901,22 +901,60 @@ func laterFutureDeadline(now time.Time, deadlines ...time.Time) time.Time {
 	return next
 }
 
+// genuineCredentialDeadline returns the latest live deadline held by a
+// GENUINE credential-wide cooldown field on auth: auth.NextRetryAfter only
+// counts when auth.CredentialCooldown marks it as a real credential-wide
+// failure (e.g. a 401), and auth.Quota.NextRecoverAt only counts when
+// auth.Quota.Reason is "credential_quota". Either field can also hold an
+// AGGREGATE-ONLY value instead - auth.NextRetryAfter/auth.Quota copied up
+// from ModelStates by updateAggregatedAvailability (which stamps
+// Reason="quota", not "credential_quota", for that case) - and an
+// aggregate-only value must never be mistaken for a deadline that applies
+// to every model; see effectiveDeadline's modelKey!="" branch, which is the
+// only reason this distinction exists.
+func genuineCredentialDeadline(auth *Auth, now time.Time) time.Time {
+	if auth == nil {
+		return time.Time{}
+	}
+	var next time.Time
+	if auth.CredentialCooldown {
+		next = laterFutureDeadline(now, next, auth.NextRetryAfter)
+	}
+	if auth.Quota.Reason == "credential_quota" {
+		next = laterFutureDeadline(now, next, auth.Quota.NextRecoverAt)
+	}
+	return next
+}
+
 // effectiveDeadline is the single accessor for "what is the latest live
-// cooldown deadline for auth" across every field that can hold one:
-// auth.NextRetryAfter, auth.Quota.NextRecoverAt, and, when modelKey
-// resolves to an existing ModelState, that state's own NextRetryAfter and
-// Quota.NextRecoverAt too. modelKey may be a raw model string or an
-// already-canonical key - it is canonicalized here before matching against
-// auth.ModelStates keys, the same way effectiveBlock's per-model loop
-// does. Fields that are zero, or already in the past, do not contribute;
-// the result is the zero Time when nothing is currently live. Pass "" for
-// modelKey to get the credential-level deadline alone.
+// cooldown deadline for auth" - at the credential level alone (modelKey ==
+// "") or for a specific model (modelKey != ""). modelKey may be a raw model
+// string or an already-canonical key - it is canonicalized here before
+// matching against auth.ModelStates keys, the same way effectiveBlock's
+// per-model loop does. Fields that are zero, or already in the past, do not
+// contribute; the result is the zero Time when nothing is currently live.
+//
+// Credential-level and model-level queries deliberately use different rules
+// for auth.NextRetryAfter/auth.Quota.NextRecoverAt (2026-09-04 review,
+// finding 1 - cross-model cooldown contamination): a credential-level query
+// (modelKey=="") wants the credential's OWN observable state as a whole, so
+// it uses those two fields unconditionally, aggregate-derived or not - that
+// aggregate IS the answer to "is this credential, taken as a whole,
+// available." A model-level query, in contrast, must not let an
+// aggregate-only value that was actually derived from a DIFFERENT sibling
+// model leak onto this one; only a genuine credential-wide deadline
+// (see genuineCredentialDeadline) may apply to every model.
 func effectiveDeadline(auth *Auth, modelKey string, now time.Time) time.Time {
 	if auth == nil {
 		return time.Time{}
 	}
-	next := laterFutureDeadline(now, auth.NextRetryAfter, auth.Quota.NextRecoverAt)
 	modelKey = canonicalModelKey(modelKey)
+	var next time.Time
+	if modelKey == "" {
+		next = laterFutureDeadline(now, auth.NextRetryAfter, auth.Quota.NextRecoverAt)
+	} else {
+		next = genuineCredentialDeadline(auth, now)
+	}
 	if modelKey == "" || len(auth.ModelStates) == 0 {
 		return next
 	}

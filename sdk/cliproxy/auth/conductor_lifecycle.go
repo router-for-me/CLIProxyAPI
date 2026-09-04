@@ -184,7 +184,21 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		// token to the same auth file/ID) - the dead-grant recovery
 		// playbook depends on a re-login restoring service immediately,
 		// not leaving it blocked until the old credential's deadline.
-		if existing.CredentialCooldown && existing.NextRetryAfter.After(time.Now()) {
+		//
+		// The liveness check uses genuineCredentialDeadline rather than
+		// existing.NextRetryAfter alone (2026-09-04 review, finding 2):
+		// checking NextRetryAfter alone missed a case where
+		// CredentialCooldown was true, NextRetryAfter had independently
+		// expired, but existing.Quota.NextRecoverAt (Reason ==
+		// "credential_quota") was still live - genuineCredentialDeadline
+		// takes the max of both so neither field's expiry alone drops the
+		// other. The unconditional Quota-preserving block above already
+		// covers the credential_quota-only case (including a re-login,
+		// deliberately, so a rotated credential still honours a live
+		// quota-wide block); this block additionally covers
+		// CredentialCooldown's own scope and applies the re-login override.
+		updateNow := time.Now()
+		if existing.CredentialCooldown && genuineCredentialDeadline(existing, updateNow).After(updateNow) {
 			if sameAuthCredential(existing, auth) {
 				auth.Unavailable = existing.Unavailable
 				auth.NextRetryAfter = existing.NextRetryAfter

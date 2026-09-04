@@ -990,6 +990,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						// racing generic 404 the same way explicit not-found does.
 						next := now.Add(12 * time.Hour)
 						next = preserveLongerCooldown(state.Quota, next)
+						next = writeCooldownDeadline(now, false, state.NextRetryAfter, next)
 						applyCooldownFields(&state.Quota, QuotaState{
 							Exceeded:      true,
 							Reason:        "model_not_supported",
@@ -1003,6 +1004,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						// already stored by an explicit not-found/unsupported-model
 						// classification for this model key.
 						next = preserveLongerCooldown(state.Quota, next)
+						next = writeCooldownDeadline(now, disableCooling, state.NextRetryAfter, next)
 						state.NextRetryAfter = next
 						state.StatusMessage = "cloudflare challenge"
 						if auth.LastError != nil {
@@ -1015,29 +1017,33 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							BackoffLevel:  backoffLevel,
 						})
 					} else if isInvalidGrantResultError(result.Error) {
-						if disableCooling {
-							state.NextRetryAfter = time.Time{}
-						} else {
-							state.NextRetryAfter = now.Add(30 * time.Minute)
+						proposed := time.Time{}
+						if !disableCooling {
+							proposed = now.Add(30 * time.Minute)
 						}
+						state.NextRetryAfter = writeCooldownDeadline(now, disableCooling, state.NextRetryAfter, proposed)
 					} else {
 						switch statusCode {
 						case 401, 402, 403:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(30 * time.Minute)
-								state.NextRetryAfter = next
+							proposed := time.Time{}
+							if !disableCooling {
+								proposed = now.Add(30 * time.Minute)
 							}
+							state.NextRetryAfter = writeCooldownDeadline(now, disableCooling, state.NextRetryAfter, proposed)
 						case 404:
-							existingModelRetryAfter := state.NextRetryAfter
 							next := notFoundRetryAfter(result.Error, classificationModel, &state.Quota, now, disableCooling)
 							// A racing generic 404 for this model key must not
 							// shorten or clear a longer-lived cooldown already
 							// recorded in this model's NextRetryAfter (e.g. a
 							// live 401) - same write-guard rule as the
-							// auth-level 404 case below, via maxDeadline.
-							next = maxDeadline(now, existingModelRetryAfter, next)
+							// auth-level 404 case below, via
+							// writeCooldownDeadline. disableCooling is passed
+							// through so an explicit clear still wins (see
+							// finding 3 addendum: notFoundRetryAfter already
+							// returns zero when disableCooling, and a bare
+							// maxDeadline would wrongly restore the old
+							// deadline over that explicit zero).
+							next = writeCooldownDeadline(now, disableCooling, state.NextRetryAfter, next)
 							state.NextRetryAfter = next
 							state.Unavailable = !state.NextRetryAfter.IsZero()
 						case 429:
@@ -1055,6 +1061,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								}
 								next = preserveLongerCooldown(state.Quota, next)
 							}
+							next = writeCooldownDeadline(now, disableCooling, state.NextRetryAfter, next)
 							state.NextRetryAfter = next
 							applyCooldownFields(&state.Quota, QuotaState{
 								Exceeded:      true,
@@ -1067,10 +1074,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									if otherState != nil && otherState != state {
 										otherState.Unavailable = true
 										otherState.Status = StatusError
+										// A credential-scope 429 on this model
+										// must not shorten a sibling's own
+										// longer-lived deadline recorded in
+										// EITHER of its two fields (finding 3:
+										// a sibling's live 401 in
+										// NextRetryAfter was being lost here
+										// because only Quota.NextRecoverAt was
+										// compared).
 										otherNext := next
 										if otherState.Quota.Exceeded && otherState.Quota.NextRecoverAt.After(otherNext) {
 											otherNext = otherState.Quota.NextRecoverAt
 										}
+										otherNext = maxDeadline(now, otherState.NextRetryAfter, otherNext)
 										otherState.NextRetryAfter = otherNext
 										applyCooldownFields(&otherState.Quota, QuotaState{
 											Exceeded:      true,
@@ -1087,14 +1103,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								if auth.Quota.NextRecoverAt.After(authNext) {
 									authNext = auth.Quota.NextRecoverAt
 								}
+								authNext = maxDeadline(now, auth.NextRetryAfter, authNext)
 								auth.Quota.NextRecoverAt = authNext
 								auth.NextRetryAfter = authNext
 							}
 						case 408, 500, 502, 503, 504:
-							state.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
+							state.NextRetryAfter = writeCooldownDeadline(now, disableCooling, state.NextRetryAfter, recoverableFailureRetryAfter(now, disableCooling))
 							state.Unavailable = !state.NextRetryAfter.IsZero()
 						default:
-							state.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
+							state.NextRetryAfter = writeCooldownDeadline(now, disableCooling, state.NextRetryAfter, recoverableFailureRetryAfter(now, disableCooling))
 							state.Unavailable = !state.NextRetryAfter.IsZero()
 						}
 					}
@@ -1435,29 +1452,35 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	if auth == nil {
 		return
 	}
-	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+	// auth.Unavailable/NextRetryAfter/Quota can carry a GENUINE
+	// credential-wide failure signal (e.g. a 401, or a credential-scope
+	// quota block) set directly by applyAuthFailureStateForModel or
+	// restoreCooldownRecordLocked's cooldownScopeCredential branch, not
+	// derived from ModelStates. That signal must survive this recompute
+	// even when ModelStates is non-empty and otherwise clean: a
+	// credential-wide failure blocks every model regardless of any
+	// individual model's state, so deciding purely from ModelStates here
+	// would silently clear it before its own deadline (the exact defect
+	// this field exists to prevent).
+	//
+	// The two genuine-scope fields (NextRetryAfter gated by
+	// CredentialCooldown, Quota.NextRecoverAt gated by
+	// Reason=="credential_quota") are checked TOGETHER via
+	// genuineCredentialDeadline (2026-09-04 review, finding 2): checking
+	// either field alone missed the case where one had independently
+	// expired while the other was still live. Once neither is live, both
+	// markers are cleared and control falls through to the normal
+	// ModelStates-derived decision below (or clearAggregatedAvailability if
+	// ModelStates is empty).
+	if genuineCredentialDeadline(auth, now).After(now) {
 		auth.Unavailable = true
 		return
 	}
 	if auth.CredentialCooldown {
-		// auth.Unavailable/NextRetryAfter were set directly by a genuine
-		// credential-wide failure (e.g. a 401), not derived from
-		// ModelStates - see applyAuthFailureStateForModel and
-		// restoreCooldownRecordLocked's cooldownScopeCredential branch. That
-		// signal must survive this recompute even when ModelStates is
-		// non-empty and otherwise clean: a credential-wide failure blocks
-		// every model regardless of any individual model's state, so
-		// deciding purely from ModelStates here would silently clear it
-		// before its own deadline (the exact defect this field exists to
-		// prevent). Once the deadline passes, the credential-wide signal no
-		// longer applies - clear the marker and fall through to the normal
-		// ModelStates-derived decision below (or clearAggregatedAvailability
-		// if ModelStates is empty).
-		if auth.NextRetryAfter.After(now) {
-			auth.Unavailable = true
-			return
-		}
 		auth.CredentialCooldown = false
+	}
+	if auth.Quota.Reason == "credential_quota" {
+		auth.Quota = QuotaState{}
 	}
 	if len(auth.ModelStates) == 0 {
 		clearAggregatedAvailability(auth)
@@ -1554,6 +1577,23 @@ func clearAggregatedAvailability(auth *Auth) {
 	applyCooldownFields(&auth.Quota, QuotaState{})
 }
 
+// hasModelError reports whether any model on auth is carrying an error
+// state. This is a fifth terminating-check site (2026-09-04 review,
+// answering the reviewer's open question at line 1571/original): a
+// ModelState CAN have LastError == nil while a longer Quota.NextRecoverAt
+// remains live, via restoreCooldownRecordLocked's model-scoped restore
+// path. That path calls mergeModelState(state, &ModelState{LastError:
+// cloneError(record.LastError), ...}); if the persisted record's LastError
+// was nil (not serialized, or genuinely absent) and the pre-existing
+// in-memory state's LastError was also nil, mergeModelState's nil-coalescing
+// (merged.LastError = cloneError(preferred.LastError); if nil, fall back to
+// the other side) leaves merged.LastError == nil while merged.NextRetryAfter
+// and merged.Quota.NextRecoverAt independently take the max of the two
+// sides regardless of LastError's nil-ness. Checking only NextRetryAfter
+// (as before) missed exactly that case when NextRetryAfter had
+// independently expired but Quota.NextRecoverAt was still live - so both
+// fields are checked here, mirroring availabilityBlock's own five-argument
+// shape.
 func hasModelError(auth *Auth, now time.Time) bool {
 	if auth == nil || len(auth.ModelStates) == 0 {
 		return false
@@ -1566,7 +1606,7 @@ func hasModelError(auth *Auth, now time.Time) bool {
 			return true
 		}
 		if state.Status == StatusError {
-			if state.Unavailable && (state.NextRetryAfter.IsZero() || state.NextRetryAfter.After(now)) {
+			if state.Unavailable && (state.NextRetryAfter.IsZero() || state.NextRetryAfter.After(now) || state.Quota.NextRecoverAt.After(now)) {
 				return true
 			}
 		}
@@ -2344,6 +2384,23 @@ func maxDeadline(now, existing, next time.Time) time.Time {
 	return next
 }
 
+// writeCooldownDeadline is the one canonical write-guard every per-field
+// NextRetryAfter writer in this file goes through when recording a fresh
+// failure: max-on-write against the existing live value for that exact
+// field, so a later failure of any kind (a different status code, a
+// sibling-model aggregate write, a racing classification) can never
+// shorten or clear an already-longer deadline recorded by an earlier one
+// (2026-09-04 review, finding 3). disableCooling is an explicit
+// operator/test override to clear cooldowns outright, not a failure to be
+// preserved against, so it bypasses the max and takes proposed as-is
+// (which callers compute as the zero Time in that case).
+func writeCooldownDeadline(now time.Time, disableCooling bool, existing, proposed time.Time) time.Time {
+	if disableCooling {
+		return proposed
+	}
+	return maxDeadline(now, existing, proposed)
+}
+
 func notFoundRetryAfter(resultErr *Error, requestedModel string, retryState *QuotaState, now time.Time, disableCooling bool) time.Time {
 	if disableCooling {
 		return time.Time{}
@@ -2447,6 +2504,7 @@ func applyAuthFailureStateForModel(auth *Auth, resultErr *Error, retryAfter *tim
 		// A racing challenge must not shorten a longer deadline already
 		// stored by an explicit not-found classification for this auth.
 		next = preserveLongerCooldown(auth.Quota, next)
+		next = writeCooldownDeadline(now, disableCooling, auth.NextRetryAfter, next)
 		applyCooldownFields(&auth.Quota, QuotaState{
 			Exceeded:      true,
 			Reason:        "cloudflare challenge",
@@ -2458,38 +2516,37 @@ func applyAuthFailureStateForModel(auth *Auth, resultErr *Error, retryAfter *tim
 	}
 	if isInvalidGrantResultError(resultErr) {
 		auth.StatusMessage = "invalid_grant"
-		if disableCooling {
-			auth.NextRetryAfter = time.Time{}
-		} else {
-			auth.NextRetryAfter = now.Add(30 * time.Minute)
+		proposed := time.Time{}
+		if !disableCooling {
+			proposed = now.Add(30 * time.Minute)
 		}
+		auth.NextRetryAfter = writeCooldownDeadline(now, disableCooling, auth.NextRetryAfter, proposed)
 		return
 	}
 	switch statusCode {
 	case 401:
 		auth.StatusMessage = "unauthorized"
-		if disableCooling {
-			auth.NextRetryAfter = time.Time{}
-		} else {
-			auth.NextRetryAfter = now.Add(30 * time.Minute)
+		proposed := time.Time{}
+		if !disableCooling {
+			proposed = now.Add(30 * time.Minute)
 		}
+		auth.NextRetryAfter = writeCooldownDeadline(now, disableCooling, auth.NextRetryAfter, proposed)
 	case 402, 403:
 		auth.StatusMessage = "payment_required"
-		if disableCooling {
-			auth.NextRetryAfter = time.Time{}
-		} else {
-			auth.NextRetryAfter = now.Add(30 * time.Minute)
+		proposed := time.Time{}
+		if !disableCooling {
+			proposed = now.Add(30 * time.Minute)
 		}
+		auth.NextRetryAfter = writeCooldownDeadline(now, disableCooling, auth.NextRetryAfter, proposed)
 	case 404:
 		auth.StatusMessage = "not_found"
-		existingRetryAfter := auth.NextRetryAfter
 		next := notFoundRetryAfter(resultErr, attemptedModel, &auth.Quota, now, disableCooling)
 		// A racing generic 404 must not shorten or clear a longer-lived
 		// credential-wide cooldown already recorded in NextRetryAfter (e.g. a
 		// live 401) - same write-guard rule as preserveLongerCooldown
 		// (which notFoundRetryAfter already applies to Quota.NextRecoverAt
-		// internally), via maxDeadline for the NextRetryAfter field.
-		next = maxDeadline(now, existingRetryAfter, next)
+		// internally), via writeCooldownDeadline for the NextRetryAfter field.
+		next = writeCooldownDeadline(now, disableCooling, auth.NextRetryAfter, next)
 		auth.NextRetryAfter = next
 		auth.Unavailable = !auth.NextRetryAfter.IsZero()
 	case 429:
@@ -2509,17 +2566,18 @@ func applyAuthFailureStateForModel(auth *Auth, resultErr *Error, retryAfter *tim
 			}
 			next = preserveLongerCooldown(auth.Quota, next)
 		}
+		next = writeCooldownDeadline(now, disableCooling, auth.NextRetryAfter, next)
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
-		auth.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
+		auth.NextRetryAfter = writeCooldownDeadline(now, disableCooling, auth.NextRetryAfter, recoverableFailureRetryAfter(now, disableCooling))
 		auth.Unavailable = !auth.NextRetryAfter.IsZero()
 	default:
 		if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
 		}
-		auth.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
+		auth.NextRetryAfter = writeCooldownDeadline(now, disableCooling, auth.NextRetryAfter, recoverableFailureRetryAfter(now, disableCooling))
 		auth.Unavailable = !auth.NextRetryAfter.IsZero()
 	}
 	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && auth.NextRetryAfter.IsZero() {
