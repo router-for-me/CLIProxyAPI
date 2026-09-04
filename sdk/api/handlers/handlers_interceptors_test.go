@@ -29,6 +29,11 @@ type handlerInterceptorTestHost struct {
 	completeRequest               func(context.Context, pluginapi.RequestCompletion)
 	// includeStreamChunkRequestBodies simulates legacy schema_version < 3 plugins.
 	includeStreamChunkRequestBodies bool
+	// omitStreamChunkHistory simulates a plugin that declared StreamChunkOmitHistory.
+	omitStreamChunkHistory bool
+	// streamChunkHistoryPolicy, when set, overrides omitStreamChunkHistory and is invoked
+	// once per chunk so a test can simulate a mid-stream reload flipping the policy.
+	streamChunkHistoryPolicy func() bool
 }
 
 type handlerInterceptorNoStreamTestHost struct {
@@ -106,6 +111,19 @@ func (h *handlerInterceptorTestHost) StreamChunkPayloadIncludesRequestBody() boo
 		return false
 	}
 	return h.includeStreamChunkRequestBodies
+}
+
+// StreamChunkPayloadIncludesHistory implements streamChunkHistoryPolicy. Default true
+// (a legacy history consumer); set omitStreamChunkHistory to simulate a plugin that
+// declared StreamChunkOmitHistory so the handler stops accumulating the window.
+func (h *handlerInterceptorTestHost) StreamChunkPayloadIncludesHistory() bool {
+	if h == nil {
+		return false
+	}
+	if h.streamChunkHistoryPolicy != nil {
+		return h.streamChunkHistoryPolicy()
+	}
+	return !h.omitStreamChunkHistory
 }
 
 type interceptorCaptureExecutor struct {
@@ -485,6 +503,147 @@ func TestHandlerLifecycleCompletesSuccessfulStreamOnce(t *testing.T) {
 	case duplicate := <-completions:
 		t.Fatalf("duplicate stream completion = %#v", duplicate)
 	default:
+	}
+}
+
+func drainInterceptorStream(t *testing.T, dataChan <-chan []byte, errChan <-chan *interfaces.ErrorMessage) {
+	t.Helper()
+	for dataChan != nil || errChan != nil {
+		select {
+		case _, ok := <-dataChan:
+			if !ok {
+				dataChan = nil
+			}
+		case errMsg, ok := <-errChan:
+			if ok && errMsg != nil {
+				t.Fatalf("stream error = %#v", errMsg)
+			}
+			if !ok {
+				errChan = nil
+			}
+		}
+	}
+}
+
+// streamHistoryChunkPayloads are the three payload frames used by the accumulation teeth.
+var streamHistoryChunkPayloads = [][]byte{[]byte("c0"), []byte("c1"), []byte("c2")}
+
+func newStreamHistoryChunks() chan coreexecutor.StreamChunk {
+	chunks := make(chan coreexecutor.StreamChunk, len(streamHistoryChunkPayloads))
+	for _, p := range streamHistoryChunkPayloads {
+		chunks <- coreexecutor.StreamChunk{Payload: append([]byte(nil), p...)}
+	}
+	close(chunks)
+	return chunks
+}
+
+// runHistoryAuthManagerStream exercises the auth-manager stream route (handlers_stream.go
+// executeStreamWithAuthManager), which the model resolves to when it is not routed to a
+// plugin executor.
+func runHistoryAuthManagerStream(t *testing.T, host *handlerInterceptorTestHost) {
+	t.Helper()
+	model := "history-accum-auth-manager"
+	executor := &interceptorCaptureExecutor{
+		stream: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			return &coreexecutor.StreamResult{Chunks: newStreamHistoryChunks()}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
+	handler.SetPluginHost(host)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, []byte(`{"model":"`+model+`","stream":true}`), "")
+	drainInterceptorStream(t, dataChan, errChan)
+}
+
+// runHistoryPluginExecutorStream exercises the plugin-executor stream route
+// (handlers_stream.go streamWithPluginExecutor), reached when the model router targets a
+// plugin executor.
+func runHistoryPluginExecutorStream(t *testing.T, host *handlerInterceptorTestHost) {
+	t.Helper()
+	const targetPluginID = "history-accum-plugin"
+	mockHost := &mockPluginUsageHost{streamResult: &coreexecutor.StreamResult{Chunks: newStreamHistoryChunks()}}
+	mockHost.hasRouters = true
+	mockHost.route = func(context.Context, pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: targetPluginID}, true
+	}
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(mockHost)
+	handler.SetPluginHost(host)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "history-accum-plugin-executor", []byte(`{"model":"history-accum-plugin-executor","stream":true}`), "")
+	drainInterceptorStream(t, dataChan, errChan)
+}
+
+// TestExecuteStreamHistoryAccumulationAcrossRoutesAndReloads drives BOTH real streaming
+// routes (auth-manager and plugin-executor) through BOTH mid-stream policy transitions and
+// asserts the history the interceptor receives on the third frame. The policy flips after
+// the first chunk, so a startup snapshot of the policy produces a different third-frame
+// history than the correct per-chunk evaluation, and a route whose guard ignores the
+// policy over-accumulates — each mutation turns a case RED.
+func TestExecuteStreamHistoryAccumulationAcrossRoutesAndReloads(t *testing.T) {
+	routes := []struct {
+		name string
+		run  func(*testing.T, *handlerInterceptorTestHost)
+	}{
+		{"auth_manager", runHistoryAuthManagerStream},
+		{"plugin_executor", runHistoryPluginExecutorStream},
+	}
+	cases := []struct {
+		name      string
+		policy    []bool // per-chunk StreamChunkPayloadIncludesHistory result
+		wantThird []string
+	}{
+		// opt-out first, then a consumer activates: accumulation starts at activation, so
+		// the third frame carries only the second chunk (not the discarded first).
+		{"optout_then_legacy", []bool{false, true, true}, []string{"c1"}},
+		// legacy first, then the last consumer opts out: accumulation stops, so the third
+		// frame still carries only the first chunk (not the second).
+		{"legacy_then_optout", []bool{true, false, false}, []string{"c0"}},
+	}
+	for _, route := range routes {
+		for _, tc := range cases {
+			t.Run(route.name+"/"+tc.name, func(t *testing.T) {
+				var mu sync.Mutex
+				var seen [][][]byte
+				var calls int
+				host := &handlerInterceptorTestHost{
+					streamChunkHistoryPolicy: func() bool {
+						mu.Lock()
+						defer mu.Unlock()
+						i := calls
+						calls++
+						if i < len(tc.policy) {
+							return tc.policy[i]
+						}
+						return tc.policy[len(tc.policy)-1]
+					},
+					interceptStreamChunk: func(_ context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+						if req.ChunkIndex >= 0 { // payload chunks only; skip header-init (-1)
+							mu.Lock()
+							seen = append(seen, req.HistoryChunks)
+							mu.Unlock()
+						}
+						return pluginapi.StreamChunkInterceptResponse{Body: req.Body}
+					},
+				}
+				route.run(t, host)
+				mu.Lock()
+				defer mu.Unlock()
+				if len(seen) < 3 {
+					t.Fatalf("expected 3 payload interceptions, got %d", len(seen))
+				}
+				got := make([]string, len(seen[2]))
+				for i, b := range seen[2] {
+					got[i] = string(b)
+				}
+				if len(got) != len(tc.wantThird) {
+					t.Fatalf("third-frame history = %v, want %v (per-chunk policy not honored on this route)", got, tc.wantThird)
+				}
+				for i := range got {
+					if got[i] != tc.wantThird[i] {
+						t.Fatalf("third-frame history = %v, want %v", got, tc.wantThird)
+					}
+				}
+			})
+		}
 	}
 }
 

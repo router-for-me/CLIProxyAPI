@@ -112,6 +112,11 @@ type Capabilities struct {
 	ResponseInterceptor ResponseInterceptor
 	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
 	StreamChunkInterceptor StreamChunkInterceptor
+	// StreamChunkOmitHistory declares that this stream chunk interceptor does not consume
+	// StreamChunkInterceptRequest.HistoryChunks. When set, the host stops cloning/sending
+	// the history window to this plugin, and stops accumulating it entirely when no active
+	// interceptor needs it. Pure opt-in hint: unset preserves the legacy full-history payload.
+	StreamChunkOmitHistory bool
 	// WebSocketResponseObserver receives upstream WebSocket response events during execution.
 	WebSocketResponseObserver WebSocketResponseObserver
 	// ThinkingApplier applies validated thinking configuration to provider payloads.

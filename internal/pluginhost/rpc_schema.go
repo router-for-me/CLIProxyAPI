@@ -39,6 +39,7 @@ type rpcCapabilities struct {
 	ResponseAfterTranslator       bool                         `json:"response_after_translator"`
 	ResponseInterceptor           bool                         `json:"response_interceptor"`
 	StreamChunkInterceptor        bool                         `json:"response_stream_interceptor"`
+	StreamChunkOmitHistory        bool                         `json:"stream_chunk_omit_history"`
 	WebSocketResponseObserver     bool                         `json:"websocket_response_observer"`
 	ThinkingApplier               bool                         `json:"thinking_applier"`
 	UsagePlugin                   bool                         `json:"usage_plugin"`
@@ -156,6 +157,7 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 		ResponseAfterTranslator:       caps.ResponseAfterTranslator != nil,
 		ResponseInterceptor:           caps.ResponseInterceptor != nil,
 		StreamChunkInterceptor:        caps.StreamChunkInterceptor != nil,
+		StreamChunkOmitHistory:        caps.StreamChunkOmitHistory,
 		WebSocketResponseObserver:     caps.WebSocketResponseObserver != nil,
 		ThinkingApplier:               caps.ThinkingApplier != nil,
 		UsagePlugin:                   caps.UsagePlugin != nil,

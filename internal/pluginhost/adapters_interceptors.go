@@ -277,7 +277,14 @@ func (h *Host) InterceptStreamChunkExcept(ctx context.Context, req pluginapi.Str
 			nextReq.RequestBody = bytes.Clone(req.RequestBody)
 		}
 		nextReq.Body = bytes.Clone(current.Body)
-		nextReq.HistoryChunks = cloneByteSlices(req.HistoryChunks)
+		// Plugins that opt out via StreamChunkOmitHistory never receive the delivered-chunk
+		// history window: no interceptor consumes it, and cloning/marshaling up to 1 MiB of
+		// it per frame is near O(n^2) on long streams. Others still get it unchanged.
+		if record.plugin.Capabilities.StreamChunkOmitHistory {
+			nextReq.HistoryChunks = nil
+		} else {
+			nextReq.HistoryChunks = cloneByteSlices(req.HistoryChunks)
+		}
 		nextReq.Metadata = cloneInterceptorMetadata(req.Metadata)
 		if resp, ok := h.callStreamChunkInterceptor(ctx, record, interceptor, nextReq); ok {
 			current.Headers = mergeHeaders(current.Headers, resp.Headers, resp.ClearHeaders)
@@ -327,6 +334,25 @@ func (h *Host) StreamChunkPayloadIncludesRequestBody() bool {
 
 func streamChunkOmitsRequestBodies(schemaVersion uint32) bool {
 	return schemaVersion >= pluginabi.SchemaVersionStreamChunkOmitRequestBody
+}
+
+// StreamChunkPayloadIncludesHistory reports whether any active stream chunk interceptor
+// still consumes the HistoryChunks window (i.e. has not opted out via
+// StreamChunkOmitHistory). When false, the host can skip accumulating the history window
+// entirely, not just skip sending it.
+func (h *Host) StreamChunkPayloadIncludesHistory() bool {
+	if h == nil {
+		return false
+	}
+	for _, record := range h.activeRecords() {
+		if h.isPluginFused(record.id) || record.plugin.Capabilities.StreamChunkInterceptor == nil {
+			continue
+		}
+		if !record.plugin.Capabilities.StreamChunkOmitHistory {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Host) HasRequestInterceptors() bool {

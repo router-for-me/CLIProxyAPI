@@ -1770,6 +1770,146 @@ func TestStreamChunkRequestBodyPolicyBySchemaVersion(t *testing.T) {
 	}
 }
 
+type omitHistoryRegisterClient struct{}
+
+func (omitHistoryRegisterClient) Call(_ context.Context, method string, _ []byte) ([]byte, error) {
+	if method != pluginabi.MethodPluginRegister {
+		return nil, fmt.Errorf("unexpected method %q", method)
+	}
+	return marshalRPCResult(rpcRegistration{
+		SchemaVersion: pluginabi.SchemaVersion,
+		Capabilities:  rpcCapabilities{StreamChunkInterceptor: true, StreamChunkOmitHistory: true},
+	})
+}
+
+func (omitHistoryRegisterClient) Shutdown() {}
+
+// TestRegisterRPCPluginParsesStreamChunkOmitHistory proves the registration JSON's
+// stream_chunk_omit_history flag propagates through the real RPC decode into
+// plugin.Capabilities.StreamChunkOmitHistory (not a hand-built Capabilities struct).
+// Removing the rpc_client.go assignment makes this RED.
+func TestRegisterRPCPluginParsesStreamChunkOmitHistory(t *testing.T) {
+	plugin, err := registerRPCPlugin(context.Background(), nil, "omit", omitHistoryRegisterClient{}, pluginabi.MethodPluginRegister, nil)
+	if err != nil {
+		t.Fatalf("registerRPCPlugin: %v", err)
+	}
+	if plugin.Capabilities.StreamChunkInterceptor == nil {
+		t.Fatal("StreamChunkInterceptor not wired from registration")
+	}
+	if !plugin.Capabilities.StreamChunkOmitHistory {
+		t.Fatal("StreamChunkOmitHistory=false: registration JSON capability did not propagate through the RPC decode (rpc_client parse missing)")
+	}
+}
+
+func TestStreamChunkHistoryPolicyByCapability(t *testing.T) {
+	var legacyGot, modernGot pluginapi.StreamChunkInterceptRequest
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "legacy",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					StreamChunkInterceptor: responseInterceptorFunc{
+						interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+							legacyGot = req
+							return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+						},
+					},
+					// StreamChunkOmitHistory unset: legacy plugin still receives history.
+				},
+			},
+		},
+		capabilityRecord{
+			id: "modern",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					StreamChunkOmitHistory: true,
+					StreamChunkInterceptor: responseInterceptorFunc{
+						interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+							modernGot = req
+							return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+						},
+					},
+				},
+			},
+		},
+	)
+	// A legacy consumer keeps the accumulation policy on.
+	if !host.StreamChunkPayloadIncludesHistory() {
+		t.Fatal("StreamChunkPayloadIncludesHistory() = false, want true when a legacy stream interceptor is active")
+	}
+
+	_ = host.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		Body:          []byte("chunk"),
+		HistoryChunks: [][]byte{[]byte("h0"), []byte("h1")},
+		ChunkIndex:    0,
+	})
+	if len(legacyGot.HistoryChunks) != 2 || string(legacyGot.HistoryChunks[0]) != "h0" {
+		t.Fatalf("legacy history = %#v, want preserved", legacyGot.HistoryChunks)
+	}
+	if len(modernGot.HistoryChunks) != 0 {
+		t.Fatalf("modern history = %#v, want omitted for StreamChunkOmitHistory plugin", modernGot.HistoryChunks)
+	}
+
+	// When every active interceptor opts out, the accumulation policy turns off so the
+	// host stops retaining the history window entirely.
+	modernOnly := newHostWithRecords(capabilityRecord{
+		id: "modern-only",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				StreamChunkOmitHistory: true,
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						return pluginapi.StreamChunkInterceptResponse{}, nil
+					},
+				},
+			},
+		},
+	})
+	if modernOnly.StreamChunkPayloadIncludesHistory() {
+		t.Fatal("StreamChunkPayloadIncludesHistory() = true, want false when every stream interceptor opted out")
+	}
+}
+
+// benchInterceptStreamChunkHistory measures the host-side per-frame cost of delivering
+// a chunk to a stream interceptor with a 1 MiB / 64-chunk history window. With
+// omitHistory the host skips cloneByteSlices of that window; without it, the legacy
+// deep-clone dominates.
+func benchInterceptStreamChunkHistory(b *testing.B, omitHistory bool) {
+	const chunks = 64
+	const per = (1 << 20) / chunks
+	history := make([][]byte, chunks)
+	for i := range history {
+		frag := make([]byte, per)
+		for j := range frag {
+			frag[j] = byte('a' + (i+j)%26)
+		}
+		history[i] = frag
+	}
+	host := newHostWithRecords(capabilityRecord{
+		id: "p",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				StreamChunkOmitHistory: omitHistory,
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+					},
+				},
+			},
+		},
+	})
+	req := pluginapi.StreamChunkInterceptRequest{Body: []byte("data: {}\n\n"), HistoryChunks: history, ChunkIndex: 0}
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = host.InterceptStreamChunk(ctx, req)
+	}
+}
+
+func BenchmarkInterceptStreamChunkHistoryLegacy(b *testing.B) { benchInterceptStreamChunkHistory(b, false) }
+func BenchmarkInterceptStreamChunkHistoryOmit(b *testing.B)   { benchInterceptStreamChunkHistory(b, true) }
+
 func TestHasRequestInterceptorsReflectsActiveRequestInterceptors(t *testing.T) {
 	responseOnly := newHostWithRecords(capabilityRecord{
 		id: "response",

@@ -133,6 +133,7 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	if resp.Capabilities.StreamChunkInterceptor {
 		plugin.Capabilities.StreamChunkInterceptor = adapter
 	}
+	plugin.Capabilities.StreamChunkOmitHistory = resp.Capabilities.StreamChunkOmitHistory
 	if resp.Capabilities.WebSocketResponseObserver {
 		plugin.Capabilities.WebSocketResponseObserver = adapter
 	}

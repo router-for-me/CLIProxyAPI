@@ -93,6 +93,15 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
 	interceptorHost := h.interceptorHost()
 	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
+	// Retain the delivered-chunk history window only while some active interceptor still
+	// consumes it. Evaluated per chunk (not snapshotted) so a mid-stream plugin reload that
+	// flips the last history consumer takes effect immediately: once every active stream
+	// interceptor has opted out (StreamChunkOmitHistory) accumulation stops, and a legacy
+	// consumer activated mid-stream begins receiving history from that chunk on (history is
+	// not reconstructed retroactively).
+	streamHistoryNeeded := func() bool {
+		return streamInterceptorsActive && streamChunkPayloadIncludesHistory(interceptorHost)
+	}
 	rawStreamHeaders := cloneHeader(streamResult.Headers)
 	baseStreamHeaders := cloneHeader(streamResult.Headers)
 	// Request headers and request bodies are stream-invariant. Keep a private snapshot
@@ -270,7 +279,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 			}
 			select {
 			case dataChan <- payload:
-				if streamInterceptorsActive {
+				if streamHistoryNeeded() {
 					historyChunks = appendStreamInterceptorHistory(historyChunks, payload)
 				}
 			case <-done:
@@ -376,6 +385,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
 	interceptorHost := h.interceptorHost()
 	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
+	// History retention is re-evaluated per chunk (see the sibling stream handler) so a
+	// mid-stream reload flipping the last history consumer takes effect immediately.
+	streamHistoryNeeded := func() bool {
+		return streamInterceptorsActive && streamChunkPayloadIncludesHistory(interceptorHost)
+	}
 	// Resolve bootstrap retries and header initialization before returning so the
 	// returned header snapshot is never modified by the stream goroutine.
 	rawStreamHeaders := cloneHeader(streamResult.Headers)
@@ -658,7 +672,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				}
 				return
 			}
-			if streamInterceptorsActive {
+			if streamHistoryNeeded() {
 				historyChunks = appendStreamInterceptorHistory(historyChunks, bootstrapPayload)
 			}
 		}
@@ -722,7 +736,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				}
 				return
 			}
-			if streamInterceptorsActive {
+			if streamHistoryNeeded() {
 				historyChunks = appendStreamInterceptorHistory(historyChunks, payload)
 			}
 		}

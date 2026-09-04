@@ -51,6 +51,26 @@ func streamChunkPayloadIncludesRequestBody(host PluginInterceptorHost) bool {
 	return true
 }
 
+// streamChunkHistoryPolicy reports whether payload stream-chunk interceptors still
+// consume the HistoryChunks window (any plugin that has not opted out via
+// StreamChunkOmitHistory).
+type streamChunkHistoryPolicy interface {
+	StreamChunkPayloadIncludesHistory() bool
+}
+
+// streamChunkPayloadIncludesHistory returns true when at least one active stream
+// interceptor still needs the delivered-chunk history window. Evaluated per call so
+// mid-stream plugin reloads stay correct. Unknown hosts default to true.
+func streamChunkPayloadIncludesHistory(host PluginInterceptorHost) bool {
+	if host == nil {
+		return false
+	}
+	if policy, ok := host.(streamChunkHistoryPolicy); ok {
+		return policy.StreamChunkPayloadIncludesHistory()
+	}
+	return true
+}
+
 type requestInterceptorDetector interface {
 	HasRequestInterceptors() bool
 }
