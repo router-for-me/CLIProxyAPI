@@ -64,7 +64,12 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
+	// Attribution prefers the configured key name when one is set; the raw key
+	// stays available through APIKeyFromContext for identity-critical callers.
 	apiKey := APIKeyFromContext(ctx)
+	if label := strings.TrimSpace(APIKeyLabelFromContext(ctx)); label != "" {
+		apiKey = label
+	}
 	alias := usage.RequestedModelAliasFromContext(ctx)
 	if alias == "" {
 		alias = model
@@ -517,6 +522,16 @@ func (r *usageTTFTReadCloser) Read(p []byte) (int, error) {
 }
 
 func APIKeyFromContext(ctx context.Context) string {
+	return ginStringValue(ctx, "userApiKey")
+}
+
+// APIKeyLabelFromContext returns the configured display name of the matched
+// client API key. It is attribution-only and never an authorization identity.
+func APIKeyLabelFromContext(ctx context.Context) string {
+	return ginStringValue(ctx, "userApiKeyLabel")
+}
+
+func ginStringValue(ctx context.Context, key string) string {
 	if ctx == nil {
 		return ""
 	}
@@ -524,7 +539,7 @@ func APIKeyFromContext(ctx context.Context) string {
 	if !ok || ginCtx == nil {
 		return ""
 	}
-	if v, exists := ginCtx.Get("userApiKey"); exists {
+	if v, exists := ginCtx.Get(key); exists {
 		switch value := v.(type) {
 		case string:
 			return value

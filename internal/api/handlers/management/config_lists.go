@@ -143,17 +143,125 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 }
 
 // api-keys
+// Entries marshal as plain JSON strings when unnamed, so existing clients keep working.
 func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
+
+// PutAPIKeys replaces the whole list. It accepts a plain string array, an array
+// mixing strings and {"key","name"} objects, or an {"items": [...]} wrapper.
 func (h *Handler) PutAPIKeys(c *gin.Context) {
-	h.putStringList(c, func(v []string) {
-		h.cfg.APIKeys = append([]string(nil), v...)
-	}, nil)
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var entries []config.APIKeyEntry
+	if err = json.Unmarshal(data, &entries); err != nil {
+		var obj struct {
+			Items []config.APIKeyEntry `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		entries = obj.Items
+	}
+	h.cfg.APIKeys = append([]config.APIKeyEntry(nil), entries...)
+	h.persist(c)
 }
+
+// PatchAPIKeys updates a single entry by index or by matching an existing key.
+// A string value updates the key and keeps any existing name; an object value
+// replaces both fields.
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	var body struct {
+		Old   *string         `json:"old"`
+		New   json.RawMessage `json:"new"`
+		Index *int            `json:"index"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	target := &h.cfg.APIKeys
+	if body.Index != nil && len(body.Value) > 0 && *body.Index >= 0 && *body.Index < len(*target) {
+		entry, err := mergeAPIKeyPatch((*target)[*body.Index], body.Value)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		(*target)[*body.Index] = entry
+		h.persist(c)
+		return
+	}
+	if body.Old != nil && len(body.New) > 0 {
+		for i := range *target {
+			if (*target)[i].Key != *body.Old {
+				continue
+			}
+			entry, err := mergeAPIKeyPatch((*target)[i], body.New)
+			if err != nil {
+				c.JSON(400, gin.H{"error": "invalid body"})
+				return
+			}
+			(*target)[i] = entry
+			h.persist(c)
+			return
+		}
+		entry, err := mergeAPIKeyPatch(config.APIKeyEntry{}, body.New)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		*target = append(*target, entry)
+		h.persist(c)
+		return
+	}
+	c.JSON(400, gin.H{"error": "missing fields"})
 }
+
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	target := &h.cfg.APIKeys
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(*target) {
+			*target = append((*target)[:idx], (*target)[idx+1:]...)
+			h.persist(c)
+			return
+		}
+	}
+	if val := strings.TrimSpace(c.Query("value")); val != "" {
+		out := make([]config.APIKeyEntry, 0, len(*target))
+		for _, entry := range *target {
+			if strings.TrimSpace(entry.Key) != val {
+				out = append(out, entry)
+			}
+		}
+		*target = out
+		h.persist(c)
+		return
+	}
+	c.JSON(400, gin.H{"error": "missing index or value"})
+}
+
+// mergeAPIKeyPatch applies a patch value to an entry. String values only replace
+// the key so an existing name survives; object values replace the whole entry.
+func mergeAPIKeyPatch(current config.APIKeyEntry, raw json.RawMessage) (config.APIKeyEntry, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var key string
+		if err := json.Unmarshal(trimmed, &key); err != nil {
+			return current, err
+		}
+		current.Key = key
+		return current, nil
+	}
+	var entry config.APIKeyEntry
+	if err := json.Unmarshal(trimmed, &entry); err != nil {
+		return current, err
+	}
+	return entry, nil
 }
 
 // gemini-api-key: []GeminiKey

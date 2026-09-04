@@ -15,7 +15,7 @@ import (
 type keysTabModel struct {
 	client       *Client
 	viewport     viewport.Model
-	keys         []string
+	keys         []APIKeyItem
 	gemini       []map[string]any
 	interactions []map[string]any
 	claude       []map[string]any
@@ -39,7 +39,7 @@ type keysTabModel struct {
 }
 
 type keysDataMsg struct {
-	apiKeys      []string
+	apiKeys      []APIKeyItem
 	gemini       []map[string]any
 	interactions []map[string]any
 	claude       []map[string]any
@@ -221,7 +221,7 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 				m.editing = true
 				m.adding = false
 				m.editIdx = m.cursor
-				m.editInput.SetValue(m.keys[m.cursor])
+				m.editInput.SetValue(m.keys[m.cursor].Key)
 				m.editInput.Prompt = T("edit_key_prompt")
 				m.editInput.Focus()
 				m.viewport.SetContent(m.renderContent())
@@ -238,7 +238,7 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 		case "c":
 			// Copy selected key to clipboard
 			if m.cursor < len(m.keys) {
-				key := m.keys[m.cursor]
+				key := m.keys[m.cursor].Key
 				if err := clipboard.WriteAll(key); err != nil {
 					m.status = errorStyle.Render(T("copy_failed") + ": " + err.Error())
 				} else {
@@ -316,13 +316,14 @@ func (m keysTabModel) renderContent() string {
 			rowStyle = lipgloss.NewStyle().Bold(true)
 		}
 
-		row := fmt.Sprintf("%s%d. %s", cursor, i+1, maskKey(key))
+		label := describeAPIKey(key)
+		row := fmt.Sprintf("%s%d. %s", cursor, i+1, label)
 		sb.WriteString(rowStyle.Render(row))
 		sb.WriteString("\n")
 
 		// Delete confirmation
 		if m.confirm == i {
-			sb.WriteString(warningStyle.Render(fmt.Sprintf("    "+T("confirm_delete_key"), maskKey(key))))
+			sb.WriteString(warningStyle.Render(fmt.Sprintf("    "+T("confirm_delete_key"), label)))
 			sb.WriteString("\n")
 		}
 
@@ -405,6 +406,14 @@ func renderProviderKeys(sb *strings.Builder, title string, keys []map[string]any
 		sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, info))
 	}
 	sb.WriteString("\n")
+}
+
+func describeAPIKey(item APIKeyItem) string {
+	masked := maskKey(item.Key)
+	if strings.TrimSpace(item.Name) == "" {
+		return masked
+	}
+	return fmt.Sprintf("%s (%s)", item.Name, masked)
 }
 
 func maskKey(key string) string {
