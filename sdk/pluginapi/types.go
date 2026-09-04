@@ -1354,6 +1354,10 @@ type UsageRecord struct {
 	Alias string
 	// APIKey is the client API key identifier when available.
 	APIKey string
+	// SessionID identifies the session when present.
+	SessionID string
+	// ParentSessionID identifies the parent session in a hierarchy or fork.
+	ParentSessionID string
 	// AuthID identifies the selected credential.
 	AuthID string
 	// AuthIndex identifies the credential index when applicable.

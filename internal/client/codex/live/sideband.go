@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -45,6 +46,8 @@ type liveSession struct {
 	callID                string
 	authID                string
 	model                 string
+	sessionID             string
+	parentSessionID       string
 	ownerPrincipal        string
 	ownerProvider         string
 	clientSecretPrincipal string
@@ -354,6 +357,15 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
 	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
+	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, c.Request.Header, nil, map[string]any{
+		coreexecutor.ExecutionSessionMetadataKey: session.callID,
+	})
+	if session.sessionID != "" {
+		meta := logging.GetClientRequestMetadata(ctx)
+		meta.SessionID = session.sessionID
+		meta.ParentSessionID = session.parentSessionID
+		ctx = logging.WithClientRequestMetadata(ctx, meta)
+	}
 	var selection *auth.HomeDispatchSelection
 	var selected *auth.Auth
 	var errSelect error
@@ -378,6 +390,19 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	if errSelect != nil {
 		writeSelectionError(c, errSelect)
 		return
+	}
+	if selection != nil && selection.CanonicalSessionID != "" {
+		meta := logging.GetClientRequestMetadata(ctx)
+		meta.SessionID = selection.CanonicalSessionID
+		if selection.ParentSessionID != "" {
+			meta.ParentSessionID = selection.ParentSessionID
+		} else {
+			meta.ParentSessionID = ""
+		}
+		if meta.SessionID == meta.ParentSessionID {
+			meta.ParentSessionID = ""
+		}
+		ctx = logging.WithClientRequestMetadata(ctx, meta)
 	}
 	if selected == nil {
 		writeLiveError(c, http.StatusServiceUnavailable, "Codex auth unavailable")
