@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -521,8 +522,9 @@ func TestCodexClientModelsResponseDoesNotInheritUnsupportedReasoningLevels(t *te
 			}
 			model := models[0]
 			if len(tt.wantEfforts) == 0 {
-				if _, exists := model["supported_reasoning_levels"]; exists {
-					t.Fatalf("supported_reasoning_levels = %#v, want absent", model["supported_reasoning_levels"])
+				rawLevels, ok := model["supported_reasoning_levels"].([]any)
+				if !ok || len(rawLevels) != 0 {
+					t.Fatalf("supported_reasoning_levels = %#v, want empty array", model["supported_reasoning_levels"])
 				}
 				if _, exists := model["default_reasoning_level"]; exists {
 					t.Fatalf("default_reasoning_level = %#v, want absent", model["default_reasoning_level"])
@@ -544,5 +546,62 @@ func TestCodexClientModelsResponseDoesNotInheritUnsupportedReasoningLevels(t *te
 				t.Fatalf("default_reasoning_level = %q, want %q", got, tt.wantDefault)
 			}
 		})
+	}
+}
+
+func TestCodexClientModelsResponseKeepsTemplateReasoningLevelsForBudgetThinking(t *testing.T) {
+	for _, modelID := range []string{"claude-opus-4-20250514", "claude-opus-4-6-thinking"} {
+		t.Run(modelID, func(t *testing.T) {
+			resp := BuildResponse([]map[string]any{{"id": modelID}}, nil, false)
+			models, ok := resp["models"].([]map[string]any)
+			if !ok || len(models) != 1 {
+				t.Fatalf("models = %#v, want one model", resp["models"])
+			}
+
+			model := models[0]
+			rawLevels, ok := model["supported_reasoning_levels"].([]any)
+			if !ok || len(rawLevels) == 0 {
+				t.Fatalf("supported_reasoning_levels = %#v, want template levels", model["supported_reasoning_levels"])
+			}
+			defaultLevel := stringModelValue(model, "default_reasoning_level")
+			if defaultLevel == "" {
+				t.Fatal("default_reasoning_level is empty, want a template default")
+			}
+			for _, rawLevel := range rawLevels {
+				level, okLevel := rawLevel.(map[string]any)
+				if okLevel && stringModelValue(level, "effort") == defaultLevel {
+					return
+				}
+			}
+			t.Fatalf("default_reasoning_level %q is not listed in supported_reasoning_levels %#v", defaultLevel, rawLevels)
+		})
+	}
+}
+
+func TestCodexClientModelsResponseKeepsRequiredEmptyReasoningLevels(t *testing.T) {
+	resp := BuildResponse([]map[string]any{{
+		"id":       "home-empty-thinking-model-test",
+		"thinking": &registry.ThinkingSupport{},
+	}}, nil, false)
+	models, ok := resp["models"].([]map[string]any)
+	if !ok || len(models) != 1 {
+		t.Fatalf("models = %#v, want one model", resp["models"])
+	}
+
+	model := models[0]
+	rawLevels, ok := model["supported_reasoning_levels"].([]any)
+	if !ok || len(rawLevels) != 0 {
+		t.Fatalf("supported_reasoning_levels = %#v, want empty array", model["supported_reasoning_levels"])
+	}
+	if _, exists := model["default_reasoning_level"]; exists {
+		t.Fatalf("default_reasoning_level = %#v, want absent", model["default_reasoning_level"])
+	}
+
+	encodedLevels, err := json.Marshal(rawLevels)
+	if err != nil {
+		t.Fatalf("marshal supported_reasoning_levels: %v", err)
+	}
+	if string(encodedLevels) != "[]" {
+		t.Fatalf("supported_reasoning_levels JSON = %s, want []", encodedLevels)
 	}
 }
