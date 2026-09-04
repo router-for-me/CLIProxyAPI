@@ -140,17 +140,23 @@ func authMetadataString(auth *Auth, key string) string {
 	}
 }
 
-// authCredentialIdentity returns the token value that changes when the
-// underlying credential itself is replaced (an operator re-login), as
+// authCredentialIdentity returns the value that changes when the underlying
+// credential itself is replaced (an operator re-login or key rotation), as
 // opposed to a routine access-token refresh which keeps the same
-// refresh_token. Falls back to access_token for credentials with no
-// refresh_token (e.g. plain API keys), so identity is still comparable
-// for those too. Returns "" when neither is present.
+// refresh_token. Precedence: OAuth refresh_token, else OAuth access_token
+// (credentials with no refresh_token), else the AttributeAPIKey attribute
+// (plain API-key auths, which carry no OAuth metadata at all - see
+// AuthKind()/authHasOAuthMetadata() above and types.go's apiKey handling at
+// authAttribute(a, AttributeAPIKey)). Returns "" when none of these are
+// present.
 func authCredentialIdentity(auth *Auth) string {
 	if token := authMetadataString(auth, "refresh_token"); token != "" {
 		return token
 	}
-	return authMetadataString(auth, "access_token")
+	if token := authMetadataString(auth, "access_token"); token != "" {
+		return token
+	}
+	return authAttribute(auth, AttributeAPIKey)
 }
 
 // sameAuthCredential reports whether next carries the same underlying

@@ -522,3 +522,98 @@ func TestManager_Update_EmptyIncomingIdentityPreservesCredentialCooldown(t *test
 		t.Fatalf("expected NextRetryAfter to remain %v, got %v", deadline, updated.NextRetryAfter)
 	}
 }
+
+// TestManager_Update_SameAPIKeyPreservesCredentialCooldown covers a plain
+// API-key auth (no OAuth metadata at all) whose Update carries the SAME
+// api_key attribute - this must be treated like a routine refresh and must
+// preserve a live credential cooldown.
+func TestManager_Update_SameAPIKeyPreservesCredentialCooldown(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	now := time.Now()
+	deadline := now.Add(30 * time.Minute)
+
+	if _, errRegister := m.Register(context.Background(), &Auth{
+		ID:                 "auth-401-apikey-refresh",
+		Provider:           "openai",
+		Unavailable:        true,
+		Status:             StatusError,
+		NextRetryAfter:     deadline,
+		CredentialCooldown: true,
+		Attributes:         map[string]string{AttributeAPIKey: "sk-same-key"},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	updated, err := m.Update(context.Background(), &Auth{
+		ID:         "auth-401-apikey-refresh",
+		Provider:   "openai",
+		Status:     StatusActive,
+		Attributes: map[string]string{AttributeAPIKey: "sk-same-key"},
+	})
+	if err != nil {
+		t.Fatalf("update auth: %v", err)
+	}
+	if !updated.Unavailable || !updated.CredentialCooldown {
+		t.Fatalf("expected cooldown preserved for same api_key, got Unavailable=%v CredentialCooldown=%v", updated.Unavailable, updated.CredentialCooldown)
+	}
+	if !updated.NextRetryAfter.Equal(deadline) {
+		t.Fatalf("expected NextRetryAfter to remain %v, got %v", deadline, updated.NextRetryAfter)
+	}
+}
+
+// TestManager_Update_RotatedAPIKeyClearsCredentialCooldown covers the
+// rotation case: a plain API-key auth whose Update carries a DIFFERENT
+// api_key attribute is a genuinely different credential and must clear a
+// live credential cooldown, same as an OAuth re-login.
+func TestManager_Update_RotatedAPIKeyClearsCredentialCooldown(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	now := time.Now()
+	deadline := now.Add(30 * time.Minute)
+
+	if _, errRegister := m.Register(context.Background(), &Auth{
+		ID:                 "auth-401-apikey-rotate",
+		Provider:           "openai",
+		Unavailable:        true,
+		Status:             StatusError,
+		NextRetryAfter:     deadline,
+		CredentialCooldown: true,
+		Attributes:         map[string]string{AttributeAPIKey: "sk-old-key"},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	updated, err := m.Update(context.Background(), &Auth{
+		ID:         "auth-401-apikey-rotate",
+		Provider:   "openai",
+		Status:     StatusActive,
+		Attributes: map[string]string{AttributeAPIKey: "sk-new-key"},
+	})
+	if err != nil {
+		t.Fatalf("update auth: %v", err)
+	}
+	if updated.Unavailable || updated.CredentialCooldown {
+		t.Fatalf("expected cooldown cleared for rotated api_key, got Unavailable=%v CredentialCooldown=%v", updated.Unavailable, updated.CredentialCooldown)
+	}
+	if !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter cleared, got %v", updated.NextRetryAfter)
+	}
+	if updated.Status != StatusActive {
+		t.Fatalf("expected Status = StatusActive, got %v", updated.Status)
+	}
+}
+
+// TestManager_Update_APIKeyIdentityMutationControl confirms sameAuthCredential
+// is load-bearing for the API-key case: without it, a rotated api_key would
+// be indistinguishable from a routine update and the cooldown would be
+// carried over unconditionally.
+func TestManager_Update_APIKeyIdentityMutationControl(t *testing.T) {
+	existing := &Auth{ID: "auth-apikey-mc", Provider: "openai", Attributes: map[string]string{AttributeAPIKey: "sk-old-key"}}
+	rotated := &Auth{ID: "auth-apikey-mc", Provider: "openai", Attributes: map[string]string{AttributeAPIKey: "sk-new-key"}}
+	if sameAuthCredential(existing, rotated) {
+		t.Fatalf("sameAuthCredential() = true for a rotated api_key, want false")
+	}
+	same := &Auth{ID: "auth-apikey-mc", Provider: "openai", Attributes: map[string]string{AttributeAPIKey: "sk-old-key"}}
+	if !sameAuthCredential(existing, same) {
+		t.Fatalf("sameAuthCredential() = false for an unchanged api_key, want true")
+	}
+}
