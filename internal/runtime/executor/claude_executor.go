@@ -76,6 +76,9 @@ func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body 
 		logClaudeSignatureSanitizeReport(ctx, baseModel, report)
 	}
 	sanitized = helps.RepairDanglingClaudeToolUses(sanitized)
+	// Repair may move a result carrier ahead of a mid-conversation system turn.
+	// Re-evaluate cache TTL order against the finished message sequence.
+	sanitized = normalizeCacheControlTTL(sanitized)
 	return sanitizeClaudeWebSearchDomains(sanitized)
 }
 

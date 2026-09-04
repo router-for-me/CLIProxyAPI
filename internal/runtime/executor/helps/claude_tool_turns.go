@@ -157,12 +157,16 @@ func collectClaudeResultCarrierRun(messages []gjson.Result, start int, toolUses 
 				run.base = message
 			}
 			run.parts = append(run.parts, parts...)
-			if claudeCarrierPartsContainInterrupt(parts, outstanding) {
+			interrupt := claudeCarrierPartsContainInterrupt(parts, outstanding)
+			if interrupt {
 				run.followingInterrupt = true
 			}
 			consumeClaudeOutstandingToolResults(outstanding, parts)
 			run.count++
 			run.end++
+			if interrupt {
+				break
+			}
 			continue
 		}
 
@@ -268,14 +272,7 @@ func buildDeferredClaudeCarrier(base gjson.Result, parts []claudeCarrierPart) []
 		content = append(content, downgradeClaudeToolResult(normalized, id))
 	}
 
-	message := []byte(`{"role":"user","content":[]}`)
-	if base.IsObject() {
-		message = []byte(base.Raw)
-		message, _ = sjson.SetBytes(message, "role", "user")
-		for _, field := range []string{"tool_use_id", "tool_call_id", "call_id", "id", "name"} {
-			message, _ = sjson.DeleteBytes(message, field)
-		}
-	}
+	message := claudeUserCarrierEnvelope(base)
 	message, _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(content))
 	return message
 }
@@ -381,15 +378,20 @@ func buildCanonicalClaudeResultCarrier(base gjson.Result, toolUses []claudeClien
 	}
 	content = append(content, extras...)
 
+	message := claudeUserCarrierEnvelope(base)
+	message, _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(content))
+	return message
+}
+
+func claudeUserCarrierEnvelope(base gjson.Result) []byte {
 	message := []byte(`{"role":"user","content":[]}`)
 	if base.IsObject() {
 		message = []byte(base.Raw)
-		message, _ = sjson.SetBytes(message, "role", "user")
-		for _, field := range []string{"tool_use_id", "tool_call_id", "call_id", "id", "name"} {
-			message, _ = sjson.DeleteBytes(message, field)
-		}
 	}
-	message, _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(content))
+	message, _ = sjson.SetBytes(message, "role", "user")
+	for _, field := range []string{"tool_use_id", "tool_call_id", "call_id", "id", "name"} {
+		message, _ = sjson.DeleteBytes(message, field)
+	}
 	return message
 }
 
@@ -506,35 +508,24 @@ func repairStandaloneClaudeToolResults(message gjson.Result) ([]byte, bool) {
 		return []byte(message.Raw), false
 	}
 	content := message.Get("content")
-	if content.Type == gjson.String {
-		if role != "tool" {
-			return []byte(message.Raw), false
-		}
-		text := "[unmatched tool result]"
-		if strings.TrimSpace(content.String()) != "" {
-			text += "\n" + content.String()
-		}
-		updated := []byte(message.Raw)
-		updated, _ = sjson.SetBytes(updated, "role", "user")
-		updated, _ = sjson.SetRawBytes(updated, "content", translatorcommon.JoinRawArray([][]byte{claudeTextPart(text)}))
-		return updated, true
-	}
 	if !content.IsArray() {
 		if role != "tool" {
 			return []byte(message.Raw), false
 		}
-		updated := []byte(message.Raw)
-		updated, _ = sjson.SetBytes(updated, "role", "user")
+		updated := claudeUserCarrierEnvelope(message)
+		updated, _ = sjson.SetRawBytes(updated, "content", translatorcommon.JoinRawArray([][]byte{unmatchedClaudeToolDiagnostic(content)}))
 		return updated, true
 	}
 
 	parts := make([][]byte, 0, len(content.Array()))
 	hasToolResult := false
 	content.ForEach(func(_, part gjson.Result) bool {
-		if !part.IsObject() {
+		partType := part.Get("type")
+		if !part.IsObject() || partType.Type != gjson.String || strings.TrimSpace(partType.String()) == "" {
+			parts = append(parts, unmatchedClaudeToolDiagnostic(part))
 			return true
 		}
-		if part.Get("type").String() == "tool_result" {
+		if partType.String() == "tool_result" {
 			hasToolResult = true
 			normalized, id := normalizeClaudeToolResult([]byte(part.Raw))
 			parts = append(parts, downgradeClaudeToolResult(normalized, id))
@@ -546,14 +537,21 @@ func repairStandaloneClaudeToolResults(message gjson.Result) ([]byte, bool) {
 	if !hasToolResult && role != "tool" {
 		return []byte(message.Raw), false
 	}
-
-	updated := []byte(message.Raw)
-	updated, _ = sjson.SetBytes(updated, "role", "user")
-	for _, field := range []string{"tool_use_id", "tool_call_id", "call_id", "id", "name"} {
-		updated, _ = sjson.DeleteBytes(updated, field)
+	if len(parts) == 0 {
+		parts = append(parts, unmatchedClaudeToolDiagnostic(gjson.Result{}))
 	}
+
+	updated := claudeUserCarrierEnvelope(message)
 	updated, _ = sjson.SetRawBytes(updated, "content", translatorcommon.JoinRawArray(parts))
 	return updated, true
+}
+
+func unmatchedClaudeToolDiagnostic(content gjson.Result) []byte {
+	text := "[unmatched tool result]"
+	if diagnostic := strings.TrimSpace(claudeToolResultText(content)); diagnostic != "" {
+		text += "\n" + diagnostic
+	}
+	return claudeTextPart(text)
 }
 
 func dropUnresolvedClaudeServerToolUses(message gjson.Result) ([]byte, bool) {

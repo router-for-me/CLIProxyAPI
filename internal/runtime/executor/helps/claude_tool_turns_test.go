@@ -172,6 +172,137 @@ func TestRepairDanglingClaudeToolUsesCanonicalizesResultCarriers(t *testing.T) {
 			t.Fatalf("standalone orphan not downgraded: %s", messages[0].Raw)
 		}
 	})
+
+	t.Run("cleans compatibility fields from a standalone tool string", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"tool","tool_use_id":"tool-use","tool_call_id":"tool-call","call_id":"call","id":"generic","name":"legacy","content":"diagnostic"}]}`)
+		once := RepairDanglingClaudeToolUses(input)
+		message := claudeMessagesForTest(t, once, 1)[0]
+		assertClaudeUserCarrierEnvelope(t, message)
+		if message.Get("content.0.type").String() != "text" || !strings.Contains(message.Get("content.0.text").String(), "diagnostic") {
+			t.Fatalf("standalone tool string was not preserved as diagnostic text: %s", message.Raw)
+		}
+		if twice := RepairDanglingClaudeToolUses(once); !bytes.Equal(twice, once) {
+			t.Fatalf("standalone tool string cleanup is not idempotent:\n once %s\n twice %s", once, twice)
+		}
+	})
+
+	for _, testCase := range []struct {
+		name           string
+		content        string
+		wantDiagnostic string
+	}{
+		{name: "null", content: `null`},
+		{name: "object", content: `{"raw":"diagnostic"}`, wantDiagnostic: `{"raw":"diagnostic"}`},
+		{name: "number", content: `42`, wantDiagnostic: `42`},
+		{name: "boolean", content: `true`, wantDiagnostic: `true`},
+	} {
+		t.Run("cleans compatibility fields from standalone tool content "+testCase.name, func(t *testing.T) {
+			input := []byte(`{"messages":[{"role":"tool","tool_use_id":"tool-use","tool_call_id":"tool-call","call_id":"call","id":"generic","name":"legacy","content":` + testCase.content + `}]}`)
+			once := RepairDanglingClaudeToolUses(input)
+			message := claudeMessagesForTest(t, once, 1)[0]
+			assertClaudeUserCarrierEnvelope(t, message)
+			text := message.Get("content.0.text")
+			if !message.Get("content").IsArray() || message.Get("content.0.type").String() != "text" || !strings.Contains(text.String(), "[unmatched tool result]") {
+				t.Fatalf("standalone %s content was not converted to diagnostic text: %s", testCase.name, message.Raw)
+			}
+			if testCase.wantDiagnostic != "" && !strings.Contains(text.String(), testCase.wantDiagnostic) {
+				t.Fatalf("standalone %s diagnostic was lost: %s", testCase.name, message.Raw)
+			}
+			if twice := RepairDanglingClaudeToolUses(once); !bytes.Equal(twice, once) {
+				t.Fatalf("standalone %s content cleanup is not idempotent:\n once %s\n twice %s", testCase.name, once, twice)
+			}
+		})
+	}
+
+	t.Run("cleans compatibility fields when standalone tool content is missing", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"tool","tool_use_id":"tool-use","tool_call_id":"tool-call","call_id":"call","id":"generic","name":"legacy"}]}`)
+		once := RepairDanglingClaudeToolUses(input)
+		message := claudeMessagesForTest(t, once, 1)[0]
+		assertClaudeUserCarrierEnvelope(t, message)
+		if !message.Get("content").IsArray() || message.Get("content.0.type").String() != "text" || !strings.Contains(message.Get("content.0.text").String(), "[unmatched tool result]") {
+			t.Fatalf("missing standalone tool content was not converted to diagnostic text: %s", message.Raw)
+		}
+		if twice := RepairDanglingClaudeToolUses(once); !bytes.Equal(twice, once) {
+			t.Fatalf("missing standalone tool content cleanup is not idempotent:\n once %s\n twice %s", once, twice)
+		}
+	})
+
+	for _, testCase := range []struct {
+		name            string
+		content         string
+		wantDiagnostics []string
+	}{
+		{name: "empty array", content: `[]`},
+		{name: "primitive array", content: `["raw diagnostic",17,true,null]`, wantDiagnostics: []string{"raw diagnostic", "17", "true"}},
+		{name: "untyped object array", content: `[{"raw":"object diagnostic"},{"type":"","raw":"empty type"}]`, wantDiagnostics: []string{"object diagnostic", "empty type"}},
+	} {
+		t.Run("repairs standalone tool "+testCase.name, func(t *testing.T) {
+			input := []byte(`{"messages":[{"role":"tool","tool_use_id":"tool-use","tool_call_id":"tool-call","call_id":"call","id":"generic","name":"legacy","content":` + testCase.content + `}]}`)
+			once := RepairDanglingClaudeToolUses(input)
+			message := claudeMessagesForTest(t, once, 1)[0]
+			assertClaudeUserCarrierEnvelope(t, message)
+			blocks := message.Get("content").Array()
+			if len(blocks) == 0 {
+				t.Fatalf("standalone tool %s produced empty user content: %s", testCase.name, message.Raw)
+			}
+			var diagnostic strings.Builder
+			for _, block := range blocks {
+				if block.Get("type").String() != "text" {
+					t.Fatalf("standalone tool %s retained a non-text primitive: %s", testCase.name, message.Raw)
+				}
+				diagnostic.WriteString(block.Get("text").String())
+			}
+			if !strings.Contains(diagnostic.String(), "[unmatched tool result]") {
+				t.Fatalf("standalone tool %s lost its diagnostic label: %s", testCase.name, message.Raw)
+			}
+			for _, want := range testCase.wantDiagnostics {
+				if !strings.Contains(diagnostic.String(), want) {
+					t.Fatalf("standalone tool %s lost diagnostic %q: %s", testCase.name, want, message.Raw)
+				}
+			}
+			if twice := RepairDanglingClaudeToolUses(once); !bytes.Equal(twice, once) {
+				t.Fatalf("standalone tool %s cleanup is not idempotent:\n once %s\n twice %s", testCase.name, once, twice)
+			}
+		})
+	}
+}
+
+func TestRepairDanglingClaudeToolUsesStopsAtFirstInterruptingCarrier(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		extra     string
+		wantExtra string
+	}{
+		{name: "text", extra: `{"type":"text","text":"change direction"}`, wantExtra: "change direction"},
+		{name: "duplicate", extra: `{"type":"tool_result","tool_use_id":"p1","content":"duplicate one"}`, wantExtra: "duplicate one"},
+		{name: "orphan", extra: `{"type":"tool_result","tool_use_id":"ghost","content":"orphan output"}`, wantExtra: "orphan output"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			input := []byte(`{"messages":[` +
+				`{"role":"assistant","content":[{"type":"tool_use","id":"p1","name":"one"},{"type":"tool_use","id":"p2","name":"two"}]},` +
+				`{"role":"user","content":[{"type":"tool_result","tool_use_id":"p1","content":"one"},` + testCase.extra + `]},` +
+				`{"role":"user","content":[{"type":"tool_result","tool_use_id":"p2","content":"late two"}]}` +
+				`]}`)
+
+			once := RepairDanglingClaudeToolUses(input)
+			messages := claudeMessagesForTest(t, once, 3)
+			blocks := messages[1].Get("content").Array()
+			if len(blocks) != 3 || blocks[0].Get("tool_use_id").String() != "p1" || blocks[0].Get("content").String() != "one" || blocks[0].Get("is_error").Bool() {
+				t.Fatalf("first result carrier changed unexpectedly: %s", messages[1].Raw)
+			}
+			assertInterruptedClaudeToolResult(t, blocks[1], "p2", "")
+			if blocks[2].Get("type").String() != "text" || !strings.Contains(blocks[2].Get("text").String(), testCase.wantExtra) {
+				t.Fatalf("interrupting %s content was not preserved: %s", testCase.name, messages[1].Raw)
+			}
+			late := messages[2].Get("content.0")
+			if late.Get("type").String() != "text" || !strings.Contains(late.Get("text").String(), "late two") {
+				t.Fatalf("late p2 result crossed the interrupting carrier: %s", once)
+			}
+			if twice := RepairDanglingClaudeToolUses(once); !bytes.Equal(twice, once) {
+				t.Fatalf("%s carrier boundary is not idempotent:\n once %s\n twice %s", testCase.name, once, twice)
+			}
+		})
+	}
 }
 
 func TestRepairDanglingClaudeToolUsesRelocatesInterveningSystemTurns(t *testing.T) {
@@ -512,6 +643,18 @@ func claudeMessagesForTest(t *testing.T, payload []byte, want int) []gjson.Resul
 		t.Fatalf("message count = %d, want %d: %s", len(messages), want, payload)
 	}
 	return messages
+}
+
+func assertClaudeUserCarrierEnvelope(t *testing.T, message gjson.Result) {
+	t.Helper()
+	if message.Get("role").String() != "user" {
+		t.Fatalf("carrier role = %q, want user: %s", message.Get("role").String(), message.Raw)
+	}
+	for _, field := range []string{"tool_use_id", "tool_call_id", "call_id", "id", "name"} {
+		if message.Get(field).Exists() {
+			t.Fatalf("carrier retained top-level %s: %s", field, message.Raw)
+		}
+	}
 }
 
 func assertInterruptedClaudeToolResult(t *testing.T, block gjson.Result, toolUseID, toolsetName string) {
