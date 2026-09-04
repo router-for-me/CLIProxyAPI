@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -498,22 +499,31 @@ func TestCodexClientModelsResponseDoesNotInheritUnsupportedReasoningLevels(t *te
 	tests := []struct {
 		name        string
 		version     string
-		levels      []string
+		thinking    registry.ThinkingSupport
 		wantEfforts []string
 		wantDefault string
 	}{
-		{name: "modern client", version: "0.144.0", levels: []string{"max", "ultra"}, wantEfforts: []string{"max", "ultra"}, wantDefault: "max"},
-		{name: "legacy client with no compatible level", version: "0.143.9", levels: []string{"max", "ultra"}},
-		{name: "legacy client with one compatible level", version: "0.143.9", levels: []string{"high", "max"}, wantEfforts: []string{"high"}, wantDefault: "high"},
+		{name: "modern client", version: "0.144.0", thinking: registry.ThinkingSupport{Levels: []string{"max", "ultra"}}, wantEfforts: []string{"max", "ultra"}, wantDefault: "max"},
+		{name: "legacy client with no compatible level", version: "0.143.9", thinking: registry.ThinkingSupport{Levels: []string{"max", "ultra"}}},
+		{name: "legacy client with one compatible level", version: "0.143.9", thinking: registry.ThinkingSupport{Levels: []string{"high", "max"}}, wantEfforts: []string{"high"}, wantDefault: "high"},
+		{
+			name:    "budget-only model",
+			version: "0.153.3",
+			thinking: registry.ThinkingSupport{
+				Min:            1024,
+				Max:            64000,
+				ZeroAllowed:    true,
+				DynamicAllowed: true,
+			},
+		},
+		{name: "empty levels", version: "0.153.3", thinking: registry.ThinkingSupport{Levels: []string{}}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resp := BuildResponseForClient([]map[string]any{{
-				"id": "home-extended-reasoning-model-test",
-				"thinking": &registry.ThinkingSupport{
-					Levels: tt.levels,
-				},
+				"id":       "home-extended-reasoning-model-test",
+				"thinking": &tt.thinking,
 			}}, nil, false, tt.version)
 			models, ok := resp["models"].([]map[string]any)
 			if !ok || len(models) != 1 {
@@ -521,8 +531,12 @@ func TestCodexClientModelsResponseDoesNotInheritUnsupportedReasoningLevels(t *te
 			}
 			model := models[0]
 			if len(tt.wantEfforts) == 0 {
-				if _, exists := model["supported_reasoning_levels"]; exists {
-					t.Fatalf("supported_reasoning_levels = %#v, want absent", model["supported_reasoning_levels"])
+				encodedLevels, errMarshal := json.Marshal(model["supported_reasoning_levels"])
+				if errMarshal != nil {
+					t.Fatalf("marshal supported_reasoning_levels: %v", errMarshal)
+				}
+				if string(encodedLevels) != "[]" {
+					t.Fatalf("supported_reasoning_levels JSON = %s, want []", encodedLevels)
 				}
 				if _, exists := model["default_reasoning_level"]; exists {
 					t.Fatalf("default_reasoning_level = %#v, want absent", model["default_reasoning_level"])
@@ -542,6 +556,37 @@ func TestCodexClientModelsResponseDoesNotInheritUnsupportedReasoningLevels(t *te
 			}
 			if got := stringModelValue(model, "default_reasoning_level"); got != tt.wantDefault {
 				t.Fatalf("default_reasoning_level = %q, want %q", got, tt.wantDefault)
+			}
+		})
+	}
+}
+
+func TestSanitizeCodexClientReasoningMetadataPreservesEmptyArray(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		levels  []any
+	}{
+		{name: "empty levels", version: "0.153.3", levels: []any{}},
+		{name: "nil levels", version: "0.153.3"},
+		{name: "legacy client with no compatible level", version: "0.143.9", levels: []any{map[string]any{"effort": "max"}, map[string]any{"effort": "ultra"}}},
+		{name: "invalid levels", version: "0.153.3", levels: []any{nil, map[string]any{"effort": "unknown"}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := map[string]any{
+				"supported_reasoning_levels": tt.levels,
+				"default_reasoning_level":    "max",
+			}
+			sanitizeCodexClientReasoningMetadata(entry, tt.version)
+
+			encodedEntry, errMarshal := json.Marshal(entry)
+			if errMarshal != nil {
+				t.Fatalf("marshal model metadata: %v", errMarshal)
+			}
+			if got, want := string(encodedEntry), `{"supported_reasoning_levels":[]}`; got != want {
+				t.Fatalf("model metadata JSON = %s, want %s", got, want)
 			}
 		})
 	}
