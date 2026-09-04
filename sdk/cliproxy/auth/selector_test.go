@@ -571,7 +571,7 @@ func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsBlocked(t *testing.T
 		},
 	}
 
-	blocked, reason, next := isAuthBlockedForModel(auth, model, now)
+	blocked, reason, next := effectiveBlock(auth, model, now)
 	if !blocked {
 		t.Fatalf("blocked = false, want true")
 	}
@@ -588,9 +588,9 @@ func TestIsAuthBlockedForModel_AuthQuotaExceededWithoutRecoveryIsBlocked(t *test
 
 	auth := &Auth{ID: "a", Quota: QuotaState{Exceeded: true}}
 	for _, model := range []string{"", "test-model"} {
-		blocked, reason, next := isAuthBlockedForModel(auth, model, time.Now())
+		blocked, reason, next := effectiveBlock(auth, model, time.Now())
 		if !blocked || reason != blockReasonOther || !next.IsZero() {
-			t.Fatalf("isAuthBlockedForModel(%q) = %v, %v, %v; want true, other, zero", model, blocked, reason, next)
+			t.Fatalf("effectiveBlock(%q) = %v, %v, %v; want true, other, zero", model, blocked, reason, next)
 		}
 	}
 }
@@ -608,9 +608,9 @@ func TestIsAuthBlockedForModel_ExpiredRecoveryIsAvailable(t *testing.T) {
 			NextRecoverAt: now.Add(-time.Second),
 		},
 	}
-	blocked, reason, next := isAuthBlockedForModel(auth, "", now)
+	blocked, reason, next := effectiveBlock(auth, "", now)
 	if blocked || reason != blockReasonNone || !next.IsZero() {
-		t.Fatalf("isAuthBlockedForModel() = %v, %v, %v; want false, none, zero", blocked, reason, next)
+		t.Fatalf("effectiveBlock() = %v, %v, %v; want false, none, zero", blocked, reason, next)
 	}
 }
 
@@ -684,9 +684,9 @@ func TestIsAuthBlockedForModel_ThinkingSuffixStatesBlockCanonicalModel(t *testin
 	}
 
 	for _, model := range []string{"test-model", "test-model(medium)", "test-model(low)"} {
-		blocked, reason, next := isAuthBlockedForModel(auth, model, now)
+		blocked, reason, next := effectiveBlock(auth, model, now)
 		if !blocked || reason != blockReasonCooldown || !next.Equal(laterRetry) {
-			t.Fatalf("isAuthBlockedForModel(%q) = %v, %v, %v; want true, cooldown, %v", model, blocked, reason, next, laterRetry)
+			t.Fatalf("effectiveBlock(%q) = %v, %v, %v; want true, cooldown, %v", model, blocked, reason, next, laterRetry)
 		}
 	}
 }

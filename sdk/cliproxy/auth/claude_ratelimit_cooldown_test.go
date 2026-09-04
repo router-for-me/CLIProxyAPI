@@ -69,7 +69,7 @@ func TestAuthManager_ConcurrentSuccessDoesNotClearActiveCredentialCooldown(t *te
 
 	// Selecting any model on this credential must be blocked locally
 	for _, m := range []string{"claude-3-5-sonnet-20241022", "claude-3-opus-20240229", "claude-3-7-sonnet-20250219"} {
-		blocked, reason, next := isAuthBlockedForModel(updatedAuth, m, time.Now())
+		blocked, reason, next := effectiveBlock(updatedAuth, m, time.Now())
 		if !blocked {
 			t.Fatalf("model %q was unblocked despite active 7d credential cooldown", m)
 		}
@@ -135,7 +135,7 @@ func TestAuthManager_UpdatePreservesActiveCredentialCooldown(t *testing.T) {
 		t.Fatalf("credential cooldown was lost after Update: quota=%+v", persistedAuth.Quota)
 	}
 
-	blocked, reason, _ := isAuthBlockedForModel(persistedAuth, "claude-3-5-sonnet-20241022", time.Now())
+	blocked, reason, _ := effectiveBlock(persistedAuth, "claude-3-5-sonnet-20241022", time.Now())
 	if !blocked || reason != blockReasonCooldown {
 		t.Fatalf("model unblocked after Update: blocked=%v reason=%v", blocked, reason)
 	}
@@ -184,7 +184,7 @@ func TestAuthManager_DisableCoolingDoesNotPermanentlyBlock(t *testing.T) {
 	// Must NOT be blocked when cooling is disabled
 	for _, m := range []string{"claude-3-5-sonnet-20241022", "claude-3-opus-20240229"} {
 		updatedAuth, _ := manager.GetByID(auth.ID)
-		blocked, _, _ := isAuthBlockedForModel(updatedAuth, m, time.Now())
+		blocked, _, _ := effectiveBlock(updatedAuth, m, time.Now())
 		if blocked {
 			t.Fatalf("model %q was blocked even though cooling is disabled", m)
 		}
@@ -228,13 +228,13 @@ func TestAuthManager_NonClaudeProvider_Model429DoesNotBlockSiblingModels(t *test
 
 	// gpt-4o should be blocked
 	updatedAuth, _ := manager.GetByID(auth.ID)
-	blocked4o, _, _ := isAuthBlockedForModel(updatedAuth, "gpt-4o", time.Now())
+	blocked4o, _, _ := effectiveBlock(updatedAuth, "gpt-4o", time.Now())
 	if !blocked4o {
 		t.Fatal("gpt-4o should be blocked after 429")
 	}
 
 	// gpt-4o-mini MUST remain selectable (unaffected by sibling model 429)
-	blockedMini, _, _ := isAuthBlockedForModel(updatedAuth, "gpt-4o-mini", time.Now())
+	blockedMini, _, _ := effectiveBlock(updatedAuth, "gpt-4o-mini", time.Now())
 	if blockedMini {
 		t.Fatal("gpt-4o-mini was incorrectly blocked by sibling model 429")
 	}

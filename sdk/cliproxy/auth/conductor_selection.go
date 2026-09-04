@@ -463,7 +463,7 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 	var earliest time.Time
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
-		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
+		blocked, reason, next := effectiveBlock(candidate, checkModel, now)
 		if !blocked {
 			priority := authPriority(candidate)
 			availableByPriority[priority] = append(availableByPriority[priority], candidate)
@@ -951,7 +951,7 @@ func (m *Manager) requestRetryRoundExclusions(retryRound int, defaultRequestRetr
 }
 
 func retryRoundAvailabilityForAuth(auth *Auth, model string, now time.Time) (bool, time.Time) {
-	blocked, reason, next := isAuthBlockedForModel(auth, model, now)
+	blocked, reason, next := effectiveBlock(auth, model, now)
 	if !blocked {
 		return true, time.Time{}
 	}
@@ -2070,7 +2070,7 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
 		}
 		totalCandidates++
 		checkModel := m.selectionModelForAuth(candidate, model)
-		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
+		blocked, reason, next := effectiveBlock(candidate, checkModel, now)
 		if blocked && reason == blockReasonCooldown {
 			coolingSummaries = append(coolingSummaries, authCoolingSummary(candidate, checkModel, next, now))
 		}

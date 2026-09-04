@@ -363,9 +363,9 @@ func TestManager_RefreshAuth_ExpiredAccessTokenBlockedFromSelection(t *testing.T
 		},
 	}
 
-	blocked, reason, _ := isAuthBlockedForModel(auth, "gpt-5", time.Now())
+	blocked, reason, _ := effectiveBlock(auth, "gpt-5", time.Now())
 	if !blocked {
-		t.Fatal("isAuthBlockedForModel should return blocked=true for expired access token")
+		t.Fatal("effectiveBlock should return blocked=true for expired access token")
 	}
 	_ = reason
 }

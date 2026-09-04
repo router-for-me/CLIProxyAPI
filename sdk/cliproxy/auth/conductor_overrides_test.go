@@ -1853,10 +1853,10 @@ func TestManager_UnknownUpstreamErrorRotatesAndPenalizesModelOnly(t *testing.T) 
 	}
 
 	now := time.Now()
-	if blocked, _, _ := isAuthBlockedForModel(updatedBad, model, now); !blocked {
+	if blocked, _, _ := effectiveBlock(updatedBad, model, now); !blocked {
 		t.Fatal("expected the failing model to be blocked on that credential")
 	}
-	if blocked, reason, _ := isAuthBlockedForModel(updatedBad, siblingModel, now); blocked {
+	if blocked, reason, _ := effectiveBlock(updatedBad, siblingModel, now); blocked {
 		t.Fatalf("sibling model was blocked on the same credential (reason=%v); the penalty must stay scoped to (credential, model)", reason)
 	}
 }

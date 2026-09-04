@@ -202,10 +202,10 @@ func TestRecoverableUnknownFailuresHaveFiniteCooldown(t *testing.T) {
 			if nextRetryAfter.IsZero() {
 				t.Fatal("recoverable failure has no retry deadline")
 			}
-			if blocked, _, _ := isAuthBlockedForModel(updated, testCase.model, time.Now()); !blocked {
+			if blocked, _, _ := effectiveBlock(updated, testCase.model, time.Now()); !blocked {
 				t.Fatal("auth was not blocked during recoverable failure cooldown")
 			}
-			if blocked, _, _ := isAuthBlockedForModel(updated, testCase.model, nextRetryAfter.Add(time.Nanosecond)); blocked {
+			if blocked, _, _ := effectiveBlock(updated, testCase.model, nextRetryAfter.Add(time.Nanosecond)); blocked {
 				t.Fatal("auth did not automatically recover after retry deadline")
 			}
 		})

@@ -13,7 +13,7 @@ func TestUpdateAggregatedAvailability_UnavailableWithoutNextRetryBlocksAuthIndef
 
 	// This intentionally documents a behavior change from the delta review's
 	// item 3 ("no field-specific shortcuts... decide per model via the same
-	// predicate the selector uses"): isAuthBlockedForModel's own matched-state
+	// predicate the selector uses"): effectiveBlock's own matched-state
 	// branch (selector.go) already treats a state with Unavailable=true and
 	// no deadlines at all as an indefinite block - availabilityBlock returns
 	// (true, ..., zero) for that combination, and the matched-model loop
@@ -37,7 +37,7 @@ func TestUpdateAggregatedAvailability_UnavailableWithoutNextRetryBlocksAuthIndef
 	updateAggregatedAvailability(auth, now)
 
 	if !auth.Unavailable {
-		t.Fatalf("auth.Unavailable = false, want true (matches isAuthBlockedForModel's own indefinite-block behavior for Unavailable=true with no deadlines)")
+		t.Fatalf("auth.Unavailable = false, want true (matches effectiveBlock's own indefinite-block behavior for Unavailable=true with no deadlines)")
 	}
 	if !auth.NextRetryAfter.IsZero() {
 		t.Fatalf("auth.NextRetryAfter = %v, want zero (indefinite block has no known deadline)", auth.NextRetryAfter)

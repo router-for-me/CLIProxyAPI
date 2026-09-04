@@ -454,7 +454,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	// (allUnavailable starts true and is only lowered by entries actually
 	// present), so calling it unconditionally here would mark the whole
 	// credential unavailable from a single restored model even when
-	// siblings exist and are selectable - even though isAuthBlockedForModel's
+	// siblings exist and are selectable - even though effectiveBlock's
 	// own model!="" path (used by every real selection call) already
 	// blocks just that model correctly. Only let this restore RAISE
 	// auth.Unavailable when the restored model-state map is PROVABLY
@@ -809,7 +809,7 @@ func cooldownErrorEqual(a, b *Error) bool {
 
 // authCooldownStateRecord builds the persisted record for a credential-level
 // cooldown. Whether a record exists at all, and what deadline it carries, is
-// decided by isAuthBlockedForModel(auth, "", now) - the same aggregate-vs-
+// decided by effectiveBlock(auth, "", now) - the same aggregate-vs-
 // credential logic the in-memory selector uses to decide whether the WHOLE
 // credential is blocked - rather than by availabilityBlock on auth.Quota
 // directly. updateAggregatedAvailability deliberately copies one cooling
@@ -818,7 +818,7 @@ func cooldownErrorEqual(a, b *Error) bool {
 // availabilityBlock call on auth.Quota alone cannot see that distinction and
 // would persist a credential-level record from that aggregate-only quota,
 // blocking every model for this credential after a restart even though only
-// one sibling was ever cooling. isAuthBlockedForModel(auth, "", now) already
+// one sibling was ever cooling. effectiveBlock(auth, "", now) already
 // encodes the exception (aggregate quota with Reason != "credential_quota"
 // and auth.Unavailable false does not block), so reusing it here keeps both
 // call sites in exact agreement.
@@ -839,7 +839,7 @@ func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bo
 	if auth == nil {
 		return CooldownStateRecord{}, false
 	}
-	blocked, _, next := isAuthBlockedForModel(auth, "", now)
+	blocked, _, next := effectiveBlock(auth, "", now)
 	if !blocked || next.IsZero() {
 		return CooldownStateRecord{}, false
 	}
@@ -1030,15 +1030,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								state.NextRetryAfter = next
 							}
 						case 404:
-							existingModelRetryAfter := state.NextRetryAfter
 							next := notFoundRetryAfter(result.Error, classificationModel, &state.Quota, now, disableCooling)
 							// A racing generic 404 for this model key must not
 							// shorten or clear a longer-lived cooldown already
-							// recorded in this model's NextRetryAfter (e.g. a
-							// live 401) - same effective-deadline rule as the
-							// auth-level 404 case above, applied per model key.
-							if existingModelRetryAfter.After(now) && existingModelRetryAfter.After(next) {
-								next = existingModelRetryAfter
+							// recorded for this model (e.g. a live 401) - same
+							// effective-deadline rule as the auth-level 404
+							// case below, applied per model key via the
+							// shared effectiveDeadline accessor.
+							if existingModelDeadline := effectiveDeadline(auth, modelKey, now); existingModelDeadline.After(next) {
+								next = existingModelDeadline
 							}
 							state.NextRetryAfter = next
 							state.Unavailable = !state.NextRetryAfter.IsZero()
@@ -1481,7 +1481,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 			stateUnavailable = true
 		} else {
 			// Decide per model via the same predicate the selector uses
-			// (isAuthBlockedForModel's matched-model path calls
+			// (effectiveBlock's matched-model path calls
 			// availabilityBlock with these exact five values) instead of a
 			// field-specific shortcut that only looked at
 			// state.Unavailable/NextRetryAfter. A generic 404 stores its
@@ -2466,14 +2466,14 @@ func applyAuthFailureStateForModel(auth *Auth, resultErr *Error, retryAfter *tim
 		}
 	case 404:
 		auth.StatusMessage = "not_found"
-		existingRetryAfter := auth.NextRetryAfter
 		next := notFoundRetryAfter(resultErr, attemptedModel, &auth.Quota, now, disableCooling)
 		// A racing generic 404 must not shorten or clear a longer-lived
-		// credential-wide cooldown already recorded in NextRetryAfter (e.g.
-		// a live 401) - same effective-deadline rule as preserveLongerCooldown,
-		// just taken across both fields instead of within Quota alone.
-		if existingRetryAfter.After(now) && existingRetryAfter.After(next) {
-			next = existingRetryAfter
+		// credential-wide cooldown already recorded (e.g. a live 401) -
+		// same effective-deadline rule as preserveLongerCooldown, taken
+		// across both NextRetryAfter and Quota.NextRecoverAt via the
+		// shared effectiveDeadline accessor instead of one field alone.
+		if existingDeadline := effectiveDeadline(auth, "", now); existingDeadline.After(next) {
+			next = existingDeadline
 		}
 		auth.NextRetryAfter = next
 		auth.Unavailable = !auth.NextRetryAfter.IsZero()

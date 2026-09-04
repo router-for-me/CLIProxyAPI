@@ -281,9 +281,9 @@ func TestManager_Update_PreservesCredentialCooldownUntilDeadline(t *testing.T) {
 	if !updated.Unavailable || !updated.CredentialCooldown || !updated.NextRetryAfter.Equal(deadline) {
 		t.Fatalf("Update() while cooldown live = %+v, want Unavailable/CredentialCooldown preserved until %v", updated, deadline)
 	}
-	blocked, _, next := isAuthBlockedForModel(updated, "", time.Now())
+	blocked, _, next := effectiveBlock(updated, "", time.Now())
 	if !blocked || !next.Equal(deadline) {
-		t.Fatalf("isAuthBlockedForModel(auth, \"\", now) after Update = blocked=%v next=%v, want blocked until %v", blocked, next, deadline)
+		t.Fatalf("effectiveBlock(auth, \"\", now) after Update = blocked=%v next=%v, want blocked until %v", blocked, next, deadline)
 	}
 }
 

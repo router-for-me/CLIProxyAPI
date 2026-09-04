@@ -881,14 +881,14 @@ func TestAuthCooldownStateRecordSkipsAggregateOnlyQuotaWithAvailableSibling(t *t
 	if !ok {
 		t.Fatal("restored auth not found")
 	}
-	if blocked, _, _ := isAuthBlockedForModel(restoredAuth, "mistral", now); blocked {
-		t.Fatal("isAuthBlockedForModel(mistral) = blocked after restoring only the llama3 model record, want selectable")
+	if blocked, _, _ := effectiveBlock(restoredAuth, "mistral", now); blocked {
+		t.Fatal("effectiveBlock(mistral) = blocked after restoring only the llama3 model record, want selectable")
 	}
-	if blocked, _, _ := isAuthBlockedForModel(restoredAuth, "llama3", now); !blocked {
-		t.Fatal("isAuthBlockedForModel(llama3) = not blocked after restore, want blocked until the cooldown deadline")
+	if blocked, _, _ := effectiveBlock(restoredAuth, "llama3", now); !blocked {
+		t.Fatal("effectiveBlock(llama3) = not blocked after restore, want blocked until the cooldown deadline")
 	}
-	if blocked, _, _ := isAuthBlockedForModel(restoredAuth, "", now); blocked {
-		t.Fatal("isAuthBlockedForModel(\"\") = blocked for the whole credential after restoring one cooling sibling, want selectable per the aggregate exception")
+	if blocked, _, _ := effectiveBlock(restoredAuth, "", now); blocked {
+		t.Fatal("effectiveBlock(\"\") = blocked for the whole credential after restoring one cooling sibling, want selectable per the aggregate exception")
 	}
 
 	// Self-reinforcement guard: if restore had left restoredAuth.Unavailable
@@ -906,7 +906,7 @@ func TestAuthCooldownStateRecordSkipsAggregateOnlyQuotaWithAvailableSibling(t *t
 // companion case: a real credential-wide cooldown (e.g. a 401, with no
 // per-model states at all) must still persist and, on restore into a fresh
 // Manager, block every model - proving the P1 fix's write-side reuse of
-// isAuthBlockedForModel didn't accidentally suppress genuine credential-level
+// effectiveBlock didn't accidentally suppress genuine credential-level
 // records, and the restore-side fix didn't route this case through
 // updateAggregatedAvailability (which would wipe it via
 // clearAggregatedAvailability when ModelStates is empty).
@@ -951,15 +951,15 @@ func TestAuthCooldownStateRecordPersistsGenuineCredentialLevel401(t *testing.T) 
 		t.Fatal("restored auth.Unavailable = false, want true (genuine credential-level cooldown must survive restore)")
 	}
 	for _, model := range []string{"", "any-model", "another-model"} {
-		if blocked, _, _ := isAuthBlockedForModel(restoredAuth, model, now); !blocked {
-			t.Fatalf("isAuthBlockedForModel(%q) = not blocked after restoring a credential-level 401, want blocked", model)
+		if blocked, _, _ := effectiveBlock(restoredAuth, model, now); !blocked {
+			t.Fatalf("effectiveBlock(%q) = not blocked after restoring a credential-level 401, want blocked", model)
 		}
 	}
 }
 
 // TestAuthCooldownStateRecordAgreesWithSelectorOnWriteSideGate is a direct,
 // standalone assertion that authCooldownStateRecord agrees with
-// isAuthBlockedForModel(auth, "", now) on the same in-memory auth (no
+// effectiveBlock(auth, "", now) on the same in-memory auth (no
 // restore round-trip). It does not by itself prove the write-side fix is
 // exercised - that proof is the mutation-control run recorded in the P1
 // report (reverting authCooldownStateRecord to call
@@ -990,16 +990,16 @@ func TestAuthCooldownStateRecordAgreesWithSelectorOnWriteSideGate(t *testing.T) 
 	}
 	updateAggregatedAvailability(auth, now)
 
-	// isAuthBlockedForModel(auth, "", now) is the exact function the fixed
+	// effectiveBlock(auth, "", now) is the exact function the fixed
 	// authCooldownStateRecord now calls; assert it agrees the credential is
 	// NOT blocked here - this is the gate whose removal would regress to
 	// the old bug.
-	blocked, _, _ := isAuthBlockedForModel(auth, "", now)
+	blocked, _, _ := effectiveBlock(auth, "", now)
 	if blocked {
-		t.Fatal("isAuthBlockedForModel(auth, \"\", now) = blocked from an aggregate-only quota with an available sibling, want selectable")
+		t.Fatal("effectiveBlock(auth, \"\", now) = blocked from an aggregate-only quota with an available sibling, want selectable")
 	}
 	if _, ok := authCooldownStateRecord(auth, now); ok {
-		t.Fatal("authCooldownStateRecord() must agree with isAuthBlockedForModel(auth, \"\", now) and skip the record")
+		t.Fatal("authCooldownStateRecord() must agree with effectiveBlock(auth, \"\", now) and skip the record")
 	}
 }
 
@@ -1077,14 +1077,14 @@ func TestRestoreCooldownStatesAllModelsCoolingBlocksCredential(t *testing.T) {
 	if !ok {
 		t.Fatal("restored auth not found")
 	}
-	if blocked, _, _ := isAuthBlockedForModel(restoredAuth, "llama3", now); !blocked {
-		t.Fatal("isAuthBlockedForModel(llama3) = not blocked after restoring both cooling models, want blocked")
+	if blocked, _, _ := effectiveBlock(restoredAuth, "llama3", now); !blocked {
+		t.Fatal("effectiveBlock(llama3) = not blocked after restoring both cooling models, want blocked")
 	}
-	if blocked, _, _ := isAuthBlockedForModel(restoredAuth, "mistral", now); !blocked {
-		t.Fatal("isAuthBlockedForModel(mistral) = not blocked after restoring both cooling models, want blocked")
+	if blocked, _, _ := effectiveBlock(restoredAuth, "mistral", now); !blocked {
+		t.Fatal("effectiveBlock(mistral) = not blocked after restoring both cooling models, want blocked")
 	}
-	if blocked, _, _ := isAuthBlockedForModel(restoredAuth, "", now); !blocked {
-		t.Fatal("isAuthBlockedForModel(\"\") = selectable after restoring every registered model as cooling, want blocked (registry set is provably complete)")
+	if blocked, _, _ := effectiveBlock(restoredAuth, "", now); !blocked {
+		t.Fatal("effectiveBlock(\"\") = selectable after restoring every registered model as cooling, want blocked (registry set is provably complete)")
 	}
 	if !restoredAuth.Unavailable {
 		t.Fatal("restoredAuth.Unavailable = false after restoring every registered model as cooling, want true")
@@ -1143,8 +1143,8 @@ func TestRestoreCooldownStatesPartialModelSetStaysSelectable(t *testing.T) {
 	if !ok {
 		t.Fatal("restored auth not found")
 	}
-	if blocked, _, _ := isAuthBlockedForModel(restoredAuth, "", now); blocked {
-		t.Fatal("isAuthBlockedForModel(\"\") = blocked when the registry lists an unrestored sibling (mistral), want selectable - the restored set is not provably complete")
+	if blocked, _, _ := effectiveBlock(restoredAuth, "", now); blocked {
+		t.Fatal("effectiveBlock(\"\") = blocked when the registry lists an unrestored sibling (mistral), want selectable - the restored set is not provably complete")
 	}
 	if restoredAuth.Unavailable {
 		t.Fatal("restoredAuth.Unavailable = true when the restored model set is not provably complete, want false")
@@ -1250,19 +1250,19 @@ func TestUpdateAggregatedAvailabilityPreservesGenericNotFoundThroughSiblingSucce
 	afterShortDeadline := now.Add(31 * time.Second)
 	updateAggregatedAvailability(auth, afterShortDeadline)
 
-	if blocked, _, next := isAuthBlockedForModel(auth, "problem-model", afterShortDeadline); !blocked {
-		t.Fatalf("isAuthBlockedForModel(problem-model) = not blocked at %v after a sibling success, want blocked until %v (generic-404 NextRecoverAt) - got next=%v", afterShortDeadline, genericNotFoundRecoverAt, next)
+	if blocked, _, next := effectiveBlock(auth, "problem-model", afterShortDeadline); !blocked {
+		t.Fatalf("effectiveBlock(problem-model) = not blocked at %v after a sibling success, want blocked until %v (generic-404 NextRecoverAt) - got next=%v", afterShortDeadline, genericNotFoundRecoverAt, next)
 	}
-	if blocked, _, _ := isAuthBlockedForModel(auth, "sibling-model", afterShortDeadline); blocked {
-		t.Fatal("isAuthBlockedForModel(sibling-model) = blocked, want selectable")
+	if blocked, _, _ := effectiveBlock(auth, "sibling-model", afterShortDeadline); blocked {
+		t.Fatal("effectiveBlock(sibling-model) = blocked, want selectable")
 	}
 
 	// Confirm the deadline itself is honored: once genericNotFoundRecoverAt
 	// has actually passed, the model must become selectable again.
 	afterLongDeadline := genericNotFoundRecoverAt.Add(time.Second)
 	updateAggregatedAvailability(auth, afterLongDeadline)
-	if blocked, _, _ := isAuthBlockedForModel(auth, "problem-model", afterLongDeadline); blocked {
-		t.Fatal("isAuthBlockedForModel(problem-model) = still blocked after genericNotFoundRecoverAt has passed, want selectable")
+	if blocked, _, _ := effectiveBlock(auth, "problem-model", afterLongDeadline); blocked {
+		t.Fatal("effectiveBlock(problem-model) = still blocked after genericNotFoundRecoverAt has passed, want selectable")
 	}
 }
 
@@ -1377,20 +1377,20 @@ func TestRestoreCooldownStatesCredentialWideSurvivesCleanModelStates(t *testing.
 	if !restored.NextRetryAfter.Equal(deadline) {
 		t.Fatalf("restored auth.NextRetryAfter = %v, want %v", restored.NextRetryAfter, deadline)
 	}
-	if blocked, _, next := isAuthBlockedForModel(restored, "", now); !blocked || !next.Equal(deadline) {
-		t.Fatalf("isAuthBlockedForModel(auth, \"\", now) = (%v, _, %v), want (true, _, %v)", blocked, next, deadline)
+	if blocked, _, next := effectiveBlock(restored, "", now); !blocked || !next.Equal(deadline) {
+		t.Fatalf("effectiveBlock(auth, \"\", now) = (%v, _, %v), want (true, _, %v)", blocked, next, deadline)
 	}
 	// Every individual model must be blocked too - a credential-wide failure
 	// blocks everything, not just the aggregate query.
-	if blocked, _, _ := isAuthBlockedForModel(restored, "claude-opus", now); !blocked {
-		t.Fatal("isAuthBlockedForModel(auth, \"claude-opus\", now) = false, want true")
+	if blocked, _, _ := effectiveBlock(restored, "claude-opus", now); !blocked {
+		t.Fatal("effectiveBlock(auth, \"claude-opus\", now) = false, want true")
 	}
 
 	// Once the deadline has actually passed, the credential-wide block must
 	// lift - this is a deadline, not a permanent flag.
 	afterDeadline := deadline.Add(time.Second)
-	if blocked, _, _ := isAuthBlockedForModel(restored, "", afterDeadline); blocked {
-		t.Fatal("isAuthBlockedForModel(auth, \"\", afterDeadline) = true, want false once the credential-wide deadline has passed")
+	if blocked, _, _ := effectiveBlock(restored, "", afterDeadline); blocked {
+		t.Fatal("effectiveBlock(auth, \"\", afterDeadline) = true, want false once the credential-wide deadline has passed")
 	}
 }
 
