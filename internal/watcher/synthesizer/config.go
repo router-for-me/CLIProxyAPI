@@ -248,6 +248,15 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		// entry_provider_key attribute.
 		providerKey := attrs["provider_key"]
 		addClaudeEntryProviderKey(attrs, providerKey, ck)
+		// Stamp the row-level pool routing strategy so the conductor can
+		// activate aggressive in-pool failover per auth. The renderer already
+		// canonicalizes the store value; re-normalizing here also guards
+		// hand-written YAML that sets the carry-through field directly.
+		// Empty (unset/unknown) leaves the attribute absent, preserving the
+		// legacy global-strategy behavior.
+		if s := config.NormalizePoolRoutingStrategy(ck.UpstreamProviderStrategy); s != "" {
+			attrs[coreauth.AttributePoolStrategy] = s
+		}
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{
 			ID:         id,
@@ -383,10 +392,23 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if disableCooling {
 				metadata["disable_cooling"] = true
 			}
-			if compat.Priority != 0 {
+			// Entry priority takes precedence over the pool-level Priority;
+			// a nil entry priority inherits the pool value. An explicit
+			// entry *0 stamps "0" (explicit-tier-0 contract), while nil +
+			// pool 0 leaves the attribute absent (legacy behavior).
+			switch {
+			case entry.Priority != nil:
+				attrs["priority"] = strconv.Itoa(*entry.Priority)
+			case compat.Priority != 0:
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
 			addWeightToAttrs(entry.Weight, attrs)
+			// Stamp the pool-level routing strategy on every entry auth so
+			// the conductor can activate aggressive in-pool failover. Empty
+			// (unset/unknown) leaves the attribute absent.
+			if s := config.NormalizePoolRoutingStrategy(compat.Strategy); s != "" {
+				attrs[coreauth.AttributePoolStrategy] = s
+			}
 			if key != "" {
 				attrs["api_key"] = key
 			}
@@ -430,6 +452,11 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
+			}
+			// The fallback auth still belongs to the pool, so it carries the
+			// pool strategy the same way the entry auths would.
+			if s := config.NormalizePoolRoutingStrategy(compat.Strategy); s != "" {
+				attrs[coreauth.AttributePoolStrategy] = s
 			}
 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 				attrs["models_hash"] = hash

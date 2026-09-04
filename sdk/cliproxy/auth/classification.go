@@ -19,6 +19,7 @@ const (
 	AttributeConfigIndex      = "config_index"
 	AttributeEntryProviderKey = "entry_provider_key"
 	AttributePath             = "path"
+	AttributePoolStrategy     = "pool_strategy"
 	AttributeRuntimeOnly      = "runtime_only"
 	AttributeSource           = "source"
 	AttributeSourceBackend    = "source_backend"

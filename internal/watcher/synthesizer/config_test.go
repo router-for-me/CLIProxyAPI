@@ -1343,3 +1343,340 @@ func TestConfigSynthesizer_Claude_LegacyIDsHaveNoEntryProviderKey(t *testing.T) 
 		}
 	}
 }
+
+// intPtrForPriority is the local int-pointer helper used by the pool-strategy
+// tests below (config.OpenAICompatibilityAPIKey.Priority is a *int). Defined
+// per the package's test style: the weight tests build their own closure.
+func intPtrForPriority(value int) *int { return &value }
+
+// TestConfigSynthesizer_Claude_PoolStrategy covers stamping the pool routing
+// strategy onto every auth synthesized from a PG-rendered Claude pool: every
+// fan-out item carries the same `pool_strategy` attribute, while the priority
+// attribute follows each item's own (render-resolved) Priority and stays
+// absent when zero — preserving the legacy attribute contract.
+func TestConfigSynthesizer_Claude_PoolStrategy(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{
+					APIKey:                   "sk-ant-pool-a",
+					UpstreamProviderID:       7,
+					UpstreamProviderEntryID:  71,
+					UpstreamProviderStrategy: "round-robin",
+					Priority:                 10,
+				},
+				{
+					APIKey:                   "sk-ant-pool-b",
+					UpstreamProviderID:       7,
+					UpstreamProviderEntryID:  72,
+					UpstreamProviderStrategy: "round-robin",
+					Priority:                 5,
+				},
+				{
+					APIKey:                   "sk-ant-pool-c",
+					UpstreamProviderID:       7,
+					UpstreamProviderEntryID:  73,
+					UpstreamProviderStrategy: "round-robin",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 3 {
+		t.Fatalf("expected 3 auths, got %d", len(auths))
+	}
+
+	wantPriorities := []string{"10", "5", ""}
+	for i, auth := range auths {
+		if got := auth.Attributes[coreauth.AttributePoolStrategy]; got != "round-robin" {
+			t.Errorf("auth[%d].pool_strategy = %q, want %q", i, got, "round-robin")
+		}
+		if wantPriorities[i] == "" {
+			if v, ok := auth.Attributes["priority"]; ok {
+				t.Errorf("auth[%d].priority = %q, want attribute to be absent", i, v)
+			}
+		} else if got := auth.Attributes["priority"]; got != wantPriorities[i] {
+			t.Errorf("auth[%d].priority = %q, want %q", i, got, wantPriorities[i])
+		}
+	}
+}
+
+// TestConfigSynthesizer_Claude_PoolStrategy_LegacyItemAbsent asserts that a
+// legacy YAML-only Claude item (no upstream provider row, no strategy) never
+// gains a pool_strategy attribute: unset must keep the global routing
+// strategy and the historical hard-stop rotation behavior.
+func TestConfigSynthesizer_Claude_PoolStrategy_LegacyItemAbsent(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{APIKey: "legacy-yaml-key"},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if v, ok := auths[0].Attributes[coreauth.AttributePoolStrategy]; ok {
+		t.Errorf("pool_strategy = %q, want attribute to be absent", v)
+	}
+}
+
+// TestConfigSynthesizer_Claude_PoolStrategy_UnknownValueAbsent asserts that a
+// non-canonical, non-alias strategy value yields no pool_strategy attribute
+// (NormalizePoolRoutingStrategy returns "" for unknown values, and the
+// synthesizer skips stamping on empty).
+func TestConfigSynthesizer_Claude_PoolStrategy_UnknownValueAbsent(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{
+					APIKey:                   "sk-ant-unknown",
+					UpstreamProviderID:       9,
+					UpstreamProviderEntryID:  91,
+					UpstreamProviderStrategy: "bogus",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if v, ok := auths[0].Attributes[coreauth.AttributePoolStrategy]; ok {
+		t.Errorf("pool_strategy = %q, want attribute to be absent", v)
+	}
+}
+
+// TestConfigSynthesizer_Claude_PoolStrategy_AliasCanonicalized asserts that
+// alias values (e.g. "failover") canonicalize at stamp time: the renderer
+// already canonicalizes, but hand-written YAML may set the carry-through
+// field directly, so the synthesizer re-normalizes as a second gate.
+func TestConfigSynthesizer_Claude_PoolStrategy_AliasCanonicalized(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{
+					APIKey:                   "sk-ant-alias",
+					UpstreamProviderID:       11,
+					UpstreamProviderEntryID:  111,
+					UpstreamProviderStrategy: "failover",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got := auths[0].Attributes[coreauth.AttributePoolStrategy]; got != "round-robin" {
+		t.Errorf("pool_strategy = %q, want %q", got, "round-robin")
+	}
+}
+
+// TestConfigSynthesizer_OpenAICompat_PoolStrategyAndEntryPriority covers the
+// OpenAI-compat pool stamping: every entry auth carries the pool's
+// pool_strategy attribute, and the per-entry priority takes precedence over
+// the pool-level Priority, which remains the fallback for entries without
+// their own tier.
+func TestConfigSynthesizer_OpenAICompat_PoolStrategyAndEntryPriority(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:     "pool",
+				BaseURL:  "https://pool.example.com/v1",
+				Strategy: "fill-first",
+				// Non-zero pool priority makes the entry-2 fallback observable.
+				Priority: 3,
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: "k1", Priority: intPtrForPriority(10)},
+					{APIKey: "k2"},
+				},
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths, got %d", len(auths))
+	}
+
+	wantPriorities := []string{"10", "3"}
+	for i, auth := range auths {
+		if got := auth.Attributes[coreauth.AttributePoolStrategy]; got != "fill-first" {
+			t.Errorf("auth[%d].pool_strategy = %q, want %q", i, got, "fill-first")
+		}
+		if got := auth.Attributes["priority"]; got != wantPriorities[i] {
+			t.Errorf("auth[%d].priority = %q, want %q", i, got, wantPriorities[i])
+		}
+	}
+}
+
+// TestConfigSynthesizer_OpenAICompat_PoolStrategy_ExplicitEntryZero asserts
+// the explicit-tier-0 contract: an entry with a non-nil Priority of 0 must
+// stamp priority "0" rather than falling back to the pool-level Priority.
+func TestConfigSynthesizer_OpenAICompat_PoolStrategy_ExplicitEntryZero(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:     "pool-zero",
+				BaseURL:  "https://pool-zero.example.com/v1",
+				Strategy: "fill-first",
+				Priority: 3,
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: "k-explicit-zero", Priority: intPtrForPriority(0)},
+				},
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got := auths[0].Attributes["priority"]; got != "0" {
+		t.Errorf("priority = %q, want %q (explicit entry zero must not fall back to pool priority)", got, "0")
+	}
+}
+
+// TestConfigSynthesizer_OpenAICompat_PoolStrategy_NilEntryAndZeroPool asserts
+// that when the entry priority is nil AND the pool priority is zero, no
+// priority attribute is stamped — matching the legacy non-zero stamping rule.
+func TestConfigSynthesizer_OpenAICompat_PoolStrategy_NilEntryAndZeroPool(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:     "pool-plain",
+				BaseURL:  "https://pool-plain.example.com/v1",
+				Strategy: "round-robin",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: "k-plain"},
+				},
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got := auths[0].Attributes[coreauth.AttributePoolStrategy]; got != "round-robin" {
+		t.Errorf("pool_strategy = %q, want %q", got, "round-robin")
+	}
+	if v, ok := auths[0].Attributes["priority"]; ok {
+		t.Errorf("priority = %q, want attribute to be absent", v)
+	}
+}
+
+// TestConfigSynthesizer_OpenAICompat_PoolStrategy_NoStrategyAbsent asserts
+// that a pool with no strategy leaves pool_strategy absent on every entry
+// auth, keeping the global routing strategy behavior.
+func TestConfigSynthesizer_OpenAICompat_PoolStrategy_NoStrategyAbsent(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:    "pool-no-strategy",
+				BaseURL: "https://pool-no-strategy.example.com/v1",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: "k-no-strategy"},
+				},
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if v, ok := auths[0].Attributes[coreauth.AttributePoolStrategy]; ok {
+		t.Errorf("pool_strategy = %q, want attribute to be absent", v)
+	}
+}
+
+// TestConfigSynthesizer_OpenAICompat_PoolStrategy_FallbackAuth covers the
+// zero-entries fallback path: a pool with a strategy but no API-key entries
+// still synthesizes a (credential-less) pool auth, and that auth belongs to
+// the pool too, so it carries the pool_strategy attribute. The fallback has
+// no entry priority; its priority stamping follows the pool-level value.
+func TestConfigSynthesizer_OpenAICompat_PoolStrategy_FallbackAuth(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:     "pool-fallback",
+				BaseURL:  "https://pool-fallback.example.com/v1",
+				Strategy: "fill-first",
+				Priority: 2,
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got := auths[0].Attributes[coreauth.AttributePoolStrategy]; got != "fill-first" {
+		t.Errorf("pool_strategy = %q, want %q", got, "fill-first")
+	}
+	// Pool priority stamping on the fallback path is unchanged.
+	if got := auths[0].Attributes["priority"]; got != "2" {
+		t.Errorf("priority = %q, want %q", got, "2")
+	}
+}
