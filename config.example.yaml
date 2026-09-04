@@ -811,6 +811,25 @@ nonstream-keepalive-interval: 0
 #         - "max_tokens_exceeded"
 #       action: "stop"
 
+# Optional thinking effort mapping
+# Rules are evaluated top-to-bottom; the first complete match wins and mapping is applied once.
+# Without a matching rule, the proxy preserves its existing effort validation and conversion behavior.
+# The target value is forced after source validation, so provider-native values such as "ultra"
+# do not need to appear in the model capability registry. Unsupported values may be rejected upstream.
+# "ultra" remains mapping-output-only: it is not a valid incoming effort or model suffix.
+# thinking:
+#   effort-mapping:
+#     - from: "max"
+#       to: "ultra"
+#       source-protocol: "claude" # optional; empty matches any inbound protocol
+#       target-protocol: "codex" # optional; empty matches any outbound protocol
+#       target-provider: "codex" # optional; empty matches any provider/executor
+#       models: # optional; empty matches all models; exact names and "*" wildcards are supported
+#         - "gpt-5.5"
+#         - "gpt-5.6-*"
+# The model scope matches either the resolved upstream model or the client-requested alias,
+# excluding any thinking suffix. Existing payload.override rules run later and retain final authority.
+
 # Optional payload configuration
 # payload:
 #   default: # Default rules only set parameters when they are missing in the payload.

@@ -674,7 +674,7 @@ func (e *CodexExecutor) prepareCodexOpenAIImageBody(body []byte, req cliproxyexe
 		mainModel = codexOpenAIImagesMainModel
 	}
 	var errThinking error
-	out, errThinking = helps.ApplyThinkingWithSourcePayload(out, body, body, mainModel, codexOpenAIImageSourceFormat, "codex", e.Identifier())
+	out, errThinking = helps.ApplyThinkingWithSourcePayload(e.cfg, opts, out, body, body, mainModel, codexOpenAIImageSourceFormat, "codex", e.Identifier())
 	if errThinking != nil {
 		return nil, errThinking
 	}

@@ -163,7 +163,14 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 //	result, err := thinking.ApplyThinking(body, "gemini-2.5-pro", "gemini", "gemini", "gemini")
 func ApplyThinking(body []byte, model string, fromFormat string, toFormat string, providerKey string) ([]byte, error) {
 	summaryConfig := ExtractSummaryConfig(body, toFormat)
-	return applyThinking(body, nil, model, fromFormat, toFormat, providerKey, nil, false, summaryConfig)
+	return applyThinking(body, nil, model, fromFormat, toFormat, providerKey, nil, false, summaryConfig, ApplyOptions{})
+}
+
+// ApplyThinkingWithOptions applies thinking configuration with optional runtime
+// policies (e.g. effort mapping). It mirrors ApplyThinking's summary handling.
+func ApplyThinkingWithOptions(body []byte, model string, fromFormat string, toFormat string, providerKey string, options ApplyOptions) ([]byte, error) {
+	summaryConfig := ExtractSummaryConfig(body, toFormat)
+	return applyThinking(body, nil, model, fromFormat, toFormat, providerKey, nil, false, summaryConfig, options)
 }
 
 // ApplyThinkingWithSummary applies canonical thinking effort while preserving
@@ -172,7 +179,14 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 // a target Claude body can temporarily lack display while disabled thinking is
 // being rewritten by a model suffix.
 func ApplyThinkingWithSummary(body []byte, model string, fromFormat string, toFormat string, providerKey string, summaryConfig SummaryConfig) ([]byte, error) {
-	return applyThinking(body, nil, model, fromFormat, toFormat, providerKey, nil, false, summaryConfig)
+	return applyThinking(body, nil, model, fromFormat, toFormat, providerKey, nil, false, summaryConfig, ApplyOptions{})
+}
+
+// ApplyThinkingWithSummaryAndOptions applies canonical thinking effort with
+// optional runtime policies while preserving summary visibility from the
+// original source request.
+func ApplyThinkingWithSummaryAndOptions(body []byte, model string, fromFormat string, toFormat string, providerKey string, summaryConfig SummaryConfig, options ApplyOptions) ([]byte, error) {
+	return applyThinking(body, nil, model, fromFormat, toFormat, providerKey, nil, false, summaryConfig, options)
 }
 
 // ApplyThinkingWithModelInfo applies thinking with the exact configured model
@@ -190,10 +204,17 @@ func ApplyThinkingWithModelInfo(body, sourceBody []byte, model string, fromForma
 // definition with a summary intent already resolved across source translation
 // and plugin normalization.
 func ApplyThinkingWithModelInfoAndSummary(body, sourceBody []byte, model string, fromFormat string, toFormat string, providerKey string, modelInfo *registry.ModelInfo, summaryConfig SummaryConfig) ([]byte, error) {
-	return applyThinking(body, sourceBody, model, fromFormat, toFormat, providerKey, modelInfo, true, summaryConfig)
+	return applyThinking(body, sourceBody, model, fromFormat, toFormat, providerKey, modelInfo, true, summaryConfig, ApplyOptions{})
 }
 
-func applyThinking(body, sourceBody []byte, model string, fromFormat string, toFormat string, providerKey string, resolvedModelInfo *registry.ModelInfo, modelInfoResolved bool, summaryConfig SummaryConfig) ([]byte, error) {
+// ApplyThinkingWithModelInfoAndSummaryAndOptions applies the exact configured
+// model definition with optional runtime policies and a summary intent already
+// resolved across source translation and plugin normalization.
+func ApplyThinkingWithModelInfoAndSummaryAndOptions(body, sourceBody []byte, model string, fromFormat string, toFormat string, providerKey string, modelInfo *registry.ModelInfo, summaryConfig SummaryConfig, options ApplyOptions) ([]byte, error) {
+	return applyThinking(body, sourceBody, model, fromFormat, toFormat, providerKey, modelInfo, true, summaryConfig, options)
+}
+
+func applyThinking(body, sourceBody []byte, model string, fromFormat string, toFormat string, providerKey string, resolvedModelInfo *registry.ModelInfo, modelInfoResolved bool, summaryConfig SummaryConfig, options ApplyOptions) ([]byte, error) {
 	providerFormat := strings.ToLower(strings.TrimSpace(toFormat))
 	if modelInfoResolved && providerFormat == "openai-response" {
 		providerFormat = "codex"
@@ -232,7 +253,7 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 	// Unknown models are treated as user-defined so thinking config can still be applied.
 	// The upstream service is responsible for validating the configuration.
 	if IsUserDefinedModel(modelInfo) {
-		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, providerKey, suffixResult, summaryConfig)
+		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, providerKey, suffixResult, summaryConfig, options)
 	}
 	if modelInfo.Thinking == nil {
 		config := extractThinkingConfig(body, providerFormat)
@@ -297,6 +318,25 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 		}
 		return applySummaryConfigForProvider(body, providerFormat, baseModel, providerKey, modelInfo, summaryConfig), nil
 	}
+
+	// Effort mapping selection uses the canonical input effort captured before any
+	// high-intent clamp so a rule keyed on "max" still matches when a cross-protocol
+	// clamp would otherwise rewrite the level. The mapped destination is forced onto
+	// the validated config after standard validation runs.
+	var selectedMapping ThinkingConfig
+	mappingSelected := false
+	if len(options.EffortMapping) > 0 {
+		if inputEffort, ok := canonicalNamedEffort(config); ok {
+			selectedMapping, mappingSelected = selectEffortMapping(options.EffortMapping, inputEffort, effortMappingContext{
+				SourceProtocol: fromFormat,
+				TargetProtocol: providerFormat,
+				TargetProvider: providerKey,
+				ResolvedModel:  baseModel,
+				RequestedModel: options.RequestedModel,
+			})
+		}
+	}
+
 	if modelInfoResolved && config.Mode == ModeLevel && modelInfo != nil && modelInfo.Thinking != nil && shouldMapConfiguredHighIntent(fromFormat, providerFormat, modelInfo) {
 		config.Level = mapConfiguredHighIntent(config.Level, modelInfo)
 	}
@@ -324,6 +364,14 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 		return body, nil
 	}
 
+	// Force the mapped destination effort. The mapping was selected from the
+	// pre-clamp input effort and provider-native values (e.g. "ultra") do not need
+	// to appear in the model capability registry; modelInfoForMappedConfig below
+	// lets the provider applier accept the forced level.
+	if mappingSelected {
+		*validated = selectedMapping
+	}
+
 	log.WithFields(log.Fields{
 		"provider": providerFormat,
 		"model":    modelInfo.ID,
@@ -334,7 +382,7 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 
 	// 6. Apply configuration using provider-specific applier, then restore the
 	// target summary intent that was explicit before suffix processing.
-	applied, err := applier.Apply(body, *validated, modelInfo)
+	applied, err := applier.Apply(body, *validated, modelInfoForMappedConfig(modelInfo, *validated, mappingSelected))
 	if err != nil {
 		return applied, err
 	}
@@ -437,7 +485,7 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 
 // applyUserDefinedModel applies thinking configuration for user-defined models
 // without ThinkingSupport validation.
-func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromFormat, toFormat, providerKey string, suffixResult SuffixResult, summaryConfig SummaryConfig) ([]byte, error) {
+func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromFormat, toFormat, providerKey string, suffixResult SuffixResult, summaryConfig SummaryConfig, options ApplyOptions) ([]byte, error) {
 	// Get model ID for logging
 	modelID := ""
 	if modelInfo != nil {
@@ -490,7 +538,24 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 		return body, nil
 	}
 
+	// Capture the canonical input effort before user-defined normalization can
+	// convert a level into a numeric budget, so an effort-mapping rule keyed on the
+	// original level name still matches.
+	inputEffort, inputEffortOK := canonicalNamedEffort(config)
 	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
+	mapped := false
+	if inputEffortOK {
+		if mappedConfig, ok := selectEffortMapping(options.EffortMapping, inputEffort, effortMappingContext{
+			SourceProtocol: fromFormat,
+			TargetProtocol: toFormat,
+			TargetProvider: providerKey,
+			ResolvedModel:  suffixResult.ModelName,
+			RequestedModel: options.RequestedModel,
+		}); ok {
+			config = mappedConfig
+			mapped = true
+		}
+	}
 	log.WithFields(log.Fields{
 		"provider": toFormat,
 		"model":    modelID,
@@ -498,7 +563,7 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 		"budget":   config.Budget,
 		"level":    config.Level,
 	}).Debug("thinking: processed config to apply |")
-	applied, err := applier.Apply(body, config, modelInfo)
+	applied, err := applier.Apply(body, config, modelInfoForMappedConfig(modelInfo, config, mapped))
 	if err != nil {
 		return applied, err
 	}
@@ -506,6 +571,24 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 		return applied, nil
 	}
 	return applySummaryConfigForProvider(applied, toFormat, modelID, providerKey, modelInfo, summaryConfig), nil
+}
+
+// modelInfoForMappedConfig returns a shallow copy of modelInfo whose thinking
+// support advertises the forced destination level, so a provider applier accepts
+// a mapped provider-native level (e.g. "ultra") that is not registered as a
+// canonical capability. The original modelInfo is returned unchanged when no
+// mapping was applied or the level is already supported.
+func modelInfoForMappedConfig(modelInfo *registry.ModelInfo, config ThinkingConfig, mapped bool) *registry.ModelInfo {
+	if !mapped || config.Mode != ModeLevel || modelInfo == nil || modelInfo.Thinking == nil || HasLevel(modelInfo.Thinking.Levels, string(config.Level)) {
+		return modelInfo
+	}
+
+	modelCopy := *modelInfo
+	supportCopy := *modelInfo.Thinking
+	supportCopy.Levels = append([]string(nil), modelInfo.Thinking.Levels...)
+	supportCopy.Levels = append(supportCopy.Levels, string(config.Level))
+	modelCopy.Thinking = &supportCopy
+	return &modelCopy
 }
 
 func normalizeUserDefinedConfig(config ThinkingConfig, fromFormat, toFormat string) ThinkingConfig {

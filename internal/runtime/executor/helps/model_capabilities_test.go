@@ -34,7 +34,7 @@ func (e *configuredThinkingExecutor) Execute(_ context.Context, _ *cliproxyauth.
 		body = sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FormatClaude, req.Model, req.Payload, opts.Stream)
 		e.translatedBody = append(e.translatedBody[:0], body...)
 	}
-	out, err := helps.ApplyRequestThinking(body, req, opts, opts.SourceFormat.String(), "claude", "claude")
+	out, err := helps.ApplyRequestThinking(nil, body, req, opts, opts.SourceFormat.String(), "claude", "claude")
 	return cliproxyexecutor.Response{Payload: out}, err
 }
 

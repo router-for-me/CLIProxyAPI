@@ -7,6 +7,7 @@ import (
 	helps "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/gemini"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -61,6 +62,8 @@ func TestApplyThinkingWithSourcePayloadPreservesNormalizerSummaryRemoval(t *test
 	}
 
 	out, err := helps.ApplyThinkingWithSourcePayload(
+		nil,
+		cliproxyexecutor.Options{},
 		translated,
 		source,
 		source,
@@ -83,6 +86,8 @@ func TestApplyThinkingWithSourcePayloadPreservesOriginalOnlySummary(t *testing.T
 	body := []byte(`{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}`)
 
 	out, err := helps.ApplyThinkingWithSourcePayload(
+		nil,
+		cliproxyexecutor.Options{},
 		body,
 		currentSource,
 		originalSource,
