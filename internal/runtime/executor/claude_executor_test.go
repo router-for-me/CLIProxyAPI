@@ -5345,6 +5345,119 @@ func TestResolveClaudeKeyConfigMatchesHeaderNamesAcrossReload(t *testing.T) {
 	}
 }
 
+func TestResolveClaudeKeyConfigKeepsKeylessCredentialsSeparate(t *testing.T) {
+	for _, configIndex := range []string{"", "0", "1"} {
+		t.Run("config index="+configIndex, func(t *testing.T) {
+			cfg := &config.Config{ClaudeKey: []config.ClaudeKey{
+				{APIKey: "shared-key", BaseURL: "https://shared.example"},
+				{BaseURL: "https://shared.example"},
+			}}
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"source":       "config:claude[keyless]",
+				"config_index": configIndex,
+				"base_url":     "https://shared.example",
+			}}
+			if got := resolveClaudeKeyConfig(cfg, auth); got != &cfg.ClaudeKey[1] {
+				t.Fatalf("resolveClaudeKeyConfig() = %p, want keyless credential %p", got, &cfg.ClaudeKey[1])
+			}
+			cfg.ClaudeKey = cfg.ClaudeKey[:1]
+			if got := resolveClaudeKeyConfig(cfg, auth); got != nil {
+				t.Fatalf("resolveClaudeKeyConfig() = %p, want nil without a matching keyless entry", got)
+			}
+		})
+	}
+}
+
+func TestResolveClaudeKeyConfigPreservesCompleteIdentityAcrossReload(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*config.ClaudeKey)
+	}{
+		{name: "API key casing", change: func(entry *config.ClaudeKey) { entry.APIKey = "SHARED-key" }},
+		{name: "endpoint path casing", change: func(entry *config.ClaudeKey) { entry.BaseURL = "https://shared.example/Relay" }},
+		{name: "prefix casing", change: func(entry *config.ClaudeKey) { entry.Prefix = "Route" }},
+		{name: "proxy password casing", change: func(entry *config.ClaudeKey) { entry.ProxyURL = "https://user:Secret@proxy.example" }},
+		{name: "header value casing", change: func(entry *config.ClaudeKey) { entry.Headers = map[string]string{"X-Relay-Account": "SECOND"} }},
+	} {
+		for _, configIndex := range []string{"", "0", "1"} {
+			t.Run(test.name+"/index="+configIndex, func(t *testing.T) {
+				entry := config.ClaudeKey{
+					APIKey: "shared-key", BaseURL: "https://shared.example/relay",
+					Prefix: "route", ProxyURL: "https://user:secret@proxy.example",
+					Headers: map[string]string{"X-Relay-Account": "second"},
+				}
+				cfg := &config.Config{ClaudeKey: []config.ClaudeKey{entry, entry}}
+				test.change(&cfg.ClaudeKey[0])
+				auth := &cliproxyauth.Auth{
+					Prefix: "route", ProxyURL: "https://user:secret@proxy.example",
+					Attributes: map[string]string{
+						"source": "config:claude[reloaded]", "config_index": configIndex,
+						"api_key": "shared-key", "base_url": "https://shared.example/relay",
+						"header:X-Relay-Account": "second",
+					},
+				}
+				if got := resolveClaudeKeyConfig(cfg, auth); got != &cfg.ClaudeKey[1] {
+					t.Fatalf("resolveClaudeKeyConfig() = %p, want original credential %p", got, &cfg.ClaudeKey[1])
+				}
+				cfg.ClaudeKey = cfg.ClaudeKey[:1]
+				if got := resolveClaudeKeyConfig(cfg, auth); got != nil {
+					t.Fatalf("resolveClaudeKeyConfig() = %p, want nil after the original identity was removed", got)
+				}
+			})
+		}
+	}
+}
+
+func TestResolveClaudeKeyConfigLimitsLegacyFallbackToUnscopedAuths(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		source  string
+		baseURL string
+		prefix  string
+		proxy   string
+		header  string
+		noKey   bool
+		want    bool
+	}{
+		{name: "legacy key-only", want: true},
+		{name: "legacy explicit matching endpoint", baseURL: "https://gateway.example", want: true},
+		{name: "legacy explicit other endpoint", baseURL: "https://other.example"},
+		{name: "config default endpoint stays distinct", source: "config:claude[current]"},
+		{name: "config empty identity stays distinct", source: "config:claude[current]", baseURL: "https://gateway.example"},
+		{name: "file explicit prefix", source: "file:claude", baseURL: "https://gateway.example", prefix: "other"},
+		{name: "file explicit proxy", source: "file:claude", baseURL: "https://gateway.example", proxy: "https://other-proxy.example"},
+		{name: "file explicit headers", source: "file:claude", baseURL: "https://gateway.example", header: "other"},
+		{name: "file partial identity", source: "file:claude", baseURL: "https://gateway.example", prefix: "route"},
+		{name: "file complete identity", source: "file:claude", baseURL: "https://gateway.example", prefix: "route", proxy: "https://proxy.example", header: "second", want: true},
+		{name: "no key or endpoint", noKey: true},
+		{name: "keyless cannot use keyed entry", baseURL: "https://gateway.example", noKey: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
+				APIKey: "shared-key", BaseURL: "https://gateway.example",
+				Prefix: "route", ProxyURL: "https://proxy.example",
+				Headers: map[string]string{"X-Relay-Account": "second"},
+			}}}
+			auth := &cliproxyauth.Auth{
+				Prefix: test.prefix, ProxyURL: test.proxy,
+				Attributes: map[string]string{
+					"source": test.source, "config_index": "0", "base_url": test.baseURL,
+				},
+			}
+			if !test.noKey {
+				auth.Attributes["api_key"] = "shared-key"
+			}
+			if test.header != "" {
+				auth.Attributes["header:X-Relay-Account"] = test.header
+			}
+			got := resolveClaudeKeyConfig(cfg, auth)
+			if (got == &cfg.ClaudeKey[0]) != test.want {
+				t.Fatalf("resolveClaudeKeyConfig() = %p, want matching entry: %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmitted(t *testing.T) {
 	cfg := &config.Config{
 		ClaudeKey: []config.ClaudeKey{{
