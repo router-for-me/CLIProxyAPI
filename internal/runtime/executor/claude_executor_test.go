@@ -1633,6 +1633,49 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_BypassesUnknownModelSignatureMa
 	}
 }
 
+func TestSanitizeClaudeMessagesForClaudeUpstream_RepairsDanglingToolUse(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]},
+			{"role":"user","content":"stop and look at this"}
+		]
+	}`)
+
+	t.Run("claude family", func(t *testing.T) {
+		output := sanitizeClaudeMessagesForClaudeUpstreamWithDebug(context.Background(), body, "claude-sonnet-4-5")
+		assertSanitizedInterruptedToolResult(t, output, "t1", "stop and look at this")
+	})
+	t.Run("non-claude messages upstream", func(t *testing.T) {
+		output := sanitizeClaudeMessagesForClaudeUpstreamWithDebug(context.Background(), body, "kimi-k2.5")
+		assertSanitizedInterruptedToolResult(t, output, "t1", "stop and look at this")
+	})
+}
+
+func assertSanitizedInterruptedToolResult(t *testing.T, output []byte, toolUseID, userText string) {
+	t.Helper()
+	messages := gjson.GetBytes(output, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("message count = %d, want 2: %s", len(messages), output)
+	}
+	blocks := messages[1].Get("content").Array()
+	if len(blocks) != 2 {
+		t.Fatalf("user blocks = %d, want 2: %s", len(blocks), messages[1].Raw)
+	}
+	if blocks[0].Get("type").String() != "tool_result" || blocks[0].Get("tool_use_id").String() != toolUseID {
+		t.Fatalf("expected synth tool_result for %s: %s", toolUseID, blocks[0].Raw)
+	}
+	if !blocks[0].Get("is_error").Bool() {
+		t.Fatalf("synth tool_result must set is_error: %s", blocks[0].Raw)
+	}
+	if blocks[0].Get("content").String() != "[operation interrupted by user]" {
+		t.Fatalf("synth content = %q", blocks[0].Get("content").String())
+	}
+	if blocks[1].Get("type").String() != "text" || blocks[1].Get("text").String() != userText {
+		t.Fatalf("user text not preserved: %s", blocks[1].Raw)
+	}
+}
+
 func TestClaudeExecutor_ExecuteBypassesSignatureSanitizerForUnknownModel(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
