@@ -75,6 +75,19 @@ const FETCHABLE_TYPES = new Set([
 // "https://api.example.com" passes — only the prefix is checked.
 const URL_RE = /^(https?:\/\/|socks5h?:\/\/|direct|none)/i;
 
+// ROUTING_STRATEGY_OPTIONS mirrors the backend's canonical pool strategies.
+// 'failover' and 'priority' are Model-Routes-compatible aliases the backend
+// canonicalizes on save; the hint documents the aliasing so the operator is
+// not surprised by the round-trip value.
+const ROUTING_STRATEGY_OPTIONS = [
+  { value: '', label: 'Default (global)' },
+  { value: 'round-robin', label: 'Round-robin' },
+  { value: 'weighted-round-robin', label: 'Weighted round-robin' },
+  { value: 'fill-first', label: 'Fill-first (priority)' },
+  { value: 'failover', label: 'Failover' },
+];
+const ROUTING_STRATEGY_HINT = 'Empty = follow the global routing strategy. Any value enables aggressive in-pool failover: on any entry error the next entry is tried first; errors surface only after the whole pool is exhausted. Fill-first ≈ priority, failover ≈ round-robin within a priority tier.';
+
 // ============================================================================
 // Page
 // ============================================================================
@@ -1327,6 +1340,14 @@ export function buildSchemas() {
     hint: 'Optional stable identifier for this upstream. Lower-cased to form its routing key; shown in the provider list.',
   };
 
+  // routingStrategyField is shared by the two entry-bearing providers
+  // (claude-api-key, openai-compatibility): it selects the in-pool selection
+  // strategy for the api_key_entries pool.
+  const routingStrategyField = {
+    name: 'routing_strategy', label: 'Routing strategy', type: 'select',
+    options: ROUTING_STRATEGY_OPTIONS, hint: ROUTING_STRATEGY_HINT,
+  };
+
   const claudeCloakSection = {
     title: 'Cloak',
     hint: 'Disguise API requests to appear as the official Claude Code CLI (Claude only).',
@@ -1369,6 +1390,9 @@ export function buildSchemas() {
           // override blank.
           { name: 'api_key_entries', label: 'API key entries', type: 'api_key_entries',
             hint: 'Multiple keys form a round-robin pool for this provider. Per-entry proxy overrides the row-level proxy when set.' },
+          // Governs the entry pool above — kept adjacent to the editor it
+          // controls.
+          routingStrategyField,
         ]},
         { title: 'Endpoint', fields: commonEndpoint },
         { title: 'Routing', fields: commonRouting, fetchModels: true },
@@ -1402,6 +1426,8 @@ export function buildSchemas() {
         { title: 'Routing', fields: [
           { name: 'priority', label: 'Priority', type: 'number', min: 0, placeholder: '0',
             hint: 'Higher value is preferred when multiple providers match.' },
+          // In-pool selection strategy for the Behavior api_key_entries pool.
+          routingStrategyField,
           { name: 'models', label: 'Models', type: 'openai_models',
             hint: 'Map client-facing aliases to upstream model names. Supports image + modality flags.' },
           { name: 'excluded_models', label: 'Excluded models', type: 'chips',
@@ -3126,8 +3152,9 @@ function ImportOAuthProviderModal({ existingProviderKeys = new Set(), onClose, o
 // APIKeyEntriesEditor — multi-row editor for OpenAI Compatibility and Claude
 // (API Key) api_key_entries. Each row carries an optional normalised
 // identity (also known as the entry provider key), a masked API key, an
-// optional proxy URL (override of the row-level proxy when filled), and an
-// optional weight for weighted round-robin. The persisted child-row id is
+// optional proxy URL (override of the row-level proxy when filled), an
+// optional weight for weighted round-robin, and an optional selection tier
+// (priority) for fill-first pools. The persisted child-row id is
 // round-tripped so the backend can update rows in place rather than
 // deleting and reinserting them.
 function APIKeyEntriesEditor({ entries, onChange, error = '' }) {
@@ -3136,7 +3163,7 @@ function APIKeyEntriesEditor({ entries, onChange, error = '' }) {
     onChange(safe.map((e, i) => (i === idx ? { ...e, ...patch } : e)));
   }
   function add() {
-    onChange([...safe, { api_key: '', proxy_url: '', name: '', id: 0, weight: '' }]);
+    onChange([...safe, { api_key: '', proxy_url: '', name: '', id: 0, weight: '', priority: '' }]);
   }
   function remove(idx) { onChange(safe.filter((_, i) => i !== idx)); }
 
@@ -3203,6 +3230,18 @@ function APIKeyEntriesEditor({ entries, onChange, error = '' }) {
                 aria-invalid={!!rowErr.weight}
                 data-testid={`api-key-entry-weight-${idx}`}
               />
+              <input
+                type="text"
+                inputMode="numeric"
+                value={e.priority ?? ''}
+                onChange={(ev) => update(idx, { priority: ev.target.value })}
+                placeholder="priority"
+                title="Selection tier within this pool. Blank = inherit the row priority. Higher tiers are served first and descend on cooldown."
+                spellCheck={false}
+                aria-label="API key entry priority"
+                aria-invalid={!!rowErr.priority}
+                data-testid={`api-key-entry-priority-${idx}`}
+              />
               <button
                 type="button"
                 className="list-editor__remove"
@@ -3219,6 +3258,9 @@ function APIKeyEntriesEditor({ entries, onChange, error = '' }) {
             )}
             {rowErr.weight && (
               <div className="form__error" role="alert">{rowErr.weight}</div>
+            )}
+            {rowErr.priority && (
+              <div className="form__error" role="alert">{rowErr.priority}</div>
             )}
           </div>
         );
@@ -3272,6 +3314,17 @@ export function validateAPIKeyEntries(entries) {
         errs.weight = `Weight must be a whole number between 1 and ${MAX_ENTRY_WEIGHT}.`;
       }
     }
+    // Priority: blank means inherit the row-level priority. Unlike weight,
+    // any integer is legal — including 0 (an explicit tier) and negatives
+    // (below default) — matching the Go *int semantics.
+    const prioRaw = e && e.priority;
+    if (prioRaw !== undefined && prioRaw !== null && String(prioRaw).trim() !== '') {
+      const s = String(prioRaw).trim();
+      const n = Number(s);
+      if (!Number.isFinite(n) || !/^-?\d+$/.test(s) || Math.floor(n) !== n) {
+        errs.priority = 'Priority must be a whole number (blank = inherit the row priority).';
+      }
+    }
     if (Object.keys(errs).length > 0) out[i] = errs;
     if (trimmed !== '' && !errs.name) {
       seenNames.set(normalised, i);
@@ -3298,8 +3351,9 @@ function idHintForIdentity(e) {
 function hydrateEntries(src) {
   // Shared row-shape used by both OpenAI Compatibility and Claude (API Key).
   // Round-trip the persisted child-row id, the server-normalised name, the
-  // optional per-entry proxy override, and the optional weight so subsequent
-  // saves update rows in place rather than deleting and reinserting them.
+  // optional per-entry proxy override, the optional weight, and the optional
+  // selection tier (priority) so subsequent saves update rows in place
+  // rather than deleting and reinserting them.
   if (!Array.isArray(src)) return [];
   return src.map((e) => ({
     id: Number(e && e.id) || 0,
@@ -3309,6 +3363,10 @@ function hydrateEntries(src) {
     // Weight is optional; editors leave it blank for the "default" affordance.
     // Treat null/undefined as blank so the editor shows an empty input.
     weight: e && e.weight !== undefined && e.weight !== null ? e.weight : '',
+    // Priority (selection tier) is optional too; null/undefined inherits the
+    // row-level priority and renders as a blank input. Unlike weight, an
+    // explicit 0 is meaningful (tier 0) and must survive the round-trip.
+    priority: e && e.priority !== undefined && e.priority !== null ? e.priority : '',
   }));
 }
 
@@ -3328,6 +3386,10 @@ export function buildForm(providerType, initial, carryOver) {
     email: src.email ?? '',
     file_name: src.file_name ?? '',
     priority: carry.priority ?? src.priority ?? 0,
+    // In-pool routing strategy for entry-bearing providers. Blank keeps the
+    // row unset so the global routing.strategy applies; carried across
+    // provider-type switches like the row-level priority above.
+    routing_strategy: carry.routing_strategy ?? src.routing_strategy ?? '',
     disabled: src.disabled ?? false,
     websockets: src.websockets ?? false,
     rebuild_mid_system_message: src.rebuild_mid_system_message ?? false,
@@ -3383,6 +3445,7 @@ export function buildForm(providerType, initial, carryOver) {
       api_key: src.api_key,
       proxy_url: '',
       weight: '',
+      priority: '',
     }];
   }
 
@@ -3465,6 +3528,10 @@ export function buildPayload(form, providerType) {
     // inserts. Blank entries (no api_key) are filtered out so a Save
     // never resends rows the operator cleared.
     payload.name = (form.name || '').trim();
+    // Routing strategy: only emitted when the operator picked one; empty
+    // keeps the row unset so the global routing.strategy applies.
+    const strategy = (form.routing_strategy || '').trim();
+    if (strategy) payload.routing_strategy = strategy;
     payload.api_key_entries = (Array.isArray(form.api_key_entries) ? form.api_key_entries : [])
       .filter((e) => e && e.api_key && String(e.api_key).trim())
       .map((e) => {
@@ -3486,6 +3553,17 @@ export function buildPayload(form, providerType) {
           const n = Number(s);
           if (Number.isFinite(n) && /^-?\d+$/.test(s) && n >= 1 && n <= MAX_ENTRY_WEIGHT && Math.floor(n) === n) {
             entry.weight = Math.trunc(n);
+          }
+        }
+        // Priority: emitted when filled and a whole number; blank = inherit
+        // the row-level priority. Explicit 0 is meaningful (tier 0) and must
+        // be sent as 0, not dropped — unlike weight, where 0 is excluded.
+        const prioRaw = e.priority;
+        if (prioRaw !== undefined && prioRaw !== null && String(prioRaw).trim() !== '') {
+          const s = String(prioRaw).trim();
+          const n = Number(s);
+          if (Number.isFinite(n) && /^-?\d+$/.test(s) && Math.floor(n) === n) {
+            entry.priority = Math.trunc(n);
           }
         }
         return entry;
@@ -3570,7 +3648,7 @@ export function validate(form, schema, providerType, siblingNames, isEdit) {
     const entryErrors = validateAPIKeyEntries(rawEntries);
     const problemCount = Object.keys(entryErrors).length;
     if (problemCount > 0) {
-      errors.api_key_entries = `${problemCount} API key entr${problemCount === 1 ? 'y has' : 'ies have'} an identity problem. See inline messages below.`;
+      errors.api_key_entries = `${problemCount} API key entr${problemCount === 1 ? 'y has' : 'ies have'} an identity or priority problem. See inline messages below.`;
     }
     // Claude (API Key) requires AT LEAST one non-blank entry (which
     // includes legacy rows carrying a single api_key). Without it the

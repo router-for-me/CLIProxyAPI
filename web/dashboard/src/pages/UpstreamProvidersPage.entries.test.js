@@ -378,3 +378,170 @@ test('validate: claude-api-key surfaces identity errors via the shared validator
     `identity errors must surface as api_key_entries, got ${JSON.stringify(errs)}`);
   assert.match(errs.api_key_entries, /identity/);
 });
+
+// ============================================================================
+// Routing strategy select — schemas, hydration, payload emission
+// ============================================================================
+
+test('buildSchemas: claude-api-key + openai-compatibility both expose the routing_strategy select', () => {
+  const schemas = buildSchemas();
+  const claudeIdentity = schemas['claude-api-key'].sections
+    .find((s) => s.title === 'Identity').fields;
+  const openaiRouting = schemas['openai-compatibility'].sections
+    .find((s) => s.title === 'Routing').fields;
+  const claudeField = claudeIdentity.find((f) => f.name === 'routing_strategy');
+  const openaiField = openaiRouting.find((f) => f.name === 'routing_strategy');
+  assert.ok(claudeField, 'claude-api-key Identity exposes routing_strategy');
+  assert.ok(openaiField, 'openai-compatibility Routing exposes routing_strategy');
+  for (const field of [claudeField, openaiField]) {
+    assert.equal(field.type, 'select');
+    assert.ok(Array.isArray(field.options) && field.options.length >= 4,
+      `routing_strategy select carries the option list, got ${JSON.stringify(field.options)}`);
+    const values = field.options.map((o) => o.value);
+    assert.ok(values.includes(''), 'option list includes the blank default');
+    assert.ok(values.includes('fill-first'), 'option list includes fill-first');
+    assert.ok(values.includes('failover'), 'option list includes the failover alias');
+    assert.ok(field.hint, 'routing_strategy carries an operator hint');
+  }
+});
+
+test('buildSchemas: other provider types do NOT gain the routing_strategy field', () => {
+  const schemas = buildSchemas();
+  for (const t of ['gemini-api-key', 'codex-api-key', 'oauth:claude', 'vertex-api-key']) {
+    const schema = schemas[t];
+    assert.ok(schema, `schema for ${t} exists`);
+    const names = schema.sections.flatMap((s) => s.fields.map((f) => f.name));
+    assert.ok(!names.includes('routing_strategy'),
+      `${t} must not expose routing_strategy, got ${JSON.stringify(names)}`);
+  }
+});
+
+test('validateAPIKeyEntries: priority blank/null/undefined inherit cleanly (no error)', () => {
+  for (const priority of ['', null, undefined, '   ']) {
+    const errs = validateAPIKeyEntries([
+      { id: 0, name: '', api_key: 'FAKE-SECRET-A', proxy_url: '', weight: '', priority },
+    ]);
+    assert.deepEqual(errs, {},
+      `blank priority (${JSON.stringify(priority)}) must not error, got ${JSON.stringify(errs)}`);
+  }
+});
+
+test('validateAPIKeyEntries: priority accepts any whole number incl. 0 and negatives', () => {
+  for (const priority of ['10', '0', '-3', '9999999', 0, 7]) {
+    const errs = validateAPIKeyEntries([
+      { id: 0, name: '', api_key: 'FAKE-SECRET-A', proxy_url: '', weight: '', priority },
+    ]);
+    assert.deepEqual(errs, {},
+      `priority ${JSON.stringify(priority)} is legal, got ${JSON.stringify(errs)}`);
+  }
+});
+
+test('validateAPIKeyEntries: priority rejects non-integer / non-numeric values', () => {
+  for (const priority of ['abc', '1.5', '1e3', '0x10']) {
+    const errs = validateAPIKeyEntries([
+      { id: 0, name: '', api_key: 'FAKE-SECRET-A', proxy_url: '', weight: '', priority },
+    ]);
+    assert.ok(errs[0]?.priority,
+      `priority ${JSON.stringify(priority)} must surface a row error, got ${JSON.stringify(errs)}`);
+    assert.match(errs[0].priority, /whole number/);
+  }
+});
+
+test('buildForm: hydrates row routing_strategy + per-entry priority (10 → 10, null → blank)', () => {
+  const initial = {
+    provider_type: 'openai-compatibility',
+    name: 'openai-strategy',
+    routing_strategy: 'fill-first',
+    api_key_entries: [
+      { id: 3, name: 'alpha', api_key: 'FAKE-SECRET-A', proxy_url: '', weight: 2, priority: 10 },
+      { id: 4, name: 'beta',  api_key: 'FAKE-SECRET-B', proxy_url: '', priority: null },
+    ],
+  };
+  const form = buildForm('openai-compatibility', initial);
+  assert.equal(form.routing_strategy, 'fill-first');
+  assert.equal(form.api_key_entries[0].priority, 10);
+  assert.equal(form.api_key_entries[1].priority, '',
+    'null priority hydrates to blank so the editor shows an empty input');
+});
+
+test('buildForm: routing_strategy defaults blank and carries across type switches', () => {
+  const fresh = buildForm('claude-api-key', {});
+  assert.equal(fresh.routing_strategy, '',
+    'no strategy on the source row → blank default');
+  const switched = buildForm('openai-compatibility',
+    { provider_type: 'claude-api-key', name: 'claude-team' },
+    { routing_strategy: 'weighted-round-robin' });
+  assert.equal(switched.routing_strategy, 'weighted-round-robin',
+    'a picked strategy survives a provider-type switch (create mode)');
+});
+
+test('buildForm: legacy claude synthesized entry carries blank priority', () => {
+  const form = buildForm('claude-api-key', {
+    provider_type: 'claude-api-key',
+    api_key: 'FAKE-LEGACY-SECRET',
+  });
+  assert.equal(form.api_key_entries.length, 1);
+  assert.equal(form.api_key_entries[0].priority, '');
+});
+
+test('buildPayload: routing_strategy emitted only when the operator picked one', () => {
+  const mk = (strategy) => ({
+    name: 'row',
+    routing_strategy: strategy,
+    api_key_entries: [{ id: 1, name: '', api_key: 'FAKE-SECRET-A', proxy_url: '', weight: '', priority: '' }],
+  });
+  const set = buildPayload(mk('failover'), 'openai-compatibility');
+  assert.equal(set.routing_strategy, 'failover',
+    'picked alias is sent verbatim; the backend canonicalizes it');
+  const claudeSet = buildPayload(mk('fill-first'), 'claude-api-key');
+  assert.equal(claudeSet.routing_strategy, 'fill-first');
+  for (const blank of ['', null, undefined]) {
+    const unset = buildPayload(mk(blank), 'openai-compatibility');
+    assert.ok(!('routing_strategy' in unset),
+      `blank strategy (${JSON.stringify(blank)}) must be omitted, got ${JSON.stringify(Object.keys(unset))}`);
+  }
+});
+
+test('buildPayload: per-entry priority emitted incl. explicit 0; blank omitted', () => {
+  const form = {
+    api_key_entries: [
+      { id: 1, name: 'alpha', api_key: 'FAKE-SECRET-A', proxy_url: '', weight: '', priority: '10' },
+      // Explicit 0 is meaningful (tier 0) and MUST be sent as 0 — unlike
+      // weight, where 0 is excluded.
+      { id: 2, name: 'beta',  api_key: 'FAKE-SECRET-B', proxy_url: '', weight: '', priority: '0' },
+      { id: 3, name: 'gamma', api_key: 'FAKE-SECRET-C', proxy_url: '', weight: '', priority: '-3' },
+      { id: 4, name: 'delta', api_key: 'FAKE-SECRET-D', proxy_url: '', weight: '', priority: '' },
+      { id: 5, name: 'eps',   api_key: 'FAKE-SECRET-E', proxy_url: '', weight: '', priority: null },
+    ],
+  };
+  const payload = buildPayload(form, 'openai-compatibility');
+  const entries = payload.api_key_entries;
+  assert.equal(entries[0].priority, 10, 'filled priority is emitted as an integer');
+  assert.equal(entries[1].priority, 0, 'explicit 0 is emitted as 0, never dropped');
+  assert.equal(entries[2].priority, -3, 'negative tier is emitted (below-default tier)');
+  assert.ok(!('priority' in entries[3]), 'blank priority is omitted (inherit)');
+  assert.ok(!('priority' in entries[4]), 'null priority is omitted (inherit)');
+});
+
+test('buildPayload: malformed priority falls back to inherit (omitted, no crash)', () => {
+  const form = {
+    api_key_entries: [
+      { id: 1, name: '', api_key: 'FAKE-SECRET-A', proxy_url: '', weight: '', priority: 'abc' },
+    ],
+  };
+  const payload = buildPayload(form, 'claude-api-key');
+  assert.ok(!('priority' in payload.api_key_entries[0]),
+    'malformed priority is silently omitted from the payload (the inline validator blocks Save first)');
+});
+
+test('buildPayload: weight 0 still excluded while priority 0 emitted (distinct semantics)', () => {
+  const form = {
+    api_key_entries: [
+      { id: 1, name: '', api_key: 'FAKE-SECRET-A', proxy_url: '', weight: '0', priority: '0' },
+    ],
+  };
+  const payload = buildPayload(form, 'openai-compatibility');
+  const entry = payload.api_key_entries[0];
+  assert.ok(!('weight' in entry), 'weight 0 stays excluded (must be >= 1)');
+  assert.equal(entry.priority, 0, 'priority 0 is meaningful and emitted');
+});
