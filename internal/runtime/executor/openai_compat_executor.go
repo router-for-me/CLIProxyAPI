@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -1044,7 +1045,7 @@ func openAICompatRetryAfter(status int, headers http.Header, body []byte, now ti
 		return nil
 	}
 	if raw := strings.TrimSpace(headers.Get("Retry-After")); raw != "" {
-		if seconds, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil && seconds >= 0 {
+		if seconds, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil && seconds >= 0 && seconds <= math.MaxInt64/int64(time.Second) {
 			delay := time.Duration(seconds) * time.Second
 			return &delay
 		}
