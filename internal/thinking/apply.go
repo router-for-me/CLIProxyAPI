@@ -365,7 +365,7 @@ func shouldMapConfiguredHighIntent(fromFormat, toFormat string, modelInfo *regis
 }
 
 func mapConfiguredHighIntent(level ThinkingLevel, modelInfo *registry.ModelInfo) ThinkingLevel {
-	if modelInfo == nil || modelInfo.Thinking == nil || len(modelInfo.Thinking.Levels) == 0 {
+	if modelInfo == nil || modelInfo.Thinking == nil || len(modelInfo.Thinking.Levels) == 0 || modelInfo.Thinking.LevelsAssumed {
 		return level
 	}
 	level = ThinkingLevel(strings.ToLower(strings.TrimSpace(string(level))))

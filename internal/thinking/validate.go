@@ -129,7 +129,9 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		config.Level = ""
 	}
 
-	if len(support.Levels) > 0 && config.Mode == ModeLevel {
+	// Assumed default levels carry no real model contract, so an explicitly
+	// requested level is forwarded for the upstream to accept or reject.
+	if len(support.Levels) > 0 && config.Mode == ModeLevel && !support.LevelsAssumed {
 		if !isLevelSupported(string(config.Level), support.Levels) {
 			if allowClampUnsupported {
 				config.Level = clampLevel(config.Level, modelInfo, toFormat)
