@@ -92,16 +92,17 @@ func TestRepairDanglingClaudeToolUsesCanonicalizesResultCarriers(t *testing.T) {
 		}
 	})
 
-	t.Run("normalizes an id alias inside a result block", func(t *testing.T) {
-		input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash"}]},{"role":"tool","content":[{"type":"tool_result","id":"t1","content":"real output"}]}]}`)
+	t.Run("does not accept an id alias inside a result block", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash"}]},{"role":"user","content":[{"type":"tool_result","id":"t1","content":"real output"}]}]}`)
 		got := RepairDanglingClaudeToolUses(input)
 		messages := claudeMessagesForTest(t, got, 2)
-		result := messages[1].Get("content.0")
-		if messages[1].Get("role").String() != "user" || result.Get("tool_use_id").String() != "t1" || result.Get("id").Exists() {
-			t.Fatalf("id alias not normalized: %s", messages[1].Raw)
+		blocks := messages[1].Get("content").Array()
+		if messages[1].Get("role").String() != "user" || len(blocks) != 2 {
+			t.Fatalf("malformed result carrier not normalized: %s", messages[1].Raw)
 		}
-		if result.Get("content").String() != "real output" || result.Get("is_error").Bool() {
-			t.Fatalf("normalized real output changed semantics: %s", result.Raw)
+		assertInterruptedClaudeToolResult(t, blocks[0], "t1", "")
+		if blocks[1].Get("type").String() != "text" || !strings.Contains(blocks[1].Get("text").String(), "real output") {
+			t.Fatalf("id alias was treated as a valid result or lost: %s", messages[1].Raw)
 		}
 	})
 
@@ -202,6 +203,20 @@ func TestRepairDanglingClaudeToolUsesPreservesToolsetAndServerToolRules(t *testi
 		assistantBlocks := messages[0].Get("content").Array()
 		if len(assistantBlocks) != 1 || assistantBlocks[0].Get("type").String() != "tool_use" {
 			t.Fatalf("unresolved server call was not removed safely: %s", messages[0].Raw)
+		}
+		assertInterruptedClaudeToolResult(t, messages[1].Get("content.0"), "client1", "")
+		if messages[1].Get("content.1.text").String() != "change direction" {
+			t.Fatalf("interrupt text was not preserved: %s", messages[1].Raw)
+		}
+	})
+
+	t.Run("drops an unresolved MCP call before preserving interrupt text", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"mcp_tool_use","id":"mcp1","server_name":"example","name":"lookup","input":{}},{"type":"tool_use","id":"client1","name":"Read","input":{}}]},{"role":"user","content":"change direction"}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		messages := claudeMessagesForTest(t, got, 2)
+		assistantBlocks := messages[0].Get("content").Array()
+		if len(assistantBlocks) != 1 || assistantBlocks[0].Get("type").String() != "tool_use" {
+			t.Fatalf("unresolved MCP call was not removed safely: %s", messages[0].Raw)
 		}
 		assertInterruptedClaudeToolResult(t, messages[1].Get("content.0"), "client1", "")
 		if messages[1].Get("content.1.text").String() != "change direction" {

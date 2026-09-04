@@ -279,13 +279,10 @@ func isCanonicalClaudeResultCarrier(message gjson.Result, toolUses []claudeClien
 
 func normalizeClaudeToolResult(raw []byte) ([]byte, string) {
 	result := gjson.ParseBytes(raw)
+	// Only tool_use_id links an Anthropic result to a call. A generic id is
+	// untrusted metadata and must not make a malformed result look complete.
 	id := claudeStringField(result, "tool_use_id")
-	aliasID := claudeStringField(result, "id")
 	updated := raw
-	if id == "" && aliasID != "" {
-		id = aliasID
-		updated, _ = sjson.SetBytes(updated, "tool_use_id", id)
-	}
 	if result.Get("id").Exists() {
 		updated, _ = sjson.DeleteBytes(updated, "id")
 	}
