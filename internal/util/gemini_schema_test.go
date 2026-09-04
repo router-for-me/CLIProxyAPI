@@ -3300,4 +3300,108 @@ func TestIntersectEnumValuesScalesAndPreservesTypedOrder(t *testing.T) {
 	if typed != `[1,"1",true,null,{"a":1}]` {
 		t.Fatalf("typed enum intersection = %s", typed)
 	}
+
+	composite := intersectEnumValues(
+		gjson.Parse(`[{"a":1,"nested":{"values":[2,3.0]}}]`),
+		gjson.Parse(`[{"nested":{"values":[2.0,3]},"a":1.0}]`),
+	)
+	if composite != `[{"a":1,"nested":{"values":[2,3.0]}}]` {
+		t.Fatalf("canonical composite enum intersection = %s", composite)
+	}
+	if reorderedArray := intersectEnumValues(gjson.Parse(`[[1,2]]`), gjson.Parse(`[[2,1]]`)); reorderedArray != `[]` {
+		t.Fatalf("array order was ignored during enum intersection: %s", reorderedArray)
+	}
+}
+
+func TestCleanJSONSchema_AllOfIntersectsNumericEnumsBeforeStringConversion(t *testing.T) {
+	typed := `{"type":"number","enum":[1,0.5,1e3]}`
+	equivalent := `{"enum":[1.0,5e-1,1000.0]}`
+
+	for order, branches := range []string{typed + `,` + equivalent, equivalent + `,` + typed} {
+		input := `{"type":"object","properties":{"amount":{"allOf":[` + branches + `]}}}`
+		for name, clean := range schemaCleaners() {
+			result := clean(input)
+			amount := gjson.Get(result, "properties.amount")
+			if name == "antigravity" {
+				description := amount.Get("description").String()
+				if amount.Get("enum").Exists() || !strings.Contains(description, "Allowed:") || strings.Count(description, ",") < 2 {
+					t.Errorf("order %d %s: numeric enum was not retained as a tool hint: %s", order, name, result)
+				}
+			} else {
+				values := amount.Get("enum").Array()
+				if len(values) != 3 {
+					t.Errorf("order %d %s: numeric enum intersection has %d values, want 3: %s", order, name, len(values), result)
+				} else {
+					want := []string{"1", "1/2", "1000"}
+					for index, value := range values {
+						number, ok := parseSchemaNumericBound(value.String())
+						if !ok || number.RatString() != want[index] {
+							t.Errorf("order %d %s: enum[%d] = %q, want numeric %s: %s", order, name, index, value.String(), want[index], result)
+						}
+					}
+				}
+			}
+			wantType := "number"
+			if name == "gemini" {
+				wantType = "string"
+			}
+			if gotType := amount.Get("type").String(); gotType != wantType {
+				t.Errorf("order %d %s: amount type = %q, want %q: %s", order, name, gotType, wantType, result)
+			}
+
+			secondPass := clean(result)
+			if !reflect.DeepEqual(gjson.Parse(result).Value(), gjson.Parse(secondPass).Value()) {
+				t.Errorf("order %d %s: numeric enum cleaning is not idempotent:\nfirst: %s\nsecond: %s", order, name, result, secondPass)
+			}
+		}
+	}
+}
+
+func TestCleanJSONSchema_AllOfPropagatesNullableBooleanTypeBeforeEnumConversion(t *testing.T) {
+	typeBranch := `{"type":["boolean","null"]}`
+	constBranch := `{"const":null}`
+	enumBranch := `{"enum":[true,null]}`
+
+	for order, branches := range []struct {
+		fixed  string
+		choice string
+	}{
+		{fixed: typeBranch + `,` + constBranch, choice: typeBranch + `,` + enumBranch},
+		{fixed: constBranch + `,` + typeBranch, choice: enumBranch + `,` + typeBranch},
+	} {
+		input := `{"type":"object","properties":{` +
+			`"fixed":{"allOf":[` + branches.fixed + `]},` +
+			`"choice":{"allOf":[` + branches.choice + `]}` +
+			`}}`
+		for name, clean := range schemaCleaners() {
+			result := clean(input)
+			parsed := gjson.Parse(result)
+			for _, field := range []string{"fixed", "choice"} {
+				schema := parsed.Get("properties." + field)
+				if schema.Get("type").String() != "boolean" {
+					t.Errorf("order %d %s: %s nullable boolean became %q: %s", order, name, field, schema.Get("type").String(), result)
+				}
+				if schema.Get("enum").Exists() || schema.Get("const").Exists() {
+					t.Errorf("order %d %s: %s retained unsupported enum/const: %s", order, name, field, result)
+				}
+				if !strings.Contains(schema.Get("description").String(), "nullable") {
+					t.Errorf("order %d %s: %s nullable hint missing: %s", order, name, field, result)
+				}
+				if name != "gemini" && !schema.Get("nullable").Bool() {
+					t.Errorf("order %d %s: %s native nullable marker missing: %s", order, name, field, result)
+				}
+			}
+			if !strings.Contains(parsed.Get("properties.fixed.description").String(), "Allowed: null") {
+				t.Errorf("order %d %s: null const hint missing: %s", order, name, result)
+			}
+			if !strings.Contains(parsed.Get("properties.choice.description").String(), "Allowed: true, null") {
+				t.Errorf("order %d %s: nullable boolean enum hint missing: %s", order, name, result)
+			}
+
+			secondPass := clean(result)
+			if !reflect.DeepEqual(gjson.Parse(result).Value(), gjson.Parse(secondPass).Value()) {
+				t.Errorf("order %d %s: cleaner is not idempotent:\nfirst: %s\nsecond: %s", order, name, result, secondPass)
+			}
+		}
+	}
 }

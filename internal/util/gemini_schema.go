@@ -100,26 +100,29 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	// Phase 0: Normalize malformed schemas (e.g. bare property maps and boolean required from MCP tools)
 	jsonStr = normalizeMalformedSchemaObjects(jsonStr, options.addMissingArrayItems)
 
-	// Phase 1: Convert and add hints
+	// Phase 1: Resolve references and normalize constraints that need their original JSON types.
 	if options.antigravitySemantics {
 		jsonStr = inlineLocalRefs(jsonStr)
 	}
 	jsonStr = convertRefsToHints(jsonStr, options.antigravitySemantics)
 	jsonStr = projectExclusiveBounds(jsonStr)
 	jsonStr = convertConstToEnum(jsonStr)
+	if options.antigravitySemantics {
+		jsonStr = moveNotToDescription(jsonStr)
+	}
+
+	// Intersect allOf before enum conversion or boolean inference erases the members' original
+	// types. Conditional properties are merged first so nested allOf schemas share this ordering.
+	jsonStr = mergeConditionals(jsonStr)
+	jsonStr = mergeAllOf(jsonStr)
+
+	// Phase 2: Convert constraints to their upstream-compatible representation and add hints.
 	jsonStr = convertEnumValuesToStrings(jsonStr, options.forceEnumStringType)
 	jsonStr = addEnumHints(jsonStr)
 	jsonStr = dropIgnoredEnumsToHints(jsonStr, options)
 	if !options.preserveAdditionalPropertiesFalse {
 		jsonStr = addAdditionalPropertiesHints(jsonStr)
 	}
-	if options.antigravitySemantics {
-		jsonStr = moveNotToDescription(jsonStr)
-	}
-
-	// Phase 2: Flatten complex structures
-	jsonStr = mergeConditionals(jsonStr)
-	jsonStr = mergeAllOf(jsonStr)
 	// Preserve only the effective constraint after intersecting allOf branches. Moving constraints
 	// before allOf flattening can leave a weaker branch's first-wins description hint behind.
 	jsonStr = moveConstraintsToDescription(jsonStr, options)
@@ -1365,28 +1368,73 @@ func intersectEnumValues(existing, incoming gjson.Result) string {
 }
 
 func enumValueKey(value gjson.Result) string {
+	var key strings.Builder
+	appendEnumValueKey(&key, value)
+	return key.String()
+}
+
+func appendEnumValueKey(key *strings.Builder, value gjson.Result) {
 	switch value.Type {
 	case gjson.String:
-		return "string:" + value.String()
+		key.WriteString("string:")
+		key.WriteString(strconv.Quote(value.String()))
 	case gjson.Number:
 		if number, ok := parseSchemaNumericBound(value.Raw); ok {
-			return "number:" + number.RatString()
+			key.WriteString("number:")
+			key.WriteString(number.RatString())
+			return
 		}
-		return "number-raw:" + value.Raw
+		key.WriteString("number-raw:")
+		key.WriteString(value.Raw)
 	case gjson.JSON:
-		var compact bytes.Buffer
-		if json.Compact(&compact, []byte(value.Raw)) == nil {
-			return "json:" + compact.String()
+		switch {
+		case value.IsArray():
+			key.WriteString("array:[")
+			for index, item := range value.Array() {
+				if index > 0 {
+					key.WriteByte(',')
+				}
+				appendEnumValueKey(key, item)
+			}
+			key.WriteByte(']')
+		case value.IsObject():
+			type objectMember struct {
+				name  string
+				value gjson.Result
+			}
+			members := make([]objectMember, 0)
+			value.ForEach(func(memberName, memberValue gjson.Result) bool {
+				members = append(members, objectMember{
+					name:  memberName.String(),
+					value: memberValue,
+				})
+				return true
+			})
+			sort.SliceStable(members, func(left, right int) bool {
+				return members[left].name < members[right].name
+			})
+			key.WriteString("object:{")
+			for index, member := range members {
+				if index > 0 {
+					key.WriteByte(',')
+				}
+				key.WriteString(strconv.Quote(member.name))
+				key.WriteByte(':')
+				appendEnumValueKey(key, member.value)
+			}
+			key.WriteByte('}')
+		default:
+			key.WriteString("json-raw:")
+			key.WriteString(value.Raw)
 		}
-		return "json-raw:" + value.Raw
 	case gjson.True:
-		return "boolean:true"
+		key.WriteString("boolean:true")
 	case gjson.False:
-		return "boolean:false"
+		key.WriteString("boolean:false")
 	case gjson.Null:
-		return "null"
+		key.WriteString("null")
 	default:
-		return fmt.Sprintf("unknown:%d:%s", value.Type, value.Raw)
+		fmt.Fprintf(key, "unknown:%d:%s", value.Type, value.Raw)
 	}
 }
 
