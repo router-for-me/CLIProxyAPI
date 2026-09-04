@@ -377,6 +377,11 @@ func applyCodexClientThinkingMetadata(entry map[string]any, thinking *registry.T
 	if thinking == nil {
 		return
 	}
+	// Budget-based thinking has no discrete registry levels. Keep the validated
+	// template levels so Codex clients retain their effort selector.
+	if len(thinking.Levels) == 0 && (thinking.Min > 0 || thinking.Max > 0) {
+		return
+	}
 
 	levels := make([]any, 0, len(thinking.Levels))
 	defaultLevel := ""
