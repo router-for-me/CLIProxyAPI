@@ -257,6 +257,18 @@ func xaiCompactBaseURL(auth *cliproxyauth.Auth) string {
 	return baseURL
 }
 
+// xaiVoiceBaseURL returns a base URL that exposes the official xAI Voice APIs.
+// The CLI chat proxy does not implement /tts or /stt, so OAuth traffic using
+// that default must be redirected to api.x.ai while explicit custom relays are
+// still honored.
+func xaiVoiceBaseURL(auth *cliproxyauth.Auth) string {
+	_, baseURL := xaiCreds(auth)
+	if baseURL == "" || xaiIsCLIChatProxyBaseURL(baseURL) {
+		return xaiauth.DefaultAPIBaseURL
+	}
+	return baseURL
+}
+
 func xaiNormalizeBaseURL(baseURL string) string {
 	return strings.TrimRight(strings.TrimSpace(baseURL), "/")
 }
