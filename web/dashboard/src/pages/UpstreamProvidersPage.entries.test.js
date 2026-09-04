@@ -509,18 +509,25 @@ test('buildPayload: per-entry priority emitted incl. explicit 0; blank omitted',
       // Explicit 0 is meaningful (tier 0) and MUST be sent as 0 — unlike
       // weight, where 0 is excluded.
       { id: 2, name: 'beta',  api_key: 'FAKE-SECRET-B', proxy_url: '', weight: '', priority: '0' },
-      { id: 3, name: 'gamma', api_key: 'FAKE-SECRET-C', proxy_url: '', weight: '', priority: '-3' },
-      { id: 4, name: 'delta', api_key: 'FAKE-SECRET-D', proxy_url: '', weight: '', priority: '' },
-      { id: 5, name: 'eps',   api_key: 'FAKE-SECRET-E', proxy_url: '', weight: '', priority: null },
+      // After a server round-trip, hydrateEntries yields a NUMERIC priority
+      // (JSON number). Numeric 0 must survive the payload too: a truthy-check
+      // "simplification" of the emission guard would drop it here while all
+      // string-based cases above stay green. This is the hydrate→save leg of
+      // the explicit-tier-0 contract.
+      { id: 3, name: 'gamma', api_key: 'FAKE-SECRET-C', proxy_url: '', weight: '', priority: 0 },
+      { id: 4, name: 'delt', api_key: 'FAKE-SECRET-D', proxy_url: '', weight: '', priority: '-3' },
+      { id: 5, name: 'epsi', api_key: 'FAKE-SECRET-E', proxy_url: '', weight: '', priority: '' },
+      { id: 6, name: 'zeta', api_key: 'FAKE-SECRET-F', proxy_url: '', weight: '', priority: null },
     ],
   };
   const payload = buildPayload(form, 'openai-compatibility');
   const entries = payload.api_key_entries;
   assert.equal(entries[0].priority, 10, 'filled priority is emitted as an integer');
   assert.equal(entries[1].priority, 0, 'explicit 0 is emitted as 0, never dropped');
-  assert.equal(entries[2].priority, -3, 'negative tier is emitted (below-default tier)');
-  assert.ok(!('priority' in entries[3]), 'blank priority is omitted (inherit)');
-  assert.ok(!('priority' in entries[4]), 'null priority is omitted (inherit)');
+  assert.equal(entries[2].priority, 0, 'numeric 0 (hydrated from the API) is emitted as 0');
+  assert.equal(entries[3].priority, -3, 'negative tier is emitted (below-default tier)');
+  assert.ok(!('priority' in entries[4]), 'blank priority is omitted (inherit)');
+  assert.ok(!('priority' in entries[5]), 'null priority is omitted (inherit)');
 });
 
 test('buildPayload: malformed priority falls back to inherit (omitted, no crash)', () => {
