@@ -302,3 +302,136 @@ func TestProviderFromOpenAICompatPropagatesEntryWeight(t *testing.T) {
 		t.Fatalf("seed entry name not copied: %q", e.Name)
 	}
 }
+
+// TestRenderClaudePoolStrategyAndEntryPriority verifies the Claude fan-out
+// carries the pool routing strategy (canonicalized from the raw store value)
+// onto every rendered item, and that a per-entry priority pointer overrides
+// the row-level default while nil inherits it.
+func TestRenderClaudePoolStrategyAndEntryPriority(t *testing.T) {
+	prio10, prio5 := 10, 5
+	cfg := RenderConfig([]store.UpstreamProvider{{
+		ID:              7,
+		ProviderType:    TypeClaudeAPIKey,
+		Name:            "pool",
+		RoutingStrategy: "failover", // raw value in store — canonicalized during render
+		APIKeyEntries: []store.UpstreamProviderAPIKey{
+			{ID: 71, APIKey: "k1", Priority: &prio10},
+			{ID: 72, APIKey: "k2", Priority: &prio5},
+			{ID: 73, APIKey: "k3"}, // nil priority = inherit row-level
+		},
+	}})
+	if len(cfg.ClaudeKey) != 3 {
+		t.Fatalf("ClaudeKey items = %d, want 3", len(cfg.ClaudeKey))
+	}
+	if cfg.ClaudeKey[0].UpstreamProviderStrategy != "round-robin" {
+		t.Fatalf("strategy carry-through = %q, want round-robin (failover canonicalized)", cfg.ClaudeKey[0].UpstreamProviderStrategy)
+	}
+	if cfg.ClaudeKey[0].Priority != 10 || cfg.ClaudeKey[1].Priority != 5 {
+		t.Fatalf("entry priorities = %d,%d, want 10,5", cfg.ClaudeKey[0].Priority, cfg.ClaudeKey[1].Priority)
+	}
+	if cfg.ClaudeKey[2].Priority != 0 {
+		t.Fatalf("inherit priority = %d, want row default 0", cfg.ClaudeKey[2].Priority)
+	}
+}
+
+// TestRenderClaudePoolStrategyUnsetAndLegacyFallback covers the two strategy
+// edges the fan-out test does not: an unset row strategy renders as an empty
+// (unset) item strategy — empty means "follow the global routing strategy",
+// never a forced default — and the legacy single-key fallback shares
+// buildClaudeKey, so it carries the strategy too.
+func TestRenderClaudePoolStrategyUnsetAndLegacyFallback(t *testing.T) {
+	cfg := RenderConfig([]store.UpstreamProvider{
+		{
+			ID:              7,
+			ProviderType:    TypeClaudeAPIKey,
+			RoutingStrategy: "", // unset → items follow the global routing strategy
+			APIKeyEntries: []store.UpstreamProviderAPIKey{
+				{ID: 71, APIKey: "k1"},
+			},
+		},
+		{
+			ID:              8,
+			ProviderType:    TypeClaudeAPIKey,
+			RoutingStrategy: "fill-first",
+			APIKey:          "legacy-single-secret",
+			// no entries → legacy single-key fallback path
+		},
+	})
+	if len(cfg.ClaudeKey) != 2 {
+		t.Fatalf("ClaudeKey items = %d, want 2", len(cfg.ClaudeKey))
+	}
+	if cfg.ClaudeKey[0].UpstreamProviderStrategy != "" {
+		t.Fatalf("unset row strategy rendered as %q, want empty", cfg.ClaudeKey[0].UpstreamProviderStrategy)
+	}
+	if cfg.ClaudeKey[1].UpstreamProviderStrategy != "fill-first" {
+		t.Fatalf("legacy fallback strategy = %q, want fill-first (buildClaudeKey is shared)", cfg.ClaudeKey[1].UpstreamProviderStrategy)
+	}
+	if cfg.ClaudeKey[1].APIKey != "legacy-single-secret" {
+		t.Fatalf("legacy fallback api key = %q, want parent key", cfg.ClaudeKey[1].APIKey)
+	}
+}
+
+// TestRenderOpenAICompatPoolStrategyAndEntryPriority verifies the OpenAI
+// compat pool renders the row strategy (canonicalized) onto the pool-level
+// Strategy field and maps each entry's priority pointer verbatim, so nil
+// stays nil and means "inherit the pool Priority".
+func TestRenderOpenAICompatPoolStrategyAndEntryPriority(t *testing.T) {
+	prio10 := 10
+	cfg := RenderConfig([]store.UpstreamProvider{{
+		ID:              8,
+		ProviderType:    TypeOpenAICompatibility,
+		Name:            "pool",
+		RoutingStrategy: "priority", // raw alias from store — canonicalized in render
+		APIKeyEntries: []store.UpstreamProviderAPIKey{
+			{ID: 81, APIKey: "k1", Priority: &prio10},
+			{ID: 82, APIKey: "k2"}, // inherit → pool Priority (0 when unset)
+		},
+	}})
+	if len(cfg.OpenAICompatibility) != 1 || cfg.OpenAICompatibility[0].Strategy != "fill-first" {
+		t.Fatalf("pool strategy = %#v, want fill-first", cfg.OpenAICompatibility)
+	}
+	entries := cfg.OpenAICompatibility[0].APIKeyEntries
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries))
+	}
+	if entries[0].Priority == nil || *entries[0].Priority != 10 {
+		t.Fatalf("entry 0 priority = %#v, want *10", entries[0].Priority)
+	}
+	if entries[1].Priority != nil {
+		t.Fatalf("entry 1 priority = %#v, want nil (inherit pool priority)", entries[1].Priority)
+	}
+}
+
+// TestSeedInverseCarriesStrategyAndEntryPriority verifies the seed direction
+// mirrors the render direction: pool strategies normalize back onto the row
+// and per-entry priority pointers survive the round trip. The Claude seed
+// drops the runtime IDs (see providerFromClaudeKey) but keeps the strategy —
+// unlike the IDs, it is row-level data with a real column to land in.
+func TestSeedInverseCarriesStrategyAndEntryPriority(t *testing.T) {
+	prio10 := 10
+	// Claude: UpstreamProviderStrategy → RoutingStrategy (normalized), IDs dropped per seed semantics
+	p := providerFromClaudeKey(config.ClaudeKey{APIKey: "k", Priority: 3, UpstreamProviderStrategy: "fill-first"})
+	if p.RoutingStrategy != "fill-first" {
+		t.Fatalf("claude seed strategy = %q, want fill-first", p.RoutingStrategy)
+	}
+	// OpenAI-compat: Strategy → RoutingStrategy (normalized), entry Priority carried
+	p2 := providerFromOpenAICompat(config.OpenAICompatibility{
+		Name: "pool", Strategy: "round-robin",
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "k1", Priority: &prio10}, {APIKey: "k2"}},
+	})
+	if p2.RoutingStrategy != "round-robin" {
+		t.Fatalf("openai seed strategy = %q, want round-robin", p2.RoutingStrategy)
+	}
+	if p2.APIKeyEntries[0].Priority == nil || *p2.APIKeyEntries[0].Priority != 10 {
+		t.Fatal("openai seed entry priority not carried")
+	}
+	if p2.APIKeyEntries[1].Priority != nil {
+		t.Fatal("openai seed entry 1 priority = not nil, want nil")
+	}
+	// Seed-side canonicalization mirrors the render side: a raw alias written
+	// in YAML normalizes to its canonical spelling on the way into the row.
+	p3 := providerFromClaudeKey(config.ClaudeKey{APIKey: "k", UpstreamProviderStrategy: "failover"})
+	if p3.RoutingStrategy != "round-robin" {
+		t.Fatalf("claude seed alias strategy = %q, want round-robin (normalized)", p3.RoutingStrategy)
+	}
+}

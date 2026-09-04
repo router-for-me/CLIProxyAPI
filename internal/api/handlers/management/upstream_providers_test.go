@@ -235,7 +235,9 @@ func TestToUpstreamProviderMapsRoutingStrategyAndEntryPriority(t *testing.T) {
 	}
 	// The nil-priority entry must omit the key entirely (the row-level
 	// `priority` scalar is always emitted by the store row; only the per-entry
-	// projection is optional).
+	// projection is optional). Assert on the decoded entries rather than the
+	// raw JSON suffix so the check stays stable against emission order and
+	// other omitempty fields.
 	var decoded struct {
 		APIKeyEntries []struct {
 			APIKey   string `json:"api_key"`
@@ -248,11 +250,11 @@ func TestToUpstreamProviderMapsRoutingStrategyAndEntryPriority(t *testing.T) {
 	if len(decoded.APIKeyEntries) != 2 {
 		t.Fatalf("decoded %d entries, want 2", len(decoded.APIKeyEntries))
 	}
+	if decoded.APIKeyEntries[1].APIKey != "k2" {
+		t.Fatalf("decoded entry 1 api key = %q, want k2", decoded.APIKeyEntries[1].APIKey)
+	}
 	if decoded.APIKeyEntries[1].Priority != nil {
 		t.Fatalf("nil-priority entry decoded priority = %#v, want nil", decoded.APIKeyEntries[1].Priority)
-	}
-	if !strings.Contains(encoded, `"api_key":"k2"}`) {
-		t.Fatalf("nil-priority entry emitted keys beyond api_key: %s", encoded)
 	}
 }
 

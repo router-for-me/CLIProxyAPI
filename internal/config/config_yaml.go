@@ -312,7 +312,9 @@ func appendPath(path []string, key string) []string {
 // This prevents non-zero defaults from polluting the config.
 func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	// Weight and priority are pointer-backed, so an explicit zero is
-	// meaningful and must be preserved.
+	// meaningful and must be preserved. The match is name-based and also
+	// covers the scalar non-pointer `priority` fields (e.g. ClaudeKey.Priority),
+	// where an explicit 0 is equally harmless — absent means 0 anyway.
 	if len(path) > 0 && (path[len(path)-1] == "weight" || path[len(path)-1] == "priority") && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!int" {
 		return false
 	}

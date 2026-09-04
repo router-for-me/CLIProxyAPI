@@ -177,6 +177,15 @@ func buildClaudeKey(p store.UpstreamProvider, e store.UpstreamProviderAPIKey) co
 		UpstreamProviderID:      p.ID,
 		UpstreamProviderEntryID: e.ID,
 	}
+	// A nil entry priority inherits the row-level default set in the literal
+	// above; a non-nil pointer overrides it with the entry's own tier.
+	if e.Priority != nil {
+		k.Priority = *e.Priority
+	}
+	// The pool strategy is row-level data stamped onto every fan-out item so
+	// the synthesizer/conductor can read it per auth. Raw store values are
+	// canonicalized here; blank stays blank (unset = global routing strategy).
+	k.UpstreamProviderStrategy = config.NormalizePoolRoutingStrategy(p.RoutingStrategy)
 	for _, m := range p.Models {
 		k.Models = append(k.Models, config.ClaudeModel{
 			Name:         m.Name,
@@ -204,17 +213,23 @@ func openAICompatFromProvider(p store.UpstreamProvider) config.OpenAICompatibili
 	k := config.OpenAICompatibility{
 		Name:     p.Name,
 		Priority: p.Priority,
+		// Raw store strategies are canonicalized here; blank stays blank
+		// (unset = follow the global routing strategy).
+		Strategy: config.NormalizePoolRoutingStrategy(p.RoutingStrategy),
 		Disabled: p.Disabled,
 		Prefix:   p.Prefix,
 		BaseURL:  p.BaseURL,
 		Headers:  p.Headers,
 	}
 	for _, e := range p.APIKeyEntries {
+		// Priority is copied verbatim so nil stays nil and continues to mean
+		// "inherit the pool-level Priority" on the runtime side.
 		k.APIKeyEntries = append(k.APIKeyEntries, config.OpenAICompatibilityAPIKey{
 			APIKey:                  e.APIKey,
 			Name:                    e.Name,
 			UpstreamProviderEntryID: e.ID,
 			Weight:                  e.Weight,
+			Priority:                e.Priority,
 			ProxyURL:                e.ProxyURL,
 		})
 	}

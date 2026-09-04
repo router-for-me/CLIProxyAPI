@@ -189,7 +189,10 @@ func providerFromClaudeKey(k config.ClaudeKey) store.UpstreamProvider {
 		ExcludedModels:          k.ExcludedModels,
 		RebuildMidSystemMessage: k.RebuildMidSystemMessage,
 		ExperimentalCCHSigning:  k.ExperimentalCCHSigning,
-		SourceBackend:           "config",
+		// Normalize on the way in so raw YAML aliases land as canonical rows,
+		// mirroring the renderer's canonicalization of store values.
+		RoutingStrategy: config.NormalizePoolRoutingStrategy(k.UpstreamProviderStrategy),
+		SourceBackend:   "config",
 	}
 	// SeedFromArtifacts creates a fresh parent row per config item, and the
 	// store's syncAPIKeyEntriesTx validator rejects any positive child ID
@@ -205,6 +208,9 @@ func providerFromClaudeKey(k config.ClaudeKey) store.UpstreamProvider {
 	// dropped. Manual YAML seeds therefore remain "one parent row, no child
 	// entries" — the same one-item-to-one-row cardinality SeedFromArtifacts
 	// has always promised.
+	// UpstreamProviderStrategy, unlike the IDs above, is row-level data with
+	// a real parent column to land in, so it round-trips through the seed
+	// instead of being dropped.
 	if k.DisableCooling {
 		setExtra(&p, "disable_cooling", true)
 	}
@@ -230,14 +236,17 @@ func providerFromClaudeKey(k config.ClaudeKey) store.UpstreamProvider {
 
 func providerFromOpenAICompat(k config.OpenAICompatibility) store.UpstreamProvider {
 	p := store.UpstreamProvider{
-		ProviderType:  TypeOpenAICompatibility,
-		Name:          k.Name,
-		Priority:      k.Priority,
-		Disabled:      k.Disabled,
-		Prefix:        k.Prefix,
-		BaseURL:       k.BaseURL,
-		Headers:       k.Headers,
-		SourceBackend: "config",
+		ProviderType: TypeOpenAICompatibility,
+		Name:         k.Name,
+		Priority:     k.Priority,
+		// Normalize on the way in so raw YAML aliases land as canonical rows,
+		// mirroring the renderer's canonicalization of store values.
+		RoutingStrategy: config.NormalizePoolRoutingStrategy(k.Strategy),
+		Disabled:        k.Disabled,
+		Prefix:          k.Prefix,
+		BaseURL:         k.BaseURL,
+		Headers:         k.Headers,
+		SourceBackend:   "config",
 	}
 	if k.DisableCooling {
 		setExtra(&p, "disable_cooling", true)
@@ -248,6 +257,9 @@ func providerFromOpenAICompat(k config.OpenAICompatibility) store.UpstreamProvid
 			APIKey:   e.APIKey,
 			ProxyURL: e.ProxyURL,
 			Weight:   e.Weight,
+			// Copied verbatim so nil stays nil ("inherit the pool Priority")
+			// across the seed round trip.
+			Priority: e.Priority,
 		})
 	}
 	for _, m := range k.Models {
