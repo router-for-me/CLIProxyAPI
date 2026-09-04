@@ -1001,7 +1001,7 @@ func convertEnumValuesToStrings(jsonStr string, forceStringType bool) string {
 }
 
 func isBooleanEnumSchema(jsonStr, parentPath string, arr gjson.Result) bool {
-	if !arr.IsArray() || len(arr.Array()) == 0 {
+	if !arr.IsArray() {
 		return false
 	}
 	hasBoolean := false
@@ -1018,10 +1018,22 @@ func isBooleanEnumSchema(jsonStr, parentPath string, arr gjson.Result) bool {
 	schemaType := gjson.Get(jsonStr, joinPath(parentPath, "type"))
 	if schemaType.Exists() {
 		// An explicitly typed nullable boolean may be constrained to null alone. The member
-		// validation above still rejects string or numeric enums on boolean-first unions.
-		return effectiveSchemaType(schemaType) == "boolean"
+		// validation above still rejects string or numeric enums on boolean-containing unions.
+		return schemaTypeIncludes(schemaType, "boolean")
 	}
 	return hasBoolean
+}
+
+func schemaTypeIncludes(schemaType gjson.Result, target string) bool {
+	if !schemaType.IsArray() {
+		return schemaType.String() == target
+	}
+	for _, item := range schemaType.Array() {
+		if item.String() == target {
+			return true
+		}
+	}
+	return false
 }
 
 func enumContainsNull(arr gjson.Result) bool {
@@ -1074,14 +1086,13 @@ func dropIgnoredEnumsToHints(jsonStr string, options jsonSchemaCleanOptions) str
 		}
 		if booleanEnum {
 			typePath := joinPath(parentPath, "type")
-			if !gjson.Get(jsonStr, typePath).Exists() {
-				inferredType := any("boolean")
-				if enumContainsNull(enum) {
-					inferredType = []string{"boolean", "null"}
-				}
-				updated, _ := sjson.SetBytes([]byte(jsonStr), typePath, inferredType)
-				jsonStr = string(updated)
+			declaredType := gjson.Get(jsonStr, typePath)
+			normalizedType := any("boolean")
+			if enumContainsNull(enum) && (!declaredType.Exists() || schemaTypeIncludes(declaredType, "null")) {
+				normalizedType = []string{"boolean", "null"}
 			}
+			updated, _ := sjson.SetBytes([]byte(jsonStr), typePath, normalizedType)
+			jsonStr = string(updated)
 		}
 		if enum.IsArray() && len(enum.Array()) == 1 {
 			jsonStr = appendHint(jsonStr, parentPath, "Allowed: "+enumHintValue(enum.Array()[0]))

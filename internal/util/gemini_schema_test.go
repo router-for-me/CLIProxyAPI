@@ -1524,6 +1524,54 @@ func TestCleanJSONSchemaForGemini_MixedBooleanStringUnionUsesEnumType(t *testing
 	}
 }
 
+func TestCleanJSONSchema_ExplicitBooleanEmptyEnumIsDropped(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"flag": {"type": "boolean", "enum": []},
+			"nullableFlag": {"type": ["boolean", "null"], "enum": []},
+			"untyped": {"enum": []}
+		}
+	}`
+
+	for name, clean := range map[string]func(string) string{
+		"gemini":              CleanJSONSchemaForGemini,
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		result := clean(input)
+		parsed := gjson.Parse(result)
+		for _, field := range []string{"flag", "nullableFlag"} {
+			schema := parsed.Get("properties." + field)
+			if schema.Get("type").String() != "boolean" || schema.Get("enum").Exists() {
+				t.Errorf("%s: explicit boolean empty enum was not dropped on %s: %s", name, field, result)
+			}
+		}
+		if schema := parsed.Get("properties.untyped"); schema.Get("type").String() == "boolean" {
+			t.Errorf("%s: untyped empty enum incorrectly inferred boolean: %s", name, result)
+		}
+	}
+}
+
+func TestCleanJSONSchema_BooleanEnumSelectsBooleanFromTypeUnion(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"flag": {"type": ["string", "boolean"], "enum": [true, false]}
+		}
+	}`
+
+	for name, clean := range schemaCleaners() {
+		result := clean(input)
+		flag := gjson.Get(result, "properties.flag")
+		if flag.Get("type").String() != "boolean" || flag.Get("enum").Exists() {
+			t.Errorf("%s: boolean enum did not select boolean from type union: %s", name, result)
+		}
+		if !strings.Contains(flag.Get("description").String(), "Allowed: true, false") {
+			t.Errorf("%s: boolean enum hint missing after union narrowing: %s", name, result)
+		}
+	}
+}
+
 func TestCleanJSONSchemaForAntigravityResponseHintsIgnoredConstraints(t *testing.T) {
 	input := `{"type":"object","properties":{"value":{"type":"number","minimum":1,"maximum":2,"not":{"enum":[1.5]}}}}`
 	result := gjson.Parse(CleanJSONSchemaForAntigravityResponse(input))
