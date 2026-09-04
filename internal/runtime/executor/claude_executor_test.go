@@ -5302,6 +5302,49 @@ func TestResolveClaudeKeyConfigDoesNotFallbackAcrossExplicitBaseURL(t *testing.T
 	}
 }
 
+func TestResolveClaudeKeyConfigMatchesHeaderNamesAcrossReload(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		authName   string
+		configName string
+	}{
+		{name: "lowercase auth", authName: "x-relay-account", configName: "X-Relay-Account"},
+		{name: "lowercase config", authName: "X-Relay-Account", configName: "x-relay-account"},
+		{name: "mixed case", authName: "x-ReLaY-aCcOuNt", configName: "X-rElAy-AcCoUnT"},
+	} {
+		for _, configIndex := range []string{"0", "1"} {
+			t.Run(test.name+"/index="+configIndex, func(t *testing.T) {
+				cfg := &config.Config{ClaudeKey: []config.ClaudeKey{
+					{
+						APIKey:  "shared-key",
+						BaseURL: "https://shared.example",
+						Headers: map[string]string{test.configName: "SECOND"},
+					},
+					{
+						APIKey:  "shared-key",
+						BaseURL: "https://shared.example",
+						Headers: map[string]string{test.configName: "second"},
+					},
+				}}
+				auth := &cliproxyauth.Auth{Attributes: map[string]string{
+					"source":                  "config:claude[reloaded]",
+					"config_index":            configIndex,
+					"api_key":                 "shared-key",
+					"base_url":                "https://shared.example",
+					"header:" + test.authName: "second",
+				}}
+
+				if got := resolveClaudeKeyConfig(cfg, auth); got != &cfg.ClaudeKey[1] {
+					t.Fatalf("resolveClaudeKeyConfig() = %p, want matching header value credential %p", got, &cfg.ClaudeKey[1])
+				}
+				if got := cfg.ClaudeKey[1].Headers[test.configName]; got != "second" {
+					t.Fatalf("configuration header changed: got %q, want second", got)
+				}
+			})
+		}
+	}
+}
+
 func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmitted(t *testing.T) {
 	cfg := &config.Config{
 		ClaudeKey: []config.ClaudeKey{{
