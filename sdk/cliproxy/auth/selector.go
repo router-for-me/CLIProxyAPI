@@ -825,8 +825,19 @@ func effectiveBlock(auth *Auth, modelKey string, now time.Time) (bool, blockReas
 	credQuotaLive := auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota"
 	credCooldownLive := auth.CredentialCooldown && auth.Unavailable
 	if credQuotaLive || credCooldownLive {
+		// Route through availabilityBlock, the same primitive the per-model
+		// loop and fallback below use, rather than returning a bespoke
+		// tuple here - effectiveBlock is built ON availabilityBlock, not
+		// beside it. effectiveDeadline supplies the combined deadline
+		// (credential NextRetryAfter/Quota.NextRecoverAt); quotaExceeded is
+		// passed as true unconditionally because a live credential-wide
+		// cooldown is always reported as blockReasonCooldown here,
+		// regardless of whether it originated from credential_quota or a
+		// CredentialCooldown-marked failure like a 401.
 		if next := effectiveDeadline(auth, "", now); !next.IsZero() {
-			return true, blockReasonCooldown, next
+			if blocked, _, until := availabilityBlock(true, true, next, time.Time{}, now); blocked {
+				return true, blockReasonCooldown, until
+			}
 		}
 	}
 	if modelKey != "" {

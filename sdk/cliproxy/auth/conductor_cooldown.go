@@ -1030,16 +1030,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								state.NextRetryAfter = next
 							}
 						case 404:
+							existingModelRetryAfter := state.NextRetryAfter
 							next := notFoundRetryAfter(result.Error, classificationModel, &state.Quota, now, disableCooling)
 							// A racing generic 404 for this model key must not
 							// shorten or clear a longer-lived cooldown already
-							// recorded for this model (e.g. a live 401) - same
-							// effective-deadline rule as the auth-level 404
-							// case below, applied per model key via the
-							// shared effectiveDeadline accessor.
-							if existingModelDeadline := effectiveDeadline(auth, modelKey, now); existingModelDeadline.After(next) {
-								next = existingModelDeadline
-							}
+							// recorded in this model's NextRetryAfter (e.g. a
+							// live 401) - same write-guard rule as the
+							// auth-level 404 case below, via maxDeadline.
+							next = maxDeadline(now, existingModelRetryAfter, next)
 							state.NextRetryAfter = next
 							state.Unavailable = !state.NextRetryAfter.IsZero()
 						case 429:
@@ -2328,6 +2326,24 @@ func preserveLongerCooldown(existing QuotaState, next time.Time) time.Time {
 	return next
 }
 
+// maxDeadline returns whichever of existing or next is the later deadline
+// that is still live (after now), or the zero Time if neither is. It is the
+// write-guard counterpart to preserveLongerCooldown, used by the two 404
+// branches below to stop a racing generic-404 recomputation from shortening
+// or clearing an already-longer NextRetryAfter recorded by an earlier
+// failure (e.g. a live 401/429) for the same auth or model key.
+//
+// Deliberately independent of effectiveBlock/effectiveDeadline in
+// selector.go: "preserve the longer of two deadlines" is write-guard
+// arithmetic, not a blocking-decision read, and the two must never be
+// routed through the same accessor.
+func maxDeadline(now, existing, next time.Time) time.Time {
+	if existing.After(now) && existing.After(next) {
+		return existing
+	}
+	return next
+}
+
 func notFoundRetryAfter(resultErr *Error, requestedModel string, retryState *QuotaState, now time.Time, disableCooling bool) time.Time {
 	if disableCooling {
 		return time.Time{}
@@ -2466,15 +2482,14 @@ func applyAuthFailureStateForModel(auth *Auth, resultErr *Error, retryAfter *tim
 		}
 	case 404:
 		auth.StatusMessage = "not_found"
+		existingRetryAfter := auth.NextRetryAfter
 		next := notFoundRetryAfter(resultErr, attemptedModel, &auth.Quota, now, disableCooling)
 		// A racing generic 404 must not shorten or clear a longer-lived
-		// credential-wide cooldown already recorded (e.g. a live 401) -
-		// same effective-deadline rule as preserveLongerCooldown, taken
-		// across both NextRetryAfter and Quota.NextRecoverAt via the
-		// shared effectiveDeadline accessor instead of one field alone.
-		if existingDeadline := effectiveDeadline(auth, "", now); existingDeadline.After(next) {
-			next = existingDeadline
-		}
+		// credential-wide cooldown already recorded in NextRetryAfter (e.g. a
+		// live 401) - same write-guard rule as preserveLongerCooldown
+		// (which notFoundRetryAfter already applies to Quota.NextRecoverAt
+		// internally), via maxDeadline for the NextRetryAfter field.
+		next = maxDeadline(now, existingRetryAfter, next)
 		auth.NextRetryAfter = next
 		auth.Unavailable = !auth.NextRetryAfter.IsZero()
 	case 429:
