@@ -93,6 +93,15 @@ func TestGetAuthFileQuotaReportsClaudeOAuthWindows(t *testing.T) {
 		Status:     coreauth.StatusActive,
 		Attributes: map[string]string{"api_key": "sk-ant-key"},
 	})
+	// Explicitly classified apikey, yet an access_token lingers in its
+	// metadata: the classification wins and the token never leaves.
+	registerAuthForLookupTest(t, manager, &coreauth.Auth{
+		ID:         "claude-key-with-token",
+		Provider:   "claude",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{coreauth.AttributeAuthKind: coreauth.AuthKindAPIKey},
+		Metadata:   map[string]any{"access_token": "stray-token"},
+	})
 	registerAuthForLookupTest(t, manager, &coreauth.Auth{
 		ID:         "codex.json",
 		FileName:   "codex.json",

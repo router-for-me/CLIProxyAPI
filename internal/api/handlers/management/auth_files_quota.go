@@ -109,7 +109,11 @@ func (h *Handler) GetAuthFileQuota(c *gin.Context) {
 			if !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
 				continue
 			}
-			if tokenValueFromMetadata(auth.Metadata) == "" {
+			// The credential's own classification decides, not the shape of
+			// its metadata: an entry marked apikey that still carries an
+			// access_token must not have that token sent to the OAuth
+			// usage endpoint.
+			if auth.AuthKind() != coreauth.AuthKindOAuth || tokenValueFromMetadata(auth.Metadata) == "" {
 				continue
 			}
 			targets = append(targets, auth)
