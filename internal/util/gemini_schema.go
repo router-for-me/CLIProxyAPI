@@ -1001,10 +1001,6 @@ func convertEnumValuesToStrings(jsonStr string, forceStringType bool) string {
 }
 
 func isBooleanEnumSchema(jsonStr, parentPath string, arr gjson.Result) bool {
-	schemaType := gjson.Get(jsonStr, joinPath(parentPath, "type"))
-	if schemaType.Exists() {
-		return effectiveSchemaType(schemaType) == "boolean"
-	}
 	if !arr.IsArray() || len(arr.Array()) == 0 {
 		return false
 	}
@@ -1018,6 +1014,12 @@ func isBooleanEnumSchema(jsonStr, parentPath string, arr gjson.Result) bool {
 		default:
 			return false
 		}
+	}
+	schemaType := gjson.Get(jsonStr, joinPath(parentPath, "type"))
+	if schemaType.Exists() {
+		// An explicitly typed nullable boolean may be constrained to null alone. The member
+		// validation above still rejects string or numeric enums on boolean-first unions.
+		return effectiveSchemaType(schemaType) == "boolean"
 	}
 	return hasBoolean
 }

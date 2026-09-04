@@ -1503,11 +1503,24 @@ func TestCleanJSONSchemaForAntigravityToolKeepsNumericEnumType(t *testing.T) {
 }
 
 func TestCleanJSONSchemaForAntigravityResponseDropsIgnoredBooleanEnum(t *testing.T) {
-	input := `{"type":"object","properties":{"value":{"type":"boolean","enum":["true"]}},"required":["value"]}`
+	input := `{"type":"object","properties":{"value":{"type":"boolean","enum":[true]}},"required":["value"]}`
 	result := gjson.Parse(CleanJSONSchemaForAntigravityResponse(input))
 	value := result.Get("properties.value")
 	if value.Get("enum").Exists() || value.Get("type").String() != "boolean" || !strings.Contains(value.Get("description").String(), "Allowed: true") {
 		t.Fatalf("ignored boolean response enum was not projected to a hint: %s", result.Raw)
+	}
+}
+
+func TestCleanJSONSchemaForGemini_MixedBooleanStringUnionUsesEnumType(t *testing.T) {
+	input := `{"type":"object","properties":{"answer":{"type":["boolean","string"],"enum":["yes","no"]}}}`
+	result := gjson.Parse(CleanJSONSchemaForGemini(input))
+	answer := result.Get("properties.answer")
+
+	if got := answer.Get("type").String(); got != "string" {
+		t.Fatalf("mixed union with string enum flattened to %q, want string: %s", got, result.Raw)
+	}
+	if got := getStrings(result.Raw, "properties.answer.enum"); !reflect.DeepEqual(got, []string{"yes", "no"}) {
+		t.Fatalf("mixed union string enum = %v, want [yes no]: %s", got, result.Raw)
 	}
 }
 
