@@ -46,42 +46,101 @@ func TestMetaAuth_StartDeviceFlow(t *testing.T) {
 }
 
 func TestMetaAuth_WaitForAuthorization(t *testing.T) {
-	attempts := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts++
-		w.Header().Set("Content-Type", "application/json")
-		if attempts < 2 {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error": "authorization_pending",
+	t.Run("successful authorization and minting", func(t *testing.T) {
+		attempts := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/key" {
+				_ = json.NewEncoder(w).Encode(MintedKeyResponse{
+					APIKey:       "LLM|test-minted-key",
+					UserEmail:    "user@meta.com",
+					UserFullName: "Meta User",
+				})
+				return
+			}
+			attempts++
+			if attempts < 2 {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error": "authorization_pending",
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(TokenData{
+				AccessToken: "test-access-token-123",
+				TokenType:   "Bearer",
+				ExpiresIn:   3600,
 			})
-			return
+		}))
+		defer server.Close()
+
+		auth := NewMetaAuth(&config.Config{})
+		auth.httpClient = server.Client()
+		auth.SetMintURL(server.URL + "/key")
+
+		dcr := &DeviceCodeResponse{
+			DeviceCode:    "test-device",
+			TokenEndpoint: server.URL + "/token",
+			Interval:      1,
+			ExpiresIn:     10,
 		}
-		_ = json.NewEncoder(w).Encode(TokenData{
-			AccessToken: "test-access-token-123",
-			TokenType:   "Bearer",
-			ExpiresIn:   3600,
-		})
-	}))
-	defer server.Close()
 
-	auth := NewMetaAuth(&config.Config{})
-	auth.httpClient = server.Client()
+		bundle, err := auth.WaitForAuthorization(context.Background(), dcr)
+		if err != nil {
+			t.Fatalf("WaitForAuthorization error: %v", err)
+		}
+		if bundle.TokenData == nil || bundle.TokenData.AccessToken != "test-access-token-123" {
+			t.Fatalf("expected token test-access-token-123, got %+v", bundle.TokenData)
+		}
+		if bundle.MintedKey == nil || bundle.MintedKey.APIKey != "LLM|test-minted-key" {
+			t.Fatalf("expected minted key LLM|test-minted-key, got %+v", bundle.MintedKey)
+		}
+		if bundle.Email != "user@meta.com" {
+			t.Errorf("expected email user@meta.com, got %s", bundle.Email)
+		}
+		if bundle.Name != "Meta User" {
+			t.Errorf("expected name Meta User, got %s", bundle.Name)
+		}
+	})
 
-	dcr := &DeviceCodeResponse{
-		DeviceCode:    "test-device",
-		TokenEndpoint: server.URL,
-		Interval:      1,
-		ExpiresIn:     10,
-	}
+	t.Run("mint failure falls back gracefully to dca token", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/key" {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"mint unavailable"}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(TokenData{
+				AccessToken: "test-access-token-dca-only",
+				TokenType:   "Bearer",
+				ExpiresIn:   3600,
+			})
+		}))
+		defer server.Close()
 
-	bundle, err := auth.WaitForAuthorization(context.Background(), dcr)
-	if err != nil {
-		t.Fatalf("WaitForAuthorization error: %v", err)
-	}
-	if bundle.TokenData.AccessToken != "test-access-token-123" {
-		t.Fatalf("expected token test-access-token-123, got %s", bundle.TokenData.AccessToken)
-	}
+		auth := NewMetaAuth(&config.Config{})
+		auth.httpClient = server.Client()
+		auth.SetMintURL(server.URL + "/key")
+
+		dcr := &DeviceCodeResponse{
+			DeviceCode:    "test-device",
+			TokenEndpoint: server.URL + "/token",
+			Interval:      1,
+			ExpiresIn:     10,
+		}
+
+		bundle, err := auth.WaitForAuthorization(context.Background(), dcr)
+		if err != nil {
+			t.Fatalf("WaitForAuthorization error: %v", err)
+		}
+		if bundle.TokenData == nil || bundle.TokenData.AccessToken != "test-access-token-dca-only" {
+			t.Fatalf("expected token test-access-token-dca-only, got %+v", bundle.TokenData)
+		}
+		if bundle.MintedKey != nil {
+			t.Fatalf("expected nil MintedKey on mint failure, got %+v", bundle.MintedKey)
+		}
+	})
 }
 
 func TestCredentialFileName(t *testing.T) {
@@ -117,17 +176,17 @@ func TestReadLocalMuseCLIAuth(t *testing.T) {
 
 	t.Setenv("MUSE_AUTH_PATH", authPath)
 
-	token, baseURL, email, ok := ReadLocalMuseCLIAuth()
+	cred, ok := ReadLocalMuseCLIAuth()
 	if !ok {
 		t.Fatalf("expected ok=true")
 	}
-	if token != "test-key-abc" {
-		t.Errorf("expected api_key test-key-abc, got %s", token)
+	if cred.APIKey != "test-key-abc" {
+		t.Errorf("expected api_key test-key-abc, got %s", cred.APIKey)
 	}
-	if baseURL != "https://api.meta.ai/v1" {
-		t.Errorf("expected base_url https://api.meta.ai/v1, got %s", baseURL)
+	if cred.BaseURL != "https://api.meta.ai/v1" {
+		t.Errorf("expected base_url https://api.meta.ai/v1, got %s", cred.BaseURL)
 	}
-	if email != "engineer@meta.com" {
-		t.Errorf("expected email engineer@meta.com, got %s", email)
+	if cred.Email != "engineer@meta.com" {
+		t.Errorf("expected email engineer@meta.com, got %s", cred.Email)
 	}
 }

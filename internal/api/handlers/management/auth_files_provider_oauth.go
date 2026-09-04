@@ -670,7 +670,7 @@ func (h *Handler) RequestMetaToken(c *gin.Context) {
 			return
 		}
 
-		fileName := metaauth.CredentialFileName(tokenStorage.Email, "")
+		fileName := metaauth.CredentialFileName(tokenStorage.Email, tokenStorage.DCAToken)
 		label := strings.TrimSpace(tokenStorage.Email)
 		if label == "" {
 			label = "Meta"
@@ -686,6 +686,12 @@ func (h *Handler) RequestMetaToken(c *gin.Context) {
 			"base_url":     tokenStorage.BaseURL,
 			"auth_kind":    "oauth",
 		}
+		if tokenStorage.DCAExpired != "" {
+			metadata["dca_expired"] = tokenStorage.DCAExpired
+		}
+		if tokenStorage.DCAExpiresAt > 0 {
+			metadata["dca_expires_at"] = tokenStorage.DCAExpiresAt
+		}
 		if tokenStorage.APIKey != "" {
 			metadata["api_key"] = tokenStorage.APIKey
 		}
@@ -699,17 +705,28 @@ func (h *Handler) RequestMetaToken(c *gin.Context) {
 			metadata["name"] = tokenStorage.Name
 		}
 
+		attrs := map[string]string{
+			"auth_kind": "oauth",
+			"base_url":  tokenStorage.BaseURL,
+		}
+		if tokenStorage.APIKey != "" {
+			attrs["api_key"] = tokenStorage.APIKey
+		}
+		if tokenStorage.DCAToken != "" {
+			attrs["dca_token"] = tokenStorage.DCAToken
+		}
+		if tokenStorage.Email != "" {
+			attrs["email"] = tokenStorage.Email
+		}
+
 		record := &coreauth.Auth{
-			ID:       fileName,
-			Provider: "meta",
-			FileName: fileName,
-			Label:    label,
-			Storage:  tokenStorage,
-			Metadata: metadata,
-			Attributes: map[string]string{
-				"auth_kind": "oauth",
-				"base_url":  tokenStorage.BaseURL,
-			},
+			ID:         fileName,
+			Provider:   "meta",
+			FileName:   fileName,
+			Label:      label,
+			Storage:    tokenStorage,
+			Metadata:   metadata,
+			Attributes: attrs,
 		}
 		if errGuard := guardOAuthSessionPendingForSave(state, "meta"); errGuard != nil {
 			return

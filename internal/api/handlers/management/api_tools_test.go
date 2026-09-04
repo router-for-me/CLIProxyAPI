@@ -327,3 +327,70 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
 	}
 }
+
+func TestAPICallResolvesMetaToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/key" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"api_key": "LLM|api-call-minted-key",
+			})
+			return
+		}
+		if r.URL.Path == "/test" {
+			authHeader := r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"auth_header": authHeader,
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	t.Setenv("META_MINT_URL", server.URL+"/key")
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	metaAuth := &coreauth.Auth{
+		ID:       "meta:oauth:user1",
+		Provider: "meta",
+		Metadata: map[string]any{
+			"dca_token": "dca:tool-test-token",
+		},
+	}
+	if _, err := manager.Register(context.Background(), metaAuth); err != nil {
+		t.Fatalf("register meta auth: %v", err)
+	}
+	authIndex := metaAuth.EnsureIndex()
+
+	h := &Handler{
+		cfg:         &config.Config{},
+		authManager: manager,
+	}
+	router := gin.New()
+	router.POST("/api/call", h.APICall)
+
+	body := `{"auth_index":"` + authIndex + `","method":"GET","url":"` + server.URL + `/test","header":{"Authorization":"Bearer $TOKEN$"}}`
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/call", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var response apiCallResponse
+	if errDecode := json.NewDecoder(recorder.Body).Decode(&response); errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+
+	var upstreamBody map[string]string
+	if err := json.Unmarshal([]byte(response.Body), &upstreamBody); err != nil {
+		t.Fatalf("decode upstream response: %v", err)
+	}
+	if upstreamBody["auth_header"] != "Bearer LLM|api-call-minted-key" {
+		t.Errorf("expected header 'Bearer LLM|api-call-minted-key', got %q", upstreamBody["auth_header"])
+	}
+}

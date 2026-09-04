@@ -4005,12 +4005,10 @@
       "max_completion_tokens": 65536,
       "thinking": {
         "levels": [
-          "minimal",
           "low",
           "medium",
           "high",
-          "xhigh",
-          "ultra"
+          "xhigh"
         ]
       },
       "supportedInputModalities": [
@@ -4034,12 +4032,10 @@
       "max_completion_tokens": 65536,
       "thinking": {
         "levels": [
-          "minimal",
           "low",
           "medium",
           "high",
-          "xhigh",
-          "ultra"
+          "xhigh"
         ]
       },
       "supportedInputModalities": [
@@ -4063,12 +4059,10 @@
       "max_completion_tokens": 65536,
       "thinking": {
         "levels": [
-          "minimal",
           "low",
           "medium",
           "high",
-          "xhigh",
-          "ultra"
+          "xhigh"
         ]
       },
       "supportedInputModalities": [
@@ -4092,12 +4086,10 @@
       "max_completion_tokens": 65536,
       "thinking": {
         "levels": [
-          "minimal",
           "low",
           "medium",
           "high",
-          "xhigh",
-          "ultra"
+          "xhigh"
         ]
       },
       "supportedInputModalities": [
@@ -4121,52 +4113,14 @@
       "max_completion_tokens": 65536,
       "thinking": {
         "levels": [
-          "minimal",
           "low",
           "medium",
           "high",
-          "xhigh",
-          "ultra"
+          "xhigh"
         ]
       },
       "supportedInputModalities": [
         "text"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "muse-image-1.0",
-      "object": "model",
-      "created": 1783000000,
-      "owned_by": "meta",
-      "type": "meta",
-      "display_name": "Muse Image 1.0",
-      "name": "muse-image-1.0",
-      "description": "Meta Muse Image 1.0 generation model",
-      "context_length": 32768,
-      "max_completion_tokens": 4096,
-      "supportedInputModalities": [
-        "text"
-      ],
-      "supportedOutputModalities": [
-        "image"
-      ]
-    },
-    {
-      "id": "muse-voice-transcribe-1.0",
-      "object": "model",
-      "created": 1783000000,
-      "owned_by": "meta",
-      "type": "meta",
-      "display_name": "Muse Voice Transcribe 1.0",
-      "name": "muse-voice-transcribe-1.0",
-      "description": "Meta Muse voice transcription model",
-      "context_length": 32768,
-      "max_completion_tokens": 4096,
-      "supportedInputModalities": [
-        "audio"
       ],
       "supportedOutputModalities": [
         "text"

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	metaauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/meta"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -251,6 +252,11 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth, 
 		return token, errToken
 	}
 
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
+		token, errToken := h.resolveMetaToken(ctx, auth, requestProxyURL)
+		return token, errToken
+	}
+
 	return tokenValueForAuth(auth), nil
 }
 
@@ -353,6 +359,129 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 	return strings.TrimSpace(tokenResp.AccessToken), nil
 }
 
+func (h *Handler) resolveMetaToken(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth == nil {
+		return "", nil
+	}
+	if auth.Metadata != nil {
+		if k, ok := auth.Metadata["api_key"].(string); ok && strings.TrimSpace(k) != "" && !strings.HasPrefix(strings.TrimSpace(k), "dca:") {
+			return strings.TrimSpace(k), nil
+		}
+		if t, ok := auth.Metadata["access_token"].(string); ok && strings.TrimSpace(t) != "" && !strings.HasPrefix(strings.TrimSpace(t), "dca:") {
+			return strings.TrimSpace(t), nil
+		}
+	}
+	if auth.Attributes != nil {
+		if k := strings.TrimSpace(auth.Attributes["api_key"]); k != "" && !strings.HasPrefix(k, "dca:") {
+			return k, nil
+		}
+		if t := strings.TrimSpace(auth.Attributes["access_token"]); t != "" && !strings.HasPrefix(t, "dca:") {
+			return t, nil
+		}
+	}
+
+	var dcaToken string
+	if auth.Metadata != nil {
+		if d, ok := auth.Metadata["dca_token"].(string); ok && strings.TrimSpace(d) != "" {
+			dcaToken = strings.TrimSpace(d)
+		} else if t, ok := auth.Metadata["access_token"].(string); ok && strings.HasPrefix(strings.TrimSpace(t), "dca:") {
+			dcaToken = strings.TrimSpace(t)
+		} else if k, ok := auth.Metadata["api_key"].(string); ok && strings.HasPrefix(strings.TrimSpace(k), "dca:") {
+			dcaToken = strings.TrimSpace(k)
+		}
+	}
+	if dcaToken == "" && auth.Attributes != nil {
+		if d := strings.TrimSpace(auth.Attributes["dca_token"]); d != "" {
+			dcaToken = d
+		} else if t := strings.TrimSpace(auth.Attributes["access_token"]); strings.HasPrefix(t, "dca:") {
+			dcaToken = t
+		} else if k := strings.TrimSpace(auth.Attributes["api_key"]); strings.HasPrefix(k, "dca:") {
+			dcaToken = k
+		}
+	}
+
+	if dcaToken == "" {
+		return "", nil
+	}
+
+	proxyURL := firstNonEmptyString(&requestProxyURL, &auth.ProxyURL)
+	var cfg *config.Config
+	if h != nil {
+		cfg = h.cfg
+	}
+	authSvc := metaauth.NewMetaAuthWithProxyURL(cfg, proxyURL)
+	minted, err := authSvc.MintAPIKey(ctx, dcaToken)
+	if err != nil {
+		return "", fmt.Errorf("meta token mint failed: %w", err)
+	}
+	if minted == nil || minted.APIKey == "" {
+		return "", fmt.Errorf("meta token mint returned empty key")
+	}
+
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["api_key"] = minted.APIKey
+	auth.Metadata["access_token"] = minted.APIKey
+	auth.Metadata["dca_token"] = dcaToken
+	delete(auth.Metadata, "expired")
+	if minted.UserEmail != "" {
+		auth.Metadata["email"] = minted.UserEmail
+	}
+	if minted.UserFullName != "" {
+		auth.Metadata["name"] = minted.UserFullName
+	}
+	nowStr := time.Now().Format(time.RFC3339)
+	auth.Metadata["last_refresh"] = nowStr
+
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["api_key"] = minted.APIKey
+	auth.Attributes["access_token"] = minted.APIKey
+
+	path := strings.TrimSpace(auth.Attributes[coreauth.AttributePath])
+	if path == "" {
+		path = strings.TrimSpace(auth.FileName)
+	}
+	if path != "" {
+		var storage *metaauth.MetaTokenStorage
+		if ms, ok := auth.Storage.(*metaauth.MetaTokenStorage); ok && ms != nil {
+			storage = ms
+			storage.APIKey = minted.APIKey
+			storage.AccessToken = minted.APIKey
+			storage.DCAToken = dcaToken
+			storage.Expired = ""
+			if minted.UserEmail != "" {
+				storage.Email = minted.UserEmail
+			}
+			if minted.UserFullName != "" {
+				storage.Name = minted.UserFullName
+			}
+			storage.LastRefresh = nowStr
+		} else {
+			storage = &metaauth.MetaTokenStorage{
+				Type:        "meta",
+				AuthKind:    "oauth",
+				AccessToken: minted.APIKey,
+				APIKey:      minted.APIKey,
+				DCAToken:    dcaToken,
+				Email:       minted.UserEmail,
+				Name:        minted.UserFullName,
+				LastRefresh: nowStr,
+				Metadata:    auth.Metadata,
+			}
+			auth.Storage = storage
+		}
+		_ = storage.SaveTokenToFile(path)
+	}
+
+	return minted.APIKey, nil
+}
+
 func antigravityTokenNeedsRefresh(metadata map[string]any) bool {
 	// Refresh a bit early to avoid requests racing token expiry.
 	const skew = 30 * time.Second
@@ -422,6 +551,12 @@ func stringValue(metadata map[string]any, key string) string {
 func tokenValueFromMetadata(metadata map[string]any) string {
 	if len(metadata) == 0 {
 		return ""
+	}
+	if v, ok := metadata["api_key"].(string); ok && strings.TrimSpace(v) != "" && !strings.HasPrefix(strings.TrimSpace(v), "dca:") {
+		return strings.TrimSpace(v)
+	}
+	if v, ok := metadata["apiKey"].(string); ok && strings.TrimSpace(v) != "" && !strings.HasPrefix(strings.TrimSpace(v), "dca:") {
+		return strings.TrimSpace(v)
 	}
 	if v, ok := metadata["accessToken"].(string); ok && strings.TrimSpace(v) != "" {
 		return strings.TrimSpace(v)

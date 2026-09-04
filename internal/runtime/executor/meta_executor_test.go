@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,25 +51,28 @@ func TestMetaExecutor_MetaCredsResolution(t *testing.T) {
 		}
 	})
 
-	t.Run("from env var", func(t *testing.T) {
+	t.Run("no bleed to env or local auth", func(t *testing.T) {
 		t.Setenv("META_API_KEY", "env-secret-key")
-		baseURL, token := metaCreds(nil)
-		if baseURL != "https://api.meta.ai/v1" || token != "env-secret-key" {
-			t.Errorf("unexpected creds: base=%s, token=%s", baseURL, token)
-		}
-	})
-
-	t.Run("from local muse auth", func(t *testing.T) {
-		t.Setenv("META_API_KEY", "")
 		tempDir := t.TempDir()
 		authPath := filepath.Join(tempDir, "auth.json")
 		content := `{"schema_version":1,"providers":{"meta":{"api_key":"local-muse-key","api_base_url":"https://api.meta.ai/v1"}}}`
 		_ = os.WriteFile(authPath, []byte(content), 0600)
 		t.Setenv("MUSE_AUTH_PATH", authPath)
 
+		// nil auth should NOT bleed to env or local file
 		baseURL, token := metaCreds(nil)
-		if baseURL != "https://api.meta.ai/v1" || token != "local-muse-key" {
-			t.Errorf("unexpected creds: base=%s, token=%s", baseURL, token)
+		if token != "" {
+			t.Errorf("expected empty token for nil auth, got %s", token)
+		}
+		if baseURL != "https://api.meta.ai/v1" {
+			t.Errorf("expected default base URL, got %s", baseURL)
+		}
+
+		// empty auth should NOT bleed to env or local file
+		emptyAuth := &cliproxyauth.Auth{}
+		_, token = metaCreds(emptyAuth)
+		if token != "" {
+			t.Errorf("expected empty token for empty auth, got %s", token)
 		}
 	})
 }
@@ -182,4 +187,223 @@ func TestMetaExecutor_ExecuteSuccessAndRateLimit(t *testing.T) {
 func mapToJSON(m map[string]any) string {
 	b, _ := json.Marshal(m)
 	return string(b)
+}
+
+func TestMetaExecutor_Refresh_DCA_MintAndPersist(t *testing.T) {
+	tempDir := t.TempDir()
+	authFilePath := filepath.Join(tempDir, "meta-test.json")
+	initialContent := `{"type":"meta","auth_kind":"oauth","access_token":"dca:initial-dca","dca_token":"dca:initial-dca","expired":"2020-01-01T00:00:00Z","request-retry":3}`
+	if err := os.WriteFile(authFilePath, []byte(initialContent), 0600); err != nil {
+		t.Fatalf("failed to write initial auth file: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/key" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"api_key":        "LLM|persisted-minted-key",
+				"user_email":     "engineer@meta.com",
+				"user_full_name": "Meta Engineer",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	t.Setenv("META_MINT_URL", server.URL+"/key")
+
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			cliproxyauth.AttributePath: authFilePath,
+		},
+		Metadata: map[string]any{
+			"dca_token": "dca:initial-dca",
+			"expired":   "2020-01-01T00:00:00Z",
+		},
+	}
+
+	exec := NewMetaExecutor(&config.Config{})
+	refreshed, err := exec.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("exec.Refresh error: %v", err)
+	}
+
+	if refreshed.Metadata["api_key"] != "LLM|persisted-minted-key" {
+		t.Errorf("expected api_key LLM|persisted-minted-key in metadata, got %v", refreshed.Metadata["api_key"])
+	}
+	if refreshed.Attributes["api_key"] != "LLM|persisted-minted-key" {
+		t.Errorf("expected api_key LLM|persisted-minted-key in attributes, got %v", refreshed.Attributes["api_key"])
+	}
+	if _, hasExpired := refreshed.Metadata["expired"]; hasExpired {
+		t.Errorf("expected expired to be removed from metadata after minting")
+	}
+
+	// Verify durable file persistence on disk
+	diskBytes, errRead := os.ReadFile(authFilePath)
+	if errRead != nil {
+		t.Fatalf("failed to read persisted file: %v", errRead)
+	}
+	var diskData map[string]any
+	if errJSON := json.Unmarshal(diskBytes, &diskData); errJSON != nil {
+		t.Fatalf("failed to parse persisted JSON: %v", errJSON)
+	}
+	if diskData["api_key"] != "LLM|persisted-minted-key" {
+		t.Errorf("expected persisted api_key LLM|persisted-minted-key, got %v", diskData["api_key"])
+	}
+	if diskData["access_token"] != "LLM|persisted-minted-key" {
+		t.Errorf("expected persisted access_token LLM|persisted-minted-key, got %v", diskData["access_token"])
+	}
+	// Verify existing properties preserved
+	if diskData["request-retry"] != float64(3) {
+		t.Errorf("expected preserved request-retry: 3, got %v", diskData["request-retry"])
+	}
+}
+
+func TestMetaExecutor_Refresh_SingleflightAndMultiAccount(t *testing.T) {
+	var count1, count2 int64
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/key" {
+			var req map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			dca := req["dca_token"]
+			w.Header().Set("Content-Type", "application/json")
+			if dca == "dca:acct1" {
+				atomic.AddInt64(&count1, 1)
+				time.Sleep(50 * time.Millisecond) // artificial delay to allow concurrent calls to coalesce
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"api_key":    "LLM|key-acct1",
+					"user_email": "acct1@meta.com",
+				})
+				return
+			}
+			if dca == "dca:acct2" {
+				atomic.AddInt64(&count2, 1)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"api_key":    "LLM|key-acct2",
+					"user_email": "acct2@meta.com",
+				})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	t.Setenv("META_MINT_URL", server.URL+"/key")
+	exec := NewMetaExecutor(&config.Config{})
+
+	// 10 concurrent refreshes for account 1
+	var wg sync.WaitGroup
+	auth1 := &cliproxyauth.Auth{
+		Provider: "meta",
+		Metadata: map[string]any{"dca_token": "dca:acct1"},
+	}
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := exec.Refresh(context.Background(), auth1)
+			if err != nil {
+				t.Errorf("Refresh acct1 error: %v", err)
+			}
+			if res != nil && res.Metadata["api_key"] != "LLM|key-acct1" {
+				t.Errorf("expected LLM|key-acct1, got %v", res.Metadata["api_key"])
+			}
+		}()
+	}
+	wg.Wait()
+
+	if totalMint1 := atomic.LoadInt64(&count1); totalMint1 != 1 {
+		t.Errorf("expected exactly 1 singleflight mint request for acct1, got %d", totalMint1)
+	}
+
+	// Account 2 refreshes independently
+	auth2 := &cliproxyauth.Auth{
+		Provider: "meta",
+		Metadata: map[string]any{"dca_token": "dca:acct2"},
+	}
+	res2, err2 := exec.Refresh(context.Background(), auth2)
+	if err2 != nil {
+		t.Fatalf("Refresh acct2 error: %v", err2)
+	}
+	if res2.Metadata["api_key"] != "LLM|key-acct2" {
+		t.Errorf("expected LLM|key-acct2, got %v", res2.Metadata["api_key"])
+	}
+	if totalMint2 := atomic.LoadInt64(&count2); totalMint2 != 1 {
+		t.Errorf("expected 1 mint request for acct2, got %d", totalMint2)
+	}
+}
+
+func TestMetaExecutor_Execute_DCARecovery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/key" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"api_key": "LLM|auto-recovered-key",
+			})
+			return
+		}
+		if r.URL.Path == "/chat/completions" {
+			if r.Header.Get("Authorization") != "Bearer LLM|auto-recovered-key" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":      "chatcmpl-123",
+				"object":  "chat.completion",
+				"created": time.Now().Unix(),
+				"model":   "muse-spark-1.3",
+				"choices": []map[string]any{
+					{
+						"index":         0,
+						"message":       map[string]any{"role": "assistant", "content": "hello world"},
+						"finish_reason": "stop",
+					},
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	t.Setenv("META_MINT_URL", server.URL+"/key")
+
+	cfg := &config.Config{}
+	exec := NewMetaExecutor(cfg)
+
+	// Auth has ONLY a DCA token
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Metadata: map[string]any{
+			"dca_token": "dca:execute-recover-me",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+	}
+
+	req := cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: []byte(`{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hi"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute with DCA-only auth error: %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Errorf("expected non-empty payload, got empty")
+	}
+	if auth.Metadata["api_key"] != "LLM|auto-recovered-key" {
+		t.Errorf("expected auth to be enriched with minted api_key, got %v", auth.Metadata["api_key"])
+	}
 }

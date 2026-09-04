@@ -88,18 +88,20 @@ type MetaAuthBundle struct {
 
 // MetaTokenStorage represents persisted Meta OAuth tokens in auth files.
 type MetaTokenStorage struct {
-	Type        string `json:"type"`
-	AuthKind    string `json:"auth_kind"`
-	AccessToken string `json:"access_token"`
-	DCAToken    string `json:"dca_token,omitempty"`
-	APIKey      string `json:"api_key,omitempty"`
-	TokenType   string `json:"token_type,omitempty"`
-	ExpiresIn   int    `json:"expires_in,omitempty"`
-	Expired     string `json:"expired,omitempty"`
-	LastRefresh string `json:"last_refresh,omitempty"`
-	BaseURL     string `json:"base_url,omitempty"`
-	Email       string `json:"email,omitempty"`
-	Name        string `json:"name,omitempty"`
+	Type         string `json:"type"`
+	AuthKind     string `json:"auth_kind"`
+	AccessToken  string `json:"access_token"`
+	DCAToken     string `json:"dca_token,omitempty"`
+	APIKey       string `json:"api_key,omitempty"`
+	TokenType    string `json:"token_type,omitempty"`
+	ExpiresIn    int    `json:"expires_in,omitempty"`
+	Expired      string `json:"expired,omitempty"`
+	DCAExpired   string `json:"dca_expired,omitempty"`
+	DCAExpiresAt int64  `json:"dca_expires_at,omitempty"`
+	LastRefresh  string `json:"last_refresh,omitempty"`
+	BaseURL      string `json:"base_url,omitempty"`
+	Email        string `json:"email,omitempty"`
+	Name         string `json:"name,omitempty"`
 
 	Metadata map[string]any `json:"-"`
 }
@@ -118,26 +120,52 @@ func (ts *MetaTokenStorage) SaveTokenToFile(authFilePath string) error {
 	}
 
 	data := map[string]any{
-		"type":         ts.Type,
-		"auth_kind":    ts.AuthKind,
+		"type":         "meta",
+		"auth_kind":    "oauth",
 		"access_token": ts.AccessToken,
-		"token_type":   ts.TokenType,
-		"expires_in":   ts.ExpiresIn,
-		"expired":      ts.Expired,
-		"last_refresh": ts.LastRefresh,
-		"base_url":     ts.BaseURL,
+	}
+	if ts.DCAToken != "" {
+		data["dca_token"] = ts.DCAToken
 	}
 	if ts.APIKey != "" {
 		data["api_key"] = ts.APIKey
 	}
-	if ts.DCAToken != "" {
-		data["dca_token"] = ts.DCAToken
+	if ts.TokenType != "" {
+		data["token_type"] = ts.TokenType
+	}
+	if ts.ExpiresIn > 0 {
+		data["expires_in"] = ts.ExpiresIn
+	}
+	if ts.Expired != "" {
+		data["expired"] = ts.Expired
+	}
+	if ts.DCAExpired != "" {
+		data["dca_expired"] = ts.DCAExpired
+	}
+	if ts.DCAExpiresAt > 0 {
+		data["dca_expires_at"] = ts.DCAExpiresAt
+	}
+	if ts.LastRefresh != "" {
+		data["last_refresh"] = ts.LastRefresh
+	}
+	if ts.BaseURL != "" {
+		data["base_url"] = ts.BaseURL
 	}
 	if ts.Email != "" {
 		data["email"] = ts.Email
 	}
 	if ts.Name != "" {
 		data["name"] = ts.Name
+	}
+	if raw, errRead := os.ReadFile(authFilePath); errRead == nil {
+		var existing map[string]any
+		if errJSON := json.Unmarshal(raw, &existing); errJSON == nil {
+			for k, v := range existing {
+				if _, exists := data[k]; !exists {
+					data[k] = v
+				}
+			}
+		}
 	}
 	for k, v := range ts.Metadata {
 		if _, exists := data[k]; !exists {
@@ -168,6 +196,12 @@ type MetaAuth struct {
 	cfg        *config.Config
 	httpClient *http.Client
 	proxyURL   string
+	mintURL    string
+}
+
+// SetMintURL overrides the API key minting endpoint (primarily for unit tests).
+func (a *MetaAuth) SetMintURL(u string) {
+	a.mintURL = strings.TrimSpace(u)
 }
 
 // NewMetaAuth creates a new MetaAuth service instance.
@@ -270,7 +304,10 @@ func (a *MetaAuth) WaitForAuthorization(ctx context.Context, dcr *DeviceCodeResp
 
 	maxDuration := MaxPollDuration
 	if dcr.ExpiresIn > 0 {
-		maxDuration = time.Duration(dcr.ExpiresIn) * time.Second
+		expiresDuration := time.Duration(dcr.ExpiresIn) * time.Second
+		if expiresDuration < maxDuration {
+			maxDuration = expiresDuration
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, maxDuration)
@@ -376,7 +413,14 @@ func (a *MetaAuth) MintAPIKey(ctx context.Context, dcaToken string) (*MintedKeyR
 		"dca_token": dcaToken,
 	})
 
-	mintURL := "https://api.meta.ai/muse-code/key"
+	mintURL := a.mintURL
+	if mintURL == "" {
+		if envMint := strings.TrimSpace(os.Getenv("META_MINT_URL")); envMint != "" {
+			mintURL = envMint
+		} else {
+			mintURL = "https://api.meta.ai/muse-code/key"
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, mintURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("meta auth: create mint request: %w", err)
@@ -391,7 +435,9 @@ func (a *MetaAuth) MintAPIKey(ctx context.Context, dcaToken string) (*MintedKeyR
 		return nil, fmt.Errorf("meta auth: mint request failed: %w", err)
 	}
 	defer func() {
-		_ = resp.Body.Close()
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("meta auth: close mint response body error: %v", errClose)
+		}
 	}()
 
 	body, errRead := io.ReadAll(resp.Body)
@@ -418,9 +464,9 @@ func (a *MetaAuth) CreateTokenStorage(bundle *MetaAuthBundle) *MetaTokenStorage 
 	if bundle == nil || bundle.TokenData == nil {
 		return nil
 	}
-	expired := ""
+	dcaExpired := ""
 	if bundle.TokenData.ExpiresAt > 0 {
-		expired = time.Unix(bundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
+		dcaExpired = time.Unix(bundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
 	}
 	apiKey := ""
 	email := bundle.Email
@@ -434,23 +480,37 @@ func (a *MetaAuth) CreateTokenStorage(bundle *MetaAuthBundle) *MetaTokenStorage 
 			name = bundle.MintedKey.UserFullName
 		}
 	}
+
+	accessToken := bundle.TokenData.AccessToken
+	expired := ""
+	if apiKey != "" {
+		accessToken = apiKey
+		// When an API key is minted, the usable credential is the API key, which does not expire on the DCA timer.
+		// Expired is left empty so selector does not block this credential.
+	} else {
+		// When only DCA token is available, expired is set to DCA expiry so manager tracks its deadline.
+		expired = dcaExpired
+	}
+
 	return &MetaTokenStorage{
-		Type:        "meta",
-		AuthKind:    "oauth",
-		AccessToken: bundle.TokenData.AccessToken,
-		DCAToken:    bundle.TokenData.AccessToken,
-		APIKey:      apiKey,
-		TokenType:   bundle.TokenData.TokenType,
-		ExpiresIn:   bundle.TokenData.ExpiresIn,
-		Expired:     expired,
-		LastRefresh: time.Now().UTC().Format(time.RFC3339),
-		BaseURL:     DefaultAPIBaseURL,
-		Email:       email,
-		Name:        name,
+		Type:         "meta",
+		AuthKind:     "oauth",
+		AccessToken:  accessToken,
+		DCAToken:     bundle.TokenData.AccessToken,
+		APIKey:       apiKey,
+		TokenType:    bundle.TokenData.TokenType,
+		ExpiresIn:    bundle.TokenData.ExpiresIn,
+		Expired:      expired,
+		DCAExpired:   dcaExpired,
+		DCAExpiresAt: bundle.TokenData.ExpiresAt,
+		LastRefresh:  time.Now().UTC().Format(time.RFC3339),
+		BaseURL:      DefaultAPIBaseURL,
+		Email:        email,
+		Name:         name,
 	}
 }
 
-// CredentialFileName derives a deterministic file name for the credentials.
+// CredentialFileName derives a deterministic, collision-free file name for the credentials.
 func CredentialFileName(email, sub string) string {
 	clean := strings.TrimSpace(email)
 	if clean != "" {
@@ -462,11 +522,21 @@ func CredentialFileName(email, sub string) string {
 		}, clean)
 		return fmt.Sprintf("meta-%s.json", sanitized)
 	}
-	if strings.TrimSpace(sub) != "" {
-		hash := sha256.Sum256([]byte(sub))
+	cleanSub := strings.TrimSpace(sub)
+	if cleanSub != "" {
+		hash := sha256.Sum256([]byte(cleanSub))
 		return fmt.Sprintf("meta-%s.json", hex.EncodeToString(hash[:8]))
 	}
 	return "meta-oauth.json"
+}
+
+// LocalMuseCredential represents credentials loaded from ~/.config/muse/auth.json or $MUSE_AUTH_PATH.
+type LocalMuseCredential struct {
+	APIKey       string
+	DCAToken     string
+	BaseURL      string
+	Email        string
+	UserFullName string
 }
 
 // LocalMuseAuth represents credentials stored by the Meta Muse CLI (~/.config/muse/auth.json).
@@ -483,8 +553,9 @@ type LocalMuseAuth struct {
 	} `json:"providers"`
 }
 
-// ReadLocalMuseCLIAuth reads credentials from ~/.config/muse/auth.json or $MUSE_AUTH_PATH.
-func ReadLocalMuseCLIAuth() (token, baseURL, email string, ok bool) {
+// ReadLocalMuseCLIAuth reads credentials from ~/.config/muse/auth.json or $MUSE_AUTH_PATH,
+// preserving whether the discovered token is an active API key or a DCA token.
+func ReadLocalMuseCLIAuth() (*LocalMuseCredential, bool) {
 	authPath := strings.TrimSpace(os.Getenv("MUSE_AUTH_PATH"))
 	if authPath == "" {
 		if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
@@ -494,31 +565,40 @@ func ReadLocalMuseCLIAuth() (token, baseURL, email string, ok bool) {
 		}
 	}
 	if authPath == "" {
-		return "", "", "", false
+		return nil, false
 	}
 	data, err := os.ReadFile(authPath)
 	if err != nil || len(data) == 0 {
-		return "", "", "", false
+		return nil, false
 	}
 	var parsed LocalMuseAuth
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		return "", "", "", false
+		return nil, false
 	}
 	metaProvider, exists := parsed.Providers["meta"]
 	if !exists {
-		return "", "", "", false
+		return nil, false
 	}
-	token = strings.TrimSpace(metaProvider.APIKey)
-	if token == "" {
-		token = strings.TrimSpace(metaProvider.AccessToken)
+	apiKey := strings.TrimSpace(metaProvider.APIKey)
+	var dcaToken string
+	rawAccess := strings.TrimSpace(metaProvider.AccessToken)
+	if strings.HasPrefix(rawAccess, "dca:") {
+		dcaToken = rawAccess
+	} else if apiKey == "" && rawAccess != "" {
+		apiKey = rawAccess
 	}
-	if token == "" {
-		return "", "", "", false
+	if apiKey == "" && dcaToken == "" {
+		return nil, false
 	}
-	baseURL = strings.TrimSpace(metaProvider.APIBaseURL)
+	baseURL := strings.TrimSpace(metaProvider.APIBaseURL)
 	if baseURL == "" {
 		baseURL = DefaultAPIBaseURL
 	}
-	email = strings.TrimSpace(metaProvider.UserEmail)
-	return token, baseURL, email, true
+	return &LocalMuseCredential{
+		APIKey:       apiKey,
+		DCAToken:     dcaToken,
+		BaseURL:      baseURL,
+		Email:        strings.TrimSpace(metaProvider.UserEmail),
+		UserFullName: strings.TrimSpace(metaProvider.UserFullName),
+	}, true
 }

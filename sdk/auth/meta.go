@@ -89,7 +89,7 @@ func (a MetaAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 		return nil, fmt.Errorf("meta token storage missing access token")
 	}
 
-	fileName := metaauth.CredentialFileName(tokenStorage.Email, "")
+	fileName := metaauth.CredentialFileName(tokenStorage.Email, tokenStorage.DCAToken)
 	label := strings.TrimSpace(tokenStorage.Email)
 	if label == "" {
 		label = "Meta"
@@ -105,6 +105,12 @@ func (a MetaAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 		"base_url":     tokenStorage.BaseURL,
 		"auth_kind":    "oauth",
 	}
+	if tokenStorage.DCAExpired != "" {
+		metadata["dca_expired"] = tokenStorage.DCAExpired
+	}
+	if tokenStorage.DCAExpiresAt > 0 {
+		metadata["dca_expires_at"] = tokenStorage.DCAExpiresAt
+	}
 	if tokenStorage.APIKey != "" {
 		metadata["api_key"] = tokenStorage.APIKey
 	}
@@ -118,18 +124,29 @@ func (a MetaAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 		metadata["name"] = tokenStorage.Name
 	}
 
+	attrs := map[string]string{
+		"auth_kind": "oauth",
+		"base_url":  tokenStorage.BaseURL,
+	}
+	if tokenStorage.APIKey != "" {
+		attrs["api_key"] = tokenStorage.APIKey
+	}
+	if tokenStorage.DCAToken != "" {
+		attrs["dca_token"] = tokenStorage.DCAToken
+	}
+	if tokenStorage.Email != "" {
+		attrs["email"] = tokenStorage.Email
+	}
+
 	fmt.Println("Meta authentication successful")
 
 	return &coreauth.Auth{
-		ID:       fileName,
-		Provider: a.Provider(),
-		FileName: fileName,
-		Label:    label,
-		Storage:  tokenStorage,
-		Metadata: metadata,
-		Attributes: map[string]string{
-			"auth_kind": "oauth",
-			"base_url":  tokenStorage.BaseURL,
-		},
+		ID:         fileName,
+		Provider:   a.Provider(),
+		FileName:   fileName,
+		Label:      label,
+		Storage:    tokenStorage,
+		Metadata:   metadata,
+		Attributes: attrs,
 	}, nil
 }
