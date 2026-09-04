@@ -228,6 +228,10 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 			provider = "realtime-client-secret"
 		}
 		c.Set("userApiKey", principal)
+		// Carry the issuing key's display label so usage records stay attributed to it.
+		if label := strings.TrimSpace(authorization.IssuerLabel); label != "" {
+			c.Set("userApiKeyLabel", label)
+		}
 		c.Set("accessProvider", provider)
 		c.Set(codexlive.ClientSecretSessionContextKey, authorization.Session)
 		c.Set(codexlive.ClientSecretPrincipalContextKey, authorization.Principal)

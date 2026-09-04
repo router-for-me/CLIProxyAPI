@@ -119,7 +119,7 @@ func TestClientSecretStoreRejectsExpiredToken(t *testing.T) {
 	store := newClientSecretStore()
 	now := time.Unix(1700000000, 0)
 	store.now = func() time.Time { return now }
-	token, _, _, errCreate := store.create(json.RawMessage(`{"type":"realtime","model":"gpt-live-1-codex"}`), time.Minute, "issuer", "test")
+	token, _, _, errCreate := store.create(json.RawMessage(`{"type":"realtime","model":"gpt-live-1-codex"}`), time.Minute, "issuer", "test", "")
 	if errCreate != nil {
 		t.Fatalf("create() error = %v", errCreate)
 	}

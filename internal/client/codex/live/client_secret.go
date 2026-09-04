@@ -38,7 +38,10 @@ type ClientSecretAuthorization struct {
 	Principal       string
 	IssuerPrincipal string
 	IssuerProvider  string
-	Session         json.RawMessage
+	// IssuerLabel is the attribution-only display label of the issuing API key.
+	// It MUST NOT participate in authorization, capacity accounting, or identity comparisons.
+	IssuerLabel string
+	Session     json.RawMessage
 }
 
 type clientSecretEntry struct {
@@ -73,7 +76,7 @@ func newClientSecretStore() *clientSecretStore {
 	}
 }
 
-func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Duration, issuerPrincipal, issuerProvider string) (string, ClientSecretAuthorization, time.Time, error) {
+func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Duration, issuerPrincipal, issuerProvider, issuerLabel string) (string, ClientSecretAuthorization, time.Time, error) {
 	if s == nil {
 		return "", ClientSecretAuthorization{}, time.Time{}, errors.New("Realtime client secret store unavailable")
 	}
@@ -89,6 +92,7 @@ func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Durati
 		Principal:       sessionID,
 		IssuerPrincipal: strings.TrimSpace(issuerPrincipal),
 		IssuerProvider:  strings.TrimSpace(issuerProvider),
+		IssuerLabel:     strings.TrimSpace(issuerLabel),
 		Session:         append(json.RawMessage(nil), session...),
 	}
 	now := s.currentTime()
@@ -99,6 +103,8 @@ func (s *clientSecretStore) create(session json.RawMessage, lifetime time.Durati
 		s.mu.Unlock()
 		return "", ClientSecretAuthorization{}, time.Time{}, errClientSecretCapacity
 	}
+	// Capacity buckets are keyed by issuer principal and provider only; the label is
+	// attribution metadata and must not widen or split a bucket.
 	if authorization.IssuerPrincipal != "" {
 		issuerEntries := 0
 		for _, entry := range s.entries {
@@ -267,9 +273,11 @@ func (h *Handler) createClientSecret(c *gin.Context, session json.RawMessage, ex
 	}
 	issuerPrincipal, _ := c.Get("userApiKey")
 	issuerProvider, _ := c.Get("accessProvider")
+	issuerLabel, _ := c.Get("userApiKeyLabel")
 	issuerPrincipalValue, _ := issuerPrincipal.(string)
 	issuerProviderValue, _ := issuerProvider.(string)
-	token, authorization, expiresAt, errCreate := h.clientSecrets.create(upstreamSession, lifetime, issuerPrincipalValue, issuerProviderValue)
+	issuerLabelValue, _ := issuerLabel.(string)
+	token, authorization, expiresAt, errCreate := h.clientSecrets.create(upstreamSession, lifetime, issuerPrincipalValue, issuerProviderValue, issuerLabelValue)
 	if errCreate != nil {
 		if errors.Is(errCreate, errClientSecretCapacity) {
 			c.Header("Retry-After", "1")
