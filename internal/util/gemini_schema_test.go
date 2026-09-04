@@ -2459,24 +2459,24 @@ func TestCleanJSONSchemaForGemini_BooleanEnumKeepsBooleanType(t *testing.T) {
 	}
 }
 
-func TestCleanJSONSchemaForGemini_UntypedBooleanEnumNotForcedToString(t *testing.T) {
+func TestCleanJSONSchema_UntypedBooleanConstraintsInferBooleanType(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
-			"toggle": {"enum": [true, false]}
+			"toggle": {"enum": [true, false]},
+			"enabled": {"const": true}
 		}
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
-	toggle := gjson.Get(result, "properties.toggle")
-	if toggle.Get("type").String() == "string" {
-		t.Errorf("untyped boolean-only enum was forced to string: %s", result)
-	}
-	if toggle.Get("enum").Exists() {
-		for _, item := range toggle.Get("enum").Array() {
-			if item.Type == gjson.String {
-				t.Errorf("untyped boolean-only enum was rewritten to strings: %s", result)
-				break
+	for name, clean := range schemaCleaners() {
+		result := clean(input)
+		for _, property := range []string{"toggle", "enabled"} {
+			schema := gjson.Get(result, "properties."+property)
+			if schema.Get("type").String() != "boolean" {
+				t.Errorf("%s: untyped boolean %s did not infer boolean type: %s", name, property, result)
+			}
+			if schema.Get("enum").Exists() || schema.Get("const").Exists() {
+				t.Errorf("%s: unsupported boolean constraint survived on %s: %s", name, property, result)
 			}
 		}
 	}
@@ -2534,10 +2534,9 @@ func TestCleanJSONSchemaForAntigravityResponse_BooleanEnumNotRewrittenToString(t
 	}
 }
 
-// TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive rewrites exclusiveMinimum /
-// exclusiveMaximum into inclusive minimum / maximum. Integer bounds shift by ±1; number
-// bounds keep the same value (intentional widening). Gemini keeps those inclusive keywords;
-// Antigravity then lifts them into description hints.
+// TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive rewrites integer exclusiveMinimum /
+// exclusiveMaximum into equivalent inclusive bounds. Continuous bounds retain exact hints because
+// their closest supported inclusive projections cannot express an open interval by themselves.
 func TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive(t *testing.T) {
 	input := `{
 		"type": "object",
@@ -2558,6 +2557,13 @@ func TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive(t *testing.T) {
 				"maximum": 10,
 				"exclusiveMinimum": 0,
 				"exclusiveMaximum": 20
+			},
+			"tightened": {
+				"type": "integer",
+				"minimum": -100,
+				"maximum": 100,
+				"exclusiveMinimum": 0,
+				"exclusiveMaximum": 10
 			}
 		}
 	}`
@@ -2568,7 +2574,10 @@ func TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive(t *testing.T) {
 		t.Errorf("Gemini exclusive bounds survived: %s", gemini.Raw)
 	}
 	if score.Get("minimum").String() != "0" || score.Get("maximum").String() != "10" {
-		t.Errorf("Gemini number exclusive bounds were not projected in place: %s", gemini.Raw)
+		t.Errorf("Gemini number exclusive bounds lack closest inclusive projections: %s", gemini.Raw)
+	}
+	if description := score.Get("description").String(); !strings.Contains(description, "exclusiveMinimum: 0") || !strings.Contains(description, "exclusiveMaximum: 10") {
+		t.Errorf("Gemini number exclusive bound hints missing: %s", gemini.Raw)
 	}
 
 	count := gemini.Get("properties.count")
@@ -2587,6 +2596,11 @@ func TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive(t *testing.T) {
 		t.Errorf("Gemini overwrote existing inclusive bounds: %s", gemini.Raw)
 	}
 
+	tightened := gemini.Get("properties.tightened")
+	if tightened.Get("minimum").String() != "1" || tightened.Get("maximum").String() != "9" {
+		t.Errorf("Gemini failed to select stricter projected bounds: %s", gemini.Raw)
+	}
+
 	for name, clean := range map[string]func(string) string{
 		"antigravity":         CleanJSONSchemaForAntigravity,
 		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
@@ -2600,11 +2614,8 @@ func TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive(t *testing.T) {
 		if parsed.Get("properties.score.minimum").Exists() || parsed.Get("properties.score.maximum").Exists() {
 			t.Errorf("%s: inclusive bounds should be hinted, not kept: %s", name, got)
 		}
-		if strings.Contains(scoreDesc, "exclusiveMinimum") || strings.Contains(scoreDesc, "exclusiveMaximum") {
-			t.Errorf("%s: exclusive keywords appeared as hints: %s", name, got)
-		}
-		if !strings.Contains(scoreDesc, "minimum: 0") || !strings.Contains(scoreDesc, "maximum: 10") {
-			t.Errorf("%s: projected number inclusive hints missing: %s", name, got)
+		if !strings.Contains(scoreDesc, "exclusiveMinimum: 0") || !strings.Contains(scoreDesc, "exclusiveMaximum: 10") {
+			t.Errorf("%s: exact number exclusive hints missing: %s", name, got)
 		}
 
 		countDesc := parsed.Get("properties.count.description").String()
@@ -2628,6 +2639,41 @@ func TestCleanJSONSchema_ExclusiveBoundsProjectedToInclusive(t *testing.T) {
 		if strings.Contains(clampedDesc, "exclusiveMinimum") || strings.Contains(clampedDesc, "exclusiveMaximum") {
 			t.Errorf("%s: exclusive keywords appeared as hints on clamped: %s", name, got)
 		}
+
+		tightenedDesc := parsed.Get("properties.tightened.description").String()
+		if !strings.Contains(tightenedDesc, "minimum: 1") || !strings.Contains(tightenedDesc, "maximum: 9") {
+			t.Errorf("%s: stricter projected bounds missing: %s", name, got)
+		}
+	}
+}
+
+func TestCleanJSONSchema_IntegerExclusiveBoundsUseExactArithmetic(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"aboveInt64": {"type": "integer", "exclusiveMinimum": 9223372036854775807},
+			"belowInt64": {"type": "integer", "exclusiveMaximum": -9223372036854775808},
+			"fractional": {"type": "integer", "exclusiveMinimum": -1.2, "exclusiveMaximum": 3.8},
+			"large": {"type": "integer", "exclusiveMinimum": 92233720368547758081234567890}
+		}
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+	parsed := gjson.Parse(result)
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"properties.aboveInt64.minimum", "9223372036854775808"},
+		{"properties.belowInt64.maximum", "-9223372036854775809"},
+		{"properties.fractional.minimum", "-1"},
+		{"properties.fractional.maximum", "3"},
+		{"properties.large.minimum", "92233720368547758081234567891"},
+	}
+	for _, test := range tests {
+		if got := parsed.Get(test.path).Raw; got != test.want {
+			t.Errorf("%s = %s, want %s: %s", test.path, got, test.want, result)
+		}
 	}
 }
 
@@ -2640,7 +2686,12 @@ func TestCleanJSONSchema_Draft04BooleanExclusiveFlagsDropped(t *testing.T) {
 				"minimum": 0,
 				"exclusiveMinimum": true,
 				"maximum": 120,
-				"exclusiveMaximum": false
+				"exclusiveMaximum": true
+			},
+			"ratio": {
+				"type": "number",
+				"minimum": 0,
+				"exclusiveMinimum": true
 			}
 		}
 	}`
@@ -2652,9 +2703,16 @@ func TestCleanJSONSchema_Draft04BooleanExclusiveFlagsDropped(t *testing.T) {
 		if age.Get("exclusiveMinimum").Exists() || age.Get("exclusiveMaximum").Exists() {
 			t.Errorf("%s: Draft-04 exclusive flags survived: %s", name, got)
 		}
+		ratio := parsed.Get("properties.ratio")
+		if ratio.Get("exclusiveMinimum").Exists() {
+			t.Errorf("%s: Draft-04 number exclusive flag survived: %s", name, got)
+		}
 		if name == "gemini" {
-			if age.Get("minimum").String() != "0" || age.Get("maximum").String() != "120" {
-				t.Errorf("%s: sibling inclusive bounds were lost: %s", name, got)
+			if age.Get("minimum").String() != "1" || age.Get("maximum").String() != "119" {
+				t.Errorf("%s: Draft-04 integer bounds were not shifted: %s", name, got)
+			}
+			if ratio.Get("minimum").String() != "0" || !strings.Contains(ratio.Get("description").String(), "exclusiveMinimum: true") {
+				t.Errorf("%s: Draft-04 number exclusivity was not retained as a hint: %s", name, got)
 			}
 			continue
 		}
@@ -2662,11 +2720,15 @@ func TestCleanJSONSchema_Draft04BooleanExclusiveFlagsDropped(t *testing.T) {
 		if age.Get("minimum").Exists() || age.Get("maximum").Exists() {
 			t.Errorf("%s: inclusive bounds should be hinted: %s", name, got)
 		}
-		if !strings.Contains(desc, "minimum: 0") || !strings.Contains(desc, "maximum: 120") {
-			t.Errorf("%s: sibling inclusive hints missing: %s", name, got)
+		if !strings.Contains(desc, "minimum: 1") || !strings.Contains(desc, "maximum: 119") {
+			t.Errorf("%s: projected inclusive hints missing: %s", name, got)
 		}
 		if strings.Contains(desc, "exclusiveMinimum") || strings.Contains(desc, "exclusiveMaximum") {
 			t.Errorf("%s: exclusive flags appeared as hints: %s", name, got)
+		}
+		ratioDesc := ratio.Get("description").String()
+		if ratio.Get("minimum").Exists() || !strings.Contains(ratioDesc, "minimum: 0") || !strings.Contains(ratioDesc, "exclusiveMinimum: true") {
+			t.Errorf("%s: Draft-04 number hints missing: %s", name, got)
 		}
 	}
 }

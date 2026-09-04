@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"math"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -766,12 +766,10 @@ func convertRefsToHints(jsonStr string, preserveSiblings bool) string {
 	return jsonStr
 }
 
-// projectExclusiveBounds rewrites numeric exclusiveMinimum / exclusiveMaximum into inclusive
-// minimum / maximum. Integer bounds shift by ±1 (floor(val)+1 / ceil(val)-1) because Gemini
-// has no exclusive-bound field; number bounds keep the same value (intentional widening).
-// An existing sibling inclusive bound is left unchanged. Draft-04 boolean exclusive flags
-// are dropped; the sibling inclusive bound is already the projected form. Property names
-// that collide with these keywords are preserved.
+// projectExclusiveBounds rewrites integer exclusiveMinimum / exclusiveMaximum into equivalent
+// inclusive bounds. Continuous number bounds use the closest supported inclusive bound and retain
+// their exact exclusivity as a description hint. Property names that collide with these keywords
+// are preserved.
 func projectExclusiveBounds(jsonStr string) string {
 	pathsByField := findPathsByFields(jsonStr, []string{"exclusiveMinimum", "exclusiveMaximum"})
 	for _, key := range []string{"exclusiveMinimum", "exclusiveMaximum"} {
@@ -789,15 +787,31 @@ func projectExclusiveBounds(jsonStr string) string {
 			if !val.Exists() {
 				continue
 			}
-			if val.Type == gjson.Number {
-				incPath := joinPath(parentPath, inclusive)
-				if !gjson.Get(jsonStr, incPath).Exists() {
-					projected := val.Raw
-					if gjson.Get(jsonStr, joinPath(parentPath, "type")).String() == "integer" {
-						projected = projectIntegerExclusiveBound(val.Raw, exclusiveMaximum)
+
+			incPath := joinPath(parentPath, inclusive)
+			integerSchema := gjson.Get(jsonStr, joinPath(parentPath, "type")).String() == "integer"
+			switch {
+			case val.Type == gjson.Number && integerSchema:
+				if projected, ok := projectIntegerExclusiveBound(val.Raw, exclusiveMaximum); ok {
+					jsonStr = setStricterNumericBound(jsonStr, incPath, projected, exclusiveMaximum)
+				} else {
+					jsonStr = appendHint(jsonStr, parentPath, fmt.Sprintf("%s: %s", key, val.Raw))
+				}
+			case val.Type == gjson.Number:
+				jsonStr = setStricterNumericBound(jsonStr, incPath, val.Raw, exclusiveMaximum)
+				jsonStr = appendHint(jsonStr, parentPath, fmt.Sprintf("%s: %s", key, val.Raw))
+			case (val.Type == gjson.True || val.Type == gjson.False) && val.Bool():
+				// Draft-04 represents exclusivity as a boolean flag on minimum / maximum.
+				bound := gjson.Get(jsonStr, incPath)
+				if integerSchema && bound.Type == gjson.Number {
+					if projected, ok := projectIntegerExclusiveBound(bound.Raw, exclusiveMaximum); ok {
+						updated, _ := sjson.SetRawBytes([]byte(jsonStr), incPath, []byte(projected))
+						jsonStr = string(updated)
+					} else {
+						jsonStr = appendHint(jsonStr, parentPath, key+": true")
 					}
-					updated, _ := sjson.SetRawBytes([]byte(jsonStr), incPath, []byte(projected))
-					jsonStr = string(updated)
+				} else if bound.Exists() {
+					jsonStr = appendHint(jsonStr, parentPath, key+": true")
 				}
 			}
 			jsonStr, _ = sjson.Delete(jsonStr, p)
@@ -806,24 +820,39 @@ func projectExclusiveBounds(jsonStr string) string {
 	return jsonStr
 }
 
-func projectIntegerExclusiveBound(raw string, exclusiveMaximum bool) string {
-	if i, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
-		if exclusiveMaximum {
-			return strconv.FormatInt(i-1, 10)
-		}
-		return strconv.FormatInt(i+1, 10)
+func projectIntegerExclusiveBound(raw string, exclusiveMaximum bool) (string, bool) {
+	value, ok := new(big.Rat).SetString(strings.TrimSpace(raw))
+	if !ok {
+		return "", false
 	}
-	f, err := strconv.ParseFloat(raw, 64)
-	if err != nil {
-		return raw
-	}
-	var projected float64
+
+	// Div rounds toward negative infinity because the denominator is positive.
+	projected := new(big.Int).Div(value.Num(), value.Denom())
 	if exclusiveMaximum {
-		projected = math.Ceil(f) - 1
+		if value.IsInt() {
+			projected.Sub(projected, big.NewInt(1))
+		}
 	} else {
-		projected = math.Floor(f) + 1
+		projected.Add(projected, big.NewInt(1))
 	}
-	return strconv.FormatInt(int64(projected), 10)
+	return projected.String(), true
+}
+
+func setStricterNumericBound(jsonStr, path, projected string, maximum bool) string {
+	existing := gjson.Get(jsonStr, path)
+	if existing.Exists() {
+		projectedValue, projectedOK := new(big.Rat).SetString(projected)
+		existingValue, existingOK := new(big.Rat).SetString(existing.Raw)
+		if !projectedOK || !existingOK {
+			return jsonStr
+		}
+		comparison := projectedValue.Cmp(existingValue)
+		if (maximum && comparison >= 0) || (!maximum && comparison <= 0) {
+			return jsonStr
+		}
+	}
+	updated, _ := sjson.SetRawBytes([]byte(jsonStr), path, []byte(projected))
+	return string(updated)
 }
 
 func convertConstToEnum(jsonStr string) string {
@@ -911,11 +940,19 @@ func addEnumHints(jsonStr string) string {
 func dropIgnoredEnumsToHints(jsonStr string, options jsonSchemaCleanOptions) string {
 	for _, path := range findPaths(jsonStr, "enum") {
 		parentPath := trimSuffix(path, ".enum")
-		shouldDrop := options.dropAllEnums || (options.dropBooleanEnums && isBooleanEnumSchema(jsonStr, parentPath, gjson.Get(jsonStr, path)))
+		enum := gjson.Get(jsonStr, path)
+		booleanEnum := isBooleanEnumSchema(jsonStr, parentPath, enum)
+		shouldDrop := options.dropAllEnums || (options.dropBooleanEnums && booleanEnum)
 		if !shouldDrop {
 			continue
 		}
-		enum := gjson.Get(jsonStr, path)
+		if booleanEnum {
+			typePath := joinPath(parentPath, "type")
+			if !gjson.Get(jsonStr, typePath).Exists() {
+				updated, _ := sjson.SetBytes([]byte(jsonStr), typePath, "boolean")
+				jsonStr = string(updated)
+			}
+		}
 		if enum.IsArray() && len(enum.Array()) == 1 {
 			jsonStr = appendHint(jsonStr, parentPath, "Allowed: "+enum.Array()[0].String())
 		}
