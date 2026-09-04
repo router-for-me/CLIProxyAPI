@@ -24,8 +24,19 @@ import (
 const (
 	codexResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
 	codexResponsesWebsocketIdleTimeout     = 5 * time.Minute
+	codexResponsesWebsocketPingInterval    = 30 * time.Second
+	codexResponsesWebsocketPingWriteTO     = 10 * time.Second
 	codexResponsesWebsocketHandshakeTO     = 30 * time.Second
 )
+
+func configureCodexWebsocketPongHandler(conn *websocket.Conn, idleTimeout time.Duration) {
+	if conn == nil || idleTimeout <= 0 {
+		return
+	}
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(idleTimeout))
+	})
+}
 
 func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
 	dialer := newProxyAwareWebsocketDialer(e.cfg, auth)

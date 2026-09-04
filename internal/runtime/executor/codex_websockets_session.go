@@ -24,16 +24,23 @@ var globalCodexWebsocketSessionStore = &codexWebsocketSessionStore{
 }
 
 type websocketConnectionCloser struct {
-	conn *websocket.Conn
-	once sync.Once
-	err  error
+	conn             *websocket.Conn
+	once             sync.Once
+	heartbeatOnce    sync.Once
+	done             chan struct{}
+	heartbeatStopped chan struct{}
+	err              error
 }
 
 func newWebsocketConnectionCloser(conn *websocket.Conn) *websocketConnectionCloser {
 	if conn == nil {
 		return nil
 	}
-	return &websocketConnectionCloser{conn: conn}
+	return &websocketConnectionCloser{
+		conn:             conn,
+		done:             make(chan struct{}),
+		heartbeatStopped: make(chan struct{}),
+	}
 }
 
 func (c *websocketConnectionCloser) Close() error {
@@ -41,9 +48,43 @@ func (c *websocketConnectionCloser) Close() error {
 		return nil
 	}
 	c.once.Do(func() {
+		close(c.done)
 		c.err = c.conn.Close()
 	})
 	return c.err
+}
+
+func (c *websocketConnectionCloser) startHeartbeat(interval time.Duration, writeTimeout time.Duration, onError func(error)) <-chan struct{} {
+	if c == nil || c.conn == nil || interval <= 0 || writeTimeout <= 0 {
+		return nil
+	}
+	c.heartbeatOnce.Do(func() {
+		go func() {
+			defer close(c.heartbeatStopped)
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-c.done:
+					return
+				case <-ticker.C:
+					errWrite := c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeTimeout))
+					if errWrite == nil {
+						continue
+					}
+					errHeartbeat := fmt.Errorf("codex websocket heartbeat ping failed: %w", errWrite)
+					if onError != nil {
+						onError(errHeartbeat)
+					}
+					if errClose := c.Close(); errClose != nil {
+						log.Debugf("codex websockets executor: close after heartbeat error: %v", errClose)
+					}
+					return
+				}
+			}
+		}()
+	})
+	return c.heartbeatStopped
 }
 
 type codexWebsocketSession struct {
@@ -214,6 +255,7 @@ func (s *codexWebsocketSession) configureConn(conn *websocket.Conn) {
 		return
 	}
 	s.resetUpstreamDisconnectError(conn)
+	configureCodexWebsocketPongHandler(conn, codexResponsesWebsocketIdleTimeout)
 	conn.SetPingHandler(func(appData string) error {
 		s.writeMu.Lock()
 		defer s.writeMu.Unlock()
@@ -484,7 +526,12 @@ func (e *CodexWebsocketsExecutor) UpstreamDisconnectChan(sessionID string) <-cha
 
 func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
 	if sess == nil {
-		return e.dialCodexWebsocket(ctx, auth, wsURL, headers)
+		conn, closer, resp, errDial := e.dialCodexWebsocket(ctx, auth, wsURL, headers)
+		if errDial == nil && conn != nil && closer != nil {
+			configureCodexWebsocketPongHandler(conn, codexResponsesWebsocketIdleTimeout)
+			closer.startHeartbeat(codexResponsesWebsocketPingInterval, codexResponsesWebsocketPingWriteTO, nil)
+		}
+		return conn, closer, resp, errDial
 	}
 
 	if staleConn, staleCloser, staleAuthID, staleWSURL, staleLifecycle := detachMismatchedWebsocketSessionConn(sess, authID, wsURL); staleConn != nil {
@@ -511,6 +558,12 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 			sess.connMu.Unlock()
 			sess.configureConn(conn)
 			go e.readUpstreamLoop(sess, conn)
+		}
+		if closer != nil {
+			closer.startHeartbeat(codexResponsesWebsocketPingInterval, codexResponsesWebsocketPingWriteTO, func(errHeartbeat error) {
+				sess.setUpstreamDisconnectError(conn, errHeartbeat)
+				e.invalidateUpstreamConn(sess, conn, "heartbeat_failed", errHeartbeat)
+			})
 		}
 		return conn, closer, nil, nil
 	}
@@ -540,6 +593,10 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 
 	sess.configureConn(conn)
 	go e.readUpstreamLoop(sess, conn)
+	closer.startHeartbeat(codexResponsesWebsocketPingInterval, codexResponsesWebsocketPingWriteTO, func(errHeartbeat error) {
+		sess.setUpstreamDisconnectError(conn, errHeartbeat)
+		e.invalidateUpstreamConn(sess, conn, "heartbeat_failed", errHeartbeat)
+	})
 	logCodexWebsocketConnected(sess.sessionID, authID, wsURL)
 	return conn, closer, resp, nil
 }
