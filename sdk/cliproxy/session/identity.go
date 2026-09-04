@@ -124,18 +124,94 @@ func Enrich(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (clipro
 		opts.OriginalRequest = bytes.Clone(req.Payload)
 		payload = opts.OriginalRequest
 	}
-	if executionID := firstNormalizedMetadataID(cliproxyexecutor.ExecutionSessionMetadataKey, opts.Metadata, req.Metadata); executionID != "" {
-		req.Metadata = metadataWithValue(metadataWithoutKey(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey), cliproxyexecutor.ExecutionSessionMetadataKey, executionID)
-		opts.Metadata = metadataWithValue(metadataWithoutKey(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey), cliproxyexecutor.ExecutionSessionMetadataKey, executionID)
-		return req, opts
-	}
-	req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
-	opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
+	executionID := firstNormalizedMetadataID(cliproxyexecutor.ExecutionSessionMetadataKey, opts.Metadata, req.Metadata)
+
 	if hasExplicitSession(opts.Headers, payload) {
 		req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
 		opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
+		if executionID != "" {
+			req.Metadata = metadataWithValue(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey, executionID)
+			opts.Metadata = metadataWithValue(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey, executionID)
+		} else {
+			req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
+			opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
+		}
+		if info, ok := ExtractSessionInfo(opts.Headers, payload, opts.Metadata); ok && info.SessionID != "" {
+			canonicalSessionID := BoundSessionIdentity(info.SessionID)
+			req.Metadata = metadataWithValue(req.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey, canonicalSessionID)
+			opts.Metadata = metadataWithValue(opts.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey, canonicalSessionID)
+			if info.ParentSessionID != "" && info.ParentSessionID != info.SessionID {
+				parentSessionID := BoundSessionIdentity(info.ParentSessionID)
+				req.Metadata = metadataWithValue(req.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey, parentSessionID)
+				opts.Metadata = metadataWithValue(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey, parentSessionID)
+			} else {
+				req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
+				opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
+			}
+		}
 		return req, opts
 	}
+
+	// Metadata-provided canonical or LCP session (e.g. embeddable SDK callers or pre-routed stages)
+	if canonicalID := firstNormalizedMetadataID(cliproxyexecutor.CanonicalSessionIDMetadataKey, opts.Metadata, req.Metadata); canonicalID != "" {
+		req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
+		opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
+		if executionID != "" {
+			req.Metadata = metadataWithValue(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey, executionID)
+			opts.Metadata = metadataWithValue(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey, executionID)
+		} else {
+			req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
+			opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
+		}
+		canonicalSessionID := BoundSessionIdentity(canonicalID)
+		req.Metadata = metadataWithValue(req.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey, canonicalSessionID)
+		opts.Metadata = metadataWithValue(opts.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey, canonicalSessionID)
+		if parentID := firstNormalizedMetadataID(cliproxyexecutor.ParentSessionIDMetadataKey, opts.Metadata, req.Metadata); parentID != "" && parentID != canonicalID {
+			boundedParent := BoundSessionIdentity(parentID)
+			req.Metadata = metadataWithValue(req.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey, boundedParent)
+			opts.Metadata = metadataWithValue(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey, boundedParent)
+		} else {
+			req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
+			opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
+		}
+		return req, opts
+	}
+
+	if lcpID := firstNormalizedMetadataID(cliproxyexecutor.LCPAffinitySessionIDMetadataKey, opts.Metadata, req.Metadata); lcpID != "" {
+		req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
+		opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
+		if executionID != "" {
+			req.Metadata = metadataWithValue(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey, executionID)
+			opts.Metadata = metadataWithValue(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey, executionID)
+		} else {
+			req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
+			opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
+		}
+		canonicalLCP := BoundSessionIdentity(lcpID)
+		req.Metadata = metadataWithValue(req.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey, canonicalLCP)
+		opts.Metadata = metadataWithValue(opts.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey, canonicalLCP)
+		if parentID := firstNormalizedMetadataID(cliproxyexecutor.ParentSessionIDMetadataKey, opts.Metadata, req.Metadata); parentID != "" && parentID != lcpID {
+			boundedParent := BoundSessionIdentity(parentID)
+			req.Metadata = metadataWithValue(req.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey, boundedParent)
+			opts.Metadata = metadataWithValue(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey, boundedParent)
+		} else {
+			req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
+			opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
+		}
+		return req, opts
+	}
+
+	if executionID != "" {
+		canonicalExecutionID := BoundSessionIdentity("execution:" + executionID)
+		req.Metadata = metadataWithValue(metadataWithValue(metadataWithoutKey(metadataWithoutKey(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey), cliproxyexecutor.ParentSessionIDMetadataKey), cliproxyexecutor.ExecutionSessionMetadataKey, executionID), cliproxyexecutor.CanonicalSessionIDMetadataKey, canonicalExecutionID)
+		opts.Metadata = metadataWithValue(metadataWithValue(metadataWithoutKey(metadataWithoutKey(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey), cliproxyexecutor.ParentSessionIDMetadataKey), cliproxyexecutor.ExecutionSessionMetadataKey, executionID), cliproxyexecutor.CanonicalSessionIDMetadataKey, canonicalExecutionID)
+		return req, opts
+	}
+
+	req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
+	opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
+	req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
+	opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
 
 	derivedID := firstNormalizedMetadataID(cliproxyexecutor.DerivedSessionIDMetadataKey, opts.Metadata, req.Metadata)
 	req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)

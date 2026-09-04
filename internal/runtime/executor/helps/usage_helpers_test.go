@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
@@ -956,4 +957,55 @@ type TestUsageExecutor struct{}
 
 func (TestUsageExecutor) Identifier() string {
 	return "test-provider"
+}
+
+func TestUsageReporterPropagatesSessionHierarchy(t *testing.T) {
+	ctx := logging.WithClientRequestMetadata(context.Background(), logging.ClientRequestMetadata{
+		SessionID:       "claude:sess-1:agent:sub-1",
+		ParentSessionID: "claude:sess-1",
+	})
+
+	reporter := NewUsageReporter(ctx, "claude", "claude-3-7-sonnet", nil)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 100}, false, usage.Failure{})
+	if record.SessionID != "claude:sess-1:agent:sub-1" || record.ParentSessionID != "claude:sess-1" {
+		t.Fatalf("record session hierarchy = (%q, %q), want (claude:sess-1:agent:sub-1, claude:sess-1)", record.SessionID, record.ParentSessionID)
+	}
+
+	// Test explicit override via SetSessionHierarchy
+	reporter.SetSessionHierarchy("override:child", "override:parent")
+	record2 := reporter.buildRecord(usage.Detail{TotalTokens: 100}, false, usage.Failure{})
+	if record2.SessionID != "override:child" || record2.ParentSessionID != "override:parent" {
+		t.Fatalf("overridden record session hierarchy = (%q, %q), want (override:child, override:parent)", record2.SessionID, record2.ParentSessionID)
+	}
+
+	// Test self-loop elimination in SetSessionHierarchy
+	reporter.SetSessionHierarchy("loop:node", "loop:node")
+	record3 := reporter.buildRecord(usage.Detail{TotalTokens: 100}, false, usage.Failure{})
+	if record3.SessionID != "loop:node" || record3.ParentSessionID != "" {
+		t.Fatalf("self loop record session hierarchy = (%q, %q), want (loop:node, empty)", record3.SessionID, record3.ParentSessionID)
+	}
+
+	// Test orphan parent elimination when sessionID is empty
+	reporter.SetSessionHierarchy("", "orphan:parent")
+	record4 := reporter.buildRecord(usage.Detail{TotalTokens: 100}, false, usage.Failure{})
+	if record4.SessionID != "" || record4.ParentSessionID != "" {
+		t.Fatalf("orphan parent record session hierarchy = (%q, %q), want empty both", record4.SessionID, record4.ParentSessionID)
+	}
+
+	// Test cross-prefix alias rejection (e.g. pck:* and conv:* are aliases, not parent-child)
+	ctxAlias := logging.WithClientRequestMetadata(context.Background(), logging.ClientRequestMetadata{
+		SessionID:       "pck:prompt-key-123",
+		ParentSessionID: "conv:conv-456",
+	})
+	reporterAlias := NewUsageReporter(ctxAlias, "openai", "gpt-5.4", nil)
+	recordAlias := reporterAlias.buildRecord(usage.Detail{TotalTokens: 100}, false, usage.Failure{})
+	if recordAlias.SessionID != "pck:prompt-key-123" || recordAlias.ParentSessionID != "" {
+		t.Fatalf("cross prefix alias emitted as parent: (%q, %q), want (pck:prompt-key-123, empty)", recordAlias.SessionID, recordAlias.ParentSessionID)
+	}
+
+	reporterAlias.SetSessionHierarchy("pck:key-999", "conv:alias-888")
+	recordAlias2 := reporterAlias.buildRecord(usage.Detail{TotalTokens: 100}, false, usage.Failure{})
+	if recordAlias2.SessionID != "pck:key-999" || recordAlias2.ParentSessionID != "" {
+		t.Fatalf("SetSessionHierarchy cross prefix alias emitted as parent: (%q, %q), want (pck:key-999, empty)", recordAlias2.SessionID, recordAlias2.ParentSessionID)
+	}
 }

@@ -584,3 +584,92 @@ func requireHeaderField(t *testing.T, payload map[string]json.RawMessage, field,
 		}
 	}
 }
+
+func TestUsageQueuePluginPayloadIncludesExplicitSessionHierarchy(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithRequestID(context.Background(), "ctx-session-req-1")
+		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
+		ctx = internallogging.WithClientRequestMetadata(ctx, internallogging.ClientRequestMetadata{
+			ClientIP:        "192.0.2.10",
+			SessionID:       "slot:pi-worker-1",
+			ParentSessionID: "slot:pi-main-root",
+		})
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:        "openai",
+			Model:           "gpt-5.6-sol",
+			APIKey:          "test-key",
+			SessionID:       "slot:pi-worker-1",
+			ParentSessionID: "slot:pi-main-root",
+			RequestedAt:     time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC),
+			Latency:         5000 * time.Millisecond,
+		})
+
+		payload := popSinglePayload(t)
+		requireStringField(t, payload, "request_id", "ctx-session-req-1")
+		requireStringField(t, payload, "session_id", "slot:pi-worker-1")
+		requireStringField(t, payload, "parent_session_id", "slot:pi-main-root")
+	})
+}
+
+func TestUsageQueuePluginPayloadPreventsSelfReferentialLoop(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithRequestID(context.Background(), "ctx-loop-req-1")
+		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:        "openai",
+			Model:           "gpt-5.6-sol",
+			APIKey:          "test-key",
+			SessionID:       "loop-sess-1",
+			ParentSessionID: "loop-sess-1",
+			RequestedAt:     time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC),
+			Latency:         1000 * time.Millisecond,
+		})
+
+		payload := popSinglePayload(t)
+		requireStringField(t, payload, "request_id", "ctx-loop-req-1")
+		requireStringField(t, payload, "session_id", "loop-sess-1")
+		if _, exists := payload["parent_session_id"]; exists {
+			t.Fatalf("expected parent_session_id to be omitted on self-referential loop, got %s", payload["parent_session_id"])
+		}
+	})
+}
+
+func TestUsageQueuePluginPayloadSameOriginFallback(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithRequestID(context.Background(), "ctx-same-origin-1")
+		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
+		ctx = internallogging.WithClientRequestMetadata(ctx, internallogging.ClientRequestMetadata{
+			SessionID:       "old-root",
+			ParentSessionID: "old-parent",
+		})
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		plugin := &usageQueuePlugin{}
+		// Record explicitly defines an independent root session without parent.
+		// It should NOT pick up old-parent from context.
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:        "openai",
+			Model:           "gpt-5.6-sol",
+			APIKey:          "test-key",
+			SessionID:       "new-custom-root",
+			ParentSessionID: "",
+			RequestedAt:     time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC),
+			Latency:         1000 * time.Millisecond,
+		})
+
+		payload := popSinglePayload(t)
+		requireStringField(t, payload, "session_id", "new-custom-root")
+		if _, exists := payload["parent_session_id"]; exists {
+			t.Fatalf("expected parent_session_id to be omitted when record is independent root, got %s", payload["parent_session_id"])
+		}
+	})
+}

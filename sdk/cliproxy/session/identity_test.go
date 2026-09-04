@@ -393,3 +393,88 @@ func TestClaudeMetadataIdentitiesNormalizesAgentID(t *testing.T) {
 		t.Fatalf("expected badAgentID to be empty for control character, got %q", badAgentID)
 	}
 }
+
+func TestEnrich_ExplicitSessionPreferredOverExecutionSession(t *testing.T) {
+	t.Parallel()
+
+	// Scenario 1: Responses WebSocket provides ExecutionSessionMetadataKey for transport reuse,
+	// but the client payload carries an explicit conversation/session identity.
+	wsPayload := []byte(`{"session_id":"explicit-ws-session"}`)
+	req1 := cliproxyexecutor.Request{
+		Payload: wsPayload,
+	}
+	opts1 := cliproxyexecutor.Options{
+		OriginalRequest: wsPayload,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "conn-ws-uuid-123",
+		},
+	}
+
+	enrichedReq1, enrichedOpts1 := Enrich(req1, opts1)
+	canonical1, ok1 := enrichedOpts1.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string)
+	if !ok1 || canonical1 != "session:explicit-ws-session" {
+		t.Fatalf("canonical session = %q (ok=%v), want session:explicit-ws-session", canonical1, ok1)
+	}
+	execID1, okExec1 := enrichedOpts1.Metadata[cliproxyexecutor.ExecutionSessionMetadataKey].(string)
+	if !okExec1 || execID1 != "conn-ws-uuid-123" {
+		t.Fatalf("execution session was not preserved: %q (ok=%v)", execID1, okExec1)
+	}
+	_ = enrichedReq1
+
+	// Scenario 2: Only ExecutionSessionMetadataKey exists (no explicit session headers or payload).
+	req2 := cliproxyexecutor.Request{
+		Payload: []byte(`{"model":"test"}`),
+	}
+	opts2 := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "conn-ws-uuid-456",
+		},
+	}
+	_, enrichedOpts2 := Enrich(req2, opts2)
+	canonical2, ok2 := enrichedOpts2.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string)
+	if !ok2 || canonical2 != "execution:conn-ws-uuid-456" {
+		t.Fatalf("canonical fallback = %q (ok=%v), want execution:conn-ws-uuid-456", canonical2, ok2)
+	}
+	execID2, okExec2 := enrichedOpts2.Metadata[cliproxyexecutor.ExecutionSessionMetadataKey].(string)
+	if !okExec2 || execID2 != "conn-ws-uuid-456" {
+		t.Fatalf("execution session was not preserved in fallback: %q (ok=%v)", execID2, okExec2)
+	}
+}
+
+func TestEnrich_MetadataOnlyCanonicalAndParentSessionPreserved(t *testing.T) {
+	t.Parallel()
+
+	// Embeddable SDK caller provides explicit canonical and parent session in Options.Metadata
+	// without HTTP session headers or body session fields.
+	req := cliproxyexecutor.Request{
+		Payload: []byte(`{"model":"gpt-5.4"}`),
+	}
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.CanonicalSessionIDMetadataKey: "session:sdk-child-001",
+			cliproxyexecutor.ParentSessionIDMetadataKey:    "session:sdk-parent-999",
+		},
+	}
+
+	_, enrichedOpts := Enrich(req, opts)
+	canonical, ok := enrichedOpts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string)
+	if !ok || canonical != "session:sdk-child-001" {
+		t.Fatalf("canonical session = %q (ok=%v), want session:sdk-child-001", canonical, ok)
+	}
+	parent, okParent := enrichedOpts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey].(string)
+	if !okParent || parent != "session:sdk-parent-999" {
+		t.Fatalf("parent session = %q (ok=%v), want session:sdk-parent-999", parent, okParent)
+	}
+
+	// Self-loop elimination in metadata-only mode
+	optsLoop := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.CanonicalSessionIDMetadataKey: "session:same-loop",
+			cliproxyexecutor.ParentSessionIDMetadataKey:    "session:same-loop",
+		},
+	}
+	_, enrichedLoop := Enrich(req, optsLoop)
+	if _, hasLoopParent := enrichedLoop.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey]; hasLoopParent {
+		t.Fatalf("self-loop parent was not eliminated in metadata-only mode")
+	}
+}
