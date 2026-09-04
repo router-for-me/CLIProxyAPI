@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -349,6 +350,26 @@ func marshalRPCError(code, message string) []byte {
 		Error: &pluginabi.Error{
 			Code:    code,
 			Message: message,
+		},
+	})
+	return raw
+}
+
+func marshalRPCErrorFromError(code string, err error) []byte {
+	if err == nil {
+		return marshalRPCError(code, "")
+	}
+	status := 0
+	var statusErr interface{ StatusCode() int }
+	if errors.As(err, &statusErr) && statusErr != nil {
+		status = statusErr.StatusCode()
+	}
+	raw, _ := json.Marshal(pluginabi.Envelope{
+		OK: false,
+		Error: &pluginabi.Error{
+			Code:       code,
+			Message:    err.Error(),
+			HTTPStatus: status,
 		},
 	})
 	return raw

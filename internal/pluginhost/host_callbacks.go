@@ -310,17 +310,39 @@ func modelExecutionRequestFromPlugin(req pluginapi.HostModelExecutionRequest, sk
 	}
 }
 
+type modelExecutionCallbackError struct {
+	cause      error
+	statusCode int
+}
+
+func (e *modelExecutionCallbackError) Error() string {
+	return e.cause.Error()
+}
+
+func (e *modelExecutionCallbackError) Unwrap() error {
+	return e.cause
+}
+
+func (e *modelExecutionCallbackError) StatusCode() int {
+	return e.statusCode
+}
+
 func modelExecutionError(errMsg *interfaces.ErrorMessage) error {
 	if errMsg == nil {
 		return nil
 	}
-	if errMsg.Error != nil {
-		return errMsg.Error
+	cause := errMsg.Error
+	if cause == nil {
+		if errMsg.StatusCode > 0 {
+			cause = fmt.Errorf("model execution failed with status %d", errMsg.StatusCode)
+		} else {
+			cause = fmt.Errorf("model execution failed")
+		}
 	}
 	if errMsg.StatusCode > 0 {
-		return fmt.Errorf("model execution failed with status %d", errMsg.StatusCode)
+		return &modelExecutionCallbackError{cause: cause, statusCode: errMsg.StatusCode}
 	}
-	return fmt.Errorf("model execution failed")
+	return cause
 }
 
 func (h *Host) callHostLog(ctx context.Context, request []byte) ([]byte, error) {
