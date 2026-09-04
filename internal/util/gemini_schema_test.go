@@ -2677,6 +2677,31 @@ func TestCleanJSONSchema_IntegerExclusiveBoundsUseExactArithmetic(t *testing.T) 
 	}
 }
 
+func TestCleanJSONSchema_NullableIntegerExclusiveBoundsUseIntegerProjection(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"lower": {"type": ["integer", "null"], "exclusiveMinimum": 0},
+			"upper": {"type": ["null", "integer"], "exclusiveMaximum": 10}
+		}
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+	parsed := gjson.Parse(result)
+	if got := parsed.Get("properties.lower.type").String(); got != "integer" {
+		t.Fatalf("lower type = %q, want integer: %s", got, result)
+	}
+	if got := parsed.Get("properties.lower.minimum").Raw; got != "1" {
+		t.Fatalf("lower minimum = %s, want 1: %s", got, result)
+	}
+	if got := parsed.Get("properties.upper.type").String(); got != "integer" {
+		t.Fatalf("upper type = %q, want integer: %s", got, result)
+	}
+	if got := parsed.Get("properties.upper.maximum").Raw; got != "9" {
+		t.Fatalf("upper maximum = %s, want 9: %s", got, result)
+	}
+}
+
 func TestCleanJSONSchema_Draft04BooleanExclusiveFlagsDropped(t *testing.T) {
 	input := `{
 		"type": "object",

@@ -789,7 +789,7 @@ func projectExclusiveBounds(jsonStr string) string {
 			}
 
 			incPath := joinPath(parentPath, inclusive)
-			integerSchema := gjson.Get(jsonStr, joinPath(parentPath, "type")).String() == "integer"
+			integerSchema := effectiveSchemaType(gjson.Get(jsonStr, joinPath(parentPath, "type"))) == "integer"
 			switch {
 			case val.Type == gjson.Number && integerSchema:
 				if projected, ok := projectIntegerExclusiveBound(val.Raw, exclusiveMaximum); ok {
@@ -818,6 +818,20 @@ func projectExclusiveBounds(jsonStr string) string {
 		}
 	}
 	return jsonStr
+}
+
+// effectiveSchemaType mirrors flattenTypeArrays: for a type union, the first
+// non-null member is the scalar type that survives cleaning.
+func effectiveSchemaType(schemaType gjson.Result) string {
+	if !schemaType.IsArray() {
+		return schemaType.String()
+	}
+	for _, item := range schemaType.Array() {
+		if value := item.String(); value != "" && value != "null" {
+			return value
+		}
+	}
+	return ""
 }
 
 func projectIntegerExclusiveBound(raw string, exclusiveMaximum bool) (string, bool) {
