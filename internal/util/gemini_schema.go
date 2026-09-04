@@ -173,7 +173,7 @@ func removeKeywords(jsonStr string, keywords []string) string {
 // removePlaceholderFields removes placeholder-only properties ("_" and "reason") and their required entries.
 func removePlaceholderFields(jsonStr string) string {
 	// Remove "_" placeholder properties.
-	paths := findPaths(jsonStr, "_")
+	paths := findPropertyNamePaths(jsonStr, "_")
 	sortByDepth(paths)
 	for _, p := range paths {
 		if !strings.HasSuffix(p, ".properties._") {
@@ -200,7 +200,7 @@ func removePlaceholderFields(jsonStr string) string {
 	}
 
 	// Remove placeholder-only "reason" objects.
-	reasonPaths := findPaths(jsonStr, "reason")
+	reasonPaths := findPropertyNamePaths(jsonStr, "reason")
 	sortByDepth(reasonPaths)
 	for _, p := range reasonPaths {
 		if !strings.HasSuffix(p, ".properties.reason") {
@@ -637,7 +637,7 @@ func inlineLocalRefs(jsonStr string) string {
 		return jsonStr
 	}
 
-	resolved := resolveLocalRefs(root, root, make(map[string]bool))
+	resolved := resolveLocalRefs(root, root, make(map[string]bool), "")
 	out, err := json.Marshal(resolved)
 	if err != nil {
 		return jsonStr
@@ -645,12 +645,12 @@ func inlineLocalRefs(jsonStr string) string {
 	return string(out)
 }
 
-func resolveLocalRefs(root, value any, active map[string]bool) any {
+func resolveLocalRefs(root, value any, active map[string]bool, path string) any {
 	switch node := value.(type) {
 	case []any:
 		out := make([]any, len(node))
 		for i, item := range node {
-			out[i] = resolveLocalRefs(root, item, active)
+			out[i] = resolveLocalRefs(root, item, active, joinPath(path, strconv.Itoa(i)))
 		}
 		return out
 	case map[string]any:
@@ -661,7 +661,7 @@ func resolveLocalRefs(root, value any, active map[string]bool) any {
 					return cyclicRefFallback(node, target, ref)
 				}
 				active[ref] = true
-				resolvedTarget := resolveLocalRefs(root, target, active)
+				resolvedTarget := resolveLocalRefs(root, target, active, path)
 				delete(active, ref)
 				if targetMap, okTarget := resolvedTarget.(map[string]any); okTarget {
 					out := make(map[string]any, len(targetMap)+len(node))
@@ -672,7 +672,11 @@ func resolveLocalRefs(root, value any, active map[string]bool) any {
 						if key == "$ref" {
 							continue
 						}
-						out[key] = resolveLocalRefs(root, item, active)
+						if isOpaqueSchemaValue(path, key) {
+							out[key] = item
+							continue
+						}
+						out[key] = resolveLocalRefs(root, item, active, joinPath(path, escapeGJSONPathKey(key)))
 					}
 					return out
 				}
@@ -681,7 +685,11 @@ func resolveLocalRefs(root, value any, active map[string]bool) any {
 
 		out := make(map[string]any, len(node))
 		for key, item := range node {
-			out[key] = resolveLocalRefs(root, item, active)
+			if isOpaqueSchemaValue(path, key) {
+				out[key] = item
+				continue
+			}
+			out[key] = resolveLocalRefs(root, item, active, joinPath(path, escapeGJSONPathKey(key)))
 		}
 		return out
 	default:
@@ -979,9 +987,9 @@ func convertConstToEnum(jsonStr string) string {
 		if !val.Exists() {
 			continue
 		}
-		enumPath := trimSuffix(p, ".const") + ".enum"
+		enumPath := joinPath(trimSuffix(p, ".const"), "enum")
 		if !gjson.Get(jsonStr, enumPath).Exists() {
-			updated, _ := sjson.SetBytes([]byte(jsonStr), enumPath, []interface{}{val.Value()})
+			updated, _ := sjson.SetRawBytes([]byte(jsonStr), enumPath, []byte("["+val.Raw+"]"))
 			jsonStr = string(updated)
 		}
 	}
@@ -1731,6 +1739,9 @@ func walkForExtensions(value gjson.Result, path string, paths *[]string) {
 				*paths = append(*paths, childPath)
 				return true
 			}
+			if isOpaqueSchemaValue(path, keyStr) {
+				return true
+			}
 
 			walkForExtensions(val, childPath, paths)
 			return true
@@ -1844,22 +1855,34 @@ func addEmptySchemaPlaceholder(jsonStr string) string {
 // --- Helpers ---
 
 func findPaths(jsonStr, field string) []string {
-	var paths []string
-	Walk(gjson.Parse(jsonStr), "", field, &paths)
-	return paths
+	pathsByField := findPathsByFields(jsonStr, []string{field})
+	return pathsByField[field]
+}
+
+// findPropertyNamePaths is used only when the caller intentionally searches author-selected
+// names in a schema name map (for example, cleanup of generated placeholder properties). It still
+// observes opaque literal boundaries, so a matching object key inside enum/const/default data is
+// never returned.
+func findPropertyNamePaths(jsonStr, field string) []string {
+	pathsByField := findPathsByFieldsWithPropertyNames(jsonStr, []string{field}, true)
+	return pathsByField[field]
 }
 
 func findPathsByFields(jsonStr string, fields []string) map[string][]string {
+	return findPathsByFieldsWithPropertyNames(jsonStr, fields, false)
+}
+
+func findPathsByFieldsWithPropertyNames(jsonStr string, fields []string, includePropertyNames bool) map[string][]string {
 	set := make(map[string]struct{}, len(fields))
 	for _, field := range fields {
 		set[field] = struct{}{}
 	}
 	paths := make(map[string][]string, len(set))
-	walkForFields(gjson.Parse(jsonStr), "", set, paths)
+	walkForFields(gjson.Parse(jsonStr), "", set, paths, includePropertyNames)
 	return paths
 }
 
-func walkForFields(value gjson.Result, path string, fields map[string]struct{}, paths map[string][]string) {
+func walkForFields(value gjson.Result, path string, fields map[string]struct{}, paths map[string][]string, includePropertyNames bool) {
 	switch value.Type {
 	case gjson.JSON:
 		value.ForEach(func(key, val gjson.Result) bool {
@@ -1873,15 +1896,35 @@ func walkForFields(value gjson.Result, path string, fields map[string]struct{}, 
 				childPath = path + "." + safeKey
 			}
 
-			if _, ok := fields[keyStr]; ok {
+			if _, ok := fields[keyStr]; ok && (includePropertyNames || !isPropertyDefinition(path)) {
 				paths[keyStr] = append(paths[keyStr], childPath)
 			}
+			if isOpaqueSchemaValue(path, keyStr) {
+				return true
+			}
 
-			walkForFields(val, childPath, fields, paths)
+			walkForFields(val, childPath, fields, paths, includePropertyNames)
 			return true
 		})
 	case gjson.String, gjson.Number, gjson.True, gjson.False, gjson.Null:
 		// Terminal types - no further traversal needed
+	}
+}
+
+// isOpaqueSchemaValue identifies schema keywords whose values are instance data or annotations,
+// not nested schemas. A matching name directly under properties/$defs is author-selected and its
+// value remains a schema, so property-name collision handling takes precedence.
+func isOpaqueSchemaValue(parentPath, field string) bool {
+	if isPropertyDefinition(parentPath) {
+		return false
+	}
+	switch field {
+	case "enum", "const", "default", "example", "examples",
+		"enumDescriptions", "enumTitles", "required", "dependentRequired",
+		"discriminator", "xml", "externalDocs":
+		return true
+	default:
+		return false
 	}
 }
 

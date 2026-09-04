@@ -3405,3 +3405,179 @@ func TestCleanJSONSchema_AllOfPropagatesNullableBooleanTypeBeforeEnumConversion(
 		}
 	}
 }
+
+func TestCleanJSONSchema_PreservesCompositeLiteralValues(t *testing.T) {
+	enumLiteral := `{
+		"minProperties": 1,
+		"maxProperties": 3,
+		"exclusiveMinimum": 2,
+		"format": "literal-format",
+		"$ref": "#/$defs/Referenced",
+		"x-literal": {"maxItems": 4},
+		"type": ["literal", "null"],
+		"nested": [
+			{"enum": [{"minLength": 5}]},
+			{"const": {"maxLength": 6}}
+		]
+	}`
+	constLiteral := `{
+		"large": 9007199254740993,
+		"minProperties": 7,
+		"nested": [{"exclusiveMaximum": 8, "x-value": true}]
+	}`
+	input := `{
+		"type": "object",
+		"properties": {
+			"choice": {"type": "object", "enum": [` + enumLiteral + `]},
+			"fixed": {"type": "object", "const": ` + constLiteral + `},
+			"defaulted": {"type": "object", "default": ` + enumLiteral + `},
+			"sampled": {"type": "object", "examples": [` + constLiteral + `]}
+		},
+		"$defs": {
+			"Referenced": {"type": "object", "properties": {"resolved": {"type": "boolean"}}}
+		}
+	}`
+
+	extractAllowed := func(t *testing.T, result, cleaner, property string) string {
+		t.Helper()
+		schema := gjson.Get(result, "properties."+property)
+		if cleaner != "antigravity" {
+			return schema.Get("enum.0").String()
+		}
+		const prefix = "Allowed: "
+		description := schema.Get("description").String()
+		if !strings.HasPrefix(description, prefix) {
+			t.Fatalf("%s: %s literal hint missing: %s", cleaner, property, result)
+		}
+		return strings.TrimPrefix(description, prefix)
+	}
+	assertLiteral := func(t *testing.T, cleaner, property, got, want string) {
+		t.Helper()
+		if !gjson.Valid(got) {
+			t.Fatalf("%s: %s literal is invalid JSON: %q", cleaner, property, got)
+		}
+		if enumValueKey(gjson.Parse(got)) != enumValueKey(gjson.Parse(want)) {
+			t.Fatalf("%s: %s literal changed:\ngot:  %s\nwant: %s", cleaner, property, got, want)
+		}
+	}
+
+	for name, clean := range schemaCleaners() {
+		result := clean(input)
+		choice := extractAllowed(t, result, name, "choice")
+		fixed := extractAllowed(t, result, name, "fixed")
+		assertLiteral(t, name, "choice", choice, enumLiteral)
+		assertLiteral(t, name, "fixed", fixed, constLiteral)
+		if got := gjson.Get(fixed, "large").Raw; got != "9007199254740993" {
+			t.Errorf("%s: composite const large integer = %s: %s", name, got, result)
+		}
+
+		defaultHint := gjson.Get(result, "properties.defaulted.description").String()
+		const defaultPrefix = "default: "
+		if !strings.HasPrefix(defaultHint, defaultPrefix) {
+			t.Errorf("%s: default literal hint missing: %s", name, result)
+		} else {
+			assertLiteral(t, name, "defaulted", strings.TrimPrefix(defaultHint, defaultPrefix), enumLiteral)
+		}
+		examplesHint := gjson.Get(result, "properties.sampled.description").String()
+		const examplesPrefix = "examples: "
+		if !strings.HasPrefix(examplesHint, examplesPrefix) {
+			t.Errorf("%s: examples literal hint missing: %s", name, result)
+		} else {
+			examples := gjson.Parse(strings.TrimPrefix(examplesHint, examplesPrefix)).Array()
+			if len(examples) != 1 {
+				t.Errorf("%s: examples literal count = %d: %s", name, len(examples), result)
+			} else {
+				assertLiteral(t, name, "sampled", examples[0].Raw, constLiteral)
+			}
+		}
+
+		secondPass := clean(result)
+		if !reflect.DeepEqual(gjson.Parse(result).Value(), gjson.Parse(secondPass).Value()) {
+			t.Errorf("%s: literal cleaning is not idempotent:\nfirst: %s\nsecond: %s", name, result, secondPass)
+		}
+	}
+}
+
+func TestCleanJSONSchema_LiteralKeywordPropertyNamesRemainSchemas(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"enum": {"type": "object", "minProperties": 1},
+			"const": {"type": "object", "maxProperties": 2},
+			"default": {"type": "string", "format": "date"},
+			"examples": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+		}
+	}`
+
+	for name, clean := range schemaCleaners() {
+		result := clean(input)
+		parsed := gjson.Parse(result)
+		for _, testCase := range []struct {
+			property string
+			keyword  string
+			hint     string
+		}{
+			{property: "enum", keyword: "minProperties", hint: "minProperties: 1"},
+			{property: "const", keyword: "maxProperties", hint: "maxProperties: 2"},
+			{property: "default", keyword: "format", hint: "format: date"},
+			{property: "examples", keyword: "minItems", hint: "minItems: 1"},
+		} {
+			schema := parsed.Get("properties." + testCase.property)
+			if !schema.Exists() || schema.Get(testCase.keyword).Exists() {
+				t.Errorf("%s: property named %s was skipped or retained %s: %s", name, testCase.property, testCase.keyword, result)
+			}
+			if !strings.Contains(schema.Get("description").String(), testCase.hint) {
+				t.Errorf("%s: property named %s lost hint %q: %s", name, testCase.property, testCase.hint, result)
+			}
+		}
+
+		secondPass := clean(result)
+		if !reflect.DeepEqual(gjson.Parse(result).Value(), gjson.Parse(secondPass).Value()) {
+			t.Errorf("%s: keyword-named property cleaning is not idempotent:\nfirst: %s\nsecond: %s", name, result, secondPass)
+		}
+	}
+}
+
+func TestCleanJSONSchema_RootCompositeConstPreservesExactValue(t *testing.T) {
+	constLiteral := `{
+		"large": 9007199254740993,
+		"minProperties": 1,
+		"nested": [{"const": {"exclusiveMinimum": 2}}]
+	}`
+	input := `{"type":"object","const":` + constLiteral + `}`
+
+	for name, clean := range schemaCleaners() {
+		result := clean(input)
+		parsed := gjson.Parse(result)
+		if _, exists := parsed.Map()[""]; exists {
+			t.Fatalf("%s: root const conversion created an empty-key object: %s", name, result)
+		}
+
+		var literal string
+		if name == "antigravity" {
+			const prefix = "Allowed: "
+			description := parsed.Get("description").String()
+			if !strings.HasPrefix(description, prefix) {
+				t.Fatalf("%s: root const hint missing: %s", name, result)
+			}
+			literal = strings.TrimPrefix(description, prefix)
+		} else {
+			literal = parsed.Get("enum.0").String()
+		}
+
+		if !gjson.Valid(literal) {
+			t.Fatalf("%s: root const literal is invalid JSON: %q", name, literal)
+		}
+		if enumValueKey(gjson.Parse(literal)) != enumValueKey(gjson.Parse(constLiteral)) {
+			t.Fatalf("%s: root const changed:\ngot:  %s\nwant: %s", name, literal, constLiteral)
+		}
+		if got := gjson.Get(literal, "large").Raw; got != "9007199254740993" {
+			t.Errorf("%s: root const large integer = %s: %s", name, got, result)
+		}
+
+		secondPass := clean(result)
+		if !reflect.DeepEqual(gjson.Parse(result).Value(), gjson.Parse(secondPass).Value()) {
+			t.Errorf("%s: root const cleaning is not idempotent:\nfirst: %s\nsecond: %s", name, result, secondPass)
+		}
+	}
+}
