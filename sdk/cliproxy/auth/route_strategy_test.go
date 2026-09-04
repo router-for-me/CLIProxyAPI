@@ -57,6 +57,26 @@ func TestRouteStrategyFromMetadata(t *testing.T) {
 			meta: map[string]any{cliproxyexecutor.RouteStrategyMetadataKey: ""},
 			want: schedulerStrategyCurrent,
 		},
+		{
+			name: "canonical_round_robin_maps_to_round_robin",
+			meta: map[string]any{cliproxyexecutor.RouteStrategyMetadataKey: "round-robin"},
+			want: schedulerStrategyRoundRobin,
+		},
+		{
+			name: "canonical_fill_first_maps_to_fill_first",
+			meta: map[string]any{cliproxyexecutor.RouteStrategyMetadataKey: "fill-first"},
+			want: schedulerStrategyFillFirst,
+		},
+		{
+			name: "canonical_weighted_round_robin_maps_to_weighted",
+			meta: map[string]any{cliproxyexecutor.RouteStrategyMetadataKey: "weighted-round-robin"},
+			want: schedulerStrategyWeightedRoundRobin,
+		},
+		{
+			name: "canonical_values_case_insensitive",
+			meta: map[string]any{cliproxyexecutor.RouteStrategyMetadataKey: " Fill-First "},
+			want: schedulerStrategyFillFirst,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

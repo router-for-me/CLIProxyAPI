@@ -1074,7 +1074,10 @@ func isFreeCodexAuth(auth *Auth) bool {
 // routeStrategyFromMetadata maps the per-model routing strategy carried in
 // execution metadata to the scheduler strategy. "priority" pins to the
 // highest-priority provider (fill-first); "failover" enables round-robin
-// across providers with the existing inner-loop failover on error. Any other
+// across providers with the existing inner-loop failover on error. The
+// canonical pool strategy spellings ("round-robin", "fill-first",
+// "weighted-round-robin") map to their scheduler counterparts so a pool row's
+// strategy can serve as a route's default without translation. Any other
 // value (including absence) yields schedulerStrategyCurrent, which means the
 // configured global routing.strategy applies unchanged.
 func routeStrategyFromMetadata(meta map[string]any) schedulerStrategy {
@@ -1095,10 +1098,12 @@ func routeStrategyFromMetadata(meta map[string]any) schedulerStrategy {
 		return schedulerStrategyCurrent
 	}
 	switch strings.ToLower(strategy) {
-	case "priority":
+	case "priority", "fill-first":
 		return schedulerStrategyFillFirst
-	case "failover":
+	case "failover", "round-robin":
 		return schedulerStrategyRoundRobin
+	case "weighted-round-robin":
+		return schedulerStrategyWeightedRoundRobin
 	default:
 		return schedulerStrategyCurrent
 	}

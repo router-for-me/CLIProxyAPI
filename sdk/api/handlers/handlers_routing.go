@@ -111,9 +111,10 @@ func excludeExecutionProvider(providers []string, excluded string) []string {
 // (empty intersection is a hard 503) and applies the route's strategy ordering
 // when one is configured ("priority" reorders by descending priority, "failover"
 // reorders and stashes the strategy so the conductor uses its cross-provider
-// failover loop). Shared by the Global Model route and the per-API-key route
-// so both pin with identical mechanics.
-func applyPinnedRoute(ctx context.Context, providers []string, modelName string, route *store.ModelRoute) ([]string, *interfaces.ErrorMessage) {
+// failover loop). A route without its own strategy inherits the pinned pool
+// row's strategy when every pinned pool agrees. Shared by the Global Model
+// route and the per-API-key route so both pin with identical mechanics.
+func (h *BaseAPIHandler) applyPinnedRoute(ctx context.Context, providers []string, modelName string, route *store.ModelRoute) ([]string, *interfaces.ErrorMessage) {
 	if route == nil {
 		return providers, nil
 	}
@@ -125,11 +126,29 @@ func applyPinnedRoute(ctx context.Context, providers []string, modelName string,
 		}
 	}
 	strategy := strings.ToLower(strings.TrimSpace(route.Strategy))
-	if strategy == "priority" || strategy == "failover" {
+	if strategy == "" {
+		// A route pinning a pool without its own strategy inherits the pool
+		// row's strategy when every pinned pool agrees; mixed pools keep the
+		// global routing strategy. The route's own strategy always wins.
+		strategy = h.poolStrategyForProviders(filtered)
+	}
+	switch strategy {
+	case "priority", "failover", "round-robin", "fill-first", "weighted-round-robin":
 		filtered = orderProvidersByPriority(filtered, route.Priorities)
 		stashRouteStrategy(ctx, strategy)
 	}
 	return filtered, nil
+}
+
+// poolStrategyForProviders resolves the shared in-pool routing strategy of the
+// pools behind the pinned provider keys. Returns "" on a nil manager, no
+// pinned providers, or disagreeing pools so the caller keeps the global
+// routing strategy.
+func (h *BaseAPIHandler) poolStrategyForProviders(providers []string) string {
+	if h == nil || h.AuthManager == nil || len(providers) == 0 {
+		return ""
+	}
+	return h.AuthManager.PoolStrategyForProviderKeys(providers...)
 }
 
 func validateNativeInteractionsExecution(entryProtocol string, execOptions modelExecutionOptions, routeDecision modelRouteDecision) *interfaces.ErrorMessage {
@@ -463,7 +482,7 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(ctx context.Context, model
 	// model pinned inside a group.
 	if h != nil && h.GlobalModelRouter != nil {
 		if route := h.GlobalModelRouter.GlobalModelRoute(ctx, baseModel); route != nil {
-			filtered, errMsg := applyPinnedRoute(ctx, providers, modelName, route)
+			filtered, errMsg := h.applyPinnedRoute(ctx, providers, modelName, route)
 			if errMsg != nil {
 				return nil, "", errMsg
 			}
@@ -477,12 +496,15 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(ctx context.Context, model
 	// over any Global Model route for the same model. There is no failover to
 	// registry providers outside the pinned set; an empty intersection (no pinned
 	// provider serves the model) is a hard 503. When the route carries a strategy
-	// ("priority" or "failover"), reorder the providers by descending priority and
-	// stash the strategy so the conductor pins credential selection to the primary
-	// provider (priority) or relies on its cross-provider failover loop (failover).
-	// An empty strategy inherits the global routing.strategy unchanged.
+	// ("priority", "failover", or a canonical pool strategy), reorder the
+	// providers by descending priority and stash the strategy so the conductor
+	// pins credential selection to the primary provider (priority/fill-first) or
+	// relies on its cross-provider failover loop (failover/round-robin). A route
+	// without a strategy inherits the pinned pool row's strategy when every
+	// pinned pool agrees; otherwise the global routing.strategy applies
+	// unchanged.
 	if route := policyRouteForModel(ctx, baseModel); route != nil {
-		filtered, errMsg := applyPinnedRoute(ctx, registryProviders, modelName, route)
+		filtered, errMsg := h.applyPinnedRoute(ctx, registryProviders, modelName, route)
 		if errMsg != nil {
 			return nil, "", errMsg
 		}

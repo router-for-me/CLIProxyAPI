@@ -1196,6 +1196,57 @@ func (m *Manager) executorForEntryRoutingKeyLocked(provider string) (ProviderExe
 	return nil, false
 }
 
+// PoolStrategyForProviderKeys returns the shared in-pool routing strategy of
+// the auths matching any of the given provider keys. Returns "" when no
+// matching auth carries a pool strategy or when matching pools disagree —
+// mixed pools keep the global routing strategy. Matching reuses the
+// auth-selection semantics (authMatchesAnyProvider / provider_key +
+// entry_provider_key), so a pool key matches both the row key and its
+// per-entry keys.
+func (m *Manager) PoolStrategyForProviderKeys(keys ...string) string {
+	if m == nil || len(keys) == 0 {
+		return ""
+	}
+	providerSet := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			continue
+		}
+		providerSet[key] = struct{}{}
+	}
+	if len(providerSet) == 0 {
+		return ""
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var (
+		found    bool
+		strategy string
+	)
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		if !authMatchesAnyProvider(auth, providerSet) {
+			continue
+		}
+		poolStrategy := poolStrategyFromAuth(auth)
+		if poolStrategy == "" {
+			continue
+		}
+		if found && !strings.EqualFold(strategy, poolStrategy) {
+			return ""
+		}
+		strategy = poolStrategy
+		found = true
+	}
+	if !found {
+		return ""
+	}
+	return strings.ToLower(strategy)
+}
+
 func (m *Manager) isCompoundRoutingKey(provider string) bool {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if provider == "" {
