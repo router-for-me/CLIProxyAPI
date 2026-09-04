@@ -62,6 +62,40 @@ func TestApplyThinkingWithModelInfoMapsOpenAICompatibilityHighIntent(t *testing.
 	}
 }
 
+// A model whose configuration declares no thinking support gets proxy-fabricated
+// default levels; those must not remap an explicitly requested effort (#5499).
+func TestApplyThinkingWithModelInfoKeepsAssumedLevelRequestsVerbatim(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{name: "xhigh stays xhigh", source: "xhigh", want: "xhigh"},
+		{name: "high stays high", source: "high", want: "high"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			modelInfo := &registry.ModelInfo{
+				ID:   "compat-upstream",
+				Type: "openai-compatibility",
+				Thinking: &registry.ThinkingSupport{
+					Levels:        []string{"low", "medium", "high"},
+					LevelsAssumed: true,
+				},
+			}
+			body := []byte(`{"reasoning_effort":"` + tc.source + `"}`)
+			source := []byte(`{"reasoning":{"effort":"` + tc.source + `"}}`)
+			out, err := thinking.ApplyThinkingWithModelInfo(body, source, "compat-upstream", "openai-response", "openai", "compat-provider", modelInfo)
+			if err != nil {
+				t.Fatalf("ApplyThinkingWithModelInfo() error = %v", err)
+			}
+			if got := gjson.GetBytes(out, "reasoning_effort").String(); got != tc.want {
+				t.Fatalf("reasoning_effort = %q, want %q; body=%s", got, tc.want, out)
+			}
+		})
+	}
+}
+
 func TestApplyThinkingWithModelInfoMapsResponsesToCodexHighIntent(t *testing.T) {
 	modelInfo := &registry.ModelInfo{
 		ID:       "codex-upstream",
