@@ -465,6 +465,8 @@ nonstream-keepalive-interval: 0
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
 #   - api-key: "sk-atSM..."
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
+#     priority: 10 # optional: selection tier when several credentials match; higher tiers are served first and descend on cooldown; 0 is the default
+#     upstream-provider-strategy: "fill-first" # renderer-managed: the upstream_providers row's routing strategy, stamped by the dashboard renderer. Not set manually.
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
@@ -547,6 +549,15 @@ nonstream-keepalive-interval: 0
 #     disabled: false # optional: set to true to disable this provider without removing it
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     strategy: "failover" # optional: in-pool selection strategy for this provider's api-key-entries:
+#                         # round-robin | weighted-round-robin | fill-first (the Model Routes aliases
+#                         # "priority" and "failover" are accepted and canonicalized to fill-first /
+#                         # round-robin). Empty = follow routing.strategy. Setting any value additionally
+#                         # enables aggressive in-pool failover: on any entry error — including ones
+#                         # upstreams report as client request faults — the next entry is tried before
+#                         # the error reaches the client; errors surface only after the whole pool is
+#                         # exhausted. A model route pinning this pool without its own strategy
+#                         # inherits this value.
 #     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     headers:
@@ -554,6 +565,9 @@ nonstream-keepalive-interval: 0
 #     api-key-entries:
 #       - api-key: "sk-or-v1-...b780"
 #         weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
+#         priority: 10 # optional: selection tier within the pool; higher tiers are served first and
+#                      # descend on cooldown; omitted = inherit the provider-level priority; 0 is a
+#                      # valid explicit tier, distinct from omitted
 #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #         # proxy-url: "direct" # optional: explicit direct connect for this credential
 #       - api-key: "sk-or-v1-...b781" # without proxy-url

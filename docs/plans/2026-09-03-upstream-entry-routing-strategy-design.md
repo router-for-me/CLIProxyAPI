@@ -1,7 +1,7 @@
 # Design: Routing Strategy for Upstream Provider API Key Entries
 
 **Date:** 2026-09-03
-**Status:** Approved (brainstorming session, all sections validated)
+**Status:** Implemented (feat/entry-routing-strategy; implementation plan at 2026-09-03-upstream-entry-routing-strategy-plan.md)
 **Goal:** Give upstream-provider pools (Claude API Key + OpenAI Compatibility) a row-level routing strategy and per-entry priority, and — the core need — aggressive failover: when any entry fails with any error, the request is re-routed to the next entry in the same pool with zero downtime; errors only surface to the end user after the whole pool is exhausted.
 
 ## Context & Motivation
