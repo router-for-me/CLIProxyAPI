@@ -50,6 +50,7 @@ const (
 	claudeExtendedCacheTTLBeta       = "extended-cache-ttl-2025-04-11"
 	claudeCacheDiagnosisBeta         = "cache-diagnosis-2026-04-07"
 	claudeRedactThinkingBeta         = "redact-thinking-2026-02-12"
+	claudeAFKModeBeta                = "afk-mode-2026-01-31"
 )
 
 // claudeCodeCLIConstantBetas are the betas Claude Code sends on every
@@ -94,20 +95,21 @@ var claudeCodeTrailingBetas = []string{
 //	 8 prompt-caching-scope-2026-01-05
 //	 9 mid-conversation-system-2026-04-07  models accepting a role=system turn
 //	10 advisor-tool-2026-03-01             requests declaring advisor tools or requesting advisor beta
-//	11 advanced-tool-use-2025-11-20       requests with tools
+//	11 advanced-tool-use-2025-11-20       requests using tool search or another advanced tool-use feature
 //	12 effort-2025-11-24                  effort-supporting models with active thinking
 //	13 server-side-fallback-2026-06-01    requests with fallbacks or requested
 //	14 fallback-credit-2026-06-01         OAuth credentials
 //	15 structured-outputs-2025-12-15      structured output requests
 //	16 thinking-display-updates-2026-08-18 requests with thinking.display=updates
 //	17 fast-mode-2026-02-01               speed:fast requests only
-//	18 extended-cache-ttl-2025-04-11      OAuth credentials (omitted on subagent & probe)
-//	19 cache-diagnosis-2026-04-07         requests with diagnostics only
+//	18 afk-mode-2026-01-31                auto-mode sessions, forwarded when the caller sends it
+//	19 extended-cache-ttl-2025-04-11      OAuth credentials (omitted on subagent & probe)
+//	20 cache-diagnosis-2026-04-07         requests with diagnostics only
 //
 // An empty body keeps the optimistic role=system default, matching the cloaking
 // policy for unknown and future model IDs.
 func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool) string {
-	betas := make([]string, 0, len(claudeCodeCLIConstantBetas)+len(claudeCodeTrailingBetas)+8)
+	betas := make([]string, 0, len(claudeCodeCLIConstantBetas)+len(claudeCodeTrailingBetas)+9)
 	betas = append(betas, claudeCodeBeta)
 	if oauthToken {
 		betas = append(betas, claudeOAuthBeta)
@@ -128,7 +130,7 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	if requested[claudeAdvisorToolBeta] || claudeBodyHasAdvisorTool(body) {
 		betas = append(betas, claudeAdvisorToolBeta)
 	}
-	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() && len(tools.Array()) > 0 {
+	if requested[claudeAdvancedToolUseBeta] || claudeBodyUsesAdvancedToolUse(body) {
 		betas = append(betas, claudeAdvancedToolUseBeta)
 	}
 	if claudeRequestSupportsEffort(body, requested) {
@@ -155,6 +157,9 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	}
 	if claudeRequestUsesFastMode(body, requested) {
 		betas = append(betas, claudeFastModeBeta)
+	}
+	if requested[claudeAFKModeBeta] {
+		betas = append(betas, claudeAFKModeBeta)
 	}
 	if oauthToken && !helps.IsClaudeSubagentRequest(nil, body) && !isProbeOrHelper {
 		betas = append(betas, claudeExtendedCacheTTLBeta)
@@ -192,6 +197,31 @@ func claudeRequestSupportsEffort(body []byte, requested map[string]bool) bool {
 func claudeThinkingDisplayUpdates(body []byte) bool {
 	display := gjson.GetBytes(body, "thinking.display")
 	return display.Type == gjson.String && strings.EqualFold(strings.TrimSpace(display.String()), "updates")
+}
+
+// claudeBodyUsesAdvancedToolUse reports whether the request needs
+// advanced-tool-use-2025-11-20. Claude Code 2.1.258 adds the beta only while
+// tool search is active, which puts a tool_search_tool_* server tool and
+// defer_loading tools on the wire; plain tool declarations no longer carry it
+// (measured 2026-09-02: 158 inline tools, no beta). Tool use examples
+// (input_examples) and programmatic tool calling (allowed_callers) sit behind
+// the same beta and are just as visible in the body, so callers using them keep
+// working without requesting the beta explicitly.
+func claudeBodyUsesAdvancedToolUse(body []byte) bool {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
+		if strings.HasPrefix(toolType, "tool_search_tool_") {
+			return true
+		}
+		if tool.Get("defer_loading").Bool() || tool.Get("input_examples").Exists() || tool.Get("allowed_callers").Exists() {
+			return true
+		}
+	}
+	return false
 }
 
 // claudeBodyHasAdvisorTool reports whether the request body declares an
@@ -333,7 +363,9 @@ func withoutClaudeBeta(betas, removeBeta string) string {
 
 // withClaudeAdvisorToolBeta ensures advisor-tool-2026-03-01 is present when
 // the body declares an advisor server tool, placed at the observed wire position
-// before advanced-tool-use-2025-11-20 or effort-2025-11-24.
+// before advanced-tool-use-2025-11-20 or effort-2025-11-24. Every beta that
+// follows advisor on the wire, afk-mode-2026-01-31 included, is an insertion
+// boundary so a caller-supplied trailer never ends up ahead of it.
 func withClaudeAdvisorToolBeta(betas string) string {
 	if strings.TrimSpace(betas) == "" {
 		return claudeAdvisorToolBeta
@@ -354,6 +386,7 @@ func withClaudeAdvisorToolBeta(betas string) string {
 			beta == claudeFallbackCreditBeta ||
 			beta == claudeStructuredOutputsBeta ||
 			beta == claudeFastModeBeta ||
+			beta == claudeAFKModeBeta ||
 			beta == claudeExtendedCacheTTLBeta ||
 			beta == claudeCacheDiagnosisBeta {
 			insertAt = index
@@ -1071,14 +1104,13 @@ func applyClaudeHeadersWithNativeProfile(
 	}
 	r.Header.Set("Connection", "keep-alive")
 	// Regular Claude Code requests negotiate transport identically for streaming
-	// and non-streaming requests. Measured Haiku helpers are the exception: their
-	// minimal non-stream request offers gzip only, while the structured streaming
-	// helper offers the full compression set. Confirmed helpers preserve the
-	// incoming native values.
+	// and non-streaming requests. Claude Code 2.1.258 Haiku helpers offer the same
+	// full compression set as the main thread (2.1.220's minimal probe offered gzip
+	// only). Confirmed helpers preserve the incoming native values.
 	applyTransportNegotiation := func() {
 		if helperProfile {
 			identityHeader("Accept", "application/json")
-			identityHeader("Accept-Encoding", "gzip")
+			identityHeader("Accept-Encoding", "gzip, deflate, br, zstd")
 			return
 		}
 		if stream && !isAnthropicBase {
