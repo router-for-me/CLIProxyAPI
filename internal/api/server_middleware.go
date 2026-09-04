@@ -167,6 +167,9 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 		if err == nil {
 			if result != nil {
 				c.Set("userApiKey", result.Principal)
+				if label := strings.TrimSpace(result.PrincipalLabel); label != "" {
+					c.Set("userApiKeyLabel", label)
+				}
 				c.Set("accessProvider", result.Provider)
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)

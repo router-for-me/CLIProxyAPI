@@ -36,8 +36,8 @@ remote-management:
 auth-dir: "~/.cli-proxy-api"
 
 # API keys for authentication
-# An entry may also be a mapping with an optional name. The name replaces the raw key
-# in usage records and request logs.
+# An entry may also be a mapping with an optional name. The name is used for attribution
+# in usage records and request logs; authorization still uses the raw key.
 api-keys:
   - "your-api-key-1"
   - "your-api-key-2"

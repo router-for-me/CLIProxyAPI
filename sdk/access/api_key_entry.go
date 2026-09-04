@@ -16,8 +16,8 @@ type APIKeyEntry struct {
 	// Key is the raw credential value clients send.
 	Key string `yaml:"key" json:"key"`
 
-	// Name optionally labels the key. When set it replaces the raw key as the
-	// authenticated principal in usage records and request logs.
+	// Name optionally labels the key. When set it is used for attribution in
+	// usage records and request logs; authorization still uses the raw key.
 	Name string `yaml:"name,omitempty" json:"name,omitempty"`
 }
 

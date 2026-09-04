@@ -11,40 +11,40 @@ import (
 
 func TestProviderPrincipalResolution(t *testing.T) {
 	tests := []struct {
-		name    string
-		entries []sdkaccess.APIKeyEntry
-		key     string
-		want    string
+		name      string
+		entries   []sdkaccess.APIKeyEntry
+		key       string
+		wantLabel string
 	}{
 		{
-			name:    "named entry uses name",
-			entries: []sdkaccess.APIKeyEntry{{Key: "k1", Name: "alice"}},
-			key:     "k1",
-			want:    "alice",
+			name:      "named entry labels the raw key",
+			entries:   []sdkaccess.APIKeyEntry{{Key: "k1", Name: "alice"}},
+			key:       "k1",
+			wantLabel: "alice",
 		},
 		{
-			name:    "unnamed entry uses raw key",
-			entries: []sdkaccess.APIKeyEntry{{Key: "k1"}},
-			key:     "k1",
-			want:    "k1",
+			name:      "unnamed entry has no label",
+			entries:   []sdkaccess.APIKeyEntry{{Key: "k1"}},
+			key:       "k1",
+			wantLabel: "",
 		},
 		{
-			name:    "duplicate key adopts first non-empty name",
-			entries: []sdkaccess.APIKeyEntry{{Key: "k1"}, {Key: "k1", Name: "alice"}},
-			key:     "k1",
-			want:    "alice",
+			name:      "duplicate key adopts first non-empty name",
+			entries:   []sdkaccess.APIKeyEntry{{Key: "k1"}, {Key: "k1", Name: "alice"}},
+			key:       "k1",
+			wantLabel: "alice",
 		},
 		{
-			name:    "duplicate key keeps first name",
-			entries: []sdkaccess.APIKeyEntry{{Key: "k1", Name: "alice"}, {Key: "k1", Name: "bob"}},
-			key:     "k1",
-			want:    "alice",
+			name:      "duplicate key keeps first name",
+			entries:   []sdkaccess.APIKeyEntry{{Key: "k1", Name: "alice"}, {Key: "k1", Name: "bob"}},
+			key:       "k1",
+			wantLabel: "alice",
 		},
 		{
-			name:    "whitespace is trimmed",
-			entries: []sdkaccess.APIKeyEntry{{Key: "  k1  ", Name: "  alice  "}},
-			key:     "k1",
-			want:    "alice",
+			name:      "whitespace is trimmed",
+			entries:   []sdkaccess.APIKeyEntry{{Key: "  k1  ", Name: "  alice  "}},
+			key:       "k1",
+			wantLabel: "alice",
 		},
 	}
 
@@ -58,8 +58,11 @@ func TestProviderPrincipalResolution(t *testing.T) {
 			if authErr != nil {
 				t.Fatalf("Authenticate() error = %v", authErr)
 			}
-			if result.Principal != tt.want {
-				t.Fatalf("Principal = %q, want %q", result.Principal, tt.want)
+			if result.Principal != tt.key {
+				t.Fatalf("Principal = %q, want raw key %q", result.Principal, tt.key)
+			}
+			if result.PrincipalLabel != tt.wantLabel {
+				t.Fatalf("PrincipalLabel = %q, want %q", result.PrincipalLabel, tt.wantLabel)
 			}
 		})
 	}

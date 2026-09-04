@@ -31,7 +31,7 @@ func Register(cfg *sdkconfig.SDKConfig) {
 type provider struct {
 	name string
 	// keys maps a raw API key to its display name; an empty name means the key
-	// itself is used as the principal.
+	// has no attribution label.
 	keys map[string]string
 }
 
@@ -92,13 +92,12 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 			continue
 		}
 		if name, ok := p.keys[candidate.value]; ok {
-			principal := name
-			if principal == "" {
-				principal = candidate.value
-			}
+			// The raw key stays the principal so authorization and cache
+			// isolation keep their per-key scope; the name is attribution only.
 			return &sdkaccess.Result{
-				Provider:  p.Identifier(),
-				Principal: principal,
+				Provider:       p.Identifier(),
+				Principal:      candidate.value,
+				PrincipalLabel: name,
 				Metadata: map[string]string{
 					"source": candidate.source,
 				},
