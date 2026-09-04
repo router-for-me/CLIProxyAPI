@@ -284,6 +284,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	var lastErr error
+	pinnedPool := ""
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
@@ -295,7 +296,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		if homeMode {
 			pickOpts = withHomeAuthCount(opts, homeAuthCount)
 		}
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		auth, executor, provider, errPick := m.pickNextMixed(ctx, poolPickProviders(providers, pinnedPool), routeModel, pickOpts, tried)
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return cliproxyexecutor.Response{}, lastErr
@@ -375,7 +376,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
-				if isRequestInvalidError(errExec) {
+				if isRequestInvalidError(errExec) && poolStrategyFromAuth(auth) == "" {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
@@ -387,10 +388,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			return resp, nil
 		}
 		if authErr != nil {
-			if isRequestInvalidError(authErr) {
+			if isRequestInvalidError(authErr) && poolStrategyFromAuth(auth) == "" {
 				return cliproxyexecutor.Response{}, authErr
 			}
 			lastErr = authErr
+			pinPoolFromFailedAuth(auth, &pinnedPool)
 			if homeMode {
 				homeAuthCount++
 			}
@@ -411,6 +413,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	var lastErr error
+	pinnedPool := ""
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
@@ -422,7 +425,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		if homeMode {
 			pickOpts = withHomeAuthCount(opts, homeAuthCount)
 		}
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		auth, executor, provider, errPick := m.pickNextMixed(ctx, poolPickProviders(providers, pinnedPool), routeModel, pickOpts, tried)
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return cliproxyexecutor.Response{}, lastErr
@@ -510,7 +513,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				} else {
 					m.MarkResult(execCtx, result)
 				}
-				if isRequestInvalidError(errExec) {
+				if isRequestInvalidError(errExec) && poolStrategyFromAuth(auth) == "" {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
@@ -522,10 +525,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			return resp, nil
 		}
 		if authErr != nil {
-			if isRequestInvalidError(authErr) {
+			if isRequestInvalidError(authErr) && poolStrategyFromAuth(auth) == "" {
 				return cliproxyexecutor.Response{}, authErr
 			}
 			lastErr = authErr
+			pinPoolFromFailedAuth(auth, &pinnedPool)
 			if homeMode {
 				homeAuthCount++
 			}
@@ -548,6 +552,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	attempted := make(map[string]struct{})
 	unauthorizedRefreshTried := make(map[string]struct{})
 	var lastErr error
+	pinnedPool := ""
 	for {
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
@@ -573,7 +578,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				provider = selection.Provider
 			}
 		} else {
-			auth, executor, provider, errPick = m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+			auth, executor, provider, errPick = m.pickNextMixed(ctx, poolPickProviders(providers, pinnedPool), routeModel, pickOpts, tried)
 		}
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
@@ -689,10 +694,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
 				return nil, errCtx
 			}
-			if isRequestInvalidError(errStream) {
+			if isRequestInvalidError(errStream) && poolStrategyFromAuth(auth) == "" {
 				return nil, errStream
 			}
 			lastErr = errStream
+			pinPoolFromFailedAuth(auth, &pinnedPool)
 			if homeMode {
 				homeAuthCount++
 			}
@@ -1096,6 +1102,51 @@ func routeStrategyFromMetadata(meta map[string]any) schedulerStrategy {
 	default:
 		return schedulerStrategyCurrent
 	}
+}
+
+// poolStrategyFromAuth returns the in-pool routing strategy stamped by the
+// synthesizer for entry-bearing provider pools. Non-empty means the auth's
+// pool opted into aggressive failover: any entry error — including
+// request-fault-classified ones — rotates to another entry of the same pool
+// before the error surfaces to the client. Empty keeps the historical
+// hard-stop on request-fault errors.
+func poolStrategyFromAuth(a *Auth) string {
+	if a == nil {
+		return ""
+	}
+	return strings.TrimSpace(a.Attributes[AttributePoolStrategy])
+}
+
+// pinPoolFromFailedAuth records the routing key of a failed pool auth so the
+// remaining iterations of the execution loop stay confined to that pool.
+// Only compound routing keys (e.g. "claude:7") are pinned: bare channel keys
+// (OpenAI-compat pools like "openai-compatible-foo") are left unpinned, so
+// after a compat-pool failure the pick may legitimately cross into other
+// providers serving the same model — the aggressive-failover intent. The pin
+// is never cleared once set: a request that already rotated through one pool
+// stays on it until the pool is exhausted or the request ends.
+func pinPoolFromFailedAuth(auth *Auth, pinnedPool *string) {
+	if pinnedPool == nil || *pinnedPool != "" {
+		return
+	}
+	if poolStrategyFromAuth(auth) == "" {
+		return
+	}
+	key := routingKeyFromAuth(auth)
+	if key == "" {
+		return
+	}
+	*pinnedPool = key
+}
+
+// poolPickProviders narrows the candidate provider list to the pinned pool
+// key once a pool auth has failed and its pool opted into aggressive
+// failover. With no pin, the original list is returned unchanged.
+func poolPickProviders(providers []string, pinnedPool string) []string {
+	if pinnedPool == "" {
+		return providers
+	}
+	return []string{pinnedPool}
 }
 
 func publishSelectedAuthMetadata(meta map[string]any, auth *Auth) {
