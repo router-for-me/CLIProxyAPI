@@ -34,13 +34,7 @@ const (
 	// proxy. Native OpenAI blobs start with "gAAAA" and never match it.
 	syntheticCompactionPrefix = "cpa-compaction-v1:"
 
-	syntheticCompactionPrompt = "The context window is being compacted. Do not continue the task. " +
-		"Write a handoff summary for a model that will continue this conversation without seeing the earlier messages. " +
-		"Include, in this order: the user's goal and constraints; decisions made and why; what has been done so far " +
-		"(files read or changed, commands run, results, errors); the current state of any tool interaction; " +
-		"open questions or approvals still pending from the user; and the exact next steps. " +
-		"Be precise: keep file paths, identifiers, numbers, error text and user quotes verbatim. " +
-		"Output plain text only, no preamble."
+	syntheticCompactionPrompt = "Summarize the transcript inside <summary></summary> tags. Include relevant information in the summary such that this conversation will be continued by a new context window without needing to redo work or be reprovided with relevant constraints or context. Be sure to preserve: (1) any difficulties or problems that came up, and how they were handled or resolved; (2) any possibilities, options, or approaches that were considered but ruled out, and why; (3) the user's goal and explicit constraints, quoted verbatim where possible; (4) decisions made and their rationale; (5) what has been completed, with file paths, identifiers, commands, results and error text kept verbatim; (6) the current state of any tool interaction and anything still pending from the user; (7) the exact next steps. Do not continue the task; write only the summary."
 
 	syntheticCompactionReplayPrefix = "The conversation so far was compacted. The following summary, written by the previous model window, " +
 		"is the authoritative state of the task. Continue from it without repeating completed work:\n\n"
@@ -121,7 +115,7 @@ func runSyntheticCompaction(ctx context.Context, exec compactionExecutor, auth *
 	if err != nil {
 		return nil, nil, fmt.Errorf("synthetic compaction: summary request failed: %w", err)
 	}
-	summary := strings.TrimSpace(responsesOutputText(resp.Payload))
+	summary := extractSummaryTag(strings.TrimSpace(responsesOutputText(resp.Payload)))
 	if summary == "" {
 		return nil, nil, errors.New("synthetic compaction: upstream returned an empty summary")
 	}
@@ -309,4 +303,15 @@ func removeInputItemsByType(payload []byte, itemType string) []byte {
 		return payload
 	}
 	return out
+}
+
+// extractSummaryTag returns the text inside <summary></summary> when the
+// model followed the instruction, and the whole text otherwise.
+func extractSummaryTag(text string) string {
+	start := strings.Index(text, "<summary>")
+	end := strings.LastIndex(text, "</summary>")
+	if start >= 0 && end > start {
+		return strings.TrimSpace(text[start+len("<summary>") : end])
+	}
+	return text
 }
