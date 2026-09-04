@@ -1030,7 +1030,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								state.NextRetryAfter = next
 							}
 						case 404:
-							state.NextRetryAfter = notFoundRetryAfter(result.Error, classificationModel, &state.Quota, now, disableCooling)
+							existingModelRetryAfter := state.NextRetryAfter
+							next := notFoundRetryAfter(result.Error, classificationModel, &state.Quota, now, disableCooling)
+							// A racing generic 404 for this model key must not
+							// shorten or clear a longer-lived cooldown already
+							// recorded in this model's NextRetryAfter (e.g. a
+							// live 401) - same effective-deadline rule as the
+							// auth-level 404 case above, applied per model key.
+							if existingModelRetryAfter.After(now) && existingModelRetryAfter.After(next) {
+								next = existingModelRetryAfter
+							}
+							state.NextRetryAfter = next
 							state.Unavailable = !state.NextRetryAfter.IsZero()
 						case 429:
 							var next time.Time

@@ -1425,3 +1425,89 @@ func TestClearAuthStateOnSuccessClearsCredentialCooldown(t *testing.T) {
 		t.Fatalf("clearAuthStateOnSuccess() left cooldown state = %+v, want fully cleared", auth)
 	}
 }
+
+func TestMarkResultModelCooldownSurvivesRacingGeneric404(t *testing.T) {
+	previousTransient := transientErrorCooldownSeconds.Load()
+	previousDisabled := quotaCooldownDisabled.Load()
+	SetTransientErrorCooldownSeconds(0)
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() {
+		transientErrorCooldownSeconds.Store(previousTransient)
+		quotaCooldownDisabled.Store(previousDisabled)
+	})
+
+	generic := &Error{HTTPStatus: http.StatusNotFound, Message: "Not Found"}
+	unauthorized := &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"}
+
+	newAuth := func(id string) (*Manager, *Auth) {
+		manager := NewManager(nil, nil, nil)
+		auth := &Auth{ID: id, Provider: "codex", ModelStates: map[string]*ModelState{
+			"gpt-5": {},
+		}}
+		if _, err := manager.Register(WithSkipPersist(context.Background()), auth); err != nil {
+			t.Fatalf("Register() error = %v", err)
+		}
+		return manager, auth
+	}
+	retryAfterFor := func(manager *Manager, authID string) time.Time {
+		updated, ok := manager.GetByID(authID)
+		if !ok || updated.ModelStates["gpt-5"] == nil {
+			t.Fatal("MarkResult() did not retain model cooldown state")
+		}
+		return updated.ModelStates["gpt-5"].NextRetryAfter
+	}
+
+	// A 401 for this model key sets a 30-minute deadline; a racing generic
+	// 404 for the same key must not shorten it down to the 404's short
+	// transient backoff.
+	managerLonger, authLonger := newAuth("model-401-then-404")
+	before := time.Now()
+	managerLonger.MarkResult(context.Background(), Result{AuthID: authLonger.ID, Provider: "codex", Model: "gpt-5", Error: unauthorized})
+	deadline := retryAfterFor(managerLonger, authLonger.ID)
+	if cooldown := deadline.Sub(before); cooldown < 30*time.Minute-time.Second || cooldown > 30*time.Minute+time.Second {
+		t.Fatalf("401 cooldown = %v, want about 30m", cooldown)
+	}
+	managerLonger.MarkResult(context.Background(), Result{AuthID: authLonger.ID, Provider: "codex", Model: "gpt-5", Error: generic})
+	if got := retryAfterFor(managerLonger, authLonger.ID); !got.Equal(deadline) {
+		t.Fatalf("racing generic 404 shortened model deadline: NextRetryAfter = %v, want unchanged %v", got, deadline)
+	}
+
+	// Control: a generic 404 recorded first (short transient backoff) must
+	// be extended by a later, genuinely longer 401 for the same key - the
+	// preserve-longer rule must not pin the deadline to whichever error
+	// landed first.
+	managerShorter, authShorter := newAuth("model-404-then-401")
+	before = time.Now()
+	managerShorter.MarkResult(context.Background(), Result{AuthID: authShorter.ID, Provider: "codex", Model: "gpt-5", Error: generic})
+	shortDeadline := retryAfterFor(managerShorter, authShorter.ID)
+	if cooldown := shortDeadline.Sub(before); cooldown < 59*time.Second || cooldown > 61*time.Second {
+		t.Fatalf("generic-404-first cooldown = %v, want about 1m", cooldown)
+	}
+	managerShorter.MarkResult(context.Background(), Result{AuthID: authShorter.ID, Provider: "codex", Model: "gpt-5", Error: unauthorized})
+	longDeadline := retryAfterFor(managerShorter, authShorter.ID)
+	if cooldown := longDeadline.Sub(before); cooldown < 30*time.Minute-time.Second || cooldown > 30*time.Minute+time.Second {
+		t.Fatalf("generic-then-401 cooldown = %v, want about 30m (extended)", cooldown)
+	}
+	if !longDeadline.After(shortDeadline) {
+		t.Fatalf("longer 401 did not extend the shorter generic-404 deadline: got %v, want after %v", longDeadline, shortDeadline)
+	}
+}
+
+func TestMarkResultModelCooldownRacingGeneric404MutationControl(t *testing.T) {
+	previousTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(previousTransient) })
+
+	now := time.Date(2026, 9, 3, 14, 42, 0, 0, time.UTC)
+	generic := &Error{HTTPStatus: http.StatusNotFound, Message: "Not Found"}
+	deadline := now.Add(30 * time.Minute)
+
+	// Mimic the pre-fix model-level generic-404 branch directly (unconditional
+	// overwrite, no preserved-existing-deadline check) to confirm it would
+	// reproduce the exact defect this pair of tests guards against.
+	state := &ModelState{NextRetryAfter: deadline, Unavailable: true, Status: StatusError}
+	preFixNext := notFoundRetryAfter(generic, "", &state.Quota, now, false)
+	if !preFixNext.Before(deadline) {
+		t.Fatalf("expected the pre-fix computed NextRetryAfter (%v) to be shorter than the live model deadline (%v)", preFixNext, deadline)
+	}
+}
