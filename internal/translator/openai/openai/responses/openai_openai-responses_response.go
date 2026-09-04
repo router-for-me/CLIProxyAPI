@@ -321,6 +321,10 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		} else if v := usage.Get("completion_tokens_details.reasoning_tokens"); v.Exists() {
 			st.ReasoningTokens = v.Int()
 			st.UsageSeen = true
+		} else if v := usage.Get("reasoning_tokens"); v.Exists() {
+			// SGLang-style gateways emit a flat top-level reasoning_tokens field.
+			st.ReasoningTokens = v.Int()
+			st.UsageSeen = true
 		}
 		if v := usage.Get("total_tokens"); v.Exists() {
 			st.TotalTokens = v.Int()
@@ -981,8 +985,14 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 				resp, _ = sjson.SetBytes(resp, "usage.input_tokens_details.cached_tokens", d.Int())
 			}
 			resp, _ = sjson.SetBytes(resp, "usage.output_tokens", usage.Get("completion_tokens").Int())
-			// Reasoning tokens not available in Chat Completions; set only if present under output_tokens_details
+			// Reasoning tokens may appear under output_tokens_details (Responses style),
+			// completion_tokens_details (chat completions style), or as a flat top-level
+			// field on SGLang-style gateways; map whichever is present.
 			if d := usage.Get("output_tokens_details.reasoning_tokens"); d.Exists() {
+				resp, _ = sjson.SetBytes(resp, "usage.output_tokens_details.reasoning_tokens", d.Int())
+			} else if d := usage.Get("completion_tokens_details.reasoning_tokens"); d.Exists() {
+				resp, _ = sjson.SetBytes(resp, "usage.output_tokens_details.reasoning_tokens", d.Int())
+			} else if d := usage.Get("reasoning_tokens"); d.Exists() {
 				resp, _ = sjson.SetBytes(resp, "usage.output_tokens_details.reasoning_tokens", d.Int())
 			}
 			resp, _ = sjson.SetBytes(resp, "usage.total_tokens", usage.Get("total_tokens").Int())
