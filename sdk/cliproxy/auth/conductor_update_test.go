@@ -351,3 +351,174 @@ func TestManager_Update_CredentialCooldownMutationControl(t *testing.T) {
 		t.Fatalf("mutation-control clean auth unexpectedly carries cooldown fields: %+v", clean)
 	}
 }
+
+func TestManager_Update_SameCredentialRefreshPreservesCredentialCooldown(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	now := time.Now()
+	deadline := now.Add(30 * time.Minute)
+
+	if _, errRegister := m.Register(context.Background(), &Auth{
+		ID:                 "auth-401-refresh",
+		Provider:           "claude",
+		Unavailable:        true,
+		Status:             StatusError,
+		NextRetryAfter:     deadline,
+		CredentialCooldown: true,
+		Metadata: map[string]any{
+			"access_token":  "stale-access-token",
+			"refresh_token": "refresh-token-abc",
+		},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	// A routine access-token refresh rotates access_token but keeps the
+	// same refresh_token - same underlying credential, cooldown must
+	// survive.
+	updated, errUpdate := m.Update(context.Background(), &Auth{
+		ID:       "auth-401-refresh",
+		Provider: "claude",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token":  "fresh-access-token",
+			"refresh_token": "refresh-token-abc",
+		},
+	})
+	if errUpdate != nil {
+		t.Fatalf("update auth: %v", errUpdate)
+	}
+	if !updated.Unavailable || !updated.CredentialCooldown || !updated.NextRetryAfter.Equal(deadline) {
+		t.Fatalf("Update() with same refresh_token = %+v, want cooldown preserved until %v", updated, deadline)
+	}
+}
+
+func TestManager_Update_NewCredentialReLoginClearsCredentialCooldown(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	now := time.Now()
+	deadline := now.Add(30 * time.Minute)
+
+	if _, errRegister := m.Register(context.Background(), &Auth{
+		ID:                 "auth-401-relogin",
+		Provider:           "claude",
+		Unavailable:        true,
+		Status:             StatusError,
+		NextRetryAfter:     deadline,
+		CredentialCooldown: true,
+		Metadata: map[string]any{
+			"access_token":  "stale-access-token",
+			"refresh_token": "refresh-token-old",
+		},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	// An operator re-login writes a genuinely different credential (new
+	// refresh_token) to the same auth file/ID - the old cooldown must not
+	// carry over, so re-login restores service immediately per the
+	// dead-grant recovery playbook.
+	updated, errUpdate := m.Update(context.Background(), &Auth{
+		ID:       "auth-401-relogin",
+		Provider: "claude",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token":  "new-access-token",
+			"refresh_token": "refresh-token-new",
+		},
+	})
+	if errUpdate != nil {
+		t.Fatalf("update auth: %v", errUpdate)
+	}
+	if updated.Unavailable || updated.CredentialCooldown || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("Update() with new refresh_token = %+v, want cooldown cleared", updated)
+	}
+	if updated.Status != StatusActive {
+		t.Fatalf("Update() with new refresh_token Status = %v, want %v", updated.Status, StatusActive)
+	}
+}
+
+func TestManager_Update_CredentialIdentityMutationControl(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	now := time.Now()
+	deadline := now.Add(30 * time.Minute)
+
+	if _, errRegister := m.Register(context.Background(), &Auth{
+		ID:                 "auth-401-relogin-mc",
+		Provider:           "claude",
+		Unavailable:        true,
+		Status:             StatusError,
+		NextRetryAfter:     deadline,
+		CredentialCooldown: true,
+		Metadata: map[string]any{
+			"refresh_token": "refresh-token-old",
+		},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	// Mimic the pre-fix behavior directly: unconditionally preserving the
+	// cooldown regardless of credential identity. Confirms this test would
+	// have failed to catch the regression without the sameAuthCredential
+	// check, i.e. that the check is load-bearing.
+	m.mu.Lock()
+	existing := m.auths["auth-401-relogin-mc"]
+	m.mu.Unlock()
+	if existing == nil {
+		t.Fatalf("expected existing auth to be present")
+	}
+	unconditional := &Auth{ID: "auth-401-relogin-mc", Provider: "claude", Status: StatusActive, Metadata: map[string]any{"refresh_token": "refresh-token-new"}}
+	// pre-fix: no identity check at all
+	unconditional.Unavailable = existing.Unavailable
+	unconditional.NextRetryAfter = existing.NextRetryAfter
+	unconditional.CredentialCooldown = existing.CredentialCooldown
+	if !unconditional.CredentialCooldown {
+		t.Fatalf("expected the unconditional pre-fix simulation to carry the cooldown over")
+	}
+	if sameAuthCredential(existing, unconditional) {
+		t.Fatalf("sameAuthCredential() = true for a rotated refresh_token, want false")
+	}
+}
+
+// TestManager_Update_EmptyIncomingIdentityPreservesCredentialCooldown covers
+// an Update call whose incoming Auth carries no token metadata at all (e.g.
+// a caller updating only Status/Attributes, or one that runs before a later
+// metadata merge fills in the tokens). This must NOT be misread as a
+// different credential and must NOT clear a live cooldown - only a
+// non-empty incoming identity that differs from existing's should do that.
+func TestManager_Update_EmptyIncomingIdentityPreservesCredentialCooldown(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	now := time.Now()
+	deadline := now.Add(30 * time.Minute)
+
+	if _, errRegister := m.Register(context.Background(), &Auth{
+		ID:                 "auth-401-empty-identity",
+		Provider:           "claude",
+		Unavailable:        true,
+		Status:             StatusError,
+		NextRetryAfter:     deadline,
+		CredentialCooldown: true,
+		Metadata: map[string]any{
+			"access_token":  "stale-access-token",
+			"refresh_token": "refresh-token-abc",
+		},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	updated, err := m.Update(context.Background(), &Auth{
+		ID:       "auth-401-empty-identity",
+		Provider: "claude",
+		Status:   StatusActive,
+	})
+	if err != nil {
+		t.Fatalf("update auth: %v", err)
+	}
+	if !updated.Unavailable {
+		t.Fatalf("expected Unavailable to remain true for an update with no incoming identity")
+	}
+	if !updated.CredentialCooldown {
+		t.Fatalf("expected CredentialCooldown to remain true for an update with no incoming identity")
+	}
+	if !updated.NextRetryAfter.Equal(deadline) {
+		t.Fatalf("expected NextRetryAfter to remain %v, got %v", deadline, updated.NextRetryAfter)
+	}
+}

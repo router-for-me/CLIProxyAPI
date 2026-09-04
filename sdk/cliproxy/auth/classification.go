@@ -139,3 +139,38 @@ func authMetadataString(auth *Auth, key string) string {
 		return ""
 	}
 }
+
+// authCredentialIdentity returns the token value that changes when the
+// underlying credential itself is replaced (an operator re-login), as
+// opposed to a routine access-token refresh which keeps the same
+// refresh_token. Falls back to access_token for credentials with no
+// refresh_token (e.g. plain API keys), so identity is still comparable
+// for those too. Returns "" when neither is present.
+func authCredentialIdentity(auth *Auth) string {
+	if token := authMetadataString(auth, "refresh_token"); token != "" {
+		return token
+	}
+	return authMetadataString(auth, "access_token")
+}
+
+// sameAuthCredential reports whether next carries the same underlying
+// credential as existing, per authCredentialIdentity. Only a non-empty
+// incoming identity that differs from existing's counts as a genuinely
+// different credential - an incoming Auth with no identifiable token at
+// all (e.g. a caller that updates Status/Metadata fields other than the
+// token, or arrives before a later metadata merge fills them in) must not
+// be misread as a re-login and must not clear a live cooldown; a re-login
+// always writes a full token set, so that case is unaffected. When
+// existing itself has no identifiable token (e.g. non-OAuth entries), both
+// sides are unknown and treated as unchanged.
+func sameAuthCredential(existing, next *Auth) bool {
+	existingIdentity := authCredentialIdentity(existing)
+	if existingIdentity == "" {
+		return true
+	}
+	nextIdentity := authCredentialIdentity(next)
+	if nextIdentity == "" {
+		return true
+	}
+	return existingIdentity == nextIdentity
+}
