@@ -25,7 +25,9 @@ type claudeResultCarrierRun struct {
 	count              int
 	base               gjson.Result
 	parts              []claudeCarrierPart
-	interveningSystems [][]byte
+	replayAfterCarrier [][]byte
+	followingInterrupt bool
+	bridgedSystem      bool
 }
 
 // RepairDanglingClaudeToolUses closes client tool calls left incomplete by an
@@ -52,9 +54,9 @@ func RepairDanglingClaudeToolUses(payload []byte) []byte {
 			continue
 		}
 
-		run := collectClaudeResultCarrierRun(messageResults, i+1)
+		run := collectClaudeResultCarrierRun(messageResults, i+1, toolUses)
 		carrier := buildCanonicalClaudeResultCarrier(run.base, toolUses, run.parts)
-		hasExtras := claudeContentHasNonToolResults(gjson.GetBytes(carrier, "content"))
+		hasExtras := claudeContentHasNonToolResults(gjson.GetBytes(carrier, "content")) || run.followingInterrupt
 		assistantRaw := []byte(message.Raw)
 		droppedServerTool := false
 		if hasExtras {
@@ -68,14 +70,14 @@ func RepairDanglingClaudeToolUses(payload []byte) []byte {
 
 		if run.count == 1 && !droppedServerTool && isCanonicalClaudeResultCarrier(run.base, toolUses) {
 			out = append(out, []byte(run.base.Raw))
-			out = append(out, run.interveningSystems...)
-			changed = changed || len(run.interveningSystems) > 0
+			out = append(out, run.replayAfterCarrier...)
+			changed = changed || len(run.replayAfterCarrier) > 0
 			i = run.end - 1
 			continue
 		}
 
 		out = append(out, carrier)
-		out = append(out, run.interveningSystems...)
+		out = append(out, run.replayAfterCarrier...)
 		changed = true
 		if run.count > 0 {
 			i = run.end - 1
@@ -118,21 +120,56 @@ func claudeAssistantClientToolUses(message gjson.Result) []claudeClientToolUse {
 	return toolUses
 }
 
-func collectClaudeResultCarrierRun(messages []gjson.Result, start int) claudeResultCarrierRun {
+func collectClaudeResultCarrierRun(messages []gjson.Result, start int, toolUses []claudeClientToolUse) claudeResultCarrierRun {
 	run := claudeResultCarrierRun{end: start}
+	outstanding := make(map[string]struct{}, len(toolUses))
+	for _, toolUse := range toolUses {
+		outstanding[toolUse.id] = struct{}{}
+	}
 	for run.end < len(messages) {
 		message := messages[run.end]
 		if isClaudeResultCarrierMessage(message) {
+			parts := claudeCarrierMessageParts(message, message.Get("role").String())
+			if run.bridgedSystem {
+				if !claudeCarrierPartsContainOutstandingResult(parts, outstanding) {
+					run.followingInterrupt = true
+					break
+				}
+				matched, remaining := extractClaudeOutstandingToolResults(outstanding, parts)
+				run.parts = append(run.parts, matched...)
+				if len(remaining) > 0 {
+					run.replayAfterCarrier = append(run.replayAfterCarrier, buildDeferredClaudeCarrier(message, remaining))
+					run.followingInterrupt = true
+				}
+				if run.count == 0 && len(remaining) == 0 {
+					run.base = message
+				}
+				run.count++
+				run.end++
+				if len(remaining) > 0 {
+					// Remaining user content ends the tool-result bridge. A later result
+					// must not be hoisted across that instruction or diagnostic text.
+					break
+				}
+				continue
+			}
 			if run.count == 0 {
 				run.base = message
 			}
-			run.parts = append(run.parts, claudeCarrierMessageParts(message, message.Get("role").String())...)
+			run.parts = append(run.parts, parts...)
+			if claudeCarrierPartsContainInterrupt(parts, outstanding) {
+				run.followingInterrupt = true
+			}
+			consumeClaudeOutstandingToolResults(outstanding, parts)
 			run.count++
 			run.end++
 			continue
 		}
 
 		if message.Get("role").String() != "system" {
+			break
+		}
+		if run.followingInterrupt {
 			break
 		}
 		systemEnd := run.end
@@ -142,18 +179,105 @@ func collectClaudeResultCarrierRun(messages []gjson.Result, start int) claudeRes
 		if systemEnd == len(messages) || !isClaudeResultCarrierMessage(messages[systemEnd]) {
 			break
 		}
+		nextCarrier := messages[systemEnd]
+		nextParts := claudeCarrierMessageParts(nextCarrier, nextCarrier.Get("role").String())
+		if len(outstanding) == 0 || !claudeCarrierPartsContainOutstandingResult(nextParts, outstanding) {
+			run.followingInterrupt = true
+			break
+		}
 
 		// Anthropic requires the user result carrier immediately after an
 		// assistant tool_use, while a mid-conversation system turn must follow a
-		// user turn. Defer only system runs that lead to another carrier, then
-		// replay them after the canonical carrier. This keeps their relative order
-		// while satisfying both placement rules.
+		// user turn. Defer only system runs whose next carrier satisfies an
+		// outstanding call, then replay them after the canonical carrier. This
+		// keeps completed tool turns from absorbing a later ordinary user request.
 		for index := run.end; index < systemEnd; index++ {
-			run.interveningSystems = append(run.interveningSystems, []byte(messages[index].Raw))
+			run.replayAfterCarrier = append(run.replayAfterCarrier, []byte(messages[index].Raw))
 		}
 		run.end = systemEnd
+		run.bridgedSystem = true
 	}
 	return run
+}
+
+func claudeCarrierPartsContainInterrupt(parts []claudeCarrierPart, outstanding map[string]struct{}) bool {
+	matched := make(map[string]struct{})
+	for _, part := range parts {
+		if !part.isToolResult {
+			return true
+		}
+		id := claudeStringField(gjson.ParseBytes(part.raw), "tool_use_id")
+		if _, exists := outstanding[id]; !exists {
+			return true
+		}
+		if _, duplicate := matched[id]; duplicate {
+			return true
+		}
+		matched[id] = struct{}{}
+	}
+	return false
+}
+
+func claudeCarrierPartsContainOutstandingResult(parts []claudeCarrierPart, outstanding map[string]struct{}) bool {
+	for _, part := range parts {
+		if !part.isToolResult {
+			continue
+		}
+		id := claudeStringField(gjson.ParseBytes(part.raw), "tool_use_id")
+		if _, exists := outstanding[id]; exists {
+			return true
+		}
+	}
+	return false
+}
+
+func consumeClaudeOutstandingToolResults(outstanding map[string]struct{}, parts []claudeCarrierPart) {
+	for _, part := range parts {
+		if !part.isToolResult {
+			continue
+		}
+		delete(outstanding, claudeStringField(gjson.ParseBytes(part.raw), "tool_use_id"))
+	}
+}
+
+func extractClaudeOutstandingToolResults(outstanding map[string]struct{}, parts []claudeCarrierPart) (matched, remaining []claudeCarrierPart) {
+	matched = make([]claudeCarrierPart, 0, len(parts))
+	remaining = make([]claudeCarrierPart, 0, len(parts))
+	for _, part := range parts {
+		if part.isToolResult {
+			id := claudeStringField(gjson.ParseBytes(part.raw), "tool_use_id")
+			if _, exists := outstanding[id]; exists {
+				matched = append(matched, part)
+				delete(outstanding, id)
+				continue
+			}
+		}
+		remaining = append(remaining, part)
+	}
+	return matched, remaining
+}
+
+func buildDeferredClaudeCarrier(base gjson.Result, parts []claudeCarrierPart) []byte {
+	content := make([][]byte, 0, len(parts))
+	for _, part := range parts {
+		if !part.isToolResult {
+			content = append(content, part.raw)
+			continue
+		}
+		normalized, id := normalizeClaudeToolResult(part.raw)
+		content = append(content, downgradeClaudeToolResult(normalized, id))
+	}
+
+	message := []byte(`{"role":"user","content":[]}`)
+	if base.IsObject() {
+		message = []byte(base.Raw)
+		message, _ = sjson.SetBytes(message, "role", "user")
+		for _, field := range []string{"tool_use_id", "tool_call_id", "call_id", "id", "name"} {
+			message, _ = sjson.DeleteBytes(message, field)
+		}
+	}
+	message, _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(content))
+	return message
 }
 
 func isClaudeResultCarrierMessage(message gjson.Result) bool {

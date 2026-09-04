@@ -194,6 +194,136 @@ func TestRepairDanglingClaudeToolUsesRelocatesInterveningSystemTurns(t *testing.
 		}
 	})
 
+	t.Run("keeps a completed result before a system and later user request", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read"}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]},{"role":"system","content":"apply this constraint"},{"role":"user","content":"next request"}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		if !bytes.Equal(got, input) {
+			t.Fatalf("completed turn absorbed a later request:\n got %s\nwant %s", got, input)
+		}
+		if twice := RepairDanglingClaudeToolUses(got); !bytes.Equal(twice, got) {
+			t.Fatalf("completed result boundary is not idempotent:\n once %s\n twice %s", got, twice)
+		}
+	})
+
+	t.Run("hoists only an outstanding result across a system turn", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read"}]},{"role":"system","content":"apply before the request"},{"role":"user","content":[{"type":"text","text":"next request"},{"type":"tool_result","tool_use_id":"t1","content":"done"},{"type":"tool_result","tool_use_id":"ghost","content":"orphan output"}]}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		messages := claudeMessagesForTest(t, got, 5)
+		result := messages[2].Get("content.0")
+		if result.Get("tool_use_id").String() != "t1" || result.Get("content").String() != "done" || result.Get("is_error").Bool() {
+			t.Fatalf("outstanding result was not hoisted intact: %s", messages[2].Raw)
+		}
+		if messages[3].Get("role").String() != "system" || messages[3].Get("content").String() != "apply before the request" {
+			t.Fatalf("system constraint moved after the ordinary request: %s", got)
+		}
+		deferred := messages[4].Get("content").Array()
+		if messages[4].Get("role").String() != "user" || len(deferred) != 2 || deferred[0].Get("text").String() != "next request" || !strings.Contains(deferred[1].Get("text").String(), "orphan output") {
+			t.Fatalf("ordinary request was not preserved after the system constraint: %s", got)
+		}
+		if twice := RepairDanglingClaudeToolUses(got); !bytes.Equal(twice, got) {
+			t.Fatalf("split result carrier is not idempotent:\n once %s\n twice %s", got, twice)
+		}
+	})
+
+	t.Run("fills a partial parallel result before a system without absorbing the next request", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"p1","name":"one"},{"type":"tool_use","id":"p2","name":"two"}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"p1","content":"one"}]},{"role":"system","content":"constraint"},{"role":"user","content":"next request"}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		messages := claudeMessagesForTest(t, got, 5)
+		blocks := messages[2].Get("content").Array()
+		if len(blocks) != 2 || blocks[0].Get("tool_use_id").String() != "p1" || blocks[0].Get("content").String() != "one" {
+			t.Fatalf("partial real result changed: %s", got)
+		}
+		assertInterruptedClaudeToolResult(t, blocks[1], "p2", "")
+		if messages[3].Get("role").String() != "system" || messages[4].Get("content").String() != "next request" {
+			t.Fatalf("later request crossed the system boundary: %s", got)
+		}
+		if twice := RepairDanglingClaudeToolUses(got); !bytes.Equal(twice, got) {
+			t.Fatalf("partial-result fallback is not idempotent:\n once %s\n twice %s", got, twice)
+		}
+	})
+
+	t.Run("stops after a bridged result carrier leaves user content", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"p1","name":"one"},{"type":"tool_use","id":"p2","name":"two"}]},{"role":"system","content":"first constraint"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"p1","content":"one"},{"type":"text","text":"change direction"}]},{"role":"system","content":"second constraint"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"p2","content":"late two"}]}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		messages := claudeMessagesForTest(t, got, 7)
+		blocks := messages[2].Get("content").Array()
+		if len(blocks) != 2 || blocks[0].Get("tool_use_id").String() != "p1" || blocks[0].Get("content").String() != "one" {
+			t.Fatalf("first bridged result changed: %s", got)
+		}
+		assertInterruptedClaudeToolResult(t, blocks[1], "p2", "")
+		if messages[3].Get("content").String() != "first constraint" || messages[4].Get("content.0.text").String() != "change direction" || messages[5].Get("content").String() != "second constraint" {
+			t.Fatalf("system and user content order changed: %s", got)
+		}
+		if messages[6].Get("content.0.type").String() != "text" || !strings.Contains(messages[6].Get("content.0.text").String(), "late two") {
+			t.Fatalf("late result crossed the user interruption: %s", got)
+		}
+		if twice := RepairDanglingClaudeToolUses(got); !bytes.Equal(twice, got) {
+			t.Fatalf("bridged interruption boundary is not idempotent:\n once %s\n twice %s", got, twice)
+		}
+	})
+
+	t.Run("does not bridge after immediate result carrier user content", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"p1","name":"one"},{"type":"tool_use","id":"p2","name":"two"}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"p1","content":"one"},{"type":"text","text":"change direction"}]},{"role":"system","content":"constraint"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"p2","content":"late two"}]}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		messages := claudeMessagesForTest(t, got, 5)
+		blocks := messages[2].Get("content").Array()
+		if len(blocks) != 3 || blocks[0].Get("tool_use_id").String() != "p1" {
+			t.Fatalf("immediate carrier changed unexpectedly: %s", got)
+		}
+		assertInterruptedClaudeToolResult(t, blocks[1], "p2", "")
+		if blocks[2].Get("text").String() != "change direction" || messages[3].Get("role").String() != "system" {
+			t.Fatalf("user content or system order changed: %s", got)
+		}
+		if messages[4].Get("content.0.type").String() != "text" || !strings.Contains(messages[4].Get("content.0.text").String(), "late two") {
+			t.Fatalf("late result crossed the immediate user content: %s", got)
+		}
+		if twice := RepairDanglingClaudeToolUses(got); !bytes.Equal(twice, got) {
+			t.Fatalf("immediate interruption boundary is not idempotent:\n once %s\n twice %s", got, twice)
+		}
+	})
+
+	for _, testCase := range []struct {
+		name       string
+		laterBlock string
+		wantText   string
+	}{
+		{name: "orphan", laterBlock: `{"type":"tool_result","tool_use_id":"ghost","content":"orphan output"}`, wantText: "orphan output"},
+		{name: "malformed", laterBlock: `{"type":"tool_result","id":"t1","content":"malformed output"}`, wantText: "malformed output"},
+	} {
+		t.Run("does not bridge a completed result to a later "+testCase.name, func(t *testing.T) {
+			input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read"}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]},{"role":"system","content":"constraint"},{"role":"user","content":[` + testCase.laterBlock + `]}]}`)
+			got := RepairDanglingClaudeToolUses(input)
+			messages := claudeMessagesForTest(t, got, 5)
+			if messages[2].Get("content.0.tool_use_id").String() != "t1" || messages[2].Get("content.0.content").String() != "done" {
+				t.Fatalf("completed result changed: %s", got)
+			}
+			if messages[3].Get("role").String() != "system" || messages[3].Get("content").String() != "constraint" {
+				t.Fatalf("system moved across later %s: %s", testCase.name, got)
+			}
+			later := messages[4].Get("content.0")
+			if later.Get("type").String() != "text" || !strings.Contains(later.Get("text").String(), testCase.wantText) {
+				t.Fatalf("later %s was not downgraded in place: %s", testCase.name, got)
+			}
+			if twice := RepairDanglingClaudeToolUses(got); !bytes.Equal(twice, got) {
+				t.Fatalf("%s boundary is not idempotent:\n once %s\n twice %s", testCase.name, got, twice)
+			}
+		})
+	}
+
+	t.Run("does not bridge a duplicate while another result is outstanding", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"p1","name":"one"},{"type":"tool_use","id":"p2","name":"two"}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"p1","content":"one"}]},{"role":"system","content":"constraint"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"p1","content":"duplicate"}]}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		messages := claudeMessagesForTest(t, got, 5)
+		blocks := messages[2].Get("content").Array()
+		if len(blocks) != 2 || blocks[0].Get("tool_use_id").String() != "p1" {
+			t.Fatalf("first result carrier changed unexpectedly: %s", got)
+		}
+		assertInterruptedClaudeToolResult(t, blocks[1], "p2", "")
+		if messages[3].Get("role").String() != "system" || messages[4].Get("content.0.type").String() != "text" || !strings.Contains(messages[4].Get("content.0.text").String(), "duplicate") {
+			t.Fatalf("duplicate crossed the system boundary: %s", got)
+		}
+	})
+
 	t.Run("merges split results before replaying systems in source order", func(t *testing.T) {
 		input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"p1","name":"one"},{"type":"tool_use","id":"p2","name":"two"}]},{"role":"system","content":"first"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"p2","content":"two"}]},{"role":"system","content":[{"type":"text","text":"second"}],"clear_at":"next_user_message"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"p1","content":"one"}]},{"role":"system","content":"third"},{"role":"assistant","content":"continue"}]}`)
 		got := RepairDanglingClaudeToolUses(input)
@@ -216,24 +346,51 @@ func TestRepairDanglingClaudeToolUsesRelocatesInterveningSystemTurns(t *testing.
 		if messages[6].Get("role").String() != "assistant" || messages[6].Get("content").String() != "continue" {
 			t.Fatalf("following assistant turn changed: %s", messages[6].Raw)
 		}
+		if twice := RepairDanglingClaudeToolUses(got); !bytes.Equal(twice, got) {
+			t.Fatalf("multi-system result bridging is not idempotent:\n once %s\n twice %s", got, twice)
+		}
 	})
 
-	t.Run("places an interrupt and its synthetic result before the system turn", func(t *testing.T) {
+	t.Run("does not bridge a plain request across a system turn", func(t *testing.T) {
 		input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash"}]},{"role":"system","content":"new constraint"},{"role":"user","content":"change direction"}]}`)
 		got := RepairDanglingClaudeToolUses(input)
-		messages := claudeMessagesForTest(t, got, 4)
+		messages := claudeMessagesForTest(t, got, 5)
 		blocks := messages[2].Get("content").Array()
-		if len(blocks) != 2 {
-			t.Fatalf("canonical user blocks = %d, want 2: %s", len(blocks), messages[2].Raw)
+		if len(blocks) != 1 {
+			t.Fatalf("synthetic result blocks = %d, want 1: %s", len(blocks), messages[2].Raw)
 		}
 		assertInterruptedClaudeToolResult(t, blocks[0], "t1", "")
-		if blocks[1].Get("type").String() != "text" || blocks[1].Get("text").String() != "change direction" {
-			t.Fatalf("interrupt text was not preserved: %s", messages[2].Raw)
-		}
 		if messages[3].Get("role").String() != "system" || messages[3].Get("content").String() != "new constraint" {
-			t.Fatalf("system turn was not moved after the canonical user turn: %s", messages[3].Raw)
+			t.Fatalf("system turn moved across the user request: %s", got)
+		}
+		if messages[4].Get("role").String() != "user" || messages[4].Get("content").String() != "change direction" {
+			t.Fatalf("ordinary user request was not preserved after the system turn: %s", got)
+		}
+		if twice := RepairDanglingClaudeToolUses(got); !bytes.Equal(twice, got) {
+			t.Fatalf("plain-request fallback is not idempotent:\n once %s\n twice %s", got, twice)
 		}
 	})
+
+	for _, testCase := range []struct {
+		name  string
+		block string
+	}{
+		{name: "orphan", block: `{"type":"tool_result","tool_use_id":"ghost","content":"orphan"}`},
+		{name: "malformed", block: `{"type":"tool_result","id":"t1","content":"malformed"}`},
+	} {
+		t.Run("does not bridge an "+testCase.name+" result for an outstanding call", func(t *testing.T) {
+			input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read"}]},{"role":"system","content":"constraint"},{"role":"user","content":[` + testCase.block + `]}]}`)
+			got := RepairDanglingClaudeToolUses(input)
+			messages := claudeMessagesForTest(t, got, 5)
+			assertInterruptedClaudeToolResult(t, messages[2].Get("content.0"), "t1", "")
+			if messages[3].Get("role").String() != "system" || messages[4].Get("content.0.type").String() != "text" {
+				t.Fatalf("%s result crossed the system boundary: %s", testCase.name, got)
+			}
+			if twice := RepairDanglingClaudeToolUses(got); !bytes.Equal(twice, got) {
+				t.Fatalf("outstanding %s fallback is not idempotent:\n once %s\n twice %s", testCase.name, got, twice)
+			}
+		})
+	}
 
 	t.Run("inserts a fallback before terminal systems without duplication", func(t *testing.T) {
 		input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash"}]},{"role":"system","content":"first"},{"role":"system","content":"second"},{"role":"assistant","content":"continue"}]}`)
@@ -319,6 +476,33 @@ func TestRepairDanglingClaudeToolUsesPreservesToolsetAndServerToolRules(t *testi
 			t.Fatalf("valid server resume history mutated:\n got %s\nwant %s", got, input)
 		}
 	})
+
+	t.Run("keeps an unresolved server call when a real client result crosses a system", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"server_tool_use","id":"srv1","name":"web_search","input":{}},{"type":"tool_use","id":"client1","name":"Read","input":{}}]},{"role":"system","content":"context"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"client1","content":"done"}]}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		messages := claudeMessagesForTest(t, got, 4)
+		if messages[1].Get("content.0.type").String() != "server_tool_use" {
+			t.Fatalf("resumable server call was removed: %s", got)
+		}
+		if messages[2].Get("content.0.tool_use_id").String() != "client1" || messages[3].Get("role").String() != "system" {
+			t.Fatalf("client result and system were not normalized: %s", got)
+		}
+	})
+
+	for _, serverType := range []string{"server_tool_use", "mcp_tool_use"} {
+		t.Run("drops an unresolved "+serverType+" before a post-system request", func(t *testing.T) {
+			input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"` + serverType + `","id":"srv1","name":"lookup","input":{}},{"type":"tool_use","id":"client1","name":"Read","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"client1","content":"done"}]},{"role":"system","content":"constraint"},{"role":"user","content":"next request"}]}`)
+			got := RepairDanglingClaudeToolUses(input)
+			messages := claudeMessagesForTest(t, got, 5)
+			assistantBlocks := messages[1].Get("content").Array()
+			if len(assistantBlocks) != 1 || assistantBlocks[0].Get("type").String() != "tool_use" {
+				t.Fatalf("unresolved %s was not removed before the later request: %s", serverType, got)
+			}
+			if messages[2].Get("content.0.tool_use_id").String() != "client1" || messages[3].Get("role").String() != "system" || messages[4].Get("content").String() != "next request" {
+				t.Fatalf("completed client turn or later request was reordered: %s", got)
+			}
+		})
+	}
 }
 
 func claudeMessagesForTest(t *testing.T, payload []byte, want int) []gjson.Result {
