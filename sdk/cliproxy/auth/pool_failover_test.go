@@ -44,6 +44,7 @@ func newPoolRequestFaultError(marker string) error {
 // order entries were attempted in.
 type poolFailoverTestExecutor struct {
 	failMessages map[string]string
+	identifier   string
 
 	mu           sync.Mutex
 	executeCalls []string
@@ -51,7 +52,12 @@ type poolFailoverTestExecutor struct {
 	streamCalls  []string
 }
 
-func (*poolFailoverTestExecutor) Identifier() string { return "claude" }
+func (e *poolFailoverTestExecutor) Identifier() string {
+	if e.identifier != "" {
+		return e.identifier
+	}
+	return "claude"
+}
 
 func (e *poolFailoverTestExecutor) failError(authID string) error {
 	e.mu.Lock()
@@ -327,6 +333,76 @@ func TestPoolStrategyRotationStaysInsidePool(t *testing.T) {
 	lastMarker := failMessages[calls[len(calls)-1]]
 	if !strings.Contains(errExecute.Error(), lastMarker) {
 		t.Fatalf("Execute() error = %v, want the last attempted pool entry's marker %q", errExecute, lastMarker)
+	}
+}
+
+// TestPoolStrategyBareKeyStaysUnpinned pins the compound-only pinning rule: a
+// pool-strategy auth with a BARE channel routing key (the OpenAI-compat and
+// fallback shapes) must not confine rotation to that channel. After the bare
+// pool fails, a multi-provider request may still be rescued by another
+// provider serving the model — the aggressive-failover intent for
+// bare-channel pools. This is the exact scenario the routing-key pin exists
+// to keep open; pinning the bare key would surface the pool's error without
+// ever attempting the rescuing provider.
+func TestPoolStrategyBareKeyStaysUnpinned(t *testing.T) {
+	model := "pool-failover-model-" + uuid.NewString()
+	// Bare-channel pool whose entry fails with the request-fault 400.
+	failMessages := map[string]string{
+		"pool-bare-auth": "quota-bare",
+	}
+	executor := &poolFailoverTestExecutor{failMessages: failMessages, identifier: "openai-compatible-foo"}
+	manager := NewManager(nil, nil, NoopHook{})
+	manager.SetRetryConfig(0, 0, 0)
+	manager.RegisterExecutor(executor)
+	bare := &Auth{
+		ID:       "pool-bare-auth",
+		Provider: "openai-compatible-foo",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"provider_key":        "openai-compatible-foo",
+			AttributeAuthKind:     "apikey",
+			AttributeAPIKey:       "k-bare",
+			AttributePoolStrategy: "round-robin",
+		},
+	}
+	// A second, succeeding provider on the same bare channel proves rotation
+	// crossed the failed pool rather than dying inside it.
+	rescue := &Auth{
+		ID:       "pool-bare-rescue",
+		Provider: "openai-compatible-foo",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"provider_key":    "openai-compatible-foo",
+			AttributeAuthKind: "apikey",
+			AttributeAPIKey:   "k-rescue",
+		},
+	}
+	reg := registry.GetGlobalRegistry()
+	for _, auth := range []*Auth{bare, rescue} {
+		reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+	t.Cleanup(func() {
+		for _, auth := range []*Auth{bare, rescue} {
+			reg.UnregisterClient(auth.ID)
+		}
+	})
+
+	resp, errExecute := manager.Execute(context.Background(), []string{"openai-compatible-foo"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v, want the rescuing auth to serve after the failed bare-pool entry", errExecute)
+	}
+	calls := executor.ExecuteCalls()
+	if len(calls) != 2 {
+		t.Fatalf("execute calls = %v, want the failed entry plus the rescuing auth", calls)
+	}
+	if got := callsForAuth(calls, "pool-bare-auth"); got != 1 {
+		t.Fatalf("failing entry called %d times, want 1", got)
+	}
+	if served := string(resp.Payload); served != "pool-bare-rescue" {
+		t.Fatalf("request served by %q, want pool-bare-rescue", served)
 	}
 }
 

@@ -1122,9 +1122,12 @@ func poolStrategyFromAuth(a *Auth) string {
 // Only compound routing keys (e.g. "claude:7") are pinned: bare channel keys
 // (OpenAI-compat pools like "openai-compatible-foo") are left unpinned, so
 // after a compat-pool failure the pick may legitimately cross into other
-// providers serving the same model — the aggressive-failover intent. The pin
-// is never cleared once set: a request that already rotated through one pool
-// stays on it until the pool is exhausted or the request ends.
+// providers serving the same model — the aggressive-failover intent. Note a
+// bare-key test cannot be a naive colon check, because compat provider names
+// may themselves contain colons; the manager's compound-key detection is the
+// authoritative discriminator. The pin is never cleared once set: a request
+// that already rotated through one pool stays on it until the pool is
+// exhausted or the request ends.
 func pinPoolFromFailedAuth(auth *Auth, pinnedPool *string) {
 	if pinnedPool == nil || *pinnedPool != "" {
 		return
@@ -1136,7 +1139,43 @@ func pinPoolFromFailedAuth(auth *Auth, pinnedPool *string) {
 	if key == "" {
 		return
 	}
+	// pinPoolFromFailedAuth is a free function without manager access, so it
+	// mirrors the compound-key shape directly: a compound key carries a
+	// channel prefix and a positive row id after the last colon
+	// ("<channel>:<rowID>", "<channel>:<rowID>:key-<entryID>"). Bare keys never
+	// end in a positive numeric row id, so this check keeps compat names that
+	// embed colons (e.g. "openai-compatible-foo:bar") unpinned.
+	if !isCompoundPoolRoutingKey(key) {
+		return
+	}
 	*pinnedPool = key
+}
+
+// isCompoundPoolRoutingKey reports whether key is a per-row compound routing
+// key of the form "<channel>:<rowID>" (or its per-entry extension), using the
+// same shape the manager's isCompoundRoutingKey detects. It exists as a
+// package-level helper because pinPoolFromFailedAuth has no manager receiver
+// to call the method form. Bare channel keys — including colon-bearing compat
+// names — report false.
+func isCompoundPoolRoutingKey(key string) bool {
+	idx := strings.LastIndex(key, ":")
+	if idx <= 0 || idx == len(key)-1 {
+		return false
+	}
+	suffix := key[idx+1:]
+	if suffix == "" {
+		return false
+	}
+	for i := 0; i < len(suffix); i++ {
+		if suffix[i] < '0' || suffix[i] > '9' {
+			return false
+		}
+	}
+	// A row id of 0 is never a valid upstream_providers id; treat it as bare.
+	if len(suffix) > 1 && suffix[0] == '0' {
+		return false
+	}
+	return true
 }
 
 // poolPickProviders narrows the candidate provider list to the pinned pool
