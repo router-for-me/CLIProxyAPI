@@ -577,3 +577,63 @@ func TestConvertCodexResponseToOpenAI_NonStreamMultiMessageEmptyTrailingKeepsCon
 		t.Fatalf("expected content %q, got %q; resp=%s", "the real answer", got.String(), string(out))
 	}
 }
+
+func TestConvertCodexResponseToOpenAI_StreamReasoningTextDeltaAndDone(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	deltaRaw := []byte(`data: {"type":"response.reasoning_text.delta","delta":"Thinking step 1"}`)
+	streamOut := ConvertCodexResponseToOpenAI(ctx, "MiniMax-M3", nil, nil, deltaRaw, &param)
+	if len(streamOut) != 1 {
+		t.Fatalf("expected 1 streaming chunk for reasoning_text.delta, got %d", len(streamOut))
+	}
+	if got := gjson.GetBytes(streamOut[0], "choices.0.delta.reasoning_content").String(); got != "Thinking step 1" {
+		t.Fatalf("expected reasoning_content %q, got %q; payload=%s", "Thinking step 1", got, streamOut[0])
+	}
+	if got := gjson.GetBytes(streamOut[0], "choices.0.delta.role").String(); got != "assistant" {
+		t.Fatalf("expected role assistant, got %q; payload=%s", got, streamOut[0])
+	}
+
+	doneRaw := []byte(`data: {"type":"response.reasoning_text.done","text":"Thinking step 1"}`)
+	doneOut := ConvertCodexResponseToOpenAI(ctx, "MiniMax-M3", nil, nil, doneRaw, &param)
+	if len(doneOut) != 1 {
+		t.Fatalf("expected 1 streaming chunk for reasoning_text.done, got %d", len(doneOut))
+	}
+	if got := gjson.GetBytes(doneOut[0], "choices.0.delta.reasoning_content").String(); got != "\n\n" {
+		t.Fatalf("expected reasoning_content %q, got %q; payload=%s", "\n\n", got, doneOut[0])
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_NonStreamReasoningTextContent(t *testing.T) {
+	ctx := context.Background()
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","created_at":1700000000,"model":"MiniMax-M3","status":"completed","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"output_tokens_details":{"reasoning_tokens":15}},"output":[` +
+		`{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"Full reasoning from MiniMax"}]},` +
+		`{"type":"message","content":[{"type":"output_text","text":"Answer"}]}` +
+		`]}}`)
+	out := ConvertCodexResponseToOpenAINonStream(ctx, "MiniMax-M3", nil, nil, raw, nil)
+
+	got := gjson.GetBytes(out, "choices.0.message.reasoning_content")
+	if !got.Exists() || got.Type == gjson.Null {
+		t.Fatalf("expected reasoning_content to exist, got null/missing; payload=%s", string(out))
+	}
+	if got.String() != "Full reasoning from MiniMax" {
+		t.Fatalf("expected reasoning_content %q, got %q; payload=%s", "Full reasoning from MiniMax", got.String(), string(out))
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_NonStreamReasoningSummaryAndContent(t *testing.T) {
+	ctx := context.Background()
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","created_at":1700000000,"model":"MiniMax-M3","status":"completed","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"output_tokens_details":{"reasoning_tokens":15}},"output":[` +
+		`{"type":"reasoning","summary":[{"type":"summary_text","text":"Summary part"}],"content":[{"type":"reasoning_text","text":" and Content part"}]},` +
+		`{"type":"message","content":[{"type":"output_text","text":"Answer"}]}` +
+		`]}}`)
+	out := ConvertCodexResponseToOpenAINonStream(ctx, "MiniMax-M3", nil, nil, raw, nil)
+
+	got := gjson.GetBytes(out, "choices.0.message.reasoning_content")
+	if !got.Exists() || got.Type == gjson.Null {
+		t.Fatalf("expected reasoning_content to exist, got null/missing; payload=%s", string(out))
+	}
+	if got.String() != "Summary part and Content part" {
+		t.Fatalf("expected reasoning_content %q, got %q; payload=%s", "Summary part and Content part", got.String(), string(out))
+	}
+}

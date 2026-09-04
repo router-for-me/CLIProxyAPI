@@ -42,6 +42,63 @@ func TestConvertOpenAIResponsesRequestToClaude_SanitizesToolCallIDsForClaude(t *
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_FableMaxTokens(t *testing.T) {
+	t.Run("defaults to 64k", func(t *testing.T) {
+		out := ConvertOpenAIResponsesRequestToClaude(
+			"claude-fable-5-1",
+			[]byte(`{"model":"claude-fable-5-1","input":"hello"}`),
+			true,
+		)
+		if got := gjson.GetBytes(out, "max_tokens").Int(); got != 64000 {
+			t.Fatalf("max_tokens = %d, want %d; output=%s", got, 64000, out)
+		}
+	})
+
+	t.Run("preserves explicit 128k limit", func(t *testing.T) {
+		out := ConvertOpenAIResponsesRequestToClaude(
+			"claude-fable-5-1",
+			[]byte(`{"model":"claude-fable-5-1","max_output_tokens":128000,"input":"hello"}`),
+			true,
+		)
+		if got := gjson.GetBytes(out, "max_tokens").Int(); got != 128000 {
+			t.Fatalf("max_tokens = %d, want 128000; output=%s", got, out)
+		}
+	})
+
+	t.Run("does not exceed registered model maximum", func(t *testing.T) {
+		out := ConvertOpenAIResponsesRequestToClaude(
+			"claude-3-5-haiku-20241022",
+			[]byte(`{"model":"claude-3-5-haiku-20241022","input":"hello"}`),
+			true,
+		)
+		if got := gjson.GetBytes(out, "max_tokens").Int(); got != 8192 {
+			t.Fatalf("max_tokens = %d, want 8192; output=%s", got, out)
+		}
+	})
+
+	t.Run("clamps explicit limit exceeding registered model maximum", func(t *testing.T) {
+		out := ConvertOpenAIResponsesRequestToClaude(
+			"claude-3-5-haiku-20241022",
+			[]byte(`{"model":"claude-3-5-haiku-20241022","max_output_tokens":128000,"input":"hello"}`),
+			true,
+		)
+		if got := gjson.GetBytes(out, "max_tokens").Int(); got != 8192 {
+			t.Fatalf("max_tokens = %d, want 8192; output=%s", got, out)
+		}
+	})
+
+	t.Run("null max_output_tokens retains default 64k", func(t *testing.T) {
+		out := ConvertOpenAIResponsesRequestToClaude(
+			"claude-fable-5-1",
+			[]byte(`{"model":"claude-fable-5-1","max_output_tokens":null,"input":"hello"}`),
+			true,
+		)
+		if got := gjson.GetBytes(out, "max_tokens").Int(); got != 64000 {
+			t.Fatalf("max_tokens = %d, want 64000; output=%s", got, out)
+		}
+	})
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_ReasoningItemToThinkingBlock(t *testing.T) {
 	rawSignature, expectedSignature := testClaudeResponsesThinkingSignature(t)
 	raw := []byte(`{

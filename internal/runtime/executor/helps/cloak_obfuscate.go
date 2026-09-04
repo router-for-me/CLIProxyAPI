@@ -147,6 +147,9 @@ func obfuscateSystemBlocks(payload []byte, matcher *SensitiveWordMatcher) []byte
 		system.ForEach(func(key, value gjson.Result) bool {
 			if value.Get("type").String() == "text" {
 				text := value.Get("text").String()
+				if strings.HasPrefix(text, "x-anthropic-billing-header:") {
+					return true
+				}
 				obfuscated := matcher.obfuscateText(text)
 				if obfuscated != text {
 					path := "system." + key.String() + ".text"
@@ -161,9 +164,11 @@ func obfuscateSystemBlocks(payload []byte, matcher *SensitiveWordMatcher) []byte
 		}
 	} else if system.Type == gjson.String {
 		text := system.String()
-		obfuscated := matcher.obfuscateText(text)
-		if obfuscated != text {
-			payload, _ = sjson.SetBytes(payload, "system", obfuscated)
+		if !strings.HasPrefix(text, "x-anthropic-billing-header:") {
+			obfuscated := matcher.obfuscateText(text)
+			if obfuscated != text {
+				payload, _ = sjson.SetBytes(payload, "system", obfuscated)
+			}
 		}
 	}
 

@@ -3,6 +3,7 @@ package helps
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -36,6 +38,7 @@ type UsageReporter struct {
 	reasoning           string
 	serviceTier         string
 	generate            bool
+	stream              bool
 	requestedAt         time.Time
 	ttftMu              sync.RWMutex
 	ttft                time.Duration
@@ -77,6 +80,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reasoning:   usage.ReasoningEffortFromContext(ctx),
 		serviceTier: usage.ServiceTierFromContext(ctx),
 		generate:    usage.GenerateFromContext(ctx),
+		stream:      usage.StreamFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -84,6 +88,14 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reporter.accessTokenHash = authAccessTokenSHA256(auth)
 	}
 	return reporter
+}
+
+// SetStream records whether the request was executed in streaming mode.
+func (r *UsageReporter) SetStream(stream bool) {
+	if r == nil {
+		return
+	}
+	r.stream = stream
 }
 
 // UpdateAccessTokenFingerprint records the token version actually used upstream.
@@ -389,6 +401,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		ServiceTier:         r.serviceTier,
 		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
 		Generate:            usage.GenerateFlag(r.generate),
+		Stream:              r.stream,
 		RequestedAt:         r.requestedAt,
 		Latency:             r.latency(),
 		TTFT:                r.ttftDuration(),
@@ -403,8 +416,18 @@ func failFromErrors(errs ...error) usage.Failure {
 		if err == nil {
 			continue
 		}
+		body := strings.TrimSpace(err.Error())
+		type responseBodyProvider interface {
+			ResponseBody() []byte
+		}
+		var responseErr responseBodyProvider
+		if errors.As(err, &responseErr) && responseErr != nil {
+			if responseBody := responseErr.ResponseBody(); len(responseBody) > 0 {
+				body = string(responseBody)
+			}
+		}
 		return usage.Failure{
-			Body:       strings.TrimSpace(err.Error()),
+			Body:       body,
 			StatusCode: clienterror.HTTPStatusFromError(err),
 		}
 	}
@@ -462,6 +485,7 @@ type usageTTFTRoundTripper struct {
 }
 
 func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	cliproxyexecutor.MarkUpstreamAttempt(req.Context())
 	t.reporter.StartResponseTTFT()
 	resp, errRoundTrip := t.base.RoundTrip(req)
 	if errRoundTrip != nil {

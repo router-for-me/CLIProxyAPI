@@ -158,6 +158,8 @@ type CodexConfig struct {
 	StreamBootstrapBuffering bool `yaml:"stream-bootstrap-buffering" json:"stream-bootstrap-buffering"`
 	// OptimizeMultiAgentV2 optimizes official Codex multi-agent requests.
 	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
+	// OrphanDelegationCompatibility enables opt-in compatibility for orphan Codex delegation outputs.
+	OrphanDelegationCompatibility bool `yaml:"orphan-delegation-compatibility" json:"orphan-delegation-compatibility"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
 	LiveMediaRelay CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
 }
@@ -245,6 +247,13 @@ type RoutingConfig struct {
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+
+	// SessionAffinitySubagents controls whether subagents (child sessions with parent references)
+	// inherit and bind to the parent's upstream credential across all providers (Claude, Codex,
+	// Antigravity, Gemini), maximizing prompt and KV cache reuse.
+	// When false, subagents are distributed across the credential pool via the fallback selector.
+	// Default: true. Ignored when SessionAffinity is false.
+	SessionAffinitySubagents *bool `yaml:"session-affinity-subagents,omitempty" json:"session-affinity-subagents,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

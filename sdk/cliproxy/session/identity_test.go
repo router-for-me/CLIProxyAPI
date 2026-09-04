@@ -1,7 +1,6 @@
 package session
 
 import (
-	"bytes"
 	"net/http"
 	"strings"
 	"testing"
@@ -197,6 +196,14 @@ func TestEnrichSkipsDerivationForExplicitSessions(t *testing.T) {
 				cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:stale",
 			},
 		},
+		{
+			name:    "nested request sessionId",
+			payload: []byte(`{"request":{"sessionId":"nested-session"},"messages":[{"role":"user","content":"hello"}]}`),
+		},
+		{
+			name:    "nested request subagent",
+			payload: []byte(`{"request":{"sessionId":"nested-session","metadata":{"agent_id":"worker"}},"messages":[{"role":"user","content":"hello"}]}`),
+		},
 	}
 
 	for _, test := range tests {
@@ -327,22 +334,62 @@ func TestEnrichCopiesDerivedIdentityToRequestAndOptions(t *testing.T) {
 	}
 }
 
-func TestEnrichCarriesRequestPayloadIntoSelectionOptions(t *testing.T) {
+func TestDeriveIDAntigravityNestedRequestAndEmptyFirstUser(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{"conversation":{"id":"request-only-conversation"},"input":"hello"}`)
-	_, enrichedOpts := Enrich(
-		cliproxyexecutor.Request{Payload: payload},
-		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
-	)
+	nestedAntigravity := []byte(`{
+		"project_id": "test-project",
+		"request": {
+			"systemInstruction": {"parts":[{"text":"system prompt"}]},
+			"contents": [
+				{"role":"user","parts":[{"text":""}]},
+				{"role":"user","parts":[{"text":"actual user prompt"}]}
+			]
+		}
+	}`)
+	id := DeriveID(sdktranslator.FormatAntigravity, nestedAntigravity, "caller-a")
+	if id == "" {
+		t.Fatal("DeriveID returned empty for nested Antigravity request with empty first turn")
+	}
 
-	if !bytes.Equal(enrichedOpts.OriginalRequest, payload) {
-		t.Fatalf("OriginalRequest = %q, want request payload %q", enrichedOpts.OriginalRequest, payload)
+	directAntigravity := []byte(`{
+		"systemInstruction": {"parts":[{"text":"system prompt"}]},
+		"contents": [
+			{"role":"user","parts":[{"text":"actual user prompt"}]}
+		]
+	}`)
+	directID := DeriveID(sdktranslator.FormatAntigravity, directAntigravity, "caller-a")
+	if id != directID {
+		t.Fatalf("DeriveID mismatch: nested=%s, direct=%s", id, directID)
 	}
-	if len(enrichedOpts.OriginalRequest) > 0 && &enrichedOpts.OriginalRequest[0] == &payload[0] {
-		t.Fatal("OriginalRequest aliases Request.Payload instead of preserving a snapshot")
+}
+
+func TestClaudeMetadataIdentitiesNormalizesAgentID(t *testing.T) {
+	t.Parallel()
+
+	validPayload := []byte(`{
+		"metadata": {
+			"user_id": "{\"session_id\":\"sess-123\",\"parent_session_id\":\"parent-456\",\"agent_id\":\"  subagent-alpha  \"}"
+		}
+	}`)
+	sessionID, parentSessionID, agentID := ClaudeMetadataIdentities(validPayload)
+	if sessionID != "sess-123" {
+		t.Fatalf("sessionID = %q, want sess-123", sessionID)
 	}
-	if got := DerivedID(enrichedOpts.Metadata); got != "" {
-		t.Fatalf("DerivedSessionID = %q, want explicit conversation to remain authoritative", got)
+	if parentSessionID != "parent-456" {
+		t.Fatalf("parentSessionID = %q, want parent-456", parentSessionID)
+	}
+	if agentID != "subagent-alpha" {
+		t.Fatalf("agentID = %q, want subagent-alpha", agentID)
+	}
+
+	invalidPayload := []byte(`{
+		"metadata": {
+			"user_id": "{\"session_id\":\"sess-123\",\"agent_id\":\"bad\nagent\"}"
+		}
+	}`)
+	_, _, badAgentID := ClaudeMetadataIdentities(invalidPayload)
+	if badAgentID != "" {
+		t.Fatalf("expected badAgentID to be empty for control character, got %q", badAgentID)
 	}
 }

@@ -294,7 +294,7 @@ func ValidateGeminiFunctionCallPairing(inputRawJSON []byte) error {
 	contents.ForEach(func(contentIndex, content gjson.Result) bool {
 		i := int(contentIndex.Int())
 		parts := content.Get("parts")
-		if !parts.IsArray() {
+		if !parts.IsArray() || parts.Raw == "[]" || !parts.Get("0").Exists() {
 			if len(pending) > 0 {
 				validationErr = fmt.Errorf(
 					"%s[%d]: content appears before %d pending functionResponse part(s)",
@@ -352,12 +352,19 @@ func ValidateGeminiFunctionCallPairing(inputRawJSON []byte) error {
 			pending = calls
 			return true
 		case len(responses) == 0 && len(pending) > 0:
-			validationErr = fmt.Errorf(
-				"%s[%d]: content appears before %d pending functionResponse part(s)",
-				contentsPath,
-				i,
-				len(pending),
-			)
+			// Allow intervening user content (such as system reminders, mid-session developer notices, or user turns)
+			// to appear before the pending functionResponse turn. Upstream Antigravity accepts this natively.
+			// Reject only if it is a model turn without responses, which breaks turn ownership.
+			role := strings.ToLower(strings.TrimSpace(content.Get("role").String()))
+			if role == "model" {
+				validationErr = fmt.Errorf(
+					"%s[%d]: model content appears before %d pending functionResponse part(s)",
+					contentsPath,
+					i,
+					len(pending),
+				)
+			}
+			return validationErr == nil
 		case len(responses) == 0:
 			return true
 		case len(pending) == 0:

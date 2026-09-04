@@ -505,3 +505,24 @@ func TestRequestLoggingMiddleware_ClientCancellationExclusion(t *testing.T) {
 		}
 	})
 }
+
+func TestCaptureRequestInfo_HeadersDeepCopy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodPost, "/v1/test", nil)
+	req.Header.Set("X-Audit", "original-value")
+	c.Request = req
+
+	info, err := captureRequestInfo(c, false)
+	if err != nil {
+		t.Fatalf("captureRequestInfo failed: %v", err)
+	}
+
+	// Mutate the original request header slice in place
+	c.Request.Header["X-Audit"][0] = "mutated-value"
+
+	if got := info.Headers["X-Audit"][0]; got != "original-value" {
+		t.Fatalf("header slice was aliased: got %q, want %q", got, "original-value")
+	}
+}

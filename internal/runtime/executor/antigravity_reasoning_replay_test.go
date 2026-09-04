@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -1759,8 +1760,8 @@ func TestDegradeAntigravityClaudeToolProvenanceIDsKeepsParallelShape(t *testing.
 		if signature != "" {
 			signed++
 		}
-		if i == 0 && !antigravityHasNativeThoughtSignature(signature) {
-			t.Fatalf("first call thoughtSignature = %q, want the in-band signature kept through degradation", signature)
+		if i == 0 && signature != internalsignature.GeminiSkipThoughtSignatureValidator {
+			t.Fatalf("first call thoughtSignature = %q, want bypass sentinel signature", signature)
 		}
 		if i > 0 && signature != "" {
 			t.Fatalf("sibling call %d gained a signature %q, want unsigned", i, signature)
@@ -1774,6 +1775,155 @@ func TestDegradeAntigravityClaudeToolProvenanceIDsKeepsParallelShape(t *testing.
 	}
 	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
 		t.Fatalf("degraded history is invalid: %v", errPairing)
+	}
+}
+
+func TestDegradeAntigravityClaudeToolProvenanceIDs_AllCallsSigned_OnlyFirstGetsBypassSentinel(t *testing.T) {
+	ids := make([]string, 3)
+	for i := range ids {
+		ids[i] = util.GeminiClaudeToolUseID(fmt.Sprintf("native-signed-%d", i), "Read", `{"file_path":"/tmp/a"}`)
+	}
+	payload := []byte(`{"request":{"contents":[{"role":"model","parts":[` +
+		`{"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg","functionCall":{"id":"` + ids[0] + `","name":"Read","args":{"file_path":"/tmp/a"}}},` +
+		`{"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xh","functionCall":{"id":"` + ids[1] + `","name":"Read","args":{"file_path":"/tmp/b"}}},` +
+		`{"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xi","functionCall":{"id":"` + ids[2] + `","name":"Read","args":{"file_path":"/tmp/c"}}}` +
+		`]},{"role":"user","parts":[` +
+		`{"functionResponse":{"id":"` + ids[0] + `","name":"Read","response":{"result":"a"}}},` +
+		`{"functionResponse":{"id":"` + ids[1] + `","name":"Read","response":{"result":"b"}}},` +
+		`{"functionResponse":{"id":"` + ids[2] + `","name":"Read","response":{"result":"c"}}}` +
+		`]}]}}`)
+
+	out, degraded := degradeAntigravityClaudeToolProvenanceIDs(payload)
+	out = antigravityRepairUnsignedFirstFunctionCalls(out)
+	if degraded != 6 {
+		t.Fatalf("degraded = %d, want 6", degraded)
+	}
+
+	calls := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	if len(calls) != 3 {
+		t.Fatalf("call count: %d", len(calls))
+	}
+	if calls[0].Get("thoughtSignature").String() != internalsignature.GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("first call thoughtSignature = %q, want bypass sentinel", calls[0].Get("thoughtSignature").String())
+	}
+	if calls[1].Get("thoughtSignature").Exists() && calls[1].Get("thoughtSignature").String() != "" {
+		t.Fatalf("second call thoughtSignature = %q, want deleted/empty", calls[1].Get("thoughtSignature").String())
+	}
+	if calls[2].Get("thoughtSignature").Exists() && calls[2].Get("thoughtSignature").String() != "" {
+		t.Fatalf("third call thoughtSignature = %q, want deleted/empty", calls[2].Get("thoughtSignature").String())
+	}
+
+	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
+		t.Fatalf("pairing invalid: %v", errPairing)
+	}
+	if errSig := internalsignature.ValidateGeminiThoughtSignatures(out, internalsignature.GeminiThoughtSignatureValidationOptions{AllowBypassSentinel: true}); errSig != nil {
+		t.Fatalf("ValidateGeminiThoughtSignatures failed: %v\noutput: %s", errSig, out)
+	}
+}
+
+func TestDegradeAntigravityClaudeToolProvenanceIDs_StrictMonotonicOffsets(t *testing.T) {
+	id := util.GeminiClaudeToolUseID("native-1", "Read", `{"file_path":"/tmp/a"}`)
+	payload := []byte(fmt.Sprintf(`{"request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"sig-1","functionCall":{"id":"%s","name":"Read","args":{"file_path":"/tmp/a"}}}]},{"role":"user","parts":[{"functionResponse":{"id":"%s","name":"Read","response":{"result":"ok"}}}]}]}}`, id, id))
+
+	out, degraded := degradeAntigravityClaudeToolProvenanceIDs(payload)
+	if degraded != 2 {
+		t.Fatalf("degraded = %d, want 2", degraded)
+	}
+	if bytes.Equal(out, payload) {
+		t.Fatal("expected payload to be modified")
+	}
+	if strings.Contains(string(out), id) {
+		t.Fatalf("expected reserved ID %s to be replaced", id)
+	}
+
+	syntheticID := antigravitySyntheticToolCallID(id)
+	if !strings.Contains(string(out), syntheticID) {
+		t.Fatalf("expected synthetic ID %s in output, got: %s", syntheticID, string(out))
+	}
+}
+
+var antigravityDegradeBenchmarkOutput []byte
+
+func BenchmarkDegradeAntigravityClaudeToolProvenanceIDs(b *testing.B) {
+	const calls = 217
+	var payload strings.Builder
+	payload.Grow(1<<20 + calls*512)
+	payload.WriteString(`{"request":{"contents":[{"role":"user","parts":[{"text":"`)
+	payload.WriteString(strings.Repeat("x", 1<<20))
+	payload.WriteString(`"}]}`)
+	for i := range calls {
+		id := util.GeminiClaudeToolUseID(fmt.Sprintf("native-%d", i), "Read", `{"file_path":"/tmp/a"}`)
+		fmt.Fprintf(&payload, `,{"role":"model","parts":[{"thoughtSignature":"signature-%d","functionCall":{"id":"%s","name":"Read","args":{"file_path":"/tmp/a"}}}]}`, i, id)
+		fmt.Fprintf(&payload, `,{"role":"user","parts":[{"functionResponse":{"id":"%s","name":"Read","response":{"result":"ok"}}}]}`, id)
+	}
+	payload.WriteString(`]}}`)
+	input := []byte(payload.String())
+	if _, degraded := degradeAntigravityClaudeToolProvenanceIDs(input); degraded != calls*2 {
+		b.Fatalf("degraded = %d, want %d", degraded, calls*2)
+	}
+
+	b.SetBytes(int64(len(input)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		var degraded int
+		antigravityDegradeBenchmarkOutput, degraded = degradeAntigravityClaudeToolProvenanceIDs(input)
+		if degraded != calls*2 {
+			b.Fatalf("degraded = %d, want %d", degraded, calls*2)
+		}
+	}
+}
+
+func TestPrepareAntigravityGeminiReasoningReplay_ReordersPermutedParallelToolResponsesWithDegradedIDs(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const model = "gemini-3.7-flash-high"
+	const count = 12
+	calls := make([]string, count)
+	responses := make([]string, count)
+	ids := make([]string, count)
+	for i := 0; i < count; i++ {
+		ids[i] = util.GeminiClaudeToolUseID(fmt.Sprintf("native-%d", i), "Read", `{"file_path":"/tmp/a"}`)
+		sig := ""
+		if i == 0 {
+			sig = `, "thoughtSignature": "skip_thought_signature_validator"`
+		}
+		calls[i] = fmt.Sprintf(`{"functionCall":{"id":"%s","name":"Read","args":{"file_path":"/tmp/a"}}%s}`, ids[i], sig)
+	}
+
+	// Permute responses: reverse order
+	for i := 0; i < count; i++ {
+		permutedIndex := count - 1 - i
+		responses[i] = fmt.Sprintf(`{"functionResponse":{"id":"%s","name":"Read","response":{"result":"ok-%d"}}}`, ids[permutedIndex], permutedIndex)
+	}
+
+	payload := []byte(fmt.Sprintf(`{"sessionId":"sess-permuted","request":{"contents":[{"role":"model","parts":[%s]},{"role":"user","parts":[%s]}]}}`,
+		strings.Join(calls, ","),
+		strings.Join(responses, ","),
+	))
+
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")}
+	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload}, opts, payload)
+	if errPrepare != nil {
+		t.Fatalf("prepareAntigravityGeminiReasoningReplayPayload error: %v", errPrepare)
+	}
+
+	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v\noutput: %s", errPairing, out)
+	}
+
+	outCalls := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	outResponses := gjson.GetBytes(out, "request.contents.1.parts").Array()
+	if len(outCalls) != count || len(outResponses) != count {
+		t.Fatalf("part counts: %d calls, %d responses", len(outCalls), len(outResponses))
+	}
+	for i := 0; i < count; i++ {
+		callID := outCalls[i].Get("functionCall.id").String()
+		respID := outResponses[i].Get("functionResponse.id").String()
+		if callID == "" || respID == "" || callID != respID {
+			t.Fatalf("part %d id mismatch: call %q != resp %q", i, callID, respID)
+		}
 	}
 }
 

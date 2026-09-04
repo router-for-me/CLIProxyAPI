@@ -78,6 +78,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
 		requireBoolField(t, payload, "failed", false)
 		requireBoolField(t, payload, "generate", true)
+		requireBoolField(t, payload, "stream", false)
 		requireFailField(t, payload, http.StatusOK, "")
 	})
 }
@@ -152,6 +153,30 @@ func TestUsageQueuePluginPayloadDefaultsGenerateTrueWhenOmitted(t *testing.T) {
 		payload := popSinglePayload(t)
 		requireBoolField(t, payload, "generate", true)
 	})
+}
+
+func TestUsageQueuePluginPublishesStreamFlag(t *testing.T) {
+	for _, stream := range []bool{true, false} {
+		t.Run(map[bool]string{true: "stream_true", false: "stream_false"}[stream], func(t *testing.T) {
+			withEnabledQueue(t, func() {
+				ctx := internallogging.WithResponseStatusHolder(context.Background())
+				internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+				(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+					Provider: "openai",
+					Model:    "gpt-5.4",
+					Stream:   stream,
+					Detail: coreusage.Detail{
+						InputTokens: 1,
+						TotalTokens: 1,
+					},
+				})
+
+				payload := popSinglePayload(t)
+				requireBoolField(t, payload, "stream", stream)
+			})
+		})
+	}
 }
 
 func TestUsageQueuePluginPreservesLegacyCachedOnlyUsage(t *testing.T) {

@@ -148,20 +148,44 @@ func computeFingerprint(messageText, version string) string {
 
 // generateBillingHeader creates the x-anthropic-billing-header text block that
 // Claude Code prepends to its system prompt. cch is present only on signed paths.
-func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, workload string) string {
+func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, workload string, isSubagent bool, prevReq, promptID string) string {
 	if entrypoint == "" {
 		entrypoint = "cli"
 	}
 	buildHash := computeFingerprint(messageText, version)
-	workloadPart := ""
-	if workload != "" {
-		workloadPart = fmt.Sprintf(" cc_workload=%s;", workload)
-	}
+	var b strings.Builder
+	b.WriteString("x-anthropic-billing-header: cc_version=")
+	b.WriteString(version)
+	b.WriteByte('.')
+	b.WriteString(buildHash)
+	b.WriteString("; cc_entrypoint=")
+	b.WriteString(entrypoint)
+	b.WriteByte(';')
 
 	if cchSigning {
-		return fmt.Sprintf("x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=00000;%s", version, buildHash, entrypoint, workloadPart)
+		b.WriteString(" cch=00000;")
 	}
-	return fmt.Sprintf("x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s;%s", version, buildHash, entrypoint, workloadPart)
+	if workload != "" {
+		b.WriteString(" cc_workload=")
+		b.WriteString(workload)
+		b.WriteByte(';')
+	}
+	if isSubagent {
+		b.WriteString(" cc_is_subagent=true;")
+	}
+	if cchSigning {
+		if prevReq != "" {
+			b.WriteString(" cc_prev_req=")
+			b.WriteString(prevReq)
+			b.WriteByte(';')
+		}
+		if promptID != "" {
+			b.WriteString(" cc_prompt_id=")
+			b.WriteString(promptID)
+			b.WriteByte(';')
+		}
+	}
+	return b.String()
 }
 
 func claudeBillingFingerprintMessageText(payload []byte) string {
@@ -191,19 +215,39 @@ func claudeBillingFingerprintMessageText(payload []byte) string {
 }
 
 func claudeCCHFallbackBillingHeader(ctx context.Context, cfg *config.Config, payload []byte, entrypoint string) string {
+	isProbeOrHelper := helps.IsClaudeProbeOrHelperRequest(payload)
+	prevReq, promptID := helps.ExtractClaudeBillingTags(payload)
+	if !isProbeOrHelper {
+		continuityCtx := helps.ClaudeContinuityContextFromContext(ctx)
+		if prevReq == "" && continuityCtx != nil {
+			prevReq = continuityCtx.PreviousRequestID
+		}
+		if promptID == "" && continuityCtx != nil {
+			promptID = continuityCtx.PromptID
+		}
+	}
+	incomingHeaders := resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
+	isSubagent := helps.IsClaudeSubagentRequest(incomingHeaders, payload)
 	return generateBillingHeader(
 		true,
 		helps.DefaultClaudeVersion(cfg),
 		claudeBillingFingerprintMessageText(payload),
 		entrypoint,
 		getWorkloadFromContext(ctx),
+		isSubagent,
+		prevReq,
+		promptID,
 	)
 }
 
 const claudeCodeCLIIdentity = "You are Claude Code, Anthropic's official CLI for Claude."
 
+const claudeCodeFableReportingOutcomes = `# Reporting outcomes
+
+Report what actually happened, not what you intended. When you say something is done, sent, saved, fixed, or verified, that claim must rest on a result you observed in this session — tool output, the file as it now reads, the page as it now loads — not on what the step should have produced. If you did not check, say you did not check. If any step failed, was skipped, or came back different from what you expected, say so in the first sentence of your report, before anything else, even when the rest of the work succeeded. Never quietly work around a failure in a way that makes it look resolved; a problem the user can see is recoverable, one your summary hides is not. When you stop before the task is complete, your first line says so plainly and names what is left. Do not describe partial work as done, and do not let a summary read as more certain than the evidence behind it.`
+
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.220", "cli", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.258", "cli", "")
 }
 
 // checkSystemInstructionsWithSigningMode keeps the top-level system in Claude
@@ -212,17 +256,47 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 // Claude models give it operator-level authority without changing the cached
 // top-level prefix.
 func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cchSigning bool, version, entrypoint, workload string) []byte {
-	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, time.Now())
+	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, time.Now(), false, "", "")
 }
 
-func checkSystemInstructionsWithSigningModeAt(payload []byte, strictMode bool, cchSigning bool, version, entrypoint, workload string, now time.Time) []byte {
+// isClaudeFable51Model reports whether the model is specifically Fable 5.1 / Mythos 5.1,
+// matching native Claude Code 2.1.258 family/major/minor checks (AFo = {major:5, minor:1}).
+func isClaudeFable51Model(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	for _, target := range []string{"fable-5-1", "fable-5.1", "mythos-5-1", "mythos-5.1"} {
+		idx := strings.Index(m, target)
+		if idx != -1 {
+			nextIdx := idx + len(target)
+			if nextIdx >= len(m) || m[nextIdx] < '0' || m[nextIdx] > '9' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func checkSystemInstructionsWithSigningModeAt(
+	payload []byte,
+	strictMode bool,
+	cchSigning bool,
+	version, entrypoint, workload string,
+	now time.Time,
+	isSubagent bool,
+	prevReq, promptID string,
+) []byte {
 	system := gjson.GetBytes(payload, "system")
 	messageText := claudeBillingFingerprintMessageText(payload)
 
-	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload)
+	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload, isSubagent, prevReq, promptID)
 	billingBlock := buildTextBlock(billingText, nil)
 	agentBlock := buildTextBlock(claudeCodeCLIIdentity, &claudeCodeCacheControl)
-	payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+billingBlock+","+agentBlock+"]"))
+
+	systemBlocks := []string{billingBlock, agentBlock}
+	model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "model").String()))
+	if isClaudeFable51Model(model) && !helps.IsClaudeProbeOrHelperRequest(payload) {
+		systemBlocks = append(systemBlocks, buildTextBlock(claudeCodeFableReportingOutcomes, nil))
+	}
+	payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(systemBlocks, ",")+"]"))
 	if strictMode {
 		return injectClaudeCodeCurrentDate(payload, now)
 	}
@@ -701,6 +775,158 @@ func reconcileClaudeCodeSystemPlacementAfterPayload(payload []byte, state claude
 	return prependClaudeSystemRemindersToFirstUserMessage(updated, state.texts)
 }
 
+type claudeCodeFableState struct {
+	injectedFallbacks bool
+	injectedDisplay   bool
+	injectedReporting bool
+}
+
+func hasFableReportingBlock(body []byte) bool {
+	system := gjson.GetBytes(body, "system")
+	if !system.IsArray() {
+		str := strings.ReplaceAll(system.String(), "\u200B", "")
+		return str == claudeCodeFableReportingOutcomes || strings.Contains(str, claudeCodeFableReportingOutcomes)
+	}
+	for _, blk := range system.Array() {
+		text := strings.ReplaceAll(blk.Get("text").String(), "\u200B", "")
+		if text == claudeCodeFableReportingOutcomes {
+			return true
+		}
+	}
+	return false
+}
+
+func captureClaudeCodeFableState(before, after []byte, cloaked bool) claudeCodeFableState {
+	if !cloaked || len(before) == 0 || len(after) == 0 {
+		return claudeCodeFableState{}
+	}
+	return claudeCodeFableState{
+		injectedFallbacks: !gjson.GetBytes(before, "fallbacks").Exists() && gjson.GetBytes(after, "fallbacks").Exists(),
+		injectedDisplay:   !gjson.GetBytes(before, "thinking.display").Exists() && gjson.GetBytes(after, "thinking.display").Exists(),
+		injectedReporting: !hasFableReportingBlock(before) && hasFableReportingBlock(after),
+	}
+}
+
+// reconcileClaudeCodeFableModelAfterPayload reconciles model-specific additions
+// (Opus fallback, thinking.display=updates, and # Reporting outcomes system block)
+// if payload rules rewrite the request model between Fable 5.1 and non-Fable models.
+func reconcileClaudeCodeFableModelAfterPayload(
+	body []byte,
+	fableState claudeCodeFableState,
+	payloadTouchedFallbacks bool,
+	payloadTouchedDisplay bool,
+	cloaked bool,
+	isProbeOrHelper bool,
+) []byte {
+	if !cloaked || len(body) == 0 {
+		return body
+	}
+
+	// Probes and helpers must never carry Fable additions (Opus fallback, display=updates, reporting block)
+	if isProbeOrHelper {
+		if fableState.injectedFallbacks && !payloadTouchedFallbacks {
+			body, _ = sjson.DeleteBytes(body, "fallbacks")
+		}
+		if fableState.injectedDisplay && !payloadTouchedDisplay {
+			body, _ = sjson.DeleteBytes(body, "thinking.display")
+		}
+		if fableState.injectedReporting {
+			system := gjson.GetBytes(body, "system")
+			if system.IsArray() {
+				blocks := make([]string, 0, len(system.Array()))
+				removed := false
+				for _, blk := range system.Array() {
+					if strings.ReplaceAll(blk.Get("text").String(), "\u200B", "") == claudeCodeFableReportingOutcomes {
+						removed = true
+						continue
+					}
+					blocks = append(blocks, blk.Raw)
+				}
+				if removed {
+					body, _ = sjson.SetRawBytes(body, "system", []byte("["+strings.Join(blocks, ",")+"]"))
+				}
+			} else if strings.ReplaceAll(system.String(), "\u200B", "") == claudeCodeFableReportingOutcomes {
+				body, _ = sjson.DeleteBytes(body, "system")
+			}
+		}
+		return body
+	}
+	currentModel := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "model").String()))
+
+	if isClaudeFable51Model(currentModel) {
+		// Non-Fable rewritten to Fable 5.1 (or original Fable 5.1): attach Fable additions
+		// unless matching payload rules explicitly configured or filtered them.
+		if !gjson.GetBytes(body, "fallbacks").Exists() && !payloadTouchedFallbacks {
+			body, _ = sjson.SetRawBytes(body, "fallbacks", []byte(`[{"model":"claude-opus-5"}]`))
+		}
+		if gjson.GetBytes(body, "thinking").Exists() {
+			thinkingType := gjson.GetBytes(body, "thinking.type").String()
+			if thinkingType == "adaptive" && !gjson.GetBytes(body, "thinking.display").Exists() && !payloadTouchedDisplay {
+				body, _ = sjson.SetBytes(body, "thinking.display", "updates")
+			} else if thinkingType != "adaptive" && fableState.injectedDisplay && !payloadTouchedDisplay {
+				body, _ = sjson.DeleteBytes(body, "thinking.display")
+			}
+		} else if fableState.injectedDisplay && !payloadTouchedDisplay {
+			body, _ = sjson.DeleteBytes(body, "thinking.display")
+		}
+		if !hasFableReportingBlock(body) {
+			system := gjson.GetBytes(body, "system")
+			if system.IsArray() {
+				blocks := make([]string, 0, len(system.Array())+1)
+				for _, blk := range system.Array() {
+					blocks = append(blocks, blk.Raw)
+				}
+				blocks = append(blocks, buildTextBlock(claudeCodeFableReportingOutcomes, nil))
+				body, _ = sjson.SetRawBytes(body, "system", []byte("["+strings.Join(blocks, ",")+"]"))
+			} else if system.Type == gjson.String {
+				str := system.String()
+				blocks := []string{
+					buildTextBlock(str, nil),
+					buildTextBlock(claudeCodeFableReportingOutcomes, nil),
+				}
+				body, _ = sjson.SetRawBytes(body, "system", []byte("["+strings.Join(blocks, ",")+"]"))
+			} else if !system.Exists() {
+				blocks := []string{
+					buildTextBlock(claudeCodeFableReportingOutcomes, nil),
+				}
+				body, _ = sjson.SetRawBytes(body, "system", []byte("["+strings.Join(blocks, ",")+"]"))
+			}
+		}
+		return body
+	}
+
+	// Target model is Non-Fable 5.1:
+	// Only delete fallbacks if CPA automatically injected it and matching payload rules did NOT explicitly configure/modify it
+	if fableState.injectedFallbacks && !payloadTouchedFallbacks {
+		body, _ = sjson.DeleteBytes(body, "fallbacks")
+	}
+	if fableState.injectedDisplay && !payloadTouchedDisplay {
+		body, _ = sjson.DeleteBytes(body, "thinking.display")
+	}
+
+	// Remove Reporting outcomes if CPA automatically injected it
+	if fableState.injectedReporting {
+		system := gjson.GetBytes(body, "system")
+		if system.IsArray() {
+			blocks := make([]string, 0, len(system.Array()))
+			removed := false
+			for _, blk := range system.Array() {
+				if strings.ReplaceAll(blk.Get("text").String(), "\u200B", "") == claudeCodeFableReportingOutcomes {
+					removed = true
+					continue
+				}
+				blocks = append(blocks, blk.Raw)
+			}
+			if removed {
+				body, _ = sjson.SetRawBytes(body, "system", []byte("["+strings.Join(blocks, ",")+"]"))
+			}
+		} else if strings.ReplaceAll(system.String(), "\u200B", "") == claudeCodeFableReportingOutcomes {
+			body, _ = sjson.DeleteBytes(body, "system")
+		}
+	}
+	return body
+}
+
 // claudeCodeLocalDate reproduces Claude Code 2.1.220's wcs() helper:
 // new Date(), local calendar fields, and zero-padded YYYY-MM-DD components.
 func claudeCodeLocalDate(now time.Time) string {
@@ -1012,6 +1238,19 @@ func applyCloaking(
 	confirmedClaudeCode bool,
 	cchSigning bool,
 ) ([]byte, bool, error) {
+	return applyCloakingInternal(ctx, cfg, auth, payload, apiKey, confirmedClaudeCode, cchSigning, true)
+}
+
+func applyCloakingInternal(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *cliproxyauth.Auth,
+	payload []byte,
+	apiKey string,
+	confirmedClaudeCode bool,
+	cchSigning bool,
+	obfuscateSensitiveWords bool,
+) ([]byte, bool, error) {
 	policy, settings := resolveClaudeWirePolicy(cfg, auth, apiKey, confirmedClaudeCode)
 	if !policy.Cloak {
 		return payload, false, nil
@@ -1026,7 +1265,81 @@ func applyCloaking(
 
 	billingVersion := helps.DefaultClaudeVersion(cfg)
 	workload := getWorkloadFromContext(ctx)
-	payload = checkSystemInstructionsWithSigningModeAt(payload, settings.strictMode, cchSigning, billingVersion, "cli", workload, claudeCodeCurrentTime(cfg, auth))
+
+	isProbeOrHelper := helps.IsClaudeProbeOrHelperRequest(payload)
+	isSubagent := false
+	prevReq := ""
+	promptID := ""
+	if !isProbeOrHelper {
+		incomingHeaders := resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
+		isSubagent = helps.IsClaudeSubagentRequest(incomingHeaders, payload)
+		existingPrevReq, existingPromptID := helps.ExtractClaudeBillingTags(payload)
+
+		sessionID := helps.ClaudeSessionIDFromContext(ctx)
+		if sessionID == "" && auth != nil {
+			sessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, payload, payload, confirmedClaudeCode)
+		}
+
+		if sessionID != "" && auth != nil {
+			credIdentity := claudeDiagnosticsCredentialIdentity(auth)
+			isNewTurn := helps.IsClaudeNewPromptTurn(payload)
+			continuityKey, seq, prevMsgID, storedPrevReq, storedPromptID := helps.BeginClaudeContinuity(credIdentity, sessionID, isNewTurn, existingPromptID)
+
+			if existingPromptID != "" {
+				promptID = existingPromptID
+			} else {
+				promptID = storedPromptID
+			}
+			if storedPrevReq != "" {
+				prevReq = storedPrevReq
+			} else {
+				prevReq = existingPrevReq
+			}
+
+			if continuityCtx := helps.ClaudeContinuityContextFromContext(ctx); continuityCtx != nil {
+				continuityCtx.Key = continuityKey
+				continuityCtx.Sequence = seq
+				continuityCtx.PreviousMessageID = prevMsgID
+				continuityCtx.PreviousRequestID = prevReq
+				continuityCtx.PromptID = promptID
+				continuityCtx.Initialized = true
+			}
+		}
+	}
+
+	payload = checkSystemInstructionsWithSigningModeAt(
+		payload,
+		settings.strictMode,
+		cchSigning,
+		billingVersion,
+		"cli",
+		workload,
+		claudeCodeCurrentTime(cfg, auth),
+		isSubagent,
+		prevReq,
+		promptID,
+	)
+
+	// In native Claude Code 2.1.258, claude-fable-5-1 requests carry:
+	// "fallbacks": [{"model": "claude-opus-5"}]
+	model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "model").String()))
+	if isClaudeFable51Model(model) && !isProbeOrHelper {
+		if !gjson.GetBytes(payload, "fallbacks").Exists() {
+			payload, _ = sjson.SetRawBytes(payload, "fallbacks", []byte(`[{"model":"claude-opus-5"}]`))
+		}
+		if gjson.GetBytes(payload, "thinking").Exists() {
+			thinkingType := gjson.GetBytes(payload, "thinking.type").String()
+			if thinkingType == "adaptive" && !gjson.GetBytes(payload, "thinking.display").Exists() {
+				payload, _ = sjson.SetBytes(payload, "thinking.display", "updates")
+			}
+		}
+	}
+
+	// Probes and subagents never use 1h cache in native Claude Code; ensure any
+	// caller-supplied 1h ttl is stripped to match extended-cache-ttl beta suppression.
+	if isSubagent || isProbeOrHelper {
+		payload = stripClaudeCacheControlTTL(payload)
+	}
 
 	// Claude-Code-CLI fingerprint identity (real OAuth or fingerprint-profile=claude-code-cli)
 	// is applied later through the shared ApplyClaudeCredentialMetadata path.
@@ -1040,7 +1353,7 @@ func applyCloaking(
 	}
 
 	// Apply sensitive word obfuscation
-	if len(settings.sensitiveWords) > 0 {
+	if obfuscateSensitiveWords && len(settings.sensitiveWords) > 0 {
 		matcher := helps.BuildSensitiveWordMatcher(settings.sensitiveWords)
 		payload = helps.ObfuscateSensitiveWords(payload, matcher)
 	}
@@ -1163,6 +1476,32 @@ func upgradeClaudeCacheControlTTL(payload []byte, ttl string) []byte {
 	}
 
 	forEachClaudeCacheControlBlock(payload, upgrade)
+	return payload
+}
+
+// stripClaudeCacheControlTTL removes any ttl field from cache_control blocks in payload,
+// downgrading {"type":"ephemeral","ttl":"..."} to {"type":"ephemeral"}.
+// This ensures that when extended-cache-ttl-2025-04-11 is stripped (e.g. on probes,
+// subagents, or non-OAuth credentials), the body does not retain a ttl field that would
+// trigger Anthropic 400 errors or fingerprint mismatch.
+func stripClaudeCacheControlTTL(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+
+	strip := func(path string, block gjson.Result) {
+		cacheControl := block.Get("cache_control")
+		if !cacheControl.IsObject() || !cacheControl.Get("ttl").Exists() {
+			return
+		}
+		updated, errDel := sjson.DeleteBytes(payload, path+".cache_control.ttl")
+		if errDel != nil {
+			return
+		}
+		payload = updated
+	}
+
+	forEachClaudeCacheControlBlock(payload, strip)
 	return payload
 }
 

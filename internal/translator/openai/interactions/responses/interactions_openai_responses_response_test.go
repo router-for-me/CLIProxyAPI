@@ -703,3 +703,66 @@ func TestConvertInteractionsResponseToOpenAIResponsesStream_PreservesEnvironment
 		t.Fatalf("response.completed environment_id = %q, want env_stream123. Payload: %s", got, string(completedPayload))
 	}
 }
+
+func TestConvertInteractionsResponseToOpenAIResponsesNonStreamRestoresAntigravityToolName(t *testing.T) {
+	raw := []byte(`{
+		"id":"interaction_1",
+		"model":"antigravity-preview-05-2026",
+		"steps":[
+			{"type":"function_call","id":"call_1","name":"external_read_file","arguments":{"path":"/etc/hosts"}}
+		]
+	}`)
+	out := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "antigravity-preview-05-2026", []byte(`{"model":"antigravity-preview-05-2026"}`), nil, raw, nil)
+	if got := gjson.GetBytes(out, "output.0.name").String(); got != "read_file" {
+		t.Fatalf("output.0.name = %q, want read_file. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponsesStreamRestoresAntigravityToolName(t *testing.T) {
+	var param any
+	var out [][]byte
+	rawEvents := [][]byte{
+		[]byte("event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1\",\"model\":\"antigravity-preview-05-2026\"},\"event_type\":\"interaction.created\"}\n\n"),
+		[]byte("event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"function_call\",\"id\":\"call_1\",\"name\":\"external_read_file\"},\"event_type\":\"step.start\"}\n\n"),
+		[]byte("event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"arguments_delta\",\"arguments\":\"{\\\"path\\\":\\\"/etc/hosts\\\"}\"},\"event_type\":\"step.delta\"}\n\n"),
+		[]byte("event: step.stop\ndata: {\"index\":0,\"event_type\":\"step.stop\"}\n\n"),
+		[]byte("event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1\",\"status\":\"completed\"},\"event_type\":\"interaction.completed\"}\n\n"),
+		[]byte("event: done\ndata: [DONE]\n\n"),
+	}
+	for _, raw := range rawEvents {
+		out = append(out, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "antigravity-preview-05-2026", []byte(`{"model":"antigravity-preview-05-2026"}`), nil, raw, &param)...)
+	}
+
+	addedPayload := findResponsesEventPayload(out, "response.output_item.added")
+	if got := gjson.GetBytes(addedPayload, "item.name").String(); got != "read_file" {
+		t.Fatalf("stream item.name = %q, want read_file. Payload: %s", got, string(addedPayload))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponsesPreservesNonCollidingAndNonAntigravityNames(t *testing.T) {
+	// 1. Antigravity model with non-colliding external_ name: external_lookup must NOT be stripped.
+	rawNonColliding := []byte(`{
+		"id":"interaction_1",
+		"model":"antigravity-preview-05-2026",
+		"steps":[
+			{"type":"function_call","id":"call_1","name":"external_lookup","arguments":{"q":"test"}}
+		]
+	}`)
+	outNonColliding := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "antigravity-preview-05-2026", []byte(`{"model":"antigravity-preview-05-2026"}`), nil, rawNonColliding, nil)
+	if got := gjson.GetBytes(outNonColliding, "output.0.name").String(); got != "external_lookup" {
+		t.Fatalf("output.0.name = %q, want external_lookup (preserved). Output: %s", got, string(outNonColliding))
+	}
+
+	// 2. Non-antigravity model with external_read_file: must NOT be stripped.
+	rawNonAnti := []byte(`{
+		"id":"interaction_2",
+		"model":"gemini-3.1-flash-lite",
+		"steps":[
+			{"type":"function_call","id":"call_2","name":"external_read_file","arguments":{"path":"/etc/hosts"}}
+		]
+	}`)
+	outNonAnti := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.1-flash-lite", []byte(`{"model":"gemini-3.1-flash-lite"}`), nil, rawNonAnti, nil)
+	if got := gjson.GetBytes(outNonAnti, "output.0.name").String(); got != "external_read_file" {
+		t.Fatalf("output.0.name = %q, want external_read_file (preserved for non-antigravity). Output: %s", got, string(outNonAnti))
+	}
+}

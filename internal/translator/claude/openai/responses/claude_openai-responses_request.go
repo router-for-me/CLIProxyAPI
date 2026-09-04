@@ -1,7 +1,9 @@
 package responses
 
 import (
+	"strconv"
 	"strings"
+	"unicode/utf16"
 
 	log "github.com/sirupsen/logrus"
 
@@ -12,6 +14,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+)
+
+const (
+	defaultClaudeResponsesMaxTokens = 32000
+	defaultFableResponsesMaxTokens  = 64000
 )
 
 // ConvertOpenAIResponsesRequestToClaude transforms an OpenAI Responses API request
@@ -43,6 +50,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	// Base Claude message payload
 	out := []byte(`{"model":"","max_tokens":32000,"messages":[],"metadata":{}}`)
 	out, _ = sjson.SetBytes(out, "metadata.user_id", userID)
+	out, _ = sjson.SetBytes(out, "max_tokens", defaultClaudeResponsesMaxTokensForModel(modelName))
 
 	root := gjson.ParseBytes(rawJSON)
 
@@ -99,8 +107,12 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
 	// Max tokens
-	if mot := root.Get("max_output_tokens"); mot.Exists() {
-		out, _ = sjson.SetBytes(out, "max_tokens", mot.Int())
+	if mot := root.Get("max_output_tokens"); mot.Exists() && mot.Type != gjson.Null {
+		val := mot.Int()
+		if info := registry.LookupModelInfo(modelName, "claude"); info != nil && info.MaxCompletionTokens > 0 && val > int64(info.MaxCompletionTokens) {
+			val = int64(info.MaxCompletionTokens)
+		}
+		out, _ = sjson.SetBytes(out, "max_tokens", val)
 	}
 
 	// Stream
@@ -566,6 +578,17 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	return out
+}
+
+func defaultClaudeResponsesMaxTokensForModel(modelName string) int {
+	maxTokens := defaultClaudeResponsesMaxTokens
+	if strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "fable") {
+		maxTokens = defaultFableResponsesMaxTokens
+	}
+	if info := registry.LookupModelInfo(modelName, "claude"); info != nil && info.MaxCompletionTokens > 0 && info.MaxCompletionTokens < maxTokens {
+		return info.MaxCompletionTokens
+	}
+	return maxTokens
 }
 
 // isResponsesSystemLevelRole reports whether an input item carries system-level
@@ -1060,11 +1083,76 @@ func responsesCustomToolNames(requestRawJSON []byte) map[string]struct{} {
 }
 
 func unwrapCustomToolInput(arguments string) string {
-	if v := gjson.Get(arguments, "input"); v.Exists() {
+	trimmed := strings.TrimSpace(arguments)
+	if v := gjson.Get(trimmed, "input"); v.Exists() {
 		if v.Type == gjson.String {
 			return v.String()
 		}
 		return v.Raw
+	}
+	idx := strings.Index(trimmed, `"input"`)
+	if idx >= 0 {
+		rest := strings.TrimSpace(trimmed[idx+7:])
+		if strings.HasPrefix(rest, ":") {
+			rest = strings.TrimSpace(rest[1:])
+			if strings.HasPrefix(rest, `"`) {
+				content := rest[1:]
+				var unescaped strings.Builder
+				inEscape := false
+				for i := 0; i < len(content); i++ {
+					c := content[i]
+					if inEscape {
+						switch c {
+						case '"', '\\', '/':
+							unescaped.WriteByte(c)
+						case 'b':
+							unescaped.WriteByte('\b')
+						case 'f':
+							unescaped.WriteByte('\f')
+						case 'n':
+							unescaped.WriteByte('\n')
+						case 'r':
+							unescaped.WriteByte('\r')
+						case 't':
+							unescaped.WriteByte('\t')
+						case 'u':
+							if i+4 < len(content) {
+								if r, err := strconv.ParseUint(content[i+1:i+5], 16, 16); err == nil {
+									if utf16.IsSurrogate(rune(r)) && i+10 < len(content) && content[i+5:i+7] == `\u` {
+										if r2, err2 := strconv.ParseUint(content[i+7:i+11], 16, 16); err2 == nil {
+											unescaped.WriteRune(utf16.DecodeRune(rune(r), rune(r2)))
+											i += 10
+											inEscape = false
+											continue
+										}
+									}
+									unescaped.WriteRune(rune(r))
+									i += 4
+									inEscape = false
+									continue
+								}
+							}
+							unescaped.WriteByte('\\')
+							unescaped.WriteByte('u')
+						default:
+							unescaped.WriteByte('\\')
+							unescaped.WriteByte(c)
+						}
+						inEscape = false
+					} else if c == '\\' {
+						inEscape = true
+					} else if c == '"' {
+						break
+					} else {
+						unescaped.WriteByte(c)
+					}
+				}
+				if inEscape {
+					unescaped.WriteByte('\\')
+				}
+				return unescaped.String()
+			}
+		}
 	}
 	return arguments
 }

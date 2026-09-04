@@ -3,6 +3,7 @@ package helps
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -556,7 +558,8 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 
 func TestUsageReporterTrackHTTPClientStartsTTFTBeforeRoundTrip(t *testing.T) {
 	delay := 40 * time.Millisecond
-	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
+	ctx := cliproxyexecutor.WithUpstreamAttemptTracker(context.Background())
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 	client := reporter.TrackHTTPClient(&http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			time.Sleep(delay)
@@ -570,7 +573,7 @@ func TestUsageReporterTrackHTTPClientStartsTTFTBeforeRoundTrip(t *testing.T) {
 		}),
 	})
 
-	req, errNewRequest := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.invalid/v1/chat/completions", strings.NewReader("{}"))
+	req, errNewRequest := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.invalid/v1/chat/completions", strings.NewReader("{}"))
 	if errNewRequest != nil {
 		t.Fatalf("NewRequestWithContext() error = %v", errNewRequest)
 	}
@@ -587,12 +590,16 @@ func TestUsageReporterTrackHTTPClientStartsTTFTBeforeRoundTrip(t *testing.T) {
 	if got := reporter.ttftDuration(); got < delay {
 		t.Fatalf("ttft = %v, want >= %v", got, delay)
 	}
+	if !cliproxyexecutor.UpstreamAttempted(ctx) {
+		t.Fatal("HTTP RoundTrip did not mark an upstream attempt")
+	}
 }
 
 func TestUsageReporterTrackHTTPClientRoundTripOnly_DoesNotTriggerOnBodyRead(t *testing.T) {
 	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5.6-luna", nil)
 	client := reporter.TrackHTTPClientRoundTripOnly(&http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			time.Sleep(10 * time.Millisecond)
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Status:     "200 OK",
@@ -782,6 +789,35 @@ func TestUsageReporterBuildRecordIncludesGenerateFalse(t *testing.T) {
 	}
 }
 
+func TestUsageReporterBuildRecordDefaultsStreamFalse(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.Stream {
+		t.Fatalf("stream = %v, want false", record.Stream)
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesStreamTrue(t *testing.T) {
+	ctx := usage.WithStream(context.Background(), true)
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if !record.Stream {
+		t.Fatalf("stream = %v, want true", record.Stream)
+	}
+}
+
+func TestUsageReporterSetStream(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
+	reporter.SetStream(true)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if !record.Stream {
+		t.Fatalf("stream = %v, want true", record.Stream)
+	}
+}
+
 func TestUsageReporterSetTranslatedReasoningEffortPreservesClientServiceTier(t *testing.T) {
 	ctx := usage.WithServiceTier(context.Background(), "auto")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
@@ -809,6 +845,50 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	}
 	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
 		t.Fatalf("expected non-zero cached token usage to be recorded")
+	}
+}
+
+type usageResponseBodyError struct {
+	status  int
+	message string
+	body    []byte
+}
+
+func (e usageResponseBodyError) Error() string {
+	return e.message
+}
+
+func (e usageResponseBodyError) StatusCode() int {
+	return e.status
+}
+
+func (e usageResponseBodyError) ResponseBody() []byte {
+	return e.body
+}
+
+func TestFailFromErrorsPrefersResponseBody(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{name: "original response body", body: []byte(" \n{\"error\":\"upstream rejected request\"}\r\n")},
+		{name: "empty response body"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errExecute := fmt.Errorf("execute failed: %w", usageResponseBodyError{
+				status:  http.StatusUnauthorized,
+				message: "generic upstream error",
+				body:    tc.body,
+			})
+			failure := failFromErrors(errExecute)
+			wantBody := errExecute.Error()
+			if len(tc.body) > 0 {
+				wantBody = string(tc.body)
+			}
+			if failure.StatusCode != http.StatusUnauthorized || failure.Body != wantBody {
+				t.Fatalf("failure = %#v, want status %d body %q", failure, http.StatusUnauthorized, wantBody)
+			}
+		})
 	}
 }
 

@@ -51,6 +51,25 @@ func streamChunkPayloadIncludesRequestBody(host PluginInterceptorHost) bool {
 	return true
 }
 
+// streamChunkHistoryPolicy reports whether payload stream-chunk interceptors
+// still require HistoryChunks (legacy schema_version < 5).
+type streamChunkHistoryPolicy interface {
+	StreamChunkPayloadIncludesHistory() bool
+}
+
+// streamChunkPayloadIncludesHistory returns true when at least one active
+// stream interceptor needs per-chunk history chunks. Evaluated per call so
+// mid-stream plugin reloads stay correct. Unknown hosts default to true.
+func streamChunkPayloadIncludesHistory(host PluginInterceptorHost) bool {
+	if host == nil {
+		return false
+	}
+	if policy, ok := host.(streamChunkHistoryPolicy); ok {
+		return policy.StreamChunkPayloadIncludesHistory()
+	}
+	return true
+}
+
 type requestInterceptorDetector interface {
 	HasRequestInterceptors() bool
 }

@@ -2915,6 +2915,70 @@ func TestServiceApplyConfigRuntimePreservesSelectorForUnchangedRouting(t *testin
 	}
 }
 
+func TestServiceApplyConfigRuntimeSessionAffinitySubagentsChangeRecreatesSelector(t *testing.T) {
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+
+	subagentsEnabled := true
+	initial := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                 "round-robin",
+		SessionAffinity:          true,
+		SessionAffinityTTL:       "1h",
+		SessionAffinitySubagents: &subagentsEnabled,
+	}})
+	if !service.applyConfigRuntime(context.Background(), initial, false) {
+		t.Fatal("initial config runtime apply failed")
+	}
+	initialSelector := manager.Selector()
+
+	subagentsDisabled := false
+	changed := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                 "round-robin",
+		SessionAffinity:          true,
+		SessionAffinityTTL:       "1h",
+		SessionAffinitySubagents: &subagentsDisabled,
+	}})
+	if !service.applyConfigRuntime(context.Background(), changed, false) {
+		t.Fatal("changed config runtime apply failed")
+	}
+	changedSelector := manager.Selector()
+	if changedSelector == initialSelector {
+		t.Fatal("changing SessionAffinitySubagents should recreate selector")
+	}
+}
+
+func TestServiceApplyConfigRuntimeSessionAffinityDisabledSubagentsChangeIsNoOp(t *testing.T) {
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+
+	subagentsEnabled := true
+	initial := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                 "round-robin",
+		SessionAffinity:          false,
+		SessionAffinityTTL:       "1h",
+		SessionAffinitySubagents: &subagentsEnabled,
+	}})
+	if !service.applyConfigRuntime(context.Background(), initial, false) {
+		t.Fatal("initial config runtime apply failed")
+	}
+	initialSelector := manager.Selector()
+
+	subagentsDisabled := false
+	changed := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                 "round-robin",
+		SessionAffinity:          false,
+		SessionAffinityTTL:       "1h",
+		SessionAffinitySubagents: &subagentsDisabled,
+	}})
+	if !service.applyConfigRuntime(context.Background(), changed, false) {
+		t.Fatal("changed config runtime apply failed")
+	}
+	changedSelector := manager.Selector()
+	if changedSelector != initialSelector {
+		t.Fatal("toggling SessionAffinitySubagents when SessionAffinity is false must be a no-op")
+	}
+}
+
 func TestServiceSerializesHomeAndWatcherConfigRuntimeApply(t *testing.T) {
 	baseCfg := &config.Config{}
 	baseCfg.Home.Enabled = true

@@ -28,11 +28,15 @@ func IsGeminiTokenEvent(payload []byte) bool {
 	}
 
 	// Terminal error fallback
-	if gjson.GetBytes(payload, "error.message").Exists() || gjson.GetBytes(payload, "error").Exists() {
+	if gjson.GetBytes(payload, "error.message").Exists() || gjson.GetBytes(payload, "error").Exists() || gjson.GetBytes(payload, "response.error").Exists() {
 		return true
 	}
 
-	candidates := gjson.GetBytes(payload, "candidates").Array()
+	candidatesNode := gjson.GetBytes(payload, "candidates")
+	if !candidatesNode.Exists() {
+		candidatesNode = gjson.GetBytes(payload, "response.candidates")
+	}
+	candidates := candidatesNode.Array()
 	if len(candidates) == 0 {
 		return false
 	}

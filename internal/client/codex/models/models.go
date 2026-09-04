@@ -251,6 +251,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	displayName := stringModelValue(model, "display_name")
 	description := stringModelValue(model, "description")
 	contextWindow := intModelValue(model, "context_length")
+	thinkingSupport := codexClientThinkingSupport(model)
 
 	if info != nil {
 		if info.DisplayName != "" {
@@ -259,7 +260,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		if info.Description != "" {
 			description = info.Description
 		}
-		if info.ContextLength > 0 {
+		if contextWindow <= 0 && info.ContextLength > 0 {
 			contextWindow = info.ContextLength
 		}
 		if info.Type == registry.OpenAIImageModelType {
@@ -269,8 +270,11 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		} else {
 			applyCodexClientInputModalitiesMetadata(entry, info.SupportedInputModalities)
 		}
-		applyCodexClientThinkingMetadata(entry, info.Thinking, clientVersion)
+		if thinkingSupport == nil {
+			thinkingSupport = info.Thinking
+		}
 	}
+	applyCodexClientThinkingMetadata(entry, thinkingSupport, clientVersion)
 
 	if maxContextWindow := intModelValue(model, "max_context_length"); maxContextWindow > 0 {
 		contextWindow = maxContextWindow
@@ -306,6 +310,28 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	if plans, ok := model["available_in_plans"]; ok {
 		entry["available_in_plans"] = cloneCodexClientModelValue(plans)
 	}
+}
+
+func codexClientThinkingSupport(model map[string]any) *registry.ThinkingSupport {
+	raw, ok := model["thinking"]
+	if !ok || raw == nil {
+		return nil
+	}
+	switch thinking := raw.(type) {
+	case *registry.ThinkingSupport:
+		return thinking
+	case registry.ThinkingSupport:
+		return &thinking
+	}
+	data, errMarshal := json.Marshal(raw)
+	if errMarshal != nil {
+		return nil
+	}
+	var thinking registry.ThinkingSupport
+	if errUnmarshal := json.Unmarshal(data, &thinking); errUnmarshal != nil {
+		return nil
+	}
+	return &thinking
 }
 
 func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
@@ -348,7 +374,7 @@ func applyCodexClientInputModalitiesMetadata(entry map[string]any, modalities []
 }
 
 func applyCodexClientThinkingMetadata(entry map[string]any, thinking *registry.ThinkingSupport, clientVersion string) {
-	if thinking == nil || len(thinking.Levels) == 0 {
+	if thinking == nil {
 		return
 	}
 
@@ -372,6 +398,8 @@ func applyCodexClientThinkingMetadata(entry map[string]any, thinking *registry.T
 		})
 	}
 	if len(levels) == 0 {
+		delete(entry, "supported_reasoning_levels")
+		delete(entry, "default_reasoning_level")
 		return
 	}
 	if defaultLevel == "" {
