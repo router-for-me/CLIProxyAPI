@@ -1418,6 +1418,16 @@ func resultErrorFromError(err error) *Error {
 		resultErr.HTTPStatus = statusCodeFromError(err)
 	}
 	switch {
+	case isOutOfExtraUsageError(err):
+		// Fast Claude responses wrap the upstream JSON body behind ResponseBody
+		// and otherwise present as request-scoped. Preserve that body so MarkResult
+		// can recognize the credential quota and avoid tagging it request_scoped.
+		if body := extractErrorBody(err); body != "" {
+			resultErr.Message = body
+		}
+		if resultErr.Code == requestScopedErrorCode {
+			resultErr.Code = ""
+		}
 	case isRequestScopedError(err) || isRequestInvalidError(err):
 		// Prefer true request-scoped faults (including Claude OAuth cancellation)
 		// over the broader connection-lifecycle classification.
@@ -1983,6 +1993,9 @@ func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if isOutOfExtraUsageError(err) {
+		return false
+	}
 	if isRequestScopedError(err) {
 		return true
 	}
@@ -1993,9 +2006,6 @@ func isRequestInvalidError(err error) bool {
 		return false
 	}
 	if isModelSupportError(err) {
-		return false
-	}
-	if isOutOfExtraUsageError(err) {
 		return false
 	}
 	status := statusCodeFromError(err)

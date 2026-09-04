@@ -140,7 +140,7 @@ func IsOutOfExtraUsage(status int, err error) bool {
 	if status != http.StatusBadRequest {
 		return false
 	}
-	return isOutOfExtraUsageBody(err.Error())
+	return isOutOfExtraUsageBody(errorBody(err))
 }
 
 func isOutOfExtraUsageBody(body string) bool {
@@ -152,7 +152,7 @@ func isOutOfExtraUsageBody(body string) bool {
 		return true
 	}
 	message := body
-	errType := ""
+	hasInvalidRequestType := false
 	if json.Valid([]byte(body)) {
 		for _, path := range []string{"error.message", "message", "response.error.message", "body.error.message"} {
 			if value := strings.TrimSpace(gjson.Get(body, path).String()); value != "" {
@@ -161,8 +161,8 @@ func isOutOfExtraUsageBody(body string) bool {
 			}
 		}
 		for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
-			if value := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String())); value != "" {
-				errType = value
+			if value := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String())); value == "invalid_request_error" {
+				hasInvalidRequestType = true
 				break
 			}
 		}
@@ -174,12 +174,28 @@ func isOutOfExtraUsageBody(body string) bool {
 		!strings.Contains(strings.ToLower(body), outOfExtraUsageNeedle) {
 		return false
 	}
-	if errType == "invalid_request_error" {
+	if hasInvalidRequestType {
 		return true
 	}
 	// Non-JSON wrappers still need the Anthropic type token so a random 400
 	// that merely mentions extra usage is not treated as quota.
-	return errType == "" && strings.Contains(strings.ToLower(body), "invalid_request_error")
+	return !json.Valid([]byte(body)) && strings.Contains(strings.ToLower(body), "invalid_request_error")
+}
+
+func errorBody(err error) string {
+	if err == nil {
+		return ""
+	}
+	type responseBodyProvider interface {
+		ResponseBody() []byte
+	}
+	var bodyProvider responseBodyProvider
+	if errors.As(err, &bodyProvider) && bodyProvider != nil {
+		if body := bodyProvider.ResponseBody(); len(body) > 0 {
+			return string(body)
+		}
+	}
+	return err.Error()
 }
 
 // IsItemNotPersisted matches the upstream 404 raised when a request references a
@@ -201,7 +217,7 @@ func hasAuthenticationErrorBody(err error) bool {
 	if err == nil {
 		return false
 	}
-	body := strings.TrimSpace(err.Error())
+	body := strings.TrimSpace(errorBody(err))
 	if body == "" || !json.Valid([]byte(body)) {
 		return false
 	}
@@ -217,7 +233,7 @@ func hasRequestFaultBody(err error) bool {
 	if err == nil {
 		return false
 	}
-	body := strings.TrimSpace(err.Error())
+	body := strings.TrimSpace(errorBody(err))
 	if body == "" || !json.Valid([]byte(body)) {
 		return false
 	}

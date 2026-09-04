@@ -12,6 +12,16 @@ import (
 
 const claudeExtraUsageBody = `{"type":"error","error":{"type":"invalid_request_error","message":"You're out of extra usage. Add more at claude.ai/settings/usage and keep going."}}`
 
+type requestScopedResponseBodyError struct {
+	status int
+	body   string
+}
+
+func (e requestScopedResponseBodyError) Error() string         { return "claude Fast upstream request failed" }
+func (e requestScopedResponseBodyError) StatusCode() int       { return e.status }
+func (e requestScopedResponseBodyError) ResponseBody() []byte  { return []byte(e.body) }
+func (e requestScopedResponseBodyError) IsRequestScoped() bool { return true }
+
 func TestIsRequestInvalidError_ClaudeExtraUsageIsNotRequestFault(t *testing.T) {
 	extraUsageErr := &Error{HTTPStatus: http.StatusBadRequest, Message: claudeExtraUsageBody}
 	if isRequestInvalidError(extraUsageErr) {
@@ -52,6 +62,30 @@ func TestIsRequestInvalidError_ClaudeExtraUsageIsNotRequestFault(t *testing.T) {
 	}
 }
 
+func TestResultErrorFromError_ClaudeFastExtraUsagePreservesQuotaBody(t *testing.T) {
+	err := requestScopedResponseBodyError{
+		status: http.StatusBadRequest,
+		body:   claudeExtraUsageBody,
+	}
+	if isRequestInvalidError(err) {
+		t.Fatal("request-scoped wrapper must not mask an extra-usage quota response")
+	}
+
+	got := resultErrorFromError(err)
+	if got == nil {
+		t.Fatal("resultErrorFromError() = nil")
+	}
+	if got.Code == requestScopedErrorCode {
+		t.Fatalf("result code = %q, must not be request-scoped", got.Code)
+	}
+	if got.Message != claudeExtraUsageBody {
+		t.Fatalf("result message = %q, want upstream body", got.Message)
+	}
+	if !isOutOfExtraUsageResultError(got) {
+		t.Fatal("preserved result error must remain classifiable as extra usage")
+	}
+}
+
 func TestManager_Execute_ClaudeExtraUsage400CoolsAndRotates(t *testing.T) {
 	previous := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
@@ -61,9 +95,9 @@ func TestManager_Execute_ClaudeExtraUsage400CoolsAndRotates(t *testing.T) {
 	executor := &authFallbackExecutor{
 		id: "claude",
 		executeErrors: map[string]error{
-			"aa-extra-usage-auth": &Error{
-				HTTPStatus: http.StatusBadRequest,
-				Message:    claudeExtraUsageBody,
+			"aa-extra-usage-auth": requestScopedResponseBodyError{
+				status: http.StatusBadRequest,
+				body:   claudeExtraUsageBody,
 			},
 		},
 	}

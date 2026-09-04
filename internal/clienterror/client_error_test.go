@@ -17,6 +17,15 @@ type statusError struct {
 func (e statusError) Error() string   { return e.body }
 func (e statusError) StatusCode() int { return e.status }
 
+type responseBodyStatusError struct {
+	status int
+	body   string
+}
+
+func (e responseBodyStatusError) Error() string        { return "upstream request failed" }
+func (e responseBodyStatusError) StatusCode() int      { return e.status }
+func (e responseBodyStatusError) ResponseBody() []byte { return []byte(e.body) }
+
 func TestHTTPStatusFromError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -290,6 +299,25 @@ func TestIsOutOfExtraUsage(t *testing.T) {
 			name: "status from error",
 			err:  statusError{status: http.StatusBadRequest, body: extraUsageJSON},
 			want: true,
+		},
+		{
+			name: "response body provider",
+			err: responseBodyStatusError{
+				status: http.StatusBadRequest,
+				body:   extraUsageJSON,
+			},
+			want: true,
+		},
+		{
+			name:   "nested body type is not masked by envelope type",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"type":"error","body":{"error":{"type":"invalid_request_error","message":"You're out of extra usage"}}}`),
+			want:   true,
+		},
+		{
+			name:   "nested body with unrelated type is not extra usage",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"type":"error","body":{"error":{"type":"overloaded_error","message":"You're out of extra usage"}}}`),
 		},
 		{
 			name:   "generic invalid request is not extra usage",
