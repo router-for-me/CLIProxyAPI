@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
@@ -519,13 +520,22 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 	if apiKey == "" && baseURL == "" {
 		return nil
 	}
+	// Header names are case-insensitive; header values distinguish credentials.
+	formatHeaderIdentity := func(headers map[string]string) string {
+		fields := make([]string, 0, len(headers))
+		for key, value := range headers {
+			fields = append(fields, http.CanonicalHeaderKey(strings.TrimSpace(key))+"\x00"+strings.TrimSpace(value))
+		}
+		sort.Strings(fields)
+		return strings.Join(fields, "\x00")
+	}
 	authHeaders := make(map[string]string)
 	for key, value := range auth.Attributes {
 		if strings.HasPrefix(key, "header:") {
 			authHeaders[strings.TrimPrefix(key, "header:")] = strings.TrimSpace(value)
 		}
 	}
-	formattedAuthHeaders := config.FormatSortedHeaders(authHeaders)
+	formattedAuthHeaders := formatHeaderIdentity(authHeaders)
 	matchesCredentials := func(entry *config.ClaudeKey) bool {
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
@@ -538,7 +548,7 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 		return strings.EqualFold(cfgBase, baseURL)
 	}
 	matchesIdentity := func(entry *config.ClaudeKey) bool {
-		return matchesCredentials(entry) && strings.EqualFold(strings.TrimSpace(entry.Prefix), strings.TrimSpace(auth.Prefix)) && strings.EqualFold(strings.TrimSpace(entry.ProxyURL), strings.TrimSpace(auth.ProxyURL)) && config.FormatSortedHeaders(entry.Headers) == formattedAuthHeaders
+		return matchesCredentials(entry) && strings.EqualFold(strings.TrimSpace(entry.Prefix), strings.TrimSpace(auth.Prefix)) && strings.EqualFold(strings.TrimSpace(entry.ProxyURL), strings.TrimSpace(auth.ProxyURL)) && formatHeaderIdentity(entry.Headers) == formattedAuthHeaders
 	}
 
 	if auth.AuthSourceKind() == cliproxyauth.AuthSourceConfig && auth.Attributes != nil {
