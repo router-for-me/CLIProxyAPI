@@ -130,6 +130,9 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	if helps.SyntheticCompactionSupported(req.Payload, opts) {
+		return helps.ExecuteSyntheticCompaction(ctx, e, auth, req, opts)
+	}
 	if shouldExecuteNativeInteractions(auth, opts) {
 		return e.executeInteractions(ctx, auth, req, opts)
 	}
@@ -248,6 +251,9 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	}
+	if helps.SyntheticCompactionSupported(req.Payload, opts) {
+		return helps.ExecuteSyntheticCompactionStream(ctx, e, auth, req, opts)
 	}
 	if shouldExecuteNativeInteractions(auth, opts) {
 		return e.executeInteractionsStream(ctx, auth, req, opts)
