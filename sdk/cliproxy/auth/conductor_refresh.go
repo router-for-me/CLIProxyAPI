@@ -35,6 +35,16 @@ const (
 	quotaBackoffMax           = 30 * time.Minute
 	minQuotaCooldownFloor     = 10 * time.Second
 	transientErrorCooldown    = time.Minute
+	// notFoundCooldown covers raw HTTP 404s that carry no model-support
+	// classification. They are frequently transient on Codex routes (streamed
+	// response.failed events map to 404), so a single occurrence only cools the
+	// credential for minutes.
+	notFoundCooldown = 10 * time.Minute
+	// modelSupportCooldown is the long cooldown for demonstrably persistent
+	// model-availability failures: structured model-not-found errors and
+	// model-support messages that name this credential as unable to serve the
+	// model.
+	modelSupportCooldown = 12 * time.Hour
 )
 
 // StartAutoRefresh launches a background loop that evaluates auth freshness
