@@ -148,20 +148,44 @@ func computeFingerprint(messageText, version string) string {
 
 // generateBillingHeader creates the x-anthropic-billing-header text block that
 // Claude Code prepends to its system prompt. cch is present only on signed paths.
-func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, workload string) string {
+func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, workload string, isSubagent bool, prevReq, promptID string) string {
 	if entrypoint == "" {
 		entrypoint = "cli"
 	}
 	buildHash := computeFingerprint(messageText, version)
-	workloadPart := ""
-	if workload != "" {
-		workloadPart = fmt.Sprintf(" cc_workload=%s;", workload)
-	}
+	var b strings.Builder
+	b.WriteString("x-anthropic-billing-header: cc_version=")
+	b.WriteString(version)
+	b.WriteByte('.')
+	b.WriteString(buildHash)
+	b.WriteString("; cc_entrypoint=")
+	b.WriteString(entrypoint)
+	b.WriteByte(';')
 
 	if cchSigning {
-		return fmt.Sprintf("x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=00000;%s", version, buildHash, entrypoint, workloadPart)
+		b.WriteString(" cch=00000;")
 	}
-	return fmt.Sprintf("x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s;%s", version, buildHash, entrypoint, workloadPart)
+	if workload != "" {
+		b.WriteString(" cc_workload=")
+		b.WriteString(workload)
+		b.WriteByte(';')
+	}
+	if isSubagent {
+		b.WriteString(" cc_is_subagent=true;")
+	}
+	if cchSigning {
+		if prevReq != "" {
+			b.WriteString(" cc_prev_req=")
+			b.WriteString(prevReq)
+			b.WriteByte(';')
+		}
+		if promptID != "" {
+			b.WriteString(" cc_prompt_id=")
+			b.WriteString(promptID)
+			b.WriteByte(';')
+		}
+	}
+	return b.String()
 }
 
 func claudeBillingFingerprintMessageText(payload []byte) string {
@@ -191,12 +215,28 @@ func claudeBillingFingerprintMessageText(payload []byte) string {
 }
 
 func claudeCCHFallbackBillingHeader(ctx context.Context, cfg *config.Config, payload []byte, entrypoint string) string {
+	isProbeOrHelper := helps.IsClaudeProbeOrHelperRequest(payload)
+	prevReq, promptID := helps.ExtractClaudeBillingTags(payload)
+	if !isProbeOrHelper {
+		continuityCtx := helps.ClaudeContinuityContextFromContext(ctx)
+		if prevReq == "" && continuityCtx != nil {
+			prevReq = continuityCtx.PreviousRequestID
+		}
+		if promptID == "" && continuityCtx != nil {
+			promptID = continuityCtx.PromptID
+		}
+	}
+	incomingHeaders := resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
+	isSubagent := helps.IsClaudeSubagentRequest(incomingHeaders, payload)
 	return generateBillingHeader(
 		true,
 		helps.DefaultClaudeVersion(cfg),
 		claudeBillingFingerprintMessageText(payload),
 		entrypoint,
 		getWorkloadFromContext(ctx),
+		isSubagent,
+		prevReq,
+		promptID,
 	)
 }
 
@@ -212,14 +252,22 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 // Claude models give it operator-level authority without changing the cached
 // top-level prefix.
 func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cchSigning bool, version, entrypoint, workload string) []byte {
-	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, time.Now())
+	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, time.Now(), false, "", "")
 }
 
-func checkSystemInstructionsWithSigningModeAt(payload []byte, strictMode bool, cchSigning bool, version, entrypoint, workload string, now time.Time) []byte {
+func checkSystemInstructionsWithSigningModeAt(
+	payload []byte,
+	strictMode bool,
+	cchSigning bool,
+	version, entrypoint, workload string,
+	now time.Time,
+	isSubagent bool,
+	prevReq, promptID string,
+) []byte {
 	system := gjson.GetBytes(payload, "system")
 	messageText := claudeBillingFingerprintMessageText(payload)
 
-	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload)
+	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload, isSubagent, prevReq, promptID)
 	billingBlock := buildTextBlock(billingText, nil)
 	agentBlock := buildTextBlock(claudeCodeCLIIdentity, &claudeCodeCacheControl)
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+billingBlock+","+agentBlock+"]"))
@@ -1026,7 +1074,59 @@ func applyCloaking(
 
 	billingVersion := helps.DefaultClaudeVersion(cfg)
 	workload := getWorkloadFromContext(ctx)
-	payload = checkSystemInstructionsWithSigningModeAt(payload, settings.strictMode, cchSigning, billingVersion, "cli", workload, claudeCodeCurrentTime(cfg, auth))
+
+	isSubagent := false
+	prevReq := ""
+	promptID := ""
+	if !helps.IsClaudeProbeOrHelperRequest(payload) {
+		incomingHeaders := resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
+		isSubagent = helps.IsClaudeSubagentRequest(incomingHeaders, payload)
+		existingPrevReq, existingPromptID := helps.ExtractClaudeBillingTags(payload)
+
+		sessionID := helps.ClaudeSessionIDFromContext(ctx)
+		if sessionID == "" && auth != nil {
+			sessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, payload, payload, confirmedClaudeCode)
+		}
+
+		if sessionID != "" && auth != nil {
+			credIdentity := claudeDiagnosticsCredentialIdentity(auth)
+			isNewTurn := helps.IsClaudeNewPromptTurn(payload)
+			continuityKey, seq, prevMsgID, storedPrevReq, storedPromptID := helps.BeginClaudeContinuity(credIdentity, sessionID, isNewTurn, existingPromptID)
+
+			if existingPromptID != "" {
+				promptID = existingPromptID
+			} else {
+				promptID = storedPromptID
+			}
+			if storedPrevReq != "" {
+				prevReq = storedPrevReq
+			} else {
+				prevReq = existingPrevReq
+			}
+
+			if continuityCtx := helps.ClaudeContinuityContextFromContext(ctx); continuityCtx != nil {
+				continuityCtx.Key = continuityKey
+				continuityCtx.Sequence = seq
+				continuityCtx.PreviousMessageID = prevMsgID
+				continuityCtx.PreviousRequestID = prevReq
+				continuityCtx.PromptID = promptID
+				continuityCtx.Initialized = true
+			}
+		}
+	}
+
+	payload = checkSystemInstructionsWithSigningModeAt(
+		payload,
+		settings.strictMode,
+		cchSigning,
+		billingVersion,
+		"cli",
+		workload,
+		claudeCodeCurrentTime(cfg, auth),
+		isSubagent,
+		prevReq,
+		promptID,
+	)
 
 	// Claude-Code-CLI fingerprint identity (real OAuth or fingerprint-profile=claude-code-cli)
 	// is applied later through the shared ApplyClaudeCredentialMetadata path.

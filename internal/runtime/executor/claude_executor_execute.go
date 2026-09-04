@@ -62,6 +62,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if fp.ProfileClaudeCodeCLI {
 		claudeSessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, originalPayload, req.Payload, confirmedClaudeCode, opts.Metadata, req.Metadata)
 	}
+
+	continuityCtx := &helps.ClaudeContinuityContext{}
+	ctx = helps.WithClaudeContinuityContext(ctx, continuityCtx)
+	ctx = helps.WithIncomingHeaders(ctx, incomingHeaders)
+	if claudeSessionID != "" {
+		ctx = helps.WithClaudeSessionID(ctx, claudeSessionID)
+	}
+
 	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, upstreamStream, helps.APIKeyModelIsCompat(req))
 	body := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, upstreamStream, helps.APIKeyModelIsCompat(req))
 	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
@@ -94,14 +102,26 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Only the Messages endpoint on Anthropic itself was captured; count_tokens
 	// keeps its own shape and other gateways never see this field.
 	diagnosticsState := claudeDiagnosticsRequestState{}
+	isProbeOrHelper := helps.IsClaudeProbeOrHelperRequest(body)
+	if continuityCtx.Initialized {
+		diagnosticsState = claudeDiagnosticsRequestState{
+			key:      continuityCtx.Key,
+			sequence: continuityCtx.Sequence,
+			promptID: continuityCtx.PromptID,
+		}
+	}
 	contextManagementState := claudeCodeContextManagementState{
 		eligible:    cloaked && isAnthropicUpstreamBase(baseURL),
 		callerOwned: gjson.GetBytes(body, "context_management").Exists(),
 	}
 	if contextManagementState.eligible {
 		body, contextManagementState.automaticallyInjected = injectClaudeCodeContextManagement(body)
-		if fp.InjectDiagnostics {
-			body, diagnosticsState = injectClaudeDiagnostics(body, auth, claudeSessionID)
+		if fp.InjectDiagnostics && !isProbeOrHelper {
+			if continuityCtx.Initialized {
+				body, diagnosticsState = injectClaudeDiagnosticsWithState(body, continuityCtx.Key, continuityCtx.Sequence, continuityCtx.PreviousMessageID, continuityCtx.PromptID)
+			} else {
+				body, diagnosticsState = injectClaudeDiagnostics(body, auth, claudeSessionID)
+			}
 		}
 	}
 
@@ -291,7 +311,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			helps.RecordAPIResponseError(ctx, e.cfg, errValidate)
 			return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errValidate)
 		}
-		commitClaudeDiagnostics(diagnosticsState, claudeMessageIDFromSSE(data))
+		if msgID := claudeMessageIDFromSSE(data); msgID != "" {
+			commitClaudeContinuity(diagnosticsState, msgID, helps.HeaderValueCaseInsensitive(httpResp.Header, "request-id"))
+		}
 		lines := bytes.Split(data, []byte("\n"))
 		for i, line := range lines {
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
@@ -307,7 +329,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 		data = bytes.Join(lines, []byte("\n"))
 	} else {
-		commitClaudeDiagnostics(diagnosticsState, claudeMessageIDFromResponse(data))
+		commitClaudeContinuity(diagnosticsState, claudeMessageIDFromResponse(data), helps.HeaderValueCaseInsensitive(httpResp.Header, "request-id"))
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 		var errRestore error
 		data, errRestore = restoreClaudeOAuthToolNamesFromResponse(data, oauthToolNamesReverseMap)
