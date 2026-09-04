@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -274,10 +273,11 @@ func (o *ClaudeAuth) fetchOAuthControlPlaneJSON(ctx context.Context, endpoint, a
 		}
 	}()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		// The status is the answer; the error body is never exposed, so it
-		// is drained (bounded, for connection reuse) rather than decoded —
-		// an oversized or oddly encoded error body must not hide the status.
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxOAuthControlPlaneBodyBytes))
+		// The status is the answer and the error body is never exposed, so
+		// it is not read at all: the request goes out with Connection:
+		// close, so there is no connection to keep clean, and a stalled or
+		// trickling error body must not hold one credential's fan-out slot.
+		// The deferred Close discards whatever is in flight.
 		return nil, &OAuthStatusError{Label: label, StatusCode: resp.StatusCode}
 	}
 	body, errRead := readClaudeOAuthResponseBodyLimited(resp, maxOAuthControlPlaneBodyBytes)
