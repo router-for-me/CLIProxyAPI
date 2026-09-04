@@ -3248,6 +3248,38 @@
       ]
     },
     {
+      "id": "gpt-daybreak-blue-latest",
+      "object": "model",
+      "created": 1786320000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "Daybreak Blue",
+      "version": "gpt-daybreak-blue-latest",
+      "description": "Latest frontier agentic coding model for broad defensive cybersecurity work.",
+      "context_length": 872000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+          "ultra"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
       "id": "gpt-5.6-terra",
       "object": "model",
       "created": 1783616400,
