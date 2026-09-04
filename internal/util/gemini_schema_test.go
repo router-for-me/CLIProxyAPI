@@ -2777,3 +2777,201 @@ func TestCleanJSONSchema_KeepsPropertyNamedExclusiveMinimum(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanJSONSchema_OversizedNumericBoundsDoNotExpand(t *testing.T) {
+	const oversizedExponent = "1e1000000000"
+	input := `{
+		"type": "object",
+		"properties": {
+			"integerBound": {
+				"type": "integer",
+				"exclusiveMinimum": ` + oversizedExponent + `
+			},
+			"numberBound": {
+				"type": "number",
+				"minimum": 0,
+				"exclusiveMinimum": ` + oversizedExponent + `
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+	parsed := gjson.Parse(result)
+	integerBound := parsed.Get("properties.integerBound")
+	if integerBound.Get("exclusiveMinimum").Exists() || integerBound.Get("minimum").Exists() {
+		t.Fatalf("oversized integer bound should be retained only as a hint: %s", result)
+	}
+	if !strings.Contains(integerBound.Get("description").String(), "exclusiveMinimum: "+oversizedExponent) {
+		t.Fatalf("oversized integer bound hint missing: %s", result)
+	}
+
+	numberBound := parsed.Get("properties.numberBound")
+	if got := numberBound.Get("minimum").Raw; got != "0" {
+		t.Fatalf("oversized number bound replaced existing minimum with %s: %s", got, result)
+	}
+	if !strings.Contains(numberBound.Get("description").String(), "exclusiveMinimum: "+oversizedExponent) {
+		t.Fatalf("oversized number bound hint missing: %s", result)
+	}
+}
+
+func TestParseSchemaNumericBoundCapsWork(t *testing.T) {
+	tests := []string{
+		"1e1000000000",
+		"1e-1000000000",
+		strings.Repeat("9", maxSchemaBoundLiteralLength+1),
+	}
+	for _, raw := range tests {
+		if _, ok := parseSchemaNumericBound(raw); ok {
+			t.Errorf("parseSchemaNumericBound(%q) unexpectedly succeeded", raw)
+		}
+	}
+
+	reasonableLargeInteger := strings.Repeat("9", 512)
+	if projected, ok := projectIntegerExclusiveBound(reasonableLargeInteger, false); !ok || len(projected) != 513 || projected[0] != '1' {
+		t.Fatalf("reasonable large integer was not projected exactly: ok=%v result=%q", ok, projected)
+	}
+}
+
+func TestCleanJSONSchema_NullableBooleanConstraintsPreserveType(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"choice": {
+				"type": ["boolean", "null"],
+				"enum": [true, false, null]
+			},
+			"fixed": {
+				"type": ["null", "boolean"],
+				"const": null
+			},
+			"inferred": {
+				"enum": [true, null]
+			}
+		},
+		"required": ["choice", "fixed", "inferred"]
+	}`
+
+	for name, clean := range schemaCleaners() {
+		result := clean(input)
+		parsed := gjson.Parse(result)
+		for _, field := range []string{"choice", "fixed", "inferred"} {
+			schema := parsed.Get("properties." + field)
+			if got := schema.Get("type").String(); got != "boolean" {
+				t.Errorf("%s: %s type = %q, want boolean: %s", name, field, got, result)
+			}
+			if schema.Get("enum").Exists() || schema.Get("const").Exists() {
+				t.Errorf("%s: unsupported constraint survived on %s: %s", name, field, result)
+			}
+			if !strings.Contains(schema.Get("description").String(), "nullable") {
+				t.Errorf("%s: nullable hint missing on %s: %s", name, field, result)
+			}
+			if name != "gemini" && !schema.Get("nullable").Bool() {
+				t.Errorf("%s: native nullable marker missing on %s: %s", name, field, result)
+			}
+		}
+
+		choiceDescription := parsed.Get("properties.choice.description").String()
+		if !strings.Contains(choiceDescription, "Allowed: true, false, null") {
+			t.Errorf("%s: nullable boolean enum hint malformed: %s", name, result)
+		}
+		fixedDescription := parsed.Get("properties.fixed.description").String()
+		if !strings.Contains(fixedDescription, "Allowed: null") {
+			t.Errorf("%s: nullable boolean const hint malformed: %s", name, result)
+		}
+
+		required := getStrings(result, "required")
+		if name == "gemini" {
+			if len(required) != 0 {
+				t.Errorf("%s: nullable fields remained required: %s", name, result)
+			}
+		} else if !reflect.DeepEqual(required, []string{"choice", "fixed", "inferred"}) {
+			t.Errorf("%s: natively nullable required fields changed: %s", name, result)
+		}
+	}
+}
+
+func TestCleanJSONSchema_AllOfUsesStrictestBounds(t *testing.T) {
+	input := `{
+		"type": "integer",
+		"minimum": -100,
+		"maximum": 100,
+		"allOf": [
+			{"type": "integer", "exclusiveMinimum": 0, "exclusiveMaximum": 20},
+			{"minimum": 10, "maximum": 15},
+			{"minimum": 5, "maximum": 18}
+		]
+	}`
+
+	for name, clean := range schemaCleaners() {
+		result := clean(input)
+		parsed := gjson.Parse(result)
+		if parsed.Get("allOf").Exists() || parsed.Get("exclusiveMinimum").Exists() || parsed.Get("exclusiveMaximum").Exists() {
+			t.Errorf("%s: allOf or exclusive bounds survived: %s", name, result)
+		}
+		if name == "gemini" {
+			if got := parsed.Get("minimum").Raw; got != "10" {
+				t.Errorf("%s: minimum = %s, want 10: %s", name, got, result)
+			}
+			if got := parsed.Get("maximum").Raw; got != "15" {
+				t.Errorf("%s: maximum = %s, want 15: %s", name, got, result)
+			}
+			continue
+		}
+		if parsed.Get("minimum").Exists() || parsed.Get("maximum").Exists() {
+			t.Errorf("%s: native bounds should be replaced by hints: %s", name, result)
+		}
+		description := parsed.Get("description").String()
+		if !strings.Contains(description, "minimum: 10") || !strings.Contains(description, "maximum: 15") {
+			t.Errorf("%s: strictest bound hints missing: %s", name, result)
+		}
+		if description != "minimum: 10 (maximum: 15)" {
+			t.Errorf("%s: weaker branch bound leaked into hints: %s", name, result)
+		}
+	}
+}
+
+func TestCleanJSONSchema_AllOfUsesStrictestNestedBounds(t *testing.T) {
+	input := `{
+		"type": "object",
+		"allOf": [
+			{"properties": {"count": {"type": "integer", "exclusiveMinimum": 0, "maximum": 100}}},
+			{"properties": {"count": {"minimum": 10, "exclusiveMaximum": 20}}}
+		]
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+	count := gjson.Get(result, "properties.count")
+	if got := count.Get("minimum").Raw; got != "10" {
+		t.Fatalf("nested minimum = %s, want 10: %s", got, result)
+	}
+	if got := count.Get("maximum").Raw; got != "19" {
+		t.Fatalf("nested maximum = %s, want 19: %s", got, result)
+	}
+}
+
+func TestCleanJSONSchema_AllOfPreservesContinuousExclusiveHints(t *testing.T) {
+	input := `{
+		"allOf": [
+			{"type": "number", "exclusiveMinimum": 0},
+			{"type": "number", "exclusiveMaximum": 10}
+		]
+	}`
+
+	for name, clean := range schemaCleaners() {
+		result := clean(input)
+		parsed := gjson.Parse(result)
+		description := parsed.Get("description").String()
+		if !strings.Contains(description, "exclusiveMinimum: 0") || !strings.Contains(description, "exclusiveMaximum: 10") {
+			t.Errorf("%s: exact continuous exclusivity hint lost: %s", name, result)
+		}
+		if name == "gemini" {
+			if parsed.Get("minimum").Raw != "0" || parsed.Get("maximum").Raw != "10" {
+				t.Errorf("%s: closest continuous bounds missing: %s", name, result)
+			}
+			continue
+		}
+		if parsed.Get("minimum").Exists() || parsed.Get("maximum").Exists() {
+			t.Errorf("%s: continuous bounds should be retained only as hints: %s", name, result)
+		}
+	}
+}

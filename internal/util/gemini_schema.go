@@ -113,7 +113,6 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	if !options.preserveAdditionalPropertiesFalse {
 		jsonStr = addAdditionalPropertiesHints(jsonStr)
 	}
-	jsonStr = moveConstraintsToDescription(jsonStr, options)
 	if options.antigravitySemantics {
 		jsonStr = moveNotToDescription(jsonStr)
 	}
@@ -121,6 +120,9 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	// Phase 2: Flatten complex structures
 	jsonStr = mergeConditionals(jsonStr)
 	jsonStr = mergeAllOf(jsonStr)
+	// Preserve only the effective constraint after intersecting allOf branches. Moving constraints
+	// before allOf flattening can leave a weaker branch's first-wins description hint behind.
+	jsonStr = moveConstraintsToDescription(jsonStr, options)
 	if options.flattenUnions {
 		jsonStr = flattenAnyOfOneOf(jsonStr)
 	}
@@ -772,6 +774,7 @@ func convertRefsToHints(jsonStr string, preserveSiblings bool) string {
 // are preserved.
 func projectExclusiveBounds(jsonStr string) string {
 	pathsByField := findPathsByFields(jsonStr, []string{"exclusiveMinimum", "exclusiveMaximum"})
+	integerSchemaPaths := findIntegerSchemaPaths(jsonStr)
 	for _, key := range []string{"exclusiveMinimum", "exclusiveMaximum"} {
 		inclusive := "minimum"
 		exclusiveMaximum := key == "exclusiveMaximum"
@@ -790,6 +793,9 @@ func projectExclusiveBounds(jsonStr string) string {
 
 			incPath := joinPath(parentPath, inclusive)
 			integerSchema := effectiveSchemaType(gjson.Get(jsonStr, joinPath(parentPath, "type"))) == "integer"
+			if !integerSchema {
+				_, integerSchema = integerSchemaPaths[logicalAllOfSchemaPath(parentPath)]
+			}
 			switch {
 			case val.Type == gjson.Number && integerSchema:
 				if projected, ok := projectIntegerExclusiveBound(val.Raw, exclusiveMaximum); ok {
@@ -820,6 +826,45 @@ func projectExclusiveBounds(jsonStr string) string {
 	return jsonStr
 }
 
+// findIntegerSchemaPaths records types by their logical location after allOf flattening. An allOf
+// branch inherits the intersection's integer domain even when its own bound-only branch omits type.
+func findIntegerSchemaPaths(jsonStr string) map[string]struct{} {
+	paths := make(map[string]struct{})
+	for _, typePath := range findPaths(jsonStr, "type") {
+		if effectiveSchemaType(gjson.Get(jsonStr, typePath)) != "integer" {
+			continue
+		}
+		parentPath := trimSuffix(typePath, ".type")
+		paths[logicalAllOfSchemaPath(parentPath)] = struct{}{}
+	}
+	return paths
+}
+
+func logicalAllOfSchemaPath(path string) string {
+	parts := splitGJSONPath(path)
+	logical := make([]string, 0, len(parts))
+	for index := 0; index < len(parts); index++ {
+		if parts[index] == "allOf" && index+1 < len(parts) && isDecimalPathIndex(parts[index+1]) {
+			index++
+			continue
+		}
+		logical = append(logical, parts[index])
+	}
+	return strings.Join(logical, ".")
+}
+
+func isDecimalPathIndex(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // effectiveSchemaType mirrors flattenTypeArrays: for a type union, the first
 // non-null member is the scalar type that survives cleaning.
 func effectiveSchemaType(schemaType gjson.Result) string {
@@ -834,8 +879,50 @@ func effectiveSchemaType(schemaType gjson.Result) string {
 	return ""
 }
 
+const (
+	// Bounds larger than these limits cannot be represented usefully by the upstream schema APIs.
+	// Keeping both the literal and exponent bounded also prevents big.Rat from expanding a compact
+	// value such as 1e1000000000 into an enormous integer.
+	maxSchemaBoundLiteralLength = 4096
+	maxSchemaBoundExponent      = 4096
+)
+
+func parseSchemaNumericBound(raw string) (*big.Rat, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(raw) > maxSchemaBoundLiteralLength {
+		return nil, false
+	}
+
+	if exponentIndex := strings.IndexAny(raw, "eE"); exponentIndex >= 0 {
+		exponent := raw[exponentIndex+1:]
+		if exponent == "" {
+			return nil, false
+		}
+		if exponent[0] == '+' || exponent[0] == '-' {
+			exponent = exponent[1:]
+		}
+		if exponent == "" {
+			return nil, false
+		}
+		magnitude := 0
+		for i := 0; i < len(exponent); i++ {
+			if exponent[i] < '0' || exponent[i] > '9' {
+				return nil, false
+			}
+			digit := int(exponent[i] - '0')
+			if magnitude > (maxSchemaBoundExponent-digit)/10 {
+				return nil, false
+			}
+			magnitude = magnitude*10 + digit
+		}
+	}
+
+	value, ok := new(big.Rat).SetString(raw)
+	return value, ok
+}
+
 func projectIntegerExclusiveBound(raw string, exclusiveMaximum bool) (string, bool) {
-	value, ok := new(big.Rat).SetString(strings.TrimSpace(raw))
+	value, ok := parseSchemaNumericBound(raw)
 	if !ok {
 		return "", false
 	}
@@ -855,8 +942,8 @@ func projectIntegerExclusiveBound(raw string, exclusiveMaximum bool) (string, bo
 func setStricterNumericBound(jsonStr, path, projected string, maximum bool) string {
 	existing := gjson.Get(jsonStr, path)
 	if existing.Exists() {
-		projectedValue, projectedOK := new(big.Rat).SetString(projected)
-		existingValue, existingOK := new(big.Rat).SetString(existing.Raw)
+		projectedValue, projectedOK := parseSchemaNumericBound(projected)
+		existingValue, existingOK := parseSchemaNumericBound(existing.Raw)
 		if !projectedOK || !existingOK {
 			return jsonStr
 		}
@@ -914,18 +1001,41 @@ func convertEnumValuesToStrings(jsonStr string, forceStringType bool) string {
 }
 
 func isBooleanEnumSchema(jsonStr, parentPath string, arr gjson.Result) bool {
-	if gjson.Get(jsonStr, joinPath(parentPath, "type")).String() == "boolean" {
-		return true
+	schemaType := gjson.Get(jsonStr, joinPath(parentPath, "type"))
+	if schemaType.Exists() {
+		return effectiveSchemaType(schemaType) == "boolean"
 	}
 	if !arr.IsArray() || len(arr.Array()) == 0 {
 		return false
 	}
+	hasBoolean := false
 	for _, item := range arr.Array() {
-		if item.Type != gjson.True && item.Type != gjson.False {
+		switch item.Type {
+		case gjson.True, gjson.False:
+			hasBoolean = true
+		case gjson.Null:
+			// An untyped boolean enum can express nullability through a null member.
+		default:
 			return false
 		}
 	}
-	return true
+	return hasBoolean
+}
+
+func enumContainsNull(arr gjson.Result) bool {
+	for _, item := range arr.Array() {
+		if item.Type == gjson.Null {
+			return true
+		}
+	}
+	return false
+}
+
+func enumHintValue(value gjson.Result) string {
+	if value.Type == gjson.Null {
+		return "null"
+	}
+	return value.String()
 }
 
 func addEnumHints(jsonStr string) string {
@@ -941,7 +1051,7 @@ func addEnumHints(jsonStr string) string {
 
 		var vals []string
 		for _, item := range items {
-			vals = append(vals, item.String())
+			vals = append(vals, enumHintValue(item))
 		}
 		jsonStr = appendHint(jsonStr, trimSuffix(p, ".enum"), "Allowed: "+strings.Join(vals, ", "))
 	}
@@ -963,12 +1073,16 @@ func dropIgnoredEnumsToHints(jsonStr string, options jsonSchemaCleanOptions) str
 		if booleanEnum {
 			typePath := joinPath(parentPath, "type")
 			if !gjson.Get(jsonStr, typePath).Exists() {
-				updated, _ := sjson.SetBytes([]byte(jsonStr), typePath, "boolean")
+				inferredType := any("boolean")
+				if enumContainsNull(enum) {
+					inferredType = []string{"boolean", "null"}
+				}
+				updated, _ := sjson.SetBytes([]byte(jsonStr), typePath, inferredType)
 				jsonStr = string(updated)
 			}
 		}
 		if enum.IsArray() && len(enum.Array()) == 1 {
-			jsonStr = appendHint(jsonStr, parentPath, "Allowed: "+enum.Array()[0].String())
+			jsonStr = appendHint(jsonStr, parentPath, "Allowed: "+enumHintValue(enum.Array()[0]))
 		}
 		jsonStr, _ = sjson.Delete(jsonStr, path)
 	}
@@ -1109,13 +1223,50 @@ func mergeAllOf(jsonStr string) string {
 					// Conditional applicability cannot be represented by the upstream schema.
 				default:
 					destination := joinPath(parentPath, escapeGJSONPathKey(field))
-					jsonStr = mergeMissingSchemaAtPath(jsonStr, destination, value)
+					jsonStr = mergeAllOfSchemaAtPath(jsonStr, destination, field, value)
 				}
 				return true
 			})
 		}
 		jsonStr, _ = sjson.Delete(jsonStr, p)
 	}
+	return jsonStr
+}
+
+// mergeAllOfSchemaAtPath preserves the parent-first behavior for schema shape while intersecting
+// numeric bounds. Bounds may be nested under properties, so this rule is intentionally recursive
+// and local to allOf rather than changing the merger also used for lossy anyOf projections.
+func mergeAllOfSchemaAtPath(jsonStr, destination, field string, incoming gjson.Result) string {
+	if incoming.Type == gjson.Number {
+		switch field {
+		case "minimum":
+			return setStricterNumericBound(jsonStr, destination, incoming.Raw, false)
+		case "maximum":
+			return setStricterNumericBound(jsonStr, destination, incoming.Raw, true)
+		}
+	}
+	if field == "description" && incoming.Type == gjson.String {
+		existing := gjson.Get(jsonStr, destination)
+		if existing.Type == gjson.String {
+			updated, _ := sjson.SetBytes([]byte(jsonStr), destination, mergeHint(existing.String(), incoming.String()))
+			return string(updated)
+		}
+	}
+
+	existing := gjson.Get(jsonStr, destination)
+	if !existing.Exists() {
+		updated, _ := sjson.SetRawBytes([]byte(jsonStr), destination, []byte(incoming.Raw))
+		return string(updated)
+	}
+	if !existing.IsObject() || !incoming.IsObject() {
+		return jsonStr
+	}
+	incoming.ForEach(func(key, value gjson.Result) bool {
+		field := key.String()
+		child := joinPath(destination, escapeGJSONPathKey(field))
+		jsonStr = mergeAllOfSchemaAtPath(jsonStr, child, field, value)
+		return true
+	})
 	return jsonStr
 }
 
