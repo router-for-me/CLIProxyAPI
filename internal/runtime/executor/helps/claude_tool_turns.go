@@ -291,38 +291,62 @@ func claudeCarrierMessageParts(message gjson.Result, role string) []claudeCarrie
 		if id := firstClaudeStringField(message, "tool_use_id", "tool_call_id", "call_id"); id != "" {
 			result := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 			result, _ = sjson.SetBytes(result, "tool_use_id", id)
-			if content.Exists() && content.Type != gjson.Null {
-				if content.Type == gjson.String {
-					result, _ = sjson.SetBytes(result, "content", content.String())
-				} else {
-					result, _ = sjson.SetRawBytes(result, "content", []byte(content.Raw))
-				}
+			if content.Exists() {
+				result, _ = sjson.SetRawBytes(result, "content", []byte(content.Raw))
 			}
+			result = normalizeClaudeToolResultContent(result)
 			return []claudeCarrierPart{{raw: result, isToolResult: true}}
 		}
 	}
 
 	if content.Type == gjson.String {
 		if strings.TrimSpace(content.String()) == "" {
-			return nil
+			if role == "tool" {
+				return []claudeCarrierPart{{raw: unmatchedClaudeToolDiagnostic(content)}}
+			}
+			return []claudeCarrierPart{{raw: invalidClaudeUserContentDiagnostic(content)}}
 		}
 		return []claudeCarrierPart{{raw: claudeTextPart(content.String())}}
 	}
 	if !content.IsArray() {
-		return nil
+		if role == "tool" {
+			return []claudeCarrierPart{{raw: unmatchedClaudeToolDiagnostic(content)}}
+		}
+		return []claudeCarrierPart{{raw: invalidClaudeUserContentDiagnostic(content)}}
 	}
 
 	parts := make([]claudeCarrierPart, 0, len(content.Array()))
 	content.ForEach(func(_, part gjson.Result) bool {
 		if !part.IsObject() {
+			diagnostic := invalidClaudeUserContentDiagnostic(part)
+			if role == "tool" {
+				diagnostic = unmatchedClaudeToolDiagnostic(part)
+			}
+			parts = append(parts, claudeCarrierPart{raw: diagnostic})
+			return true
+		}
+		partType := claudeStringField(part, "type")
+		if partType == "" {
+			diagnostic := invalidClaudeUserContentDiagnostic(part)
+			if role == "tool" {
+				diagnostic = unmatchedClaudeToolDiagnostic(part)
+			}
+			parts = append(parts, claudeCarrierPart{raw: diagnostic})
 			return true
 		}
 		parts = append(parts, claudeCarrierPart{
 			raw:          []byte(part.Raw),
-			isToolResult: part.Get("type").String() == "tool_result",
+			isToolResult: partType == "tool_result",
 		})
 		return true
 	})
+	if len(parts) == 0 {
+		diagnostic := invalidClaudeUserContentDiagnostic(content)
+		if role == "tool" {
+			diagnostic = unmatchedClaudeToolDiagnostic(content)
+		}
+		parts = append(parts, claudeCarrierPart{raw: diagnostic})
+	}
 	return parts
 }
 
@@ -399,6 +423,11 @@ func isCanonicalClaudeResultCarrier(message gjson.Result, toolUses []claudeClien
 	if message.Get("role").String() != "user" {
 		return false
 	}
+	for _, field := range []string{"tool_use_id", "tool_call_id", "call_id", "id", "name"} {
+		if message.Get(field).Exists() {
+			return false
+		}
+	}
 	content := message.Get("content")
 	if !content.IsArray() {
 		return false
@@ -408,11 +437,16 @@ func isCanonicalClaudeResultCarrier(message gjson.Result, toolUses []claudeClien
 	extrasStarted := false
 	canonical := true
 	content.ForEach(func(_, part gjson.Result) bool {
-		if part.Get("type").String() != "tool_result" {
+		partType := claudeStringField(part, "type")
+		if partType != "tool_result" {
+			if !part.IsObject() || partType == "" {
+				canonical = false
+				return false
+			}
 			extrasStarted = true
 			return true
 		}
-		if extrasStarted || resultIndex >= len(toolUses) || part.Get("id").Exists() {
+		if extrasStarted || resultIndex >= len(toolUses) || claudeToolResultHasCompatibilityFields(part) || !isCanonicalClaudeToolResultContent(part.Get("content")) {
 			canonical = false
 			return false
 		}
@@ -441,10 +475,65 @@ func normalizeClaudeToolResult(raw []byte) ([]byte, string) {
 	// untrusted metadata and must not make a malformed result look complete.
 	id := claudeStringField(result, "tool_use_id")
 	updated := raw
-	if result.Get("id").Exists() {
-		updated, _ = sjson.DeleteBytes(updated, "id")
+	for _, field := range []string{"id", "tool_call_id", "call_id", "name"} {
+		updated, _ = sjson.DeleteBytes(updated, field)
 	}
+	updated = normalizeClaudeToolResultContent(updated)
 	return updated, id
+}
+
+func claudeToolResultHasCompatibilityFields(result gjson.Result) bool {
+	for _, field := range []string{"id", "tool_call_id", "call_id", "name"} {
+		if result.Get(field).Exists() {
+			return true
+		}
+	}
+	return false
+}
+
+func isCanonicalClaudeToolResultContent(content gjson.Result) bool {
+	if content.Type == gjson.String {
+		return true
+	}
+	if !content.IsArray() || len(content.Array()) == 0 {
+		return false
+	}
+	canonical := true
+	content.ForEach(func(_, part gjson.Result) bool {
+		if !part.IsObject() || claudeStringField(part, "type") == "" {
+			canonical = false
+			return false
+		}
+		return true
+	})
+	return canonical
+}
+
+func normalizeClaudeToolResultContent(result []byte) []byte {
+	content := gjson.GetBytes(result, "content")
+	if content.Type == gjson.String {
+		return result
+	}
+	if content.IsArray() && len(content.Array()) > 0 {
+		parts := make([][]byte, 0, len(content.Array()))
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.IsObject() && claudeStringField(part, "type") != "" {
+				parts = append(parts, []byte(part.Raw))
+			} else {
+				parts = append(parts, invalidClaudeToolResultContentDiagnostic(part))
+			}
+			return true
+		})
+		updated, _ := sjson.SetRawBytes(result, "content", translatorcommon.JoinRawArray(parts))
+		return updated
+	}
+
+	text := ""
+	if content.Exists() && content.Type != gjson.Null {
+		text = claudeToolResultText(content)
+	}
+	updated, _ := sjson.SetBytes(result, "content", text)
+	return updated
 }
 
 func alignClaudeToolResultToolset(result []byte, toolsetName string) []byte {
@@ -547,7 +636,19 @@ func repairStandaloneClaudeToolResults(message gjson.Result) ([]byte, bool) {
 }
 
 func unmatchedClaudeToolDiagnostic(content gjson.Result) []byte {
-	text := "[unmatched tool result]"
+	return claudeDiagnosticTextPart("[unmatched tool result]", content)
+}
+
+func invalidClaudeUserContentDiagnostic(content gjson.Result) []byte {
+	return claudeDiagnosticTextPart("[invalid user content]", content)
+}
+
+func invalidClaudeToolResultContentDiagnostic(content gjson.Result) []byte {
+	return claudeDiagnosticTextPart("[invalid tool result content]", content)
+}
+
+func claudeDiagnosticTextPart(label string, content gjson.Result) []byte {
+	text := label
 	if diagnostic := strings.TrimSpace(claudeToolResultText(content)); diagnostic != "" {
 		text += "\n" + diagnostic
 	}

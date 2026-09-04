@@ -265,6 +265,125 @@ func TestRepairDanglingClaudeToolUsesCanonicalizesResultCarriers(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("sanitizes compatibility fields on a canonical result carrier", func(t *testing.T) {
+		input := []byte(`{"messages":[` +
+			`{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read"}]},` +
+			`{"role":"user","tool_use_id":"top-tool-use","tool_call_id":"top-tool-call","call_id":"top-call","id":"top-id","name":"top-name","content":[` +
+			`{"type":"tool_result","tool_use_id":"t1","tool_call_id":"block-tool-call","call_id":"block-call","id":"block-id","name":"block-name","content":"done"}` +
+			`]}` +
+			`]}`)
+
+		once := RepairDanglingClaudeToolUses(input)
+		messages := claudeMessagesForTest(t, once, 2)
+		assertClaudeUserCarrierEnvelope(t, messages[1])
+		result := messages[1].Get("content.0")
+		if result.Get("tool_use_id").String() != "t1" || result.Get("content").String() != "done" || result.Get("is_error").Bool() {
+			t.Fatalf("canonical result was not preserved: %s", result.Raw)
+		}
+		for _, field := range []string{"tool_call_id", "call_id", "id", "name"} {
+			if result.Get(field).Exists() {
+				t.Fatalf("canonical result retained block-level %s: %s", field, result.Raw)
+			}
+		}
+		if twice := RepairDanglingClaudeToolUses(once); !bytes.Equal(twice, once) {
+			t.Fatalf("canonical compatibility cleanup is not idempotent:\n once %s\n twice %s", once, twice)
+		}
+	})
+
+	for _, testCase := range []struct {
+		name            string
+		carrier         string
+		wantDiagnostics []string
+	}{
+		{
+			name:            "legacy tool number",
+			carrier:         `{"role":"tool","tool_call_id":"t1","id":"legacy","name":"tool","content":42}`,
+			wantDiagnostics: []string{"42"},
+		},
+		{
+			name:            "legacy tool boolean",
+			carrier:         `{"role":"tool","tool_call_id":"t1","content":false}`,
+			wantDiagnostics: []string{"false"},
+		},
+		{
+			name:    "legacy tool null",
+			carrier: `{"role":"tool","tool_call_id":"t1","content":null}`,
+		},
+		{
+			name:            "result object",
+			carrier:         `{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":{"raw":"object output"}}]}`,
+			wantDiagnostics: []string{"object output"},
+		},
+		{
+			name:            "legacy tool primitive array",
+			carrier:         `{"role":"tool","call_id":"t1","content":["raw output",17,{"raw":"untyped output"},{"type":"text","text":"typed output"}]}`,
+			wantDiagnostics: []string{"raw output", "17", "untyped output", "typed output"},
+		},
+		{
+			name:            "result empty array",
+			carrier:         `{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[]}]}`,
+			wantDiagnostics: []string{"[]"},
+		},
+		{
+			name:    "result missing content",
+			carrier: `{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]}`,
+		},
+	} {
+		t.Run("normalizes adopted "+testCase.name, func(t *testing.T) {
+			input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read"}]},` + testCase.carrier + `]}`)
+			once := RepairDanglingClaudeToolUses(input)
+			messages := claudeMessagesForTest(t, once, 2)
+			assertClaudeUserCarrierEnvelope(t, messages[1])
+			result := messages[1].Get("content.0")
+			if result.Get("type").String() != "tool_result" || result.Get("tool_use_id").String() != "t1" || result.Get("is_error").Bool() {
+				t.Fatalf("adopted result was not preserved: %s", result.Raw)
+			}
+			if !isCanonicalClaudeToolResultContent(result.Get("content")) {
+				t.Fatalf("adopted result retained invalid content: %s", result.Raw)
+			}
+			diagnostic := claudeToolResultText(result.Get("content"))
+			for _, want := range testCase.wantDiagnostics {
+				if !strings.Contains(diagnostic, want) {
+					t.Fatalf("adopted result lost %q: %s", want, result.Raw)
+				}
+			}
+			if twice := RepairDanglingClaudeToolUses(once); !bytes.Equal(twice, once) {
+				t.Fatalf("adopted %s cleanup is not idempotent:\n once %s\n twice %s", testCase.name, once, twice)
+			}
+		})
+	}
+
+	for _, testCase := range []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{name: "whole number", content: `42`, want: "42"},
+		{name: "primitive array", content: `[17,{"raw":"untyped"}]`, want: "untyped"},
+		{name: "empty array", content: `[]`, want: "[invalid user content]"},
+	} {
+		t.Run("preserves invalid interrupting user content "+testCase.name, func(t *testing.T) {
+			input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read"}]},{"role":"user","content":` + testCase.content + `}]}`)
+			once := RepairDanglingClaudeToolUses(input)
+			messages := claudeMessagesForTest(t, once, 2)
+			blocks := messages[1].Get("content").Array()
+			if len(blocks) < 2 {
+				t.Fatalf("invalid user content was dropped: %s", messages[1].Raw)
+			}
+			assertInterruptedClaudeToolResult(t, blocks[0], "t1", "")
+			var diagnostic strings.Builder
+			for _, block := range blocks[1:] {
+				diagnostic.WriteString(block.Get("text").String())
+			}
+			if !strings.Contains(diagnostic.String(), testCase.want) {
+				t.Fatalf("invalid user diagnostic lost %q: %s", testCase.want, messages[1].Raw)
+			}
+			if twice := RepairDanglingClaudeToolUses(once); !bytes.Equal(twice, once) {
+				t.Fatalf("invalid user %s repair is not idempotent:\n once %s\n twice %s", testCase.name, once, twice)
+			}
+		})
+	}
 }
 
 func TestRepairDanglingClaudeToolUsesStopsAtFirstInterruptingCarrier(t *testing.T) {

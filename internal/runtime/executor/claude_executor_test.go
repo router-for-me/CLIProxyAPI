@@ -1650,6 +1650,27 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_RepairsDanglingToolUse(t *testi
 		output := sanitizeClaudeMessagesForClaudeUpstreamWithDebug(context.Background(), body, "kimi-k2.5")
 		assertSanitizedInterruptedToolResult(t, output, "t1", "stop and look at this")
 	})
+	t.Run("canonical carrier compatibility fields and invalid content", func(t *testing.T) {
+		input := []byte(`{
+			"model":"claude-sonnet-4-5",
+			"messages":[
+				{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]},
+				{"role":"user","tool_call_id":"top-alias","name":"legacy","content":[{"type":"tool_result","tool_use_id":"t1","call_id":"block-alias","content":42}]}
+			]
+		}`)
+		output := sanitizeClaudeMessagesForClaudeUpstreamWithDebug(context.Background(), input, "claude-sonnet-4-5")
+		message := gjson.GetBytes(output, "messages.1")
+		if message.Get("tool_call_id").Exists() || message.Get("name").Exists() {
+			t.Fatalf("sanitized carrier retained top-level compatibility fields: %s", message.Raw)
+		}
+		result := message.Get("content.0")
+		if result.Get("tool_use_id").String() != "t1" || result.Get("content").Type != gjson.String || result.Get("content").String() != "42" {
+			t.Fatalf("sanitized carrier retained invalid tool result content: %s", result.Raw)
+		}
+		if result.Get("call_id").Exists() {
+			t.Fatalf("sanitized result retained a block-level compatibility field: %s", result.Raw)
+		}
+	})
 	t.Run("real result across a mid-conversation system turn renormalizes cache TTL", func(t *testing.T) {
 		midSystemBody := []byte(`{
 			"model": "claude-opus-5",
