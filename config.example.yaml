@@ -489,6 +489,7 @@ nonstream-keepalive-interval: 0
 #           - "prompt is too long"
 #         action: "stop"
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
+#     # Credential matching ignores header-name casing; header values remain case-sensitive.
 #     headers:
 #       X-Custom-Header: "custom-value"
 #       # Values starting with "$" dynamically copy the header value from downstream client requests.
