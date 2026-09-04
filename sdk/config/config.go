@@ -10,6 +10,13 @@ type SDKConfig = internalconfig.SDKConfig
 
 type Config = internalconfig.Config
 
+type APIKeyEntry = internalconfig.APIKeyEntry
+
+// APIKeysFromStrings converts raw key strings into unnamed client API key entries.
+func APIKeysFromStrings(keys []string) []APIKeyEntry {
+	return internalconfig.APIKeysFromStrings(keys)
+}
+
 type StreamingConfig = internalconfig.StreamingConfig
 type ClaudeCodeConfig = internalconfig.ClaudeCodeConfig
 type TLSConfig = internalconfig.TLSConfig

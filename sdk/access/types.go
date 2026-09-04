@@ -18,7 +18,7 @@ type AccessProvider struct {
 	SDK string `yaml:"sdk,omitempty" json:"sdk,omitempty"`
 
 	// APIKeys lists inline keys for providers that require them.
-	APIKeys []string `yaml:"api-keys,omitempty" json:"api-keys,omitempty"`
+	APIKeys []APIKeyEntry `yaml:"api-keys,omitempty" json:"api-keys,omitempty"`
 
 	// Config passes provider-specific options to the implementation.
 	Config map[string]any `yaml:"config,omitempty" json:"config,omitempty"`
@@ -34,14 +34,14 @@ const (
 
 // MakeInlineAPIKeyProvider constructs an inline API key provider configuration.
 // It returns nil when no keys are supplied.
-func MakeInlineAPIKeyProvider(keys []string) *AccessProvider {
+func MakeInlineAPIKeyProvider(keys []APIKeyEntry) *AccessProvider {
 	if len(keys) == 0 {
 		return nil
 	}
 	provider := &AccessProvider{
 		Name:    DefaultAccessProviderName,
 		Type:    AccessProviderTypeConfigAPIKey,
-		APIKeys: append([]string(nil), keys...),
+		APIKeys: append([]APIKeyEntry(nil), keys...),
 	}
 	return provider
 }

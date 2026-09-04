@@ -36,10 +36,14 @@ remote-management:
 auth-dir: "~/.cli-proxy-api"
 
 # API keys for authentication
+# An entry may also be a mapping with an optional name. The name replaces the raw key
+# in usage records and request logs.
 api-keys:
   - "your-api-key-1"
   - "your-api-key-2"
   - "your-api-key-3"
+#  - key: "your-api-key-4"
+#    name: "alice"
 
 # Enable debug logging
 debug: false

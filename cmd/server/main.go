@@ -63,7 +63,7 @@ func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode,
 	if tuiMode && !standalone {
 		return false
 	}
-	return safemode.HasExampleAPIKeys(cfg.APIKeys)
+	return safemode.HasExampleAPIKeys(cfg.APIKeyValues())
 }
 
 // main is the entry point of the application.
@@ -594,7 +594,7 @@ func main() {
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
 	serverOptions := []api.ServerOption(nil)
 	if exampleAPIKeySafeMode {
-		matches := safemode.ExampleAPIKeys(cfg.APIKeys)
+		matches := safemode.ExampleAPIKeys(cfg.APIKeyValues())
 		log.WithField("api_keys", strings.Join(matches, ",")).Error("unsafe example API key configured; proxy API endpoints disabled until api-keys is updated")
 		serverOptions = append(serverOptions, api.WithExampleAPIKeySafeMode())
 	}

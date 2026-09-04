@@ -161,7 +161,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	// API keys (redacted) and counts
 	if len(oldCfg.APIKeys) != len(newCfg.APIKeys) {
 		changes = append(changes, fmt.Sprintf("api-keys count: %d -> %d", len(oldCfg.APIKeys), len(newCfg.APIKeys)))
-	} else if !reflect.DeepEqual(trimStrings(oldCfg.APIKeys), trimStrings(newCfg.APIKeys)) {
+	} else if !reflect.DeepEqual(trimAPIKeyEntries(oldCfg.APIKeys), trimAPIKeyEntries(newCfg.APIKeys)) {
 		changes = append(changes, "api-keys: values updated (count unchanged, redacted)")
 	}
 	if len(oldCfg.GeminiKey) != len(newCfg.GeminiKey) {
@@ -459,10 +459,15 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	return changes
 }
 
-func trimStrings(in []string) []string {
-	out := make([]string, len(in))
+// trimAPIKeyEntries normalizes entries for comparison. Names are compared so a
+// name-only change still triggers a reload; no value is included in messages.
+func trimAPIKeyEntries(in []config.APIKeyEntry) []config.APIKeyEntry {
+	out := make([]config.APIKeyEntry, len(in))
 	for i := range in {
-		out[i] = strings.TrimSpace(in[i])
+		out[i] = config.APIKeyEntry{
+			Key:  strings.TrimSpace(in[i].Key),
+			Name: strings.TrimSpace(in[i].Name),
+		}
 	}
 	return out
 }
