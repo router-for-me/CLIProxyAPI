@@ -23,11 +23,15 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func resetClaudeDeviceProfileCache() {
@@ -45,6 +49,58 @@ func claudeOAuthTestMetadata() map[string]any {
 
 func malformedClaudeTreeSignatureForClaudeExecutorTest() string {
 	return base64.StdEncoding.EncodeToString([]byte{0x12, 0xFF, 0xFE, 0xFD})
+}
+
+func modelFreeClaudeCAISSignatureForExecutorTest(envelopeVersion, channelID uint64) string {
+	channel := protowire.AppendTag(nil, 1, protowire.VarintType)
+	channel = protowire.AppendVarint(channel, channelID)
+
+	container := protowire.AppendTag(nil, 1, protowire.BytesType)
+	container = protowire.AppendBytes(container, channel)
+	container = protowire.AppendTag(container, 5, protowire.BytesType)
+	container = protowire.AppendBytes(container, []byte("synthetic-model-free-carrier"))
+
+	payload := protowire.AppendTag(nil, 1, protowire.VarintType)
+	payload = protowire.AppendVarint(payload, envelopeVersion)
+	payload = protowire.AppendTag(payload, 2, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, container)
+	return base64.StdEncoding.EncodeToString(payload)
+}
+
+// modelTaggedClaudeCAISSignatureForExecutorTest builds a structurally valid,
+// Claude-target-compatible (preserve path) CAIS signature carrying modelText
+// as its channel field 6 model_text. It mirrors the wire layout the signature
+// package's defaultClaudeCAISParts/claudeCAISParts.encode fixture confirmed
+// against real claude-fable-5/claude-opus-5 captures (top-level field 1
+// envelope=2, field 2 container -> channel block field 1 channel_id=16, field
+// 3 channel version=2, field 5 a non-empty signature blob, field 6
+// model_text, top-level field 3 trailer=1), so InspectClaudeCAISSignature
+// classifies it as a genuine model-tagged signature and
+// DecideSignatureCompatibilityForModel takes the preserve branch rather than
+// the drop branch. modelText must start with "claude-"
+// (claudeCAISModelTextPrefix) to pass validation; everything after that
+// prefix is free-form, mirroring how a real model_text field carries an
+// attacker-observable value the sanitizer never authenticates.
+func modelTaggedClaudeCAISSignatureForExecutorTest(modelText string) string {
+	channelBlock := protowire.AppendTag(nil, 1, protowire.VarintType)
+	channelBlock = protowire.AppendVarint(channelBlock, 16)
+	channelBlock = protowire.AppendTag(channelBlock, 3, protowire.VarintType)
+	channelBlock = protowire.AppendVarint(channelBlock, 2)
+	channelBlock = protowire.AppendTag(channelBlock, 5, protowire.BytesType)
+	channelBlock = protowire.AppendBytes(channelBlock, make([]byte, 64))
+	channelBlock = protowire.AppendTag(channelBlock, 6, protowire.BytesType)
+	channelBlock = protowire.AppendBytes(channelBlock, []byte(modelText))
+
+	container := protowire.AppendTag(nil, 1, protowire.BytesType)
+	container = protowire.AppendBytes(container, channelBlock)
+
+	payload := protowire.AppendTag(nil, 1, protowire.VarintType)
+	payload = protowire.AppendVarint(payload, 2)
+	payload = protowire.AppendTag(payload, 2, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, container)
+	payload = protowire.AppendTag(payload, 3, protowire.VarintType)
+	payload = protowire.AppendVarint(payload, 1)
+	return base64.StdEncoding.EncodeToString(payload)
 }
 
 func newClaudeHeaderTestRequest(t *testing.T, incoming http.Header) *http.Request {
@@ -3191,6 +3247,262 @@ func TestClaudeExecutor_ExecuteSanitizesSignaturesBeforeUpstream(t *testing.T) {
 		if toolUse.Get(path).Exists() {
 			t.Fatalf("tool_use.%s should be removed before upstream: %s", path, seenBody)
 		}
+	}
+}
+
+func TestClaudeExecutor_ExecuteWarnsForUnknownCAISGenerationAtDefaultInfo(t *testing.T) {
+	logger := log.StandardLogger()
+	previousLevel := logger.GetLevel()
+	previousOutput := logger.Out
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	logger.SetLevel(log.InfoLevel)
+	logger.SetOutput(io.Discard)
+	hook := logtest.NewLocal(logger)
+	t.Cleanup(func() {
+		hook.Reset()
+		logger.ReplaceHooks(previousHooks)
+		logger.SetOutput(previousOutput)
+		logger.SetLevel(previousLevel)
+	})
+
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-fable-5-1","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	run := func(t *testing.T, payload []byte) ([]*log.Entry, []byte) {
+		t.Helper()
+		hook.Reset()
+		seenBody = nil
+		if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-fable-5-1",
+			Payload: payload,
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")}); err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if len(seenBody) == 0 {
+			t.Fatal("expected executor to send an upstream request")
+		}
+		return hook.AllEntries(), bytes.Clone(seenBody)
+	}
+
+	const warningMessage = "claude executor: dropped signed history for unknown CAIS generation"
+	assertUnknownWarnings := func(t *testing.T, entries []*log.Entry, want map[string]int) {
+		t.Helper()
+		got := make(map[string]int)
+		for _, entry := range entries {
+			if entry.Message != warningMessage {
+				continue
+			}
+			if entry.Level != log.WarnLevel {
+				t.Fatalf("unknown-generation diagnosis level = %s, want warning", entry.Level)
+			}
+			reason := fmt.Sprint(entry.Data["reason"])
+			if _, duplicate := got[reason]; duplicate {
+				t.Fatalf("unknown-generation reason %q emitted more than once instead of being aggregated", reason)
+			}
+			count, ok := entry.Data["dropped_block_count"].(int)
+			if !ok {
+				t.Fatalf("warning for %q has dropped_block_count=%#v, want integer", reason, entry.Data["dropped_block_count"])
+			}
+			got[reason] = count
+		}
+		if len(got) != len(want) {
+			t.Fatalf("unknown-generation warning reasons = %v, want %v; entries=%v", got, want, entries)
+		}
+		for reason, count := range want {
+			if got[reason] != count {
+				t.Fatalf("warning count for %q = %d, want %d; all=%v", reason, got[reason], count, got)
+			}
+		}
+	}
+
+	const unknownEnvelopeReason = "invalid Claude model-free CAIS signature: unknown envelope version 5"
+	const unknownChannelReason = "invalid Claude model-free CAIS signature: unknown channel_id 18"
+	t.Run("sole unknown generation is visible at default info", func(t *testing.T) {
+		signature := modelFreeClaudeCAISSignatureForExecutorTest(5, 17)
+		payload := []byte(`{"model":"claude-fable-5-1","max_tokens":16,"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"signed history","signature":"` + signature + `"},{"type":"text","text":"answer"}]},{"role":"user","content":[{"type":"text","text":"next"}]}]}`)
+		entries, body := run(t, payload)
+		if bytes.Contains(body, []byte(signature)) {
+			t.Fatal("unknown-generation thinking signature reached upstream")
+		}
+		assertUnknownWarnings(t, entries, map[string]int{unknownEnvelopeReason: 1})
+	})
+
+	t.Run("later unknown generations are aggregated at default info", func(t *testing.T) {
+		recognized := modelFreeClaudeCAISSignatureForExecutorTest(4, 17)
+		unknownEnvelope := modelFreeClaudeCAISSignatureForExecutorTest(5, 17)
+		unknownChannel := modelFreeClaudeCAISSignatureForExecutorTest(4, 18)
+		payload := []byte(`{"model":"claude-fable-5-1","max_tokens":16,"messages":[` +
+			`{"role":"assistant","content":[{"type":"thinking","thinking":"recognized","signature":"` + recognized + `"},{"type":"text","text":"answer 0"}]},` +
+			`{"role":"user","content":[{"type":"text","text":"next 0"}]},` +
+			`{"role":"assistant","content":[{"type":"thinking","thinking":"unknown envelope one","signature":"` + unknownEnvelope + `"},{"type":"text","text":"answer 1"}]},` +
+			`{"role":"user","content":[{"type":"text","text":"next 1"}]},` +
+			`{"role":"assistant","content":[{"type":"thinking","thinking":"unknown envelope two","signature":"` + unknownEnvelope + `"},{"type":"text","text":"answer 2"}]},` +
+			`{"role":"user","content":[{"type":"text","text":"next 2"}]},` +
+			`{"role":"assistant","content":[{"type":"thinking","thinking":"unknown channel","signature":"` + unknownChannel + `"},{"type":"text","text":"answer 3"}]},` +
+			`{"role":"user","content":[{"type":"text","text":"next 3"}]}]}`)
+		entries, body := run(t, payload)
+		if !bytes.Contains(body, []byte(recognized)) {
+			t.Fatal("recognized CAIS signature was not preserved ahead of later rejections")
+		}
+		if bytes.Contains(body, []byte(unknownEnvelope)) || bytes.Contains(body, []byte(unknownChannel)) {
+			t.Fatal("later unknown-generation thinking signature reached upstream")
+		}
+		assertUnknownWarnings(t, entries, map[string]int{
+			unknownEnvelopeReason: 2,
+			unknownChannelReason:  1,
+		})
+	})
+
+	t.Run("ordinary drop emits no warning", func(t *testing.T) {
+		const ordinarySignature = "gAAAAABopenai-encrypted-content"
+		payload := []byte(`{"model":"claude-fable-5-1","max_tokens":16,"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"foreign history","signature":"` + ordinarySignature + `"},{"type":"text","text":"answer"}]},{"role":"user","content":[{"type":"text","text":"next"}]}]}`)
+		entries, body := run(t, payload)
+		if bytes.Contains(body, []byte(ordinarySignature)) {
+			t.Fatal("ordinary incompatible thinking signature reached upstream")
+		}
+		for _, entry := range entries {
+			if entry.Data["component"] == "signature_sanitizer" {
+				t.Fatalf("ordinary sanitize report escaped debug logging: level=%s message=%q fields=%v", entry.Level, entry.Message, entry.Data)
+			}
+		}
+	})
+
+	// A model-tagged CAIS signature's model_text is attacker-controlled past
+	// its required "claude-" prefix. claudeCompatibleSignatureReason copies
+	// model_text verbatim into a PRESERVED decision's reason, so an attacker
+	// can make that reason contain the unknown-generation marker's prose even
+	// though the block was never dropped. These two cases pin that such a
+	// preserved decision is never misclassified as a drop: paired with a real
+	// drop, it must not be counted as (or alongside) that drop's warning; and
+	// alone, it must not produce a warning at all.
+	const embeddedMarkerModelText = "claude-x invalid Claude model-free CAIS signature: unknown envelope version 9"
+	t.Run("preserved decision echoing marker text is not misclassified as a drop", func(t *testing.T) {
+		preservedSignature := modelTaggedClaudeCAISSignatureForExecutorTest(embeddedMarkerModelText)
+		droppedSignature := modelFreeClaudeCAISSignatureForExecutorTest(5, 17)
+		payload := []byte(`{"model":"claude-fable-5-1","max_tokens":16,"messages":[` +
+			`{"role":"assistant","content":[{"type":"thinking","thinking":"preserved with embedded marker","signature":"` + preservedSignature + `"},{"type":"text","text":"answer 0"}]},` +
+			`{"role":"user","content":[{"type":"text","text":"next 0"}]},` +
+			`{"role":"assistant","content":[{"type":"thinking","thinking":"real drop","signature":"` + droppedSignature + `"},{"type":"text","text":"answer 1"}]},` +
+			`{"role":"user","content":[{"type":"text","text":"next 1"}]}]}`)
+		entries, body := run(t, payload)
+		if !bytes.Contains(body, []byte(preservedSignature)) {
+			t.Fatal("preserved CAIS signature with embedded marker text was not sent upstream")
+		}
+		if bytes.Contains(body, []byte(droppedSignature)) {
+			t.Fatal("unknown-generation thinking signature reached upstream")
+		}
+		assertUnknownWarnings(t, entries, map[string]int{unknownEnvelopeReason: 1})
+	})
+
+	t.Run("marker text only in a preserved decision emits no warning", func(t *testing.T) {
+		// Pair the preserved marker-bearing signature with an ordinary foreign
+		// drop (unrelated reason text) rather than sending it alone: alone,
+		// report.DroppedBlocks/DroppedSignatures/ReplacedSignatures would all
+		// be zero and logClaudeSignatureSanitizeReport would return before
+		// ever reaching the decisions loop, passing regardless of whether the
+		// classifier is anchored. The ordinary drop reaches that loop without
+		// itself being an unknown-generation reason.
+		const ordinarySignature = "gAAAAABopenai-encrypted-content"
+		preservedSignature := modelTaggedClaudeCAISSignatureForExecutorTest(embeddedMarkerModelText)
+		payload := []byte(`{"model":"claude-fable-5-1","max_tokens":16,"messages":[` +
+			`{"role":"assistant","content":[{"type":"thinking","thinking":"preserved with embedded marker","signature":"` + preservedSignature + `"},{"type":"text","text":"answer 0"}]},` +
+			`{"role":"user","content":[{"type":"text","text":"next 0"}]},` +
+			`{"role":"assistant","content":[{"type":"thinking","thinking":"ordinary foreign drop","signature":"` + ordinarySignature + `"},{"type":"text","text":"answer 1"}]},` +
+			`{"role":"user","content":[{"type":"text","text":"next 1"}]}]}`)
+		entries, body := run(t, payload)
+		if !bytes.Contains(body, []byte(preservedSignature)) {
+			t.Fatal("preserved CAIS signature with embedded marker text was not sent upstream")
+		}
+		if bytes.Contains(body, []byte(ordinarySignature)) {
+			t.Fatal("ordinary incompatible thinking signature reached upstream")
+		}
+		assertUnknownWarnings(t, entries, map[string]int{})
+	})
+}
+
+// TestLogClaudeSignatureSanitizeReport_FiltersNonDropDecisionsBeforeClassifying
+// isolates logClaudeSignatureSanitizeReport's own Action == SignatureActionDropBlock
+// filter, independent of sigcompat.ClassifyUnknownCAISGeneration's anchoring
+// (which TestClaudeExecutor_ExecuteWarnsForUnknownCAISGenerationAtDefaultInfo's
+// "preserved decision echoing marker text" subtest already covers via the real
+// sanitizer). The real sanitizer never produces a preserve decision whose
+// Reason equals the unknown-generation marker verbatim — claudeCompatibleSignatureReason
+// always prepends its own fixed "valid Claude..." lead-in text first, which
+// the classifier's anchoring alone is enough to reject — so this builds the
+// report directly to construct the one case that isolates the filter: a
+// preserve decision whose Reason, if classified, WOULD pass the anchored
+// classifier. Without the filter this still logs a second, spurious warning;
+// with it, only the genuine drop is reported.
+func TestLogClaudeSignatureSanitizeReport_FiltersNonDropDecisionsBeforeClassifying(t *testing.T) {
+	logger := log.StandardLogger()
+	previousLevel := logger.GetLevel()
+	previousOutput := logger.Out
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	logger.SetLevel(log.InfoLevel)
+	logger.SetOutput(io.Discard)
+	hook := logtest.NewLocal(logger)
+	t.Cleanup(func() {
+		hook.Reset()
+		logger.ReplaceHooks(previousHooks)
+		logger.SetOutput(previousOutput)
+		logger.SetLevel(previousLevel)
+	})
+
+	const realDropReason = "invalid Claude model-free CAIS signature: unknown envelope version 5"
+	const notADropReason = "invalid Claude model-free CAIS signature: unknown channel_id 18"
+
+	report := sigcompat.SignatureSanitizeReport{
+		TargetProvider: sigcompat.SignatureProviderClaude,
+		Preserved:      1,
+		DroppedBlocks:  1,
+		Decisions: []sigcompat.SignatureCompatibilityDecision{
+			{
+				Action:    sigcompat.SignatureActionDropBlock,
+				Reason:    "messages[0].content[0]: " + realDropReason,
+				BlockKind: sigcompat.SignatureBlockKindClaudeThinking,
+			},
+			{
+				// Constructed directly, not via the real sanitizer: a
+				// preserve decision whose Reason is exactly a position
+				// prefix plus the unknown-generation marker, with nothing
+				// else around it, so ClassifyUnknownCAISGeneration alone
+				// would say ok=true for it. Only the Action filter can
+				// catch this one.
+				Action:    sigcompat.SignatureActionPreserve,
+				Reason:    "messages[1].content[0]: " + notADropReason,
+				BlockKind: sigcompat.SignatureBlockKindClaudeThinking,
+			},
+		},
+	}
+
+	logClaudeSignatureSanitizeReport(context.Background(), "claude-fable-5-1", report)
+
+	const warningMessage = "claude executor: dropped signed history for unknown CAIS generation"
+	var warnings []*log.Entry
+	for _, entry := range hook.AllEntries() {
+		if entry.Message == warningMessage {
+			warnings = append(warnings, entry)
+		}
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("unknown-generation warning count = %d, want 1; entries=%v", len(warnings), warnings)
+	}
+	if got := fmt.Sprint(warnings[0].Data["reason"]); got != realDropReason {
+		t.Fatalf("warning reason = %q, want %q (the preserved decision must not be classified)", got, realDropReason)
+	}
+	if got := fmt.Sprint(warnings[0].Data["signature_action"]); got != string(sigcompat.SignatureActionDropBlock) {
+		t.Fatalf("warning signature_action = %q, want %q", got, sigcompat.SignatureActionDropBlock)
 	}
 }
 

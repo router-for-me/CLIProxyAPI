@@ -2,6 +2,7 @@ package signature
 
 import (
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 
@@ -269,6 +270,146 @@ func (p claudeCAISParts) encode() string {
 
 func testClaudeCAISSignature(model string) string {
 	return defaultClaudeCAISParts(model).encode()
+}
+
+// claudeModelFreeCAISParts builds only synthetic model-free CAIS envelopes. The
+// envelope and channel identifiers, field numbers, wire types, and field
+// presence constants were confirmed against all 8 real captures on 2026-09-02;
+// no captured signature bytes are embedded in this test fixture.
+type claudeModelFreeCAISParts struct {
+	envelopeVersion       uint64
+	channelID             uint64
+	includeChannelVersion bool
+	channelVersion        uint64
+	includeField7         bool
+	field7                uint64
+	blockKind             string
+	contextID             string
+	includeTopTrailer     bool
+	topTrailer            uint64
+	includeCarrier        bool
+	carrierLen            int
+	carrierTypes          []protowire.Type
+}
+
+func defaultClaudeModelFreeCAISParts() claudeModelFreeCAISParts {
+	return claudeModelFreeCAISParts{
+		envelopeVersion:       4,
+		channelID:             17,
+		includeChannelVersion: true,
+		channelVersion:        2,
+		includeField7:         true,
+		field7:                1,
+		blockKind:             "thinking",
+		includeTopTrailer:     true,
+		topTrailer:            1,
+		includeCarrier:        true,
+		carrierLen:            96,
+		carrierTypes:          []protowire.Type{protowire.BytesType},
+	}
+}
+
+func syntheticSignatureBytes(length int, salt byte) []byte {
+	value := make([]byte, length)
+	for i := range value {
+		value[i] = byte(i*73 + int(salt))
+	}
+	return value
+}
+
+func (p claudeModelFreeCAISParts) encode() string {
+	var channelBlock []byte
+	channelBlock = protowire.AppendTag(channelBlock, 1, protowire.VarintType)
+	channelBlock = protowire.AppendVarint(channelBlock, p.channelID)
+	if p.includeChannelVersion {
+		channelBlock = protowire.AppendTag(channelBlock, 3, protowire.VarintType)
+		channelBlock = protowire.AppendVarint(channelBlock, p.channelVersion)
+	}
+	if p.includeField7 {
+		channelBlock = protowire.AppendTag(channelBlock, 7, protowire.VarintType)
+		channelBlock = protowire.AppendVarint(channelBlock, p.field7)
+	}
+	if p.blockKind != "" {
+		channelBlock = protowire.AppendTag(channelBlock, 8, protowire.BytesType)
+		channelBlock = protowire.AppendString(channelBlock, p.blockKind)
+	}
+	if p.contextID != "" {
+		channelBlock = protowire.AppendTag(channelBlock, 11, protowire.BytesType)
+		channelBlock = protowire.AppendString(channelBlock, p.contextID)
+	}
+
+	var container []byte
+	container = protowire.AppendTag(container, 1, protowire.BytesType)
+	container = protowire.AppendBytes(container, channelBlock)
+	container = protowire.AppendTag(container, 2, protowire.BytesType)
+	container = protowire.AppendBytes(container, syntheticSignatureBytes(12, 0x21))
+	container = protowire.AppendTag(container, 3, protowire.BytesType)
+	container = protowire.AppendBytes(container, syntheticSignatureBytes(12, 0x43))
+	container = protowire.AppendTag(container, 4, protowire.BytesType)
+	container = protowire.AppendBytes(container, syntheticSignatureBytes(48, 0x65))
+	if p.includeCarrier {
+		for _, carrierType := range p.carrierTypes {
+			container = protowire.AppendTag(container, 5, carrierType)
+			switch carrierType {
+			case protowire.BytesType:
+				container = protowire.AppendBytes(container, syntheticSignatureBytes(p.carrierLen, 0x87))
+			case protowire.VarintType:
+				container = protowire.AppendVarint(container, 1)
+			default:
+				panic("unsupported synthetic carrier wire type")
+			}
+		}
+	}
+
+	var payload []byte
+	payload = protowire.AppendTag(payload, 1, protowire.VarintType)
+	payload = protowire.AppendVarint(payload, p.envelopeVersion)
+	payload = protowire.AppendTag(payload, 2, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, container)
+	if p.includeTopTrailer {
+		payload = protowire.AppendTag(payload, 3, protowire.VarintType)
+		payload = protowire.AppendVarint(payload, p.topTrailer)
+	}
+	return base64.StdEncoding.EncodeToString(payload)
+}
+
+func syntheticOpaqueProviderSignature(decodedLen int) string {
+	payload := syntheticSignatureBytes(decodedLen, 0xfc)
+	if len(payload) > 0 {
+		payload[0] = 0xfc
+	}
+	return base64.RawStdEncoding.EncodeToString(payload)
+}
+
+// hasGrokOpaqueTransportShapeWithoutEnvelopeExclusions checks only the opaque
+// payload properties that the Grok validator enforces. It must not
+// call InspectGrokEncryptedContent: that validator rejects recognized Claude
+// envelopes by invoking the Claude predicate under test, which would make a
+// negative assertion circular.
+func hasGrokOpaqueTransportShapeWithoutEnvelopeExclusions(raw string) bool {
+	if raw == "" || raw != strings.TrimSpace(raw) || len(raw) > MaxGrokEncryptedContentLen || strings.Contains(raw, "=") {
+		return false
+	}
+	decoded, err := base64.RawStdEncoding.DecodeString(raw)
+	if err != nil || len(decoded) < MinGrokEncryptedContentDecodedLen {
+		return false
+	}
+	return byteEntropyRatio(decoded) >= MinGrokEncryptedContentEntropyRatio
+}
+
+// hasKimiStreamingTransportShapeWithoutEnvelopeExclusions checks only Kimi's
+// fixed streaming length, base64 form, and entropy floor. It must not call the
+// Kimi validator because that validator invokes the Claude predicate under test
+// to reject self-describing foreign envelopes.
+func hasKimiStreamingTransportShapeWithoutEnvelopeExclusions(raw string) bool {
+	if len(raw) != KimiThinkingSignatureStreamingLen || raw != strings.TrimSpace(raw) || strings.Contains(raw, "=") {
+		return false
+	}
+	decoded, err := base64.RawStdEncoding.DecodeString(raw)
+	if err != nil {
+		return false
+	}
+	return byteEntropyRatio(decoded) >= MinKimiThinkingSignatureEntropyRatio
 }
 
 func TestClaudeCAISSignature_ObservedFable5Sample(t *testing.T) {
@@ -637,5 +778,506 @@ func TestCompatibleAntigravityClaudeThinkingSignature_RejectsClaudeCAIS(t *testi
 	}
 	if normalized, ok := CompatibleAntigravityClaudeThinkingSignature("claude-cais#" + observedFable5Sample); ok || normalized != "" {
 		t.Fatalf("CompatibleAntigravityClaudeThinkingSignature(claude-cais#ClaudeCAIS) = %q, %v; want empty and false", normalized, ok)
+	}
+}
+
+func TestClaudeModelFreeCAISSignature_PreservesSignedHistory(t *testing.T) {
+	signature := defaultClaudeModelFreeCAISParts().encode()
+	input := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"before"}]},{"role":"system","content":[{"type":"text","text":"directive"}]},{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"` + signature + `"}]},{"role":"user","content":[{"type":"text","text":"after"}]}]}`)
+
+	output, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-fable-5-1")
+	if got := gjson.GetBytes(output, "messages.#").Int(); got != 4 {
+		t.Errorf("messages.# = %d, want 4; body=%s", got, output)
+	}
+
+	messages := gjson.GetBytes(output, "messages").Array()
+	wantRoles := []string{"user", "system", "assistant", "user"}
+	if len(messages) == len(wantRoles) {
+		for i, want := range wantRoles {
+			if got := messages[i].Get("role").String(); got != want {
+				t.Errorf("messages[%d].role = %q, want %q; body=%s", i, got, want, output)
+			}
+		}
+	}
+	for i, message := range messages {
+		if message.Get("role").String() != "system" || i == len(messages)-1 {
+			continue
+		}
+		if got := messages[i+1].Get("role").String(); got != "assistant" {
+			t.Errorf("messages[%d] role=system is followed by %q, want assistant; body=%s", i, got, output)
+		}
+	}
+	if got := gjson.GetBytes(output, "messages.2.content.0.signature").String(); got != signature {
+		t.Errorf("model-free thinking signature was not preserved; body=%s", output)
+	}
+	if report.Preserved != 1 || report.DroppedBlocks != 0 {
+		t.Errorf("report = %+v, want one preserved block and no drops; body=%s", report, output)
+	}
+}
+
+func TestClaudeModelFreeCAISSignature_UsesStructuralGenerationRecognition(t *testing.T) {
+	accepted := []struct {
+		name  string
+		parts claudeModelFreeCAISParts
+	}{
+		{"captured field shape", defaultClaudeModelFreeCAISParts()},
+		// The generation allowlists are deliberately Cartesian. These cases pin
+		// every currently accepted pair without claiming that every pair has
+		// appeared in model-free captures.
+		{"known envelope 2 with channel 17", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.envelopeVersion = 2
+			return p
+		}()},
+		{"envelope 4 with known channel 16", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.channelID = 16
+			return p
+		}()},
+		{"known envelope 2 with channel 16", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.envelopeVersion = 2
+			p.channelID = 16
+			return p
+		}()},
+		{"channel version absent", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.includeChannelVersion = false
+			return p
+		}()},
+		{"channel version changed", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.channelVersion = 99
+			return p
+		}()},
+		{"field 7 absent", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.includeField7 = false
+			return p
+		}()},
+		{"field 7 changed", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.field7 = 123
+			return p
+		}()},
+		{"trailer absent", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.includeTopTrailer = false
+			return p
+		}()},
+		{"trailer changed", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.topTrailer = 7
+			return p
+		}()},
+		{"tool use block kind", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.blockKind = "tool_use"
+			return p
+		}()},
+		{"context id present", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.contextID = "00000000-0000-4000-8000-000000000001"
+			return p
+		}()},
+		{"one-byte carrier", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.carrierLen = 1
+			return p
+		}()},
+		{"200 KiB carrier", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.carrierLen = 200 * 1024
+			return p
+		}()},
+	}
+	for _, tc := range accepted {
+		signature := tc.parts.encode()
+		if got := DetectSignatureProviderForBlock(signature, SignatureBlockKindClaudeThinking); got != SignatureProviderClaude {
+			t.Errorf("%s: provider = %q, want %q", tc.name, got, SignatureProviderClaude)
+		}
+	}
+
+	rejected := []struct {
+		name  string
+		parts claudeModelFreeCAISParts
+	}{
+		{"unknown envelope version", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.envelopeVersion = 5
+			return p
+		}()},
+		{"unknown channel id", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.channelID = 18
+			return p
+		}()},
+		{"legacy-only channel id", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.channelID = 11
+			return p
+		}()},
+		{"missing carrier", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.includeCarrier = false
+			return p
+		}()},
+		{"empty carrier", func() claudeModelFreeCAISParts {
+			p := defaultClaudeModelFreeCAISParts()
+			p.carrierLen = 0
+			return p
+		}()},
+	}
+	for _, tc := range rejected {
+		signature := tc.parts.encode()
+		if got := DetectSignatureProviderForBlock(signature, SignatureBlockKindClaudeThinking); got == SignatureProviderClaude {
+			t.Errorf("%s: provider = %q, want non-Claude", tc.name, got)
+		}
+	}
+}
+
+func TestClaudeModelFreeCAISSignature_UsesEnvelopeClassificationWithOpaqueOverlap(t *testing.T) {
+	claudeSignature := defaultClaudeModelFreeCAISParts().encode()
+	if got := DetectSignatureProviderForBlock(claudeSignature, SignatureBlockKindClaudeThinking); got != SignatureProviderClaude {
+		t.Errorf("model-free CAIS provider = %q, want %q", got, SignatureProviderClaude)
+	}
+	// Grok has no provider-distinguishing payload envelope. This synthetic CAIS
+	// fixture also satisfies Grok's opaque base64, size, and entropy properties.
+	// Classification must therefore come from the CAIS tree, not from a false
+	// claim that the transport shapes are disjoint.
+	if !hasGrokOpaqueTransportShapeWithoutEnvelopeExclusions(claudeSignature) {
+		t.Error("model-free CAIS fixture no longer exercises the Grok transport-shape overlap")
+	}
+
+	// No Kimi or Grok provider corpus is present locally. These ordinary controls
+	// reproduce their documented opaque transport shapes with deterministic
+	// high-entropy bytes rather than embedding captured values. The Kimi value is
+	// not adversarially CAIS-shaped: it only proves the residual fixed-length path
+	// remains reachable after the self-describing envelope probes decline.
+	kimiSignature := syntheticOpaqueProviderSignature(KimiThinkingSignatureStreamingLen * 3 / 4)
+	if len(kimiSignature) != KimiThinkingSignatureStreamingLen || !IsValidKimiThinkingSignature(kimiSignature) {
+		t.Fatal("synthetic Kimi control does not satisfy Kimi's streaming transport shape")
+	}
+	grokSignature := syntheticOpaqueProviderSignature(257)
+	if !IsValidGrokEncryptedContent(grokSignature) {
+		t.Fatal("synthetic Grok control does not satisfy Grok's transport shape")
+	}
+
+	controls := []struct {
+		name      string
+		signature string
+		provider  SignatureProvider
+	}{
+		{"Gemini protobuf envelope", testGeminiThoughtSignatureEnvelope(), SignatureProviderGemini},
+		{"GPT Fernet envelope", testGPTReasoningSignature(), SignatureProviderGPT},
+		{"Kimi streaming transport", kimiSignature, SignatureProviderKimi},
+		{"Grok opaque transport", grokSignature, SignatureProviderUnknown},
+	}
+	for _, control := range controls {
+		if IsValidClaudeCAISSignature(control.signature) {
+			t.Errorf("%s was claimed as Claude CAIS", control.name)
+		}
+		if got := DetectSignatureProviderForBlock(control.signature, SignatureBlockKindClaudeThinking); got != control.provider {
+			t.Errorf("%s provider = %q, want %q", control.name, got, control.provider)
+		}
+	}
+}
+
+func TestClaudeModelFreeCAISSignature_UsesEnvelopeClassificationAtKimiStreamingLength(t *testing.T) {
+	parts := defaultClaudeModelFreeCAISParts()
+	parts.carrierLen = 3149 // 3,255 decoded bytes encode to Kimi's 4,340-character streaming length.
+	signature := parts.encode()
+
+	// This deliberately pads a syntactically valid CAIS envelope to Kimi's
+	// streaming dimensions. The overlap is outside the threat model because it
+	// requires an authenticated client to build the envelope against its own
+	// request. Anthropic still authenticates the carried signature, so matching
+	// Kimi's transport dimensions cannot make foreign reasoning authentic.
+	if !hasKimiStreamingTransportShapeWithoutEnvelopeExclusions(signature) {
+		t.Fatalf("synthetic CAIS length = %d, want independent Kimi streaming transport overlap", len(signature))
+	}
+	if got := DetectSignatureProviderForBlock(signature, SignatureBlockKindClaudeThinking); got != SignatureProviderClaude {
+		t.Fatalf("Kimi-dimension CAIS provider = %q, want %q", got, SignatureProviderClaude)
+	}
+}
+
+func TestClaudeCAISSignature_RejectsInvalidUTF8BlockKind(t *testing.T) {
+	parts := defaultClaudeCAISParts("claude-opus-5")
+	parts.blockKind = string([]byte{0xff, 0xfe})
+	signature := parts.encode()
+
+	if IsValidClaudeCAISSignature(signature) {
+		t.Fatal("model-tagged CAIS accepted invalid UTF-8 in channel field 8")
+	}
+}
+
+func TestClaudeModelFreeCAISSignature_UnknownGenerationReasonIsSpecific(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*claudeModelFreeCAISParts)
+		want   string
+	}{
+		{"channel id", func(parts *claudeModelFreeCAISParts) { parts.channelID = 18 }, "unknown channel_id 18"},
+		{"envelope version", func(parts *claudeModelFreeCAISParts) { parts.envelopeVersion = 5 }, "unknown envelope version 5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parts := defaultClaudeModelFreeCAISParts()
+			tc.mutate(&parts)
+			signature := parts.encode()
+			input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"` + signature + `"},{"type":"text","text":"answer"}]}]}`)
+
+			_, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-fable-5-1")
+			if len(report.Decisions) != 1 {
+				t.Fatalf("decision count = %d, want 1; report=%+v", len(report.Decisions), report)
+			}
+			decision := report.Decisions[0]
+			if decision.Action != SignatureActionDropBlock || decision.DetectedProvider != SignatureProviderUnknown {
+				t.Fatalf("decision = %+v, want unknown provider and dropped block", decision)
+			}
+			if !strings.Contains(decision.Reason, tc.want) {
+				t.Fatalf("reason = %q, want specific diagnosis containing %q", decision.Reason, tc.want)
+			}
+			if strings.Contains(decision.Reason, "cross-provider") {
+				t.Fatalf("reason = %q, must not claim a cross-provider mismatch", decision.Reason)
+			}
+		})
+	}
+}
+
+// TestClassifyUnknownCAISGeneration pins the exported classifier that callers
+// (the Claude executor's sanitize-report logger) must use instead of
+// re-matching claudeCAISUnknownGenerationError's prose themselves.
+func TestClassifyUnknownCAISGeneration(t *testing.T) {
+	t.Run("bare reason", func(t *testing.T) {
+		err := &claudeCAISUnknownGenerationError{identifier: "channel_id", value: 99}
+		normalized, ok := ClassifyUnknownCAISGeneration(err.Error())
+		if !ok {
+			t.Fatalf("ClassifyUnknownCAISGeneration(%q) ok = false, want true", err.Error())
+		}
+		if normalized != err.Error() {
+			t.Fatalf("normalized = %q, want %q unchanged (no position prefix to strip)", normalized, err.Error())
+		}
+	})
+
+	t.Run("position-prefixed reason", func(t *testing.T) {
+		err := &claudeCAISUnknownGenerationError{identifier: "envelope version", value: 7}
+		prefixed := "messages[2].content[5]: " + err.Error()
+		normalized, ok := ClassifyUnknownCAISGeneration(prefixed)
+		if !ok {
+			t.Fatalf("ClassifyUnknownCAISGeneration(%q) ok = false, want true", prefixed)
+		}
+		if normalized != err.Error() {
+			t.Fatalf("normalized = %q, want %q (sanitizer position prefix must be stripped)", normalized, err.Error())
+		}
+	})
+
+	t.Run("non-matching reason", func(t *testing.T) {
+		for _, reason := range []string{
+			"",
+			"Claude has no cross-provider bypass sentinel for thinking blocks",
+			"GPT reasoning encrypted_content cannot be synthesized from another provider signature",
+		} {
+			if normalized, ok := ClassifyUnknownCAISGeneration(reason); ok {
+				t.Fatalf("ClassifyUnknownCAISGeneration(%q) = (%q, true), want ok=false", reason, normalized)
+			}
+		}
+	})
+
+	// A model-tagged CAIS signature's model_text is attacker-controlled past its
+	// required "claude-" prefix, and claudeCompatibleSignatureReason
+	// (provider_compatibility.go) copies model_text verbatim into a PRESERVED
+	// decision's reason. These cases pin that such a reason must never
+	// classify as an unknown-generation drop, no matter where the marker text
+	// sits inside it or whether the sanitizer's position prefix is present,
+	// while a genuine drop reason with that same position prefix still
+	// classifies correctly (positive control alongside the negative ones).
+	t.Run("marker text embedded in unrelated prose is not misclassified as a drop", func(t *testing.T) {
+		const embeddedMarkerReason = "valid Claude CAIS signature with embedded model claude-x invalid Claude model-free CAIS signature: unknown envelope version 9 is compatible with any Claude target"
+		genuineDrop := (&claudeCAISUnknownGenerationError{identifier: "envelope version", value: 9}).Error()
+
+		cases := []struct {
+			name           string
+			reason         string
+			wantOK         bool
+			wantNormalized string
+		}{
+			{
+				name:   "bare preserved reason with embedded marker",
+				reason: embeddedMarkerReason,
+				wantOK: false,
+			},
+			{
+				name:   "position-prefixed preserved reason with embedded marker",
+				reason: "messages[2].content[0]: " + embeddedMarkerReason,
+				wantOK: false,
+			},
+			{
+				// The extra ".signature" segment makes this not match
+				// claudeSignaturePositionPrefixPattern at all (that pattern
+				// only recognizes the thinking-block shape; see its doc
+				// comment for why the tool-use shape is deliberately not
+				// included). It must fall back to the bare-reason path and
+				// still reject, since the full string does not start with
+				// the marker either.
+				name:   "reason with an unrecognized-shaped prefix and embedded marker",
+				reason: "messages[2].content[0].signature: " + embeddedMarkerReason,
+				wantOK: false,
+			},
+			{
+				name:           "genuine drop reason with the real position prefix (positive control)",
+				reason:         "messages[3].content[1]: " + genuineDrop,
+				wantOK:         true,
+				wantNormalized: genuineDrop,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				normalized, ok := ClassifyUnknownCAISGeneration(tc.reason)
+				if ok != tc.wantOK {
+					t.Fatalf("ClassifyUnknownCAISGeneration(%q) ok = %v, want %v (normalized=%q)", tc.reason, ok, tc.wantOK, normalized)
+				}
+				if ok && normalized != tc.wantNormalized {
+					t.Fatalf("ClassifyUnknownCAISGeneration(%q) normalized = %q, want %q", tc.reason, normalized, tc.wantNormalized)
+				}
+			})
+		}
+	})
+
+	// The motivating case: classify a reason produced end to end by the real
+	// sanitizer (SanitizeClaudeMessagesForClaudeUpstream ->
+	// DecideSignatureCompatibilityForModel -> claudeCAISUnknownGenerationError.Error()),
+	// not a hand-typed string on either side of the comparison. This is the
+	// assertion that fails if someone rewords claudeCAISUnknownGenerationError.Error()
+	// without updating claudeCAISUnknownGenerationPrefix: ok would become false
+	// (the classifier no longer recognizes the real error's prose), which the
+	// t.Fatalf below on "ok = false" catches directly.
+	t.Run("agrees with the real sanitizer-produced reason", func(t *testing.T) {
+		parts := defaultClaudeModelFreeCAISParts()
+		parts.envelopeVersion = 5
+		signature := parts.encode()
+		input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"` + signature + `"},{"type":"text","text":"answer"}]}]}`)
+
+		_, report := SanitizeClaudeMessagesForClaudeUpstream(input, "claude-fable-5-1")
+		if len(report.Decisions) != 1 {
+			t.Fatalf("decision count = %d, want 1; report=%+v", len(report.Decisions), report)
+		}
+		decision := report.Decisions[0]
+		if !strings.HasPrefix(decision.Reason, "messages[0].content[0]: ") {
+			t.Fatalf("decision.Reason = %q, want a sanitizer position prefix so this test exercises prefix tolerance", decision.Reason)
+		}
+
+		want := (&claudeCAISUnknownGenerationError{identifier: "envelope version", value: 5}).Error()
+		normalized, ok := ClassifyUnknownCAISGeneration(decision.Reason)
+		if !ok {
+			t.Fatalf("ClassifyUnknownCAISGeneration(%q) ok = false, want true", decision.Reason)
+		}
+		if normalized != want {
+			t.Fatalf("normalized = %q, want %q (must agree with the real claudeCAISUnknownGenerationError value)", normalized, want)
+		}
+	})
+}
+
+// TestClaudeModelFreeCAISSignature_CarrierValidatedBeforeGeneration pins the
+// order of the model-free CAIS switch: a malformed container carrier (field 5)
+// must be reported as a structural defect, never as
+// claudeCAISUnknownGenerationError, even when the envelope version or
+// channel_id is also unrecognized. Otherwise malformed client input produces
+// a false stale-allowlist warning instead of naming the carrier defect that
+// actually caused rejection.
+func TestClaudeModelFreeCAISSignature_CarrierValidatedBeforeGeneration(t *testing.T) {
+	t.Run("unknown envelope version with missing carrier reports the carrier defect", func(t *testing.T) {
+		parts := defaultClaudeModelFreeCAISParts()
+		parts.envelopeVersion = 5
+		parts.includeCarrier = false
+		signature := parts.encode()
+
+		_, err := InspectClaudeCAISSignature(signature)
+		if err == nil {
+			t.Fatal("InspectClaudeCAISSignature err = nil, want a carrier error")
+		}
+		var unknownGeneration *claudeCAISUnknownGenerationError
+		if errors.As(err, &unknownGeneration) {
+			t.Fatalf("err = %v, must not classify as unknown-generation when the carrier is missing", err)
+		}
+		if !strings.Contains(err.Error(), "container field 5") {
+			t.Fatalf("err = %q, want it to mention container field 5", err.Error())
+		}
+	})
+
+	t.Run("unknown channel_id with empty carrier reports the carrier defect", func(t *testing.T) {
+		parts := defaultClaudeModelFreeCAISParts()
+		parts.channelID = 18
+		parts.carrierLen = 0
+		signature := parts.encode()
+
+		_, err := InspectClaudeCAISSignature(signature)
+		if err == nil {
+			t.Fatal("InspectClaudeCAISSignature err = nil, want a carrier error")
+		}
+		var unknownGeneration *claudeCAISUnknownGenerationError
+		if errors.As(err, &unknownGeneration) {
+			t.Fatalf("err = %v, must not classify as unknown-generation when the carrier is empty", err)
+		}
+		if !strings.Contains(err.Error(), "container field 5") {
+			t.Fatalf("err = %q, want it to mention container field 5", err.Error())
+		}
+	})
+
+	t.Run("unknown envelope version with a valid carrier still reports unknown generation", func(t *testing.T) {
+		parts := defaultClaudeModelFreeCAISParts()
+		parts.envelopeVersion = 5
+		signature := parts.encode()
+
+		_, err := InspectClaudeCAISSignature(signature)
+		if err == nil {
+			t.Fatal("InspectClaudeCAISSignature err = nil, want an unknown-generation error")
+		}
+		var unknownGeneration *claudeCAISUnknownGenerationError
+		if !errors.As(err, &unknownGeneration) {
+			t.Fatalf("err = %v, want *claudeCAISUnknownGenerationError when the carrier is well-formed", err)
+		}
+	})
+}
+
+func TestClaudeModelFreeCAISSignature_RejectsAnyWrongWireCarrierOccurrence(t *testing.T) {
+	tests := []struct {
+		name         string
+		carrierTypes []protowire.Type
+		wantValid    bool
+	}{
+		{name: "wrong then valid", carrierTypes: []protowire.Type{protowire.VarintType, protowire.BytesType}},
+		{name: "valid then wrong", carrierTypes: []protowire.Type{protowire.BytesType, protowire.VarintType}},
+		{name: "valid then valid", carrierTypes: []protowire.Type{protowire.BytesType, protowire.BytesType}, wantValid: true},
+		{name: "single wrong", carrierTypes: []protowire.Type{protowire.VarintType}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			parts := defaultClaudeModelFreeCAISParts()
+			parts.carrierTypes = tc.carrierTypes
+			_, err := InspectClaudeCAISSignature(parts.encode())
+			if tc.wantValid {
+				if err != nil {
+					t.Fatalf("InspectClaudeCAISSignature() error = %v, want accepted", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("InspectClaudeCAISSignature() error = nil, want wrong-wire rejection")
+			}
+			if !strings.Contains(err.Error(), "container field 5 carrier must be bytes") {
+				t.Fatalf("error = %q, want container field 5 wrong-wire error", err)
+			}
+		})
+	}
+}
+
+func TestClaudeModelFreeCAISSignature_RejectsLegacyOnlyChannelID(t *testing.T) {
+	parts := defaultClaudeModelFreeCAISParts()
+	parts.channelID = 11
+	signature := parts.encode()
+
+	if got := DetectSignatureProviderForBlock(signature, SignatureBlockKindClaudeThinking); got != SignatureProviderUnknown {
+		t.Fatalf("channel_id 11 provider = %q, want %q because 11 is unobserved under CAIS", got, SignatureProviderUnknown)
 	}
 }
