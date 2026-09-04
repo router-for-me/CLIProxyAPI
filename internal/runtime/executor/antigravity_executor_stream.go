@@ -24,6 +24,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	if helps.SyntheticCompactionSupported(req.Payload, opts) {
+		return helps.ExecuteSyntheticCompactionStream(ctx, e, auth, req, opts)
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	ctx = context.WithValue(ctx, "alt", "")
