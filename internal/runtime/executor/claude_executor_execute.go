@@ -163,8 +163,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Only a ttl the caller wrote out explicitly survives, because
 	// upgradeClaudeCacheControlTTL skips any block that already has one.
 	// claude-code-cli fingerprint profiles emit extended-cache-ttl and must use the same 1h pool.
-	if cpaOwnsCacheControl && fp.ProfileClaudeCodeCLI {
+	// In native Claude Code 2.1.258, 1h cache and extended-cache-ttl are restricted to main
+	// interaction queries (repl_main_thread*); subagents, side queries, and probes omit both.
+	isSubagent := helps.IsClaudeSubagentRequest(incomingHeaders, body)
+	if cpaOwnsCacheControl && fp.ProfileClaudeCodeCLI && !isSubagent && !isProbeOrHelper {
 		body = upgradeClaudeCacheControlTTL(body, claudeCacheControlTTL1h)
+	} else if isSubagent || isProbeOrHelper {
+		body = stripClaudeCacheControlTTL(body)
 	}
 
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.

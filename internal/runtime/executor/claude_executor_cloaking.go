@@ -255,6 +255,22 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cch
 	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, time.Now(), false, "", "")
 }
 
+// isClaudeFable51Model reports whether the model is specifically Fable 5.1 / Mythos 5.1,
+// matching native Claude Code 2.1.258 family/major/minor checks (AFo = {major:5, minor:1}).
+func isClaudeFable51Model(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	for _, target := range []string{"fable-5-1", "fable-5.1", "mythos-5-1", "mythos-5.1"} {
+		idx := strings.Index(m, target)
+		if idx != -1 {
+			nextIdx := idx + len(target)
+			if nextIdx >= len(m) || m[nextIdx] < '0' || m[nextIdx] > '9' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func checkSystemInstructionsWithSigningModeAt(
 	payload []byte,
 	strictMode bool,
@@ -1075,10 +1091,11 @@ func applyCloaking(
 	billingVersion := helps.DefaultClaudeVersion(cfg)
 	workload := getWorkloadFromContext(ctx)
 
+	isProbeOrHelper := helps.IsClaudeProbeOrHelperRequest(payload)
 	isSubagent := false
 	prevReq := ""
 	promptID := ""
-	if !helps.IsClaudeProbeOrHelperRequest(payload) {
+	if !isProbeOrHelper {
 		incomingHeaders := resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
 		isSubagent = helps.IsClaudeSubagentRequest(incomingHeaders, payload)
 		existingPrevReq, existingPromptID := helps.ExtractClaudeBillingTags(payload)
@@ -1127,6 +1144,22 @@ func applyCloaking(
 		prevReq,
 		promptID,
 	)
+
+	// Fable 5.1 / Mythos 5.1 native profile: emit fallbacks and adaptive thinking display
+	if isClaudeFable51Model(gjson.GetBytes(payload, "model").String()) {
+		if !gjson.GetBytes(payload, "fallbacks").Exists() {
+			payload, _ = sjson.SetRawBytes(payload, "fallbacks", []byte(`[{"model":"claude-opus-5"}]`))
+		}
+		if gjson.GetBytes(payload, "thinking.type").String() == "adaptive" && !gjson.GetBytes(payload, "thinking.display").Exists() {
+			payload, _ = sjson.SetBytes(payload, "thinking.display", "updates")
+		}
+	}
+
+	// Probes and subagents never use 1h cache in native Claude Code; ensure any
+	// caller-supplied 1h ttl is stripped to match extended-cache-ttl beta suppression.
+	if isSubagent || isProbeOrHelper {
+		payload = stripClaudeCacheControlTTL(payload)
+	}
 
 	// Claude-Code-CLI fingerprint identity (real OAuth or fingerprint-profile=claude-code-cli)
 	// is applied later through the shared ApplyClaudeCredentialMetadata path.
@@ -1263,6 +1296,32 @@ func upgradeClaudeCacheControlTTL(payload []byte, ttl string) []byte {
 	}
 
 	forEachClaudeCacheControlBlock(payload, upgrade)
+	return payload
+}
+
+// stripClaudeCacheControlTTL removes any ttl field from cache_control blocks in payload,
+// downgrading {"type":"ephemeral","ttl":"..."} to {"type":"ephemeral"}.
+// This ensures that when extended-cache-ttl-2025-04-11 is stripped (e.g. on probes,
+// subagents, or non-OAuth credentials), the body does not retain a ttl field that would
+// trigger Anthropic 400 errors or fingerprint mismatch.
+func stripClaudeCacheControlTTL(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+
+	strip := func(path string, block gjson.Result) {
+		cacheControl := block.Get("cache_control")
+		if !cacheControl.IsObject() || !cacheControl.Get("ttl").Exists() {
+			return
+		}
+		updated, errDel := sjson.DeleteBytes(payload, path+".cache_control.ttl")
+		if errDel != nil {
+			return
+		}
+		payload = updated
+	}
+
+	forEachClaudeCacheControlBlock(payload, strip)
 	return payload
 }
 

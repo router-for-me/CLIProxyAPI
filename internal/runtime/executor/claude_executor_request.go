@@ -34,24 +34,25 @@ import (
 )
 
 const (
-	claudeTokenCountingBeta      = "token-counting-2024-11-01"
-	claudeFastModeBeta           = "fast-mode-2026-02-01"
-	claudeOAuthBeta              = "oauth-2025-04-20"
-	claudeCodeBeta               = "claude-code-20250219"
-	claudeContext1MBeta          = "context-1m-2025-08-07"
-	claudeMidConvSystemBeta      = "mid-conversation-system-2026-04-07"
-	claudeAdvisorToolBeta        = "advisor-tool-2026-03-01"
-	claudeAdvancedToolUseBeta    = "advanced-tool-use-2025-11-20"
-	claudeEffortBeta             = "effort-2025-11-24"
-	claudeServerSideFallbackBeta = "server-side-fallback-2026-06-01"
-	claudeFallbackCreditBeta     = "fallback-credit-2026-06-01"
-	claudeStructuredOutputsBeta  = "structured-outputs-2025-12-15"
-	claudeExtendedCacheTTLBeta   = "extended-cache-ttl-2025-04-11"
-	claudeCacheDiagnosisBeta     = "cache-diagnosis-2026-04-07"
-	claudeRedactThinkingBeta     = "redact-thinking-2026-02-12"
+	claudeTokenCountingBeta          = "token-counting-2024-11-01"
+	claudeFastModeBeta               = "fast-mode-2026-02-01"
+	claudeOAuthBeta                  = "oauth-2025-04-20"
+	claudeCodeBeta                   = "claude-code-20250219"
+	claudeContext1MBeta              = "context-1m-2025-08-07"
+	claudeMidConvSystemBeta          = "mid-conversation-system-2026-04-07"
+	claudeAdvisorToolBeta            = "advisor-tool-2026-03-01"
+	claudeAdvancedToolUseBeta        = "advanced-tool-use-2025-11-20"
+	claudeEffortBeta                 = "effort-2025-11-24"
+	claudeServerSideFallbackBeta     = "server-side-fallback-2026-06-01"
+	claudeFallbackCreditBeta         = "fallback-credit-2026-06-01"
+	claudeStructuredOutputsBeta      = "structured-outputs-2025-12-15"
+	claudeThinkingDisplayUpdatesBeta = "thinking-display-updates-2026-08-18"
+	claudeExtendedCacheTTLBeta       = "extended-cache-ttl-2025-04-11"
+	claudeCacheDiagnosisBeta         = "cache-diagnosis-2026-04-07"
+	claudeRedactThinkingBeta         = "redact-thinking-2026-02-12"
 )
 
-// claudeCodeCLIConstantBetas are the betas Claude Code 2.1.220 sends on every
+// claudeCodeCLIConstantBetas are the betas Claude Code sends on every
 // /v1/messages request from the "cli" entrypoint, in wire order, excluding the
 // leading claude-code-20250219.
 //
@@ -76,12 +77,11 @@ var claudeCodeTrailingBetas = []string{
 }
 
 // claudeCodeCLIBetas assembles the Anthropic-Beta baseline the way Claude Code
-// 2.1.220 does: the list is per-request, not a fixed string. requested holds the
+// 2.1.258 does: the list is per-request, not a fixed string. requested holds the
 // betas the caller asked for, which decide the capability flags below.
 //
-// Verified against api.anthropic.com with isolated 2.1.220 profiles on both
-// API-key and OAuth paths. A 2026-08-03 A/B capture with two distinct OAuth
-// accounts confirmed the current tool beta and OAuth trailer below.
+// Verified against api.anthropic.com with native 2.1.258 captures on interactive,
+// non-interactive, subagent, and multi-model paths (Sonnet, Opus, Fable, Haiku).
 // The full observed order is:
 //
 //	 1 claude-code-20250219
@@ -95,17 +95,19 @@ var claudeCodeTrailingBetas = []string{
 //	 9 mid-conversation-system-2026-04-07  models accepting a role=system turn
 //	10 advisor-tool-2026-03-01             requests declaring advisor tools or requesting advisor beta
 //	11 advanced-tool-use-2025-11-20       requests with tools
-//	12 effort-2025-11-24
-//	13 server-side-fallback-2026-06-01
-//	14 fallback-credit-2026-06-01
-//	15 fast-mode-2026-02-01               speed:fast requests only
-//	16 extended-cache-ttl-2025-04-11      OAuth credentials only
-//	17 cache-diagnosis-2026-04-07         requests with diagnostics only
+//	12 effort-2025-11-24                  effort-supporting models with active thinking
+//	13 server-side-fallback-2026-06-01    requests with fallbacks or requested
+//	14 fallback-credit-2026-06-01         OAuth credentials
+//	15 structured-outputs-2025-12-15      structured output requests
+//	16 thinking-display-updates-2026-08-18 requests with thinking.display=updates
+//	17 fast-mode-2026-02-01               speed:fast requests only
+//	18 extended-cache-ttl-2025-04-11      OAuth credentials (omitted on subagent & probe)
+//	19 cache-diagnosis-2026-04-07         requests with diagnostics only
 //
 // An empty body keeps the optimistic role=system default, matching the cloaking
 // policy for unknown and future model IDs.
 func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool) string {
-	betas := make([]string, 0, len(claudeCodeCLIConstantBetas)+len(claudeCodeTrailingBetas)+7)
+	betas := make([]string, 0, len(claudeCodeCLIConstantBetas)+len(claudeCodeTrailingBetas)+8)
 	betas = append(betas, claudeCodeBeta)
 	if oauthToken {
 		betas = append(betas, claudeOAuthBeta)
@@ -129,25 +131,67 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() && len(tools.Array()) > 0 {
 		betas = append(betas, claudeAdvancedToolUseBeta)
 	}
-	betas = append(betas, claudeEffortBeta)
-	if oauthToken && !requested[claudeFallbackCreditBeta] {
+	if claudeRequestSupportsEffort(body, requested) {
+		betas = append(betas, claudeEffortBeta)
+	}
+	isProbeOrHelper := helps.IsClaudeProbeOrHelperRequest(body)
+	if !isProbeOrHelper && (requested[claudeServerSideFallbackBeta] || gjson.GetBytes(body, "fallbacks").Exists()) {
+		betas = append(betas, claudeServerSideFallbackBeta)
+	}
+	if requested[claudeFallbackCreditBeta] || oauthToken {
 		betas = append(betas, claudeFallbackCreditBeta)
 	}
 	for _, beta := range claudeCodeTrailingBetas {
+		if beta == claudeServerSideFallbackBeta || beta == claudeFallbackCreditBeta {
+			continue
+		}
 		if requested[beta] {
 			betas = append(betas, beta)
 		}
 	}
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	if !isProbeOrHelper && thinkingType != "disabled" && (requested[claudeThinkingDisplayUpdatesBeta] || claudeThinkingDisplayUpdates(body)) {
+		betas = append(betas, claudeThinkingDisplayUpdatesBeta)
+	}
 	if claudeRequestUsesFastMode(body, requested) {
 		betas = append(betas, claudeFastModeBeta)
 	}
-	if oauthToken {
+	if oauthToken && !helps.IsClaudeSubagentRequest(nil, body) && !isProbeOrHelper {
 		betas = append(betas, claudeExtendedCacheTTLBeta)
 	}
 	if diagnostics := gjson.GetBytes(body, "diagnostics"); diagnostics.IsObject() {
 		betas = append(betas, claudeCacheDiagnosisBeta)
 	}
 	return strings.Join(betas, ",")
+}
+
+func isClaudeHaikuModel(model string) bool {
+	return strings.Contains(strings.ToLower(model), "haiku")
+}
+
+func claudeRequestSupportsEffort(body []byte, requested map[string]bool) bool {
+	if len(body) > 0 {
+		if helps.IsClaudeProbeOrHelperRequest(body) {
+			return false
+		}
+		model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "model").String()))
+		if isClaudeHaikuModel(model) {
+			return false
+		}
+		thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
+		if thinkingType == "disabled" {
+			return false
+		}
+	}
+	if requested[claudeEffortBeta] {
+		return true
+	}
+	return true
+}
+
+func claudeThinkingDisplayUpdates(body []byte) bool {
+	display := gjson.GetBytes(body, "thinking.display")
+	return display.Type == gjson.String && strings.EqualFold(strings.TrimSpace(display.String()), "updates")
 }
 
 // claudeBodyHasAdvisorTool reports whether the request body declares an
@@ -250,7 +294,7 @@ func withClaudeCountTokensOAuthBeta(betas string) string {
 // be described accurately.
 //
 // Betas already present are left exactly where the caller put them.
-func withClaudeOAuthCredentialBetas(betas string) string {
+func withClaudeOAuthCredentialBetas(betas string, includeExtendedCacheTTL bool) string {
 	parts := make([]string, 0, 16)
 	seen := make(map[string]bool)
 	for _, beta := range strings.Split(betas, ",") {
@@ -269,10 +313,22 @@ func withClaudeOAuthCredentialBetas(betas string) string {
 		copy(parts[insertAt+1:], parts[insertAt:])
 		parts[insertAt] = claudeOAuthBeta
 	}
-	if !seen[claudeExtendedCacheTTLBeta] {
+	if includeExtendedCacheTTL && !seen[claudeExtendedCacheTTLBeta] {
 		parts = append(parts, claudeExtendedCacheTTLBeta)
 	}
 	return strings.Join(parts, ",")
+}
+
+func withoutClaudeBeta(betas, removeBeta string) string {
+	parts := strings.Split(betas, ",")
+	res := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" && p != removeBeta {
+			res = append(res, p)
+		}
+	}
+	return strings.Join(res, ",")
 }
 
 // withClaudeAdvisorToolBeta ensures advisor-tool-2026-03-01 is present when
@@ -784,7 +840,7 @@ func applyClaudeHeadersWithNativeProfile(
 		}
 	}
 
-	incomingBetas := strings.TrimSpace(strings.Join(incomingHeaders.Values("Anthropic-Beta"), ","))
+	incomingBetas := strings.TrimSpace(strings.Join(helps.HeaderValuesCaseInsensitive(incomingHeaders, "Anthropic-Beta"), ","))
 	countTokens := r.URL != nil && strings.HasSuffix(r.URL.Path, "/count_tokens")
 	requestedMap := claudeRequestedBetas(incomingBetas, extraBetas)
 	advisorNeeded := requestedMap[claudeAdvisorToolBeta] || claudeBodyHasAdvisorTool(body)
@@ -806,16 +862,23 @@ func applyClaudeHeadersWithNativeProfile(
 		}
 		// Measured Haiku helper requests already carry the exact credential
 		// beta profile and intentionally omit extended-cache-ttl.
+		// Native Claude Code subagents and probes also omit extended-cache-ttl.
 		if useOAuthBetas && !helperProfile {
 			if countTokens {
 				baseBetas = withClaudeCountTokensOAuthBeta(baseBetas)
 			} else {
-				baseBetas = withClaudeOAuthCredentialBetas(baseBetas)
+				isSubagent := helps.IsClaudeSubagentRequest(incomingHeaders, body)
+				isProbe := helps.IsClaudeProbeOrHelperRequest(body)
+				includeExtendedCacheTTL := !isSubagent && !isProbe
+				baseBetas = withClaudeOAuthCredentialBetas(baseBetas, includeExtendedCacheTTL)
 			}
 		}
 	}
 	if preserveCallerFingerprint && advisorNeeded {
 		baseBetas = withClaudeAdvisorToolBeta(baseBetas)
+	}
+	if !claudeRequestSupportsEffort(body, nil) {
+		baseBetas = withoutClaudeBeta(baseBetas, claudeEffortBeta)
 	}
 	existingSet := make(map[string]bool)
 	for _, beta := range strings.Split(baseBetas, ",") {
@@ -860,6 +923,28 @@ func applyClaudeHeadersWithNativeProfile(
 		}
 	}
 	applyBetaHeader := func() {
+		// Enforce strict native Claude Code 2.1.258 model & turn beta gating:
+		if !claudeRequestSupportsEffort(body, nil) {
+			baseBetas = withoutClaudeBeta(baseBetas, claudeEffortBeta)
+		}
+		reqProbeOrHelper := helps.IsClaudeProbeOrHelperRequest(body)
+		if reqProbeOrHelper {
+			baseBetas = withoutClaudeBeta(baseBetas, claudeServerSideFallbackBeta)
+			baseBetas = withoutClaudeBeta(baseBetas, claudeThinkingDisplayUpdatesBeta)
+			baseBetas = withoutClaudeBeta(baseBetas, claudeExtendedCacheTTLBeta)
+		}
+		reqThinkingType := gjson.GetBytes(body, "thinking.type").String()
+		if reqThinkingType == "disabled" {
+			baseBetas = withoutClaudeBeta(baseBetas, claudeThinkingDisplayUpdatesBeta)
+		}
+		if helps.IsClaudeSubagentRequest(nil, body) {
+			baseBetas = withoutClaudeBeta(baseBetas, claudeExtendedCacheTTLBeta)
+		}
+		reqModel := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "model").String()))
+		if isClaudeHaikuModel(reqModel) && !gjson.GetBytes(body, "fallbacks").Exists() {
+			baseBetas = withoutClaudeBeta(baseBetas, claudeServerSideFallbackBeta)
+		}
+
 		if strings.TrimSpace(baseBetas) == "" {
 			r.Header.Del("Anthropic-Beta")
 			return
@@ -932,7 +1017,7 @@ func applyClaudeHeadersWithNativeProfile(
 	identityHeader("X-Stainless-Lang", "js")
 	// Native async SDK helpers add this header independently of body.stream.
 	// Preserve it only after the complete native-client detector succeeds.
-	if confirmedClaudeCode && incomingHeaders.Get("X-Stainless-Async") == "async" {
+	if confirmedClaudeCode && helps.HeaderValueCaseInsensitive(incomingHeaders, "X-Stainless-Async") == "async" {
 		r.Header.Set("X-Stainless-Async", "async")
 	}
 	// Claude Code omits X-Stainless-Timeout on count_tokens; only a confirmed
@@ -940,7 +1025,7 @@ func applyClaudeHeadersWithNativeProfile(
 	if !countTokens {
 		identityHeader("X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
 	} else if confirmedClaudeCode {
-		if incomingTimeout := incomingHeaders.Get("X-Stainless-Timeout"); incomingTimeout != "" {
+		if incomingTimeout := helps.HeaderValueCaseInsensitive(incomingHeaders, "X-Stainless-Timeout"); incomingTimeout != "" {
 			r.Header.Set("X-Stainless-Timeout", incomingTimeout)
 		}
 	}

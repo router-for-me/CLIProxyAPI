@@ -5542,9 +5542,9 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			want: constants + ",effort-2025-11-24",
 		},
 		{
-			name: "claude-haiku-4-5-20251001 stays on the reminder path",
+			name: "claude-haiku-4-5-20251001 stays on the reminder path and omits effort",
 			body: `{"model":"claude-haiku-4-5-20251001"}`,
-			want: constants + ",effort-2025-11-24",
+			want: constants,
 		},
 		{
 			name: "legacy model with tools adds advanced tool use only",
@@ -5606,6 +5606,61 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			name: "body with advisor server tool automatically adds advisor-tool beta",
 			body: `{"model":"claude-opus-5","tools":[{"type":"advisor_20260301","name":"advisor"}]}`,
 			want: constants + ",mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24",
+		},
+		{
+			name: "thinking display updates emits thinking-display-updates beta and drops redact-thinking",
+			body: `{"model":"claude-fable-5-1","thinking":{"type":"adaptive","display":"updates"}}`,
+			want: "claude-code-20250219,interleaved-thinking-2025-05-14," +
+				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07," +
+				"effort-2025-11-24,thinking-display-updates-2026-08-18",
+		},
+		{
+			name: "body with fallbacks automatically adds server-side-fallback beta",
+			body: `{"model":"claude-fable-5-1","fallbacks":[{"model":"claude-opus-5"}]}`,
+			want: constants + ",mid-conversation-system-2026-04-07,effort-2025-11-24,server-side-fallback-2026-06-01",
+		},
+		{
+			name:  "subagent request omits extended-cache-ttl beta",
+			body:  `{"model":"claude-sonnet-5","system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.258.0ab; cc_is_subagent=true;"}]}`,
+			oauth: true,
+			want: "claude-code-20250219,oauth-2025-04-20," +
+				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
+				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07," +
+				"effort-2025-11-24,fallback-credit-2026-06-01",
+		},
+		{
+			name:  "probe request max_tokens=1 omits effort and extended-cache-ttl betas",
+			body:  `{"model":"claude-sonnet-5","max_tokens":1}`,
+			oauth: true,
+			want: "claude-code-20250219,oauth-2025-04-20," +
+				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
+				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07," +
+				"fallback-credit-2026-06-01",
+		},
+		{
+			name:      "haiku model omits effort beta even if requested",
+			body:      `{"model":"claude-haiku-4-5-20251001"}`,
+			requested: map[string]bool{"effort-2025-11-24": true},
+			oauth:     true,
+			want: "claude-code-20250219,oauth-2025-04-20," +
+				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
+				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05," +
+				"fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11",
+		},
+		{
+			name:      "disabled thinking omits effort beta even if requested",
+			body:      `{"model":"claude-sonnet-5","thinking":{"type":"disabled"}}`,
+			requested: map[string]bool{"effort-2025-11-24": true},
+			oauth:     true,
+			want: "claude-code-20250219,oauth-2025-04-20," +
+				"interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
+				"thinking-token-count-2026-05-13,context-management-2025-06-27," +
+				"prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07," +
+				"fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11",
 		},
 	}
 
@@ -6511,5 +6566,224 @@ func TestClaudeExecutor_PreservesNativeAgentAndEnvironmentHeaders(t *testing.T) 
 				}
 			}
 		})
+	}
+}
+
+func TestIsClaudeFable51Model_DigitBoundary(t *testing.T) {
+	valid := []string{
+		"claude-fable-5-1",
+		"claude-fable-5.1",
+		"claude-fable-5-1-20260901",
+		"claude-mythos-5-1",
+		"claude-mythos-5.1",
+		"claude-mythos-5-1-preview",
+	}
+	for _, m := range valid {
+		if !isClaudeFable51Model(m) {
+			t.Errorf("expected %q to be recognized as Fable 5.1", m)
+		}
+	}
+
+	invalid := []string{
+		"claude-fable-5-10",
+		"claude-fable-5.10",
+		"claude-mythos-5-10",
+		"claude-sonnet-5",
+		"claude-opus-5",
+		"claude-haiku-4-5",
+	}
+	for _, m := range invalid {
+		if isClaudeFable51Model(m) {
+			t.Errorf("expected %q NOT to be recognized as Fable 5.1", m)
+		}
+	}
+}
+
+func TestClaudeExecutor_ProbeStripsCaller1hTTLAndBetas(t *testing.T) {
+	var seenHeaders http.Header
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHeaders = r.Header.Clone()
+		seenBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "sk-ant-oat-probe-ttl-test",
+		}},
+	}
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-probe-ttl-test",
+		Metadata: claudeOAuthTestMetadata(),
+		Attributes: map[string]string{
+			"api_key":  "sk-ant-oat-probe-ttl-test",
+			"base_url": server.URL,
+		},
+	}
+
+	executor := NewClaudeExecutor(cfg)
+	// Probe request with caller-supplied 1h TTL and forbidden betas
+	payload := []byte(`{
+		"model": "claude-sonnet-5",
+		"max_tokens": 1,
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "quota", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+			]
+		}]
+	}`)
+	incomingHeaders := http.Header{}
+	incomingHeaders.Set("Anthropic-Beta", "extended-cache-ttl-2025-04-11,server-side-fallback-2026-06-01,thinking-display-updates-2026-08-18,effort-2025-11-24")
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Headers:      incomingHeaders,
+	})
+	if err != nil {
+		t.Fatalf("Execute error = %v", err)
+	}
+
+	// 1. Verify body cache_control does not have ttl: "1h"
+	rawBody := string(seenBody)
+	if strings.Contains(rawBody, `"ttl":"1h"`) || strings.Contains(rawBody, `"ttl": "1h"`) {
+		t.Fatalf("probe body must have ttl stripped, got: %s", rawBody)
+	}
+
+	// 2. Verify forbidden betas are stripped from header
+	betas := seenHeaders.Get("Anthropic-Beta")
+	for _, forbidden := range []string{
+		"extended-cache-ttl-2025-04-11",
+		"server-side-fallback-2026-06-01",
+		"thinking-display-updates-2026-08-18",
+		"effort-2025-11-24",
+	} {
+		if strings.Contains(betas, forbidden) {
+			t.Errorf("probe Anthropic-Beta must not contain %s, got: %s", forbidden, betas)
+		}
+	}
+}
+
+func TestClaudeExecutor_SubagentStripsCaller1hTTLAndExtendedCacheBeta(t *testing.T) {
+	var seenHeaders http.Header
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHeaders = r.Header.Clone()
+		seenBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "sk-ant-oat-subagent-ttl-test",
+		}},
+	}
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-subagent-ttl-test",
+		Metadata: claudeOAuthTestMetadata(),
+		Attributes: map[string]string{
+			"api_key":  "sk-ant-oat-subagent-ttl-test",
+			"base_url": server.URL,
+		},
+	}
+
+	executor := NewClaudeExecutor(cfg)
+	payload := []byte(`{
+		"model": "claude-sonnet-5",
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "subagent work", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+			]
+		}]
+	}`)
+	incomingHeaders := http.Header{}
+	incomingHeaders.Set("X-Claude-Code-Agent-Id", "agent-sub-123")
+	incomingHeaders.Set("Anthropic-Beta", "extended-cache-ttl-2025-04-11")
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Headers:      incomingHeaders,
+	})
+	if err != nil {
+		t.Fatalf("Execute error = %v", err)
+	}
+
+	// 1. Verify body cache_control does not have ttl: "1h"
+	rawBody := string(seenBody)
+	if strings.Contains(rawBody, `"ttl":"1h"`) || strings.Contains(rawBody, `"ttl": "1h"`) {
+		t.Fatalf("subagent body must have ttl stripped, got: %s", rawBody)
+	}
+
+	// 2. Verify extended-cache-ttl beta is stripped from header
+	betas := seenHeaders.Get("Anthropic-Beta")
+	if strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
+		t.Errorf("subagent Anthropic-Beta must not contain extended-cache-ttl, got: %s", betas)
+	}
+}
+
+func TestClaudeExecutor_DisabledThinkingStripsDisplayBeta(t *testing.T) {
+	var seenHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "sk-ant-oat-disabled-thinking-beta-test",
+		}},
+	}
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-disabled-thinking-beta-test",
+		Metadata: claudeOAuthTestMetadata(),
+		Attributes: map[string]string{
+			"api_key":  "sk-ant-oat-disabled-thinking-beta-test",
+			"base_url": server.URL,
+		},
+	}
+
+	executor := NewClaudeExecutor(cfg)
+	payload := []byte(`{
+		"model": "claude-sonnet-5",
+		"thinking": {"type": "disabled"},
+		"messages": [{
+			"role": "user",
+			"content": "hello"
+		}]
+	}`)
+	incomingHeaders := http.Header{}
+	incomingHeaders.Set("Anthropic-Beta", "thinking-display-updates-2026-08-18,effort-2025-11-24")
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Headers:      incomingHeaders,
+	})
+	if err != nil {
+		t.Fatalf("Execute error = %v", err)
+	}
+
+	betas := seenHeaders.Get("Anthropic-Beta")
+	if strings.Contains(betas, "thinking-display-updates-2026-08-18") {
+		t.Errorf("disabled thinking must not send thinking-display-updates beta, got: %s", betas)
+	}
+	if strings.Contains(betas, "effort-2025-11-24") {
+		t.Errorf("disabled thinking must not send effort beta, got: %s", betas)
 	}
 }
