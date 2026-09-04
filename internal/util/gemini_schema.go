@@ -499,7 +499,9 @@ func repairSchemaNode(node map[string]any, addMissingArrayItems bool) (map[strin
 		}
 	}
 
-	for _, key := range []string{"$defs", "definitions", "dependentSchemas"} {
+	// Legacy dependencies is a hybrid name map: object values are schemas, while array values are
+	// property-name lists. The type assertion below deliberately repairs only its schema values.
+	for _, key := range []string{"$defs", "definitions", "dependentSchemas", "dependencies"} {
 		if defsVal, ok := clone[key].(map[string]any); ok {
 			repairedDefs := make(map[string]any, len(defsVal))
 			defsModified := false
@@ -1957,11 +1959,13 @@ func setRawAt(jsonStr, path, value string) string {
 }
 
 // schemaNameMapKeywords are the schema keywords whose value maps author-chosen names to
-// subschemas. A key directly under one of them is a name, never a schema keyword.
+// subschemas. Legacy dependencies may also map a name to a string array. A key directly under any
+// of these maps is a name, never a schema keyword.
 var schemaNameMapKeywords = map[string]struct{}{
 	"properties":        {},
 	"patternProperties": {},
 	"dependentSchemas":  {},
+	"dependencies":      {},
 	"$defs":             {},
 	"definitions":       {},
 }

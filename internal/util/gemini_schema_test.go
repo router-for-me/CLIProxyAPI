@@ -3581,3 +3581,78 @@ func TestCleanJSONSchema_RootCompositeConstPreservesExactValue(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanJSONSchema_LegacyDependenciesRespectSchemaAndArrayValues(t *testing.T) {
+	arrayDependency := `["const","default","examples","minProperties","$ref"]`
+	input := `{
+		"type": "object",
+		"dependencies": {
+			"enum": {"type": "object", "minProperties": 1},
+			"const": {"type": "object", "maxProperties": 2},
+			"default": {
+				"type": "object",
+				"minProperties": 3,
+				"properties": {"child": {"type": "string", "required": true}},
+				"dependencies": {"enum": ` + arrayDependency + `}
+			},
+			"examples": {"$ref": "#/$defs/Referenced"}
+		},
+		"$defs": {
+			"Referenced": {
+				"type": "object",
+				"properties": {"resolved": {"type": "string", "format": "uuid"}},
+				"required": ["resolved"]
+			}
+		}
+	}`
+
+	for name, clean := range schemaCleaners() {
+		result := clean(input)
+		parsed := gjson.Parse(result)
+
+		for _, testCase := range []struct {
+			entry string
+			hint  string
+		}{
+			{entry: "enum", hint: "minProperties: 1"},
+			{entry: "const", hint: "maxProperties: 2"},
+			{entry: "default", hint: "minProperties: 3"},
+		} {
+			schema := parsed.Get("dependencies." + testCase.entry)
+			if !schema.IsObject() {
+				t.Errorf("%s: schema-valued dependency %s was changed: %s", name, testCase.entry, result)
+				continue
+			}
+			if !strings.Contains(schema.Get("description").String(), testCase.hint) {
+				t.Errorf("%s: dependency %s was not recursively cleaned: %s", name, testCase.entry, result)
+			}
+		}
+
+		defaultDependency := parsed.Get("dependencies.default")
+		if defaultDependency.Get("properties.child.required").Exists() ||
+			defaultDependency.Get("required.0").String() != "child" {
+			t.Errorf("%s: schema-valued dependency was not normalized: %s", name, result)
+		}
+		gotArrayDependency := defaultDependency.Get("dependencies.enum")
+		if !reflect.DeepEqual(gotArrayDependency.Value(), gjson.Parse(arrayDependency).Value()) {
+			t.Errorf("%s: array-valued dependency changed: got %s, want %s", name, gotArrayDependency.Raw, arrayDependency)
+		}
+
+		refDependency := parsed.Get("dependencies.examples")
+		if name == "gemini" {
+			if !strings.Contains(refDependency.Get("description").String(), "See: Referenced") {
+				t.Errorf("%s: dependency ref hint missing: %s", name, result)
+			}
+		} else {
+			resolved := refDependency.Get("properties.resolved")
+			if !resolved.Exists() || !strings.Contains(resolved.Get("description").String(), "format: uuid") {
+				t.Errorf("%s: dependency ref was not inlined and cleaned: %s", name, result)
+			}
+		}
+
+		secondPass := clean(result)
+		if !reflect.DeepEqual(gjson.Parse(result).Value(), gjson.Parse(secondPass).Value()) {
+			t.Errorf("%s: legacy dependency cleaning is not idempotent:\nfirst: %s\nsecond: %s", name, result, secondPass)
+		}
+	}
+}
