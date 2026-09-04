@@ -234,6 +234,12 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		m.scheduler.upsertAuth(authClone.Clone())
 	}
 	m.queueRefreshReschedule(auth.ID)
+	// No Anthropic rate-limit scrub here on purpose. Update is the routine
+	// token-refresh path (conductor_refresh.go calls it after every OAuth
+	// refresh), not just the rotation path, so clearing the hint would drop
+	// valid quota state for the same account on an ordinary refresh. A
+	// rotation to a different account is handled on read instead, by the
+	// account fingerprint on the hint.
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	if cooldownStateChanged {
@@ -252,6 +258,14 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 	if id == "" {
 		return
 	}
+	// Release the Anthropic rate-limit hint before the already-absent early
+	// return below, not after it. A response still in flight when an auth is
+	// removed lands after the scrub and re-creates the entry; the delete that
+	// follows finds no auth in the map and returns, so a scrub placed later
+	// would never reach the resurrected hint and it would outlive the process.
+	// Unconditional is safe: the store is keyed by authID and this is a no-op
+	// for IDs without one.
+	DeleteAnthropicRateLimitHint(id)
 	_ = ctx
 
 	m.mu.Lock()
