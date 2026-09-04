@@ -193,3 +193,23 @@ func TestSelectDeviceIDUsesOneDeviceAcrossSessions(t *testing.T) {
 		t.Fatalf("single device selection = %q then %q, want %q", first, second, deviceIDs[0])
 	}
 }
+
+func TestReadMetadataBool(t *testing.T) {
+	metadata := map[string]any{
+		"enabled":  true,
+		"disabled": false,
+		"string":   "true",
+	}
+
+	if value, ok := ReadMetadataBool(&metadata, "enabled"); !ok || !value {
+		t.Fatalf("enabled = (%v, %v), want (true, true)", value, ok)
+	}
+	if value, ok := ReadMetadataBool(&metadata, "disabled"); !ok || value {
+		t.Fatalf("disabled = (%v, %v), want (false, true)", value, ok)
+	}
+	for _, key := range []string{"string", "missing"} {
+		if value, ok := ReadMetadataBool(&metadata, key); ok || value {
+			t.Fatalf("%s = (%v, %v), want (false, false)", key, value, ok)
+		}
+	}
+}
