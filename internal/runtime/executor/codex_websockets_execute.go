@@ -158,7 +158,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			cliproxyexecutor.MarkUpstreamAttempt(ctx)
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
-			return resp, newCodexStatusErr(respHS.StatusCode, bodyErr)
+			return resp, newCodexWebsocketHandshakeStatusErr(respHS.StatusCode, bodyErr)
 		}
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
 		return resp, errDial
@@ -251,9 +251,16 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 					return resp, errSendRetry
 				}
 			} else {
-				closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
-				return resp, errDialRetry
+				retryErr := errDialRetry
+				if respHSRetry != nil && respHSRetry.StatusCode > 0 {
+					bodyErr := websocketHandshakeBody(respHSRetry)
+					helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHSRetry.StatusCode, respHSRetry.Header.Clone(), bodyErr)
+					retryErr = newCodexWebsocketHandshakeStatusErr(respHSRetry.StatusCode, bodyErr)
+				} else {
+					closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
+				}
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", retryErr)
+				return resp, retryErr
 			}
 		} else {
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
