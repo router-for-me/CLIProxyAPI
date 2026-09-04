@@ -184,7 +184,10 @@ func TestGetAuthFileQuotaReportsClaudeOAuthWindows(t *testing.T) {
 func TestParseClaudeOAuthUsageFallsBackToLegacyWindows(t *testing.T) {
 	windows, errParse := parseClaudeOAuthUsage([]byte(`{
 	  "five_hour": {"utilization": 12.5, "resets_at": "2026-09-02T16:19:59+00:00"},
-	  "seven_day": {"utilization": 3, "resets_at": null}
+	  "seven_day": {"utilization": 3, "resets_at": null},
+	  "seven_day_sonnet": {"utilization": 40, "resets_at": "2026-09-07T14:59:59+00:00"},
+	  "seven_day_opus": {"utilization": 97, "resets_at": "2026-09-07T14:59:59+00:00"},
+	  "seven_day_ignored": {"resets_at": "2026-09-07T14:59:59+00:00"}
 	}`))
 	if errParse != nil {
 		t.Fatalf("parse: %v", errParse)
@@ -192,6 +195,8 @@ func TestParseClaudeOAuthUsageFallsBackToLegacyWindows(t *testing.T) {
 	want := []authFileQuotaWindow{
 		{Kind: "session", Utilization: 12.5, ResetsAt: "2026-09-02T16:19:59+00:00"},
 		{Kind: "weekly_all", Utilization: 3},
+		{Kind: "weekly_scoped", Utilization: 97, ResetsAt: "2026-09-07T14:59:59+00:00", Scope: "Opus"},
+		{Kind: "weekly_scoped", Utilization: 40, ResetsAt: "2026-09-07T14:59:59+00:00", Scope: "Sonnet"},
 	}
 	if len(windows) != len(want) {
 		t.Fatalf("windows = %#v, want %#v", windows, want)

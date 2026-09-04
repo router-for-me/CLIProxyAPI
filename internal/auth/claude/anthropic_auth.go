@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -272,12 +273,16 @@ func (o *ClaudeAuth) fetchOAuthControlPlaneJSON(ctx context.Context, endpoint, a
 			log.Errorf("failed to close Claude OAuth %s response body: %v", label, errClose)
 		}
 	}()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		// The status is the answer; the error body is never exposed, so it
+		// is drained (bounded, for connection reuse) rather than decoded —
+		// an oversized or oddly encoded error body must not hide the status.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxOAuthControlPlaneBodyBytes))
+		return nil, &OAuthStatusError{Label: label, StatusCode: resp.StatusCode}
+	}
 	body, errRead := readClaudeOAuthResponseBodyLimited(resp, maxOAuthControlPlaneBodyBytes)
 	if errRead != nil {
 		return nil, fmt.Errorf("read Claude OAuth %s response: %w", label, errRead)
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, &OAuthStatusError{Label: label, StatusCode: resp.StatusCode}
 	}
 	return body, nil
 }

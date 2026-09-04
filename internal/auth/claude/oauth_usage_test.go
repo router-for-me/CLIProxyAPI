@@ -60,6 +60,34 @@ func TestFetchOAuthUsageReportsUpstreamStatus(t *testing.T) {
 	}
 }
 
+// A non-2xx reply keeps its status even when its body can't be read: over
+// the cap, or in an encoding the decoder doesn't know.
+func TestFetchOAuthUsageKeepsTheStatusWhenTheErrorBodyIsUnreadable(t *testing.T) {
+	cases := map[string]*http.Response{
+		"oversize": {
+			StatusCode: http.StatusTooManyRequests,
+			Body:       io.NopCloser(bytes.NewReader(make([]byte, (2<<20)+1))),
+			Header:     make(http.Header),
+		},
+		"unknown encoding": {
+			StatusCode: http.StatusTooManyRequests,
+			Body:       io.NopCloser(strings.NewReader("not really zstd")),
+			Header:     http.Header{"Content-Encoding": []string{"zstd"}},
+		},
+	}
+	for name, resp := range cases {
+		auth := &ClaudeAuth{httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			resp.Request = req
+			return resp, nil
+		})}}
+		_, errFetch := auth.FetchOAuthUsage(context.Background(), "access")
+		var statusErr *OAuthStatusError
+		if !errors.As(errFetch, &statusErr) || statusErr.StatusCode != http.StatusTooManyRequests {
+			t.Fatalf("%s: error = %v, want an OAuthStatusError carrying 429", name, errFetch)
+		}
+	}
+}
+
 func TestFetchOAuthUsageBoundsTheBodyBeforeAndAfterDecompression(t *testing.T) {
 	// 3 MiB of zeros gzips to a few KB: small on the wire, over the cap decoded.
 	var bomb bytes.Buffer

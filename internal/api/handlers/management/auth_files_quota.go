@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -59,7 +60,8 @@ type authFileQuotaEntry struct {
 
 // claudeOAuthUsageResponse is the subset of the Anthropic usage payload that
 // this endpoint reads. `limits` is the newer shape; `five_hour`/`seven_day`
-// are the older one and are only used when `limits` is absent.
+// plus the per-model `seven_day_<model>` buckets are the older one and are
+// only used when `limits` is absent.
 type claudeOAuthUsageResponse struct {
 	FiveHour *claudeOAuthUsageWindow `json:"five_hour"`
 	SevenDay *claudeOAuthUsageWindow `json:"seven_day"`
@@ -100,9 +102,18 @@ func (h *Handler) GetAuthFileQuota(c *gin.Context) {
 	name := strings.TrimSpace(c.Query("name"))
 	authIndex := strings.TrimSpace(c.Query("auth_index"))
 
+	// One reload generation for the whole request: SetAuthManager/SetConfig
+	// swap these under h.mu during a hot reload.
+	var manager *coreauth.Manager
+	var cfg *config.Config
+	if h != nil {
+		h.mu.Lock()
+		manager, cfg = h.authManager, h.cfg
+		h.mu.Unlock()
+	}
 	var targets []*coreauth.Auth
-	if h != nil && h.authManager != nil {
-		for _, auth := range h.authManager.List() {
+	if manager != nil {
+		for _, auth := range manager.List() {
 			if auth == nil || !matchesAuthFileLookup(auth, name, authIndex) {
 				continue
 			}
@@ -129,7 +140,7 @@ func (h *Handler) GetAuthFileQuota(c *gin.Context) {
 			defer wg.Done()
 			slots <- struct{}{}
 			defer func() { <-slots }()
-			entries[i] = h.fetchClaudeOAuthQuota(c.Request.Context(), auth)
+			entries[i] = fetchClaudeOAuthQuota(c.Request.Context(), cfg, auth)
 		}()
 	}
 	wg.Wait()
@@ -137,7 +148,7 @@ func (h *Handler) GetAuthFileQuota(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"files": entries})
 }
 
-func (h *Handler) fetchClaudeOAuthQuota(ctx context.Context, auth *coreauth.Auth) authFileQuotaEntry {
+func fetchClaudeOAuthQuota(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) authFileQuotaEntry {
 	name := strings.TrimSpace(auth.FileName)
 	if name == "" {
 		name = auth.ID
@@ -154,10 +165,6 @@ func (h *Handler) fetchClaudeOAuthQuota(ctx context.Context, auth *coreauth.Auth
 	// the upstream connection is up the request only ends with the response
 	// or the caller's context (the management client disconnecting).
 	// Repository policy allows timeouts during credential acquisition only.
-	var cfg *config.Config
-	if h != nil {
-		cfg = h.cfg
-	}
 	client := newClaudeOAuthUsageClient(cfg, auth.ProxyURL)
 	body, errFetch := client.FetchOAuthUsage(ctx, tokenValueFromMetadata(auth.Metadata))
 	if errFetch != nil {
@@ -218,5 +225,46 @@ func parseClaudeOAuthUsage(body []byte) ([]authFileQuotaWindow, error) {
 	}
 	appendWindow("session", payload.FiveHour)
 	appendWindow("weekly_all", payload.SevenDay)
+	// Legacy per-model buckets (`seven_day_opus`, `seven_day_sonnet`, …)
+	// become weekly_scoped windows so a model-scoped limit isn't reported as
+	// spare quota. The model name is the key's suffix, title-cased.
+	var raw map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(body, &raw); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+	keys := make([]string, 0, len(raw))
+	for key := range raw {
+		if strings.HasPrefix(key, legacyScopedWeeklyPrefix) && len(key) > len(legacyScopedWeeklyPrefix) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		var scoped claudeOAuthUsageWindow
+		if errUnmarshal := json.Unmarshal(raw[key], &scoped); errUnmarshal != nil || scoped.Utilization == nil {
+			continue
+		}
+		window := authFileQuotaWindow{Kind: "weekly_scoped", Utilization: *scoped.Utilization,
+			Scope: legacyScopedModelName(strings.TrimPrefix(key, legacyScopedWeeklyPrefix))}
+		if scoped.ResetsAt != nil {
+			window.ResetsAt = *scoped.ResetsAt
+		}
+		windows = append(windows, window)
+	}
 	return windows, nil
+}
+
+const legacyScopedWeeklyPrefix = "seven_day_"
+
+// legacyScopedModelName turns a legacy key suffix ("opus", "sonnet_4") into
+// the display form the `limits` shape carries ("Opus", "Sonnet 4").
+func legacyScopedModelName(suffix string) string {
+	parts := strings.Split(suffix, "_")
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		parts[i] = strings.ToUpper(part[:1]) + part[1:]
+	}
+	return strings.Join(parts, " ")
 }
