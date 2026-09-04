@@ -252,7 +252,7 @@ func (c *DeviceFlowClient) PollForToken(ctx context.Context, deviceCode *DeviceC
 		case <-ctx.Done():
 			return nil, fmt.Errorf("kimi: context cancelled: %w", ctx.Err())
 		case <-timer.C:
-			if time.Now().After(deadline) {
+			if !time.Now().Before(deadline) {
 				return nil, fmt.Errorf("kimi: device code expired")
 			}
 

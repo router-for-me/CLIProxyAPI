@@ -193,8 +193,8 @@ func TestPollForTokenSlowDownDoesNotSleepPastDeadline(t *testing.T) {
 		if elapsed := time.Since(start); elapsed != 8*time.Second {
 			t.Fatalf("elapsed = %s, want 8s (deadline), not the uncapped 15s wait", elapsed)
 		}
-		if len(pollTimes) != 2 {
-			t.Fatalf("poll count = %d, want 2 (wake at deadline, then expire)", len(pollTimes))
+		if len(pollTimes) != 1 {
+			t.Fatalf("poll count = %d, want 1 (do not poll at the deadline)", len(pollTimes))
 		}
 	})
 }
@@ -219,8 +219,8 @@ func TestPollForTokenFirstWaitCappedToDeadline(t *testing.T) {
 		if elapsed := time.Since(start); elapsed != 3*time.Second {
 			t.Fatalf("elapsed = %s, want 3s (deadline), not the 5s first interval", elapsed)
 		}
-		if calls != 1 {
-			t.Fatalf("poll count = %d, want 1", calls)
+		if calls != 0 {
+			t.Fatalf("poll count = %d, want 0 (do not poll at the deadline)", calls)
 		}
 	})
 }
