@@ -75,8 +75,9 @@ func applyRouteOnGinContext(t *testing.T, h *BaseAPIHandler, providers []string,
 func TestApplyPinnedRoute_PoolStrategyBecomesRouteDefault(t *testing.T) {
 	const model = "glm-5.3-pool-strategy-route"
 	handler, cleanup := newPoolStrategyHandler(t, model, map[string]string{
-		"claude:7": "round-robin",
-		"claude:9": "fill-first",
+		"claude:7":  "round-robin",
+		"claude:9":  "fill-first",
+		"claude:11": "weighted-round-robin",
 	})
 	t.Cleanup(cleanup)
 
@@ -96,6 +97,15 @@ func TestApplyPinnedRoute_PoolStrategyBecomesRouteDefault(t *testing.T) {
 			wantStrategy: "priority",
 		},
 		{
+			// weighted-round-robin is reachable only through the pool fallback
+			// at this layer (the per-key route input boundary still validates
+			// routes to ""/priority/failover), so this case is the sole guard
+			// for that stash-switch arm.
+			name:         "route_without_strategy_inherits_weighted_pool_strategy",
+			route:        &store.ModelRoute{Model: model, Providers: []string{"claude:11"}},
+			wantStrategy: "weighted-round-robin",
+		},
+		{
 			name: "mixed_pools_with_different_strategies_keep_global",
 			route: &store.ModelRoute{
 				Model:     model,
@@ -111,7 +121,7 @@ func TestApplyPinnedRoute_PoolStrategyBecomesRouteDefault(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			filtered, strategy := applyRouteOnGinContext(t, handler, []string{"claude:7", "claude:9"}, model, tc.route)
+			filtered, strategy := applyRouteOnGinContext(t, handler, []string{"claude:7", "claude:9", "claude:11"}, model, tc.route)
 			if strategy != tc.wantStrategy {
 				t.Fatalf("RouteStrategyFor = %q, want %q (providers=%v)", strategy, tc.wantStrategy, filtered)
 			}

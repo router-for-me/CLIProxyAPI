@@ -19,8 +19,11 @@ const RequestPathMetadataKey = "request_path"
 const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 
 // RouteStrategyMetadataKey carries the per-model routing strategy override
-// ("priority" or "failover") resolved from the matched ModelRoute. An empty
-// value (or absence) means the configured global routing.strategy applies.
+// resolved from the matched ModelRoute — "priority" or "failover" from the
+// route itself, or a canonical pool strategy ("round-robin",
+// "weighted-round-robin", "fill-first") inherited from the pinned pool row's
+// strategy. An empty value (or absence) means the configured global
+// routing.strategy applies.
 const RouteStrategyMetadataKey = "route_strategy"
 
 // AuthSelectionModelMetadataKey overrides the model used only for auth selection.
