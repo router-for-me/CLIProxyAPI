@@ -3,6 +3,7 @@ package util
 import (
 	"encoding/json"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -3034,5 +3035,269 @@ func TestCleanJSONSchema_AllOfPreservesContinuousExclusiveHints(t *testing.T) {
 		if parsed.Get("minimum").Exists() || parsed.Get("maximum").Exists() {
 			t.Errorf("%s: continuous bounds should be retained only as hints: %s", name, result)
 		}
+	}
+}
+
+func TestCleanJSONSchema_UncomparableInclusiveSiblingKeepsExclusiveSemantics(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"lower": {"type": "integer", "minimum": -1e1000000000, "exclusiveMinimum": 0},
+			"upper": {"type": "integer", "maximum": 1e1000000000, "exclusiveMaximum": 10},
+			"strictLower": {"type": "integer", "minimum": 1e1000000000, "exclusiveMinimum": 0},
+			"strictUpper": {"type": "integer", "maximum": -1e1000000000, "exclusiveMaximum": 10},
+			"invalidLower": {"type": "integer", "minimum": "invalid", "exclusiveMinimum": 0},
+			"invalidUpper": {"type": "integer", "maximum": false, "exclusiveMaximum": 10},
+			"continuous": {"type": "number", "minimum": -1e1000000000, "exclusiveMinimum": 0}
+		}
+	}`
+
+	for name, clean := range schemaCleaners() {
+		result := clean(input)
+		parsed := gjson.Parse(result)
+		for _, field := range []string{"lower", "upper", "strictLower", "strictUpper", "invalidLower", "invalidUpper", "continuous"} {
+			schema := parsed.Get("properties." + field)
+			if schema.Get("exclusiveMinimum").Exists() || schema.Get("exclusiveMaximum").Exists() {
+				t.Errorf("%s: exclusive keyword survived on %s: %s", name, field, result)
+			}
+		}
+
+		if !strings.Contains(parsed.Get("properties.lower.description").String(), "exclusiveMinimum: 0") {
+			t.Errorf("%s: capped lower sibling lost exact exclusive hint: %s", name, result)
+		}
+		if !strings.Contains(parsed.Get("properties.upper.description").String(), "exclusiveMaximum: 10") {
+			t.Errorf("%s: capped upper sibling lost exact exclusive hint: %s", name, result)
+		}
+		if !strings.Contains(parsed.Get("properties.strictLower.description").String(), "exclusiveMinimum: 0") {
+			t.Errorf("%s: potentially stricter capped lower sibling lost exact exclusive hint: %s", name, result)
+		}
+		if !strings.Contains(parsed.Get("properties.strictUpper.description").String(), "exclusiveMaximum: 10") {
+			t.Errorf("%s: potentially stricter capped upper sibling lost exact exclusive hint: %s", name, result)
+		}
+		if !strings.Contains(parsed.Get("properties.continuous.description").String(), "exclusiveMinimum: 0") {
+			t.Errorf("%s: continuous capped sibling lost exact exclusive hint: %s", name, result)
+		}
+
+		invalidLower := parsed.Get("properties.invalidLower")
+		invalidUpper := parsed.Get("properties.invalidUpper")
+		if name == "gemini" {
+			if invalidLower.Get("minimum").Raw != "1" || invalidUpper.Get("maximum").Raw != "9" {
+				t.Errorf("%s: invalid siblings were not replaced by projected bounds: %s", name, result)
+			}
+			continue
+		}
+		if !strings.Contains(invalidLower.Get("description").String(), "minimum: 1") ||
+			!strings.Contains(invalidUpper.Get("description").String(), "maximum: 9") {
+			t.Errorf("%s: projected bounds from invalid siblings were not retained as hints: %s", name, result)
+		}
+	}
+}
+
+func TestCleanJSONSchema_AllOfIntersectsMonotonicSizeConstraints(t *testing.T) {
+	weak := `{
+		"minProperties": 1,
+		"maxProperties": 9,
+		"properties": {
+			"text": {"type": "string", "minLength": 1, "maxLength": 9},
+			"items": {"type": "array", "minItems": 1, "maxItems": 9}
+		}
+	}`
+	strict := `{
+		"minProperties": 5,
+		"maxProperties": 7,
+		"properties": {
+			"text": {"minLength": 5, "maxLength": 7},
+			"items": {"minItems": 5, "maxItems": 7}
+		}
+	}`
+
+	for order, input := range []string{
+		`{"type":"object","allOf":[` + weak + `,` + strict + `]}`,
+		`{"type":"object","allOf":[` + strict + `,` + weak + `]}`,
+	} {
+		for name, clean := range schemaCleaners() {
+			result := clean(input)
+			parsed := gjson.Parse(result)
+			descriptions := map[string]string{
+				"root":  parsed.Get("description").String(),
+				"text":  parsed.Get("properties.text.description").String(),
+				"items": parsed.Get("properties.items.description").String(),
+			}
+			want := map[string]string{
+				"root":  "minProperties: 5 (maxProperties: 7)",
+				"text":  "minLength: 5 (maxLength: 7)",
+				"items": "minItems: 5 (maxItems: 7)",
+			}
+			for path, wantDescription := range want {
+				if descriptions[path] != wantDescription {
+					t.Errorf("order %d %s: %s description = %q, want %q: %s", order, name, path, descriptions[path], wantDescription, result)
+				}
+			}
+		}
+	}
+}
+
+func TestCleanJSONSchema_AllOfPreservesNonOrderableConstraintHints(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"code": {
+				"type": "string",
+				"allOf": [
+					{"pattern": "^a", "format": "first"},
+					{"pattern": "z$", "format": "second"}
+				]
+			},
+			"amount": {
+				"type": "number",
+				"allOf": [{"multipleOf": 2}, {"multipleOf": 3}]
+			},
+			"tags": {
+				"type": "array",
+				"allOf": [
+					{"contains": {"type": "string", "enum": ["a"]}, "uniqueItems": false},
+					{"contains": {"type": "string", "enum": ["b"]}, "uniqueItems": true}
+				]
+			}
+		}
+	}`
+
+	for name, clean := range schemaCleaners() {
+		result := clean(input)
+		parsed := gjson.Parse(result)
+		codeDescription := parsed.Get("properties.code.description").String()
+		for _, hint := range []string{"pattern: ^a", "pattern: z$", "format: first", "format: second"} {
+			if !strings.Contains(codeDescription, hint) {
+				t.Errorf("%s: code constraint hint %q missing: %s", name, hint, result)
+			}
+		}
+		amountDescription := parsed.Get("properties.amount.description").String()
+		if name == "gemini" {
+			if parsed.Get("properties.amount.multipleOf").Raw != "2" || !strings.Contains(amountDescription, "multipleOf: 3") {
+				t.Errorf("%s: native and advisory multipleOf intersection lost: %s", name, result)
+			}
+		} else if !strings.Contains(amountDescription, "multipleOf: 2") || !strings.Contains(amountDescription, "multipleOf: 3") {
+			t.Errorf("%s: multipleOf intersection hints lost: %s", name, result)
+		}
+		tagsDescription := parsed.Get("properties.tags.description").String()
+		for _, hint := range []string{"contains:", "uniqueItems: false", "uniqueItems: true"} {
+			if !strings.Contains(tagsDescription, hint) {
+				t.Errorf("%s: tags constraint hint %q missing: %s", name, hint, result)
+			}
+		}
+		for _, value := range []string{"a", "b"} {
+			if !strings.Contains(tagsDescription, `"`+value+`"`) && !strings.Contains(tagsDescription, "Allowed: "+value) {
+				t.Errorf("%s: contains value %q missing from hints: %s", name, value, result)
+			}
+		}
+	}
+}
+
+func TestCleanJSONSchema_AllOfMergesNestedRequiredEnumAndClosedObjects(t *testing.T) {
+	first := `{
+		"properties": {
+			"config": {
+				"type": "object",
+				"properties": {"a": {"type": "string"}},
+				"required": ["a"],
+				"additionalProperties": true
+			},
+			"choice": {"type": "string", "enum": ["a", "b"]}
+		}
+	}`
+	second := `{
+		"properties": {
+			"config": {
+				"properties": {"b": {"type": "string"}},
+				"required": ["b"],
+				"additionalProperties": false
+			},
+			"choice": {"enum": ["b", "c"]}
+		}
+	}`
+
+	for order, input := range []string{
+		`{"type":"object","allOf":[` + first + `,` + second + `]}`,
+		`{"type":"object","allOf":[` + second + `,` + first + `]}`,
+	} {
+		for name, clean := range schemaCleaners() {
+			result := clean(input)
+			config := gjson.Get(result, "properties.config")
+			required := getStrings(result, "properties.config.required")
+			if !contains(required, "a") || !contains(required, "b") {
+				t.Errorf("order %d %s: nested required union = %v: %s", order, name, required, result)
+			}
+			if name == "antigravityResponse" && config.Get("additionalProperties").Type != gjson.False {
+				t.Errorf("order %d %s: additionalProperties:false was not retained: %s", order, name, result)
+			}
+			if name == "gemini" || name == "antigravityResponse" {
+				choiceEnum := getStrings(result, "properties.choice.enum")
+				if !reflect.DeepEqual(choiceEnum, []string{"b"}) {
+					t.Errorf("order %d %s: enum intersection = %v, want [b]: %s", order, name, choiceEnum, result)
+				}
+			}
+		}
+	}
+}
+
+func TestMergeAllOf_AdditionalPropertiesUsesStrictestSchema(t *testing.T) {
+	open := `{"additionalProperties":true}`
+	typed := `{"additionalProperties":{"type":"string","minLength":2}}`
+	closed := `{"additionalProperties":false}`
+
+	for name, testCase := range map[string]struct {
+		branches string
+		closed   bool
+	}{
+		"openThenTyped":   {branches: open + `,` + typed},
+		"typedThenOpen":   {branches: typed + `,` + open},
+		"typedThenClosed": {branches: typed + `,` + closed, closed: true},
+		"closedThenTyped": {branches: closed + `,` + typed, closed: true},
+	} {
+		result := gjson.Parse(mergeAllOf(`{"allOf":[` + testCase.branches + `]}`))
+		additional := result.Get("additionalProperties")
+		if testCase.closed {
+			if additional.Type != gjson.False {
+				t.Errorf("%s: false did not dominate additionalProperties: %s", name, result.Raw)
+			}
+			continue
+		}
+		if !additional.IsObject() || additional.Get("type").String() != "string" || additional.Get("minLength").Raw != "2" {
+			t.Errorf("%s: schema did not dominate true additionalProperties: %s", name, result.Raw)
+		}
+	}
+}
+
+func TestIntersectEnumValuesScalesAndPreservesTypedOrder(t *testing.T) {
+	existing := make([]string, 2000)
+	incoming := make([]string, 2000)
+	for index := range existing {
+		existing[index] = "value-" + strconv.Itoa(index)
+		incoming[index] = "value-" + strconv.Itoa(index+1000)
+	}
+	existingJSON, errExisting := json.Marshal(existing)
+	if errExisting != nil {
+		t.Fatal(errExisting)
+	}
+	incomingJSON, errIncoming := json.Marshal(incoming)
+	if errIncoming != nil {
+		t.Fatal(errIncoming)
+	}
+
+	intersection := intersectEnumValues(gjson.ParseBytes(existingJSON), gjson.ParseBytes(incomingJSON))
+	var got []string
+	if err := json.Unmarshal([]byte(intersection), &got); err != nil {
+		t.Fatalf("intersection is invalid JSON: %v: %s", err, intersection)
+	}
+	if len(got) != 1000 || got[0] != "value-1000" || got[len(got)-1] != "value-1999" {
+		t.Fatalf("large enum intersection has wrong ordered range: len=%d first=%q last=%q", len(got), got[0], got[len(got)-1])
+	}
+
+	typed := intersectEnumValues(
+		gjson.Parse(`[1,1.0,"1",true,null,{"a":1}]`),
+		gjson.Parse(`[1e0,"1",true,null,{"a":1}]`),
+	)
+	if typed != `[1,"1",true,null,{"a":1}]` {
+		t.Fatalf("typed enum intersection = %s", typed)
 	}
 }

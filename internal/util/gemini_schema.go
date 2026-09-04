@@ -799,12 +799,16 @@ func projectExclusiveBounds(jsonStr string) string {
 			switch {
 			case val.Type == gjson.Number && integerSchema:
 				if projected, ok := projectIntegerExclusiveBound(val.Raw, exclusiveMaximum); ok {
-					jsonStr = setStricterNumericBound(jsonStr, incPath, projected, exclusiveMaximum)
+					var represented bool
+					jsonStr, represented = setStricterNumericBound(jsonStr, incPath, projected, exclusiveMaximum)
+					if !represented {
+						jsonStr = appendHint(jsonStr, parentPath, fmt.Sprintf("%s: %s", key, val.Raw))
+					}
 				} else {
 					jsonStr = appendHint(jsonStr, parentPath, fmt.Sprintf("%s: %s", key, val.Raw))
 				}
 			case val.Type == gjson.Number:
-				jsonStr = setStricterNumericBound(jsonStr, incPath, val.Raw, exclusiveMaximum)
+				jsonStr, _ = setStricterNumericBound(jsonStr, incPath, val.Raw, exclusiveMaximum)
 				jsonStr = appendHint(jsonStr, parentPath, fmt.Sprintf("%s: %s", key, val.Raw))
 			case (val.Type == gjson.True || val.Type == gjson.False) && val.Bool():
 				// Draft-04 represents exclusivity as a boolean flag on minimum / maximum.
@@ -939,21 +943,31 @@ func projectIntegerExclusiveBound(raw string, exclusiveMaximum bool) (string, bo
 	return projected.String(), true
 }
 
-func setStricterNumericBound(jsonStr, path, projected string, maximum bool) string {
+// setStricterNumericBound returns whether the incoming bound is represented either by the
+// existing stricter bound or by a successful write. A capped numeric sibling cannot be compared
+// safely, so callers can preserve the incoming constraint as an exact description hint.
+func setStricterNumericBound(jsonStr, path, projected string, maximum bool) (string, bool) {
 	existing := gjson.Get(jsonStr, path)
 	if existing.Exists() {
 		projectedValue, projectedOK := parseSchemaNumericBound(projected)
+		if !projectedOK {
+			return jsonStr, false
+		}
+		if existing.Type != gjson.Number {
+			updated, _ := sjson.SetRawBytes([]byte(jsonStr), path, []byte(projected))
+			return string(updated), true
+		}
 		existingValue, existingOK := parseSchemaNumericBound(existing.Raw)
-		if !projectedOK || !existingOK {
-			return jsonStr
+		if !existingOK {
+			return jsonStr, false
 		}
 		comparison := projectedValue.Cmp(existingValue)
 		if (maximum && comparison >= 0) || (!maximum && comparison <= 0) {
-			return jsonStr
+			return jsonStr, true
 		}
 	}
 	updated, _ := sjson.SetRawBytes([]byte(jsonStr), path, []byte(projected))
-	return string(updated)
+	return string(updated), true
 }
 
 func convertConstToEnum(jsonStr string) string {
@@ -1138,14 +1152,17 @@ func moveConstraintsToDescription(jsonStr string, options jsonSchemaCleanOptions
 			if isPropertyDefinition(parentPath) {
 				continue
 			}
-			if val.IsObject() || val.IsArray() {
-				jsonStr = appendHint(jsonStr, parentPath, fmt.Sprintf("%s: %s", key, val.Raw))
-				continue
-			}
-			jsonStr = appendHint(jsonStr, parentPath, fmt.Sprintf("%s: %s", key, val.String()))
+			jsonStr = appendConstraintHint(jsonStr, parentPath, key, val)
 		}
 	}
 	return jsonStr
+}
+
+func appendConstraintHint(jsonStr, parentPath, field string, value gjson.Result) string {
+	if value.IsObject() || value.IsArray() {
+		return appendHint(jsonStr, parentPath, fmt.Sprintf("%s: %s", field, value.Raw))
+	}
+	return appendHint(jsonStr, parentPath, fmt.Sprintf("%s: %s", field, value.String()))
 }
 
 func moveNotToDescription(jsonStr string) string {
@@ -1246,16 +1263,51 @@ func mergeAllOf(jsonStr string) string {
 	return jsonStr
 }
 
-// mergeAllOfSchemaAtPath preserves the parent-first behavior for schema shape while intersecting
-// numeric bounds. Bounds may be nested under properties, so this rule is intentionally recursive
-// and local to allOf rather than changing the merger also used for lossy anyOf projections.
+// mergeAllOfSchemaAtPath preserves parent-first schema shape while intersecting the constraints
+// that have safe projections. The rule is recursive and local to allOf rather than changing the
+// merger also used for lossy anyOf projections.
 func mergeAllOfSchemaAtPath(jsonStr, destination, field string, incoming gjson.Result) string {
+	parentPath := trimSuffix(destination, "."+escapeGJSONPathKey(field))
+	propertyDefinition := isPropertyDefinition(parentPath)
+	if field == "required" && incoming.IsArray() && !propertyDefinition {
+		current := getStrings(jsonStr, destination)
+		for _, required := range incoming.Array() {
+			if name := required.String(); !contains(current, name) {
+				current = append(current, name)
+			}
+		}
+		updated, _ := sjson.SetBytes([]byte(jsonStr), destination, current)
+		return string(updated)
+	}
+	if field == "enum" && incoming.IsArray() && !propertyDefinition {
+		if existing := gjson.Get(jsonStr, destination); existing.IsArray() {
+			updated, _ := sjson.SetRawBytes([]byte(jsonStr), destination, []byte(intersectEnumValues(existing, incoming)))
+			return string(updated)
+		}
+	}
+	if field == "additionalProperties" && !propertyDefinition {
+		existing := gjson.Get(jsonStr, destination)
+		switch {
+		case existing.Type == gjson.False:
+			return jsonStr
+		case incoming.Type == gjson.False:
+			updated, _ := sjson.SetBytes([]byte(jsonStr), destination, false)
+			return string(updated)
+		case existing.Type == gjson.True && incoming.IsObject():
+			updated, _ := sjson.SetRawBytes([]byte(jsonStr), destination, []byte(incoming.Raw))
+			return string(updated)
+		}
+	}
+	if shouldPreserveAllOfConstraintHints(field) && !propertyDefinition && gjson.Get(jsonStr, destination).Exists() {
+		return appendConstraintHint(jsonStr, parentPath, field, incoming)
+	}
 	if incoming.Type == gjson.Number {
-		switch field {
-		case "minimum":
-			return setStricterNumericBound(jsonStr, destination, incoming.Raw, false)
-		case "maximum":
-			return setStricterNumericBound(jsonStr, destination, incoming.Raw, true)
+		if maximum, ok := allOfBoundDirection(field); ok {
+			updated, represented := setStricterNumericBound(jsonStr, destination, incoming.Raw, maximum)
+			if !represented {
+				return appendConstraintHint(updated, parentPath, field, incoming)
+			}
+			return updated
 		}
 	}
 	if field == "description" && incoming.Type == gjson.String {
@@ -1281,6 +1333,81 @@ func mergeAllOfSchemaAtPath(jsonStr, destination, field string, incoming gjson.R
 		return true
 	})
 	return jsonStr
+}
+
+func intersectEnumValues(existing, incoming gjson.Result) string {
+	incomingValues := incoming.Array()
+	allowed := make(map[string]struct{}, len(incomingValues))
+	for _, value := range incomingValues {
+		allowed[enumValueKey(value)] = struct{}{}
+	}
+	emitted := make(map[string]struct{})
+	var result bytes.Buffer
+	result.WriteByte('[')
+	first := true
+	for _, candidate := range existing.Array() {
+		key := enumValueKey(candidate)
+		if _, ok := allowed[key]; !ok {
+			continue
+		}
+		if _, duplicate := emitted[key]; duplicate {
+			continue
+		}
+		emitted[key] = struct{}{}
+		if !first {
+			result.WriteByte(',')
+		}
+		result.WriteString(candidate.Raw)
+		first = false
+	}
+	result.WriteByte(']')
+	return result.String()
+}
+
+func enumValueKey(value gjson.Result) string {
+	switch value.Type {
+	case gjson.String:
+		return "string:" + value.String()
+	case gjson.Number:
+		if number, ok := parseSchemaNumericBound(value.Raw); ok {
+			return "number:" + number.RatString()
+		}
+		return "number-raw:" + value.Raw
+	case gjson.JSON:
+		var compact bytes.Buffer
+		if json.Compact(&compact, []byte(value.Raw)) == nil {
+			return "json:" + compact.String()
+		}
+		return "json-raw:" + value.Raw
+	case gjson.True:
+		return "boolean:true"
+	case gjson.False:
+		return "boolean:false"
+	case gjson.Null:
+		return "null"
+	default:
+		return fmt.Sprintf("unknown:%d:%s", value.Type, value.Raw)
+	}
+}
+
+func allOfBoundDirection(field string) (maximum bool, ok bool) {
+	switch field {
+	case "minimum", "minLength", "minItems", "minProperties":
+		return false, true
+	case "maximum", "maxLength", "maxItems", "maxProperties":
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+func shouldPreserveAllOfConstraintHints(field string) bool {
+	switch field {
+	case "pattern", "format", "contains", "uniqueItems", "multipleOf":
+		return true
+	default:
+		return false
+	}
 }
 
 // mergeMissingSchemaAtPath recursively fills absent fields without replacing any existing
