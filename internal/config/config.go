@@ -105,6 +105,24 @@ type Config struct {
 
 	AntigravitySignatureBypassStrict *bool `yaml:"antigravity-signature-bypass-strict,omitempty" json:"antigravity-signature-bypass-strict,omitempty"`
 
+	// CodexCacheKeyPerAgent controls whether the prompt_cache_key derived for a Claude Code
+	// request keeps its per-agent component.
+	//
+	// When true or unset (default, and the historical behavior) every subagent of one Claude
+	// Code session gets its own upstream cache partition. A fan-out of N subagents therefore
+	// pays N first-turn cache misses even though they share an identical system prompt and
+	// tool block.
+	//
+	// When false, all agents of one session share a single partition keyed on the session
+	// alone, so a fan-out can read the prefix the root agent already warmed. Only set this
+	// false if the shared prefix really is identical across agents; divergent prefixes will
+	// simply miss rather than corrupt anything, but they also gain nothing.
+	//
+	// This only affects the upstream cache key. Reasoning-replay state stays agent-scoped
+	// unconditionally (see helps.ClaudeCodeExecutionScope) so subagents can never replay each
+	// other's reasoning items.
+	CodexCacheKeyPerAgent *bool `yaml:"codex-cache-key-per-agent,omitempty" json:"codex-cache-key-per-agent,omitempty"`
+
 	// Antigravity configures provider-wide Antigravity request behavior.
 	Antigravity AntigravityConfig `yaml:"antigravity" json:"antigravity"`
 
@@ -171,4 +189,13 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+}
+
+// CodexCacheKeyPerAgentEnabled reports whether Claude Code prompt cache keys stay agent-scoped.
+// A nil receiver or an unset key yields true, preserving the historical behavior.
+func (cfg *Config) CodexCacheKeyPerAgentEnabled() bool {
+	if cfg == nil || cfg.CodexCacheKeyPerAgent == nil {
+		return true
+	}
+	return *cfg.CodexCacheKeyPerAgent
 }
