@@ -1650,6 +1650,29 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_RepairsDanglingToolUse(t *testi
 		output := sanitizeClaudeMessagesForClaudeUpstreamWithDebug(context.Background(), body, "kimi-k2.5")
 		assertSanitizedInterruptedToolResult(t, output, "t1", "stop and look at this")
 	})
+	t.Run("real result across a mid-conversation system turn", func(t *testing.T) {
+		midSystemBody := []byte(`{
+			"model": "claude-opus-5",
+			"messages": [
+				{"role":"user","content":"start"},
+				{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]},
+				{"role":"system","content":"new context"},
+				{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"real output"}]}
+			]
+		}`)
+		output := sanitizeClaudeMessagesForClaudeUpstreamWithDebug(context.Background(), midSystemBody, "claude-opus-5")
+		messages := gjson.GetBytes(output, "messages").Array()
+		if len(messages) != 4 {
+			t.Fatalf("message count = %d, want 4: %s", len(messages), output)
+		}
+		result := messages[2].Get("content.0")
+		if result.Get("tool_use_id").String() != "t1" || result.Get("content").String() != "real output" || result.Get("is_error").Bool() {
+			t.Fatalf("real result was not preserved: %s", result.Raw)
+		}
+		if messages[3].Get("role").String() != "system" || messages[3].Get("content").String() != "new context" {
+			t.Fatalf("mid-conversation system turn was not replayed after the result: %s", output)
+		}
+	})
 }
 
 func assertSanitizedInterruptedToolResult(t *testing.T, output []byte, toolUseID, userText string) {

@@ -20,6 +20,14 @@ type claudeCarrierPart struct {
 	isToolResult bool
 }
 
+type claudeResultCarrierRun struct {
+	end                int
+	count              int
+	base               gjson.Result
+	parts              []claudeCarrierPart
+	interveningSystems [][]byte
+}
+
 // RepairDanglingClaudeToolUses closes client tool calls left incomplete by an
 // interrupted agent turn. It also canonicalizes adjacent result carriers so the
 // final Claude Messages payload contains one ordered user turn with exactly one
@@ -44,12 +52,8 @@ func RepairDanglingClaudeToolUses(payload []byte) []byte {
 			continue
 		}
 
-		runEnd, runCount, carrierParts := collectClaudeResultCarrierRun(messageResults, i+1)
-		var carrierBase gjson.Result
-		if runCount > 0 {
-			carrierBase = messageResults[i+1]
-		}
-		carrier := buildCanonicalClaudeResultCarrier(carrierBase, toolUses, carrierParts)
+		run := collectClaudeResultCarrierRun(messageResults, i+1)
+		carrier := buildCanonicalClaudeResultCarrier(run.base, toolUses, run.parts)
 		hasExtras := claudeContentHasNonToolResults(gjson.GetBytes(carrier, "content"))
 		assistantRaw := []byte(message.Raw)
 		droppedServerTool := false
@@ -62,16 +66,19 @@ func RepairDanglingClaudeToolUses(payload []byte) []byte {
 		}
 		out = append(out, assistantRaw)
 
-		if runCount == 1 && !droppedServerTool && isCanonicalClaudeResultCarrier(messageResults[i+1], toolUses) {
-			out = append(out, []byte(messageResults[i+1].Raw))
-			i = runEnd - 1
+		if run.count == 1 && !droppedServerTool && isCanonicalClaudeResultCarrier(run.base, toolUses) {
+			out = append(out, []byte(run.base.Raw))
+			out = append(out, run.interveningSystems...)
+			changed = changed || len(run.interveningSystems) > 0
+			i = run.end - 1
 			continue
 		}
 
 		out = append(out, carrier)
+		out = append(out, run.interveningSystems...)
 		changed = true
-		if runCount > 0 {
-			i = runEnd - 1
+		if run.count > 0 {
+			i = run.end - 1
 		}
 	}
 
@@ -111,25 +118,50 @@ func claudeAssistantClientToolUses(message gjson.Result) []claudeClientToolUse {
 	return toolUses
 }
 
-func collectClaudeResultCarrierRun(messages []gjson.Result, start int) (end, count int, parts []claudeCarrierPart) {
-	end = start
-	for end < len(messages) {
-		message := messages[end]
-		role := message.Get("role").String()
-		if role != "user" && role != "tool" {
+func collectClaudeResultCarrierRun(messages []gjson.Result, start int) claudeResultCarrierRun {
+	run := claudeResultCarrierRun{end: start}
+	for run.end < len(messages) {
+		message := messages[run.end]
+		if isClaudeResultCarrierMessage(message) {
+			if run.count == 0 {
+				run.base = message
+			}
+			run.parts = append(run.parts, claudeCarrierMessageParts(message, message.Get("role").String())...)
+			run.count++
+			run.end++
+			continue
+		}
+
+		if message.Get("role").String() != "system" {
 			break
 		}
-		content := message.Get("content")
-		if claudeContentContainsType(content, "tool_use") {
+		systemEnd := run.end
+		for systemEnd < len(messages) && messages[systemEnd].Get("role").String() == "system" {
+			systemEnd++
+		}
+		if systemEnd == len(messages) || !isClaudeResultCarrierMessage(messages[systemEnd]) {
 			break
 		}
 
-		messageParts := claudeCarrierMessageParts(message, role)
-		parts = append(parts, messageParts...)
-		count++
-		end++
+		// Anthropic requires the user result carrier immediately after an
+		// assistant tool_use, while a mid-conversation system turn must follow a
+		// user turn. Defer only system runs that lead to another carrier, then
+		// replay them after the canonical carrier. This keeps their relative order
+		// while satisfying both placement rules.
+		for index := run.end; index < systemEnd; index++ {
+			run.interveningSystems = append(run.interveningSystems, []byte(messages[index].Raw))
+		}
+		run.end = systemEnd
 	}
-	return end, count, parts
+	return run
+}
+
+func isClaudeResultCarrierMessage(message gjson.Result) bool {
+	role := message.Get("role").String()
+	if role != "user" && role != "tool" {
+		return false
+	}
+	return !claudeContentContainsType(message.Get("content"), "tool_use")
 }
 
 func claudeCarrierMessageParts(message gjson.Result, role string) []claudeCarrierPart {

@@ -174,6 +174,85 @@ func TestRepairDanglingClaudeToolUsesCanonicalizesResultCarriers(t *testing.T) {
 	})
 }
 
+func TestRepairDanglingClaudeToolUsesRelocatesInterveningSystemTurns(t *testing.T) {
+	t.Run("adopts a real result across a system turn", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read"}]},{"role":"system","content":"new context","clear_at":"next_user_message"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"real output"}]}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		messages := claudeMessagesForTest(t, got, 4)
+		result := messages[2].Get("content.0")
+		if messages[2].Get("role").String() != "user" || result.Get("tool_use_id").String() != "t1" || result.Get("content").String() != "real output" {
+			t.Fatalf("real result was not adopted: %s", messages[2].Raw)
+		}
+		if result.Get("is_error").Bool() {
+			t.Fatalf("real result was replaced by an interruption: %s", result.Raw)
+		}
+		if messages[3].Raw != `{"role":"system","content":"new context","clear_at":"next_user_message"}` {
+			t.Fatalf("system turn was not replayed intact after the result: %s", messages[3].Raw)
+		}
+		if twice := RepairDanglingClaudeToolUses(got); !bytes.Equal(twice, got) {
+			t.Fatalf("real-result relocation is not idempotent:\n once %s\n twice %s", got, twice)
+		}
+	})
+
+	t.Run("merges split results before replaying systems in source order", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"p1","name":"one"},{"type":"tool_use","id":"p2","name":"two"}]},{"role":"system","content":"first"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"p2","content":"two"}]},{"role":"system","content":[{"type":"text","text":"second"}],"clear_at":"next_user_message"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"p1","content":"one"}]},{"role":"system","content":"third"},{"role":"assistant","content":"continue"}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		messages := claudeMessagesForTest(t, got, 7)
+		blocks := messages[2].Get("content").Array()
+		if len(blocks) != 2 || blocks[0].Get("tool_use_id").String() != "p1" || blocks[1].Get("tool_use_id").String() != "p2" {
+			t.Fatalf("split real results were not merged in call order: %s", messages[2].Raw)
+		}
+		for _, block := range blocks {
+			if block.Get("is_error").Bool() {
+				t.Fatalf("real result was replaced by an interruption: %s", block.Raw)
+			}
+		}
+		if messages[3].Get("content").String() != "first" || messages[4].Get("content.0.text").String() != "second" || messages[5].Get("content").String() != "third" {
+			t.Fatalf("system turn order changed: %s", got)
+		}
+		if messages[4].Get("clear_at").String() != "next_user_message" {
+			t.Fatalf("system metadata was not preserved: %s", messages[4].Raw)
+		}
+		if messages[6].Get("role").String() != "assistant" || messages[6].Get("content").String() != "continue" {
+			t.Fatalf("following assistant turn changed: %s", messages[6].Raw)
+		}
+	})
+
+	t.Run("places an interrupt and its synthetic result before the system turn", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash"}]},{"role":"system","content":"new constraint"},{"role":"user","content":"change direction"}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		messages := claudeMessagesForTest(t, got, 4)
+		blocks := messages[2].Get("content").Array()
+		if len(blocks) != 2 {
+			t.Fatalf("canonical user blocks = %d, want 2: %s", len(blocks), messages[2].Raw)
+		}
+		assertInterruptedClaudeToolResult(t, blocks[0], "t1", "")
+		if blocks[1].Get("type").String() != "text" || blocks[1].Get("text").String() != "change direction" {
+			t.Fatalf("interrupt text was not preserved: %s", messages[2].Raw)
+		}
+		if messages[3].Get("role").String() != "system" || messages[3].Get("content").String() != "new constraint" {
+			t.Fatalf("system turn was not moved after the canonical user turn: %s", messages[3].Raw)
+		}
+	})
+
+	t.Run("inserts a fallback before terminal systems without duplication", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash"}]},{"role":"system","content":"first"},{"role":"system","content":"second"},{"role":"assistant","content":"continue"}]}`)
+		once := RepairDanglingClaudeToolUses(input)
+		messages := claudeMessagesForTest(t, once, 6)
+		assertInterruptedClaudeToolResult(t, messages[2].Get("content.0"), "t1", "")
+		if messages[3].Get("content").String() != "first" || messages[4].Get("content").String() != "second" {
+			t.Fatalf("terminal systems were lost or reordered: %s", once)
+		}
+		if messages[5].Get("role").String() != "assistant" {
+			t.Fatalf("following assistant turn changed: %s", messages[5].Raw)
+		}
+		twice := RepairDanglingClaudeToolUses(once)
+		if !bytes.Equal(twice, once) {
+			t.Fatalf("system relocation is not idempotent:\n once %s\n twice %s", once, twice)
+		}
+	})
+}
+
 func TestRepairDanglingClaudeToolUsesPreservesToolsetAndServerToolRules(t *testing.T) {
 	t.Run("copies toolset name onto a synthetic result", func(t *testing.T) {
 		input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"browser1","toolset_name":"browser","name":"navigate","input":{}}]},{"role":"user","content":"stop"}]}`)
