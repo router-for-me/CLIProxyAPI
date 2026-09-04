@@ -214,13 +214,12 @@ func (s *Service) wsOnConnected(channelID string) {
 	if !strings.HasPrefix(strings.ToLower(channelID), "aistudio-") {
 		return
 	}
-	if s.coreManager != nil {
-		if existing, ok := s.coreManager.GetByID(channelID); ok && existing != nil {
-			if !existing.Disabled && existing.Status == coreauth.StatusActive {
-				return
-			}
-		}
-	}
+	// No liveness guard against the stored auth here: a queued Delete from the
+	// previous session can still make that auth look active, so skipping the
+	// Add would leave a reconnect registered without an auth entry until it
+	// disconnects again. The Add is idempotent (an existing ID is updated in
+	// place, preserving counters and model states), so emitting it
+	// unconditionally is safe.
 	now := time.Now().UTC()
 	auth := &coreauth.Auth{
 		ID:         channelID,  // keep channel identifier as ID
