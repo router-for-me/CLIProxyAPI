@@ -794,6 +794,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					state.Unavailable = true
 					state.Status = StatusError
 					state.UpdatedAt = now
+					prevModelRetryAfter := state.NextRetryAfter
 					if result.Error != nil {
 						state.LastError = cloneError(result.Error)
 						state.StatusMessage = result.Error.Message
@@ -873,6 +874,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										if otherState.Quota.Exceeded && otherState.Quota.NextRecoverAt.After(otherNext) {
 											otherNext = otherState.Quota.NextRecoverAt
 										}
+										// Propagation only extends a sibling's still-live
+										// per-model deadline; it never shortens one.
+										if !otherState.NextRetryAfter.IsZero() && otherState.NextRetryAfter.After(otherNext) {
+											otherNext = otherState.NextRetryAfter
+										}
 										otherState.NextRetryAfter = otherNext
 										applyCooldownFields(&otherState.Quota, QuotaState{
 											Exceeded:      true,
@@ -888,6 +894,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								authNext := next
 								if auth.Quota.NextRecoverAt.After(authNext) {
 									authNext = auth.Quota.NextRecoverAt
+								}
+								if !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(authNext) {
+									authNext = auth.NextRetryAfter
 								}
 								auth.Quota.NextRecoverAt = authNext
 								auth.NextRetryAfter = authNext
@@ -908,6 +917,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown && state.NextRetryAfter.IsZero() {
 						state.NextRetryAfter = now.Add(transientErrorCooldown)
 						state.Unavailable = true
+					}
+					// A later failure only extends a still-live cooldown; it never
+					// shortens one. A deliberate zero write (disableCooling) still
+					// clears the deadline.
+					if !state.NextRetryAfter.IsZero() && prevModelRetryAfter.After(state.NextRetryAfter) && prevModelRetryAfter.After(now) {
+						state.NextRetryAfter = prevModelRetryAfter
 					}
 					auth.Status = StatusError
 					updateAggregatedAvailability(auth, now)
@@ -1985,6 +2000,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if auth == nil {
 		return
 	}
+	prevAuthRetryAfter := auth.NextRetryAfter
 	if shouldSkipCredentialCooldown(resultErr) {
 		return
 	}
@@ -2078,6 +2094,11 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 		auth.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
 		auth.Unavailable = !auth.NextRetryAfter.IsZero()
+	}
+	// A later failure only extends a still-live credential cooldown; a
+	// deliberate zero write (disableCooling) still clears it.
+	if !auth.NextRetryAfter.IsZero() && prevAuthRetryAfter.After(auth.NextRetryAfter) && prevAuthRetryAfter.After(now) {
+		auth.NextRetryAfter = prevAuthRetryAfter
 	}
 	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && auth.NextRetryAfter.IsZero() {
 		auth.NextRetryAfter = now.Add(transientErrorCooldown)
