@@ -102,6 +102,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	systemPlacementState := captureClaudeCodeSystemPlacement(bodyBeforeCloaking, body, cloaked)
+	fableState := captureClaudeCodeFableState(bodyBeforeCloaking, body, cloaked)
 	// Only the Messages endpoint on Anthropic itself was captured; count_tokens
 	// keeps its own shape and other gateways never see this field.
 	diagnosticsState := claudeDiagnosticsRequestState{}
@@ -130,8 +131,32 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body, contextManagementState.payloadRuleTouched = helps.ApplyPayloadConfigWithRequestTracked(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers, "context_management")
+	var touchedPayloadPaths map[string]bool
+	body, touchedPayloadPaths = helps.ApplyPayloadConfigWithTrackedPaths(
+		e.cfg,
+		baseModel,
+		to.String(),
+		from.String(),
+		"",
+		body,
+		originalTranslated,
+		requestedModel,
+		requestPath,
+		opts.Headers,
+		"context_management",
+		"fallbacks",
+		"thinking.display",
+	)
+	contextManagementState.payloadRuleTouched = touchedPayloadPaths["context_management"]
 	body = reconcileClaudeCodeSystemPlacementAfterPayload(body, systemPlacementState)
+	body = reconcileClaudeCodeFableModelAfterPayload(
+		body,
+		fableState,
+		touchedPayloadPaths["fallbacks"],
+		touchedPayloadPaths["thinking.display"],
+		cloaked,
+		isProbeOrHelper,
+	)
 	body = ensureModelMaxTokens(body, baseModel)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
