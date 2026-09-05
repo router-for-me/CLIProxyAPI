@@ -146,7 +146,7 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 	}
 	s.runModelRegistrationTasks(registrationCtx, tasks)
 	if needsPluginSync {
-		s.syncPluginRuntime(registrationCtx)
+		s.syncPluginRuntimeForAuthChange(registrationCtx)
 	}
 }
 
@@ -266,7 +266,7 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 		return
 	}
 	s.completeModelRegistrationForAuth(ctx, auth)
-	s.syncPluginRuntime(ctx)
+	s.syncPluginRuntimeForAuthChange(ctx)
 }
 
 func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth *coreauth.Auth) *coreauth.Auth {
@@ -351,7 +351,7 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	if strings.EqualFold(provider, "xai") {
 		executor.CloseXAIWebsocketSessionsForAuthID(id, "auth_removed")
 	}
-	s.syncPluginRuntime(ctx)
+	s.syncPluginRuntimeForAuthChange(ctx)
 }
 
 func (s *Service) applyRetryConfig(cfg *config.Config) {

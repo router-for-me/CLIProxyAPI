@@ -75,6 +75,21 @@ func (s *Service) syncPluginRuntime(ctx context.Context) {
 	s.syncPluginModelRuntime(ctx)
 }
 
+// syncPluginRuntimeForAuthChange refreshes what an auth change can affect - the
+// models that plugin providers expose for the changed credential - without
+// re-applying the plugin configuration.
+//
+// ApplyConfig sends plugin.reconfigure to every registered plugin, and an
+// auth-file write happens on every token refresh, several times an hour with
+// several credentials. That is not a plugin configuration change, and plugins
+// that keep state in memory were losing it on every refresh.
+func (s *Service) syncPluginRuntimeForAuthChange(ctx context.Context) {
+	if s == nil || s.pluginHost == nil {
+		return
+	}
+	s.syncPluginModelRuntime(ctx)
+}
+
 func (s *Service) syncPluginRuntimeConfig(ctx context.Context) bool {
 	if s == nil {
 		sdkAuth.RegisterPluginAuthParser(nil)
