@@ -335,9 +335,7 @@ func decodeEnvelopeResult[T any](envelope pluginabi.Envelope) (T, error) {
 		return zero, nil
 	}
 	var out T
-	decoder := json.NewDecoder(bytes.NewReader(envelope.Result))
-	decoder.UseNumber()
-	if errDecode := decoder.Decode(&out); errDecode != nil {
+	if errDecode := json.Unmarshal(envelope.Result, &out); errDecode != nil {
 		return zero, errDecode
 	}
 	return out, nil

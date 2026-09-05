@@ -2,6 +2,7 @@
 package pluginapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -238,6 +239,45 @@ type AuthData struct {
 	Attributes map[string]string
 	// NextRefreshAfter is the earliest time the host should refresh this auth.
 	NextRefreshAfter time.Time
+}
+
+// UnmarshalJSON preserves exact numbers only inside the explicitly public
+// plugin quota contract. Other metadata keeps encoding/json's historical
+// float64 representation for compatibility with existing host readers.
+func (data *AuthData) UnmarshalJSON(raw []byte) error {
+	type plainAuthData AuthData
+	decoded := struct {
+		*plainAuthData
+		Metadata json.RawMessage
+	}{plainAuthData: (*plainAuthData)(data)}
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		return errUnmarshal
+	}
+	trimmedMetadata := bytes.TrimSpace(decoded.Metadata)
+	if len(trimmedMetadata) == 0 {
+		return nil
+	}
+	if bytes.Equal(trimmedMetadata, []byte("null")) {
+		data.Metadata = nil
+		return nil
+	}
+	var rawMetadata map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(trimmedMetadata, &rawMetadata); errUnmarshal != nil {
+		return errUnmarshal
+	}
+	data.Metadata = make(map[string]any, len(rawMetadata))
+	for key, rawValue := range rawMetadata {
+		decoder := json.NewDecoder(bytes.NewReader(rawValue))
+		if key == "plugin_quota" {
+			decoder.UseNumber()
+		}
+		var value any
+		if errDecode := decoder.Decode(&value); errDecode != nil {
+			return errDecode
+		}
+		data.Metadata[key] = value
+	}
+	return nil
 }
 
 // AuthParseRequest describes auth material offered to a plugin parser.

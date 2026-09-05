@@ -84,7 +84,7 @@ func TestIsPluginErrorEnvelopeAcceptsNonzeroReturnEnvelope(t *testing.T) {
 
 func TestDecodeEnvelopeResultPreservesAuthMetadataNumbers(t *testing.T) {
 	const exact = "9007199254740993"
-	result := json.RawMessage(`{"Handled":true,"Auth":{"Provider":"plugin-provider","Metadata":{"plugin_quota":{"period_tokens":` + exact + `}}}}`)
+	result := json.RawMessage(`{"Handled":true,"Auth":{"Provider":"plugin-provider","Metadata":{"priority":7,"plugin_quota":{"period_tokens":` + exact + `}}}}`)
 	response, errDecode := decodeEnvelopeResult[pluginapi.AuthParseResponse](pluginabi.Envelope{OK: true, Result: result})
 	if errDecode != nil {
 		t.Fatalf("decodeEnvelopeResult() error = %v", errDecode)
@@ -92,6 +92,9 @@ func TestDecodeEnvelopeResultPreservesAuthMetadataNumbers(t *testing.T) {
 	quota := response.Auth.Metadata["plugin_quota"].(map[string]any)
 	if quota["period_tokens"] != json.Number(exact) {
 		t.Fatalf("period_tokens = %#v, want exact JSON number %s", quota["period_tokens"], exact)
+	}
+	if response.Auth.Metadata["priority"] != float64(7) {
+		t.Fatalf("priority = %#v, want backward-compatible float64", response.Auth.Metadata["priority"])
 	}
 	sanitized := sanitizePluginMetadata(response.Auth.Metadata)
 	sanitizedQuota := sanitized["plugin_quota"].(map[string]any)
