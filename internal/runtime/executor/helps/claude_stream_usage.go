@@ -86,6 +86,26 @@ func NewClaudeThinkingTokenCountEmitter(enabled bool) *ClaudeThinkingTokenCountE
 	return &ClaudeThinkingTokenCountEmitter{enabled: enabled}
 }
 
+// ClaudeBootstrapUsageChunks preserves live usage state while the executor holds
+// initial events for overload detection. The same state continues after release.
+func ClaudeBootstrapUsageChunks(estimator *ClaudeStreamUsageEstimator, emitter *ClaudeThinkingTokenCountEmitter, data []byte, chunks [][]byte) [][]byte {
+	if estimator == nil {
+		return chunks
+	}
+	if snapshot, emit := estimator.ObserveCodexEvent(data); emit {
+		if update := emitter.Event(snapshot); len(update) > 0 {
+			chunks = append([][]byte{update}, chunks...)
+		}
+		if !ClaudeApplyMessageStartUsage(chunks, snapshot) {
+			if update := ClaudeCumulativeUsageEvent(snapshot); len(update) > 0 {
+				chunks = append(chunks, update)
+			}
+		}
+	}
+	emitter.ObserveTranslatedChunks(chunks)
+	return chunks
+}
+
 func (e *ClaudeThinkingTokenCountEmitter) ObserveTranslatedChunks(chunks [][]byte) {
 	if e == nil || !e.enabled {
 		return
