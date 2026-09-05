@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,7 +18,35 @@ import (
 const (
 	modelsFetchTimeout    = 30 * time.Second
 	modelsRefreshInterval = 3 * time.Hour
+
+	// Startup retry backoff for the initial remote catalog fetch. The first
+	// fetch runs concurrently with process startup, so a transport that is
+	// not ready yet (e.g. a local proxy that starts after login) can make it
+	// fail; without retries the registry silently falls back to the embedded
+	// catalog, which may be outdated and miss newly released models until
+	// the next periodic tick. Retries start at 10s, double with ±20% jitter,
+	// cap at 5 minutes, and never give up: once the first fetch succeeds the
+	// regular modelsRefreshInterval ticker takes over.
+	startupRetryBaseDelay = 10 * time.Second
+	startupRetryMaxDelay  = 5 * time.Minute
 )
+
+// startupSleep waits for d or until ctx is cancelled. It is a package
+// variable so tests can run the startup retry loop without real delays.
+var startupSleep = func(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// fetchModelsFromRemoteFn is the fetch entry used by the startup retry loop.
+// Tests replace it to simulate transient remote failures.
+var fetchModelsFromRemoteFn = fetchModelsFromRemote
 
 var modelsURLs = []string{
 	"https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json",
@@ -81,8 +110,45 @@ func StartModelsUpdater(ctx context.Context) {
 }
 
 func runModelsUpdater(ctx context.Context) {
-	tryStartupRefresh(ctx)
+	runStartupRefreshWithBackoff(ctx)
 	periodicRefresh(ctx)
+}
+
+// runStartupRefreshWithBackoff performs the initial remote catalog fetch and,
+// on failure, retries with exponential backoff (10s doubling with jitter,
+// capped at 5 minutes) until it succeeds or ctx is cancelled. Every failed
+// attempt is logged at error level so a degraded startup is visible in file
+// logs. Periodic refresh remains responsible for all subsequent updates.
+func runStartupRefreshWithBackoff(ctx context.Context) {
+	delay := startupRetryBaseDelay
+	for attempt := 1; ; attempt++ {
+		if tryStartupRefresh(ctx) {
+			if attempt > 1 {
+				log.Infof("startup model refresh succeeded on attempt %d after retries", attempt)
+			}
+			return
+		}
+		log.Errorf("startup model refresh failed (attempt %d); retrying in %s", attempt, delay)
+		if errSleep := startupSleep(ctx, jitteredDelay(delay)); errSleep != nil {
+			// Context cancelled (shutdown): periodic refresh will not run either.
+			log.Infof("startup model refresh retry loop stopped: %v", errSleep)
+			return
+		}
+		delay = min(delay*2, startupRetryMaxDelay)
+	}
+}
+
+// jitteredDelay spreads the retry delay by ±20% so a fleet of restarts (or
+// multiple local instances) does not hammer the catalog mirrors in sync.
+func jitteredDelay(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	spread := d / 5
+	if spread <= 0 {
+		return d
+	}
+	return d - spread + time.Duration(rand.Int64N(int64(2*spread)+1))
 }
 
 func periodicRefresh(ctx context.Context) {
@@ -101,24 +167,30 @@ func periodicRefresh(ctx context.Context) {
 
 // tryPeriodicRefresh fetches models from remote, compares with the current
 // catalog, and notifies the registered callback if any provider changed.
+// A failed periodic attempt keeps the current data; the next tick retries,
+// so no backoff loop is needed here.
 func tryPeriodicRefresh(ctx context.Context) {
-	tryRefreshModels(ctx, "periodic model refresh")
+	if !tryRefreshModels(ctx, "periodic model refresh") {
+		log.Errorf("periodic model refresh failed: fetch failed from all URLs; keeping current catalog until next tick (%s)", modelsRefreshInterval)
+	}
 }
 
-// tryStartupRefresh fetches models from remote in the background during
-// process startup. It uses the same change detection as periodic refresh so
-// existing auth registrations can be updated after the callback is registered.
-func tryStartupRefresh(ctx context.Context) {
-	tryRefreshModels(ctx, "startup model refresh")
+// tryStartupRefresh runs one startup fetch attempt. It reports whether the
+// remote catalog was fetched and applied.
+func tryStartupRefresh(ctx context.Context) bool {
+	return tryRefreshModels(ctx, "startup model refresh")
 }
 
-func tryRefreshModels(ctx context.Context, label string) {
+// tryRefreshModels fetches models from remote and swaps the store on success.
+// It returns true when a remote catalog was fetched (regardless of whether
+// it differed from the current data), false when all URLs failed.
+func tryRefreshModels(ctx context.Context, label string) bool {
 	oldData := getModels()
 
-	parsed, url := fetchModelsFromRemote(ctx)
+	parsed, url := fetchModelsFromRemoteFn(ctx)
 	if parsed == nil {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
-		return
+		return false
 	}
 
 	// Detect changes before updating store.
@@ -131,11 +203,12 @@ func tryRefreshModels(ctx context.Context, label string) {
 
 	if len(changed) == 0 {
 		log.Infof("%s completed from %s, no changes detected", label, url)
-		return
+		return true
 	}
 
 	log.Infof("%s completed from %s, changes detected for providers: %v", label, url, changed)
 	notifyModelRefresh(changed)
+	return true
 }
 
 // fetchModelsFromRemote tries all remote URLs and returns the parsed model catalog
