@@ -50,6 +50,7 @@ func (m *Manager) reportHomeUnauthorized(ctx context.Context, auth *Auth, provid
 		ExecutorType:      homeResultExecutorType,
 		Model:             model,
 		Alias:             alias,
+		APIKey:            homeAPIKeyLabelFromContext(ctx),
 		AuthID:            auth.ID,
 		AuthIndex:         authIndex,
 		AccessTokenSHA256: accessTokenSHA256,
@@ -65,4 +66,22 @@ func (m *Manager) reportHomeUnauthorized(ctx context.Context, auth *Auth, provid
 			Body:       failureBody,
 		},
 	})
+}
+
+// homeAPIKeyLabelFromContext returns the configured display name of the matched
+// client API key. It is attribution-only: the raw key is never used as a
+// fallback, so unnamed keys stay unattributed on this path.
+func homeAPIKeyLabelFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	ginCtx, ok := ctx.Value("gin").(interface{ Get(string) (any, bool) })
+	if !ok || ginCtx == nil {
+		return ""
+	}
+	rawLabel, ok := ginCtx.Get("userApiKeyLabel")
+	if !ok {
+		return ""
+	}
+	return contextStringValue(rawLabel)
 }

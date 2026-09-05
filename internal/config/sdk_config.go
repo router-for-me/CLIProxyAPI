@@ -4,6 +4,15 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+
+// APIKeyEntry is a client-facing API key with an optional name. It accepts and
+// re-emits plain strings, so existing configurations keep working unchanged.
+type APIKeyEntry = sdkaccess.APIKeyEntry
+
+// APIKeysFromStrings converts raw key strings into unnamed entries.
+func APIKeysFromStrings(keys []string) []APIKeyEntry { return sdkaccess.APIKeysFromStrings(keys) }
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
@@ -52,7 +61,10 @@ type SDKConfig struct {
 	ClaudeCode ClaudeCodeConfig `yaml:"claude-code" json:"claude-code"`
 
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
-	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+	// Each entry is a plain key string or a mapping with an optional name. The
+	// name is used for attribution in usage records and request logs;
+	// authorization still uses the raw key.
+	APIKeys []APIKeyEntry `yaml:"api-keys" json:"api-keys"`
 
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
@@ -83,4 +95,12 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+}
+
+// APIKeyValues returns the raw key values of the configured client API keys.
+func (c *SDKConfig) APIKeyValues() []string {
+	if c == nil {
+		return nil
+	}
+	return sdkaccess.APIKeyValues(c.APIKeys)
 }

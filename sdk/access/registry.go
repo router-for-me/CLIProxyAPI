@@ -17,7 +17,11 @@ type Provider interface {
 type Result struct {
 	Provider  string
 	Principal string
-	Metadata  map[string]string
+	// PrincipalLabel is an optional display label for attribution only
+	// (usage records and request logs). It MUST NOT be used for authorization,
+	// session ownership, or cache isolation; use Principal for those.
+	PrincipalLabel string
+	Metadata       map[string]string
 }
 
 var (

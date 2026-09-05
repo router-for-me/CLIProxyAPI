@@ -60,7 +60,7 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 }
 
 func (s *Server) exampleAPIKeySafeModeRequired(cfg *config.Config) bool {
-	return s != nil && s.exampleAPIKeySafeModeEnabled && cfg != nil && safemode.HasExampleAPIKeys(cfg.APIKeys)
+	return s != nil && s.exampleAPIKeySafeModeEnabled && cfg != nil && safemode.HasExampleAPIKeys(cfg.APIKeyValues())
 }
 
 func (s *Server) exampleAPIKeySafeModeMiddleware() gin.HandlerFunc {
@@ -96,7 +96,7 @@ func (s *Server) serveExampleAPIKeyWarningPage(c *gin.Context) {
 	cfg := s.cfg
 	var keys []string
 	if cfg != nil {
-		keys = safemode.ExampleAPIKeys(cfg.APIKeys)
+		keys = safemode.ExampleAPIKeys(cfg.APIKeyValues())
 	}
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.Header("Cache-Control", "no-store")
@@ -167,6 +167,9 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 		if err == nil {
 			if result != nil {
 				c.Set("userApiKey", result.Principal)
+				if label := strings.TrimSpace(result.PrincipalLabel); label != "" {
+					c.Set("userApiKeyLabel", label)
+				}
 				c.Set("accessProvider", result.Provider)
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
@@ -225,6 +228,10 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 			provider = "realtime-client-secret"
 		}
 		c.Set("userApiKey", principal)
+		// Carry the issuing key's display label so usage records stay attributed to it.
+		if label := strings.TrimSpace(authorization.IssuerLabel); label != "" {
+			c.Set("userApiKeyLabel", label)
+		}
 		c.Set("accessProvider", provider)
 		c.Set(codexlive.ClientSecretSessionContextKey, authorization.Session)
 		c.Set(codexlive.ClientSecretPrincipalContextKey, authorization.Principal)

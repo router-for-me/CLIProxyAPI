@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -234,9 +235,39 @@ func (c *Client) GetLogs(after int64, limit int) ([]string, int64, error) {
 	return lines, latest, nil
 }
 
+// APIKeyItem is a client API key with its optional name.
+type APIKeyItem struct {
+	Key  string
+	Name string
+}
+
+// UnmarshalJSON accepts either a plain key string or a {"key","name"} object.
+func (i *APIKeyItem) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var key string
+		if err := json.Unmarshal(trimmed, &key); err != nil {
+			return err
+		}
+		i.Key = key
+		i.Name = ""
+		return nil
+	}
+	var raw struct {
+		Key  string `json:"key"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(trimmed, &raw); err != nil {
+		return err
+	}
+	i.Key = raw.Key
+	i.Name = raw.Name
+	return nil
+}
+
 // GetAPIKeys fetches the list of API keys.
-// API returns {"api-keys": [...]}.
-func (c *Client) GetAPIKeys() ([]string, error) {
+// API returns {"api-keys": [...]} with plain strings or named objects.
+func (c *Client) GetAPIKeys() ([]APIKeyItem, error) {
 	wrapper, err := c.getJSON("/v0/management/api-keys")
 	if err != nil {
 		return nil, err
@@ -249,7 +280,7 @@ func (c *Client) GetAPIKeys() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var result []string
+	var result []APIKeyItem
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, err
 	}

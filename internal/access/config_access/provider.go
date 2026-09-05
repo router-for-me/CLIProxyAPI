@@ -30,17 +30,19 @@ func Register(cfg *sdkconfig.SDKConfig) {
 
 type provider struct {
 	name string
-	keys map[string]struct{}
+	// keys maps a raw API key to its display name; an empty name means the key
+	// has no attribution label.
+	keys map[string]string
 }
 
-func newProvider(name string, keys []string) *provider {
+func newProvider(name string, keys []sdkaccess.APIKeyEntry) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
 	}
-	keySet := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		keySet[key] = struct{}{}
+	keySet := make(map[string]string, len(keys))
+	for _, entry := range keys {
+		keySet[entry.Key] = entry.Name
 	}
 	return &provider{name: providerName, keys: keySet}
 }
@@ -89,10 +91,13 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		if candidate.value == "" {
 			continue
 		}
-		if _, ok := p.keys[candidate.value]; ok {
+		if name, ok := p.keys[candidate.value]; ok {
+			// The raw key stays the principal so authorization and cache
+			// isolation keep their per-key scope; the name is attribution only.
 			return &sdkaccess.Result{
-				Provider:  p.Identifier(),
-				Principal: candidate.value,
+				Provider:       p.Identifier(),
+				Principal:      candidate.value,
+				PrincipalLabel: name,
 				Metadata: map[string]string{
 					"source": candidate.source,
 				},
@@ -117,22 +122,29 @@ func extractBearerToken(header string) string {
 	return strings.TrimSpace(parts[1])
 }
 
-func normalizeKeys(keys []string) []string {
+// normalizeKeys trims entries, drops empty keys and deduplicates by key while
+// keeping the first occurrence. When the first occurrence carries no name, a
+// later duplicate may still supply one.
+func normalizeKeys(keys []sdkaccess.APIKeyEntry) []sdkaccess.APIKeyEntry {
 	if len(keys) == 0 {
 		return nil
 	}
-	normalized := make([]string, 0, len(keys))
-	seen := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		trimmedKey := strings.TrimSpace(key)
+	normalized := make([]sdkaccess.APIKeyEntry, 0, len(keys))
+	seen := make(map[string]int, len(keys))
+	for _, entry := range keys {
+		trimmedKey := strings.TrimSpace(entry.Key)
 		if trimmedKey == "" {
 			continue
 		}
-		if _, exists := seen[trimmedKey]; exists {
+		trimmedName := strings.TrimSpace(entry.Name)
+		if index, exists := seen[trimmedKey]; exists {
+			if normalized[index].Name == "" && trimmedName != "" {
+				normalized[index].Name = trimmedName
+			}
 			continue
 		}
-		seen[trimmedKey] = struct{}{}
-		normalized = append(normalized, trimmedKey)
+		seen[trimmedKey] = len(normalized)
+		normalized = append(normalized, sdkaccess.APIKeyEntry{Key: trimmedKey, Name: trimmedName})
 	}
 	if len(normalized) == 0 {
 		return nil

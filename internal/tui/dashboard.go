@@ -23,13 +23,13 @@ type dashboardModel struct {
 	// Cached data for re-rendering on locale change
 	lastConfig    map[string]any
 	lastAuthFiles []map[string]any
-	lastAPIKeys   []string
+	lastAPIKeys   []APIKeyItem
 }
 
 type dashboardDataMsg struct {
 	config    map[string]any
 	authFiles []map[string]any
-	apiKeys   []string
+	apiKeys   []APIKeyItem
 	err       error
 }
 
@@ -117,7 +117,7 @@ func (m dashboardModel) View() string {
 	return m.viewport.View()
 }
 
-func (m dashboardModel) renderDashboard(cfg map[string]any, authFiles []map[string]any, apiKeys []string) string {
+func (m dashboardModel) renderDashboard(cfg map[string]any, authFiles []map[string]any, apiKeys []APIKeyItem) string {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render(T("dashboard_title")))
