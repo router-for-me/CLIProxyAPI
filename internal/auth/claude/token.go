@@ -86,7 +86,7 @@ func (ts *ClaudeTokenStorage) SaveTokenToFile(authFilePath string) error {
 	}
 
 	// Create the token file
-	f, err := os.Create(authFilePath)
+	f, err := os.OpenFile(authFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}
@@ -95,6 +95,9 @@ func (ts *ClaudeTokenStorage) SaveTokenToFile(authFilePath string) error {
 			log.Errorf("claude token storage: close token file error: %v", errClose)
 		}
 	}()
+	if errChmod := f.Chmod(0o600); errChmod != nil {
+		return fmt.Errorf("failed to restrict token file permissions: %w", errChmod)
+	}
 
 	// Encode and write the token data as JSON
 	if err = json.NewEncoder(f).Encode(data); err != nil {
