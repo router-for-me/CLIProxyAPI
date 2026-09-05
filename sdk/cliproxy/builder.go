@@ -283,6 +283,7 @@ func (b *Builder) Build() (*Service, error) {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))
 	}
 	service.serverOptions = append(service.serverOptions,
+		api.WithMiddleware(modelListPluginMiddleware(pluginHost)),
 		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
 		api.WithPluginHost(pluginHost),
 		api.WithConfigReloadHook(func(_ context.Context, _ *config.Config) {
