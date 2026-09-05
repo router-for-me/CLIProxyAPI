@@ -124,8 +124,8 @@ func TestGeminiExecutorExecutePrependsLeadingUser(t *testing.T) {
 	if len(contents) != 3 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" || contents[2].Get("role").String() != "user" {
 		t.Fatalf("upstream roles malformed: %s", upstreamBody)
 	}
-	if got := contents[0].Get("parts.0.text").String(); got != "" {
-		t.Fatalf("leading user prompt = %q, want empty string; body=%s", got, upstreamBody)
+	if got := contents[0].Get("parts.0.text").String(); got != " " {
+		t.Fatalf("leading user prompt = %q, want single-space placeholder; body=%s", got, upstreamBody)
 	}
 }
 
@@ -190,7 +190,7 @@ func TestGeminiExecutorCountTokensPrependsLeadingUser(t *testing.T) {
 	if len(contents) != 2 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" {
 		t.Fatalf("countTokens roles malformed: %s", upstreamBody)
 	}
-	if text := contents[0].Get("parts.0.text"); !text.Exists() || text.String() != "" {
+	if text := contents[0].Get("parts.0.text"); !text.Exists() || text.String() != " " {
 		t.Fatalf("countTokens synthetic user missing: %s", upstreamBody)
 	}
 	if got := contents[1].Get("parts.0.text").String(); got != "prior output" {
@@ -243,7 +243,7 @@ func TestGeminiExecutorAppliesPayloadRulesBeforeLeadingUserNormalization(t *test
 	if len(contents) != 3 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" {
 		t.Fatalf("upstream roles malformed: %s", upstreamBody)
 	}
-	if text := contents[0].Get("parts.0.text"); !text.Exists() || text.String() != "" {
+	if text := contents[0].Get("parts.0.text"); !text.Exists() || text.String() != " " {
 		t.Fatalf("synthetic leading user changed: %s", upstreamBody)
 	}
 	if got := contents[1].Get("parts.0.text").String(); got != "payload override" {
