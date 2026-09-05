@@ -275,3 +275,89 @@ func TestHostAuthSaveCallbackWritesPhysicalFile(t *testing.T) {
 		t.Fatalf("auths = %#v, want one registered auth", auths)
 	}
 }
+
+// TestHostAuthSaveCallbackPreservesPrefixAndDisabled guards the host.auth.save
+// in-memory upsert path: rebuilding the auth from the saved file payload must
+// not drop Prefix (the source of "<prefix>/<model>" IDs in the model registry)
+// nor ignore the file's disabled flag. Regression test for plugins whose
+// scheduled check-in/lifecycle jobs rewrite their auth files daily.
+func TestHostAuthSaveCallbackPreservesPrefixAndDisabled(t *testing.T) {
+	authDir := t.TempDir()
+	host := New()
+	host.runtimeConfig = &config.Config{AuthDir: authDir}
+	manager := coreauth.NewManager(nil, nil, nil)
+	host.SetAuthManager(manager)
+
+	// Seed the runtime the way the watcher does at startup: the plugin's
+	// parse_auth response supplies the Prefix.
+	filePath := filepath.Join(authDir, "saved.json")
+	seed := &coreauth.Auth{
+		ID:       "saved.json",
+		Provider: "demo",
+		FileName: "saved.json",
+		Label:    "demo",
+		Prefix:   "workbuddy",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path":   filePath,
+			"source": filePath,
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), seed); errRegister != nil {
+		t.Fatalf("seed register: %v", errRegister)
+	}
+
+	save := func(name, payload string) {
+		t.Helper()
+		req, errMarshal := json.Marshal(pluginapi.HostAuthSaveRequest{
+			Name: name,
+			JSON: json.RawMessage(payload),
+		})
+		if errMarshal != nil {
+			t.Fatalf("marshal request: %v", errMarshal)
+		}
+		if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthSave, req); errCall != nil {
+			t.Fatalf("host.auth.save(%s): %v", name, errCall)
+		}
+	}
+
+	// Legacy payload without a "prefix" field: the rebuilt auth must inherit
+	// the live Prefix instead of clearing it.
+	save("saved.json", `{"type":"demo","email":"saved@example.com","api_key":"k1"}`)
+	if got, ok := manager.GetByID("saved.json"); !ok {
+		t.Fatal("auth disappeared after legacy save")
+	} else if got.Prefix != "workbuddy" {
+		t.Fatalf("Prefix after legacy save = %q, want inherited %q", got.Prefix, "workbuddy")
+	}
+
+	// Payload carrying prefix + disabled: the file is authoritative.
+	save("saved.json", `{"type":"demo","email":"saved@example.com","api_key":"k1","prefix":"qoderwork","disabled":true}`)
+	if got, ok := manager.GetByID("saved.json"); !ok {
+		t.Fatal("auth disappeared after prefixed save")
+	} else {
+		if got.Prefix != "qoderwork" {
+			t.Fatalf("Prefix after prefixed save = %q, want %q", got.Prefix, "qoderwork")
+		}
+		if !got.Disabled || got.Status != coreauth.StatusDisabled {
+			t.Fatalf("disabled state after save = (%v, %v), want (true, disabled)", got.Disabled, got.Status)
+		}
+	}
+
+	// Explicit empty "prefix" is how a prefix gets removed: the key is
+	// present, so it stays authoritative and must NOT fall back to the
+	// previous live value.
+	save("saved.json", `{"type":"demo","email":"saved@example.com","api_key":"k1","prefix":"","disabled":false}`)
+	if got, ok := manager.GetByID("saved.json"); !ok {
+		t.Fatal("auth disappeared after empty-prefix save")
+	} else if got.Prefix != "" {
+		t.Fatalf("Prefix after explicit empty save = %q, want cleared", got.Prefix)
+	}
+
+	// Fresh file (register path) with a prefix field: prefix comes from the file.
+	save("fresh.json", `{"type":"demo","email":"fresh@example.com","api_key":"k2","prefix":"demo"}`)
+	if got, ok := manager.GetByID("fresh.json"); !ok {
+		t.Fatal("fresh auth was not registered")
+	} else if got.Prefix != "demo" {
+		t.Fatalf("Prefix on fresh register = %q, want %q", got.Prefix, "demo")
+	}
+}
