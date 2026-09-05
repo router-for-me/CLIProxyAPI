@@ -98,7 +98,16 @@ func CacheAntigravityInteractionsStateBestEffort(ctx context.Context, modelName,
 	defer antigravityInteractionsMu.Unlock()
 	stored, ok := antigravityInteractionsEntries[key]
 	if !ok || !now.Before(stored.ExpiresAt) {
-		antigravityInteractionsEvictionOrder = append(antigravityInteractionsEvictionOrder, key)
+		// Drop any stale queue positions for this key (e.g. left behind by
+		// an expired entry deleted on Get): otherwise a later eviction pass
+		// processing the old position would delete this fresh entry.
+		kept := antigravityInteractionsEvictionOrder[:0]
+		for _, queued := range antigravityInteractionsEvictionOrder {
+			if queued != key {
+				kept = append(kept, queued)
+			}
+		}
+		antigravityInteractionsEvictionOrder = append(kept, key)
 	}
 	antigravityInteractionsEntries[key] = antigravityInteractionsEntry{
 		State:     state,

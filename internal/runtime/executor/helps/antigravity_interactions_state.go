@@ -67,14 +67,14 @@ func CacheAntigravityInteractionsState(ctx context.Context, modelName string, or
 	// overwriting the whole entry would blank the missing coordinate, leaving
 	// the next tool-result turn unable to resume.
 	//
-	// The read runs on a detached context: this capture is best-effort and
-	// must never block (or outlive) the stream read loop — a slow Home store
-	// would otherwise stall frame processing and break connection pooling.
+	// The read uses the caller's context so client cancellation aborts a
+	// stalled Home-backed lookup instead of blocking response delivery; the
+	// merge stays best-effort (a miss just keeps this frame's coordinates).
 	state := internalcache.AntigravityInteractionsState{
 		InteractionID: interactionID,
 		EnvironmentID: envID,
 	}
-	if existing, ok := internalcache.GetAntigravityInteractionsState(context.Background(), modelName, sessionKey); ok {
+	if existing, ok := internalcache.GetAntigravityInteractionsState(ctx, modelName, sessionKey); ok {
 		if state.InteractionID == "" {
 			state.InteractionID = existing.InteractionID
 		}
@@ -129,7 +129,14 @@ func CacheAntigravityInteractionsState(ctx context.Context, modelName string, or
 		gjson.GetBytes(payload, "interaction.id").String(),
 		gjson.GetBytes(payload, "id").String(),
 	)); responseID != "" {
-		internalcache.CacheAntigravityInteractionsStateBestEffort(ctx, modelName, "response-id:"+responseID, state)
+		// Caller-scoped like the primary session key: without the scope, a
+		// caller presenting another caller's known previous_response_id
+		// could resolve that caller's interaction coordinates.
+		aliasKey := "response-id:" + responseID
+		if callerScope := metadataString(opts.Metadata, cliproxyexecutor.CallerScopeMetadataKey); callerScope != "" {
+			aliasKey = "caller:" + callerScope + "\x00" + aliasKey
+		}
+		internalcache.CacheAntigravityInteractionsStateBestEffort(ctx, modelName, aliasKey, state)
 	}
 	log.Debugf("antigravity interactions state: cached model=%s session=%s interaction=%s env=%s", modelName, sessionKey, state.InteractionID, state.EnvironmentID)
 }
@@ -198,11 +205,18 @@ func AntigravityExecSessionKey(opts cliproxyexecutor.Options, originalRequest []
 	// conversation id, prompt_cache_key, metadata.user_id, execution
 	// metadata). Keeping one list avoids drift between auth selection and
 	// continuation keying.
-	if value := strings.TrimSpace(cliproxyauth.ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)); value != "" {
-		return namespaced("session:" + value)
-	}
-	if value := strings.TrimSpace(cliproxyauth.ExtractSessionID(opts.Headers, originalRequest, opts.Metadata)); value != "" {
-		return namespaced("session:" + value)
+	//
+	// NOTE: ExtractSessionID falls back to message-content hashes ("msg:…")
+	// when no explicit signal exists. Those are unstable across turns — the
+	// initial [system,user] turn hashes short while a continuation carrying
+	// assistant text hashes full — so a lookup on the continuation turn
+	// would miss the state cached on the initial turn. Skip them here: the
+	// conversation-prefix fallback below is stable across turns by design
+	// (it hashes only up to the last user message).
+	for _, raw := range [][]byte{opts.OriginalRequest, originalRequest} {
+		if value := strings.TrimSpace(cliproxyauth.ExtractSessionID(opts.Headers, raw, opts.Metadata)); value != "" && !strings.HasPrefix(value, "msg:") {
+			return namespaced("session:" + value)
+		}
 	}
 	// Context-derived identity (conductor runs session.Enrich before exec):
 	// stable per downstream caller+conversation even when the client sends no
@@ -291,7 +305,11 @@ func ApplyAntigravityInteractionsContinuation(ctx context.Context, modelName str
 	if !ok {
 		for _, path := range []string{"previous_response_id", "previous_interaction_id"} {
 			if responseID := strings.TrimSpace(gjson.GetBytes(body, path).String()); responseID != "" {
-				if state, ok = internalcache.GetAntigravityInteractionsState(ctx, modelName, "response-id:"+responseID); ok {
+				aliasKey := "response-id:" + responseID
+				if callerScope := metadataString(opts.Metadata, cliproxyexecutor.CallerScopeMetadataKey); callerScope != "" {
+					aliasKey = "caller:" + callerScope + "\x00" + aliasKey
+				}
+				if state, ok = internalcache.GetAntigravityInteractionsState(ctx, modelName, aliasKey); ok {
 					break
 				}
 			}
