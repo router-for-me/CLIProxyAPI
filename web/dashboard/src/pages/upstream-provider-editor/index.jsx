@@ -89,6 +89,12 @@ export default function UpstreamProviderEditorPage() {
     let cancelled = false;
     if (!isCreate) {
       setFetchError(null);
+      // Clear the previous row before refetching: navigating from one
+      // provider straight to another (same Route, no wrapper remount) would
+      // otherwise mount the keyed editor with the STALE provider — hydrating
+      // the old row's data into the new route's form. Resetting to null
+      // re-arms the loading gate below until the fresh row arrives.
+      setProvider(null);
       getUpstreamProvider(providerId)
         .then((row) => { if (!cancelled) setProvider(row); })
         .catch((err) => { if (!cancelled) setFetchError(err); });
@@ -119,8 +125,10 @@ export default function UpstreamProviderEditorPage() {
     return <Spinner label="Loading provider…" />;
   }
 
-  // Keyed by the route id so navigating straight to a different provider
-  // (e.g. via the browser back/forward stack) remounts a fresh editor.
+  // Keyed by the route id so a provider-to-provider navigation remounts a
+  // fresh editor. The fetch effect above nulls the row on id change, so the
+  // key remount only ever happens with freshly fetched data for the new id
+  // (the loading gate holds the render until then).
   return (
     <ProviderEditorForm
       key={id}
