@@ -1,7 +1,7 @@
 # Design: Dedicated Upstream Provider Editor Page
 
 **Date:** 2026-09-05
-**Status:** Approved (brainstorming session, all sections validated)
+**Status:** Implemented (feat/provider-editor-page; implementation plan at 2026-09-05-upstream-provider-editor-page-plan.md)
 **Goal:** Replace the upstream-provider add/edit modal with a dedicated full-page editor routed at `/upstream-providers/new` and `/upstream-providers/:id`, split out of the 3,700-line UpstreamProvidersPage into a focused editor module.
 
 ## Decisions (from the brainstorming session)
