@@ -21,6 +21,13 @@ const (
 // RewriteCodexOrphanDelegationInput converts orphan Codex delegation outputs into
 // standard user messages when orphan delegation compatibility is enabled.
 func RewriteCodexOrphanDelegationInput(ctx context.Context, headers http.Header, payload []byte, enabled bool) []byte {
+	return RewriteCodexOrphanDelegationInputWithPendingToolCallIDs(ctx, headers, payload, enabled, nil)
+}
+
+// RewriteCodexOrphanDelegationInputWithPendingToolCallIDs converts orphan Codex
+// delegation outputs while preserving outputs paired with pending calls from the
+// preceding response.
+func RewriteCodexOrphanDelegationInputWithPendingToolCallIDs(ctx context.Context, headers http.Header, payload []byte, enabled bool, pendingToolCallIDs []string) []byte {
 	if !enabled || len(payload) == 0 {
 		return payload
 	}
@@ -40,6 +47,13 @@ func RewriteCodexOrphanDelegationInput(ctx context.Context, headers http.Header,
 			}
 		}
 	}
+	pendingCalls := make(map[string]int, len(pendingToolCallIDs))
+	for _, callID := range pendingToolCallIDs {
+		if strings.TrimSpace(callID) != "" {
+			pendingCalls[callID]++
+		}
+	}
+	hasPreviousResponseID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != ""
 
 	updated := payload
 	for itemIndex, item := range inputItems {
@@ -53,9 +67,18 @@ func RewriteCodexOrphanDelegationInput(ctx context.Context, headers http.Header,
 			availableCalls[callID]--
 			continue
 		}
+		if pendingCalls[callID] > 0 {
+			// Paired with a pending function call from the preceding response.
+			pendingCalls[callID]--
+			continue
+		}
 
 		toolLabel, isTarget := matchCodexDelegationTool(item)
 		if !isTarget {
+			continue
+		}
+		if hasPreviousResponseID && strings.TrimSpace(callID) != "" {
+			// Without response state, a non-empty call_id may still be a valid continuation.
 			continue
 		}
 

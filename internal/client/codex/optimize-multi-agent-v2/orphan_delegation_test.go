@@ -15,6 +15,10 @@ func testRewriteCodexOrphan(payload []byte, enabled bool) []byte {
 	return RewriteCodexOrphanDelegationInput(context.Background(), http.Header{}, payload, enabled)
 }
 
+func testRewriteCodexOrphanWithPendingCalls(payload []byte, pendingToolCallIDs []string) []byte {
+	return RewriteCodexOrphanDelegationInputWithPendingToolCallIDs(context.Background(), http.Header{}, payload, true, pendingToolCallIDs)
+}
+
 func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 	t.Run("disabled leaves payload unchanged", func(t *testing.T) {
 		payload := []byte(`{
@@ -154,6 +158,65 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 		wantText := "Tool output from codex_app__send_message_to_thread:\n<codex_delegation>msg</codex_delegation>"
 		if text := item0.Get("content.0.text").String(); text != wantText {
 			t.Fatalf("input.0.content.0.text = %q, want %q", text, wantText)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		tool string
+	}{
+		{name: "create thread", tool: codexCreateThreadName},
+		{name: "send message to thread", tool: codexSendMessageToThreadName},
+	} {
+		t.Run("preserves incremental pending "+tc.name+" output", func(t *testing.T) {
+			payload := []byte(`{
+				"previous_response_id": "resp_previous",
+				"input": [{
+					"type": "function_call_output",
+					"call_id": "call_pending",
+					"name": "` + tc.tool + `",
+					"namespace": "codex_app",
+					"output": "completed"
+				}]
+			}`)
+			got := testRewriteCodexOrphanWithPendingCalls(payload, []string{"call_pending"})
+			if itemType := gjson.GetBytes(got, "input.0.type").String(); itemType != "function_call_output" {
+				t.Fatalf("incremental pending output was rewritten: %s", got)
+			}
+		})
+	}
+
+	t.Run("response append preserves pending output without previous response id", func(t *testing.T) {
+		payload := []byte(`{
+			"type": "response.append",
+			"input": [{
+				"type": "function_call_output",
+				"call_id": "call_pending",
+				"name": "create_thread",
+				"namespace": "codex_app",
+				"output": "completed"
+			}]
+		}`)
+		got := testRewriteCodexOrphanWithPendingCalls(payload, []string{"call_pending"})
+		if itemType := gjson.GetBytes(got, "input.0.type").String(); itemType != "function_call_output" {
+			t.Fatalf("pending append output was rewritten: %s", got)
+		}
+	})
+
+	t.Run("ordinary request preserves unknown call id with previous response", func(t *testing.T) {
+		payload := []byte(`{
+			"previous_response_id": "resp_previous",
+			"input": [{
+				"type": "function_call_output",
+				"call_id": "call_unknown",
+				"name": "create_thread",
+				"namespace": "codex_app",
+				"output": "completed"
+			}]
+		}`)
+		got := testRewriteCodexOrphan(payload, true)
+		if itemType := gjson.GetBytes(got, "input.0.type").String(); itemType != "function_call_output" {
+			t.Fatalf("ordinary incremental output was rewritten: %s", got)
 		}
 	})
 

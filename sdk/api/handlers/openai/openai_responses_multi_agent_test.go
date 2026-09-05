@@ -177,6 +177,71 @@ func TestResponsesWebsocketPreparesCodexMultiAgentV2Tools(t *testing.T) {
 	}
 }
 
+func TestResponsesWebsocketFallbackRewritesOrphansAfterExpandingHistory(t *testing.T) {
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOrphanDelegationCompatibility: true}, nil)
+	handler := NewOpenAIResponsesAPIHandler(base)
+	lastRequest := []byte(`{"model":"test-model","input":[{"type":"message","role":"user","content":"start"}]}`)
+
+	for _, tc := range []struct {
+		name               string
+		callID             string
+		lastResponseOutput []byte
+		wantInputTypes     []string
+	}{
+		{
+			name:               "preserves paired output",
+			callID:             "call-pending",
+			lastResponseOutput: []byte(`[{"type":"function_call","call_id":"call-pending","name":"create_thread","namespace":"codex_app"}]`),
+			wantInputTypes:     []string{"message", "function_call", "function_call_output"},
+		},
+		{
+			name:               "rewrites unknown orphan",
+			callID:             "call-unknown",
+			lastResponseOutput: []byte(`[]`),
+			wantInputTypes:     []string{"message", "message"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := []byte(`{
+				"type":"response.create",
+				"previous_response_id":"resp-previous",
+				"input":[{
+					"type":"function_call_output",
+					"call_id":"` + tc.callID + `",
+					"name":"create_thread",
+					"namespace":"codex_app",
+					"output":"completed"
+				}]
+			}`)
+			normalized, _, errMsg := normalizeResponsesWebsocketRequestWithIncrementalState(
+				payload,
+				lastRequest,
+				tc.lastResponseOutput,
+				"resp-previous",
+				nil,
+				false,
+				false,
+			)
+			if errMsg != nil {
+				t.Fatalf("normalize fallback request: %v", errMsg.Error)
+			}
+			if gjson.GetBytes(normalized, "previous_response_id").Exists() {
+				t.Fatalf("fallback retained previous_response_id: %s", normalized)
+			}
+			rewritten := handler.prepareCodexOrphanDelegation(nil, normalized)
+			input := gjson.GetBytes(rewritten, "input").Array()
+			if len(input) != len(tc.wantInputTypes) {
+				t.Fatalf("input length = %d, want %d: %s", len(input), len(tc.wantInputTypes), rewritten)
+			}
+			for i, wantType := range tc.wantInputTypes {
+				if gotType := input[i].Get("type").String(); gotType != wantType {
+					t.Fatalf("input.%d.type = %q, want %q: %s", i, gotType, wantType, rewritten)
+				}
+			}
+		})
+	}
+}
+
 func TestPrepareCodexMultiAgentV2ToolsAtResponsesBoundarySkipsOtherClients(t *testing.T) {
 	t.Parallel()
 
@@ -287,5 +352,31 @@ func TestResponsesOrphanCodexDelegationCompatibility(t *testing.T) {
 	}
 	if text := parsedWithUnrelatedHeader.Get("input.0.content.0.text").String(); text != wantText {
 		t.Fatalf("input.0.content.0.text = %q, want %q", text, wantText)
+	}
+
+	incrementalPayload := fmt.Sprintf(`{
+		"model": %q,
+		"stream": false,
+		"previous_response_id": "resp-previous",
+		"input": [{
+			"type": "function_call_output",
+			"call_id": "call-unknown",
+			"name": "create_thread",
+			"namespace": "codex_app",
+			"output": "completed"
+		}]
+	}`, modelID)
+	incrementalRequest := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(incrementalPayload))
+	incrementalRecorder := httptest.NewRecorder()
+	router.ServeHTTP(incrementalRecorder, incrementalRequest)
+	if incrementalRecorder.Code != http.StatusOK {
+		t.Fatalf("incremental status = %d, want 200; body=%s", incrementalRecorder.Code, incrementalRecorder.Body.String())
+	}
+	payloads = executor.Payloads()
+	if len(payloads) != 3 {
+		t.Fatalf("captured payload count = %d, want 3", len(payloads))
+	}
+	if itemType := gjson.GetBytes(payloads[2], "input.0.type").String(); itemType != "function_call_output" {
+		t.Fatalf("ordinary incremental output was rewritten: %s", payloads[2])
 	}
 }
