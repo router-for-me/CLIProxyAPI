@@ -154,6 +154,20 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				excluded = entry.ExcludedModels
 			}
 		}
+		// OAuth model IDs are account-scoped; static definitions only enrich the
+		// metadata returned by the account's model endpoint.
+		if authKind == coreauth.AuthKindOAuth {
+			discovered, errDiscover := s.xaiModelsForAuth(ctx, a)
+			if errDiscover != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				// Discovery failures must not fall back to the static catalog.
+				models = nil
+			} else {
+				models = discovered
+			}
+		}
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
@@ -319,12 +333,15 @@ func (s *Service) refreshModelRegistrationForAuthWithContext(ctx context.Context
 		s.coreManager.RefreshSchedulerEntry(current.ID)
 		return false
 	}
+	reuseXAIRegistration := sameXAIModelRegistrationInputs(current, latest)
 
 	// Re-apply the latest auth snapshot so concurrent auth updates cannot leave
-	// stale model registrations behind. This may duplicate registration work when
-	// no auth fields changed, but keeps the refresh path simple and correct.
+	// stale model registrations behind. Avoid repeating account model discovery
+	// when the latest snapshot has the same xAI OAuth registration inputs.
 	s.ensureExecutorsForAuthWithContext(ctx, latest, false)
-	s.registerModelsForAuthWithCache(ctx, latest, compatCache)
+	if !reuseXAIRegistration {
+		s.registerModelsForAuthWithCache(ctx, latest, compatCache)
+	}
 	if ctx.Err() != nil {
 		return false
 	}
