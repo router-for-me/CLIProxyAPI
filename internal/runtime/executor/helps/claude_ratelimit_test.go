@@ -212,6 +212,61 @@ func TestParseClaudeRateLimitReset_AllCases(t *testing.T) {
 		}
 	})
 
+	t.Run("numeric millisecond reset", func(t *testing.T) {
+		h := make(http.Header)
+		h.Set("Anthropic-Ratelimit-Unified-5h-Status", "rejected")
+		h.Set("Anthropic-Ratelimit-Unified-5h-Reset", strconv.FormatInt(now.Add(5*time.Minute).UnixMilli(), 10))
+
+		got := parseClaudeRateLimitResetWithFuzz(h, now, 0, 0)
+		if got == nil {
+			t.Fatal("expected non-nil RetryAfter")
+		}
+		if *got < 5*time.Minute-time.Second || *got > 5*time.Minute+time.Second {
+			t.Fatalf("expected ~5m from millisecond epoch, got %v", *got)
+		}
+	})
+
+	t.Run("second-scale unified reset still multi-day", func(t *testing.T) {
+		h := make(http.Header)
+		h.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+		h.Set("Anthropic-Ratelimit-Unified-Reset", strconv.FormatInt(now.Add(7*24*time.Hour).Unix(), 10))
+
+		got := parseClaudeRateLimitResetWithFuzz(h, now, 0, 0)
+		if got == nil {
+			t.Fatal("expected non-nil RetryAfter")
+		}
+		if *got < 7*24*time.Hour-5*time.Second || *got > 7*24*time.Hour+5*time.Second {
+			t.Fatalf("expected ~7d from second-scale unified reset, got %v", *got)
+		}
+	})
+
+	t.Run("7d rejected with RFC3339 reset", func(t *testing.T) {
+		h := make(http.Header)
+		h.Set("Anthropic-Ratelimit-Unified-7d-Status", "rejected")
+		h.Set("Anthropic-Ratelimit-Unified-7d-Reset", now.Add(7*24*time.Hour).UTC().Format(time.RFC3339))
+
+		got := parseClaudeRateLimitResetWithFuzz(h, now, 0, 0)
+		if got == nil {
+			t.Fatal("expected non-nil RetryAfter")
+		}
+		if *got < 7*24*time.Hour-5*time.Second || *got > 7*24*time.Hour+5*time.Second {
+			t.Fatalf("expected ~7d from RFC3339 reset, got %v", *got)
+		}
+	})
+
+	t.Run("retry-after remains RFC 7231 delta seconds", func(t *testing.T) {
+		h := make(http.Header)
+		// A millisecond-looking integer must stay delta-seconds, not an epoch.
+		h.Set("Retry-After", "90")
+		got := parseClaudeRateLimitResetWithFuzz(h, now, 0, 0)
+		if got == nil {
+			t.Fatal("expected non-nil RetryAfter")
+		}
+		if *got != 90*time.Second {
+			t.Fatalf("expected 90s delta, got %v", *got)
+		}
+	})
+
 	t.Run("fuzz is bounded and non-negative", func(t *testing.T) {
 		h := make(http.Header)
 		h.Set("Retry-After", "100")

@@ -394,8 +394,8 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 		return nil
 	}
 	if resetsAt := gjson.GetBytes(errorBody, "error.resets_at").Int(); resetsAt > 0 {
-		resetAtTime := time.Unix(resetsAt, 0)
-		if resetAtTime.After(now) {
+		resetAtTime := helps.UnixSecondsOrMilli(resetsAt)
+		if resetAtTime.Year() <= 2100 && resetAtTime.After(now) {
 			retryAfter := resetAtTime.Sub(now)
 			return &retryAfter
 		}
