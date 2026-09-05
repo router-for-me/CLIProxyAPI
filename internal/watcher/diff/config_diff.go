@@ -124,6 +124,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.Codex.OrphanDelegationCompatibility != newCfg.Codex.OrphanDelegationCompatibility {
 		changes = append(changes, fmt.Sprintf("codex.orphan-delegation-compatibility: %t -> %t", oldCfg.Codex.OrphanDelegationCompatibility, newCfg.Codex.OrphanDelegationCompatibility))
 	}
+	if oldCfg.Codex.UpstreamRequestCompression != newCfg.Codex.UpstreamRequestCompression {
+		changes = append(changes, fmt.Sprintf("codex.upstream-request-compression: %q -> %q", oldCfg.Codex.UpstreamRequestCompression, newCfg.Codex.UpstreamRequestCompression))
+	}
 	if oldCfg.XAI.InjectXSearch != newCfg.XAI.InjectXSearch {
 		changes = append(changes, fmt.Sprintf("xai.inject-x-search: %t -> %t", oldCfg.XAI.InjectXSearch, newCfg.XAI.InjectXSearch))
 	}
