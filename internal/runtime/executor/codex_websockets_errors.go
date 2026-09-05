@@ -19,6 +19,22 @@ type statusErrWithHeaders struct {
 	headers http.Header
 }
 
+type codexWebsocketHandshakeNotFoundError struct {
+	statusErr
+}
+
+func (codexWebsocketHandshakeNotFoundError) IsRequestScoped() bool {
+	return true
+}
+
+func newCodexWebsocketHandshakeStatusErr(statusCode int, body []byte) error {
+	statusError := newCodexStatusErr(statusCode, body)
+	if statusCode == http.StatusNotFound {
+		return codexWebsocketHandshakeNotFoundError{statusErr: statusError}
+	}
+	return statusError
+}
+
 func (e statusErrWithHeaders) Headers() http.Header {
 	if e.headers == nil {
 		return nil
