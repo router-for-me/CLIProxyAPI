@@ -26,6 +26,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if isCodexOpenAIImageRequest(opts) {
 		return e.executeOpenAIImage(ctx, auth, req, opts)
 	}
+	if opts.Alt == constant.ClaudeResponsesBridgeAlt {
+		ctx = context.WithValue(ctx, constant.ClaudeBridgeUsageContextKey{}, true)
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)

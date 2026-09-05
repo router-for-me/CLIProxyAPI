@@ -29,6 +29,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
 
+	if opts.Alt == constant.ClaudeResponsesBridgeAlt {
+		ctx = context.WithValue(ctx, constant.ClaudeBridgeUsageContextKey{}, true)
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
@@ -282,6 +285,16 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		sess.setMultiAgentV2Optimized(conn, optimizeMultiAgentV2 && !multiAgentV2Conflict)
 	}
 
+	var usageEstimator *helps.ClaudeStreamUsageEstimator
+	if opts.Alt == constant.ClaudeResponsesBridgeAlt {
+		var errEstimator error
+		usageEstimator, errEstimator = helps.NewClaudeStreamUsageEstimator(baseModel, estimatedClaudeInputTokens)
+		if errEstimator != nil {
+			log.WithError(errEstimator).WithField("model", baseModel).Warn("Claude Responses bridge live usage estimation is unavailable")
+		}
+	}
+	thinkingTokenEmitter := helps.NewClaudeThinkingTokenCountEmitter(claudeThinkingTokenCountRequested(opts.Headers))
+
 	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
 
 	claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
@@ -443,6 +456,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				currentChunks = helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, clientBody, line, &param, claudeInputTokens)
 			}
 
+			currentChunks = helps.ClaudeBootstrapUsageChunks(usageEstimator, thinkingTokenEmitter, payload, currentChunks)
 			if isCodexHandshakeMetadataEvent(eventType) && !isTerminalEvent {
 				if len(bufferedChunks) < codexBootstrapMaxBufferedEvents {
 					bufferedChunks = append(bufferedChunks, currentChunks...)
@@ -521,15 +535,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 		}
 
-		var usageEstimator *helps.ClaudeStreamUsageEstimator
-		if opts.Alt == constant.ClaudeResponsesBridgeAlt {
-			var errEstimator error
-			usageEstimator, errEstimator = helps.NewClaudeStreamUsageEstimator(baseModel, estimatedClaudeInputTokens)
-			if errEstimator != nil {
-				log.WithError(errEstimator).WithField("model", baseModel).Warn("Claude Responses bridge live usage estimation is unavailable")
-			}
-		}
-		thinkingTokenEmitter := helps.NewClaudeThinkingTokenCountEmitter(claudeThinkingTokenCountRequested(opts.Headers))
 		var usageTicker *time.Ticker
 		var usageTicks <-chan time.Time
 		if usageEstimator != nil {

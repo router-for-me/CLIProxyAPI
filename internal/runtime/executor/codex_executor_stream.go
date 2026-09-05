@@ -29,6 +29,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if isCodexOpenAIImageRequest(opts) {
 		return e.executeOpenAIImageStream(ctx, auth, req, opts)
 	}
+	if opts.Alt == constant.ClaudeResponsesBridgeAlt {
+		ctx = context.WithValue(ctx, constant.ClaudeBridgeUsageContextKey{}, true)
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
@@ -141,6 +144,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 
+	var usageEstimator *helps.ClaudeStreamUsageEstimator
+	if opts.Alt == constant.ClaudeResponsesBridgeAlt {
+		var errEstimator error
+		usageEstimator, errEstimator = helps.NewClaudeStreamUsageEstimator(baseModel, estimatedClaudeInputTokens)
+		if errEstimator != nil {
+			log.WithError(errEstimator).WithField("model", baseModel).Warn("Claude Responses bridge live usage estimation is unavailable")
+		}
+	}
+	thinkingTokenEmitter := helps.NewClaudeThinkingTokenCountEmitter(claudeThinkingTokenCountRequested(opts.Headers))
+
 	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
 
 	scanner := bufio.NewScanner(httpResp.Body)
@@ -229,6 +242,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			translatedLine = applyCodexIdentityExposeResponsePayload(translatedLine, identityState)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
+			if bytes.HasPrefix(translatedLine, dataTag) {
+				chunks = helps.ClaudeBootstrapUsageChunks(usageEstimator, thinkingTokenEmitter, bytes.TrimSpace(translatedLine[5:]), chunks)
+			}
 			if isHandshake && !terminalSuccess {
 				if len(bufferedChunks) < codexBootstrapMaxBufferedEvents {
 					bufferedChunks = append(bufferedChunks, chunks...)
@@ -298,15 +314,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
 		}()
-		var usageEstimator *helps.ClaudeStreamUsageEstimator
-		if opts.Alt == constant.ClaudeResponsesBridgeAlt {
-			var errEstimator error
-			usageEstimator, errEstimator = helps.NewClaudeStreamUsageEstimator(baseModel, estimatedClaudeInputTokens)
-			if errEstimator != nil {
-				log.WithError(errEstimator).WithField("model", baseModel).Warn("Claude Responses bridge live usage estimation is unavailable")
-			}
-		}
-		thinkingTokenEmitter := helps.NewClaudeThinkingTokenCountEmitter(claudeThinkingTokenCountRequested(opts.Headers))
 		type scanResult struct {
 			line []byte
 			err  error

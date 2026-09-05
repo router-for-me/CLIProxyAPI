@@ -3,6 +3,9 @@
 // ensuring consistent naming across the application.
 package constant
 
+// ClaudeBridgeUsageContextKey scopes bridge-specific context accounting to its requests.
+type ClaudeBridgeUsageContextKey struct{}
+
 const (
 	// Gemini represents the Google Gemini provider identifier.
 	Gemini = "gemini"

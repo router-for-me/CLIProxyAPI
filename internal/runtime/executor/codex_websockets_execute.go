@@ -28,6 +28,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		return e.CodexExecutor.executeCompact(ctx, auth, req, opts)
 	}
 
+	if opts.Alt == constant.ClaudeResponsesBridgeAlt {
+		ctx = context.WithValue(ctx, constant.ClaudeBridgeUsageContextKey{}, true)
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
