@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"strings"
 	"testing"
 
@@ -1380,7 +1381,7 @@ func TestConvertCodexResponseToClaudeNonStream_StopSequenceMapping(t *testing.T)
 }
 
 func TestConvertCodexResponseToClaude_StreamUsageBreakdown(t *testing.T) {
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), constant.ClaudeBridgeUsageContextKey{}, true)
 	var param any
 	outputs := ConvertCodexResponseToClaude(ctx, "", []byte(`{"messages":[]}`), nil, []byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-terra"}}`), &param)
 	outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", []byte(`{"messages":[]}`), nil, []byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":80000,"input_tokens_details":{"cache_write_tokens":1000,"cached_tokens":60000},"output_tokens":500,"output_tokens_details":{"reasoning_tokens":250}},"tool_usage":{"web_search":{"num_requests":2}},"output":[]}}`), &param)...)
@@ -1421,7 +1422,7 @@ func TestConvertCodexResponseToClaude_StreamUsageBreakdown(t *testing.T) {
 
 func TestConvertCodexResponseToClaudeNonStreamUsageBreakdown(t *testing.T) {
 	response := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.6-terra","usage":{"input_tokens":80000,"input_tokens_details":{"cache_write_tokens":1000,"cached_tokens":60000},"output_tokens":500,"output_tokens_details":{"reasoning_tokens":250}},"tool_usage":{"web_search":{"num_requests":2}},"output":[]}}`)
-	out := ConvertCodexResponseToClaudeNonStream(context.Background(), "", []byte(`{"messages":[]}`), nil, response, nil)
+	out := ConvertCodexResponseToClaudeNonStream(context.WithValue(context.Background(), constant.ClaudeBridgeUsageContextKey{}, true), "", []byte(`{"messages":[]}`), nil, response, nil)
 	assertClaudeUsageBreakdown(t, gjson.GetBytes(out, "usage"))
 }
 

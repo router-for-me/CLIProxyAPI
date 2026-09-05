@@ -19,6 +19,11 @@ import (
 )
 
 func TestCodexAutoExecutorClaudeResponsesBridgeStreamsOverWebsocket(t *testing.T) {
+	t.Run("unbuffered", func(t *testing.T) { testClaudeWebsocketBridgeUsage(t, false) })
+	t.Run("buffered", func(t *testing.T) { testClaudeWebsocketBridgeUsage(t, true) })
+}
+
+func testClaudeWebsocketBridgeUsage(t *testing.T, buffering bool) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedAuthorization := make(chan string, 1)
 	capturedPayload := make(chan []byte, 1)
@@ -49,7 +54,7 @@ func TestCodexAutoExecutorClaudeResponsesBridgeStreamsOverWebsocket(t *testing.T
 	}))
 	defer server.Close()
 
-	exec := NewCodexAutoExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	exec := NewCodexAutoExecutor(&config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: buffering}, SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
 	auth := &cliproxyauth.Auth{
 		ID:         "bridge-ws-auth",
 		Provider:   constant.Codex,

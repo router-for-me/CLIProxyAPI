@@ -79,6 +79,11 @@ func TestCodexExecutorClaudeResponsesBridgeUsesOAuthToken(t *testing.T) {
 }
 
 func TestCodexExecutorClaudeResponsesBridgeStreamUsesOAuthToken(t *testing.T) {
+	t.Run("unbuffered", func(t *testing.T) { testClaudeHTTPBridgeUsage(t, false) })
+	t.Run("buffered", func(t *testing.T) { testClaudeHTTPBridgeUsage(t, true) })
+}
+
+func testClaudeHTTPBridgeUsage(t *testing.T, buffering bool) {
 	var gotAuthorization string
 	var gotBody []byte
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +102,7 @@ func TestCodexExecutorClaudeResponsesBridgeStreamUsesOAuthToken(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	executor := NewCodexExecutor(&config.Config{})
+	executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: buffering}})
 	auth := &cliproxyauth.Auth{
 		Attributes: map[string]string{"base_url": upstream.URL},
 		Metadata:   map[string]any{"access_token": "oauth-token"},
