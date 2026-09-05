@@ -291,7 +291,7 @@ func main() {
 		}()
 
 		ctxHomeConfig, cancelHomeConfig := context.WithTimeout(context.Background(), 30*time.Second)
-		raw, errGetConfig := homeClient.GetConfig(ctxHomeConfig)
+		raw, errGetConfig := homeClient.WaitForConfig(ctxHomeConfig)
 		cancelHomeConfig()
 		if errGetConfig != nil {
 			log.Errorf("failed to fetch config from home: %v", errGetConfig)
