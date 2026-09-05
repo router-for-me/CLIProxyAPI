@@ -56,6 +56,9 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-request-scoped-errors")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "plugins", "configs")
+	// routing.* keys are omitempty: a cleared session-affinity / TTL must
+	// leave the file too, or the next reload restores it.
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "routing")
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
