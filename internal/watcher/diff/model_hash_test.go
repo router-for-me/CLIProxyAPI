@@ -50,6 +50,14 @@ func TestComputeOpenAICompatModelsHashIncludesModalities(t *testing.T) {
 	}
 }
 
+func TestComputeOpenAICompatModelsHashIncludesMaxOutputTokens(t *testing.T) {
+	base := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "model"}})
+	changed := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "model", MaxOutputTokens: 64000}})
+	if base == changed {
+		t.Fatal("max-output-tokens did not change model hash")
+	}
+}
+
 func TestComputeOpenAICompatModelsHashPreservesRoutingOrderAndDuplicates(t *testing.T) {
 	a := []config.OpenAICompatibilityModel{
 		{Name: "gpt-4", Alias: "gpt4"},
