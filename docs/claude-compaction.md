@@ -1,32 +1,33 @@
 # Claude compaction bridge
 
-Claude requests compaction through its normal messages endpoint. CPA translates
-that request to Codex `/responses/compact`, stores the returned window on the
-server, and returns a short opaque reference as the Claude text response. On
-continuation CPA removes that reference from the messages and prepends the saved
-window to Responses input. Encrypted state is never emitted in new Claude
-conversation transcripts. Existing inline capsules remain readable.
+Claude requests compaction through its normal messages endpoint. The bridge
+translates the transcript and custom summary instructions into Codex input,
+appends a compaction_trigger item, and dispatches through CPA's ordinary Responses
+execution. CPA handles upstream routing, credentials, transport and response
+assembly.
 
-Each compaction creates an immutable reference so simultaneous agents and branched
-conversations cannot overwrite each other's windows. Credential selection uses
-the normal CPA router, including when reading older capsules with an `auth_id`.
+The bridge returns only the compaction item's encrypted_content as Claude text,
+including for SSE clients. It adds no capsule wrapper or cache reference. On
+replay, a complete Fernet-shaped ciphertext line is removed from the summary
+message and restored as a Responses compaction input item. The newest raw block
+replaces the preceding conversation window; messages after that boundary remain.
+Quoted or inline ciphertext examples are left as ordinary text.
 
-CPA reports estimated live usage but imposes no synthetic 200k rejection. Claude
-uses its configured compaction window and the upstream enforces its context limit.
+This recognition checks transport shape, not decryptability or origin. Raw
+ciphertext carries no explicit type tag, so a standalone valid-looking ciphertext
+line in ordinary prose is ambiguous and will be interpreted as compaction state.
+The upstream validates the encrypted state.
 
-## Storage
+Credential selection uses CPA's normal router. No auth ID is stored or pinned.
+There is no synthetic 200k rejection; Claude uses its configured window and the
+upstream enforces the model's actual context limit.
 
-Home deployments use shared KV keys under `cpa:claude:compaction:`. Standalone
-servers use `WRITABLE_PATH/cliproxyapi/claude-compaction`, or the operating system's
-user cache directory followed by `cliproxyapi/claude-compaction` when
-`WRITABLE_PATH` is unset. Files have mode 0600 and are atomically published.
+New compactions require no server cache. Old inline capsules and cache references
+remain readable for existing conversations. If those conversations still contain
+cache references, retain their existing Home KV or standalone compaction cache
+until the next successful compaction replaces the reference with raw ciphertext.
 
-Persist this directory when replacing containers. For example, mount a persistent
-volume at `/data` and set `WRITABLE_PATH=/data`. Standalone replicas serving the
-same conversations must share that directory. Home instances must share KV.
-
-Entries are limited to 8 MiB each and retained without automatic expiry because
-old transcripts and conversation forks can still reference them. Include them in
-backups; remove entries only when the corresponding conversations are no longer
-needed. Storage usage grows with the number of compactions. A missing entry
-returns an explicit error before inference instead of silently dropping context.
+Three manual compact/resume cycles with real Luna OAuth output and unmodified
+Claude Code 2.1.211 established that ciphertext text is replayed unchanged and each
+replacement supersedes the previous block. This does not establish automatic
+compaction or Claude Desktop behavior.

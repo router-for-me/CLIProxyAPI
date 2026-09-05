@@ -1,22 +1,20 @@
 package claude
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
 
-func TestCompactResponseCachesOpaqueStateAndResumesWithoutPinning(t *testing.T) {
+func TestCompactResponseReturnsRawCiphertextAndResumesWithoutPinning(t *testing.T) {
 	t.Setenv("WRITABLE_PATH", t.TempDir())
-	opaque := strings.Repeat("opaque-encrypted-state", 50000)
+	opaque := rawCiphertextForTest(50000)
 	raw := mustJSONMarshalForTest(t, map[string]any{
 		"id": "compact-test", "object": "response.compaction",
 		"output": []any{map[string]any{"type": "compaction", "encrypted_content": opaque}},
@@ -25,19 +23,8 @@ func TestCompactResponseCachesOpaqueStateAndResumesWithoutPinning(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(marker) > 128 || strings.Contains(string(response), opaque) {
-		t.Fatal("large compact state leaked into Claude response")
-	}
-	ref := strings.TrimSuffix(strings.TrimPrefix(marker, claudeCompactionCapsulePrefix+"ref:"), claudeCompactionCapsuleSuffix)
-	saved, err := cache.LoadClaudeCompaction(context.Background(), ref)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gjson.GetBytes(saved, "auth_id").Exists() {
-		t.Fatal("cache retained credential affinity")
-	}
-	if gjson.GetBytes(saved, "output.0.encrypted_content").String() != opaque {
-		t.Fatal("opaque state changed")
+	if marker != opaque || gjson.GetBytes(response, "content.0.text").String() != opaque {
+		t.Fatal("ciphertext was wrapped or changed")
 	}
 	for _, stream := range []bool{false, true} {
 		handler, executor := newResponsesBridgeHandler(t)

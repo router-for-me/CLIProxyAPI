@@ -12,9 +12,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const (
@@ -26,9 +29,10 @@ const (
 )
 
 type claudeCompactionCapsule struct {
-	Version int               `json:"version"`
-	Model   string            `json:"model"`
-	Output  []json.RawMessage `json:"output"`
+	rawCiphertext bool
+	Version       int               `json:"version"`
+	Model         string            `json:"model"`
+	Output        []json.RawMessage `json:"output"`
 }
 
 type responsesCompactionResource struct {
@@ -109,6 +113,12 @@ func prepareClaudeCompactionReplay(rawJSON []byte, upstreamModel string) ([]byte
 			return nil, nil, errRewrite
 		}
 		if found != nil {
+			if found.rawCiphertext {
+				// The newest compact result replaces the previous context window.
+				updatedMessages = updatedMessages[:0]
+				capsule = nil
+				found.Model = upstreamModel
+			}
 			if capsule != nil {
 				return nil, nil, fmt.Errorf("multiple compaction capsules are not supported")
 			}
@@ -196,6 +206,27 @@ func rewriteClaudeMessageCapsule(message map[string]any) (bool, *claudeCompactio
 }
 
 func stripClaudeCompactionCapsule(text string) (string, *claudeCompactionCapsule, bool, error) {
+	// Claude wraps the compact summary in explanatory text on replay. Only
+	// recognize a complete ciphertext line, never quoted or embedded examples.
+	if !strings.Contains(text, claudeCompactionCapsulePrefix) {
+		lines := strings.Split(text, "\n")
+		var found *claudeCompactionCapsule
+		for i, line := range lines {
+			token := strings.TrimSpace(line)
+			if len(token) > claudeCompactionCapsuleMaxSize || !signature.IsValidGPTReasoningSignature(token) {
+				continue
+			}
+			if found != nil {
+				return "", nil, false, fmt.Errorf("multiple raw compaction blocks in one message")
+			}
+			item, _ := json.Marshal(map[string]string{"type": "compaction", "encrypted_content": token})
+			found = &claudeCompactionCapsule{Version: claudeCompactionCapsuleVersion, rawCiphertext: true, Output: []json.RawMessage{item}}
+			lines[i] = ""
+		}
+		if found != nil {
+			return strings.TrimSpace(strings.Join(lines, "\n")), found, true, nil
+		}
+	}
 	searchFrom := 0
 	foundStart := -1
 	foundEnd := -1
@@ -360,19 +391,31 @@ func (h *ClaudeCodeAPIHandler) handleCompactResponsesBridge(c *gin.Context, rawJ
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	modelName := gjson.GetBytes(rawJSON, "model").String()
+	// Compaction is a normal Codex Responses request with a final trigger item.
+	// Leave authentication, transport, and response assembly to CPA's executor.
+	translated := sdktranslator.TranslateRequest(sdktranslator.FromString(Claude), sdktranslator.FromString(Codex), modelName, rawJSON, false)
+	var input []json.RawMessage
+	for _, item := range gjson.GetBytes(rawJSON, ClaudeResponsesCompactionField+".output").Array() {
+		input = append(input, json.RawMessage(item.Raw))
+	}
+	for _, item := range gjson.GetBytes(translated, "input").Array() {
+		input = append(input, json.RawMessage(item.Raw))
+	}
+	input = append(input, json.RawMessage(`{"type":"compaction_trigger"}`))
+	inputJSON, _ := json.Marshal(input)
+	translated, _ = sjson.SetRawBytes(translated, "input", inputJSON)
 	stopKeepAlive := func() {}
 	if !clientWantsStream {
 		stopKeepAlive = h.StartNonStreamingKeepAlive(c, cliCtx)
 	}
 	response, errMsg := h.ExecuteProtocolWithAuthManager(cliCtx, handlers.ProtocolExecutionRequest{
-		EntryProtocol:  Claude,
+		EntryProtocol:  Codex,
 		ExitProtocol:   OpenaiResponse,
 		ForcedProvider: Codex,
 		Model:          modelName,
-		Body:           rawJSON,
+		Body:           translated,
 		Headers:        c.Request.Header.Clone(),
 		Query:          c.Request.URL.Query(),
-		Alt:            ClaudeResponsesCompactBridgeAlt,
 	})
 	stopKeepAlive()
 	if errMsg != nil {
@@ -410,20 +453,25 @@ func buildClaudeCompactResponse(rawCompact []byte, clientModel, upstreamModel st
 	if errUnmarshal := json.Unmarshal(rawCompact, &compact); errUnmarshal != nil {
 		return nil, "", fmt.Errorf("decode upstream compaction response: %w", errUnmarshal)
 	}
-	if compact.Object != "response.compaction" {
+	if compact.Object != "response.compaction" && compact.Object != "response" {
 		return nil, "", fmt.Errorf("unexpected upstream compaction object %q", compact.Object)
 	}
 	if errValidate := validateResponsesCompactionOutput(compact.Output); errValidate != nil {
 		return nil, "", errValidate
 	}
-	capsule := &claudeCompactionCapsule{
-		Version: claudeCompactionCapsuleVersion,
-		Model:   upstreamModel,
-		Output:  compact.Output,
+	var marker string
+	for _, item := range compact.Output {
+		kind := gjson.GetBytes(item, "type").String()
+		if kind != "compaction" && kind != "compaction_summary" {
+			continue
+		}
+		if marker != "" {
+			return nil, "", fmt.Errorf("multiple upstream compaction blocks")
+		}
+		marker = gjson.GetBytes(item, "encrypted_content").String()
 	}
-	marker, errEncode := encodeClaudeCompactionCapsule(capsule)
-	if errEncode != nil {
-		return nil, "", errEncode
+	if len(marker) > claudeCompactionCapsuleMaxSize || !signature.IsValidGPTReasoningSignature(marker) {
+		return nil, "", fmt.Errorf("invalid upstream compaction ciphertext")
 	}
 	response := map[string]any{
 		"id":            compact.ID,
