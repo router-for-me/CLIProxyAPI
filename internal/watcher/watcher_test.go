@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -264,6 +265,185 @@ func TestStartAndStopSuccess(t *testing.T) {
 	}
 }
 
+type failingCompletion struct {
+	startErr error
+	closed   bool
+}
+
+func (f *failingCompletion) Start(context.Context, func(), func(error), func()) error {
+	return f.startErr
+}
+func (f *failingCompletion) Close() error {
+	f.closed = true
+	return nil
+}
+
+func TestStartFallsBackWhenNativeCompletionUnavailable(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.Mkdir(authDir, 0o755); err != nil {
+		t.Fatalf("create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 6001\nauth-dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	reloads := make(chan int, 2)
+	w, err := NewWatcher(configPath, authDir, func(cfg *config.Config) { reloads <- cfg.Port })
+	if err != nil {
+		t.Fatalf("create watcher: %v", err)
+	}
+	failed := &failingCompletion{startErr: errors.New("injected native start failure")}
+	w.completion = failed
+	w.startTestHook = func() {
+		if errWrite := os.WriteFile(configPath, []byte("port: 6002\nauth-dir: "+authDir+"\n"), 0o644); errWrite != nil {
+			t.Fatalf("update config during fallback admission: %v", errWrite)
+		}
+	}
+	w.SetConfig(&config.Config{Port: 6001, AuthDir: authDir})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err = w.Start(ctx); err != nil {
+		t.Fatalf("fallback start failed: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+	if w.completionActive.Load() || w.completion != nil || !failed.closed {
+		t.Fatal("failed native completion was not closed and replaced by fallback")
+	}
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case port := <-reloads:
+			if port == 6002 {
+				return
+			}
+		case <-deadline:
+			t.Fatal("fsnotify fallback did not reconcile admission change")
+		}
+	}
+}
+
+func TestStartAndStopWhenAuthDirIsConfigDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("auth-dir: "+tmpDir+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	w, err := NewWatcher(configPath, tmpDir, nil)
+	if err != nil {
+		t.Fatalf("create watcher: %v", err)
+	}
+	w.SetConfig(&config.Config{AuthDir: tmpDir})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err = w.Start(ctx); err != nil {
+		t.Fatalf("start watcher with shared directory: %v", err)
+	}
+	if err = w.Stop(); err != nil {
+		t.Fatalf("stop watcher: %v", err)
+	}
+}
+
+func TestConfigWatcherIgnoresSiblingFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.Mkdir(authDir, 0o755); err != nil {
+		t.Fatalf("create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 1001\nauth-dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	reloads := make(chan struct{}, 2)
+	w, err := NewWatcher(configPath, authDir, func(*config.Config) { reloads <- struct{}{} })
+	if err != nil {
+		t.Fatalf("create watcher: %v", err)
+	}
+	w.SetConfig(&config.Config{Port: 1001, AuthDir: authDir})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err = w.Start(ctx); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+	select {
+	case <-reloads:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for initial callback")
+	}
+	if err = os.WriteFile(filepath.Join(tmpDir, "config.yaml.tmp"), []byte("port: 9999\n"), 0o644); err != nil {
+		t.Fatalf("write sibling: %v", err)
+	}
+	select {
+	case <-reloads:
+		t.Fatal("sibling file triggered config reload")
+	case <-time.After(2 * configReloadDebounce):
+	}
+}
+
+func TestConfigWatcherFallbackReloadsRepeatedAtomicReplacements(t *testing.T) {
+	testConfigWatcherReloadsRepeatedAtomicReplacements(t, false)
+}
+
+func testConfigWatcherReloadsRepeatedAtomicReplacements(t *testing.T, nativeCompletion bool) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.Mkdir(authDir, 0o755); err != nil {
+		t.Fatalf("create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	writeConfig := func(path string, port int) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("port: %d\nauth-dir: %s\n", port, authDir)), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+	writeConfig(configPath, 1001)
+
+	reloads := make(chan int, 4)
+	w, err := NewWatcher(configPath, authDir, func(cfg *config.Config) { reloads <- cfg.Port })
+	if err != nil {
+		t.Fatalf("create watcher: %v", err)
+	}
+	if !nativeCompletion {
+		if w.completion != nil {
+			_ = w.completion.Close()
+		}
+		w.completion = nil
+		w.completionActive.Store(false)
+	}
+	w.SetConfig(&config.Config{Port: 1001, AuthDir: authDir})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err = w.Start(ctx); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+
+	select {
+	case <-reloads: // initial client load
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for initial callback")
+	}
+
+	for _, port := range []int{1002, 1003} {
+		tmp := filepath.Join(tmpDir, fmt.Sprintf(".config-%d.tmp", port))
+		writeConfig(tmp, port)
+		if err = os.Rename(tmp, configPath); err != nil {
+			t.Fatalf("replace config: %v", err)
+		}
+		select {
+		case got := <-reloads:
+			if got != port {
+				t.Fatalf("expected port %d after replacement, got %d", port, got)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for replacement %d", port)
+		}
+	}
+}
+
 func TestStartFailsWhenConfigMissing(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
@@ -276,7 +456,7 @@ func TestStartFailsWhenConfigMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create watcher: %v", err)
 	}
-	defer w.Stop()
+	t.Cleanup(func() { _ = w.Stop() })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1513,6 +1693,48 @@ func TestNormalizeAuthNil(t *testing.T) {
 	}
 }
 
+type blockingConfigPersister struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingConfigPersister) PersistConfig(context.Context) error {
+	close(p.started)
+	<-p.release
+	return nil
+}
+func (*blockingConfigPersister) PersistAuthFiles(context.Context, string, ...string) error {
+	return nil
+}
+
+func TestStopWaitsForConfigPersistence(t *testing.T) {
+	p := &blockingConfigPersister{started: make(chan struct{}), release: make(chan struct{})}
+	w := &Watcher{storePersister: p}
+	fsWatcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("create fsnotify watcher: %v", err)
+	}
+	w.watcher = fsWatcher
+	w.persistConfigAsync()
+	<-p.started
+	stopped := make(chan error, 1)
+	go func() { stopped <- w.Stop() }()
+	select {
+	case err := <-stopped:
+		t.Fatalf("Stop returned before persistence completed: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(p.release)
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("Stop failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not return after persistence completed")
+	}
+}
+
 // stubStore implements coreauth.Store plus watcher-specific persistence helpers.
 type stubStore struct {
 	mu              sync.Mutex
@@ -1647,6 +1869,103 @@ func TestScheduleConfigReloadDebounces(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&reloads); got != 1 {
 		t.Fatalf("expected single debounced reload, got %d", got)
+	}
+}
+
+func TestReloadConfigIfChangedSerializesDuplicateTriggers(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("auth-dir: "+tmp+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	var reloads int32
+	w := &Watcher{
+		configPath:     cfgPath,
+		authDir:        tmp,
+		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+	}
+	w.SetConfig(&config.Config{AuthDir: tmp})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); w.reloadConfigIfChanged() }()
+	go func() { defer wg.Done(); w.reloadConfigIfChanged() }()
+	wg.Wait()
+	if got := atomic.LoadInt32(&reloads); got != 1 {
+		t.Fatalf("expected one reload for concurrent duplicate triggers, got %d", got)
+	}
+}
+
+func TestReloadConfigIfChangedAppliesHashedGeneration(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.yaml")
+	write := func(port int) {
+		t.Helper()
+		if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("port: %d\nauth-dir: %s\n", port, tmp)), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+	write(4101)
+	got := make(chan int, 2)
+	w := &Watcher{configPath: cfgPath, authDir: tmp, reloadCallback: func(cfg *config.Config) { got <- cfg.Port }}
+	w.SetConfig(&config.Config{Port: 4100, AuthDir: tmp})
+	w.reloadTestHook = func() { write(4102); w.reloadTestHook = nil }
+	w.reloadConfigIfChanged()
+	select {
+	case port := <-got:
+		if port != 4101 {
+			t.Fatalf("applied generation %d, want hashed generation 4101", port)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for hashed generation")
+	}
+	w.reloadConfigIfChanged()
+	select {
+	case port := <-got:
+		if port != 4102 {
+			t.Fatalf("applied generation %d, want latest generation 4102", port)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for latest generation")
+	}
+}
+
+func TestStopWaitsForAdmittedConfigReload(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("port: 4201\nauth-dir: "+tmp+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	w, err := NewWatcher(cfgPath, tmp, nil)
+	if err != nil {
+		t.Fatalf("create watcher: %v", err)
+	}
+	w.SetConfig(&config.Config{Port: 4200, AuthDir: tmp})
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	w.reloadTestHook = func() { close(entered); <-release }
+	reloadDone := make(chan struct{})
+	go func() { w.reloadConfigIfChanged(); close(reloadDone) }()
+	<-entered
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- w.Stop() }()
+	select {
+	case errStop := <-stopDone:
+		t.Fatalf("Stop returned before admitted reload completed: %v", errStop)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-reloadDone:
+	case <-time.After(time.Second):
+		t.Fatal("reload did not finish")
+	}
+	select {
+	case errStop := <-stopDone:
+		if errStop != nil {
+			t.Fatalf("Stop failed: %v", errStop)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not return after reload finished")
 	}
 }
 

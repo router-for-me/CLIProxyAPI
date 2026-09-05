@@ -424,7 +424,9 @@ func (w *Watcher) persistConfigAsync() {
 	if w == nil || w.storePersister == nil {
 		return
 	}
+	w.persistConfigWG.Add(1)
 	go func() {
+		defer w.persistConfigWG.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := w.storePersister.PersistConfig(ctx); err != nil {

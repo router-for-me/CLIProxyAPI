@@ -1,13 +1,90 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
+
+// ParseConfigBytesAndPersistMigrations parses a config snapshot and persists
+// the same load-time management-secret migration as LoadConfig. The returned
+// bytes are the generation represented by the returned config.
+func ParseConfigBytesAndPersistMigrations(configFile string, data []byte) (*Config, []byte, error) {
+	var raw struct {
+		RemoteManagement struct {
+			SecretKey string `yaml:"secret-key"`
+		} `yaml:"remote-management"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, nil, fmt.Errorf("parse config payload: %w", err)
+	}
+	cfg, err := ParseConfigBytes(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	if errValidate := cfg.Codex.LiveMediaRelay.Validate(); errValidate != nil {
+		return nil, nil, errValidate
+	}
+	persisted := data
+	if raw.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(raw.RemoteManagement.SecretKey) {
+		if migrated, errMigrate := updateNestedScalarBytes(data, []string{"remote-management", "secret-key"}, cfg.RemoteManagement.SecretKey); errMigrate == nil && persistMigrationIfUnchanged(configFile, data, migrated) {
+			persisted = migrated
+		}
+	}
+	return cfg, persisted, nil
+}
+
+type migrationFile interface {
+	io.Reader
+	io.Writer
+	io.Seeker
+	Close() error
+	Truncate(size int64) error
+}
+
+var openMigrationFile = func(configFile string) (migrationFile, error) {
+	return os.OpenFile(configFile, os.O_RDWR, 0)
+}
+
+func persistMigrationIfUnchanged(configFile string, original, migrated []byte) bool {
+	f, err := openMigrationFile(configFile)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	current, err := io.ReadAll(f)
+	if err != nil || !bytes.Equal(current, original) {
+		return false
+	}
+	if _, err = f.Seek(0, 0); err != nil {
+		return false
+	}
+	written, err := io.Copy(f, bytes.NewReader(migrated))
+	if err == nil && written == int64(len(migrated)) && f.Truncate(int64(len(migrated))) == nil {
+		return true
+	}
+	if !restoreMigrationOriginal(f, original) {
+		log.WithField("path", configFile).Error("failed to restore config after management-secret migration write failure")
+	}
+	return false
+}
+
+func restoreMigrationOriginal(f migrationFile, original []byte) bool {
+	if _, err := f.Seek(0, 0); err != nil {
+		return false
+	}
+	written, err := io.Copy(f, bytes.NewReader(original))
+	if err != nil || written != int64(len(original)) {
+		return false
+	}
+	return f.Truncate(int64(len(original))) == nil
+}
 
 // ParseConfigBytes parses a YAML configuration payload into Config and applies the same
 // in-memory normalizations as LoadConfigOptional, without persisting any changes to disk.
