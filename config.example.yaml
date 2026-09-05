@@ -475,6 +475,34 @@ nonstream-keepalive-interval: 0
 #       - "grok-4.1"             # exclude specific models (exact match)
 #       - "grok-3-*"             # wildcard matching prefix
 
+# CodeBuddy CN (Tencent) API keys — OpenAI-compatible gateway at copilot.tencent.com.
+# OAuth accounts can be added with `--codebuddy-cn-login` or from the TUI OAuth tab;
+# OAuth tokens are stored under auth-dir and can be used alongside API keys.
+# The gateway rejects non-stream chat requests, so the executor forces streaming and
+# re-aggregates SSE for non-streaming clients. reasoning_effort is mapped to
+# reasoning_summary:"auto" (dropped for "none"/"off"); agent system prompts are
+# neutralized to avoid the upstream content filter.
+# codebuddy-cn-api-key:
+#   - api-key: "cbcn-..."
+#     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1
+#     prefix: "cb" # optional: require calls like "cb/glm-5.2" to target this credential
+#     disable-cooling: false # optional override
+#     base-url: "https://copilot.tencent.com/v2" # optional override (executor appends /chat/completions)
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     models:
+#       - name: "glm-5.2"        # upstream model name
+#         alias: "glm-5.2"       # client alias mapped to the upstream model
+#         display-name: "GLM 5.2" # optional catalog display name
+#         max-context-length: 1000000 # optional: override context window metadata
+#         force-mapping: true    # optional: rewrite response model fields back to the alias
+#         is-compat: false       # optional: preserve thinking blocks for compatible upstreams
+#         thinking:              # optional: exact thinking capability for this model
+#           levels: ["low", "medium", "high"]
+#     excluded-models:
+#       - "deepseek-v3-2-volc"   # exclude specific models (exact match)
+
 # Claude API keys
 # claude-api-key:
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
