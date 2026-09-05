@@ -2,11 +2,60 @@ package executor
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"testing"
 	"time"
 )
+
+func TestCodexQuotaErrorCredentialScope(t *testing.T) {
+	quota := `{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":3600}`
+	for _, test := range []struct {
+		name string
+		path string
+		body string
+		want bool
+	}{
+		{name: "http usage limit", path: "http", body: `{"error":` + quota + `}`, want: true},
+		{name: "http usage limit without reset", path: "http", body: `{"error":{"type":"usage_limit_reached"}}`, want: true},
+		{name: "sse error", path: "terminal", body: `{"type":"error","error":` + quota + `}`, want: true},
+		{name: "sse response failed", path: "terminal", body: `{"type":"response.failed","response":{"error":` + quota + `}}`, want: true},
+		{name: "websocket error", path: "websocket", body: `{"type":"error","status":429,"error":` + quota + `}`, want: true},
+		{name: "websocket body error", path: "websocket", body: `{"type":"error","status":429,"body":{"error":` + quota + `}}`, want: true},
+		{name: "model capacity", path: "http", body: `{"error":{"message":"Selected model is at capacity. Please try a different model."}}`},
+		{name: "transient rate limit", path: "http", body: `{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded"}}`},
+		{name: "websocket connection limit", path: "websocket", body: `{"type":"error","status":429,"error":{"code":"websocket_connection_limit_reached"}}`},
+		{name: "generic provider error", path: "generic", body: `{"error":` + quota + `}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var err error
+			switch test.path {
+			case "http":
+				err = newCodexStatusErr(http.StatusTooManyRequests, []byte(test.body))
+			case "terminal":
+				terminalErr, _, ok := codexTerminalStreamErr([]byte(test.body))
+				if !ok {
+					t.Fatal("terminal error was not recognized")
+				}
+				err = terminalErr
+			case "websocket":
+				var ok bool
+				err, ok = parseCodexWebsocketError([]byte(test.body))
+				if !ok {
+					t.Fatal("websocket error was not recognized")
+				}
+			default:
+				err = statusErr{code: http.StatusTooManyRequests, msg: test.body}
+			}
+			var scoped interface{ IsCredentialScoped() bool }
+			got := errors.As(err, &scoped) && scoped.IsCredentialScoped()
+			if got != test.want {
+				t.Errorf("credential scope = %t, want %t; actual error type %T", got, test.want, err)
+			}
+		})
+	}
+}
 
 func TestParseCodexRetryAfter(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
