@@ -26,6 +26,7 @@ const (
 	codexCollaborationNamespace           = "collaboration"
 	codexOptimizedCollaborationNamespace  = "collaboration-optimize"
 	codexOptimizedCollaborationNamePrefix = codexOptimizedCollaborationNamespace + "__"
+	codexOptimizedCollaborationDotPrefix  = codexOptimizedCollaborationNamespace + "."
 )
 
 // CodexMultiAgentV2ToolsPreparedContextKey marks a request whose collaboration
@@ -745,6 +746,10 @@ func restoreCodexCollaborationValue(value any) bool {
 				changed = true
 			case isToolCall && strings.HasPrefix(name, codexOptimizedCollaborationNamePrefix):
 				typed["name"] = codexCollaborationNamespace + "__" + strings.TrimPrefix(name, codexOptimizedCollaborationNamePrefix)
+				changed = true
+			case isToolCall && strings.HasPrefix(name, codexOptimizedCollaborationDotPrefix):
+				typed["namespace"] = codexCollaborationNamespace
+				typed["name"] = strings.TrimPrefix(name, codexOptimizedCollaborationDotPrefix)
 				changed = true
 			}
 		}

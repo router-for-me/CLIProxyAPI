@@ -456,6 +456,65 @@ func TestRestoreCodexMultiAgentV2Response(t *testing.T) {
 	}
 }
 
+// TestRestoreCodexMultiAgentV2ResponseDottedFlatNames covers third-party
+// Responses upstreams (codex-api-key over plain HTTP) that flatten the
+// optimized collaboration namespace into dotted flat function names.
+// See router-for-me/CLIProxyAPI#5524.
+func TestRestoreCodexMultiAgentV2ResponseDottedFlatNames(t *testing.T) {
+	t.Parallel()
+
+	lifecycleTools := []string{"spawn_agent", "send_message", "followup_task", "wait_agent", "list_agents"}
+	for _, tool := range lifecycleTools {
+		payload := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_838779_0","name":"collaboration-optimize.` + tool + `","namespace":null,"arguments":"{\"task_name\":\"mode2_workspace_discovery\"}"}}`)
+		got := RestoreCodexMultiAgentV2Response(payload, true)
+		if name := gjson.GetBytes(got, "item.name").String(); name != tool {
+			t.Fatalf("dotted flat name restore: item.name = %q, want %q", name, tool)
+		}
+		if namespace := gjson.GetBytes(got, "item.namespace").String(); namespace != codexCollaborationNamespace {
+			t.Fatalf("dotted flat name restore: item.namespace = %q, want %q", namespace, codexCollaborationNamespace)
+		}
+		if arguments := gjson.GetBytes(got, "item.arguments").String(); !strings.Contains(arguments, "mode2_workspace_discovery") {
+			t.Fatalf("dotted flat name restore changed arguments: %s", arguments)
+		}
+		if unchanged := RestoreCodexMultiAgentV2Response(payload, false); string(unchanged) != string(payload) {
+			t.Fatalf("inactive restore changed payload: %s", unchanged)
+		}
+	}
+}
+
+// TestRestoreCodexMultiAgentV2ResponseDottedFlatNamesGuarded ensures dotted
+// normalization is restricted to actual collaboration tool-call items and
+// leaves unrelated names, non-tool items, and malformed payloads untouched.
+func TestRestoreCodexMultiAgentV2ResponseDottedFlatNamesGuarded(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"output":[
+				{"type":"message","name":"collaboration-optimize.plain"},
+				{"type":"function_call","name":"unrelated.dotted_tool","arguments":"{}"},
+				{"type":"function_call","name":"collaboration-optimizer.spawn_agent","arguments":"{}"}
+			]
+		}
+	}`)
+	got := RestoreCodexMultiAgentV2Response(payload, true)
+	if name := gjson.GetBytes(got, "response.output.0.name").String(); name != "collaboration-optimize.plain" {
+		t.Fatalf("non-tool dotted name was unexpectedly rewritten: %q", name)
+	}
+	if name := gjson.GetBytes(got, "response.output.1.name").String(); name != "unrelated.dotted_tool" {
+		t.Fatalf("unrelated dotted tool name was unexpectedly rewritten: %q", name)
+	}
+	if name := gjson.GetBytes(got, "response.output.2.name").String(); name != "collaboration-optimizer.spawn_agent" {
+		t.Fatalf("near-prefix dotted name was unexpectedly rewritten: %q", name)
+	}
+
+	malformed := []byte(`{"type":"response.completed","response":{"output":[{"type":"function_call","name":"collaboration-optimize.spawn_agent"}`)
+	if string(RestoreCodexMultiAgentV2Response(malformed, true)) != string(malformed) {
+		t.Fatalf("malformed payload was changed: %s", RestoreCodexMultiAgentV2Response(malformed, true))
+	}
+}
+
 func TestRewriteCodexMultiAgentV2InputRewritesAgentMessage(t *testing.T) {
 	t.Parallel()
 
