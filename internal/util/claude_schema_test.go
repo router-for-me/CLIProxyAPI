@@ -1,6 +1,10 @@
 package util
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/tidwall/gjson"
+)
 
 func TestNormalizeClaudeToolInputSchema(t *testing.T) {
 	tests := []struct {
@@ -110,5 +114,59 @@ func TestNormalizeClaudeToolInputSchema(t *testing.T) {
 			actual := NormalizeClaudeToolInputSchema([]byte(test.input))
 			compareJSON(t, test.expected, string(actual))
 		})
+	}
+}
+
+func TestNormalizeClaudeToolInputSchemaResolvesNestedLocalRefs(t *testing.T) {
+	input := `{
+		"type":"object",
+		"properties":{},
+		"oneOf":[{"$ref":"#/$defs/view"},{"$ref":"#/$defs/createVariants"}],
+		"$defs":{
+			"view":{
+				"type":"object",
+				"additionalProperties":false,
+				"properties":{"mode":{"type":"string","const":"view"},"id":{"type":"string"}},
+				"required":["mode","id"]
+			},
+			"createVariants":{"oneOf":[{"$ref":"#/$defs/createCron"},{"$ref":"#/$defs/createHeartbeat"}]},
+			"createCron":{
+				"type":"object",
+				"additionalProperties":false,
+				"properties":{"mode":{"type":"string","const":"create"},"kind":{"type":"string","const":"cron"},"rrule":{"type":"string"}},
+				"required":["mode","kind"]
+			},
+			"createHeartbeat":{
+				"type":"object",
+				"additionalProperties":false,
+				"properties":{"mode":{"type":"string","const":"create"},"kind":{"type":"string","const":"heartbeat"},"rrule":{"type":"object","properties":{"frequency":{"oneOf":[{"type":"string"},{"type":"number"}]}}}},
+				"required":["mode","kind"]
+			}
+		}
+	}`
+
+	actual := NormalizeClaudeToolInputSchema([]byte(input))
+	root := gjson.ParseBytes(actual)
+	for _, keyword := range []string{"oneOf", "anyOf", "allOf"} {
+		if root.Get(keyword).Exists() {
+			t.Fatalf("root %s must be removed: %s", keyword, string(actual))
+		}
+	}
+	for _, property := range []string{"mode", "id", "kind", "rrule"} {
+		if !root.Get("properties." + property).Exists() {
+			t.Fatalf("merged schema is missing property %q: %s", property, string(actual))
+		}
+	}
+	if got := root.Get("required.#").Int(); got != 1 || root.Get("required.0").String() != "mode" {
+		t.Fatalf("required = %s, want only mode", root.Get("required").Raw)
+	}
+	if got := root.Get("properties.mode.enum.#").Int(); got != 2 {
+		t.Fatalf("mode enum count = %d, want 2: %s", got, string(actual))
+	}
+	if !root.Get("properties.rrule.anyOf.1.properties.frequency.oneOf").Exists() {
+		t.Fatalf("nested property combinator was not preserved: %s", string(actual))
+	}
+	if root.Get("additionalProperties").Bool() || !root.Get("additionalProperties").Exists() {
+		t.Fatalf("additionalProperties should remain false: %s", string(actual))
 	}
 }

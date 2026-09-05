@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/optimize-multi-agent-v2"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/diagnosticcapture"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -543,6 +544,7 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		})
 		return
 	}
+	diagnosticcapture.CaptureInbound(c.Request.Context(), rawJSON)
 
 	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
 	rawJSON = h.prepareCodexOrphanDelegation(c, rawJSON)

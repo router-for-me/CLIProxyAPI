@@ -82,7 +82,11 @@ func (m *SensitiveWordMatcher) obfuscateText(text string) string {
 }
 
 // ObfuscateSensitiveWords processes the payload and obfuscates sensitive words
-// in system blocks and message content.
+// in system blocks, message content, and tool schemas.
+//
+// Tool names are left unchanged so the client can still dispatch returned
+// tool_use blocks. Descriptions and nested JSON-schema description fields are
+// obfuscated because Anthropic third-party classifiers inspect that text.
 func ObfuscateSensitiveWords(payload []byte, matcher *SensitiveWordMatcher) []byte {
 	if matcher == nil || matcher.regex == nil {
 		return payload
@@ -93,6 +97,9 @@ func ObfuscateSensitiveWords(payload []byte, matcher *SensitiveWordMatcher) []by
 
 	// Obfuscate in messages
 	payload = obfuscateMessages(payload, matcher)
+
+	// Obfuscate in tool schemas (descriptions / nested description fields only)
+	payload = obfuscateTools(payload, matcher)
 
 	return payload
 }
@@ -214,6 +221,73 @@ func obfuscateMessages(payload []byte, matcher *SensitiveWordMatcher) []byte {
 
 		return true
 	})
+
+	return payload
+}
+
+// obfuscateTools obfuscates sensitive words in tool descriptions and nested
+// JSON-schema description fields. Tool names are intentionally preserved.
+func obfuscateTools(payload []byte, matcher *SensitiveWordMatcher) []byte {
+	tools := gjson.GetBytes(payload, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return payload
+	}
+
+	tools.ForEach(func(toolKey, tool gjson.Result) bool {
+		toolPath := "tools." + toolKey.String()
+
+		if desc := tool.Get("description"); desc.Exists() && desc.Type == gjson.String {
+			text := desc.String()
+			obfuscated := matcher.obfuscateText(text)
+			if obfuscated != text {
+				payload, _ = sjson.SetBytes(payload, toolPath+".description", obfuscated)
+			}
+		}
+
+		// Anthropic tool schema uses input_schema; some translators keep parameters.
+		for _, schemaField := range []string{"input_schema", "parameters"} {
+			schema := tool.Get(schemaField)
+			if !schema.Exists() {
+				continue
+			}
+			payload = obfuscateDescriptionFields(payload, toolPath+"."+schemaField, schema, matcher)
+		}
+		return true
+	})
+
+	return payload
+}
+
+// obfuscateDescriptionFields walks a JSON value and obfuscates every string
+// field named "description".
+func obfuscateDescriptionFields(payload []byte, path string, node gjson.Result, matcher *SensitiveWordMatcher) []byte {
+	if !node.Exists() {
+		return payload
+	}
+
+	if node.IsObject() {
+		node.ForEach(func(key, value gjson.Result) bool {
+			childPath := path + "." + key.String()
+			if key.String() == "description" && value.Type == gjson.String {
+				text := value.String()
+				obfuscated := matcher.obfuscateText(text)
+				if obfuscated != text {
+					payload, _ = sjson.SetBytes(payload, childPath, obfuscated)
+				}
+				return true
+			}
+			payload = obfuscateDescriptionFields(payload, childPath, value, matcher)
+			return true
+		})
+		return payload
+	}
+
+	if node.IsArray() {
+		node.ForEach(func(key, value gjson.Result) bool {
+			payload = obfuscateDescriptionFields(payload, path+"."+key.String(), value, matcher)
+			return true
+		})
+	}
 
 	return payload
 }
