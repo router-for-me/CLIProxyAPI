@@ -23,6 +23,99 @@ func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
 	}
 }
 
+const astraWantUA = "codex-tui/0.153.3 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.3)"
+
+func assertAstraOverrideHeaders(t *testing.T, label string) {
+	t.Helper()
+	got := ModelOverrideHeaders("gpt-6-astra")
+	if got == nil {
+		t.Fatalf("%s: ModelOverrideHeaders(gpt-6-astra) = nil, want headers", label)
+	}
+	if got["user-agent"] != astraWantUA {
+		t.Fatalf("%s: user-agent = %q, want %q", label, got["user-agent"], astraWantUA)
+	}
+	if got["originator"] != "codex-tui" {
+		t.Fatalf("%s: originator = %q, want codex-tui", label, got["originator"])
+	}
+	for _, models := range [][]*ModelInfo{GetCodexTeamModels(), GetCodexPlusModels(), GetCodexProModels()} {
+		found := false
+		for _, model := range models {
+			if model.ID != "gpt-6-astra" {
+				continue
+			}
+			found = true
+			if model.Config == nil || model.Config.OverrideHeader["user-agent"] != astraWantUA {
+				t.Fatalf("%s: gpt-6-astra tier definition lacks the override_header user-agent: %#v", label, model.Config)
+			}
+		}
+		if !found {
+			t.Fatalf("%s: gpt-6-astra missing from a Codex tier that should list it", label)
+		}
+	}
+}
+
+// gpt-6-astra is gated upstream on the Codex client version
+// (codex_client_models.json: minimal_client_version 0.153.0). The executor's
+// default cloak is older than that, so the model must carry its own
+// override_header or every OAuth request is rejected with "not supported when
+// using Codex with a ChatGPT account".
+func TestGPT6AstraOverrideHeadersMeetMinimalClientVersion(t *testing.T) {
+	assertAstraOverrideHeaders(t, "embedded catalog")
+}
+
+// The remote models.json replaces the embedded catalog on refresh. A remote
+// copy that predates the Astra gate (no `config` on its entries) must not
+// strip the override, or the fix only holds until the first successful fetch.
+func TestGPT6AstraOverrideHeadersSurviveRemoteCatalogWithoutConfig(t *testing.T) {
+	modelsCatalogStore.mu.RLock()
+	original := modelsCatalogStore.data
+	modelsCatalogStore.mu.RUnlock()
+	t.Cleanup(func() {
+		modelsCatalogStore.mu.Lock()
+		modelsCatalogStore.data = original
+		modelsCatalogStore.mu.Unlock()
+	})
+
+	// Simulate a remote payload: same catalog, but every Astra entry has lost
+	// its config block, exactly as router-for-me/models serves it today.
+	remote := &staticModelsJSON{}
+	*remote = *original
+	strip := func(models []*ModelInfo) []*ModelInfo {
+		out := cloneModelInfos(models)
+		for _, model := range out {
+			if model != nil && model.ID == "gpt-6-astra" {
+				model.Config = nil
+			}
+		}
+		return out
+	}
+	remote.CodexTeam = strip(original.CodexTeam)
+	remote.CodexPlus = strip(original.CodexPlus)
+	remote.CodexPro = strip(original.CodexPro)
+
+	modelsCatalogStore.mu.Lock()
+	modelsCatalogStore.data = remote
+	modelsCatalogStore.mu.Unlock()
+
+	assertAstraOverrideHeaders(t, "remote catalog without config")
+}
+
+// A catalog that ships its own override for a gated model wins over the
+// built-in, so the JSON remains the place to tune the value.
+func TestCodexBuiltinOverrideHeadersDeferToCatalog(t *testing.T) {
+	models := withCodexBuiltinOverrideHeaders([]*ModelInfo{
+		{ID: "gpt-6-astra", Config: &ModelConfig{OverrideHeader: map[string]string{"user-agent": "custom/9.9.9"}}},
+		{ID: "gpt-5.4"},
+		nil,
+	})
+	if got := models[0].Config.OverrideHeader["user-agent"]; got != "custom/9.9.9" {
+		t.Fatalf("catalog override was replaced: user-agent = %q", got)
+	}
+	if models[1].Config != nil {
+		t.Fatalf("gpt-5.4 gained a Config it should not have: %#v", models[1].Config)
+	}
+}
+
 func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
 	const releaseID = "gemini-3.1-flash-lite"
 	const previewID = releaseID + "-preview"
