@@ -23,6 +23,40 @@ func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
 	}
 }
 
+// gpt-6-astra is gated upstream on the Codex client version
+// (codex_client_models.json: minimal_client_version 0.153.0). The executor's
+// default cloak is older than that, so the model must carry its own
+// override_header or every OAuth request is rejected with "not supported when
+// using Codex with a ChatGPT account".
+func TestGPT6AstraOverrideHeadersMeetMinimalClientVersion(t *testing.T) {
+	const wantUA = "codex-tui/0.153.3 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.3)"
+	got := ModelOverrideHeaders("gpt-6-astra")
+	if got == nil {
+		t.Fatal("ModelOverrideHeaders(gpt-6-astra) = nil, want headers")
+	}
+	if got["user-agent"] != wantUA {
+		t.Fatalf("user-agent = %q, want %q", got["user-agent"], wantUA)
+	}
+	if got["originator"] != "codex-tui" {
+		t.Fatalf("originator = %q, want codex-tui", got["originator"])
+	}
+	for _, models := range [][]*ModelInfo{GetCodexTeamModels(), GetCodexPlusModels(), GetCodexProModels()} {
+		found := false
+		for _, model := range models {
+			if model.ID != "gpt-6-astra" {
+				continue
+			}
+			found = true
+			if model.Config == nil || model.Config.OverrideHeader["user-agent"] != wantUA {
+				t.Fatalf("gpt-6-astra tier definition lacks the override_header user-agent: %#v", model.Config)
+			}
+		}
+		if !found {
+			t.Fatal("gpt-6-astra missing from a Codex tier that should list it")
+		}
+	}
+}
+
 func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
 	const releaseID = "gemini-3.1-flash-lite"
 	const previewID = releaseID + "-preview"
