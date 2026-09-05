@@ -21,10 +21,6 @@ import (
 const (
 	claudeLiveUsageTickInterval  = 2 * time.Second
 	claudeThinkingTokenCountBeta = "thinking-token-count-2026-05-13"
-	// Claude clients treat unknown gateway model IDs as 200k-context models and
-	// enter their native compact-and-retry path after a context_too_large error.
-	// This compatibility boundary does not change the routed upstream model.
-	claudeBridgeContextWindow = int64(200_000)
 )
 
 func claudeThinkingTokenCountRequested(headers http.Header) bool {
@@ -40,30 +36,9 @@ func validateClaudeBridgeContextWindow(model string, body []byte, opts cliproxye
 	if opts.Alt != constant.ClaudeResponsesBridgeAlt {
 		return 0, nil
 	}
-	count, errCount := estimateCodexInputTokens(model, body)
-	if errCount != nil {
-		return 0, errCount
-	}
-	if count <= claudeBridgeContextWindow || hasClaudeCompactionReplay(body) {
-		return count, nil
-	}
-	errorBody := []byte(`{"error":{"message":"","type":"invalid_request_error","code":"context_too_large"}}`)
-	errorBody, _ = sjson.SetBytes(errorBody, "error.message", fmt.Sprintf("prompt is too long: %d tokens > %d maximum", count, claudeBridgeContextWindow))
-	return count, newCodexStatusErr(http.StatusBadRequest, errorBody)
-}
-
-func hasClaudeCompactionReplay(body []byte) bool {
-	input := gjson.GetBytes(body, "input")
-	if !input.IsArray() {
-		return false
-	}
-	for _, item := range input.Array() {
-		switch item.Get("type").String() {
-		case "compaction", "compaction_summary":
-			return strings.TrimSpace(item.Get("encrypted_content").String()) != ""
-		}
-	}
-	return false
+	// Claude decides when to compact using its configured window. Let the
+	// upstream enforce its actual context limit instead of imposing 200k here.
+	return estimateCodexInputTokens(model, body)
 }
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
