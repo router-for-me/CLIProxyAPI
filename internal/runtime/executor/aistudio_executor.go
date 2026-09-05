@@ -488,7 +488,35 @@ func (e *AIStudioExecutor) translateRequest(ctx context.Context, req cliproxyexe
 	}
 	payload, _ = sjson.DeleteBytes(payload, "session_id")
 	payload = helps.EnsureGeminiLeadingUserContent(payload, "contents")
+	payload = normalizeAIStudioThinkingLevel(payload)
 	return payload, translatedPayload{payload: payload, action: action, toFormat: to}, nil
+}
+
+// normalizeAIStudioThinkingLevel normalizes thinking levels to Google's canonical uppercase enum values.
+// The AI Studio upstream validates generationConfig.thinkingConfig.thinkingLevel case-sensitively
+// and rejects lowercase values with a 400 invalid argument error.
+func normalizeAIStudioThinkingLevel(payload []byte) []byte {
+	const path = "generationConfig.thinkingConfig.thinkingLevel"
+	level := gjson.GetBytes(payload, path)
+	if level.Type != gjson.String {
+		return payload
+	}
+
+	normalized := strings.ToUpper(level.String())
+	switch normalized {
+	case "MINIMAL", "LOW", "MEDIUM", "HIGH":
+	default:
+		return payload
+	}
+	if normalized == level.String() {
+		return payload
+	}
+
+	result, err := sjson.SetBytes(payload, path, normalized)
+	if err != nil {
+		return payload
+	}
+	return result
 }
 
 func (e *AIStudioExecutor) buildEndpoint(model, action, alt string) string {
