@@ -456,6 +456,24 @@ func TestRestoreCodexMultiAgentV2Response(t *testing.T) {
 	}
 }
 
+func TestRestoreCodexMultiAgentV2ResponseFlatFunctionName(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"type":"response.completed",
+		"response":{"output":[
+			{"type":"function_call","name":"collaboration-optimize.spawn_agent","namespace":null,"arguments":"{}"}
+		]}
+	}`)
+	got := RestoreCodexMultiAgentV2Response(payload, true)
+	if namespace := gjson.GetBytes(got, "response.output.0.namespace").String(); namespace != codexCollaborationNamespace {
+		t.Fatalf("flat function namespace = %q, want collaboration; payload=%s", namespace, got)
+	}
+	if name := gjson.GetBytes(got, "response.output.0.name").String(); name != "spawn_agent" {
+		t.Fatalf("flat function name = %q, want spawn_agent; payload=%s", name, got)
+	}
+}
+
 func TestRewriteCodexMultiAgentV2InputRewritesAgentMessage(t *testing.T) {
 	t.Parallel()
 
