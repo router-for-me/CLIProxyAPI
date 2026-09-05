@@ -91,9 +91,9 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	}
 
 	// Runtime updates must not recreate a disabled credential whose source file
-	// was deliberately removed. A login record has TokenStorage, however, and is
-	// an intentional write (including migration to a new canonical filename).
-	if auth.Disabled && auth.Storage == nil {
+	// was deliberately removed. Login and migration callers explicitly mark the
+	// save when creating a missing disabled credential is intentional.
+	if auth.Disabled && !cliproxyauth.HasAuthCreationIntent(ctx) {
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
 			return "", nil
 		}

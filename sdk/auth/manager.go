@@ -95,7 +95,7 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 		coreauth.MergeExistingAuthMetadata(record, legacyClaudeCredential.Metadata)
 	}
 
-	savedPath, err := m.store.Save(ctx, record)
+	savedPath, err := m.store.Save(coreauth.WithAuthCreationIntent(ctx), record)
 	if err != nil {
 		return record, "", err
 	}
