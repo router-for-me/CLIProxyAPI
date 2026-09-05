@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -16,6 +17,11 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"golang.org/x/sync/singleflight"
+)
+
+var (
+	_ cliproxyauth.ProviderExecutor    = (*MetaExecutor)(nil)
+	_ cliproxyauth.RequestAuthPreparer = (*MetaExecutor)(nil)
 )
 
 var metaRefreshGroup singleflight.Group
@@ -88,9 +94,16 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}
 	resp, err := e.compat.Execute(ctx, enriched, req, opts)
 	if err != nil {
-		if se, ok := err.(statusErr); ok && se.code == http.StatusTooManyRequests {
-			if retryAfter := parseMetaRetryAfter(se.code, []byte(se.msg), time.Now()); retryAfter != nil {
+		var se statusErr
+		if errors.As(err, &se) && se.code == http.StatusTooManyRequests {
+			body := []byte(se.msg)
+			if retryAfter := parseMetaRetryAfter(se.code, body, time.Now()); retryAfter != nil {
 				se.retryAfter = retryAfter
+			}
+			if isMetaSubscriptionQuota(se.code, body) {
+				return resp, metaRateLimitError{statusErr: se, credentialScoped: true}
+			}
+			if se.retryAfter != nil {
 				return resp, se
 			}
 		}
@@ -106,9 +119,16 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	streamRes, err := e.compat.ExecuteStream(ctx, enriched, req, opts)
 	if err != nil {
-		if se, ok := err.(statusErr); ok && se.code == http.StatusTooManyRequests {
-			if retryAfter := parseMetaRetryAfter(se.code, []byte(se.msg), time.Now()); retryAfter != nil {
+		var se statusErr
+		if errors.As(err, &se) && se.code == http.StatusTooManyRequests {
+			body := []byte(se.msg)
+			if retryAfter := parseMetaRetryAfter(se.code, body, time.Now()); retryAfter != nil {
 				se.retryAfter = retryAfter
+			}
+			if isMetaSubscriptionQuota(se.code, body) {
+				return streamRes, metaRateLimitError{statusErr: se, credentialScoped: true}
+			}
+			if se.retryAfter != nil {
 				return streamRes, se
 			}
 		}
@@ -230,6 +250,24 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	}
 
 	return auth, nil
+}
+
+// ShouldPrepareRequestAuth reports true when a Meta auth has a DCA token but no usable API key.
+func (e *MetaExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	_, token := metaCreds(auth)
+	return token == "" && extractDCAToken(auth) != ""
+}
+
+// PrepareRequestAuth exchanges the DCA token for an API key before request execution,
+// allowing the conductor to atomically install and persist the credential in the manager.
+func (e *MetaExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if auth == nil || !e.ShouldPrepareRequestAuth(auth) {
+		return auth, nil
+	}
+	return e.Refresh(ctx, auth)
 }
 
 func (e *MetaExecutor) ensureAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -385,4 +423,32 @@ func parseMetaRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.
 		}
 	}
 	return nil
+}
+
+type metaRateLimitError struct {
+	statusErr
+	credentialScoped bool
+}
+
+func (e metaRateLimitError) Unwrap() error {
+	return e.statusErr
+}
+
+func (e metaRateLimitError) IsCredentialScoped() bool {
+	return e.credentialScoped
+}
+
+func isMetaSubscriptionQuota(statusCode int, body []byte) bool {
+	if statusCode != http.StatusTooManyRequests || len(body) == 0 {
+		return false
+	}
+	msg := strings.ToLower(gjson.GetBytes(body, "error.message").String())
+	code := strings.ToLower(gjson.GetBytes(body, "error.code").String())
+	if strings.Contains(msg, "subscription quota") || strings.Contains(msg, "quota exhausted") {
+		return true
+	}
+	if (code == "rate_limit_exceeded" || strings.Contains(code, "quota")) && gjson.GetBytes(body, "error.resets_at").Exists() {
+		return true
+	}
+	return false
 }

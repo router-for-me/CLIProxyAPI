@@ -9,7 +9,7 @@ func TestMetaAuthenticator(t *testing.T) {
 	if authenticator.Provider() != "meta" {
 		t.Errorf("expected provider 'meta', got '%s'", authenticator.Provider())
 	}
-	if authenticator.RefreshLead() == nil {
-		t.Errorf("expected non-nil refresh lead")
+	if lead := authenticator.RefreshLead(); lead != nil {
+		t.Errorf("expected nil refresh lead, got %v", lead)
 	}
 }

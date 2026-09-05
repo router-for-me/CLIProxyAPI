@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -170,7 +171,8 @@ func TestMetaExecutor_ExecuteSuccessAndRateLimit(t *testing.T) {
 		t.Fatalf("expected error from 429 response")
 	}
 
-	if se, ok := err.(statusErr); ok {
+	var se statusErr
+	if errors.As(err, &se) {
 		if se.StatusCode() != http.StatusTooManyRequests {
 			t.Errorf("expected 429 status code, got %d", se.StatusCode())
 		}
@@ -182,6 +184,11 @@ func TestMetaExecutor_ExecuteSuccessAndRateLimit(t *testing.T) {
 		}
 	} else {
 		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+
+	var scoped interface{ IsCredentialScoped() bool }
+	if !errors.As(err, &scoped) || !scoped.IsCredentialScoped() {
+		t.Fatalf("expected rate limit error to be credential scoped, got %T: %v", err, err)
 	}
 }
 
@@ -477,5 +484,146 @@ func TestMetaExecutorRefreshUsesMintedBaseURL(t *testing.T) {
 				t.Errorf("saved base URL = %v, want %q", saved["base_url"], tc.want)
 			}
 		})
+	}
+}
+
+func TestMetaExecutor_ExecuteStreamRateLimit(t *testing.T) {
+	now := time.Now()
+	resetEpoch := now.Add(2 * time.Hour).Unix()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(mapToJSON(map[string]any{
+			"error": map[string]any{
+				"code":      "rate_limit_exceeded",
+				"message":   "Subscription quota exhausted. Please try again later.",
+				"resets_at": resetEpoch,
+				"type":      "rate_limit_error",
+			},
+		})))
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "test-key",
+			"base_url": server.URL,
+		},
+	}
+
+	req := cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: []byte(`{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hi"}]}`),
+	}
+
+	_, err := exec.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatalf("expected error from 429 streaming response")
+	}
+
+	var se statusErr
+	if !errors.As(err, &se) {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+	if se.StatusCode() != http.StatusTooManyRequests {
+		t.Errorf("expected 429 status code, got %d", se.StatusCode())
+	}
+	if se.RetryAfter() == nil {
+		t.Fatalf("expected non-nil RetryAfter")
+	}
+
+	var scoped interface{ IsCredentialScoped() bool }
+	if !errors.As(err, &scoped) || !scoped.IsCredentialScoped() {
+		t.Fatalf("expected streaming rate limit error to be credential scoped, got %T: %v", err, err)
+	}
+}
+
+func TestMetaExecutor_RequestAuthPreparer(t *testing.T) {
+	var mints atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/key" {
+			mints.Add(1)
+			_, _ = w.Write([]byte(`{"api_key":"LLM|prepared-key"}`))
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer LLM|prepared-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"message":"unauthorized"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"ok","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hello"}}]}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("META_MINT_URL", server.URL+"/key")
+	exec := NewMetaExecutor(&config.Config{})
+
+	authWithKey := &cliproxyauth.Auth{Provider: "meta", Attributes: map[string]string{"api_key": "exists"}}
+	if exec.ShouldPrepareRequestAuth(authWithKey) {
+		t.Errorf("ShouldPrepareRequestAuth should be false when api_key is present")
+	}
+
+	authNoDCA := &cliproxyauth.Auth{Provider: "meta"}
+	if exec.ShouldPrepareRequestAuth(authNoDCA) {
+		t.Errorf("ShouldPrepareRequestAuth should be false when dca_token is missing")
+	}
+
+	authDCAOnly := &cliproxyauth.Auth{
+		ID:       "meta-prep-test",
+		Provider: "meta",
+		Metadata: map[string]any{
+			"dca_token": "dca:valid",
+			"auth_kind": "oauth",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+	}
+	if !exec.ShouldPrepareRequestAuth(authDCAOnly) {
+		t.Errorf("ShouldPrepareRequestAuth should be true when only dca_token is present")
+	}
+
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(exec)
+	if _, err := manager.Register(context.Background(), authDCAOnly); err != nil {
+		t.Fatal(err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authDCAOnly.ID, "meta", []*registry.ModelInfo{{ID: "muse-spark-1.3"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authDCAOnly.ID) })
+
+	req := cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: []byte(`{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hi"}]}`),
+	}
+
+	resp, err := manager.Execute(context.Background(), []string{"meta"}, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("execute failed: %v", err)
+	}
+	if string(resp.Payload) == "" {
+		t.Errorf("expected non-empty response payload")
+	}
+	if mints.Load() != 1 {
+		t.Fatalf("mint count = %d, want 1", mints.Load())
+	}
+
+	stored, ok := manager.GetByID(authDCAOnly.ID)
+	if !ok || stored == nil {
+		t.Fatalf("stored auth not found in manager")
+	}
+	if key, _ := stored.Metadata["api_key"].(string); key != "LLM|prepared-key" {
+		t.Errorf("expected stored api_key 'LLM|prepared-key', got %q", key)
+	}
+
+	_, err = manager.Execute(context.Background(), []string{"meta"}, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("second execute failed: %v", err)
+	}
+	if mints.Load() != 1 {
+		t.Fatalf("mint count after second request = %d, want 1", mints.Load())
 	}
 }

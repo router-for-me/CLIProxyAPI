@@ -27,9 +27,10 @@ func (MetaAuthenticator) Provider() string {
 }
 
 // RefreshLead instructs the manager on token refresh lead time.
+// Meta credentials do not advertise an API key expiration, so scheduled refresh
+// is disabled and recovery is triggered on demand (e.g. on 401 or request preparation).
 func (MetaAuthenticator) RefreshLead() *time.Duration {
-	lead := 5 * time.Minute
-	return &lead
+	return nil
 }
 
 // Login launches the OAuth device-code flow to obtain Meta tokens and persists them.
