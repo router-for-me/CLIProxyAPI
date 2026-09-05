@@ -350,6 +350,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		}
 	}
 
+	if helps.ShouldForceNonStreamToolCalls(e.resolveCompatConfig(auth), translated) {
+		return e.executeStreamViaNonStream(ctx, auth, req, opts, reporter, baseURL, apiKey, to, responseFormat, translated, originalPayload)
+	}
+
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
@@ -567,6 +571,114 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		streamUsage.Publish(ctx, reporter)
 		reporter.EnsurePublished(ctx)
 	}()
+	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+// executeStreamViaNonStream sends tool-bearing requests upstream as a single
+// JSON response and translates synthesized OpenAI chunks through the existing
+// downstream stream pipeline.
+func (e *OpenAICompatExecutor) executeStreamViaNonStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, reporter *helps.UsageReporter, baseURL, apiKey string, to, responseFormat sdktranslator.Format, translated, originalPayload []byte) (*cliproxyexecutor.StreamResult, error) {
+	translated = helps.SetBoolIfDifferent(translated, "stream", false)
+	translated = helps.DeleteJSONField(translated, "stream_options")
+	reporter.SetTranslatedReasoningEffort(translated, to.String())
+
+	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL: url, Method: http.MethodPost, Headers: httpReq.Header.Clone(), Body: translated,
+		Provider: e.Identifier(), AuthID: authID, AuthLabel: authLabel, AuthType: authType, AuthValue: authValue,
+	})
+
+	httpClient := reporter.TrackHTTPClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return nil, err
+	}
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		defer func() {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("openai compat executor: close response body error: %v", errClose)
+			}
+		}()
+		body, _ := io.ReadAll(httpResp.Body)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+		return nil, statusErr{code: httpResp.StatusCode, msg: string(body)}
+	}
+
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		defer func() {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("openai compat executor: close response body error: %v", errClose)
+			}
+		}()
+		body, errRead := io.ReadAll(httpResp.Body)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+			reporter.PublishFailure(ctx, errRead)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errRead}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+		frames := helps.SynthesizeOpenAIStreamFrames(body)
+		if len(frames) == 0 {
+			errSynth := statusErr{code: http.StatusBadGateway, msg: "upstream non-streaming reply could not be converted to a stream"}
+			helps.RecordAPIResponseError(ctx, e.cfg, errSynth)
+			reporter.PublishFailure(ctx, errSynth)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errSynth}:
+			case <-ctx.Done():
+			}
+			return
+		}
+
+		claudeInputTokens := helps.NewClaudeInputTokenState(opts.SourceFormat, to, responseFormat, originalPayload)
+		var param any
+		var streamUsage helps.StreamUsageBuffer
+		defer func() {
+			streamUsage.Publish(ctx, reporter)
+			reporter.EnsurePublished(ctx)
+		}()
+		for _, frame := range frames {
+			streamLine := append([]byte("data: "), frame...)
+			streamUsage.ObserveOpenAIStream(streamLine)
+			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, streamLine, &param, claudeInputTokens)
+			for i := range chunks {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	// Status and headers are available synchronously. The first payload is sent
+	// only after the complete body is validated, preserving bootstrap fallback.
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
