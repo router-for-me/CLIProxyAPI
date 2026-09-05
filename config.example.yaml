@@ -265,8 +265,7 @@ codex:
   # When true, enable opt-in compatibility for orphan Codex delegation outputs.
   # Converts orphan function_call_output items from codex_app/create_thread and
   # codex_app/send_message_to_thread (which lack a valid call_id or matching function_call)
-  # into standard user messages across Responses and non-Codex protocols when the request
-  # header contains X-Openai-Subagent: collab_spawn.
+  # into standard user messages across Responses and non-Codex protocols.
   orphan-delegation-compatibility: false
   # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
   # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.

@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -17,15 +16,12 @@ const (
 	codexSendMessageToThreadName = "send_message_to_thread"
 	codexAppCreateThreadTool     = "codex_app__create_thread"
 	codexAppSendMessageTool      = "codex_app__send_message_to_thread"
-	codexOpenAISubagentHeader    = "X-Openai-Subagent"
-	codexCollabSpawnSubagent     = "collab_spawn"
 )
 
 // RewriteCodexOrphanDelegationInput converts orphan Codex delegation outputs into
-// standard user messages when orphan delegation compatibility is enabled and the
-// request carries the X-Openai-Subagent: collab_spawn header.
+// standard user messages when orphan delegation compatibility is enabled.
 func RewriteCodexOrphanDelegationInput(ctx context.Context, headers http.Header, payload []byte, enabled bool) []byte {
-	if !enabled || len(payload) == 0 || !isCodexCollabSpawnSubagent(ctx, headers) {
+	if !enabled || len(payload) == 0 {
 		return payload
 	}
 
@@ -74,19 +70,6 @@ func RewriteCodexOrphanDelegationInput(ctx context.Context, headers http.Header,
 	}
 
 	return updated
-}
-
-func codexSubagentHeader(ctx context.Context, headers http.Header) string {
-	if ctx != nil {
-		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-			return headerValueCaseInsensitive(ginCtx.Request.Header, codexOpenAISubagentHeader)
-		}
-	}
-	return headerValueCaseInsensitive(headers, codexOpenAISubagentHeader)
-}
-
-func isCodexCollabSpawnSubagent(ctx context.Context, headers http.Header) bool {
-	return strings.EqualFold(codexSubagentHeader(ctx, headers), codexCollabSpawnSubagent)
 }
 
 func matchCodexDelegationTool(item gjson.Result) (string, bool) {

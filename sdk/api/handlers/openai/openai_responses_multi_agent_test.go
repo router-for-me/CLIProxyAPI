@@ -246,7 +246,6 @@ func TestResponsesOrphanCodexDelegationCompatibility(t *testing.T) {
 	}`, modelID)
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(payload))
-	request.Header.Set("X-Openai-Subagent", "collab_spawn")
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -270,20 +269,23 @@ func TestResponsesOrphanCodexDelegationCompatibility(t *testing.T) {
 		t.Fatalf("input.0.content.0.text = %q, want %q", text, wantText)
 	}
 
-	// Without X-Openai-Subagent header, payload should remain function_call_output
-	requestNoHeader := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(payload))
-	recorderNoHeader := httptest.NewRecorder()
-	router.ServeHTTP(recorderNoHeader, requestNoHeader)
-	if recorderNoHeader.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", recorderNoHeader.Code, recorderNoHeader.Body.String())
+	requestWithUnrelatedHeader := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(payload))
+	requestWithUnrelatedHeader.Header.Set("X-Openai-Subagent", "other_agent")
+	recorderWithUnrelatedHeader := httptest.NewRecorder()
+	router.ServeHTTP(recorderWithUnrelatedHeader, requestWithUnrelatedHeader)
+	if recorderWithUnrelatedHeader.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorderWithUnrelatedHeader.Code, recorderWithUnrelatedHeader.Body.String())
 	}
 	payloads = executor.Payloads()
 	if len(payloads) != 2 {
 		t.Fatalf("captured payload count = %d, want 2", len(payloads))
 	}
-	capturedNoHeader := payloads[1]
-	parsedNoHeader := gjson.ParseBytes(capturedNoHeader)
-	if itemType := parsedNoHeader.Get("input.0.type").String(); itemType != "function_call_output" {
-		t.Fatalf("input.0.type = %q, want function_call_output without header; captured=%s", itemType, capturedNoHeader)
+	capturedWithUnrelatedHeader := payloads[1]
+	parsedWithUnrelatedHeader := gjson.ParseBytes(capturedWithUnrelatedHeader)
+	if itemType := parsedWithUnrelatedHeader.Get("input.0.type").String(); itemType != "message" {
+		t.Fatalf("input.0.type = %q, want message with unrelated header; captured=%s", itemType, capturedWithUnrelatedHeader)
+	}
+	if text := parsedWithUnrelatedHeader.Get("input.0.content.0.text").String(); text != wantText {
+		t.Fatalf("input.0.content.0.text = %q, want %q", text, wantText)
 	}
 }
