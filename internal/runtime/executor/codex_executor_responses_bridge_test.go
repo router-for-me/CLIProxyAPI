@@ -253,24 +253,14 @@ func TestCodexExecutorCountTokensReturnsExactInputCount(t *testing.T) {
 	}
 }
 
-func TestValidateClaudeBridgeContextWindowRejectsOversizedInput(t *testing.T) {
+func TestValidateClaudeBridgeContextWindowAllowsClientConfiguredWindow(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.6-luna","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":` + string(mustJSONMarshalExecutorTest(t, strings.Repeat("x ", 200_500))) + `}]}]}`)
 	count, errContext := validateClaudeBridgeContextWindow("gpt-5.6-luna", body, cliproxyexecutor.Options{Alt: constant.ClaudeResponsesBridgeAlt})
-	if errContext == nil {
-		t.Fatalf("context count = %d, want context_too_large error", count)
+	if errContext != nil {
+		t.Fatalf("input above 200k rejected: %v", errContext)
 	}
-	if count <= claudeBridgeContextWindow {
-		t.Fatalf("context count = %d, want > %d", count, claudeBridgeContextWindow)
-	}
-	statusCoder, ok := errContext.(interface{ StatusCode() int })
-	if !ok || statusCoder.StatusCode() != http.StatusBadRequest {
-		t.Fatalf("context error = %T %v, want status 400", errContext, errContext)
-	}
-	if got := gjson.Get(errContext.Error(), "error.code").String(); got != "context_too_large" {
-		t.Fatalf("error code = %q, want context_too_large; error=%v", got, errContext)
-	}
-	if message := gjson.Get(errContext.Error(), "error.message").String(); !strings.Contains(message, "prompt is too long") {
-		t.Fatalf("error message = %q, want prompt is too long", message)
+	if count <= 200_000 {
+		t.Fatalf("count = %d, want > 200000", count)
 	}
 }
 
@@ -280,8 +270,8 @@ func TestValidateClaudeBridgeContextWindowAllowsCompactedReplayAboveSyntheticLim
 	if errContext != nil {
 		t.Fatalf("compacted replay rejected at synthetic limit: %v", errContext)
 	}
-	if count <= claudeBridgeContextWindow {
-		t.Fatalf("context count = %d, want > %d to exercise compacted replay exception", count, claudeBridgeContextWindow)
+	if count <= int64(200_000) {
+		t.Fatalf("context count = %d, want > %d to exercise compacted replay exception", count, int64(200_000))
 	}
 }
 
