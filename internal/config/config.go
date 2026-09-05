@@ -169,6 +169,29 @@ type Config struct {
 	// NOTE: This applies only to OAuth credentials and does not affect per-credential request-scoped-errors under *-api-key.
 	OAuthRequestScopedErrors map[string][]RequestScopedErrorRule `yaml:"oauth-request-scoped-errors,omitempty" json:"oauth-request-scoped-errors,omitempty"`
 
+	// Thinking defines opt-in policies for translating thinking effort between providers.
+	Thinking ThinkingPolicyConfig `yaml:"thinking" json:"thinking"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+}
+
+// ThinkingPolicyConfig defines opt-in policies for translating thinking effort.
+type ThinkingPolicyConfig struct {
+	// EffortMapping rewrites a canonical source effort to a destination effort.
+	// Rules are evaluated top-to-bottom; the first complete match wins.
+	EffortMapping []ThinkingEffortMappingRule `yaml:"effort-mapping" json:"effort-mapping"`
+}
+
+// ThinkingEffortMappingRule maps a canonical source effort to a destination effort.
+// All scope fields are optional; an empty scope matches anything. The destination
+// value is forced after source validation, so provider-native values (e.g. "ultra")
+// need not appear in the model capability registry.
+type ThinkingEffortMappingRule struct {
+	From           string   `yaml:"from" json:"from"`
+	To             string   `yaml:"to" json:"to"`
+	SourceProtocol string   `yaml:"source-protocol" json:"source-protocol"`
+	TargetProtocol string   `yaml:"target-protocol" json:"target-protocol"`
+	TargetProvider string   `yaml:"target-provider" json:"target-provider"`
+	Models         []string `yaml:"models" json:"models"`
 }
