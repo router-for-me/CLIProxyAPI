@@ -406,6 +406,8 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			},
 		},
 	}
+	oldCfg.SetListUnprefixedModels(true)
+	newCfg.SetListUnprefixedModels(false)
 
 	details := BuildConfigChangeDetails(oldCfg, newCfg)
 	expectContains(t, details, "debug: false -> true")
@@ -423,6 +425,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "proxy-url: http://old-proxy -> http://new-proxy")
 	expectContains(t, details, "ws-auth: false -> true")
 	expectContains(t, details, "force-model-prefix: false -> true")
+	expectContains(t, details, "list-unprefixed-models: true -> false")
 	expectContains(t, details, "nonstream-keepalive-interval: 0 -> 5")
 	expectContains(t, details, "quota-exceeded.switch-project: false -> true")
 	expectContains(t, details, "quota-exceeded.switch-preview-model: false -> true")

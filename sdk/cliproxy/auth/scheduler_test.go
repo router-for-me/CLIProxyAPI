@@ -119,6 +119,19 @@ type trackingSelector struct {
 	lastAuthID []string
 }
 
+type fixedAuthSelector struct {
+	authID string
+}
+
+func (s *fixedAuthSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	for _, auth := range auths {
+		if auth != nil && auth.ID == s.authID {
+			return auth, nil
+		}
+	}
+	return nil, &Error{Code: "auth_not_found", Message: "requested test auth was not a candidate"}
+}
+
 func (s *trackingSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	s.calls++
 	s.lastAuthID = s.lastAuthID[:0]
@@ -172,6 +185,96 @@ func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
 		if got.ID != wantID {
 			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
 		}
+	}
+}
+
+func TestManagerSelection_AntigravityWebSearchPreservesNormalRouting(t *testing.T) {
+	const modelID = "mixed-antigravity-web-search-scheduler-model"
+	const unsupportedAuthID = "antigravity-web-search-unsupported"
+	const capableAuthID = "antigravity-web-search-capable"
+
+	registryRef := registry.GetGlobalRegistry()
+	registryRef.RegisterClient(unsupportedAuthID, "antigravity", []*registry.ModelInfo{{ID: modelID}})
+	registryRef.RegisterClient(capableAuthID, "antigravity", []*registry.ModelInfo{{ID: modelID, SupportsWebSearch: true}})
+	t.Cleanup(func() {
+		registryRef.UnregisterClient(unsupportedAuthID)
+		registryRef.UnregisterClient(capableAuthID)
+	})
+	if got := registry.AntigravityWebSearchModelFor(modelID); got != "" {
+		t.Fatalf("mixed capability model should not enable native web search, got %q", got)
+	}
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerTestExecutor{provider: "antigravity"})
+	for _, auth := range []*Auth{
+		{ID: unsupportedAuthID, Provider: "antigravity"},
+		{ID: capableAuthID, Provider: "antigravity"},
+	} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%q) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	selected, _, errPick := manager.pickNext(context.Background(), "antigravity", modelID, cliproxyexecutor.Options{}, map[string]struct{}{capableAuthID: {}})
+	if errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+	if selected == nil || selected.ID != unsupportedAuthID {
+		t.Fatalf("pickNext() selected auth = %#v, want non-capable auth %q", selected, unsupportedAuthID)
+	}
+
+	legacyManager := NewManager(nil, &fixedAuthSelector{authID: unsupportedAuthID}, nil)
+	legacyManager.RegisterExecutor(schedulerTestExecutor{provider: "antigravity"})
+	for _, auth := range []*Auth{
+		{ID: unsupportedAuthID, Provider: "antigravity"},
+		{ID: capableAuthID, Provider: "antigravity"},
+	} {
+		if _, errRegister := legacyManager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("legacy Register(%q) error = %v", auth.ID, errRegister)
+		}
+	}
+	selected, errPick = legacyManager.SelectAuth(context.Background(), "antigravity", modelID, cliproxyexecutor.Options{})
+	if errPick != nil {
+		t.Fatalf("SelectAuth() error = %v", errPick)
+	}
+	if selected == nil || selected.ID != unsupportedAuthID {
+		t.Fatalf("SelectAuth() selected auth = %#v, want non-capable auth %q", selected, unsupportedAuthID)
+	}
+}
+
+func TestManagerSelection_AllCapableAntigravityWebSearch(t *testing.T) {
+	const modelID = "all-antigravity-web-search-manager-model"
+	const firstAuthID = "antigravity-all-web-search-first"
+	const secondAuthID = "antigravity-all-web-search-second"
+
+	registryRef := registry.GetGlobalRegistry()
+	registryRef.RegisterClient(firstAuthID, "antigravity", []*registry.ModelInfo{{ID: modelID, SupportsWebSearch: true}})
+	registryRef.RegisterClient(secondAuthID, "antigravity", []*registry.ModelInfo{{ID: modelID, SupportsWebSearch: true}})
+	t.Cleanup(func() {
+		registryRef.UnregisterClient(firstAuthID)
+		registryRef.UnregisterClient(secondAuthID)
+	})
+	if got := registry.AntigravityWebSearchModelFor(modelID); got != modelID {
+		t.Fatalf("AntigravityWebSearchModelFor() = %q, want %q", got, modelID)
+	}
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerTestExecutor{provider: "antigravity"})
+	for _, auth := range []*Auth{
+		{ID: firstAuthID, Provider: "antigravity"},
+		{ID: secondAuthID, Provider: "antigravity"},
+	} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%q) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	selected, _, errPick := manager.pickNext(context.Background(), "antigravity", modelID, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+	if selected == nil || (selected.ID != firstAuthID && selected.ID != secondAuthID) {
+		t.Fatalf("pickNext() selected auth = %#v, want one of the capable credentials", selected)
 	}
 }
 

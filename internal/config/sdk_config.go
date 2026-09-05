@@ -39,6 +39,13 @@ type SDKConfig struct {
 	// credentials as well.
 	ForceModelPrefix bool `yaml:"force-model-prefix" json:"force-model-prefix"`
 
+	// ListUnprefixedModels controls whether unprefixed model aliases are exposed
+	// in the model catalog when a credential has a prefix. When false, only the
+	// prefixed form (e.g., "nim/<model>") is listed, while unprefixed requests
+	// still route as before. A nil value uses the backward-compatible default
+	// true. Use SetListUnprefixedModels for programmatic configurations.
+	ListUnprefixedModels *bool `yaml:"list-unprefixed-models,omitempty" json:"list-unprefixed-models,omitempty"`
+
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
@@ -64,6 +71,27 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// SetListUnprefixedModels explicitly sets whether unprefixed model aliases are
+// exposed in model catalogs.
+func (c *SDKConfig) SetListUnprefixedModels(enabled bool) {
+	if c == nil {
+		return
+	}
+	c.ListUnprefixedModels = &enabled
+}
+
+// EffectiveListUnprefixedModels returns the configured catalog behavior. A
+// programmatic zero-value configuration keeps the documented default true.
+func (c *SDKConfig) EffectiveListUnprefixedModels() bool {
+	if c == nil {
+		return true
+	}
+	if c.ListUnprefixedModels != nil {
+		return *c.ListUnprefixedModels
+	}
+	return true
 }
 
 // ClaudeCodeConfig configures Claude Code compatibility behavior.
