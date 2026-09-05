@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -11,11 +12,128 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	tls "github.com/refraction-networking/utls"
 )
+
+func TestChatGPTUtlsTransportReusesHTTP2AndResumesAfterReconnect(t *testing.T) {
+	var (
+		stateMu          sync.Mutex
+		seenConnections  = make(map[net.Conn]struct{})
+		resumptions      []bool
+		connectionClosed = make(chan struct{}, 1)
+	)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "ok")
+	}))
+	server.EnableHTTP2 = true
+	server.TLS = &gotls.Config{MinVersion: gotls.VersionTLS13}
+	server.Config.ConnState = func(conn net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			select {
+			case connectionClosed <- struct{}{}:
+			default:
+			}
+			return
+		}
+		if state != http.StateActive {
+			return
+		}
+		tlsConn, ok := conn.(*gotls.Conn)
+		if !ok {
+			return
+		}
+		stateMu.Lock()
+		defer stateMu.Unlock()
+		if _, seen := seenConnections[conn]; seen {
+			return
+		}
+		seenConnections[conn] = struct{}{}
+		resumptions = append(resumptions, tlsConn.ConnectionState().DidResume)
+	}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	var dialCount atomic.Int32
+	dialer := contextDialerFunc(func(ctx context.Context, network, _ string) (net.Conn, error) {
+		dialCount.Add(1)
+		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+	})
+	clientTLSConfig := func(host string, sessionCache tls.ClientSessionCache) *tls.Config {
+		config := newChatGPTTLSConfig(host, sessionCache)
+		config.InsecureSkipVerify = true // Loopback test server uses an ephemeral certificate.
+		config.MinVersion = tls.VersionTLS13
+		return config
+	}
+	roundTripper := newUtlsRoundTripperWithDialer(dialer, clientTLSConfig)
+	t.Cleanup(roundTripper.CloseIdleConnections)
+
+	request := func() {
+		t.Helper()
+		req, errRequest := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://chatgpt.com/backend-api/codex/responses", nil)
+		if errRequest != nil {
+			t.Fatal(errRequest)
+		}
+		resp, errRoundTrip := roundTripper.RoundTrip(req)
+		if errRoundTrip != nil {
+			t.Fatal(errRoundTrip)
+		}
+		if resp.ProtoMajor != 2 {
+			t.Fatalf("HTTP protocol = %q, want HTTP/2", resp.Proto)
+		}
+		payload, errRead := io.ReadAll(resp.Body)
+		errClose := resp.Body.Close()
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		if errClose != nil {
+			t.Fatal(errClose)
+		}
+		if got := strings.TrimSpace(string(payload)); got != "ok" {
+			t.Fatalf("response body = %q, want %q", got, "ok")
+		}
+	}
+
+	request()
+	request()
+	if got := dialCount.Load(); got != 1 {
+		t.Fatalf("dials after two requests = %d, want 1 reusable HTTP/2 connection", got)
+	}
+
+	// Simulate an upstream connection failure. The next safe request must cause
+	// the HTTP/2 pool to discard the dead connection and establish a new one.
+	server.CloseClientConnections()
+	select {
+	case <-connectionClosed:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP/2 client did not observe the closed upstream connection")
+	}
+	request()
+	if got := dialCount.Load(); got != 2 {
+		t.Fatalf("dials after upstream close = %d, want 2 after automatic rebuild", got)
+	}
+
+	stateMu.Lock()
+	gotResumptions := append([]bool(nil), resumptions...)
+	stateMu.Unlock()
+	if len(gotResumptions) != 2 {
+		t.Fatalf("server TLS connections = %d, want 2", len(gotResumptions))
+	}
+	if gotResumptions[0] {
+		t.Fatal("first TLS connection unexpectedly resumed")
+	}
+	if !gotResumptions[1] {
+		t.Fatal("rebuilt TLS connection did not resume the cached session")
+	}
+}
 
 // newResumptionTestCertificate mints a short-lived self-signed leaf for the
 // loopback TLS server used by the resumption test.
