@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -49,15 +50,23 @@ func writeResponsesSSEChunk(w io.Writer, chunk []byte) {
 }
 
 type responsesSSEFramer struct {
-	pending              []byte
-	outputItems          map[int][]byte
-	outputOrder          []int
-	unindexedOutputItems [][]byte
-	lastEvent            string
-	terminalEvent        string
-	terminalError        *interfaces.ErrorMessage
-	failureEvent         string
-	dataFrames           int
+	pending               []byte
+	outputItems           map[int][]byte
+	outputOrder           []int
+	unindexedOutputItems  [][]byte
+	lastEvent             string
+	terminalEvent         string
+	terminalError         *interfaces.ErrorMessage
+	failureEvent          string
+	dataFrames            int
+	completedImageItems   map[string]struct{}
+	sequenceOffset        int64
+	imageOutputDir        string
+	resolvedImageDir      string
+	imageDirResolved      bool
+	savedImagePaths       map[string]string
+	savedImageOrder       []string
+	imageMarkdownInjected bool
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -116,29 +125,34 @@ func (f *responsesSSEFramer) Flush(w io.Writer) {
 }
 
 func (f *responsesSSEFramer) writeFrame(w io.Writer, frame []byte) {
-	writeResponsesSSEChunk(w, f.repairFrame(frame))
+	for _, repaired := range f.repairFrames(frame) {
+		writeResponsesSSEChunk(w, repaired)
+	}
 }
 
-func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
+func (f *responsesSSEFramer) repairFrames(frame []byte) [][]byte {
 	payload, ok := responsesSSEDataPayload(frame)
 	if !ok || len(payload) == 0 {
-		return frame
+		return [][]byte{frame}
 	}
 	if bytes.Equal(payload, []byte("[DONE]")) {
 		f.dataFrames++
-		return frame
+		return [][]byte{frame}
 	}
 	if !json.Valid(payload) {
-		return frame
+		return [][]byte{frame}
 	}
 	f.dataFrames++
+	payload = f.shiftSequenceNumber(payload)
+	payload = f.injectImageMarkdown(payload)
+	frame = responsesSSEFrameWithData(frame, payload)
 
 	payloadType := gjson.GetBytes(payload, "type").String()
 	if responsesSSEErrorEvent(payloadType) || responsesSSEPayloadHasError(payload) {
 		if payloadType != "" {
 			f.lastEvent = sanitizeResponsesStreamEventName(payloadType)
 		}
-		return f.repairErrorPayload(payload)
+		return [][]byte{f.repairErrorPayload(payload)}
 	}
 	streamEvent := responsesSSEEventName(frame)
 	eventType := payloadType
@@ -151,22 +165,131 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 		f.lastEvent = sanitizeResponsesStreamEventName(eventType)
 	}
 	if responsesSSEErrorEvent(eventType) {
-		return f.repairErrorPayload(payload)
+		return [][]byte{f.repairErrorPayload(payload)}
 	}
 	if responsesSSETerminalEvent(eventType) {
 		f.terminalEvent = eventType
 	}
 
 	switch eventType {
+	case "response.image_generation_call.completed":
+		f.recordCompletedImageItem(payload)
 	case "response.output_item.done":
+		if completedPayload, repairedPayload, repaired := f.repairImageGenerationDone(payload); repaired {
+			f.persistImageGenerationResult(repairedPayload)
+			f.recordOutputItem(repairedPayload)
+			repairedFrame := responsesSSEFrameWithData(frame, repairedPayload)
+			if len(completedPayload) > 0 {
+				return [][]byte{
+					responsesSSEEventFrame("response.image_generation_call.completed", completedPayload),
+					repairedFrame,
+				}
+			}
+			return [][]byte{repairedFrame}
+		}
 		f.recordOutputItem(payload)
 	case "response.completed":
 		repaired := f.repairCompletedPayload(payload)
 		if !bytes.Equal(repaired, payload) {
-			return responsesSSEFrameWithData(frame, repaired)
+			return [][]byte{responsesSSEFrameWithData(frame, repaired)}
 		}
 	}
-	return frame
+	return [][]byte{frame}
+}
+
+func responsesSSEEventFrame(event string, payload []byte) []byte {
+	var out bytes.Buffer
+	out.Grow(len(event) + len(payload) + 16)
+	out.WriteString("event: ")
+	out.WriteString(event)
+	out.WriteByte('\n')
+	out.WriteString("data: ")
+	out.Write(payload)
+	return out.Bytes()
+}
+
+func (f *responsesSSEFramer) shiftSequenceNumber(payload []byte) []byte {
+	if f.sequenceOffset == 0 {
+		return payload
+	}
+	sequenceNumber := gjson.GetBytes(payload, "sequence_number")
+	if !sequenceNumber.Exists() {
+		return payload
+	}
+	shifted, err := sjson.SetBytes(payload, "sequence_number", sequenceNumber.Int()+f.sequenceOffset)
+	if err != nil {
+		return payload
+	}
+	return shifted
+}
+
+func imageGenerationItemKey(payload []byte, itemIDPath string) string {
+	if itemID := strings.TrimSpace(gjson.GetBytes(payload, itemIDPath).String()); itemID != "" {
+		return "id:" + itemID
+	}
+	if outputIndex := gjson.GetBytes(payload, "output_index"); outputIndex.Exists() {
+		return "index:" + strconv.FormatInt(outputIndex.Int(), 10)
+	}
+	return ""
+}
+
+func (f *responsesSSEFramer) recordCompletedImageItem(payload []byte) {
+	key := imageGenerationItemKey(payload, "item_id")
+	if key == "" {
+		return
+	}
+	if f.completedImageItems == nil {
+		f.completedImageItems = make(map[string]struct{})
+	}
+	f.completedImageItems[key] = struct{}{}
+}
+
+func (f *responsesSSEFramer) repairImageGenerationDone(payload []byte) (completedPayload, repairedPayload []byte, repaired bool) {
+	item := gjson.GetBytes(payload, "item")
+	if item.Get("type").String() != "image_generation_call" || strings.TrimSpace(item.Get("result").String()) == "" {
+		return nil, payload, false
+	}
+
+	repairedPayload = payload
+	if item.Get("status").String() != "completed" {
+		if updated, err := sjson.SetBytes(repairedPayload, "item.status", "completed"); err == nil {
+			repairedPayload = updated
+		}
+	}
+
+	key := imageGenerationItemKey(repairedPayload, "item.id")
+	if key != "" {
+		if _, exists := f.completedImageItems[key]; exists {
+			return nil, repairedPayload, true
+		}
+	}
+
+	completedPayload = []byte(`{"type":"response.image_generation_call.completed"}`)
+	for sourcePath, targetPath := range map[string]string{
+		"output_index": "output_index",
+		"item.id":      "item_id",
+	} {
+		value := gjson.GetBytes(repairedPayload, sourcePath)
+		if !value.Exists() {
+			continue
+		}
+		completedPayload, _ = sjson.SetBytes(completedPayload, targetPath, value.Value())
+	}
+
+	sequenceNumber := gjson.GetBytes(repairedPayload, "sequence_number")
+	if sequenceNumber.Exists() {
+		completedPayload, _ = sjson.SetBytes(completedPayload, "sequence_number", sequenceNumber.Int())
+		repairedPayload, _ = sjson.SetBytes(repairedPayload, "sequence_number", sequenceNumber.Int()+1)
+		f.sequenceOffset++
+	}
+
+	if key != "" {
+		if f.completedImageItems == nil {
+			f.completedImageItems = make(map[string]struct{})
+		}
+		f.completedImageItems[key] = struct{}{}
+	}
+	return completedPayload, repairedPayload, true
 }
 
 func responsesSSEPayloadErrorMessage(payload []byte) *interfaces.ErrorMessage {
@@ -288,6 +411,7 @@ func (f *responsesSSEFramer) recordOutputItem(payload []byte) {
 }
 
 func (f *responsesSSEFramer) repairCompletedPayload(payload []byte) []byte {
+	payload = normalizeResponsesImageGenerationOutput(payload)
 	if len(f.outputOrder) == 0 && len(f.unindexedOutputItems) == 0 {
 		return payload
 	}
@@ -324,6 +448,28 @@ func (f *responsesSSEFramer) repairCompletedPayload(payload []byte) []byte {
 	repaired, err := sjson.SetRawBytes(payload, "response.output", outputJSON.Bytes())
 	if err != nil {
 		return payload
+	}
+	return repaired
+}
+
+func normalizeResponsesImageGenerationOutput(payload []byte) []byte {
+	output := gjson.GetBytes(payload, "response.output")
+	if !output.IsArray() {
+		return payload
+	}
+
+	repaired := payload
+	for index, item := range output.Array() {
+		if item.Get("type").String() != "image_generation_call" || strings.TrimSpace(item.Get("result").String()) == "" {
+			continue
+		}
+		if item.Get("status").String() == "completed" {
+			continue
+		}
+		updated, err := sjson.SetBytes(repaired, "response.output."+strconv.Itoa(index)+".status", "completed")
+		if err == nil {
+			repaired = updated
+		}
 	}
 	return repaired
 }
@@ -664,7 +810,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	if isCodexResponsesClientRequest(c) {
 		failureEvent = "response.failed"
 	}
-	framer := &responsesSSEFramer{failureEvent: failureEvent}
+	framer := &responsesSSEFramer{failureEvent: failureEvent, imageOutputDir: h.codexImageOutputDir()}
 	var initialOutput bytes.Buffer
 
 	// Peek at the first complete SSE data frame.
@@ -923,7 +1069,7 @@ func (h *OpenAIResponsesAPIHandler) logResponsesStreamError(c *gin.Context, fram
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
 	if framer == nil {
-		framer = &responsesSSEFramer{}
+		framer = &responsesSSEFramer{imageOutputDir: h.codexImageOutputDir()}
 	}
 	if isCodexResponsesClientRequest(c) {
 		framer.failureEvent = "response.failed"
