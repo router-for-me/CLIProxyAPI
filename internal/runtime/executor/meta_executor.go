@@ -159,9 +159,14 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		return nil, fmt.Errorf("meta executor: mint API key returned empty key")
 	}
 
+	baseURL, _ := metaCreds(auth)
+	if mintedURL := strings.TrimSpace(minted.BaseURL); mintedURL != "" {
+		baseURL = mintedURL
+	}
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
+	auth.Metadata["base_url"] = baseURL
 	auth.Metadata["api_key"] = minted.APIKey
 	auth.Metadata["access_token"] = minted.APIKey
 	auth.Metadata["dca_token"] = dcaToken
@@ -179,6 +184,7 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
 	}
+	auth.Attributes["base_url"] = baseURL
 	auth.Attributes["api_key"] = minted.APIKey
 	auth.Attributes["access_token"] = minted.APIKey
 
@@ -210,6 +216,8 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		}
 		auth.Storage = storage
 	}
+
+	storage.BaseURL = baseURL
 
 	filePath := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributePath])
 	if filePath == "" {

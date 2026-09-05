@@ -281,3 +281,20 @@ func TestSaveTokenToFile_DoesNotRestoreClearedCredentialFields(t *testing.T) {
 		t.Errorf("models = %v, want [muse-latest]", saved["models"])
 	}
 }
+
+func TestCreateTokenStorageUsesMintedBaseURL(t *testing.T) {
+	for _, tc := range []struct{ name, minted, want string }{
+		{"custom", " https://regional.meta.example/v1 ", "https://regional.meta.example/v1"},
+		{"omitted", "", DefaultAPIBaseURL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			storage := NewMetaAuth(nil).CreateTokenStorage(&MetaAuthBundle{
+				TokenData: &TokenData{AccessToken: "dca:test"},
+				MintedKey: &MintedKeyResponse{APIKey: "LLM|test", BaseURL: tc.minted},
+			})
+			if storage.BaseURL != tc.want {
+				t.Fatalf("base URL = %q, want %q", storage.BaseURL, tc.want)
+			}
+		})
+	}
+}

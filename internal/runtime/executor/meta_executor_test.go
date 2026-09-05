@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -405,5 +406,76 @@ func TestMetaExecutor_Execute_DCARecovery(t *testing.T) {
 	}
 	if auth.Metadata["api_key"] != "LLM|auto-recovered-key" {
 		t.Errorf("expected auth to be enriched with minted api_key, got %v", auth.Metadata["api_key"])
+	}
+}
+
+func TestMetaExecutorManagerRecoversUnauthorizedKey(t *testing.T) {
+	var mints atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/key" {
+			mints.Add(1)
+			_, _ = w.Write([]byte(`{"api_key":"LLM|replacement"}`))
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer LLM|replacement" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"message":"key revoked"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"ok","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+	t.Setenv("META_MINT_URL", server.URL+"/key")
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(NewMetaExecutor(&config.Config{}))
+	auth := &cliproxyauth.Auth{ID: "meta-401-recovery", Provider: "meta", Metadata: map[string]any{"access_token": "LLM|revoked", "api_key": "LLM|revoked", "dca_token": "dca:valid", "auth_kind": "oauth"}, Attributes: map[string]string{"base_url": server.URL}}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatal(err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, "meta", []*registry.ModelInfo{{ID: "muse-spark-1.3"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	req := cliproxyexecutor.Request{Model: "muse-spark-1.3", Payload: []byte(`{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hi"}]}`)}
+	_, err := manager.Execute(context.Background(), []string{"meta"}, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("401 recovery failed: %v", err)
+	}
+	if mints.Load() != 1 {
+		t.Fatalf("mint count = %d, want 1", mints.Load())
+	}
+}
+
+func TestMetaExecutorRefreshUsesMintedBaseURL(t *testing.T) {
+	for _, tc := range []struct{ name, minted, want string }{
+		{"custom", " https://regional.meta.example/v1 ", "https://regional.meta.example/v1"},
+		{"omitted", "", "https://previous.meta.example/v1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]string{"api_key": "LLM|replacement", "base_url": tc.minted})
+			}))
+			defer server.Close()
+			t.Setenv("META_MINT_URL", server.URL)
+			path := filepath.Join(t.TempDir(), "meta.json")
+			auth := &cliproxyauth.Auth{Provider: "meta", Metadata: map[string]any{"dca_token": "dca:test", "base_url": "https://previous.meta.example/v1"}, Attributes: map[string]string{"base_url": "https://previous.meta.example/v1", cliproxyauth.AttributePath: path}}
+			updated, err := NewMetaExecutor(nil).Refresh(context.Background(), auth)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := metaCreds(updated); got != tc.want {
+				t.Errorf("request base URL = %q, want %q", got, tc.want)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saved map[string]any
+			if err = json.Unmarshal(raw, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved["base_url"] != tc.want {
+				t.Errorf("saved base URL = %v, want %q", saved["base_url"], tc.want)
+			}
+		})
 	}
 }

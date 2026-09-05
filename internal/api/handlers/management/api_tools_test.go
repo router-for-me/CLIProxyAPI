@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -367,6 +368,7 @@ func TestAPICallResolvesMetaToken(t *testing.T) {
 	h := &Handler{
 		cfg:         &config.Config{},
 		authManager: manager,
+		tokenStore:  &memoryAuthStore{},
 	}
 	router := gin.New()
 	router.POST("/api/call", h.APICall)
@@ -392,5 +394,83 @@ func TestAPICallResolvesMetaToken(t *testing.T) {
 	}
 	if upstreamBody["auth_header"] != "Bearer LLM|api-call-minted-key" {
 		t.Errorf("expected header 'Bearer LLM|api-call-minted-key', got %q", upstreamBody["auth_header"])
+	}
+}
+
+func TestResolveMetaTokenUpdatesManagerAndStore(t *testing.T) {
+	mints := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mints++
+		_ = json.NewEncoder(w).Encode(map[string]string{"api_key": "LLM|minted", "base_url": " https://regional.meta.example/v1 "})
+	}))
+	defer server.Close()
+	t.Setenv("META_MINT_URL", server.URL)
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth, err := manager.Register(coreauth.WithSkipPersist(context.Background()), &coreauth.Auth{ID: "meta-management", Provider: "meta", Metadata: map[string]any{"dca_token": "dca:test", "base_url": "https://previous.meta.example/v1"}, Attributes: map[string]string{"base_url": "https://previous.meta.example/v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{cfg: &config.Config{}, authManager: manager, tokenStore: store}
+	for i := 0; i < 2; i++ {
+		token, err := h.resolveTokenForAuth(context.Background(), h.authByIndex(auth.Index), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if token != "LLM|minted" {
+			t.Fatalf("token = %q", token)
+		}
+	}
+	if mints != 1 {
+		t.Errorf("minted %d times for sequential calls, want 1", mints)
+	}
+	live := h.authByIndex(auth.Index)
+	if live.Metadata["api_key"] != "LLM|minted" {
+		t.Error("live manager did not retain minted key")
+	}
+	if live.Metadata["base_url"] != "https://regional.meta.example/v1" || live.Attributes["base_url"] != "https://regional.meta.example/v1" {
+		t.Error("live manager did not retain minted base URL")
+	}
+	saved, err := store.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(saved) != 1 || saved[0].Metadata["api_key"] != "LLM|minted" || saved[0].Metadata["base_url"] != "https://regional.meta.example/v1" {
+		t.Fatalf("configured store did not retain minted credentials: %#v", saved)
+	}
+}
+
+type failingMetaTokenStore struct {
+	memoryAuthStore
+	err error
+}
+
+func (s *failingMetaTokenStore) Save(context.Context, *coreauth.Auth) (string, error) {
+	return "", s.err
+}
+
+func TestResolveMetaTokenPropagatesStoreFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"api_key":"LLM|minted"}`))
+	}))
+	defer server.Close()
+	t.Setenv("META_MINT_URL", server.URL)
+	saveErr := errors.New("test store unavailable")
+	store := &failingMetaTokenStore{err: saveErr}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth, err := manager.Register(coreauth.WithSkipPersist(context.Background()), &coreauth.Auth{ID: "meta-save-failure", Provider: "meta", Metadata: map[string]any{"dca_token": "dca:test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{cfg: &config.Config{}, authManager: manager, tokenStore: store}
+	token, err := h.resolveTokenForAuth(context.Background(), h.authByIndex(auth.Index), "")
+	if !errors.Is(err, saveErr) {
+		t.Fatalf("error = %v, want store failure", err)
+	}
+	if token != "" {
+		t.Error("returned a token despite failed persistence")
+	}
+	if h.authByIndex(auth.Index).Metadata["api_key"] != nil {
+		t.Error("failed save installed a token in the manager")
 	}
 }

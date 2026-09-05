@@ -491,10 +491,14 @@ func (a *MetaAuth) CreateTokenStorage(bundle *MetaAuthBundle) *MetaTokenStorage 
 		dcaExpired = time.Unix(bundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
 	}
 	apiKey := ""
+	baseURL := DefaultAPIBaseURL
 	email := bundle.Email
 	name := bundle.Name
 	if bundle.MintedKey != nil {
 		apiKey = bundle.MintedKey.APIKey
+		if mintedURL := strings.TrimSpace(bundle.MintedKey.BaseURL); mintedURL != "" {
+			baseURL = mintedURL
+		}
 		if bundle.MintedKey.UserEmail != "" {
 			email = bundle.MintedKey.UserEmail
 		}
@@ -526,7 +530,7 @@ func (a *MetaAuth) CreateTokenStorage(bundle *MetaAuthBundle) *MetaTokenStorage 
 		DCAExpired:   dcaExpired,
 		DCAExpiresAt: bundle.TokenData.ExpiresAt,
 		LastRefresh:  time.Now().UTC().Format(time.RFC3339),
-		BaseURL:      DefaultAPIBaseURL,
+		BaseURL:      baseURL,
 		Email:        email,
 		Name:         name,
 	}

@@ -209,12 +209,16 @@ func sanitizeMetaKeyEntries(entries []MetaKey) []MetaKey {
 	out := make([]MetaKey, 0, len(entries))
 	for i := range entries {
 		e := entries[i]
+		e.APIKey = strings.TrimSpace(e.APIKey)
+		// The native Meta executor requires an API key or a DCA token in this field.
+		if e.APIKey == "" {
+			continue
+		}
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		if e.BaseURL == "" {
 			e.BaseURL = "https://api.meta.ai/v1"
 		}
-		e.APIKey = strings.TrimSpace(e.APIKey)
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
 		e.AlphaSearch = false
