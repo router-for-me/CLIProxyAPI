@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -946,6 +947,9 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 	}
 
 	forward := make(map[string][]aliasEntry, len(aliases))
+	// wildcardTargets holds the upstream models a wildcard alias resolves to, keyed
+	// the same way as forward.
+	wildcardTargets := make(map[string]struct{})
 	for i := range aliases {
 		name := strings.TrimSpace(aliases[i].Name)
 		alias := strings.TrimSpace(aliases[i].Alias)
@@ -953,6 +957,14 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 			continue
 		}
 		if strings.EqualFold(name, alias) {
+			continue
+		}
+		if strings.Contains(alias, "*") {
+			// A wildcard alias is a routing pattern, not a model id, so it must never
+			// reach the catalog itself. Its target does have to stay published: routing
+			// resolves the pattern to this upstream name, and both the provider lookup
+			// and the credential support check compare against registered model ids.
+			wildcardTargets[strings.ToLower(name)] = struct{}{}
 			continue
 		}
 		key := strings.ToLower(name)
@@ -988,6 +1000,11 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		}
 
 		keepOriginal := false
+		if _, isWildcardTarget := wildcardTargets[key]; isWildcardTarget {
+			// An exact alias would otherwise replace this model, which would strand the
+			// wildcard on an id no client registers.
+			keepOriginal = true
+		}
 		for _, entry := range entries {
 			if entry.fork {
 				keepOriginal = true
@@ -1036,4 +1053,42 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		}
 	}
 	return out
+}
+
+// collectModelAliasPatterns extracts routing-only wildcard alias patterns from the
+// OAuth model alias configuration. Exact aliases are published as models by
+// applyOAuthModelAliasEntries and are therefore not included here.
+//
+// Channels are walked in sorted order so a reload produces a stable pattern order.
+func collectModelAliasPatterns(aliases map[string][]config.OAuthModelAlias) []registry.ModelAliasPattern {
+	if len(aliases) == 0 {
+		return nil
+	}
+	channels := make([]string, 0, len(aliases))
+	for channel := range aliases {
+		channels = append(channels, channel)
+	}
+	sort.Strings(channels)
+
+	var out []registry.ModelAliasPattern
+	for _, channel := range channels {
+		for _, entry := range aliases[channel] {
+			name := strings.TrimSpace(entry.Name)
+			alias := strings.TrimSpace(entry.Alias)
+			if name == "" || alias == "" {
+				continue
+			}
+			if !strings.Contains(alias, "*") {
+				continue
+			}
+			out = append(out, registry.ModelAliasPattern{Pattern: alias, Target: name})
+		}
+	}
+	return out
+}
+
+// applyModelAliasPatterns publishes wildcard alias patterns to the global model
+// registry so provider lookups can resolve model ids that no client registers.
+func applyModelAliasPatterns(aliases map[string][]config.OAuthModelAlias) {
+	registry.GetGlobalRegistry().SetModelAliasPatterns(collectModelAliasPatterns(aliases))
 }
