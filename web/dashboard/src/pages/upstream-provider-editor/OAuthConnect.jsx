@@ -3,10 +3,9 @@
 // ============================================================================
 
 // OAuthConnectSection — the connect workflow step for oauth:* providers.
-// Extracted verbatim from UpstreamProvidersPage.jsx (provider-editor-page
-// plan, Task 3) so the list page and the dedicated editor page (built in
-// later tasks of the same plan) share one source of truth for the connect
-// flow.
+// Extracted from UpstreamProvidersPage.jsx (provider-editor-page plan,
+// Task 3); rendered by the routed editor page (./index.jsx) for connectable
+// OAuth types in create mode.
 
 import React, { useState } from 'react';
 import {

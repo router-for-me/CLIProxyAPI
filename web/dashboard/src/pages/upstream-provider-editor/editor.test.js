@@ -1,15 +1,13 @@
-// Tests for Task 4 of the Claude (API Key) multi-entry plan: the
-// `claude-api-key` provider now uses the same `api_key_entries`
-// multi-row editor as `openai-compatibility`, gains an optional per-entry
-// weight field, and round-trips legacy single-key rows by synthesising
-// one unsaved entry. The OpenAI editor also gains the same optional
-// weight field.
+// Tests for the upstream provider editor's pure form layer: the
+// `claude-api-key` provider uses the same `api_key_entries` multi-row editor
+// as `openai-compatibility`, carries an optional per-entry weight and
+// selection-tier priority, and round-trips legacy single-key rows by
+// synthesising one unsaved entry. Covers the routing-strategy select too.
 //
-// These tests touch only pure helper functions exported from
-// upstream-provider-editor/schemas.js (buildSchemas) and
-// upstream-provider-editor/form.js (buildForm, buildPayload, validate,
-// validateAPIKeyEntries). They never log fixture credentials
-// and never rely on the network or the React tree.
+// These tests touch only pure helper functions exported from this editor
+// module — ./schemas.js (buildSchemas) and ./form.js (buildForm,
+// buildPayload, validate, validateAPIKeyEntries). They never log fixture
+// credentials and never rely on the network or the React tree.
 //
 // Fixture secret material is intentionally obvious ("FAKE-SECRET-*")
 // so any accidental inclusion in a test failure message is obvious as
@@ -17,13 +15,13 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSchemas } from './upstream-provider-editor/schemas.js';
+import { buildSchemas } from './schemas.js';
 import {
   buildForm,
   buildPayload,
   validate,
   validateAPIKeyEntries,
-} from './upstream-provider-editor/form.js';
+} from './form.js';
 
 // ============================================================================
 // buildSchemas — schema mapping

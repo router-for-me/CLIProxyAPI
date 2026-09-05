@@ -27,6 +27,9 @@
   --radius-sm: 4px;
   --sidebar-w: 240px;
   --sidebar-w-collapsed: 56px;
+  /* Sticky app topbar height (36px bell + 2×10px padding + 1px border).
+     Stable across breakpoints; used by page headers that dock below it. */
+  --topbar-h: 57px;
   --mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
 }
@@ -3365,7 +3368,7 @@ button.ghost:hover:not(:disabled) {
 }
 
 /* Editor summary banner — appears at the top of the Upstream Provider editor
-   modal so the operator can see at-a-glance which row they're editing and
+   page so the operator can see at-a-glance which row they're editing and
    what saving it will trigger. */
 .editor-summary {
   border: 1px solid var(--border);
@@ -3403,6 +3406,69 @@ button.ghost:hover:not(:disabled) {
   color: var(--text-muted);
   margin-top: 6px;
   line-height: 1.5;
+}
+
+/* Upstream provider editor page — routed at /upstream-providers/new and
+   /upstream-providers/:id. Operator form, not a dashboard: a single
+   ~900px column of stacked .form-section cards under a sticky header that
+   keeps the Back link + Save button visible while scrolling long schemas. */
+.upstream-editor {
+  max-width: 900px;
+}
+.upstream-editor__header {
+  position: sticky;
+  /* Dock below the sticky app topbar (both live in the content column) so
+     the Back link + Save stay visible instead of sliding under it. */
+  top: var(--topbar-h);
+  z-index: 30; /* below the sidebar drawer (50), backdrop (45), and topbar (40) */
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 0;
+  margin-bottom: 8px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.upstream-editor__header-main {
+  min-width: 0;
+}
+.upstream-editor__header-main .linklike {
+  font-size: 12px;
+}
+.upstream-editor__title {
+  margin: 2px 0 0;
+}
+
+/* Create-mode step 0: grouped card grid of provider types. Cards are
+   buttons so they're keyboard-operable; the value id is shown under the
+   label for operators who know the provider_type string. */
+.type-picker__grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 10px;
+}
+.type-picker__card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  padding: 12px 14px;
+}
+.type-picker__label {
+  font-weight: 500;
+}
+.type-picker__value {
+  font-size: 11px;
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 900px) {
+  .type-picker__grid { grid-template-columns: repeat(2, 1fr); }
 }
 
 /* Pagination bar — rendered under the providers table. Two-row layout on

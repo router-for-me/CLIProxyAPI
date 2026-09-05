@@ -4,10 +4,9 @@
 
 // The pure form/data functions for the upstream provider editor: entry
 // validation, form hydration, payload building, and schema-driven save
-// validation. Extracted verbatim from UpstreamProvidersPage.jsx
-// (provider-editor-page plan, Task 2) so the list page and the dedicated
-// editor page (built in later tasks of the same plan) share one source of
-// truth for the form contract.
+// validation. Extracted from UpstreamProvidersPage.jsx (provider-editor-page
+// plan, Task 2) as the single source of truth for the editor page's
+// (./index.jsx) form contract.
 
 import {
   isOAuth,
@@ -18,8 +17,9 @@ import {
 
 // validateAPIKeyEntries enforces the same rules the backend's
 // normalizeUpstreamProviderEntryName applies, plus the duplicate-name check
-// across the provider's entries and the per-row weight bounds. Returns a map
-// keyed by entry index plus a __global bucket for cross-entry messages.
+// across the provider's entries and the per-row weight and priority bounds.
+// Returns a map keyed by entry index, each value a { name?, weight?,
+// priority? } error bag for that row.
 export function validateAPIKeyEntries(entries) {
   const out = {};
   const list = Array.isArray(entries) ? entries : [];
@@ -111,8 +111,11 @@ function hydrateEntries(src) {
   }));
 }
 
-// buildForm is exported solely for focused tests in this directory —
-// production callers only reach it via the React tree above.
+// buildForm hydrates a provider row (or nothing, for create) into the
+// editor's flat form shape. Called by the routed editor page (./index.jsx)
+// on mount and on provider-type switches (carryOver preserves the
+// operator's in-progress values across the switch); also exercised
+// directly by ./editor.test.js.
 export function buildForm(providerType, initial, carryOver) {
   const src = initial || {};
   const carry = carryOver || {};
@@ -193,8 +196,9 @@ export function buildForm(providerType, initial, carryOver) {
   return base;
 }
 
-// buildPayload is exported solely for focused tests in this directory —
-// the production callers only reach it via the React tree above.
+// buildPayload serializes the editor form into the JSON body POSTed/PUT to
+// /upstream-providers. Called by the routed editor page (./index.jsx) on
+// save; also exercised directly by ./editor.test.js.
 export function buildPayload(form, providerType) {
   const oauth = isOAuth(providerType);
   const openai = isOpenAI(providerType);
@@ -340,8 +344,11 @@ export function buildPayload(form, providerType) {
 // Validation
 // ============================================================================
 
-// validate is exported solely for focused tests in this directory —
-// production callers only reach it via the React tree above.
+// validate runs the schema-driven per-field checks plus the entry-pool
+// checks (identity rules, weight bounds, credential-required) and returns a
+// field-name → message map consumed by the routed editor page (./index.jsx)
+// for both the inline errors and the aggregate fix-N banner; also exercised
+// directly by ./editor.test.js.
 export function validate(form, schema, providerType, siblingNames, isEdit) {
   const errors = {};
   for (const section of schema.sections) {

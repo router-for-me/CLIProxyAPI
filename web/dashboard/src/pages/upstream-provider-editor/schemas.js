@@ -3,10 +3,10 @@
 // ============================================================================
 
 // The declarative provider-type catalog and the per-type form schemas for
-// the upstream provider editor. Extracted verbatim from
-// UpstreamProvidersPage.jsx (provider-editor-page plan, Task 1) so the list
-// page and the editor share one source of truth for the catalog. Later tasks
-// of the same plan move the form builders and editor components alongside.
+// the upstream provider editor. Extracted from UpstreamProvidersPage.jsx
+// (provider-editor-page plan, Task 1) as the single source of truth for the
+// catalog: the list page imports the type constants + isOAuth, the editor
+// page (./index.jsx) imports the schemas.
 
 // ============================================================================
 // Provider type catalog
@@ -68,8 +68,9 @@ export const MAX_ENTRY_WEIGHT = 1000000;
 // Schema definitions (declarative, per provider_type)
 // ============================================================================
 
-// buildSchemas is exported solely for focused tests in this directory —
-// the production callers only reach it via the React tree above.
+// buildSchemas returns the per-provider_type form schema map consumed by
+// the routed editor page (./index.jsx); also exercised directly by
+// ./editor.test.js.
 export function buildSchemas() {
   const commonEndpoint = [
     { name: 'base_url', label: 'Base URL', type: 'text', placeholder: 'https://api.example.com',

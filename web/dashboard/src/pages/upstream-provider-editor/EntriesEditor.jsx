@@ -3,27 +3,19 @@
 // ============================================================================
 
 // APIKeyEntriesEditor — multi-row editor for OpenAI Compatibility and Claude
-// (API Key) api_key_entries. Extracted verbatim from UpstreamProvidersPage.jsx
-// (provider-editor-page plan, Task 3) so the list page and the dedicated
-// editor page (built in later tasks of the same plan) share one source of
-// truth for the entry editing UI.
-
-import React, { useMemo } from 'react';
-import { PasswordInput } from '../manage-cpa/FormPrimitives.jsx';
-import { validateAPIKeyEntries, idHintForIdentity } from './form.js';
-
-// ============================================================================
-// APIKeyEntriesEditor
-// ============================================================================
-
-// APIKeyEntriesEditor — multi-row editor for OpenAI Compatibility and Claude
 // (API Key) api_key_entries. Each row carries an optional normalised
 // identity (also known as the entry provider key), a masked API key, an
 // optional proxy URL (override of the row-level proxy when filled), an
 // optional weight for weighted round-robin, and an optional selection tier
 // (priority) for fill-first pools. The persisted child-row id is
 // round-tripped so the backend can update rows in place rather than
-// deleting and reinserting them.
+// deleting and reinserting them. Rendered by the routed editor page
+// (./index.jsx) via the renderInput field engine.
+
+import React, { useMemo } from 'react';
+import { PasswordInput } from '../manage-cpa/FormPrimitives.jsx';
+import { validateAPIKeyEntries, idHintForIdentity } from './form.js';
+
 export default function APIKeyEntriesEditor({ entries, onChange, error = '' }) {
   const safe = Array.isArray(entries) ? entries : [];
   function update(idx, patch) {
@@ -49,9 +41,6 @@ export default function APIKeyEntriesEditor({ entries, onChange, error = '' }) {
       {safe.length === 0 && <div className="list-editor__empty">No API key entries. Click "+ Add key".</div>}
       {error && (
         <div className="error-banner" role="alert" style={{ marginTop: 4 }}>{error}</div>
-      )}
-      {errors.__global && (
-        <div className="error-banner" role="alert" style={{ marginTop: 4 }}>{errors.__global}</div>
       )}
       {safe.map((e, idx) => {
         const id = Number(e && e.id) || 0;

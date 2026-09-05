@@ -1,10 +1,10 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   listUpstreamProviders,
   createUpstreamProvider,
   updateUpstreamProvider,
   deleteUpstreamProvider,
-  oauthChannelToAuthProvider,
   listAuthFiles,
   getAuthFileModels,
   fetchAuthFileJSON,
@@ -18,43 +18,13 @@ import { ApiError } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import { Spinner, ErrorBanner, EmptyState, Modal } from '../components/Primitives.jsx';
 import { useToast } from '../components/Toast.jsx';
+import { Field } from './manage-cpa/FormPrimitives.jsx';
 import {
-  Field,
-  PasswordInput,
-  ToggleRow,
-  ChipListEditor,
-  KeyValueEditor,
-  ModelListEditor,
-} from './manage-cpa/FormPrimitives.jsx';
-import FetchModelsInline from './manage-cpa/FetchModelsInline.jsx';
-import {
-  buildSchemas,
   API_KEY_TYPES,
   OAUTH_TYPES,
   TYPE_LABEL,
-  TYPE_SIMPLE,
   isOAuth,
-  isOpenAI,
 } from './upstream-provider-editor/schemas.js';
-import {
-  buildForm,
-  buildPayload,
-  validate,
-  formatRFC3339,
-} from './upstream-provider-editor/form.js';
-import OAuthConnectSection from './upstream-provider-editor/OAuthConnect.jsx';
-import APIKeyEntriesEditor from './upstream-provider-editor/entries.jsx';
-
-// ============================================================================
-// Provider type catalog (moved to upstream-provider-editor/schemas.js)
-// ============================================================================
-
-// Types where the FetchModelsInline probe is meaningful (has a base_url +
-// api_key the operator can probe, or an auth-file the registry tracks).
-const FETCHABLE_TYPES = new Set([
-  'gemini-api-key', 'interactions-api-key', 'codex-api-key', 'xai-api-key',
-  'claude-api-key', 'vertex-api-key', 'openai-compatibility',
-]);
 
 // ============================================================================
 // Page
@@ -62,10 +32,10 @@ const FETCHABLE_TYPES = new Set([
 
 export default function UpstreamProvidersPage() {
   const toast = useToast();
+  const navigate = useNavigate();
   const { data, error, loading, reload } = useAsync(() => listUpstreamProviders(), []);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
-  const [editing, setEditing] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [importing, setImporting] = useState(false);
   // Table sort: { key, dir } — null = leave server order. Keys map 1:1 to
@@ -252,11 +222,6 @@ export default function UpstreamProvidersPage() {
 
   const hasFilters = !!search.trim() || !!typeFilter;
 
-  const siblingNames = useMemo(
-    () => providers.filter((p) => isOpenAI(p.provider_type)).map((p) => p.name).filter(Boolean),
-    [providers],
-  );
-
   // Existing (provider_type, file_name) pairs already represented as upstream
   // provider rows. The Import modal uses this to mark auth files that are
   // already imported (and to detect 409 conflicts on create ahead of time).
@@ -371,7 +336,7 @@ export default function UpstreamProvidersPage() {
           >
             ↓ Import
           </button>
-          <button className="primary" onClick={() => setEditing({})}>+ New Provider</button>
+          <button className="primary" onClick={() => navigate('/upstream-providers/new')}>+ New Provider</button>
         </div>
       </div>
 
@@ -465,7 +430,7 @@ export default function UpstreamProvidersPage() {
             ) : (
               <div className="row gap-sm">
                 <button onClick={() => setImporting(true)}>↓ Import OAuth</button>
-                <button className="primary" onClick={() => setEditing({})}>+ New Provider</button>
+                <button className="primary" onClick={() => navigate('/upstream-providers/new')}>+ New Provider</button>
               </div>
             )}
           />
@@ -501,7 +466,7 @@ export default function UpstreamProvidersPage() {
                 return (
                   <tr key={p.id}
                     className={`clickable-row${isSel ? ' row--selected' : ''}`}
-                    onClick={() => setEditing(p)}
+                    onClick={() => navigate(`/upstream-providers/${encodeURIComponent(p.id)}`)}
                     style={{ cursor: 'pointer' }}
                   >
                     <td className="col-check" onClick={(e) => e.stopPropagation()}>
@@ -548,7 +513,7 @@ export default function UpstreamProvidersPage() {
                     <td>
                       <div className="row gap-sm" style={{ justifyContent: 'flex-end' }}>
                         <button className="btn-icon" title="Edit" aria-label="Edit provider"
-                          onClick={(e) => { e.stopPropagation(); setEditing(p); }}>✎</button>
+                          onClick={(e) => { e.stopPropagation(); navigate(`/upstream-providers/${encodeURIComponent(p.id)}`); }}>✎</button>
                         <button className="btn-icon" title="Delete" aria-label="Delete provider"
                           onClick={(e) => { e.stopPropagation(); setConfirmDelete(p); }}>✕</button>
                       </div>
@@ -584,15 +549,6 @@ export default function UpstreamProvidersPage() {
           />
         )}
       </div>
-
-      {editing && (
-        <UpstreamProviderEditor
-          provider={editing}
-          siblingNames={siblingNames}
-          onClose={() => setEditing(null)}
-          onSaved={() => { setEditing(null); reload(); }}
-        />
-      )}
 
       {importing && (
         <ImportOAuthProviderModal
@@ -1245,358 +1201,12 @@ function ChannelAliasEditor({ channel, label, rows, onChange, onSave, onRemove, 
 }
 
 // ============================================================================
-// Editor modal (schema-driven)
-// ============================================================================
-
-function UpstreamProviderEditor({ provider, siblingNames = [], onClose, onSaved }) {
-  const toast = useToast();
-  const schemas = useMemo(() => buildSchemas(), []);
-  const isEdit = !!(provider && provider.id);
-
-  // provider_type drives the schema. On create, the operator picks it first.
-  const [providerType, setProviderType] = useState(() => provider?.provider_type || '');
-  const schema = schemas[providerType] || { sections: [] };
-
-  // OAuth connect state: for oauth:* types that have a web auth-url endpoint,
-  // the operator must complete the OAuth flow (generate URL → browser login →
-  // paste callback URL) before the token fields are meaningful. We track
-  // whether that flow has completed in this editor session. In edit mode the
-  // provider is already connected, so we start connected=true (skip the
-  // connect step, reveal the token section immediately).
-  const oauthChannel = isOAuth(providerType) ? providerType.replace(/^oauth:/, '') : '';
-  const oauthConnectable = !!oauthChannelToAuthProvider(oauthChannel);
-  const [oauthConnected, setOauthConnected] = useState(isEdit && oauthConnectable);
-
-  const [form, setForm] = useState(() => buildForm(providerType, provider));
-  const [touched, setTouched] = useState({});
-  const [saving, setSaving] = useState(false);
-  const [serverError, setServerError] = useState('');
-  const [initialSnapshot] = useState(() => JSON.stringify(form));
-  const prevTypeRef = useRef(providerType);
-
-  // When the provider_type changes (create mode), re-build the form to match
-  // the new schema while preserving the provider_type itself + sensible
-  // carry-overs (priority, prefix).
-  useEffect(() => {
-    if (prevTypeRef.current === providerType) return;
-    prevTypeRef.current = providerType;
-    setForm(buildForm(providerType, provider, form));
-    setTouched({});
-    setServerError('');
-    setOauthConnected(false);
-  }, [providerType]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const errors = useMemo(
-    () => validate(form, schema, providerType, siblingNames, isEdit),
-    [form, schema, providerType, siblingNames, isEdit],
-  );
-  const hasErrors = Object.keys(errors).length > 0;
-  const dirty = JSON.stringify(form) !== initialSnapshot;
-
-  function update(name, value) {
-    setForm((f) => ({ ...f, [name]: value }));
-    setTouched((t) => ({ ...t, [name]: true }));
-    setServerError('');
-  }
-
-  async function handleSubmit(e) {
-    e?.preventDefault?.();
-    if (hasErrors) {
-      setTouched(Object.fromEntries(Object.keys(errors).map((k) => [k, true])));
-      return;
-    }
-    setSaving(true);
-    setServerError('');
-    try {
-      const payload = buildPayload(form, providerType);
-      if (isEdit) {
-        await updateUpstreamProvider(provider.id, payload);
-        toast.success('Provider updated');
-      } else {
-        await createUpstreamProvider(payload);
-        toast.success('Provider created');
-      }
-      onSaved();
-    } catch (err) {
-      const msg = err instanceof ApiError ? err.message : (err.message || 'Save failed');
-      setServerError(msg);
-      toast.error(msg);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function attemptClose() {
-    if (dirty && !saving) {
-      const ok = window.confirm('Discard unsaved changes?');
-      if (!ok) return;
-    }
-    onClose();
-  }
-
-  const title = isEdit
-    ? `Edit ${TYPE_LABEL[providerType] || providerType}`
-    : 'New Upstream Provider';
-
-  // Summary banner content for the editor header. Operators editing OAuth
-  // accounts care about file_name (auth-dir collision key) and the account
-  // email; for API-key providers it's the api_key entries count.
-  const summary = isEdit
-    ? {
-        identifier: provider?.file_name || provider?.name || provider?.label || '',
-        secondary: provider?.email || provider?.base_url || '',
-      }
-    : null;
-
-  return (
-    <Modal
-      title={title}
-      size="xl"
-      onClose={attemptClose}
-      footer={<>
-        <button type="button" onClick={attemptClose} disabled={saving}>Cancel</button>
-        <button type="button" className="primary" onClick={handleSubmit}
-          disabled={saving || (hasErrors && Object.values(touched).some(Boolean))}>
-          {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Create provider'}
-        </button>
-      </>}
-    >
-      <div>
-        {serverError && <div className="error-banner">{serverError}</div>}
-        {hasErrors && (
-          <div className="error-summary">
-            <strong>Please fix {Object.keys(errors).length} field{Object.keys(errors).length === 1 ? '' : 's'}:</strong>
-            <ul>{Object.entries(errors).map(([k, v]) => <li key={k}>{v}</li>)}</ul>
-          </div>
-        )}
-
-        {/* Editor summary banner. Surfaces the provider type + identifier
-            (file_name for OAuth, name for OpenAI-compat, base_url for API-key)
-            and a one-line "save will re-render" hint so the operator never
-            has to remember what an upstream provider row actually controls. */}
-        {providerType && (
-          <div className="editor-summary" role="region" aria-label="Editor summary">
-            <div className="editor-summary__head">
-              <span className="badge badge--muted" style={{ fontSize: 10 }}>{providerType}</span>
-              {summary?.identifier && (
-                <code className="editor-summary__id">{summary.identifier}</code>
-              )}
-              {dirty && (
-                <span className="editor-summary__dirty" title="You have unsaved changes">● unsaved changes</span>
-              )}
-            </div>
-            <div className="editor-summary__hint">
-              {isOAuth(providerType) && (
-                <>Saves write a row to <code>upstream_providers</code> + a normalized JSON file to the auth-dir.</>
-              )}
-              {isOpenAI(providerType) && (
-                <>Saves write a row to <code>upstream_providers</code>; base URL becomes the routing key.</>
-              )}
-              {!isOAuth(providerType) && !isOpenAI(providerType) && (
-                <>Saves write a row to <code>upstream_providers</code> + re-render the matching <code>config.yaml</code> provider block.</>
-              )}
-              {' '}Reload is triggered automatically.
-            </div>
-          </div>
-        )}
-
-        {/* Provider type selector — always rendered first, disabled in edit. */}
-        <div className="form-section">
-          <div className="form-section__title">Provider Type</div>
-          <div className="form-section__row">
-            <Field label="Type" required>
-              <select value={providerType} onChange={(e) => setProviderType(e.target.value)} disabled={isEdit}>
-                <option value="">Select a provider type…</option>
-                <optgroup label="API Key">{API_KEY_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</optgroup>
-                <optgroup label="OAuth / File-backed">{OAUTH_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</optgroup>
-              </select>
-            </Field>
-          </div>
-        </div>
-
-        {/* OAuth connect workflow — for oauth:* types that support a web
-            auth-url flow, show the Connect step first (create mode only) so
-            the operator can generate the authorize URL, complete the browser
-            login, then paste the callback redirect URL to complete the token
-            exchange. In edit mode the provider is already connected, so the
-            flow is skipped entirely. After a successful callback, the
-            identity/token/models fields are auto-populated from the new auth
-            file before the full settings are revealed. */}
-        {oauthConnectable && !isEdit && (
-          <OAuthConnectSection
-            providerType={providerType}
-            onCompleted={(authData) => {
-              setOauthConnected(true);
-              // Auto-populate Identity + token + cloak + models from the auth
-              // file the server just created during the OAuth flow. All
-              // available fields from the auth JSON are merged so the
-              // upstream_providers row persists the complete picture.
-              if (authData) {
-                setForm((f) => {
-                  const next = {
-                    ...f,
-                    file_name: authData.file_name || f.file_name,
-                    email: authData.email || f.email,
-                    label: authData.label || f.label,
-                  };
-                  // Token fields.
-                  if (authData.token_access_token) next.token_access_token = authData.token_access_token;
-                  if (authData.token_refresh_token) next.token_refresh_token = authData.token_refresh_token;
-                  if (authData.token_token_type) next.token_token_type = authData.token_token_type;
-                  if (authData.token_scope) next.token_scope = authData.token_scope;
-                  if (authData.token_expiry) next.token_expiry = formatRFC3339(authData.token_expiry);
-                  if (authData.token_expired) next.token_expired = true;
-                  // Cloak fields (Claude OAuth).
-                  if (authData.cloak_mode != null) next.cloak_mode = authData.cloak_mode;
-                  if (authData.cloak_strict_mode) next.cloak_strict_mode = true;
-                  if (Array.isArray(authData.cloak_sensitive_words)) {
-                    next.cloak_sensitive_words = authData.cloak_sensitive_words;
-                  }
-                  if (authData.cloak_cache_user_id === true || authData.cloak_cache_user_id === false) {
-                    next.cloak_cache_user_id = authData.cloak_cache_user_id;
-                  }
-                  // Extra config passthrough.
-                  const extra = { ...(f.extra_config || {}) };
-                  if (authData.disable_cooling) extra.disable_cooling = true;
-                  if (authData.request_retry != null) extra.request_retry = authData.request_retry;
-                  if (authData.tool_prefix_disabled) extra.tool_prefix_disabled = true;
-                  if (Object.keys(extra).length > 0) next.extra_config = extra;
-                  // Prefix.
-                  if (authData.prefix) next.prefix = authData.prefix;
-                  // Models.
-                  if (authData.models && authData.models.length > 0) {
-                    next.models = authData.models;
-                  }
-                  return next;
-                });
-              }
-            }}
-          />
-        )}
-
-        {/* Schema-driven sections. */}
-        {schema.sections.map((section) => {
-          // For OAuth providers, hide the OAuth token section until the
-          // connect flow is done (those fields are populated by the callback).
-          if (oauthConnectable && !oauthConnected && section.title === 'OAuth token') {
-            return null;
-          }
-          return (
-          <div className="form-section" key={section.title}>
-            <div className="form-section__title">{section.title}</div>
-            {section.hint && <div className="form-section__hint">{section.hint}</div>}
-            <div className="form-section__row">
-              {section.fields.map((field) => {
-                const showError = touched[field.name] && errors[field.name];
-                return (
-                  <Field
-                    key={field.name}
-                    label={field.label}
-                    hint={field.hint}
-                    error={showError ? errors[field.name] : ''}
-                    required={field.required}
-                    htmlFor={`up_${field.name.replace(/[.\s]/g, '_')}`}
-                  >
-                    {renderInput(field, form, update, isEdit, providerType)}
-                  </Field>
-                );
-              })}
-            </div>
-
-            {/* Inline Fetch Models — rendered at the bottom of sections that
-                declare fetchModels:true, for fetchable provider types. */}
-            {section.fetchModels && FETCHABLE_TYPES.has(providerType) && (
-              <FetchModelsInline
-                form={form}
-                provider={TYPE_SIMPLE[providerType] || providerType}
-                isEdit={isEdit}
-                siblingNames={siblingNames}
-                onAddModels={(picked) => {
-                  const existing = Array.isArray(form.models) ? form.models : [];
-                  const byName = new Set(existing.map((r) => (r?.name || r?.id || '').trim()).filter(Boolean));
-                  const additions = picked
-                    .filter((p) => p && (p.id || p.name) && !byName.has(p.id || p.name))
-                    .map((p) => {
-                      const m = { name: p.id || p.name };
-                      // Use camelCase keys for the upstream_providers API.
-                      if (p.display_name) m.display_name = p.display_name;
-                      return m;
-                    });
-                  if (additions.length > 0) {
-                    // Merge into existing model rows (which use camelCase).
-                    const merged = [...existing];
-                    for (const a of additions) merged.push(a);
-                    update('models', merged);
-                  }
-                }}
-              />
-            )}
-          </div>
-          );
-        })}
-
-        {!providerType && (
-          <EmptyState title="Select a provider type" hint="Choose a type above to see its configuration fields." />
-        )}
-      </div>
-    </Modal>
-  );
-}
-
-// ============================================================================
-// Input renderer (dispatches by field.type)
-// ============================================================================
-
-function renderInput(field, form, update, isEdit, providerType) {
-  const id = `up_${field.name.replace(/[.\s]/g, '_')}`;
-  const value = form[field.name];
-  switch (field.type) {
-    case 'password':
-      return <PasswordInput id={id} value={value} onChange={(v) => update(field.name, v)}
-        placeholder={field.placeholder} defaultShown={isEdit} />;
-    case 'number':
-      return <input id={id} type="number" min={field.min} value={value ?? ''}
-        onChange={(e) => update(field.name, e.target.value)} placeholder={field.placeholder} />;
-    case 'select':
-      return <select id={id} value={value || ''} onChange={(e) => update(field.name, e.target.value)}>
-        {field.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>;
-    case 'toggle':
-      return <ToggleRow label={field.label} hint={field.hint} checked={!!value}
-        onChange={(v) => update(field.name, v)} />;
-    case 'chips':
-      return <ChipListEditor values={value || []} onChange={(v) => update(field.name, v)}
-        placeholder={field.placeholder} emptyHint={field.emptyHint} />;
-    case 'headers':
-      return <KeyValueEditor rows={value || []} onChange={(v) => update(field.name, v)} />;
-    case 'models':
-      return <ModelListEditor rows={value || []} onChange={(v) => update(field.name, v)}
-        fieldHints={{ name: 'upstream name', alias: 'client alias', displayName: 'display name' }} />;
-    case 'openai_models':
-      return <ModelListEditor rows={value || []} onChange={(v) => update(field.name, v)}
-        fieldHints={{
-          name: 'upstream model (e.g. anthropic/claude-3-5-sonnet)',
-          alias: 'client alias (e.g. claude-sonnet)',
-          displayName: 'display name (optional)',
-        }} />;
-    case 'api_key_entries':
-      return <APIKeyEntriesEditor
-        entries={value || []}
-        onChange={(v) => update(field.name, v)}
-      />;
-    case 'text':
-    default:
-      return <input id={id} type="text" value={value || ''} onChange={(e) => update(field.name, e.target.value)}
-        placeholder={field.placeholder} required={field.required} />;
-  }
-}
-
-// ============================================================================
 // ImportOAuthProviderModal — create an upstream provider from existing/pasted
 // OAuth material (auth files already on disk, pasted token JSON, or uploaded
-// JSON files). Complements OAuthConnectSection (which performs a live browser
-// login). All three tabs share extractAuthFields() + buildOAuthCreatePayload()
-// below so token/cloak/model extraction is consistent with the connect flow.
+// JSON files). Complements the editor page's OAuth connect flow (which
+// performs a live browser login). All three tabs share extractAuthFields() +
+// buildOAuthCreatePayload() below so token/cloak/model extraction is
+// consistent with the connect flow.
 // ============================================================================
 
 // Map an auth-file's `type`/`provider` string (lowercased) to the upstream
@@ -1630,10 +1240,10 @@ function isServiceAccountJson(obj) {
 
 // extractAuthFields maps a parsed auth-dir JSON object to the field set the
 // upstream_providers POST endpoint expects for an `oauth:<channel>` row.
-// Mirrors the merging logic in OAuthConnectSection.pollForAuthFile
-// (lines ~1308-1343) and the onCompleted merger (~1017-1055) so a row created
-// via Import carries the same token/cloak/model metadata as one created via
-// the live connect flow.
+// Mirrors the merging logic in OAuthConnectSection.pollForAuthFile and the
+// editor page's onCompleted merger (upstream-provider-editor/) so a row
+// created via Import carries the same token/cloak/model metadata as one
+// created via the live connect flow.
 //
 // Returns { provider_type, file_name, email, label, token_*, cloak_*, prefix,
 // extra_config, models } or { error } when the channel cannot be detected or
@@ -1693,8 +1303,8 @@ function extractAuthFields(json, opts = {}) {
 }
 
 // buildOAuthCreatePayload converts extracted fields into the JSON body shape
-// expected by POST /upstream-providers (mirrors UpstreamProviderEditor's
-// buildPayload for the `oauth` + `claude` branches).
+// expected by POST /upstream-providers (mirrors the editor page's buildPayload
+// in upstream-provider-editor/form.js for the `oauth` + `claude` branches).
 function buildOAuthCreatePayload(fields) {
   const payload = {
     provider_type: fields.provider_type,
