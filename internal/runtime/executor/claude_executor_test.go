@@ -4227,6 +4227,373 @@ func TestRelocateClaudeSystemPromptForCountTokensKeepsBlocksSeparate(t *testing.
 	}
 }
 
+func TestCheckSystemInstructionsWithMode_AdvisorToolResultPreservesTopLevelSystemAndKeepsMessagesIntact(t *testing.T) {
+	payload := []byte(`{
+		"model": "claude-opus-5",
+		"system": [
+			{"type": "text", "text": "first guidance"},
+			{"type": "text", "text": "second guidance"}
+		],
+		"messages": [
+			{"role": "user", "content": "hello"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "server_tool_use", "id": "srvtoolu_adv1", "name": "advisor", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "advisor_tool_result",
+						"tool_use_id": "srvtoolu_adv1",
+						"content": {
+							"type": "advisor_redacted_result",
+							"encrypted_content": "ciphertext123"
+						}
+					}
+				]
+			},
+			{"role": "assistant", "content": "advice acknowledged"}
+		]
+	}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	// Messages must NOT have mid-conversation role=system turns inserted,
+	// so the message count stays at 4 and roles remain intact.
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 4 {
+		t.Fatalf("messages count = %d, want 4 (no mid-conversation system splice): %s", got, out)
+	}
+	roles := gjson.GetBytes(out, "messages.#.role").Array()
+	wantRoles := []string{"user", "assistant", "user", "assistant"}
+	for idx, wantRole := range wantRoles {
+		if got := roles[idx].String(); got != wantRole {
+			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
+		}
+	}
+
+	// Top-level system must retain caller system blocks in addition to Claude Code identity blocks.
+	systemBlocks := gjson.GetBytes(out, "system").Array()
+	if len(systemBlocks) != 4 {
+		t.Fatalf("system blocks count = %d, want 4 (2 identity + 2 caller blocks): %s", len(systemBlocks), out)
+	}
+	if got := systemBlocks[2].Get("text").String(); got != "first guidance" {
+		t.Fatalf("system[2].text = %q, want first guidance", got)
+	}
+	if got := systemBlocks[3].Get("text").String(); got != "second guidance" {
+		t.Fatalf("system[3].text = %q, want second guidance", got)
+	}
+}
+
+func TestRelocateClaudeSystemPromptForCountTokens_AdvisorToolResultLeavesMessagesUntouched(t *testing.T) {
+	payload := []byte(`{
+		"model": "claude-opus-5",
+		"system": [
+			{"type": "text", "text": "first guidance"},
+			{"type": "text", "text": "second guidance"}
+		],
+		"messages": [
+			{"role": "user", "content": "hello"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "server_tool_use", "id": "srvtoolu_adv1", "name": "advisor", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "advisor_tool_result",
+						"tool_use_id": "srvtoolu_adv1",
+						"content": [
+							{
+								"type": "advisor_redacted_result",
+								"encrypted_content": "ciphertext123"
+							}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	out := relocateClaudeSystemPromptForCountTokens(payload, false)
+
+	// Caller system blocks must be retained in top-level system so that
+	// their tokens are counted, without splicing them into messages[].
+	systemBlocks := gjson.GetBytes(out, "system").Array()
+	if len(systemBlocks) != 2 {
+		t.Fatalf("count_tokens system blocks count = %d, want 2: %s", len(systemBlocks), out)
+	}
+	if got := systemBlocks[0].Get("text").String(); got != "first guidance" {
+		t.Fatalf("system[0].text = %q, want first guidance", got)
+	}
+	if got := systemBlocks[1].Get("text").String(); got != "second guidance" {
+		t.Fatalf("system[1].text = %q, want second guidance", got)
+	}
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+		t.Fatalf("count_tokens messages count = %d, want 3 (no mid-conversation system splice): %s", got, out)
+	}
+	roles := gjson.GetBytes(out, "messages.#.role").Array()
+	wantRoles := []string{"user", "assistant", "user"}
+	for idx, wantRole := range wantRoles {
+		if got := roles[idx].String(); got != wantRole {
+			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
+		}
+	}
+}
+
+func TestCheckSystemInstructionsWithMode_UnicodeEscapedAdvisor(t *testing.T) {
+	// JSON with unicode-escaped "advisor" name: \u0061dvisor
+	payload := []byte(`{
+		"model": "claude-opus-5",
+		"system": [
+			{"type": "text", "text": "guidance"}
+		],
+		"messages": [
+			{"role": "user", "content": "hello"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "server_tool_use", "id": "srvtoolu_adv1", "name": "\u0061dvisor", "input": {}}
+				]
+			}
+		]
+	}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+		t.Fatalf("messages count = %d, want 2 (no mid-conversation splice): %s", got, out)
+	}
+	systemBlocks := gjson.GetBytes(out, "system").Array()
+	if len(systemBlocks) != 3 {
+		t.Fatalf("system blocks count = %d, want 3: %s", len(systemBlocks), out)
+	}
+	if got := systemBlocks[2].Get("text").String(); got != "guidance" {
+		t.Fatalf("system[2].text = %q, want guidance", got)
+	}
+}
+
+func TestCheckSystemInstructionsWithMode_StandaloneAdvisorCallWithoutResult(t *testing.T) {
+	// Assistant made an advisor call, but no result has arrived yet
+	payload := []byte(`{
+		"model": "claude-opus-5",
+		"system": [
+			{"type": "text", "text": "guidance"}
+		],
+		"messages": [
+			{"role": "user", "content": "hello"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "server_tool_use", "id": "srvtoolu_adv1", "name": "advisor", "input": {}}
+				]
+			}
+		]
+	}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+		t.Fatalf("messages count = %d, want 2 (no mid-conversation splice): %s", got, out)
+	}
+	roles := gjson.GetBytes(out, "messages.#.role").Array()
+	wantRoles := []string{"user", "assistant"}
+	for idx, wantRole := range wantRoles {
+		if got := roles[idx].String(); got != wantRole {
+			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
+		}
+	}
+	systemBlocks := gjson.GetBytes(out, "system").Array()
+	if len(systemBlocks) != 3 {
+		t.Fatalf("system blocks count = %d, want 3: %s", len(systemBlocks), out)
+	}
+	if got := systemBlocks[2].Get("text").String(); got != "guidance" {
+		t.Fatalf("system[2].text = %q, want guidance", got)
+	}
+}
+
+func TestCheckSystemInstructionsWithMode_StandaloneAdvisorResultWithoutCall(t *testing.T) {
+	// User message has advisor_tool_result without preceding server_tool_use in the window
+	payload := []byte(`{
+		"model": "claude-opus-5",
+		"system": [
+			{"type": "text", "text": "guidance"}
+		],
+		"messages": [
+			{"role": "user", "content": "hello"},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "advisor_tool_result",
+						"tool_use_id": "srvtoolu_adv1",
+						"content": [
+							{
+								"type": "advisor_redacted_result",
+								"encrypted_content": "ciphertext123"
+							}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+		t.Fatalf("messages count = %d, want 2 (no mid-conversation splice): %s", got, out)
+	}
+	roles := gjson.GetBytes(out, "messages.#.role").Array()
+	wantRoles := []string{"user", "user"}
+	for idx, wantRole := range wantRoles {
+		if got := roles[idx].String(); got != wantRole {
+			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
+		}
+	}
+	systemBlocks := gjson.GetBytes(out, "system").Array()
+	if len(systemBlocks) != 3 {
+		t.Fatalf("system blocks count = %d, want 3: %s", len(systemBlocks), out)
+	}
+	if got := systemBlocks[2].Get("text").String(); got != "guidance" {
+		t.Fatalf("system[2].text = %q, want guidance", got)
+	}
+}
+
+func TestCheckSystemInstructionsWithMode_NormalTextWithAdvisorWordDoesNotBypassMidSystemSplice(t *testing.T) {
+	payload := []byte(`{
+		"model": "claude-opus-5",
+		"system": [
+			{"type": "text", "text": "first guidance"},
+			{"type": "text", "text": "second guidance"}
+		],
+		"messages": [
+			{"role": "user", "content": "I need an advisor on financial planning."}
+		]
+	}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	// Since there is no advisor tool invocation/result, normal mid-conversation system insertion occurs.
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+		t.Fatalf("messages count = %d, want 3 (user + 2 system messages): %s", got, out)
+	}
+	assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance", "")
+	assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance", "")
+}
+
+func TestCheckSystemInstructionsWithMode_AdvisorToolResultArrayContent(t *testing.T) {
+	payload := []byte(`{
+		"model": "claude-opus-5",
+		"system": [
+			{"type": "text", "text": "guidance"}
+		],
+		"messages": [
+			{"role": "user", "content": "hello"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "server_tool_use", "id": "srvtoolu_adv1", "name": "advisor", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "advisor_tool_result",
+						"tool_use_id": "srvtoolu_adv1",
+						"content": [
+							{
+								"type": "advisor_redacted_result",
+								"encrypted_content": "ciphertext123"
+							}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+		t.Fatalf("messages count = %d, want 3: %s", got, out)
+	}
+	roles := gjson.GetBytes(out, "messages.#.role").Array()
+	wantRoles := []string{"user", "assistant", "user"}
+	for idx, wantRole := range wantRoles {
+		if got := roles[idx].String(); got != wantRole {
+			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
+		}
+	}
+	systemBlocks := gjson.GetBytes(out, "system").Array()
+	if len(systemBlocks) != 3 {
+		t.Fatalf("system blocks count = %d, want 3: %s", len(systemBlocks), out)
+	}
+	if got := systemBlocks[2].Get("text").String(); got != "guidance" {
+		t.Fatalf("system[2].text = %q, want guidance", got)
+	}
+}
+
+func TestCheckSystemInstructionsWithMode_ToolResultWithAdvisorRedactedResult(t *testing.T) {
+	payload := []byte(`{
+		"model": "claude-opus-5",
+		"system": [
+			{"type": "text", "text": "guidance"}
+		],
+		"messages": [
+			{"role": "user", "content": "hello"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_adv1", "name": "advisor", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "toolu_adv1",
+						"content": [
+							{
+								"type": "advisor_redacted_result",
+								"encrypted_content": "ciphertext123"
+							}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+		t.Fatalf("messages count = %d, want 3: %s", got, out)
+	}
+	roles := gjson.GetBytes(out, "messages.#.role").Array()
+	wantRoles := []string{"user", "assistant", "user"}
+	for idx, wantRole := range wantRoles {
+		if got := roles[idx].String(); got != wantRole {
+			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
+		}
+	}
+	systemBlocks := gjson.GetBytes(out, "system").Array()
+	if len(systemBlocks) != 3 {
+		t.Fatalf("system blocks count = %d, want 3: %s", len(systemBlocks), out)
+	}
+	if got := systemBlocks[2].Get("text").String(); got != "guidance" {
+		t.Fatalf("system[2].text = %q, want guidance", got)
+	}
+}
+
 // Test case 5: Special characters survive the mid-conversation system move.
 func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	payload := []byte(`{"model":"claude-opus-5","system":"Use <xml> tags & \"quotes\" in output.","messages":[{"role":"user","content":"hi"}]}`)
