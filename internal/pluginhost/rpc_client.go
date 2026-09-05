@@ -269,6 +269,11 @@ func sanitizePluginMetadataValue(value any) (any, bool) {
 		int, int8, int16, int32, int64,
 		uint, uint8, uint16, uint32, uint64:
 		return value, true
+	case json.Number:
+		if _, errMarshal := json.Marshal(v); errMarshal != nil {
+			return nil, false
+		}
+		return v, true
 	case map[string]any:
 		return sanitizePluginMetadata(v), true
 	case []any:
@@ -330,7 +335,9 @@ func decodeEnvelopeResult[T any](envelope pluginabi.Envelope) (T, error) {
 		return zero, nil
 	}
 	var out T
-	if errDecode := json.Unmarshal(envelope.Result, &out); errDecode != nil {
+	decoder := json.NewDecoder(bytes.NewReader(envelope.Result))
+	decoder.UseNumber()
+	if errDecode := decoder.Decode(&out); errDecode != nil {
 		return zero, errDecode
 	}
 	return out, nil

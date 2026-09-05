@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 type staticEnvelopePluginClient struct {
@@ -78,5 +79,23 @@ func TestIsPluginErrorEnvelopeAcceptsNonzeroReturnEnvelope(t *testing.T) {
 	}
 	if isPluginErrorEnvelope([]byte(`not json`)) {
 		t.Fatal("isPluginErrorEnvelope accepted invalid JSON")
+	}
+}
+
+func TestDecodeEnvelopeResultPreservesAuthMetadataNumbers(t *testing.T) {
+	const exact = "9007199254740993"
+	result := json.RawMessage(`{"Handled":true,"Auth":{"Provider":"plugin-provider","Metadata":{"plugin_quota":{"period_tokens":` + exact + `}}}}`)
+	response, errDecode := decodeEnvelopeResult[pluginapi.AuthParseResponse](pluginabi.Envelope{OK: true, Result: result})
+	if errDecode != nil {
+		t.Fatalf("decodeEnvelopeResult() error = %v", errDecode)
+	}
+	quota := response.Auth.Metadata["plugin_quota"].(map[string]any)
+	if quota["period_tokens"] != json.Number(exact) {
+		t.Fatalf("period_tokens = %#v, want exact JSON number %s", quota["period_tokens"], exact)
+	}
+	sanitized := sanitizePluginMetadata(response.Auth.Metadata)
+	sanitizedQuota := sanitized["plugin_quota"].(map[string]any)
+	if sanitizedQuota["period_tokens"] != json.Number(exact) {
+		t.Fatalf("sanitized period_tokens = %#v, want exact JSON number %s", sanitizedQuota["period_tokens"], exact)
 	}
 }
