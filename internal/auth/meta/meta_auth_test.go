@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -144,7 +145,7 @@ func TestMetaAuth_WaitForAuthorization(t *testing.T) {
 }
 
 func TestCredentialFileName(t *testing.T) {
-	if got := CredentialFileName("user@example.com", ""); got != "meta-user_example.com.json" {
+	if got := CredentialFileName("user@example.com", ""); !strings.HasPrefix(got, "meta-user_example.com-") || !strings.HasSuffix(got, ".json") {
 		t.Errorf("unexpected fileName: %s", got)
 	}
 	if got := CredentialFileName("", "12345"); got == "" || !filepath.IsLocal(got) {
@@ -296,5 +297,64 @@ func TestCreateTokenStorageUsesMintedBaseURL(t *testing.T) {
 				t.Fatalf("base URL = %q, want %q", storage.BaseURL, tc.want)
 			}
 		})
+	}
+}
+
+func TestCredentialFileNameSeparatesAccounts(t *testing.T) {
+	first := CredentialFileName("alice+work@example.com", "dca:first")
+	second := CredentialFileName("alice_work@example.com", "dca:second")
+	if first == second {
+		t.Fatal("distinct accounts overwrite the same file")
+	}
+	if first != CredentialFileName("alice+work@example.com", "dca:replacement") {
+		t.Fatal("re-login changed account file")
+	}
+	long := CredentialFileName(strings.Repeat("a", 300)+"@example.com", "")
+	if len(long) > 255 || !filepath.IsLocal(long) {
+		t.Fatal("filename cannot be saved on common filesystems")
+	}
+}
+
+func TestSaveTokenToFileUsesCurrentSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meta.json")
+	if err := os.WriteFile(path, []byte(`{"disabled":false,"priority":1,"notes":"removed"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	storage := &MetaTokenStorage{AccessToken: "LLM|key", APIKey: "LLM|key", Metadata: map[string]any{"disabled": true, "priority": float64(2)}}
+	if err := storage.SaveTokenToFile(path); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved["disabled"] != true || saved["priority"] != float64(2) {
+		t.Fatalf("restored old settings: %s", raw)
+	}
+	if _, exists := saved["notes"]; exists {
+		t.Fatal("restored a deleted setting")
+	}
+}
+
+func TestSaveTokenToFilePreservesFileOnEncodingFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meta.json")
+	initial := `{"access_token":"LLM|previous"}`
+	if err := os.WriteFile(path, []byte(initial), 0600); err != nil {
+		t.Fatal(err)
+	}
+	storage := &MetaTokenStorage{AccessToken: "LLM|new", Metadata: map[string]any{"invalid": make(chan int)}}
+	if err := storage.SaveTokenToFile(path); err == nil {
+		t.Fatal("expected encoding failure")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != initial {
+		t.Fatalf("failed save corrupted existing credential: %q", raw)
 	}
 }

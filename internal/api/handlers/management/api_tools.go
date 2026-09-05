@@ -11,12 +11,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	metaauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/meta"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/sync/singleflight"
 )
 
 const defaultAPICallTimeout = 60 * time.Second
@@ -360,8 +359,6 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 	return strings.TrimSpace(tokenResp.AccessToken), nil
 }
 
-var metaManagementMintGroup singleflight.Group
-
 func metaTokenFromAuth(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
@@ -385,6 +382,29 @@ func metaTokenFromAuth(auth *coreauth.Auth) string {
 	return ""
 }
 
+// metaManagementPreparer applies the tool's proxy override only to acquisition.
+// The saved credential retains its configured proxy.
+type metaManagementPreparer struct {
+	executor *executor.MetaExecutor
+	proxyURL string
+}
+
+func (p metaManagementPreparer) ShouldPrepareRequestAuth(auth *coreauth.Auth) bool {
+	return p.executor.ShouldPrepareRequestAuth(auth)
+}
+
+func (p metaManagementPreparer) PrepareRequestAuth(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	proxyURL := auth.ProxyURL
+	if strings.TrimSpace(p.proxyURL) != "" {
+		auth.ProxyURL = p.proxyURL
+	}
+	updated, err := p.executor.PrepareRequestAuth(ctx, auth)
+	if updated != nil {
+		updated.ProxyURL = proxyURL
+	}
+	return updated, err
+}
+
 func (h *Handler) resolveMetaToken(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -392,183 +412,25 @@ func (h *Handler) resolveMetaToken(ctx context.Context, auth *coreauth.Auth, req
 	if auth == nil {
 		return "", nil
 	}
-	if tok := metaTokenFromAuth(auth); tok != "" {
-		return tok, nil
+	if token := metaTokenFromAuth(auth); token != "" {
+		return token, nil
 	}
-
-	var dcaToken string
-	if !coreauth.IsConfigAPIKeyAuth(auth) {
-		if auth.Metadata != nil {
-			if d, ok := auth.Metadata["dca_token"].(string); ok && strings.TrimSpace(d) != "" {
-				dcaToken = strings.TrimSpace(d)
-			} else if t, ok := auth.Metadata["access_token"].(string); ok && strings.HasPrefix(strings.TrimSpace(t), "dca:") {
-				dcaToken = strings.TrimSpace(t)
-			}
-		}
-		if dcaToken == "" && auth.Attributes != nil {
-			if d := strings.TrimSpace(auth.Attributes["dca_token"]); d != "" {
-				dcaToken = d
-			} else if t := strings.TrimSpace(auth.Attributes["access_token"]); strings.HasPrefix(t, "dca:") {
-				dcaToken = t
-			}
-		}
+	var cfg *config.Config
+	if h != nil {
+		cfg = h.cfg
 	}
-
-	if dcaToken == "" {
+	preparer := metaManagementPreparer{executor: executor.NewMetaExecutor(cfg), proxyURL: requestProxyURL}
+	if !preparer.ShouldPrepareRequestAuth(auth) {
 		return "", nil
 	}
-
-	flightKey := firstNonEmptyString(&auth.ID, &dcaToken)
-
-	mintRes, errMint, _ := metaManagementMintGroup.Do(flightKey, func() (any, error) {
-		if h != nil && h.authManager != nil {
-			var latest *coreauth.Auth
-			if auth.ID != "" {
-				if a, ok := h.authManager.GetByID(auth.ID); ok && a != nil {
-					latest = a
-				}
-			}
-			if latest == nil && auth.Index != "" {
-				latest = h.authByIndex(auth.Index)
-			}
-			if latest != nil {
-				if k := metaTokenFromAuth(latest); k != "" {
-					return k, nil
-				}
-			}
-		}
-
-		proxyURL := firstNonEmptyString(&requestProxyURL, &auth.ProxyURL)
-		var cfg *config.Config
-		if h != nil {
-			cfg = h.cfg
-		}
-		authSvc := metaauth.NewMetaAuthWithProxyURL(cfg, proxyURL)
-		minted, err := authSvc.MintAPIKey(ctx, dcaToken)
-		if err != nil {
-			return "", fmt.Errorf("meta token mint failed: %w", err)
-		}
-		if minted == nil || minted.APIKey == "" {
-			return "", fmt.Errorf("meta token mint returned empty key")
-		}
-
-		base := auth.Clone()
-		baseURL := ""
-		if auth.Attributes != nil {
-			baseURL = strings.TrimSpace(auth.Attributes["base_url"])
-		}
-		if baseURL == "" {
-			baseURL = stringValue(auth.Metadata, "base_url")
-		}
-		if baseURL == "" {
-			baseURL = stringValue(auth.Metadata, "api_base_url")
-		}
-		if baseURL == "" {
-			baseURL = metaauth.DefaultAPIBaseURL
-		}
-		if mintedURL := strings.TrimSpace(minted.BaseURL); mintedURL != "" {
-			baseURL = mintedURL
-		}
-		if auth.Metadata == nil {
-			auth.Metadata = make(map[string]any)
-		}
-		auth.Metadata["base_url"] = baseURL
-		auth.Metadata["api_key"] = minted.APIKey
-		auth.Metadata["access_token"] = minted.APIKey
-		auth.Metadata["dca_token"] = dcaToken
-		delete(auth.Metadata, "expired")
-		if minted.UserEmail != "" {
-			auth.Metadata["email"] = minted.UserEmail
-		}
-		if minted.UserFullName != "" {
-			auth.Metadata["name"] = minted.UserFullName
-		}
-		now := time.Now()
-		nowStr := now.Format(time.RFC3339)
-		auth.LastRefreshedAt = now
-		auth.UpdatedAt = now
-		auth.Metadata["last_refresh"] = nowStr
-
-		if auth.Attributes == nil {
-			auth.Attributes = make(map[string]string)
-		}
-		auth.Attributes["base_url"] = baseURL
-		auth.Attributes["api_key"] = minted.APIKey
-		auth.Attributes["access_token"] = minted.APIKey
-
-		storage := &metaauth.MetaTokenStorage{Type: "meta", AuthKind: "oauth"}
-		if existing, ok := auth.Storage.(*metaauth.MetaTokenStorage); ok && existing != nil {
-			copyStorage := *existing
-			storage = &copyStorage
-		}
-		storage.APIKey = minted.APIKey
-		storage.AccessToken = minted.APIKey
-		storage.DCAToken = dcaToken
-		storage.Expired = ""
-		storage.BaseURL = baseURL
-		storage.LastRefresh = nowStr
-		storage.Metadata = auth.Metadata
-		if minted.UserEmail != "" {
-			storage.Email = minted.UserEmail
-		}
-		if minted.UserFullName != "" {
-			storage.Name = minted.UserFullName
-		}
-		auth.Storage = storage
-
-		// Use the configured backend; direct file writes bypass remote token stores.
-		if !coreauth.IsConfigAPIKeyAuth(auth) {
-			store := h.tokenStoreWithBaseDir()
-			if store == nil {
-				return "", fmt.Errorf("meta token store unavailable")
-			}
-			if _, errSave := store.Save(ctx, auth); errSave != nil {
-				return "", fmt.Errorf("persist meta token: %w", errSave)
-			}
-		}
-		if h != nil && h.authManager != nil {
-			if _, errUpdate := h.authManager.UpdateRefreshedAuth(coreauth.WithSkipPersist(ctx), base, auth); errUpdate != nil {
-				return "", fmt.Errorf("update meta auth: %w", errUpdate)
-			}
-		}
-
-		return minted.APIKey, nil
-	})
-	if errMint != nil {
-		return "", errMint
+	if h == nil || h.authManager == nil || auth.ID == "" {
+		return "", fmt.Errorf("meta token mint requires a registered credential")
 	}
-
-	key, _ := mintRes.(string)
-	if h != nil && h.authManager != nil {
-		var latest *coreauth.Auth
-		if auth.ID != "" {
-			if a, ok := h.authManager.GetByID(auth.ID); ok && a != nil {
-				latest = a
-			}
-		}
-		if latest == nil && auth.Index != "" {
-			latest = h.authByIndex(auth.Index)
-		}
-		if latest != nil {
-			if auth.Metadata == nil {
-				auth.Metadata = make(map[string]any)
-			}
-			for k, v := range latest.Metadata {
-				auth.Metadata[k] = v
-			}
-			if auth.Attributes == nil {
-				auth.Attributes = make(map[string]string)
-			}
-			for k, v := range latest.Attributes {
-				auth.Attributes[k] = v
-			}
-			auth.Storage = latest.Storage
-			auth.LastRefreshedAt = latest.LastRefreshedAt
-			auth.UpdatedAt = latest.UpdatedAt
-		}
+	updated, err := h.authManager.PrepareRequestAuth(ctx, preparer, auth)
+	if err != nil {
+		return "", err
 	}
-
-	return key, nil
+	return metaTokenFromAuth(updated), nil
 }
 
 func antigravityTokenNeedsRefresh(metadata map[string]any) bool {

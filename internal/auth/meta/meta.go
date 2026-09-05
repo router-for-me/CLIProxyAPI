@@ -173,43 +173,44 @@ func (ts *MetaTokenStorage) SaveTokenToFile(authFilePath string) error {
 	if ts.Name != "" {
 		data["name"] = ts.Name
 	}
-	if raw, errRead := os.ReadFile(authFilePath); errRead == nil {
-		var existing map[string]any
-		if errJSON := json.Unmarshal(raw, &existing); errJSON == nil {
-			for k, v := range existing {
-				if _, isCred := metaCredentialFields[k]; isCred {
-					continue
-				}
-				if _, exists := data[k]; !exists {
-					data[k] = v
-				}
-			}
+	// Managed saves supply the current metadata, including deliberate deletions.
+	// Only login callers without a metadata snapshot inherit settings from disk.
+	metadata := ts.Metadata
+	if metadata == nil {
+		if raw, errRead := os.ReadFile(authFilePath); errRead == nil {
+			_ = json.Unmarshal(raw, &metadata)
 		}
 	}
-	for k, v := range ts.Metadata {
+	for k, v := range metadata {
 		if _, isCred := metaCredentialFields[k]; isCred {
 			continue
 		}
-		if _, exists := data[k]; !exists {
+		// Supplied settings take precedence over storage's older snapshot.
+		if _, exists := data[k]; !exists || ts.Metadata != nil {
 			data[k] = v
 		}
 	}
 
-	file, err := os.Create(authFilePath)
+	raw, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return fmt.Errorf("meta token storage: encode token file: %w", err)
+	}
+	file, err := os.CreateTemp(filepath.Dir(authFilePath), ".meta-token-*")
 	if err != nil {
 		return fmt.Errorf("meta token storage: create token file: %w", err)
 	}
-	defer func() {
-		if errClose := file.Close(); errClose != nil {
-			log.Errorf("meta token storage: close token file error: %v", errClose)
-		}
-	}()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err = encoder.Encode(data); err != nil {
-		return fmt.Errorf("meta token storage: write token file: %w", err)
+	defer func() { _ = os.Remove(file.Name()) }()
+	if _, errWrite := file.Write(append(raw, '\n')); errWrite != nil {
+		_ = file.Close()
+		return fmt.Errorf("meta token storage: write token file: %w", errWrite)
 	}
+	if errClose := file.Close(); errClose != nil {
+		return fmt.Errorf("meta token storage: close token file: %w", errClose)
+	}
+	if errRename := os.Rename(file.Name(), authFilePath); errRename != nil {
+		return fmt.Errorf("meta token storage: replace token file: %w", errRename)
+	}
+
 	return nil
 }
 
@@ -536,7 +537,8 @@ func (a *MetaAuth) CreateTokenStorage(bundle *MetaAuthBundle) *MetaTokenStorage 
 	}
 }
 
-// CredentialFileName derives a deterministic, collision-free file name for the credentials.
+// CredentialFileName keeps a readable account name and hashes the original identity
+// so distinct emails that sanitize identically cannot overwrite each other.
 func CredentialFileName(email, sub string) string {
 	clean := strings.TrimSpace(email)
 	if clean != "" {
@@ -546,7 +548,12 @@ func CredentialFileName(email, sub string) string {
 			}
 			return '_'
 		}, clean)
-		return fmt.Sprintf("meta-%s.json", sanitized)
+		// Leave room for the prefix, identity hash and extension on common filesystems.
+		if len(sanitized) > 120 {
+			sanitized = sanitized[:120]
+		}
+		hash := sha256.Sum256([]byte(clean))
+		return fmt.Sprintf("meta-%s-%s.json", sanitized, hex.EncodeToString(hash[:8]))
 	}
 	cleanSub := strings.TrimSpace(sub)
 	if cleanSub != "" {

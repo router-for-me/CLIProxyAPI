@@ -208,46 +208,27 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	auth.Attributes["api_key"] = minted.APIKey
 	auth.Attributes["access_token"] = minted.APIKey
 
-	var storage *metaauth.MetaTokenStorage
-	if ms, ok := auth.Storage.(*metaauth.MetaTokenStorage); ok && ms != nil {
-		storage = ms
+	// Auth.Clone does not clone Storage. Keep the candidate isolated from live
+	// login storage; file-loaded records already persist through Metadata.
+	if existing, ok := auth.Storage.(*metaauth.MetaTokenStorage); ok && existing != nil {
+		storage := *existing
 		storage.APIKey = minted.APIKey
 		storage.AccessToken = minted.APIKey
 		storage.DCAToken = dcaToken
 		storage.Expired = ""
+		storage.BaseURL = baseURL
+		storage.LastRefresh = nowStr
+		storage.Metadata = auth.Metadata
 		if minted.UserEmail != "" {
 			storage.Email = minted.UserEmail
 		}
 		if minted.UserFullName != "" {
 			storage.Name = minted.UserFullName
 		}
-		storage.LastRefresh = nowStr
-	} else {
-		storage = &metaauth.MetaTokenStorage{
-			Type:        "meta",
-			AuthKind:    "oauth",
-			AccessToken: minted.APIKey,
-			APIKey:      minted.APIKey,
-			DCAToken:    dcaToken,
-			Email:       minted.UserEmail,
-			Name:        minted.UserFullName,
-			LastRefresh: nowStr,
-			Metadata:    auth.Metadata,
-		}
-		auth.Storage = storage
+		auth.Storage = &storage
 	}
-
-	storage.BaseURL = baseURL
-
-	filePath := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributePath])
-	if filePath == "" {
-		filePath = strings.TrimSpace(auth.FileName)
-	}
-	if filePath != "" {
-		if errSave := storage.SaveTokenToFile(filePath); errSave != nil {
-			log.Warnf("meta executor: failed to persist refreshed token to %s: %v", filePath, errSave)
-		}
-	}
+	// Only the manager may accept and persist the candidate.
+	auth.LastRefreshedAt = time.Now()
 
 	return auth, nil
 }

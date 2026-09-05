@@ -8,14 +8,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	metaauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/meta"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -198,7 +199,7 @@ func mapToJSON(m map[string]any) string {
 	return string(b)
 }
 
-func TestMetaExecutor_Refresh_DCA_MintAndPersist(t *testing.T) {
+func TestMetaExecutor_Refresh_RequiresManagerAcceptance(t *testing.T) {
 	tempDir := t.TempDir()
 	authFilePath := filepath.Join(tempDir, "meta-test.json")
 	initialContent := `{"type":"meta","auth_kind":"oauth","access_token":"dca:initial-dca","dca_token":"dca:initial-dca","expired":"2020-01-01T00:00:00Z","request-retry":3}`
@@ -223,6 +224,8 @@ func TestMetaExecutor_Refresh_DCA_MintAndPersist(t *testing.T) {
 	t.Setenv("META_MINT_URL", server.URL+"/key")
 
 	auth := &cliproxyauth.Auth{
+		ID:       "meta-test.json",
+		FileName: "meta-test.json",
 		Provider: "meta",
 		Attributes: map[string]string{
 			cliproxyauth.AttributePath: authFilePath,
@@ -233,8 +236,17 @@ func TestMetaExecutor_Refresh_DCA_MintAndPersist(t *testing.T) {
 		},
 	}
 
+	store := sdkauth.NewFileTokenStore()
+	store.SetBaseDir(tempDir)
+	manager := cliproxyauth.NewManager(store, nil, nil)
+	auth.Metadata["request-retry"] = float64(3)
+	auth.Storage = &metaauth.MetaTokenStorage{AccessToken: "dca:initial-dca", DCAToken: "dca:initial-dca", Expired: "2020-01-01T00:00:00Z"}
+	auth, errRegister := manager.Register(cliproxyauth.WithSkipPersist(context.Background()), auth)
+	if errRegister != nil {
+		t.Fatal(errRegister)
+	}
 	exec := NewMetaExecutor(&config.Config{})
-	refreshed, err := exec.Refresh(context.Background(), auth)
+	refreshed, err := exec.Refresh(context.Background(), auth.Clone())
 	if err != nil {
 		t.Fatalf("exec.Refresh error: %v", err)
 	}
@@ -249,6 +261,20 @@ func TestMetaExecutor_Refresh_DCA_MintAndPersist(t *testing.T) {
 		t.Errorf("expected expired to be removed from metadata after minting")
 	}
 
+	unchanged, errRead := os.ReadFile(authFilePath)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if string(unchanged) != initialContent {
+		t.Fatal("executor wrote candidate before manager acceptance")
+	}
+	live, _ := manager.GetByID(auth.ID)
+	if live.Storage.(*metaauth.MetaTokenStorage).AccessToken != "dca:initial-dca" {
+		t.Fatal("refresh mutated live token storage")
+	}
+	if _, err := manager.UpdateRefreshedAuth(context.Background(), auth, refreshed); err != nil {
+		t.Fatal(err)
+	}
 	// Verify durable file persistence on disk
 	diskBytes, errRead := os.ReadFile(authFilePath)
 	if errRead != nil {
@@ -265,12 +291,12 @@ func TestMetaExecutor_Refresh_DCA_MintAndPersist(t *testing.T) {
 		t.Errorf("expected persisted access_token LLM|persisted-minted-key, got %v", diskData["access_token"])
 	}
 	// Verify existing properties preserved
-	if diskData["request-retry"] != float64(3) {
-		t.Errorf("expected preserved request-retry: 3, got %v", diskData["request-retry"])
+	if diskData["request_retry"] != float64(3) {
+		t.Errorf("expected preserved request-retry: 3, got %v", diskData["request_retry"])
 	}
 }
 
-func TestMetaExecutor_Refresh_SingleflightAndMultiAccount(t *testing.T) {
+func TestMetaExecutor_PrepareConcurrentAccounts(t *testing.T) {
 	var count1, count2 int64
 
 	serverStarted := make(chan struct{})
@@ -312,10 +338,15 @@ func TestMetaExecutor_Refresh_SingleflightAndMultiAccount(t *testing.T) {
 	// 10 concurrent refreshes for account 1
 	var wg sync.WaitGroup
 	auth1 := &cliproxyauth.Auth{
+		ID:       "meta-acct1",
 		Provider: "meta",
 		Metadata: map[string]any{"dca_token": "dca:acct1"},
 	}
 
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), auth1); err != nil {
+		t.Fatal(err)
+	}
 	const goroutines = 10
 	var entryWg sync.WaitGroup
 	entryWg.Add(goroutines)
@@ -330,7 +361,7 @@ func TestMetaExecutor_Refresh_SingleflightAndMultiAccount(t *testing.T) {
 			entryWg.Done()
 			<-ready
 			inFlight.Done()
-			res, err := exec.Refresh(context.Background(), auth1.Clone())
+			res, err := manager.PrepareRequestAuth(context.Background(), exec, auth1.Clone())
 			if err != nil {
 				t.Errorf("Refresh acct1 error: %v", err)
 			}
@@ -348,12 +379,12 @@ func TestMetaExecutor_Refresh_SingleflightAndMultiAccount(t *testing.T) {
 	<-serverStarted
 	inFlight.Wait()
 
-	// Allow pending goroutines to enter singleflight.Do while the server holds the in-flight request.
-	for i := 0; i < 50; i++ {
-		runtime.Gosched()
+	// A second account must complete while the first account's mint is blocked.
+	auth2 := &cliproxyauth.Auth{ID: "meta-acct2", Provider: "meta", Metadata: map[string]any{"dca_token": "dca:acct2"}}
+	if _, err := manager.Register(context.Background(), auth2); err != nil {
+		t.Fatal(err)
 	}
-
-	// Release the HTTP server handler to complete the single in-flight mint.
+	res2, err2 := manager.PrepareRequestAuth(context.Background(), exec, auth2.Clone())
 	close(releaseServer)
 	wg.Wait()
 
@@ -361,12 +392,6 @@ func TestMetaExecutor_Refresh_SingleflightAndMultiAccount(t *testing.T) {
 		t.Errorf("expected exactly 1 singleflight mint request for acct1, got %d", totalMint1)
 	}
 
-	// Account 2 refreshes independently
-	auth2 := &cliproxyauth.Auth{
-		Provider: "meta",
-		Metadata: map[string]any{"dca_token": "dca:acct2"},
-	}
-	res2, err2 := exec.Refresh(context.Background(), auth2.Clone())
 	if err2 != nil {
 		t.Fatalf("Refresh acct2 error: %v", err2)
 	}
@@ -504,17 +529,13 @@ func TestMetaExecutorRefreshUsesMintedBaseURL(t *testing.T) {
 			if got, _ := metaCreds(updated); got != tc.want {
 				t.Errorf("request base URL = %q, want %q", got, tc.want)
 			}
-			raw, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
+			if updated.Metadata["base_url"] != tc.want {
+				t.Errorf("candidate base URL = %v, want %q", updated.Metadata["base_url"], tc.want)
 			}
-			var saved map[string]any
-			if err = json.Unmarshal(raw, &saved); err != nil {
-				t.Fatal(err)
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("refresh created a file: %v", err)
 			}
-			if saved["base_url"] != tc.want {
-				t.Errorf("saved base URL = %v, want %q", saved["base_url"], tc.want)
-			}
+
 		})
 	}
 }
@@ -616,7 +637,7 @@ func TestMetaExecutor_RequestAuthPreparer(t *testing.T) {
 	}
 
 	authDCAOnly := &cliproxyauth.Auth{
-		ID:       "meta-prep-test",
+		ID:       "meta-prep-test.json",
 		Provider: "meta",
 		Metadata: map[string]any{
 			"dca_token": "dca:valid",
@@ -630,7 +651,9 @@ func TestMetaExecutor_RequestAuthPreparer(t *testing.T) {
 		t.Errorf("ShouldPrepareRequestAuth should be true when only dca_token is present")
 	}
 
-	manager := cliproxyauth.NewManager(nil, nil, nil)
+	store := sdkauth.NewFileTokenStore()
+	store.SetBaseDir(t.TempDir())
+	manager := cliproxyauth.NewManager(store, nil, nil)
 	manager.RegisterExecutor(exec)
 	if _, err := manager.Register(context.Background(), authDCAOnly); err != nil {
 		t.Fatal(err)
@@ -662,11 +685,107 @@ func TestMetaExecutor_RequestAuthPreparer(t *testing.T) {
 		t.Errorf("expected stored api_key 'LLM|prepared-key', got %q", key)
 	}
 
+	reloaded, err := store.List(context.Background())
+	if err != nil || len(reloaded) != 1 {
+		t.Fatalf("reload auth: %v, records=%d", err, len(reloaded))
+	}
+	if reloaded[0].Metadata["api_key"] != "LLM|prepared-key" {
+		t.Fatal("minted key was not persisted for restart")
+	}
+
 	_, err = manager.Execute(context.Background(), []string{"meta"}, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
 	if err != nil {
 		t.Fatalf("second execute failed: %v", err)
 	}
 	if mints.Load() != 1 {
 		t.Fatalf("mint count after second request = %d, want 1", mints.Load())
+	}
+}
+
+func TestMetaMintRejectsRemovedOrReloadedCredential(t *testing.T) {
+	for _, prepare := range []bool{false, true} {
+		for _, action := range []string{"remove", "reload"} {
+			name := action + "/refresh"
+			if prepare {
+				name = action + "/prepare"
+			}
+			t.Run(name, func(t *testing.T) {
+				started := make(chan struct{})
+				release := make(chan struct{})
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					close(started)
+					<-release
+					_, _ = w.Write([]byte(`{"api_key":"LLM|obsolete"}`))
+				}))
+				defer server.Close()
+				var releaseOnce sync.Once
+				defer releaseOnce.Do(func() { close(release) })
+				t.Setenv("META_MINT_URL", server.URL)
+				dir := t.TempDir()
+				store := sdkauth.NewFileTokenStore()
+				store.SetBaseDir(dir)
+				manager := cliproxyauth.NewManager(store, nil, nil)
+				storage := &metaauth.MetaTokenStorage{AccessToken: "dca:initial", DCAToken: "dca:initial"}
+				auth, err := manager.Register(context.Background(), &cliproxyauth.Auth{ID: "meta-lifecycle.json", Provider: "meta", Storage: storage, Metadata: map[string]any{"type": "meta", "access_token": "dca:initial", "dca_token": "dca:initial"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				exec := NewMetaExecutor(nil)
+				done := make(chan error, 1)
+				go func() {
+					if prepare {
+						_, err := manager.PrepareRequestAuth(context.Background(), exec, auth.Clone())
+						done <- err
+						return
+					}
+					updated, err := exec.Refresh(context.Background(), auth.Clone())
+					if err == nil {
+						_, err = manager.UpdateRefreshedAuth(context.Background(), auth, updated)
+					}
+					done <- err
+				}()
+				<-started
+				path := filepath.Join(dir, auth.ID)
+				if action == "remove" {
+					manager.Remove(context.Background(), auth.ID)
+					if err := store.Delete(context.Background(), auth.ID); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					_, err := manager.Register(context.Background(), &cliproxyauth.Auth{ID: auth.ID, Provider: "meta", Metadata: map[string]any{"type": "meta", "api_key": "LLM|reloaded", "access_token": "LLM|reloaded", "dca_token": "dca:reloaded"}})
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				releaseOnce.Do(func() { close(release) })
+				err = <-done
+				if (prepare || action == "reload") && err == nil {
+					t.Fatal("obsolete mint was accepted")
+				}
+				if storage.AccessToken != "dca:initial" {
+					t.Fatal("obsolete mint changed shared login storage")
+				}
+				raw, errRead := os.ReadFile(path)
+				if action == "remove" {
+					if !os.IsNotExist(errRead) {
+						t.Fatalf("removed auth was recreated: %s, %v", raw, errRead)
+					}
+					if _, ok := manager.GetByID(auth.ID); ok {
+						t.Fatal("removed auth was reinstalled")
+					}
+				} else {
+					if errRead != nil {
+						t.Fatal(errRead)
+					}
+					var saved map[string]any
+					if err := json.Unmarshal(raw, &saved); err != nil {
+						t.Fatal(err)
+					}
+					if saved["api_key"] != "LLM|reloaded" {
+						t.Fatalf("obsolete mint overwrote reload: %s", raw)
+					}
+				}
+			})
+		}
 	}
 }

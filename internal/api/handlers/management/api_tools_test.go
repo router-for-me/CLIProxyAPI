@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
@@ -524,7 +524,15 @@ func TestResolveMetaToken_ConcurrentSingleflight(t *testing.T) {
 			entryWg.Done()
 			<-ready
 			inFlight.Done()
-			token, errToken := h.resolveTokenForAuth(context.Background(), h.authByIndex(auth.Index), "")
+			var token string
+			var errToken error
+			if i%2 == 0 {
+				prepared, err := manager.PrepareRequestAuth(context.Background(), executor.NewMetaExecutor(h.cfg), auth.Clone())
+				errToken = err
+				token = metaTokenFromAuth(prepared)
+			} else {
+				token, errToken = h.resolveTokenForAuth(context.Background(), auth.Clone(), "")
+			}
 			if errToken != nil {
 				t.Errorf("resolveTokenForAuth error: %v", errToken)
 			}
@@ -539,9 +547,6 @@ func TestResolveMetaToken_ConcurrentSingleflight(t *testing.T) {
 
 	<-serverStarted
 	inFlight.Wait()
-	for i := 0; i < 50; i++ {
-		runtime.Gosched()
-	}
 	close(releaseServer)
 	doneWg.Wait()
 
@@ -554,5 +559,34 @@ func TestResolveMetaToken_ConcurrentSingleflight(t *testing.T) {
 	}
 	if live.Attributes["api_key"] != "LLM|minted-concurrent" {
 		t.Error("live manager did not retain minted key in attributes")
+	}
+}
+
+func TestResolveMetaTokenUsesRequestProxyWithoutSavingOverride(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer dca:proxy-test" {
+			t.Error("mint request did not carry the DCA token")
+		}
+		_, _ = w.Write([]byte(`{"api_key":"LLM|proxied"}`))
+	}))
+	defer proxy.Close()
+	t.Setenv("META_MINT_URL", "http://meta.invalid/key")
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth, err := manager.Register(coreauth.WithSkipPersist(context.Background()), &coreauth.Auth{
+		ID: "meta-proxy.json", Provider: "meta", ProxyURL: "http://127.0.0.1:1",
+		Metadata: map[string]any{"dca_token": "dca:proxy-test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{cfg: &config.Config{}, authManager: manager, tokenStore: store}
+	token, err := h.resolveMetaToken(context.Background(), auth.Clone(), proxy.URL)
+	if err != nil || token != "LLM|proxied" {
+		t.Fatalf("resolve via request proxy: token=%q, err=%v", token, err)
+	}
+	live, _ := manager.GetByID(auth.ID)
+	if live.ProxyURL != auth.ProxyURL {
+		t.Fatal("request proxy override changed the credential's configured proxy")
 	}
 }

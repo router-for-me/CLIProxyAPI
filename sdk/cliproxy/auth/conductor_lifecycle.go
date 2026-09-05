@@ -224,6 +224,16 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
 	}
 	auth.EnsureIndex()
+	// A minted Meta key must reach the configured store before requests can use it.
+	// Keep the epoch check, save and installation together so a concurrent reload
+	// or removal cannot let an obsolete mint overwrite the credential on disk.
+	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
+	if persistMetaMint {
+		if errPersist := m.persist(ctx, auth); errPersist != nil {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("persist meta auth: %w", errPersist)
+		}
+	}
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
@@ -234,7 +244,9 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		m.scheduler.upsertAuth(authClone.Clone())
 	}
 	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
+	if !persistMetaMint {
+		_ = m.persist(ctx, auth)
+	}
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	if cooldownStateChanged {
 		m.persistCooldownStates(context.Background())
