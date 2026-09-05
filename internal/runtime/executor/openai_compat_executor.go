@@ -89,6 +89,16 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImages(ctx, auth, req, opts, endpointPath)
 	}
+	if e.fallbackCompactionEnabled(auth) {
+		if opts.Alt == "responses/compact" {
+			return e.executeFallbackCompaction(ctx, auth, req, opts)
+		}
+		expanded, errExpand := e.expandFallbackCompactionCapsules(auth, req.Payload)
+		if errExpand != nil {
+			return resp, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+		}
+		req.Payload = expanded
+	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -307,6 +317,16 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImagesStream(ctx, auth, req, opts, endpointPath)
+	}
+	if e.fallbackCompactionEnabled(auth) {
+		if opts.Alt == "responses/compact" {
+			return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for fallback compaction"}
+		}
+		expanded, errExpand := e.expandFallbackCompactionCapsules(auth, req.Payload)
+		if errExpand != nil {
+			return nil, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+		}
+		req.Payload = expanded
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
