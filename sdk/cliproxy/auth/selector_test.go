@@ -2552,3 +2552,86 @@ func TestManagerSetSelectorConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestSessionAffinitySelector_LongCompositeIDBoundConsistency(t *testing.T) {
+	t.Parallel()
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelector(fallback)
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "auth-1"}}
+	longSession := strings.Repeat("s", 200)
+	longAgent := strings.Repeat("a", 100)
+
+	opts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Claude-Code-Session-Id": []string{longSession},
+			"X-Claude-Code-Agent-Id":   []string{longAgent},
+		},
+		Metadata: make(map[string]any),
+	}
+
+	auth, err := selector.Pick(context.Background(), "claude", "claude-3-7-sonnet", opts, auths)
+	if err != nil || auth == nil {
+		t.Fatalf("selector.Pick failed: %v", err)
+	}
+
+	canonicalID, ok := opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string)
+	if !ok || canonicalID == "" {
+		t.Fatalf("canonical session ID not set in metadata")
+	}
+	if len(canonicalID) > 256 {
+		t.Fatalf("canonical ID length = %d, want <= 256", len(canonicalID))
+	}
+	if !strings.Contains(canonicalID, "#") {
+		t.Fatalf("canonical ID %q missing hash separator", canonicalID)
+	}
+
+	// Verify CanonicalSessionID helper returns the same bounded identity
+	resolvedID := CanonicalSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if resolvedID != canonicalID {
+		t.Fatalf("CanonicalSessionID %q != metadata canonical %q", resolvedID, canonicalID)
+	}
+}
+
+func TestSessionAffinitySelector_DerivedIDBoundConsistencyOnResult(t *testing.T) {
+	t.Parallel()
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelector(fallback)
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	longDerivedRaw := strings.Repeat("d", 250)
+
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.DerivedSessionIDMetadataKey: longDerivedRaw,
+		},
+	}
+
+	// 1. Pick establishes initial binding
+	pickedAuth, err := selector.Pick(context.Background(), "openai", "gpt-5.4", opts, auths)
+	if err != nil || pickedAuth == nil {
+		t.Fatalf("Pick failed: %v", err)
+	}
+
+	// 2. OnResult records success under bounded derived key
+	res := Result{
+		AuthID:   pickedAuth.ID,
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		Success:  true,
+		Options:  opts,
+	}
+	selector.OnResult(res)
+
+	// 3. Next Pick with reverse candidates must hit the same bound credential
+	reverseAuths := []*Auth{{ID: "auth-b"}, {ID: "auth-a"}}
+	secondPicked, err := selector.Pick(context.Background(), "openai", "gpt-5.4", opts, reverseAuths)
+	if err != nil || secondPicked == nil {
+		t.Fatalf("second Pick failed: %v", err)
+	}
+	if secondPicked.ID != pickedAuth.ID {
+		t.Fatalf("affinity failed: got auth %s, want %s", secondPicked.ID, pickedAuth.ID)
+	}
+}

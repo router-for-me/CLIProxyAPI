@@ -961,7 +961,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		delete(opts.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey)
 		delete(opts.Metadata, cliproxyexecutor.LCPAccessGenerationMetadataKey)
 		if explicitFallbackID != "" {
-			opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey] = explicitFallbackID
+			opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(explicitFallbackID)
 		} else {
 			delete(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
 		}
@@ -974,8 +974,14 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if primaryID == "" {
 		primaryID, fallbackID = extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
 	}
-	if primaryID != "" && opts.Metadata != nil {
-		opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = primaryID
+	if primaryID != "" {
+		primaryID = cliproxysession.BoundSessionIdentity(primaryID)
+		if fallbackID != "" {
+			fallbackID = cliproxysession.BoundSessionIdentity(fallbackID)
+		}
+		if opts.Metadata != nil {
+			opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = primaryID
+		}
 	}
 	now := time.Now()
 	availabilityCandidates := auths
@@ -1267,6 +1273,12 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	}
 
 	explicitID, explicitFallbackID := extractExplicitSessionIDs(res.Options.Headers, res.Options.OriginalRequest, res.Options.Metadata)
+	if explicitID != "" {
+		explicitID = cliproxysession.BoundSessionIdentity(explicitID)
+		if explicitFallbackID != "" {
+			explicitFallbackID = cliproxysession.BoundSessionIdentity(explicitFallbackID)
+		}
+	}
 	ns := res.Provider
 	if raw, ok := res.Options.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey].(string); ok && raw != "" {
 		ns = raw
@@ -1322,6 +1334,12 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	}
 	if primaryID == "" && fallbackID == "" {
 		return
+	}
+	if primaryID != "" {
+		primaryID = cliproxysession.BoundSessionIdentity(primaryID)
+	}
+	if fallbackID != "" {
+		fallbackID = cliproxysession.BoundSessionIdentity(fallbackID)
 	}
 
 	cacheKey := ns + "::" + primaryID + "::" + nsModel
@@ -1404,17 +1422,17 @@ func sessionHeaderValue(headers http.Header, name string) string {
 // CanonicalSessionID resolves the single authoritative session identity from request options and metadata.
 func CanonicalSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
 	if explicitID, _ := extractExplicitSessionIDs(headers, payload, metadata); explicitID != "" {
-		return explicitID
+		return cliproxysession.BoundSessionIdentity(explicitID)
 	}
 	if metadata != nil {
 		if canonicalID, ok := metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string); ok && strings.TrimSpace(canonicalID) != "" {
-			return strings.TrimSpace(canonicalID)
+			return cliproxysession.BoundSessionIdentity(strings.TrimSpace(canonicalID))
 		}
 		if lcpID, ok := metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey].(string); ok && strings.TrimSpace(lcpID) != "" {
-			return strings.TrimSpace(lcpID)
+			return cliproxysession.BoundSessionIdentity(strings.TrimSpace(lcpID))
 		}
 	}
-	return ExtractSessionID(headers, payload, metadata)
+	return cliproxysession.BoundSessionIdentity(ExtractSessionID(headers, payload, metadata))
 }
 
 // ExtractSessionID extracts a session identifier from explicit client signals,
