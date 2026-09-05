@@ -34,6 +34,11 @@ var requestFaultTypes = map[string]struct{}{
 	"invalid_prompt":        {},
 }
 
+const (
+	outOfExtraUsageNeedle       = "out of extra usage"
+	outOfExtraUsageExactMessage = "You're out of extra usage. Add more at claude.ai/settings/usage and keep going."
+)
+
 // HTTPStatusFromError extracts an HTTP status from err.
 // Explicit StatusCode() values win. Otherwise context.Canceled maps to 499
 // and context.DeadlineExceeded maps to 504. Returns 0 when unknown.
@@ -86,6 +91,12 @@ func IsRequestFault(status int, err error) bool {
 	if status == http.StatusPaymentRequired || status == http.StatusTooManyRequests {
 		return false
 	}
+	// Anthropic reports extra-usage exhaustion as HTTP 400 invalid_request_error
+	// rather than 429. Keep that credential eligible for cooldown and rotation
+	// without treating every account-level 400 as quota.
+	if IsOutOfExtraUsage(status, err) {
+		return false
+	}
 	// DeepSeek reports an invalid API key as 401 with the authentication_error
 	// type alongside the same generic code. Preserve that credential failure
 	// classification without weakening generic request-fault handling.
@@ -109,6 +120,84 @@ func IsRequestFault(status int, err error) bool {
 	}
 }
 
+// IsOutOfExtraUsage reports Anthropic's extra-usage exhaustion. Claude delivers
+// it as HTTP 400 invalid_request_error, not 429. The needle is the phrase
+// "out of extra usage" (covering you're-less variants); generic
+// invalid_request_error 400s stay request faults.
+func IsOutOfExtraUsage(status int, err error) bool {
+	if err == nil {
+		return false
+	}
+	if status <= 0 {
+		type statusCoder interface {
+			StatusCode() int
+		}
+		var statusErr statusCoder
+		if errors.As(err, &statusErr) && statusErr != nil {
+			status = statusErr.StatusCode()
+		}
+	}
+	if status != http.StatusBadRequest {
+		return false
+	}
+	return isOutOfExtraUsageBody(errorBody(err))
+}
+
+func isOutOfExtraUsageBody(body string) bool {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return false
+	}
+	if body == outOfExtraUsageExactMessage {
+		return true
+	}
+	message := body
+	hasInvalidRequestType := false
+	if json.Valid([]byte(body)) {
+		for _, path := range []string{"error.message", "message", "response.error.message", "body.error.message"} {
+			if value := strings.TrimSpace(gjson.Get(body, path).String()); value != "" {
+				message = value
+				break
+			}
+		}
+		for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
+			if value := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String())); value == "invalid_request_error" {
+				hasInvalidRequestType = true
+				break
+			}
+		}
+	}
+	if message == outOfExtraUsageExactMessage {
+		return true
+	}
+	if !strings.Contains(strings.ToLower(message), outOfExtraUsageNeedle) &&
+		!strings.Contains(strings.ToLower(body), outOfExtraUsageNeedle) {
+		return false
+	}
+	if hasInvalidRequestType {
+		return true
+	}
+	// Non-JSON wrappers still need the Anthropic type token so a random 400
+	// that merely mentions extra usage is not treated as quota.
+	return !json.Valid([]byte(body)) && strings.Contains(strings.ToLower(body), "invalid_request_error")
+}
+
+func errorBody(err error) string {
+	if err == nil {
+		return ""
+	}
+	type responseBodyProvider interface {
+		ResponseBody() []byte
+	}
+	var bodyProvider responseBodyProvider
+	if errors.As(err, &bodyProvider) && bodyProvider != nil {
+		if body := bodyProvider.ResponseBody(); len(body) > 0 {
+			return string(body)
+		}
+	}
+	return err.Error()
+}
+
 // IsItemNotPersisted matches the upstream 404 raised when a request references a
 // response item the upstream never stored because `store` was false. The upstream
 // sends this as a plain-text message rather than a JSON body, so it cannot be
@@ -128,7 +217,7 @@ func hasAuthenticationErrorBody(err error) bool {
 	if err == nil {
 		return false
 	}
-	body := strings.TrimSpace(err.Error())
+	body := strings.TrimSpace(errorBody(err))
 	if body == "" || !json.Valid([]byte(body)) {
 		return false
 	}
@@ -144,7 +233,7 @@ func hasRequestFaultBody(err error) bool {
 	if err == nil {
 		return false
 	}
-	body := strings.TrimSpace(err.Error())
+	body := strings.TrimSpace(errorBody(err))
 	if body == "" || !json.Valid([]byte(body)) {
 		return false
 	}
