@@ -1852,6 +1852,9 @@ func TestRootAndManagementHEADRequests(t *testing.T) {
 		if rr.Body.Len() != 0 {
 			t.Fatalf("HEAD root body length = %d, want 0", rr.Body.Len())
 		}
+		if contentType := rr.Header().Get("Content-Type"); !strings.Contains(contentType, "application/json") {
+			t.Fatalf("HEAD root Content-Type = %q, want application/json", contentType)
+		}
 	})
 
 	t.Run("HEAD management.html returns 200 without body", func(t *testing.T) {

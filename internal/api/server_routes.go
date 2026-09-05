@@ -131,6 +131,7 @@ func (s *Server) setupRoutes() {
 	// Root endpoint
 	rootHandler := func(c *gin.Context) {
 		if c.Request.Method == http.MethodHead {
+			c.Header("Content-Type", "application/json; charset=utf-8")
 			c.Status(http.StatusOK)
 			return
 		}
