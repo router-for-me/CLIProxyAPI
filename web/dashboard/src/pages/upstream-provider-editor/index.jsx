@@ -121,14 +121,17 @@ export default function UpstreamProviderEditorPage() {
       </div>
     );
   }
-  if (!isCreate && !provider) {
+  // Derived gate: render the editor only when the loaded row matches the
+  // route id. This is timing-independent — a provider-to-provider navigation
+  // cannot flash the old row's editor (or its error banner) for a commit,
+  // regardless of effect ordering between the shell and the keyed child.
+  const providerMatchesRoute = !isCreate && provider && String(provider.id) === providerId;
+  if (!isCreate && !providerMatchesRoute) {
     return <Spinner label="Loading provider…" />;
   }
 
   // Keyed by the route id so a provider-to-provider navigation remounts a
-  // fresh editor. The fetch effect above nulls the row on id change, so the
-  // key remount only ever happens with freshly fetched data for the new id
-  // (the loading gate holds the render until then).
+  // fresh editor once the derived gate above releases it.
   return (
     <ProviderEditorForm
       key={id}
@@ -295,7 +298,7 @@ function ProviderEditorForm({ provider, siblingNames = [] }) {
       <>
         <div className="main__header">
           <div>
-            <div className="dim"><button type="button" className="linklike" onClick={attemptBack}>← Back</button></div>
+            <div className="dim"><button type="button" className="linklike" onClick={attemptBack} disabled={saving}>← Back</button></div>
             <h1 className="main__title">New Provider</h1>
             <div className="main__subtitle">Choose a provider type to configure its credentials.</div>
           </div>
@@ -315,7 +318,7 @@ function ProviderEditorForm({ provider, siblingNames = [] }) {
       <div className="upstream-editor__header">
         <div className="upstream-editor__header-main">
           <div className="dim">
-            <button type="button" className="linklike" onClick={attemptBack}>← Back</button>
+            <button type="button" className="linklike" onClick={attemptBack} disabled={saving}>← Back</button>
           </div>
           <h1 className="main__title upstream-editor__title">{title}</h1>
         </div>
