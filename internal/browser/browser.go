@@ -4,6 +4,7 @@ package browser
 
 import (
 	"fmt"
+	"net/url"
 	"os/exec"
 	"runtime"
 
@@ -44,7 +45,12 @@ func OpenURL(url string) error {
 //
 // Returns:
 //   - An error if the URL cannot be opened, otherwise nil.
-func openURLPlatformSpecific(url string) error {
+func openURLPlatformSpecific(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("invalid or disallowed URL scheme: only http and https are permitted")
+	}
+
 	var cmd *exec.Cmd
 
 	switch runtime.GOOS {
