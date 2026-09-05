@@ -8488,6 +8488,117 @@ func TestClaudeExecutor_PreservesNativeAgentAndEnvironmentHeaders(t *testing.T) 
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Placeholder API key detection
+// ---------------------------------------------------------------------------
+
+func TestIsPlaceholderAPIKey(t *testing.T) {
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{"your_oauth_token_here", true},
+		{"YOUR_API_KEY_HERE", true},
+		{"sk-ant-oat01-abc123", false},
+		{"placeholder", true},
+		{"replace_me", true},
+		{"changeme", true},
+		{"change-me", true},
+		{"your-key", true},
+		{"your-api-key", true},
+		{"your-api-key-1", true},
+		{"your-api-key-2", true},
+		{"your-api-key-3", true},
+		{"your-api-key-4", false},
+		{"my-your-api-key-1", false},
+		{"sk-atSM...", true},
+		{"sk-atsm", true},
+		{"sk-atsm-example", false},
+		{"sk-ant-oat-placeholder", true},
+		{"prefix-placeholder-suffix", false},
+		{"  Placeholder  ", true},
+		{"sk-ant-api03-real-key", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isPlaceholderAPIKey(tt.key); got != tt.want {
+			t.Errorf("isPlaceholderAPIKey(%q) = %v, want %v", tt.key, got, tt.want)
+		}
+	}
+}
+
+func TestClaudeExecutor_Execute_RejectsPlaceholderKey(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "your_oauth_token_here"},
+	}
+	cfg := &config.Config{}
+	e := NewClaudeExecutor(cfg)
+
+	_, err := e.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-20250514",
+		Payload: []byte(`{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+
+	if err == nil {
+		t.Fatal("expected error for placeholder key, got nil")
+	}
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+	if se.code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", se.code)
+	}
+}
+
+func TestClaudeExecutor_ExecuteStream_RejectsPlaceholderKey(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "placeholder"},
+	}
+	cfg := &config.Config{}
+	e := NewClaudeExecutor(cfg)
+
+	_, err := e.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-20250514",
+		Payload: []byte(`{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+
+	if err == nil {
+		t.Fatal("expected error for placeholder key, got nil")
+	}
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+	if se.code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", se.code)
+	}
+}
+
+func TestClaudeExecutor_CountTokens_RejectsPlaceholderKey(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "replace_me"},
+	}
+	cfg := &config.Config{}
+	e := NewClaudeExecutor(cfg)
+
+	_, err := e.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-20250514",
+		Payload: []byte(`{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+
+	if err == nil {
+		t.Fatal("expected error for placeholder key, got nil")
+	}
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+	if se.code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", se.code)
+	}
+}
+
 func TestIsClaudeFable51Model_DigitBoundary(t *testing.T) {
 	valid := []string{
 		"claude-fable-5-1",
@@ -8782,5 +8893,103 @@ func TestClaudeExecutor_CloakModePrefersStoredPrevReqOverCallerFake(t *testing.T
 	}
 	if strings.Contains(turn2System, "req_fake_caller_999") {
 		t.Fatalf("CPA must not use fake caller cc_prev_req, got: %s", turn2System)
+	}
+}
+
+func TestClaudeExecutor_HttpRequest_RejectsPlaceholderKey(t *testing.T) {
+	upstreamCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "your_api_key_here"},
+	}
+	e := NewClaudeExecutor(&config.Config{})
+	req, errNew := http.NewRequest(http.MethodPost, server.URL+"/v1/messages", strings.NewReader(`{}`))
+	if errNew != nil {
+		t.Fatalf("NewRequest() error = %v", errNew)
+	}
+
+	resp, err := e.HttpRequest(context.Background(), auth, req)
+	if err == nil {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		t.Fatal("expected error for placeholder key, got nil")
+	}
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+	if se.code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", se.code)
+	}
+	if upstreamCalled {
+		t.Fatal("placeholder HttpRequest must fail before any upstream call")
+	}
+}
+
+func TestClaudeExecutor_PrepareRequest_RejectsPlaceholderKey(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "changeme"},
+	}
+	e := NewClaudeExecutor(&config.Config{})
+	req, errNew := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader(`{}`))
+	if errNew != nil {
+		t.Fatalf("NewRequest() error = %v", errNew)
+	}
+
+	err := e.PrepareRequest(req, auth)
+	if err == nil {
+		t.Fatal("expected error for placeholder key, got nil")
+	}
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+	if se.code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", se.code)
+	}
+	if got := req.Header.Get("x-api-key"); got != "" {
+		t.Fatalf("x-api-key = %q, want empty after placeholder rejection", got)
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty after placeholder rejection", got)
+	}
+}
+
+// TestApplyClaudeHeaders_GatesStainlessHelperMethodOnStream guards the review
+// requirement that X-Stainless-Helper-Method: stream is attached only when
+// stream=true. Non-stream messages.create and count_tokens must omit it.
+func TestApplyClaudeHeaders_GatesStainlessHelperMethodOnStream(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-helper-method", "cloak_mode": "always"}}
+	body := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"hi"}]}`)
+
+	nonStream := newClaudeHeaderTestRequest(t, nil)
+	if err := applyClaudeHeaders(nonStream, auth, "key-helper-method", false, nil, body, nil, nil, false); err != nil {
+		t.Fatalf("applyClaudeHeaders(stream=false) error = %v", err)
+	}
+	if got := nonStream.Header.Get("X-Stainless-Helper-Method"); got != "" {
+		t.Fatalf("stream=false: X-Stainless-Helper-Method = %q, want unset", got)
+	}
+
+	streamReq := newClaudeHeaderTestRequest(t, nil)
+	if err := applyClaudeHeaders(streamReq, auth, "key-helper-method", true, nil, body, nil, nil, false); err != nil {
+		t.Fatalf("applyClaudeHeaders(stream=true) error = %v", err)
+	}
+	if got := streamReq.Header.Get("X-Stainless-Helper-Method"); got != "stream" {
+		t.Fatalf("stream=true: X-Stainless-Helper-Method = %q, want %q", got, "stream")
+	}
+
+	countTokens := newClaudeHeaderTestRequest(t, nil)
+	countTokens.URL.Path = "/v1/messages/count_tokens"
+	if err := applyClaudeHeaders(countTokens, auth, "key-helper-method", false, nil, body, nil, nil, false); err != nil {
+		t.Fatalf("applyClaudeHeaders(count_tokens) error = %v", err)
+	}
+	if got := countTokens.Header.Get("X-Stainless-Helper-Method"); got != "" {
+		t.Fatalf("count_tokens: X-Stainless-Helper-Method = %q, want unset", got)
 	}
 }
