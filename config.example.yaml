@@ -477,7 +477,6 @@ nonstream-keepalive-interval: 0
 #
 # Meta API keys (Muse Code)
 # Uses the native Meta executor targeting https://api.meta.ai/v1.
-# Also auto-detects local credentials from ~/.config/muse/auth.json or META_API_KEY.
 # meta-api-key:
 #   - api-key: "..."
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000

@@ -148,8 +148,6 @@ func main() {
 	// Parse the command-line flags.
 	flag.Parse()
 
-	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin || metaLogin
-
 	// Core application variables.
 	var err error
 	var cfg *config.Config
@@ -514,14 +512,14 @@ func main() {
 			log.Errorf("failed to inspect git-backed config: %v", statErr)
 			return
 		}
-		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy || commandMode)
+		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
 		if err == nil {
 			cfg.AuthDir = gitStoreInst.AuthDir()
 			log.Infof("git-backed token store enabled, repository path: %s", gitStoreRoot)
 		}
 	} else if configPath != "" {
 		configFilePath = configPath
-		cfg, err = config.LoadConfigOptional(configPath, isCloudDeploy || commandMode)
+		cfg, err = config.LoadConfigOptional(configPath, isCloudDeploy)
 	} else {
 		wd, err = os.Getwd()
 		if err != nil {
@@ -529,7 +527,7 @@ func main() {
 			return
 		}
 		configFilePath = filepath.Join(wd, "config.yaml")
-		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy || commandMode)
+		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
 	}
 	if err != nil {
 		log.Errorf("failed to load config: %v", err)
@@ -592,6 +590,7 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
+	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin || metaLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)

@@ -155,42 +155,6 @@ func TestCredentialFileName(t *testing.T) {
 	}
 }
 
-func TestReadLocalMuseCLIAuth(t *testing.T) {
-	tempDir := t.TempDir()
-	authPath := filepath.Join(tempDir, "auth.json")
-
-	content := `{
-		"schema_version": 1,
-		"providers": {
-			"meta": {
-				"access_token": "test-token-xyz",
-				"api_key": "test-key-abc",
-				"api_base_url": "https://api.meta.ai/v1",
-				"user_email": "engineer@meta.com"
-			}
-		}
-	}`
-	if err := os.WriteFile(authPath, []byte(content), 0600); err != nil {
-		t.Fatalf("failed to write auth.json: %v", err)
-	}
-
-	t.Setenv("MUSE_AUTH_PATH", authPath)
-
-	cred, ok := ReadLocalMuseCLIAuth()
-	if !ok {
-		t.Fatalf("expected ok=true")
-	}
-	if cred.APIKey != "test-key-abc" {
-		t.Errorf("expected api_key test-key-abc, got %s", cred.APIKey)
-	}
-	if cred.BaseURL != "https://api.meta.ai/v1" {
-		t.Errorf("expected base_url https://api.meta.ai/v1, got %s", cred.BaseURL)
-	}
-	if cred.Email != "engineer@meta.com" {
-		t.Errorf("expected email engineer@meta.com, got %s", cred.Email)
-	}
-}
-
 func TestSaveTokenToFile_PreservesCustomMetadata(t *testing.T) {
 	tempDir := t.TempDir()
 	authFilePath := filepath.Join(tempDir, "meta-test.json")

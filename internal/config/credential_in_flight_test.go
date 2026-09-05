@@ -50,10 +50,11 @@ func TestLoadConfigOptionalInvalidFallbackAppliesCredentialInFlightDefaults(t *t
 	if errWrite := os.WriteFile(configPath, []byte(":"), 0o600); errWrite != nil {
 		t.Fatal(errWrite)
 	}
-	_, errLoad := LoadConfigOptional(configPath, true)
-	if errLoad == nil {
-		t.Fatal("expected error from invalid YAML when optional=true, got nil")
+	cfg, errLoad := LoadConfigOptional(configPath, true)
+	if errLoad != nil {
+		t.Fatalf("LoadConfigOptional() error = %v", errLoad)
 	}
+	assertOptionalConfigFallback(t, cfg)
 }
 
 func assertOptionalConfigFallback(t *testing.T, cfg *Config) {
