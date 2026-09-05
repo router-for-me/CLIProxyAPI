@@ -93,6 +93,8 @@ func TestBuildInteractionsExecutionRequestUsesAgentAuthSelectionModel(t *testing
 	if req.ForcedProvider != "gemini-interactions" {
 		t.Fatalf("ForcedProvider = %q, want gemini-interactions", req.ForcedProvider)
 	}
+	// Auth selection uses the catalog-backed antigravity default so
+	// --local-model deployments resolve a credential.
 	if req.AuthSelectionModel != interactionsAgentAuthSelectionModel {
 		t.Fatalf("AuthSelectionModel = %q, want %q", req.AuthSelectionModel, interactionsAgentAuthSelectionModel)
 	}
@@ -204,7 +206,10 @@ func TestInteractionsAgentUsesNativeInteractionsEndpoint(t *testing.T) {
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("manager.Register(): %v", errRegister)
 	}
-	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: interactionsAgentAuthSelectionModel}})
+	// Register both the agent id (the request's model) and a backing Gemini
+	// model: agent auth selection is unfiltered, so any registered model on
+	// the provider makes the credential eligible.
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "agents/test-agent"}, {ID: "gemini-3.6-flash"}})
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
 	})
