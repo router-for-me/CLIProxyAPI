@@ -116,7 +116,49 @@ func GetXAIModels() []*ModelInfo {
 // not depend on remote models.json updates. Built-ins replace any matching IDs
 // already present in the provided slice.
 func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo())
+	return withCodexBuiltinOverrideHeaders(upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo()))
+}
+
+// codexBuiltinOverrideHeaders are upstream client-version gates that must hold
+// regardless of which models.json (embedded or remote) is in effect. The
+// remote catalog replaces the embedded one wholesale on refresh, so a gate
+// carried only in the JSON is lost the moment the remote copy lacks it.
+//
+// gpt-6-astra: codex_client_models.json declares minimal_client_version
+// 0.153.0, above the executor's default cloak, and upstream rejects older
+// identities with "not supported when using Codex with a ChatGPT account".
+var codexBuiltinOverrideHeaders = map[string]map[string]string{
+	"gpt-6-astra": {
+		"user-agent": "codex-tui/0.153.3 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.3)",
+		"originator": "codex-tui",
+	},
+}
+
+// withCodexBuiltinOverrideHeaders fills in a built-in override_header for any
+// listed model whose catalog entry does not already carry one. A catalog that
+// does carry one wins, so the JSON stays the place to tune the value.
+func withCodexBuiltinOverrideHeaders(models []*ModelInfo) []*ModelInfo {
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		headers, ok := codexBuiltinOverrideHeaders[strings.ToLower(strings.TrimSpace(model.ID))]
+		if !ok {
+			continue
+		}
+		if model.Config != nil && len(model.Config.OverrideHeader) > 0 {
+			continue
+		}
+		override := make(map[string]string, len(headers))
+		for key, value := range headers {
+			override[key] = value
+		}
+		if model.Config == nil {
+			model.Config = &ModelConfig{}
+		}
+		model.Config.OverrideHeader = override
+	}
+	return models
 }
 
 // WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
@@ -353,7 +395,10 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 	for _, models := range allModels {
 		for _, m := range models {
 			if m != nil && m.ID == modelID {
-				return cloneModelInfo(m)
+				// Apply the same built-in Codex gates the tier getters apply, so a
+				// static lookup (the executor's ModelOverrideHeaders fallback) never
+				// returns a weaker definition than the registered one.
+				return withCodexBuiltinOverrideHeaders([]*ModelInfo{cloneModelInfo(m)})[0]
 			}
 		}
 	}
