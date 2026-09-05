@@ -190,3 +190,130 @@ func TestReadLocalMuseCLIAuth(t *testing.T) {
 		t.Errorf("expected email engineer@meta.com, got %s", cred.Email)
 	}
 }
+
+func TestSaveTokenToFile_PreservesCustomMetadata(t *testing.T) {
+	tempDir := t.TempDir()
+	authFilePath := filepath.Join(tempDir, "meta-test.json")
+
+	storage := &MetaTokenStorage{
+		Type:        "meta",
+		AuthKind:    "oauth",
+		AccessToken: "test-access-token",
+		APIKey:      "test-api-key",
+		DCAToken:    "dca:token",
+		Email:       "user@example.com",
+	}
+	storage.SetMetadata(map[string]any{
+		"priority":        float64(10),
+		"disable_cooling": true,
+		"proxy_url":       "http://proxy:8080",
+	})
+
+	if errSave := storage.SaveTokenToFile(authFilePath); errSave != nil {
+		t.Fatalf("SaveTokenToFile() error = %v", errSave)
+	}
+
+	savedRaw, errRead := os.ReadFile(authFilePath)
+	if errRead != nil {
+		t.Fatalf("os.ReadFile error = %v", errRead)
+	}
+
+	var saved map[string]any
+	if errUnmarshal := json.Unmarshal(savedRaw, &saved); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal error = %v", errUnmarshal)
+	}
+
+	if saved["api_key"] != "test-api-key" {
+		t.Errorf("api_key = %v, want test-api-key", saved["api_key"])
+	}
+	if saved["priority"] != float64(10) {
+		t.Errorf("priority = %v, want 10", saved["priority"])
+	}
+	if saved["disable_cooling"] != true {
+		t.Errorf("disable_cooling = %v, want true", saved["disable_cooling"])
+	}
+	if saved["proxy_url"] != "http://proxy:8080" {
+		t.Errorf("proxy_url = %v, want http://proxy:8080", saved["proxy_url"])
+	}
+}
+
+func TestSaveTokenToFile_DoesNotRestoreClearedCredentialFields(t *testing.T) {
+	tempDir := t.TempDir()
+	authFilePath := filepath.Join(tempDir, "meta-test.json")
+
+	// Pre-populate an auth file that had expired DCA credentials and custom configuration
+	initial := map[string]any{
+		"type":            "meta",
+		"auth_kind":       "oauth",
+		"access_token":    "old-dca-token",
+		"dca_token":       "old-dca-token",
+		"expired":         "2026-01-01T00:00:00Z",
+		"dca_expired":     "2026-01-01T00:00:00Z",
+		"dca_expires_at":  float64(1767225600),
+		"priority":        float64(42),
+		"models":          []any{"muse-latest"},
+		"disable-cooling": true,
+	}
+	raw, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatalf("json.Marshal error = %v", err)
+	}
+	if err := os.WriteFile(authFilePath, raw, 0600); err != nil {
+		t.Fatalf("WriteFile error = %v", err)
+	}
+
+	// Token storage after minting an API key: Expired is explicitly empty, new APIKey set
+	storage := &MetaTokenStorage{
+		Type:        "meta",
+		AuthKind:    "oauth",
+		AccessToken: "new-minted-key",
+		APIKey:      "new-minted-key",
+		DCAToken:    "new-dca-token",
+		Expired:     "", // Deliberately cleared on refresh
+		Email:       "user@example.com",
+	}
+
+	if errSave := storage.SaveTokenToFile(authFilePath); errSave != nil {
+		t.Fatalf("SaveTokenToFile error = %v", errSave)
+	}
+
+	savedRaw, errRead := os.ReadFile(authFilePath)
+	if errRead != nil {
+		t.Fatalf("os.ReadFile error = %v", errRead)
+	}
+
+	var saved map[string]any
+	if errUnmarshal := json.Unmarshal(savedRaw, &saved); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal error = %v", errUnmarshal)
+	}
+
+	// Verify cleared credential fields were NOT restored from disk
+	if val, exists := saved["expired"]; exists && val != "" {
+		t.Errorf("SaveTokenToFile restored expired timestamp: %v", val)
+	}
+	if val, exists := saved["dca_expired"]; exists && val != "" {
+		t.Errorf("SaveTokenToFile restored dca_expired timestamp: %v", val)
+	}
+	if _, exists := saved["dca_expires_at"]; exists {
+		t.Errorf("SaveTokenToFile restored dca_expires_at timestamp")
+	}
+
+	// Verify new credentials were written
+	if saved["api_key"] != "new-minted-key" {
+		t.Errorf("api_key = %v, want new-minted-key", saved["api_key"])
+	}
+	if saved["access_token"] != "new-minted-key" {
+		t.Errorf("access_token = %v, want new-minted-key", saved["access_token"])
+	}
+
+	// Verify non-credential configuration from disk was preserved
+	if saved["priority"] != float64(42) {
+		t.Errorf("priority = %v, want 42", saved["priority"])
+	}
+	if saved["disable-cooling"] != true {
+		t.Errorf("disable-cooling = %v, want true", saved["disable-cooling"])
+	}
+	if models, ok := saved["models"].([]any); !ok || len(models) != 1 || models[0] != "muse-latest" {
+		t.Errorf("models = %v, want [muse-latest]", saved["models"])
+	}
+}

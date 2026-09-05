@@ -306,7 +306,7 @@ func TestMetaExecutor_Refresh_SingleflightAndMultiAccount(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			res, err := exec.Refresh(context.Background(), auth1)
+			res, err := exec.Refresh(context.Background(), auth1.Clone())
 			if err != nil {
 				t.Errorf("Refresh acct1 error: %v", err)
 			}
@@ -326,7 +326,7 @@ func TestMetaExecutor_Refresh_SingleflightAndMultiAccount(t *testing.T) {
 		Provider: "meta",
 		Metadata: map[string]any{"dca_token": "dca:acct2"},
 	}
-	res2, err2 := exec.Refresh(context.Background(), auth2)
+	res2, err2 := exec.Refresh(context.Background(), auth2.Clone())
 	if err2 != nil {
 		t.Fatalf("Refresh acct2 error: %v", err2)
 	}

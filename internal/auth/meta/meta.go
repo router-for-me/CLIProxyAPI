@@ -111,6 +111,22 @@ func (ts *MetaTokenStorage) SetMetadata(meta map[string]any) {
 	ts.Metadata = meta
 }
 
+// metaCredentialFields identifies credential and lifecycle fields managed by MetaTokenStorage.
+// These fields must never be restored from disk or metadata when omitted from storage.
+var metaCredentialFields = map[string]struct{}{
+	"type":           {},
+	"auth_kind":      {},
+	"access_token":   {},
+	"token_type":     {},
+	"dca_token":      {},
+	"api_key":        {},
+	"expires_in":     {},
+	"expired":        {},
+	"dca_expired":    {},
+	"dca_expires_at": {},
+	"last_refresh":   {},
+}
+
 // SaveTokenToFile writes Meta credentials to a JSON auth file.
 func (ts *MetaTokenStorage) SaveTokenToFile(authFilePath string) error {
 	ts.Type = "meta"
@@ -161,6 +177,9 @@ func (ts *MetaTokenStorage) SaveTokenToFile(authFilePath string) error {
 		var existing map[string]any
 		if errJSON := json.Unmarshal(raw, &existing); errJSON == nil {
 			for k, v := range existing {
+				if _, isCred := metaCredentialFields[k]; isCred {
+					continue
+				}
 				if _, exists := data[k]; !exists {
 					data[k] = v
 				}
@@ -168,6 +187,9 @@ func (ts *MetaTokenStorage) SaveTokenToFile(authFilePath string) error {
 		}
 	}
 	for k, v := range ts.Metadata {
+		if _, isCred := metaCredentialFields[k]; isCred {
+			continue
+		}
 		if _, exists := data[k]; !exists {
 			data[k] = v
 		}
