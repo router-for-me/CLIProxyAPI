@@ -572,6 +572,17 @@ func TestMetaExecutor_RequestAuthPreparer(t *testing.T) {
 		t.Errorf("ShouldPrepareRequestAuth should be false when dca_token is missing")
 	}
 
+	authConfigDCA := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":                    "dca:invalid-for-config",
+			cliproxyauth.AttributeSource: "config:meta[0]",
+		},
+	}
+	if exec.ShouldPrepareRequestAuth(authConfigDCA) {
+		t.Errorf("ShouldPrepareRequestAuth should be false for config API key auths")
+	}
+
 	authDCAOnly := &cliproxyauth.Auth{
 		ID:       "meta-prep-test",
 		Provider: "meta",

@@ -210,8 +210,8 @@ func sanitizeMetaKeyEntries(entries []MetaKey) []MetaKey {
 	for i := range entries {
 		e := entries[i]
 		e.APIKey = strings.TrimSpace(e.APIKey)
-		// The native Meta executor requires an API key or a DCA token in this field.
-		if e.APIKey == "" {
+		// meta-api-key requires a valid API key. DCA tokens require OAuth storage (auths/*.json).
+		if e.APIKey == "" || strings.HasPrefix(e.APIKey, "dca:") {
 			continue
 		}
 		e.Prefix = normalizeModelPrefix(e.Prefix)

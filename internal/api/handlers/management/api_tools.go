@@ -384,22 +384,20 @@ func (h *Handler) resolveMetaToken(ctx context.Context, auth *coreauth.Auth, req
 	}
 
 	var dcaToken string
-	if auth.Metadata != nil {
-		if d, ok := auth.Metadata["dca_token"].(string); ok && strings.TrimSpace(d) != "" {
-			dcaToken = strings.TrimSpace(d)
-		} else if t, ok := auth.Metadata["access_token"].(string); ok && strings.HasPrefix(strings.TrimSpace(t), "dca:") {
-			dcaToken = strings.TrimSpace(t)
-		} else if k, ok := auth.Metadata["api_key"].(string); ok && strings.HasPrefix(strings.TrimSpace(k), "dca:") {
-			dcaToken = strings.TrimSpace(k)
+	if !coreauth.IsConfigAPIKeyAuth(auth) {
+		if auth.Metadata != nil {
+			if d, ok := auth.Metadata["dca_token"].(string); ok && strings.TrimSpace(d) != "" {
+				dcaToken = strings.TrimSpace(d)
+			} else if t, ok := auth.Metadata["access_token"].(string); ok && strings.HasPrefix(strings.TrimSpace(t), "dca:") {
+				dcaToken = strings.TrimSpace(t)
+			}
 		}
-	}
-	if dcaToken == "" && auth.Attributes != nil {
-		if d := strings.TrimSpace(auth.Attributes["dca_token"]); d != "" {
-			dcaToken = d
-		} else if t := strings.TrimSpace(auth.Attributes["access_token"]); strings.HasPrefix(t, "dca:") {
-			dcaToken = t
-		} else if k := strings.TrimSpace(auth.Attributes["api_key"]); strings.HasPrefix(k, "dca:") {
-			dcaToken = k
+		if dcaToken == "" && auth.Attributes != nil {
+			if d := strings.TrimSpace(auth.Attributes["dca_token"]); d != "" {
+				dcaToken = d
+			} else if t := strings.TrimSpace(auth.Attributes["access_token"]); strings.HasPrefix(t, "dca:") {
+				dcaToken = t
+			}
 		}
 	}
 

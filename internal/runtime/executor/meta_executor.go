@@ -254,7 +254,7 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 
 // ShouldPrepareRequestAuth reports true when a Meta auth has a DCA token but no usable API key.
 func (e *MetaExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
-	if auth == nil {
+	if auth == nil || cliproxyauth.IsConfigAPIKeyAuth(auth) {
 		return false
 	}
 	_, token := metaCreds(auth)
@@ -291,6 +291,12 @@ func (e *MetaExecutor) ensureAuth(ctx context.Context, auth *cliproxyauth.Auth) 
 	}
 
 	if token == "" {
+		if cliproxyauth.IsConfigAPIKeyAuth(auth) {
+			return nil, statusErr{
+				code: http.StatusUnauthorized,
+				msg:  "meta executor: meta-api-key requires a valid API key (DCA tokens require OAuth storage)",
+			}
+		}
 		return nil, statusErr{
 			code: http.StatusUnauthorized,
 			msg:  "meta executor: missing API key or access token",
@@ -326,7 +332,7 @@ func (e *MetaExecutor) enrichAuth(auth *cliproxyauth.Auth) *cliproxyauth.Auth {
 }
 
 func extractDCAToken(a *cliproxyauth.Auth) string {
-	if a == nil {
+	if a == nil || cliproxyauth.IsConfigAPIKeyAuth(a) {
 		return ""
 	}
 	if a.Attributes != nil {
@@ -336,9 +342,6 @@ func extractDCAToken(a *cliproxyauth.Auth) string {
 		if t := strings.TrimSpace(a.Attributes["access_token"]); strings.HasPrefix(t, "dca:") {
 			return t
 		}
-		if k := strings.TrimSpace(a.Attributes["api_key"]); strings.HasPrefix(k, "dca:") {
-			return k
-		}
 	}
 	if a.Metadata != nil {
 		if d, ok := a.Metadata["dca_token"].(string); ok && strings.TrimSpace(d) != "" {
@@ -346,9 +349,6 @@ func extractDCAToken(a *cliproxyauth.Auth) string {
 		}
 		if t, ok := a.Metadata["access_token"].(string); ok && strings.HasPrefix(strings.TrimSpace(t), "dca:") {
 			return strings.TrimSpace(t)
-		}
-		if k, ok := a.Metadata["api_key"].(string); ok && strings.HasPrefix(strings.TrimSpace(k), "dca:") {
-			return strings.TrimSpace(k)
 		}
 	}
 	if a.Storage != nil {
