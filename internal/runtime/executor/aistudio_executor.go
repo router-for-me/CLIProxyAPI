@@ -488,7 +488,28 @@ func (e *AIStudioExecutor) translateRequest(ctx context.Context, req cliproxyexe
 	}
 	payload, _ = sjson.DeleteBytes(payload, "session_id")
 	payload = helps.EnsureGeminiLeadingUserContent(payload, "contents")
+	payload = normalizeAIStudioThinkingLevel(payload)
 	return payload, translatedPayload{payload: payload, action: action, toFormat: to}, nil
+}
+
+// normalizeAIStudioThinkingLevel uppercases generationConfig.thinkingConfig.thinkingLevel.
+// The AI Studio upstream validates the value as an uppercase enum and rejects the
+// lowercase canonical levels used elsewhere with "400 Request contains an invalid
+// argument" (https://github.com/router-for-me/CLIProxyAPI/issues/5481).
+func normalizeAIStudioThinkingLevel(payload []byte) []byte {
+	level := gjson.GetBytes(payload, "generationConfig.thinkingConfig.thinkingLevel").String()
+	if level == "" {
+		return payload
+	}
+	upper := strings.ToUpper(level)
+	if upper == level {
+		return payload
+	}
+	out, err := sjson.SetBytes(payload, "generationConfig.thinkingConfig.thinkingLevel", upper)
+	if err != nil {
+		return payload
+	}
+	return out
 }
 
 func (e *AIStudioExecutor) buildEndpoint(model, action, alt string) string {

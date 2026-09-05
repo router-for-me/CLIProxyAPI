@@ -51,6 +51,24 @@ func TestAIStudioTranslateRequestPrependsLeadingUserForIssue4959ResponsesHistory
 	assertIssue4959LeadingUserContents(t, gjson.GetBytes(body.payload, "contents").Array())
 }
 
+// The AI Studio upstream rejects lowercase thinking levels with 400 (#5481);
+// the executor must emit the uppercase enum (HIGH/LOW/MEDIUM) on this channel.
+func TestAIStudioTranslateRequestUppercasesThinkingLevel(t *testing.T) {
+	executor := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
+	req := cliproxyexecutor.Request{
+		Model:   "gemini-3.7-flash",
+		Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"high","includeThoughts":true}}}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
+	payload, _, err := executor.translateRequest(context.Background(), req, opts, false)
+	if err != nil {
+		t.Fatalf("translateRequest() error = %v", err)
+	}
+	if got := gjson.GetBytes(payload, "generationConfig.thinkingConfig.thinkingLevel").String(); got != "HIGH" {
+		t.Fatalf("thinkingLevel = %q, want HIGH; body=%s", got, payload)
+	}
+}
+
 func TestAIStudioExecutorWithoutRelaySessionDoesNotMarkUpstreamAttempt(t *testing.T) {
 	const authID = "aistudio-not-connected"
 	relay := wsrelay.NewManager(wsrelay.Options{})
