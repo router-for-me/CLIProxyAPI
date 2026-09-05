@@ -665,7 +665,9 @@ func codexToolsHaveOptimizedCollaborationConflict(tools gjson.Result) bool {
 	}
 	for _, tool := range tools.Array() {
 		name := strings.TrimSpace(tool.Get("name").String())
-		if name == codexOptimizedCollaborationNamespace || strings.HasPrefix(name, codexOptimizedCollaborationNamePrefix) {
+		if name == codexOptimizedCollaborationNamespace ||
+			strings.HasPrefix(name, codexOptimizedCollaborationNamePrefix) ||
+			strings.HasPrefix(name, codexOptimizedCollaborationDotPrefix) {
 			return true
 		}
 		if strings.TrimSpace(tool.Get("type").String()) == "namespace" && codexToolsHaveOptimizedCollaborationConflict(tool.Get("tools")) {

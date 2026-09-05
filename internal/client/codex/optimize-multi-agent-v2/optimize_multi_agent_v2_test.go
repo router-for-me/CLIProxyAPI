@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -245,6 +246,58 @@ func TestOptimizeCodexMultiAgentV2RequestSkipsNamespaceConflict(t *testing.T) {
 	}
 	if string(got) != string(payload) {
 		t.Fatalf("namespace conflict changed payload: %s", got)
+	}
+}
+
+// TestOptimizeCodexMultiAgentV2RequestSkipsDottedAliasConflict ensures a
+// legitimate user-defined flat function named collaboration-optimize.<tool>
+// is treated as a reserved optimized-collaboration conflict, so the optimizer
+// stays disabled and the response-side dotted restore rule can never
+// misroute calls to that user tool. See PR #5538 review (P2).
+func TestOptimizeCodexMultiAgentV2RequestSkipsDottedAliasConflict(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent"}]},{"type":"function","name":"collaboration-optimize.custom_tool","parameters":{"type":"object"}}]}`)
+	headers := http.Header{"User-Agent": []string{"codex-tui/0.145.0"}}
+	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+	got, optimized := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
+	if optimized {
+		t.Fatal("dotted alias conflict unexpectedly enabled optimization")
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("dotted alias conflict changed payload: %s", got)
+	}
+	if namespace := gjson.GetBytes(got, "tools.0.name").String(); namespace != codexCollaborationNamespace {
+		t.Fatalf("collaboration namespace was renamed despite conflict: %q", namespace)
+	}
+}
+
+// TestCodexToolsHaveOptimizedCollaborationConflictForms verifies the conflict
+// matcher against all reserved optimized-name forms and near-prefix names
+// that must remain unaffected.
+func TestCodexToolsHaveOptimizedCollaborationConflictForms(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name     string
+		toolName string
+		want     bool
+	}{
+		{name: "exact optimized namespace", toolName: "collaboration-optimize", want: true},
+		{name: "double-underscore alias", toolName: "collaboration-optimize__spawn_agent", want: true},
+		{name: "dotted flat alias", toolName: "collaboration-optimize.custom_tool", want: true},
+		{name: "near-prefix longer word", toolName: "collaboration-optimizer.custom_tool", want: false},
+		{name: "prefixed unrelated name", toolName: "x-collaboration-optimize.custom_tool", want: false},
+		{name: "unrelated dotted name", toolName: "unrelated.dotted_tool", want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tools := gjson.Parse(`[{"type":"function","name":` + strconv.Quote(tt.toolName) + `}]`)
+			if got := codexToolsHaveOptimizedCollaborationConflict(tools); got != tt.want {
+				t.Fatalf("codexToolsHaveOptimizedCollaborationConflict(%q) = %v, want %v", tt.toolName, got, tt.want)
+			}
+		})
 	}
 }
 
