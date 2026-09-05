@@ -8,6 +8,19 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// openAIResponsesSamplingParamKeys are forwarded unchanged from a Responses
+// request to the Chat Completions request.
+var openAIResponsesSamplingParamKeys = []string{
+	"temperature",
+	"top_p",
+	"top_k",
+	"min_p",
+	"seed",
+	"presence_penalty",
+	"frequency_penalty",
+	"repetition_penalty",
+}
+
 // ConvertOpenAIResponsesRequestToOpenAIChatCompletions converts OpenAI responses format to OpenAI chat completions format.
 // It transforms the OpenAI responses API format (with instructions and input array) into the standard
 // OpenAI chat completions format (with messages array and system content).
@@ -55,6 +68,14 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	// Map generation parameters from responses format to chat completions format
 	if maxTokens := root.Get("max_output_tokens"); maxTokens.Exists() {
 		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
+	}
+	// Sampling parameters share names across both APIs. temperature/top_p are
+	// standard; the rest are the common extras OpenAI-compatible servers
+	// (vLLM, SGLang, llama.cpp) accept and clients send verbatim.
+	for _, key := range openAIResponsesSamplingParamKeys {
+		if v := root.Get(key); v.Exists() {
+			out, _ = sjson.SetRawBytes(out, key, []byte(v.Raw))
+		}
 	}
 
 	// Convert instructions to system message
