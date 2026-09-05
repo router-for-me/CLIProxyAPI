@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -37,9 +38,9 @@ func (e *responsesBridgeCaptureExecutor) Identifier() string { return constant.C
 func (e *responsesBridgeCaptureExecutor) Execute(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
 	e.capture(req, opts)
 	e.executeCalls++
-	if opts.Alt == constant.ClaudeResponsesCompactBridgeAlt {
+	if gjson.GetBytes(req.Payload, "input.@reverse.0.type").String() == "compaction_trigger" {
 		return coreexecutor.Response{
-			Payload: []byte(`{"id":"resp_compact_1","object":"response.compaction","output":[{"id":"msg_1","type":"message","status":"completed","role":"user","content":[{"type":"input_text","text":"hello"}]},{"id":"cmp_1","type":"compaction_summary","encrypted_content":"encrypted-state"}],"usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}}`),
+			Payload: []byte(`{"id":"resp_compact_1","object":"response.compaction","output":[{"id":"msg_1","type":"message","status":"completed","role":"user","content":[{"type":"input_text","text":"hello"}]},{"id":"cmp_1","type":"compaction_summary","encrypted_content":"gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}],"usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}}`),
 			Headers: http.Header{"X-Upstream": []string{"compact"}},
 		}, nil
 	}
@@ -268,7 +269,7 @@ func TestClaudeMessagesResponsesBridgeCompactNonStreaming(t *testing.T) {
 	if errStrip != nil || !found {
 		t.Fatalf("decode compact marker: found=%v err=%v marker=%q", found, errStrip, marker)
 	}
-	if capsule.Model != responsesBridgeUpstreamModel {
+	if !capsule.rawCiphertext {
 		t.Fatalf("capsule model = %q, want %q", capsule.Model, responsesBridgeUpstreamModel)
 	}
 	if got := gjson.Get(recorder.Body.String(), "model").String(); got != responsesBridgeClientModel {
@@ -276,13 +277,13 @@ func TestClaudeMessagesResponsesBridgeCompactNonStreaming(t *testing.T) {
 	}
 
 	gotReq, gotOpts := executor.request, executor.options
-	if gotOpts.Alt != constant.ClaudeResponsesCompactBridgeAlt {
-		t.Fatalf("Alt = %q, want %q", gotOpts.Alt, constant.ClaudeResponsesCompactBridgeAlt)
+	if gotOpts.Alt != "" || gotOpts.SourceFormat != sdktranslator.FormatCodex {
+		t.Fatalf("compact must use normal Codex execution: %#v", gotOpts)
 	}
 	if gotOpts.ResponseFormat != sdktranslator.FormatOpenAIResponse {
 		t.Fatalf("ResponseFormat = %q, want %q", gotOpts.ResponseFormat, sdktranslator.FormatOpenAIResponse)
 	}
-	if got := gjson.GetBytes(gotReq.Payload, "messages.2.content").String(); !strings.Contains(got, "Preserve the API details") {
+	if got := gjson.GetBytes(gotReq.Payload, "input.2.content.0.text").String(); !strings.Contains(got, "Preserve the API details") {
 		t.Fatalf("custom compact instruction was not preserved; payload=%s", gotReq.Payload)
 	}
 	if _, pinned := gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey]; pinned {
@@ -299,7 +300,7 @@ func TestClaudeMessagesResponsesBridgeCompactStreamingUsesBufferedCompactEndpoin
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "event: message_start") || !strings.Contains(recorder.Body.String(), "cpa-responses-compaction") {
+	if !strings.Contains(recorder.Body.String(), "event: message_start") || !strings.Contains(recorder.Body.String(), "gAAAA") {
 		t.Fatalf("unexpected compact SSE: %s", recorder.Body.String())
 	}
 	if executor.executeCalls != 1 || executor.streamCalls != 0 {
@@ -330,7 +331,7 @@ func TestClaudeMessagesResponsesBridgeRehydratesCompactCapsule(t *testing.T) {
 	if pinned := gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey]; pinned != nil {
 		t.Fatalf("compaction replay pinned auth = %#v, want no pin", pinned)
 	}
-	if got := gjson.GetBytes(gotReq.Payload, constant.ClaudeResponsesCompactionField+".output.1.type").String(); got != "compaction_summary" {
+	if got := gjson.GetBytes(gotReq.Payload, constant.ClaudeResponsesCompactionField+".output.0.type").String(); got != "compaction" {
 		t.Fatalf("replay compaction item type = %q; payload=%s", got, gotReq.Payload)
 	}
 	if got := gjson.GetBytes(gotReq.Payload, "messages.0.content").String(); got != "continue" {
@@ -359,7 +360,7 @@ func TestPrepareClaudeCompactionReplayUsesNewestCanonicalWindow(t *testing.T) {
 		t.Fatalf("second compact input retained capsule message: %s", preparedSecond)
 	}
 
-	secondCompact := []byte(`{"id":"resp_compact_2","object":"response.compaction","output":[{"type":"message","role":"user","content":[{"type":"input_text","text":"new canonical window"}]},{"type":"compaction","encrypted_content":"encrypted-second"}],"usage":{"input_tokens":100,"output_tokens":20}}`)
+	secondCompact := []byte(`{"id":"resp_compact_2","object":"response.compaction","output":[{"type":"message","role":"user","content":[{"type":"input_text","text":"new canonical window"}]},{"type":"compaction","encrypted_content":"gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}],"usage":{"input_tokens":100,"output_tokens":20}}`)
 	_, secondMarker, errBuild := buildClaudeCompactResponse(secondCompact, responsesBridgeClientModel, responsesBridgeUpstreamModel)
 	if errBuild != nil {
 		t.Fatalf("build second compact response: %v", errBuild)
@@ -376,7 +377,7 @@ func TestPrepareClaudeCompactionReplayUsesNewestCanonicalWindow(t *testing.T) {
 		t.Fatalf("prepare follow-up after second compaction: %v", errPrepareFollowup)
 	}
 	encodedReplay := string(mustJSONMarshalForTest(t, secondReplay.Output))
-	if !strings.Contains(encodedReplay, "encrypted-second") {
+	if !strings.Contains(encodedReplay, "gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==") {
 		t.Fatalf("new canonical window missing: %s", encodedReplay)
 	}
 	if strings.Contains(encodedReplay, "encrypted-state") {
