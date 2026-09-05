@@ -107,6 +107,20 @@ func TestPluginQuotaRejectsInvalidShapesAndOversize(t *testing.T) {
 	}
 }
 
+func TestPluginQuotaRejectsPayloadExpandedPastLimitBySanitizing(t *testing.T) {
+	raw := map[string]any{"label": strings.Repeat("'", 3<<10)}
+	encoded, errMarshal := json.Marshal(raw)
+	if errMarshal != nil {
+		t.Fatalf("marshal raw quota: %v", errMarshal)
+	}
+	if len(encoded) >= maxPluginQuotaBytes {
+		t.Fatalf("raw quota size = %d, want below %d", len(encoded), maxPluginQuotaBytes)
+	}
+	if quota, ok := pluginQuotaMetadata(raw); ok || quota != nil {
+		t.Fatalf("quota expanded beyond the sanitized size limit was accepted: %#v", quota)
+	}
+}
+
 func TestPluginQuotaPreflightRejectsLargeAndUnsafeTrees(t *testing.T) {
 	deep := map[string]any{}
 	cursor := deep
@@ -221,6 +235,26 @@ func TestPluginQuotaAllowsTokenCountKeys(t *testing.T) {
 	}
 	if quota["daily"].([]any)[0].(map[string]any)["tokens"] != json.Number("14") {
 		t.Fatalf("daily token count changed: %#v", quota)
+	}
+}
+
+func TestPluginQuotaTokenCountKeysRejectNonnumericValues(t *testing.T) {
+	keys := []string{"tokens", "latest_tokens", "period-tokens"}
+	values := map[string]any{
+		"credential string": "secret-token-value",
+		"array":             []any{1},
+		"object":            map[string]any{"value": 1},
+		"boolean":           true,
+		"null":              nil,
+	}
+	for _, key := range keys {
+		for name, value := range values {
+			t.Run(key+"/"+name, func(t *testing.T) {
+				if quota, ok := pluginQuotaMetadata(map[string]any{key: value}); ok || quota != nil {
+					t.Fatalf("nonnumeric token counter %q accepted: %#v", key, quota)
+				}
+			})
+		}
 	}
 }
 

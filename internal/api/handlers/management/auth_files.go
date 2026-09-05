@@ -477,7 +477,15 @@ func pluginQuotaMetadata(raw any) (map[string]any, bool) {
 	if errDecode := decoder.Decode(&detached); errDecode != nil {
 		return nil, false
 	}
-	return htmlsanitize.JSONValue(detached).(map[string]any), true
+	sanitized, ok := htmlsanitize.JSONValue(detached).(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	sanitizedEncoded, errMarshalSanitized := json.Marshal(sanitized)
+	if errMarshalSanitized != nil || len(sanitizedEncoded) > maxPluginQuotaBytes {
+		return nil, false
+	}
+	return sanitized, true
 }
 
 func pluginQuotaJSONValue(value any, depth int, budget *pluginQuotaBudget) bool {
@@ -491,7 +499,7 @@ func pluginQuotaJSONValue(value any, depth int, budget *pluginQuotaBudget) bool 
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, nested := range typed {
-			if !pluginQuotaKeyAllowed(key) || !pluginQuotaTextWithinBudget(key, budget) || !pluginQuotaJSONValue(nested, depth+1, budget) {
+			if !pluginQuotaKeyAllowed(key, nested) || !pluginQuotaTextWithinBudget(key, budget) || !pluginQuotaJSONValue(nested, depth+1, budget) {
 				return false
 			}
 		}
@@ -534,8 +542,8 @@ func pluginQuotaFiniteNumber(value string) bool {
 }
 
 // Keys are ASCII-only, compacted by dropping punctuation, then compared with
-// a fixed credential-name denylist. Only three quota token counters are exempt.
-func pluginQuotaKeyAllowed(key string) bool {
+// a fixed credential-name denylist. Only numeric quota token counters are exempt.
+func pluginQuotaKeyAllowed(key string, value any) bool {
 	compact := make([]byte, 0, len(key))
 	for index := 0; index < len(key); index++ {
 		character := key[index]
@@ -551,7 +559,7 @@ func pluginQuotaKeyAllowed(key string) bool {
 	}
 	normalized := string(compact)
 	if normalized == "tokens" || normalized == "latesttokens" || normalized == "periodtokens" {
-		return true
+		return pluginQuotaNumericValue(value)
 	}
 	switch normalized {
 	case "token", "accesstoken", "refreshtoken", "idtoken", "oauthtoken", "bearertoken", "sessiontoken", "portaltoken",
@@ -560,6 +568,21 @@ func pluginQuotaKeyAllowed(key string) bool {
 		return false
 	}
 	return true
+}
+
+func pluginQuotaNumericValue(value any) bool {
+	switch typed := value.(type) {
+	case json.Number:
+		return pluginQuotaFiniteNumber(typed.String())
+	case float32:
+		return !math.IsNaN(float64(typed)) && !math.IsInf(float64(typed), 0)
+	case float64:
+		return !math.IsNaN(typed) && !math.IsInf(typed, 0)
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, uintptr:
+		return true
+	default:
+		return false
+	}
 }
 
 func authFileRequestRetryFromJSON(data []byte) (int, bool) {
