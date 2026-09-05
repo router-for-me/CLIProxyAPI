@@ -58,6 +58,11 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 		return err
 	}
 
+	cause := errors.Unwrap(err)
+	if overloaded := promotedOverloadError(cause); overloaded != nil {
+		return coreauth.WithCause(overloaded, cause)
+	}
+
 	providerText := strings.Join(providers, ",")
 	if providerText == "" {
 		providerText = "unknown"
@@ -72,7 +77,6 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 		baseMessage = "no auth available"
 	}
 
-	cause := errors.Unwrap(err)
 	var upstreamSummary string
 	if cause != nil {
 		upstreamSummary = coreauth.ExtractUpstreamErrorSummary(cause.Error())
@@ -104,6 +108,38 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 		return coreauth.WithCause(enriched, cause)
 	}
 	return enriched
+}
+
+func promotedOverloadError(cause error) *coreauth.Error {
+	const code = "server_is_overloaded"
+	for current := cause; current != nil; current = errors.Unwrap(current) {
+		var upstreamErr *coreauth.Error
+		if errors.As(current, &upstreamErr) && upstreamErr != nil && strings.TrimSpace(upstreamErr.Code) == code {
+			return newPromotedOverloadError(code, upstreamErr.Message, upstreamErr.HTTPStatus)
+		}
+		summary := coreauth.ExtractUpstreamErrorSummary(current.Error())
+		if strings.HasPrefix(strings.ToLower(summary), code+":") {
+			return newPromotedOverloadError(code, summary, http.StatusServiceUnavailable)
+		}
+	}
+	return nil
+}
+
+func newPromotedOverloadError(code, rawMessage string, status int) *coreauth.Error {
+	message := coreauth.ExtractUpstreamErrorSummary(rawMessage)
+	message = strings.TrimSpace(strings.TrimPrefix(message, code+":"))
+	if message == "" {
+		message = "Upstream servers are currently overloaded. Please try again later."
+	}
+	if status <= 0 {
+		status = http.StatusServiceUnavailable
+	}
+	return &coreauth.Error{
+		Code:       code,
+		Message:    message,
+		Retryable:  true,
+		HTTPStatus: status,
+	}
 }
 
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
@@ -141,6 +177,12 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	}
 
 	body := BuildErrorResponseBody(status, errText)
+	if msg != nil && msg.Error != nil {
+		var authErr *coreauth.Error
+		if errors.As(msg.Error, &authErr) && authErr != nil && authErr.Code == "server_is_overloaded" {
+			body = buildErrorResponseBody(status, authErr.Message, authErr.Code)
+		}
+	}
 	// Append first to preserve upstream response logs, then drop duplicate payloads if already recorded.
 	var previous []byte
 	if existing, exists := c.Get("API_RESPONSE"); exists {
