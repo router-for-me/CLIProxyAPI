@@ -544,6 +544,9 @@ func pluginQuotaFiniteNumber(value string) bool {
 // Keys are ASCII-only, compacted by dropping punctuation, then compared with
 // a fixed credential-name denylist. Only numeric quota token counters are exempt.
 func pluginQuotaKeyAllowed(key string, value any) bool {
+	if len(key) > maxPluginQuotaStringBytes {
+		return false
+	}
 	compact := make([]byte, 0, len(key))
 	for index := 0; index < len(key); index++ {
 		character := key[index]
