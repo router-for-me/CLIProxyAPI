@@ -315,8 +315,16 @@ func validatePluginStoreRequestURL(auth []AuthConfig, requestURL string, kind st
 	if parsed.User != nil {
 		return fmt.Errorf("plugin store url must not contain credentials")
 	}
-	if hasSensitiveQueryParameter(parsed) {
-		return fmt.Errorf("plugin store url contains sensitive query parameter")
+	// Artifact downloads may carry ephemeral signed query parameters such as
+	// GitHub release CDN ?token=... values, so sensitive query keys are only
+	// checked for non-artifact (registry/metadata) requests. Declared URLs are
+	// also independently validated via hasSensitiveQueryParameter at parse time,
+	// but applying the check here again covers runtime redirect targets so
+	// long-lived secrets never reach the wire for registry/metadata requests.
+	if kind != RequestKindArtifact {
+		if hasSensitiveQueryParameter(parsed) {
+			return fmt.Errorf("plugin store url contains sensitive query parameter")
+		}
 	}
 	if strings.EqualFold(parsed.Scheme, "http") && !allowInsecurePluginStoreURL(auth, requestURL, kind) {
 		return fmt.Errorf("insecure plugin store url requires matching allow-insecure auth rule")

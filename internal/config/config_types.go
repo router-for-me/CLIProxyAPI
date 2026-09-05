@@ -756,3 +756,43 @@ func (m OpenAICompatibilityModel) GetForceMapping() bool    { return m.ForceMapp
 func (m OpenAICompatibilityModel) GetIsCompat() bool        { return m.IsCompat }
 
 func (m OpenAICompatibilityModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
+
+// PluginProxyConfig is the dedicated outbound proxy/accelerator for plugin-store traffic.
+// It is independent from the global proxy-url used by OAuth/providers/API calls.
+//
+// Status:
+//   - -1 (direct): no proxy, connect directly even when a global proxy-url is set
+//   - 0 (none): unset/default; fall back to the global proxy-url when present (legacy behavior)
+//   - 1 (custom): use PluginProxy.URL as socks/http/https proxy
+//   - 2 (system): reuse config.yaml proxy-url
+//   - 3 (accelerator): rewrite GitHub resource URLs as prefix + original URL
+//
+// URL keeps the last user-provided custom/accelerator value so re-enabling
+// either mode does not lose input.
+type PluginProxyConfig struct {
+	// URL is the last custom proxy URL (traditional proxy only).
+	// Accelerator uses a separate field.
+	URL string `yaml:"url,omitempty" json:"url"`
+	// Accelerator is the web accelerator base used when status=3.
+	// Example: https://gh-proxy.com
+	Accelerator string `yaml:"accelerator,omitempty" json:"accelerator"`
+	// Status is -1=direct, 0=none, 1=custom, 2=system, 3=accelerator.
+	// Omit empty is removed to ensure status is explicitly serialized.
+	Status int `yaml:"status" json:"status"`
+}
+
+// Plugin-proxy status values (selection is encoded by status only).
+const (
+	// PluginProxyStatusDirect means connect directly, bypassing the global proxy-url.
+	PluginProxyStatusDirect = -1
+	// PluginProxyStatusNone means unset/default: fall back to the global proxy-url
+	// when present, otherwise connect directly. Preserves legacy behavior for
+	// configs that never set plugin-proxy.
+	PluginProxyStatusNone = 0
+	// PluginProxyStatusCustom means use PluginProxy.URL as a traditional outbound proxy.
+	PluginProxyStatusCustom = 1
+	// PluginProxyStatusSystem means reuse the global proxy-url.
+	PluginProxyStatusSystem = 2
+	// PluginProxyStatusAccelerator means rewrite GitHub resource URLs with PluginProxy.URL as a web accelerator prefix.
+	PluginProxyStatusAccelerator = 3
+)
