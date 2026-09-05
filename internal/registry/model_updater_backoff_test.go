@@ -23,13 +23,42 @@ func staticCatalog(t *testing.T) *staticModelsJSON {
 	return &parsed
 }
 
-// restoreUpdaterHooks saves package-level test hooks and restores them via
-// t.Cleanup so parallel tests in the package are not affected.
+// restoreUpdaterHooks saves package-level test hooks and global state, then
+// restores them via t.Cleanup so tests stay isolated regardless of order
+// (go test -shuffle=on). It returns a slice that records sleep durations.
 func restoreUpdaterHooks(t *testing.T) (sleepCalls *[]time.Duration) {
 	t.Helper()
 	origSleep, origFetch := startupSleep, fetchModelsFromRemoteFn
+
+	// Snapshot the global catalog store so a mocked successful fetch (which
+	// swaps modelsCatalogStore.data via tryRefreshModels) cannot leak into
+	// other tests.
+	modelsCatalogStore.mu.Lock()
+	origData := modelsCatalogStore.data
+	modelsCatalogStore.mu.Unlock()
+
+	// Snapshot refresh-callback state; tryRefreshModels appends to
+	// pendingRefreshChanges when no callback is registered.
+	refreshCallbackMu.Lock()
+	origCallback := refreshCallback
+	origPending := pendingRefreshChanges
+	refreshCallbackMu.Unlock()
+
+	// Capture the global logger configuration before any test mutates it.
+	origLogOut := log.StandardLogger().Out
+	origLogLevel := log.GetLevel()
+
 	t.Cleanup(func() {
 		startupSleep, fetchModelsFromRemoteFn = origSleep, origFetch
+		modelsCatalogStore.mu.Lock()
+		modelsCatalogStore.data = origData
+		modelsCatalogStore.mu.Unlock()
+		refreshCallbackMu.Lock()
+		refreshCallback = origCallback
+		pendingRefreshChanges = origPending
+		refreshCallbackMu.Unlock()
+		log.SetOutput(origLogOut)
+		log.SetLevel(origLogLevel)
 	})
 	calls := &[]time.Duration{}
 	return calls
@@ -172,21 +201,17 @@ func TestRunStartupRefreshWithBackoff_LogsFailedAttempts(t *testing.T) {
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	log.SetLevel(log.ErrorLevel)
-	t.Cleanup(func() {
-		log.SetOutput(log.StandardLogger().Out)
-		log.SetLevel(log.InfoLevel)
-	})
 
 	startupSleep = func(ctx context.Context, d time.Duration) error { return nil }
 
 	runStartupRefreshWithBackoff(context.Background())
 
 	out := buf.String()
-	if !strings.Contains(out, "startup model refresh failed (attempt 1)") {
+	if !strings.Contains(out, "startup model catalog fetch failed") {
 		t.Errorf("error-level log for failed attempt missing, got: %q", out)
 	}
-	if !strings.Contains(out, "retrying in") {
-		t.Errorf("retry delay missing from error log, got: %q", out)
+	if !strings.Contains(out, "attempt=1") || !strings.Contains(out, "retry_delay=10s") {
+		t.Errorf("structured fields (attempt, retry_delay) missing from error log, got: %q", out)
 	}
 }
 
@@ -200,10 +225,6 @@ func TestTryPeriodicRefresh_LogsFailure(t *testing.T) {
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	log.SetLevel(log.ErrorLevel)
-	t.Cleanup(func() {
-		log.SetOutput(log.StandardLogger().Out)
-		log.SetLevel(log.InfoLevel)
-	})
 
 	tryPeriodicRefresh(context.Background())
 

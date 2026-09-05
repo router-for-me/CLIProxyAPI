@@ -124,14 +124,19 @@ func runStartupRefreshWithBackoff(ctx context.Context) {
 	for attempt := 1; ; attempt++ {
 		if tryStartupRefresh(ctx) {
 			if attempt > 1 {
-				log.Infof("startup model refresh succeeded on attempt %d after retries", attempt)
+				log.WithFields(log.Fields{
+					"attempts": attempt,
+				}).Info("startup model refresh succeeded after retries")
 			}
 			return
 		}
-		log.Errorf("startup model refresh failed (attempt %d); retrying in %s", attempt, delay)
+		log.WithFields(log.Fields{
+			"attempt":     attempt,
+			"retry_delay": delay.String(),
+		}).Error("startup model catalog fetch failed; retrying")
 		if errSleep := startupSleep(ctx, jitteredDelay(delay)); errSleep != nil {
 			// Context cancelled (shutdown): periodic refresh will not run either.
-			log.Infof("startup model refresh retry loop stopped: %v", errSleep)
+			log.WithField("reason", errSleep.Error()).Info("startup model refresh retry loop stopped")
 			return
 		}
 		delay = min(delay*2, startupRetryMaxDelay)
@@ -171,7 +176,7 @@ func periodicRefresh(ctx context.Context) {
 // so no backoff loop is needed here.
 func tryPeriodicRefresh(ctx context.Context) {
 	if !tryRefreshModels(ctx, "periodic model refresh") {
-		log.Errorf("periodic model refresh failed: fetch failed from all URLs; keeping current catalog until next tick (%s)", modelsRefreshInterval)
+		log.WithField("next_retry_after", modelsRefreshInterval.String()).Error("periodic model refresh failed: fetch failed from all URLs; keeping current catalog until next tick")
 	}
 }
 
