@@ -73,10 +73,11 @@ func TestFindMatchingLegacyCredential(t *testing.T) {
 	legacyFileName := CredentialFileName(email, "", "")
 
 	tests := []struct {
-		name           string
-		targetMetadata map[string]any
-		legacyMetadata map[string]any
-		wantMatch      bool
+		name              string
+		targetMetadata    map[string]any
+		legacyMetadata    map[string]any
+		candidateFileName string
+		wantMatch         bool
 	}{
 		{
 			name: "matching organization",
@@ -116,6 +117,37 @@ func TestFindMatchingLegacyCredential(t *testing.T) {
 			},
 			wantMatch: true,
 		},
+		{
+			name: "matching account-hashed predecessor when target gains organization",
+			targetMetadata: map[string]any{
+				"email": email, "organization_uuid": "organization-a", "account_uuid": "account-a",
+			},
+			legacyMetadata: map[string]any{
+				"email": email, "account_uuid": "account-a",
+			},
+			candidateFileName: CredentialFileName(email, "", "account-a"),
+			wantMatch:         true,
+		},
+		{
+			name: "different account-hashed predecessor",
+			targetMetadata: map[string]any{
+				"email": email, "organization_uuid": "organization-a", "account_uuid": "account-a",
+			},
+			legacyMetadata: map[string]any{
+				"email": email, "account_uuid": "account-b",
+			},
+			candidateFileName: CredentialFileName(email, "", "account-b"),
+		},
+		{
+			name: "account-hashed predecessor associated with another organization",
+			targetMetadata: map[string]any{
+				"email": email, "organization_uuid": "organization-a", "account_uuid": "shared-account",
+			},
+			legacyMetadata: map[string]any{
+				"email": email, "organization_uuid": "organization-b", "account_uuid": "shared-account",
+			},
+			candidateFileName: CredentialFileName(email, "", "shared-account"),
+		},
 	}
 
 	for _, tt := range tests {
@@ -126,8 +158,12 @@ func TestFindMatchingLegacyCredential(t *testing.T) {
 				Provider: "claude",
 				Metadata: tt.targetMetadata,
 			}
+			candidateFileName := tt.candidateFileName
+			if candidateFileName == "" {
+				candidateFileName = legacyFileName
+			}
 			legacy := &coreauth.Auth{
-				ID: legacyFileName, FileName: legacyFileName, Provider: "claude", Metadata: tt.legacyMetadata,
+				ID: candidateFileName, FileName: candidateFileName, Provider: "claude", Metadata: tt.legacyMetadata,
 			}
 			got, err := FindMatchingLegacyCredential(context.Background(), &credentialListStore{records: []*coreauth.Auth{legacy}}, target)
 			if err != nil {

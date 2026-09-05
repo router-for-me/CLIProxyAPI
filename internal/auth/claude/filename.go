@@ -32,10 +32,10 @@ func CredentialFileName(email, organizationUUID, accountUUID string) string {
 	return fmt.Sprintf("claude-%s-%s.json", identityHash, email)
 }
 
-// FindMatchingLegacyCredential locates the pre-organization filename for the
-// same Claude identity as target. Organization UUID is authoritative when it is
-// present. Account UUID is used only when neither credential has organization
-// identity, because one account can belong to multiple organizations.
+// FindMatchingLegacyCredential locates a prior filename for the same Claude
+// identity as target. In addition to the email-only legacy name, an
+// account-hashed name can precede an organization-hashed target when an earlier
+// login did not return organization identity.
 func FindMatchingLegacyCredential(ctx context.Context, store coreauth.Store, target *coreauth.Auth) (*coreauth.Auth, error) {
 	if store == nil || !isHashedCredentialTarget(target) {
 		return nil, nil
@@ -53,6 +53,10 @@ func FindMatchingLegacyCredential(ctx context.Context, store coreauth.Store, tar
 	targetOrganization := metadataString(target.Metadata, "organization_uuid")
 	targetAccount := metadataString(target.Metadata, "account_uuid")
 	legacyFileName := CredentialFileName(targetEmail, "", "")
+	accountFileName := ""
+	if targetOrganization != "" && targetAccount != "" {
+		accountFileName = CredentialFileName(targetEmail, "", targetAccount)
+	}
 
 	for _, candidate := range records {
 		if candidate == nil || !strings.EqualFold(strings.TrimSpace(candidate.Provider), "claude") {
@@ -62,7 +66,10 @@ func FindMatchingLegacyCredential(ctx context.Context, store coreauth.Store, tar
 		if candidateFileName == "" {
 			candidateFileName = strings.TrimSpace(candidate.ID)
 		}
-		if !strings.EqualFold(filepath.Base(candidateFileName), legacyFileName) {
+		candidateBaseName := filepath.Base(candidateFileName)
+		isEmailLegacy := strings.EqualFold(candidateBaseName, legacyFileName)
+		isAccountPredecessor := accountFileName != "" && strings.EqualFold(candidateBaseName, accountFileName)
+		if !isEmailLegacy && !isAccountPredecessor {
 			continue
 		}
 
@@ -73,7 +80,10 @@ func FindMatchingLegacyCredential(ctx context.Context, store coreauth.Store, tar
 			if candidateOrganization != "" && strings.EqualFold(candidateOrganization, targetOrganization) {
 				return candidate, nil
 			}
-		case candidateOrganization == "" && targetAccount != "":
+			if candidateOrganization == "" && isAccountPredecessor && candidateAccount != "" && strings.EqualFold(candidateAccount, targetAccount) {
+				return candidate, nil
+			}
+		case isEmailLegacy && candidateOrganization == "" && targetAccount != "":
 			if candidateAccount != "" && strings.EqualFold(candidateAccount, targetAccount) {
 				return candidate, nil
 			}
