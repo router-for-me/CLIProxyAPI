@@ -329,6 +329,13 @@ func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
 	}
 }
 
+func TestParseClaudeUsageCapturesEffectiveSpeed(t *testing.T) {
+	detail := ParseClaudeUsage([]byte(`{"usage":{"input_tokens":2,"output_tokens":3,"speed":"fast"}}`))
+	if detail.ResponseServiceTier != "fast" {
+		t.Fatalf("response service tier = %q, want fast", detail.ResponseServiceTier)
+	}
+}
+
 func TestParseClaudeUsageDoesNotAliasCacheCreationAsCachedTokens(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":3085,"output_tokens":253,"cache_creation_input_tokens":19514}}`)
 	detail := ParseClaudeUsage(data)
@@ -367,6 +374,27 @@ func TestClaudeStreamUsageBufferMergesMessageStartAndMessageDelta(t *testing.T) 
 		detail.CacheCreationTokens != 31 || detail.CacheCreation5mTokens != 19 || detail.CacheCreation1hTokens != 12 ||
 		detail.TotalTokens != 22048 {
 		t.Fatalf("unexpected merged Claude usage: %+v", detail)
+	}
+}
+
+func TestClaudeStreamUsageBufferPreservesEffectiveSpeed(t *testing.T) {
+	var buffer ClaudeStreamUsageBuffer
+	if !buffer.Observe([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":13,"output_tokens":1,"speed":"fast"}}}`)) {
+		t.Fatal("message_start usage was not observed")
+	}
+	if !buffer.Observe([]byte(`data: {"type":"message_delta","usage":{"output_tokens":4}}`)) {
+		t.Fatal("message_delta usage was not observed")
+	}
+	detail, ok := buffer.Detail()
+	if !ok || detail.ResponseServiceTier != "fast" {
+		t.Fatalf("stream usage detail = %+v, want fast response tier", detail)
+	}
+}
+
+func TestParseClaudeStreamUsageCapturesEffectiveSpeed(t *testing.T) {
+	detail, ok := ParseClaudeStreamUsage([]byte(`data: {"type":"message_delta","usage":{"output_tokens":4,"speed":"standard"}}`))
+	if !ok || detail.ResponseServiceTier != "standard" {
+		t.Fatalf("stream usage detail = %+v, want standard response tier", detail)
 	}
 }
 

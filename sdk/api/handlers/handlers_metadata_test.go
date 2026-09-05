@@ -153,6 +153,26 @@ func TestSetServiceTierMetadataPreservesExplicitDefault(t *testing.T) {
 	}
 }
 
+func TestSetServiceTierMetadataExtractsClaudeSpeed(t *testing.T) {
+	meta := make(map[string]any)
+
+	setServiceTierMetadata(meta, []byte(`{"speed":"fast"}`))
+
+	if got := meta[coreexecutor.ServiceTierMetadataKey]; got != "fast" {
+		t.Fatalf("ServiceTierMetadataKey = %v, want %q", got, "fast")
+	}
+}
+
+func TestSetServiceTierMetadataPrefersExplicitServiceTier(t *testing.T) {
+	meta := make(map[string]any)
+
+	setServiceTierMetadata(meta, []byte(`{"service_tier":"default","speed":"fast"}`))
+
+	if got := meta[coreexecutor.ServiceTierMetadataKey]; got != "default" {
+		t.Fatalf("ServiceTierMetadataKey = %v, want %q", got, "default")
+	}
+}
+
 func TestSetGenerateMetadataDefaultsWhenMissing(t *testing.T) {
 	meta := make(map[string]any)
 

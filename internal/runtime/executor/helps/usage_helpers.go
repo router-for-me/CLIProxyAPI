@@ -787,6 +787,9 @@ func mergeClaudeUsageNode(detail *usage.Detail, usageNode gjson.Result) {
 	if output := usageNode.Get("output_tokens"); output.Exists() {
 		detail.OutputTokens = output.Int()
 	}
+	if speed := strings.TrimSpace(usageNode.Get("speed").String()); speed != "" {
+		detail.ResponseServiceTier = speed
+	}
 	if cacheRead := usageNode.Get("cache_read_input_tokens"); cacheRead.Exists() {
 		detail.CacheReadTokens = cacheRead.Int()
 		detail.CachedTokens = detail.CacheReadTokens

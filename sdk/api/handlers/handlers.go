@@ -254,6 +254,11 @@ func setServiceTierMetadata(meta map[string]any, rawJSON []byte) {
 		if value != "" {
 			serviceTier = value
 		}
+	} else if speed := strings.TrimSpace(gjson.GetBytes(rawJSON, "speed").String()); speed != "" {
+		// Anthropic exposes fast mode as `speed` rather than `service_tier`.
+		// Store the requested value in the common usage metadata field so the
+		// accounting sink can select the matching effective price.
+		serviceTier = speed
 	}
 	meta[coreexecutor.ServiceTierMetadataKey] = serviceTier
 }
